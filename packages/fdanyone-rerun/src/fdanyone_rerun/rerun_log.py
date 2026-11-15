@@ -67,12 +67,33 @@ class BodyTrack:
     """Source video size, pixels."""
 
 
+def source_transforms(
+    points_incam: Float32[ndarray, "frames points 3"], points_world: Float32[ndarray, "frames points 3"]
+) -> Float64[ndarray, "frames 4 4"]:
+    """The rigid source-camera pose per frame that maps the in-camera body onto the world body (Kabsch fit).
+
+    From upstream 4DAnyone's GUI (fdanyone/space/body.py, not copied).
+    """
+    source: Float64[ndarray, "frames points 3"] = np.asarray(points_incam, dtype=np.float64)
+    target: Float64[ndarray, "frames points 3"] = np.asarray(points_world, dtype=np.float64)
+    source_mean: Float64[ndarray, "frames 3"] = source.mean(axis=1)
+    target_mean: Float64[ndarray, "frames 3"] = target.mean(axis=1)
+    covariance: Float64[ndarray, "frames 3 3"] = np.swapaxes(source - source_mean[:, None], 1, 2) @ (target - target_mean[:, None])
+    left, _, right = np.linalg.svd(covariance)
+    correction: Float64[ndarray, "frames 3 3"] = np.broadcast_to(np.eye(3), covariance.shape).copy()
+    correction[:, 2, 2] = np.linalg.det(left @ right)
+    row_rotation: Float64[ndarray, "frames 3 3"] = left @ correction @ right
+    transforms: Float64[ndarray, "frames 4 4"] = np.broadcast_to(np.eye(4), (len(source), 4, 4)).copy()
+    transforms[:, :3, :3] = np.swapaxes(row_rotation, 1, 2)
+    transforms[:, :3, 3] = target_mean - np.einsum("fi,fij->fj", source_mean, row_rotation)
+    return transforms
+
+
 def load_body(output_dir: Path, models: Path) -> BodyTrack:
     """Rebuild the body track from the run's GVHMR motion (on the CPU) with upstream's own geometry code."""
     from fdanyone.assets import MHR70_REGRESSOR
     from fdanyone.motion.result import MotionResult
     from fdanyone.skeleton.pipeline import _body_geometry
-    from fdanyone.space.body import source_transforms
 
     motion = MotionResult.load(output_dir / "gvhmr")
     geometry = _body_geometry(motion, models / MHR70_REGRESSOR, gvhmr_root(models), "cpu", include_mesh=True)

@@ -23,10 +23,10 @@ from fdanyone_rerun.rerun_log import camera_entity
 
 pytestmark = pytest.mark.golden
 
-GOLDEN_RRD: Path = Path(os.environ.get("FDANYONE_GOLDEN_RRD", PACKAGE_ROOT / "data" / "golden" / "example.rrd"))
-MEAN_SSIM_MIN: float = 0.92
-"""Mean over the six views. Two runs of the same code and seed on the RTX 5090 (2026-11-15) scored 0.948 mean,
-0.943-0.955 per view (frames 0/30/60/90/120); the band leaves ~0.03 for process-to-process variation."""
+GOLDEN_RRD: Path = Path(os.environ.get("FDANYONE_GOLDEN_RRD", PACKAGE_ROOT / "data" / "golden" / "example-fp8.rrd"))
+MEAN_SSIM_MIN: float = 0.91
+"""Mean over the six views. Two runs of the default (FP8) build on the RTX 5090 (2026-11-15) scored 0.942 mean,
+0.938-0.947 per view (frames 0/30/60/90/120); the band leaves ~0.03 for process-to-process variation."""
 VIEW_SSIM_MIN: float = 0.90
 """Worst single view (same calibration)."""
 SAMPLE_FRAMES: tuple[int, ...] = (0, 30, 60, 90, 120)

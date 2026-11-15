@@ -4071,24 +4071,22 @@ cwd = "packages/metrictrail"
 description = "Build the lietorch-mojo extension and the DPVO and ViPE kernels, then run the package integration tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# fdanyone-rerun: 4DAnyone (ant-research/4DAnyone, recipes/4danyone-src) streamed into Rerun
+# fdanyone-rerun: 4DAnyone (ant-research/4DAnyone) streamed into Rerun
 # ═══════════════════════════════════════════════════════════════════════════
 # One casual video of a person -> GVHMR SMPL-X motion -> synced novel-view videos from a Wan 2.2 5B DiT (4DAnyone-Turbo,
-# 4 steps). Upstream source: recipes/4danyone-src (+ gvhmr-src, sageattention-src); our code: packages/fdanyone-rerun.
+# 4 steps). packages/fdanyone-rerun holds the run-path copy of upstream (src/fdanyone, Apache-2.0) and our code;
+# GVHMR and SageAttention build from recipes/gvhmr-src and recipes/sageattention-src.
 [feature.fdanyone-rerun]
 # linux-aarch64: the DGX Spark (GB10).
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.fdanyone-rerun.dependencies]
 python = "3.12.*"
-4danyone-src = { path = "recipes/4danyone-src" }
 gvhmr-src = { path = "recipes/gvhmr-src" }
 # SageAttention's CUDA kernels (sm_120, sm_121); 4DAnyone's DiT selects it automatically when importable.
 sageattention-src = { path = "recipes/sageattention-src" }
 # TAEW2.2's decoder for the per-step denoising previews (the weights: _download-fdanyone-models).
 taehv-src = { path = "recipes/taehv-src" }
-# FP8 W8A8 of the DiT's interior projections (4danyone-src, INFERENCE.dit_fp8_w8a8); the 5090 port's pin.
-torchao = "0.17.*"
 tyro = ">=0.9.1,<0.10"
 # What upstream fdanyone and GVHMR's static-camera path import (upstream requirements.txt + GVHMR's hmr4d).
 colorlog = ">=6,<7"

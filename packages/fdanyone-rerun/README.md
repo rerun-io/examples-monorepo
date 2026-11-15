@@ -58,15 +58,26 @@ the run through four layouts:
 
 The page fits the window. One run at a time.
 
+## Speed
+
+The recipe builds upstream plus speed levers (fork branch `upstream-fast`, one commit each; see `recipes/README.md`).
+RTX 5090, six-view example, busy host (load ~10), whole CLI run including Rerun logging:
+
+| build | wall | own CPU | denoise | peak reserved |
+| --- | ---: | ---: | ---: | ---: |
+| default (FP8 W8A8 row-wise) | 199 s | 1,342 CPU-s | 86 s | 24.5 GB |
+| `FDANYONE_DIT_FP8=0` (BF16) | 230 s | 1,389 CPU-s | 112 s | 29.2 GB |
+| `FDANYONE_TURBO_KEPT_STEPS=0,2,3` (3 steps, BF16) | 184 s | 1,324 CPU-s | 72 s | 29.2 GB |
+
+The 3-step Turbo schedule is opt-in: it is visibly softer (mean per-view SSIM 0.862 against the full-VAE reference,
+versus 0.897 for the default).
+
 ## Goldens
 
 - `tests-golden` compares a fresh example run (six views, seed 42) with the banked reference recording
-  `$FDANYONE_GOLDEN_RRD`, by default `data/golden/example.rrd`. The banked copy is
-  `/mnt/nas/ssd-8tb/fdanyone-rerun/golden/example.rrd` (run of 2026-11-15, RTX 5090).
-- The band is per-view SSIM at frames 0/30/60/90/120: mean >= 0.92 and every view >= 0.90. Two runs of the same code
-  and seed scored 0.948 mean (0.943-0.955 per view). SageAttention and the GPU kernels do not give bit-identical runs,
-  so the check is a band.
-- Reference timing (RTX 5090, six views, SageAttention, 26.9 GB peak reserved): denoising 105 s, in line with
-  upstream's 97 s on the RTX 5090 D. End to end took 576-756 s on a host whose CPU was heavily shared (load 37-108
-  on 32 cores). GVHMR, skeleton loading (~14 s per view) and the decode-and-publish tail (~20 s per view) run on the
-  CPU and take most of that time.
+  `$FDANYONE_GOLDEN_RRD`, by default `data/golden/example-fp8.rrd`. The banked copy of the default (FP8) build is
+  `/mnt/nas/ssd-8tb/fdanyone-rerun/golden/example-fp8.rrd` (RTX 5090, 2026-11-15).
+- The band is per-view SSIM at frames 0/30/60/90/120, calibrated from a same-code repeat of the default build
+  (see `tests/test_golden.py`). FP8 (dynamic activation scales) and SageAttention do not give bit-identical runs.
+- The earlier BF16 + full-VAE reference stays at `/mnt/nas/ssd-8tb/fdanyone-rerun/golden/example.rrd`: against it the
+  default scores 0.897 mean SSIM.

@@ -14877,7 +14877,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.1.0-haa8c3ee_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.23.3-py312h70625ff_2.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/torchao-0.17.0-cuda_130py312h0671f0b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.28.0-cuda130_py312_h2966ecb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.6.1-py312h1b36aeb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.7.1-cuda130py312hc6dca4b_1.conda
@@ -15145,7 +15144,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: 4danyone-src[5bbc461e] @ recipes/4danyone-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: sageattention-src[fdaeb1b9] @ recipes/sageattention-src
       - conda_source: taehv-src[09083131] @ recipes/taehv-src
@@ -15535,7 +15533,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tbb-2023.1.0-hdaecc9b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tokenizers-0.23.3-py312h2411609_2.conda
-      - conda: https://prefix.dev/conda-forge/linux-aarch64/torchao-0.17.0-cuda_130py312hbbc71f4_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/torchvision-0.28.0-cuda130_py312_hed8ace6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tornado-6.6.1-py312h898233f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/triton-3.7.1-cuda130py312h06dc8f7_1.conda
@@ -15805,7 +15802,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: 4danyone-src[bbba12c0] @ recipes/4danyone-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: sageattention-src[275ad343] @ recipes/sageattention-src
       - conda_source: taehv-src[7e6ea400] @ recipes/taehv-src
@@ -16213,7 +16209,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.1.0-haa8c3ee_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.23.3-py312h70625ff_2.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/torchao-0.17.0-cuda_130py312h0671f0b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.28.0-cuda130_py312_h2966ecb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.6.1-py312h1b36aeb_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.7.1-cuda130py312hc6dca4b_1.conda
@@ -16486,7 +16481,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: 4danyone-src[5bbc461e] @ recipes/4danyone-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: sageattention-src[fdaeb1b9] @ recipes/sageattention-src
       - conda_source: taehv-src[09083131] @ recipes/taehv-src
@@ -16879,7 +16873,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tbb-2023.1.0-hdaecc9b_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tokenizers-0.23.3-py312h2411609_2.conda
-      - conda: https://prefix.dev/conda-forge/linux-aarch64/torchao-0.17.0-cuda_130py312hbbc71f4_3.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/torchvision-0.28.0-cuda130_py312_hed8ace6_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/tornado-6.6.1-py312h898233f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/triton-3.7.1-cuda130py312h06dc8f7_1.conda
@@ -17154,7 +17147,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: 4danyone-src[bbba12c0] @ recipes/4danyone-src
       - conda_source: gvhmr-src[d4a50600] @ recipes/gvhmr-src
       - conda_source: sageattention-src[275ad343] @ recipes/sageattention-src
       - conda_source: taehv-src[7e6ea400] @ recipes/taehv-src
@@ -129188,28 +129180,6 @@ packages:
   run_exports: {}
   size: 2526380
   timestamp: 1792575567610
-- conda: https://prefix.dev/conda-forge/linux-64/torchao-0.17.0-cuda_130py312h0671f0b_3.conda
-  sha256: d3a2611ef93ebac8a0662f13c2821a590ddbd5026d44ae4ddfbe7324abaa24fa
-  md5: 6e5d1d14a89d8582ec3ab0a078da3be9
-  depends:
-  - python
-  - importlib-metadata
-  - pytorch * cuda*
-  - cuda-version >=13.0,<14
-  - libgcc >=14
-  - __glibc >=2.28,<3.0.a0
-  - libstdcxx >=14
-  - cuda-cudart >=13.0.96,<14.0a0
-  - python_abi 3.12.* *_cp312
-  - pytorch >=2.12.0,<2.13.0a0
-  - libtorch >=2.12.0,<2.13.0a0
-  license: BSD-3-Clause
-  license_family: BSD
-  purls:
-  - pkg:pypi/torchao?source=hash-mapping
-  run_exports: {}
-  size: 2877734
-  timestamp: 1782918167472
 - conda: https://prefix.dev/conda-forge/linux-64/torchcodec-0.14.0-cuda130_py312_h0ea267f_0.conda
   sha256: 7aae9a8c02cd907a01c8756dd1294d2a1f83906b9adaef681628e652e7a73434
   md5: bf31433ab96b28ea25d3d45970014fa2
@@ -154655,29 +154625,6 @@ packages:
   run_exports: {}
   size: 2510802
   timestamp: 1792575564015
-- conda: https://prefix.dev/conda-forge/linux-aarch64/torchao-0.17.0-cuda_130py312hbbc71f4_3.conda
-  sha256: 16c8dc08d11f2099d7a67108bb930f1857a701372c2b23e78b71217080766e7f
-  md5: 8f379dd735f5e1a6ebb954e5b69eb05a
-  depends:
-  - python
-  - importlib-metadata
-  - pytorch * cuda*
-  - __glibc >=2.28,<3.0.a0
-  - cuda-version >=13.0,<14
-  - arm-variant * sbsa
-  - libstdcxx >=14
-  - libgcc >=14
-  - python_abi 3.12.* *_cp312
-  - pytorch >=2.12.0,<2.13.0a0
-  - libtorch >=2.12.0,<2.13.0a0
-  - cuda-cudart >=13.0.96,<14.0a0
-  license: BSD-3-Clause
-  license_family: BSD
-  purls:
-  - pkg:pypi/torchao?source=hash-mapping
-  run_exports: {}
-  size: 2865323
-  timestamp: 1782918346808
 - conda: https://prefix.dev/conda-forge/linux-aarch64/torchcodec-0.14.0-cuda130_py312_h59f5513_0.conda
   sha256: e5acba7ce61bbf102edad2e633b163e1e043bc25a1761b5897452155388c95aa
   md5: 93c5c8dd8107314ec231f1b932e53a2c
@@ -176732,64 +176679,6 @@ packages:
     - zstd >=1.5.7,<1.6.0a0
   size: 433687
   timestamp: 1786599629846
-- conda_source: 4danyone-src[5bbc461e] @ recipes/4danyone-src
-  variants:
-    target_platform: noarch
-  depends:
-  - python *
-  - python >=3.11
-  license: Apache-2.0
-  host_packages:
-  - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_103.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libedit-3.1.20260512-pl5321h373387f_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libexpat-2.9.0-hd2095e1_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libffi-3.7.0-h81df57d_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libmpdec-4.0.0-hb03c661_2.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libsqlite-3.54.1-h0737f62_101.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libuuid-2.42.4-hcfc3c73_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/python-3.15.2-h6e52b48_100_cp315.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
-  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
-  - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.15-9_cp315.conda
-  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
-- conda_source: 4danyone-src[bbba12c0] @ recipes/4danyone-src
-  variants:
-    target_platform: noarch
-  depends:
-  - python *
-  - python >=3.11
-  license: Apache-2.0
-  host_packages:
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-20_gnu.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/bzip2-1.0.8-h4777abc_10.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/ld_impl_linux-aarch64-2.46.1-default_h1979696_103.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libedit-3.1.20260512-pl5321hc48eb74_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libexpat-2.9.0-h4154aff_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libffi-3.7.0-hdaad0be_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libgcc-16.2.0-h205dda4_7.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libgomp-16.2.0-h8acb6b2_7.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/liblzma-5.8.3-he30d5cf_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libmpdec-4.0.0-he30d5cf_2.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libsqlite-3.54.1-hd26f1b6_101.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libuuid-2.42.4-hd6fdeab_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/libzlib-1.3.2-hdc9db2a_3.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/ncurses-6.6-h2b6f883_1.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/openssl-3.6.5-he6ad1d5_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/python-3.15.2-h0c7c799_100_cp315.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/tk-8.6.13-noxft_hf03c496_4.conda
-  - conda: https://prefix.dev/conda-forge/linux-aarch64/zstd-1.5.7-h9d15635_7.conda
-  - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
-  - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.15-9_cp315.conda
-  - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
 - conda_source: asmk-rs[ccc7d3d7] @ packages/asmk-rs
   variants:
     target_platform: linux-64
