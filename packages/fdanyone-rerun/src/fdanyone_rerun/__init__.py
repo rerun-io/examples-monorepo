@@ -1,0 +1,12 @@
+"""4DAnyone in the monorepo, streamed into Rerun.
+
+Upstream 4DAnyone is the `fdanyone` module from `recipes/4danyone-src` (GVHMR: `recipes/gvhmr-src`); this package
+holds our code around it: the run core with its hooks, the Rerun recording and layouts, the CLIs and the Gradio app.
+"""
+
+import os
+
+if os.environ.get("PIXI_DEV_MODE") == "1":
+    from beartype.claw import beartype_this_package
+
+    beartype_this_package()

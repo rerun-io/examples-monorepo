@@ -1,0 +1,6 @@
+[package]
+name = "4danyone-src"
+version = "0.1.0.6dcf626"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

@@ -1,0 +1,32 @@
+# GVHMR (zju3dv/GVHMR) at 6ec3ca3, the revision 4DAnyone pins as a submodule. 4DAnyone runs GVHMR as a working tree:
+# it chdirs into the root, imports `hmr4d` from it and reads `inputs/checkpoints/...` relative to it. So the tree
+# (hmr4d + tools, with the commit in REVISION) installs read-only at $PREFIX/share/gvhmr-src, and packages/fdanyone-rerun
+# copies it into a writable run root beside the weights (GVHMR's PROJ_ROOT is Path(hmr4d.__file__).resolve(), so links
+# into this tree would make it read and download checkpoints here). Nothing is compiled; the moving-camera DPVO in
+# third-party/ is not installed (4DAnyone runs the static-camera path).
+package:
+  name: gvhmr-src
+  version: "1.0.0.6ec3ca3"
+
+source:
+  url: https://github.com/zju3dv/GVHMR/archive/6ec3ca39336c50492c0fae65fba2fb831fc7d866.tar.gz
+  sha256: bf7008a6dfb2ac202c9f53db04c1b1ac2f12e0fdab85ca70d1e16b1813702764
+
+build:
+  number: 0
+  noarch: generic
+  script:
+    - export ROOT="$PREFIX/share/gvhmr-src"
+    - rm -rf "$ROOT"
+    - mkdir -p "$ROOT"
+    - cp -r hmr4d tools "$ROOT/"
+    - cp LICENSE "$ROOT/LICENSE"
+    - echo 6ec3ca39336c50492c0fae65fba2fb831fc7d866 > "$ROOT/REVISION"
+    - find "$ROOT" -name __pycache__ -prune -exec rm -rf {} +
+    - test -f "$ROOT/hmr4d/__init__.py"
+    - test -f "$ROOT/tools/demo/demo.py"
+
+about:
+  homepage: https://github.com/zju3dv/GVHMR
+  license_file: LICENSE
+  summary: GVHMR source tree (6ec3ca3) at share/gvhmr-src for 4DAnyone's motion recovery

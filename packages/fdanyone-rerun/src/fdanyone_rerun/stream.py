@@ -1,0 +1,114 @@
+"""One run streamed into a Rerun recording, phase by phase: the CLI and the Gradio app both run through this.
+
+1. Motion: the input clip and the progress log (``motion_blueprint``).
+2. Conditioning: once GVHMR's motion is saved, the body in 3D and over the source (``body_blueprint``).
+3. Denoising: per-view previews on ``diffusion_step`` from upstream's step hook (``diffusion_blueprint``).
+4. Result: the camera rig and the generated videos (``result_blueprint``).
+"""
+
+import threading
+from pathlib import Path
+
+import rerun as rr
+import torch
+from taehv import TAEHV
+
+from fdanyone_rerun.assets import model_dir
+from fdanyone_rerun.core import RunConfig, run_views
+from fdanyone_rerun.outputs import RunMetadata
+from fdanyone_rerun.previews import decode_previews
+from fdanyone_rerun.rerun_log import (
+    DIFFUSION_TIMELINE,
+    FRAME_TIMELINE,
+    PROGRESS,
+    TIMELINE,
+    body_blueprint,
+    diffusion_blueprint,
+    load_body,
+    log_body,
+    log_cameras,
+    log_source_video,
+    motion_blueprint,
+    preview_entity,
+    result_blueprint,
+)
+
+CONDITIONING_STAGE: str = "Building foreground masks and skeletons"
+"""Upstream's progress label once GVHMR's motion is saved in the run directory."""
+GENERATION_STAGE: str = "Generating target-view videos"
+"""Upstream's progress label when denoising starts."""
+
+
+class RunCancelled(RuntimeError):
+    """The user stopped the run; raised from the next stage or step callback."""
+
+
+class RunStreamer:
+    """Logs one run into ``recording`` as it happens."""
+
+    def __init__(self, config: RunConfig, recording: rr.RecordingStream, preview_decoder: TAEHV | None) -> None:
+        self.config: RunConfig = config
+        self.recording: rr.RecordingStream = recording
+        self.preview_decoder: TAEHV | None = preview_decoder
+        """TAEW2.2 (``previews.load_preview_decoder``); None logs no previews."""
+        self.stop: threading.Event = threading.Event()
+        """Set from another thread to cancel at the next stage or step."""
+        self.output_dir: Path = config.output_dir.expanduser().resolve()
+
+    def message(self, text: str, step: int = 0) -> None:
+        """One progress line, in the log view and on stdout.
+
+        A log view lists only rows on its active timeline, so every line sits at the start of ``time`` and ``frame``
+        and at its denoising step: it shows in every phase's layout.
+        """
+        print(f"[fdanyone-rerun] {text}")
+        self.recording.set_time(TIMELINE, duration=0.0)
+        self.recording.set_time(FRAME_TIMELINE, sequence=0)
+        self.recording.set_time(DIFFUSION_TIMELINE, sequence=step)
+        self.recording.log(PROGRESS, rr.TextLog(text, level=rr.TextLogLevel.INFO))
+        self.recording.reset_time()
+
+    def on_stage(self, label: str, fraction: float) -> None:
+        """Upstream's stage callback: switch the layout at the phase boundaries."""
+        if self.stop.is_set():
+            raise RunCancelled("stopped")
+        self.message(f"{fraction:4.0%} {label}")
+        if label == CONDITIONING_STAGE:
+            fps: float = self._motion_fps()
+            log_body(load_body(self.output_dir, model_dir()), fps, self.recording)
+            self.recording.send_blueprint(body_blueprint())
+        elif label == GENERATION_STAGE:
+            self.recording.send_blueprint(diffusion_blueprint(self.config.layout.num_views))
+
+    def on_step(self, step_index: int, view_indices: tuple[int, ...] | None, clean_estimate: torch.Tensor) -> None:
+        """Upstream's step hook: decode and log each view's preview (the RCP proposals are not shown)."""
+        if self.stop.is_set():
+            raise RunCancelled("stopped")
+        if view_indices is None or self.preview_decoder is None:
+            return
+        self.message(f"denoising step {step_index + 1}: views {', '.join(f'{view:02d}' for view in view_indices)}", step=step_index)
+        self.recording.set_time(DIFFUSION_TIMELINE, sequence=step_index)
+        for view, image in zip(view_indices, decode_previews(self.preview_decoder, clean_estimate), strict=True):
+            self.recording.log(preview_entity(view), rr.Image(image).compress(jpeg_quality=85))
+        self.recording.reset_time()
+
+    def _motion_fps(self) -> float:
+        """The canonical clip rate, from GVHMR's saved motion."""
+        from fdanyone.motion.result import MotionResult
+
+        return float(MotionResult.load(self.output_dir / "gvhmr").fps)
+
+    def run(self) -> RunMetadata:
+        """Run the pipeline and stream all four phases; returns upstream's run summary."""
+        self.recording.send_blueprint(motion_blueprint())
+        self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
+        log_source_video(self.config.video.expanduser().resolve(), self.recording)
+        metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step)
+        log_cameras(self.output_dir, self.recording)
+        self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
+        generation = metadata.generation
+        self.message(
+            f"done in {generation.total_elapsed_seconds:.1f} s ({generation.attention_backend}, "
+            f"{generation.peak_vram_reserved_bytes / 1e9:.2f} GB reserved)"
+        )
+        return metadata
