@@ -74,13 +74,15 @@ class RoundStats:
 class PolishStats:
     """The one Ceres bundle adjustment that finishes a CASPAR mapping run.
 
-    Nothing is merged, completed or filtered around it, so the observation set that
-    goes in is the one that comes out and every number here is the solve's alone
-    (`docs/caspar-build.md` § Shipped: CASPAR + Ceres polish).
+    Nothing is merged, completed or quality-filtered around it, so every number here
+    is the solve's alone (`docs/caspar-build.md` § Shipped: CASPAR + Ceres polish);
+    only the rounds' post-solve sanity guards run after it (`num_diverged`).
     """
 
     num_observations: int
-    """Observations the solve parameterised; unchanged by it, since nothing filters."""
+    """Observations the solve parameterised."""
+    num_diverged: int
+    """Observations the post-solve guards removed (points walked behind or into a camera)."""
     report: SolverReport
     """What the polish said about its own progress: 22 iterations on KITTI 06 from
     CASPAR's answer, ending 3.4 % below the initial cost. Optional throughout for the

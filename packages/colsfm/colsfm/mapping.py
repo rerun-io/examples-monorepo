@@ -531,13 +531,18 @@ def _polish_with_ceres(
     options: MappingOptions,
     gauge_frame_id: int,
     fixed_camera_params_id: int | None,
+    observation_manager: pycolmap.ObservationManager,
+    depth_threshold: float,
 ) -> PolishStats:
     """One Ceres global bundle adjustment over a finished CASPAR model.
 
     The whole step: the same gauge frame, the same observation set, no
-    re-triangulation, no merge, no complete, no filter — so the reprojection error
-    the round loop reported and the one this returns describe the same points, and
-    every difference between them is the solve's. `docs/caspar-build.md`
+    re-triangulation, no merge, no complete, no quality filter — so the reprojection
+    error the round loop reported and the one this returns describe the same points,
+    and every difference between them is the solve's. Only the numeric-sanity guards
+    every round runs after its solve run here too: a converged polish can also walk a
+    weakly constrained point behind a camera (MSD MGO07: 2 of 89,470 points at
+    1e154 px, which made the mean 1.9e149 px). `docs/caspar-build.md`
     § Shipped: CASPAR + Ceres polish measured 22 iterations and 9.8 s on KITTI 06's
     2156 images, which recovers the 0.4 m of trajectory CASPAR left on the table.
 
@@ -547,6 +552,8 @@ def _polish_with_ceres(
         options: The run's knobs; the plan's backend is forced to Ceres.
         gauge_frame_id: The same frame the rounds held constant.
         fixed_camera_params_id: The same camera the rounds held constant, or None.
+        observation_manager: Bookkeeping bound to the reconstruction, for the guards.
+        depth_threshold: `filter_degenerate_points`' bound, as in the rounds.
 
     Returns:
         What the solve cost and how far it moved the reprojection error.
@@ -554,10 +561,15 @@ def _polish_with_ceres(
     polish_options: pycolmap.BundleAdjustmentOptions = ceres_polish_options(ba_config, options)
     before_px: float = reconstruction.compute_mean_reprojection_error()
     summary, solve_seconds = solve_bundle_adjustment(reconstruction, polish_options, gauge_frame_id, fixed_camera_params_id)
+    num_observations: int = reconstruction.compute_num_observations()
+    num_diverged: int = filter_degenerate_points(observation_manager, reconstruction, depth_threshold) + filter_projection_failures(
+        observation_manager, reconstruction
+    )
     reconstruction.update_point_3d_errors()
     report: SolverReport = parse_brief_report(summary.brief_report())
     stats: PolishStats = PolishStats(
-        num_observations=reconstruction.compute_num_observations(),
+        num_observations=num_observations,
+        num_diverged=num_diverged,
         report=report,
         ba_termination=summary.termination_type.name,
         mean_reprojection_error_before_px=before_px,
@@ -576,7 +588,7 @@ def _polish_with_ceres(
         print(
             f"[colsfm] ceres polish: {iterations} iterations, {costs}, "
             f"reprojection {stats.mean_reprojection_error_before_px:.4f} -> "
-            f"{stats.mean_reprojection_error_after_px:.4f} px in {stats.seconds:.1f} s ({stats.ba_termination})"
+            f"{stats.mean_reprojection_error_after_px:.4f} px in {stats.seconds:.1f} s ({stats.ba_termination}), diverged {stats.num_diverged}"
         )
     return stats
 
@@ -754,11 +766,17 @@ def run_mapping(
             break
 
     # The rounds are done; CASPAR's answer is not yet a stationary point of the
-    # objective, so one Ceres solve finishes it. Nothing filters around it.
+    # objective, so one Ceres solve finishes it. Only the post-solve guards run after it.
     polish: PolishStats | None = None
     if plan.ceres_polish:
         polish = _polish_with_ceres(
-            reconstruction, ba_config, resolved_options, resolved_gauge_frame_id, fixed_camera_params_id
+            reconstruction,
+            ba_config,
+            resolved_options,
+            resolved_gauge_frame_id,
+            fixed_camera_params_id,
+            correspondences.observation_manager,
+            mapping_config.depth_threshold,
         )
         bundle_adjustment_seconds += polish.seconds
 
