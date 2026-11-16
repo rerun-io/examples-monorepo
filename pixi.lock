@@ -2897,7 +2897,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: colmap-src[ec87c25c] @ recipes/colmap-src
+      - conda_source: colmap-src[cc631c98] @ recipes/colmap-src
       - conda_source: lightglue-onnx-src[53d9c975] @ recipes/lightglue-onnx-src
       - pypi: ./packages/colsfm
       - pypi: ./packages/simplecv
@@ -3560,7 +3560,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: colmap-src[a9971e3b] @ recipes/colmap-src
+      - conda_source: colmap-src[c11d59cb] @ recipes/colmap-src
       - conda_source: lightglue-onnx-src[71ebc885] @ recipes/lightglue-onnx-src
       - pypi: ./packages/colsfm
       - pypi: ./packages/simplecv
@@ -4245,7 +4245,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: colmap-src[ec87c25c] @ recipes/colmap-src
+      - conda_source: colmap-src[cc631c98] @ recipes/colmap-src
       - conda_source: lightglue-onnx-src[53d9c975] @ recipes/lightglue-onnx-src
       - pypi: ./packages/colsfm
       - pypi: ./packages/simplecv
@@ -4917,7 +4917,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.2-pyh5ded981_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/widgetsnbextension-4.0.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.2-pyh5ded981_0.conda
-      - conda_source: colmap-src[a9971e3b] @ recipes/colmap-src
+      - conda_source: colmap-src[c11d59cb] @ recipes/colmap-src
       - conda_source: lightglue-onnx-src[71ebc885] @ recipes/lightglue-onnx-src
       - pypi: ./packages/colsfm
       - pypi: ./packages/simplecv
@@ -164446,6 +164446,15 @@ packages:
   run_exports: {}
   size: 247376
   timestamp: 1786200320545
+- conda: https://prefix.dev/conda-forge/noarch/pybind11-stubgen-3.0.0-pyhd8ed1ab_0.conda
+  sha256: f47d6b56a010d6e585ee2462aadc51255424153c394e4c143286780d9f37d9b5
+  md5: bdee6f98fb15d9f2b0d4769ec154fa14
+  depends:
+  - python >=3.11
+  license: BSD-Protection
+  run_exports: {}
+  size: 39067
+  timestamp: 1791219313522
 - conda: https://prefix.dev/conda-forge/noarch/pycparser-3.0-pyhcf101f3_0.conda
   sha256: e27e0473fc6723311a0bd48b89b616fa1b996a2f7a2b555338cbbcfb9c640568
   md5: 9c5491066224083c41b6d5635ed7107b
@@ -178183,7 +178192,7 @@ packages:
 - conda_source: brush-src[74cb6902] @ recipes/brush-src
   variants:
     target_platform: noarch
-- conda_source: colmap-src[a9971e3b] @ recipes/colmap-src
+- conda_source: colmap-src[c11d59cb] @ recipes/colmap-src
   variants:
     target_platform: linux-aarch64
   depends:
@@ -178287,6 +178296,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/linux-aarch64/pcre2-10.49-he574923_0.conda
   - conda: https://prefix.dev/conda-forge/linux-aarch64/perl-5.44.0-1_h5bc82ec_perl5.conda
   - conda: https://prefix.dev/conda-forge/linux-aarch64/rhash-1.4.6-he30d5cf_2.conda
+  - conda: https://prefix.dev/conda-forge/linux-aarch64/ruff-0.17.5-h328a733_0.conda
   - conda: https://prefix.dev/conda-forge/linux-aarch64/zstd-1.5.7-h9d15635_7.conda
   - conda: https://prefix.dev/conda-forge/noarch/arm-variant-1.2.0-sbsa.conda
   - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
@@ -178561,6 +178571,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/pip-26.2.2-pyh8b19718_2.conda
   - conda: https://prefix.dev/conda-forge/noarch/pybind11-3.1.0-pyh293190f_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/pybind11-global-3.1.0-pyh648e204_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/pybind11-stubgen-3.0.0-pyhd8ed1ab_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.12-9_cp312.conda
   - conda: https://prefix.dev/conda-forge/noarch/scikit-build-core-1.1.2-pyhcb39dcd_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/setuptools-84.2.1-pyhe730653_0.conda
@@ -178568,7 +178579,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.conda
-- conda_source: colmap-src[ec87c25c] @ recipes/colmap-src
+- conda_source: colmap-src[cc631c98] @ recipes/colmap-src
   variants:
     target_platform: linux-64
   depends:
@@ -178671,6 +178682,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/linux-64/pcre2-10.49-h8b3dc9c_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/perl-5.44.0-1_h7cc23a3_perl5.conda
   - conda: https://prefix.dev/conda-forge/linux-64/rhash-1.4.6-hb03c661_2.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/ruff-0.17.5-hf19af3b_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
   - conda: https://prefix.dev/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/cuda-cccl_linux-64-13.0.85-ha770c72_1.conda
@@ -178952,6 +178964,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/pip-26.2.2-pyh8b19718_2.conda
   - conda: https://prefix.dev/conda-forge/noarch/pybind11-3.1.0-pyh293190f_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/pybind11-global-3.1.0-pyh648e204_0.conda
+  - conda: https://prefix.dev/conda-forge/noarch/pybind11-stubgen-3.0.0-pyhd8ed1ab_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/python_abi-3.12-9_cp312.conda
   - conda: https://prefix.dev/conda-forge/noarch/scikit-build-core-1.1.2-pyhcb39dcd_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/setuptools-84.2.1-pyhe730653_0.conda
