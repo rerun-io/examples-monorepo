@@ -2638,6 +2638,13 @@
       "name": "missing-import",
       "concise_description": "Cannot find module `conftest`",
       "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "tests/test_rational_pole.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
     }
   ]
 }

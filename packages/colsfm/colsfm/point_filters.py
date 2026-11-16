@@ -1,15 +1,17 @@
 """The guards that run after a bundle adjustment, which cuSFM has no equivalent of.
 
 A converged solve can still leave a point outside the world or inside a camera:
-`filter_degenerate_points` removes what the depth and bounds tests reject, and
+`filter_degenerate_points` removes what the depth and bounds tests reject,
 `filter_projection_failures` removes observations whose projection is not finite
-or lands absurdly far off the sensor. Both docstrings carry the measurements that
-justify their thresholds.
+or lands absurdly far off the sensor, and `filter_past_rational_pole` removes
+observations at or past a `FULL_OPENCV` camera's rational distortion pole. The
+docstrings carry the measurements that justify them.
 
 Their own module because they are a *policy about points*, applied between the
 solve and the next round, and they are exercised directly by tests that build a
 degenerate model on purpose rather than through a whole mapping run.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -89,13 +91,9 @@ def filter_degenerate_points(
     if not points:
         return 0
     point3D_ids: list[int] = [point3D_id for point3D_id, _ in points]
-    points_xyz: Float64[ndarray, "num_points 3"] = np.array(
-        [point.xyz for _, point in points], dtype=np.float64
-    )
+    points_xyz: Float64[ndarray, "num_points 3"] = np.array([point.xyz for _, point in points], dtype=np.float64)
     # `np.abs(nan) > threshold` is False, so the finiteness term has to carry the NaNs.
-    out_of_bounds: Bool[ndarray, "num_points"] = ~np.isfinite(points_xyz).all(axis=1) | (
-        np.abs(points_xyz).max(axis=1) > depth_threshold
-    )
+    out_of_bounds: Bool[ndarray, "num_points"] = ~np.isfinite(points_xyz).all(axis=1) | (np.abs(points_xyz).max(axis=1) > depth_threshold)
     removed: int = 0
     for point3D_id in np.asarray(point3D_ids)[out_of_bounds].tolist():
         removed += reconstruction.point3D(point3D_id).track.length()
@@ -118,9 +116,7 @@ def projection_sanity_bound_px(reconstruction: pycolmap.Reconstruction) -> float
     return max(sides) if sides else 0.0
 
 
-def filter_projection_failures(
-    observation_manager: pycolmap.ObservationManager, reconstruction: pycolmap.Reconstruction
-) -> int:
+def filter_projection_failures(observation_manager: pycolmap.ObservationManager, reconstruction: pycolmap.Reconstruction) -> int:
     """Drop observations a solve has made unprojectable, at a numeric-sanity bound.
 
     Not a quality filter — the round's own gate (25 down to 5 px) is far tighter
@@ -159,6 +155,96 @@ def filter_projection_failures(
     return observation_manager.filter_all_points3D(bound_px, 0.0)
 
 
+def rational_pole_angle(camera: pycolmap.Camera) -> float:
+    """The angle off the optical axis where a `FULL_OPENCV` camera's rational distortion reaches its first pole.
+
+    `FULL_OPENCV`'s radial factor `(1 + k1 r^2 + k2 r^4 + k3 r^6) / (1 + k4 r^2 + k5 r^4 + k6 r^6)` is infinite
+    at the denominator's first positive root in `r^2`, found here analytically: when the numerator nearly cancels it
+    the pole is a spike too narrow to sample. MSD MGO07's cam 2 has one at r = 1.32422 (52.9 degrees, inside the image
+    at v = 592 of 640), where the projection jumps to -1.9e10 px within 1e-7 of r; a central-difference Jacobian across
+    it made an extrinsics solve fail on its first evaluation.
+
+    This is a guard against that one singularity, not a general validity test of the camera model. Every other model,
+    and a `FULL_OPENCV` camera without a positive root, gets the whole front half-space: radial folds before the pole
+    and folds of the tangential terms between image axes (`p1 = p2 = 0.1` folds along the negative diagonal at
+    r = 1.17851) are out of scope; the extrinsic solve's finite-evaluation backstop catches only non-finite results.
+
+    Args:
+        camera: The camera.
+
+    Returns:
+        The angle in radians; pi/2 when the model has no rational pole (COLMAP projects nothing at or behind z = 0).
+    """
+    if camera.model != pycolmap.CameraModelId.FULL_OPENCV:
+        return 0.5 * np.pi
+    k4, k5, k6 = (float(value) for value in camera.params[9:12])
+    poles: list[float] = [float(root.real) for root in np.roots([k6, k5, k4, 1.0]) if abs(root.imag) < 1e-12 and root.real > 0.0]
+    return float(np.arctan(np.sqrt(min(poles)))) if poles else 0.5 * np.pi
+
+
+def before_rational_pole(points_in_camera: Float64[ndarray, "n 3"], pole_angle: float) -> Bool[ndarray, " n"]:
+    """Which camera-frame points lie in front of the camera and inside its `rational_pole_angle`.
+
+    Args:
+        points_in_camera: Points in the camera frame, metres.
+        pole_angle: The camera's `rational_pole_angle`.
+
+    Returns:
+        True for points in front of the camera and short of the pole.
+    """
+    off_axis: Float64[ndarray, " n"] = np.arctan2(np.hypot(points_in_camera[:, 0], points_in_camera[:, 1]), points_in_camera[:, 2])
+    return (points_in_camera[:, 2] > 0.0) & (off_axis < pole_angle)
+
+
+def filter_past_rational_pole(observation_manager: pycolmap.ObservationManager, reconstruction: pycolmap.Reconstruction) -> int:
+    """Delete every observation whose point lies at or past its camera's rational pole (`rational_pole_angle`).
+
+    Runs at the bundle-adjustment boundary (`colsfm.mapping.solve_bundle_adjustment`), before the adjuster is built and
+    again after the solve, so the rounds, the polish and extrinsic refinement never hand the solver such an observation
+    and never read one back; the extrinsic gather applies the same `before_rational_pole` test to its own folded points.
+    Cameras without a pole are skipped (only a point behind them would fail, and `filter_projection_failures` already
+    removes those).
+
+    Args:
+        observation_manager: Bookkeeping bound to the reconstruction.
+        reconstruction: The model to filter, edited in place.
+
+    Returns:
+        Observations removed: the reconstruction's observation count before minus after, so a deletion that takes a
+        whole two-observation track counts both.
+    """
+    pole_angles: dict[int, float] = {camera_id: rational_pole_angle(camera) for camera_id, camera in reconstruction.cameras.items()}
+    limited: set[int] = {camera_id for camera_id, angle in pole_angles.items() if angle < 0.5 * np.pi}
+    if not limited:
+        return 0
+    before: int = reconstruction.compute_num_observations()
+    # One pass over the points, then each image's observation list: `reconstruction.point3D(id)` copies the point and
+    # its whole track, which per observation made this 83 s per call on MGO07 (1.4M observations, load ~65).
+    xyz_by_id: dict[int, ndarray] = {int(point3D_id): point.xyz for point3D_id, point in reconstruction.points3D.items()}
+    for image_id in reconstruction.reg_image_ids():
+        image: pycolmap.Image = reconstruction.image(image_id)
+        if image.camera_id not in limited:
+            continue
+        point2D_idxs: list[int] = list(image.get_observation_point2D_idxs())
+        if not point2D_idxs:
+            continue
+        world: Float64[ndarray, "n 3"] = np.asarray(
+            [xyz_by_id[int(point2D.point3D_id)] for point2D in image.get_observation_points2D()], dtype=np.float64
+        )
+        cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
+        # einsum, not `@`: a [n, 3] x [3, 3] product through MKL's thread pool spun 170 CPU-seconds per call on a busy host.
+        in_camera: Float64[ndarray, "n 3"] = np.einsum(
+            "ij,nj->ni", np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64), world
+        ) + np.asarray(cam_from_world.translation, dtype=np.float64)
+        for row in np.flatnonzero(~before_rational_pole(in_camera, pole_angles[image.camera_id])):
+            point2D_idx: int = int(point2D_idxs[int(row)])
+            # A deletion that leaves a track below two observations deletes the point and every other observation
+            # of it, this image's included, so each row is checked again before its own deletion.
+            if image.point2D(point2D_idx).has_point3D():
+                observation_manager.delete_observation(image_id, point2D_idx)
+    return before - reconstruction.compute_num_observations()
+
+
 def _filter_points(
     observation_manager: pycolmap.ObservationManager,
     reconstruction: pycolmap.Reconstruction,
@@ -182,9 +268,7 @@ def _filter_points(
     Returns:
         Observations removed, split by cause.
     """
-    reprojection_and_angle: int = observation_manager.filter_all_points3D(
-        max_pixel_error, mapping_config.min_triangulation_deg
-    )
+    reprojection_and_angle: int = observation_manager.filter_all_points3D(max_pixel_error, mapping_config.min_triangulation_deg)
     negative_depth: int = observation_manager.filter_observations_with_negative_depth()
     short_track: int = observation_manager.filter_points3D_with_short_tracks(mapping_config.min_correspondences)
     degenerate: int = filter_degenerate_points(observation_manager, reconstruction, mapping_config.depth_threshold)
@@ -194,5 +278,3 @@ def _filter_points(
         short_track=short_track,
         degenerate=degenerate,
     )
-
-

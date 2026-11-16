@@ -22,6 +22,7 @@ from jaxtyping import Float64
 from mapping_helpers import SyntheticRig, synthetic_matches, write_database
 from numpy import ndarray
 
+from colsfm import point_filters
 from colsfm.config import CusfmConfig
 from colsfm.mapping import (
     BundleAdjustmentSolve,
@@ -200,3 +201,73 @@ def test_the_solve_boundary_guards_the_points_it_returns(synthetic_rig: Syntheti
     assert solve.num_diverged > 0
     assert reconstruction.compute_num_observations() == observations_before - solve.num_diverged
     assert all(np.abs(point.xyz).max() <= extent for point in reconstruction.points3D.values())
+
+
+def _off_axis_deg(reconstruction: pycolmap.Reconstruction, image_ids: list[int]) -> list[float]:
+    """Every observation's angle off its camera's optical axis, degrees, over the given images."""
+    angles: list[float] = []
+    for image_id in image_ids:
+        image = reconstruction.image(image_id)
+        cam_from_world = image.cam_from_world()
+        for point2D in image.points2D:
+            if point2D.has_point3D():
+                xyz = cam_from_world * reconstruction.point3D(point2D.point3D_id).xyz
+                angles.append(float(np.degrees(np.arctan2(np.hypot(xyz[0], xyz[1]), xyz[2]))))
+    return angles
+
+
+def test_the_pole_guard_survives_tracks_it_deletes_and_counts_every_observation_removed(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a pole close enough to cut most tracks, deleting one observation also deletes whole points.
+
+    The first version deleted the rows it had listed up front and failed on a point an earlier deletion had already
+    removed (`Point3D with ID -1`); every listed row is now checked again before its deletion. The count is the
+    model's observation count before minus after: a deletion that takes a two-observation track removes both.
+    """
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    monkeypatch.setattr(point_filters, "rational_pole_angle", lambda camera: np.radians(5.0))
+    before: int = reconstruction.compute_num_observations()
+    removed: int = point_filters.filter_past_rational_pole(correspondences.observation_manager, reconstruction)
+    assert removed > 0
+    assert removed == before - reconstruction.compute_num_observations()
+    assert max(_off_axis_deg(reconstruction, list(reconstruction.reg_image_ids()))) < 5.0
+
+
+def test_new_extrinsics_that_move_observations_past_the_pole_never_reach_the_adjuster(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extrinsic refinement writes new extrinsics, then solves: the boundary guards before it builds the adjuster.
+
+    One camera's `sensor_from_rig` is turned so that part of its observations land past a pole every observation was
+    short of before. The adjuster is handed none of them, and the solve reports every observation its guards removed.
+    """
+    from colsfm.reconstruction import RIG_ID, camera_sensor_id
+
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    camera_id: int = reconstruction.image(min(reconstruction.reg_image_ids())).camera_id
+    image_ids: list[int] = [image_id for image_id in reconstruction.reg_image_ids() if reconstruction.image(image_id).camera_id == camera_id]
+    pole_deg: float = max(_off_axis_deg(reconstruction, image_ids)) + 1.0
+    monkeypatch.setattr(point_filters, "rational_pole_angle", lambda camera: np.radians(pole_deg) if camera.camera_id == camera_id else 0.5 * np.pi)
+    rig: pycolmap.Rig = reconstruction.rig(RIG_ID)
+    sensor: pycolmap.sensor_t = camera_sensor_id(camera_id)
+    turn = pycolmap.Rigid3d(pycolmap.Rotation3d(np.array([0.0, np.radians(0.5 * pole_deg), 0.0])), np.zeros(3))
+    sensor_from_rig: pycolmap.Rigid3d | None = rig.sensor_from_rig(sensor)
+    assert sensor_from_rig is not None
+    rig.set_sensor_from_rig(sensor, turn * sensor_from_rig)
+    assert max(_off_axis_deg(reconstruction, image_ids)) > pole_deg
+    handed: list[float] = []
+    build = pycolmap.create_default_bundle_adjuster
+
+    def adjuster(
+        options: pycolmap.BundleAdjustmentOptions, config: pycolmap.BundleAdjustmentConfig, model: pycolmap.Reconstruction
+    ) -> pycolmap.BundleAdjuster:
+        handed.extend(_off_axis_deg(model, image_ids))
+        return build(options, config, model)
+
+    monkeypatch.setattr(pycolmap, "create_default_bundle_adjuster", adjuster)
+    before: int = reconstruction.compute_num_observations()
+    solve: BundleAdjustmentSolve = _solve(reconstruction, correspondences, DEPTH_THRESHOLD_M)
+    assert handed and max(handed) < pole_deg
+    assert solve.num_past_pole_before > 0
+    assert solve.num_removed == before - reconstruction.compute_num_observations()

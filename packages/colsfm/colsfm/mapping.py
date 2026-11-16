@@ -179,6 +179,7 @@ from colsfm.point_filters import (
     _filter_points,
     _FilterCounts,
     filter_degenerate_points,
+    filter_past_rational_pole,
     filter_projection_failures,
     projection_sanity_bound_px,
 )
@@ -455,6 +456,29 @@ class BundleAdjustmentSolve:
     """Seconds inside `solve()`."""
     num_diverged: int
     """Observations the post-solve guards removed (`filter_degenerate_points` + `filter_projection_failures`)."""
+    num_past_pole_before: int
+    """Observations removed before the adjuster was built for lying at or past their camera's rational pole
+    (`filter_past_rational_pole`): a caller's new extrinsics or poses can move an observation across it."""
+    num_past_pole_after: int
+    """Observations the same guard removed after the solve."""
+
+    @property
+    def num_past_pole(self) -> int:
+        """Observations the rational-pole guard removed on either side of the solve.
+
+        Returns:
+            `num_past_pole_before + num_past_pole_after`.
+        """
+        return self.num_past_pole_before + self.num_past_pole_after
+
+    @property
+    def num_removed(self) -> int:
+        """Observations any guard of this boundary removed; a caller holding an index of the model rebuilds it when nonzero.
+
+        Returns:
+            `num_diverged + num_past_pole`.
+        """
+        return self.num_diverged + self.num_past_pole
 
 
 def solve_bundle_adjustment(
@@ -503,6 +527,9 @@ def solve_bundle_adjustment(
     Raises:
         SolverFailure: When the solve is not usable; the model is then as the solver left it.
     """
+    # Before the adjuster is built: Ceres evaluates every observation it is handed, and one at a rational pole is
+    # infinite there or within a finite-difference step of it.
+    num_past_pole_before: int = filter_past_rational_pole(observation_manager, reconstruction)
     config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
     for image_id in registered_image_ids(reconstruction):
         config.add_image(image_id)
@@ -520,8 +547,15 @@ def solve_bundle_adjustment(
     num_diverged: int = filter_degenerate_points(observation_manager, reconstruction, depth_threshold) + filter_projection_failures(
         observation_manager, reconstruction
     )
+    num_past_pole_after: int = filter_past_rational_pole(observation_manager, reconstruction)
     reconstruction.update_point_3d_errors()
-    return BundleAdjustmentSolve(summary=summary, seconds=seconds, num_diverged=num_diverged)
+    return BundleAdjustmentSolve(
+        summary=summary,
+        seconds=seconds,
+        num_diverged=num_diverged,
+        num_past_pole_before=num_past_pole_before,
+        num_past_pole_after=num_past_pole_after,
+    )
 
 
 def _check_extrinsics_are_refinable(model: PosedModel) -> None:
@@ -596,8 +630,9 @@ def _polish_with_ceres(
     )
     report: SolverReport = parse_brief_report(solve.summary.brief_report())
     stats: PolishStats = PolishStats(
-        num_observations=reconstruction.compute_num_observations() + solve.num_diverged,
+        num_observations=reconstruction.compute_num_observations() + solve.num_diverged + solve.num_past_pole_after,
         num_diverged=solve.num_diverged,
+        num_past_pole=solve.num_past_pole,
         report=report,
         ba_termination=solve.summary.termination_type.name,
         mean_reprojection_error_before_px=before_px,
@@ -615,7 +650,7 @@ def _polish_with_ceres(
         print(
             f"[colsfm] ceres polish: {iterations} iterations, {costs}, "
             f"reprojection {stats.mean_reprojection_error_before_px:.4f} -> "
-            f"{stats.mean_reprojection_error_after_px:.4f} px in {stats.seconds:.1f} s ({stats.ba_termination}), diverged {stats.num_diverged}"
+            f"{stats.mean_reprojection_error_after_px:.4f} px in {stats.seconds:.1f} s ({stats.ba_termination}), diverged {stats.num_diverged}, past the rational pole {stats.num_past_pole}"
         )
     return stats
 
@@ -736,12 +771,9 @@ def run_mapping(
         num_merged: int = triangulator.merge_all_tracks(round_options)
         num_completed: int = triangulator.complete_all_tracks(round_options)
         filtered: _FilterCounts = _filter_points(correspondences.observation_manager, reconstruction, mapping_config, max_pixel_error)
-        num_observations: int = reconstruction.compute_num_observations()
-        observation_change: float = (num_merged + num_completed + filtered.total()) / num_observations if num_observations else 0.0
-
-        # The guards run on both sides of the solve: before it (`_filter_points`), so Ceres never
-        # linearises a NaN; after it inside the solve boundary, so the next round inherits no
-        # point the solve walked out of the world.
+        # The guards run on both sides of the solve: before it (`_filter_points`, and the rational-pole guard inside the
+        # solve boundary), so Ceres never linearises a NaN; after it inside the solve boundary, so the next round
+        # inherits no point the solve walked out of the world.
         solve: BundleAdjustmentSolve = solve_bundle_adjustment(
             reconstruction,
             ba_options,
@@ -750,6 +782,10 @@ def run_mapping(
             correspondences.observation_manager,
             mapping_config.depth_threshold,
         )
+        # What the solve was handed: the model after every pre-solve removal, the pole guard's included.
+        num_observations: int = reconstruction.compute_num_observations() + solve.num_diverged + solve.num_past_pole_after
+        num_changed: int = num_merged + num_completed + filtered.total() + solve.num_past_pole_before
+        observation_change: float = num_changed / num_observations if num_observations else 0.0
         bundle_adjustment_seconds += solve.seconds
         report: SolverReport = parse_brief_report(solve.summary.brief_report())
         rounds.append(
@@ -760,6 +796,7 @@ def run_mapping(
                 num_completed=num_completed,
                 num_filtered=filtered.total(),
                 num_diverged=solve.num_diverged,
+                num_past_pole=solve.num_past_pole,
                 num_observations=num_observations,
                 observation_change=observation_change,
                 num_points3D=reconstruction.num_points3D(),
@@ -775,7 +812,7 @@ def run_mapping(
         if resolved_options.verbose:
             print(
                 f"[colsfm] round {round_index} gate {max_pixel_error:.1f} px: merged {num_merged}, "
-                f"completed {num_completed}, filtered {filtered.total()}, diverged {latest.num_diverged}, "
+                f"completed {num_completed}, filtered {filtered.total()}, diverged {latest.num_diverged}, past the pole {latest.num_past_pole}, "
                 f"change {observation_change:.6f}, points {latest.num_points3D}, "
                 f"reprojection {latest.mean_reprojection_error_px:.4f} px"
             )
