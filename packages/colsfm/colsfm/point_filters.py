@@ -254,8 +254,12 @@ def filter_outside_camera_domain(observation_manager: pycolmap.ObservationManage
             cam_from_world.translation, dtype=np.float64
         )
         for row in np.flatnonzero(~in_camera_domain(in_camera, domains[image.camera_id])):
-            observation_manager.delete_observation(image_id, observed[int(row)][0])
-            removed += 1
+            point2D_idx: int = observed[int(row)][0]
+            # A deletion that leaves a track below two observations deletes the point and every other observation
+            # of it, this image's included, so each row is checked again before its own deletion.
+            if image.point2D(point2D_idx).has_point3D():
+                observation_manager.delete_observation(image_id, point2D_idx)
+                removed += 1
     return removed
 
 

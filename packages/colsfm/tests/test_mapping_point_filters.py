@@ -22,6 +22,7 @@ from jaxtyping import Float64
 from mapping_helpers import SyntheticRig, synthetic_matches, write_database
 from numpy import ndarray
 
+from colsfm import point_filters
 from colsfm.config import CusfmConfig
 from colsfm.mapping import (
     BundleAdjustmentSolve,
@@ -200,3 +201,25 @@ def test_the_solve_boundary_guards_the_points_it_returns(synthetic_rig: Syntheti
     assert solve.num_diverged > 0
     assert reconstruction.compute_num_observations() == observations_before - solve.num_diverged
     assert all(np.abs(point.xyz).max() <= extent for point in reconstruction.points3D.values())
+
+
+def test_the_domain_filter_survives_tracks_it_deletes_and_leaves_nothing_outside(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a domain narrow enough to cut most tracks, deleting one observation also deletes whole points.
+
+    The first version deleted the rows it had listed up front and failed on a point an earlier deletion had already
+    removed (`Point3D with ID -1`); every listed row is now checked again before its deletion.
+    """
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    monkeypatch.setattr(point_filters, "camera_domain_angle", lambda camera: np.radians(5.0))
+    before: int = reconstruction.compute_num_observations()
+    removed: int = point_filters.filter_outside_camera_domain(correspondences.observation_manager, reconstruction)
+    assert 0 < removed <= before
+    for image_id in reconstruction.reg_image_ids():
+        image = reconstruction.image(image_id)
+        cam_from_world = image.cam_from_world()
+        for point2D in image.points2D:
+            if point2D.has_point3D():
+                xyz = cam_from_world * reconstruction.point3D(point2D.point3D_id).xyz
+                assert np.degrees(np.arctan2(np.hypot(xyz[0], xyz[1]), xyz[2])) < 5.0
