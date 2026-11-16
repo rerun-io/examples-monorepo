@@ -85,19 +85,16 @@ def _raco_models_available() -> bool:
 
     Returns:
         True when the extractor and matcher graphs exist and
-        `cudaGetDeviceProperties` answers, so an engine can be loaded or built.
+        a CUDA device answers, so an engine can be loaded or built.
     """
+    import torch
+
     from colsfm.features_raco import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
     from colsfm.model_assets import RACO_LIGHTGLUE_ONNX_PATH
-    from colsfm.tensorrt_runtime import compute_capability
 
     if not RACO_ONNX_PATH.is_file() or not RACO_DYNAMIC_ONNX_PATH.is_file() or not RACO_LIGHTGLUE_ONNX_PATH.is_file():
         return False
-    try:
-        compute_capability()
-    except RuntimeError:
-        return False
-    return True
+    return torch.cuda.is_available()
 
 
 requires_raco_models = pytest.mark.skipif(not _raco_models_available(), reason="the RaCo ONNX graphs or a CUDA device are missing")

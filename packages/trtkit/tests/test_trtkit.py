@@ -332,7 +332,11 @@ def test_shape_profiles_pin_dynamic_inputs_and_key_the_engine(monkeypatch: pytes
     plain: Path = cached_engine_path(onnx_path, TrtBuildConfig(), cache_dir=tmp_path)
     profiled: Path = cached_engine_path(onnx_path, TrtBuildConfig(shape_profiles=(entry,)), cache_dir=tmp_path)
     other: Path = cached_engine_path(
-        onnx_path, TrtBuildConfig(shape_profiles=(InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(2, 3, 112, 112)),)), cache_dir=tmp_path
+        onnx_path,
+        TrtBuildConfig(
+            shape_profiles=(InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(2, 3, 112, 112)),)
+        ),
+        cache_dir=tmp_path,
     )
     assert plain != profiled != other
     assert "_s" not in plain.name.split("_trt")[0].split("_w")[1]
@@ -387,6 +391,57 @@ def test_dynamic_runtime_runs_two_shapes_from_one_engine(tmp_path: Path) -> None
         torch.testing.assert_close(outputs["y"].float(), expected, rtol=2e-2, atol=2e-2)
     with pytest.raises(ValueError, match="outside the engine profile"):
         runtime({"images": torch.randn(5, 3, 28, 28, device="cuda"), "bias": bias})
+
+
+@pytest.mark.integration
+@cuda_only
+def test_direct_binding_reads_device_inputs_in_place_and_grows_outputs_to_each_call(tmp_path: Path) -> None:
+    """`direct_binding`: no input copies, outputs sized per call and grown, views valid until the next call."""
+    from trtkit import DynamicDim, InputShapeProfile, TensorRtDynamicRuntime, ensure_engine
+
+    model = _ToyDynamic().eval().cuda()
+    onnx_path: Path = tmp_path / "toy.onnx"
+    export_onnx(
+        model,
+        (torch.zeros(2, 3, 28, 42, device="cuda"), torch.zeros(1, 4, device="cuda")),
+        onnx_path,
+        input_names=["images", "bias"],
+        output_names=["y"],
+        compute_dtype=torch.float16,
+        dynamic_dims={"images": {0: DynamicDim("batch", 1, 4), 2: DynamicDim("rows", 2, 6, multiple=14), 3: DynamicDim("cols", 2, 6, multiple=14)}},
+    )
+    config = TrtBuildConfig(
+        max_batch_size=4,
+        opt_batch_size=1,
+        workspace_gib=1.0,
+        shape_profiles=(
+            InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(4, 3, 84, 84)),
+            InputShapeProfile(name="bias", min_shape=(1, 4), opt_shape=(1, 4), max_shape=(1, 4)),
+        ),
+    )
+    runtime = TensorRtDynamicRuntime(ensure_engine(onnx_path, config, cache_dir=tmp_path), direct_binding=True)
+    assert runtime._input_buffers == {} and runtime._output_buffers == {}, "nothing is allocated at the profile's max shapes"
+    bias = torch.randn(1, 4, device="cuda")
+    capacities: list[int] = []
+    for shape in ((1, 3, 28, 42), (3, 3, 70, 56), (2, 3, 28, 28)):
+        images = torch.randn(*shape, device="cuda", dtype=runtime._input_dtypes["images"])
+        with torch.inference_mode():
+            expected = model(images.float(), bias)
+        outputs = runtime({"images": images, "bias": bias.to(runtime._input_dtypes["bias"])})
+        assert outputs["y"].shape == expected.shape
+        torch.testing.assert_close(outputs["y"].float(), expected, rtol=2e-2, atol=2e-2)
+        capacities.append(runtime._output_buffers["y"].numel())
+    assert capacities == sorted(capacities) and capacities[1] == capacities[2], "outputs grow to the high-water mark and never shrink"
+    with pytest.raises(ValueError, match="contiguous CUDA"):
+        runtime({"images": torch.randn(1, 3, 28, 28, device="cuda", dtype=torch.float64), "bias": bias.to(runtime._input_dtypes["bias"])})
+
+
+def test_direct_binding_refuses_cuda_graphs(tmp_path: Path) -> None:
+    """A graph replays fixed addresses; direct binding binds new ones per call."""
+    from trtkit import TensorRtDynamicRuntime
+
+    with pytest.raises(ValueError, match="CUDA graph"):
+        TensorRtDynamicRuntime(tmp_path / "unused.engine", use_cuda_graph=True, direct_binding=True)
 
 
 def _trunk_and_tail_model():

@@ -4,7 +4,7 @@ Frames come from the run's `colsfm.frames.FrameSource` as GPU tensors; `_device_
 input size on the engine's own stream and binds the batch in place. `FeatureBatch` names what came back off the
 bindings, `select_keypoints` is the score gate plus the top-k, and `store_feature_batch` writes the two database
 columns. `run_native_extraction` sequences them over a list of `ExtractionGroup`s (one per engine and network size),
-reusing one `TensorRTSession` per engine.
+reusing one trtkit `TensorRtDynamicRuntime` (direct binding) per engine.
 
 **Subsampling order**: gate first, then rank the survivors and keep the strongest `max_num_features`; the SSC thinning
 that selects points for LightGlue+ happens later, on its scores (`colsfm.matching_trt`).
@@ -24,10 +24,10 @@ import torch
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from torch import Tensor
+from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.database import Descriptors, KeypointsXY, database_transaction
 from colsfm.frames import FrameSource
-from colsfm.tensorrt_runtime import DeviceTensor, TensorRTSession
 
 NormalizedKeypoints: TypeAlias = Float32[ndarray, "num_keypoints 2"]
 """An ALIKED head's own output coordinates, normalised to [-1, 1] over the network input."""
@@ -284,7 +284,7 @@ def run_native_extraction(
     max_num_features: int,
     batch_size: int,
 ) -> None:
-    """Execute every group on GPU frames and store what came back, one `TensorRTSession` per engine.
+    """Execute every group on GPU frames and store what came back, one direct-binding runtime per engine.
 
     Args:
         database_path: An existing COLMAP database whose image rows are written.
@@ -300,28 +300,22 @@ def run_native_extraction(
     """
     with ExitStack() as stack:
         database: pycolmap.Database = stack.enter_context(pycolmap.Database.open(database_path))
-        sessions: dict[Path, TensorRTSession] = {}
+        runtimes: dict[Path, TensorRtDynamicRuntime] = {}
         for group in groups:
             if not group.tasks:
                 continue
-            if group.engine_path not in sessions:
-                sessions[group.engine_path] = stack.enter_context(TensorRTSession(group.engine_path, reuse_output_buffers=True))
-            session: TensorRTSession = sessions[group.engine_path]
+            if group.engine_path not in runtimes:
+                runtimes[group.engine_path] = TensorRtDynamicRuntime(group.engine_path, direct_binding=True)
+            runtime: TensorRtDynamicRuntime = runtimes[group.engine_path]
             group_batch: int = min(batch_size, group.maximum_batch_size or batch_size)
-            declared_shape: tuple[int, ...] = tuple(session.engine.get_tensor_shape(model.image_binding))
+            declared_shape: tuple[int, ...] = runtime.max_input_shapes[model.image_binding]
             network_height: int = group.network_height if group.network_height is not None else int(declared_shape[2])
             network_width: int = group.network_width if group.network_width is not None else int(declared_shape[3])
             for first in range(0, len(group.tasks), group_batch):
                 tasks: list[ImageTask] = list(group.tasks[first : first + group_batch])
-                network_tensor: Tensor = _device_batch(frames, tasks, session, network_height, network_width)
-                device_input: DeviceTensor = DeviceTensor(
-                    pointer=int(network_tensor.data_ptr()),
-                    shape=tuple(int(dim) for dim in network_tensor.shape),
-                    dtype=np.dtype(np.float32),
-                    capacity_bytes=int(network_tensor.numel()) * 4,
-                    stream=int(session.stream),
-                )
-                outputs: dict[str, ndarray] = session.run({model.image_binding: device_input})
+                network_tensor: Tensor = _device_batch(frames, tasks, network_height, network_width)
+                # The engine's views are valid until the next call: the database write is the one place they become host.
+                outputs: dict[str, ndarray] = {name: value.cpu().numpy() for name, value in runtime({model.image_binding: network_tensor}).items()}
                 store_feature_batch(
                     database,
                     tasks,
@@ -332,8 +326,8 @@ def run_native_extraction(
                 )
 
 
-def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], session: TensorRTSession, network_height: int, network_width: int) -> Tensor:
-    """One engine input built on the GPU from frame-source pixels, on the session's own stream.
+def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], network_height: int, network_width: int) -> Tensor:
+    """One engine input built on the GPU from frame-source pixels, on torch's current stream (the runtime waits on it).
 
     RGB, stretched to the network size with bilinear interpolation only when the image is not already that size, scaled
     to [0, 1], float32 `[batch, 3, h, w]` — what the RaCo graph was exported against.
@@ -341,28 +335,23 @@ def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], session: Tens
     Args:
         frames: The run's frame source.
         tasks: The batch's images.
-        session: The engine session; the tensor is produced on its stream so it can be bound with no copy.
         network_height: The engine's input height.
         network_width: The engine's input width.
 
     Returns:
-        The batch, contiguous, on the session's stream.
+        The batch, contiguous, bound by the runtime with no copy.
 
     Raises:
         ValueError: When a frame's size disagrees with its database camera (which would misplace every keypoint).
     """
-    stream: torch.cuda.ExternalStream = torch.cuda.ExternalStream(int(session.stream))
     resized: list[Tensor] = []
-    with torch.cuda.stream(stream):
-        for task, (name, rgb) in zip(tasks, frames.frames([task.name for task in tasks]), strict=True):
-            if (int(rgb.shape[1]), int(rgb.shape[2])) != (task.image_height, task.image_width):
-                raise ValueError(
-                    f"The database camera says {task.image_width}x{task.image_height}, but frame {name} is {rgb.shape[2]}x{rgb.shape[1]}"
-                )
-            image: Tensor = rgb[None].float()
-            if (task.image_height, task.image_width) != (network_height, network_width):
-                image = torch.nn.functional.interpolate(
-                    image, size=(network_height, network_width), mode="bilinear", align_corners=False, antialias=False
-                )
-            resized.append(image)
-        return torch.cat(resized).div_(255.0)
+    for task, (name, rgb) in zip(tasks, frames.frames([task.name for task in tasks]), strict=True):
+        if (int(rgb.shape[1]), int(rgb.shape[2])) != (task.image_height, task.image_width):
+            raise ValueError(f"The database camera says {task.image_width}x{task.image_height}, but frame {name} is {rgb.shape[2]}x{rgb.shape[1]}")
+        image: Tensor = rgb[None].float()
+        if (task.image_height, task.image_width) != (network_height, network_width):
+            image = torch.nn.functional.interpolate(
+                image, size=(network_height, network_width), mode="bilinear", align_corners=False, antialias=False
+            )
+        resized.append(image)
+    return torch.cat(resized).div_(255.0)
