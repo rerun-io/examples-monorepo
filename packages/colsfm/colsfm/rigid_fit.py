@@ -22,7 +22,7 @@ show up as alignment error rather than disappear into the fit.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 import numpy as np
 from jaxtyping import Float64, Int64
@@ -46,6 +46,10 @@ Rotations: TypeAlias = Float64[ndarray, "n 3 3"]
 
 Timestamps: TypeAlias = Int64[ndarray, "n"]
 """Capture times in integer microseconds since the Unix epoch."""
+
+DEGENERATE_VARIANCE: Final[float] = 1e-15
+"""Source variance (m^2) at or below which a trajectory counts as not moving: the fit holds the scale at 1.0 instead of
+estimating it. Far below simplecv's default (1e-9, a 32 µm spread), so a small but moving trajectory keeps its scale."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,18 +133,24 @@ def align_rigid(source_xyz: Positions, target_xyz: Positions, *, estimate_scale:
         target_xyz: Float64 positions to move onto, shape `[n, 3]`.
         estimate_scale: Let the fit absorb a scale change instead of holding it at 1.0.
 
+    A trajectory that does not move (stationary, or rotating in place; source variance at most
+    `DEGENERATE_VARIANCE`) is still scored: the fit is rigid with scale 1.0 (simplecv's `degenerate="unit_scale"`
+    policy), and `would_be_scale` reports 1.0.
+
     Returns:
         The fitted transform plus its residual statistics.
 
     Raises:
-        ValueError: When the two trajectories differ in length, hold fewer than three samples, or do not move
+        ValueError: When the two trajectories differ in length or hold fewer than three samples
             (`simplecv.ops.umeyama.umeyama_alignment`, which does the fit).
     """
     if source_xyz.shape != target_xyz.shape:
         raise ValueError(f"alignment needs matched trajectories, got {source_xyz.shape} and {target_xyz.shape}")
     # The rotation does not depend on the scale, so the similarity fit gives `would_be_scale` for both kinds.
-    similarity: SimilarityTransform = umeyama_alignment(source_xyz, target_xyz, allow_scaling=True)
-    fit: SimilarityTransform = similarity if estimate_scale else umeyama_alignment(source_xyz, target_xyz)
+    similarity: SimilarityTransform = umeyama_alignment(source_xyz, target_xyz, allow_scaling=True, eps=DEGENERATE_VARIANCE, degenerate="unit_scale")
+    fit: SimilarityTransform = (
+        similarity if estimate_scale else umeyama_alignment(source_xyz, target_xyz, eps=DEGENERATE_VARIANCE, degenerate="unit_scale")
+    )
     distances: Float64[ndarray, "n"] = np.linalg.norm(fit.apply(source_xyz) - target_xyz, axis=1)
     return RigidAlignment(
         target_R_source=fit.dst_R_src,

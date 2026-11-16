@@ -32,6 +32,7 @@ from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, reconstruction
 from colsfm.catalog import CatalogCameraModel, CatalogTrajectory
 from colsfm.rerun_layer import rig_poses
 from colsfm.rigid_fit import RigidAlignment, align_rigid
+from colsfm.trajectory import MIN_ALIGNMENT_SAMPLES
 
 ROOT: Final[str] = "/overview"
 """Entity root of the overview, apart from the walkthrough's stage roots."""
@@ -46,16 +47,26 @@ OUTPUT_RGB: Final[tuple[int, int, int]] = (255, 140, 0)
 
 @dataclass(frozen=True)
 class TrajectoryError:
-    """ATE of one trajectory against ground truth, in metres."""
+    """ATE of one trajectory against ground truth, in metres; unscored (None) when too few poses overlap it."""
 
-    se3_rmse_m: float
+    se3_rmse_m: float | None
     """RMSE after a rigid fit (scale held at 1)."""
-    sim3_rmse_m: float
+    sim3_rmse_m: float | None
     """RMSE after a similarity fit."""
-    sim3_scale: float
+    sim3_scale: float | None
     """The similarity fit's scale."""
     num_matched: int
     """Poses joined to ground truth."""
+
+    def table_cells(self) -> str:
+        """This trajectory's cells in the notes table.
+
+        Returns:
+            `SE(3) | Sim(3) | scale | poses`, with `unscored` in place of the numbers when there are none.
+        """
+        if self.se3_rmse_m is None or self.sim3_rmse_m is None or self.sim3_scale is None:
+            return f"unscored | unscored | – | {self.num_matched}"
+        return f"{100 * self.se3_rmse_m:.2f} cm | {100 * self.sim3_rmse_m:.2f} cm | {self.sim3_scale:.4f} | {self.num_matched}"
 
 
 @dataclass(frozen=True)
@@ -83,8 +94,11 @@ def _join(
 
 def trajectory_error(
     times_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 4 4"], ground_truth: CatalogTrajectory
-) -> tuple[TrajectoryError, RigidAlignment]:
+) -> tuple[TrajectoryError, RigidAlignment | None]:
     """ATE of `poses` against ground truth interpolated at the same instants, and the SE(3) fit that scores it.
+
+    Fewer than `MIN_ALIGNMENT_SAMPLES` poses inside the ground truth's time span determine no fit: the error comes
+    back unscored and the fit None, and the overview draws that trajectory where it is instead of aborting.
 
     Args:
         times_ns: Pose timestamps on the segment timeline.
@@ -95,6 +109,8 @@ def trajectory_error(
         SE(3) and Sim(3) RMSE, and the SE(3) fit (which moves the trajectory into the ground-truth frame for display).
     """
     source, target = _join(times_ns, poses, ground_truth)
+    if len(source) < MIN_ALIGNMENT_SAMPLES:
+        return TrajectoryError(se3_rmse_m=None, sim3_rmse_m=None, sim3_scale=None, num_matched=len(source)), None
     rigid: RigidAlignment = align_rigid(source, target)
     similarity: RigidAlignment = align_rigid(source, target, estimate_scale=True)
     error: TrajectoryError = TrajectoryError(
@@ -136,14 +152,15 @@ def log_overview(
     )
     input_error, input_fit = trajectory_error(input_times_ns, input_poses, ground_truth)
     output_error, output_fit = trajectory_error(output_times_ns, output_poses, ground_truth)
-    path_xyz: Float64[ndarray, "n 3"] = output_fit.apply(output_poses[:, :3, 3])
+    input_xyz: Float64[ndarray, "n 3"] = input_poses[:, :3, 3] if input_fit is None else input_fit.apply(input_poses[:, :3, 3])
+    path_xyz: Float64[ndarray, "n 3"] = output_poses[:, :3, 3] if output_fit is None else output_fit.apply(output_poses[:, :3, 3])
 
     world: str = f"{ROOT}/world"
     gt_xyz: Float64[ndarray, "g 3"] = ground_truth.at(ground_truth.t_ns[:: max(1, len(ground_truth.t_ns) // 4000)])[:, :3, 3]
     rr.log(f"{world}/gt/trajectory", rr.LineStrips3D([gt_xyz], colors=[GT_RGB], radii=rr.Radius.ui_points(2.0)), static=True, recording=recording)
     rr.log(
         f"{world}/input/trajectory",
-        rr.LineStrips3D([input_fit.apply(input_poses[:, :3, 3])], colors=[INPUT_RGB], radii=rr.Radius.ui_points(1.5)),
+        rr.LineStrips3D([input_xyz], colors=[INPUT_RGB], radii=rr.Radius.ui_points(1.5)),
         static=True,
         recording=recording,
     )
@@ -155,7 +172,7 @@ def log_overview(
     )
     # Points farther from the path than POINT_CROP_FACTOR x its own extent are dropped from the overview (they are
     # kept in the walkthrough's stage 7): a handful of far triangulations would otherwise set the 3D view's framing.
-    points_xyz: Float64[ndarray, "p 3"] = output_fit.apply(artifacts.points_xyz())
+    points_xyz: Float64[ndarray, "p 3"] = artifacts.points_xyz() if output_fit is None else output_fit.apply(artifacts.points_xyz())
     centre: Float64[ndarray, " 3"] = path_xyz.mean(axis=0)
     extent: float = float(np.linalg.norm(path_xyz - centre, axis=1).max()) + 1.0
     near: np.ndarray = np.linalg.norm(points_xyz - centre, axis=1) <= POINT_CROP_FACTOR * extent
@@ -167,7 +184,7 @@ def log_overview(
     )
 
     # The refined rig, moved into the ground-truth frame, carrying the cameras and their video.
-    rig_rotations: Float64[ndarray, "n 3 3"] = output_fit.apply_rotations(output_poses[:, :3, :3])
+    rig_rotations: Float64[ndarray, "n 3 3"] = output_poses[:, :3, :3] if output_fit is None else output_fit.apply_rotations(output_poses[:, :3, :3])
     rig_entity: str = f"{world}/colsfm/rig"
     rr.send_columns(
         rig_entity,
@@ -244,10 +261,8 @@ def notes_markdown(segment: str, numbers: OverviewNumbers) -> str:
         "",
         "| trajectory | SE(3) ATE | Sim(3) ATE | Sim(3) scale | poses |",
         "|---|---:|---:|---:|---:|",
-        f"| input | {100 * numbers.input_error.se3_rmse_m:.2f} cm | {100 * numbers.input_error.sim3_rmse_m:.2f} cm | "
-        f"{numbers.input_error.sim3_scale:.4f} | {numbers.input_error.num_matched} |",
-        f"| colsfm | {100 * numbers.output_error.se3_rmse_m:.2f} cm | {100 * numbers.output_error.sim3_rmse_m:.2f} cm | "
-        f"{numbers.output_error.sim3_scale:.4f} | {numbers.output_error.num_matched} |",
+        f"| input | {numbers.input_error.table_cells()} |",
+        f"| colsfm | {numbers.output_error.table_cells()} |",
         "",
         f"Registered {numbers.metrics.registered_images} / {numbers.total_images} images, {numbers.metrics.num_points3D} points, "
         f"mean reprojection {numbers.metrics.mean_reprojection_error_px:.3f} px.",

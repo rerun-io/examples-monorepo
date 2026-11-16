@@ -1,6 +1,7 @@
 """Umeyama similarity alignment between two row-aligned point sets."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from jaxtyping import Float, Float64
@@ -42,6 +43,7 @@ def umeyama_alignment(
     *,
     allow_scaling: bool = False,
     eps: float = 1e-9,
+    degenerate: Literal["raise", "unit_scale"] = "raise",
 ) -> SimilarityTransform:
     """Least-squares similarity aligning ``src_points`` onto ``dst_points`` (Umeyama 1991).
 
@@ -53,12 +55,17 @@ def umeyama_alignment(
         dst_points: Target XYZ coordinates, row-aligned with ``src_points``.
         allow_scaling: Estimate an isotropic scale; otherwise the scale is fixed at 1.
         eps: Smallest source variance accepted before the problem counts as degenerate.
+        degenerate: What a source variance at most ``eps`` does. ``"raise"`` refuses it. ``"unit_scale"`` returns the
+            rigid fit with ``scale = 1``: the translation matches the centroids, and the rotation is whatever the SVD
+            of the (near-)zero cross-covariance gives, identity when it is exactly zero. For a reporter that must
+            score a stationary or rotation-only trajectory instead of aborting.
 
     Returns:
         The similarity such that ``dst_points ≈ scale * (dst_R_src @ src_points.T).T + dst_t_src``.
 
     Raises:
-        ValueError: If the shapes differ, fewer than three pairs are given, or the source variance is at most ``eps``.
+        ValueError: If the shapes differ, fewer than three pairs are given, or the source variance is at most ``eps``
+            and ``degenerate`` is ``"raise"``.
     """
     if src_points.shape != dst_points.shape:
         raise ValueError(f"Source and destination shapes must match; got {src_points.shape} vs {dst_points.shape}")
@@ -81,7 +88,9 @@ def umeyama_alignment(
     dst_R_src: Float64[ndarray, "3 3"] = u @ np.diag(reflection) @ vt
     src_variance: float = float(np.mean(np.sum(src_centered**2, axis=1)))
     if src_variance <= eps:
-        raise ValueError(f"Source variance too small for stable Umeyama estimation (variance={src_variance})")
+        if degenerate == "raise":
+            raise ValueError(f"Source variance too small for stable Umeyama estimation (variance={src_variance})")
+        allow_scaling = False
     scale: float = float(np.sum(singular_values * reflection) / src_variance) if allow_scaling else 1.0
     dst_t_src: Float64[ndarray, "3"] = dst_mean - scale * (dst_R_src @ src_mean)
     return SimilarityTransform(dst_R_src=dst_R_src, dst_t_src=dst_t_src, scale=scale)

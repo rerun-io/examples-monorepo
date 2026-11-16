@@ -48,6 +48,8 @@ class CatalogCameraCalibration:
 def read_camera_calibration(dataset: DatasetEntry, segment_id: str, camera_entities: Sequence[str]) -> dict[str, PinholeParameters]:
     """Read the static pinhole calibration of the given camera nodes.
 
+    Needs only the four calibration components: a camera's distortion components, complete or not, are not read.
+
     Args:
         dataset: Catalog dataset entry.
         segment_id: Segment to read.
@@ -59,7 +61,7 @@ def read_camera_calibration(dataset: DatasetEntry, segment_id: str, camera_entit
     Raises:
         ValueError: If a camera lacks one of the four calibration components in this segment.
     """
-    return {entity: model.pinhole for entity, model in read_camera_models(dataset, segment_id, camera_entities).items()}
+    return {entity: model.pinhole for entity, model in _read_cameras(dataset, segment_id, camera_entities, with_distortion=False).items()}
 
 
 def read_camera_models(dataset: DatasetEntry, segment_id: str, camera_entities: Sequence[str]) -> dict[str, CatalogCameraCalibration]:
@@ -78,6 +80,13 @@ def read_camera_models(dataset: DatasetEntry, segment_id: str, camera_entities: 
         ValueError: If a camera lacks one of the four calibration components in this segment, or carries a
             distortion model without coefficients.
     """
+    return _read_cameras(dataset, segment_id, camera_entities, with_distortion=True)
+
+
+def _read_cameras(
+    dataset: DatasetEntry, segment_id: str, camera_entities: Sequence[str], *, with_distortion: bool
+) -> dict[str, CatalogCameraCalibration]:
+    """One query for the camera nodes; the pinhole always, the distortion components only when asked for."""
     view = dataset.filter_segments(segment_id).filter_contents([f"{entity}/**" for entity in camera_entities])
     table: pa.Table = view.reader(index=None).to_arrow_table()
 
@@ -99,7 +108,7 @@ def read_camera_models(dataset: DatasetEntry, segment_id: str, camera_entities: 
         )
         model_column: str = f"{entity}/pinhole:{DISTORTION_MODEL_COMPONENT}"
         distortion: CatalogDistortion | None = None
-        if model_column in table.column_names:
+        if with_distortion and model_column in table.column_names:
             model: object = first_valid_value(table.column(model_column), allow_none=True, component_name=model_column)
             # The model is a one-element string batch; unwrap it the way the coefficients are flattened.
             if isinstance(model, list):
