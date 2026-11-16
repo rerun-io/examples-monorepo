@@ -375,7 +375,7 @@ def run_loop_closure_stage(
     *,
     enabled: bool,
     frames: FrameSource | None = None,
-    loop_pairs_in_mapper: LoopPairsInMapper = "accepted",
+    loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted",
 ) -> LoopClosureStageResult:
     """Retrieve, match and verify loop candidates.
 

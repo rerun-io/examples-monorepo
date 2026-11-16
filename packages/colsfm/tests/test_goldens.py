@@ -151,9 +151,6 @@ def test_kitti06_default_pipeline_reproduces_the_fork(tmp_path: Path) -> None:
             output_dir=output_dir,
             config_dir=RESOURCES_DIR / "configs" / "kitti",
             min_inter_frame_distance=0.5,
-            # The kitti profile's loop edge gates are 0.0, which rejects every loop edge, so KITTI's revisits reach the
-            # map only through the loop stage's matched pairs: with "accepted" this run scores cuSFM's 1.328 m.
-            loop_pairs_in_mapper="shortlisted",
         )
     )
     wall: float = time.perf_counter() - started

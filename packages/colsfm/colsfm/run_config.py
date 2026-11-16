@@ -144,13 +144,14 @@ class PipelineOptions:
     extrinsic_refinement_rounds: int = DEFAULT_EXTRINSIC_ROUNDS
     """Ceiling on the extrinsics-then-poses rounds the regularised refinement may take (`DEFAULT_EXTRINSIC_ROUNDS`); it
     also stops early on `ExtrinsicRefinementOptions`' tolerances."""
-    loop_pairs_in_mapper: LoopPairsInMapper = "accepted"
+    loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted"
     """Which of the loop stage's image pairs stay in the database the mapper triangulates from.
 
-    `"accepted"` (default, as cuSFM): only the image pairs of the loop edges that were kept; the pairs the stage matched
-    only to measure a candidate it then rejected are deleted again. `"shortlisted"`: every pair the stage matched, as
-    colsfm did before (fork decision 15); long cross-revisit tracks then reach the triangulator even when the loop
-    itself was rejected, which helped on KITTI."""
+    `"shortlisted"` (default): every pair the stage matched (fork decision 15), so cross-revisit tracks reach the
+    triangulator even when their loop edge was rejected. `"accepted"` (cuSFM's way): only the image pairs of the loop
+    edges that were kept; the rest are deleted again. Measured: `"accepted"` cost MSD MGO05 0.23 cm SE(3) (1.41 against
+    1.18 cm) and put KITTI 06 back at cuSFM's 1.328 m, because the kitti profile's loop edge gates reject every edge and
+    its revisits reach the map only through these pairs (0.845 m with `"shortlisted"`)."""
     loop_closure: bool = True
     """Run retrieval-based loop closure. On by default, as in the blob, so every run and
     every blob comparison pays for the same stage (NOTES.md decision 10, revised). On the

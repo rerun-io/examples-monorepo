@@ -45,9 +45,8 @@ Ordering notes worth knowing before reading the code:
   after retrieval and verification in stage 5, which matches them into the same
   database. `colsfm.mapping.load_correspondences` reads *every* verified
   two-view geometry, so a loop pair matched in stage 5 reaches the triangulator
-  without being named in stage 3's list. By default stage 5 deletes again the
-  pairs it matched only for a candidate it rejected, so only accepted loop edges'
-  pairs reach it (`PipelineOptions.loop_pairs_in_mapper`).
+  without being named in stage 3's list, whether or not its loop edge was
+  accepted (`PipelineOptions.loop_pairs_in_mapper="accepted"` deletes those again).
 * **Loop closure needs matches to verify, and matching is a batch operation.**
   The estimator pulls matches through an injected `match_fn` one pair at a time,
   and running COLMAP's matcher per pair would reload the LightGlue graph per

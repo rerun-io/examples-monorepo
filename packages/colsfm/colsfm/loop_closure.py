@@ -356,6 +356,9 @@ class LoopClosureConfig:
     num_votes: int = 3
     """`pose_graph_config.num_votes`: target rig frames each query rig frame measures, best retrieval score first.
 
+    3, not cuSFM's 1: on MSD MGO05 one vote scored SE(3) 1.53 cm against 1.18 (Sim(3) 0.59 against 0.60), for 130 s
+    against 217 s; the kitti profile keeps 1 (0.838 m against 0.857, half the loop time).
+
     Replaced one candidate per 10 s `|dt|` band per query keyframe, which grew with the sequence length: on MSD MGO05
     (8,172 keyframes) it asked for 24k loop image pairs, the loop pairs grew as keyframes^1.8 and the loop stage took
     506 s of 2,408."""

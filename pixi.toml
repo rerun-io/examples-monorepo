@@ -4151,9 +4151,7 @@ cwd = "packages/colsfm"
 description = "The default pipeline on the RoboCap fisheye segment s00000021 from the Spark catalog, starting from its slam_rs trajectory"
 
 [feature.colsfm.tasks.colsfm-kitti06]
-# loop-pairs-in-mapper shortlisted: the kitti profile's loop edge gates are 0.0 (every loop edge rejected), so KITTI's
-# revisits reach the map only through the loop stage's matched pairs.
-cmd = "python tools/run.py catalog --source.dataset dataforge-vslam-lab-kitti --source.segment vslam-lab-kitti__06 --source.cameras rgb_0 rgb_1 --source.stereo-pairs rgb_0 rgb_1 --source.trajectory-entity /world/runs/cuvslam/rig --options.config-dir colsfm/resources/configs/kitti --options.min-inter-frame-distance 0.5 --options.loop-pairs-in-mapper shortlisted"
+cmd = "python tools/run.py catalog --source.dataset dataforge-vslam-lab-kitti --source.segment vslam-lab-kitti__06 --source.cameras rgb_0 rgb_1 --source.stereo-pairs rgb_0 rgb_1 --source.trajectory-entity /world/runs/cuvslam/rig --options.config-dir colsfm/resources/configs/kitti --options.min-inter-frame-distance 0.5"
 depends-on = ["colsfm-raco-export", "colsfm-download-flexglue"]
 cwd = "packages/colsfm"
 description = "The default pipeline on KITTI 06 from the Spark catalog, starting from the cuvslam layer (the cuVSLAM SLAM trajectory)"
