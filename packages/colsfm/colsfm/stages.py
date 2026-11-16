@@ -11,6 +11,7 @@ stage that produced one object returns that object: there is no wrapper carrying
 a single field, because a wrapper with one field states no contract the field
 does not state itself.
 """
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -40,7 +41,8 @@ from colsfm.export import (
 )
 from colsfm.extrinsic_refinement import ExtrinsicRefinementOptions, ExtrinsicRefinementResult, refine_extrinsics
 from colsfm.features import ExtractionReport, FeatureOptions, extract_features
-from colsfm.frames import colour_points, frame_source_for
+from colsfm.frame_manifest import FrameSource
+from colsfm.frames import colour_points
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, RigFrame, read_frames_meta, write_frames_meta
 from colsfm.geometry import TumPose
 from colsfm.keyframe_selection import KeyframeSelection, apply_selection, select_keyframes
@@ -244,13 +246,11 @@ def run_keyframe_selection_stage(options: SelectionOptions) -> KeyframeSelection
     selected: FramesMeta = apply_selection(frames_meta, selection)
     if not selected.keyframes:
         raise ValueError("keyframe selection kept no frames; loosen the distance and rotation gates")
-    return KeyframeSelectionStageResult(
-        config=config, frames_meta=frames_meta, selected=selected, rig_frames=selected.rig_frames()
-    )
+    return KeyframeSelectionStageResult(config=config, frames_meta=frames_meta, selected=selected, rig_frames=selected.rig_frames())
 
 
 def run_feature_extraction_stage(
-    options: PipelineOptions, selected: FramesMeta, feature_options: FeatureOptions
+    options: PipelineOptions, selected: FramesMeta, feature_options: FeatureOptions, frames: FrameSource
 ) -> ExtractionReport:
     """Create the COLMAP database and run ALIKED over the selected keyframes.
 
@@ -259,6 +259,7 @@ def run_feature_extraction_stage(
         selected: The collection keyframe selection kept.
         feature_options: The extractor's resolved settings, as `resolve_run` produced
             them; `PipelineOptions.resolve()` is the one place that derives them.
+        frames: The run's frame source.
 
     Returns:
         The extraction report: per-image keypoint counts, the device used and the
@@ -273,6 +274,7 @@ def run_feature_extraction_stage(
         options.input_dir,
         [keyframe.image_name for keyframe in selected.keyframes],
         feature_options,
+        frames=frames,
     )
 
 
@@ -297,21 +299,20 @@ def run_pair_selection_stage(selected: FramesMeta, config: CusfmConfig) -> list[
     return pairs
 
 
-def run_matching_stage(
-    options: PipelineOptions, pairs: Sequence[ImagePair], matching_options: MatchingOptions
-) -> MatchReport:
+def run_matching_stage(options: PipelineOptions, pairs: Sequence[ImagePair], matching_options: MatchingOptions, frames: FrameSource) -> MatchReport:
     """Match and verify every selected pair into the database.
 
     Args:
         options: The run's options, for the database path.
         pairs: The pairs stage 3 selected.
         matching_options: Matching and verification settings.
+        frames: The run's frame source.
 
     Returns:
         The match report: per-pair raw and inlier counts, the device used and the
         wall time.
     """
-    return match_pairs(options.database_path, list(pairs), matching_options)
+    return match_pairs(options.database_path, list(pairs), matching_options, frames)
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +370,7 @@ def run_loop_closure_stage(
     matching_options: MatchingOptions,
     *,
     enabled: bool,
+    frames: FrameSource | None = None,
 ) -> LoopClosureStageResult:
     """Retrieve, match and verify loop candidates.
 
@@ -383,6 +385,7 @@ def run_loop_closure_stage(
         pose_graph_config: `pose_graph_config.pb.txt`, whose loop gates this honours.
         matching_options: Settings for the batch match over the missing pairs.
         enabled: Whether to run at all.
+        frames: The run's frame source, for a matcher that reads pixels; one is opened per call when None.
 
     Returns:
         The loop edges and how many extra pairs were matched to find them.
@@ -420,7 +423,7 @@ def run_loop_closure_stage(
         f"{len(plan.image_pairs)} image pairs, {len(present)} already matched, {len(missing_pairs)} to match"
     )
     if missing_pairs:
-        match_pairs(database_path, missing_pairs, matching_options)
+        match_pairs(database_path, missing_pairs, matching_options, frames)
 
     # One handle for the whole verification pass: a plan of tens of thousands of pairs
     # would otherwise pay a SQLite open and close per `match_fn` call.
@@ -441,9 +444,7 @@ def run_loop_closure_stage(
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified over {len(plan.image_pairs)} image pairs"
     )
-    return LoopClosureStageResult(
-        edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics
-    )
+    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics)
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,9 +540,7 @@ def run_reconstruction_stage(
         FileNotFoundError: When the database does not exist.
         ValueError: When no frame is registered.
     """
-    reference_camera_params_id: int | None = (
-        gauge_camera_params_id(pose_graph_meta) if options.optimize_extrinsics else None
-    )
+    reference_camera_params_id: int | None = gauge_camera_params_id(pose_graph_meta) if options.optimize_extrinsics else None
     model: PosedModel = build_reconstruction(pose_graph_meta, reference_camera_params_id=reference_camera_params_id)
     mapping: MappingResult = run_mapping(model, options.database_path, config.vision_mapping, mapping_options)
     _print_mapping(mapping)
@@ -603,9 +602,7 @@ def run_extrinsic_refinement_stage(
         ),
     )
     reference_camera_params_id: int = gauge_camera_params_id(pose_graph_meta)
-    changes: tuple[ExtrinsicChange, ...] = extrinsic_changes(
-        pose_graph_meta, refinement.refined_extrinsics, reference_camera_params_id
-    )
+    changes: tuple[ExtrinsicChange, ...] = extrinsic_changes(pose_graph_meta, refinement.refined_extrinsics, reference_camera_params_id)
     _print_mapping(refinement.mapping)
     print(
         f"[colsfm] extrinsic refinement "
@@ -634,13 +631,14 @@ class ExportStageResult:
     """Every TUM trajectory written, per-camera files first."""
 
 
-def run_export_stage(options: PipelineOptions, mapped_meta: FramesMeta, mapping: MappingResult) -> ExportStageResult:
+def run_export_stage(options: PipelineOptions, mapped_meta: FramesMeta, mapping: MappingResult, frames: FrameSource) -> ExportStageResult:
     """Colour the points and write `sparse/`, `kpmap/` and `output_poses/`.
 
     Args:
         options: The run's options, for the output directory and the image root.
         mapped_meta: The collection carrying whatever extrinsics were just solved.
         mapping: The final mapping result.
+        frames: The run's frame source, for the point colours.
 
     Returns:
         The exported collection and what was written.
@@ -648,16 +646,12 @@ def run_export_stage(options: PipelineOptions, mapped_meta: FramesMeta, mapping:
     Raises:
         FileNotFoundError: When the image root is missing.
     """
-    num_coloured: int = colour_points(mapping.reconstruction, frame_source_for(options.input_dir))
+    num_coloured: int = colour_points(mapping.reconstruction, frames)
     print(f"[colsfm] export: coloured {num_coloured}/{mapping.num_points3D} points from the source imagery")
     write_colmap_model(options.output_dir, mapping.reconstruction)
     # `camera_to_world` comes straight off the adjusted reconstruction, so it stays
     # consistent with whatever extrinsics were just written next to it.
-    optimised: FramesMeta = write_optimised_frames_meta(
-        options.output_dir, mapped_meta, optimised_camera_poses(mapping.reconstruction), "ALIGNMENT"
-    )
+    optimised: FramesMeta = write_optimised_frames_meta(options.output_dir, mapped_meta, optimised_camera_poses(mapping.reconstruction), "ALIGNMENT")
     written: list[Path] = write_pose_files(options.output_dir, optimised)
     print(f"[colsfm] export: sparse/ model, kpmap/keyframes/{FRAMES_META_NAME}, {len(written)} TUM files")
     return ExportStageResult(optimised=optimised, num_coloured=num_coloured, pose_files=written)
-
-

@@ -43,7 +43,7 @@ from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 from trtkit.trt_builder import onnx_content_hash
 
 from colsfm.database import ImagePair, KeypointsXY, MatchIndices, database_transaction
-from colsfm.frames import FrameSource, frame_source_for
+from colsfm.frames import FrameSource, open_frame_source
 from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, verify_and_report
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
 
@@ -502,7 +502,7 @@ class FlexGlueTensorRT:
         return results
 
 
-def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions) -> MatchReport:
+def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions, frames: FrameSource | None = None) -> MatchReport:
     """Match and verify a pair list with FlexGlue on TensorRT, writing both tables into the database.
 
     The same contract as `colsfm.matching_trt.match_pairs_tensorrt`: raw matches are written per pair, then COLMAP's
@@ -533,7 +533,24 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
     matcher_engine: Path = resolve_engine(matcher_graph, matcher_profile(), precision="fp32")
-    frames: FrameSource = frame_source_for(options.image_dir)
+    owned: bool = frames is None
+    source: FrameSource = open_frame_source(options.image_dir) if frames is None else frames
+    try:
+        return _match_pairs_flexglue(database_path, pairs, options, flexglue_options, descriptor_engine, matcher_engine, source)
+    finally:
+        if owned:
+            source.close()
+
+
+def _match_pairs_flexglue(
+    database_path: Path,
+    pairs: Sequence[ImagePair],
+    options: MatchingOptions,
+    flexglue_options: FlexGlueOptions,
+    descriptor_engine: Path,
+    matcher_engine: Path,
+    frames: FrameSource,
+) -> MatchReport:
     started: float = time.perf_counter()
     with pycolmap.Database.open(database_path) as database:
         names: dict[int, str] = {image.image_id: image.name for image in database.read_all_images()}

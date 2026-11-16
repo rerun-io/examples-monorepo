@@ -2416,7 +2416,7 @@
       "severity": "error"
     },
     {
-      "column": 20,
+      "column": 41,
       "path": "tests/test_pose_graph.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsFloat | SupportsIndex | str` in function `float.__new__`",

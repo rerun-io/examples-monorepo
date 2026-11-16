@@ -12,7 +12,6 @@ observer calls these after each stage's timing window has closed, which is what
 keeps the visualisation outside the run's measurements.
 """
 
-
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -32,6 +31,7 @@ from colsfm.benchmark import AcceptanceBounds, Comparison, RunArtifacts, compare
 from colsfm.config import CusfmConfig
 from colsfm.database import ImagePair, Keypoints, read_keypoints_batch, read_two_view_geometry
 from colsfm.features import ExtractionReport
+from colsfm.frame_manifest import FrameSource
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, KeyframeMeta, RigFrame, read_frames_meta
 from colsfm.mapping import MappingResult, RoundStats
 from colsfm.matching import MatchReport, PairMatchStats
@@ -197,7 +197,7 @@ def log_feature_extraction(
     selected: FramesMeta,
     extraction: ExtractionReport,
     database_path: Path,
-    input_dir: Path,
+    frames: FrameSource,
     num_samples: int,
     console: str,
     published_database_path: Path | None = None,
@@ -212,7 +212,7 @@ def log_feature_extraction(
         selected: The collection keyframe selection kept.
         extraction: The report `run_feature_extraction_stage` returned.
         database_path: The database the stage wrote, read from here and now.
-        input_dir: The dataset's raw image root.
+        frames: The run's frame source.
         num_samples: How many keyframes to show.
         console: What the stage printed.
         published_database_path: Where that database will live once the run publishes,
@@ -229,14 +229,12 @@ def log_feature_extraction(
     drawable: list[KeyframeMeta] = list(sample_keyframes(selected, num_samples))
     # One database handle for the panel, not one per sample: `read_keypoints` opens and
     # closes the file every call.
-    keypoints_by_id: dict[int, Keypoints] = read_keypoints_batch(
-        database_path, [keyframe.keyframe_id for keyframe in drawable]
-    )
+    keypoints_by_id: dict[int, Keypoints] = read_keypoints_batch(database_path, [keyframe.keyframe_id for keyframe in drawable])
     for keyframe in drawable:
         sensor_name: str = selected.cameras[keyframe.camera_params_id].sensor_name
         sample_path: str = f"{stage.entity_root}/samples/{sensor_name}_{keyframe.keyframe_id}"
         keypoints_xy: Keypoints = keypoints_by_id[keyframe.keyframe_id]
-        rr.log(f"{sample_path}/image", rr.Image(keyframe_rgb(input_dir, keyframe.image_name)[0]).compress(jpeg_quality=SAMPLE_JPEG_QUALITY))
+        rr.log(f"{sample_path}/image", rr.Image(keyframe_rgb(frames, keyframe.image_name)[0]).compress(jpeg_quality=SAMPLE_JPEG_QUALITY))
         rr.log(
             f"{sample_path}/keypoints",
             rr.Points2D(rerun_keypoints(keypoints_xy), colors=SELECTED_COLOR, radii=KEYPOINT_RADIUS),
@@ -342,7 +340,7 @@ def log_matching(
     selected: FramesMeta,
     matching: MatchReport,
     database_path: Path,
-    input_dir: Path,
+    frames: FrameSource,
     console: str,
 ) -> None:
     """Stage 4: one sample pair with its verified matches, plus the inlier distribution.
@@ -352,7 +350,7 @@ def log_matching(
         selected: The collection keyframe selection kept.
         matching: The report `run_matching_stage` returned.
         database_path: The database holding the keypoints and geometries.
-        input_dir: The dataset's raw image root.
+        frames: The run's frame source.
         console: What the stage printed.
     """
     stamp_stage(stage)
@@ -372,7 +370,7 @@ def log_matching(
     ]
     chosen: ImagePair | None = _pair_for_display(stats)
     if chosen is not None:
-        rows.extend(_log_match_pair(stage, selected, chosen, database_path, input_dir, stats[chosen]))
+        rows.extend(_log_match_pair(stage, selected, chosen, database_path, frames, stats[chosen]))
     log_notes(stage, rows, console)
 
 
@@ -381,7 +379,7 @@ def _log_match_pair(
     selected: FramesMeta,
     pair: ImagePair,
     database_path: Path,
-    input_dir: Path,
+    frames: FrameSource,
     stats: PairMatchStats,
 ) -> MarkdownRows:
     """Draw one verified pair: each image with its keypoints, then the two concatenated.
@@ -391,7 +389,7 @@ def _log_match_pair(
         selected: The collection, for the keyframes' image names.
         pair: The image pair to draw.
         database_path: The database holding the keypoints and the geometry.
-        input_dir: The dataset's raw image root.
+        frames: The run's frame source.
         stats: The matcher's counters for this pair.
 
     Returns:
@@ -412,12 +410,12 @@ def _log_match_pair(
 
     for side, keyframe, matched in (("left", left, left_matched), ("right", right, right_matched)):
         side_path: str = f"{stage.entity_root}/pair/{side}"
-        rr.log(f"{side_path}/image", rr.Image(keyframe_rgb(input_dir, keyframe.image_name)[0]).compress(jpeg_quality=SAMPLE_JPEG_QUALITY))
+        rr.log(f"{side_path}/image", rr.Image(keyframe_rgb(frames, keyframe.image_name)[0]).compress(jpeg_quality=SAMPLE_JPEG_QUALITY))
         rr.log(f"{side_path}/keypoints", rr.Points2D(matched, colors=SOLVED_COLOR, radii=KEYPOINT_RADIUS))
         rr.log(f"{side_path}/name", rr.TextDocument(f"{selected.cameras[keyframe.camera_params_id].sensor_name}\n{keyframe.image_name}"))
 
-    left_rgb, scale = keyframe_rgb(input_dir, left.image_name, STACKED_MAX_WIDTH // 2)
-    right_rgb, _ = keyframe_rgb(input_dir, right.image_name, STACKED_MAX_WIDTH // 2)
+    left_rgb, scale = keyframe_rgb(frames, left.image_name, STACKED_MAX_WIDTH // 2)
+    right_rgb, _ = keyframe_rgb(frames, right.image_name, STACKED_MAX_WIDTH // 2)
     height: int = min(left_rgb.shape[0], right_rgb.shape[0])
     stacked: UInt8[ndarray, "h w 3"] = np.hstack([left_rgb[:height], right_rgb[:height]])
     offset_x: float = float(left_rgb.shape[1])
@@ -533,9 +531,9 @@ def _log_robocap_loops(stage: WalkthroughStage, robocap_run: Path | None) -> Mar
 
     frames_meta: FramesMeta = read_frames_meta(pose_graph_meta)
     rig_frames: tuple[RigFrame, ...] = frames_meta.rig_frames()
-    positions: Float64[ndarray, "n 3"] = np.asarray(
-        [rig_frame.world_T_vehicle.translation for rig_frame in rig_frames], dtype=np.float64
-    ).reshape(-1, 3)
+    positions: Float64[ndarray, "n 3"] = np.asarray([rig_frame.world_T_vehicle.translation for rig_frame in rig_frames], dtype=np.float64).reshape(
+        -1, 3
+    )
     revisits: dict[tuple[int, int], int] = _verified_revisit_pairs(database_path, _rig_id_by_keyframe(frames_meta))
     strongest: list[tuple[int, int]] = sorted(revisits, key=lambda key: revisits[key], reverse=True)[:MAX_LOOP_ARCS]
 
@@ -581,9 +579,7 @@ def log_pose_graph(stage: WalkthroughStage, pose_graph: PoseGraphStageResult, co
     """
     stamp_stage(stage)
     nodes: list[RigNode] = pose_graph.nodes
-    before_by_id: dict[int, Float64[ndarray, "3"]] = {
-        node.rig_id: np.asarray(node.world_T_rig.translation, dtype=np.float64) for node in nodes
-    }
+    before_by_id: dict[int, Float64[ndarray, "3"]] = {node.rig_id: np.asarray(node.world_T_rig.translation, dtype=np.float64) for node in nodes}
     after_by_id: dict[int, Float64[ndarray, "3"]] = {
         rig_frame.synced_sample_id: np.asarray(rig_frame.world_T_vehicle.translation, dtype=np.float64)
         for rig_frame in pose_graph.frames_meta.rig_frames()
@@ -591,9 +587,7 @@ def log_pose_graph(stage: WalkthroughStage, pose_graph: PoseGraphStageResult, co
 
     def edge_segments(by_id: Mapping[int, Float64[ndarray, "3"]], kind: str) -> Float64[ndarray, "n 2 3"]:
         """Two-point segments for every constraint of one kind."""
-        drawn: list[PoseGraphEdge] = [
-            edge for edge in pose_graph.edges if edge.kind == kind and edge.source in by_id and edge.target in by_id
-        ]
+        drawn: list[PoseGraphEdge] = [edge for edge in pose_graph.edges if edge.kind == kind and edge.source in by_id and edge.target in by_id]
         if not drawn:
             return np.zeros((0, 2, 3), dtype=np.float64)
         return np.asarray([[by_id[edge.source], by_id[edge.target]] for edge in drawn], dtype=np.float64).reshape(-1, 2, 3)
@@ -651,9 +645,9 @@ def log_reconstruction(stage: WalkthroughStage, mapping: MappingResult, console:
         console: What it printed — the per-pass triangulation counts live here.
     """
     stamp_stage(stage)
-    positions: Float64[ndarray, "n 3"] = np.asarray(
-        [point.xyz for point in mapping.reconstruction.points3D.values()], dtype=np.float64
-    ).reshape(-1, 3)
+    positions: Float64[ndarray, "n 3"] = np.asarray([point.xyz for point in mapping.reconstruction.points3D.values()], dtype=np.float64).reshape(
+        -1, 3
+    )
     rr.log(f"{stage.entity_root}/points", rr.Points3D(positions, colors=SELECTED_COLOR, radii=POINT_RADIUS))
 
     rounds: tuple[RoundStats, ...] = mapping.rounds
@@ -854,12 +848,10 @@ def log_export(
         console: What the stage printed.
     """
     stamp_stage(stage)
-    positions: Float64[ndarray, "n 3"] = np.asarray(
-        [point.xyz for point in mapping.reconstruction.points3D.values()], dtype=np.float64
-    ).reshape(-1, 3)
-    colours: Int64[ndarray, "n 3"] = np.asarray(
-        [point.color for point in mapping.reconstruction.points3D.values()], dtype=np.int64
-    ).reshape(-1, 3)
+    positions: Float64[ndarray, "n 3"] = np.asarray([point.xyz for point in mapping.reconstruction.points3D.values()], dtype=np.float64).reshape(
+        -1, 3
+    )
+    colours: Int64[ndarray, "n 3"] = np.asarray([point.color for point in mapping.reconstruction.points3D.values()], dtype=np.int64).reshape(-1, 3)
     rr.log(f"{stage.entity_root}/points", rr.Points3D(positions, colors=colours.astype(np.uint8), radii=POINT_RADIUS))
 
     log_run_as_rig(stage, input_meta, 0, label="input frames_meta.json", colour=INPUT_COLOR)
@@ -908,5 +900,3 @@ def _log_benchmark(stage: WalkthroughStage, options: PipelineOptions, reference_
         ("this run's points", f"{comparison.run_b.reconstruction.num_points3D:,}"),
         ("acceptance bounds met", f"{sum(1 for check in comparison.acceptance if check.passed)}/{len(comparison.acceptance)}"),
     ]
-
-

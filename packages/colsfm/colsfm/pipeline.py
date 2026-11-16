@@ -97,6 +97,8 @@ from colsfm.database import (
     ImagePair,
 )
 from colsfm.features import ExtractionReport
+from colsfm.frame_manifest import FrameSource
+from colsfm.frames import open_frame_source
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, RigFrame, write_frames_meta
 from colsfm.mapping import MappingOptions, MappingResult
 from colsfm.matching import (
@@ -164,7 +166,7 @@ class PipelineObserver:
     uses when no observer is passed.
     """
 
-    def run_started(self, options: PipelineOptions, stages: tuple[StageName, ...]) -> None:
+    def run_started(self, options: PipelineOptions, stages: tuple[StageName, ...], frames: FrameSource) -> None:
         """Announce the run before stage 1.
 
         Args:
@@ -173,6 +175,7 @@ class PipelineObserver:
                 the database or reads an artifact mid-run looks where the run is
                 actually writing. `summary.options` keeps the caller's own paths.
             stages: The stages it will record, in order.
+            frames: The run's frame source; valid through `on_export`, closed before `run_finished` or on a failure.
         """
 
     def stage_scope(self, stage: StageName) -> contextlib.AbstractContextManager[None]:
@@ -299,12 +302,16 @@ def run_pipeline(options: PipelineOptions, observer: PipelineObserver | None = N
     # summary below reports `options`, i.e. the paths the caller asked for.
     staged: PipelineOptions = replace(options, output_dir=workspace.staging_dir)
     print(f"[colsfm] config {options.config_dir} | input {options.input_dir} | output {options.output_dir}")
-    watcher.run_started(staged, stages)
+    # The run's one frame source: every stage that reads pixels gets it, and it is released however the run ends.
+    frames: FrameSource = open_frame_source(options.input_dir)
     try:
-        summary: PipelineSummary = _run_stages(options, staged, resolved, workspace.ledger, watcher, started)
+        watcher.run_started(staged, stages, frames)
+        summary: PipelineSummary = _run_stages(options, staged, resolved, workspace.ledger, watcher, started, frames)
     except BaseException as error:
         workspace.fail(f"{type(error).__name__}: {error}")
         raise
+    finally:
+        frames.close()
     workspace.publish()
     watcher.run_finished(summary)
     return summary
@@ -317,6 +324,7 @@ def _run_stages(
     ledger: StageLedger,
     watcher: PipelineObserver,
     started: float,
+    frames: FrameSource,
 ) -> PipelineSummary:
     """Run every stage into the staging workspace and write its summary there.
 
@@ -353,7 +361,7 @@ def _run_stages(
 
     # ── 2. feature extraction ────────────────────────────────────────────────────────
     with timed_stage(ledger, "feature_extraction"), watcher.stage_scope("feature_extraction"):
-        extraction: ExtractionReport = run_feature_extraction_stage(staged, selection.selected, resolved.features)
+        extraction: ExtractionReport = run_feature_extraction_stage(staged, selection.selected, resolved.features, frames)
     watcher.on_feature_extraction(extraction)
 
     # ── 3. pair selection ────────────────────────────────────────────────────────────
@@ -366,13 +374,13 @@ def _run_stages(
     # candidates with settings of its own is exactly the drift this prevents.
     matching_options: MatchingOptions = resolved.matching_options(config)
     with timed_stage(ledger, "matching"), watcher.stage_scope("matching"):
-        matching: MatchReport = run_matching_stage(staged, pairs, matching_options)
+        matching: MatchReport = run_matching_stage(staged, pairs, matching_options, frames)
     watcher.on_matching(matching)
 
     # ── 5. loop closure ──────────────────────────────────────────────────────────────
     with timed_stage(ledger, "loop_closure"), watcher.stage_scope("loop_closure"):
         loops: LoopClosureStageResult = run_loop_closure_stage(
-            selection.selected, staged.database_path, config.pose_graph, matching_options, enabled=options.loop_closure
+            selection.selected, staged.database_path, config.pose_graph, matching_options, enabled=options.loop_closure, frames=frames
         )
     watcher.on_loop_closure(loops)
 
@@ -385,9 +393,7 @@ def _run_stages(
 
     # ── 7. triangulation and bundle adjustment ───────────────────────────────────────
     with timed_stage(ledger, "reconstruction"), watcher.stage_scope("reconstruction"):
-        reconstruction: MappingResult = run_reconstruction_stage(
-            staged, pose_graph.frames_meta, config, mapping_options
-        )
+        reconstruction: MappingResult = run_reconstruction_stage(staged, pose_graph.frames_meta, config, mapping_options)
     # Before 7b: the refinement adjusts this very reconstruction in place.
     watcher.on_reconstruction(reconstruction)
 
@@ -409,7 +415,7 @@ def _run_stages(
 
     # ── 8. export ────────────────────────────────────────────────────────────────────
     with timed_stage(ledger, "export"), watcher.stage_scope("export"):
-        export: ExportStageResult = run_export_stage(staged, mapped_meta, mapping)
+        export: ExportStageResult = run_export_stage(staged, mapped_meta, mapping, frames)
     watcher.on_export(export, mapping)
 
     summary: PipelineSummary = PipelineSummary(
@@ -469,9 +475,7 @@ def run_stage(options: SelectionOptions, stage: CheapStageName) -> StageResult:
         ValueError: When no keyframe survives selection.
     """
     selection: KeyframeSelectionStageResult = run_keyframe_selection_stage(options)
-    pairs: list[ImagePair] = (
-        run_pair_selection_stage(selection.selected, selection.config) if stage == "pair_selection" else []
-    )
+    pairs: list[ImagePair] = run_pair_selection_stage(selection.selected, selection.config) if stage == "pair_selection" else []
     rig_frames: tuple[RigFrame, ...] = selection.rig_frames
     print(
         f"[colsfm] {stage}: {len(selection.selected.keyframes)}/{len(selection.frames_meta.keyframes)} keyframes, "

@@ -103,6 +103,7 @@ import tyro
 from colsfm.ba_backend import BaBackend
 from colsfm.database import ImagePair
 from colsfm.features import ExtractionReport, FeatureBackend
+from colsfm.frame_manifest import FrameSource
 from colsfm.frames_meta import FramesMeta
 from colsfm.mapping import MappingResult
 from colsfm.matching import MatchingBackend, MatchReport
@@ -279,6 +280,8 @@ class WalkthroughObserver(PipelineObserver):
     A staging directory is where a stage wrote; it is not where the artifact ends
     up, and a finished recording that names one names a directory that no longer
     exists."""
+    frames: FrameSource = field(init=False)
+    """The run's frame source, handed over in `run_started`."""
     stages: tuple[WalkthroughStage, ...]
     """The timeline slots this run records, in stage order."""
     console: dict[str, str] = field(default_factory=dict)
@@ -352,16 +355,18 @@ class WalkthroughObserver(PipelineObserver):
         """
         return self._captured(stage)
 
-    def run_started(self, options: PipelineOptions, stages: tuple[StageName, ...]) -> None:
+    def run_started(self, options: PipelineOptions, stages: tuple[StageName, ...], frames: FrameSource) -> None:
         """Take the staged options and set the recording's world axes before stage 1.
 
         Args:
             options: The options the stages will execute, rebased onto the run's
                 staging directory. Everything this observer opens mid-run is there.
             stages: The stages it will record; already held as `stages`.
+            frames: The run's frame source, which the feature and matching panels draw from.
         """
         self.published_options = self.options
         self.options = options
+        self.frames = frames
         rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
     def on_keyframe_selection(self, result: KeyframeSelectionStageResult) -> None:
@@ -384,7 +389,7 @@ class WalkthroughObserver(PipelineObserver):
             self._selected().selected,
             report,
             self.options.database_path,
-            self.options.input_dir,
+            self.frames,
             self.config.num_sample_keyframes,
             self.console["feature_extraction"],
             published_database_path=self.published_options.database_path,
@@ -397,9 +402,7 @@ class WalkthroughObserver(PipelineObserver):
             pairs: The consecutive and stereo pairs the matcher will be given.
         """
         selection: KeyframeSelectionStageResult = self._selected()
-        log_pair_selection(
-            self.stage("pair_selection"), selection.selected, selection.config, pairs, self.console["pair_selection"]
-        )
+        log_pair_selection(self.stage("pair_selection"), selection.selected, selection.config, pairs, self.console["pair_selection"])
 
     def on_matching(self, report: MatchReport) -> None:
         """Draw stage 4.
@@ -412,7 +415,7 @@ class WalkthroughObserver(PipelineObserver):
             self._selected().selected,
             report,
             self.options.database_path,
-            self.options.input_dir,
+            self.frames,
             self.console["matching"],
         )
 

@@ -49,6 +49,7 @@ from typing import Final, Literal, TypeAlias
 import pycolmap
 
 from colsfm.database import image_ids_by_name, keypoint_counts
+from colsfm.frame_manifest import FrameSource
 
 AlikedVariant: TypeAlias = Literal["ALIKED_N16ROT", "ALIKED_N32"]
 """The two ALIKED graphs COLMAP 4.2 can download and run."""
@@ -247,6 +248,7 @@ def extract_features(
     image_root: Path,
     image_names: Sequence[str],
     options: FeatureOptions = DEFAULT_FEATURE_OPTIONS,
+    frames: FrameSource | None = None,
 ) -> ExtractionReport:
     """Run ALIKED over the named images and store keypoints and descriptors.
 
@@ -260,6 +262,8 @@ def extract_features(
             source decodes from the segment's video streams (`colsfm.frames`).
         image_names: Images to extract, as stored in the database.
         options: Extraction settings.
+        frames: The run's frame source, for the `raco` backend (it reads pixels); one is opened on `image_root`
+            for this call when None.
 
     Returns:
         Per-image keypoint counts, the device used and the wall time.
@@ -279,23 +283,26 @@ def extract_features(
         # Imported here, not at module scope: TensorRT and `cuda-python` are only needed by this branch, and a machine
         # without a usable engine must still be able to run the `pycolmap` backend.
         from colsfm.features_raco import extract_raco
-        from colsfm.frames import frame_source_for
+        from colsfm.frames import open_frame_source
 
         # The graph's `scores` output is a selection rank, not a detector response, so the blob's
         # `detector_threshold` is meaningless against it; `colsfm.features_raco` documents why the gate is dropped.
-        extracted: TensorRTExtraction = extract_raco(
-            database_path,
-            image_root,
-            image_names,
-            min_score=RACO_MIN_SCORE,
-            max_num_features=options.max_num_features,
-            native_resolution=options.native_resolution,
-            raco_engine=options.raco_engine,
-            frames=frame_source_for(image_root),
-        )
-        tensorrt_report: ExtractionReport = ExtractionReport(
-            keypoint_counts=extracted[0], device="cuda", elapsed_seconds=extracted[1]
-        )
+        source: FrameSource = open_frame_source(image_root) if frames is None else frames
+        try:
+            extracted: TensorRTExtraction = extract_raco(
+                database_path,
+                image_root,
+                image_names,
+                min_score=RACO_MIN_SCORE,
+                max_num_features=options.max_num_features,
+                native_resolution=options.native_resolution,
+                raco_engine=options.raco_engine,
+                frames=source,
+            )
+        finally:
+            if frames is None:
+                source.close()
+        tensorrt_report: ExtractionReport = ExtractionReport(keypoint_counts=extracted[0], device="cuda", elapsed_seconds=extracted[1])
         print(f"colsfm.features[{options.backend}]: {tensorrt_report.summary()}")
         return tensorrt_report
 

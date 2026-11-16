@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+from typing import Any
 
 import pytest
 from serde.json import from_json
@@ -13,7 +14,7 @@ from colsfm.catalog import CATALOG_INPUT_FILE, CatalogInputConfig, CatalogSnapsh
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, read_manifest
 
 
-def _config(tmp_path: Path, **changes: object) -> CatalogInputConfig:
+def _config(tmp_path: Path, **changes: Any) -> CatalogInputConfig:
     return dataclasses.replace(CatalogInputConfig(dataset="msd-g2", segment="seg", output_root=tmp_path), **changes)
 
 

@@ -1,21 +1,45 @@
-"""The frame-source manifest: which `VideoStream` sample each keyframe of a catalog input is.
+"""The frame-source manifest (which `VideoStream` sample each keyframe of a catalog input is) and the `FrameSource` contract.
 
-Torch-free on purpose: the catalog door (metadata only), run resolution and the COLMAP-only backends read it without
-loading the GPU stack that `colsfm.frames` needs to decode the pixels.
+Torch-free on purpose: the catalog door (metadata only), run resolution and the COLMAP-only backends read it, and the
+stage signatures name `FrameSource`, without loading the GPU stack that `colsfm.frames` needs to decode the pixels.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 from serde import SerdeError, serde
 from serde.json import from_json, to_json
 
+if TYPE_CHECKING:
+    from torch import Tensor
+
 FRAME_SOURCE_FILE: Final[str] = "frame_source.json"
 """The manifest a catalog input directory carries instead of image files."""
+
+
+@runtime_checkable
+class FrameSource(Protocol):
+    """Keyframe pixels by image name, as RGB uint8 `[3, h, w]` tensors on the GPU; `close` releases what it holds."""
+
+    def frames(self, names: Sequence[str]) -> Iterator[tuple[str, Tensor]]:
+        """Yield each named frame once, in the order given.
+
+        Args:
+            names: Image names as `frames_meta.json` and the database hold them.
+
+        Yields:
+            `(name, rgb)` with `rgb` uint8 `[3, height, width]` on the GPU.
+        """
+        ...
+
+    def close(self) -> None:
+        """Release decoded frames and decoders; the source can still be read afterwards, from scratch."""
+        ...
 
 
 def is_catalog_input(input_dir: Path) -> bool:
@@ -91,5 +115,3 @@ def read_manifest(path: Path) -> FrameSourceManifest:
         return from_json(FrameSourceManifest, path.read_text())
     except (SerdeError, json.JSONDecodeError) as error:
         raise ValueError(f"{path}: not a frame-source manifest ({error})") from error
-
-

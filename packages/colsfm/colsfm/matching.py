@@ -106,6 +106,7 @@ from colsfm.database import (
     read_keypoints_batch,
 )
 from colsfm.features import DeviceChoice, ResolvedDevice, resolve_device
+from colsfm.frame_manifest import FrameSource
 from colsfm.pairs import write_pair_list
 
 FLEXGLUE_MODEL_DIR: Final[Path] = DATA_DIR / "models" / "flexglue"
@@ -521,12 +522,8 @@ def subsample_matches_by_coverage(
     positions_xy: KeypointsXY = keypoints_xy[ordered[:, 0]]
     num_columns: int = max(int(math.sqrt(max_matches * image_width / image_height)), 1)
     num_rows: int = max(max_matches // num_columns, 1)
-    columns: Int64[ndarray, "num_matches"] = np.clip(
-        (positions_xy[:, 0] * num_columns / image_width).astype(np.int64), 0, num_columns - 1
-    )
-    rows: Int64[ndarray, "num_matches"] = np.clip(
-        (positions_xy[:, 1] * num_rows / image_height).astype(np.int64), 0, num_rows - 1
-    )
+    columns: Int64[ndarray, "num_matches"] = np.clip((positions_xy[:, 0] * num_columns / image_width).astype(np.int64), 0, num_columns - 1)
+    rows: Int64[ndarray, "num_matches"] = np.clip((positions_xy[:, 1] * num_rows / image_height).astype(np.int64), 0, num_rows - 1)
     cells: Int64[ndarray, "num_matches"] = rows * num_columns + columns
     # `np.unique` returns the first index of each value because `cells` is scanned in
     # the sorted keypoint order above, so the winner per cell is the lowest index.
@@ -623,9 +620,7 @@ def select_by_square_covering(
     return np.sort(np.asarray(kept, dtype=np.int64))
 
 
-def _cover_squares(
-    ordered_xy: KeypointsXY, ordered_indices: Sequence[int], width: float, image_width: int, image_height: int
-) -> list[int]:
+def _cover_squares(ordered_xy: KeypointsXY, ordered_indices: Sequence[int], width: float, image_width: int, image_height: int) -> list[int]:
     """One SSC pass at one suppression width.
 
     The covered set is a Python `set` of flat cell ids rather than a boolean
@@ -683,9 +678,7 @@ def _image_sizes(database: pycolmap.Database, image_ids: Sequence[int]) -> dict[
     return sizes
 
 
-def cap_verified_matches(
-    database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions = DEFAULT_MATCHING_OPTIONS
-) -> int:
+def cap_verified_matches(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions = DEFAULT_MATCHING_OPTIONS) -> int:
     """Rewrite every over-full two-view geometry with a spatially spread subset.
 
     Runs **after** verification, so the survivors are inliers of the same
@@ -728,9 +721,7 @@ def cap_verified_matches(
                 inliers: MatchIndices = np.asarray(geometry.inlier_matches, dtype=np.int64)
                 if len(inliers) <= cap:
                     continue
-                kept: MatchIndices = subsample_matches_by_coverage(
-                    keypoints_by_image_id[image_id1], inliers, width, height, cap
-                )
+                kept: MatchIndices = subsample_matches_by_coverage(keypoints_by_image_id[image_id1], inliers, width, height, cap)
                 removed += len(inliers) - len(kept)
                 geometry.inlier_matches = kept.astype(np.uint32)
                 database.update_two_view_geometry(image_id1, image_id2, geometry)
@@ -778,6 +769,7 @@ def match_pairs(
     database_path: Path,
     pairs: Sequence[ImagePair],
     options: MatchingOptions = DEFAULT_MATCHING_OPTIONS,
+    frames: FrameSource | None = None,
 ) -> MatchReport:
     """Match and verify a list of image pairs, writing the results into the database.
 
@@ -790,6 +782,8 @@ def match_pairs(
         database_path: An existing COLMAP database.
         pairs: Image-id pairs, normalised and deduplicated by `colsfm.pairs`.
         options: Matching and verification settings.
+        frames: The run's frame source, for the `flexglue` backend (it reads pixels); one is opened on
+            `options.image_dir` for this call when None.
 
     Returns:
         Per-pair raw and inlier counts, the device used and the wall time.
@@ -810,7 +804,7 @@ def match_pairs(
         # Imported here for the same reason: TensorRT, torch and cv2 are only needed by this branch.
         from colsfm.flexglue_trt import match_pairs_flexglue
 
-        return match_pairs_flexglue(database_path, list(pairs), options)
+        return match_pairs_flexglue(database_path, list(pairs), options, frames)
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     if not pairs:

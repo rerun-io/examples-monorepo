@@ -7,11 +7,9 @@ Markdown notes document each panel closes with. Nothing here knows what a stage
 a change to how the walkthrough looks does not touch what it reports.
 """
 
-
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -21,7 +19,7 @@ from jaxtyping import Float, Float64, Int64, UInt8
 from numpy import ndarray
 
 from colsfm.cameras import colmap_camera
-from colsfm.frames import frame_source_for
+from colsfm.frame_manifest import FrameSource
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.walkthrough_stages import (
     ARC_LIFT_FRACTION,
@@ -83,9 +81,7 @@ def frustum_strips(world_T_cam: pycolmap.Rigid3d, camera: pycolmap.Camera, depth
         ],
         axis=-1,
     )
-    apex_and_corners: Float64[ndarray, "5 3"] = transform_points(
-        world_T_cam, np.vstack([np.zeros((1, 3), dtype=np.float64), corners_cam])
-    )
+    apex_and_corners: Float64[ndarray, "5 3"] = transform_points(world_T_cam, np.vstack([np.zeros((1, 3), dtype=np.float64), corners_cam]))
     apex: Float64[ndarray, "3"] = apex_and_corners[0]
     corners: Float64[ndarray, "4 3"] = apex_and_corners[1:]
     rectangle: Float64[ndarray, "5 3"] = np.vstack([corners, corners[:1]])
@@ -93,9 +89,7 @@ def frustum_strips(world_T_cam: pycolmap.Rigid3d, camera: pycolmap.Camera, depth
     return [rectangle, rays]
 
 
-def camera_frusta(
-    frames_meta: FramesMeta, keyframes: Sequence[KeyframeMeta], depth: float
-) -> list[Float64[ndarray, "n 3"]]:
+def camera_frusta(frames_meta: FramesMeta, keyframes: Sequence[KeyframeMeta], depth: float) -> list[Float64[ndarray, "n 3"]]:
     """Draw every keyframe of a collection as a frustum.
 
     Args:
@@ -106,9 +100,7 @@ def camera_frusta(
     Returns:
         Two polylines per keyframe, in keyframe order.
     """
-    cameras: dict[int, pycolmap.Camera] = {
-        camera_params_id: colmap_camera(camera) for camera_params_id, camera in frames_meta.cameras.items()
-    }
+    cameras: dict[int, pycolmap.Camera] = {camera_params_id: colmap_camera(camera) for camera_params_id, camera in frames_meta.cameras.items()}
     strips: list[Float64[ndarray, "n 3"]] = []
     for keyframe in keyframes:
         strips.extend(frustum_strips(keyframe.world_T_cam, cameras[keyframe.camera_params_id], depth))
@@ -174,21 +166,21 @@ def arc_strip(start_xyz: Float64[ndarray, "3"], end_xyz: Float64[ndarray, "3"]) 
     return chord
 
 
-def keyframe_rgb(input_dir: Path, image_name: str, max_width: int | None = None) -> tuple[UInt8[ndarray, "h w 3"], float]:
+def keyframe_rgb(frames: FrameSource, image_name: str, max_width: int | None = None) -> tuple[UInt8[ndarray, "h w 3"], float]:
     """One keyframe's pixels from the run's frame source, on the host, optionally scaled down to a width budget.
 
     The walkthrough draws a handful of frames; they come from the same `colsfm.frames` source the stages read (the
     catalog video on NVDEC, or the image folder), so no image file has to exist.
 
     Args:
-        input_dir: The run's input directory.
+        frames: The run's frame source.
         image_name: The keyframe's name.
         max_width: Largest width to return, in pixels; None keeps the full frame.
 
     Returns:
         The uint8 RGB image and the scale factor that was applied to it.
     """
-    (_, rgb), = frame_source_for(input_dir).frames([image_name])
+    ((_, rgb),) = frames.frames([image_name])
     image: UInt8[ndarray, "h w 3"] = rgb.permute(1, 2, 0).contiguous().cpu().numpy()
     scale: float = 1.0 if max_width is None else min(1.0, max_width / float(image.shape[1]))
     if scale < 1.0:
@@ -286,5 +278,3 @@ def log_notes(stage: WalkthroughStage, rows: MarkdownRows, console: str, extra: 
         f"{stage.entity_root}/notes",
         rr.TextDocument(render_notes(stage, rows, console, extra), media_type="text/markdown"),
     )
-
-

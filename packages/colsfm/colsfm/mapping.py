@@ -775,7 +775,7 @@ def run_mapping(
         if resolved_options.verbose:
             print(
                 f"[colsfm] round {round_index} gate {max_pixel_error:.1f} px: merged {num_merged}, "
-                f"completed {num_completed}, filtered {filtered.total()}, diverged {num_diverged}, "
+                f"completed {num_completed}, filtered {filtered.total()}, diverged {latest.num_diverged}, "
                 f"change {observation_change:.6f}, points {latest.num_points3D}, "
                 f"reprojection {latest.mean_reprojection_error_px:.4f} px"
             )
