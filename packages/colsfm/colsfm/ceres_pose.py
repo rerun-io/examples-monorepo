@@ -42,7 +42,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from colsfm.geometry import Matrix3, QuaternionXYZW, Vector3
-from colsfm.solver_report import CeresTermination
+from colsfm.solver_report import CeresTermination, ceres_termination
 
 LinearSolver: TypeAlias = Literal["SPARSE_SCHUR", "SPARSE_NORMAL_CHOLESKY"]
 """The two linear solvers cuSFM uses: SPARSE_SCHUR on the CPU, the other on the cuDSS path."""
@@ -138,9 +138,7 @@ def pose_parameter_blocks(pose: pycolmap.Rigid3d, *, canonical_sign: bool = Fals
     quat_xyzw /= np.linalg.norm(quat_xyzw)
     if canonical_sign and quat_xyzw[3] < 0.0:
         quat_xyzw = -quat_xyzw
-    return PoseBlocks(
-        quat_xyzw=quat_xyzw, translation=np.asarray(pose.translation, dtype=np.float64).copy()
-    )
+    return PoseBlocks(quat_xyzw=quat_xyzw, translation=np.asarray(pose.translation, dtype=np.float64).copy())
 
 
 def rigid3d_from_parameter_blocks(quat_xyzw: QuaternionXYZW, translation: Vector3) -> pycolmap.Rigid3d:
@@ -220,7 +218,7 @@ def solver_stats(summary: pyceres.SolverSummary) -> SolverStats:
         iterations=int(summary.num_successful_steps) + int(summary.num_unsuccessful_steps),
         initial_cost=float(summary.initial_cost),
         final_cost=float(summary.final_cost),
-        termination=str(summary.termination_type).rsplit(".", maxsplit=1)[-1],
+        termination=ceres_termination(str(summary.termination_type)),
     )
 
 

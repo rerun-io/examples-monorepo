@@ -44,7 +44,6 @@ from scipy.spatial.transform import Rotation
 from colsfm.frames_meta import FramesMeta, KeyframeMeta, RigFrame
 from colsfm.geometry import MILLIMETRES_PER_METRE, TumPose, parse_tum_line
 from colsfm.rigid_fit import (
-    DEGENERATE_VARIANCE,
     Positions,
     RigidAlignment,
     Rotations,
@@ -54,7 +53,6 @@ from colsfm.rigid_fit import (
 )
 
 __all__ = [
-    "DEGENERATE_VARIANCE",
     "GROUND_TRUTH_FILE_NAME",
     "GROUND_TRUTH_TOLERANCE_MICROSECONDS",
     "Positions",
@@ -136,9 +134,7 @@ def rig_track_of(poses: Sequence[tuple[int, pycolmap.Rigid3d]]) -> RigTrack:
     return RigTrack(
         timestamps_microseconds=np.asarray([timestamp for timestamp, _ in poses], dtype=np.int64),
         world_t_rig=np.asarray([pose.translation for _, pose in poses], dtype=np.float64).reshape(-1, 3),
-        world_R_rig=np.asarray(
-            [Rotation.from_quat(pose.rotation.quat).as_matrix() for _, pose in poses], dtype=np.float64
-        ).reshape(-1, 3, 3),
+        world_R_rig=np.asarray([Rotation.from_quat(pose.rotation.quat).as_matrix() for _, pose in poses], dtype=np.float64).reshape(-1, 3, 3),
     )
 
 
@@ -223,9 +219,9 @@ def read_ground_truth(input_dir: Path) -> RigTrack | None:
     return RigTrack(
         timestamps_microseconds=np.asarray([pose.timestamp_microseconds for pose in ordered], dtype=np.int64),
         world_t_rig=np.asarray([pose.world_T_body.translation for pose in ordered], dtype=np.float64).reshape(-1, 3),
-        world_R_rig=np.asarray(
-            [Rotation.from_quat(pose.world_T_body.rotation.quat).as_matrix() for pose in ordered], dtype=np.float64
-        ).reshape(-1, 3, 3),
+        world_R_rig=np.asarray([Rotation.from_quat(pose.world_T_body.rotation.quat).as_matrix() for pose in ordered], dtype=np.float64).reshape(
+            -1, 3, 3
+        ),
     )
 
 

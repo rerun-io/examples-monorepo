@@ -363,7 +363,9 @@ def test_the_direction_cross_check_can_be_switched_off(scene: FourCameraScene, e
     costs 66 of 921 pairs and buys 10 mm of trajectory RMSE, which is why it is on.
     """
     assert not np.isnan(estimate.direction_disagreement_deg)
-    assert estimate.direction_disagreement_deg < RigPoseConfig().max_direction_disagreement_deg
+    limit: float | None = RigPoseConfig().max_direction_disagreement_deg
+    assert limit is not None
+    assert estimate.direction_disagreement_deg < limit
 
     unchecked: RigPoseOutcome = make_estimator(scene, RigPoseConfig(max_direction_disagreement_deg=None)).measure(SOURCE_RIG_ID, TARGET_RIG_ID)
     assert isinstance(unchecked, RigPoseEstimate)
@@ -453,7 +455,9 @@ def test_an_anchors_landmarks_are_packed_for_the_join(scene: FourCameraScene) ->
     once at triangulation instead of re-sorted for every candidate the source rig has.
     """
     landmarks: RigLandmarks = make_estimator(scene).local_map(SOURCE_RIG_ID)
-    anchor: AnchorLandmarks = landmarks[scene.index.keyframe(SOURCE_RIG_ID, 0)]
+    anchor_image: int | None = scene.index.keyframe(SOURCE_RIG_ID, 0)
+    assert anchor_image is not None
+    anchor: AnchorLandmarks = landmarks[anchor_image]
     assert anchor.keypoint_indices.shape == (len(anchor),)
     assert anchor.points_in_rig.shape == (len(anchor), 3)
     assert np.all(np.diff(anchor.keypoint_indices) > 0)

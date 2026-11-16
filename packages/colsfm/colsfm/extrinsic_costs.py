@@ -49,7 +49,7 @@ from numpy import ndarray
 
 from colsfm.ceres_pose import batched_skew
 from colsfm.extrinsic_observations import CameraObservations, PixelObservations, PointsInVehicle
-from colsfm.geometry import Matrix3
+from colsfm.geometry import Matrix3, img_from_cam
 from colsfm.pose_graph import quaternion_plus_jacobian_transpose, rotation_matrix_from_quat_xyzw
 
 _SMALL_SQUARED_NORM: Final[float] = 1e-8
@@ -176,8 +176,8 @@ class RigReprojectionCost(pyceres.CostFunction):
         for axis in range(3):
             offset: Float64[ndarray, "n_obs 3"] = np.zeros_like(points_in_cam)
             offset[:, axis] = step
-            forward: PixelObservations = self._camera.img_from_cam(points_in_cam + offset)
-            backward: PixelObservations = self._camera.img_from_cam(points_in_cam - offset)
+            forward: PixelObservations = img_from_cam(self._camera, points_in_cam + offset)
+            backward: PixelObservations = img_from_cam(self._camera, points_in_cam - offset)
             jacobian[:, :, axis] = (forward - backward) / (2.0 * step)[:, None]
         return jacobian
 

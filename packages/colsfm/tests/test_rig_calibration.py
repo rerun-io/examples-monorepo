@@ -15,7 +15,7 @@ import pytest
 from conftest import build_reconstruction
 
 from colsfm.frames_meta import FramesMeta
-from colsfm.reconstruction import RigReference, gauge_camera_params_id, rig_reference
+from colsfm.reconstruction import RigReference, gauge_camera_params_id, rig_reference, rig_sensor_from_rig
 from colsfm.rig_calibration import (
     ExtrinsicChange,
     calibrated_cam_from_rig,
@@ -51,9 +51,7 @@ def test_the_reference_camera_sits_at_identity(three_samples: FramesMeta, galile
     np.testing.assert_allclose(calibrated[galileo_reference.camera_params_id].matrix(), np.eye(3, 4), atol=1e-12)
 
 
-def test_cam_from_rig_is_cam_from_vehicle_composed_with_the_reference_bridge(
-    three_samples: FramesMeta, galileo_reference: RigReference
-) -> None:
+def test_cam_from_rig_is_cam_from_vehicle_composed_with_the_reference_bridge(three_samples: FramesMeta, galileo_reference: RigReference) -> None:
     """`cam_i_T_cam_ref = cam_i_T_vehicle * vehicle_T_cam_ref`, for every camera."""
     calibrated: dict[int, pycolmap.Rigid3d] = calibrated_cam_from_rig(three_samples, galileo_reference)
 
@@ -63,11 +61,10 @@ def test_cam_from_rig_is_cam_from_vehicle_composed_with_the_reference_bridge(
         np.testing.assert_allclose(calibrated[camera_params_id].matrix(), expected.matrix(), atol=1e-12)
 
 
-def test_rig_config_lists_the_reference_first_and_gives_it_no_transform(
-    three_samples: FramesMeta, galileo_reference: RigReference
-) -> None:
+def test_rig_config_lists_the_reference_first_and_gives_it_no_transform(three_samples: FramesMeta, galileo_reference: RigReference) -> None:
     """`Rig::AddSensor` refuses to run before a reference exists, so order matters."""
     config: pycolmap.RigConfig = rig_config(three_samples, galileo_reference)
+    assert galileo_reference.camera_params_id is not None
     reference_camera = three_samples.cameras[galileo_reference.camera_params_id]
 
     assert len(config.cameras) == len(three_samples.cameras)
@@ -77,18 +74,15 @@ def test_rig_config_lists_the_reference_first_and_gives_it_no_transform(
     assert [entry.ref_sensor for entry in config.cameras[1:]] == [False] * (len(config.cameras) - 1)
 
 
-def test_rig_config_carries_the_calibrated_transform_on_every_other_camera(
-    three_samples: FramesMeta, galileo_reference: RigReference
-) -> None:
+def test_rig_config_carries_the_calibrated_transform_on_every_other_camera(three_samples: FramesMeta, galileo_reference: RigReference) -> None:
     """Each non-reference entry carries exactly the `cam_from_rig` of the calibration."""
     calibrated: dict[int, pycolmap.Rigid3d] = calibrated_cam_from_rig(three_samples, galileo_reference)
-    prefix_by_params_id: dict[int, str] = {
-        camera_params_id: f"{camera.sensor_name}/" for camera_params_id, camera in three_samples.cameras.items()
-    }
+    prefix_by_params_id: dict[int, str] = {camera_params_id: f"{camera.sensor_name}/" for camera_params_id, camera in three_samples.cameras.items()}
     params_id_by_prefix: dict[str, int] = {prefix: params_id for params_id, prefix in prefix_by_params_id.items()}
 
     for entry in rig_config(three_samples, galileo_reference).cameras[1:]:
         expected: pycolmap.Rigid3d = calibrated[params_id_by_prefix[entry.image_prefix]]
+        assert entry.cam_from_rig is not None
         np.testing.assert_allclose(entry.cam_from_rig.matrix(), expected.matrix(), atol=1e-12)
 
 
@@ -99,9 +93,7 @@ def test_rotation_degrees_of_the_identity_is_zero() -> None:
 
 def test_rotation_degrees_measures_the_geodesic_angle() -> None:
     """Ninety degrees about +Z reads as ninety degrees, whichever way it is signed."""
-    quarter_turn: pycolmap.Rigid3d = pycolmap.Rigid3d(
-        pycolmap.Rotation3d(np.array([0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)])), np.zeros(3)
-    )
+    quarter_turn: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(np.array([0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4)])), np.zeros(3))
 
     assert rotation_degrees(quarter_turn) == pytest.approx(90.0)
     assert rotation_degrees(quarter_turn.inverse()) == pytest.approx(90.0)
@@ -124,9 +116,7 @@ def test_a_model_built_from_the_calibration_has_no_extrinsic_delta(three_samples
     deltas: tuple[ExtrinsicChange, ...] = extrinsic_deltas(reconstruction, three_samples, galileo_reference)
 
     assert [delta.camera_params_id for delta in deltas] == sorted(set(three_samples.cameras) - {galileo_reference.camera_params_id})
-    assert [delta.sensor_name for delta in deltas] == [
-        three_samples.cameras[delta.camera_params_id].sensor_name for delta in deltas
-    ]
+    assert [delta.sensor_name for delta in deltas] == [three_samples.cameras[delta.camera_params_id].sensor_name for delta in deltas]
     assert max(delta.translation_change_mm for delta in deltas) == pytest.approx(0.0, abs=1e-9)
     assert max(delta.rotation_change_deg for delta in deltas) == pytest.approx(0.0, abs=1e-9)
 
@@ -137,7 +127,7 @@ def test_a_moved_sensor_shows_up_in_millimetres_and_degrees(three_samples: Frame
     rig: pycolmap.Rig = next(iter(reconstruction.rigs.values()))
     moved_params_id: int = max(three_samples.cameras)
     sensor_id: pycolmap.sensor_t = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, moved_params_id + 1)
-    original: pycolmap.Rigid3d = rig.sensor_from_rig(sensor_id)
+    original: pycolmap.Rigid3d = rig_sensor_from_rig(rig, sensor_id)
     nudge: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([0.005, 0.0, 0.0]))
     rig.set_sensor_from_rig(sensor_id, nudge * original)
 
@@ -147,7 +137,5 @@ def test_a_moved_sensor_shows_up_in_millimetres_and_degrees(three_samples: Frame
 
     assert by_params_id[moved_params_id].translation_change_mm == pytest.approx(5.0, abs=1e-6)
     assert by_params_id[moved_params_id].rotation_change_deg == pytest.approx(0.0, abs=1e-9)
-    others: list[float] = [
-        delta.translation_change_mm for params_id, delta in by_params_id.items() if params_id != moved_params_id
-    ]
+    others: list[float] = [delta.translation_change_mm for params_id, delta in by_params_id.items() if params_id != moved_params_id]
     assert max(others) == pytest.approx(0.0, abs=1e-9)

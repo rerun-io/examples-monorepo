@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Umeyama fit of one trajectory onto another, and nothing that needs pycolmap.
+"""The trajectory fit (simplecv's Umeyama) with colsfm's residual report, and nothing that needs pycolmap.
 
 Split out of `colsfm.alignment` so that both sides of the repository can call the
 same fit. `colsfm.alignment` is where the fit belongs conceptually -- it sits
@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Final, TypeAlias
 import numpy as np
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from simplecv.ops.umeyama import SimilarityTransform, umeyama_alignment
 
 if TYPE_CHECKING:
     import pycolmap
@@ -47,7 +48,8 @@ Timestamps: TypeAlias = Int64[ndarray, "n"]
 """Capture times in integer microseconds since the Unix epoch."""
 
 DEGENERATE_VARIANCE: Final[float] = 1e-15
-"""Below this the source cloud is a point and the would-be scale is undefined."""
+"""Source variance (m^2) at or below which a trajectory counts as not moving: the fit holds the scale at 1.0 instead of
+estimating it. Far below simplecv's default (1e-9, a 32 µm spread), so a small but moving trajectory keeps its scale."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,45 +133,32 @@ def align_rigid(source_xyz: Positions, target_xyz: Positions, *, estimate_scale:
         target_xyz: Float64 positions to move onto, shape `[n, 3]`.
         estimate_scale: Let the fit absorb a scale change instead of holding it at 1.0.
 
+    A trajectory that does not move (stationary, or rotating in place; source variance at most
+    `DEGENERATE_VARIANCE`) is still scored: the fit is rigid with scale 1.0 (simplecv's `degenerate="unit_scale"`
+    policy), and `would_be_scale` reports 1.0.
+
     Returns:
         The fitted transform plus its residual statistics.
 
     Raises:
-        ValueError: When the two trajectories differ in length or are empty.
+        ValueError: When the two trajectories differ in length or hold fewer than three samples
+            (`simplecv.ops.umeyama.umeyama_alignment`, which does the fit).
     """
     if source_xyz.shape != target_xyz.shape:
         raise ValueError(f"alignment needs matched trajectories, got {source_xyz.shape} and {target_xyz.shape}")
-    if len(source_xyz) == 0:
-        raise ValueError("alignment needs at least one sample")
-
-    source_mean: Vector3 = source_xyz.mean(axis=0)
-    target_mean: Vector3 = target_xyz.mean(axis=0)
-    source_centred: Positions = source_xyz - source_mean
-    target_centred: Positions = target_xyz - target_mean
-
-    covariance: Matrix3 = target_centred.T @ source_centred / len(source_xyz)
-    u_matrix, singular_values, vt_matrix = np.linalg.svd(covariance)
-    sign_fix: Matrix3 = np.eye(3)
-    if np.linalg.det(u_matrix) * np.linalg.det(vt_matrix) < 0:
-        sign_fix[2, 2] = -1.0
-    target_R_source: Matrix3 = u_matrix @ sign_fix @ vt_matrix
-
-    source_variance: float = float((source_centred**2).sum() / len(source_xyz))
-    would_be_scale: float = (
-        float((singular_values * np.diag(sign_fix)).sum() / source_variance) if source_variance > DEGENERATE_VARIANCE else 1.0
+    # The rotation does not depend on the scale, so the similarity fit gives `would_be_scale` for both kinds.
+    similarity: SimilarityTransform = umeyama_alignment(source_xyz, target_xyz, allow_scaling=True, eps=DEGENERATE_VARIANCE, degenerate="unit_scale")
+    fit: SimilarityTransform = (
+        similarity if estimate_scale else umeyama_alignment(source_xyz, target_xyz, eps=DEGENERATE_VARIANCE, degenerate="unit_scale")
     )
-
-    scale: float = would_be_scale if estimate_scale else 1.0
-    target_t_source: Vector3 = target_mean - scale * (target_R_source @ source_mean)
-    residual: Positions = (scale * (source_xyz @ target_R_source.T) + target_t_source) - target_xyz
-    distances: Float64[ndarray, "n"] = np.linalg.norm(residual, axis=1)
+    distances: Float64[ndarray, "n"] = np.linalg.norm(fit.apply(source_xyz) - target_xyz, axis=1)
     return RigidAlignment(
-        target_R_source=target_R_source,
-        target_t_source=target_t_source,
+        target_R_source=fit.dst_R_src,
+        target_t_source=fit.dst_t_src,
         rmse_meters=float(np.sqrt((distances**2).mean())),
         max_error_meters=float(distances.max()),
-        would_be_scale=would_be_scale,
-        scale=scale,
+        would_be_scale=similarity.scale,
+        scale=fit.scale,
     )
 
 

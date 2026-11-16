@@ -19,6 +19,8 @@ from jaxtyping import Float, Int, UInt32
 from numpy import ndarray
 from PIL import Image as PILImage
 
+from colsfm.geometry import img_from_cam
+
 ImageId: TypeAlias = int
 """COLMAP image identifier (1-based, unique within a database)."""
 
@@ -154,17 +156,13 @@ def build_scene(num_frames: int = 5, seed: int = 0) -> SyntheticScene:
             # A frame must own its data ids before Reconstruction.add_image
             # accepts the corresponding image, otherwise COLMAP aborts with
             # "Check failed: frame.HasDataId(image.DataId())".
-            frame.add_data_id(
-                pycolmap.data_t(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id), next_image_id)
-            )
+            frame.add_data_id(pycolmap.data_t(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id), next_image_id))
             pending.append((next_image_id, camera_id))
         reconstruction.add_frame(frame)
         reconstruction.register_frame(frame.frame_id)
         for image_id, camera_id in pending:
             names[image_id] = f"frame{frame_index:02d}_cam{camera_id}.png"
-            image: pycolmap.Image = pycolmap.Image(
-                name=names[image_id], camera_id=camera_id, image_id=image_id
-            )
+            image: pycolmap.Image = pycolmap.Image(name=names[image_id], camera_id=camera_id, image_id=image_id)
             image.frame_id = frame.frame_id
             reconstruction.add_image(image)
 
@@ -179,10 +177,8 @@ def build_scene(num_frames: int = 5, seed: int = 0) -> SyntheticScene:
         image = reconstruction.image(image_id)
         camera: pycolmap.Camera = reconstruction.camera(image.camera_id)
         cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
-        points_in_cam: Float[ndarray, "n_points 3"] = (
-            points_xyz @ cam_from_world.rotation.matrix().T + cam_from_world.translation
-        )
-        projected: Float[ndarray, "n_points 2"] = camera.img_from_cam(points_in_cam)
+        points_in_cam: Float[ndarray, "n_points 3"] = points_xyz @ cam_from_world.rotation.matrix().T + cam_from_world.translation
+        projected: Float[ndarray, "n_points 2"] = img_from_cam(camera, points_in_cam)
         in_frame: np.ndarray = (
             np.isfinite(projected).all(axis=1)
             & (points_in_cam[:, 2] > 0.0)
@@ -193,9 +189,7 @@ def build_scene(num_frames: int = 5, seed: int = 0) -> SyntheticScene:
         )
         keypoints[image_id] = projected[in_frame]
         indices[image_id] = np.flatnonzero(in_frame).astype(np.int64)
-        image.points2D = pycolmap.Point2DList(
-            [pycolmap.Point2D(xy) for xy in keypoints[image_id]]
-        )
+        image.points2D = pycolmap.Point2DList([pycolmap.Point2D(xy) for xy in keypoints[image_id]])
 
     return SyntheticScene(
         reconstruction=reconstruction,
@@ -206,9 +200,7 @@ def build_scene(num_frames: int = 5, seed: int = 0) -> SyntheticScene:
     )
 
 
-def matches_between(
-    scene: SyntheticScene, image_id1: ImageId, image_id2: ImageId
-) -> UInt32[ndarray, "n_matches 2"]:
+def matches_between(scene: SyntheticScene, image_id1: ImageId, image_id2: ImageId) -> UInt32[ndarray, "n_matches 2"]:
     """Ground-truth matches between two images of the scene.
 
     Args:
@@ -222,9 +214,7 @@ def matches_between(
     left: Int[ndarray, " n_obs"] = scene.point_indices[image_id1]
     right: Int[ndarray, " n_obs"] = scene.point_indices[image_id2]
     common: Int[ndarray, " n_common"] = np.intersect1d(left, right)
-    return np.stack(
-        [np.searchsorted(left, common), np.searchsorted(right, common)], axis=1
-    ).astype(np.uint32)
+    return np.stack([np.searchsorted(left, common), np.searchsorted(right, common)], axis=1).astype(np.uint32)
 
 
 def write_database(scene: SyntheticScene, database_path: Path, min_matches: int = 20) -> int:
@@ -252,9 +242,7 @@ def write_database(scene: SyntheticScene, database_path: Path, min_matches: int 
         database.write_frame(frame, use_frame_id=True)
     for image_id in sorted(reconstruction.images):
         source: pycolmap.Image = reconstruction.image(image_id)
-        row: pycolmap.Image = pycolmap.Image(
-            name=source.name, camera_id=source.camera_id, image_id=image_id
-        )
+        row: pycolmap.Image = pycolmap.Image(name=source.name, camera_id=source.camera_id, image_id=image_id)
         row.frame_id = source.frame_id
         database.write_image(row, use_image_id=True)
         database.write_keypoints(image_id, scene.keypoints_px[image_id].astype(np.float32))
@@ -300,9 +288,7 @@ def add_ground_truth_points(scene: SyntheticScene) -> list[int]:
         The point3D ids in the order of `scene.points_xyz`.
     """
     reconstruction: pycolmap.Reconstruction = scene.reconstruction
-    tracks: dict[int, list[pycolmap.TrackElement]] = {
-        index: [] for index in range(len(scene.points_xyz))
-    }
+    tracks: dict[int, list[pycolmap.TrackElement]] = {index: [] for index in range(len(scene.points_xyz))}
     for image_id in sorted(reconstruction.images):
         for observation_index, point_index in enumerate(scene.point_indices[image_id]):
             tracks[int(point_index)].append(pycolmap.TrackElement(image_id, observation_index))
@@ -310,12 +296,8 @@ def add_ground_truth_points(scene: SyntheticScene) -> list[int]:
     point3D_ids: list[int] = []
     for point_index, point_xyz in enumerate(scene.points_xyz):
         elements: list[pycolmap.TrackElement] = tracks[point_index]
-        point3D_id: int = reconstruction.add_point3D(
-            point_xyz, pycolmap.Track(elements), np.array([200, 100, 50], dtype=np.uint8)
-        )
+        point3D_id: int = reconstruction.add_point3D(point_xyz, pycolmap.Track(elements), np.array([200, 100, 50], dtype=np.uint8))
         for element in elements:
-            reconstruction.image(element.image_id).set_point3D_for_point2D(
-                element.point2D_idx, point3D_id
-            )
+            reconstruction.image(element.image_id).set_point3D_for_point2D(element.point2D_idx, point3D_id)
         point3D_ids.append(point3D_id)
     return point3D_ids

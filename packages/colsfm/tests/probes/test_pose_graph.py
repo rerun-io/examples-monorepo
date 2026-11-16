@@ -23,8 +23,8 @@ import pycolmap.cost_functions as colmap_costs
 import pytest
 from jaxtyping import Float, Int
 from numpy import ndarray
-from scipy.optimize import least_squares
-from scipy.sparse import csr_matrix, lil_matrix
+from scipy.optimize import OptimizeResult, least_squares
+from scipy.sparse import lil_matrix
 from scipy.spatial.transform import Rotation
 
 NUM_NODES: int = 1000
@@ -71,16 +71,12 @@ def build_loop_graph(num_nodes: int = NUM_NODES, seed: int = 7) -> LoopGraph:
     """
     rng: np.random.Generator = np.random.default_rng(seed)
     angles: Float[ndarray, " n"] = np.linspace(0.0, 2.0 * np.pi, num_nodes, endpoint=False)
-    world_t: Float[ndarray, "n 3"] = np.stack(
-        [10.0 * np.cos(angles), 10.0 * np.sin(angles), np.zeros(num_nodes)], axis=1
-    )
+    world_t: Float[ndarray, "n 3"] = np.stack([10.0 * np.cos(angles), 10.0 * np.sin(angles), np.zeros(num_nodes)], axis=1)
     world_R: Float[ndarray, "n 3 3"] = Rotation.from_euler("z", angles[:, None]).as_matrix()
     truth_R: Float[ndarray, "n 3 3"] = np.transpose(world_R, (0, 2, 1))
     truth_t: Float[ndarray, "n 3"] = -np.einsum("nij,nj->ni", truth_R, world_t)
 
-    edge_from: Int[ndarray, " m"] = np.array(
-        list(range(num_nodes - 1)) + [num_nodes - 1], dtype=np.int64
-    )
+    edge_from: Int[ndarray, " m"] = np.array(list(range(num_nodes - 1)) + [num_nodes - 1], dtype=np.int64)
     edge_to: Int[ndarray, " m"] = np.array(list(range(1, num_nodes)) + [0], dtype=np.int64)
 
     measured_R: list[Float[ndarray, "3 3"]] = []
@@ -88,9 +84,7 @@ def build_loop_graph(num_nodes: int = NUM_NODES, seed: int = 7) -> LoopGraph:
     for node_a, node_b in zip(edge_from, edge_to, strict=True):
         relative_R: Float[ndarray, "3 3"] = truth_R[node_a] @ truth_R[node_b].T
         relative_t: Float[ndarray, "3"] = truth_t[node_a] - relative_R @ truth_t[node_b]
-        noise: Float[ndarray, "3 3"] = Rotation.from_rotvec(
-            rng.normal(0.0, ROTATION_NOISE_RAD, 3)
-        ).as_matrix()
+        noise: Float[ndarray, "3 3"] = Rotation.from_rotvec(rng.normal(0.0, ROTATION_NOISE_RAD, 3)).as_matrix()
         measured_R.append(noise @ relative_R)
         measured_t.append(relative_t + rng.normal(0.0, TRANSLATION_NOISE_M, 3))
 
@@ -150,19 +144,11 @@ class _RelativePoseCost(pyceres.CostFunction):
         trans_j: Float[ndarray, "3"],
     ) -> Float[ndarray, "6"]:
         """Log of the measured-versus-predicted relative pose."""
-        rotation_i: Float[ndarray, "3 3"] = Rotation.from_quat(
-            quat_i / np.linalg.norm(quat_i)
-        ).as_matrix()
-        rotation_j: Float[ndarray, "3 3"] = Rotation.from_quat(
-            quat_j / np.linalg.norm(quat_j)
-        ).as_matrix()
+        rotation_i: Float[ndarray, "3 3"] = Rotation.from_quat(quat_i / np.linalg.norm(quat_i)).as_matrix()
+        rotation_j: Float[ndarray, "3 3"] = Rotation.from_quat(quat_j / np.linalg.norm(quat_j)).as_matrix()
         predicted_R: Float[ndarray, "3 3"] = rotation_i @ rotation_j.T
-        rotation_error: Float[ndarray, "3"] = Rotation.from_matrix(
-            self._measured_R_transpose @ predicted_R
-        ).as_rotvec()
-        translation_error: Float[ndarray, "3"] = self._measured_R_transpose @ (
-            trans_i - predicted_R @ trans_j - self._measured_t
-        )
+        rotation_error: Float[ndarray, "3"] = Rotation.from_matrix(self._measured_R_transpose @ predicted_R).as_rotvec()
+        translation_error: Float[ndarray, "3"] = self._measured_R_transpose @ (trans_i - predicted_R @ trans_j - self._measured_t)
         return np.concatenate([rotation_error, translation_error])
 
     def Evaluate(self, parameters: list, residuals: ndarray, jacobians: list | None) -> bool:
@@ -199,17 +185,11 @@ def solve_with_pyceres(graph: LoopGraph) -> tuple[Float[ndarray, "n 3"], float, 
     Returns:
         `(translations, wall seconds, summary)`.
     """
-    quaternions: list[Float[ndarray, "4"]] = [
-        np.ascontiguousarray(quat) for quat in Rotation.from_matrix(graph.initial_R).as_quat()
-    ]
-    translations: list[Float[ndarray, "3"]] = [
-        np.ascontiguousarray(vector.copy()) for vector in graph.initial_t
-    ]
+    quaternions: list[Float[ndarray, "4"]] = [np.ascontiguousarray(quat) for quat in Rotation.from_matrix(graph.initial_R).as_quat()]
+    translations: list[Float[ndarray, "3"]] = [np.ascontiguousarray(vector.copy()) for vector in graph.initial_t]
 
     problem: pyceres.Problem = pyceres.Problem()
-    for edge_index, (node_a, node_b) in enumerate(
-        zip(graph.edge_from, graph.edge_to, strict=True)
-    ):
+    for edge_index, (node_a, node_b) in enumerate(zip(graph.edge_from, graph.edge_to, strict=True)):
         problem.add_residual_block(
             _RelativePoseCost(graph.measured_R[edge_index], graph.measured_t[edge_index]),
             pyceres.TrivialLoss(),
@@ -231,9 +211,7 @@ def solve_with_pyceres(graph: LoopGraph) -> tuple[Float[ndarray, "n 3"], float, 
     return np.asarray(translations), elapsed, summary
 
 
-def solve_with_scipy(
-    graph: LoopGraph, max_nfev: int = 40
-) -> tuple[Float[ndarray, "n 3"], float, object]:
+def solve_with_scipy(graph: LoopGraph, max_nfev: int = 40) -> tuple[Float[ndarray, "n 3"], float, OptimizeResult]:
     """Optimise the same pose graph with `scipy.optimize.least_squares`.
 
     Node 0 is dropped from the parameter vector to fix the gauge, and the
@@ -262,18 +240,10 @@ def solve_with_scipy(
 
     def residual(state: Float[ndarray, " p"]) -> Float[ndarray, " r"]:
         rotations, translations = unpack(state)
-        predicted_R: Float[ndarray, "m 3 3"] = rotations[graph.edge_from] @ np.transpose(
-            rotations[graph.edge_to], (0, 2, 1)
-        )
-        predicted_t: Float[ndarray, "m 3"] = translations[graph.edge_from] - np.einsum(
-            "nij,nj->ni", predicted_R, translations[graph.edge_to]
-        )
-        rotation_error: Float[ndarray, "m 3"] = Rotation.from_matrix(
-            measured_R_transpose @ predicted_R
-        ).as_rotvec()
-        translation_error: Float[ndarray, "m 3"] = np.einsum(
-            "nij,nj->ni", measured_R_transpose, predicted_t - graph.measured_t
-        )
+        predicted_R: Float[ndarray, "m 3 3"] = rotations[graph.edge_from] @ np.transpose(rotations[graph.edge_to], (0, 2, 1))
+        predicted_t: Float[ndarray, "m 3"] = translations[graph.edge_from] - np.einsum("nij,nj->ni", predicted_R, translations[graph.edge_to])
+        rotation_error: Float[ndarray, "m 3"] = Rotation.from_matrix(measured_R_transpose @ predicted_R).as_rotvec()
+        translation_error: Float[ndarray, "m 3"] = np.einsum("nij,nj->ni", measured_R_transpose, predicted_t - graph.measured_t)
         return np.concatenate([rotation_error.ravel(), translation_error.ravel()])
 
     num_params: int = 6 * (num_nodes - 1)
@@ -287,16 +257,14 @@ def solve_with_scipy(
         translation_start: int = 3 * (num_nodes - 1) + 3 * offset
         return rotation_block + list(range(translation_start, translation_start + 3))
 
-    for edge_index, (node_a, node_b) in enumerate(
-        zip(graph.edge_from, graph.edge_to, strict=True)
-    ):
+    for edge_index, (node_a, node_b) in enumerate(zip(graph.edge_from, graph.edge_to, strict=True)):
         touched: list[int] = columns_for(int(node_a)) + columns_for(int(node_b))
         if not touched:
             continue
         for block_offset in (0, 3 * num_edges):
             for axis in range(3):
                 sparsity[block_offset + 3 * edge_index + axis, touched] = 1
-    pattern: csr_matrix = sparsity.tocsr()
+    pattern = sparsity.tocsr()
 
     initial_state: Float[ndarray, " p"] = np.concatenate(
         [
@@ -332,9 +300,7 @@ def test_pycolmap_has_no_pose_graph_optimiser() -> None:
     fields: set[str] = {name for name in dir(edge) if not name.startswith("_")}
     assert {"cam2_from_cam1", "num_matches", "valid"} <= fields
     assert not fields & {"covariance", "information", "weight"}
-    assert not any(
-        "pose_graph" in name and ("optim" in name or "solve" in name) for name in dir(pycolmap)
-    )
+    assert not any("pose_graph" in name and ("optim" in name or "solve" in name) for name in dir(pycolmap))
 
 
 def test_cost_functions_cannot_reach_pyceres() -> None:
@@ -380,10 +346,7 @@ def test_pyceres_pose_graph_closes_the_loop() -> None:
         f"jacobian {summary.jacobian_evaluation_time_in_seconds:.2f} s / "
         f"linear solver {summary.linear_solver_time_in_seconds:.2f} s"
     )
-    print(
-        f"[probe] pyceres PGO: loop seam {seam_before:.4f} -> {seam_after:.2e} m, "
-        f"mean node error {error_before:.4f} -> {error_after:.4f} m"
-    )
+    print(f"[probe] pyceres PGO: loop seam {seam_before:.4f} -> {seam_after:.2e} m, mean node error {error_before:.4f} -> {error_after:.4f} m")
     assert summary.termination_type == pyceres.TerminationType.CONVERGENCE
     assert summary.final_cost < 1e-4 * summary.initial_cost
     # The loop-closure measurement is itself noisy, so the maximum-likelihood
@@ -426,10 +389,7 @@ def test_relative_pose_blocks_match_pycolmap_rigid3d_layout() -> None:
     assert quaternion.dtype == np.float64 and quaternion.shape == (4,)
     assert quaternion.flags["WRITEABLE"]
     assert np.allclose(quaternion, [0.0, 0.0, 0.0, 1.0]), "layout is xyzw, not wxyz"
-    assert (
-        pose.rotation.quat.__array_interface__["data"][0]
-        == pose.rotation.quat.__array_interface__["data"][0]
-    )
+    assert pose.rotation.quat.__array_interface__["data"][0] == pose.rotation.quat.__array_interface__["data"][0]
     translation: Float[ndarray, "3"] = pose.translation
     assert translation.dtype == np.float64 and translation.flags["WRITEABLE"]
     # Sim3d exists too, with an extra scale, for similarity-transform problems.

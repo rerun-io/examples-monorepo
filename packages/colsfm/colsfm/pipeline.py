@@ -63,7 +63,7 @@ Ordering notes worth knowing before reading the code:
   depends on which one was used (`colsfm.reconstruction`).
 * **The two learned stages have their own backends.** `--features-backend` picks RaCo-ALIKED on TensorRT
   (`colsfm.features_raco`, the default) or COLMAP's own ALIKED; `--matching-backend` picks FlexGlue on TensorRT
-  (`colsfm.flexglue_trt`, the default), LightGlue+ on TensorRT (`colsfm.matching_raco`), COLMAP's LightGlue, or COLMAP's
+  (`colsfm.flexglue_trt`, the default), LightGlue+ on TensorRT (`colsfm.matching_trt`), COLMAP's LightGlue, or COLMAP's
   ONNX Runtime FlexGlue (the parity reference). They are independent, and the choice is invisible past
   the database: all write the same keypoint and descriptor columns and leave the
   same matches and two-view geometries. The `pycolmap` matcher is the only one

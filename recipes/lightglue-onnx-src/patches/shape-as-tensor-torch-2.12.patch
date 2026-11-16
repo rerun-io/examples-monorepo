@@ -1,0 +1,28 @@
+Export the shape from the sizes, not through torch._shape_as_tensor.
+
+Why: torch 2.12 (the monorepo's pin) cannot run `torch._shape_as_tensor` on the
+Dynamo exporter's fake tensors ("data is not allocated yet"); upstream exports on
+torch 2.13. Stacking scalar tensors of the (possibly symbolic) sizes exports the same
+Shape-derived graph and keeps every dynamic axis symbolic.
+
+Remove when: the workspace moves to torch >= 2.13 and an export of the RaCo graphs
+without this patch keeps its dynamic axes (colsfm-raco-export).
+
+--- a/lightglue_dynamo/ops/shape_utils.py
++++ b/lightglue_dynamo/ops/shape_utils.py
+@@ -3,6 +3,13 @@
+ 
+ def shape_as_tensor(tensor: torch.Tensor) -> torch.Tensor:
+     """Return dynamic shape as a tensor when exporting; otherwise use eager shape."""
+-    if torch.onnx.is_in_onnx_export() and hasattr(torch, "_shape_as_tensor"):
+-        return torch._shape_as_tensor(tensor)
++    if torch.onnx.is_in_onnx_export():
++        return torch.stack(
++            [
++                torch.tensor(size, dtype=torch.int64, device=tensor.device)
++                if isinstance(size, int)
++                else torch.scalar_tensor(size, dtype=torch.int64, device=tensor.device)
++                for size in tensor.shape
++            ]
++        )
+     return torch.tensor(tensor.shape, device=tensor.device)

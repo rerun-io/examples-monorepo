@@ -8,12 +8,11 @@ import numpy as np
 import pycolmap
 import pytest
 
+from colsfm.reconstruction import rig_from_world
 from probes.synthetic import SyntheticScene, matches_between
 
 
-def test_triangulate_points_end_to_end(
-    scene_on_disk: tuple[SyntheticScene, Path, Path], tmp_path: Path
-) -> None:
+def test_triangulate_points_end_to_end(scene_on_disk: tuple[SyntheticScene, Path, Path], tmp_path: Path) -> None:
     """`triangulate_points` triangulates a model whose poses are already known.
 
     Signature (COLMAP 4.2)::
@@ -45,19 +44,12 @@ def test_triangulate_points_end_to_end(
     written: set[str] = {path.name for path in output_dir.iterdir()}
     assert written == {"cameras.bin", "images.bin", "points3D.bin", "rigs.bin", "frames.bin"}
 
-    recovered: dict[int, np.ndarray] = {
-        point_id: triangulated.point3D(point_id).xyz for point_id in triangulated.point3D_ids()
-    }
-    nearest: float = max(
-        float(np.min(np.linalg.norm(scene.points_xyz - xyz, axis=1)))
-        for xyz in recovered.values()
-    )
+    recovered: dict[int, np.ndarray] = {point_id: triangulated.point3D(point_id).xyz for point_id in triangulated.point3D_ids()}
+    nearest: float = max(float(np.min(np.linalg.norm(scene.points_xyz - xyz, axis=1))) for xyz in recovered.values())
     assert nearest < 1e-3, f"worst triangulated point is {nearest:.4f} m from ground truth"
 
 
-def test_triangulate_points_preserves_the_input_poses(
-    scene_on_disk: tuple[SyntheticScene, Path, Path], tmp_path: Path
-) -> None:
+def test_triangulate_points_preserves_the_input_poses(scene_on_disk: tuple[SyntheticScene, Path, Path], tmp_path: Path) -> None:
     """`triangulate_points` is pose-preserving: the input trajectory survives bit-exact.
 
     That is the property the cuSFM contract needs — the supplied trajectory is a
@@ -73,13 +65,11 @@ def test_triangulate_points_preserves_the_input_poses(
 
     perturbed_frame_id: int = 3
     scene.reconstruction.frame(perturbed_frame_id).rig_from_world = pycolmap.Rigid3d(
-        scene.reconstruction.frame(perturbed_frame_id).rig_from_world.rotation,
-        scene.reconstruction.frame(perturbed_frame_id).rig_from_world.translation
-        + np.array([0.05, -0.03, 0.02]),
+        rig_from_world(scene.reconstruction, perturbed_frame_id).rotation,
+        rig_from_world(scene.reconstruction, perturbed_frame_id).translation + np.array([0.05, -0.03, 0.02]),
     )
     poses_before: dict[int, np.ndarray] = {
-        frame_id: scene.reconstruction.frame(frame_id).rig_from_world.matrix().copy()
-        for frame_id in sorted(scene.reconstruction.frames)
+        frame_id: rig_from_world(scene.reconstruction, frame_id).matrix().copy() for frame_id in sorted(scene.reconstruction.frames)
     }
 
     triangulated: pycolmap.Reconstruction = pycolmap.triangulate_points(
@@ -91,12 +81,7 @@ def test_triangulate_points_preserves_the_input_poses(
         pycolmap.IncrementalPipelineOptions(),
         False,
     )
-    shifts: list[float] = [
-        float(
-            np.abs(triangulated.frame(frame_id).rig_from_world.matrix() - matrix).max()
-        )
-        for frame_id, matrix in poses_before.items()
-    ]
+    shifts: list[float] = [float(np.abs(rig_from_world(triangulated, frame_id).matrix() - matrix).max()) for frame_id, matrix in poses_before.items()]
     print(
         f"[probe] triangulate_points max pose change {max(shifts):.3e} "
         f"with one frame 6 cm off; reproj {triangulated.compute_mean_reprojection_error():.4f} px"
@@ -131,20 +116,15 @@ def test_incremental_triangulator_only_triangulates(scene: SyntheticScene) -> No
     graph.finalize()
 
     observations: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
-    triangulator: pycolmap.IncrementalTriangulator = pycolmap.IncrementalTriangulator(
-        graph, reconstruction, observations
-    )
+    triangulator: pycolmap.IncrementalTriangulator = pycolmap.IncrementalTriangulator(graph, reconstruction, observations)
     options: pycolmap.IncrementalTriangulatorOptions = pycolmap.IncrementalTriangulatorOptions()
     options.min_angle = 0.5
     options.ignore_two_view_tracks = False
 
     poses_before: dict[int, np.ndarray] = {
-        frame_id: reconstruction.frame(frame_id).rig_from_world.matrix().copy()
-        for frame_id in sorted(reconstruction.frames)
+        frame_id: rig_from_world(reconstruction, frame_id).matrix().copy() for frame_id in sorted(reconstruction.frames)
     }
-    num_new: int = sum(
-        triangulator.triangulate_image(options, image_id) for image_id in image_ids
-    )
+    num_new: int = sum(triangulator.triangulate_image(options, image_id) for image_id in image_ids)
     merged: int = triangulator.merge_all_tracks(options)
     completed: int = triangulator.complete_all_tracks(options)
     print(f"[probe] triangulated {num_new}, merged {merged}, completed {completed}")
@@ -152,7 +132,7 @@ def test_incremental_triangulator_only_triangulates(scene: SyntheticScene) -> No
     assert reconstruction.num_points3D() > 0
     assert reconstruction.compute_mean_reprojection_error() < 0.01
     for frame_id, matrix in poses_before.items():
-        assert np.array_equal(reconstruction.frame(frame_id).rig_from_world.matrix(), matrix)
+        assert np.array_equal(rig_from_world(reconstruction, frame_id).matrix(), matrix)
 
 
 def test_incremental_triangulator_options_defaults() -> None:
@@ -205,8 +185,6 @@ def test_estimate_triangulation_is_the_standalone_multi_view_solver(
         cameras.append(reconstruction.camera(reconstruction.image(image_id).camera_id))
     assert len(pixels) >= 3
 
-    result: dict | None = pycolmap.estimate_triangulation(
-        np.asarray(pixels), poses, cameras, pycolmap.EstimateTriangulationOptions()
-    )
+    result: dict | None = pycolmap.estimate_triangulation(np.asarray(pixels), poses, cameras, pycolmap.EstimateTriangulationOptions())
     assert result is not None
     assert np.allclose(result["xyz"], scene.points_xyz[point_index], atol=1e-6)

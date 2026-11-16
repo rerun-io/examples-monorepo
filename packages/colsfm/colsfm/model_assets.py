@@ -14,7 +14,7 @@ message names both ways out: build the graphs, or ask for the ablation.
 
 The path constants live here rather than beside the code that runs them because
 naming a file has no business importing TensorRT: `colsfm.features_raco` and
-`colsfm.matching_raco` both pull in `colsfm.tensorrt_runtime`, which imports
+`colsfm.matching_trt` both pull in `colsfm.tensorrt_runtime`, which imports
 `tensorrt` and `cuda.bindings` at module scope, and `colsfm.run_config` has to be
 able to check for a missing graph without any of that.
 """
@@ -47,9 +47,7 @@ fixed-shape engine does not cover (`colsfm.features_raco.select_raco_engine`), w
 Galileo, at the profile maximum, never is. A dataset that does need it says so at the
 engine build, by name."""
 
-RACO_LIGHTGLUE_ONNX_PATH: Final[Path] = (
-    DATA_DIR / "models" / "raco" / "aliked_lightglue" / "lightglue_aliked.onnx"
-)
+RACO_LIGHTGLUE_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco" / "aliked_lightglue" / "lightglue_aliked.onnx"
 """The RaCo-trained LightGlue+ graph; its engine is cached beside it.
 
 Not committed either. Produce it with `pixi run -e colsfm colsfm-raco-export`, which writes
@@ -116,8 +114,6 @@ def check_raco_graphs(features_backend: FeatureBackend, matching_backend: Matchi
         FileNotFoundError: When a required graph is missing, with the export command
             and the ablation named.
     """
-    missing: tuple[Path, ...] = tuple(
-        path for path in required_raco_graphs(features_backend, matching_backend) if not path.is_file()
-    )
+    missing: tuple[Path, ...] = tuple(path for path in required_raco_graphs(features_backend, matching_backend) if not path.is_file())
     if missing:
         raise FileNotFoundError(missing_raco_graphs_message(missing))

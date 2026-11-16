@@ -21,6 +21,7 @@ import dataclasses
 import itertools
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pycolmap
@@ -98,9 +99,7 @@ def _camera_matrix() -> Float64[ndarray, "3 3"]:
     Returns:
         A 3x3 intrinsic matrix in pixels.
     """
-    return np.array(
-        [[FOCAL_LENGTH_PX, 0.0, IMAGE_WIDTH / 2.0], [0.0, FOCAL_LENGTH_PX, IMAGE_HEIGHT / 2.0], [0.0, 0.0, 1.0]]
-    )
+    return np.array([[FOCAL_LENGTH_PX, 0.0, IMAGE_WIDTH / 2.0], [0.0, FOCAL_LENGTH_PX, IMAGE_HEIGHT / 2.0], [0.0, 0.0, 1.0]])
 
 
 def _fill_camera(
@@ -129,9 +128,7 @@ def _fill_camera(
     if fisheye:
         message.calibration_parameters.camera_matrix.row_count = 3
         message.calibration_parameters.camera_matrix.column_count = 3
-        message.calibration_parameters.camera_matrix.data.extend(
-            [float(value) for value in _camera_matrix().reshape(-1)]
-        )
+        message.calibration_parameters.camera_matrix.data.extend([float(value) for value in _camera_matrix().reshape(-1)])
         message.calibration_parameters.distortion_coefficients.row_count = 1
         message.calibration_parameters.distortion_coefficients.column_count = 4
         message.calibration_parameters.distortion_coefficients.data.extend([0.02, -0.005, 0.001, 0.0])
@@ -139,9 +136,9 @@ def _fill_camera(
         message.calibration_parameters.projection_matrix.row_count = 3
         message.calibration_parameters.projection_matrix.column_count = 4
         message.calibration_parameters.projection_matrix.data.extend(_pinhole_projection(_camera_matrix()))
-    message.camera_projection_model_type = message.DESCRIPTOR.fields_by_name[
-        "camera_projection_model_type"
-    ].enum_type.values_by_name[projection_model].number
+    message.camera_projection_model_type = (
+        message.DESCRIPTOR.fields_by_name["camera_projection_model_type"].enum_type.values_by_name[projection_model].number
+    )
 
 
 def _world_T_vehicle_at(frame_index: int) -> pycolmap.Rigid3d:
@@ -239,9 +236,7 @@ def build_synthetic_rig(
             entry.timestamp_microseconds = 1_000_000 + frame_index * 33_333
             entry.image_name = f"camera_{camera_params_id}/{frame_index:04d}.jpeg"
             entry.synced_sample_id = frame_index
-            write_rigid_transform(
-                entry.camera_to_world, world_T_vehicle[frame_index] * vehicle_T_cams[camera_params_id]
-            )
+            write_rigid_transform(entry.camera_to_world, world_T_vehicle[frame_index] * vehicle_T_cams[camera_params_id])
             keyframe_id += 1
 
     frames_meta: FramesMeta = parse_message(collection)
@@ -312,9 +307,7 @@ def write_database(
             database.write_camera(camera, use_camera_id=True)
         for keyframe in frames_meta.keyframes:
             image_id: int = keyframe.keyframe_id + image_id_offset
-            image: pycolmap.Image = pycolmap.Image(
-                name=keyframe.image_name, camera_id=keyframe.camera_params_id, image_id=image_id
-            )
+            image: pycolmap.Image = pycolmap.Image(name=keyframe.image_name, camera_id=keyframe.camera_params_id, image_id=image_id)
             database.write_image(image, use_image_id=True)
             database.write_keypoints(image_id, keypoints_px[keyframe.keyframe_id].astype(np.float32))
         num_pairs: int = 0
@@ -348,9 +341,7 @@ def synthetic_matches(rig: SyntheticRig, min_matches: int = 20) -> dict[tuple[in
         common: Int[ndarray, " n"] = np.intersect1d(left, right)
         if len(common) < min_matches:
             continue
-        matches[(image_id1, image_id2)] = np.stack(
-            [np.searchsorted(left, common), np.searchsorted(right, common)], axis=1
-        ).astype(np.uint32)
+        matches[(image_id1, image_id2)] = np.stack([np.searchsorted(left, common), np.searchsorted(right, common)], axis=1).astype(np.uint32)
     return matches
 
 
@@ -384,9 +375,7 @@ def caspar_plan(
     capability: CasparCapability | None = (
         None
         if supported_camera_models is None
-        else CasparCapability(
-            availability="available", supported_camera_models=supported_camera_models, probe_errors=()
-        )
+        else CasparCapability(availability="available", supported_camera_models=supported_camera_models, probe_errors=())
     )
     return resolve_ba_plan(
         "caspar",
@@ -397,7 +386,7 @@ def caspar_plan(
     )
 
 
-def quiet_options(**overrides: object) -> MappingOptions:
+def quiet_options(**overrides: Any) -> MappingOptions:
     """Mapping options with the per-round printing turned off.
 
     Args:
@@ -425,9 +414,7 @@ def every_round(mapping_config: VisionMappingConfig) -> VisionMappingConfig:
     return dataclasses.replace(mapping_config, max_observation_change=0.0)
 
 
-def match_tracks_to_truth(
-    reconstruction: pycolmap.Reconstruction, rig: SyntheticRig
-) -> tuple[set[int], int, list[float]]:
+def match_tracks_to_truth(reconstruction: pycolmap.Reconstruction, rig: SyntheticRig) -> tuple[set[int], int, list[float]]:
     """Match every triangulated track back to the point that generated it.
 
     Identity comes from the observations, not from proximity: each track element
@@ -449,9 +436,7 @@ def match_tracks_to_truth(
     relative_errors: list[float] = []
     for point3D_id in reconstruction.point3D_ids():
         point: pycolmap.Point3D = reconstruction.point3D(point3D_id)
-        truth_indices: set[int] = {
-            int(rig.point_indices[element.image_id][element.point2D_idx]) for element in point.track.elements
-        }
+        truth_indices: set[int] = {int(rig.point_indices[element.image_id][element.point2D_idx]) for element in point.track.elements}
         if len(truth_indices) != 1:
             mixed_tracks += 1
             continue
@@ -464,9 +449,7 @@ def match_tracks_to_truth(
     return recovered, mixed_tracks, relative_errors
 
 
-def random_offset(
-    rng: np.random.Generator, translation_m: float, rotation_deg: float
-) -> pycolmap.Rigid3d:
+def random_offset(rng: np.random.Generator, translation_m: float, rotation_deg: float) -> pycolmap.Rigid3d:
     """One rigid offset of an exact size, in a random direction.
 
     Both the pose-recovery and the extrinsic-recovery tests need the same thing: an

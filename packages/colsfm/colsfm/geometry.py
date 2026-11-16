@@ -231,3 +231,22 @@ def parse_tum_line(line: str) -> TumPose:
         timestamp_microseconds=timestamp_microseconds,
         world_T_body=pycolmap.Rigid3d(pycolmap.Rotation3d(quaternion_xyzw), translation_xyz),
     )
+
+
+def img_from_cam(camera: pycolmap.Camera, points_in_camera: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 2"]:
+    """`Camera.img_from_cam` over a batch: the stubs type it as optional, a batch always comes back as an array.
+
+    Args:
+        camera: The camera.
+        points_in_camera: Points in its frame, metres.
+
+    Returns:
+        Pixels per point, NaN where a point does not project.
+
+    Raises:
+        TypeError: When pycolmap returns no array for a batch.
+    """
+    pixels: Float64[ndarray, "n 2"] | None = camera.img_from_cam(points_in_camera)
+    if pixels is None:
+        raise TypeError("Camera.img_from_cam returned None for a batch of points")
+    return pixels

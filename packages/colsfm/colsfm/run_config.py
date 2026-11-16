@@ -17,6 +17,7 @@ stage` takes it, because keyframe and pair selection read `frames_meta.json` and
 a config profile, touch no image, open no GPU and write nothing -- so asking them
 for an output directory asked for a workspace nobody would fill.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -195,7 +196,7 @@ class PipelineOptions:
     (`colsfm.model_assets`), never quietly given another extractor.
     See `colsfm.features.FeatureBackend`."""
     matching_backend: MatchingBackend = "flexglue"
-    """Which matcher runs: COLMAP's FlexGlue, LightGlue+ on TensorRT (`colsfm.matching_raco`), or COLMAP's own ONNX
+    """Which matcher runs: COLMAP's FlexGlue, LightGlue+ on TensorRT (`colsfm.matching_trt`), or COLMAP's own ONNX
     LightGlue. See `colsfm.matching.MatchingBackend`.
 
     `flexglue` by default since 2026-11-15: on RaCo-ALIKED keypoints it beat LightGlue+ on both datasets measured
@@ -331,8 +332,14 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
     check_raco_graphs(options.features_backend, options.matching_backend)
     if is_catalog_input(options.input_dir):
         # COLMAP's own extractor and its ONNX Runtime FlexGlue read image files; a catalog input has none.
-        file_readers: list[str] = [flag for flag, chosen in (("--features-backend pycolmap", options.features_backend == "pycolmap"),
-                                                             ("--matching-backend flexglue_ort", options.matching_backend == "flexglue_ort")) if chosen]
+        file_readers: list[str] = [
+            flag
+            for flag, chosen in (
+                ("--features-backend pycolmap", options.features_backend == "pycolmap"),
+                ("--matching-backend flexglue_ort", options.matching_backend == "flexglue_ort"),
+            )
+            if chosen
+        ]
         if file_readers:
             raise ValueError(
                 f"{options.input_dir} is a catalog input (its keyframes live in the segment's video streams, not in files), and "
@@ -355,19 +362,13 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
     ba_plan.announce()
     return ResolvedRun(
         selection=options.selection,
-        features=FeatureOptions(
-            backend=options.features_backend, num_threads=options.num_threads, device=options.device
-        ),
+        features=FeatureOptions(backend=options.features_backend, num_threads=options.num_threads, device=options.device),
         matching_backend=options.matching_backend,
         match_limit=MatchLimitPolicy.of(options.match_cap_mode, options.max_matches_per_pair),
         # The mapper receives the plan itself, not the knobs it was made from: there is
         # one decision about bundle adjustment in a run, and this is it.
-        mapping=MappingOptions(
-            num_threads=options.ba_num_threads, use_gpu=options.ba_use_gpu, ba_plan=ba_plan
-        ),
+        mapping=MappingOptions(num_threads=options.ba_num_threads, use_gpu=options.ba_use_gpu, ba_plan=ba_plan),
         ba_plan=ba_plan,
         device=options.device,
         num_threads=options.num_threads,
     )
-
-

@@ -50,6 +50,26 @@ def test_umeyama_alignment_rejects_degenerate_source() -> None:
         umeyama_alignment(src, src + 1.0)
 
 
+def test_unit_scale_policy_fits_a_degenerate_source_rigidly() -> None:
+    """A stationary source: the rigid fit's translation matches the centroids, scale 1, rotation identity."""
+    src: Float64[ndarray, "n 3"] = np.full((4, 3), 2.0)
+    dst: Float64[ndarray, "n 3"] = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0]])
+    for allow_scaling in (False, True):
+        similarity: SimilarityTransform = umeyama_alignment(src, dst, allow_scaling=allow_scaling, degenerate="unit_scale")
+        assert similarity.scale == 1.0
+        assert np.allclose(similarity.dst_R_src, np.eye(3))
+        assert np.allclose(similarity.apply(src[:1]), dst.mean(axis=0))
+
+
+def test_eps_sets_where_a_small_source_turns_degenerate() -> None:
+    """A trajectory of micrometres still gets its scale with a smaller ``eps``; the default treats it as degenerate."""
+    rng = np.random.default_rng(2)
+    src: Float64[ndarray, "n 3"] = 1e-6 * rng.normal(size=(8, 3))
+    dst: Float64[ndarray, "n 3"] = 3.0 * src + 1.0
+    assert umeyama_alignment(src, dst, allow_scaling=True, eps=1e-15).scale == pytest.approx(3.0)
+    assert umeyama_alignment(src, dst, allow_scaling=True, degenerate="unit_scale").scale == 1.0
+
+
 def test_umeyama_alignment_rejects_fewer_than_three_correspondences() -> None:
     src: Float64[ndarray, "n 3"] = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])  # two distinct points pass the variance check
     with pytest.raises(ValueError, match="at least 3 correspondences"):

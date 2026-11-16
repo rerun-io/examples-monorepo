@@ -53,7 +53,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pycolmap
@@ -64,7 +64,6 @@ from serde import serde
 from serde.json import to_json
 
 from colsfm.alignment import (
-    DEGENERATE_VARIANCE,
     GROUND_TRUTH_FILE_NAME,
     GROUND_TRUTH_TOLERANCE_MICROSECONDS,
     Positions,
@@ -88,7 +87,6 @@ from colsfm.runtime import STAGE_PATTERNS, STAGES, Stage, classify_stage, latest
 from colsfm.trajectory import MIN_ALIGNMENT_SAMPLES, TrajectoryScore, score_positions
 
 __all__ = [
-    "DEGENERATE_VARIANCE",
     "GROUND_TRUTH_FILE_NAME",
     "GROUND_TRUTH_TOLERANCE_MICROSECONDS",
     "MILLIMETRES_PER_METRE",
@@ -134,13 +132,6 @@ __all__ = [
 
 TrajectoryReference: TypeAlias = Literal["input", "ground_truth"]
 """What a run's trajectory was scored against: the dataset's input poses, or `ground_truth.txt`."""
-
-
-@runtime_checkable
-class SerdeObject(Protocol):
-    """Anything pyserde can serialise: a `@serde`-decorated class stamps `__serde__` on itself."""
-
-    __serde__: ClassVar[object]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -439,9 +430,7 @@ def reconstruction_metrics(reconstruction: pycolmap.Reconstruction) -> Reconstru
     Returns:
         The model's metrics; track lengths are 0.0 for a model with no points.
     """
-    track_lengths: Int64[ndarray, "n_points"] = np.asarray(
-        [point.track.length() for point in reconstruction.points3D.values()], dtype=np.int64
-    )
+    track_lengths: Int64[ndarray, "n_points"] = np.asarray([point.track.length() for point in reconstruction.points3D.values()], dtype=np.int64)
     return ReconstructionMetrics(
         registered_images=num_registered_images(reconstruction),
         num_points3D=reconstruction.num_points3D(),
@@ -452,9 +441,7 @@ def reconstruction_metrics(reconstruction: pycolmap.Reconstruction) -> Reconstru
     )
 
 
-def _trajectory_metrics(
-    reference_name: TrajectoryReference, track: RigTrack, reference: RigTrack, tolerance_microseconds: int
-) -> TrajectoryMetrics:
+def _trajectory_metrics(reference_name: TrajectoryReference, track: RigTrack, reference: RigTrack, tolerance_microseconds: int) -> TrajectoryMetrics:
     """Join two trajectories on timestamp and align the run onto the reference.
 
     The join and the fit are `colsfm.trajectory`'s: `score_positions` owns the rigid
@@ -462,9 +449,7 @@ def _trajectory_metrics(
     function used to carry its own copy of all three. Only the reference path length
     is local, because only the benchmark's report has a column for it.
     """
-    track_indices, reference_indices = match_timestamps(
-        track.timestamps_microseconds, reference.timestamps_microseconds, tolerance_microseconds
-    )
+    track_indices, reference_indices = match_timestamps(track.timestamps_microseconds, reference.timestamps_microseconds, tolerance_microseconds)
     source_xyz: Positions = track.world_t_rig[track_indices]
     target_xyz: Positions = reference.world_t_rig[reference_indices]
     score: TrajectoryScore = score_positions(source_xyz, target_xyz)
@@ -476,9 +461,7 @@ def _trajectory_metrics(
         would_be_scale=score.would_be_scale,
         # 0.0 rather than a path along too few points: an unfitted row has no reference
         # length to report, which is what the NaN residuals above already say.
-        reference_path_length_meters=(
-            path_length_meters(target_xyz) if score.num_matched >= MIN_ALIGNMENT_SAMPLES else 0.0
-        ),
+        reference_path_length_meters=(path_length_meters(target_xyz) if score.num_matched >= MIN_ALIGNMENT_SAMPLES else 0.0),
     )
 
 
@@ -507,15 +490,11 @@ def compute_run_metrics(artifacts: RunArtifacts, input_track: RigTrack, ground_t
         rig_rigidity_spread_millimeters=rig_rigidity_spread_millimeters(artifacts.frames_meta),
         num_rig_frames=len(artifacts.track),
         stage_runtimes=stage_runtimes,
-        total_runtime_seconds=(
-            float(sum(artifacts.runtime_seconds_by_stage.values())) if artifacts.runtime_seconds_by_stage else None
-        ),
+        total_runtime_seconds=(float(sum(artifacts.runtime_seconds_by_stage.values())) if artifacts.runtime_seconds_by_stage else None),
         points_are_black=bool(len(points_rgb) > 0 and not points_rgb.any()),
         vs_input=_trajectory_metrics("input", artifacts.track, input_track, 0),
         vs_ground_truth=(
-            None
-            if ground_truth is None
-            else _trajectory_metrics("ground_truth", artifacts.track, ground_truth, GROUND_TRUTH_TOLERANCE_MICROSECONDS)
+            None if ground_truth is None else _trajectory_metrics("ground_truth", artifacts.track, ground_truth, GROUND_TRUTH_TOLERANCE_MICROSECONDS)
         ),
     )
 
@@ -650,11 +629,7 @@ def check_acceptance(
             name="total runtime ratio",
             bound=f"<= {bounds.max_runtime_ratio} x A",
             value=total_runtime_ratio,
-            passed=(
-                None
-                if total_runtime_ratio is None
-                else _verdict(total_runtime_ratio, bounds.max_runtime_ratio, at_most=True)
-            ),
+            passed=(None if total_runtime_ratio is None else _verdict(total_runtime_ratio, bounds.max_runtime_ratio, at_most=True)),
         )
     )
     return tuple(checks)
@@ -700,7 +675,7 @@ def compare_runs(
     )
 
 
-def write_json_report(path: Path, report: SerdeObject) -> Path:
+def write_json_report(path: Path, report: object) -> Path:
     """Dump any `@serde` result as indented JSON.
 
     Deliberately not typed to `Comparison`: the audit tools under `tools/audit`

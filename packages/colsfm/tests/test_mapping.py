@@ -43,7 +43,7 @@ from numpy import ndarray
 from colsfm.config import CusfmConfig, VisionMappingConfig
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.mapping import MappingResult, RoundStats, load_correspondences, pixel_error_schedule, run_mapping
-from colsfm.reconstruction import RIG_ID, PosedModel, build_reconstruction, camera_sensor_id, gauge_rig_frame
+from colsfm.reconstruction import RIG_ID, PosedModel, build_reconstruction, camera_sensor_id, gauge_rig_frame, rig_from_world, rig_sensor_from_rig
 
 
 def test_pixel_error_schedule_is_the_isaac_ramp(isaac_config: CusfmConfig) -> None:
@@ -54,9 +54,7 @@ def test_pixel_error_schedule_is_the_isaac_ramp(isaac_config: CusfmConfig) -> No
     assert pixel_error_schedule(isaac_config.vision_mapping) == (25.0, 20.0, 15.0, 10.0, 5.0)
 
 
-def test_load_correspondences_fills_points2d_and_the_graph(
-    synthetic_rig: SyntheticRig, synthetic_database: Path
-) -> None:
+def test_load_correspondences_fills_points2d_and_the_graph(synthetic_rig: SyntheticRig, synthetic_database: Path) -> None:
     """Keypoints land on the images and the verified pairs become the graph.
 
     Nothing is re-estimated: the poses the reconstruction went in with come back
@@ -64,7 +62,7 @@ def test_load_correspondences_fills_points2d_and_the_graph(
     """
     reconstruction: pycolmap.Reconstruction = build_reconstruction(synthetic_rig.frames_meta).reconstruction
     poses_before: dict[int, Float64[ndarray, "3 4"]] = {
-        frame_id: reconstruction.frame(frame_id).rig_from_world.matrix().copy() for frame_id in sorted(reconstruction.frames)
+        frame_id: rig_from_world(reconstruction, frame_id).matrix().copy() for frame_id in sorted(reconstruction.frames)
     }
 
     correspondences = load_correspondences(reconstruction, synthetic_database, min_num_matches=15)
@@ -78,12 +76,10 @@ def test_load_correspondences_fills_points2d_and_the_graph(
         assert np.allclose(np.array([point.xy for point in image.points2D]), expected, atol=1e-4)
         assert correspondences.graph.num_correspondences_for_image(keyframe.keyframe_id) > 0
     for frame_id, matrix in poses_before.items():
-        assert np.array_equal(reconstruction.frame(frame_id).rig_from_world.matrix(), matrix)
+        assert np.array_equal(rig_from_world(reconstruction, frame_id).matrix(), matrix)
 
 
-def test_load_correspondences_rejects_a_database_with_other_image_ids(
-    synthetic_rig: SyntheticRig, tmp_path: Path
-) -> None:
+def test_load_correspondences_rejects_a_database_with_other_image_ids(synthetic_rig: SyntheticRig, tmp_path: Path) -> None:
     """A database that numbers the same image differently is an error, not a silent miss.
 
     The correspondence graph is keyed by database image id, so a mismatch would
@@ -103,9 +99,7 @@ def test_load_correspondences_rejects_a_database_with_other_image_ids(
         load_correspondences(reconstruction, database_path)
 
 
-def test_run_mapping_recovers_the_synthetic_points(
-    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
-) -> None:
+def test_run_mapping_recovers_the_synthetic_points(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """With exact poses, at least 95 % of the points come back at the noise floor.
 
     Ground truth is the point cloud the observations were generated from, so a
@@ -135,9 +129,7 @@ def test_run_mapping_recovers_the_synthetic_points(
     assert all(round_stats.ba_termination != "FAILURE" for round_stats in result.rounds)
 
 
-def test_the_outer_loop_can_run_to_the_end_or_exit_early(
-    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
-) -> None:
+def test_the_outer_loop_can_run_to_the_end_or_exit_early(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """On data where nothing moves, the observation-change test ends the loop at once.
 
     `observation_change = (merged + completed + filtered) / observations` (§5.4).
@@ -148,9 +140,7 @@ def test_the_outer_loop_can_run_to_the_end_or_exit_early(
     for every round regardless.
     """
     mapping_config: VisionMappingConfig = isaac_config.vision_mapping
-    early: MappingResult = run_mapping(
-        build_reconstruction(synthetic_rig.frames_meta), synthetic_database, mapping_config, quiet_options()
-    )
+    early: MappingResult = run_mapping(build_reconstruction(synthetic_rig.frames_meta), synthetic_database, mapping_config, quiet_options())
     assert len(early.rounds) == 1
     assert early.rounds[0].observation_change < mapping_config.max_observation_change
     # A Ceres round reports its own progress, so none of the three is None here.
@@ -191,9 +181,7 @@ def _perturbed_metadata(rig: SyntheticRig, seed: int = 11) -> FramesMeta:
     perturbed_poses: dict[int, pycolmap.Rigid3d] = {}
     for rig_frame in rig.frames_meta.rig_frames():
         offset: pycolmap.Rigid3d = (
-            pycolmap.Rigid3d()
-            if rig_frame.synced_sample_id == gauge_sample_id
-            else random_offset(rng, PERTURBATION_M, PERTURBATION_DEG)
+            pycolmap.Rigid3d() if rig_frame.synced_sample_id == gauge_sample_id else random_offset(rng, PERTURBATION_M, PERTURBATION_DEG)
         )
         world_T_vehicle: pycolmap.Rigid3d = rig_frame.world_T_vehicle * offset
         for keyframe_id in rig_frame.keyframe_ids:
@@ -228,25 +216,24 @@ def test_bundle_adjustment_pulls_perturbed_rig_poses_back(
     model: PosedModel = build_reconstruction(perturbed_meta)
     reconstruction: pycolmap.Reconstruction = model.reconstruction
     extrinsics_before: dict[int, Float64[ndarray, "3 4"]] = {
-        camera_params_id: reconstruction.rig(RIG_ID).sensor_from_rig(camera_sensor_id(camera_params_id)).matrix().copy()
+        camera_params_id: rig_sensor_from_rig(reconstruction.rig(RIG_ID), camera_sensor_id(camera_params_id)).matrix().copy()
         for camera_params_id in sorted(perturbed_meta.cameras)
     }
     start_translation_m: float = max(
-        pose_delta(reconstruction.frame(rig_frame.synced_sample_id).rig_from_world.inverse(), rig_frame.world_T_vehicle)[0]
+        pose_delta(rig_from_world(reconstruction, rig_frame.synced_sample_id).inverse(), rig_frame.world_T_vehicle)[0]
         for rig_frame in rig.frames_meta.rig_frames()
     )
     assert start_translation_m == pytest.approx(PERTURBATION_M, abs=1e-6)
 
     mapping_config: VisionMappingConfig = isaac_config.vision_mapping
-    result: MappingResult = run_mapping(
-        model, database_path, every_round(mapping_config), quiet_options()
-    )
+    result: MappingResult = run_mapping(model, database_path, every_round(mapping_config), quiet_options())
 
     worst_translation_m: float = 0.0
     worst_rotation_deg: float = 0.0
     for rig_frame in rig.frames_meta.rig_frames():
-        frame: pycolmap.Frame = result.reconstruction.frame(rig_frame.synced_sample_id)
-        translation_m, rotation_deg = pose_delta(frame.rig_from_world.inverse(), rig_frame.world_T_vehicle)
+        translation_m, rotation_deg = pose_delta(
+            rig_from_world(result.reconstruction, rig_frame.synced_sample_id).inverse(), rig_frame.world_T_vehicle
+        )
         worst_translation_m = max(worst_translation_m, translation_m)
         worst_rotation_deg = max(worst_rotation_deg, rotation_deg)
     print(
@@ -256,15 +243,11 @@ def test_bundle_adjustment_pulls_perturbed_rig_poses_back(
     assert worst_translation_m < max_translation_m
     assert worst_rotation_deg < max_rotation_deg
     for camera_params_id, matrix in extrinsics_before.items():
-        after: Float64[ndarray, "3 4"] = (
-            result.reconstruction.rig(RIG_ID).sensor_from_rig(camera_sensor_id(camera_params_id)).matrix()
-        )
+        after: Float64[ndarray, "3 4"] = rig_sensor_from_rig(result.reconstruction.rig(RIG_ID), camera_sensor_id(camera_params_id)).matrix()
         assert np.array_equal(after, matrix), "extrinsics must not move when optimize_extrinsics is off"
 
 
-def test_run_mapping_is_deterministic_on_one_thread(
-    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
-) -> None:
+def test_run_mapping_is_deterministic_on_one_thread(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """Two single-threaded runs agree on every point count and every round.
 
     cuSFM's own config says the same thing about its triangulator: a re-run at
@@ -309,9 +292,7 @@ def test_fisheye_rig_triangulates(tmp_path: Path, isaac_config: CusfmConfig) -> 
     assert result.mean_reprojection_error_px < 1.0
 
 
-def test_the_round_callback_sees_every_round_as_it_finishes(
-    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
-) -> None:
+def test_the_round_callback_sees_every_round_as_it_finishes(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """`MappingOptions.round_callback` fires once per round, with that round's model.
 
     The hook a live viewer needs. It runs after the round's filter and solve and
@@ -326,9 +307,7 @@ def test_the_round_callback_sees_every_round_as_it_finishes(
         seen.append((stats.round_index, stats.num_points3D, reconstruction.num_points3D()))
 
     model: PosedModel = build_reconstruction(synthetic_rig.frames_meta)
-    result: MappingResult = run_mapping(
-        model, synthetic_database, isaac_config.vision_mapping, quiet_options(round_callback=record)
-    )
+    result: MappingResult = run_mapping(model, synthetic_database, isaac_config.vision_mapping, quiet_options(round_callback=record))
     assert len(seen) == len(result.rounds)
     assert [entry[0] for entry in seen] == [stats.round_index for stats in result.rounds]
     assert all(reported == live for _index, reported, live in seen)
