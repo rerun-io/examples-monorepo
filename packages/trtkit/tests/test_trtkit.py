@@ -436,6 +436,53 @@ def test_direct_binding_reads_device_inputs_in_place_and_grows_outputs_to_each_c
         runtime({"images": torch.randn(1, 3, 28, 28, device="cuda", dtype=torch.float64), "bias": bias.to(runtime._input_dtypes["bias"])})
 
 
+@pytest.mark.parametrize("direct_binding", [False, True])
+def test_an_unresolved_output_shape_is_refused_before_anything_is_bound_or_launched(direct_binding: bool) -> None:
+    """A context that resolves an output to `(-1, 2)`: refused by name and shape; nothing bound, allocated or run."""
+    from trtkit import TensorRtDynamicRuntime
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.bound: list[tuple[str, int]] = []
+
+        def set_input_shape(self, name: str, shape: tuple[int, ...]) -> bool:
+            return True
+
+        def get_tensor_shape(self, name: str) -> tuple[int, ...]:
+            return (-1, 2)
+
+        def set_tensor_address(self, name: str, address: int) -> None:
+            self.bound.append((name, address))
+
+    def launch() -> None:
+        raise AssertionError("an unresolved output reached execution")
+
+    runtime = cast(TensorRtDynamicRuntime, object.__new__(TensorRtDynamicRuntime))
+    context = FakeContext()
+    fields = SimpleNamespace(
+        direct_binding=direct_binding,
+        device_index=0,
+        min_input_shapes={"x": (1, 2)},
+        max_input_shapes={"x": (4, 2)},
+        _input_dtypes={"x": torch.float32},
+        _output_dtypes={"y": torch.float32},
+        _active_shapes={},
+        _context=context,
+        _input_buffers={} if direct_binding else {"x": torch.zeros(8)},
+        _output_buffers={} if direct_binding else {"y": torch.zeros(8)},
+        _device=torch.device("cpu"),
+        _use_cuda_graph=False,
+        _graphs={},
+        _execute=launch,
+    )
+    for name, value in vars(fields).items():
+        object.__setattr__(runtime, name, value)
+    with pytest.raises(ValueError, match=r"'y': \(-1, 2\)"):
+        runtime({"x": torch.zeros(3, 2)})
+    assert context.bound == []
+    assert runtime._output_buffers == ({} if direct_binding else {"y": runtime._output_buffers["y"]})
+
+
 def test_direct_binding_refuses_cuda_graphs(tmp_path: Path) -> None:
     """A graph replays fixed addresses; direct binding binds new ones per call."""
     from trtkit import TensorRtDynamicRuntime

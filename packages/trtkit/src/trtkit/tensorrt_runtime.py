@@ -268,6 +268,8 @@ class TensorRtDynamicRuntime(_TrtEngine):
             raise ValueError("direct_binding binds a new address per call; CUDA graph replay needs fixed addresses.")
         super().__init__(engine_path, use_cuda_graph=use_cuda_graph)
         self.direct_binding: bool = direct_binding
+        self.device_index: int = torch.cuda.current_device()
+        """The CUDA device the context and stream were created on; direct-binding inputs must live there."""
         trt: Any = self._trt
         engine: Any = self._engine
         self.min_input_shapes: dict[str, tuple[int, ...]] = {}
@@ -335,8 +337,9 @@ class TensorRtDynamicRuntime(_TrtEngine):
             Output views into runtime-owned buffers (overwritten by the next call), shaped by the context.
 
         Raises:
-            ValueError: If names, ranks, or shapes fall outside the engine's profile, or, with ``direct_binding``, an
-                input is not a contiguous CUDA tensor of its binding's dtype.
+            ValueError: If names, ranks, or shapes fall outside the engine's profile, an output shape is not resolved
+                by the input shapes (a negative, data-dependent dimension), or, with ``direct_binding``, an input is not
+                a contiguous CUDA tensor of its binding's dtype on the runtime's device.
         """
         if set(inputs) != set(self._input_dtypes):
             raise ValueError(f"Runtime expects inputs {tuple(self._input_dtypes)}, got {tuple(inputs)}.")
@@ -347,19 +350,31 @@ class TensorRtDynamicRuntime(_TrtEngine):
             if len(shape) != len(upper) or any(dim < low or dim > high for dim, low, high in zip(shape, lower, upper, strict=True)):
                 raise ValueError(f"Input {name!r} shape {shape} is outside the engine profile {lower}..{upper}.")
             self._set_input_shape(name, shape)
+        # Resolved once, before anything is bound or allocated: a negative dimension is data-dependent, and no buffer
+        # sized here could hold it (that needs TensorRT's output allocator, which this runtime does not implement).
+        output_shapes: dict[str, tuple[int, ...]] = {
+            name: tuple(int(dim) for dim in self._context.get_tensor_shape(name)) for name in self._output_dtypes
+        }
+        unresolved: dict[str, tuple[int, ...]] = {name: shape for name, shape in output_shapes.items() if any(dim < 0 for dim in shape)}
+        if unresolved:
+            raise ValueError(f"Output shapes {unresolved} are not resolved by the input shapes; data-dependent outputs are not supported.")
+        for name, tensor in inputs.items():
             if self.direct_binding:
                 if tensor.dtype != self._input_dtypes[name] or not tensor.is_cuda or not tensor.is_contiguous():
                     raise ValueError(
                         f"Input {name!r} must be a contiguous CUDA {self._input_dtypes[name]} tensor to bind in place, got {tensor.dtype}."
                     )
+                if tensor.device.index != self.device_index:
+                    raise ValueError(f"Input {name!r} is on {tensor.device}; the engine's context and stream are on cuda:{self.device_index}.")
                 tensor.record_stream(self._stream)
                 self._context.set_tensor_address(name, int(tensor.data_ptr()))
                 continue
-            numel: int = math.prod(shape)
+            numel: int = math.prod(tensor.shape)
             self._input_buffers[name][:numel].copy_(tensor.reshape(-1).to(dtype=self._input_dtypes[name]))
         if self.direct_binding:
             for name, dtype in self._output_dtypes.items():
-                needed: int = max(math.prod(int(dim) for dim in self._context.get_tensor_shape(name)), 1)
+                # A resolved zero-size output still gets one element, so its address is a real allocation.
+                needed: int = max(math.prod(output_shapes[name]), 1)
                 buffer: Tensor | None = self._output_buffers.get(name)
                 if buffer is None or buffer.numel() < needed:
                     self._output_buffers[name] = torch.empty(needed, dtype=dtype, device=self._device)
@@ -371,11 +386,7 @@ class TensorRtDynamicRuntime(_TrtEngine):
             self._graphs[key].replay()
         else:
             self._execute()
-        outputs: dict[str, Tensor] = {}
-        for name, buffer in self._output_buffers.items():
-            out_shape: tuple[int, ...] = tuple(int(dim) for dim in self._context.get_tensor_shape(name))
-            outputs[name] = buffer[: math.prod(out_shape)].view(out_shape)
-        return outputs
+        return {name: buffer[: math.prod(output_shapes[name])].view(output_shapes[name]) for name, buffer in self._output_buffers.items()}
 
 
 def _torch_dtype(dtype: Any, trt: Any) -> torch.dtype:
