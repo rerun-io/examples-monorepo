@@ -10,6 +10,7 @@ pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this t
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters  # noqa: E402
 from simplecv.catalog_calibration import read_camera_calibration, read_camera_models  # noqa: E402
+from simplecv.rerun_custom_types import DistortionModelBatch  # noqa: E402
 from simplecv.rerun_log_utils import log_pinhole  # noqa: E402
 
 pytestmark = pytest.mark.integration
@@ -48,3 +49,19 @@ def test_a_logged_distortion_reads_back_and_an_undistorted_camera_has_none(tmp_p
     np.testing.assert_allclose(distorted.pinhole.extrinsics.cam_t_world, [0.1, 0.0, -0.05], atol=1e-7)
     assert (distorted.pinhole.intrinsics.width, distorted.pinhole.intrinsics.height) == (480, 640)
     np.testing.assert_allclose(pinholes["/world/rig_00/cam_00"].intrinsics.k_matrix, distorted.pinhole.intrinsics.k_matrix)
+
+
+def test_a_partial_distortion_leaves_the_pinhole_reader_alone(tmp_path: Path) -> None:
+    """A camera with a distortion model but no coefficients: the pinhole reader still reads it; the model reader refuses it."""
+    path = tmp_path / "segment.rrd"
+    entity = "/world/rig_00/cam_00"
+    with rr.RecordingStream("calibration", recording_id="segment") as recording:
+        recording.save(path)
+        log_pinhole(_camera("cam_00", None), Path(entity), static=True, recording=recording)
+        recording.log(f"{entity}/pinhole", [DistortionModelBatch("brown_conrady")], static=True)
+    with rr.server.Server(datasets={"calibration": [path]}) as server:
+        dataset = server.client().get_dataset("calibration")
+        pinholes = read_camera_calibration(dataset, "segment", [entity])
+        with pytest.raises(ValueError, match="DistortionCoefficients"):
+            read_camera_models(dataset, "segment", [entity])
+    np.testing.assert_allclose(pinholes[entity].intrinsics.k_matrix, _camera("x", None).intrinsics.k_matrix, rtol=1e-6)
