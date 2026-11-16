@@ -13,7 +13,7 @@ the way `colsfm.matching_trt` drives LightGlue+:
 TensorRT cannot parse the matcher as shipped: it uses ONNX Runtime's contrib `com.microsoft.MultiHeadAttention` and
 `com.microsoft.Gelu`. `prepare_matcher_graph` rewrites both into standard ONNX ops (attention as reshape, matmul,
 softmax, matmul, the pattern TensorRT fuses; Gelu as its erf form), inside every early-stop `If` branch, and folds the four scalar options
-into constants, so an engine is one fixed set of options. The early-stop `If`s are inlined (`_flatten_early_stop`).
+into constants, so an engine is one fixed set of options. The early-stop `If`s become `Where` selects (`_lower_early_stop`).
 
 Pre- and post-processing mirror `src/colmap/feature/flexglue.cc` at the recipe's revision: the RGB image is squashed to
 512x512 with torch's bilinear resize (align_corners=False, no antialias) and divided by 255; keypoints are scaled by
@@ -65,7 +65,7 @@ MATCHER_STREAMS: Final[int] = 2
 DOWNLOAD_CHUNK: Final[int] = 256
 """Pairs whose matches are downloaded and written together."""
 
-GRAPH_REWRITE_VERSION: Final[int] = 1
+GRAPH_REWRITE_VERSION: Final[int] = 3
 """Bumped whenever `prepare_matcher_graph` / `prepare_descriptor_graph` change what they write; part of the cached file name."""
 
 ATTENTION_HEADS_ATTRIBUTE: Final[str] = "num_heads"
@@ -82,13 +82,16 @@ class FlexGlueOptions:
     """Keypoint-to-correspondence distance gate in the 512x512 frame; COLMAP passes infinity for a non-positive value."""
     min_covisibility: float = 0.5
     """A pair whose predicted covisibility is below this keeps no match."""
+    early_stop_decay: float = 0.5
+    """The early-stop gate after layers 2, 4, 6 and 8 (`min_covisibility * (1 - decay)^(9 - k)`); 1 disables it."""
+
     def tag(self) -> str:
         """A file-name-safe key for the folded graph and its engine.
 
         Returns:
-            E.g. `ft0.1_md3_mc0.5`.
+            E.g. `ft0.1_md3_mc0.5_es0.5`.
         """
-        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}"
+        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}_es{self.early_stop_decay:g}"
 
 
 def matcher_profile(max_keypoints: int = MATCHER_MAX_KEYPOINTS) -> dict[str, ShapeProfile]:
@@ -114,6 +117,12 @@ def _attention_nodes(node: onnx.NodeProto) -> list[onnx.NodeProto]:
     and no bias: the only form the FlexGlue graph uses (checked by the caller). MatMul -> Softmax -> MatMul in one dtype,
     with no cast between, is the pattern TensorRT fuses into one attention kernel; a cast to fp32 around the softmax
     broke the fusion and made the matcher 2x slower.
+
+    That core runs in bf16, the fp16 matcher's other tensors stay fp16. TensorRT 11.2's fused fp16 attention overflows
+    on some pairs: the covisibility comes back NaN, which fails every gate, so the pair keeps no match where ONNX
+    Runtime's contrib kernel keeps up to 137 (74 of 688 random MGO07 pairs that run every layer). bf16 has fp32's range;
+    it heals all of them for 12.1 against 10.0 ms per 2048x2048 pair, where an fp32 core costs 60 ms. Breaking single
+    fusions with extra engine outputs only moved the overflow to another layer.
     """
     heads: int = next(helper.get_attribute_value(a) for a in node.attribute if a.name == ATTENTION_HEADS_ATTRIBUTE)
     query, key, value = node.input
@@ -135,9 +144,13 @@ def _attention_nodes(node: onnx.NodeProto) -> list[onnx.NodeProto]:
         helper.make_node("Reciprocal", [f"{p}_sqrt"], [f"{p}_scale_f"]),
         helper.make_node("CastLike", [f"{p}_scale_f", query], [f"{p}_scale"]),
         helper.make_node("Mul", [f"{p}_q", f"{p}_scale"], [f"{p}_qs"]),
-        helper.make_node("MatMul", [f"{p}_qs", f"{p}_kt"], [f"{p}_logits"]),
+        helper.make_node("Cast", [f"{p}_qs"], [f"{p}_qs_bf16"], to=TensorProto.BFLOAT16),
+        helper.make_node("Cast", [f"{p}_kt"], [f"{p}_kt_bf16"], to=TensorProto.BFLOAT16),
+        helper.make_node("Cast", [f"{p}_v"], [f"{p}_v_bf16"], to=TensorProto.BFLOAT16),
+        helper.make_node("MatMul", [f"{p}_qs_bf16", f"{p}_kt_bf16"], [f"{p}_logits"]),
         helper.make_node("Softmax", [f"{p}_logits"], [f"{p}_weights"], axis=-1),
-        helper.make_node("MatMul", [f"{p}_weights", f"{p}_v"], [f"{p}_context4"]),
+        helper.make_node("MatMul", [f"{p}_weights", f"{p}_v_bf16"], [f"{p}_context4_bf16"]),
+        helper.make_node("CastLike", [f"{p}_context4_bf16", query], [f"{p}_context4"]),
         helper.make_node("Transpose", [f"{p}_context4"], [f"{p}_context"], perm=[0, 2, 1, 3]),
         helper.make_node("Reshape", [f"{p}_context", f"{p}_merge"], [output]),
     ]
@@ -199,35 +212,59 @@ def _rewrite(graph: onnx.GraphProto) -> tuple[int, int]:
     return attention, gelu
 
 
-def _flatten_early_stop(graph: onnx.GraphProto) -> int:
-    """Inline the continue (`else`) branch of every early-stop `If`, recursively, so the graph runs every layer.
+EARLY_STOP_LAYERS: Final[tuple[int, ...]] = (2, 4, 6, 8)
+"""The pinned matcher's early-stop checks, outermost first: `early_stop_layer<k>_if`, each nested in the previous one's else."""
 
-    TensorRT 11.2 parses the conditionals but its Myelin compiler cannot build them with dynamic keypoint counts
-    ("Could not find any implementation for node {ForeignNode[...early_stop_layer2_if...]}"). Early stop only skips the
-    remaining layers of a pair that is not covisible; the final layer's covisibility gate still rejects that pair, so the
-    flattened graph returns the same matches and spends a little more time on rejected pairs.
+EARLY_STOP_THEN_OPS: Final[list[str]] = ["Shape", "ConstantOfShape", "ConstantOfShape", "Identity"]
+"""What every early-stop `then` branch computes: no matches, zero scores, and the covisibility score so far."""
+
+
+def _lower_early_stop(graph: onnx.GraphProto, depth: int = 0) -> int:
+    """Turn the pinned graph's early-stop conditionals into tensor selects that keep their decisions.
+
+    TensorRT 11.2 parses these `If`s but its Myelin compiler cannot build them with dynamic keypoint counts ("Could not
+    find any implementation for node {ForeignNode[...early_stop_layer2_if...]}"). Each one becomes both branches inlined
+    plus `Where(stop, then_output, else_output)` per output: the original stop predicate (with its `early_stop_decay`)
+    still decides, and a stopped pair still returns the stop branch's no-match outputs, so the matches equal the
+    conditional graph's. The later layers now always execute, so a stopped pair costs the full matcher.
+
+    Only the known structure is accepted: one `early_stop_layer<k>_if` per nesting level, in `EARLY_STOP_LAYERS` order,
+    each with the `EARLY_STOP_THEN_OPS` stop branch. Any other conditional is refused rather than lowered.
 
     Args:
         graph: Edited in place.
+        depth: Nesting level, i.e. the index into `EARLY_STOP_LAYERS` this graph's conditional must have.
 
     Returns:
-        How many `If` nodes were inlined.
+        How many conditionals were lowered.
+
+    Raises:
+        ValueError: On a conditional that is not the expected early stop.
     """
-    inlined: int = 0
+    lowered: int = 0
     body: list[onnx.NodeProto] = []
     for node in graph.node:
         if node.op_type != "If":
             body.append(node)
             continue
-        branch: onnx.GraphProto = next(a.g for a in node.attribute if a.name == "else_branch")
-        inlined += 1 + _flatten_early_stop(branch)
-        body.extend(branch.node)
-        # The later layers' weights are the branch's own initializers.
-        graph.initializer.extend(branch.initializer)
-        body.extend(helper.make_node("Identity", [inner.name], [outer]) for inner, outer in zip(branch.output, node.output, strict=True))
+        expected: str | None = f"early_stop_layer{EARLY_STOP_LAYERS[depth]}_if" if depth < len(EARLY_STOP_LAYERS) else None
+        then_branch: onnx.GraphProto = next(a.g for a in node.attribute if a.name == "then_branch")
+        else_branch: onnx.GraphProto = next(a.g for a in node.attribute if a.name == "else_branch")
+        if node.name != expected or [inner.op_type for inner in then_branch.node] != EARLY_STOP_THEN_OPS:
+            raise ValueError(f"unexpected conditional {node.name!r} at depth {depth}: only the pinned early-stop structure is lowered")
+        lowered += 1 + _lower_early_stop(else_branch, depth + 1)
+        body.extend(then_branch.node)
+        body.extend(else_branch.node)
+        # Branch-local initializers (the later layers' weights live in the else branches).
+        graph.initializer.extend(then_branch.initializer)
+        graph.initializer.extend(else_branch.initializer)
+        body.extend(
+            helper.make_node("Where", [node.input[0], stopped.name, continued.name], [output], name=f"{node.name}_select_{index}")
+            for index, (stopped, continued, output) in enumerate(zip(then_branch.output, else_branch.output, node.output, strict=True))
+        )
     del graph.node[:]
     graph.node.extend(body)
-    return inlined
+    return lowered
 
 
 def _cached_graph(source: Path, cache_dir: Path, label: str, write: Callable[[onnx.ModelProto], onnx.ModelProto]) -> Path:
@@ -259,7 +296,7 @@ def _cached_graph(source: Path, cache_dir: Path, label: str, write: Callable[[on
 
 
 def prepare_matcher_graph(source: Path, cache_dir: Path, options: FlexGlueOptions) -> Path:
-    """The TensorRT-parsable matcher: contrib ops rewritten, early stop inlined, scalar options folded into constants.
+    """The TensorRT-parsable matcher: contrib ops rewritten, early stop lowered to selects, scalar options folded into constants.
 
     Args:
         source: COLMAP's matcher graph (the fp16 variant).
@@ -275,13 +312,12 @@ def prepare_matcher_graph(source: Path, cache_dir: Path, options: FlexGlueOption
 
     def write(model: onnx.ModelProto) -> onnx.ModelProto:
         attention, gelu = _rewrite(model.graph)
-        inlined: int = _flatten_early_stop(model.graph)
+        lowered: int = _lower_early_stop(model.graph)
         folded: dict[str, float] = {
             "filter_threshold": options.filter_threshold,
             "max_distance_px": options.max_distance_px if options.max_distance_px > 0 else float("inf"),
             "min_covisibility": options.min_covisibility,
-            # Every early-stop branch is inlined, so the decay no longer gates anything; 1 is its "off" value.
-            "early_stop_decay": 1.0,
+            "early_stop_decay": options.early_stop_decay,
         }
         kept_inputs = [value for value in model.graph.input if value.name not in folded]
         del model.graph.input[:]
@@ -293,7 +329,9 @@ def prepare_matcher_graph(source: Path, cache_dir: Path, options: FlexGlueOption
         # as Reshape(Constant, Constant). onnxscript's optimizer folds those, in the If branches too.
         model = onnxscript.optimizer.optimize(model)
         onnx.checker.check_model(model)
-        print(f"[colsfm] flexglue matcher graph: {attention} attention and {gelu} Gelu nodes rewritten, {inlined} early-stop branches inlined, {options.tag()}")
+        print(
+            f"[colsfm] flexglue matcher graph: {attention} attention and {gelu} Gelu nodes rewritten, {lowered} early-stop conditionals lowered to selects, {options.tag()}"
+        )
         return model
 
     return _cached_graph(source, cache_dir, f"fp16_{options.tag()}", write)
@@ -370,7 +408,9 @@ class FlexGlueTensorRT:
         self.cache_images: int = max(cache_images, 2 * DESCRIPTOR_BATCH)
         self.size: Tensor = torch.tensor([[DESCRIPTOR_SIZE, DESCRIPTOR_SIZE]], dtype=torch.float32, device=self.device)
         self.images: OrderedDict[int, DenseImage] = OrderedDict()
-        self.pending: list[tuple[ImagePair, Tensor]] = []
+        self.pending: list[tuple[ImagePair, Tensor, Tensor]] = []
+        self.nonfinite_pairs: int = 0
+        """Pairs whose covisibility came back NaN or infinite: the engine miscomputed them, and they kept no match."""
         self.calls: int = 0
         self.descriptor_runs: int = 0
         self.descriptor_images: int = 0
@@ -413,7 +453,9 @@ class FlexGlueTensorRT:
         self.images.move_to_end(pair[0])
         self.images.move_to_end(pair[1])
         if first.keypoints.shape[1] == 0 or second.keypoints.shape[1] == 0:
-            self.pending.append((pair, torch.full((int(first.keypoints.shape[1]),), -1, dtype=torch.int64, device=self.device)))
+            self.pending.append(
+                (pair, torch.full((int(first.keypoints.shape[1]),), -1, dtype=torch.int64, device=self.device), self.size.new_zeros(1))
+            )
             return
         slot: int = self.calls % MATCHER_STREAMS
         self.calls += 1
@@ -433,7 +475,7 @@ class FlexGlueTensorRT:
                     "image_size1": self.size,
                 }
             )
-            self.pending.append((pair, outputs["matches0"][0].clone()))
+            self.pending.append((pair, outputs["matches0"][0].clone(), outputs["covisibility_score"].reshape(1).float()))
 
     def flush(self) -> list[tuple[ImagePair, MatchIndices]]:
         """Download every pending pair's matches in one transfer.
@@ -446,11 +488,12 @@ class FlexGlueTensorRT:
         current: torch.cuda.Stream = torch.cuda.current_stream(self.device)
         for stream in self.streams:
             current.wait_stream(stream)
-        lengths: list[int] = [len(matches0) for _, matches0 in self.pending]
-        everything: ndarray = torch.cat([matches0 for _, matches0 in self.pending]).cpu().numpy()
+        lengths: list[int] = [len(matches0) for _, matches0, _ in self.pending]
+        everything: ndarray = torch.cat([matches0 for _, matches0, _ in self.pending]).cpu().numpy()
+        self.nonfinite_pairs += int((~torch.isfinite(torch.cat([covisibility for _, _, covisibility in self.pending]))).sum())
         results: list[tuple[ImagePair, MatchIndices]] = []
         offset: int = 0
-        for (pair, _), length in zip(self.pending, lengths, strict=True):
+        for (pair, _, _), length in zip(self.pending, lengths, strict=True):
             matches0: ndarray = everything[offset : offset + length]
             offset += length
             rows: ndarray = np.flatnonzero(matches0 >= 0)
@@ -534,6 +577,7 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     report, dropped = verify_and_report(database_path, pairs, options, device="cuda", started=started, cap=True)
     print(
         f"colsfm.matching[flexglue-trt]: {report.summary()} | matching {matching_seconds:.1f} s for {len(pairs)} pairs, "
-        f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped {dropped} inlier matches"
+        f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped {dropped} inlier matches, "
+        f"{flexglue.nonfinite_pairs} pairs with a non-finite covisibility"
     )
     return report
