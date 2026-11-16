@@ -12,7 +12,6 @@ the one reader left in this file is `read_vehicle_pose_graph`, because
 
 from __future__ import annotations
 
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -634,10 +633,12 @@ def test_a_thousand_node_graph_closes_its_loop(thousand_node_solve: ThousandNode
 
 
 @pytest.mark.perf
-@pytest.mark.skipif(
-    os.environ.get("PIXI_DEV_MODE") == "1",
-    reason="PIXI_DEV_MODE=1 puts beartype's claw on every call in the Ceres inner loop; timing is meaningless there",
-)
-def test_a_thousand_node_graph_solves_within_one_second(thousand_node_solve: ThousandNodeSolve) -> None:
-    """Budget from the task: the blob solves 1132 nodes in 6.5 ms; we allow 1.0 s."""
+def test_a_thousand_node_graph_solves_within_one_second(thousand_node_solve: ThousandNodeSolve, request: pytest.FixtureRequest) -> None:
+    """Budget from the task: the blob solves 1132 nodes in 6.5 ms; we allow 1.0 s.
+
+    Timed only without pytest-beartype (`-p no:beartype`): it checks every call in the Ceres inner loop, so a deadline
+    measured through it means nothing.
+    """
+    if request.config.pluginmanager.hasplugin("pytest_beartype"):
+        pytest.skip("pytest-beartype is active; run with -p no:beartype to time this")
     assert thousand_node_solve.elapsed_s < 1.0, f"{thousand_node_solve.elapsed_s:.3f} s"

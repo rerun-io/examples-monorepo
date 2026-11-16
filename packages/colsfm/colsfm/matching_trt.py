@@ -44,7 +44,6 @@ graph that pads with sentinel indices cannot write a corrupt match table.
 
 from __future__ import annotations
 
-import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -61,19 +60,14 @@ from colsfm.database import (
     ImagePair,
     KeypointsXY,
     MatchIndices,
-    delete_two_view_geometries,
-    pair_inlier_counts,
-    raw_match_counts,
 )
 from colsfm.matching import (
     MatchingOptions,
     MatchReport,
     MatchScores,
-    PairMatchStats,
     select_by_square_covering,
-    verification_options,
+    verify_and_report,
 )
-from colsfm.pairs import write_pair_list
 from colsfm.tensorrt_runtime import ShapeProfile, TensorRTSession, resolve_engine
 
 ImageFeatures: TypeAlias = tuple[KeypointsXY, Descriptors]
@@ -304,7 +298,6 @@ def match_pairs_tensorrt(
 
     # LightGlue has no convolutional trunk; its attention stays fp32 (TF32) under the strongly typed build.
     engine_path: Path = resolve_engine(onnx_path, profile if profile is not None else LIGHTGLUE_PROFILE, precision="fp32")
-    geometry_options: pycolmap.TwoViewGeometryOptions = verification_options(options)
     started: float = time.perf_counter()
     with TensorRTSession(engine_path) as session, pycolmap.Database.open(database_path) as database:
         sizes: dict[int, tuple[int, int]] = _image_sizes(database)
@@ -313,19 +306,7 @@ def match_pairs_tensorrt(
             matches: MatchIndices = match_one_pair(session, features, sizes, pair, options, normalize)
             database.write_matches(pair[0], pair[1], matches.astype(np.uint32))
 
-    raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
-    delete_two_view_geometries(database_path, pairs)
-    with tempfile.TemporaryDirectory(prefix="colsfm-pairs-") as scratch:
-        pair_list_path: Path = Path(scratch) / "pairs.txt"
-        write_pair_list(pair_list_path, pairs, database_path)
-        pycolmap.verify_matches(database_path, pair_list_path, geometry_options)
-    elapsed_seconds: float = time.perf_counter() - started
-
-    inliers: dict[ImagePair, int] = pair_inlier_counts(database_path, pairs)
-    report: MatchReport = MatchReport(
-        pair_stats={pair: PairMatchStats(raw_matches=raw[pair], inlier_matches=inliers[pair]) for pair in pairs},
-        device="cuda",
-        elapsed_seconds=elapsed_seconds,
-    )
+    # No spatial cap here: LightGlue+ already ran SSC on its scores before verification (`match_one_pair`).
+    report, _ = verify_and_report(database_path, pairs, options, device="cuda", started=started, cap=False)
     print(f"colsfm.matching[{label}]: {report.summary()}")
     return report

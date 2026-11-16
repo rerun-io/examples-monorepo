@@ -34,19 +34,17 @@ from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.rrd_query_utils import first_valid_value
 
 from colsfm import DATA_DIR
-from colsfm.frames import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, write_manifest
+from colsfm.alignment import GROUND_TRUTH_FILE_NAME
+from colsfm.export import write_tum_file
+from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, write_manifest
+from colsfm.frames_meta import FRAMES_META_NAME
+from colsfm.geometry import TumPose, rigid3d_from_matrix
 
 DEFAULT_CATALOG_URL: Final[str] = "rerun+http://dgx-spark:51235"
 """The shared catalog the dataforge corpora are registered on."""
 
 DEFAULT_TIMELINE: Final[str] = "video_time"
 """The timeline exoego:v2 segments index their video and poses on."""
-
-FRAMES_META_FILE: Final[str] = "frames_meta.json"
-"""The file name the pipeline looks for in its input directory."""
-
-GROUND_TRUTH_FILE: Final[str] = "ground_truth.txt"
-"""The file name the pipeline looks for in its input directory."""
 
 ProjectionModel: TypeAlias = Literal["PINHOLE", "DISTORTED_PINHOLE", "OPENCV_FISHEYE"]
 """The cuSFM camera projection models a catalog camera maps onto (COLMAP PINHOLE, FULL_OPENCV, OPENCV_FISHEYE)."""
@@ -168,15 +166,15 @@ class PreparedInput:
     """What `prepare_catalog_input` wrote."""
 
     input_dir: Path
-    """Directory holding `frames_meta.json` and one image folder per camera."""
+    """Directory holding `frames_meta.json`, `frame_source.json` and the ground truth."""
     cameras: tuple[CatalogCameraModel, ...]
     """The cameras handed to the pipeline, in entity order."""
     num_rig_frames: int
     """Rig frames written (synced samples)."""
     num_keyframes: int
-    """Images written over all cameras."""
+    """Keyframes recorded over all cameras."""
     seconds: float
-    """Wall time of the read, decode and write."""
+    """Wall time of the catalog reads and the metadata writes."""
 
 
 def _static_values(table: pa.Table, column: str) -> list[float] | list[str] | None:
@@ -417,13 +415,11 @@ def write_ground_truth(
     query_ns: Int64[ndarray, " m"] = np.asarray([stamp * 1000 for stamp in stamps_us], dtype=np.int64)
     inside: np.ndarray = (query_ns >= ground_truth.t_ns[0]) & (query_ns <= ground_truth.t_ns[-1])
     poses: Float64[ndarray, "m 4 4"] = ground_truth.at(query_ns[inside])
-    lines: list[str] = []
-    for stamp, pose in zip(np.asarray(stamps_us)[inside], poses, strict=True):
-        qx, qy, qz, qw = Rotation.from_matrix(pose[:3, :3]).as_quat()
-        x, y, z = pose[:3, 3]
-        lines.append(f"{stamp // 1_000_000}.{stamp % 1_000_000:06d} {x:.9f} {y:.9f} {z:.9f} {qx:.9f} {qy:.9f} {qz:.9f} {qw:.9f}")
-    path.write_text("\n".join(lines) + "\n")
-    return len(lines)
+    written: list[TumPose] = [
+        TumPose(int(stamp), rigid3d_from_matrix(pose[:3, :3], pose[:3, 3])) for stamp, pose in zip(np.asarray(stamps_us)[inside], poses, strict=True)
+    ]
+    write_tum_file(path, written)
+    return len(written)
 
 
 def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
@@ -497,9 +493,9 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
 
     if config.ground_truth_entity is not None:
         ground_truth: CatalogTrajectory = read_catalog_trajectory(dataset, config.segment, config.ground_truth_entity, config.timeline)
-        write_ground_truth(input_dir / GROUND_TRUTH_FILE, ground_truth, rig_frames, cameras)
+        write_ground_truth(input_dir / GROUND_TRUTH_FILE_NAME, ground_truth, rig_frames, cameras)
     document: dict[str, object] = frames_meta_document(cameras, rig_frames, config.stereo_pairs)
-    (input_dir / FRAMES_META_FILE).write_text(json.dumps(document, indent=1))
+    (input_dir / FRAMES_META_NAME).write_text(json.dumps(document, indent=1))
     seconds: float = time.perf_counter() - started
     print(f"[colsfm.catalog] {config.segment}: {len(candidates)} rig frames, {written} keyframes, {len(cameras)} cameras in {seconds:.1f} s")
     return PreparedInput(input_dir=input_dir, cameras=cameras, num_rig_frames=len(candidates), num_keyframes=written, seconds=seconds)

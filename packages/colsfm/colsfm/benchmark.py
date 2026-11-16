@@ -26,10 +26,7 @@ re-exported here, because `tools/audit` reaches for them through this name:
    `ERROR = 2.0` on every point (export.md §3.5), so the column in
    `points3D.txt` is not a measurement. `pycolmap.Reconstruction.update_point_3d_errors`
    followed by `compute_mean_reprojection_error` re-derives it from the tracks.
-2. **The model is read with `pycolmap.Reconstruction.read_text`,** not
-   `colsfm.colmap_text_model.read_colmap_model`. The text reader exists so the
-   demo need not carry pycolmap's dependency stack; where pycolmap is already
-   present, its own reader is the one to use.
+2. **The model is read with `pycolmap.Reconstruction.read_text`.**
 3. **The rig trajectory comes from `kpmap/keyframes/frames_meta.json`,** through
    `FramesMeta.rig_frames()` — see `colsfm.alignment` for why.
 4. **`runtime.csv` is cut down to its last run** — see `colsfm.runtime`.

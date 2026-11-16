@@ -1,9 +1,10 @@
 """The colsfm CLI: `run` (a cuSFM input folder), `catalog` (a Rerun catalog segment) and `stage` (one cheap stage).
 
-`run` and `catalog` with no other flag run the fast full pipeline: RaCo-ALIKED features, LightGlue+ matching, loop
-closure, CASPAR bundle adjustment with its closing Ceres polish, and the regularised rig-extrinsic refinement. Every one
+`run` and `catalog` with no other flag run the fast full pipeline: RaCo-ALIKED features, FlexGlue matching (both on
+TensorRT), loop closure, CASPAR bundle adjustment with its closing Ceres polish, and the regularised rig-extrinsic refinement. Every one
 of those is a flag with a `--no-` or a `pycolmap`/`ceres` spelling (`colsfm.run_config.PipelineOptions`). The RaCo graphs
-come from `pixi run -e colsfm colsfm-raco-export`; a missing graph stops the run and names that task.
+come from `pixi run -e colsfm colsfm-raco-export` and FlexGlue's from `colsfm-download-flexglue`; a missing graph stops the
+run and names those tasks.
 
 `catalog` reads the rig, the video and the initial trajectory from a catalog segment (`colsfm.catalog`), runs the
 pipeline on the decoded keyframes, and writes the run as a `/world/runs/colsfm` layer of that segment

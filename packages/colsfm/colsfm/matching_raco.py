@@ -63,7 +63,7 @@ def normalize_keypoints_raco(
 ) -> Float32[ndarray, "1 num_keypoints 2"]:
     """Put pixel keypoints back into the frame the RaCo extractor emitted them in.
 
-    The exact inverse of `colsfm.features_trt.normalized_to_pixels`,
+    The exact inverse of `colsfm.features_native.normalized_to_pixels`,
     `2 * p / (size - 1) - 1`, which is what the exported LightGlue+ adapter takes
     before it applies its own `[1, H_proc / W]` scaling. Passing the blob's
     `(p - size/2) / (max(size)/2)` here would scale x correctly by luck and y by

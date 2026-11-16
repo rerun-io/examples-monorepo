@@ -29,6 +29,7 @@ from colsfm import RESOURCES_DIR
 from colsfm.ba_backend import BaBackend, BaExecutionPlan, resolve_ba_plan
 from colsfm.config import CusfmConfig
 from colsfm.features import DeviceChoice, FeatureBackend, FeatureOptions
+from colsfm.frame_manifest import is_catalog_input
 from colsfm.frames_meta import FRAMES_META_NAME
 from colsfm.mapping import MappingOptions
 from colsfm.matching import (
@@ -184,8 +185,8 @@ class PipelineOptions:
     follow-up used, `image_area` scales it with the frame's resolution, `off` keeps every
     verified inlier."""
     features_backend: FeatureBackend = "raco"
-    """Which ALIKED runs: RaCo-ALIKED on its own engine (`colsfm.features_raco`), COLMAP's
-    own ONNX one, or the blob's TensorRT engine (`colsfm.features_trt`).
+    """Which ALIKED runs: RaCo-ALIKED on its own TensorRT engine (`colsfm.features_raco`) or COLMAP's
+    own ONNX one.
 
     `raco` by default (NOTES.md decision 17): 2.6 s of Galileo's 20.0 s total against
     6.0 s for the blob's engine and 8.3 s for COLMAP's, at the same accuracy. It needs
@@ -325,9 +326,18 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
             default — and this checkout has none of its graphs.
         ValueError: When a `--caspar-option` item is malformed, names an option
             that is not a settable numeric CASPAR knob, or gives an integer knob a
-            fractional value.
+            fractional value; or when a catalog input asks for a backend that reads image files.
     """
     check_raco_graphs(options.features_backend, options.matching_backend)
+    if is_catalog_input(options.input_dir):
+        # COLMAP's own extractor and its ONNX Runtime FlexGlue read image files; a catalog input has none.
+        file_readers: list[str] = [flag for flag, chosen in (("--features-backend pycolmap", options.features_backend == "pycolmap"),
+                                                             ("--matching-backend flexglue_ort", options.matching_backend == "flexglue_ort")) if chosen]
+        if file_readers:
+            raise ValueError(
+                f"{options.input_dir} is a catalog input (its keyframes live in the segment's video streams, not in files), and "
+                f"{' and '.join(file_readers)} read image files; use --features-backend raco and --matching-backend flexglue"
+            )
     ba_plan: BaExecutionPlan = resolve_ba_plan(
         options.ba_backend,
         options.caspar_option,

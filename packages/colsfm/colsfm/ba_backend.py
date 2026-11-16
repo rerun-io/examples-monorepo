@@ -371,14 +371,6 @@ def backend_name(ba_options: pycolmap.BundleAdjustmentOptions) -> BaBackend:
     return "caspar" if ba_options.backend == BUNDLE_ADJUSTMENT_BACKEND["caspar"] else "ceres"
 
 
-def caspar_option_names() -> frozenset[str]:
-    """The numeric option names `apply_caspar_options` accepts.
-
-    Returns:
-        Every key of a default `caspar.todict()` whose value is a number, i.e.
-        everything but the string `gpu_index`.
-    """
-    return frozenset(caspar_option_types())
 
 
 def caspar_option_types() -> dict[str, type[int | float]]:

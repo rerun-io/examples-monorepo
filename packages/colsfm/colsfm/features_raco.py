@@ -13,16 +13,11 @@ imports `onnx` or `torch`: the `colsfm` environment only parses the graph with
 TensorRT's own `OnnxParser`, which is the same split `colsfm.tensorrt_runtime`
 documents.
 
-**What is different from `colsfm.features_trt`.** One thing, and it is the whole
-point: the graph has a real batch axis, `image [batch, 3, 1200, 1920]` with
-`batch` in 1..16, so the engine is built with an optimisation profile rather than
-at the shipped static shape and `DEFAULT_BATCH_SIZE` images cross the PCIe bus
-and the detector pyramid together. Everything either side of the engine is
-unchanged and runs through `colsfm.features_native`, the same module the blob's
-backend runs through: the same OpenCV preprocessing, the same bounded
-decode-ahead thread pool, the same `(k + 1) * 0.5 * (size - 1)` mapping back onto
-the original image, the same two database columns written for image rows
-somebody else created. What this module still owns is what is RaCo's alone —
+**The engines.** The graph has a real batch axis, `image [batch, 3, h, w]`, so each engine is built with an
+optimisation profile and `DEFAULT_BATCH_SIZE` images run together. Everything either side of the engine runs through
+`colsfm.features_native`: GPU frames from the run's `colsfm.frames.FrameSource`, the `(k + 1) * 0.5 * (size - 1)`
+mapping back onto the original image, and the two database columns written for image rows somebody else created.
+What this module owns is what is RaCo's alone —
 which of two graphs serves a size, what its optimisation profiles are, how wide
 a batch each admits, and that its `scores` output is a rank rather than a
 detector response.
@@ -77,8 +72,6 @@ from colsfm.database import keypoint_counts
 from colsfm.features import RacoEngineChoice, TensorRTExtraction
 from colsfm.features_native import (
     ALIKED_IMAGE_BINDING,
-    DEFAULT_GPU_PREPROCESSING,
-    DEFAULT_PREPROCESSING_WORKERS,
     DESCRIPTOR_TYPE,
     ExtractionGroup,
     ImageTask,
@@ -86,7 +79,7 @@ from colsfm.features_native import (
     image_tasks,
     run_native_extraction,
 )
-from colsfm.frames import FrameSource
+from colsfm.frames import FrameSource, ImageFolderFrames
 from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
 
@@ -407,8 +400,6 @@ def extract_raco(
     min_score: float,
     max_num_features: int,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    preprocessing_workers: int = DEFAULT_PREPROCESSING_WORKERS,
-    gpu_preprocessing: bool = DEFAULT_GPU_PREPROCESSING,
     native_resolution: bool = True,
     raco_engine: RacoEngineChoice = "auto",
     frames: FrameSource | None = None,
@@ -428,11 +419,6 @@ def extract_raco(
             `native_resolution` bounds it at `DYNAMIC_MAXIMUM_BATCH_SIZE` unless
             `raco_engine` forces the fixed engine, because `auto` may reach the
             dynamic one for any size group.
-        preprocessing_workers: Decode-and-resize threads.
-        gpu_preprocessing: Stage the decoded uint8 frames in one page-locked
-            batch buffer and let a TensorRT preprocessing engine transpose, widen
-            and scale them. `False` restores the host conversion plus the
-            `np.concatenate` that used to build every batch.
         native_resolution: Run each image at its own size, rounded up to
             `INPUT_DIM_DIVISOR`, on whichever engine `raco_engine` picks for that
             size. `False` is the legacy behaviour: the fixed-shape graph, and
@@ -441,15 +427,14 @@ def extract_raco(
             Read only when `native_resolution` is on — the stretch is the fixed
             engine by definition.
         frames: Where the pixels come from as GPU tensors (`colsfm.frames`); None reads
-            the files under `image_root`.
+            the image files under `image_root` through an `ImageFolderFrames`.
 
     Returns:
         Keypoints stored per `image_id`, and the wall time of the whole pass
         including the engine load.
 
     Raises:
-        FileNotFoundError: When the database, the image root, an image or the
-            ONNX graph is missing.
+        FileNotFoundError: When the database, the image root or the ONNX graph is missing.
         ValueError: When `batch_size` is outside the graph's profile.
     """
     if not database_path.is_file():
@@ -462,17 +447,15 @@ def extract_raco(
         raise ValueError(f"batch_size must be in [{MINIMUM_BATCH_SIZE}, {maximum_batch_size}], got {batch_size}")
 
     started: float = time.perf_counter()
-    tasks: list[ImageTask] = image_tasks(database_path, image_root, image_names, check_files=frames is None)
+    tasks: list[ImageTask] = image_tasks(database_path, image_names)
     run_native_extraction(
         database_path,
         extraction_groups(tasks, native_resolution=native_resolution, choice=engine_choice),
         RACO_MODEL,
+        frames if frames is not None else ImageFolderFrames(image_root),
         min_score=min_score,
         max_num_features=max_num_features,
         batch_size=batch_size,
-        preprocessing_workers=preprocessing_workers,
-        gpu_preprocessing=gpu_preprocessing,
-        frames=frames,
     )
     elapsed_seconds: float = time.perf_counter() - started
     return keypoint_counts(database_path, [task.image_id for task in tasks]), elapsed_seconds

@@ -61,12 +61,10 @@ Ordering notes worth knowing before reading the code:
   stage 7b refines the extrinsics of the model stage 7 left behind. Both
   references give the same `cam_T_world`, so nothing about stage 7's result
   depends on which one was used (`colsfm.reconstruction`).
-* **The two ONNX stages have three backends each.** `--features-backend` and
-  `--matching-backend` pick between RaCo-ALIKED and LightGlue+ on their own
-  engines (`colsfm.features_raco`, `colsfm.matching_raco`, the default since
-  NOTES.md decision 17), COLMAP's own ALIKED and LightGlue, and the blob's graphs
-  on the blob's TensorRT engines (`colsfm.features_trt`, `colsfm.matching_trt`).
-  They are independent, every combination runs, and the choice is invisible past
+* **The two learned stages have their own backends.** `--features-backend` picks RaCo-ALIKED on TensorRT
+  (`colsfm.features_raco`, the default) or COLMAP's own ALIKED; `--matching-backend` picks FlexGlue on TensorRT
+  (`colsfm.flexglue_trt`, the default), LightGlue+ on TensorRT (`colsfm.matching_raco`), COLMAP's LightGlue, or COLMAP's
+  ONNX Runtime FlexGlue (the parity reference). They are independent, and the choice is invisible past
   the database: all write the same keypoint and descriptor columns and leave the
   same matches and two-view geometries. The `pycolmap` matcher is the only one
   that cannot see a per-match score, so it is the only one that substitutes a grid

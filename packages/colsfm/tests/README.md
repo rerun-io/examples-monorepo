@@ -21,7 +21,7 @@ named rather than failing, so a checkout without the data is still green — and
 reports more skips than usual is telling you which datasets are absent.
 
 **The suite does not run the default configuration, on purpose.** Since 2026-09-06 a run
-with no flags asks for RaCo, LightGlue+ and CASPAR (NOTES.md decision 17), which need the
+with no flags asks for RaCo, FlexGlue and CASPAR, which need the
 gitignored graphs under `data/cusfm_models/` and a `CASPAR_ENABLED` pycolmap — neither of
 which a fresh clone has. `test_pipeline.py` therefore builds every run from
 `PYCOLMAP_ABLATION`, the `--features-backend pycolmap --matching-backend pycolmap

@@ -7,7 +7,7 @@ The torch modules come from `recipes/lightglue-onnx-src` (LightGlue-ONNX @ d12b4
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +19,6 @@ from onnxscript import opset20 as onnx_op
 from onnxscript import optimizer as onnx_optimizer
 from torch import nn
 from torch.nn import functional
-
-from colsfm import DATA_DIR
 
 
 def export_shape_as_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -75,10 +73,8 @@ MINIMUM_DYNAMIC_SIDE: int = 64
 
 @dataclass
 class ExportConfig:
-    """Static cuSFM deployment contract."""
+    """The export settings of the RaCo-ALIKED extractors and the LightGlue+ matcher."""
 
-    output_root: Path = field(default_factory=lambda: DATA_DIR / "models" / "raco")
-    """Model root passed to ``CusfmRunner(model_dir=...)``."""
     image_height: int = 1200
     """Static padded image height expected by cuSFM."""
     image_width: int = 1920
@@ -87,8 +83,6 @@ class ExportConfig:
     """Fixed extractor keypoint budget."""
     opset: int = 20
     """ONNX opset required by upstream's Dynamo RaCo export."""
-    batched_extractor_path: Path | None = None
-    """When set, export only a batch-dynamic extractor to this separate path."""
     minimum_batch_size: int = 1
     """Minimum batch accepted by a dynamic extractor."""
     optimal_batch_size: int = 8
@@ -97,8 +91,6 @@ class ExportConfig:
     """Maximum batch accepted by a dynamic extractor."""
     portable_deform_conv: bool = True
     """Decompose DeformConv into GridSample nodes instead of its native ONNX operator."""
-    static_batch_size: int | None = None
-    """When set, unroll this fixed batch into batch-one branches instead of exporting dynamically."""
     dynamic_shape: bool = False
     """When set, also mark height and width dynamic so one engine serves every frame size.
 
@@ -229,39 +221,8 @@ class DynamicShapeCusfmExtractor(CusfmExtractor):
         return normalized_bnc, descriptors_bnd, scores_bn
 
 
-class StaticBatchedCusfmExtractor(CusfmExtractor):
-    """Expose a fixed batch as independent batch-one branches.
-
-    TensorRT's compiler otherwise fuses the full-resolution detector pyramid
-    across the dynamic batch and needs more than 10 GiB of temporary build
-    memory at batch 8. Static unrolling keeps each fusion at batch 1.
-    """
-
-    batch_size: int
-
-    def __init__(self, config: ExportConfig) -> None:
-        super().__init__(config)
-        if config.static_batch_size is None or config.static_batch_size < 1:
-            raise ValueError("static_batch_size must be positive")
-        self.batch_size = config.static_batch_size
-
-    def forward(self, image: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        """Extract one fixed batch through independent batch-one branches."""
-        branch_outputs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = [
-            self.extract_batch(image[index : index + 1]) for index in range(self.batch_size)
-        ]
-        return tuple(tensor for outputs in branch_outputs for tensor in outputs)
 
 
-def static_output_names(batch_size: int) -> list[str]:
-    """Name each unrolled image's outputs without a cross-branch concatenation."""
-    if batch_size < 1:
-        raise ValueError("batch_size must be positive")
-    return [
-        f"{output_name}_{index}"
-        for index in range(batch_size)
-        for output_name in ("keypoints", "descriptors", "scores")
-    ]
 
 
 class CusfmLightGlue(nn.Module):
@@ -365,34 +326,10 @@ def _stamp_model(path: Path, artifact: str) -> None:
     onnx.save(model, path, save_as_external_data=False)
 
 
-def export_extractor(config: ExportConfig, output_path: Path) -> None:
-    """Export the cuSFM-compatible RaCo-ALIKED graph."""
-    module: CusfmExtractor = CusfmExtractor(config).eval()
-    module.extractor.fuse_batch_norm()
-    example_image_bchw: torch.Tensor = torch.zeros(
-        1, 3, config.image_height, config.image_width, dtype=torch.float32
-    )
-    translation_table: dict[Any, Any] = {torch.ops.aten.div.Tensor_mode: _integer_division}
-    torch.onnx.export(
-        module,
-        (example_image_bchw,),
-        str(output_path),
-        input_names=["image"],
-        output_names=["keypoints", "descriptors", "scores"],
-        opset_version=config.opset,
-        dynamo=True,
-        external_data=False,
-        optimize=False,
-        custom_translation_table=translation_table,
-    )
-    _stamp_model(output_path, "cusfm-raco-aliked-extractor")
 
 
 def export_batched_extractor(config: ExportConfig, output_path: Path) -> None:
     """Export a batch-dynamic RaCo-ALIKED graph for the direct writer."""
-    if config.static_batch_size is not None:
-        export_static_batched_extractor(config, output_path)
-        return
     if config.dynamic_shape:
         export_dynamic_shape_extractor(config, output_path)
         return
@@ -497,34 +434,6 @@ def export_dynamic_shape_extractor(config: ExportConfig, output_path: Path) -> N
     _stamp_model(output_path, "cusfm-raco-aliked-dynamic-shape-extractor")
 
 
-def export_static_batched_extractor(config: ExportConfig, output_path: Path) -> None:
-    """Export a fixed batch as unrolled batch-one branches for low-memory TensorRT builds."""
-    if config.static_batch_size is None or config.static_batch_size < 1:
-        raise ValueError("static_batch_size must be positive")
-    module: StaticBatchedCusfmExtractor = StaticBatchedCusfmExtractor(config).eval()
-    module.extractor.fuse_batch_norm()
-    example_image_bchw: torch.Tensor = torch.zeros(
-        config.static_batch_size,
-        3,
-        config.image_height,
-        config.image_width,
-        dtype=torch.float32,
-    )
-    translation_table: dict[Any, Any] = {torch.ops.aten.div.Tensor_mode: _integer_division}
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        module,
-        (example_image_bchw,),
-        str(output_path),
-        input_names=["image"],
-        output_names=static_output_names(config.static_batch_size),
-        opset_version=config.opset,
-        dynamo=True,
-        external_data=False,
-        optimize=False,
-        custom_translation_table=translation_table,
-    )
-    _stamp_model(output_path, f"cusfm-raco-aliked-static-b{config.static_batch_size}-extractor")
 
 
 def export_matcher(config: ExportConfig, output_path: Path) -> None:
@@ -561,33 +470,5 @@ def export_matcher(config: ExportConfig, output_path: Path) -> None:
     _stamp_model(output_path, "cusfm-raco-lightglue-matcher")
 
 
-def main(config: ExportConfig) -> None:
-    """Export both drop-in ONNX files and validate their serialized graphs."""
-    if config.batched_extractor_path is not None:
-        torch.set_grad_enabled(False)
-        mode: str = (
-            f"static unrolled batch {config.static_batch_size}"
-            if config.static_batch_size is not None
-            else ("dynamic batch and shape" if config.dynamic_shape else "dynamic batch")
-        )
-        print(f"Exporting {mode} extractor to {config.batched_extractor_path}")
-        export_batched_extractor(config, config.batched_extractor_path)
-        if config.static_batch_size is None:
-            print(f"Exported batch range {config.minimum_batch_size}..{config.maximum_batch_size}")
-        else:
-            print(f"Exported fixed batch {config.static_batch_size}")
-        return
-
-    output_directory: Path = config.output_root / "aliked_lightglue"
-    output_directory.mkdir(parents=True, exist_ok=True)
-    extractor_path: Path = output_directory / "aliked.onnx"
-    matcher_path: Path = output_directory / "lightglue_aliked.onnx"
-
-    torch.set_grad_enabled(False)
-    print(f"Exporting extractor to {extractor_path}")
-    export_extractor(config, extractor_path)
-    print(f"Exporting matcher to {matcher_path}")
-    export_matcher(config, matcher_path)
-    print(f"Exported cuSFM model root: {config.output_root}")
 
 

@@ -156,7 +156,7 @@ class BenchmarkScene:
     """Input and ground-truth trajectories drawn alongside the two runs."""
 
 
-def _camera_k_matrix(camera: CameraParams) -> Matrix3:
+def camera_k_matrix(camera: CameraParams) -> Matrix3:
     """Pick the intrinsic matrix cuSFM's export rules pick for this model.
 
     `colsfm.cameras.PINHOLE_FAMILY_MODELS` are exported from the rectified 3x4
@@ -215,7 +215,7 @@ def build_rig(frames_meta: FramesMeta, index: int, track: RigTrack) -> Rig:
         extrinsics: Extrinsics = Extrinsics(world_R_cam=vehicle_T_cam[:3, :3], world_t_cam=vehicle_T_cam[:3, 3])
         intrinsics: Intrinsics = Intrinsics.from_k_matrix(
             camera_conventions="RDF",
-            k_matrix=_camera_k_matrix(camera),
+            k_matrix=camera_k_matrix(camera),
             height=camera.image_height,
             width=camera.image_width,
         )

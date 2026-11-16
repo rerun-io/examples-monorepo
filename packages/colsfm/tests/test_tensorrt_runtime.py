@@ -1,17 +1,14 @@
 """Device-memory ownership in `colsfm.tensorrt_runtime`, through a fake CUDA boundary.
 
-The seam is `DeviceBufferPool`, the device memory one execution context owns, plus
-the `GpuPreprocessor` constructor that acquires several resources in a row. What
-matters is what they own after a `cudaMalloc` fails, and how many times each
+The seam is `DeviceBufferPool`, the device memory one execution context owns. What
+matters is what it owns after a `cudaMalloc` fails, and how many times each
 pointer is freed — neither of which a passing GPU run can show.
 
 `FakeCudart` replaces only the two device entry points, delegating everything else
-(streams, page-locked host memory) to the real `cuda.bindings.runtime`, so the one
-test that builds a real engine still works while its allocations stay fake.
+to the real `cuda.bindings.runtime`.
 
 The module needs the `tensorrt` and `cuda-python` wheels because
-`colsfm.tensorrt_runtime` imports them at module scope; only the last test needs a
-device, and it skips itself without one.
+`colsfm.tensorrt_runtime` imports them at module scope; no test needs a device.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ pytest.importorskip("tensorrt", reason="colsfm.tensorrt_runtime imports tensorrt
 cudart: Any = pytest.importorskip("cuda.bindings.runtime", reason="colsfm.tensorrt_runtime allocates through cuda-python")
 
 from colsfm import tensorrt_runtime  # noqa: E402  (after importorskip)
-from colsfm.tensorrt_runtime import DeviceBufferPool, GpuPreprocessor, compute_capability  # noqa: E402
+from colsfm.tensorrt_runtime import DeviceBufferPool  # noqa: E402
 
 FIRST_FAKE_POINTER: Final[int] = 0x1000
 """The address the fake boundary hands out first; every later one is a multiple of it."""
@@ -97,17 +94,6 @@ class FakeCudart:
         return (cudart.cudaError_t.cudaSuccess,)
 
 
-def _cuda_device_available() -> bool:
-    """Whether a CUDA device answers, so a real engine can be built.
-
-    Returns:
-        True when `cudaGetDeviceProperties` succeeds.
-    """
-    try:
-        compute_capability()
-    except RuntimeError:
-        return False
-    return True
 
 
 def test_a_failed_growth_leaves_the_pool_owning_the_buffer_it_could_not_replace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,38 +155,3 @@ def test_closing_twice_frees_nothing_twice(monkeypatch: pytest.MonkeyPatch) -> N
     assert fake.double_frees == []
     assert pool.pointers == {}
     assert pool.capacities == {}
-
-
-@pytest.mark.skipif(not _cuda_device_available(), reason="a partly built GpuPreprocessor needs a real engine to get that far")
-def test_a_preprocessor_whose_second_allocation_fails_frees_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Partial construction must not leak: what was acquired is freed, then the error propagates.
-
-    The engine is real — an 8x8 one builds in seconds — but the device
-    allocations are fake, so the second `cudaMalloc` can be made to fail on
-    demand. Before the fix the first device buffer and the page-locked staging
-    both stayed allocated with no owner left to free them.
-    """
-    fake: FakeCudart = FakeCudart(fail_at_allocation=2)
-    released_staging: list[int] = []
-    real_close: Any = tensorrt_runtime.PinnedHostBuffer.close
-
-    def recording_close(buffer: tensorrt_runtime.PinnedHostBuffer) -> None:
-        """Record that page-locked staging was released, then release it.
-
-        Args:
-            buffer: The staging buffer being closed.
-        """
-        if not buffer.closed:
-            released_staging.append(buffer.pointer)
-        real_close(buffer)
-
-    monkeypatch.setattr(tensorrt_runtime.PinnedHostBuffer, "close", recording_close)
-    monkeypatch.setattr(tensorrt_runtime, "cudart", fake)
-
-    with pytest.raises(RuntimeError, match="cudaMalloc"):
-        GpuPreprocessor(height=8, width=8, max_batch=1, optimal_batch=1, stream=0)
-
-    assert fake.freed == [FIRST_FAKE_POINTER]
-    assert fake.live == set()
-    assert fake.double_frees == []
-    assert len(released_staging) == 1

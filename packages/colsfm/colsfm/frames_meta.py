@@ -84,7 +84,7 @@ class KeyframeMeta:
     timestamp_microseconds: int
     """Capture time in microseconds since the Unix epoch."""
     image_name: str
-    """`<camera_name>/<timestamp_nanoseconds>.jpeg`, relative to the raw data directory."""
+    """The keyframe's name: a path relative to an image folder, or a `<camera>/<t_ns>` key for a catalog input."""
     world_T_cam: pycolmap.Rigid3d
     """`camera_to_world`: the camera's pose in the world frame."""
     synced_sample_id: int

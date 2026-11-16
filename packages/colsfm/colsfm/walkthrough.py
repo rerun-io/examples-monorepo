@@ -193,11 +193,11 @@ class WalkthroughConfig:
     the same whichever extractor filled the database. Pass `raco` to draw the default
     pipeline instead."""
     matching_backend: MatchingBackend = "pycolmap"
-    """Which LightGlue the drawn run uses; `pycolmap` for the same reason."""
+    """Which matcher the drawn run uses; `pycolmap` for the same reason."""
     ba_backend: BaBackend = "ceres"
     """Which bundle adjuster the drawn run uses. `ceres`, not the pipeline's `caspar`:
-    the the `colsfm` environment (recipes/colmap-src) are the ones with that build, and this recording
-    is made wherever a viewer is."""
+    only the `colsfm` environments (recipes/colmap-src) have a CASPAR build, and this recording is made
+    wherever a viewer is."""
 
     @property
     def resolved_work_dir(self) -> Path:

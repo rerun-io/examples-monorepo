@@ -1,8 +1,8 @@
 """The extraction machinery both TensorRT feature backends share.
 
 These are pure contracts: the score gate, the keypoint budget, the coordinate
-mapping, the host conversion, the shape the tensor bindings are read at, and the
-two database columns that get written. None of them needs a GPU, an ONNX graph or
+mapping, the shape the tensor bindings are read at, and the two database columns
+that get written. None of them needs a GPU, an ONNX graph or
 a built engine, so none of them is gated on one — which is the point.
 `tests/colsfm/test_raco_backend.py` used to gate exactly this kind of check on
 both, and a fresh clone therefore ran none of it.
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from jaxtyping import Bool, Float32, UInt8
+from jaxtyping import Bool, Float32
 from numpy import ndarray
 
 from colsfm.database import Descriptors, KeypointsXY, create_database, read_descriptors_from_database, read_keypoints
@@ -33,12 +33,10 @@ from colsfm.features_native import (
     FeatureBatch,
     ImageTask,
     NativeModel,
-    PreparedImage,
     image_tasks,
     normalized_to_pixels,
     select_keypoints,
     store_feature_batch,
-    to_network_bchw,
 )
 
 DESCRIPTOR_DIM: int = 128
@@ -124,21 +122,6 @@ def test_normalized_coordinates_map_onto_the_original_image_not_the_network() ->
     assert pixels_xy.flags.c_contiguous
 
 
-def test_the_host_conversion_is_planar_rgb_divided_by_255() -> None:
-    """BGR HWC uint8 in, planar RGB float32 in [0, 1] out, with a leading batch axis.
-
-    This is the reference `colsfm.tensorrt_runtime.GpuPreprocessor` is checked
-    against bit for bit, so the channel order is the assertion that matters.
-    """
-    bgr_hwc: UInt8[ndarray, "1 1 3"] = np.asarray([[[10, 20, 30]]], dtype=np.uint8)
-
-    network_bchw: Float32[ndarray, "1 3 1 1"] = to_network_bchw(bgr_hwc)
-
-    assert network_bchw.shape == (1, 3, 1, 1)
-    assert network_bchw.dtype == np.float32
-    np.testing.assert_array_equal(network_bchw.reshape(3), np.asarray([30, 20, 10], dtype=np.float32) / np.float32(255.0))
-
-
 # ── The typed boundary at the tensor bindings ────────────────────────────────
 
 
@@ -199,21 +182,10 @@ def _two_keyframes(galileo_input: FramesMeta) -> FramesMeta:
     return galileo_input.filtered([keyframe.keyframe_id for keyframe in galileo_input.keyframes[:2]])
 
 
-def _prepared(task: ImageTask) -> PreparedImage:
-    """A `PreparedImage` carrying no pixels, for tests that only store outputs.
-
-    Args:
-        task: The image row the features belong to.
-
-    Returns:
-        A prepared image whose buffers are the smallest legal ones; nothing in
-        `store_feature_batch` reads them.
-    """
-    return PreparedImage(task=task, resized_bgr_hwc=np.zeros((1, 1, 3), dtype=np.uint8), network_bchw=None)
 
 
 def test_storing_a_batch_writes_exactly_the_gated_points_per_image(
-    galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path
+    galileo_input: FramesMeta, tmp_path: Path
 ) -> None:
     """Two images, two different gates, two different rows — and the right pixels.
 
@@ -226,10 +198,7 @@ def test_storing_a_batch_writes_exactly_the_gated_points_per_image(
     subset: FramesMeta = _two_keyframes(galileo_input)
     database_path: Path = tmp_path / "store.db"
     create_database(database_path, subset)
-    tasks: list[ImageTask] = image_tasks(
-        database_path, galileo_input_dir, [keyframe.image_name for keyframe in subset.keyframes]
-    )
-    batch: list[PreparedImage] = [_prepared(task) for task in tasks]
+    tasks: list[ImageTask] = image_tasks(database_path, [keyframe.image_name for keyframe in subset.keyframes])
 
     keypoints_bn2: Float32[ndarray, "2 3 2"] = np.asarray(
         [[[-1.0, -1.0], [0.0, 0.0], [1.0, 1.0]], [[1.0, 1.0], [0.0, 0.0], [-1.0, -1.0]]], dtype=np.float32
@@ -242,7 +211,7 @@ def test_storing_a_batch_writes_exactly_the_gated_points_per_image(
     with pycolmap.Database.open(database_path) as database:
         store_feature_batch(
             database,
-            batch,
+            tasks,
             FeatureBatch(keypoints_bn2=keypoints_bn2, descriptors_bnd=descriptors_bnd, scores_bn=scores_bn),
             min_score=0.005,
             max_num_features=0,
@@ -269,7 +238,7 @@ def test_storing_a_batch_writes_exactly_the_gated_points_per_image(
 
 
 def test_the_budget_applies_per_image_not_per_batch(
-    galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path
+    galileo_input: FramesMeta, tmp_path: Path
 ) -> None:
     """Each image gets its own `max_num_features`, which a flattened batch would not."""
     import pycolmap
@@ -277,14 +246,12 @@ def test_the_budget_applies_per_image_not_per_batch(
     subset: FramesMeta = _two_keyframes(galileo_input)
     database_path: Path = tmp_path / "budget.db"
     create_database(database_path, subset)
-    tasks: list[ImageTask] = image_tasks(
-        database_path, galileo_input_dir, [keyframe.image_name for keyframe in subset.keyframes]
-    )
+    tasks: list[ImageTask] = image_tasks(database_path, [keyframe.image_name for keyframe in subset.keyframes])
 
     with pycolmap.Database.open(database_path) as database:
         store_feature_batch(
             database,
-            [_prepared(task) for task in tasks],
+            tasks,
             FeatureBatch(
                 keypoints_bn2=np.zeros((2, 4, 2), dtype=np.float32),
                 descriptors_bnd=np.zeros((2, 4, DESCRIPTOR_DIM), dtype=np.float32),
@@ -299,14 +266,14 @@ def test_the_budget_applies_per_image_not_per_batch(
 
 
 def test_image_tasks_refuse_a_name_the_database_does_not_hold(
-    galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path
+    galileo_input: FramesMeta, tmp_path: Path
 ) -> None:
     """A typo in an image name is a `KeyError` here, not a silently skipped image."""
     database_path: Path = tmp_path / "missing.db"
     create_database(database_path, _two_keyframes(galileo_input))
 
     with pytest.raises(KeyError, match="no image named"):
-        image_tasks(database_path, galileo_input_dir, ["not/a/real/image.jpeg"])
+        image_tasks(database_path, ["not/a/real/image.jpeg"])
 
 
 # ── The two model adapters ───────────────────────────────────────────────────

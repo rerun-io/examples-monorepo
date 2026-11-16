@@ -9,16 +9,8 @@ import numpy as np
 import pytest
 import torch
 
-from colsfm.frames import (
-    FRAME_SOURCE_FILE,
-    FrameSourceManifest,
-    ImageFolderFrames,
-    StreamKeyframes,
-    VideoStreamFrames,
-    open_frame_source,
-    read_manifest,
-    write_manifest,
-)
+from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, read_manifest, write_manifest
+from colsfm.frames import ImageFolderFrames, VideoStreamFrames, open_frame_source
 
 
 def _manifest() -> FrameSourceManifest:

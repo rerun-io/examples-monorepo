@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import torch
 
 from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_LIGHTGLUE_ONNX_PATH, RACO_ONNX_PATH
-from colsfm.raco_export import ExportConfig, export_batched_extractor, export_extractor, export_matcher
+from colsfm.raco_export import ExportConfig, export_batched_extractor, export_matcher
 
 
 @dataclass
@@ -24,7 +25,10 @@ class Config:
 
 
 def main(config: Config) -> None:
-    """Write the LightGlue+ matcher, the batch-1 and batch-dynamic extractors, and the shape-dynamic extractor.
+    """Write the LightGlue+ matcher, the batch-dynamic extractor and the shape-dynamic extractor.
+
+    Each graph is exported to a temporary file beside its destination and renamed into place, so an interrupted or
+    failed export never leaves a partial graph that a later run would keep as "exists".
 
     Args:
         config: Export settings.
@@ -34,7 +38,6 @@ def main(config: Config) -> None:
     matcher_dir.mkdir(parents=True, exist_ok=True)
     jobs: list[tuple[str, Path, Callable[[Path], None]]] = [
         ("LightGlue+ matcher", RACO_LIGHTGLUE_ONNX_PATH, lambda path: export_matcher(config.export, path)),
-        ("batch-1 extractor", matcher_dir / "aliked.onnx", lambda path: export_extractor(config.export, path)),
         ("batch-dynamic extractor", RACO_ONNX_PATH, lambda path: export_batched_extractor(config.export, path)),
         (
             "batch- and shape-dynamic extractor",
@@ -48,4 +51,9 @@ def main(config: Config) -> None:
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         print(f"[colsfm] exporting the {label} to {path}")
-        export(path)
+        staged: Path = path.with_name(f".{path.stem}.{os.getpid()}.onnx")
+        try:
+            export(staged)
+            staged.replace(path)
+        finally:
+            staged.unlink(missing_ok=True)

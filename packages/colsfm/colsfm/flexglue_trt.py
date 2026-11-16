@@ -22,12 +22,12 @@ Pre- and post-processing mirror `src/colmap/feature/flexglue.cc` at the recipe's
 
 from __future__ import annotations
 
-import tempfile
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Final
 
 import numpy as np
@@ -38,20 +38,17 @@ import torch
 from numpy import ndarray
 from onnx import TensorProto, helper, numpy_helper
 from torch import Tensor
+from trtkit.artifacts import build_once
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
+from trtkit.trt_builder import onnx_content_hash
 
-from colsfm.database import ImagePair, KeypointsXY, MatchIndices, delete_two_view_geometries, pair_inlier_counts, raw_match_counts
+from colsfm.database import ImagePair, KeypointsXY, MatchIndices, database_transaction
 from colsfm.frames import FrameSource, frame_source_for
-from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, PairMatchStats, cap_verified_matches, verification_options
-from colsfm.matching_trt import FeatureCache
-from colsfm.pairs import write_pair_list
+from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, verify_and_report
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
 
 DESCRIPTOR_SIZE: Final[int] = 512
 """FlexGlue's descriptor input side; the graph is static at 512x512 (COLMAP's default)."""
-
-FEATURE_SHAPE: Final[tuple[int, int, int, int]] = (1, 256, 64, 64)
-"""Dense features per image: stride 8 at 512x512."""
 
 MATCHER_MAX_KEYPOINTS: Final[int] = 4096
 """Upper end of the matcher's keypoint profile; RaCo-ALIKED stores at most 2048 per image."""
@@ -68,13 +65,16 @@ MATCHER_STREAMS: Final[int] = 2
 DOWNLOAD_CHUNK: Final[int] = 256
 """Pairs whose matches are downloaded and written together."""
 
+GRAPH_REWRITE_VERSION: Final[int] = 1
+"""Bumped whenever `prepare_matcher_graph` / `prepare_descriptor_graph` change what they write; part of the cached file name."""
+
 ATTENTION_HEADS_ATTRIBUTE: Final[str] = "num_heads"
 """The contrib `MultiHeadAttention` attribute that carries the head count."""
 
 
 @dataclass(frozen=True, slots=True)
 class FlexGlueOptions:
-    """The four scalar inputs of FlexGlue's matcher, with COLMAP's defaults (`FlexGlueMatchingOptions`)."""
+    """FlexGlue's matcher thresholds, with COLMAP's defaults (`FlexGlueMatchingOptions`)."""
 
     filter_threshold: float = 0.1
     """Minimum match confidence (geometric mean of both directions)."""
@@ -82,20 +82,13 @@ class FlexGlueOptions:
     """Keypoint-to-correspondence distance gate in the 512x512 frame; COLMAP passes infinity for a non-positive value."""
     min_covisibility: float = 0.5
     """A pair whose predicted covisibility is below this keeps no match."""
-    early_stop_decay: float = 0.5
-    """Early stop of non-covisible pairs after layers 2, 4, 6 and 8; 1 disables it."""
-
     def tag(self) -> str:
         """A file-name-safe key for the folded graph and its engine.
 
         Returns:
-            E.g. `ft0.1_md3_mc0.5_es0.5`.
+            E.g. `ft0.1_md3_mc0.5`.
         """
-        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}_es{self.early_stop_decay:g}"
-
-
-DESCRIPTOR_PROFILE: Final[dict[str, ShapeProfile]] = {}
-"""The descriptor graph is fully static, so it needs no optimisation profile."""
+        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}"
 
 
 def matcher_profile(max_keypoints: int = MATCHER_MAX_KEYPOINTS) -> dict[str, ShapeProfile]:
@@ -237,75 +230,95 @@ def _flatten_early_stop(graph: onnx.GraphProto) -> int:
     return inlined
 
 
-def prepare_matcher_graph(source: Path, destination: Path, options: FlexGlueOptions) -> Path:
-    """Write the TensorRT-parsable matcher: contrib ops rewritten, scalar options folded into constants.
+def _cached_graph(source: Path, cache_dir: Path, label: str, write: Callable[[onnx.ModelProto], onnx.ModelProto]) -> Path:
+    """Rewrite a graph once per source content, rewrite version and label, publishing it atomically across processes.
 
-    Kept when the destination already exists (its name carries `options.tag()`).
+    The cached name carries the source's content hash and `GRAPH_REWRITE_VERSION`, so a re-downloaded source or a
+    changed rewrite cannot reuse a stale graph (whose engine trtkit would then build faithfully); `build_once` and a
+    staging directory keep concurrent runs from interleaving writes. The pattern of `trtkit.onnx_precision.fp16_trunk`.
+
+    Args:
+        source: The graph to rewrite.
+        cache_dir: Directory the rewritten graphs live in.
+        label: What distinguishes this rewrite of the source (e.g. the folded options).
+        write: The rewrite, from the loaded source to the model to save.
+
+    Returns:
+        The rewritten graph.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    destination: Path = cache_dir / f"{source.stem}_{onnx_content_hash(source, cache_dir=cache_dir)[:16]}_{label}_v{GRAPH_REWRITE_VERSION}.onnx"
+
+    def build() -> None:
+        with TemporaryDirectory(prefix=".flexglue-", dir=cache_dir) as work:
+            staged: Path = Path(work) / destination.name
+            onnx.save(write(onnx.load(source)), staged)
+            staged.replace(destination)
+
+    return build_once(destination, build)
+
+
+def prepare_matcher_graph(source: Path, cache_dir: Path, options: FlexGlueOptions) -> Path:
+    """The TensorRT-parsable matcher: contrib ops rewritten, early stop inlined, scalar options folded into constants.
 
     Args:
         source: COLMAP's matcher graph (the fp16 variant).
-        destination: Where the rewritten graph goes.
-        options: The four scalar options to fold.
+        cache_dir: Directory the rewritten graph is cached in.
+        options: The thresholds to fold.
 
     Returns:
-        The destination.
+        The rewritten graph.
 
     Raises:
         ValueError: When the graph has a contrib node this rewrite does not know.
     """
-    if destination.is_file():
-        return destination
-    model: onnx.ModelProto = onnx.load(source)
-    attention, gelu = _rewrite(model.graph)
-    inlined: int = _flatten_early_stop(model.graph)
-    max_distance: float = options.max_distance_px if options.max_distance_px > 0 else float("inf")
-    folded: dict[str, float] = {
-        "filter_threshold": options.filter_threshold,
-        "max_distance_px": max_distance,
-        "min_covisibility": options.min_covisibility,
-        "early_stop_decay": options.early_stop_decay,
-    }
-    kept_inputs = [value for value in model.graph.input if value.name not in folded]
-    del model.graph.input[:]
-    model.graph.input.extend(kept_inputs)
-    model.graph.initializer.extend(numpy_helper.from_array(np.array(v, dtype=np.float32), name=k) for k, v in folded.items())
-    del model.opset_import[:]
-    model.opset_import.append(helper.make_opsetid("", 18))
-    # TensorRT folds an operand such as ReduceMean's axes only when it is already a constant; the exporter left some as
-    # Reshape(Constant, Constant). onnxscript's optimizer folds those, in the If branches too.
-    model = onnxscript.optimizer.optimize(model)
-    onnx.checker.check_model(model)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial: Path = destination.with_suffix(".onnx.part")
-    onnx.save(model, partial)
-    partial.rename(destination)
-    print(f"[colsfm] flexglue matcher graph: {attention} attention and {gelu} Gelu nodes rewritten, {inlined} early-stop branches inlined, options {options.tag()}")
-    return destination
+
+    def write(model: onnx.ModelProto) -> onnx.ModelProto:
+        attention, gelu = _rewrite(model.graph)
+        inlined: int = _flatten_early_stop(model.graph)
+        folded: dict[str, float] = {
+            "filter_threshold": options.filter_threshold,
+            "max_distance_px": options.max_distance_px if options.max_distance_px > 0 else float("inf"),
+            "min_covisibility": options.min_covisibility,
+            # Every early-stop branch is inlined, so the decay no longer gates anything; 1 is its "off" value.
+            "early_stop_decay": 1.0,
+        }
+        kept_inputs = [value for value in model.graph.input if value.name not in folded]
+        del model.graph.input[:]
+        model.graph.input.extend(kept_inputs)
+        model.graph.initializer.extend(numpy_helper.from_array(np.array(v, dtype=np.float32), name=k) for k, v in folded.items())
+        del model.opset_import[:]
+        model.opset_import.append(helper.make_opsetid("", 18))
+        # TensorRT folds an operand such as ReduceMean's axes only when it is already a constant; the exporter left some
+        # as Reshape(Constant, Constant). onnxscript's optimizer folds those, in the If branches too.
+        model = onnxscript.optimizer.optimize(model)
+        onnx.checker.check_model(model)
+        print(f"[colsfm] flexglue matcher graph: {attention} attention and {gelu} Gelu nodes rewritten, {inlined} early-stop branches inlined, {options.tag()}")
+        return model
+
+    return _cached_graph(source, cache_dir, f"fp16_{options.tag()}", write)
 
 
-def prepare_descriptor_graph(source: Path, destination: Path) -> Path:
-    """Write the descriptor with a symbolic batch dimension, so one engine call encodes several images.
+def prepare_descriptor_graph(source: Path, cache_dir: Path) -> Path:
+    """The descriptor with a symbolic batch dimension, so one engine call encodes several images.
 
     The shipped graph is static at batch 1; nothing inside it depends on that (a batch of 8 matches eight batch-1 runs
-    to TF32 rounding), so only the input and output declarations change. Kept when the destination exists.
+    to TF32 rounding), so only the input and output declarations change.
 
     Args:
         source: COLMAP's descriptor graph.
-        destination: Where the batch-dynamic graph goes.
+        cache_dir: Directory the rewritten graph is cached in.
 
     Returns:
-        The destination.
+        The batch-dynamic graph.
     """
-    if destination.is_file():
-        return destination
-    model: onnx.ModelProto = onnx.load(source)
-    for value in [*model.graph.input, *model.graph.output]:
-        value.type.tensor_type.shape.dim[0].dim_param = "batch"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial: Path = destination.with_suffix(".onnx.part")
-    onnx.save(model, partial)
-    partial.rename(destination)
-    return destination
+
+    def write(model: onnx.ModelProto) -> onnx.ModelProto:
+        for value in [*model.graph.input, *model.graph.output]:
+            value.type.tensor_type.shape.dim[0].dim_param = "batch"
+        return model
+
+    return _cached_graph(source, cache_dir, "batch", write)
 
 
 def descriptor_profile(max_batch: int = DESCRIPTOR_BATCH) -> dict[str, ShapeProfile]:
@@ -328,9 +341,7 @@ class DenseImage:
     features: Tensor
     """Dense features `[1, 256, 64, 64]`."""
     keypoints: Tensor
-    """Keypoints `[1, n, 2]` scaled into the 512x512 descriptor frame."""
-    num_keypoints: int
-    """`n`; 0 when the image has none."""
+    """Keypoints `[1, n, 2]` scaled into the 512x512 descriptor frame; `n` may be 0."""
 
 
 class FlexGlueTensorRT:
@@ -380,12 +391,13 @@ class FlexGlueTensorRT:
                 )
             )
             scales.append((DESCRIPTOR_SIZE / width, DESCRIPTOR_SIZE / height))
-        features: Tensor = self.descriptor({"image": (torch.cat(resized) / 255.0).contiguous()})["features"].clone()
+        features: Tensor = self.descriptor({"image": torch.cat(resized).div_(255.0)})["features"]
         self.descriptor_runs += 1
         self.descriptor_images += len(batch)
         for index, (image_id, _, keypoints) in enumerate(batch):
             scaled: Tensor = torch.from_numpy(keypoints * np.asarray(scales[index], dtype=np.float32)).to(self.device)[None]
-            self.images[image_id] = DenseImage(features=features[index : index + 1], keypoints=scaled, num_keypoints=len(keypoints))
+            # One clone per image, so evicting an image frees it (a view would pin the whole batch).
+            self.images[image_id] = DenseImage(features=features[index : index + 1].clone(), keypoints=scaled)
             self.images.move_to_end(image_id)
         while len(self.images) > self.cache_images:
             self.images.popitem(last=False)
@@ -400,8 +412,8 @@ class FlexGlueTensorRT:
         second: DenseImage = self.images[pair[1]]
         self.images.move_to_end(pair[0])
         self.images.move_to_end(pair[1])
-        if first.num_keypoints == 0 or second.num_keypoints == 0:
-            self.pending.append((pair, torch.full((first.num_keypoints,), -1, dtype=torch.int64, device=self.device)))
+        if first.keypoints.shape[1] == 0 or second.keypoints.shape[1] == 0:
+            self.pending.append((pair, torch.full((int(first.keypoints.shape[1]),), -1, dtype=torch.int64, device=self.device)))
             return
         slot: int = self.calls % MATCHER_STREAMS
         self.calls += 1
@@ -447,18 +459,6 @@ class FlexGlueTensorRT:
         return results
 
 
-def first_use_order(pairs: Sequence[ImagePair]) -> list[int]:
-    """Images in the order the pair loop first needs them, for the decode prefetch and the descriptor batches.
-
-    Args:
-        pairs: The pair list.
-
-    Returns:
-        Each image id once.
-    """
-    return list(dict.fromkeys(image_id for pair in pairs for image_id in pair))
-
-
 def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions) -> MatchReport:
     """Match and verify a pair list with FlexGlue on TensorRT, writing both tables into the database.
 
@@ -486,58 +486,52 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
         return MatchReport(device="cuda")
     flexglue_options: FlexGlueOptions = FlexGlueOptions(min_covisibility=options.flexglue_min_covisibility)
     models: Path = options.flexglue_model_dir
-    descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt" / "flexglue_descriptor_batch.onnx")
+    descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
     descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
-    matcher_graph: Path = prepare_matcher_graph(
-        models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt" / f"flexglue_matcher_fp16_{flexglue_options.tag()}.onnx", flexglue_options
-    )
+    matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
     matcher_engine: Path = resolve_engine(matcher_graph, matcher_profile(), precision="fp32")
     frames: FrameSource = frame_source_for(options.image_dir)
     started: float = time.perf_counter()
     with pycolmap.Database.open(database_path) as database:
         names: dict[int, str] = {image.image_id: image.name for image in database.read_all_images()}
-        keypoints: FeatureCache = FeatureCache(database)
         flexglue: FlexGlueTensorRT = FlexGlueTensorRT(descriptor_engine, matcher_engine)
-        order: list[int] = first_use_order(pairs)
+        # Images in the order the pair loop first needs them: the descriptor batches follow it.
+        order: list[int] = list(dict.fromkeys(image_id for pair in pairs for image_id in pair))
         position: dict[int, int] = {image_id: index for index, image_id in enumerate(order)}
 
         def ensure(image_id: int) -> None:
             if image_id in flexglue.images:
+                # Refresh it: encoding the pair's other image must not evict this one before the matcher reads it.
+                flexglue.images.move_to_end(image_id)
                 return
             start: int = position[image_id]
             batch_ids: list[int] = [image_id] + [
                 candidate for candidate in order[start + 1 : start + 4 * DESCRIPTOR_BATCH] if candidate not in flexglue.images
             ][: DESCRIPTOR_BATCH - 1]
             decoded: list[tuple[str, Tensor]] = list(frames.frames([names[candidate] for candidate in batch_ids]))
-            flexglue.encode([(candidate, rgb, keypoints[candidate][0]) for candidate, (_, rgb) in zip(batch_ids, decoded, strict=True)])
+            flexglue.encode(
+                [
+                    (candidate, rgb, np.ascontiguousarray(database.read_keypoints(candidate)[:, :2], dtype=np.float32))
+                    for candidate, (_, rgb) in zip(batch_ids, decoded, strict=True)
+                ]
+            )
+
+        def drain() -> None:
+            with database_transaction(database):
+                for (first, second), matches in flexglue.flush():
+                    database.write_matches(first, second, matches.astype(np.uint32))
 
         for index, (image_id1, image_id2) in enumerate(pairs):
             ensure(image_id1)
             ensure(image_id2)
             flexglue.enqueue((image_id1, image_id2))
-            if (index + 1) % DOWNLOAD_CHUNK == 0:
-                for (first, second), matches in flexglue.flush():
-                    database.write_matches(first, second, matches.astype(np.uint32))
-        for (first, second), matches in flexglue.flush():
-            database.write_matches(first, second, matches.astype(np.uint32))
+            if (index + 1) % DOWNLOAD_CHUNK == 0 or index + 1 == len(pairs):
+                drain()
     matching_seconds: float = time.perf_counter() - started
 
-    raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
-    delete_two_view_geometries(database_path, pairs)
-    with tempfile.TemporaryDirectory(prefix="colsfm-pairs-") as scratch:
-        pair_list_path: Path = Path(scratch) / "pairs.txt"
-        write_pair_list(pair_list_path, pairs, database_path)
-        pycolmap.verify_matches(database_path, pair_list_path, verification_options(options))
     # The same post-verification spatial cap as the COLMAP path (`flexglue_ort`, `pycolmap`), so the two FlexGlue
     # backends hand the mapper the same observation budget.
-    dropped: int = cap_verified_matches(database_path, pairs, options)
-    elapsed_seconds: float = time.perf_counter() - started
-    inliers: dict[ImagePair, int] = pair_inlier_counts(database_path, pairs)
-    report: MatchReport = MatchReport(
-        pair_stats={pair: PairMatchStats(raw_matches=raw[pair], inlier_matches=inliers[pair]) for pair in pairs},
-        device="cuda",
-        elapsed_seconds=elapsed_seconds,
-    )
+    report, dropped = verify_and_report(database_path, pairs, options, device="cuda", started=started, cap=True)
     print(
         f"colsfm.matching[flexglue-trt]: {report.summary()} | matching {matching_seconds:.1f} s for {len(pairs)} pairs, "
         f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped {dropped} inlier matches"

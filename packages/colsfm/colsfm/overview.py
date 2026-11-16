@@ -26,6 +26,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_codec import video_codec
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, reconstruction_metrics
 from colsfm.catalog import CatalogCameraModel, CatalogTrajectory
@@ -80,8 +81,10 @@ def _join(
     return poses[inside, :3, 3], ground_truth.at(times_ns[inside])[:, :3, 3]
 
 
-def trajectory_error(times_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 4 4"], ground_truth: CatalogTrajectory) -> TrajectoryError:
-    """ATE of `poses` against ground truth interpolated at the same instants.
+def trajectory_error(
+    times_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 4 4"], ground_truth: CatalogTrajectory
+) -> tuple[TrajectoryError, RigidAlignment]:
+    """ATE of `poses` against ground truth interpolated at the same instants, and the SE(3) fit that scores it.
 
     Args:
         times_ns: Pose timestamps on the segment timeline.
@@ -89,18 +92,15 @@ def trajectory_error(times_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 
         ground_truth: The ground-truth trajectory.
 
     Returns:
-        SE(3) and Sim(3) RMSE.
+        SE(3) and Sim(3) RMSE, and the SE(3) fit (which moves the trajectory into the ground-truth frame for display).
     """
     source, target = _join(times_ns, poses, ground_truth)
     rigid: RigidAlignment = align_rigid(source, target)
     similarity: RigidAlignment = align_rigid(source, target, estimate_scale=True)
-    return TrajectoryError(
+    error: TrajectoryError = TrajectoryError(
         se3_rmse_m=rigid.rmse_meters, sim3_rmse_m=similarity.rmse_meters, sim3_scale=similarity.scale, num_matched=len(source)
     )
-
-
-def _aligned(alignment: RigidAlignment, xyz: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
-    return (alignment.scale * (alignment.target_R_source @ xyz.T)).T + alignment.target_t_source
+    return error, rigid
 
 
 def log_overview(
@@ -134,32 +134,28 @@ def log_overview(
     output_times_ns, output_poses = rig_poses(
         artifacts.frames_meta, {image.name for image in artifacts.reconstruction.images.values() if image.has_pose}
     )
-    input_error: TrajectoryError = trajectory_error(input_times_ns, input_poses, ground_truth)
-    output_error: TrajectoryError = trajectory_error(output_times_ns, output_poses, ground_truth)
-    source, target = _join(output_times_ns, output_poses, ground_truth)
-    output_fit: RigidAlignment = align_rigid(source, target)
-    input_source, input_target = _join(input_times_ns, input_poses, ground_truth)
-    input_fit: RigidAlignment = align_rigid(input_source, input_target)
+    input_error, input_fit = trajectory_error(input_times_ns, input_poses, ground_truth)
+    output_error, output_fit = trajectory_error(output_times_ns, output_poses, ground_truth)
+    path_xyz: Float64[ndarray, "n 3"] = output_fit.apply(output_poses[:, :3, 3])
 
     world: str = f"{ROOT}/world"
     gt_xyz: Float64[ndarray, "g 3"] = ground_truth.at(ground_truth.t_ns[:: max(1, len(ground_truth.t_ns) // 4000)])[:, :3, 3]
     rr.log(f"{world}/gt/trajectory", rr.LineStrips3D([gt_xyz], colors=[GT_RGB], radii=rr.Radius.ui_points(2.0)), static=True, recording=recording)
     rr.log(
         f"{world}/input/trajectory",
-        rr.LineStrips3D([_aligned(input_fit, input_poses[:, :3, 3])], colors=[INPUT_RGB], radii=rr.Radius.ui_points(1.5)),
+        rr.LineStrips3D([input_fit.apply(input_poses[:, :3, 3])], colors=[INPUT_RGB], radii=rr.Radius.ui_points(1.5)),
         static=True,
         recording=recording,
     )
     rr.log(
         f"{world}/colsfm/trajectory",
-        rr.LineStrips3D([_aligned(output_fit, output_poses[:, :3, 3])], colors=[OUTPUT_RGB], radii=rr.Radius.ui_points(2.0)),
+        rr.LineStrips3D([path_xyz], colors=[OUTPUT_RGB], radii=rr.Radius.ui_points(2.0)),
         static=True,
         recording=recording,
     )
     # Points farther from the path than POINT_CROP_FACTOR x its own extent are dropped from the overview (they are
     # kept in the walkthrough's stage 7): a handful of far triangulations would otherwise set the 3D view's framing.
-    points_xyz: Float64[ndarray, "p 3"] = _aligned(output_fit, artifacts.points_xyz())
-    path_xyz: Float64[ndarray, "n 3"] = _aligned(output_fit, output_poses[:, :3, 3])
+    points_xyz: Float64[ndarray, "p 3"] = output_fit.apply(artifacts.points_xyz())
     centre: Float64[ndarray, " 3"] = path_xyz.mean(axis=0)
     extent: float = float(np.linalg.norm(path_xyz - centre, axis=1).max()) + 1.0
     near: np.ndarray = np.linalg.norm(points_xyz - centre, axis=1) <= POINT_CROP_FACTOR * extent
@@ -171,14 +167,12 @@ def log_overview(
     )
 
     # The refined rig, moved into the ground-truth frame, carrying the cameras and their video.
-    gt_R: Float64[ndarray, "3 3"] = output_fit.target_R_source
-    rig_rotations: Float64[ndarray, "n 3 3"] = np.einsum("ij,njk->nik", gt_R, output_poses[:, :3, :3])
-    rig_translations: Float64[ndarray, "n 3"] = _aligned(output_fit, output_poses[:, :3, 3])
+    rig_rotations: Float64[ndarray, "n 3 3"] = output_fit.apply_rotations(output_poses[:, :3, :3])
     rig_entity: str = f"{world}/colsfm/rig"
     rr.send_columns(
         rig_entity,
         indexes=[rr.TimeColumn(timeline, duration=output_times_ns.astype("timedelta64[ns]"))],
-        columns=rr.Transform3D.columns(translation=rig_translations, mat3x3=rig_rotations),
+        columns=rr.Transform3D.columns(translation=path_xyz, mat3x3=rig_rotations),
         recording=recording,
     )
     refined_by_name = {camera.sensor_name: camera for camera in artifacts.frames_meta.cameras.values()}
@@ -200,7 +194,7 @@ def log_overview(
             static=True,
             recording=recording,
         )
-        rr.log(f"{entity}/pinhole/video", rr.VideoStream(codec=_video_codec(video.codec)), static=True, recording=recording)
+        rr.log(f"{entity}/pinhole/video", rr.VideoStream(codec=video_codec(video.codec)), static=True, recording=recording)
         rr.send_columns(
             f"{entity}/pinhole/video",
             indexes=[rr.TimeColumn(timeline, duration=video.t_ns.astype("timedelta64[ns]"))],
@@ -233,12 +227,6 @@ def overview_eye(ground_truth: CatalogTrajectory) -> tuple[list[float], list[flo
     radius: float = float(np.linalg.norm(xyz - centre, axis=1).max()) + 0.5
     offset: Float64[ndarray, " 3"] = np.array([1.2, -1.2, 1.4]) * radius
     return (centre + offset).tolist(), centre.tolist()
-
-
-def _video_codec(name: str) -> rr.VideoCodec:
-    from simplecv.catalog_video_codec import video_codec
-
-    return video_codec(name)
 
 
 def notes_markdown(segment: str, numbers: OverviewNumbers) -> str:

@@ -14,10 +14,8 @@ streams, its absence means the folder.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Final, Protocol
@@ -27,13 +25,10 @@ import numpy as np
 import pycolmap
 import torch
 from numpy import ndarray
-from serde import SerdeError, serde
-from serde.json import from_json, to_json
 from torch import Tensor
 from torchvision.io import ImageReadMode, decode_jpeg
 
-FRAME_SOURCE_FILE: Final[str] = "frame_source.json"
-"""The manifest a catalog input directory carries instead of image files."""
+from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, read_manifest
 
 READ_WORKERS: Final[int] = 4
 """Threads reading image files ahead of their decode."""
@@ -116,69 +111,6 @@ class ImageFolderFrames:
                 yield name, decode_image_bytes(payload, str(self.root / name), self.device)
 
 
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class StreamKeyframes:
-    """One camera's video stream and the keyframes the run uses from it."""
-
-    entity: str
-    """The `VideoStream` entity path, without the leading slash."""
-    names: list[str]
-    """Image names, as `frames_meta.json` holds them."""
-    t_ns: list[int]
-    """Each keyframe's sample index value on the manifest's timeline as int64 (`CatalogVideo.t_ns`); the frame is matched by it."""
-
-    def __post_init__(self) -> None:
-        """Check the two lists pair up."""
-        if len(self.names) != len(self.t_ns):
-            raise ValueError(f"{self.entity}: {len(self.names)} names for {len(self.t_ns)} timestamps")
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class FrameSourceManifest:
-    """Where a catalog input's keyframes live: the segment's video streams, and which samples are keyframes."""
-
-    catalog_url: str
-    """The catalog server."""
-    dataset: str
-    """The catalog dataset."""
-    segment: str
-    """The segment id."""
-    timeline: str
-    """The index timeline the timestamps are on."""
-    streams: list[StreamKeyframes]
-    """One entry per camera."""
-
-
-def write_manifest(path: Path, manifest: FrameSourceManifest) -> None:
-    """Write a frame-source manifest as JSON.
-
-    Args:
-        path: Destination, normally `<input_dir>/frame_source.json`.
-        manifest: The manifest.
-    """
-    path.write_text(to_json(manifest))
-
-
-def read_manifest(path: Path) -> FrameSourceManifest:
-    """Read a frame-source manifest.
-
-    Args:
-        path: The JSON file.
-
-    Returns:
-        The manifest.
-
-    Raises:
-        ValueError: When the file does not parse as a manifest, naming it.
-    """
-    try:
-        return from_json(FrameSourceManifest, path.read_text())
-    except (SerdeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{path}: not a frame-source manifest ({error})") from error
-
-
 class VideoStreamFrames:
     """Keyframes decoded from a catalog segment's video streams on NVDEC, once, and kept on the GPU.
 
@@ -203,11 +135,14 @@ class VideoStreamFrames:
         from simplecv.rerun_dataloader import open_segment_decoder
 
         dataset = CatalogClient(self.manifest.catalog_url).get_dataset(name=self.manifest.dataset)
+        # Built locally and kept only when every stream decoded: a half-filled store would read as already decoded.
+        store: dict[str, Tensor] = {}
         for stream in self.manifest.streams:
             times, _, _, decoder = open_segment_decoder(
                 dataset, self.manifest.segment, stream.entity, self.manifest.timeline, self.device, NOMINAL_FPS
             )
-            sample_ns: ndarray = _index_values(times)
+            # The same int64 view `simplecv.catalog_video.CatalogVideo.t_ns` gives the catalog door: no unit change.
+            sample_ns: ndarray = np.asarray(times).view(np.int64)
             wanted: ndarray = np.asarray(stream.t_ns, dtype=np.int64)
             indices: ndarray = np.searchsorted(sample_ns, wanted)
             if np.any(indices >= len(sample_ns)) or np.any(sample_ns[np.minimum(indices, len(sample_ns) - 1)] != wanted):
@@ -216,9 +151,12 @@ class VideoStreamFrames:
             for first in range(0, len(order), DECODE_CHUNK):
                 chunk: ndarray = order[first : first + DECODE_CHUNK]
                 decoded: Tensor = decoder.get_frames_at([int(indices[position]) for position in chunk]).data
+                if first == 0:
+                    _check_store_fits(decoded[0], sum(len(entry.names) for entry in self.manifest.streams), self.device)
                 for row, position in enumerate(chunk):
-                    self.store[stream.names[int(position)]] = decoded[row].clone()
+                    store[stream.names[int(position)]] = decoded[row].clone()
             print(f"[colsfm.frames] {stream.entity}: {len(order)} keyframes decoded on {self.device}")
+        self.store = store
 
     def frames(self, names: Sequence[str]) -> Iterator[tuple[str, Tensor]]:
         """Yield the named frames in order, decoding every stream on the first call.
@@ -238,16 +176,24 @@ class VideoStreamFrames:
             yield name, self.store[name]
 
 
-def _index_values(times: ndarray) -> ndarray:
-    """Sample index values as int64, exactly as `simplecv.catalog_video.CatalogVideo.t_ns` reads them (a view, no unit change).
+def _check_store_fits(frame: Tensor, num_frames: int, device: torch.device) -> None:
+    """Fail before decoding the rest when the whole keyframe store cannot fit in free GPU memory.
 
     Args:
-        times: The decoder's sample index values.
+        frame: One decoded frame, for the per-frame size.
+        num_frames: Keyframes the store will hold.
+        device: The CUDA device.
 
-    Returns:
-        The same values as int64.
+    Raises:
+        MemoryError: When the store would exceed the device's free memory.
     """
-    return np.asarray(times).view(np.int64)
+    needed: int = frame.numel() * frame.element_size() * num_frames
+    free, _ = torch.cuda.mem_get_info(device)
+    if needed > free:
+        raise MemoryError(
+            f"the keyframe store needs {needed / 2**30:.1f} GiB of GPU memory and {free / 2**30:.1f} GiB is free; "
+            "sample fewer frames (--source.frame-stride, --source.max-samples)"
+        )
 
 
 def open_frame_source(input_dir: Path, device: torch.device | None = None) -> FrameSource:
@@ -266,20 +212,25 @@ def open_frame_source(input_dir: Path, device: torch.device | None = None) -> Fr
     return ImageFolderFrames(input_dir, device)
 
 
-@cache
 def frame_source_for(input_dir: Path) -> FrameSource:
     """The one frame source of an input directory for this process, so every stage reads the same decoded store.
 
     A video-stream input is decoded once however many stages ask (feature extraction, both matching passes, point
-    colours); an image folder holds no state, so sharing it costs nothing.
+    colours); an image folder holds no state, so sharing it costs nothing. The path is resolved before the lookup, so
+    two spellings of one directory share one store.
 
     Args:
         input_dir: The run's input directory, as `PipelineOptions.input_dir` holds it.
 
     Returns:
-        `open_frame_source(input_dir.resolve())`, cached.
+        The cached frame source of the resolved directory.
     """
-    return open_frame_source(input_dir.resolve())
+    return _frame_source(input_dir.resolve())
+
+
+@cache
+def _frame_source(resolved_dir: Path) -> FrameSource:
+    return open_frame_source(resolved_dir)
 
 
 def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) -> int:
@@ -299,7 +250,6 @@ def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) 
     point_ids: ndarray = np.asarray(sorted(reconstruction.points3D), dtype=np.int64)
     if len(point_ids) == 0:
         return 0
-    row_of: dict[int, int] = {int(point_id): row for row, point_id in enumerate(point_ids)}
     sums: ndarray = np.zeros((len(point_ids), 3), dtype=np.float64)
     counts: ndarray = np.zeros(len(point_ids), dtype=np.int64)
     image_ids: list[int] = sorted(int(image_id) for image_id in reconstruction.reg_image_ids())
@@ -309,7 +259,7 @@ def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) 
         if not observed:
             continue
         xy: ndarray = np.asarray([pixel for pixel, _ in observed], dtype=np.float64)
-        rows: ndarray = np.asarray([row_of[int(point_id)] for _, point_id in observed], dtype=np.int64)
+        rows: ndarray = np.searchsorted(point_ids, np.asarray([point_id for _, point_id in observed], dtype=np.int64))
         height, width = int(rgb.shape[1]), int(rgb.shape[2])
         centre: ndarray = xy - 0.5
         inside: ndarray = (centre[:, 0] >= 0) & (centre[:, 0] <= width - 1) & (centre[:, 1] >= 0) & (centre[:, 1] <= height - 1)
@@ -317,13 +267,13 @@ def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) 
             continue
         grid: Tensor = torch.from_numpy((2.0 * xy[inside] / np.array([width, height]) - 1.0).astype(np.float32)).to(rgb.device)[None, None]
         sampled: ndarray = torch.nn.functional.grid_sample(rgb[None].float(), grid, mode="bilinear", align_corners=False)[0, :, 0].T.cpu().numpy()
-        np.add.at(sums, rows[inside], sampled)
-        np.add.at(counts, rows[inside], 1)
+        for channel in range(3):
+            sums[:, channel] += np.bincount(rows[inside], weights=sampled[:, channel], minlength=len(point_ids))
+        counts += np.bincount(rows[inside], minlength=len(point_ids))
     coloured: int = 0
-    for row, point_id in enumerate(point_ids):
-        if counts[row] == 0:
-            continue
-        colour: ndarray = np.clip(np.rint(sums[row] / counts[row]), 0, 255).astype(np.uint8)
+    seen: ndarray = np.flatnonzero(counts)
+    colours: ndarray = np.clip(np.rint(sums[seen] / counts[seen, None]), 0, 255).astype(np.uint8)
+    for point_id, colour in zip(point_ids[seen], colours, strict=True):
         reconstruction.points3D[int(point_id)].color = colour
         coloured += int(colour.any())
     return coloured

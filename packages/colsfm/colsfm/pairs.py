@@ -34,7 +34,6 @@ from pathlib import Path
 
 from colsfm.database import ImagePair, image_ids_by_name
 from colsfm.frames_meta import FramesMeta, KeyframeMeta, RigFrame
-from colsfm.schema import CusfmSchema, load_schema
 
 FEATURE_MATCHING_TASK: str = "protos.visual.cusfm.FeatureMatchingTask"
 """The message `feature_matcher_task_builder_main` writes to `matching_task_%03zu.pb`."""
@@ -183,20 +182,3 @@ def write_pair_list(pair_list_path: Path, pairs: Sequence[ImagePair], database_p
     pair_list_path.write_text("\n".join(lines) + "\n")
 
 
-def read_task_pairs(task_path: Path, schema: CusfmSchema | None = None) -> list[ImagePair]:
-    """Read a blob `matching_task_NNN.pb` back into a pair list.
-
-    Only used to compare against cuSFM's own output; the Python pipeline passes
-    pairs in memory rather than through task files.
-
-    Args:
-        task_path: A binary `protos.visual.cusfm.FeatureMatchingTask`.
-        schema: Loaded cuSFM schema; the vendored one by default.
-
-    Returns:
-        Normalised, deduplicated, sorted pairs.
-    """
-    resolved_schema: CusfmSchema = load_schema() if schema is None else schema
-    task = resolved_schema.message_class(FEATURE_MATCHING_TASK)()
-    task.ParseFromString(task_path.read_bytes())
-    return sorted({normalise_pair(int(pair.source_frame_id), int(pair.target_frame_id)) for pair in task.frame_pairs})

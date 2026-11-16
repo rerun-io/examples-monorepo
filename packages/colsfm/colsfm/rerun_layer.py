@@ -27,6 +27,7 @@ from numpy import ndarray
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
 from colsfm.frames_meta import CameraParams, FramesMeta, KeyframeMeta
+from colsfm.rerun_log import camera_k_matrix
 
 APPLICATION_ID: Final[str] = "colsfm"
 """Application id of a layer written here."""
@@ -83,13 +84,11 @@ def rig_poses(frames_meta: FramesMeta, registered: set[str] | None = None) -> tu
 def _log_camera(recording: rr.RecordingStream, entity: str, camera: CameraParams) -> None:
     rig_T_cam: Float64[ndarray, "3 4"] = camera.vehicle_T_cam.matrix()
     recording.log(entity, rr.Transform3D(translation=rig_T_cam[:, 3], mat3x3=rig_T_cam[:, :3]), static=True)
-    k: Float64[ndarray, "3 3"]
-    if camera.camera_matrix is not None:
-        k = np.asarray(camera.camera_matrix, dtype=np.float64).reshape(3, 3)
-    elif camera.projection_matrix is not None:
-        k = np.asarray(camera.projection_matrix, dtype=np.float64).reshape(3, 4)[:, :3]
-    else:
+    if camera.camera_matrix is None and camera.projection_matrix is None:
         return
+    # The export rule (rectified projection matrix for the pinhole family, raw camera matrix otherwise), so the layer's
+    # frusta agree with the walkthrough's and with the exported COLMAP cameras.
+    k: Float64[ndarray, "3 3"] = camera_k_matrix(camera)
     recording.log(
         f"{entity}/pinhole",
         rr.Pinhole(

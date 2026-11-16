@@ -61,8 +61,8 @@ against the blob's 8 (2.4 %). The default here is COLMAP's own 0.1, measured at
 13 empty pairs (3.9 %) with a 10th-percentile match count of 116 against the
 blob's 118. `BLOB_MATCH_THRESHOLD` is kept for parity runs.
 
-**The engine backend.** `MatchingOptions.backend = "raco"` runs LightGlue+ (`colsfm.matching_raco`) on a TensorRT
-engine, which is what a run does by default. It *does* see the per-match score, so it runs the real SSC
+**The LightGlue+ backend.** `MatchingOptions.backend = "raco"` runs LightGlue+ (`colsfm.matching_raco`) on a TensorRT
+engine (a run's default matcher is FlexGlue, below). It *does* see the per-match score, so it runs the real SSC
 (`select_by_square_covering`) before verification, at the blob's own 0.3 threshold, and skips the grid subsample below
 entirely. Everything above this paragraph describes the `pycolmap` path, the ablation for a machine with no engine.
 Both leave the same two database tables filled, so the choice is invisible to every later stage. (The fork's third
@@ -131,10 +131,9 @@ FlexGlue, kept as its parity reference. Both ignore the descriptors.
 score COLMAP's bindings hide and therefore runs the blob's real SSC spatial NMS rather than
 `subsample_matches_by_coverage`'s score-free stand-in.
 
-`raco` is what `python -m colsfm run` asks for by default since 2026-09-06
-(NOTES.md decision 17), because the default extractor is RaCo-ALIKED and LightGlue+
-is the matcher trained against it. `pycolmap` is the ablation, and the default of
-`MatchingOptions` below, which is the *stage's* API rather than the run's."""
+A run asks for `flexglue` by default (`colsfm.run_config.PipelineOptions`); `raco` is the matcher trained against the
+default extractor and keeps per-match scores for SSC. `pycolmap` is the ablation, and the default of `MatchingOptions`
+below, which is the *stage's* API rather than the run's."""
 
 MatchCapMode: TypeAlias = Literal["fixed", "image_area", "off"]
 """`--match-cap-mode`, the command line's spelling; `MatchLimitPolicy.of` resolves it."""
@@ -259,9 +258,9 @@ class MatchingOptions:
     """How LightGlue and the two-view verifier run over a pair list."""
 
     backend: MatchingBackend = "pycolmap"
-    """Which LightGlue implementation runs; see `MatchingBackend`.
+    """Which matcher runs; see `MatchingBackend`.
 
-    `pycolmap` here even though a *run* defaults to `raco`, for the reason
+    `pycolmap` here even though a *run* defaults to `flexglue`, for the reason
     `colsfm.features.FeatureOptions.backend` gives: this is the stage's API, and it
     must work where no engine does. `colsfm.run_config` always passes the run's
     choice explicitly.
@@ -431,11 +430,6 @@ def _matching_options(options: MatchingOptions, device: ResolvedDevice) -> pycol
     if options.backend == "flexglue_ort":
         if options.image_dir is None:
             raise ValueError("the flexglue matcher reads image pixels: MatchingOptions.image_dir is required")
-        if (options.image_dir / "frame_source.json").is_file():
-            raise ValueError(
-                f"{options.image_dir} is a catalog input with no image files; COLMAP's FlexGlue reads files, so use --matching-backend "
-                "flexglue (TensorRT, reads the run's frames)"
-            )
         matching_options.type = pycolmap.FeatureMatcherType.FLEXGLUE
         flexglue = matching_options.flexglue
         flexglue.image_path = str(options.image_dir)
@@ -743,6 +737,43 @@ def cap_verified_matches(
     return removed
 
 
+def verify_and_report(
+    database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions, *, device: ResolvedDevice, started: float, cap: bool
+) -> tuple[MatchReport, int]:
+    """Verify the raw matches every backend wrote, optionally cap them, and report: the tail all matchers share.
+
+    Raw counts are read first, so a pair that fails verification still reports what it matched; then COLMAP's batch
+    `verify_matches` runs over the pair file and, with `cap`, `cap_verified_matches` spreads the inliers.
+
+    Args:
+        database_path: The database holding the raw matches.
+        pairs: The matched pairs.
+        options: Verification and match-limit settings.
+        device: What the report names as the matching device.
+        started: `time.perf_counter()` at the start of matching, for the report's wall time.
+        cap: Apply the post-verification spatial cap (the backends without per-match scores; LightGlue+ runs SSC before
+            verification instead).
+
+    Returns:
+        The report, and the inlier matches the cap removed (0 without it).
+    """
+    raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
+    delete_two_view_geometries(database_path, pairs)
+    with tempfile.TemporaryDirectory(prefix="colsfm-pairs-") as scratch:
+        pair_list_path: Path = Path(scratch) / "pairs.txt"
+        write_pair_list(pair_list_path, pairs, database_path)
+        pycolmap.verify_matches(database_path, pair_list_path, verification_options(options))
+    dropped: int = cap_verified_matches(database_path, pairs, options) if cap else 0
+    elapsed_seconds: float = time.perf_counter() - started
+    inliers: dict[ImagePair, int] = pair_inlier_counts(database_path, pairs)
+    report: MatchReport = MatchReport(
+        pair_stats={pair: PairMatchStats(raw_matches=raw[pair], inlier_matches=inliers[pair]) for pair in pairs},
+        device=device,
+        elapsed_seconds=elapsed_seconds,
+    )
+    return report, dropped
+
+
 def match_pairs(
     database_path: Path,
     pairs: Sequence[ImagePair],
@@ -793,30 +824,15 @@ def match_pairs(
         pairing_options.match_list_path = pair_list_path
         matching_options: pycolmap.FeatureMatchingOptions = _matching_options(options, device)
         matching_options.skip_geometric_verification = True
-        geometry_options: pycolmap.TwoViewGeometryOptions = verification_options(options)
         started: float = time.perf_counter()
         pycolmap.match_image_pairs(
             database_path,
             matching_options=matching_options,
             pairing_options=pairing_options,
-            verification_options=geometry_options,
+            verification_options=verification_options(options),
             device=pycolmap.Device.cuda if device == "cuda" else pycolmap.Device.cpu,
         )
-        raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
-        delete_two_view_geometries(database_path, pairs)
-        pycolmap.verify_matches(database_path, pair_list_path, geometry_options)
-        dropped: int = cap_verified_matches(database_path, pairs, options)
-        print(
-            f"colsfm.matching: spatial cap ({options.match_limit.kind}, "
-            f"{options.match_limit.matches_per_pair}/pair) dropped {dropped} inlier matches"
-        )
-        elapsed_seconds: float = time.perf_counter() - started
-
-    inliers: dict[ImagePair, int] = pair_inlier_counts(database_path, pairs)
-    report: MatchReport = MatchReport(
-        pair_stats={pair: PairMatchStats(raw_matches=raw[pair], inlier_matches=inliers[pair]) for pair in pairs},
-        device=device,
-        elapsed_seconds=elapsed_seconds,
-    )
+    report, dropped = verify_and_report(database_path, pairs, options, device=device, started=started, cap=True)
+    print(f"colsfm.matching: spatial cap ({options.match_limit.kind}, {options.match_limit.matches_per_pair}/pair) dropped {dropped} inlier matches")
     print(f"colsfm.matching: {report.summary()}")
     return report

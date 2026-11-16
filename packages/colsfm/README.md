@@ -31,7 +31,7 @@ whose temporal `Transform3D` is the initial trajectory, stride, trim) and every 
 | Knob | Default | Ablation |
 |---|---|---|
 | `--features-backend` | `raco` (RaCo-ALIKED, TensorRT) | `pycolmap` (COLMAP's ALIKED through ONNX Runtime; no engine) |
-| `--matching-backend` | `flexglue` (COLMAP's FlexGlue, ORT CUDA, covisibility gate) | `raco` (LightGlue+, TensorRT, real SSC); `pycolmap` (COLMAP's LightGlue) |
+| `--matching-backend` | `flexglue` (FlexGlue on TensorRT, covisibility gate) | `raco` (LightGlue+, TensorRT, real SSC); `pycolmap` (COLMAP's LightGlue); `flexglue_ort` (COLMAP's ONNX Runtime FlexGlue, parity reference, image folders only) |
 | `--ba-backend` | `caspar` (COLMAP's GPU bundle adjuster) + one Ceres polish | `ceres` |
 | `--optimize-extrinsics` | on (regularised, cuSFM's priors) | `--no-optimize-extrinsics`, `--no-regularised-extrinsics` |
 | `--loop-closure` | on | `--no-loop-closure` |

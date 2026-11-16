@@ -46,7 +46,7 @@ source:
 
 build:
   # Bump with every patch or build-script edit: the build string hash does not follow them (recipes/README.md).
-  number: 0
+  number: 1
   string: main137f216_caspar_fisheye_fullopencv_cuda130_sm${{ cuda_arch }}_py312_${{ build_number }}
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
@@ -80,11 +80,13 @@ build:
     # Step 2: the bindings against that libcolmap. scikit-build-core defaults to one job without this.
     - export CMAKE_PREFIX_PATH="$PREFIX:${CMAKE_PREFIX_PATH:-}"
     - export CMAKE_BUILD_PARALLEL_LEVEL=${{ CPU_COUNT }}
-    - export CMAKE_ARGS="-DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=${{ cuda_arch }} -DGENERATE_STUBS=OFF -DFETCH_ONNX=OFF -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF -DFETCH_BOOST=OFF -DCMAKE_PREFIX_PATH=$PREFIX"
+    - export CMAKE_ARGS="-DCASPAR_ENABLED=ON -DCMAKE_CUDA_ARCHITECTURES=${{ cuda_arch }} -DGENERATE_STUBS=ON -DFETCH_ONNX=OFF -DFETCH_FAISS=OFF -DFETCH_POSELIB=OFF -DFETCH_BOOST=OFF -DCMAKE_PREFIX_PATH=$PREFIX"
     - python -m pip install . -vv --no-build-isolation --no-deps
     # Step 3: the adapter reached the extension module (0 hits in a stock build). pixi-build does not run `tests:`.
     - grep -aq OpenCVFisheyeAdapter "$PREFIX"/lib/python3.12/site-packages/pycolmap/_core*.so
     - grep -aq FullOpenCVAdapter "$PREFIX"/lib/python3.12/site-packages/pycolmap/_core*.so
+    # The stubs reached the package (pyrefly reads them; GENERATE_STUBS installs them under pycolmap/_core/).
+    - test -f "$PREFIX"/lib/python3.12/site-packages/pycolmap/_core/__init__.pyi
     # FlexGlue is compiled only with ONNX on (COLMAP_ONNX_ENABLED); its default model URI is the marker.
     - grep -rlaq flexglue_descriptor.onnx "$PREFIX"/lib/libcolmap* "$PREFIX"/lib/python3.12/site-packages/pycolmap/
 
@@ -101,10 +103,16 @@ requirements:
     - git
     - libgomp
     - patchelf
+    # pycolmap's generate_stubs.sh post-processes the stubs with perl and formats them with ruff.
+    - perl
+    - ruff
   host:
     - python 3.12.*
     - pip
     - scikit-build-core
+    # Type stubs for the compiled pycolmap._core (GENERATE_STUBS): without them every pycolmap attribute is unknown to
+    # pyrefly, which is what colsfm's baseline of ~1,300 `missing-attribute` entries was.
+    - pybind11-stubgen 3.*
     - pybind11 >=3.0,<4
     - numpy
     # COLMAP's C++ dependencies, as conda-forge's colmap 4.2.0 cuda_130 build has them, minus Qt (GUI off). The

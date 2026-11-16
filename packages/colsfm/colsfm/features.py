@@ -256,8 +256,8 @@ def extract_features(
 
     Args:
         database_path: An existing COLMAP database.
-        image_root: Directory the `image_name` values are relative to, i.e. the
-            raw data directory holding `<camera_name>/<timestamp>.jpeg`.
+        image_root: The run's input directory: an image folder, or a catalog input whose keyframes the frame
+            source decodes from the segment's video streams (`colsfm.frames`).
         image_names: Images to extract, as stored in the database.
         options: Extraction settings.
 
@@ -299,12 +299,6 @@ def extract_features(
         print(f"colsfm.features[{options.backend}]: {tensorrt_report.summary()}")
         return tensorrt_report
 
-    # A literal rather than `colsfm.frames.FRAME_SOURCE_FILE`: that module imports torch, which this path never needs.
-    if (image_root / "frame_source.json").is_file():
-        raise ValueError(
-            f"{image_root} is a catalog input (its keyframes live in the segment's video streams, not in files); COLMAP's "
-            "own extractor reads files, so use --features-backend raco"
-        )
     device: ResolvedDevice = resolve_device(options.device)
     extraction_options: pycolmap.FeatureExtractionOptions = _extraction_options(options, device)
     started: float = time.perf_counter()
