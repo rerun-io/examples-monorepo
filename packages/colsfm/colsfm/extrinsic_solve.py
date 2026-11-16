@@ -62,7 +62,7 @@ from colsfm.ceres_pose import (
 from colsfm.extrinsic_costs import RepeatedCauchyLoss, RigReprojectionCost
 from colsfm.extrinsic_observations import CameraObservations, CameraPairKey, camera_observations, co_observed_camera_pairs
 from colsfm.geometry import Matrix3
-from colsfm.point_filters import camera_domain_angle, in_camera_domain
+from colsfm.point_filters import before_rational_pole, rational_pole_angle
 from colsfm.pose_graph import Information6, RelativePoseCost, default_information, rotation_matrix_from_quat_xyzw
 from colsfm.reconstruction import RigReference
 from colsfm.solver_report import CeresTermination, SolverFailure
@@ -134,8 +134,8 @@ class ExtrinsicSolveStats:
     """Distinct co-observed camera pairs, each carrying its own multiplicity."""
     num_relative_prior_frames: int
     """Sum of those multiplicities: the blob's own block count, 777 on Galileo."""
-    num_outside_domain: int
-    """Observations left out for lying outside their camera model's valid domain (`colsfm.point_filters`)."""
+    num_past_pole: int
+    """Observations left out for lying at or past their camera's rational pole (`colsfm.point_filters`)."""
     num_non_finite: int
     """Observations left out because their residual or Jacobian was not finite at the start (the backstop)."""
     iterations: int
@@ -160,9 +160,9 @@ def _add_reprojection_blocks(
 ) -> tuple[int, int, int, int]:
     """Add one vectorised reprojection block per free camera, over the observations it can evaluate.
 
-    Two filters, both counted: the camera model's valid domain at the start extrinsics
-    (`colsfm.point_filters.in_camera_domain`, the rule every bundle adjustment's guards
-    apply), and, as a backstop, any observation whose residual or Jacobian is not finite
+    Two filters, both counted: the rational-pole guard at the start extrinsics
+    (`colsfm.point_filters.before_rational_pole`, the rule every bundle adjustment's boundary
+    applies), and, as a backstop, any observation whose residual or Jacobian is not finite
     there. Ceres refuses a problem whose first evaluation is not finite, so one such
     observation used to fail the whole solve.
 
@@ -178,22 +178,22 @@ def _add_reprojection_blocks(
             into it and a dropped reference is a segfault, not an error.
 
     Returns:
-        The blocks added, the scalar residuals in them, and the observations dropped outside
-        the camera domain and for a non-finite evaluation.
+        The blocks added, the scalar residuals in them, and the observations dropped at or
+        past a rational pole and for a non-finite evaluation.
     """
     num_blocks: int = 0
     num_residuals: int = 0
-    num_outside_domain: int = 0
+    num_past_pole: int = 0
     num_non_finite: int = 0
     for camera_params_id, gathered in observations.items():
         if camera_params_id == reference_camera_params_id:
             continue
         blocks: PoseBlocks = poses[camera_params_id]
         vehicle_R_cam: Matrix3 = rotation_matrix_from_quat_xyzw(blocks.quat_xyzw, np.empty((3, 3), dtype=np.float64))
-        inside: Bool[ndarray, " n_obs"] = in_camera_domain(
-            np.einsum("nj,ji->ni", gathered.points_in_vehicle - blocks.translation, vehicle_R_cam), camera_domain_angle(gathered.camera)
+        inside: Bool[ndarray, " n_obs"] = before_rational_pole(
+            np.einsum("nj,ji->ni", gathered.points_in_vehicle - blocks.translation, vehicle_R_cam), rational_pole_angle(gathered.camera)
         )
-        num_outside_domain += int((~inside).sum())
+        num_past_pole += int((~inside).sum())
         camera_obs: CameraObservations = _subset(gathered, inside)
         if camera_obs.points_in_vehicle.shape[0] == 0:
             continue
@@ -209,7 +209,7 @@ def _add_reprojection_blocks(
         problem.add_residual_block(cost, None, [blocks.quat_xyzw, blocks.translation])
         num_blocks += 1
         num_residuals += 2 * int(camera_obs.points_in_vehicle.shape[0])
-    return num_blocks, num_residuals, num_outside_domain, num_non_finite
+    return num_blocks, num_residuals, num_past_pole, num_non_finite
 
 
 def _subset(observations: CameraObservations, keep: Bool[ndarray, " n_obs"]) -> CameraObservations:
@@ -389,7 +389,7 @@ def solve_extrinsics(
     resolved_observations: Mapping[int, CameraObservations] = (
         camera_observations(reconstruction, rig_reference) if observations is None else observations
     )
-    num_reprojection_blocks, num_reprojection_residuals, num_outside_domain, num_non_finite = _add_reprojection_blocks(
+    num_reprojection_blocks, num_reprojection_residuals, num_past_pole, num_non_finite = _add_reprojection_blocks(
         problem,
         poses,
         resolved_observations,
@@ -441,7 +441,7 @@ def solve_extrinsics(
         num_absolute_prior_blocks=num_absolute_blocks,
         num_relative_prior_blocks=num_relative_blocks,
         num_relative_prior_frames=num_relative_frames,
-        num_outside_domain=num_outside_domain,
+        num_past_pole=num_past_pole,
         num_non_finite=num_non_finite,
         iterations=solved.iterations,
         initial_cost=solved.initial_cost,

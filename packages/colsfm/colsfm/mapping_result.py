@@ -48,9 +48,9 @@ class RoundStats:
     num_diverged: int
     """Observations dropped by the degeneracy guard *after* the solve, i.e. points bundle
     adjustment itself pushed out of bounds. Normally 0; see `filter_degenerate_points`."""
-    num_outside_domain: int
-    """Observations dropped after the solve for lying outside their camera model's valid domain
-    (`filter_outside_camera_domain`: behind it, or past a `FULL_OPENCV` pole)."""
+    num_past_pole: int
+    """Observations the solve boundary dropped, before or after the solve, for lying at or past their
+    camera's rational distortion pole (`filter_past_rational_pole`; only `FULL_OPENCV` has one)."""
     num_observations: int
     """Observations left in the reconstruction after filtering; cuSFM's `num observed`."""
     observation_change: float
@@ -87,8 +87,8 @@ class PolishStats:
     """Observations the solve parameterised."""
     num_diverged: int
     """Observations the post-solve guards removed (points walked behind or into a camera)."""
-    num_outside_domain: int
-    """Observations removed after the solve for lying outside their camera model's valid domain."""
+    num_past_pole: int
+    """Observations the solve boundary removed, before or after the solve, at or past a rational pole."""
     report: SolverReport
     """What the polish said about its own progress: 22 iterations on KITTI 06 from
     CASPAR's answer, ending 3.4 % below the initial cost. Optional throughout for the

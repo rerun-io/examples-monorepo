@@ -2641,7 +2641,7 @@
     },
     {
       "column": 8,
-      "path": "tests/test_camera_domain.py",
+      "path": "tests/test_rational_pole.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `pyceres`",
       "severity": "error"
