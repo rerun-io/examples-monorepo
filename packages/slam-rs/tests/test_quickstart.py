@@ -111,6 +111,6 @@ def test_every_tool_task_builds_the_one_gpu_enabled_core_first() -> None:
     assert "slam-rs-wgpu-build" not in tasks
     builds: list[str] = [name for name, task in tasks.items() if "_core.so" in str(task.get("cmd", ""))]
     assert builds == ["slam-rs-build"], builds
-    for name in ("slam-rs-gate", "slam-rs-replay", "slam-rs-demo", "slam-rs-wgpu-test"):
+    for name in ("slam-rs-gate", "slam-rs-replay", "slam-rs-demo", "slam-rs-wgpu-test", "slam-rs-robocap-probe", "slam-rs-robocap-fleet", "slam-rs-bench-track"):
         assert "slam-rs-build" in list(tasks[name]["depends-on"]), name  # type: ignore[arg-type]
     assert list(features["slam-rs-nvdec"]["tasks"]["slam-rs-catalog-layer"]["depends-on"]) == ["slam-rs-build"]  # type: ignore[arg-type]

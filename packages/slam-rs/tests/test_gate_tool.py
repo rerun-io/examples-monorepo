@@ -63,7 +63,7 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
     assert result.measurement.associated == (30 if clock_offset == 0 else 0)
     assert bool(result.failures) == bool(clock_offset)
     output: Path = tmp_path / "new" / "fleet.json"
-    config: Config = Config(segments=(benchmarks.segments[0].segment_id,), output_json=output)
+    config: Config = Config(segments=(benchmarks.segments[0].segment_id,), output_json=output, backend="cpu")
     if clock_offset:
         with pytest.raises(SystemExit, match="associated"):
             main(config)
@@ -96,7 +96,7 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
 
 def test_empty_selection_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no clip"):
-        main(Config(segments=(), output_json=tmp_path / "empty.json"))
+        main(Config(segments=(), output_json=tmp_path / "empty.json", backend="cpu"))
 
 
 @pytest.mark.parametrize("bad_reference", [False, True])
@@ -118,3 +118,40 @@ def test_nonfinite_scoring_keeps_costs_and_reports_refusal(
     assert result.measurement.median_tracker_ms == 4.0
     assert result.unscored is not None and "first at 3 ns" in result.unscored
     assert any(clause.startswith("scoring:") for clause in result.failures)
+
+
+def test_the_gate_forwards_auto_and_measures_the_lane_it_resolved(
+    benchmarks: Benchmarks, settings: SlamConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No device: the selector is stubbed, so this checks only what the gate asks for and what it runs."""
+    truth: Trajectory = Trajectory(
+        t_ns=np.arange(30, dtype=np.int64) * 10_000_000,
+        position_m=np.random.default_rng(3).normal(size=(30, 3)),
+        quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (30, 1)),
+    )
+    run: SegmentRun = SegmentRun(
+        estimate=truth, framesets=30, lost=0, wall_s=1.0, config_sha256="a" * 64, ground_truth=truth, median_tracker_ms=0.5
+    )
+    requests: list[str] = []
+    lanes: list[str] = []
+
+    def select(request: str) -> str:
+        requests.append(request)
+        return "gpu"
+
+    def run_on(*_args: object, backend: str, **_kwargs: object) -> SegmentRun:
+        lanes.append(backend)
+        return run
+
+    monkeypatch.setattr(gate._core, "select_backend", select)
+    monkeypatch.setattr(
+        gate,
+        "resolve_catalog_segments",
+        lambda sources, **_kwargs: tuple(replace(source, ground_truth_uri="file:///test-gt.rrd") for source in sources),
+    )
+    monkeypatch.setattr(gate, "run_segment", run_on)
+    output: Path = tmp_path / "gate.json"
+    main(Config(segments=(benchmarks.segments[0].segment_id,), output_json=output))
+    assert requests == ["auto"], "the tool's default request reaches the shared selector unchanged"
+    assert lanes == ["gpu"], "every clip runs on the lane resolved once"
+    assert json.loads(output.read_text())["lane"] == "gpu"

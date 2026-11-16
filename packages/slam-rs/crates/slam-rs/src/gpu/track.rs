@@ -9,6 +9,7 @@ use cubecl::prelude::*;
 use super::patches::GpuPatchSources;
 use super::pyramid::GpuPyramid;
 use kornia_staging_gpu::optical_flow::{FUSED_RUNS, FusedKltPlan, TrackPoints};
+use kornia_staging_gpu::runtime::DeviceCapabilities;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
 use kornia_staging_imgproc::optical_flow::patch_tracker::{FlowTransforms, TrackerError};
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackPhase};
@@ -26,6 +27,8 @@ pub(super) struct PackedFused<P: Pattern, R: Runtime> {
 pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
     launches: super::submission::LaunchList,
     client: ComputeClient<R>,
+    /// The client's validated capabilities, so no plan probes it again.
+    capabilities: DeviceCapabilities,
     capacity: usize,
     num_levels: usize,
     max_iterations: usize,
@@ -43,9 +46,13 @@ pub struct GpuPatchTracker<P: Pattern, R: Runtime> {
 }
 
 impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
-    /// Allocate point buffers and verify the device's subgroup operations.
+    /// Allocate point buffers on a client whose capabilities were validated
+    /// once ([`kornia_staging_gpu::runtime::default_capabilities`] for the
+    /// default client): no plan probes the device again.
+    #[expect(clippy::too_many_arguments, reason = "the client, its proof of validation and the plan geometry")]
     pub fn new(
         client: ComputeClient<R>,
+        capabilities: DeviceCapabilities,
         capacity: usize,
         num_levels: usize,
         max_iterations: usize,
@@ -55,8 +62,9 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     ) -> Result<Self, FrontendError> {
         let lanes = lanes.max(1);
         let make_plan = |cameras| {
-            FusedKltPlan::new_batched(
+            FusedKltPlan::new_batched_validated(
                 client.clone(),
+                capabilities,
                 capacity,
                 num_levels,
                 max_iterations,
@@ -76,6 +84,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
         Ok(Self {
             launches,
             client,
+            capabilities,
             capacity,
             num_levels,
             max_iterations,
@@ -199,7 +208,7 @@ impl<P: Pattern, R: Runtime> GpuPatchTracker<P, R> {
     }
 
     pub(super) fn plan_like(&self, capacity: usize, lanes: usize) -> Result<FusedKltPlan<P, R>, FrontendError> {
-        let mut plan = FusedKltPlan::new_batched(self.client.clone(), capacity, self.num_levels, self.max_iterations, self.max_recovered_dist2, lanes)?;
+        let mut plan = FusedKltPlan::new_batched_validated(self.client.clone(), self.capabilities, capacity, self.num_levels, self.max_iterations, self.max_recovered_dist2, lanes)?;
         plan.set_exit_step_px(self.exit_step_px)?;
         Ok(plan)
     }

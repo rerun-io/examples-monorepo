@@ -43,6 +43,7 @@ Five decisions matter here because each one can change the numbers:
 """
 
 import hashlib
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -114,33 +115,49 @@ DecodeDevice: TypeAlias = Literal["cpu", "cuda"]
 
 
 @cache
+def nvdec_unavailable_reason() -> str | None:
+    """Why NVDEC decoding cannot run in this process, or None when it can; discovered once.
+
+    CUDA decoding needs torch with a visible CUDA device plus torchcodec, which
+    only the slam-rs-cuda environments carry.
+    """
+    if find_spec("torch") is None or find_spec("torchcodec") is None:
+        return "this environment has no torch with torchcodec (the slam-rs-cuda environment has them)"
+    import torch
+
+    if not torch.cuda.is_available():
+        return "torch sees no CUDA device"
+    return None
+
+
+_CPU_DECODE_NOTICE: threading.Event = threading.Event()
+"""Set once the CPU-decoding notice is printed; the notice is once per process."""
+
+_CPU_DECODE_NOTICE_LOCK: threading.Lock = threading.Lock()
+
+
 def select_decode_device(requested: DecodeRequest = "auto") -> DecodeDevice:
     """Resolve a decode request: NVDEC when CUDA is available, otherwise the CPU decoder.
 
     The rule every slam-rs tool follows, as :func:`slam_rs._core.select_backend`
-    is for the frontend. CUDA means a torch with a visible CUDA device plus
-    torchcodec, which only the slam-rs-cuda environments carry. ``auto`` without
-    them prints one line naming the reason (once per process) and returns
-    ``"cpu"``.
+    is for the frontend. ``auto`` without CUDA prints one line naming the
+    reason, once per process however it is called, and returns ``"cpu"``.
+    ``cpu`` never inspects the environment.
 
     Raises:
         ValueError: If ``cuda`` is requested and CUDA is not available.
     """
     if requested == "cpu":
         return "cpu"
-    reason: str | None = None
-    if find_spec("torch") is None or find_spec("torchcodec") is None:
-        reason = "this environment has no torch with torchcodec (the slam-rs-cuda environment has them)"
-    else:
-        import torch
-
-        if not torch.cuda.is_available():
-            reason = "torch sees no CUDA device"
+    reason: str | None = nvdec_unavailable_reason()
     if reason is None:
         return "cuda"
     if requested == "cuda":
         raise ValueError(f"NVDEC decoding is unavailable: {reason}")
-    print(f"slam-rs: decoding on the CPU (PyAV/dav1d) because NVDEC is unavailable: {reason}", flush=True)
+    with _CPU_DECODE_NOTICE_LOCK:
+        if not _CPU_DECODE_NOTICE.is_set():
+            _CPU_DECODE_NOTICE.set()
+            print(f"slam-rs: decoding on the CPU (PyAV/dav1d) because NVDEC is unavailable: {reason}", flush=True)
     return "cpu"
 
 

@@ -2759,6 +2759,24 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Build the core, then replay a segment in the viewer (GPU frontend when available)"
 
+[feature.slam-rs.tasks.slam-rs-robocap-probe]
+cmd = "python tools/apps/robocap_probe.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then replay a RoboCap session in the viewer against its regression reference"
+
+[feature.slam-rs.tasks.slam-rs-robocap-fleet]
+cmd = "python tools/apps/robocap_fleet.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then measure one RoboCap session on this machine (CPU decode, so machines compare)"
+
+[feature.slam-rs.tasks.slam-rs-bench-track]
+cmd = "python tools/apps/bench_track.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then time Vio.track on a dumped segment, lane against lane"
+
 [feature.slam-rs.tasks.slam-rs-download-sample]
 # All three layers must be present. Adding a clip and updating the count
 # re-downloads for everyone; hf download reconciles what is already there.
@@ -2928,9 +2946,9 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # runs separately because each binary shares one CubeCL client.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
 depends-on = ["slam-rs-build"]
-cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu -- --nocapture && python -m pytest -q -ra -m integration tests/test_metal_python_host.py"
+cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_capabilities -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu -- --nocapture && python -m pytest -q -ra -m integration tests/test_metal_python_host.py"
 cwd = "packages/slam-rs"
-description = "Run workspace tests with wgpu, checking that all three GPU integration binaries contain tests"
+description = "Run workspace tests with wgpu, checking that all four GPU integration binaries contain tests"
 
 [feature.slam-rs.tasks.slam-rs-wgpu-doc]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]

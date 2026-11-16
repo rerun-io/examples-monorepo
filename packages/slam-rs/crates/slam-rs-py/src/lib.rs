@@ -1324,6 +1324,16 @@ fn select_backend(request: &str) -> PyResult<&'static str> {
         .name())
 }
 
+/// How many device capability probes this process has run.
+///
+/// Validation runs once per process, so this is 0 before the first `auto` or
+/// `gpu` request and stays at its first value after it. The unit test tier
+/// asserts it stays at 0.
+#[pyfunction]
+fn device_probes_run() -> usize {
+    slam_rs::device_probes_run()
+}
+
 /// The compiled core of the `slam_rs` package.
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1332,6 +1342,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
     module.add_function(wrap_pyfunction!(select_backend, module)?)?;
+    module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
     module.add_class::<VioStatus>()?;

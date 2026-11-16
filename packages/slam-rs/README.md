@@ -51,8 +51,10 @@ follows the same rule as the frontend: NVDEC when CUDA is available, otherwise
 the CPU decoder (PyAV with dav1d). Only the `slam-rs-cuda` environment carries
 the CUDA torch stack for NVDEC; the `slam-rs` environment stays small and
 portable (Linux x86-64 and aarch64 without CUDA, and `slam-rs-osx` on macOS), so
-it decodes on the CPU and says so once. The gate always decodes on the CPU: its
-baselines are frozen on the single-threaded dav1d path.
+it decodes on the CPU and says so once. Two measurements always decode on the
+CPU: the gate, whose baselines are frozen on the single-threaded dav1d path, and
+the RoboCap fleet rows, which compare machines and so need the same pixels on
+every machine.
 
 The gate prints the ATE beside the baseline and pass or fail; on a host that
 recorded no baseline the speed clause is reported, not gated. `slam-rs-serve`

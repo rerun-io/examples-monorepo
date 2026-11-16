@@ -8,8 +8,8 @@
 mod pipeline;
 pub use pipeline::{
     Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView, OverlapTimings,
-    PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample, gpu_probe,
-    select_backend,
+    PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
+    device_probes_run, gpu_probe, select_backend,
 };
 
 pub mod ba_base;

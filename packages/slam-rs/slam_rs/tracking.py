@@ -274,10 +274,14 @@ def run_segment(
     catalog: str | None = None,
     source: CatalogSegment | None = None,
 ) -> SegmentRun:
-    """Replay an MSD segment from the catalog with its dataset configuration."""
+    """Replay an MSD segment from the catalog with its dataset configuration.
+
+    Decodes on the CPU on purpose: the gate's baselines were measured on the
+    single-threaded dav1d path (D28), so NVDEC would move the numbers it scores.
+    """
     source = source or CatalogSegment(catalog or settings.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
-    with open_segment(source) as feed:
+    with open_segment(source, decode_device="cpu") as feed:
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
@@ -357,7 +361,13 @@ def run_robocap(
     catalog: str | None = None,
     backend: BackendRequest = "auto",
 ) -> SegmentRun:
-    """Replay a RoboCap catalog session without logging."""
+    """Replay a RoboCap catalog session without logging.
+
+    Decodes on the CPU on purpose: a fleet row compares this machine's
+    trajectory with other machines' and with a CPU-decoded regression
+    reference, so every machine must see the same pixels; NVDEC rounds them
+    differently.
+    """
     calibration: _core.Calibration
     flow: _core.VioConfig
     calibration, flow, config_text = robocap_estimator_files(settings, profile=profile)
@@ -366,6 +376,7 @@ def run_robocap(
         CatalogSegment(catalog or settings.catalog_url, "robocap", session.segment_id),
         profile=ROBOCAP_RIG,
         window_s=window_s,
+        decode_device="cpu",
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)

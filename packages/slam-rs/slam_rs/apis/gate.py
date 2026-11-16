@@ -193,9 +193,6 @@ class Config:
 
 def main(config: Config) -> None:
     """Validate sources, measure each segment, and persist results after each run."""
-    # Resolved before any data is read, so `--backend gpu` on a host without one fails at once.
-    lane: Lane = _core.select_backend(config.backend)
-    print(f"gate lane: {lane}", flush=True)
     settings: SlamConfig = load_slam_config()
     benchmarks: Benchmarks = load_benchmarks(settings)
     segments: tuple[ReferenceSegment, ...] = (
@@ -203,6 +200,10 @@ def main(config: Config) -> None:
     )
     if not segments:
         raise ValueError("--segments named no clip")
+    # Resolved after the selection is checked and before any data is read, so
+    # `--backend gpu` on a host without one fails at once.
+    lane: Lane = _core.select_backend(config.backend)
+    print(f"gate lane: {lane}", flush=True)
     sources: tuple[CatalogSegment, ...] = resolve_catalog_segments(
         tuple(CatalogSegment(config.catalog or settings.catalog_url, segment.dataset_name, segment.segment_id) for segment in segments),
         require_ground_truth=True,

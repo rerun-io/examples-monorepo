@@ -28,6 +28,14 @@ crate, kept for wasm, iOS and embedded consumers): there ``backend="auto"`` runs
 the CPU and ``backend="gpu"`` is refused.
 """
 
+def device_probes_run() -> int:
+    """How many device capability probes this process has run.
+
+    Validation of the default device runs once per process, so this is 0
+    before the first ``auto`` or ``gpu`` request and constant after it. The
+    unit test tier asserts it stays at 0.
+    """
+
 def select_backend(request: BackendRequest) -> Lane:
     """Resolve a backend request to the lane :class:`Vio` would run (``slam_rs::select_backend``).
 

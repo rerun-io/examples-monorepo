@@ -25,6 +25,7 @@ fn fused_tracker_fits_the_point_buffer_budget() {
     let before = client.memory_usage().unwrap().bytes_in_use;
     let tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
+        kornia_staging_gpu::runtime::default_capabilities().unwrap(),
         3000,
         4,
         MAX_ITERATIONS,
@@ -75,6 +76,7 @@ fn the_whole_gpu_path_holds_the_pool_flat() {
 
     let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
+        kornia_staging_gpu::runtime::default_capabilities().unwrap(),
         MAX_KEYPOINTS,
         LEVELS + 1,
         MAX_ITERATIONS,

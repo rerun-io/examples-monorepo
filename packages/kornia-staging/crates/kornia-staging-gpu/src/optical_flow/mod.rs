@@ -84,6 +84,9 @@ impl<P: Pattern, R: Runtime> FusedKltPlan<P, R> {
 
     /// Reserve a fused pass for up to `cameras` source/target pairs.
     ///
+    /// Probes the client's subgroups first; on a device already validated use
+    /// [`Self::new_batched_validated`].
+    ///
     /// # Errors
     /// Rejects invalid tracking parameters, unsupported capacities and device failures.
     pub fn new_batched(
@@ -97,6 +100,38 @@ impl<P: Pattern, R: Runtime> FusedKltPlan<P, R> {
         patch_tracker::limits::validate_tracking_parameters(iterations, max_dist2)?;
         patch_tracker::limits::checked_patch_shape(capacity, levels, P::SIZE)?;
         crate::runtime::probe_subgroups(&client)?;
+        Self::allocate(client, capacity, levels, iterations, max_dist2, cameras)
+    }
+
+    /// [`Self::new_batched`] on a client whose capabilities were already
+    /// validated ([`crate::runtime::validate_device`] or
+    /// [`crate::runtime::default_capabilities`]): no probe runs again.
+    ///
+    /// # Errors
+    /// Rejects invalid tracking parameters, unsupported capacities and allocation failures.
+    pub fn new_batched_validated(
+        client: ComputeClient<R>,
+        _capabilities: crate::runtime::DeviceCapabilities,
+        capacity: usize,
+        levels: usize,
+        iterations: usize,
+        max_dist2: f32,
+        cameras: usize,
+    ) -> Result<Self, TrackingError> {
+        patch_tracker::limits::validate_tracking_parameters(iterations, max_dist2)?;
+        patch_tracker::limits::checked_patch_shape(capacity, levels, P::SIZE)?;
+        Self::allocate(client, capacity, levels, iterations, max_dist2, cameras)
+    }
+
+    /// Allocate the buffers of a checked plan.
+    fn allocate(
+        client: ComputeClient<R>,
+        capacity: usize,
+        levels: usize,
+        iterations: usize,
+        max_dist2: f32,
+        cameras: usize,
+    ) -> Result<Self, TrackingError> {
         guarded(
             GpuError::DeviceLost {
                 what: "tracker allocation",
