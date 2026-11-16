@@ -1,0 +1,2643 @@
+{
+  "errors": [
+    {
+      "column": 65,
+      "path": "colsfm/bench_cli.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Comparison` is not assignable to parameter `report` with type `SerdeObject` in function `colsfm.benchmark.write_json_report`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "colsfm/ceres_pose.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "colsfm/ceres_pose.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `termination` with type `Literal['CONVERGENCE', 'FAILURE', 'NO_CONVERGENCE']` in function `SolverStats.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `full_name`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_key_points_for_tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `detector_threshold`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `num_points_tolerance_fraction`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `global_non_max_method` with type `Literal['NONE', 'SUPPRESSION_VIA_SQUARE_COVERING', 'TOP_M']` in function `LearningBasedDetectorConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 19,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `loss_type` with type `Literal['CAUCHY', 'HUBER', 'SOFT_L1', 'TRIVIAL']` in function `BundleAdjustmentConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loss_function_scale`",
+      "severity": "error"
+    },
+    {
+      "column": 32,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_num_iterations`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_invalid_steps`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_linear_solver_iterations`",
+      "severity": "error"
+    },
+    {
+      "column": 25,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `num_threads`",
+      "severity": "error"
+    },
+    {
+      "column": 53,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `reprojection_error_standard_deviation`",
+      "severity": "error"
+    },
+    {
+      "column": 57,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `absolute_position_constraint_error_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 54,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `absolute_pose_translation_error_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 52,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `absolute_pose_rotation_error_degrees`",
+      "severity": "error"
+    },
+    {
+      "column": 54,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `relative_pose_translation_error_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 52,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `relative_pose_rotation_error_degrees`",
+      "severity": "error"
+    },
+    {
+      "column": 54,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `relative_constraint_use_pose_covariance`",
+      "severity": "error"
+    },
+    {
+      "column": 38,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `extrinsic_error_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 39,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `extrinsic_error_degrees`",
+      "severity": "error"
+    },
+    {
+      "column": 44,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `do_rolling_shutter_correction`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `ba_frame_type` with type `Literal['CAMERA_FRAME', 'VEHICLE_FRAME', 'VEHICLE_RIG']` in function `BundleAdjustmentConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_cudss_solver`",
+      "severity": "error"
+    },
+    {
+      "column": 43,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `minimizer_progress_to_stdout`",
+      "severity": "error"
+    },
+    {
+      "column": 22,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `verbose`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `match_threshold`",
+      "severity": "error"
+    },
+    {
+      "column": 25,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `match_top_k`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `num_points_tolerance_fraction`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `global_non_max_method` with type `Literal['NONE', 'SUPPRESSION_VIA_SQUARE_COVERING', 'TOP_M']` in function `LightGlueConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 39,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `aliked_detector`",
+      "severity": "error"
+    },
+    {
+      "column": 44,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `super_point_detector`",
+      "severity": "error"
+    },
+    {
+      "column": 55,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `search_translation_threshold_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 53,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `search_rotation_threshold_degrees`",
+      "severity": "error"
+    },
+    {
+      "column": 46,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_frame_pair_size_per_file`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_time_interval_between_keyframes_seconds`",
+      "severity": "error"
+    },
+    {
+      "column": 57,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_distance_between_keyframes_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 52,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `collection_time_interval_seconds`",
+      "severity": "error"
+    },
+    {
+      "column": 46,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_keyframes_per_collection`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `search_method` with type `Literal['IMAGE_RETRIEVAL', 'POSE_GRAPH_ASSOCIATION', 'RADIUS_SEARCH', 'TRACK_2D_OVERLAP_IR']` in function `MatchPairSelectConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_downsampling`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `query_result_number`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_shared_word_number`",
+      "severity": "error"
+    },
+    {
+      "column": 29,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `lightglue_params`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `matching_params`",
+      "severity": "error"
+    },
+    {
+      "column": 51,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `verification_config`",
+      "severity": "error"
+    },
+    {
+      "column": 39,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `verification_config`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `verification_config`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `verification_config`",
+      "severity": "error"
+    },
+    {
+      "column": 58,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `verification_config`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_pixel_error`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_ransac_confidence`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `connected_keyframe_num`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_closure_min_words`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_closure_query_count`",
+      "severity": "error"
+    },
+    {
+      "column": 47,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_closure_interval_ratio`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_incremental`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_residual_weight`",
+      "severity": "error"
+    },
+    {
+      "column": 39,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `good_loop_threshold`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `num_votes`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_switchable_pgo`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `confidence_to_pose_error_ratio`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_edge_prune_threshold`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `point3d_max_error`",
+      "severity": "error"
+    },
+    {
+      "column": 58,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_edge_translation_threshold_meters`",
+      "severity": "error"
+    },
+    {
+      "column": 56,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `loop_edge_rotation_threshold_degrees`",
+      "severity": "error"
+    },
+    {
+      "column": 54,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_sequential_edge_pose_estimation`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `optimization_config`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_num_matches_per_pair`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `depth_threshold`",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `search_depth`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_correspondences`",
+      "severity": "error"
+    },
+    {
+      "column": 43,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `initial_max_pixel_error`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `final_max_pixel_error`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_triangulation_deg`",
+      "severity": "error"
+    },
+    {
+      "column": 38,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_ransac_iteration`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `min_num_samples`",
+      "severity": "error"
+    },
+    {
+      "column": 47,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `iterative_triangulation_times`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `maximum_cache_frame_size`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `num_ba_iterations`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `max_observation_change`",
+      "severity": "error"
+    },
+    {
+      "column": 29,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `num_threads`",
+      "severity": "error"
+    },
+    {
+      "column": 29,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `random_seed`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `triangulation_method` with type `Literal['MIDPOINT', 'NORMALIZED_COORDINATES', 'NORMALIZED_COORDINATES_WITH_DEPTH', 'PIXEL_COORDINATES']` in function `VisionMappingConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `pose_constrains_type` with type `Literal['AUTO', 'CONSTANT_CONSTRAINS', 'POSITION_CONSTRAINS', 'RELATIVE_CONSTRAINS']` in function `VisionMappingConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_camera_extrinsic_constraint`",
+      "severity": "error"
+    },
+    {
+      "column": 47,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_relative_pose_constraint`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_absolute_pose_constraints`",
+      "severity": "error"
+    },
+    {
+      "column": 52,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `use_absolute_position_constraints`",
+      "severity": "error"
+    },
+    {
+      "column": 59,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `extrinsic_max_timestamp_diff_microseconds`",
+      "severity": "error"
+    },
+    {
+      "column": 64,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `relative_pose_measurement_min_timestamp_gap_us`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/config.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `localization_mode` with type `Literal['ADJUST', 'FIX', 'NONE', 'PRE_BUILD']` in function `VisionMappingConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `refine_ba`",
+      "severity": "error"
+    },
+    {
+      "column": 46,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `image_pair_min_shared_points`",
+      "severity": "error"
+    },
+    {
+      "column": 54,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `refine_ba_use_fixed_max_pixel_error`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `refine_ba_avoid_loss_function`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "colsfm/config.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `bundle_adjustment_config`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "colsfm/extrinsic_costs.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/extrinsic_costs.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 43,
+      "path": "colsfm/extrinsic_costs.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "colsfm/extrinsic_solve.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 22,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `initial_pose_type` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `values_by_name`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_params_id_to_camera_params`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 74,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 52,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 76,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 29,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 60,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 85,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 19,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `values_by_name`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `row_count` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `column_count` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 95,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 36,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 32,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_to_vehicle_transform`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `projection_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `distortion_coefficients`",
+      "severity": "error"
+    },
+    {
+      "column": 45,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_params_id_to_camera_params`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `stereo_pair`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `stereo_pair`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `stereo_pair`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `left_camera_param_id` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `right_camera_param_id` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `baseline_meters` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 59,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_projection_model_type`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 20,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 25,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `image_width`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `image_height`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `projection_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 47,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `distortion_coefficients`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/frames_meta.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `projection_model` with type `Literal['DISTORTED_PINHOLE', 'FTHETA_WINDSHIELD', 'OPENCV_FISHEYE', 'PINHOLE']` in function `CameraParams.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `rolling_shutter_delay_microseconds`",
+      "severity": "error"
+    },
+    {
+      "column": 22,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 48,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_params_id_to_camera_params`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `stereo_pair`",
+      "severity": "error"
+    },
+    {
+      "column": 103,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `initial_pose_type`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "colsfm/frames_meta.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `initial_pose_type` with type `Literal['ALIGNMENT', 'EGO_MOTION', 'GPS_IMU', 'MAP_POSE', 'SESSION_EGO_MOTION']` in function `FramesMeta.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 91,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `detector_type`",
+      "severity": "error"
+    },
+    {
+      "column": 95,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `descriptor_type`",
+      "severity": "error"
+    },
+    {
+      "column": 77,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_params_id_to_session_name`",
+      "severity": "error"
+    },
+    {
+      "column": 67,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `track_id_to_track_name`",
+      "severity": "error"
+    },
+    {
+      "column": 65,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `track_id_to_bag_name`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keypoint_feature_has_depth`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/frames_meta.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `local_sector_key`",
+      "severity": "error"
+    },
+    {
+      "column": 24,
+      "path": "colsfm/mapping.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `ba_termination` with type `Literal['CONVERGENCE', 'FAILURE', 'NO_CONVERGENCE']` in function `colsfm.mapping_result.PolishStats.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 32,
+      "path": "colsfm/mapping.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `ba_termination` with type `Literal['CONVERGENCE', 'FAILURE', 'NO_CONVERGENCE']` in function `colsfm.mapping_result.RoundStats.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 101,
+      "path": "colsfm/pairs.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `frame_pairs`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "colsfm/pose_graph.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "colsfm/raco_export.py",
+      "name": "bad-override",
+      "concise_description": "Class member `StaticBatchedCusfmExtractor.forward` overrides parent class `CusfmExtractor` in an inconsistent manner",
+      "severity": "error"
+    },
+    {
+      "column": 43,
+      "path": "colsfm/raco_export.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `tuple[Literal[0], Literal[0], Literal[0], SymInt | int]` is not assignable to parameter `pad` with type `Sequence[int]` in function `torch._C._nn.pad`",
+      "severity": "error"
+    },
+    {
+      "column": 44,
+      "path": "colsfm/raco_export.py",
+      "name": "bad-assignment",
+      "concise_description": "`float | Unknown` is not assignable to `SymInt | int`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "colsfm/raco_export.py",
+      "name": "bad-assignment",
+      "concise_description": "`Tensor | bool` is not assignable to `Tensor`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/raco_export.py",
+      "name": "bad-specialization",
+      "concise_description": "`object` is not assignable to any of constraints `BFLOAT16`, `DOUBLE`, `FLOAT`, `FLOAT16`, `INT16`, `INT32`, `INT64`, `INT8`, `UINT16`, `UINT32`, `UINT64`, `UINT8` of type variable `T_Div`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "colsfm/reconstruction.py",
+      "name": "bad-return",
+      "concise_description": "Returned type `Rigid3d | None` is not assignable to declared return type `Rigid3d`",
+      "severity": "error"
+    },
+    {
+      "column": 40,
+      "path": "colsfm/rig_calibration.py",
+      "name": "unsupported-operation",
+      "concise_description": "`*` is not supported between `None` and `Rigid3d`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-module-attribute",
+      "concise_description": "Could not import `runtime` from `cuda.bindings`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `init_libnvinfer_plugins` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Runtime` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Runtime` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ICudaEngine` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 22,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ICudaEngine` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `IExecutionContext` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 53,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `TensorIOMode` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 53,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `TensorIOMode` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 26,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 14,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Builder` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Builder` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 14,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `INetworkDefinition` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 71,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `NetworkDefinitionCreationFlag` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ITensor` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 77,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `uint8` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 14,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ITensor` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 56,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `float32` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `IShuffleLayer` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Permutation` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 20,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ITensor` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 10,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ITensor` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 18,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ITensor` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ITensor` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 69,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ElementWiseOperation` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `IBuilderConfig` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `MemoryPoolType` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 14,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `IOptimizationProfile` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `IHostMemory` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 30,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Logger` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Runtime` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `Runtime` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ICudaEngine` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 22,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `ICudaEngine` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 23,
+      "path": "colsfm/tensorrt_runtime.py",
+      "name": "missing-attribute",
+      "concise_description": "No attribute `IExecutionContext` in module `tensorrt`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "colsfm/vocab_tree.py",
+      "name": "bad-assignment",
+      "concise_description": "`csr_array` is not assignable to `csr_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "colsfm/vocab_tree.py",
+      "name": "bad-assignment",
+      "concise_description": "`csc_array` is not assignable to `csc_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "colsfm/walkthrough.py",
+      "name": "bad-assignment",
+      "concise_description": "`dict[StageName, float]` is not assignable to attribute `seconds_by_stage` with type `dict[str, float]`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/conftest.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/conftest.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/conftest.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/loop_helpers.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `sensor_meta_data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `calibration_parameters`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_projection_model_type` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 44,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `values_by_name`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_params_id_to_camera_params`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "tests/mapping_helpers.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `optimize_extrinsics` with type `bool` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `fixed_camera_params_id` with type `int | None` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `num_threads` with type `int | None` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `use_gpu` with type `bool` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `ba_plan` with type `BaExecutionPlan` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `verbose` with type `bool` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/mapping_helpers.py",
+      "name": "bad-argument-type",
+      "concise_description": "Unpacked keyword argument `object` is not assignable to parameter `round_callback` with type `((RoundStats, Reconstruction) -> None) | None` in function `colsfm.mapping.MappingOptions.__replace__`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/probes/conftest.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `probes.synthetic`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/probes/conftest.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `probes.synthetic`",
+      "severity": "error"
+    },
+    {
+      "column": 51,
+      "path": "tests/probes/synthetic.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `probes.synthetic`",
+      "severity": "error"
+    },
+    {
+      "column": 19,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 11,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `rotation`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 24,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 36,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `max_num_iterations`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `num_threads`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `function_tolerance`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `gradient_tolerance`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `parameter_tolerance`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 9,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `rotation`",
+      "severity": "error"
+    },
+    {
+      "column": 38,
+      "path": "tests/probes/test_bundle_adjustment.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "tests/probes/test_camera_models.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `arg1` with type `Sequence[SupportsFloat | SupportsIndex]` in function `pycolmap._core.Camera.params`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "tests/probes/test_camera_models.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 35,
+      "path": "tests/probes/test_camera_models.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 21,
+      "path": "tests/probes/test_camera_models.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `arg1` with type `Sequence[SupportsFloat | SupportsIndex]` in function `pycolmap._core.Camera.params`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/probes/test_database.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `probes.synthetic`",
+      "severity": "error"
+    },
+    {
+      "column": 46,
+      "path": "tests/probes/test_database.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `descriptors` with type `FeatureDescriptors` in function `pycolmap._core.Database.write_descriptors`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "bad-assignment",
+      "concise_description": "`csr_array` is not assignable to `csr_matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `nfev`",
+      "severity": "error"
+    },
+    {
+      "column": 36,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `njev`",
+      "severity": "error"
+    },
+    {
+      "column": 56,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `cost`",
+      "severity": "error"
+    },
+    {
+      "column": 82,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `status`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/probes/test_pose_graph.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `object` has no attribute `status`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/probes/test_triangulation.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `probes.synthetic`",
+      "severity": "error"
+    },
+    {
+      "column": 20,
+      "path": "tests/probes/test_triangulation.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 19,
+      "path": "tests/probes/test_triangulation.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/probes/test_triangulation.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/probes/test_two_view_geometry.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `probes.synthetic`",
+      "severity": "error"
+    },
+    {
+      "column": 38,
+      "path": "tests/probes/test_two_view_geometry.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 38,
+      "path": "tests/probes/test_two_view_geometry.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_benchmark.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 8,
+      "path": "tests/test_extrinsic_refinement.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `pyceres`",
+      "severity": "error"
+    },
+    {
+      "column": 51,
+      "path": "tests/test_extrinsic_refinement.py",
+      "name": "bad-assignment",
+      "concise_description": "`ndarray[tuple[Any, ...], dtype[float64]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/test_gpu_preprocess.py",
+      "name": "missing-module-attribute",
+      "concise_description": "Could not import `runtime` from `cuda.bindings`",
+      "severity": "error"
+    },
+    {
+      "column": 37,
+      "path": "tests/test_gpu_preprocess.py",
+      "name": "bad-assignment",
+      "concise_description": "`list[Mat | ndarray[Any, dtype[floating | integer]] | None]` is not assignable to `list[ndarray]`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/test_gpu_preprocess.py",
+      "name": "missing-module-attribute",
+      "concise_description": "Could not import `runtime` from `cuda.bindings`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `loop_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `row_count` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `column_count` (not declared in `__slots__`)",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `data`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 49,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `axis_angle`",
+      "severity": "error"
+    },
+    {
+      "column": 5,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 51,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `translation`",
+      "severity": "error"
+    },
+    {
+      "column": 17,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `keyframes_metadata`",
+      "severity": "error"
+    },
+    {
+      "column": 18,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `camera_params_id_to_camera_params`",
+      "severity": "error"
+    },
+    {
+      "column": 14,
+      "path": "tests/test_loop_closure.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `Message` has no attribute `stereo_pair`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_loop_pose.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `loop_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/test_loop_pose.py",
+      "name": "unsupported-operation",
+      "concise_description": "`<` is not supported between `float` and `None`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "tests/test_loop_pose.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `dict[int, AnchorLandmarks]`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_mapping.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_mapping.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 19,
+      "path": "tests/test_mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 31,
+      "path": "tests/test_mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 27,
+      "path": "tests/test_mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 20,
+      "path": "tests/test_mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `inverse`",
+      "severity": "error"
+    },
+    {
+      "column": 50,
+      "path": "tests/test_mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `inverse`",
+      "severity": "error"
+    },
+    {
+      "column": 13,
+      "path": "tests/test_mapping.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_mapping_ba_backend.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_mapping_extrinsics.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_mapping_extrinsics.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_mapping_point_filters.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 29,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-assignment",
+      "concise_description": "`float | int | str | TextProto` is not assignable to `dict[str, list[float | int | str | TextProto]]`",
+      "severity": "error"
+    },
+    {
+      "column": 36,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-assignment",
+      "concise_description": "`float | int | str | TextProto` is not assignable to `dict[str, list[float | int | str | TextProto]]`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsFloat | SupportsIndex | str` in function `float.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 29,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsFloat | SupportsIndex | str` in function `float.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 41,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsFloat | SupportsIndex | str` in function `float.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `float`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `int`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `str`",
+      "severity": "error"
+    },
+    {
+      "column": 33,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-assignment",
+      "concise_description": "`float | int | str | Unknown | TextProto` is not assignable to `dict[str, list[float | int | str | TextProto]]`",
+      "severity": "error"
+    },
+    {
+      "column": 36,
+      "path": "tests/test_pose_graph.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of type `float | int | str | TextProto` has no attribute `get`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/test_pose_graph.py",
+      "name": "not-iterable",
+      "concise_description": "`in` is not supported between `Literal['pose_covariance']` and `float`",
+      "severity": "error"
+    },
+    {
+      "column": 12,
+      "path": "tests/test_pose_graph.py",
+      "name": "not-iterable",
+      "concise_description": "`in` is not supported between `Literal['pose_covariance']` and `int`",
+      "severity": "error"
+    },
+    {
+      "column": 42,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | Unknown | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsFloat | SupportsIndex | str` in function `float.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 62,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `float`",
+      "severity": "error"
+    },
+    {
+      "column": 62,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `int`",
+      "severity": "error"
+    },
+    {
+      "column": 62,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `str`",
+      "severity": "error"
+    },
+    {
+      "column": 62,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `float`",
+      "severity": "error"
+    },
+    {
+      "column": 62,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `int`",
+      "severity": "error"
+    },
+    {
+      "column": 62,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `str`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsIndex | SupportsInt | SupportsTrunc | str` in function `int.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 28,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsIndex | SupportsInt | SupportsTrunc | str` in function `int.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 55,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `float`",
+      "severity": "error"
+    },
+    {
+      "column": 55,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `int`",
+      "severity": "error"
+    },
+    {
+      "column": 55,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `str`",
+      "severity": "error"
+    },
+    {
+      "column": 55,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | Unknown | TextProto` is not assignable to parameter `message` with type `dict[str, list[float | int | str | TextProto]]` in function `rigid_from_text_proto`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "tests/test_pose_graph.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `float | int | str | TextProto` is not assignable to parameter `x` with type `Buffer | SupportsIndex | SupportsInt | SupportsTrunc | str` in function `int.__new__`",
+      "severity": "error"
+    },
+    {
+      "column": 58,
+      "path": "tests/test_raco_backend.py",
+      "name": "bad-assignment",
+      "concise_description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_reconstruction.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_rerun_log.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 16,
+      "path": "tests/test_rerun_log.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `Iterable[Container | View] | tuple[Container | View, ...]` is not assignable to parameter `obj` with type `Sized` in function `len`",
+      "severity": "error"
+    },
+    {
+      "column": 63,
+      "path": "tests/test_retrieval.py",
+      "name": "bad-argument-type",
+      "concise_description": "Argument `str` is not assignable to parameter `backend` with type `Literal['auto', 'brute_force', 'vocab']` in function `colsfm.retrieval.RetrievalConfig.__init__`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_rig_calibration.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
+      "column": 46,
+      "path": "tests/test_rig_calibration.py",
+      "name": "bad-index",
+      "concise_description": "Cannot index into `dict[int, CameraParams]`",
+      "severity": "error"
+    },
+    {
+      "column": 36,
+      "path": "tests/test_rig_calibration.py",
+      "name": "missing-attribute",
+      "concise_description": "Object of class `NoneType` has no attribute `matrix`",
+      "severity": "error"
+    },
+    {
+      "column": 34,
+      "path": "tests/test_rig_calibration.py",
+      "name": "bad-assignment",
+      "concise_description": "`Rigid3d | None` is not assignable to `Rigid3d`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_trajectory.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    }
+  ]
+}

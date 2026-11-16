@@ -1,3 +1,9 @@
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
 packages/mast3r-slam/media/*.gif filter=lfs diff=lfs merge=lfs -text
+
+# recipes/colmap-src: patches and their checksum manifest reach rattler-build byte for byte.
+recipes/colmap-src/patches/*.patch -text
+recipes/colmap-src/patches/SHA256SUMS -text
+# ~3 MiB of Symforce-generated CUDA; read it with `git diff --text`.
+recipes/colmap-src/patches/add-opencv-fisheye-generated-*.patch linguist-generated=true -diff

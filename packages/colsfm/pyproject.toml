@@ -1,0 +1,46 @@
+[project]
+name = "colsfm"
+version = "0.1.0"
+description = "colsfm: an open rebuild of NVIDIA cuSFM on pycolmap — rig-aware SfM from an initial trajectory, read from the Rerun catalog"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only. pycolmap (with CASPAR and the OPENCV_FISHEYE adapter) is the `recipes/colmap-src` conda package;
+# pyceres, protobuf and torch come from the `colsfm` and `cuda` features. simplecv and trtkit are workspace packages.
+dependencies = ["simplecv", "trtkit"]
+
+[tool.uv.sources]
+simplecv = { path = "../simplecv", editable = true }
+trtkit = { path = "../trtkit", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["colsfm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest-beartype: beartype checks colsfm only while pytest runs (AGENTS.md, Beartype).
+beartype_packages = ["colsfm"]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e colsfm-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e colsfm-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+# A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+filterwarnings = ["ignore::beartype.roar.BeartypeDecorHintPep613DeprecationWarning", "error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["colsfm", "tools", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*"]
+min_confidence = 80
+# Protocol parameter names (schema.DescriptorPoolLike) are part of the protocol, not dead code.
+ignore_names = ["pytestmark", "file_desc_proto"]
