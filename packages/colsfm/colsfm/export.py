@@ -62,6 +62,10 @@ MERGED_POSE_FILE_NAME: Final[str] = "merged_pose_file.tum"
 KEYFRAME_METADATA_SUBPATH: Final[Path] = Path("kpmap") / "keyframes" / "frames_meta.json"
 """Where the optimised metadata lands inside the workspace."""
 
+EVERY_FRAME_METADATA_SUBPATH: Final[Path] = Path("kpmap") / "every_frame" / "frames_meta.json"
+"""Every input frame posed: the mapped keyframes optimised, the others re-anchored on them (`colsfm.frame_poses`).
+colsfm's own addition to cuSFM's layout; the TUM files and the run layer are written from it."""
+
 RUNTIME_CSV_NAME: Final[str] = "runtime.csv"
 """Per-stage runtime log, appended to by every stage."""
 

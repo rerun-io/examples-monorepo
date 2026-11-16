@@ -6,6 +6,8 @@ loop_closure_interval_ratio: 0.05
 use_incremental: true
 loop_residual_weight: 0.25
 good_loop_threshold: 150
+# colsfm keeps one loop per query rig frame, i.e. num_votes: 1, and does not read this field; how many candidates
+# it verifies per rig frame is loop_candidates_per_frame in colsfm.toml.
 num_votes: 1
 optimization_config {
   # TRIVIAL

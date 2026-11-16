@@ -78,7 +78,7 @@ from colsfm.alignment import (
     rig_rigidity_spread_millimeters,
     rig_track_from_frames_meta,
 )
-from colsfm.export import KEYFRAME_METADATA_SUBPATH, RUNTIME_CSV_NAME, SPARSE_DIR_NAME, RuntimeRecord
+from colsfm.export import EVERY_FRAME_METADATA_SUBPATH, KEYFRAME_METADATA_SUBPATH, RUNTIME_CSV_NAME, SPARSE_DIR_NAME, RuntimeRecord
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, read_frames_meta
 from colsfm.geometry import MILLIMETRES_PER_METRE
 from colsfm.reconstruction import num_registered_images, registered_image_names
@@ -159,6 +159,9 @@ class RunArtifacts:
     """Rig trajectory over the samples the reconstruction registered."""
     runtime_seconds_by_stage: dict[Stage, float]
     """Wall clock per stage, from `runtime.csv`."""
+    every_frame: FramesMeta | None = None
+    """`kpmap/every_frame/frames_meta.json`: every input frame posed (`colsfm.frame_poses`), or None for a run that
+    predates it or a `pycusfm` reference run."""
 
     def points_xyz(self) -> Positions:
         """Sparse point positions in the run's world frame.
@@ -226,6 +229,7 @@ def read_run(run_dir: Path, name: str) -> RunArtifacts:
         frames_meta=frames_meta,
         track=rig_track_from_frames_meta(frames_meta, keep_image_names=registered_names),
         runtime_seconds_by_stage=read_stage_runtimes(run_dir / RUNTIME_CSV_NAME),
+        every_frame=read_frames_meta(run_dir / EVERY_FRAME_METADATA_SUBPATH) if (run_dir / EVERY_FRAME_METADATA_SUBPATH).is_file() else None,
     )
 
 

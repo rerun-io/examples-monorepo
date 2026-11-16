@@ -209,7 +209,8 @@ def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str 
     artifacts: RunArtifacts = read_run(run_dir, source)
     reconstruction: pycolmap.Reconstruction = artifacts.reconstruction
     registered: set[str] = {image.name for image in reconstruction.images.values() if image.has_pose}
-    times_ns, world_T_rig = rig_poses(artifacts.frames_meta, registered)
+    # One pose per input frame when the run wrote them; a run without them carries its registered keyframes.
+    times_ns, world_T_rig = rig_poses(artifacts.every_frame) if artifacts.every_frame is not None else rig_poses(artifacts.frames_meta, registered)
     metrics: ReconstructionMetrics = reconstruction_metrics(reconstruction)
 
     root: str = f"/world/runs/{source}"

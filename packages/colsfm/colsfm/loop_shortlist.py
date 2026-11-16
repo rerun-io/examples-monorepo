@@ -2,8 +2,8 @@
 
 The retrieval half of the loop funnel, and the half that reads no match at all:
 a query per keyframe of an allowed camera, the score gate, the time gate, the
-same-rig gate, one hit per `|dt|` band per query, then one hit per unordered rig
-pair. `colsfm.loop_closure.plan_loop_search` is its only caller, and the fact
+same-rig gate, the `loop_candidates_per_frame` best-scoring target rig frames per query rig frame,
+then one hit per unordered rig pair. `colsfm.loop_closure.plan_loop_search` is its only caller, and the fact
 that none of this needs a match is exactly why the pipeline's discovery run --
 which learned the pair list by *executing* the whole search against a matcher
 that returned nothing -- was unnecessary.
@@ -14,12 +14,11 @@ too close (spec §6.4). `RetrievalIndex.search` applies it inside the ranking wa
 instead, which keeps all `top_k` slots useful and reports what the gate dropped
 from the same walk.
 """
+
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-
-import numpy as np
 
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.geometry import MICROSECONDS_PER_SECOND
@@ -47,8 +46,8 @@ class FunnelCounters:
     """Hits dropped by the temporal gate."""
     rejected_by_same_rig: int = 0
     """Hits whose rig frame is the query's own."""
-    after_banding: int = 0
-    """Hits left after `select_best_candidates`."""
+    after_candidates: int = 0
+    """Hits left after each query rig frame kept its `loop_candidates_per_frame` best target rig frames."""
     after_deduplication: int = 0
     """Rig pairs left after one hit per unordered rig pair."""
     rejected_no_matches: int = 0
@@ -61,6 +60,10 @@ class FunnelCounters:
     """Rig pairs the direction cross-check dropped."""
     verified: int = 0
     """Rig pairs that produced a metric relative pose."""
+    not_best: int = 0
+    """Verified rig pairs that were no voting query rig frame's best by inliers."""
+    below_good_loop: int = 0
+    """Query rig frames whose best verified pair had fewer than `good_loop_threshold` inliers."""
 
     def count(self, rejection: RigPoseRejection) -> None:
         """Add one `colsfm.loop_pose` rejection to the counter that owns it.
@@ -123,11 +126,12 @@ class LoopClosureDiagnostics:
     edges: int
     """Edges left after `gate_loop_edges`, i.e. what the caller receives."""
 
+
 @dataclass(frozen=True, slots=True)
 class RetrievalHit:
     """One retrieval hit that passed the score, time and rig gates, before any matching.
 
-    The funnel bands and deduplicates these, and only the survivors are handed to the
+    The funnel keeps each query rig frame's best candidates, deduplicates them, and only the survivors are handed to the
     matcher. Nothing here needs an image pair to have been matched, which is what lets the
     stage name every pair it will need in a single dry run (`find_loop_edges`).
     """
@@ -143,46 +147,7 @@ class RetrievalHit:
     score: float
     """Retrieval score in `[0, 1]`."""
     delta_seconds: float
-    """`t_query - t_candidate` in seconds; `select_best_candidates` bands on its magnitude."""
-
-
-def select_best_candidates(hits: Sequence[RetrievalHit], band_seconds: float) -> list[RetrievalHit]:
-    """`SelectBestCandidates`: keep one hit per band of `|dt|` (spec §6.4).
-
-    Sorts ascending by `|dt|` and walks greedily: a hit more than `band_seconds` beyond the
-    last emitted one opens a new band, otherwise it replaces the last emitted one when it
-    scores higher. This is what stops a single revisit producing 20 near-duplicate loop
-    edges (spec §7.1 item 5).
-
-    **Departure from the blob, measured.** `SelectBestCandidates` ranks a band first by the
-    geometric inlier count and only then by the retrieval score. Ranking by inliers needs
-    every candidate matched *before* the band is chosen, which is 15 325 image pairs on
-    RoboCap where the banded shortlist needs 6 000 — and the pipeline has to name every pair
-    it will match in one dry run, before any match result exists (`find_loop_edges`). The
-    retrieval score is the only ranking available at that point. Measured on RoboCap the two
-    orders pick nearly the same pairs, because a band is a 10 s window of one revisit and its
-    candidates are near-duplicates of each other.
-
-    Args:
-        hits: Retrieval hits for one query keyframe that passed the score and time gates.
-        band_seconds: Band width in seconds; the blob uses
-            `loop_interval_threshold_in_seconds`.
-
-    Returns:
-        The kept hits, in ascending `|dt|` order.
-    """
-    ordered: list[RetrievalHit] = sorted(hits, key=lambda hit: (abs(hit.delta_seconds), hit.candidate_keyframe_id))
-    kept: list[RetrievalHit] = []
-    last_gap_seconds: float = -np.inf
-    for hit in ordered:
-        gap_seconds: float = abs(hit.delta_seconds)
-        if gap_seconds - last_gap_seconds > band_seconds:
-            kept.append(hit)
-            last_gap_seconds = gap_seconds
-            continue
-        if hit.score > kept[-1].score:
-            kept[-1] = hit
-    return kept
+    """`t_query - t_candidate` in seconds."""
 
 
 def query_camera_ids(frames_meta: FramesMeta) -> set[int]:
@@ -250,6 +215,17 @@ def hits_for_query(
     return hits
 
 
+@dataclass(frozen=True, slots=True)
+class Shortlist:
+    """The rig pairs to measure, and which query rig frames kept each among their candidates."""
+
+    hits: dict[tuple[int, int], RetrievalHit]
+    """The best-scoring hit per unordered rig pair, keyed by that pair."""
+    queried_by: dict[tuple[int, int], frozenset[int]]
+    """Per unordered rig pair, the query rig frames that kept it among their `loop_candidates_per_frame`; each of them later keeps only
+    its best measured pair."""
+
+
 def shortlist_rig_pairs(
     frames_meta: FramesMeta,
     index: RetrievalIndex,
@@ -257,55 +233,64 @@ def shortlist_rig_pairs(
     timestamps_us: Mapping[int, int],
     *,
     top_k: int,
-    candidate_band_seconds: float,
+    loop_candidates_per_frame: int,
     gap_seconds: float,
     score_threshold: float,
     counters: FunnelCounters,
-) -> dict[tuple[int, int], RetrievalHit]:
-    """Retrieve, gate, band and deduplicate down to one hit per unordered rig pair.
+) -> Shortlist:
+    """Retrieve, gate, keep each query rig frame's `loop_candidates_per_frame` best target rig frames, then deduplicate.
 
     The blob applies the time gate AFTER retrieval, so temporal neighbours eat slots out of
     its top-20 and it needs an early abort when more than half the hits are too close
     (spec §6.4). `RetrievalIndex.search` applies it inside the ranking walk instead, which
     keeps all `top_k` slots useful and reports what the gate dropped from the same walk.
 
+    A query rig frame pools the hits of all its query keyframes, keeps the best score per target rig frame and then
+    the `loop_candidates_per_frame` best target rig frames. This replaced one hit per 10 s `|dt|` band per query keyframe, which let a
+    long sequence measure up to (length / 10 s) candidates per query and grew the loop pairs as keyframes^1.8 on MSD.
+
     Args:
         frames_meta: The parsed metadata.
         index: The retrieval index.
         keyframe_by_id: Every keyframe, indexed by id.
         timestamps_us: Capture time per keyframe id.
-        top_k: Retrieval hits to ask the index for per query.
-        candidate_band_seconds: Band width `select_best_candidates` collapses within.
+        top_k: Retrieval hits to ask the index for per query keyframe.
+        loop_candidates_per_frame: Target rig frames each query rig frame keeps, best retrieval score first.
         gap_seconds: The temporal gate actually applied.
         score_threshold: The resolved retrieval score gate.
         counters: Diagnostic counters, mutated in place.
 
     Returns:
-        The best-scoring hit per unordered rig pair, keyed by that pair.
+        The best-scoring hit per unordered rig pair and the query rig frames that kept it among their candidates.
     """
     allowed_camera_ids: set[int] = query_camera_ids(frames_meta)
     gap_us: int = round(gap_seconds * MICROSECONDS_PER_SECOND)
     indexed: set[int] = set(index.image_ids)
 
-    banded: list[RetrievalHit] = []
+    kept: list[RetrievalHit] = []
     for rig in frames_meta.rig_frames():
+        best_by_target: dict[int, RetrievalHit] = {}
         for query_id in rig.keyframe_ids:
             query: KeyframeMeta = keyframe_by_id[query_id]
             if query.camera_params_id not in allowed_camera_ids or query_id not in indexed:
                 continue
             counters.queries += 1
             answer: RetrievalQuery = index.search(query_id, top_k=top_k, min_time_gap_us=gap_us, timestamps=timestamps_us)
-            for_query: list[RetrievalHit] = hits_for_query(query, rig.synced_sample_id, answer, keyframe_by_id, score_threshold, counters)
-            banded.extend(select_best_candidates(for_query, candidate_band_seconds))
+            for hit in hits_for_query(query, rig.synced_sample_id, answer, keyframe_by_id, score_threshold, counters):
+                incumbent: RetrievalHit | None = best_by_target.get(hit.target_rig_id)
+                if incumbent is None or hit.score > incumbent.score:
+                    best_by_target[hit.target_rig_id] = hit
+        ranked: list[RetrievalHit] = sorted(best_by_target.values(), key=lambda hit: (-hit.score, hit.target_rig_id))
+        kept.extend(ranked[:loop_candidates_per_frame])
 
-    counters.after_banding = len(banded)
-    shortlist: dict[tuple[int, int], RetrievalHit] = {}
-    for hit in banded:
+    counters.after_candidates = len(kept)
+    hits: dict[tuple[int, int], RetrievalHit] = {}
+    queried_by: dict[tuple[int, int], set[int]] = {}
+    for hit in kept:
         key: tuple[int, int] = normalise_pair(hit.source_rig_id, hit.target_rig_id)
-        incumbent: RetrievalHit | None = shortlist.get(key)
+        queried_by.setdefault(key, set()).add(hit.source_rig_id)
+        incumbent = hits.get(key)
         if incumbent is None or hit.score > incumbent.score:
-            shortlist[key] = hit
-    counters.after_deduplication = len(shortlist)
-    return shortlist
-
-
+            hits[key] = hit
+    counters.after_deduplication = len(hits)
+    return Shortlist(hits=hits, queried_by={key: frozenset(rigs) for key, rigs in queried_by.items()})

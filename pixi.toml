@@ -4131,13 +4131,15 @@ cwd = "packages/colsfm"
 description = "Download the 226-frame r2b Galileo sample (8 pinhole cameras, ground truth) from upstream PyCuSFM at a pinned commit"
 
 [feature.colsfm.tasks.colsfm-galileo]
-cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo"
+# --min-inter-frame-distance 0.0: the Galileo demo is a 0.93 s, 0.66 m sweep of 29 rig frames, and cuSFM's demo keeps all 226 keyframes.
+cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo --min-inter-frame-distance 0.0"
 depends-on = ["colsfm-download-galileo", "colsfm-raco-export", "colsfm-download-flexglue"]
 cwd = "packages/colsfm"
 description = "The default pipeline (RaCo, FlexGlue, loop closure, CASPAR + Ceres polish, extrinsic refinement) on Galileo"
 
 [feature.colsfm.tasks.colsfm-galileo-ablation]
-cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo_ablation --features-backend pycolmap --matching-backend pycolmap --ba-backend ceres --no-optimize-extrinsics --no-loop-closure"
+# Every keyframe, as colsfm-galileo.
+cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo_ablation --min-inter-frame-distance 0.0 --features-backend pycolmap --matching-backend pycolmap --ba-backend ceres --no-optimize-extrinsics --no-loop-closure"
 depends-on = ["colsfm-download-galileo"]
 cwd = "packages/colsfm"
 description = "The no-engine ablation on Galileo (COLMAP's ALIKED + LightGlue, Ceres, no refinement, no loops): the 4.33 mm / 19.4 s comparison"
@@ -4155,7 +4157,8 @@ cwd = "packages/colsfm"
 description = "The default pipeline on KITTI 06 from the Spark catalog, starting from the cuvslam layer (the cuVSLAM SLAM trajectory)"
 
 [feature.colsfm.tasks.colsfm-walkthrough]
-cmd = "python tools/walkthrough.py --input-dir data/r2b_galileo"
+# Every keyframe, as colsfm-galileo.
+cmd = "python tools/walkthrough.py --input-dir data/r2b_galileo --min-inter-frame-distance 0.0"
 depends-on = ["colsfm-download-galileo"]
 cwd = "packages/colsfm"
 description = "Run Galileo stage by stage and write the Rerun walkthrough to packages/colsfm/data/rrd/galileo_walkthrough.rrd"

@@ -36,8 +36,45 @@ from typing import Final, Literal, TypeAlias
 
 from google.protobuf import text_format
 from google.protobuf.message import Message
+from serde import SerdeError, serde
+from serde.core import coerce
+from serde.toml import from_toml
 
 from colsfm.schema import CusfmSchema, load_schema
+
+COLSFM_PROFILE_FILE: Final[str] = "colsfm.toml"
+"""colsfm's own settings beside a profile's cuSFM `.pb.txt` files; optional, every field has a default."""
+
+
+@serde(type_check=coerce, deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class ColsfmProfileConfig:
+    """A profile's `colsfm.toml`: the knobs colsfm adds that cuSFM's schema has no field for."""
+
+    loop_candidates_per_frame: int = 3
+    """`colsfm.loop_closure.LoopClosureConfig.loop_candidates_per_frame`."""
+
+
+def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
+    """Read a profile's `colsfm.toml`, or the defaults when it has none.
+
+    Args:
+        directory: The profile directory.
+
+    Returns:
+        The settings.
+
+    Raises:
+        ValueError: When the file names an unknown field or a value of the wrong type.
+    """
+    path: Path = directory / COLSFM_PROFILE_FILE
+    if not path.is_file():
+        return ColsfmProfileConfig()
+    try:
+        return from_toml(ColsfmProfileConfig, path.read_text())
+    except SerdeError as error:
+        raise ValueError(f"{path}: {error}") from error
+
 
 LossFunctionType: TypeAlias = Literal["TRIVIAL", "SOFT_L1", "CAUCHY", "HUBER"]
 """Ceres robust loss applied to the whitened residual."""
@@ -243,40 +280,33 @@ class BundleAdjustmentConfig:
 
 @dataclass(frozen=True, slots=True)
 class PoseGraphConfig:
-    """`pose_graph_config.pb.txt`: the rig-level pose graph."""
+    """`pose_graph_config.pb.txt`: the rig-level pose graph and the loop search, as colsfm uses them.
+
+    Only the fields a stage reads are carried. The proto's other fields — `loop_closure_min_words`,
+    `use_incremental`, `use_switchable_pgo`, `confidence_to_pose_error_ratio`, `loop_edge_prune_threshold`,
+    `point3d_max_error`, `use_sequential_edge_pose_estimation`, `optimization_config` and `num_votes` (colsfm behaves as
+    `num_votes: 1`) — drive parts of the blob
+    colsfm does not reimplement (an incremental and switchable pose graph, BoW word voting, its own Ceres settings for
+    the pose graph), so they are parsed by the proto and dropped here rather than carried unused.
+    """
 
     connected_keyframe_num: int
     """How many previous rig frames each node gets a CONSECUTIVE edge to."""
-    loop_closure_min_words: int
-    """Minimum shared BoW words for a loop candidate."""
     loop_closure_query_count: int
-    """Retrieval candidates queried per rig frame."""
+    """Retrieval hits asked for per query keyframe (`colsfm.loop_closure.LoopClosureConfig.top_k`)."""
     loop_closure_interval_ratio: float
     """Minimum loop separation as a fraction of the session duration."""
-    use_incremental: bool
-    """Grow the graph incrementally rather than in one batch."""
     loop_residual_weight: float
     """Weight applied to LOOP edge residuals relative to CONSECUTIVE ones."""
     good_loop_threshold: float
-    """Score above which a loop candidate is accepted outright."""
-    num_votes: int
-    """Votes required before a loop candidate becomes an edge."""
-    use_switchable_pgo: bool
-    """Attach a switch variable to each loop edge (switchable-constraint PGO)."""
-    confidence_to_pose_error_ratio: float
-    """Converts a match confidence into a pose-error sigma."""
-    loop_edge_prune_threshold: float
-    """Residual above which a loop edge is dropped after a solve."""
-    point3d_max_error: float
-    """Maximum 3-D point error accepted when estimating a loop edge."""
+    """Inliers the best measured loop of a query rig frame needs to become an edge (`LoopClosureConfig.good_loop_threshold`)."""
+    loop_candidates_per_frame: int
+    """From the profile's `colsfm.toml`, not the proto (`LoopClosureConfig.loop_candidates_per_frame`). cuSFM's
+    `num_votes` is not carried: colsfm keeps one loop per query rig frame, which is cuSFM's `num_votes: 1`."""
     loop_edge_translation_threshold_meters: float
     """Translation gate a loop edge must pass; 0.0 disables the gate."""
     loop_edge_rotation_threshold_degrees: float
     """Rotation gate a loop edge must pass; 0.0 disables the gate."""
-    use_sequential_edge_pose_estimation: bool
-    """Re-estimate CONSECUTIVE edges from matches instead of trusting the input poses."""
-    optimization: BundleAdjustmentConfig
-    """Ceres settings for the pose-graph solve."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,21 +567,13 @@ def read_config_directory(
         ),
         pose_graph=PoseGraphConfig(
             connected_keyframe_num=int(pose_graph_message.connected_keyframe_num),
-            loop_closure_min_words=int(pose_graph_message.loop_closure_min_words),
             loop_closure_query_count=int(pose_graph_message.loop_closure_query_count),
             loop_closure_interval_ratio=float(pose_graph_message.loop_closure_interval_ratio),
-            use_incremental=bool(pose_graph_message.use_incremental),
             loop_residual_weight=float(pose_graph_message.loop_residual_weight),
             good_loop_threshold=float(pose_graph_message.good_loop_threshold),
-            num_votes=int(pose_graph_message.num_votes),
-            use_switchable_pgo=bool(pose_graph_message.use_switchable_pgo),
-            confidence_to_pose_error_ratio=float(pose_graph_message.confidence_to_pose_error_ratio),
-            loop_edge_prune_threshold=float(pose_graph_message.loop_edge_prune_threshold),
-            point3d_max_error=float(pose_graph_message.point3d_max_error),
+            loop_candidates_per_frame=read_colsfm_profile(directory).loop_candidates_per_frame,
             loop_edge_translation_threshold_meters=float(pose_graph_message.loop_edge_translation_threshold_meters),
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
-            use_sequential_edge_pose_estimation=bool(pose_graph_message.use_sequential_edge_pose_estimation),
-            optimization=_bundle_adjustment(pose_graph_message.optimization_config, resolved_schema),
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),

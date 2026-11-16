@@ -147,8 +147,10 @@ def log_overview(
     Returns:
         The numbers the notes table shows.
     """
-    output_times_ns, output_poses = rig_poses(
-        artifacts.frames_meta, {image.name for image in artifacts.reconstruction.images.values() if image.has_pose}
+    output_times_ns, output_poses = (
+        rig_poses(artifacts.every_frame)
+        if artifacts.every_frame is not None
+        else rig_poses(artifacts.frames_meta, {image.name for image in artifacts.reconstruction.images.values() if image.has_pose})
     )
     input_error, input_fit = trajectory_error(input_times_ns, input_poses, ground_truth)
     output_error, output_fit = trajectory_error(output_times_ns, output_poses, ground_truth)

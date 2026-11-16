@@ -82,6 +82,11 @@ def _require(*paths: Path) -> None:
         pytest.skip(f"missing asset(s): {', '.join(missing)}")
 
 
+GALILEO_EVERY_FRAME_M: Final[float] = 0.0
+"""Galileo keeps every keyframe, as cuSFM's demo does: it is a 0.93 s, 0.66 m sweep of 29 rig frames, so the pipeline's
+0.10 m / 15 deg default would leave a handful of rig frames. 0.0 turns both gates off (they are OR-combined with `>=`)."""
+
+
 def _galileo_metrics(output_dir: Path) -> RunMetrics:
     input_track: RigTrack = rig_track_from_frames_meta(read_frames_meta(GALILEO_DIR / FRAMES_META_NAME))
     return compute_run_metrics(read_run(output_dir, "colsfm"), input_track, read_ground_truth(GALILEO_DIR))
@@ -96,6 +101,7 @@ def test_galileo_ablation_beats_the_cusfm_binary(tmp_path: Path) -> None:
         PipelineOptions(
             input_dir=GALILEO_DIR,
             output_dir=output_dir,
+            min_inter_frame_distance=GALILEO_EVERY_FRAME_M,
             features_backend="pycolmap",
             matching_backend="pycolmap",
             ba_backend="ceres",
@@ -121,7 +127,7 @@ def test_galileo_default_pipeline_stays_in_its_band(tmp_path: Path) -> None:
     _require(GALILEO_DIR / FRAMES_META_NAME, RACO_ONNX_PATH, *(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values()))
     output_dir: Path = tmp_path / "galileo_default"
     started: float = time.perf_counter()
-    run_pipeline(PipelineOptions(input_dir=GALILEO_DIR, output_dir=output_dir))
+    run_pipeline(PipelineOptions(input_dir=GALILEO_DIR, output_dir=output_dir, min_inter_frame_distance=GALILEO_EVERY_FRAME_M))
     wall: float = time.perf_counter() - started
     metrics: RunMetrics = _galileo_metrics(output_dir)
     assert metrics.vs_ground_truth is not None
