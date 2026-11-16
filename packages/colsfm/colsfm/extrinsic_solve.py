@@ -191,7 +191,7 @@ def _add_reprojection_blocks(
         blocks: PoseBlocks = poses[camera_params_id]
         vehicle_R_cam: Matrix3 = rotation_matrix_from_quat_xyzw(blocks.quat_xyzw, np.empty((3, 3), dtype=np.float64))
         inside: Bool[ndarray, " n_obs"] = in_camera_domain(
-            (gathered.points_in_vehicle - blocks.translation) @ vehicle_R_cam, camera_domain_angle(gathered.camera)
+            np.einsum("nj,ji->ni", gathered.points_in_vehicle - blocks.translation, vehicle_R_cam), camera_domain_angle(gathered.camera)
         )
         num_outside_domain += int((~inside).sum())
         camera_obs: CameraObservations = _subset(gathered, inside)

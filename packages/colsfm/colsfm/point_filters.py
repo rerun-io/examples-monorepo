@@ -238,23 +238,27 @@ def filter_outside_camera_domain(observation_manager: pycolmap.ObservationManage
     limited: set[int] = {camera_id for camera_id, angle in domains.items() if angle < 0.5 * np.pi}
     if not limited:
         return 0
+    # One pass over the points, then each image's observation list: `reconstruction.point3D(id)` copies the point and
+    # its whole track, which per observation made this 83 s per call on MGO07 (1.4M observations, load ~65).
+    xyz_by_id: dict[int, ndarray] = {int(point3D_id): point.xyz for point3D_id, point in reconstruction.points3D.items()}
     removed: int = 0
     for image_id in reconstruction.reg_image_ids():
         image: pycolmap.Image = reconstruction.image(image_id)
         if image.camera_id not in limited:
             continue
-        observed: list[tuple[int, int]] = [
-            (point2D_idx, int(point2D.point3D_id)) for point2D_idx, point2D in enumerate(image.points2D) if point2D.has_point3D()
-        ]
-        if not observed:
+        point2D_idxs: list[int] = list(image.get_observation_point2D_idxs())
+        if not point2D_idxs:
             continue
-        world: Float64[ndarray, "n 3"] = np.asarray([reconstruction.point3D(point3D_id).xyz for _, point3D_id in observed], dtype=np.float64)
-        cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
-        in_camera: Float64[ndarray, "n 3"] = world @ np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64).T + np.asarray(
-            cam_from_world.translation, dtype=np.float64
+        world: Float64[ndarray, "n 3"] = np.asarray(
+            [xyz_by_id[int(point2D.point3D_id)] for point2D in image.get_observation_points2D()], dtype=np.float64
         )
+        cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
+        # einsum, not `@`: a [n, 3] x [3, 3] product through MKL's thread pool spun 170 CPU-seconds per call on a busy host.
+        in_camera: Float64[ndarray, "n 3"] = np.einsum(
+            "ij,nj->ni", np.asarray(cam_from_world.rotation.matrix(), dtype=np.float64), world
+        ) + np.asarray(cam_from_world.translation, dtype=np.float64)
         for row in np.flatnonzero(~in_camera_domain(in_camera, domains[image.camera_id])):
-            point2D_idx: int = observed[int(row)][0]
+            point2D_idx: int = int(point2D_idxs[int(row)])
             # A deletion that leaves a track below two observations deletes the point and every other observation
             # of it, this image's included, so each row is checked again before its own deletion.
             if image.point2D(point2D_idx).has_point3D():
