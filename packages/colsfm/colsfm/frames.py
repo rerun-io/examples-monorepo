@@ -193,16 +193,16 @@ class VideoStreamFrames:
         """
         for first in range(0, len(names), DECODE_CHUNK):
             window: Sequence[str] = names[first : first + DECODE_CHUNK]
-            missing: list[str] = list(dict.fromkeys(name for name in window if name not in self.store))
+            # Take the window's held frames first: inserting the fresh ones can evict them from the store.
+            held: dict[str, Tensor] = {name: self.store[name] for name in window if name in self.store}
+            for name in held:
+                self.store.move_to_end(name)
+            missing: list[str] = list(dict.fromkeys(name for name in window if name not in held))
             fresh: dict[str, Tensor] = self._decode(missing) if missing else {}
             for name, frame in fresh.items():
                 self._keep(name, frame)
             for name in window:
-                held: Tensor | None = fresh.get(name)
-                if held is None:
-                    held = self.store[name]
-                    self.store.move_to_end(name)
-                yield name, held
+                yield name, held[name] if name in held else fresh[name]
 
     def close(self) -> None:
         """Drop every decoded frame and decoder (their GPU memory returns to torch's allocator)."""

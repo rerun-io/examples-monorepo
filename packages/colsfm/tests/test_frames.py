@@ -139,6 +139,16 @@ def test_an_evicted_frame_is_decoded_again_from_the_video(opened: list[_FakeVide
     assert source.decoded_frames == 5
 
 
+def test_a_window_whose_fresh_frames_evict_its_own_held_frames_still_yields_them(opened: list[_FakeVideo]) -> None:
+    """Storing the window's decoded frames can evict the frames it already held; those still come back, unchanged."""
+    source = VideoStreamFrames(_stream_manifest(), device=torch.device("cpu"), budget_bytes=2 * FRAME_BYTES)
+    list(source.frames(["cam0/0", "cam0/10"]))
+    got = list(source.frames(["cam0/0", "cam0/20", "cam0/30"]))
+    assert [(name, int(rgb[0, 0, 0])) for name, rgb in got] == [("cam0/0", 0), ("cam0/20", 2), ("cam0/30", 3)]
+    assert source.decoded_frames == 4
+    assert source.stored_bytes <= 2 * FRAME_BYTES
+
+
 def test_close_releases_every_frame_and_decoder(opened: list[_FakeVideo]) -> None:
     """After `close` nothing is held; a later read starts from scratch with a fresh decoder."""
     source = VideoStreamFrames(_stream_manifest(), device=torch.device("cpu"), budget_bytes=SAMPLES * FRAME_BYTES)
