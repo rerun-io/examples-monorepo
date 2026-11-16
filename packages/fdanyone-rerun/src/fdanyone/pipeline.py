@@ -26,7 +26,7 @@ from fdanyone.assets import (
 )
 from fdanyone.config import BASE24, INFERENCE, RANK64_DELTA4
 from fdanyone.device import CUDA_ALLOCATOR_CONF, select_cuda_devices
-from fdanyone.download import ensure_example_video, ensure_models, ensure_smplx
+from fdanyone.download import create_classic_gvhmr_links
 from fdanyone.errors import ConfigurationError, RunCancelled
 from fdanyone.io import remove_tree, resolve_output_path, write_json
 from fdanyone.motion.gvhmr import validate_gvhmr
@@ -281,12 +281,8 @@ def run_pipeline(
     LOGGER.info("Using attention backend: %s", attention_backend)
 
     PROGRESS.info("Preparing model assets", extra={"fraction": 0.05})
-    ensure_example_video(video_path)
-    # Resolve the licensed body model before starting the much larger public
-    # model download. Interactive use continues automatically after setup;
-    # background jobs receive an actionable error instead of hanging.
-    ensure_smplx(model_dir, gvhmr_root)
-    ensure_models(model_dir, gvhmr_root)
+    # The weights come from the pixi download tasks; GVHMR reads some of them, SMPL-X included, from its own tree.
+    create_classic_gvhmr_links(model_dir, gvhmr_root)
     turbo_lora = resolve_turbo_lora(model_dir) if enable_turbo else None
     gvhmr_root, gvhmr_revision = validate_gvhmr(gvhmr_root)
     worker_python = os.path.abspath(sys.executable)

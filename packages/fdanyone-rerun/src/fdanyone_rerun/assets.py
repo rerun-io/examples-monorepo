@@ -4,7 +4,7 @@ The weights come from the ``_download-fdanyone-models`` pixi task into ``$FDANYO
 ``data/models`` by default). Upstream runs GVHMR as a working tree: it imports ``hmr4d`` from the root and reads
 ``inputs/checkpoints/...`` relative to it. ``recipes/gvhmr-src`` installs that tree read-only under
 ``$PREFIX/share/gvhmr-src``, so :func:`gvhmr_root` copies it (10 MB) into a writable root next to the weights; upstream's
-``ensure_models`` then links the checkpoints into its ``inputs/``. A copy, not links: GVHMR finds ``inputs/`` from
+``create_classic_gvhmr_links`` then links the checkpoints into its ``inputs/``. A copy, not links: GVHMR finds ``inputs/`` from
 ``Path(hmr4d.__file__).resolve()``, which would follow a link back into the read-only tree.
 """
 

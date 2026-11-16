@@ -9,7 +9,7 @@ import os
 import shutil
 import time
 import uuid
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
 
 from fdanyone.errors import FourDAnyoneError
@@ -120,43 +120,3 @@ def remove_tree(
             time.sleep(initial_delay_seconds * (2**attempt))
 
 
-class AtomicResultDirectory(AbstractContextManager[Path]):
-    """Build beside the destination and rename only after all validation passes."""
-
-    def __init__(self, destination: str | Path):
-        self.destination = resolve_output_path(destination)
-        self.working = self.destination.with_name(f".{self.destination.name}.work-{uuid.uuid4().hex[:10]}")
-        self._committed = False
-
-    def _destination_exists(self) -> bool:
-        return os.path.lexists(self.destination)
-
-    def __enter__(self) -> Path:
-        if self._destination_exists():
-            raise FourDAnyoneError(
-                f"Output directory already exists: {self.destination}. Choose a new directory to avoid mixed runs."
-            )
-        self.working.mkdir(parents=True)
-        return self.working
-
-    def commit(self) -> Path:
-        if self._committed:
-            return self.destination
-        if self._destination_exists():
-            raise FourDAnyoneError(
-                f"Output directory appeared during inference: {self.destination}. Refusing to overwrite it."
-            )
-        os.replace(self.working, self.destination)
-        self._committed = True
-        return self.destination
-
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        if exc_type is None:
-            try:
-                self.commit()
-            except BaseException:
-                remove_tree(self.working, ignore_errors=True)
-                raise
-        else:
-            remove_tree(self.working, ignore_errors=True)
-        return False

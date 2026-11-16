@@ -1,8 +1,8 @@
 """Locate the model files used by 4DAnyone.
 
-Every published file is anchored by one immutable Hugging Face revision and
-downloaded on demand. ``fdanyone.download`` fetches missing files;
-the resolvers here only locate them.
+Every published file is anchored by one immutable Hugging Face revision. In the
+monorepo the pixi download tasks (``fdanyone-download``) fetch them; the resolvers
+here only locate them.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ GVHMR_CHECKPOINT = "gvhmr/gvhmr_siga24_release.ckpt"
 HMR2_CHECKPOINT = "gvhmr/epoch=10-step=25000.ckpt"
 VITPOSE_CHECKPOINT = "gvhmr/vitpose-h-multi-coco.pth"
 YOLO_CHECKPOINT = "gvhmr/yolov8x.pt"
-PERCEPTUAL_VGG19 = "perceptual/imagenet-vgg-verydeep-19-conv.safetensors"
 
 TAEW2_2 = "taehv/taew2_2.pth"
 TAEW2_2_URL = "https://raw.githubusercontent.com/madebyollin/taehv/e743234f3217ab3d1570f65642ab06596d1bd7c5/taew2_2.pth"
@@ -48,41 +47,6 @@ TAEW2_2_SHA256 = "d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c55
 
 SMPLX_MODEL = "body_models/smplx/SMPLX_NEUTRAL.npz"
 
-MODEL_FILES = (
-    CHECKPOINT,
-    MHR70_REGRESSOR,
-    WAN_VAE,
-    PROMPT_CONTEXT,
-    GVHMR_CHECKPOINT,
-    HMR2_CHECKPOINT,
-    VITPOSE_CHECKPOINT,
-    YOLO_CHECKPOINT,
-    PERCEPTUAL_VGG19,
-    TURBO_LORA,
-)
-
-EXAMPLE_FILES = (
-    "data/source/pexels/10331522-uhd_2160_4096_25fps.mp4",
-    "data/source/pexels/15443888_1080_1920_100fps.mp4",
-    "data/source/pexels/2785536-uhd_2160_3840_25fps.mp4",
-    "data/source/pexels/5385965-uhd_2160_4096_25fps.mp4",
-    "data/source/pexels/5390224-uhd_2160_4096_30fps.mp4",
-    "data/source/pexels/5390836-uhd_2160_4096_30fps.mp4",
-    "data/source/pexels/5435720-uhd_2160_4096_25fps.mp4",
-    "data/source/pexels/5885633-hd_1080_1920_25fps.mp4",
-    "data/source/pexels/5999210-uhd_2160_4096_25fps.mp4",
-    "data/source/pexels/6003989-uhd_2160_3840_30fps.mp4",
-    "data/source/pexels/6191453-uhd_2160_4096_25fps.mp4",
-    "data/source/pexels/6616344-hd_1080_1920_25fps.mp4",
-    "data/source/pexels/6980035-uhd_2160_4096_30fps.mp4",
-    "data/source/pexels/7017803-hd_1080_1920_30fps.mp4",
-    "data/source/pexels/7080903-hd_1080_1920_30fps.mp4",
-    "data/source/pexels/7341232-uhd_2160_3840_25fps.mp4",
-    "data/source/pexels/7480858-uhd_2160_3840_25fps.mp4",
-    "data/source/pexels/7716891-uhd_2160_4096_25fps.mp4",
-    "data/source/pexels/8059623-hd_1080_1920_25fps.mp4",
-    "data/source/pexels/8431510-uhd_2160_4096_25fps.mp4",
-)
 
 # Upstream GVHMR resolves its model files relative to its own checkout, so the
 # install commands link each downloaded file to the location GVHMR expects.
@@ -145,16 +109,6 @@ def resolve_foreground_model(model_dir: str | Path = "models") -> Path:
     for relative in BIREFNET_FILES:
         _require_file(root / relative, "BiRefNet file", "scripts/download_model.py")
     return root.resolve()
-
-
-def resolve_perceptual_vgg19(model_dir: str | Path = "models") -> Path:
-    """Resolve the converted VGG-19 weights used by perceptual reconstruction."""
-
-    return _require_file(
-        Path(model_dir) / PERCEPTUAL_VGG19,
-        "Perceptual VGG-19 weights",
-        "scripts/download_model.py",
-    )
 
 
 def resolve_base_assets(model_dir: str | Path = "models") -> BaseAssets:

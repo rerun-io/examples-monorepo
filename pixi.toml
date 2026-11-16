@@ -4120,11 +4120,10 @@ PYREFLY_TARGET = "src/fdanyone_rerun tests tools"
 FDANYONE_MODEL_DIR = "${FDANYONE_MODEL_DIR:-$PIXI_PROJECT_ROOT/packages/fdanyone-rerun/data/models}"
 
 # The weights at the revision upstream 6dcf626 pins (AntResearch/4DAnyone 4c80e87): the 4DAnyone DiT, Wan2.2 VAE,
-# Turbo-LoRA, prompt context, SMPL-X -> Goliath70 regressor, GVHMR/HMR2/ViTPose/YOLO and the VGG-19 that upstream's
-# ensure_models checks for. SMPL-X comes from the mirror mamma already uses; BiRefNet at upstream's pin; the TAEW2.2
-# preview decoder from taehv's repo (sha256-checked).
+# Turbo-LoRA, prompt context, SMPL-X -> Goliath70 regressor and GVHMR/HMR2/ViTPose/YOLO. SMPL-X comes from the mirror
+# mamma already uses; BiRefNet at upstream's pin; the TAEW2.2 decoder from taehv's repo (sha256-checked).
 [feature.fdanyone-rerun.tasks._download-fdanyone-models]
-cmd = "hf download AntResearch/4DAnyone --revision 4c80e87b805a5f8461cf339cdbe2fb4249e585aa --include '4danyone/*' --include 'gvhmr/*' --include 'perceptual/*' --local-dir $FDANYONE_MODEL_DIR && hf download ZhengPeng7/BiRefNet BiRefNet_config.py birefnet.py config.json model.safetensors --revision e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4 --local-dir $FDANYONE_MODEL_DIR/birefnet && hf download pablovela5620/mamma-streaming-data body_models/smplx/SMPLX_NEUTRAL.npz --repo-type dataset --local-dir $FDANYONE_MODEL_DIR && python -c \"from fdanyone.download import ensure_tiny_decoder; ensure_tiny_decoder('$FDANYONE_MODEL_DIR')\""
+cmd = "hf download AntResearch/4DAnyone --revision 4c80e87b805a5f8461cf339cdbe2fb4249e585aa --include '4danyone/*' --include 'gvhmr/*' --local-dir $FDANYONE_MODEL_DIR && hf download ZhengPeng7/BiRefNet BiRefNet_config.py birefnet.py config.json model.safetensors --revision e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4 --local-dir $FDANYONE_MODEL_DIR/birefnet && hf download pablovela5620/mamma-streaming-data body_models/smplx/SMPLX_NEUTRAL.npz --repo-type dataset --local-dir $FDANYONE_MODEL_DIR && python -c \"from fdanyone.download import ensure_tiny_decoder; ensure_tiny_decoder('$FDANYONE_MODEL_DIR')\""
 cwd = "packages/fdanyone-rerun"
 description = "Download the 4DAnyone, GVHMR, BiRefNet and SMPL-X weights (~21 GB) into $FDANYONE_MODEL_DIR"
 

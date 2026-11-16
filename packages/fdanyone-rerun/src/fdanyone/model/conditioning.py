@@ -153,10 +153,6 @@ class PoseFeatureBank:
     def num_features(self) -> int:
         return int(self.features.shape[0])
 
-    @property
-    def num_packed_views(self) -> int:
-        return int(self.null_features.shape[0])
-
     def allocate_group(self, size: int, device: str) -> Tensor:
         """Allocate one reusable group buffer on the requested device."""
 

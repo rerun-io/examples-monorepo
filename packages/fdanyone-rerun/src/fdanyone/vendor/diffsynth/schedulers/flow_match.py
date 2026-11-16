@@ -77,40 +77,6 @@ class FlowMatchScheduler():
         return prev_sample
     
 
-    def return_to_timestep(self, timestep, sample, sample_stablized):
-        if isinstance(timestep, torch.Tensor):
-            timestep = timestep.cpu()
-        timestep_id = torch.argmin((self.timesteps - timestep).abs())
-        sigma = self.sigmas[timestep_id]
-        model_output = (sample - sample_stablized) / sigma
-        return model_output
-    
-    
-    def add_noise(self, original_samples, noise, timestep):
-        if isinstance(timestep, torch.Tensor):
-            timestep = timestep.cpu()
-        timestep_id = torch.argmin((self.timesteps - timestep).abs())
-        sigma = self.sigmas[timestep_id]
-        sample = (1 - sigma) * original_samples + sigma * noise
-        return sample
-    
-
-    def training_target(self, sample, noise, timestep):
-        target = noise - sample
-        return target
-
-
-    def denoised_sample(self, prediction, noise, timestep):
-        sample = noise - prediction
-        return sample
-
-
-    def training_weight(self, timestep):
-        timestep_id = torch.argmin((self.timesteps - timestep.to(self.timesteps.device)).abs())
-        weights = self.linear_timesteps_weights[timestep_id]
-        return weights
-    
-    
     def calculate_shift(
         self,
         image_seq_len,
