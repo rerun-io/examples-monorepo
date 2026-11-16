@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fdanyone.assets import BIREFNET_REPO_ID, BIREFNET_REVISION
+from fdanyone.assets import BIREFNET_REPO_ID, BIREFNET_REVISION, DOWNLOAD_COMMAND
 from fdanyone.config import CAMERA, CROP, FOREGROUND, INFERENCE, SKELETON, CameraConfig
 from fdanyone.errors import AssetError, FourDAnyoneError
 from fdanyone.foreground import predict_foreground_masks
@@ -242,7 +242,7 @@ def _body_geometry(
     body_model = gvhmr_root / "inputs/checkpoints/body_models/smplx/SMPLX_NEUTRAL.npz"
     if not body_model.is_file():
         raise AssetError(
-            "The licensed SMPL-X body model is missing. Run `python scripts/download_smplx.py`; "
+            f"The licensed SMPL-X body model is missing. Run `{DOWNLOAD_COMMAND}`; "
             f"expected the GVHMR compatibility link at {body_model}."
         )
     utility_root = gvhmr_root / "hmr4d/utils/body_model"

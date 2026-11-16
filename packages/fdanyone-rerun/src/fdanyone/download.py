@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 from fdanyone.assets import (
+    DOWNLOAD_COMMAND,
     TAEW2_2,
     TAEW2_2_SHA256,
     TAEW2_2_URL,
@@ -72,8 +73,7 @@ def create_classic_gvhmr_links(
         if not source.is_file():
             required = require_smplx if relative == SMPLX_MODEL else require_models
             if required:
-                command = "scripts/download_smplx.py" if relative == SMPLX_MODEL else "scripts/download_model.py"
-                raise AssetError(f"Model file is missing: {source}. Run `python {command}` first.")
+                raise AssetError(f"Model file is missing: {source}. Run `{DOWNLOAD_COMMAND}` first.")
             continue
         _ensure_link(source, root / target)
     return root

@@ -41,6 +41,9 @@ HMR2_CHECKPOINT = "gvhmr/epoch=10-step=25000.ckpt"
 VITPOSE_CHECKPOINT = "gvhmr/vitpose-h-multi-coco.pth"
 YOLO_CHECKPOINT = "gvhmr/yolov8x.pt"
 
+DOWNLOAD_COMMAND = "pixi run -e fdanyone-rerun fdanyone-download"
+"""The monorepo task that fetches every weight (upstream's scripts/download_*.py are not copied)."""
+
 TAEW2_2 = "taehv/taew2_2.pth"
 TAEW2_2_URL = "https://raw.githubusercontent.com/madebyollin/taehv/e743234f3217ab3d1570f65642ab06596d1bd7c5/taew2_2.pth"
 TAEW2_2_SHA256 = "d053e216ca50e2bb837bbcd79b85f0366bea00e5938025572382a773b74c559a"
@@ -66,10 +69,10 @@ class BaseAssets:
     tiny_decoder: Path | None = None
 
 
-def _require_file(path: Path, label: str, command: str) -> Path:
+def _require_file(path: Path, label: str) -> Path:
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
-        raise AssetError(f"{label} does not exist: {resolved}. Run `python {command}` to install it.")
+        raise AssetError(f"{label} does not exist: {resolved}. Run `{DOWNLOAD_COMMAND}` to install it.")
     return resolved
 
 
@@ -79,13 +82,13 @@ def resolve_checkpoint(path: str | Path | None = None, model_dir: str | Path = "
         if not resolved.is_file():
             raise AssetError(f"Checkpoint override does not exist: {resolved}")
         return resolved
-    return _require_file(Path(model_dir) / CHECKPOINT, "Checkpoint", "scripts/download_model.py")
+    return _require_file(Path(model_dir) / CHECKPOINT, "Checkpoint")
 
 
 def resolve_turbo_lora(model_dir: str | Path = "models") -> Path:
     """Resolve and authenticate the exact Wan2.2 5B Turbo LoRA."""
 
-    resolved = _require_file(Path(model_dir) / TURBO_LORA, "Turbo LoRA", "scripts/download_model.py")
+    resolved = _require_file(Path(model_dir) / TURBO_LORA, "Turbo LoRA")
     size = resolved.stat().st_size
     if size != TURBO_LORA_SIZE_BYTES:
         raise AssetError(f"Turbo LoRA size mismatch: {size} != {TURBO_LORA_SIZE_BYTES} bytes ({resolved})")
@@ -101,13 +104,13 @@ def resolve_regressor(path: str | Path | None = None, model_dir: str | Path = "m
         if not resolved.is_file():
             raise AssetError(f"MHR70 regressor override does not exist: {resolved}")
         return resolved
-    return _require_file(Path(model_dir) / MHR70_REGRESSOR, "MHR70 regressor", "scripts/download_model.py")
+    return _require_file(Path(model_dir) / MHR70_REGRESSOR, "MHR70 regressor")
 
 
 def resolve_foreground_model(model_dir: str | Path = "models") -> Path:
     root = Path(model_dir).expanduser() / BIREFNET_DIR
     for relative in BIREFNET_FILES:
-        _require_file(root / relative, "BiRefNet file", "scripts/download_model.py")
+        _require_file(root / relative, "BiRefNet file")
     return root.resolve()
 
 
@@ -118,10 +121,10 @@ def resolve_base_assets(model_dir: str | Path = "models") -> BaseAssets:
 
     root = Path(model_dir).expanduser()
     return BaseAssets(
-        vae=_require_file(root / WAN_VAE, "VAE", "scripts/download_model.py"),
-        prompt_context=_require_file(root / PROMPT_CONTEXT, "Prompt conditioning", "scripts/download_model.py"),
+        vae=_require_file(root / WAN_VAE, "VAE"),
+        prompt_context=_require_file(root / PROMPT_CONTEXT, "Prompt conditioning"),
         tiny_decoder=(
-            _require_file(root / TAEW2_2, "TAEW2.2 decoder", "scripts/download_model.py")
+            _require_file(root / TAEW2_2, "TAEW2.2 decoder")
             if INFERENCE.target_decoder == "taew2_2"
             else None
         ),

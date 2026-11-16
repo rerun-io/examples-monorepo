@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from fdanyone.assets import DOWNLOAD_COMMAND
 from fdanyone.errors import AssetError
 from fdanyone.motion.result import SMPL_PARAMETER_NAMES, MotionResult
 from fdanyone.vendor.pytorch3d_compat import install_if_needed as install_pytorch3d_compat
@@ -44,8 +45,7 @@ def validate_gvhmr(root: str | Path) -> tuple[Path, str]:
     if missing:
         formatted = "\n  - ".join(missing)
         raise AssetError(
-            f"GVHMR is incomplete under {path}. Run `git submodule update --init third_party/GVHMR`, "
-            f"`python scripts/download_model.py`, and `python scripts/download_smplx.py`; missing:\n"
+            f"GVHMR is incomplete under {path}. Run `{DOWNLOAD_COMMAND}`; missing:\n"
             f"  - {formatted}"
         )
     # A packaged GVHMR tree (recipes/gvhmr-src) is not a git checkout: it records its commit in REVISION.
