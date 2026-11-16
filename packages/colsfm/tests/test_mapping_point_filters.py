@@ -24,23 +24,25 @@ from numpy import ndarray
 
 from colsfm.config import CusfmConfig
 from colsfm.mapping import (
+    BundleAdjustmentSolve,
     Correspondences,
     filter_degenerate_points,
     filter_projection_failures,
     load_correspondences,
     projection_sanity_bound_px,
+    solve_bundle_adjustment,
 )
 from colsfm.reconstruction import build_reconstruction
+from colsfm.solver_report import SolverFailure
 
 
 @pytest.fixture(scope="module")
 def synthetic_database(synthetic_rig: SyntheticRig, tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The synthetic rig's observations as a COLMAP database."""
     database_path: Path = tmp_path_factory.mktemp("synthetic") / "database.db"
-    write_database(
-        database_path, synthetic_rig.frames_meta, synthetic_rig.keypoints_px, synthetic_matches(synthetic_rig)
-    )
+    write_database(database_path, synthetic_rig.frames_meta, synthetic_rig.keypoints_px, synthetic_matches(synthetic_rig))
     return database_path
+
 
 DEPTH_THRESHOLD_M: float = 300.0
 """`vision_mapping_config.depth_threshold`, the isaac profile's world-Z cap in metres."""
@@ -62,9 +64,7 @@ def _triangulated(rig: SyntheticRig, database_path: Path, config: CusfmConfig) -
         The triangulated reconstruction and the correspondences that own its manager.
     """
     reconstruction: pycolmap.Reconstruction = build_reconstruction(rig.frames_meta).reconstruction
-    correspondences: Correspondences = load_correspondences(
-        reconstruction, database_path, config.vision_mapping.min_num_matches_per_pair
-    )
+    correspondences: Correspondences = load_correspondences(reconstruction, database_path, config.vision_mapping.min_num_matches_per_pair)
     triangulator: pycolmap.IncrementalTriangulator = pycolmap.IncrementalTriangulator(
         correspondences.graph, reconstruction, correspondences.observation_manager
     )
@@ -86,9 +86,7 @@ def _corrupt_point(reconstruction: pycolmap.Reconstruction, point3D_id: int, xyz
     reconstruction.point3D(point3D_id).xyz = xyz
 
 
-def test_degeneracy_guard_drops_points_ceres_cannot_survive(
-    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
-) -> None:
+def test_degeneracy_guard_drops_points_ceres_cannot_survive(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """Non-finite, astronomically distant and beyond-cap points all go; sane ones stay.
 
     Ceres reported ~1e152 px mean reprojection on the first RoboCap rounds, which
@@ -116,9 +114,7 @@ def test_degeneracy_guard_drops_points_ceres_cannot_survive(
     assert np.array_equal(np.asarray(reconstruction.point3D(survivor).xyz, dtype=np.float64), survivor_xyz)
 
 
-def test_degeneracy_guard_is_a_no_op_on_a_healthy_model(
-    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
-) -> None:
+def test_degeneracy_guard_is_a_no_op_on_a_healthy_model(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """A model whose points all sit inside the cap loses nothing to the guard."""
     reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
     observation_manager: pycolmap.ObservationManager = correspondences.observation_manager
@@ -171,3 +167,36 @@ def test_projection_failure_guard_is_a_no_op_on_a_healthy_model(
 
     assert filter_projection_failures(observation_manager, reconstruction) == 0
     assert reconstruction.compute_num_observations() == num_observations_before
+
+
+def _solve(reconstruction: pycolmap.Reconstruction, correspondences: Correspondences, depth_threshold: float) -> BundleAdjustmentSolve:
+    gauge_frame_id: int = reconstruction.image(min(reconstruction.reg_image_ids())).frame_id
+    return solve_bundle_adjustment(
+        reconstruction, pycolmap.BundleAdjustmentOptions(), gauge_frame_id, None, correspondences.observation_manager, depth_threshold
+    )
+
+
+def test_the_solve_boundary_refuses_an_unusable_bundle_adjustment(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """A NaN point fails Ceres' first evaluation: the boundary raises rather than hand the caller that model."""
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    _corrupt_point(reconstruction, sorted(reconstruction.points3D)[0], np.array([np.nan, 0.0, 0.0]))
+    with pytest.raises(SolverFailure, match="bundle adjustment"):
+        _solve(reconstruction, correspondences, DEPTH_THRESHOLD_M)
+
+
+def test_the_solve_boundary_guards_the_points_it_returns(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
+    """Every caller (rounds, polish, extrinsic refinement) gets the post-solve guards from the boundary itself.
+
+    A bound inside the scene stands in for a solve that walked points out of the world: the
+    boundary removes them after the solve and reports how many observations went.
+    """
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    extent: float = float(np.median([np.abs(point.xyz).max() for point in reconstruction.points3D.values()]))
+    observations_before: int = reconstruction.compute_num_observations()
+    solve: BundleAdjustmentSolve = _solve(reconstruction, correspondences, extent)
+    assert solve.summary.is_solution_usable()
+    assert solve.num_diverged > 0
+    assert reconstruction.compute_num_observations() == observations_before - solve.num_diverged
+    assert all(np.abs(point.xyz).max() <= extent for point in reconstruction.points3D.values())

@@ -26,6 +26,14 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
+
+class SolverFailure(RuntimeError):
+    """A solve ended without a usable solution (Ceres' `IsSolutionUsable()` is False).
+
+    Bundle adjustment, the extrinsics solve and the pose graph raise it before their result
+    reaches the model, so an unusable solve cannot publish a successful run."""
+
+
 CeresTermination: TypeAlias = Literal["CONVERGENCE", "NO_CONVERGENCE", "FAILURE"]
 """How Ceres ended a solve, as `TerminationType`'s bare name.
 
@@ -36,9 +44,7 @@ own `USER_SUCCESS` and `USER_FAILURE` cannot arrive here because nothing in this
 installs an `IterationCallback`, which is the only thing that produces them.
 """
 
-BRIEF_REPORT_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"Iterations:\s*(\d+),\s*Initial cost:\s*([0-9.eE+-]+),\s*Final cost:\s*([0-9.eE+-]+)"
-)
+BRIEF_REPORT_PATTERN: Final[re.Pattern[str]] = re.compile(r"Iterations:\s*(\d+),\s*Initial cost:\s*([0-9.eE+-]+),\s*Final cost:\s*([0-9.eE+-]+)")
 """`BundleAdjustmentSummary` exposes iterations and cost only inside `brief_report()`."""
 
 

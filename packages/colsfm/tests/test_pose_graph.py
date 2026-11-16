@@ -42,6 +42,7 @@ from colsfm.pose_graph import (
     sequential_edges,
     solve_pose_graph,
 )
+from colsfm.solver_report import SolverFailure
 
 # `colsfm.REPO_ROOT` rather than the `repo_root` fixture: these paths are needed by the
 # `skipif` markers below, which pytest evaluates at import time, where no fixture exists.
@@ -117,9 +118,7 @@ def rigid_from_text_proto(message: TextProto) -> pycolmap.Rigid3d:
     return rigid3d_from_axis_angle_degrees(
         axis_xyz=np.array([float(axis_angle.get(key, [0.0])[0]) for key in ("x", "y", "z")], dtype=np.float64),
         angle_degrees=float(axis_angle.get("angle_degrees", [0.0])[0]),
-        translation_xyz=np.array(
-            [float(translation_proto.get(key, [0.0])[0]) for key in ("x", "y", "z")], dtype=np.float64
-        ),
+        translation_xyz=np.array([float(translation_proto.get(key, [0.0])[0]) for key in ("x", "y", "z")], dtype=np.float64),
     )
 
 
@@ -372,9 +371,7 @@ def test_gate_loop_edges_rejects_everything_at_the_shipped_zero_thresholds() -> 
 
 
 def test_gate_loop_edges_applies_translation_and_rotation_separately() -> None:
-    identity_edge: PoseGraphEdge = PoseGraphEdge(
-        source=1, target=0, source_T_target=pycolmap.Rigid3d(), information=np.eye(6), kind="loop"
-    )
+    identity_edge: PoseGraphEdge = PoseGraphEdge(source=1, target=0, source_T_target=pycolmap.Rigid3d(), information=np.eye(6), kind="loop")
     far_edge: PoseGraphEdge = PoseGraphEdge(
         source=2, target=0, source_T_target=pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([4.0, 0.0, 0.0])), information=np.eye(6), kind="loop"
     )
@@ -478,9 +475,7 @@ def test_consistent_odometry_without_loops_leaves_the_trajectory_untouched() -> 
 def test_one_loop_closure_cuts_the_drift_error_by_more_than_five_times() -> None:
     loop: SquareLoop = make_square_loop(n_nodes=200)
     edges: list[PoseGraphEdge] = sequential_edges(loop.odometry, connected_keyframe_num=1)
-    closure: PoseGraphEdge = truth_loop_edge(
-        loop, source=199, target=0, information=loop_edge_information(score=100.0, loop_residual_weight=1.0)
-    )
+    closure: PoseGraphEdge = truth_loop_edge(loop, source=199, target=0, information=loop_edge_information(score=100.0, loop_residual_weight=1.0))
 
     before: Float[np.ndarray, "n"] = position_errors({node.rig_id: node.world_T_rig for node in loop.odometry}, loop.truth)
     result = solve_pose_graph(loop.odometry, [*edges, closure])
@@ -601,21 +596,14 @@ def thousand_node_solve() -> ThousandNodeSolve:
     for index in range(50):
         edges.append(truth_loop_edge(loop, source=999 - index, target=index, information=np.eye(6) * 10.0))
 
-    before: Float[np.ndarray, "n_nodes"] = position_errors(
-        {node.rig_id: node.world_T_rig for node in loop.odometry}, loop.truth
-    )
+    before: Float[np.ndarray, "n_nodes"] = position_errors({node.rig_id: node.world_T_rig for node in loop.odometry}, loop.truth)
     started: float = time.perf_counter()
     result: PoseGraphResult = solve_pose_graph(loop.odometry, edges, options=PoseGraphSolveOptions())
     elapsed_s: float = time.perf_counter() - started
     after: Float[np.ndarray, "n_nodes"] = position_errors(result.world_T_rig, loop.truth)
 
-    print(
-        f"solve_pose_graph: {len(loop.odometry)} nodes, {len(edges)} edges, "
-        f"{result.iterations} iterations, {elapsed_s * 1e3:.1f} ms"
-    )
-    return ThousandNodeSolve(
-        result=result, n_edges=len(edges), error_before_m=before, error_after_m=after, elapsed_s=elapsed_s
-    )
+    print(f"solve_pose_graph: {len(loop.odometry)} nodes, {len(edges)} edges, {result.iterations} iterations, {elapsed_s * 1e3:.1f} ms")
+    return ThousandNodeSolve(result=result, n_edges=len(edges), error_before_m=before, error_after_m=after, elapsed_s=elapsed_s)
 
 
 def test_a_thousand_node_graph_closes_its_loop(thousand_node_solve: ThousandNodeSolve) -> None:
@@ -642,3 +630,18 @@ def test_a_thousand_node_graph_solves_within_one_second(thousand_node_solve: Tho
     if request.config.pluginmanager.hasplugin("pytest_beartype"):
         pytest.skip("pytest-beartype is active; run with -p no:beartype to time this")
     assert thousand_node_solve.elapsed_s < 1.0, f"{thousand_node_solve.elapsed_s:.3f} s"
+
+
+def test_an_unusable_solve_raises_instead_of_returning_its_poses() -> None:
+    """A NaN measurement makes Ceres fail on its first evaluation; the stage must not install those poses."""
+    loop: SquareLoop = make_square_loop(n_nodes=4)
+    edges: list[PoseGraphEdge] = sequential_edges(loop.odometry, connected_keyframe_num=1)
+    poisoned: PoseGraphEdge = PoseGraphEdge(
+        source=edges[0].source,
+        target=edges[0].target,
+        source_T_target=pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([np.nan, 0.0, 0.0])),
+        information=np.eye(6),
+        kind="loop",
+    )
+    with pytest.raises(SolverFailure, match="pose graph"):
+        solve_pose_graph(loop.odometry, [*edges, poisoned])

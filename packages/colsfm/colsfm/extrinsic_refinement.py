@@ -122,6 +122,7 @@ from colsfm.extrinsic_observations import (
 from colsfm.extrinsic_solve import ExtrinsicRefinementOptions, ExtrinsicSolveStats, solve_extrinsics
 from colsfm.geometry import MILLIMETRES_PER_METRE, relative_rotation_degrees
 from colsfm.mapping import (
+    BundleAdjustmentSolve,
     MappingOptions,
     MappingResult,
     bundle_adjustment_options,
@@ -150,6 +151,8 @@ class ExtrinsicRefinementRound:
     """Largest extrinsic rotation this round made, in degrees."""
     bundle_adjustment_seconds: float
     """Seconds inside step (B)."""
+    num_diverged: int
+    """Observations step (B)'s post-solve guards removed; the next round reads the model without them."""
     mean_reprojection_error_px: float
     """Mean reprojection error of the whole model after step (B)."""
     seconds: float
@@ -191,8 +194,7 @@ class ExtrinsicRefinementResult:
         refined: dict[int, pycolmap.Rigid3d] | None = self.mapping.refined_extrinsics
         if refined is None:
             raise ValueError(
-                "the refined model reports no extrinsics: its rig reference is not a "
-                "camera, so `refine_extrinsics` cannot have produced it"
+                "the refined model reports no extrinsics: its rig reference is not a camera, so `refine_extrinsics` cannot have produced it"
             )
         return refined
 
@@ -242,9 +244,7 @@ def apply_extrinsics(
         rig.set_sensor_from_rig(camera_sensor_id(camera_params_id), vehicle_T_cam.inverse() * vehicle_T_reference)
 
 
-def extrinsic_deltas(
-    before: Mapping[int, pycolmap.Rigid3d], after: Mapping[int, pycolmap.Rigid3d]
-) -> tuple[float, float]:
+def extrinsic_deltas(before: Mapping[int, pycolmap.Rigid3d], after: Mapping[int, pycolmap.Rigid3d]) -> tuple[float, float]:
     """Largest translation and rotation change between two sets of extrinsics.
 
     Args:
@@ -261,10 +261,7 @@ def extrinsic_deltas(
         if camera_params_id not in after:
             continue
         updated: pycolmap.Rigid3d = after[camera_params_id]
-        translation_mm.append(
-            float(np.linalg.norm(np.asarray(updated.translation) - np.asarray(previous.translation)))
-            * MILLIMETRES_PER_METRE
-        )
+        translation_mm.append(float(np.linalg.norm(np.asarray(updated.translation) - np.asarray(previous.translation))) * MILLIMETRES_PER_METRE)
         rotation_deg.append(relative_rotation_degrees(previous, updated))
     if not translation_mm:
         return 0.0, 0.0
@@ -347,8 +344,7 @@ def refine_extrinsics(
         return ExtrinsicRefinementResult(
             mapping=dataclasses.replace(
                 unregularised,
-                bundle_adjustment_seconds=mapping.bundle_adjustment_seconds
-                + unregularised.bundle_adjustment_seconds,
+                bundle_adjustment_seconds=mapping.bundle_adjustment_seconds + unregularised.bundle_adjustment_seconds,
                 total_seconds=mapping.total_seconds + (time.perf_counter() - started),
             ),
             rounds=(),
@@ -359,16 +355,14 @@ def refine_extrinsics(
     # `mapping.ba_plan` rather than `mapping_options.ba_plan`: the mapping pass has
     # already narrowed the plan against this very reconstruction, so the rounds solve on
     # exactly what it solved on rather than re-deciding -- and announcing -- per round.
-    base_options: MappingOptions = dataclasses.replace(
-        mapping_options, optimize_extrinsics=False, ba_plan=mapping.ba_plan
-    )
+    base_options: MappingOptions = dataclasses.replace(mapping_options, optimize_extrinsics=False, ba_plan=mapping.ba_plan)
     # The same gauge `run_mapping` picked for the mapping pass: the frame owning the
     # lowest registered image id, which is cuSFM's own choice (spec §6.3).
     gauge_frame_id: int = reconstruction.image(min(registered_image_ids(reconstruction))).frame_id
     ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(ba_config, base_options)
-    # Neither of these changes across the rounds: bundle adjustment moves poses and
-    # points but adds and removes no observation, so which image saw which point — and
-    # therefore which cameras co-observed — is fixed. Only the geometry is re-gathered.
+    # Which image saw which point, and so which cameras co-observed, changes only when a
+    # solve's post-solve guards remove observations; both are rebuilt then, and only then.
+    observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction)
     observation_index: ObservationIndex = build_observation_index(reconstruction)
     pair_counts: dict[CameraPairKey, int] = co_observed_camera_pairs(reconstruction)
 
@@ -385,9 +379,14 @@ def refine_extrinsics(
             observations=camera_observations(reconstruction, rig_reference, observation_index),
             pair_counts=pair_counts,
         )
+        # `solve_extrinsics` raises on an unusable solve, so only accepted extrinsics are applied.
         apply_extrinsics(reconstruction, rig_reference, refined)
-        _, ba_seconds = solve_bundle_adjustment(reconstruction, ba_options, gauge_frame_id, None)
-        reconstruction.update_point_3d_errors()
+        solve: BundleAdjustmentSolve = solve_bundle_adjustment(
+            reconstruction, ba_options, gauge_frame_id, None, observation_manager, mapping_config.depth_threshold
+        )
+        if solve.num_diverged:
+            observation_index = build_observation_index(reconstruction)
+            pair_counts = co_observed_camera_pairs(reconstruction)
         after: dict[int, pycolmap.Rigid3d] = rig_reference.vehicle_T_cam_by_camera_params_id(reconstruction)
         translation_mm, rotation_deg = extrinsic_deltas(before, after)
         rounds.append(
@@ -396,7 +395,8 @@ def refine_extrinsics(
                 solve=stats,
                 max_translation_change_mm=translation_mm,
                 max_rotation_change_deg=rotation_deg,
-                bundle_adjustment_seconds=ba_seconds,
+                bundle_adjustment_seconds=solve.seconds,
+                num_diverged=solve.num_diverged,
                 mean_reprojection_error_px=reconstruction.compute_mean_reprojection_error(),
                 seconds=time.perf_counter() - round_started,
             )
@@ -422,11 +422,8 @@ def refine_extrinsics(
     # -- these rounds solved on it -- so it carries through untouched.
     updated: MappingResult = dataclasses.replace(
         mapping,
-        bundle_adjustment_seconds=mapping.bundle_adjustment_seconds
-        + sum(round_stats.bundle_adjustment_seconds for round_stats in rounds),
+        bundle_adjustment_seconds=mapping.bundle_adjustment_seconds + sum(round_stats.bundle_adjustment_seconds for round_stats in rounds),
         total_seconds=mapping.total_seconds + (time.perf_counter() - started),
         extrinsics_refined=True,
     )
-    return ExtrinsicRefinementResult(
-        mapping=updated, rounds=tuple(rounds), converged=converged, regularised=True
-    )
+    return ExtrinsicRefinementResult(mapping=updated, rounds=tuple(rounds), converged=converged, regularised=True)

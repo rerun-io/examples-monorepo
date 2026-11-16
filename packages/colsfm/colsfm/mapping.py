@@ -187,9 +187,10 @@ from colsfm.reconstruction import (
     PosedModel,
     camera_sensor_id,
 )
-from colsfm.solver_report import SolverReport, parse_brief_report
+from colsfm.solver_report import SolverFailure, SolverReport, parse_brief_report
 
 __all__ = [
+    "BundleAdjustmentSolve",
     "BaBackend",
     "CasparOptions",
     "Correspondences",
@@ -239,6 +240,7 @@ LOSS_FUNCTION_BY_NAME: Final[dict[LossFunctionType, pycolmap.LossFunctionType]] 
     "HUBER": pycolmap.LossFunctionType.HUBER,
 }
 """cuSFM's `loss_type` enum to pycolmap's; the two sets coincide exactly."""
+
 
 @dataclass(frozen=True, slots=True)
 class MappingOptions:
@@ -329,9 +331,7 @@ def triangulator_options(mapping_config: VisionMappingConfig, max_pixel_error: f
     return options
 
 
-def bundle_adjustment_options(
-    ba_config: BundleAdjustmentConfig, options: MappingOptions
-) -> pycolmap.BundleAdjustmentOptions:
+def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: MappingOptions) -> pycolmap.BundleAdjustmentOptions:
     """Bundle adjustment options mirroring cuSFM's `BundleAdjustmentConfig` (§9.2).
 
     Nothing is decided here: `options.ba_plan.backend` is the backend, already
@@ -392,9 +392,7 @@ def bundle_adjustment_options(
     return ba_options
 
 
-def ceres_polish_options(
-    ba_config: BundleAdjustmentConfig, options: MappingOptions
-) -> pycolmap.BundleAdjustmentOptions:
+def ceres_polish_options(ba_config: BundleAdjustmentConfig, options: MappingOptions) -> pycolmap.BundleAdjustmentOptions:
     """The same solve as the rounds, on Ceres: what polishes a finished CASPAR model.
 
     One config, one builder, one difference — the backend. `docs/caspar-build.md`
@@ -447,13 +445,34 @@ def _triangulate(
     return total
 
 
+@dataclass(frozen=True, slots=True)
+class BundleAdjustmentSolve:
+    """One accepted bundle adjustment, after its post-solve guards."""
+
+    summary: pycolmap.BundleAdjustmentSummary
+    """What the solver reported."""
+    seconds: float
+    """Seconds inside `solve()`."""
+    num_diverged: int
+    """Observations the post-solve guards removed (`filter_degenerate_points` + `filter_projection_failures`)."""
+
+
 def solve_bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     ba_options: pycolmap.BundleAdjustmentOptions,
     gauge_frame_id: int,
     fixed_camera_params_id: int | None,
-) -> tuple[pycolmap.BundleAdjustmentSummary, float]:
-    """Run one global bundle adjustment over every registered image.
+    observation_manager: pycolmap.ObservationManager,
+    depth_threshold: float,
+) -> BundleAdjustmentSolve:
+    """Run one global bundle adjustment over every registered image, accept it and guard its points.
+
+    Every solve in the package goes through here (mapping rounds, the Ceres polish, extrinsic
+    refinement), so they share one acceptance rule and one post-solve sanity policy: a solve
+    that is not usable raises, and a usable one still has the points it walked out of the
+    world (`filter_degenerate_points`) or into a camera centre (`filter_projection_failures`)
+    removed before anyone reads the model. A converged solve can do both (MSD MGO07's polish:
+    2 of 89,470 points at 1e154 px). Round-specific quality gates stay with the callers.
 
     The gauge is one constant rig frame — cuSFM fixes a single keyframe, which
     through the shared rig fixes its whole rig pose (§6.3). COLMAP's own
@@ -475,9 +494,14 @@ def solve_bundle_adjustment(
             the others are refined, or None to leave every extrinsic as the options
             say. Ignored when it names the rig's reference sensor, which COLMAP
             already fixes to identity.
+        observation_manager: Bookkeeping bound to the reconstruction, for the guards.
+        depth_threshold: `filter_degenerate_points`' bound.
 
     Returns:
-        The solver summary and the seconds `solve()` took.
+        The summary, the solve's seconds and what the guards removed.
+
+    Raises:
+        SolverFailure: When the solve is not usable; the model is then as the solver left it.
     """
     config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
     for image_id in registered_image_ids(reconstruction):
@@ -490,7 +514,14 @@ def solve_bundle_adjustment(
     adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction)
     started: float = time.perf_counter()
     summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
-    return summary, time.perf_counter() - started
+    seconds: float = time.perf_counter() - started
+    if not summary.is_solution_usable():
+        raise SolverFailure(f"bundle adjustment ended {summary.termination_type.name} without a usable solution")
+    num_diverged: int = filter_degenerate_points(observation_manager, reconstruction, depth_threshold) + filter_projection_failures(
+        observation_manager, reconstruction
+    )
+    reconstruction.update_point_3d_errors()
+    return BundleAdjustmentSolve(summary=summary, seconds=seconds, num_diverged=num_diverged)
 
 
 def _check_extrinsics_are_refinable(model: PosedModel) -> None:
@@ -560,29 +591,25 @@ def _polish_with_ceres(
     """
     polish_options: pycolmap.BundleAdjustmentOptions = ceres_polish_options(ba_config, options)
     before_px: float = reconstruction.compute_mean_reprojection_error()
-    summary, solve_seconds = solve_bundle_adjustment(reconstruction, polish_options, gauge_frame_id, fixed_camera_params_id)
-    num_observations: int = reconstruction.compute_num_observations()
-    num_diverged: int = filter_degenerate_points(observation_manager, reconstruction, depth_threshold) + filter_projection_failures(
-        observation_manager, reconstruction
+    solve: BundleAdjustmentSolve = solve_bundle_adjustment(
+        reconstruction, polish_options, gauge_frame_id, fixed_camera_params_id, observation_manager, depth_threshold
     )
-    reconstruction.update_point_3d_errors()
-    report: SolverReport = parse_brief_report(summary.brief_report())
+    report: SolverReport = parse_brief_report(solve.summary.brief_report())
     stats: PolishStats = PolishStats(
-        num_observations=num_observations,
-        num_diverged=num_diverged,
+        num_observations=reconstruction.compute_num_observations() + solve.num_diverged,
+        num_diverged=solve.num_diverged,
         report=report,
-        ba_termination=summary.termination_type.name,
+        ba_termination=solve.summary.termination_type.name,
         mean_reprojection_error_before_px=before_px,
         mean_reprojection_error_after_px=reconstruction.compute_mean_reprojection_error(),
-        seconds=solve_seconds,
+        seconds=solve.seconds,
     )
     if options.verbose:
         reduction: float | None = report.cost_reduction
         costs: str = (
             "cost not reported"
             if not report.is_available
-            else f"cost {report.initial_cost:.6g} -> {report.final_cost:.6g}"
-            + ("" if reduction is None else f" ({reduction:.2%})")
+            else f"cost {report.initial_cost:.6g} -> {report.final_cost:.6g}" + ("" if reduction is None else f" ({reduction:.2%})")
         )
         iterations: str = "?" if report.num_iterations is None else str(report.num_iterations)
         print(
@@ -656,9 +683,7 @@ def run_mapping(
     # below asks `colsfm.ba_backend` anything again, and nothing rewrites the backend
     # mid-run. `for_camera_models` returns the same plan unless CASPAR would silently
     # drop a model's observations.
-    plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(
-        camera.model.name for camera in reconstruction.cameras.values()
-    )
+    plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(camera.model.name for camera in reconstruction.cameras.values())
     if plan.fallback_reason != given_options.ba_plan.fallback_reason:
         plan.announce()
     resolved_options: MappingOptions = replace(given_options, ba_plan=plan)
@@ -667,9 +692,7 @@ def run_mapping(
     image_ids: list[int] = registered_image_ids(reconstruction)
     if not image_ids:
         raise ValueError("The reconstruction has no registered frames to map")
-    resolved_gauge_frame_id: int = (
-        reconstruction.image(min(image_ids)).frame_id if gauge_frame_id is None else gauge_frame_id
-    )
+    resolved_gauge_frame_id: int = reconstruction.image(min(image_ids)).frame_id if gauge_frame_id is None else gauge_frame_id
     fixed_camera_params_id: int | None = None
     if resolved_options.optimize_extrinsics:
         _check_extrinsics_are_refinable(model)
@@ -682,9 +705,7 @@ def run_mapping(
         )
 
     correspondence_started: float = time.perf_counter()
-    correspondences: Correspondences = load_correspondences(
-        reconstruction, database_path, mapping_config.min_num_matches_per_pair
-    )
+    correspondences: Correspondences = load_correspondences(reconstruction, database_path, mapping_config.min_num_matches_per_pair)
     correspondence_seconds: float = time.perf_counter() - correspondence_started
 
     triangulator: pycolmap.IncrementalTriangulator = pycolmap.IncrementalTriangulator(
@@ -714,25 +735,23 @@ def run_mapping(
         round_options: pycolmap.IncrementalTriangulatorOptions = triangulator_options(mapping_config, max_pixel_error)
         num_merged: int = triangulator.merge_all_tracks(round_options)
         num_completed: int = triangulator.complete_all_tracks(round_options)
-        filtered: _FilterCounts = _filter_points(
-            correspondences.observation_manager, reconstruction, mapping_config, max_pixel_error
-        )
+        filtered: _FilterCounts = _filter_points(correspondences.observation_manager, reconstruction, mapping_config, max_pixel_error)
         num_observations: int = reconstruction.compute_num_observations()
-        observation_change: float = (
-            (num_merged + num_completed + filtered.total()) / num_observations if num_observations else 0.0
-        )
+        observation_change: float = (num_merged + num_completed + filtered.total()) / num_observations if num_observations else 0.0
 
-        summary, solve_seconds = solve_bundle_adjustment(reconstruction, ba_options, resolved_gauge_frame_id, fixed_camera_params_id)
-        bundle_adjustment_seconds += solve_seconds
-        # The guards run on both sides of the solve. Before it, so Ceres never linearises a
-        # NaN; after it, because a *converged* solve can still walk a weakly-constrained
-        # point out of the world (`filter_degenerate_points`) or into a camera centre
-        # (`filter_projection_failures`), and the next round would otherwise inherit both.
-        num_diverged: int = filter_degenerate_points(
-            correspondences.observation_manager, reconstruction, mapping_config.depth_threshold
-        ) + filter_projection_failures(correspondences.observation_manager, reconstruction)
-        reconstruction.update_point_3d_errors()
-        report: SolverReport = parse_brief_report(summary.brief_report())
+        # The guards run on both sides of the solve: before it (`_filter_points`), so Ceres never
+        # linearises a NaN; after it inside the solve boundary, so the next round inherits no
+        # point the solve walked out of the world.
+        solve: BundleAdjustmentSolve = solve_bundle_adjustment(
+            reconstruction,
+            ba_options,
+            resolved_gauge_frame_id,
+            fixed_camera_params_id,
+            correspondences.observation_manager,
+            mapping_config.depth_threshold,
+        )
+        bundle_adjustment_seconds += solve.seconds
+        report: SolverReport = parse_brief_report(solve.summary.brief_report())
         rounds.append(
             RoundStats(
                 round_index=round_index,
@@ -740,13 +759,13 @@ def run_mapping(
                 num_merged=num_merged,
                 num_completed=num_completed,
                 num_filtered=filtered.total(),
-                num_diverged=num_diverged,
+                num_diverged=solve.num_diverged,
                 num_observations=num_observations,
                 observation_change=observation_change,
                 num_points3D=reconstruction.num_points3D(),
                 mean_reprojection_error_px=reconstruction.compute_mean_reprojection_error(),
                 report=report,
-                ba_termination=summary.termination_type.name,
+                ba_termination=solve.summary.termination_type.name,
                 seconds=time.perf_counter() - round_started,
             )
         )

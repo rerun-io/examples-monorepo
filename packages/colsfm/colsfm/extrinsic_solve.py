@@ -59,7 +59,7 @@ from colsfm.extrinsic_costs import RepeatedCauchyLoss, RigReprojectionCost
 from colsfm.extrinsic_observations import CameraObservations, CameraPairKey, camera_observations, co_observed_camera_pairs
 from colsfm.pose_graph import Information6, RelativePoseCost, default_information
 from colsfm.reconstruction import RigReference
-from colsfm.solver_report import CeresTermination
+from colsfm.solver_report import CeresTermination, SolverFailure
 
 EXTRINSIC_LINEAR_SOLVER: Final[LinearSolver] = "SPARSE_NORMAL_CHOLESKY"
 """The extrinsics-only problem has a handful of pose blocks and no Schur structure."""
@@ -220,9 +220,7 @@ def _add_absolute_priors(
         loss: pyceres.CauchyLoss = pyceres.CauchyLoss(1.0)
         costs.append(cost)
         losses.append(loss)
-        problem.add_residual_block(
-            cost, loss, [identity.quat_xyzw, identity.translation, blocks.quat_xyzw, blocks.translation]
-        )
+        problem.add_residual_block(cost, loss, [identity.quat_xyzw, identity.translation, blocks.quat_xyzw, blocks.translation])
         num_blocks += 1
     if num_blocks:
         problem.set_parameter_block_constant(identity.quat_xyzw)
@@ -333,10 +331,7 @@ def solve_extrinsics(
     if missing:
         raise ValueError(f"no calibration extrinsic for camera_params_id {sorted(missing)}")
 
-    poses: dict[int, PoseBlocks] = {
-        camera_params_id: pose_parameter_blocks(vehicle_T_cam)
-        for camera_params_id, vehicle_T_cam in current.items()
-    }
+    poses: dict[int, PoseBlocks] = {camera_params_id: pose_parameter_blocks(vehicle_T_cam) for camera_params_id, vehicle_T_cam in current.items()}
     information: Information6 = default_information(
         relative_rotation_sigma_deg=resolved.extrinsic_rotation_sigma_deg,
         relative_translation_sigma_m=resolved.extrinsic_translation_sigma_m,
@@ -371,9 +366,7 @@ def solve_extrinsics(
         problem, poses, calibration_vehicle_T_cam, resolved_pairs, information, costs, losses
     )
 
-    attach_quaternion_manifolds(
-        problem, {camera_params_id: blocks.quat_xyzw for camera_params_id, blocks in poses.items()}, manifold
-    )
+    attach_quaternion_manifolds(problem, {camera_params_id: blocks.quat_xyzw for camera_params_id, blocks in poses.items()}, manifold)
     reference_blocks: PoseBlocks = poses[reference_camera_params_id]
     if problem.has_parameter_block(reference_blocks.quat_xyzw):
         problem.set_parameter_block_constant(reference_blocks.quat_xyzw)
@@ -391,10 +384,11 @@ def solve_extrinsics(
         problem,
         summary,
     )
+    if not summary.IsSolutionUsable():
+        raise SolverFailure(f"extrinsics solve ended {summary.termination_type} without a usable solution: {summary.message}")
 
     refined: dict[int, pycolmap.Rigid3d] = {
-        camera_params_id: rigid3d_from_parameter_blocks(blocks.quat_xyzw, blocks.translation)
-        for camera_params_id, blocks in poses.items()
+        camera_params_id: rigid3d_from_parameter_blocks(blocks.quat_xyzw, blocks.translation) for camera_params_id, blocks in poses.items()
     }
     solved: SolverStats = solver_stats(summary)
     stats: ExtrinsicSolveStats = ExtrinsicSolveStats(

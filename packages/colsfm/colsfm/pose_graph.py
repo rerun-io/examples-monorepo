@@ -52,7 +52,7 @@ from colsfm.ceres_pose import (
     solver_options,
     solver_stats,
 )
-from colsfm.solver_report import CeresTermination
+from colsfm.solver_report import CeresTermination, SolverFailure
 
 EdgeKind: TypeAlias = Literal["consecutive", "loop"]
 Information6: TypeAlias = Float[np.ndarray, "6 6"]
@@ -420,8 +420,6 @@ class PoseGraphResult:
     """Ceres' final cost."""
     termination: CeresTermination
     """How the solve ended, as `colsfm.solver_report` names it."""
-    is_solution_usable: bool
-    """`Summary::IsSolutionUsable()`; False means the poses were left where Ceres stopped."""
     brief_report: str
     """Ceres' one-line report, kept for logs."""
     edge_residual_norms: Float[np.ndarray, "n_edges"] = field(default_factory=lambda: np.empty(0))
@@ -478,10 +476,7 @@ def solve_pose_graph(
         raise ValueError(f"anchor rig id {anchor} has no node")
 
     # The blob sign-flips every quaternion so that `w >= 0`; harmless, kept for parity.
-    poses: dict[int, PoseBlocks] = {
-        rig_id: pose_parameter_blocks(node.world_T_rig, canonical_sign=True)
-        for rig_id, node in node_by_id.items()
-    }
+    poses: dict[int, PoseBlocks] = {rig_id: pose_parameter_blocks(node.world_T_rig, canonical_sign=True) for rig_id, node in node_by_id.items()}
     quaternions: dict[int, QuaternionXYZW] = {rig_id: blocks.quat_xyzw for rig_id, blocks in poses.items()}
 
     problem: pyceres.Problem = pyceres.Problem()
@@ -507,19 +502,17 @@ def solve_pose_graph(
     summary: pyceres.SolverSummary = pyceres.SolverSummary()
     pyceres.solve(solver_options(solve_options), problem, summary)
     if not summary.IsSolutionUsable():
-        print(f"[colsfm] pose graph solve failed ({summary.termination_type}): {summary.message}")
+        raise SolverFailure(f"pose graph solve ended {summary.termination_type} without a usable solution: {summary.message}")
 
     optimised: dict[int, pycolmap.Rigid3d] = {
-        rig_id: rigid3d_from_parameter_blocks(blocks.quat_xyzw, blocks.translation)
-        for rig_id, blocks in poses.items()
+        rig_id: rigid3d_from_parameter_blocks(blocks.quat_xyzw, blocks.translation) for rig_id, blocks in poses.items()
     }
 
     residual_norms: Float[np.ndarray, "n_edges"] = np.array(
         [
             float(
                 np.linalg.norm(
-                    _sqrt_information(edge.information)
-                    @ relative_pose_error(optimised[edge.source], optimised[edge.target], edge.source_T_target)
+                    _sqrt_information(edge.information) @ relative_pose_error(optimised[edge.source], optimised[edge.target], edge.source_T_target)
                 )
             )
             for edge in edges
@@ -535,7 +528,6 @@ def solve_pose_graph(
         initial_cost=solved.initial_cost,
         final_cost=solved.final_cost,
         termination=solved.termination,
-        is_solution_usable=bool(summary.IsSolutionUsable()),
         brief_report=summary.BriefReport(),
         edge_residual_norms=residual_norms,
     )
