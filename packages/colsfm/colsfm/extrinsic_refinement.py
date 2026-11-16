@@ -152,7 +152,10 @@ class ExtrinsicRefinementRound:
     bundle_adjustment_seconds: float
     """Seconds inside step (B)."""
     num_diverged: int
-    """Observations step (B)'s post-solve guards removed; the next round reads the model without them."""
+    """Observations step (B)'s degeneracy and projection guards removed."""
+    num_outside_domain: int
+    """Observations step (B) removed for lying outside their camera model's valid domain; the next round reads the
+    model without either kind."""
     mean_reprojection_error_px: float
     """Mean reprojection error of the whole model after step (B)."""
     seconds: float
@@ -384,7 +387,7 @@ def refine_extrinsics(
         solve: BundleAdjustmentSolve = solve_bundle_adjustment(
             reconstruction, ba_options, gauge_frame_id, None, observation_manager, mapping_config.depth_threshold
         )
-        if solve.num_diverged:
+        if solve.num_diverged or solve.num_outside_domain:
             observation_index = build_observation_index(reconstruction)
             pair_counts = co_observed_camera_pairs(reconstruction)
         after: dict[int, pycolmap.Rigid3d] = rig_reference.vehicle_T_cam_by_camera_params_id(reconstruction)
@@ -397,6 +400,7 @@ def refine_extrinsics(
                 max_rotation_change_deg=rotation_deg,
                 bundle_adjustment_seconds=solve.seconds,
                 num_diverged=solve.num_diverged,
+                num_outside_domain=solve.num_outside_domain,
                 mean_reprojection_error_px=reconstruction.compute_mean_reprojection_error(),
                 seconds=time.perf_counter() - round_started,
             )
@@ -410,6 +414,8 @@ def refine_extrinsics(
                 f"{stats.initial_cost:.6g} -> {stats.final_cost:.6g} ({stats.termination}), "
                 f"moved {translation_mm:.3f} mm / {rotation_deg:.4f} deg, "
                 f"reprojection {latest.mean_reprojection_error_px:.4f} px, "
+                f"left out {stats.num_outside_domain} outside the camera domain and {stats.num_non_finite} non-finite, "
+                f"BA removed {latest.num_diverged} diverged and {latest.num_outside_domain} outside the domain, "
                 f"{latest.seconds:.2f}s"
             )
         if translation_mm < resolved.translation_tolerance_mm and rotation_deg < resolved.rotation_tolerance_deg:

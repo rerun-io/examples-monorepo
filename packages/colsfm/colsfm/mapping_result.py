@@ -9,6 +9,7 @@ benchmark -- rather than anything the mapping loop needs to execute.
 access, which is exactly why a run that wants to remember them has to snapshot
 them (`colsfm.run_report.MappingStats`): a later pass adjusts the same model.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -47,6 +48,9 @@ class RoundStats:
     num_diverged: int
     """Observations dropped by the degeneracy guard *after* the solve, i.e. points bundle
     adjustment itself pushed out of bounds. Normally 0; see `filter_degenerate_points`."""
+    num_outside_domain: int
+    """Observations dropped after the solve for lying outside their camera model's valid domain
+    (`filter_outside_camera_domain`: behind it, or past a `FULL_OPENCV` pole)."""
     num_observations: int
     """Observations left in the reconstruction after filtering; cuSFM's `num observed`."""
     observation_change: float
@@ -83,6 +87,8 @@ class PolishStats:
     """Observations the solve parameterised."""
     num_diverged: int
     """Observations the post-solve guards removed (points walked behind or into a camera)."""
+    num_outside_domain: int
+    """Observations removed after the solve for lying outside their camera model's valid domain."""
     report: SolverReport
     """What the polish said about its own progress: 22 iterations on KITTI 06 from
     CASPAR's answer, ending 3.4 % below the initial cost. Optional throughout for the
@@ -236,5 +242,3 @@ class MappingResult:
         if not self.extrinsics_refined or self.reference.camera_params_id is None:
             return None
         return self.reference.vehicle_T_cam_by_camera_params_id(self.reconstruction)
-
-
