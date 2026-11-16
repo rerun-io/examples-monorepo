@@ -1,0 +1,5 @@
+# colsfm's own settings for the kitti profile (cuSFM's schema has no field for them).
+
+# Retrieval candidates each query rig frame verifies; it keeps the best 1 by inliers. 1 here, against the default 3:
+# on KITTI 06, 3 candidates matched 3,760 loop pairs (loop stage 117 s, Sim(3) 0.857 m), 1 candidate 1,388 (61 s, 0.838 m).
+loop_candidates_per_frame = 1

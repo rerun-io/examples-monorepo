@@ -36,8 +36,45 @@ from typing import Final, Literal, TypeAlias
 
 from google.protobuf import text_format
 from google.protobuf.message import Message
+from serde import SerdeError, serde
+from serde.core import coerce
+from serde.toml import from_toml
 
 from colsfm.schema import CusfmSchema, load_schema
+
+COLSFM_PROFILE_FILE: Final[str] = "colsfm.toml"
+"""colsfm's own settings beside a profile's cuSFM `.pb.txt` files; optional, every field has a default."""
+
+
+@serde(type_check=coerce, deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class ColsfmProfileConfig:
+    """A profile's `colsfm.toml`: the knobs colsfm adds that cuSFM's schema has no field for."""
+
+    loop_candidates_per_frame: int = 3
+    """`colsfm.loop_closure.LoopClosureConfig.loop_candidates_per_frame`."""
+
+
+def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
+    """Read a profile's `colsfm.toml`, or the defaults when it has none.
+
+    Args:
+        directory: The profile directory.
+
+    Returns:
+        The settings.
+
+    Raises:
+        ValueError: When the file names an unknown field or a value of the wrong type.
+    """
+    path: Path = directory / COLSFM_PROFILE_FILE
+    if not path.is_file():
+        return ColsfmProfileConfig()
+    try:
+        return from_toml(ColsfmProfileConfig, path.read_text())
+    except SerdeError as error:
+        raise ValueError(f"{path}: {error}") from error
+
 
 LossFunctionType: TypeAlias = Literal["TRIVIAL", "SOFT_L1", "CAUCHY", "HUBER"]
 """Ceres robust loss applied to the whitened residual."""
@@ -247,7 +284,8 @@ class PoseGraphConfig:
 
     Only the fields a stage reads are carried. The proto's other fields — `loop_closure_min_words`,
     `use_incremental`, `use_switchable_pgo`, `confidence_to_pose_error_ratio`, `loop_edge_prune_threshold`,
-    `point3d_max_error`, `use_sequential_edge_pose_estimation` and `optimization_config` — drive parts of the blob
+    `point3d_max_error`, `use_sequential_edge_pose_estimation`, `optimization_config` and `num_votes` (colsfm behaves as
+    `num_votes: 1`) — drive parts of the blob
     colsfm does not reimplement (an incremental and switchable pose graph, BoW word voting, its own Ceres settings for
     the pose graph), so they are parsed by the proto and dropped here rather than carried unused.
     """
@@ -262,8 +300,9 @@ class PoseGraphConfig:
     """Weight applied to LOOP edge residuals relative to CONSECUTIVE ones."""
     good_loop_threshold: float
     """Inliers the best measured loop of a query rig frame needs to become an edge (`LoopClosureConfig.good_loop_threshold`)."""
-    num_votes: int
-    """Rig frames each query rig frame measures as loop candidates, best retrieval score first (`LoopClosureConfig.num_votes`)."""
+    loop_candidates_per_frame: int
+    """From the profile's `colsfm.toml`, not the proto (`LoopClosureConfig.loop_candidates_per_frame`). cuSFM's
+    `num_votes` is not carried: colsfm keeps one loop per query rig frame, which is cuSFM's `num_votes: 1`."""
     loop_edge_translation_threshold_meters: float
     """Translation gate a loop edge must pass; 0.0 disables the gate."""
     loop_edge_rotation_threshold_degrees: float
@@ -532,7 +571,7 @@ def read_config_directory(
             loop_closure_interval_ratio=float(pose_graph_message.loop_closure_interval_ratio),
             loop_residual_weight=float(pose_graph_message.loop_residual_weight),
             good_loop_threshold=float(pose_graph_message.good_loop_threshold),
-            num_votes=int(pose_graph_message.num_votes),
+            loop_candidates_per_frame=read_colsfm_profile(directory).loop_candidates_per_frame,
             loop_edge_translation_threshold_meters=float(pose_graph_message.loop_edge_translation_threshold_meters),
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
         ),

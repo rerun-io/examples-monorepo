@@ -115,7 +115,7 @@ def test_isaac_pose_graph_matches_the_shipped_file(isaac: CusfmConfig) -> None:
     assert pose_graph.loop_closure_interval_ratio == pytest.approx(0.08)
     assert pose_graph.loop_residual_weight == pytest.approx(0.25)
     assert pose_graph.good_loop_threshold == pytest.approx(150.0)
-    assert pose_graph.num_votes == 1
+    assert pose_graph.loop_candidates_per_frame == 3, "no colsfm.toml in isaac: the default"
     assert pose_graph.loop_edge_translation_threshold_meters == pytest.approx(0.0)
     assert pose_graph.loop_edge_rotation_threshold_degrees == pytest.approx(0.0)
 
@@ -165,3 +165,17 @@ def test_demo_overrides_can_be_supplied(repo_root: Path) -> None:
     config: CusfmConfig = read_config_directory(RESOURCES_DIR / "configs" / "isaac", demo)
     assert config.keyframe_selection.min_inter_frame_distance_m == pytest.approx(0.0)
     assert config.keyframe_selection.sample_sync_threshold_microseconds == 100
+
+
+def test_the_kitti_profile_verifies_one_loop_candidate_per_rig_frame() -> None:
+    """`loop_candidates_per_frame` comes from the profile's own `colsfm.toml`; cuSFM's `num_votes` is not read."""
+    assert read_config_directory(RESOURCES_DIR / "configs" / "kitti").pose_graph.loop_candidates_per_frame == 1
+    assert read_config_directory(RESOURCES_DIR / "configs" / "loop-closure-fixed").pose_graph.loop_candidates_per_frame == 3
+
+
+def test_a_colsfm_profile_file_with_an_unknown_field_is_refused_naming_the_file(tmp_path: Path) -> None:
+    from colsfm.config import read_colsfm_profile
+
+    (tmp_path / "colsfm.toml").write_text("num_votes = 3\n")
+    with pytest.raises(ValueError, match="colsfm.toml"):
+        read_colsfm_profile(tmp_path)

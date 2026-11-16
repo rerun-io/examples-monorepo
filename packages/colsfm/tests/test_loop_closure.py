@@ -2,7 +2,7 @@
 
 Seams under test (all public):
 
-* `find_loop_edges` — retrieval, the votes, verification, rig conversion, gating.
+* `find_loop_edges` — retrieval, the candidate cap, verification, rig conversion, gating.
 * `best_per_query_rig` — one loop per query rig frame, at `good_loop_threshold` inliers.
 * `is_good_match` / `minimum_time_gap_seconds` / `session_duration_seconds` — the gates.
 * `LoopClosureConfig.from_pose_graph` — the config profile's loop gates.
@@ -534,7 +534,7 @@ def test_the_funnel_counters_reconcile(loop_result: LoopClosureResult) -> None:
     assert counters.candidates_retrieved > 0
     assert counters.rejected_by_time > 0
     survivors: int = counters.candidates_retrieved - counters.rejected_by_time - counters.rejected_by_score - counters.rejected_by_same_rig
-    assert survivors >= counters.after_votes >= counters.after_deduplication
+    assert survivors >= counters.after_candidates >= counters.after_deduplication
     measured: int = (
         counters.rejected_no_matches
         + counters.rejected_by_geometry
@@ -785,11 +785,11 @@ def _candidate(source_rig_id: int, target_rig_id: int, num_inliers: int) -> Loop
 
 
 def test_each_query_rig_frame_keeps_only_its_best_measured_pair() -> None:
-    """Rig frame 1 voted for 10 and 11: only 11, the one with more inliers, becomes an edge."""
+    """Rig frame 1 kept 10 and 11 as candidates: only 11, the one with more inliers, becomes an edge."""
     weaker, stronger = _candidate(1, 10, 200), _candidate(1, 11, 300)
     counters: FunnelCounters = FunnelCounters()
-    voters: dict[tuple[int, int], frozenset[int]] = {(1, 10): frozenset({1}), (1, 11): frozenset({1})}
-    assert best_per_query_rig([weaker, stronger], voters, 150, counters) == [stronger]
+    queried_by: dict[tuple[int, int], frozenset[int]] = {(1, 10): frozenset({1}), (1, 11): frozenset({1})}
+    assert best_per_query_rig([weaker, stronger], queried_by, 150, counters) == [stronger]
     assert counters.not_best == 1 and counters.below_good_loop == 0
 
 
@@ -800,7 +800,7 @@ def test_a_best_pair_below_the_good_loop_threshold_is_dropped() -> None:
     assert counters.below_good_loop == 1
 
 
-def test_a_pair_both_rig_frames_voted_for_is_one_edge() -> None:
+def test_a_pair_both_rig_frames_kept_as_candidates_is_one_edge() -> None:
     """1 and 10 found each other; the pair is the best of both and is kept once."""
     counters: FunnelCounters = FunnelCounters()
     pair: LoopCandidate = _candidate(1, 10, 400)

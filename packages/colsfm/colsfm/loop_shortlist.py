@@ -2,7 +2,7 @@
 
 The retrieval half of the loop funnel, and the half that reads no match at all:
 a query per keyframe of an allowed camera, the score gate, the time gate, the
-same-rig gate, the `num_votes` best-scoring target rig frames per query rig frame,
+same-rig gate, the `loop_candidates_per_frame` best-scoring target rig frames per query rig frame,
 then one hit per unordered rig pair. `colsfm.loop_closure.plan_loop_search` is its only caller, and the fact
 that none of this needs a match is exactly why the pipeline's discovery run --
 which learned the pair list by *executing* the whole search against a matcher
@@ -46,8 +46,8 @@ class FunnelCounters:
     """Hits dropped by the temporal gate."""
     rejected_by_same_rig: int = 0
     """Hits whose rig frame is the query's own."""
-    after_votes: int = 0
-    """Hits left after each query rig frame kept its `num_votes` best target rig frames."""
+    after_candidates: int = 0
+    """Hits left after each query rig frame kept its `loop_candidates_per_frame` best target rig frames."""
     after_deduplication: int = 0
     """Rig pairs left after one hit per unordered rig pair."""
     rejected_no_matches: int = 0
@@ -131,7 +131,7 @@ class LoopClosureDiagnostics:
 class RetrievalHit:
     """One retrieval hit that passed the score, time and rig gates, before any matching.
 
-    The funnel keeps each query rig frame's best votes, deduplicates them, and only the survivors are handed to the
+    The funnel keeps each query rig frame's best candidates, deduplicates them, and only the survivors are handed to the
     matcher. Nothing here needs an image pair to have been matched, which is what lets the
     stage name every pair it will need in a single dry run (`find_loop_edges`).
     """
@@ -217,12 +217,12 @@ def hits_for_query(
 
 @dataclass(frozen=True, slots=True)
 class Shortlist:
-    """The rig pairs to measure, and which query rig frames voted for each."""
+    """The rig pairs to measure, and which query rig frames kept each among their candidates."""
 
     hits: dict[tuple[int, int], RetrievalHit]
     """The best-scoring hit per unordered rig pair, keyed by that pair."""
-    voters: dict[tuple[int, int], frozenset[int]]
-    """Per unordered rig pair, the query rig frames that kept it among their `num_votes`; each of them later keeps only
+    queried_by: dict[tuple[int, int], frozenset[int]]
+    """Per unordered rig pair, the query rig frames that kept it among their `loop_candidates_per_frame`; each of them later keeps only
     its best measured pair."""
 
 
@@ -233,12 +233,12 @@ def shortlist_rig_pairs(
     timestamps_us: Mapping[int, int],
     *,
     top_k: int,
-    num_votes: int,
+    loop_candidates_per_frame: int,
     gap_seconds: float,
     score_threshold: float,
     counters: FunnelCounters,
 ) -> Shortlist:
-    """Retrieve, gate, keep each query rig frame's `num_votes` best target rig frames, then deduplicate.
+    """Retrieve, gate, keep each query rig frame's `loop_candidates_per_frame` best target rig frames, then deduplicate.
 
     The blob applies the time gate AFTER retrieval, so temporal neighbours eat slots out of
     its top-20 and it needs an early abort when more than half the hits are too close
@@ -246,7 +246,7 @@ def shortlist_rig_pairs(
     keeps all `top_k` slots useful and reports what the gate dropped from the same walk.
 
     A query rig frame pools the hits of all its query keyframes, keeps the best score per target rig frame and then
-    the `num_votes` best target rig frames. This replaced one hit per 10 s `|dt|` band per query keyframe, which let a
+    the `loop_candidates_per_frame` best target rig frames. This replaced one hit per 10 s `|dt|` band per query keyframe, which let a
     long sequence measure up to (length / 10 s) candidates per query and grew the loop pairs as keyframes^1.8 on MSD.
 
     Args:
@@ -255,19 +255,19 @@ def shortlist_rig_pairs(
         keyframe_by_id: Every keyframe, indexed by id.
         timestamps_us: Capture time per keyframe id.
         top_k: Retrieval hits to ask the index for per query keyframe.
-        num_votes: Target rig frames each query rig frame keeps, best retrieval score first.
+        loop_candidates_per_frame: Target rig frames each query rig frame keeps, best retrieval score first.
         gap_seconds: The temporal gate actually applied.
         score_threshold: The resolved retrieval score gate.
         counters: Diagnostic counters, mutated in place.
 
     Returns:
-        The best-scoring hit per unordered rig pair and the query rig frames that voted for it.
+        The best-scoring hit per unordered rig pair and the query rig frames that kept it among their candidates.
     """
     allowed_camera_ids: set[int] = query_camera_ids(frames_meta)
     gap_us: int = round(gap_seconds * MICROSECONDS_PER_SECOND)
     indexed: set[int] = set(index.image_ids)
 
-    voted: list[RetrievalHit] = []
+    kept: list[RetrievalHit] = []
     for rig in frames_meta.rig_frames():
         best_by_target: dict[int, RetrievalHit] = {}
         for query_id in rig.keyframe_ids:
@@ -281,16 +281,16 @@ def shortlist_rig_pairs(
                 if incumbent is None or hit.score > incumbent.score:
                     best_by_target[hit.target_rig_id] = hit
         ranked: list[RetrievalHit] = sorted(best_by_target.values(), key=lambda hit: (-hit.score, hit.target_rig_id))
-        voted.extend(ranked[:num_votes])
+        kept.extend(ranked[:loop_candidates_per_frame])
 
-    counters.after_votes = len(voted)
+    counters.after_candidates = len(kept)
     hits: dict[tuple[int, int], RetrievalHit] = {}
-    voters: dict[tuple[int, int], set[int]] = {}
-    for hit in voted:
+    queried_by: dict[tuple[int, int], set[int]] = {}
+    for hit in kept:
         key: tuple[int, int] = normalise_pair(hit.source_rig_id, hit.target_rig_id)
-        voters.setdefault(key, set()).add(hit.source_rig_id)
+        queried_by.setdefault(key, set()).add(hit.source_rig_id)
         incumbent = hits.get(key)
         if incumbent is None or hit.score > incumbent.score:
             hits[key] = hit
     counters.after_deduplication = len(hits)
-    return Shortlist(hits=hits, voters={key: frozenset(rigs) for key, rigs in voters.items()})
+    return Shortlist(hits=hits, queried_by={key: frozenset(rigs) for key, rigs in queried_by.items()})

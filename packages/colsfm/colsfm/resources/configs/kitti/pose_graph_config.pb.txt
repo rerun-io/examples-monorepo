@@ -6,9 +6,8 @@ loop_closure_interval_ratio: 0.05
 use_incremental: true
 loop_residual_weight: 0.25
 good_loop_threshold: 150
-# colsfm: rig frames each query rig frame measures as loop candidates (best retrieval score first); the best by inliers
-# becomes an edge when it has at least good_loop_threshold inliers. 1 here (cuSFM's kitti value), not the default 3:
-# on KITTI 06 3 votes matched 3,760 loop pairs (loop stage 117 s, Sim(3) 0.857 m), 1 vote 1,388 (61 s, 0.838 m).
+# colsfm keeps one loop per query rig frame, i.e. num_votes: 1, and does not read this field; how many candidates
+# it verifies per rig frame is loop_candidates_per_frame in colsfm.toml.
 num_votes: 1
 optimization_config {
   # TRIVIAL
