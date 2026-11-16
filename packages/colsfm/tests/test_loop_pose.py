@@ -22,7 +22,7 @@ pass these tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import numpy as np
@@ -33,7 +33,6 @@ from loop_helpers import ProjectedPoints, matcher_from_point_indices, project_an
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from colsfm import loop_pose
 from colsfm.geometry import rigid3d_from_matrix
 from colsfm.loop_pose import (
     AnchorLandmarks,
@@ -460,9 +459,7 @@ def test_an_anchors_landmarks_are_packed_for_the_join(scene: FourCameraScene) ->
     assert np.all(np.diff(anchor.keypoint_indices) > 0)
 
 
-def test_the_bearing_memo_is_bounded_and_still_answers(
-    scene: FourCameraScene, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_bearing_memo_is_bounded_and_still_answers(scene: FourCameraScene) -> None:
     """The memo is an LRU, not a growing dict, and evicting from it changes no bearing.
 
     An unbounded memo held one float64 `[num_keypoints, 3]` array per image for the
@@ -470,11 +467,8 @@ def test_the_bearing_memo_is_bounded_and_still_answers(
     source rig frame, its temporal neighbours and one target. The cache is a speed
     device, so the only thing that must survive a smaller one is the answer.
     """
-    wanted: dict[int, Bearings] = {
-        image_id: make_estimator(scene).bearings(image_id) for image_id in sorted(scene.keypoints)
-    }
-    monkeypatch.setattr(loop_pose, "BEARING_CACHE_IMAGES", 2)
-    estimator: RigPoseEstimator = make_estimator(scene)
+    wanted: dict[int, Bearings] = {image_id: make_estimator(scene).bearings(image_id) for image_id in sorted(scene.keypoints)}
+    estimator: RigPoseEstimator = replace(make_estimator(scene), cache_images=2)
 
     for image_id, expected in wanted.items():
         np.testing.assert_array_equal(estimator.bearings(image_id), expected)

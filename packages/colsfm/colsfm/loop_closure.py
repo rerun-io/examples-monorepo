@@ -266,9 +266,11 @@ a 0.93 s, 0.66 m sweep has no drift for a loop to remove. The pipeline decides p
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Final
 
@@ -280,6 +282,7 @@ from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.geometry import MICROSECONDS_PER_SECOND
 from colsfm.loop_pairs import required_image_pairs
 from colsfm.loop_pose import (
+    BEARING_CACHE_IMAGES,
     DEFAULT_RIG_POSE_CONFIG,
     Keypoints,
     MatchFunction,
@@ -637,19 +640,13 @@ def plan_loop_search(
         score_threshold=score_threshold,
         counters=counters,
     )
-    pixels: Mapping[int, Keypoints] = (
-        read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
-    )
+    pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist)
-    rig_pairs: tuple[tuple[int, int], ...] = tuple(
-        (source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits
-    )
+    rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
     rig_index: RigFrameIndex = rig_frame_index(frames_meta)
     return LoopSearchPlan(
         config=config,
-        image_pairs=required_image_pairs(
-            rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs
-        ),
+        image_pairs=required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs),
         groups=tuple(groups),
         geometry=empty_geometry,
         rig_index=rig_index,
@@ -674,14 +671,10 @@ def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosu
         included.
     """
     config: LoopClosureConfig = plan.config
-    estimator: RigPoseEstimator = RigPoseEstimator(
-        index=plan.rig_index,
-        geometry=plan.geometry,
-        keypoints=plan.keypoints,
-        match_fn=match_fn,
-        config=config.rig_pose,
+    make_estimator: Callable[..., RigPoseEstimator] = partial(
+        RigPoseEstimator, index=plan.rig_index, geometry=plan.geometry, keypoints=plan.keypoints, match_fn=match_fn, config=config.rig_pose
     )
-    candidates: list[LoopCandidate] = _measure_groups(list(plan.groups), estimator, config, plan.counters)
+    candidates: list[LoopCandidate] = _measure_groups(list(plan.groups), make_estimator, config, plan.counters)
 
     edges: list[PoseGraphEdge] = []
     for candidate in candidates:
@@ -761,7 +754,7 @@ def _group_by_source_rig(shortlist: Mapping[tuple[int, int], RetrievalHit]) -> l
 
 def _measure_groups(
     groups: list[tuple[int, tuple[RetrievalHit, ...]]],
-    estimator: RigPoseEstimator,
+    make_estimator: Callable[..., RigPoseEstimator],
     config: LoopClosureConfig,
     counters: FunnelCounters,
 ) -> list[LoopCandidate]:
@@ -775,7 +768,10 @@ def _measure_groups(
     Args:
         groups: One `(source rig id, hits)` group per source rig frame, as the plan ordered
             them.
-        estimator: The estimator, already carrying the matcher that can answer the plan.
+        make_estimator: Builds an estimator (already carrying the matcher that can answer
+            the plan) from a `cache_images` budget. Each worker thread builds its own: an
+            estimator's bearing memo is mutable, and the threads share only the immutable
+            geometry, keypoints and matcher. They split `BEARING_CACHE_IMAGES` evenly.
         config: Gates and thresholds.
         counters: Diagnostic counters, mutated in place.
 
@@ -783,13 +779,19 @@ def _measure_groups(
         One verified candidate per rig pair that passed every gate, in rig-pair order.
     """
 
+    workers: int = max(1, min(config.num_threads, len(groups)))
+    worker: threading.local = threading.local()
+
     def measure(group: tuple[int, tuple[RetrievalHit, ...]]) -> list[RigPoseOutcome]:
-        """Measure one source rig frame's candidates against its own local map."""
+        """Measure one source rig frame's candidates against its own local map, on this thread's estimator."""
+        estimator: RigPoseEstimator | None = getattr(worker, "estimator", None)
+        if estimator is None:
+            estimator = worker.estimator = make_estimator(cache_images=BEARING_CACHE_IMAGES // workers)
         source_rig_id, hits = group
         return estimator.measure_group(source_rig_id, tuple(hit.target_rig_id for hit in hits))
 
-    if config.num_threads > 1 and len(groups) > 1:
-        with ThreadPoolExecutor(max_workers=config.num_threads) as pool:
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             outcomes_per_group: list[list[RigPoseOutcome]] = list(pool.map(measure, groups))
     else:
         outcomes_per_group = [measure(group) for group in groups]

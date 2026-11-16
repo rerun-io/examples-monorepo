@@ -29,7 +29,7 @@ from loop_helpers import ProjectedPoints, matcher_from_point_indices, project_an
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from colsfm import RESOURCES_DIR
+from colsfm import RESOURCES_DIR, loop_closure
 from colsfm.config import CusfmConfig, PoseGraphConfig, read_config_directory
 from colsfm.database import read_keypoints_batch
 from colsfm.frames_meta import FramesMeta, parse_message, read_frames_meta
@@ -120,7 +120,9 @@ class SquareRigScene:
     """How many rig frames the sequence has."""
 
 
-def _square_trajectory(side_frames: int = 10, side_meters: float = 4.0, revisit_frames: int = 8, lateral_offset_m: float = 0.3) -> list[pycolmap.Rigid3d]:
+def _square_trajectory(
+    side_frames: int = 10, side_meters: float = 4.0, revisit_frames: int = 8, lateral_offset_m: float = 0.3
+) -> list[pycolmap.Rigid3d]:
     """Walk a square, then retrace the first side 30 cm to the left.
 
     The lateral offset is what makes the revisit usable: two exactly coincident views give
@@ -176,9 +178,7 @@ def _projection_matrix_message(message: Message) -> None:
     """
     message.row_count = 3
     message.column_count = 4
-    message.data.extend(
-        [FOCAL_LENGTH_PX, 0.0, IMAGE_WIDTH / 2.0, 0.0, 0.0, FOCAL_LENGTH_PX, IMAGE_HEIGHT / 2.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    )
+    message.data.extend([FOCAL_LENGTH_PX, 0.0, IMAGE_WIDTH / 2.0, 0.0, 0.0, FOCAL_LENGTH_PX, IMAGE_HEIGHT / 2.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 
 
 def _write_rigid(message: Message, pose: pycolmap.Rigid3d) -> None:
@@ -314,12 +314,12 @@ def make_square_rig_scene(tmp_path: Path, n_points: int = 12000, pixel_noise_px:
             noisy_descriptors: Float32[ndarray, "n_keypoints 128"] = point_descriptors[chosen] + generator.standard_normal(
                 (len(chosen), ALIKED_DESCRIPTOR_DIM)
             ).astype(np.float32) * np.float32(0.02)
-            descriptors_by_keyframe[keyframe_id] = np.ascontiguousarray(
-                noisy_descriptors / np.linalg.norm(noisy_descriptors, axis=1, keepdims=True)
-            )
+            descriptors_by_keyframe[keyframe_id] = np.ascontiguousarray(noisy_descriptors / np.linalg.norm(noisy_descriptors, axis=1, keepdims=True))
             world_T_cam_prior[keyframe_id] = pycolmap.Rigid3d(
                 pycolmap.Rotation3d(
-                    (Rotation.from_quat(world_T_camera.rotation.quat) * Rotation.from_rotvec(generator.standard_normal(3) * np.deg2rad(0.1))).as_quat()
+                    (
+                        Rotation.from_quat(world_T_camera.rotation.quat) * Rotation.from_rotvec(generator.standard_normal(3) * np.deg2rad(0.1))
+                    ).as_quat()
                 ),
                 np.asarray(world_T_camera.translation, dtype=np.float64) + generator.standard_normal(3) * 0.002,
             )
@@ -461,9 +461,7 @@ def test_planning_then_verifying_gives_the_same_edges_as_one_call(
     config: LoopClosureConfig = LoopClosureConfig()
     plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, config)
     stepwise: LoopClosureResult = verify_loop_plan(plan, match_fn)
-    assert [(edge.source, edge.target) for edge in stepwise.edges] == [
-        (edge.source, edge.target) for edge in loop_result.edges
-    ]
+    assert [(edge.source, edge.target) for edge in stepwise.edges] == [(edge.source, edge.target) for edge in loop_result.edges]
     assert stepwise.diagnostics == loop_result.diagnostics
 
 
@@ -490,9 +488,7 @@ def test_the_stage_is_on_by_default_and_disabling_it_is_inert(scene: SquareRigSc
     assert result.diagnostics is None
 
 
-def test_the_score_gate_is_one_constant_and_can_be_overridden(
-    scene: SquareRigScene, match_fn: MatchFunction, loop_result: LoopClosureResult
-) -> None:
+def test_the_score_gate_is_one_constant_and_can_be_overridden(scene: SquareRigScene, match_fn: MatchFunction, loop_result: LoopClosureResult) -> None:
     """`good_score_threshold` is None by default and resolves to `GOOD_SCORE_THRESHOLD`.
 
     The two `colsfm.retrieval` backends score different quantities, but both calibrations
@@ -524,9 +520,7 @@ def test_the_funnel_counters_reconcile(loop_result: LoopClosureResult) -> None:
     assert counters.queries > 0
     assert counters.candidates_retrieved > 0
     assert counters.rejected_by_time > 0
-    survivors: int = (
-        counters.candidates_retrieved - counters.rejected_by_time - counters.rejected_by_score - counters.rejected_by_same_rig
-    )
+    survivors: int = counters.candidates_retrieved - counters.rejected_by_time - counters.rejected_by_score - counters.rejected_by_same_rig
     assert survivors >= counters.after_banding >= counters.after_deduplication
     measured: int = (
         counters.rejected_no_matches
@@ -599,8 +593,19 @@ def _poses_by_rig_pair(result: LoopClosureResult) -> dict[tuple[int, int], pycol
     return {(min(edge.source, edge.target), max(edge.source, edge.target)): edge.source_T_target for edge in result.edges}
 
 
-def test_the_thread_count_does_not_reach_the_result(scene: SquareRigScene, clean_match_fn: MatchFunction, serial_result: LoopClosureResult) -> None:
+@pytest.mark.parametrize("bearing_budget", [None, 8], ids=["default-cache", "one-image-per-worker"])
+def test_the_thread_count_does_not_reach_the_result(
+    scene: SquareRigScene,
+    clean_match_fn: MatchFunction,
+    serial_result: LoopClosureResult,
+    bearing_budget: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Eight workers measure the same pairs in the same order and get the same poses.
+
+    With a budget of 8 images over 8 workers every bearing lookup evicts, while the workers
+    ask for overlapping images at once: one estimator shared between them failed exactly
+    there (a hit's reorder after another thread's eviction), so each worker owns its own.
 
     A threading bug in this stage would be one of two things: a worker reading another
     group's local map, which puts metres of error into a pose, or the results coming back
@@ -613,6 +618,8 @@ def test_the_thread_count_does_not_reach_the_result(scene: SquareRigScene, clean
     of identical code, threaded or serial, which would hide a threading bug in noise.
     """
     assert LoopClosureConfig().num_threads >= 1
+    if bearing_budget is not None:
+        monkeypatch.setattr(loop_closure, "BEARING_CACHE_IMAGES", bearing_budget)
     threaded: LoopClosureResult = find_loop_edges(
         scene.frames_meta, scene.database_path, scene.index, replace(SEEDED_SERIAL_CONFIG, num_threads=8), clean_match_fn
     )
@@ -650,9 +657,7 @@ def test_reading_the_keypoints_once_and_passing_them_in_replaces_the_database_re
     keypoints: dict[int, Keypoints] = read_keypoints_batch(scene.database_path, scene.index.image_ids, dtype=np.float64)
     assert len(keypoints) == len(scene.index.image_ids)
     absent: Path = Path("no/such/database.db")
-    reused: LoopClosureResult = find_loop_edges(
-        scene.frames_meta, absent, scene.index, SEEDED_SERIAL_CONFIG, clean_match_fn, keypoints=keypoints
-    )
+    reused: LoopClosureResult = find_loop_edges(scene.frames_meta, absent, scene.index, SEEDED_SERIAL_CONFIG, clean_match_fn, keypoints=keypoints)
     assert reused.diagnostics.counters.after_deduplication == serial_result.diagnostics.counters.after_deduplication
     shared: set[tuple[int, int]] = set(_poses_by_rig_pair(reused)) & set(_poses_by_rig_pair(serial_result))
     assert len(shared) >= 0.8 * len(serial_result.edges)
@@ -679,9 +684,7 @@ def test_loop_edges_reduce_trajectory_error_when_the_odometry_drifts(scene: Squa
         )
         drifted[current] = drifted[previous] * (true_step * perturbation)
 
-    nodes: list[RigNode] = [
-        RigNode(rig_id=rig_id, world_T_rig=drifted[rig_id], timestamp_us=(rig_id - 1) * RIG_PERIOD_US) for rig_id in rig_ids
-    ]
+    nodes: list[RigNode] = [RigNode(rig_id=rig_id, world_T_rig=drifted[rig_id], timestamp_us=(rig_id - 1) * RIG_PERIOD_US) for rig_id in rig_ids]
     odometry_edges: list[PoseGraphEdge] = sequential_edges(nodes, connected_keyframe_num=1)
 
     def trajectory_error(poses: dict[int, pycolmap.Rigid3d]) -> float:
@@ -708,9 +711,7 @@ def test_stored_weights_scale_the_information_matrix_by_the_inlier_count(scene: 
     way between runs. The poses themselves agree to 0.1 mm; only the gate decision moves.
     """
     config: LoopClosureConfig = LoopClosureConfig(use_stored_weights=True)
-    identity_run: LoopClosureResult = find_loop_edges(
-        scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(), match_fn
-    )
+    identity_run: LoopClosureResult = find_loop_edges(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(), match_fn)
     weighted_run: LoopClosureResult = find_loop_edges(scene.frames_meta, scene.database_path, scene.index, config, match_fn)
     assert identity_run.edges
     assert weighted_run.edges
@@ -932,7 +933,11 @@ def test_every_camera_is_built_with_a_prior_focal_length(scene: SquareRigScene) 
     no longer estimates a two-view geometry, but the same cameras go on to the mapper.
     """
     naive: pycolmap.Camera = pycolmap.Camera(
-        camera_id=0, model="PINHOLE", width=IMAGE_WIDTH, height=IMAGE_HEIGHT, params=[FOCAL_LENGTH_PX, FOCAL_LENGTH_PX, IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2]
+        camera_id=0,
+        model="PINHOLE",
+        width=IMAGE_WIDTH,
+        height=IMAGE_HEIGHT,
+        params=[FOCAL_LENGTH_PX, FOCAL_LENGTH_PX, IMAGE_WIDTH / 2, IMAGE_HEIGHT / 2],
     )
     assert naive.has_prior_focal_length is False
     cameras: dict[int, pycolmap.Camera] = calibrated_cameras(scene.frames_meta)

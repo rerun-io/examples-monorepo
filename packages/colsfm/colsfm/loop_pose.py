@@ -321,7 +321,9 @@ def bearings_of(camera: pycolmap.Camera, keypoints: Keypoints) -> Bearings:
     Returns:
         Float64 unit bearings with shape `[n_keypoints, 3]`.
     """
-    normalised: Float64[ndarray, "n_keypoints 2"] = np.asarray(camera.cam_from_img(np.ascontiguousarray(keypoints, dtype=np.float64)), dtype=np.float64)
+    normalised: Float64[ndarray, "n_keypoints 2"] = np.asarray(
+        camera.cam_from_img(np.ascontiguousarray(keypoints, dtype=np.float64)), dtype=np.float64
+    )
     homogeneous: Bearings = np.concatenate([normalised, np.ones((len(normalised), 1), dtype=np.float64)], axis=1)
     return homogeneous / np.linalg.norm(homogeneous, axis=1, keepdims=True)
 
@@ -450,10 +452,10 @@ class _Observations:
 class RigPoseEstimator:
     """Measures rig-to-rig relative poses over one fixed rig, sequence and matcher.
 
-    Build one per run and call `measure_group` once per source rig frame. The estimator is
-    safe to share between threads: the only mutated state is the bearing memo, whose entries
-    are idempotent (two threads racing on the same image recompute the same array) and whose
-    eviction can only cost a recomputation.
+    Build one per worker thread and call `measure_group` once per source rig frame. Its
+    bearing memo is a mutable LRU (a hit is a lookup and a reorder, an insert can evict),
+    so an estimator is never shared between threads; `colsfm.loop_closure` gives each
+    measurement worker its own, with a share of `BEARING_CACHE_IMAGES`.
     """
 
     index: RigFrameIndex
@@ -466,6 +468,8 @@ class RigPoseEstimator:
     """The injected matcher."""
     config: RigPoseConfig = DEFAULT_RIG_POSE_CONFIG
     """Gates and thresholds."""
+    cache_images: int = BEARING_CACHE_IMAGES
+    """Images the bearing memo keeps; several workers split `BEARING_CACHE_IMAGES` between them."""
     _camera_of_image: dict[int, int] = field(init=False, repr=False)
     """`camera_params_id` per image id, inverted from the rig-frame index."""
     _rig_of_image: dict[int, int] = field(init=False, repr=False)
@@ -473,7 +477,7 @@ class RigPoseEstimator:
     _bearings: OrderedDict[int, Bearings] = field(init=False, repr=False, default_factory=OrderedDict)
     """Memoised unit bearings per image id, most recently used last.
 
-    An LRU of `BEARING_CACHE_IMAGES`, as `colsfm.matching_trt.FeatureCache` is over
+    An LRU of `cache_images`, as `colsfm.matching_trt.FeatureCache` is over
     keypoints and descriptors: the memo used to be an unbounded dict, so a RoboCap run
     ended it holding a `[num_keypoints, 3]` float64 array for every one of 4528 images
     at once, for a measurement that only ever reads a few rig frames' worth."""
@@ -512,7 +516,7 @@ class RigPoseEstimator:
             return cached
         computed: Bearings = bearings_of(self.camera_of(image_id), self.keypoints[image_id])
         self._bearings[image_id] = computed
-        if len(self._bearings) > BEARING_CACHE_IMAGES:
+        if len(self._bearings) > self.cache_images:
             self._bearings.popitem(last=False)
         return computed
 
