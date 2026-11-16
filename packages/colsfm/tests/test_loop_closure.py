@@ -2,8 +2,8 @@
 
 Seams under test (all public):
 
-* `find_loop_edges` — retrieval, verification, banding, rig conversion, gating.
-* `select_best_candidates` — the `SelectBestCandidates` banding rule.
+* `find_loop_edges` — retrieval, the votes, verification, rig conversion, gating.
+* `best_per_query_rig` — one loop per query rig frame, at `good_loop_threshold` inliers.
 * `is_good_match` / `minimum_time_gap_seconds` / `session_duration_seconds` — the gates.
 * `LoopClosureConfig.from_pose_graph` — the config profile's loop gates.
 * `colsfm.rig_geometry.calibrated_cameras` — the cameras the estimators need.
@@ -43,15 +43,16 @@ from colsfm.loop_closure import (
     LoopSearchPlan,
     MatchFunction,
     RetrievalHit,
+    best_per_query_rig,
     find_loop_edges,
     is_good_match,
     minimum_time_gap_seconds,
+    pairs_outside_accepted_edges,
     plan_loop_search,
-    select_best_candidates,
     session_duration_seconds,
     verify_loop_plan,
 )
-from colsfm.loop_pose import DEFAULT_RIG_POSE_CONFIG, Keypoints, RigPoseConfig
+from colsfm.loop_pose import DEFAULT_RIG_POSE_CONFIG, Keypoints, RigPoseConfig, RigPoseEstimate
 from colsfm.matching import MatchingOptions
 from colsfm.pose_graph import PoseGraphEdge, RigNode, gate_loop_edges, sequential_edges, solve_pose_graph
 from colsfm.retrieval import (
@@ -488,6 +489,18 @@ def test_the_stage_is_on_by_default_and_disabling_it_is_inert(scene: SquareRigSc
     assert result.diagnostics is None
 
 
+def test_only_accepted_edges_pairs_stay_for_the_mapper(scene: SquareRigScene, match_fn: MatchFunction) -> None:
+    """Pairs matched only for a candidate that was then rejected go; every pair an accepted edge was measured from stays."""
+    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, SEEDED_SERIAL_CONFIG)
+    result: LoopClosureResult = verify_loop_plan(plan, match_fn)
+    assert result.edges and len(result.edges) < len(plan.rig_pairs)
+    dropped: list[tuple[int, int]] = pairs_outside_accepted_edges(plan, result.edges, list(plan.image_pairs))
+    kept: set[tuple[int, int]] = set(plan.image_pairs) - set(dropped)
+    assert dropped and kept
+    assert pairs_outside_accepted_edges(plan, result.edges, sorted(kept)) == []
+    assert pairs_outside_accepted_edges(plan, [], list(plan.image_pairs)) == list(plan.image_pairs)
+
+
 def test_the_score_gate_is_one_constant_and_can_be_overridden(scene: SquareRigScene, match_fn: MatchFunction, loop_result: LoopClosureResult) -> None:
     """`good_score_threshold` is None by default and resolves to `GOOD_SCORE_THRESHOLD`.
 
@@ -521,7 +534,7 @@ def test_the_funnel_counters_reconcile(loop_result: LoopClosureResult) -> None:
     assert counters.candidates_retrieved > 0
     assert counters.rejected_by_time > 0
     survivors: int = counters.candidates_retrieved - counters.rejected_by_time - counters.rejected_by_score - counters.rejected_by_same_rig
-    assert survivors >= counters.after_banding >= counters.after_deduplication
+    assert survivors >= counters.after_votes >= counters.after_deduplication
     measured: int = (
         counters.rejected_no_matches
         + counters.rejected_by_geometry
@@ -742,57 +755,57 @@ def test_a_candidate_keeps_its_hit_and_its_measurement_whole(loop_result: LoopCl
 
 
 # --------------------------------------------------------------------------------------
-# c. candidate banding
+# c. one loop per query rig frame
 # --------------------------------------------------------------------------------------
 
 
-def _hit(delta_seconds: float, score: float, candidate_keyframe_id: int) -> RetrievalHit:
-    """Build a retrieval hit with a chosen time gap and score.
+def _candidate(source_rig_id: int, target_rig_id: int, num_inliers: int) -> LoopCandidate:
+    """A verified candidate between two rig frames with a chosen inlier count.
 
     Args:
-        delta_seconds: `t_query - t_candidate` in seconds.
-        score: Retrieval score.
-        candidate_keyframe_id: Id to identify the hit by in the assertions.
+        source_rig_id: The rig frame whose query found it.
+        target_rig_id: The rig frame it found.
+        num_inliers: Its measured inliers.
 
     Returns:
-        The hit.
+        The candidate.
     """
-    return RetrievalHit(
-        query_keyframe_id=1,
-        candidate_keyframe_id=candidate_keyframe_id,
-        source_rig_id=1,
-        target_rig_id=candidate_keyframe_id + 100,
-        score=score,
-        delta_seconds=delta_seconds,
+    hit: RetrievalHit = RetrievalHit(
+        query_keyframe_id=source_rig_id, candidate_keyframe_id=target_rig_id, source_rig_id=source_rig_id, target_rig_id=target_rig_id, score=0.5, delta_seconds=30.0
     )
-
-
-def test_two_hits_in_the_same_band_collapse_to_the_better_scoring_one() -> None:
-    """`SelectBestCandidates` keeps one hit per 10 s band of `|dt|` (spec §6.4).
-
-    The band is ranked by retrieval score, not by inlier count: nothing has been matched
-    when the band is chosen. See `select_best_candidates` for why.
-    """
-    kept: list[RetrievalHit] = select_best_candidates(
-        [_hit(20.0, 0.2, candidate_keyframe_id=1), _hit(23.0, 0.5, candidate_keyframe_id=2)], band_seconds=10.0
+    estimate: RigPoseEstimate = RigPoseEstimate(
+        source_T_target=pycolmap.Rigid3d(),
+        num_inliers=num_inliers,
+        num_observations=2 * num_inliers,
+        num_landmarks=num_inliers,
+        num_cameras=2,
+        direction_disagreement_deg=float("nan"),
     )
-    assert [hit.candidate_keyframe_id for hit in kept] == [2]
+    return LoopCandidate(hit=hit, estimate=estimate)
 
 
-def test_a_weaker_hit_does_not_displace_the_incumbent_of_its_band() -> None:
-    """The first hit of a band survives a later, lower-scoring one."""
-    kept: list[RetrievalHit] = select_best_candidates(
-        [_hit(20.0, 0.7, candidate_keyframe_id=1), _hit(22.0, 0.2, candidate_keyframe_id=2)], band_seconds=10.0
-    )
-    assert [hit.candidate_keyframe_id for hit in kept] == [1]
+def test_each_query_rig_frame_keeps_only_its_best_measured_pair() -> None:
+    """Rig frame 1 voted for 10 and 11: only 11, the one with more inliers, becomes an edge."""
+    weaker, stronger = _candidate(1, 10, 200), _candidate(1, 11, 300)
+    counters: FunnelCounters = FunnelCounters()
+    voters: dict[tuple[int, int], frozenset[int]] = {(1, 10): frozenset({1}), (1, 11): frozenset({1})}
+    assert best_per_query_rig([weaker, stronger], voters, 150, counters) == [stronger]
+    assert counters.not_best == 1 and counters.below_good_loop == 0
 
 
-def test_hits_in_different_bands_both_survive() -> None:
-    """A revisit far from the first one opens a new band and is kept."""
-    kept: list[RetrievalHit] = select_best_candidates(
-        [_hit(20.0, 0.5, candidate_keyframe_id=1), _hit(45.0, 0.4, candidate_keyframe_id=2)], band_seconds=10.0
-    )
-    assert [hit.candidate_keyframe_id for hit in kept] == [1, 2]
+def test_a_best_pair_below_the_good_loop_threshold_is_dropped() -> None:
+    """The best of rig frame 1 has 120 inliers, under cuSFM's 150: no edge, and the counter says why."""
+    counters: FunnelCounters = FunnelCounters()
+    assert best_per_query_rig([_candidate(1, 10, 120)], {(1, 10): frozenset({1})}, 150, counters) == []
+    assert counters.below_good_loop == 1
+
+
+def test_a_pair_both_rig_frames_voted_for_is_one_edge() -> None:
+    """1 and 10 found each other; the pair is the best of both and is kept once."""
+    counters: FunnelCounters = FunnelCounters()
+    pair: LoopCandidate = _candidate(1, 10, 400)
+    assert best_per_query_rig([pair], {(1, 10): frozenset({1, 10})}, 150, counters) == [pair]
+    assert counters.not_best == 0
 
 
 # --------------------------------------------------------------------------------------

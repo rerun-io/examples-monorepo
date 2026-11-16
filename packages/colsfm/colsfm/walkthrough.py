@@ -108,7 +108,7 @@ from colsfm.frames_meta import FramesMeta
 from colsfm.mapping import MappingResult
 from colsfm.matching import MatchingBackend, MatchReport
 from colsfm.pipeline import PipelineObserver, run_pipeline
-from colsfm.run_config import DEFAULT_CONFIG_DIR, PipelineOptions
+from colsfm.run_config import DEFAULT_CONFIG_DIR, DEFAULT_MIN_INTER_FRAME_DISTANCE_M, DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES, PipelineOptions
 from colsfm.run_lifecycle import StageName
 from colsfm.run_report import PipelineSummary
 from colsfm.stages import (
@@ -167,9 +167,9 @@ class WalkthroughConfig:
     """Run the retrieval loop-closure search. On by default here, unlike the pipeline:
     the whole point of stage 5's panel is the rejection funnel, and a disabled stage
     prints one line and produces none."""
-    min_inter_frame_distance: float = 0.0
-    """Keyframe displacement gate in metres; 0.0 keeps all 226 Galileo keyframes."""
-    min_inter_frame_rotation_degrees: float = 5.0
+    min_inter_frame_distance: float = DEFAULT_MIN_INTER_FRAME_DISTANCE_M
+    """Keyframe displacement gate in metres, the pipeline's default; the Galileo task passes 0.0 to keep all 226 keyframes."""
+    min_inter_frame_rotation_degrees: float = DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES
     """Keyframe rotation gate in degrees, OR-combined with the distance gate."""
     use_gpu: bool = True
     """Run ALIKED and LightGlue on the GPU when one is usable."""

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal, TypeAlias
 
 from serde import serde
 
@@ -48,6 +48,23 @@ from colsfm.run_lifecycle import (
 DEFAULT_CONFIG_DIR: Final[Path] = RESOURCES_DIR / "configs" / "loop-closure-fixed"
 """`isaac` with loop closure repaired; what the blob reference runs used."""
 
+LoopPairsInMapper: TypeAlias = Literal["accepted", "shortlisted"]
+"""`PipelineOptions.loop_pairs_in_mapper`."""
+
+DEFAULT_EXTRINSIC_ROUNDS: Final[int] = 3
+"""Extrinsic refinement rounds; see `colsfm.extrinsic_solve.ExtrinsicRefinementOptions.num_rounds` for the measurement."""
+
+DEFAULT_MIN_INTER_FRAME_DISTANCE_M: Final[float] = 0.10
+"""Keyframe displacement gate. The gates are OR-combined with `>=`, so a 0.0 distance keeps every sample and silently
+disables the angle gate too: that was the default until MSD, where it kept all 8,172 frames of MGO05 (15 Hz x 4 cameras)
+and made mapping about O(n^2). 0.10 m is short against 1-3 m room depth. cuSFM's isaac default is 0.5 m and its backpack
+profile 0.06 m; measured on the MSD MG inputs, 0.10 m / 15 deg keeps 15-50 % of the frames (MGO05: 8.7x faster,
+ATE 1.19 / 0.63 cm against 0.97 / 0.57). A capture that needs every frame (the 0.93 s Galileo demo) passes 0.0 itself."""
+
+DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES: Final[float] = 15.0
+"""Keyframe rotation gate. Headsets turn 40-90 deg/s, so at 15 Hz the 5 deg isaac gate still fires on most frames;
+15 deg of a ~100 deg field of view leaves about 85 % overlap between neighbouring keyframes."""
+
 
 @serde
 @dataclass(frozen=True, slots=True)
@@ -65,10 +82,10 @@ class SelectionOptions:
     """Directory holding `frames_meta.json` and the images its `image_name`s name."""
     config_dir: Path = DEFAULT_CONFIG_DIR
     """Directory of `.pb.txt` configs; the loop-closure-fixed isaac profile by default."""
-    min_inter_frame_distance: float = 0.0
-    """Keyframe displacement gate in metres; the demo passes 0.0 to keep every sample."""
-    min_inter_frame_rotation_degrees: float = 5.0
-    """Keyframe rotation gate in degrees, OR-combined with the distance gate."""
+    min_inter_frame_distance: float = DEFAULT_MIN_INTER_FRAME_DISTANCE_M
+    """Keyframe displacement gate in metres (`DEFAULT_MIN_INTER_FRAME_DISTANCE_M`); 0.0 keeps every sample, the angle gate included."""
+    min_inter_frame_rotation_degrees: float = DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES
+    """Keyframe rotation gate in degrees, OR-combined with the distance gate (`DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES`)."""
     sample_sync_threshold_microseconds: int = 100
     """Rig grouping window in microseconds; the isaac demo's value, not the gflag default."""
 
@@ -100,10 +117,10 @@ class PipelineOptions:
     """Workspace root, cuSFM's `cusfm_base_dir`; created if missing."""
     config_dir: Path = DEFAULT_CONFIG_DIR
     """Directory of `.pb.txt` configs; the loop-closure-fixed isaac profile by default."""
-    min_inter_frame_distance: float = 0.0
-    """Keyframe displacement gate in metres; the demo passes 0.0 to keep every sample."""
-    min_inter_frame_rotation_degrees: float = 5.0
-    """Keyframe rotation gate in degrees, OR-combined with the distance gate."""
+    min_inter_frame_distance: float = DEFAULT_MIN_INTER_FRAME_DISTANCE_M
+    """Keyframe displacement gate in metres (`DEFAULT_MIN_INTER_FRAME_DISTANCE_M`); 0.0 keeps every sample, the angle gate included."""
+    min_inter_frame_rotation_degrees: float = DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES
+    """Keyframe rotation gate in degrees, OR-combined with the distance gate (`DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES`)."""
     sample_sync_threshold_microseconds: int = 100
     """Rig grouping window in microseconds; the isaac demo's value, not the gflag default."""
     optimize_extrinsics: bool = True
@@ -124,9 +141,16 @@ class PipelineOptions:
     It is also the one thing that takes `--ba-backend caspar` off the GPU: the
     unregularised path *is* `run_mapping(..., optimize_extrinsics=True)`, and CASPAR
     throws when asked to refine `sensor_from_rig` (`colsfm.ba_backend`)."""
-    extrinsic_refinement_rounds: int = 20
-    """Ceiling on the extrinsics-then-poses rounds the regularised refinement may take; it
-    stops early on its own tolerances, after 19 rounds and 3.2 s on Galileo."""
+    extrinsic_refinement_rounds: int = DEFAULT_EXTRINSIC_ROUNDS
+    """Ceiling on the extrinsics-then-poses rounds the regularised refinement may take (`DEFAULT_EXTRINSIC_ROUNDS`); it
+    also stops early on `ExtrinsicRefinementOptions`' tolerances."""
+    loop_pairs_in_mapper: LoopPairsInMapper = "accepted"
+    """Which of the loop stage's image pairs stay in the database the mapper triangulates from.
+
+    `"accepted"` (default, as cuSFM): only the image pairs of the loop edges that were kept; the pairs the stage matched
+    only to measure a candidate it then rejected are deleted again. `"shortlisted"`: every pair the stage matched, as
+    colsfm did before (fork decision 15); long cross-revisit tracks then reach the triangulator even when the loop
+    itself was rejected, which helped on KITTI."""
     loop_closure: bool = True
     """Run retrieval-based loop closure. On by default, as in the blob, so every run and
     every blob comparison pays for the same stage (NOTES.md decision 10, revised). On the

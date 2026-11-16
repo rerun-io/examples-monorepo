@@ -45,7 +45,9 @@ Ordering notes worth knowing before reading the code:
   after retrieval and verification in stage 5, which matches them into the same
   database. `colsfm.mapping.load_correspondences` reads *every* verified
   two-view geometry, so a loop pair matched in stage 5 reaches the triangulator
-  without being named in stage 3's list.
+  without being named in stage 3's list. By default stage 5 deletes again the
+  pairs it matched only for a candidate it rejected, so only accepted loop edges'
+  pairs reach it (`PipelineOptions.loop_pairs_in_mapper`).
 * **Loop closure needs matches to verify, and matching is a batch operation.**
   The estimator pulls matches through an injected `match_fn` one pair at a time,
   and running COLMAP's matcher per pair would reload the LightGlue graph per
@@ -380,7 +382,13 @@ def _run_stages(
     # ── 5. loop closure ──────────────────────────────────────────────────────────────
     with timed_stage(ledger, "loop_closure"), watcher.stage_scope("loop_closure"):
         loops: LoopClosureStageResult = run_loop_closure_stage(
-            selection.selected, staged.database_path, config.pose_graph, matching_options, enabled=options.loop_closure, frames=frames
+            selection.selected,
+            staged.database_path,
+            config.pose_graph,
+            matching_options,
+            enabled=options.loop_closure,
+            frames=frames,
+            loop_pairs_in_mapper=options.loop_pairs_in_mapper,
         )
     watcher.on_loop_closure(loops)
 
@@ -415,7 +423,7 @@ def _run_stages(
 
     # ── 8. export ────────────────────────────────────────────────────────────────────
     with timed_stage(ledger, "export"), watcher.stage_scope("export"):
-        export: ExportStageResult = run_export_stage(staged, mapped_meta, mapping, frames)
+        export: ExportStageResult = run_export_stage(staged, selection.frames_meta, mapped_meta, mapping, frames)
     watcher.on_export(export, mapping)
 
     summary: PipelineSummary = PipelineSummary(

@@ -6,7 +6,9 @@ loop_closure_interval_ratio: 0.08
 use_incremental: true
 loop_residual_weight: 0.25
 good_loop_threshold: 150
-num_votes: 1
+# colsfm: rig frames each query rig frame measures as loop candidates (best retrieval score first); the best by inliers
+# becomes an edge when it has at least good_loop_threshold inliers.
+num_votes: 3
 loop_edge_prune_threshold: 0
 loop_edge_translation_threshold_meters: 1
 loop_edge_rotation_threshold_degrees: 10

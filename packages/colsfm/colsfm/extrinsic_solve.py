@@ -79,17 +79,20 @@ class ExtrinsicRefinementOptions:
     """Run the prior-carrying pyceres refinement. False falls back to the plain pycolmap
     path, `run_mapping(..., optimize_extrinsics=True)`, which is unregularised and on
     Galileo overfits (NOTES.md deviation 9)."""
-    num_rounds: int = 20
-    """Ceiling on the (A)-then-(B) rounds; the tolerances below normally stop it first.
+    num_rounds: int = 3
+    """Ceiling on the (A)-then-(B) rounds; the tolerances below can stop it first.
     Block-coordinate descent converges linearly, and on Galileo the per-round motion decays
-    by only ~0.88 per round: 0.47, 0.25, 0.18, 0.15, ... mm, reaching the tolerances after
-    **19 rounds** and 3.2 s. Three rounds would stop at a third of the final extrinsic move,
-    a worse ATE (4.38 mm against 4.28) and a worse reprojection error (0.956 px against
-    0.898). A dataset whose bundle adjustment is expensive — RoboCap's is ~20 s a round —
-    wants a smaller ceiling."""
-    translation_tolerance_mm: float = 0.1
+    by only ~0.88 per round: 0.47, 0.25, 0.18, 0.15, ... mm. The earlier 20-round ceiling at
+    0.1 mm / 0.005 deg ran 19 rounds there (3.2 s) and 7-12 rounds on MSD, where a round is
+    one global bundle adjustment of the whole map (166-201 s of the MGO04-06 runs). cuSFM
+    itself runs one pass. At 1 mm / 0.05 deg and at most 3 rounds: Galileo 3 rounds, 0.64 s
+    against 2.70 s, ATE 4.50 mm against 4.52 (reprojection 1.212 px against 1.160); KITTI 06
+    3 rounds against 7; MSD MGO05 (0.10 m keyframes) 1 round, 3.5 s against 30 s, and 20 rounds
+    allowed at the same tolerance still stopped after 1 with the same ATE (1.47 / 0.63 cm against
+    1.41 / 0.64); RoboCap s00000021 2 rounds, 9 s against 107 s."""
+    translation_tolerance_mm: float = 1.0
     """Stop once no extrinsic moved further than this in a round."""
-    rotation_tolerance_deg: float = 0.005
+    rotation_tolerance_deg: float = 0.05
     """Stop once no extrinsic rotated further than this in a round."""
     extrinsic_translation_sigma_m: float = 0.01
     """`BundleAdjustmentConfig.extrinsic_error_meters`; one sigma of the extrinsic priors.

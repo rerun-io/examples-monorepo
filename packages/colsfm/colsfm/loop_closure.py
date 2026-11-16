@@ -18,8 +18,8 @@ Pipeline per rig frame
 2. Retrieval: one `RetrievalIndex.search(top_k=20)` per query keyframe, with the temporal
    gate (below) applied inside the ranking walk, then the `good_score_threshold` gate and a
    same-rig-frame gate.
-3. `select_best_candidates`: one hit per 10 s band of `|dt|` per query (§6.4, §7.1 item 5),
-   then one rig pair overall, keeping the best retrieval score.
+3. Votes: each query rig frame pools its query keyframes' hits and keeps the `num_votes`
+   best target rig frames by retrieval score, then one hit per unordered rig pair.
 4. Measurement: `colsfm.loop_pose.RigPoseEstimator` on each surviving rig pair — a metric
    point cloud triangulated in the source rig frame from its own cameras and its temporal
    neighbours, then `estimate_and_refine_generalized_absolute_pose` for the whole target
@@ -27,14 +27,16 @@ Pipeline per rig frame
    `inliers / observations > min_inlier_ratio` (30 and 0.25,
    `docs/spec/generate_association_main.md` §6.6, §7.1 item 6), plus a cross-check of the
    translation direction against the generalized essential matrix.
-5. One edge per rig pair, then `colsfm.pose_graph.gate_loop_edges` with real thresholds.
+5. Each query rig frame keeps its single best measured pair by inliers, which becomes an edge
+   when it has at least `good_loop_threshold` inliers (cuSFM's isaac default, 150), then
+   `colsfm.pose_graph.gate_loop_edges` with real thresholds.
 
 Steps 1-3 read nothing but the retrieval index and the timestamps. That is deliberate: the
 pipeline learns which image pairs to match by running this whole stage once with a matcher
 that returns nothing, so any pair whose request depends on a match result would never be
 matched in production (`colsfm.pipeline._find_loop_edges`, `colsfm.loop_pose`). It is also
-why the band in step 3 is ranked by retrieval score where the blob ranks by inlier count —
-see `select_best_candidates`.
+why step 3 ranks by retrieval score: the inlier count only exists after the measurement, and
+step 5 is where it decides.
 
 The temporal gate
 -----------------
@@ -134,7 +136,8 @@ The whole stage, end to end
 ---------------------------
 
 Everything above varies the measurement on one frozen pair set. Running the stage as
-`colsfm.pipeline` runs it — retrieval, banding, batch matching, measurement, gating, with
+`colsfm.pipeline` ran it before `num_votes` replaced the 10 s `|dt|` banding (so the
+`select_best_candidates` row below is that banding) — retrieval, banding, batch matching, measurement, gating, with
 the `data/cusfm_configs/loop-closure-fixed` profile's own 1.0 m / 10 deg edge gates:
 
 | stage | count |
@@ -296,9 +299,10 @@ from colsfm.loop_shortlist import (
     FunnelCounters,
     LoopClosureDiagnostics,
     RetrievalHit,
-    select_best_candidates,
+    Shortlist,
     shortlist_rig_pairs,
 )
+from colsfm.pairs import normalise_pair
 from colsfm.pose_graph import Information6, PoseGraphEdge, gate_loop_edges, loop_edge_information
 from colsfm.retrieval import GOOD_SCORE_THRESHOLD, RetrievalIndex
 from colsfm.rig_geometry import RigFrameIndex, RigGeometry, rig_frame_index, rig_geometry
@@ -311,11 +315,12 @@ __all__ = [
     "LoopClosureResult",
     "LoopSearchPlan",
     "RetrievalHit",
+    "best_per_query_rig",
     "find_loop_edges",
+    "pairs_outside_accepted_edges",
     "is_good_match",
     "minimum_time_gap_seconds",
     "plan_loop_search",
-    "select_best_candidates",
     "session_duration_seconds",
     "verify_loop_plan",
 ]
@@ -323,7 +328,7 @@ __all__ = [
 
 `colsfm.loop_closure` stays the one import path, whichever of its two modules a
 name is defined in: `colsfm.loop_shortlist` owns the retrieval half of the funnel
--- the gates, the banding, the counters and the diagnostics they freeze into --
+-- the gates, the votes, the counters and the diagnostics they freeze into --
 and this module owns the plan, the measurement and the gating."""
 
 DEFAULT_MEASUREMENT_THREADS: Final[int] = min(8, os.cpu_count() or 1)
@@ -335,7 +340,7 @@ class LoopClosureConfig:
     """Gates and thresholds for the loop-closure stage."""
 
     top_k: int = 20
-    """`query_result_number`: retrieval hits considered per query keyframe."""
+    """`pose_graph_config.loop_closure_query_count`: retrieval hits considered per query keyframe."""
     good_score_threshold: float | None = None
     """Minimum retrieval score, or None to take `colsfm.retrieval.GOOD_SCORE_THRESHOLD`.
 
@@ -348,10 +353,15 @@ class LoopClosureConfig:
     0.933 s Galileo session, so it must be lowered to get any candidate there."""
     loop_closure_interval_ratio: float = 0.08
     """`pose_graph_config.loop_closure_interval_ratio`, multiplied by the session duration."""
-    candidate_band_seconds: float = 10.0
-    """Width of the `|dt|` band `select_best_candidates` collapses to one candidate. The
-    blob reuses `loop_interval_threshold_in_seconds` here; it is separate so the temporal
-    gate can be lowered without also merging every candidate into one band."""
+    num_votes: int = 3
+    """`pose_graph_config.num_votes`: target rig frames each query rig frame measures, best retrieval score first.
+
+    Replaced one candidate per 10 s `|dt|` band per query keyframe, which grew with the sequence length: on MSD MGO05
+    (8,172 keyframes) it asked for 24k loop image pairs, the loop pairs grew as keyframes^1.8 and the loop stage took
+    506 s of 2,408."""
+    good_loop_threshold: int = 150
+    """`pose_graph_config.good_loop_threshold`: inliers the best measured pair of a query rig frame needs to become an
+    edge. On top of `is_good_match`, which every measured pair must pass first."""
     min_inlier_ratio: float = 0.25
     """`min_matches_ratio`: inliers over the observations offered, strictly greater."""
     rig_pose: RigPoseConfig = DEFAULT_RIG_POSE_CONFIG
@@ -407,7 +417,7 @@ class LoopClosureConfig:
     def from_pose_graph(cls, config: PoseGraphConfig) -> LoopClosureConfig:
         """Build the stage's settings from the `pose_graph_config.pb.txt` a run was given.
 
-        The five fields the config profile owns are its loop gates; everything else stays at
+        The eight fields the config profile owns are its loop gates; everything else stays at
         the measured default. Note that the shipped isaac and av profiles leave both edge
         gates at proto3's 0.0, which rejects every candidate — only
         `data/cusfm_configs/loop-closure-fixed` repairs them.
@@ -419,6 +429,9 @@ class LoopClosureConfig:
             The loop-closure settings.
         """
         return cls(
+            top_k=config.loop_closure_query_count,
+            num_votes=config.num_votes,
+            good_loop_threshold=round(config.good_loop_threshold),
             loop_closure_interval_ratio=config.loop_closure_interval_ratio,
             max_translation_m=config.loop_edge_translation_threshold_meters,
             max_rotation_deg=config.loop_edge_rotation_threshold_degrees,
@@ -431,7 +444,7 @@ class LoopCandidate:
     """One retrieval hit that survived the metric verification.
 
     The two halves are kept whole rather than flattened into eleven fields: `hit` is what
-    retrieval and banding decided, `estimate` is what `colsfm.loop_pose` measured, and a
+    retrieval and the votes decided, `estimate` is what `colsfm.loop_pose` measured, and a
     reader asking "where did this number come from" gets the answer from the field name.
     """
 
@@ -530,7 +543,7 @@ class LoopSearchPlan:
     change to verification became a change to scheduling.
 
     Nothing in the first pass needed matches. Retrieval, the score and time gates,
-    the `|dt|` banding and the rig-pair deduplication read the index and the
+    the votes and the rig-pair deduplication read the index and the
     timestamps; the pair list follows from the rig geometry and the shortlist
     (`colsfm.loop_pairs.required_image_pairs`). So the plan is simply that work, done
     once, and `verify_loop_plan` is the only pass that matches anything.
@@ -545,6 +558,8 @@ class LoopSearchPlan:
     which is what makes one matcher load serve the whole stage."""
     groups: tuple[tuple[int, tuple[RetrievalHit, ...]], ...]
     """The measurement's own units: one source rig frame and its shortlisted hits."""
+    voters: Mapping[tuple[int, int], frozenset[int]]
+    """Per unordered rig pair, the query rig frames that voted for it; each keeps only its best measured pair."""
     geometry: RigGeometry
     """The rig's cameras, extrinsics and stereo declarations."""
     rig_index: RigFrameIndex
@@ -602,8 +617,8 @@ def plan_loop_search(
 ) -> LoopSearchPlan:
     """Decide which rig pairs to measure and which image pairs that needs, matching nothing.
 
-    The retrieval half of the funnel: hits, the score, time and same-rig gates, one hit
-    per `|dt|` band per query, then one hit per unordered rig pair. None of it reads a
+    The retrieval half of the funnel: hits, the score, time and same-rig gates, the
+    `num_votes` best target rig frames per query rig frame, then one hit per unordered rig pair. None of it reads a
     match, which is exactly why the discovery run was unnecessary.
 
     Args:
@@ -629,25 +644,26 @@ def plan_loop_search(
     counters: FunnelCounters = FunnelCounters()
     empty_geometry: RigGeometry = rig_geometry(frames_meta)
 
-    shortlist: dict[tuple[int, int], RetrievalHit] = shortlist_rig_pairs(
+    shortlist: Shortlist = shortlist_rig_pairs(
         frames_meta,
         index,
         keyframe_by_id,
         timestamps_us,
         top_k=config.top_k,
-        candidate_band_seconds=config.candidate_band_seconds,
+        num_votes=config.num_votes,
         gap_seconds=gap_seconds,
         score_threshold=score_threshold,
         counters=counters,
     )
     pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
-    groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist)
+    groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)
     rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
     rig_index: RigFrameIndex = rig_frame_index(frames_meta)
     return LoopSearchPlan(
         config=config,
         image_pairs=required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs),
         groups=tuple(groups),
+        voters=shortlist.voters,
         geometry=empty_geometry,
         rig_index=rig_index,
         keypoints=pixels,
@@ -677,7 +693,7 @@ def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosu
     candidates: list[LoopCandidate] = _measure_groups(list(plan.groups), make_estimator, config, plan.counters)
 
     edges: list[PoseGraphEdge] = []
-    for candidate in candidates:
+    for candidate in best_per_query_rig(candidates, plan.voters, config.good_loop_threshold, plan.counters):
         information: Information6 = (
             loop_edge_information(float(candidate.estimate.num_inliers), config.loop_residual_weight)
             if config.use_stored_weights
@@ -731,6 +747,57 @@ def find_loop_edges(
         FileNotFoundError: When `database_path` does not exist and no `keypoints` were given.
     """
     return verify_loop_plan(plan_loop_search(frames_meta, database_path, index, config, keypoints), match_fn)
+
+
+def pairs_outside_accepted_edges(plan: LoopSearchPlan, edges: Sequence[PoseGraphEdge], matched: Sequence[ImagePair]) -> list[ImagePair]:
+    """The pairs of `matched` that no accepted loop edge's measurement uses: what the mapper should not see.
+
+    Args:
+        plan: The plan the edges were verified from.
+        edges: The accepted loop edges, directed as their measurement was.
+        matched: Image pairs the loop stage matched itself.
+
+    Returns:
+        The pairs of `matched` outside every accepted edge's local maps and observations, in `matched`'s order.
+    """
+    kept: set[ImagePair] = set(
+        required_image_pairs(plan.rig_index, plan.geometry, plan.keypoints, plan.config.rig_pose.neighbour_span, [(edge.source, edge.target) for edge in edges])
+    )
+    return [pair for pair in matched if pair not in kept]
+
+
+def best_per_query_rig(
+    candidates: Sequence[LoopCandidate], voters: Mapping[tuple[int, int], frozenset[int]], good_loop_threshold: int, counters: FunnelCounters
+) -> list[LoopCandidate]:
+    """Each query rig frame's single best measured pair by inliers, when it has at least `good_loop_threshold` of them.
+
+    A pair two query rig frames both voted for is kept once. The order is the candidates' own (rig-pair order), so the
+    edges do not depend on the measurement's thread count.
+
+    Args:
+        candidates: The verified candidates, in rig-pair order.
+        voters: Per unordered rig pair, the query rig frames that voted for it.
+        good_loop_threshold: Inliers a query rig frame's best pair needs.
+        counters: Diagnostic counters, mutated in place.
+
+    Returns:
+        The kept candidates, in the order given.
+    """
+    best: dict[int, LoopCandidate] = {}
+    for candidate in candidates:
+        for rig_id in voters[normalise_pair(candidate.hit.source_rig_id, candidate.hit.target_rig_id)]:
+            incumbent: LoopCandidate | None = best.get(rig_id)
+            if incumbent is None or candidate.estimate.num_inliers > incumbent.estimate.num_inliers:
+                best[rig_id] = candidate
+    kept_ids: set[int] = set()
+    for candidate in best.values():
+        if candidate.estimate.num_inliers >= good_loop_threshold:
+            kept_ids.add(id(candidate))
+        else:
+            counters.below_good_loop += 1
+    kept: list[LoopCandidate] = [candidate for candidate in candidates if id(candidate) in kept_ids]
+    counters.not_best += len(candidates) - len({id(candidate) for candidate in best.values()})
+    return kept
 
 
 def _group_by_source_rig(shortlist: Mapping[tuple[int, int], RetrievalHit]) -> list[tuple[int, tuple[RetrievalHit, ...]]]:

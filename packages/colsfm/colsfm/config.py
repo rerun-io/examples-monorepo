@@ -243,40 +243,31 @@ class BundleAdjustmentConfig:
 
 @dataclass(frozen=True, slots=True)
 class PoseGraphConfig:
-    """`pose_graph_config.pb.txt`: the rig-level pose graph."""
+    """`pose_graph_config.pb.txt`: the rig-level pose graph and the loop search, as colsfm uses them.
+
+    Only the fields a stage reads are carried. The proto's other fields — `loop_closure_min_words`,
+    `use_incremental`, `use_switchable_pgo`, `confidence_to_pose_error_ratio`, `loop_edge_prune_threshold`,
+    `point3d_max_error`, `use_sequential_edge_pose_estimation` and `optimization_config` — drive parts of the blob
+    colsfm does not reimplement (an incremental and switchable pose graph, BoW word voting, its own Ceres settings for
+    the pose graph), so they are parsed by the proto and dropped here rather than carried unused.
+    """
 
     connected_keyframe_num: int
     """How many previous rig frames each node gets a CONSECUTIVE edge to."""
-    loop_closure_min_words: int
-    """Minimum shared BoW words for a loop candidate."""
     loop_closure_query_count: int
-    """Retrieval candidates queried per rig frame."""
+    """Retrieval hits asked for per query keyframe (`colsfm.loop_closure.LoopClosureConfig.top_k`)."""
     loop_closure_interval_ratio: float
     """Minimum loop separation as a fraction of the session duration."""
-    use_incremental: bool
-    """Grow the graph incrementally rather than in one batch."""
     loop_residual_weight: float
     """Weight applied to LOOP edge residuals relative to CONSECUTIVE ones."""
     good_loop_threshold: float
-    """Score above which a loop candidate is accepted outright."""
+    """Inliers the best measured loop of a query rig frame needs to become an edge (`LoopClosureConfig.good_loop_threshold`)."""
     num_votes: int
-    """Votes required before a loop candidate becomes an edge."""
-    use_switchable_pgo: bool
-    """Attach a switch variable to each loop edge (switchable-constraint PGO)."""
-    confidence_to_pose_error_ratio: float
-    """Converts a match confidence into a pose-error sigma."""
-    loop_edge_prune_threshold: float
-    """Residual above which a loop edge is dropped after a solve."""
-    point3d_max_error: float
-    """Maximum 3-D point error accepted when estimating a loop edge."""
+    """Rig frames each query rig frame measures as loop candidates, best retrieval score first (`LoopClosureConfig.num_votes`)."""
     loop_edge_translation_threshold_meters: float
     """Translation gate a loop edge must pass; 0.0 disables the gate."""
     loop_edge_rotation_threshold_degrees: float
     """Rotation gate a loop edge must pass; 0.0 disables the gate."""
-    use_sequential_edge_pose_estimation: bool
-    """Re-estimate CONSECUTIVE edges from matches instead of trusting the input poses."""
-    optimization: BundleAdjustmentConfig
-    """Ceres settings for the pose-graph solve."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,21 +528,13 @@ def read_config_directory(
         ),
         pose_graph=PoseGraphConfig(
             connected_keyframe_num=int(pose_graph_message.connected_keyframe_num),
-            loop_closure_min_words=int(pose_graph_message.loop_closure_min_words),
             loop_closure_query_count=int(pose_graph_message.loop_closure_query_count),
             loop_closure_interval_ratio=float(pose_graph_message.loop_closure_interval_ratio),
-            use_incremental=bool(pose_graph_message.use_incremental),
             loop_residual_weight=float(pose_graph_message.loop_residual_weight),
             good_loop_threshold=float(pose_graph_message.good_loop_threshold),
             num_votes=int(pose_graph_message.num_votes),
-            use_switchable_pgo=bool(pose_graph_message.use_switchable_pgo),
-            confidence_to_pose_error_ratio=float(pose_graph_message.confidence_to_pose_error_ratio),
-            loop_edge_prune_threshold=float(pose_graph_message.loop_edge_prune_threshold),
-            point3d_max_error=float(pose_graph_message.point3d_max_error),
             loop_edge_translation_threshold_meters=float(pose_graph_message.loop_edge_translation_threshold_meters),
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
-            use_sequential_edge_pose_estimation=bool(pose_graph_message.use_sequential_edge_pose_estimation),
-            optimization=_bundle_adjustment(pose_graph_message.optimization_config, resolved_schema),
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),

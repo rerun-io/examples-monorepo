@@ -111,20 +111,13 @@ def test_isaac_pose_graph_matches_the_shipped_file(isaac: CusfmConfig) -> None:
     """`pose_graph_config.pb.txt`, plus the gates it leaves at their zero defaults."""
     pose_graph = isaac.pose_graph
     assert pose_graph.connected_keyframe_num == 1
-    assert pose_graph.loop_closure_min_words == 50
     assert pose_graph.loop_closure_query_count == 20
     assert pose_graph.loop_closure_interval_ratio == pytest.approx(0.08)
-    assert pose_graph.use_incremental is True
     assert pose_graph.loop_residual_weight == pytest.approx(0.25)
     assert pose_graph.good_loop_threshold == pytest.approx(150.0)
     assert pose_graph.num_votes == 1
-    assert pose_graph.use_switchable_pgo is False
     assert pose_graph.loop_edge_translation_threshold_meters == pytest.approx(0.0)
     assert pose_graph.loop_edge_rotation_threshold_degrees == pytest.approx(0.0)
-    assert pose_graph.optimization.loss_type == "CAUCHY"
-    assert pose_graph.optimization.max_num_iterations == 200
-    assert pose_graph.optimization.reprojection_error_standard_deviation == pytest.approx(10.0)
-    assert pose_graph.optimization.absolute_position_constraint_error_meters == pytest.approx(1.0)
 
 
 def test_isaac_matching_and_pair_selection(isaac: CusfmConfig) -> None:

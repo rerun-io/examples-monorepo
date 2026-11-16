@@ -384,6 +384,22 @@ def delete_two_view_geometries(database_path: Path, pairs: Sequence[ImagePair]) 
             database.delete_two_view_geometry(image_id1, image_id2)
 
 
+def delete_image_pairs(database_path: Path, pairs: Sequence[ImagePair]) -> None:
+    """Drop the matches and the two-view geometry of the given pairs, in one transaction.
+
+    The mapper reads every verified geometry in the database (`colsfm.mapping.load_correspondences`), so this is how a
+    stage takes back pairs it matched only for its own use.
+
+    Args:
+        database_path: An existing database.
+        pairs: Image pairs to remove.
+    """
+    with pycolmap.Database.open(database_path) as database, database_transaction(database):
+        for image_id1, image_id2 in pairs:
+            database.delete_matches(image_id1, image_id2)
+            database.delete_two_view_geometry(image_id1, image_id2)
+
+
 def raw_match_counts(database_path: Path, pairs: Sequence[ImagePair]) -> dict[ImagePair, int]:
     """Count the unverified matches of many pairs in one pass.
 
