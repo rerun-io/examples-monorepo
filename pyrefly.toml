@@ -55,6 +55,9 @@ project-includes = [
     "packages/colsfm/tests/**/*",
     "packages/metrictrail/tools/**/*",
     "packages/metrictrail/tests/**/*",
+    "packages/fdanyone-rerun/src/**/*",
+    "packages/fdanyone-rerun/tools/**/*",
+    "packages/fdanyone-rerun/tests/**/*",
 ]
 project-excludes = [
     "**/node_modules",
@@ -131,6 +134,7 @@ search-path = [
     "packages/hexels",
     "packages/metrictrail",
     "packages/colsfm",
+    "packages/fdanyone-rerun/src",
     # Vendored sam2 fork is installed editable; pyrefly can't follow the
     # __editable__ finder, so resolve `sam2.*` from the source tree directly.
     "packages/sam2-streaming",
@@ -193,6 +197,7 @@ site-package-path = [
     ".pixi/envs/hexels-dev/share/hexels-src",
     ".pixi/envs/metrictrail-dev/lib/python3.12/site-packages",
     ".pixi/envs/colsfm-dev/lib/python3.12/site-packages",
+    ".pixi/envs/fdanyone-rerun-dev/lib/python3.12/site-packages",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"

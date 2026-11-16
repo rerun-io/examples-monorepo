@@ -1,0 +1,36 @@
+# TAEHV (madebyollin/taehv) at e743234: the single-module tiny video autoencoder whose TAEW2.2 decoder turns Wan 2.2
+# 5B latents into pixels cheaply. packages/fdanyone-rerun decodes its per-step denoising previews with it; the
+# taew2_2.pth weights are a download task, not part of this package. Raw files, each sha256-pinned.
+package:
+  name: taehv-src
+  version: "0.1.0.e743234"
+
+source:
+  - url: https://raw.githubusercontent.com/madebyollin/taehv/e743234f3217ab3d1570f65642ab06596d1bd7c5/taehv.py
+    sha256: 28b452ad74f924d2d0922d6b3e805dfa7f504c523ced240435fefad5f6f650a7
+    file_name: taehv.py
+  - url: https://raw.githubusercontent.com/madebyollin/taehv/e743234f3217ab3d1570f65642ab06596d1bd7c5/LICENSE
+    sha256: 532f9e394518ffddecd294a517d5b41d79d3d3866c3fb95a6cb0e8bcc02370bf
+    file_name: LICENSE
+
+build:
+  number: 0
+  noarch: python
+  script:
+    - rm -f "$SP_DIR/taehv.py"
+    - mkdir -p "$SP_DIR"
+    - cp taehv.py "$SP_DIR/taehv.py"
+
+requirements:
+  host:
+    - python >=3.11
+  run:
+    - python >=3.11
+    - pytorch
+    - tqdm
+
+about:
+  homepage: https://github.com/madebyollin/taehv
+  license: MIT
+  license_file: LICENSE
+  summary: TAEHV tiny video autoencoder (e743234) as the module taehv

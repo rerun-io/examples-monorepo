@@ -1,0 +1,6 @@
+[package]
+name = "sageattention-src"
+version = "2.2.0.d1a57a5"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

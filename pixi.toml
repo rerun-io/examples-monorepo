@@ -4161,6 +4161,105 @@ cwd = "packages/colsfm"
 description = "Run Galileo stage by stage and write the Rerun walkthrough to packages/colsfm/data/rrd/galileo_walkthrough.rrd"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# fdanyone-rerun: 4DAnyone (ant-research/4DAnyone) streamed into Rerun
+# ═══════════════════════════════════════════════════════════════════════════
+# One casual video of a person -> GVHMR SMPL-X motion -> synced novel-view videos from a Wan 2.2 5B DiT (4DAnyone-Turbo,
+# 4 steps). packages/fdanyone-rerun holds the run-path copy of upstream (src/fdanyone, Apache-2.0) and our code;
+# GVHMR and SageAttention build from recipes/gvhmr-src and recipes/sageattention-src.
+[feature.fdanyone-rerun]
+# linux-aarch64: the DGX Spark (GB10).
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.fdanyone-rerun.dependencies]
+python = "3.12.*"
+gvhmr-src = { path = "recipes/gvhmr-src" }
+# SageAttention's CUDA kernels (sm_120, sm_121); 4DAnyone's DiT selects it automatically when importable.
+sageattention-src = { path = "recipes/sageattention-src" }
+# TAEW2.2's decoder for the per-step denoising previews (the weights: _download-fdanyone-models).
+taehv-src = { path = "recipes/taehv-src" }
+tyro = ">=0.9.1,<0.10"
+# What upstream fdanyone and GVHMR's static-camera path import (upstream requirements.txt + GVHMR's hmr4d).
+colorlog = ">=6,<7"
+einops = ">=0.8,<1"
+# GVHMR's video readers import the `ffmpeg` module (ffmpeg-python), not PyAV.
+ffmpeg-python = ">=0.2,<1"
+hydra-core = ">=1.3,<1.4"
+hydra-zen = ">=0.16,<1"
+imageio = ">=2.34,<3"
+# kornia, timm, einops: also BiRefNet's trust_remote_code (foreground masks).
+kornia = ">=0.7,<1"
+pytorch-lightning = ">=2.3,<3"
+safetensors = ">=0.5,<1"
+timm = "*"
+yacs = ">=0.1,<1"
+rich = "*"
+matplotlib-base = "*"
+
+[feature.fdanyone-rerun.pypi-dependencies]
+fdanyone-rerun = { path = "packages/fdanyone-rerun", editable = true }
+simplecv = { path = "packages/simplecv", editable = true }
+smplx = ">=0.1.28"
+lapx = ">=0.5,<1"
+# GVHMR's YOLO person detector; same pin as posekit-wilor.
+ultralytics = "==8.4.52"
+
+[feature.fdanyone-rerun.activation.env]
+PACKAGE_DIR = "packages/fdanyone-rerun"
+PYREFLY_TARGET = "src/fdanyone_rerun tests tools"
+# Weights (~21 GB) and the GVHMR run root. A value set in the shell wins, so checkouts can share one model dir.
+FDANYONE_MODEL_DIR = "${FDANYONE_MODEL_DIR:-$PIXI_PROJECT_ROOT/packages/fdanyone-rerun/data/models}"
+
+# The weights at the revision upstream 6dcf626 pins (AntResearch/4DAnyone 4c80e87): the 4DAnyone DiT, Wan2.2 VAE,
+# Turbo-LoRA, prompt context, SMPL-X -> Goliath70 regressor and GVHMR/HMR2/ViTPose/YOLO. SMPL-X comes from the mirror
+# mamma already uses; BiRefNet at upstream's pin; the TAEW2.2 decoder from taehv's repo (sha256-checked).
+[feature.fdanyone-rerun.tasks._download-fdanyone-models]
+cmd = "hf download AntResearch/4DAnyone --revision 4c80e87b805a5f8461cf339cdbe2fb4249e585aa --include '4danyone/*' --include 'gvhmr/*' --local-dir $FDANYONE_MODEL_DIR && hf download ZhengPeng7/BiRefNet BiRefNet_config.py birefnet.py config.json model.safetensors --revision e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4 --local-dir $FDANYONE_MODEL_DIR/birefnet && hf download pablovela5620/mamma-streaming-data body_models/smplx/SMPLX_NEUTRAL.npz --repo-type dataset --local-dir $FDANYONE_MODEL_DIR && python -c \"from fdanyone.download import ensure_tiny_decoder; ensure_tiny_decoder('$FDANYONE_MODEL_DIR')\""
+cwd = "packages/fdanyone-rerun"
+description = "Download the 4DAnyone, GVHMR, BiRefNet and SMPL-X weights (~21 GB) into $FDANYONE_MODEL_DIR"
+
+# The example clips the README layouts and the Space use (pexels, from upstream's HF repo at the same revision).
+[feature.fdanyone-rerun.tasks._download-fdanyone-examples]
+cmd = "hf download AntResearch/4DAnyone --revision 4c80e87b805a5f8461cf339cdbe2fb4249e585aa data/source/pexels/2785536-uhd_2160_3840_25fps.mp4 data/source/pexels/5885633-hd_1080_1920_25fps.mp4 --local-dir ."
+cwd = "packages/fdanyone-rerun"
+outputs = ["packages/fdanyone-rerun/data/source/pexels/2785536-uhd_2160_3840_25fps.mp4"]
+description = "Download the example clips (pexels 2785536, the README and Space clip, and 5885633)"
+
+[feature.fdanyone-rerun.tasks.fdanyone-download]
+depends-on = ["_download-fdanyone-models", "_download-fdanyone-examples"]
+description = "Download every weight and example clip 4DAnyone needs"
+
+[feature.fdanyone-rerun.tasks.fdanyone-run]
+cmd = "python tools/run.py"
+depends-on = ["fdanyone-download"]
+cwd = "packages/fdanyone-rerun"
+description = "Generate novel views of the person in a video and log the run to Rerun (needs the GPU); see --help"
+
+# The Space's fixed policy on its example clip: six views on one ring 15 degrees above the subject, 4DAnyone-Turbo.
+[feature.fdanyone-rerun.tasks.fdanyone-example]
+cmd = "python tools/run.py --run.output-dir data/runs/example --run.overwrite"
+depends-on = ["fdanyone-download"]
+cwd = "packages/fdanyone-rerun"
+description = "Generate six views around the person in the example clip (the Space's policy) and show them in Rerun (needs the GPU)"
+
+# Upstream README's 24-view full orbit (dense coverage for 4DGS), the layout upstream benchmarks per GPU.
+[feature.fdanyone-rerun.tasks.fdanyone-orbit24]
+cmd = "python tools/run.py --run.layout.views-per-layer 24 --run.output-dir data/runs/orbit24 --run.overwrite"
+depends-on = ["fdanyone-download"]
+cwd = "packages/fdanyone-rerun"
+description = "Generate the 24-view full orbit of the example clip and show it in Rerun (needs the GPU)"
+
+[feature.fdanyone-rerun.tasks.fdanyone-app]
+cmd = "python tools/gradio_app.py"
+depends-on = ["fdanyone-download"]
+cwd = "packages/fdanyone-rerun"
+description = "Launch the 4DAnyone Gradio app: pick a clip, watch the run stream into an embedded Rerun viewer (needs the GPU)"
+
+[feature.fdanyone-rerun.tasks.fdanyone-log-run]
+cmd = "python tools/log_run.py"
+cwd = "packages/fdanyone-rerun"
+description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -4530,6 +4629,17 @@ metrictrail-dev = { features = [
     "metrictrail",
     "dev",
 ], solve-group = "metrictrail", no-default-feature = true }
+fdanyone-rerun = { features = [
+    "common",
+    "cuda",
+    "fdanyone-rerun",
+], solve-group = "fdanyone-rerun", no-default-feature = true }
+fdanyone-rerun-dev = { features = [
+    "common",
+    "cuda",
+    "fdanyone-rerun",
+    "dev",
+], solve-group = "fdanyone-rerun", no-default-feature = true }
 dataforge = { features = [
     "common",
     "dataforge",

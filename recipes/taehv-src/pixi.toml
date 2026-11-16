@@ -1,0 +1,6 @@
+[package]
+name = "taehv-src"
+version = "0.1.0.e743234"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

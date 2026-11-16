@@ -102,6 +102,7 @@ packages/mast3r-slam/checkpoints
 packages/monoprior/data/
 packages/metrictrail/data/
 packages/colsfm/data/
+packages/fdanyone-rerun/data/
 packages/simplecv/data/
 packages/mvs/data/
 packages/gauss-surf/data/
