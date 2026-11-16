@@ -1,0 +1,46 @@
+# SageAttention (thu-ml/SageAttention) at d1a57a5, the first commit with sm_121 (GB10) support; the 2.1.1 PyPI release
+# predates it and fails to build. CUDA kernels for sm_120 (RTX 5090) and sm_121 (DGX Spark) against the workspace's
+# conda-forge torch 2.12 (cuda130). 4DAnyone's vendored DiT selects it automatically when importable. A git PyPI
+# dependency would need this build during resolution, which the workspace forbids, so it is a recipe.
+package:
+  name: sageattention-src
+  version: "2.2.0.d1a57a5"
+
+source:
+  url: https://github.com/thu-ml/SageAttention/archive/d1a57a546c3d395b1ffcbeecc66d81db76f3b4b5.tar.gz
+  sha256: 74b6667164f9e368e3799bc2ab59b9b08c4591630f1c6029560208b6fcf354c4
+
+build:
+  number: 0
+  script:
+    file: build.sh
+
+requirements:
+  build:
+    - cuda-compiler 13.0.*
+    - cuda-version 13.0.*
+  host:
+    - python 3.12.*
+    - pip
+    - setuptools
+    - wheel
+    - packaging
+    - cuda-version 13.0.*
+    - pytorch-gpu 2.12.*
+    - cuda-cudart-dev
+    - cuda-driver-dev
+    - cuda-cccl
+    - cuda-nvrtc-dev
+    - libcublas-dev
+    - libcusparse-dev
+    - libcusolver-dev
+    - libcurand-dev
+  run:
+    - python 3.12.*
+    - pytorch >=2.12,<2.13
+    - cuda-version >=13.0,<14
+
+about:
+  homepage: https://github.com/thu-ml/SageAttention
+  license_file: LICENSE
+  summary: SageAttention (d1a57a5) CUDA kernels for sm_120 and sm_121

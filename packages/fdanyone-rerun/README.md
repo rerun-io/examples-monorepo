@@ -1,0 +1,84 @@
+# fdanyone-rerun
+
+[4DAnyone](https://github.com/ant-research/4DAnyone) ([paper](https://arxiv.org/abs/2608.20335)) turns one casual video
+of a person into synchronized videos of that person from many new cameras, for downstream 4D Gaussian splatting. GVHMR
+recovers the SMPL-X motion; 4DAnyone-Turbo (Wan 2.2 5B with the Turbo-LoRA, four denoising steps) generates the views,
+six at a time. This package runs it and shows the run in Rerun.
+
+- Upstream source: `src/fdanyone`, the run-path copy of ant-research/4DAnyone `6dcf626` plus the speed levers (import name `fdanyone`), with GVHMR from
+  `recipes/gvhmr-src` and SageAttention's CUDA kernels from `recipes/sageattention-src`.
+- Our code: the run core with its observers (`fdanyone_rerun.core`), the typed run-directory readers (`outputs`), the
+  Rerun recording and layout (`rerun_log`), the tyro CLIs (`apis/`) and the tasks in the root `pixi.toml`.
+
+## Quick start
+
+```bash
+pixi run -e fdanyone-rerun fdanyone-example          # six views of the example clip (the Space's policy), in Rerun
+pixi run -e fdanyone-rerun fdanyone-orbit24          # the README's 24-view full orbit (dense coverage for 4DGS)
+pixi run -e fdanyone-rerun fdanyone-run --run.video my.mp4 --run.output-dir data/runs/mine --run.overwrite
+pixi run -e fdanyone-rerun fdanyone-log-run --output-dir data/runs/example --video data/source/pexels/2785536-uhd_2160_3840_25fps.mp4
+```
+
+The first task downloads ~21 GB of weights (`fdanyone-download`) into `$FDANYONE_MODEL_DIR` (default `data/models`;
+set it in the shell to share one copy between checkouts). Add `--rr-config.headless --rr-config.save run.rrd` without a
+display. Input video: one person, full or upper body, mild camera motion, at least 121 frames; 1080p+ portrait is best.
+
+`--run.layout` sets the rig: `views-per-layer`, `layer-pitches` (degrees, -15..45), `start-yaw`, `yaw-span`. The total
+view count must be a multiple of six (upstream denoises groups of six; more than six views first generate six reference
+proposals).
+
+## Recording
+
+Timelines `time` (seconds) and `frame`. `world` is the canonical human world (Y up):
+
+| Entity | What |
+| --- | --- |
+| `world/body/{mesh,keypoints,skeleton}` | SMPL-X body and the MHR70 keypoints the views are conditioned on |
+| `world/source`, `world/source/video` | the source camera fitted to the body, and the input clip (`VideoStream`) |
+| `world/cameras/<NN>`, `.../video` | each generated view's camera (hue by yaw) and its video (`VideoStream`) |
+
+The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
+
+## Tests
+
+`pixi run -e fdanyone-rerun-dev gate` (lint, typecheck, deadcode, unit, integration). The integration lane runs the
+example clip once on the GPU (`FDANYONE_TEST_RUN=<run dir>` reuses a finished run). `tests-golden` compares that run
+with the banked reference recording (below).
+
+## App
+
+`pixi run -e fdanyone-rerun fdanyone-app` serves a Gradio app on the same core as `fdanyone-run`
+(`fdanyone_rerun.stream.RunStreamer`). Pick the example or upload a clip, press Run, and the embedded viewer follows
+the run through four layouts:
+
+1. motion recovery (source clip and progress log);
+2. the recovered body in 3D and over the source;
+3. a TAEW2.2 preview of every view at each denoising step (`previews/<NN>` on `diffusion_step`);
+4. the camera rig and the generated videos.
+
+The page fits the window. One run at a time.
+
+## Speed
+
+The recipe builds upstream plus speed levers (fork branch `upstream-fast`, one commit each; see `recipes/README.md`).
+RTX 5090, prod env (no beartype), busy host (load ~10 unless noted), whole CLI run including Rerun logging:
+
+| build | wall | own CPU | denoise | peak reserved |
+| --- | ---: | ---: | ---: | ---: |
+| default (FP8 W8A8 row-wise) | 199 s | 1,342 CPU-s | 86 s | 24.5 GB |
+| `FDANYONE_DIT_FP8=0` (BF16) | 230 s | 1,389 CPU-s | 112 s | 29.2 GB |
+| `FDANYONE_TURBO_KEPT_STEPS=0,2,3` (3 steps, BF16) | 184 s | 1,324 CPU-s | 72 s | 29.2 GB |
+| default, 24-view orbit (RCP + 4 TCR groups, 8-view groups), busy host (load 16-38) | 767 s | 4,444 CPU-s | 85 s RCP + 389 s | 25.8 GB |
+
+The 3-step Turbo schedule is opt-in: it is visibly softer (mean per-view SSIM 0.862 against the full-VAE reference,
+versus 0.897 for the default).
+
+## Goldens
+
+- `tests-golden` compares a fresh example run (six views, seed 42) with the banked reference recording
+  `$FDANYONE_GOLDEN_RRD`, by default `data/golden/example-fp8.rrd`. The banked copy of the default (FP8) build is
+  `/mnt/nas/ssd-8tb/fdanyone-rerun/golden/example-fp8.rrd` (RTX 5090, 2026-11-15).
+- The band is per-view SSIM at frames 0/30/60/90/120, calibrated from a same-code repeat of the default build
+  (see `tests/test_golden.py`). FP8 (dynamic activation scales) and SageAttention do not give bit-identical runs.
+- The earlier BF16 + full-VAE reference stays at `/mnt/nas/ssd-8tb/fdanyone-rerun/golden/example.rrd`: against it the
+  default scores 0.897 mean SSIM.

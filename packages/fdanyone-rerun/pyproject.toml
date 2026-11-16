@@ -1,0 +1,50 @@
+[project]
+name = "fdanyone-rerun"
+version = "0.1.0"
+description = "4DAnyone (one casual video of a person -> synced novel-view videos) streamed into Rerun: CLI, layouts and a Gradio app"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+# Static metadata only. src/fdanyone is the run-path copy of upstream 4DAnyone (ant-research/4DAnyone 6dcf626 + speed
+# levers, Apache-2.0, see src/fdanyone/__init__.py); GVHMR comes from `recipes/gvhmr-src`, SageAttention from
+# `recipes/sageattention-src`, torch from the `cuda` feature (pixi.toml).
+dependencies = ["simplecv"]
+
+[tool.uv.sources]
+simplecv = { path = "../simplecv", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fdanyone_rerun", "src/fdanyone"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pytest-beartype: beartype checks our package only while pytest runs; the copied upstream fdanyone stays unchecked.
+beartype_packages = ["fdanyone_rerun"]
+markers = [
+    "integration: needs a GPU, a downloaded asset/model, the catalog server, a device, or network (run: pixi run -e fdanyone-rerun-dev tests-integration)",
+    "golden: reference comparison against stored ground truth (run: pixi run -e fdanyone-rerun-dev tests-golden)",
+]
+addopts = "-m 'not integration and not golden'"
+filterwarnings = [
+    "ignore::beartype.roar.BeartypeDecorHintPep613DeprecationWarning",
+    # A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
+    "error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning",
+]
+
+[tool.ruff]
+line-length = 150
+# src/fdanyone is upstream code kept close to its source.
+extend-exclude = ["src/fdanyone"]
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["src/fdanyone_rerun", "tools", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*"]
+min_confidence = 80
+ignore_names = ["pytestmark", "types"]

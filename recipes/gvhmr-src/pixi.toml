@@ -1,0 +1,6 @@
+[package]
+name = "gvhmr-src"
+version = "1.0.0.6ec3ca3"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
