@@ -4,13 +4,16 @@ Fixture inputs remain available through `replay --clip DIR --frames FILE`.
 Build with `--features catalog` to read RoboCap and MSD G2 segments directly:
 
 ```sh
-cargo build --offline --release -p slam-rs-cli --features catalog
+cargo build --offline --release -p slam-rs-cli --features catalog,gpu-wgpu
 slam-rs replay --catalog "$SLAM_RS_CATALOG_URL" \
   --segment msd-g2__MGO_others__MGO07_mapping_easy --max-framesets 1596 \
   --config resolved-config.json --out poses.csv --summary summary.json
 ```
 
-Add `gpu-wgpu` for `--lane gpu`. The catalog mode needs no Python or local
+`--backend` defaults to `auto`: the GPU frontend when the build has `gpu-wgpu` and
+the host has a usable adapter, otherwise the CPU with one warning (the choice is
+`slam_rs::select_backend`, shared with the Python tools). `--backend cpu` and
+`--backend gpu` force a lane; `gpu` fails if it cannot run. The catalog mode needs no Python or local
 fixture. `--config -` reads the resolved config from stdin. All four cameras,
 calibration and IMU come from the named segment. The dataset is its `robocap__`
 or `msd-g2__` prefix; other rigs are rejected.

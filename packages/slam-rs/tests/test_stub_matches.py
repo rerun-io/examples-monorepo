@@ -151,9 +151,9 @@ def test_the_version_attribute_is_declared() -> None:
 def test_the_gpu_backend_names_a_runtime_the_stub_declares() -> None:
     """The one module attribute whose *value* is a contract, not only its type.
 
-    A fleet row's lane is this string (``slam_rs.apis.gate.this_lane``), so
-    a third GPU feature that forgot to name itself here would label its rows with
-    something no consumer knows. ``None`` is the CPU-only default build.
+    The catalog layer records this string as the backend of a GPU run, so a
+    third GPU feature that forgot to name itself here would label its layers with
+    something no consumer knows. ``None`` is a core built without ``gpu-wgpu``.
     """
     assert "gpu_backend" in _stub_module_names()
     assert _core.gpu_backend in (None, "wgpu")

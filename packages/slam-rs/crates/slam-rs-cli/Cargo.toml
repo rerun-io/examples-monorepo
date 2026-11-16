@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 catalog = ["dep:anyhow", "dep:arrow", "dep:re_protos", "dep:re_log_encoding", "dep:re_chunk", "dep:tonic", "dep:tokio", "kornia-staging-io/decoder", "dep:kornia-image", "dep:kornia-staging-imgproc"]
-# The CubeCL frontend through wgpu, for `replay --lane gpu`.
+# The CubeCL frontend through wgpu, which `replay --backend auto` (the default) selects when the host can run it.
 gpu-wgpu = ["slam-rs/gpu-wgpu"]
 
 [dependencies]

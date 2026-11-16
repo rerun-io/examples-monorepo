@@ -449,8 +449,8 @@ def test_no_hostile_argument_reaches_python_as_a_panic(
 
     for value in HOSTILE_INTS:
         refuse(f"push_imu({value})", lambda v=value: pipeline(2).push_imu(v, [0.0] * 3, [0.0] * 3), failures)
-        refuse(f"Vio(threads={value})", lambda v=value: _core.Vio(calibration, config, threads=v), failures)
-        refuse(f"Vio(max_keypoints={value})", lambda v=value: _core.Vio(calibration, config, max_keypoints=v), failures)
+        refuse(f"Vio(threads={value})", lambda v=value: _core.Vio(calibration, config, threads=v, backend="cpu"), failures)
+        refuse(f"Vio(max_keypoints={value})", lambda v=value: _core.Vio(calibration, config, max_keypoints=v, backend="cpu"), failures)
         refuse(f"Vio.track(t_ns={value})", lambda v=value: pipeline(2).track(v, good), failures)
         refuse(f"OpticalFlow(threads={value})", lambda v=value: _core.OpticalFlow(calibration, config, threads=v), failures)
         refuse(f"OpticalFlow(max_keypoints={value})", lambda v=value: _core.OpticalFlow(calibration, config, max_keypoints=v), failures)
@@ -476,8 +476,8 @@ def test_no_hostile_argument_reaches_python_as_a_panic(
         refuse(f"Calibration.from_catalog(imu={thing!r})", lambda i=imu_like: _core.Calibration.from_catalog([camera(0, 0.0)], i), failures)
         refuse(f"OpticalFlow(calibration={thing!r})", lambda c=calibration_like: _core.OpticalFlow(c, config), failures)
         refuse(f"OpticalFlow(config={thing!r})", lambda o=config_like: _core.OpticalFlow(calibration, o), failures)
-        refuse(f"Vio(calibration={thing!r})", lambda c=calibration_like: _core.Vio(c, config), failures)
-        refuse(f"Vio(config={thing!r})", lambda o=config_like: _core.Vio(calibration, o), failures)
+        refuse(f"Vio(calibration={thing!r})", lambda c=calibration_like: _core.Vio(c, config, backend="cpu"), failures)
+        refuse(f"Vio(config={thing!r})", lambda o=config_like: _core.Vio(calibration, o, backend="cpu"), failures)
         refuse(f"process(images={thing!r})", lambda o=images_like: flow.process(1, o), failures)
         refuse(f"process([{thing!r}])", lambda o=frameset_like: flow.process(1, o), failures)
         refuse(f"safe_radius = {thing!r}", lambda o=thing: setattr(config, "optical_flow_image_safe_radius", o), failures)
@@ -517,7 +517,7 @@ def test_no_hostile_argument_reaches_python_as_a_panic(
             )
             refuse(
                 f"Vio config {key}={value}",
-                lambda k=key, v=value: _core.Vio(calibration, _core.VioConfig.from_json(config_with(k, v))),
+                lambda k=key, v=value: _core.Vio(calibration, _core.VioConfig.from_json(config_with(k, v)), backend="cpu"),
                 failures,
             )
 

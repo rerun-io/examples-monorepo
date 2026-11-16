@@ -23,7 +23,7 @@ use slam_rs::frontend::flow::{
     FlowFrame as CoreFlowFrame, FrameToFrameOpticalFlow, FrontendError, FrontendOptions,
     PosePrediction,
 };
-use slam_rs::{Backend, FrontendLane, ImageView, VioError};
+use slam_rs::{Backend, BackendRequest, FrontendLane, ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
 fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
@@ -134,20 +134,24 @@ pub struct Vio {
 #[pymethods]
 impl Vio {
     /// Build an f32 pipeline from calibration and configuration.
-    /// Inputs can come from JSON or catalog dataclasses. CPU is the default; `gpu`
-    /// selects CubeCL frontend stages. Missing feature support or unusable runtime
-    /// returns `ValueError`, including caught runtime initialization panics (D32).
-    /// `threads` controls only the CPU pool and is accepted but inert with `gpu=True`.
+    /// Inputs can come from JSON or catalog dataclasses. `backend` is `"auto"`
+    /// (the default), `"cpu"` or `"gpu"`, resolved by `slam_rs::select_backend`:
+    /// auto runs the CubeCL frontend when this host can and otherwise the CPU,
+    /// with one warning on stderr; `"gpu"` raises `ValueError` instead of falling
+    /// back. Invalid input and runtime initialization panics also raise
+    /// `ValueError` (D32). `threads` controls only the CPU pool and is accepted
+    /// but inert on the GPU lane.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, gpu = false))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto"))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
-        gpu: bool,
+        backend: &str,
     ) -> PyResult<Self> {
-        let backend: Backend = if gpu { Backend::Gpu } else { Backend::Cpu };
+        let request: BackendRequest = backend.parse().map_err(PyValueError::new_err)?;
+        let backend: Backend = slam_rs::select_backend(request).map_err(value_error)?;
         Ok(Self {
             inner: slam_rs::Vio::with_backend(
                 config.inner.clone(),
@@ -163,6 +167,12 @@ impl Vio {
     #[getter]
     fn gpu(&self) -> bool {
         self.inner.backend() == Backend::Gpu
+    }
+
+    /// The lane this pipeline runs: `"cpu"` or `"gpu"`.
+    #[getter]
+    fn backend(&self) -> &'static str {
+        self.inner.backend().name()
     }
 
     /// Cameras this estimator expects in every frameset.
@@ -1301,6 +1311,19 @@ fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
     PyValueError::new_err(format!("{what}.{name} must be {expected}"))
 }
 
+/// Resolve a backend request (`"auto"`, `"cpu"` or `"gpu"`) to the lane `Vio`
+/// would run, `"cpu"` or `"gpu"`, through `slam_rs::select_backend`.
+///
+/// Auto never raises: it returns `"cpu"` and warns once on stderr when the GPU
+/// frontend cannot run here. `"gpu"` raises `ValueError` in that case.
+#[pyfunction]
+fn select_backend(request: &str) -> PyResult<&'static str> {
+    let request: BackendRequest = request.parse().map_err(PyValueError::new_err)?;
+    Ok(slam_rs::select_backend(request)
+        .map_err(value_error)?
+        .name())
+}
+
 /// The compiled core of the `slam_rs` package.
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1308,6 +1331,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", slam_rs::VERSION)?;
     // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
+    module.add_function(wrap_pyfunction!(select_backend, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
     module.add_class::<VioStatus>()?;

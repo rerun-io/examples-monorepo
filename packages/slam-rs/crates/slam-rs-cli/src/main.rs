@@ -38,10 +38,25 @@ struct Cli {
     command: Command,
 }
 
+/// The frontend backend a replay asks for; `slam_rs::select_backend` resolves it.
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum Lane {
+enum BackendArg {
+    /// The GPU frontend when this build and host can run it, otherwise the CPU with one warning.
+    Auto,
+    /// The CPU frontend.
     Cpu,
+    /// The GPU frontend, or an error naming why it cannot run.
     Gpu,
+}
+
+impl From<BackendArg> for slam_rs::BackendRequest {
+    fn from(arg: BackendArg) -> Self {
+        match arg {
+            BackendArg::Auto => Self::Auto,
+            BackendArg::Cpu => Self::Cpu,
+            BackendArg::Gpu => Self::Gpu,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -62,9 +77,9 @@ enum Command {
         /// Resolved VIO config JSON; `-` reads stdin (catalog mode can stream config without copying a file).
         #[arg(long)]
         config: PathBuf,
-        /// The frontend backend.
-        #[arg(long, value_enum, default_value = "cpu")]
-        lane: Lane,
+        /// The frontend backend (`--lane` is the old name).
+        #[arg(long, alias = "lane", value_enum, default_value = "auto")]
+        backend: BackendArg,
         /// Frontend worker threads (any count gives the same trajectory, D31).
         #[arg(long, default_value_t = 1)]
         threads: usize,
@@ -95,7 +110,7 @@ fn main() -> ExitCode {
             catalog,
             segment,
             config,
-            lane,
+            backend,
             threads,
             max_framesets,
             frames,
@@ -123,7 +138,7 @@ fn main() -> ExitCode {
                 replay(
                     input,
                     &config,
-                    lane,
+                    backend.into(),
                     threads,
                     started.elapsed().as_secs_f64(),
                     &out,

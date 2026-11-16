@@ -46,14 +46,14 @@ def test_a_frame_without_imu_needs_more_imu(pipeline: PipelineFactory, texture: 
 def test_a_rig_of_one_camera_is_refused(rig: RigFactory) -> None:
     """``optical_flow.h:210``: the epipolar filter needs a second camera."""
     with pytest.raises(ValueError, match="expected 2 cameras, got 1"):
-        _core.Vio(rig(1), _core.VioConfig())
+        _core.Vio(rig(1), _core.VioConfig(), backend="cpu")
 
 
 def test_a_config_the_port_does_not_implement_is_refused(rig: RigFactory) -> None:
     """Offline mode cannot drop framesets without letting arrival order reach a decision."""
     raw: str = _core.VioConfig().to_json().replace('"config.vio_enforce_realtime": false', '"config.vio_enforce_realtime": true')
     with pytest.raises(ValueError, match="vio_enforce_realtime"):
-        _core.Vio(rig(2), _core.VioConfig.from_json(raw))
+        _core.Vio(rig(2), _core.VioConfig.from_json(raw), backend="cpu")
 
 
 def test_push_imu_rejects_a_non_monotonic_timestamp(pipeline: PipelineFactory) -> None:

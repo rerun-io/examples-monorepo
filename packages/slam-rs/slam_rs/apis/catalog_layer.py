@@ -5,11 +5,20 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
-import torch
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 
-from slam_rs import _core
-from slam_rs.catalog_feed import ROBOCAP_RIG, CatalogSegment, RigProfile, SegmentFeed, open_segment, resolve_catalog_segments
+from slam_rs import BackendRequest, _core
+from slam_rs.catalog_feed import (
+    ROBOCAP_RIG,
+    CatalogSegment,
+    DecodeDevice,
+    DecodeRequest,
+    RigProfile,
+    SegmentFeed,
+    open_segment,
+    resolve_catalog_segments,
+    select_decode_device,
+)
 from slam_rs.catalog_layer import POSE_SOURCE, write_layer
 from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
 from slam_rs.tracking import Lockstep, SegmentRun, drive
@@ -27,9 +36,9 @@ class Config:
     """Catalog URL; defaults to slam.toml."""
     profile: Literal["fast", "reference"] = "fast"
     """Estimator configuration profile."""
-    backend: Literal["auto", "gpu", "cpu"] = "auto"
-    """Auto uses the GPU build when a driver is available; GPU requires it; CPU disables it."""
-    decode_device: Literal["auto", "cuda", "cpu"] = "auto"
+    backend: BackendRequest = "auto"
+    """Frontend: auto runs the GPU when this host can, otherwise the CPU with one warning; gpu fails instead; cpu forces it."""
+    decode_device: DecodeRequest = "auto"
     """CUDA/NVDEC when available; CPU retains the reference PyAV grayscale conversion."""
 
 
@@ -48,12 +57,7 @@ def main(config: Config) -> None:
     if dataset is None:
         raise ValueError(f"{config.segment}: catalog resolution returned no dataset handle")
     output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
-    cuda_available: bool = torch.cuda.is_available()
-    if config.decode_device == "cuda" and not cuda_available:
-        raise ValueError("CUDA decoding requires an available NVIDIA GPU and the slam-rs-cuda environment")
-    decode_device: Literal["cpu", "cuda"] = "cuda" if config.decode_device == "cuda" or (config.decode_device == "auto" and cuda_available) else "cpu"
-    if decode_device == "cpu" and config.decode_device == "auto":
-        print("WARNING: decoding on the CPU: no CUDA device in this environment (the slam-rs-cuda environment decodes with NVDEC)", flush=True)
+    decode_device: DecodeDevice = select_decode_device(config.decode_device)
     print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
@@ -62,20 +66,8 @@ def main(config: Config) -> None:
         config_text: str = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, config.profile)
         calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
         flow: _core.VioConfig = _core.VioConfig.from_json(config_text)
-        use_gpu: bool = config.backend == "gpu" or (config.backend == "auto" and _core.gpu_backend is not None)
-        if config.backend == "auto" and _core.gpu_backend is None:
-            print("WARNING: tracking on the CPU: this slam_rs._core has no GPU frontend (run slam-rs-wgpu-build; the "
-                  "slam-rs-catalog-layer task does it first)", flush=True)
-        vio: _core.Vio
-        try:
-            vio = _core.Vio(calibration, flow, gpu=use_gpu)
-        except ValueError as error:
-            # Only an absent adapter permits auto fallback. Invalid calibration,
-            # config, client panics and failures during tracking must still fail.
-            if config.backend != "auto" or "wgpu found no" not in str(error):
-                raise
-            print(f"GPU unavailable: {error}; using CPU", flush=True)
-            vio = _core.Vio(calibration, flow, gpu=False)
+        # The shared selector decides; only a failed device probe lets auto fall back to the CPU.
+        vio: _core.Vio = _core.Vio(calibration, flow, backend=config.backend)
         backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
         print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)

@@ -151,7 +151,7 @@ def pipeline(rig: RigFactory) -> PipelineFactory:
     from slam_rs import _core
 
     def build(camera_count: int) -> _core.Vio:
-        return _core.Vio(rig(camera_count), _core.VioConfig())
+        return _core.Vio(rig(camera_count), _core.VioConfig(), backend="cpu")
 
     return build
 

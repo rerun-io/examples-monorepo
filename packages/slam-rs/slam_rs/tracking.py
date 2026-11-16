@@ -15,7 +15,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
-from slam_rs import _core
+from slam_rs import BackendRequest, _core
 from slam_rs.catalog_calibration import ImuCalib
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
@@ -269,7 +269,7 @@ def run_segment(
     segment: ReferenceSegment,
     window_s: float | None = None,
     max_framesets: int | None = None,
-    gpu: bool = False,
+    backend: BackendRequest = "auto",
     profile: Literal["reference", "fast"] = "fast",
     catalog: str | None = None,
     source: CatalogSegment | None = None,
@@ -281,7 +281,7 @@ def run_segment(
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, gpu=gpu))
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend=backend))
         return drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
 
 
@@ -355,7 +355,7 @@ def run_robocap(
     window_s: float = DEFAULT_WINDOW_S,
     profile: Literal["reference", "fast"] = "fast",
     catalog: str | None = None,
-    gpu: bool = False,
+    backend: BackendRequest = "auto",
 ) -> SegmentRun:
     """Replay a RoboCap catalog session without logging."""
     calibration: _core.Calibration
@@ -369,4 +369,4 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, gpu=gpu)), stop_ns, config_sha256=config_text_sha256(config_text))
+        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text))

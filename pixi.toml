@@ -2749,7 +2749,15 @@ description = "Register downloaded MSD recordings in the catalog (dataforge-regi
 [feature.slam-rs.tasks.slam-rs-gate]
 cmd = "python tools/apps/gate.py"
 cwd = "packages/slam-rs"
-description = "Score catalog segments against ground truth and baselines"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then score catalog segments against ground truth and baselines (GPU frontend when available)"
+
+# Any replay flag passes through, e.g. `--stage vio --segment <id>`; `--backend cpu` forces the CPU lane.
+[feature.slam-rs.tasks.slam-rs-replay]
+cmd = "python tools/apps/replay.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then replay a segment in the viewer (GPU frontend when available)"
 
 [feature.slam-rs.tasks.slam-rs-download-sample]
 # All three layers must be present. Adding a clip and updating the count
@@ -2766,10 +2774,10 @@ cmd = "bash -c 'test \"$(ls data/msd-rrd/{base,gt,sensor_metadata}/*.rrd 2>/dev/
 cwd = "packages/slam-rs"
 description = "Download every MSD recording (about 15.5 GB)"
 
-# A catalog run belongs on the GPU: the wgpu frontend (built first, so no CPU-only core left by a test run is used) and NVDEC
-# decode, which only the slam-rs-cuda environments carry. Without a GPU adapter it falls back to the CPU and says so.
+# NVDEC decode needs the CUDA torch stack, which only the slam-rs-cuda environments carry, so this task lives there.
+# The frontend follows the shared default: the wgpu frontend when the host has an adapter, otherwise the CPU with one warning.
 [feature.slam-rs-nvdec.tasks.slam-rs-catalog-layer]
-depends-on = ["slam-rs-wgpu-build"]
+depends-on = ["slam-rs-build"]
 cmd = "python tools/apps/catalog_layer.py"
 cwd = "packages/slam-rs"
 description = "Run catalog VIO on the GPU (wgpu frontend, NVDEC decode) and replace its slam_rs pose layer (fast profile)"
@@ -2818,9 +2826,10 @@ CORE_CDYLIB = "lib_core.dylib"
 # .pth already looks (the dpvo / mast3r-slam in-place pattern).
 [feature.slam-rs.tasks.slam-rs-build]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
-# The CPU core and the GPU core (slam-rs-wgpu-build) share slam_rs/_core.so: each task that needs one installs it first, and
-# the install is a rename, so a running process keeps the file it loaded. Separate target dirs make the switch a copy, not a rebuild.
-cmd = "cargo build --release -p slam-rs-py && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
+# One core for every tool: always with the wgpu frontend (Vulkan on Linux, Metal on macOS), which `backend="auto"`
+# selects at run time when the host has an adapter. The core crate itself keeps `gpu-wgpu` off by default for wasm,
+# iOS and embedded consumers. The install is a rename, so a running process keeps the file it loaded.
+cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu && cp target/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
 cwd = "packages/slam-rs"
 inputs = [
     "packages/slam-rs/Cargo.toml",
@@ -2836,7 +2845,7 @@ inputs = [
     "packages/kornia-staging/target/patch/**",
 ]
 outputs = ["packages/slam-rs/slam_rs/_core.so"]
-description = "Build the Rust VIO core and install slam_rs._core in place"
+description = "Build the Rust VIO core with the wgpu GPU frontend and install slam_rs._core in place"
 
 [feature.slam-rs.tasks.slam-rs-clippy]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
@@ -2918,7 +2927,7 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # allocation and frame-queue tests in three binaries. The pool-flat assertion
 # runs separately because each binary shares one CubeCL client.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
-depends-on = ["slam-rs-wgpu-build"]
+depends-on = ["slam-rs-build"]
 cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu -- --nocapture && python -m pytest -q -ra -m integration tests/test_metal_python_host.py"
 cwd = "packages/slam-rs"
 description = "Run workspace tests with wgpu, checking that all three GPU integration binaries contain tests"
@@ -2928,28 +2937,6 @@ depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-stagin
 cmd = 'RUSTDOCFLAGS="-D warnings" cargo doc --locked --offline --no-deps -p slam-rs -p slam-rs-py --features slam-rs/gpu-wgpu'
 cwd = "packages/slam-rs"
 description = "Build wgpu Rust documentation with warnings denied"
-
-# The same core on the portable lane, for measuring it: `--gpu` then selects
-# wgpu, the only GPU runtime (D70).
-[feature.slam-rs.tasks.slam-rs-wgpu-build]
-depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
-cmd = "cargo build --release -p slam-rs-py --features gpu-wgpu --target-dir target/wgpu && cp target/wgpu/release/$CORE_CDYLIB slam_rs/_core.so.new && mv slam_rs/_core.so.new slam_rs/_core.so"
-cwd = "packages/slam-rs"
-inputs = [
-    "packages/slam-rs/Cargo.toml",
-    "packages/slam-rs/Cargo.lock",
-    "packages/slam-rs/crates/*/Cargo.toml",
-    "packages/slam-rs/crates/*/build.rs",
-    "packages/slam-rs/crates/*/src/**",
-    "packages/kornia-staging/Cargo.{toml,lock}",
-    "packages/kornia-staging/crates/*/{Cargo.toml,build.rs}",
-    "packages/kornia-staging/crates/*/src/**",
-    "packages/kornia-staging/patches/**",
-    "packages/kornia-staging/scripts/prepare_patched_deps.py",
-    "packages/kornia-staging/target/patch/**",
-]
-outputs = ["packages/slam-rs/slam_rs/_core.so"]
-description = "Build the Rust VIO core with the portable wgpu CubeCL frontend and install it in place"
 
 # Build against the same GStreamer minor lane installed on Cap B. This small
 # environment also runs transport tests without loading the Python VIO stack.

@@ -1,11 +1,10 @@
 //! Timed replay and its trajectory/summary outputs.
 
-use crate::Lane;
 use crate::clip::ReplayInput;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::replay::{feed_imu_through, percentile};
-use slam_rs::{Backend, ImageView, Vio, VioResult};
+use slam_rs::{Backend, BackendRequest, ImageView, Vio, VioResult, select_backend};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -26,7 +25,7 @@ struct ReplayCounters {
 pub(super) fn replay(
     input: ReplayInput,
     config_path: &Path,
-    lane: Lane,
+    request: BackendRequest,
     threads: usize,
     load_s: f64,
     out: &Path,
@@ -54,10 +53,9 @@ pub(super) fn replay(
     let framesets = clip.framesets;
     let frameset_bytes: usize = clip.resolution_wh.iter().map(|&(w, h)| w * h).sum();
 
-    let backend: Backend = match lane {
-        Lane::Cpu => Backend::Cpu,
-        Lane::Gpu => Backend::Gpu,
-    };
+    let backend: Backend =
+        select_backend(request).map_err(|error| format!("--backend gpu: {error}"))?;
+    eprintln!("slam-rs: frontend backend {}", backend.name());
     let options = FrontendOptions {
         threads,
         ..FrontendOptions::default()
@@ -158,7 +156,7 @@ pub(super) fn replay(
     let per_frame = |ns: u64| ns as f64 / 1e6 / framesets.max(1) as f64;
     let report = serde_json::json!({
         "segment_id": clip.segment_id,
-        "lane": format!("{lane:?}").to_lowercase(),
+        "lane": backend.name(),
         "threads": threads,
         "framesets": framesets,
         "tracked": tracked,

@@ -30,7 +30,7 @@ outputs:
         - cd ../kornia-staging
         - python -m scripts.prepare_patched_deps
         - cd ../slam-rs
-        - cargo build --release -p slam-rs-py --locked
+        - cargo build --release -p slam-rs-py --locked --features gpu-wgpu
         - python -m pip install . --no-deps --no-build-isolation -vv
         - export SP_DIR="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
         - if: osx

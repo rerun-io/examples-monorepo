@@ -16,7 +16,7 @@ pub use submission::LaunchList;
 #[cfg(test)]
 mod runtime;
 use kornia_staging_gpu::runtime::gpu_client;
-use kornia_staging_gpu::runtime::probe_storage;
+use kornia_staging_gpu::runtime::{GpuError, probe_storage, probe_subgroups};
 mod frontend;
 pub use frontend::GpuStages;
 mod track;
@@ -27,6 +27,22 @@ pub use pyramid::{GpuPyramid, GpuPyramidBuilder};
 pub use track::GpuPatchTracker;
 
 use kornia_staging_gpu::GpuRuntime;
+
+/// Check that this host can run the GPU frontend: build the wgpu client, then
+/// run the storage and subgroup probes that the frontend's kernels need.
+///
+/// [`crate::gpu_probe`] caches the result; call that instead.
+///
+/// # Errors
+///
+/// No adapter, a client that panicked, or a device that fails a probe.
+pub(crate) fn probe_device() -> Result<(), GpuError> {
+    let client = gpu_client()?;
+    kornia_staging_gpu::transfer::execute_exclusive(&client, "device probe", || {
+        probe_storage(&client)?;
+        probe_subgroups(&client).map(|_| ())
+    })
+}
 
 /// Construct the frame-stage owner on the selected device.
 pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(

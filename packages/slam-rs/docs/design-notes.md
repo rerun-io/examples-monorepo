@@ -54,7 +54,8 @@ config = _core.VioConfig.from_json(Path("configs/msdmi_config.json").read_text()
 config = _core.VioConfig.from_json(profiled_config_text(Path("configs/msdmi_config.json"), "fast"))  # or with the overlay
 config.optical_flow_image_safe_radius = 472.0    # settable per device, though the shipped file carries it
 
-vio = _core.Vio(calibration, config, threads=1, gpu=False)   # gpu=True runs the frontend on this host's GPU
+vio = _core.Vio(calibration, config, threads=1)   # backend="auto": the GPU frontend when this host can, else the CPU
+vio.backend                                        # "gpu" or "cpu"; backend="cpu" / "gpu" force a lane
 vio.push_imu_batch(t_ns, gyro, accel)     # int64[n], float64[n, 3], float64[n, 3], uncalibrated
 result = vio.track(t_ns, [left, right])   # uint8[h, w] per camera
 result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
@@ -116,7 +117,6 @@ absolute path to both the worker and the catalog server:
 
 ```bash
 pixi install -e slam-rs-cuda
-pixi run -e slam-rs-cuda --frozen slam-rs-wgpu-build
 pixi run -e slam-rs-cuda --frozen slam-rs-catalog-layer \
   --catalog rerun+http://dgx-spark.ilish-ruler.ts.net:9988 \
   --segment robocap__f408193e6447b3b0__s00000059 \
@@ -196,7 +196,6 @@ pixi run -e slam-rs-dev --frozen typecheck
 pixi run -e slam-rs-dev --frozen deadcode
 pixi run -e slam-rs-dev --frozen slam-rs-clippy
 pixi run -e slam-rs-dev --frozen slam-rs-rust-test
-pixi run -e slam-rs-dev --frozen slam-rs-wgpu-build
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-clippy
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-test
 pixi run -e slam-rs-dev --frozen slam-rs-wgpu-doc
@@ -255,5 +254,6 @@ pixi run -e slam-rs-dev --frozen slam-rs-wgpu-doc
 - **D82** — Ship the CubeCL worker fix as a checksummed archive plus local patch, prepared under a process lock and selected by Cargo; no maintained fork or upstream worker PR (2026-09-11)
 - **D83** — Require at least 1.2x GPU/CPU speedup on the same machine with accuracy in band; 1.5x is a research goal, separate from the 1.10x regression limits (2026-09-11)
 - **D84** — `port.keyframe_solve_deferred`: a keyframe frameset with visual support returns the frame-update pose; its triangulation, joint solve and marginalization run on a second thread beside the next frameset's frontend and finish before the estimator touches the window again (deterministic; gated on ATE, 2026-10-01)
+- **D85** — The GPU frontend is the default everywhere: one `slam_rs::select_backend` resolves `auto` (GPU when a probed adapter passes the storage and subgroup checks, else CPU with one warning) for the CLI, the Python bindings and every tool; one `slam-rs-build` carries `gpu-wgpu`; decoding uses NVDEC when CUDA is available, except the gate, which stays on its dav1d baselines (2026-11-16)
 - **S34** — Remove external comparison fixtures and fallbacks; use catalog ground truth, lane/profile baselines, and library numerics.
 - **S36** — Remove Metal wait and worker sleeps through the wgpu upgrade and local CubeCL park/unpark patch; use matched host baselines.

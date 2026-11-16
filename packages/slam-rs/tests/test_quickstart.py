@@ -99,8 +99,18 @@ def test_one_command_runs_the_whole_demo_in_the_viewer() -> None:
     assert list(tasks["slam-rs-register"]["depends-on"]) == ["slam-rs-catalog-up"]  # type: ignore[arg-type]
 
 
-def test_the_gate_never_rebuilds_the_core_it_is_handed() -> None:
-    """`slam-rs-gate --gpu` must not depend on the CPU build: pixi would rebuild the CPU core over a GPU one."""
+def test_every_tool_task_builds_the_one_gpu_enabled_core_first() -> None:
+    """One core for every tool: `slam-rs-build` always carries the wgpu frontend, and no task installs a CPU-only core over it.
+
+    The frontend choice is made at run time (`backend="auto"`), not by which build task ran last.
+    """
     with (REPO / "pixi.toml").open("rb") as handle:
-        gate: dict[str, object] = tomllib.load(handle)["feature"]["slam-rs"]["tasks"]["slam-rs-gate"]
-    assert "depends-on" not in gate
+        features: dict[str, dict[str, dict[str, dict[str, object]]]] = tomllib.load(handle)["feature"]
+    tasks: dict[str, dict[str, object]] = features["slam-rs"]["tasks"]
+    assert "--features gpu-wgpu" in str(tasks["slam-rs-build"]["cmd"])
+    assert "slam-rs-wgpu-build" not in tasks
+    builds: list[str] = [name for name, task in tasks.items() if "_core.so" in str(task.get("cmd", ""))]
+    assert builds == ["slam-rs-build"], builds
+    for name in ("slam-rs-gate", "slam-rs-replay", "slam-rs-demo", "slam-rs-wgpu-test"):
+        assert "slam-rs-build" in list(tasks[name]["depends-on"]), name  # type: ignore[arg-type]
+    assert list(features["slam-rs-nvdec"]["tasks"]["slam-rs-catalog-layer"]["depends-on"]) == ["slam-rs-build"]  # type: ignore[arg-type]

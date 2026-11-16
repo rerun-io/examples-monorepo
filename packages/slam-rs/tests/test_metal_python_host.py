@@ -36,7 +36,7 @@ def test_python_host_metal_detects_stereo_features(rig: RigFactory, texture: Tex
 def run_probe(calibration_json: str, image_path: Path) -> None:
     """Feed inertial samples and the fixture's textured stereo scene to Vio."""
     try:
-        vio: _core.Vio = _core.Vio(_core.Calibration.from_json(calibration_json), _core.VioConfig(), gpu=True)
+        vio: _core.Vio = _core.Vio(_core.Calibration.from_json(calibration_json), _core.VioConfig(), backend="gpu")
     except ValueError as error:
         if "wgpu found no metal adapter on this host" in str(error):
             sys.exit(77)
