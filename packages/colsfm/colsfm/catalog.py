@@ -16,9 +16,13 @@ extrapolated.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
+import os
+import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
@@ -29,6 +33,8 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation, Slerp
+from serde import serde
+from serde.json import to_json
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.rrd_query_utils import first_valid_value
@@ -39,6 +45,7 @@ from colsfm.export import write_tum_file
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, write_manifest
 from colsfm.frames_meta import FRAMES_META_NAME
 from colsfm.geometry import TumPose, rigid3d_from_matrix
+from colsfm.run_lifecycle import STAGING_SUFFIX, publish_directory
 
 DEFAULT_CATALOG_URL: Final[str] = "rerun+http://dgx-spark:51235"
 """The shared catalog the dataforge corpora are registered on."""
@@ -98,17 +105,43 @@ class CatalogInputConfig:
     sync_tolerance_ns: int = 5_000_000
     """Largest |dt| between the reference frame and another camera's frame of the same rig frame."""
     output_root: Path = field(default_factory=lambda: DATA_DIR / "inputs")
-    """Where `frames_meta.json`, `frame_source.json` and the ground truth go, one directory per segment and sampling."""
+    """Where the input snapshots go, one directory per complete source and sampling specification."""
+
+    def spec(self) -> str:
+        """Everything that decides the snapshot's contents, as canonical JSON (`output_root` only says where it goes).
+
+        Returns:
+            Sorted-key JSON of every field but `output_root`.
+        """
+        fields: dict[str, object] = {f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.name != "output_root"}
+        return json.dumps(fields, sort_keys=True, default=str)
 
     @property
     def input_dir(self) -> Path:
-        """The pipeline input directory for this segment and sampling.
+        """The pipeline input directory for this source and sampling.
 
         Returns:
-            `<output_root>/<segment>_s<stride>[_n<max>]`.
+            `<output_root>/<segment>_s<stride>[_n<max>]_<spec hash>`: two specifications that differ anywhere (catalog,
+            dataset, cameras, trajectory, ground truth, trims, timeline, stereo pairs) never share a directory.
         """
         cap: str = "" if self.max_samples is None else f"_n{self.max_samples}"
-        return self.output_root / f"{self.segment}_s{self.frame_stride}{cap}"
+        digest: str = hashlib.sha256(self.spec().encode()).hexdigest()[:10]
+        return self.output_root / f"{self.segment}_s{self.frame_stride}{cap}_{digest}"
+
+
+CATALOG_INPUT_FILE: Final[str] = "catalog_input.json"
+"""The snapshot's provenance, beside its frames: `CatalogSnapshot`."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class CatalogSnapshot:
+    """What one input snapshot was built from, so the directory says it and the name need not."""
+
+    spec: str
+    """`CatalogInputConfig.spec()` of the request that built it."""
+    ground_truth: bool
+    """Whether `ground_truth.txt` is part of this snapshot; False is an explicit "not scored"."""
 
 
 @dataclass(frozen=True)
@@ -422,6 +455,52 @@ def write_ground_truth(
     return len(written)
 
 
+def write_snapshot(
+    input_dir: Path,
+    snapshot: CatalogSnapshot,
+    manifest: FrameSourceManifest,
+    frames_meta: dict[str, object],
+    write_truth: Callable[[Path], object] | None,
+) -> None:
+    """Write one complete input snapshot beside `input_dir` and only then swap it into place.
+
+    The pipeline reads `input_dir` as a whole (manifest, metadata, ground truth), so it is
+    never a mix of two preparations: everything goes into a private staging sibling first,
+    which a failure deletes and success publishes with `colsfm.run_lifecycle.publish_directory`.
+
+    Args:
+        input_dir: The snapshot's directory.
+        snapshot: Its provenance, written as `CATALOG_INPUT_FILE`.
+        manifest: The frames to decode, written as `frame_source.json`.
+        frames_meta: The `frames_meta.json` document.
+        write_truth: Writes `ground_truth.txt` into a directory's file, or None for an unscored snapshot.
+
+    Raises:
+        ValueError: When the metadata's image names are not exactly the manifest's.
+    """
+    keyframes = frames_meta["keyframes_metadata"]
+    assert isinstance(keyframes, list)
+    meta_names: list[str] = [str(keyframe["image_name"]) for keyframe in keyframes]
+    manifest_names: list[str] = [name for stream in manifest.streams for name in stream.names]
+    if sorted(meta_names) != sorted(manifest_names) or len(set(meta_names)) != len(meta_names):
+        raise ValueError(
+            f"{input_dir.name}: frames_meta names {len(meta_names)} images, the frame manifest {len(manifest_names)}; they must be the same set"
+        )
+    staging: Path = input_dir.with_name(f"{input_dir.name}{STAGING_SUFFIX}-{os.getpid()}")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        write_manifest(staging / FRAME_SOURCE_FILE, manifest)
+        if write_truth is not None:
+            write_truth(staging / GROUND_TRUTH_FILE_NAME)
+        (staging / FRAMES_META_NAME).write_text(json.dumps(frames_meta, indent=1))
+        (staging / CATALOG_INPUT_FILE).write_text(to_json(snapshot) + "\n")
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    publish_directory(staging, input_dir)
+
+
 def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
     """Read the segment and write the pipeline's input directory: `frames_meta.json`, `frame_source.json`, ground truth.
 
@@ -445,9 +524,7 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
     times: Int64[ndarray, " n"] = reference.t_ns
     first: int = int(np.searchsorted(times, times[0] + int(config.trim_start_seconds * 1e9)))
     last: int = int(np.searchsorted(times, times[-1] - int(config.trim_end_seconds * 1e9), side="right"))
-    candidates: list[int] = [
-        index for index in range(first, last, config.frame_stride) if trajectory.t_ns[0] <= times[index] <= trajectory.t_ns[-1]
-    ]
+    candidates: list[int] = [index for index in range(first, last, config.frame_stride) if trajectory.t_ns[0] <= times[index] <= trajectory.t_ns[-1]]
     if config.max_samples is not None:
         candidates = candidates[: config.max_samples]
     if not candidates:
@@ -466,8 +543,6 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
                 chosen[sample] = nearest
         selection.append(chosen)
 
-    input_dir: Path = config.input_dir
-    input_dir.mkdir(parents=True, exist_ok=True)
     rig_frames: list[dict[str, tuple[int, Transform]]] = [{} for _ in candidates]
     streams: list[StreamKeyframes] = []
     written: int = 0
@@ -486,16 +561,25 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
             )
         )
         print(f"[colsfm.catalog] {camera.name}: {len(chosen)} keyframes")
-    write_manifest(
-        input_dir / FRAME_SOURCE_FILE,
-        FrameSourceManifest(catalog_url=config.catalog_url, dataset=config.dataset, segment=config.segment, timeline=config.timeline, streams=streams),
+    manifest: FrameSourceManifest = FrameSourceManifest(
+        catalog_url=config.catalog_url, dataset=config.dataset, segment=config.segment, timeline=config.timeline, streams=streams
     )
-
+    # Every catalog read happens before anything is written, so a failed read leaves the previous snapshot whole.
+    write_truth: Callable[[Path], object] | None = None
     if config.ground_truth_entity is not None:
         ground_truth: CatalogTrajectory = read_catalog_trajectory(dataset, config.segment, config.ground_truth_entity, config.timeline)
-        write_ground_truth(input_dir / GROUND_TRUTH_FILE_NAME, ground_truth, rig_frames, cameras)
-    document: dict[str, object] = frames_meta_document(cameras, rig_frames, config.stereo_pairs)
-    (input_dir / FRAMES_META_NAME).write_text(json.dumps(document, indent=1))
+
+        def write_truth(path: Path) -> object:
+            return write_ground_truth(path, ground_truth, rig_frames, cameras)
+
+    input_dir: Path = config.input_dir
+    write_snapshot(
+        input_dir,
+        CatalogSnapshot(spec=config.spec(), ground_truth=write_truth is not None),
+        manifest,
+        frames_meta_document(cameras, rig_frames, config.stereo_pairs),
+        write_truth,
+    )
     seconds: float = time.perf_counter() - started
     print(f"[colsfm.catalog] {config.segment}: {len(candidates)} rig frames, {written} keyframes, {len(cameras)} cameras in {seconds:.1f} s")
     return PreparedInput(input_dir=input_dir, cameras=cameras, num_rig_frames=len(candidates), num_keyframes=written, seconds=seconds)

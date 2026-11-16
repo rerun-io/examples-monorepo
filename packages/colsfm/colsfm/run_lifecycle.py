@@ -72,9 +72,7 @@ same `pose_graph/frames_meta.json` poses (`pycusfm/cusfm_runner.py`,
 ALL_STAGE_NAMES: Final[tuple[StageName, ...]] = get_args(StageName)
 """Every stage, in `StageName`'s own order; what an `--optimize-extrinsics` run records."""
 
-STAGE_NAMES: Final[tuple[StageName, ...]] = tuple(
-    stage for stage in ALL_STAGE_NAMES if stage != EXTRINSIC_REFINEMENT_STAGE
-)
+STAGE_NAMES: Final[tuple[StageName, ...]] = tuple(stage for stage in ALL_STAGE_NAMES if stage != EXTRINSIC_REFINEMENT_STAGE)
 """The stages a default run records: every stage but the second mapping pass."""
 
 CheapStageName: TypeAlias = Literal["keyframe_selection", "pair_selection"]
@@ -326,11 +324,7 @@ class RunWorkspace:
         never a directory being filled in: it holds the previous run, then this one.
         """
         self.record_state("succeeded", tuple(record.stage for record in self.ledger.records))
-        replaced: Path = self.output_dir.with_name(f"{self.output_dir.name}{REPLACED_SUFFIX}-{os.getpid()}")
-        if self.output_dir.exists():
-            os.replace(self.output_dir, replaced)
-        os.replace(self.staging_dir, self.output_dir)
-        shutil.rmtree(replaced, ignore_errors=True)
+        publish_directory(self.staging_dir, self.output_dir)
 
     def fail(self, reason: str) -> None:
         """Mark the run failed and leave its staging directory for inspection.
@@ -378,6 +372,23 @@ def _is_running(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def publish_directory(staging_dir: Path, destination: Path) -> None:
+    """Swap a finished staging directory into its destination.
+
+    Two renames with the previous contents parked in between, so the destination is never
+    a directory being filled in: it holds the previous generation, then this one, whole.
+
+    Args:
+        staging_dir: The complete new contents, a sibling of `destination`.
+        destination: Where they go.
+    """
+    replaced: Path = destination.with_name(f"{destination.name}{REPLACED_SUFFIX}-{os.getpid()}")
+    if destination.exists():
+        os.replace(destination, replaced)
+    os.replace(staging_dir, destination)
+    shutil.rmtree(replaced, ignore_errors=True)
 
 
 def _reap_abandoned_directories(output_dir: Path) -> None:
