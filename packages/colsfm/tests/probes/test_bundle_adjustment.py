@@ -10,6 +10,7 @@ import pytest
 from jaxtyping import Float
 from numpy import ndarray
 
+from colsfm.reconstruction import rig_from_world, rig_sensor_from_rig
 from probes.synthetic import (
     REF_CAMERA_ID,
     SECOND_CAMERA_ID,
@@ -63,12 +64,10 @@ def test_constant_poses_move_only_points(scene: SyntheticScene) -> None:
     assert before_error > 1.0
 
     poses_before: dict[int, Float[ndarray, "3 4"]] = {
-        frame_id: reconstruction.frame(frame_id).rig_from_world.matrix().copy()
-        for frame_id in sorted(reconstruction.frames)
+        frame_id: rig_from_world(reconstruction, frame_id).matrix().copy() for frame_id in sorted(reconstruction.frames)
     }
     intrinsics_before: dict[int, Float[ndarray, " n_params"]] = {
-        camera_id: reconstruction.camera(camera_id).params.copy()
-        for camera_id in sorted(reconstruction.cameras)
+        camera_id: reconstruction.camera(camera_id).params.copy() for camera_id in sorted(reconstruction.cameras)
     }
 
     config: pycolmap.BundleAdjustmentConfig = _all_images_config(reconstruction)
@@ -77,16 +76,12 @@ def test_constant_poses_move_only_points(scene: SyntheticScene) -> None:
     for camera_id in sorted(reconstruction.cameras):
         config.set_constant_cam_intrinsics(camera_id)
     for camera_id in (REF_CAMERA_ID, SECOND_CAMERA_ID):
-        config.set_constant_sensor_from_rig_pose(
-            pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id)
-        )
+        config.set_constant_sensor_from_rig_pose(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id))
     assert config.num_constant_rig_from_world_poses() == reconstruction.num_frames()
     assert config.num_constant_cam_intrinsics() == reconstruction.num_cameras()
     assert config.num_constant_sensor_from_rig_poses() == 2
 
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(
-        _quiet_options(), config, reconstruction
-    )
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(_quiet_options(), config, reconstruction)
     summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
     assert summary.termination_type != pycolmap.BundleAdjustmentTerminationType.FAILURE
 
@@ -95,7 +90,7 @@ def test_constant_poses_move_only_points(scene: SyntheticScene) -> None:
     print(f"[probe] constant-pose BA: mean reproj {before_error:.4f} -> {after_error:.6f} px")
     assert after_error < 1e-3
     for frame_id, matrix in poses_before.items():
-        assert np.array_equal(reconstruction.frame(frame_id).rig_from_world.matrix(), matrix)
+        assert np.array_equal(rig_from_world(reconstruction, frame_id).matrix(), matrix)
     for camera_id, params in intrinsics_before.items():
         assert np.array_equal(reconstruction.camera(camera_id).params, params)
     for point3D_id in reconstruction.point3D_ids():
@@ -113,14 +108,10 @@ def test_free_poses_recover_a_perturbed_frame(scene: SyntheticScene) -> None:
     point3D_ids: list[int] = add_ground_truth_points(scene)
 
     perturbed_frame_id: int = 3
-    truth: Float[ndarray, "3 4"] = (
-        reconstruction.frame(perturbed_frame_id).rig_from_world.matrix().copy()
-    )
+    truth: Float[ndarray, "3 4"] = rig_from_world(reconstruction, perturbed_frame_id).matrix().copy()
     perturbed: pycolmap.Rigid3d = pycolmap.Rigid3d(
-        pycolmap.Rotation3d(np.array([0.01, -0.02, 0.015]))
-        * reconstruction.frame(perturbed_frame_id).rig_from_world.rotation,
-        reconstruction.frame(perturbed_frame_id).rig_from_world.translation
-        + np.array([0.08, -0.05, 0.06]),
+        pycolmap.Rotation3d(np.array([0.01, -0.02, 0.015])) * rig_from_world(reconstruction, perturbed_frame_id).rotation,
+        rig_from_world(reconstruction, perturbed_frame_id).translation + np.array([0.08, -0.05, 0.06]),
     )
     reconstruction.frame(perturbed_frame_id).rig_from_world = perturbed
     start_error: float = float(np.linalg.norm(perturbed.matrix() - truth))
@@ -132,18 +123,12 @@ def test_free_poses_recover_a_perturbed_frame(scene: SyntheticScene) -> None:
     for camera_id in sorted(reconstruction.cameras):
         config.set_constant_cam_intrinsics(camera_id)
     for camera_id in (REF_CAMERA_ID, SECOND_CAMERA_ID):
-        config.set_constant_sensor_from_rig_pose(
-            pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id)
-        )
+        config.set_constant_sensor_from_rig_pose(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id))
 
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(
-        _quiet_options(), config, reconstruction
-    )
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(_quiet_options(), config, reconstruction)
     adjuster.solve()
 
-    final_error: float = float(
-        np.linalg.norm(reconstruction.frame(perturbed_frame_id).rig_from_world.matrix() - truth)
-    )
+    final_error: float = float(np.linalg.norm(rig_from_world(reconstruction, perturbed_frame_id).matrix() - truth))
     print(f"[probe] free-pose BA: frame error {start_error:.4f} -> {final_error:.3e}")
     assert final_error < 1e-6
 
@@ -155,11 +140,9 @@ def test_rig_extrinsics_can_be_refined_or_frozen(scene: SyntheticScene) -> None:
     """
     reconstruction: pycolmap.Reconstruction = scene.reconstruction
     point3D_ids: list[int] = add_ground_truth_points(scene)
-    second_sensor: pycolmap.sensor_t = pycolmap.sensor_t(
-        pycolmap.SensorType.CAMERA, SECOND_CAMERA_ID
-    )
+    second_sensor: pycolmap.sensor_t = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, SECOND_CAMERA_ID)
     rig: pycolmap.Rig = reconstruction.rig(1)
-    truth: Float[ndarray, "3"] = rig.sensor_from_rig(second_sensor).translation.copy()
+    truth: Float[ndarray, "3"] = rig_sensor_from_rig(rig, second_sensor).translation.copy()
 
     rig.set_sensor_from_rig(
         second_sensor,
@@ -176,11 +159,9 @@ def test_rig_extrinsics_can_be_refined_or_frozen(scene: SyntheticScene) -> None:
 
     options: pycolmap.BundleAdjustmentOptions = _quiet_options()
     assert options.refine_sensor_from_rig is True
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(
-        options, config, reconstruction
-    )
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, config, reconstruction)
     adjuster.solve()
-    refined: Float[ndarray, "3"] = rig.sensor_from_rig(second_sensor).translation
+    refined: Float[ndarray, "3"] = rig_sensor_from_rig(rig, second_sensor).translation
     print(f"[probe] rig extrinsic recovered to {np.linalg.norm(refined - truth):.3e} m")
     assert np.allclose(refined, truth, atol=1e-6)
 
@@ -210,7 +191,7 @@ def test_bundle_adjustment_options_surface() -> None:
     assert ceres.max_num_images_direct_dense_cpu_solver == 50
     assert ceres.max_num_images_direct_sparse_cpu_solver == 1_000
 
-    solver: object = ceres.solver_options
+    solver = ceres.solver_options
     assert solver.max_num_iterations == 100
     assert solver.num_threads == -1
     assert solver.function_tolerance == pytest.approx(0.0)
@@ -218,15 +199,11 @@ def test_bundle_adjustment_options_surface() -> None:
     assert solver.parameter_tolerance == pytest.approx(0.0)
 
     # There are exactly four robust losses; no Tukey, no GemanMcClure.
-    loss_names: set[str] = {
-        name for name in dir(pycolmap.LossFunctionType) if not name.startswith("_")
-    } - {"name", "value"}
+    loss_names: set[str] = {name for name in dir(pycolmap.LossFunctionType) if not name.startswith("_")} - {"name", "value"}
     assert loss_names == {"TRIVIAL", "SOFT_L1", "CAUCHY", "HUBER"}
 
     # Only two backends, and CASPAR is the GPU one.
-    backend_names: set[str] = {
-        name for name in dir(pycolmap.BundleAdjustmentBackend) if not name.startswith("_")
-    } - {"name", "value"}
+    backend_names: set[str] = {name for name in dir(pycolmap.BundleAdjustmentBackend) if not name.startswith("_")} - {"name", "value"}
     assert backend_names == {"CERES", "CASPAR"}
 
 
@@ -237,17 +214,13 @@ def test_robust_loss_and_solver_settings_are_honoured(scene: SyntheticScene) -> 
 
     # Move one point far away; without a robust loss it drags the whole solve.
     outlier_id: int = point3D_ids[0]
-    reconstruction.point3D(outlier_id).xyz = reconstruction.point3D(outlier_id).xyz + np.array(
-        [3.0, 3.0, 3.0]
-    )
+    reconstruction.point3D(outlier_id).xyz = reconstruction.point3D(outlier_id).xyz + np.array([3.0, 3.0, 3.0])
 
     options: pycolmap.BundleAdjustmentOptions = _quiet_options()
     options.ceres.loss_function_type = pycolmap.LossFunctionType.CAUCHY
     options.ceres.loss_function_scale = 1.0
     options.ceres.auto_select_solver_type = False
-    options.ceres.solver_options.linear_solver_type = (
-        colmap_ceres.LinearSolverType.SPARSE_SCHUR
-    )
+    options.ceres.solver_options.linear_solver_type = colmap_ceres.LinearSolverType.SPARSE_SCHUR
     options.ceres.solver_options.num_threads = 2
     options.ceres.solver_options.max_num_iterations = 40
 
@@ -257,15 +230,12 @@ def test_robust_loss_and_solver_settings_are_honoured(scene: SyntheticScene) -> 
     for camera_id in sorted(reconstruction.cameras):
         config.set_constant_cam_intrinsics(camera_id)
 
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(
-        options, config, reconstruction
-    )
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, config, reconstruction)
     summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
     assert summary.termination_type != pycolmap.BundleAdjustmentTerminationType.FAILURE
     assert adjuster.options.ceres.loss_function_type == pycolmap.LossFunctionType.CAUCHY
     inlier_errors: list[float] = [
-        float(np.min(np.linalg.norm(scene.points_xyz - reconstruction.point3D(pid).xyz, axis=1)))
-        for pid in point3D_ids[1:]
+        float(np.min(np.linalg.norm(scene.points_xyz - reconstruction.point3D(pid).xyz, axis=1))) for pid in point3D_ids[1:]
     ]
     print(f"[probe] Cauchy BA: worst inlier point error {max(inlier_errors):.3e} m")
     assert max(inlier_errors) < 1e-3
@@ -290,9 +260,7 @@ def test_ceres_gpu_solver_switch_exists(scene: SyntheticScene) -> None:
     config: pycolmap.BundleAdjustmentConfig = _all_images_config(reconstruction)
     for frame_id in sorted(reconstruction.frames):
         config.set_constant_rig_from_world_pose(frame_id)
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(
-        options, config, reconstruction
-    )
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(options, config, reconstruction)
     summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
     assert summary.termination_type != pycolmap.BundleAdjustmentTerminationType.FAILURE
 
@@ -312,16 +280,12 @@ def test_pose_prior_bundle_adjustment(scene: SyntheticScene) -> None:
     """
     reconstruction: pycolmap.Reconstruction = scene.reconstruction
     point3D_ids: list[int] = add_ground_truth_points(scene)
-    reference_sensor: pycolmap.sensor_t = pycolmap.sensor_t(
-        pycolmap.SensorType.CAMERA, REF_CAMERA_ID
-    )
+    reference_sensor: pycolmap.sensor_t = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, REF_CAMERA_ID)
 
     priors: list[pycolmap.PosePrior] = []
     for frame_id in sorted(reconstruction.frames):
         frame: pycolmap.Frame = reconstruction.frame(frame_id)
-        reference_image_id: int = next(
-            data.id for data in frame.data_ids if data.sensor_id == reference_sensor
-        )
+        reference_image_id: int = next(data.id for data in frame.data_ids if data.sensor_id == reference_sensor)
         prior: pycolmap.PosePrior = pycolmap.PosePrior()
         prior.corr_data_id = pycolmap.data_t(reference_sensor, reference_image_id)
         prior.position = reconstruction.image(reference_image_id).projection_center()
@@ -331,11 +295,9 @@ def test_pose_prior_bundle_adjustment(scene: SyntheticScene) -> None:
 
     # Shift one frame away; the prior should pull it back.
     perturbed_frame_id: int = 4
-    truth: Float[ndarray, "3"] = reconstruction.frame(
-        perturbed_frame_id
-    ).rig_from_world.translation.copy()
+    truth: Float[ndarray, "3"] = rig_from_world(reconstruction, perturbed_frame_id).translation.copy()
     reconstruction.frame(perturbed_frame_id).rig_from_world = pycolmap.Rigid3d(
-        reconstruction.frame(perturbed_frame_id).rig_from_world.rotation,
+        rig_from_world(reconstruction, perturbed_frame_id).rotation,
         truth + np.array([0.2, 0.0, 0.0]),
     )
 
@@ -345,22 +307,13 @@ def test_pose_prior_bundle_adjustment(scene: SyntheticScene) -> None:
     for camera_id in sorted(reconstruction.cameras):
         config.set_constant_cam_intrinsics(camera_id)
 
-    prior_options: pycolmap.PosePriorBundleAdjustmentOptions = (
-        pycolmap.PosePriorBundleAdjustmentOptions()
-    )
+    prior_options: pycolmap.PosePriorBundleAdjustmentOptions = pycolmap.PosePriorBundleAdjustmentOptions()
     assert prior_options.prior_position_fallback_stddev == pytest.approx(1.0)
-    assert (
-        prior_options.ceres.prior_position_loss_function_type
-        == pycolmap.LossFunctionType.TRIVIAL
-    )
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_pose_prior_bundle_adjuster(
-        _quiet_options(), prior_options, config, priors, reconstruction
-    )
+    assert prior_options.ceres.prior_position_loss_function_type == pycolmap.LossFunctionType.TRIVIAL
+    adjuster: pycolmap.BundleAdjuster = pycolmap.create_pose_prior_bundle_adjuster(_quiet_options(), prior_options, config, priors, reconstruction)
     adjuster.solve()
 
-    recovered: Float[ndarray, "3"] = reconstruction.frame(
-        perturbed_frame_id
-    ).rig_from_world.translation
+    recovered: Float[ndarray, "3"] = rig_from_world(reconstruction, perturbed_frame_id).translation
     print(f"[probe] pose-prior BA: residual {np.linalg.norm(recovered - truth):.3e} m")
     assert np.allclose(recovered, truth, atol=1e-4)
 
@@ -386,18 +339,10 @@ def test_pycolmap_embeds_a_cut_down_pyceres() -> None:
     assert "pyceres" not in pycolmap.__all__
 
     options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    assert (
-        options.ceres.solver_options.linear_solver_type
-        == colmap_ceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
-    )
+    assert options.ceres.solver_options.linear_solver_type == colmap_ceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
     # `options.ceres.solver_options` hands back a live reference, so in-place
     # mutation sticks.
     options.ceres.solver_options.linear_solver_type = colmap_ceres.LinearSolverType.SPARSE_SCHUR
-    assert (
-        options.ceres.solver_options.linear_solver_type
-        == colmap_ceres.LinearSolverType.SPARSE_SCHUR
-    )
+    assert options.ceres.solver_options.linear_solver_type == colmap_ceres.LinearSolverType.SPARSE_SCHUR
     options.ceres.solver_options.linear_solver_type = pyceres.LinearSolverType.DENSE_QR
-    assert (
-        options.ceres.solver_options.linear_solver_type == colmap_ceres.LinearSolverType.DENSE_QR
-    )
+    assert options.ceres.solver_options.linear_solver_type == colmap_ceres.LinearSolverType.DENSE_QR

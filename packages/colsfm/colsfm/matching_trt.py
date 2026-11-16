@@ -77,7 +77,7 @@ KeypointNormalizer: TypeAlias = Callable[[KeypointsXY, int, int], Float32[ndarra
 """Pixel keypoints plus the image's width and height, into a graph's `kpts` frame.
 
 The blob's graph and the RaCo one disagree about that frame — see
-`normalize_keypoints` here and `colsfm.matching_raco.normalize_keypoints_raco` —
+`normalize_keypoints` and `normalize_keypoints_raco`, both here —
 and it is the only thing that differs between the two matching backends."""
 
 
@@ -160,13 +160,33 @@ class FeatureCache:
             raise KeyError(f"Image {image_id} carries no keypoints or no descriptors; run feature extraction first")
         stored_keypoints: Float32[ndarray, "num_keypoints num_columns"] = self.database.read_keypoints(image_id)
         keypoints_xy: KeypointsXY = np.ascontiguousarray(stored_keypoints[:, :2], dtype=np.float32)
-        descriptors: Descriptors = np.ascontiguousarray(
-            self.database.read_descriptors(image_id).to_float().data, dtype=np.float32
-        )
+        descriptors: Descriptors = np.ascontiguousarray(self.database.read_descriptors(image_id).to_float().data, dtype=np.float32)
         self.entries[image_id] = (keypoints_xy, descriptors)
         if len(self.entries) > self.capacity:
             self.entries.popitem(last=False)
         return self.entries[image_id]
+
+
+def normalize_keypoints_raco(keypoints_xy: KeypointsXY, image_width: int, image_height: int) -> Float32[ndarray, "1 num_keypoints 2"]:
+    """Put pixel keypoints back into the frame the RaCo extractor emitted them in, for LightGlue+.
+
+    LightGlue+ (fabio-sim's matcher trained against RaCo-ALIKED, the `raco` backend) takes cuSFM's
+    `align_corners=False` normalisation over the network input and applies `[1, H_proc / W]` inside the graph, which
+    composes to the same LightGlue frame as `normalize_keypoints`. This is the exact inverse of
+    `colsfm.features_native.normalized_to_pixels`, `2 * p / (size - 1) - 1`. Passing `normalize_keypoints` here would
+    scale x correctly by luck and y by `H / W`, which silently degrades matching rather than failing.
+
+    Args:
+        keypoints_xy: Float32 `[num_keypoints, 2]` xy pixel coordinates.
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+
+    Returns:
+        Float32 `[1, num_keypoints, 2]`, the engine's binding shape.
+    """
+    scale_xy: Float32[ndarray, " 2"] = np.asarray([(image_width - 1) / 2.0, (image_height - 1) / 2.0], dtype=np.float32)
+    normalized: Float32[ndarray, "num_keypoints 2"] = np.asarray(keypoints_xy, dtype=np.float32) / scale_xy - np.float32(1.0)
+    return np.ascontiguousarray(normalized[None])
 
 
 def _image_sizes(database: pycolmap.Database) -> dict[int, tuple[int, int]]:
@@ -179,10 +199,7 @@ def _image_sizes(database: pycolmap.Database) -> dict[int, tuple[int, int]]:
         `(width, height)` per `image_id`.
     """
     cameras: dict[int, pycolmap.Camera] = {camera.camera_id: camera for camera in database.read_all_cameras()}
-    return {
-        image.image_id: (int(cameras[image.camera_id].width), int(cameras[image.camera_id].height))
-        for image in database.read_all_images()
-    }
+    return {image.image_id: (int(cameras[image.camera_id].width), int(cameras[image.camera_id].height)) for image in database.read_all_images()}
 
 
 def match_one_pair(
@@ -277,7 +294,7 @@ def match_pairs_tensorrt(
         database_path: An existing COLMAP database.
         pairs: Image-id pairs, normalised and deduplicated by `colsfm.pairs`.
         options: Matching and verification settings.
-        onnx_path: Which LightGlue graph to run. `colsfm.matching_raco` passes
+        onnx_path: Which LightGlue graph to run. The `raco` backend passes
             the RaCo-trained one; everything else about the pass is identical.
         profile: Optimisation profile for that graph's dynamic keypoint axis;
             `None` uses the blob's own `LIGHTGLUE_PROFILE`.

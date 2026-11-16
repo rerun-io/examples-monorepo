@@ -57,7 +57,7 @@ smallest of those is `1/2048 = 0.00049`, which is *below* the blob's
 points per image for no reason and for no meaning. `min_score` is therefore read
 but compared against a rank, and `DEFAULT_MIN_SCORE` is 0: the honest reading is
 that this graph has no score gate, and the matcher's SSC (which runs on
-*LightGlue* scores, `colsfm.matching_raco`) is where selection actually happens.
+*LightGlue* scores, `colsfm.matching_trt`) is where selection actually happens.
 """
 
 from __future__ import annotations
@@ -372,9 +372,7 @@ def extraction_groups(tasks: Sequence[ImageTask], *, native_resolution: bool, ch
         One group per network size, first-seen size first; empty when there is
         nothing to extract.
     """
-    sizes: dict[tuple[int, int], list[ImageTask]] = (
-        _size_groups(tasks) if native_resolution else {fixed_engine_size_group(): list(tasks)}
-    )
+    sizes: dict[tuple[int, int], list[ImageTask]] = _size_groups(tasks) if native_resolution else {fixed_engine_size_group(): list(tasks)}
     groups: list[ExtractionGroup] = []
     for network_size, group in sizes.items():
         if not group:

@@ -63,3 +63,12 @@ pixi run -e colsfm-dev --frozen tests-integration  # GPU, Galileo sample, RaCo e
 pixi run -e colsfm-dev --frozen tests-golden       # Galileo + KITTI 06 parity bands
 pixi run -e colsfm-dev --frozen gate
 ```
+
+## TODO
+
+TODO: one package, two modes. pysfm (plain pycolmap: no prior trajectory, intrinsics estimated, rig discovered) and
+colsfm (cuSFM-style refinement: needs rig, calibration and a starting trajectory) are complementary. Pablo leans towards
+one package with two modes, for example pysfm bootstrapping the start trajectory that colsfm refines, sharing one
+rig-layer contract (rrd in, rrd out). Not decided: first define what each mode does and which features we want.
+
+The other half: [pysfm](../pysfm/README.md).

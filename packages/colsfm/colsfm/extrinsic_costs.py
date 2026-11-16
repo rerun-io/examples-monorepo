@@ -49,7 +49,7 @@ from numpy import ndarray
 
 from colsfm.ceres_pose import batched_skew
 from colsfm.extrinsic_observations import CameraObservations, PixelObservations, PointsInVehicle
-from colsfm.geometry import Matrix3
+from colsfm.geometry import Matrix3, img_from_cam
 from colsfm.pose_graph import quaternion_plus_jacobian_transpose, rotation_matrix_from_quat_xyzw
 
 _SMALL_SQUARED_NORM: Final[float] = 1e-8
@@ -119,9 +119,7 @@ def cauchy_square_root_scale(squared_norm: Float64[ndarray, " n_obs"]) -> tuple[
     is_small: Bool[ndarray, " n_obs"] = squared < _SMALL_SQUARED_NORM
     safe: Float64[ndarray, " n_obs"] = np.where(is_small, 1.0, squared)
     ratio: Float64[ndarray, " n_obs"] = np.where(is_small, 1.0 - 0.5 * squared, np.log1p(safe) / safe)
-    derivative: Float64[ndarray, " n_obs"] = np.where(
-        is_small, -0.5 + (2.0 / 3.0) * squared, (safe / (1.0 + safe) - np.log1p(safe)) / safe**2
-    )
+    derivative: Float64[ndarray, " n_obs"] = np.where(is_small, -0.5 + (2.0 / 3.0) * squared, (safe / (1.0 + safe) - np.log1p(safe)) / safe**2)
     return np.sqrt(ratio), derivative
 
 
@@ -173,15 +171,13 @@ class RigReprojectionCost(pyceres.CostFunction):
         Returns:
             A 2x3 Jacobian per observation, pixels per metre.
         """
-        step: Float64[ndarray, " n_obs"] = _PROJECTION_STEP_SCALE * np.maximum(
-            1.0, np.abs(points_in_cam).max(axis=1)
-        )
+        step: Float64[ndarray, " n_obs"] = _PROJECTION_STEP_SCALE * np.maximum(1.0, np.abs(points_in_cam).max(axis=1))
         jacobian: Float64[ndarray, "n_obs 2 3"] = np.empty((self._num_observations, 2, 3), dtype=np.float64)
         for axis in range(3):
             offset: Float64[ndarray, "n_obs 3"] = np.zeros_like(points_in_cam)
             offset[:, axis] = step
-            forward: PixelObservations = self._camera.img_from_cam(points_in_cam + offset)
-            backward: PixelObservations = self._camera.img_from_cam(points_in_cam - offset)
+            forward: PixelObservations = img_from_cam(self._camera, points_in_cam + offset)
+            backward: PixelObservations = img_from_cam(self._camera, points_in_cam - offset)
             jacobian[:, :, axis] = (forward - backward) / (2.0 * step)[:, None]
         return jacobian
 
@@ -199,9 +195,7 @@ class RigReprojectionCost(pyceres.CostFunction):
             return True
 
         projection_jacobian: Float64[ndarray, "n_obs 2 3"] = self._projection_jacobian(points_in_cam)
-        point_jacobian: Float64[ndarray, "n_obs 3 6"] = np.empty(
-            (self._num_observations, 3, _LOCAL_PARAMETERS), dtype=np.float64
-        )
+        point_jacobian: Float64[ndarray, "n_obs 3 6"] = np.empty((self._num_observations, 3, _LOCAL_PARAMETERS), dtype=np.float64)
         point_jacobian[:, :, :3] = batched_skew(points_in_cam)
         point_jacobian[:, :, 3:] = -vehicle_R_cam.T
         local_jacobian: Float64[ndarray, "n_obs 2 6"] = self._inverse_sigma * (projection_jacobian @ point_jacobian)
@@ -211,15 +205,11 @@ class RigReprojectionCost(pyceres.CostFunction):
         # Jacobian survives a finite-difference check.
         error_times_jacobian: Float64[ndarray, "n_obs 6"] = np.einsum("ni,nij->nj", error, local_jacobian)
         robust: Float64[ndarray, "n_obs 2 6"] = (
-            scale[:, None, None] * local_jacobian
-            + (ratio_derivative / scale)[:, None, None] * error[:, :, None] * error_times_jacobian[:, None, :]
+            scale[:, None, None] * local_jacobian + (ratio_derivative / scale)[:, None, None] * error[:, :, None] * error_times_jacobian[:, None, :]
         )
         if jacobians[0] is not None:
-            plus_jacobian_t: Float64[ndarray, "3 4"] = quaternion_plus_jacobian_transpose(
-                quat_xyzw, self._plus_jacobian_t
-            )
+            plus_jacobian_t: Float64[ndarray, "3 4"] = quaternion_plus_jacobian_transpose(quat_xyzw, self._plus_jacobian_t)
             jacobians[0][:] = (robust[:, :, :3] @ plus_jacobian_t).ravel()
         if jacobians[1] is not None:
             jacobians[1][:] = robust[:, :, 3:].ravel()
         return True
-

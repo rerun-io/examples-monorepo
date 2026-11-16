@@ -187,7 +187,7 @@ from colsfm.reconstruction import (
     PosedModel,
     camera_sensor_id,
 )
-from colsfm.solver_report import SolverFailure, SolverReport, parse_brief_report
+from colsfm.solver_report import SolverFailure, SolverReport, ceres_termination, parse_brief_report
 
 __all__ = [
     "BundleAdjustmentSolve",
@@ -599,7 +599,7 @@ def _polish_with_ceres(
         num_observations=reconstruction.compute_num_observations() + solve.num_diverged,
         num_diverged=solve.num_diverged,
         report=report,
-        ba_termination=solve.summary.termination_type.name,
+        ba_termination=ceres_termination(solve.summary.termination_type.name),
         mean_reprojection_error_before_px=before_px,
         mean_reprojection_error_after_px=reconstruction.compute_mean_reprojection_error(),
         seconds=solve.seconds,
@@ -765,7 +765,7 @@ def run_mapping(
                 num_points3D=reconstruction.num_points3D(),
                 mean_reprojection_error_px=reconstruction.compute_mean_reprojection_error(),
                 report=report,
-                ba_termination=solve.summary.termination_type.name,
+                ba_termination=ceres_termination(solve.summary.termination_type.name),
                 seconds=time.perf_counter() - round_started,
             )
         )

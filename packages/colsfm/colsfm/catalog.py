@@ -35,6 +35,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation, Slerp
 from serde import serde
 from serde.json import to_json
+from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.rrd_query_utils import first_valid_value
@@ -236,40 +237,28 @@ def read_catalog_cameras(dataset: DatasetEntry, segment: str, names: Sequence[st
     """
     layout_cameras: tuple[CatalogCamera, ...] = parse_rig_layout(catalog_components(dataset.schema())).cameras
     entities: list[str] = [camera.transform_entity for camera in layout_cameras]
-    table: pa.Table = (
-        dataset.filter_segments(segment).filter_contents([f"{entity}/**" for entity in entities] + entities).reader(index=None).to_arrow_table()
-    )
+    models: dict[str, CatalogCameraCalibration] = read_camera_models(dataset, segment, entities)
+    # The camera's static `name` sits on the camera node itself, outside what the calibration reader reads.
+    names_table: pa.Table = dataset.filter_segments(segment).filter_contents(entities).reader(index=None).to_arrow_table()
     cameras: list[CatalogCameraModel] = []
     for camera in layout_cameras:
         entity: str = camera.transform_entity
-        name_values = _static_values(table, f"{entity}:name")
-        name: str = str(name_values[0]) if name_values else camera.camera
-        rotation = _static_values(table, f"{entity}:Transform3D:mat3x3")
-        translation = _static_values(table, f"{entity}:Transform3D:translation")
-        k_values = _static_values(table, f"{camera.pinhole_entity}:Pinhole:image_from_camera")
-        resolution = _static_values(table, f"{camera.pinhole_entity}:Pinhole:resolution")
-        if rotation is None or translation is None or k_values is None or resolution is None:
-            raise ValueError(f"{segment} {entity}: missing extrinsic or pinhole")
-        # The camera node's static Transform3D is logged child-from-parent (cam_T_rig); Rerun matrices are column-major.
-        cam_T_rig: Transform = np.eye(4)
-        cam_T_rig[:3, :3] = np.asarray(rotation, dtype=np.float64).reshape(3, 3).T
-        cam_T_rig[:3, 3] = np.asarray(translation, dtype=np.float64)
-        model_values = _static_values(table, f"{camera.pinhole_entity}:simplecv.components.DistortionModel")
-        coefficient_values = _static_values(table, f"{camera.pinhole_entity}:simplecv.components.DistortionCoefficients")
-        model_name: str = str(model_values[0]).lower() if model_values else ""
+        name_values = _static_values(names_table, f"{entity}:name")
+        model: CatalogCameraCalibration = models[entity]
         projection: ProjectionModel = "PINHOLE"
         distortion: tuple[float, ...] = ()
-        if model_name in PROJECTION_BY_DISTORTION_MODEL and coefficient_values is not None:
-            projection, count = PROJECTION_BY_DISTORTION_MODEL[model_name]
-            distortion = tuple(float(value) for value in coefficient_values[:count])
+        if model.distortion is not None and model.distortion.model in PROJECTION_BY_DISTORTION_MODEL:
+            projection, count = PROJECTION_BY_DISTORTION_MODEL[model.distortion.model]
+            distortion = tuple(float(value) for value in model.distortion.coefficients[:count])
         cameras.append(
             CatalogCameraModel(
                 entity=entity,
-                name=name,
-                rig_T_cam=np.linalg.inv(cam_T_rig),
-                k_matrix=np.asarray(k_values, dtype=np.float64).reshape(3, 3).T,
-                width=int(float(resolution[0])),
-                height=int(float(resolution[1])),
+                name=str(name_values[0]) if name_values else camera.camera,
+                # The node's Transform3D is cam_T_rig (logged child-from-parent); simplecv reads it as cam_T_world.
+                rig_T_cam=np.asarray(model.pinhole.extrinsics.world_T_cam, dtype=np.float64),
+                k_matrix=np.asarray(model.pinhole.intrinsics.k_matrix, dtype=np.float64),
+                width=int(model.pinhole.intrinsics.width),
+                height=int(model.pinhole.intrinsics.height),
                 projection=projection,
                 distortion=distortion,
             )

@@ -58,9 +58,7 @@ def runs(three_samples: FramesMeta, tmp_path_factory: pytest.TempPathFactory) ->
     """Two synthetic runs, B offset from A by a known rigid transform."""
     root: Path = tmp_path_factory.mktemp("runs")
     offset: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([0.05, 0.0, 0.0]))
-    run_a: RunArtifacts = read_run(
-        write_synthetic_run(root / "a", three_samples, error_px=SYNTHETIC_ERROR_PX, runtimes=BLOB_RUNTIMES), "blob"
-    )
+    run_a: RunArtifacts = read_run(write_synthetic_run(root / "a", three_samples, error_px=SYNTHETIC_ERROR_PX, runtimes=BLOB_RUNTIMES), "blob")
     run_b: RunArtifacts = read_run(
         write_synthetic_run(
             root / "b",
@@ -82,9 +80,7 @@ def comparison(runs: tuple[RunArtifacts, RunArtifacts], galileo_input_dir: Path)
 @pytest.fixture(scope="module")
 def sources(galileo_input: FramesMeta, galileo_input_dir: Path) -> TrajectorySources:
     """The input and ground-truth trajectories drawn alongside the two runs."""
-    return TrajectorySources(
-        input_track=rig_track_from_frames_meta(galileo_input), ground_truth=read_ground_truth(galileo_input_dir)
-    )
+    return TrajectorySources(input_track=rig_track_from_frames_meta(galileo_input), ground_truth=read_ground_truth(galileo_input_dir))
 
 
 @pytest.fixture(scope="module")
@@ -184,9 +180,7 @@ def test_the_report_rides_along_as_a_text_document(chunks: list[rrx.Chunk]) -> N
 
 def test_the_rig_poses_ride_the_frame_time_timeline(chunks: list[rrx.Chunk], runs: tuple[RunArtifacts, RunArtifacts]) -> None:
     """One `world_T_rig` per keyframe timestamp, on `frame_time` and nowhere else."""
-    pose_chunks: list[rrx.Chunk] = [
-        chunk for chunk in chunks if str(chunk.entity_path) == "/world/rig_00" and not chunk.is_static
-    ]
+    pose_chunks: list[rrx.Chunk] = [chunk for chunk in chunks if str(chunk.entity_path) == "/world/rig_00" and not chunk.is_static]
     assert pose_chunks
 
     for chunk in pose_chunks:
@@ -287,7 +281,7 @@ def test_the_blueprint_shows_the_scene_the_trajectories_and_the_report(compariso
     blueprint: rrb.Blueprint = build_blueprint(comparison)
     row = blueprint.root_container
     assert isinstance(row, rrb.Horizontal)
-    assert len(row.contents) == 3
+    assert len(list(row.contents)) == 3
 
     scene, trajectories, report = row.contents
     assert isinstance(scene, rrb.Spatial3DView)

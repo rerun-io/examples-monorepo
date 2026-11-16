@@ -88,7 +88,7 @@ def _raco_models_available() -> bool:
         `cudaGetDeviceProperties` answers, so an engine can be loaded or built.
     """
     from colsfm.features_raco import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
-    from colsfm.matching_raco import RACO_LIGHTGLUE_ONNX_PATH
+    from colsfm.model_assets import RACO_LIGHTGLUE_ONNX_PATH
     from colsfm.tensorrt_runtime import compute_capability
 
     if not RACO_ONNX_PATH.is_file() or not RACO_DYNAMIC_ONNX_PATH.is_file() or not RACO_LIGHTGLUE_ONNX_PATH.is_file():
@@ -100,9 +100,7 @@ def _raco_models_available() -> bool:
     return True
 
 
-requires_raco_models = pytest.mark.skipif(
-    not _raco_models_available(), reason="the RaCo ONNX graphs or a CUDA device are missing"
-)
+requires_raco_models = pytest.mark.skipif(not _raco_models_available(), reason="the RaCo ONNX graphs or a CUDA device are missing")
 """Applied to the tests that load an engine, and to nothing else.
 
 The gate used to be a module-level `pytestmark`, which took the pure contracts
@@ -122,7 +120,7 @@ def test_the_matcher_frame_is_the_exact_inverse_of_the_extractor_mapping() -> No
     costs matches — so it is asserted directly rather than through match counts.
     """
     from colsfm.features_native import normalized_to_pixels
-    from colsfm.matching_raco import normalize_keypoints_raco
+    from colsfm.matching_trt import normalize_keypoints_raco
 
     generator: np.random.Generator = np.random.default_rng(0)
     normalized_xy: Float32[ndarray, "num_keypoints 2"] = generator.uniform(-1.0, 1.0, size=(512, 2)).astype(np.float32)
@@ -139,8 +137,7 @@ def test_the_blob_normalisation_would_not_have_been_the_inverse() -> None:
     normalisation agrees with RaCo's in x and disagrees in y by `H / W`. If a
     refactor ever collapsed the two, this is what would fail.
     """
-    from colsfm.matching_raco import normalize_keypoints_raco
-    from colsfm.matching_trt import normalize_keypoints
+    from colsfm.matching_trt import normalize_keypoints, normalize_keypoints_raco
 
     keypoints_xy: KeypointsXY = np.asarray([[0.0, 0.0], [1919.0, 1199.0], [960.0, 600.0]], dtype=np.float32)
     blob: Float32[ndarray, "1 3 2"] = normalize_keypoints(keypoints_xy, 1920, 1200)
@@ -345,9 +342,7 @@ def test_lightglue_plus_matches_in_the_blobs_band(
 
 
 @requires_raco_models
-def test_the_whole_pipeline_runs_on_the_raco_backend(
-    galileo_input_dir: Path, tmp_path_factory: pytest.TempPathFactory
-) -> None:
+def test_the_whole_pipeline_runs_on_the_raco_backend(galileo_input_dir: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
     """The 34-frame Galileo selection registers and matches in the same band as the others.
 
     Deliberately the same assertions and the same bands as
@@ -378,9 +373,7 @@ def test_the_whole_pipeline_runs_on_the_raco_backend(
     assert SMOKE_MIN_MEAN_MATCHES <= mean_matches <= SMOKE_MAX_MEAN_MATCHES
 
 
-def _cropped_galileo_meta(
-    galileo_input: FramesMeta, galileo_input_dir: Path, image_root: Path, *, height: int, width: int
-) -> FramesMeta:
+def _cropped_galileo_meta(galileo_input: FramesMeta, galileo_input_dir: Path, image_root: Path, *, height: int, width: int) -> FramesMeta:
     """Write a top-left crop of one Galileo keyframe and describe it as its own camera.
 
     Args:
@@ -394,23 +387,19 @@ def _cropped_galileo_meta(
         A one-keyframe collection whose camera declares the crop's size.
     """
     keyframe: KeyframeMeta = galileo_input.keyframes[0]
-    source: UInt8[ndarray, "full_height full_width 3"] = cv2.imread(
-        str(galileo_input_dir / keyframe.image_name), cv2.IMREAD_COLOR
-    )
+    read = cv2.imread(str(galileo_input_dir / keyframe.image_name), cv2.IMREAD_COLOR)
+    assert read is not None
+    source: UInt8[ndarray, "full_height full_width 3"] = np.asarray(read)
     destination: Path = image_root / keyframe.image_name
     destination.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(destination), source[:height, :width])
     subset: FramesMeta = galileo_input.filtered([keyframe.keyframe_id])
     camera: CameraParams = subset.cameras[keyframe.camera_params_id]
-    return replace(
-        subset, cameras={keyframe.camera_params_id: replace(camera, image_width=width, image_height=height)}
-    )
+    return replace(subset, cameras={keyframe.camera_params_id: replace(camera, image_width=width, image_height=height)})
 
 
 @requires_raco_models
-def test_a_640x480_crop_runs_at_its_own_size_and_stays_inside_it(
-    galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path
-) -> None:
+def test_a_640x480_crop_runs_at_its_own_size_and_stays_inside_it(galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path) -> None:
     """A camera far below the profile's maximum still fills its 2048-point head.
 
     The fixed-shape graph would have stretched this crop back up to 1920x1200 and
@@ -440,9 +429,7 @@ def test_a_640x480_crop_runs_at_its_own_size_and_stays_inside_it(
 
 
 @requires_raco_models
-def test_galileo_at_the_profile_maximum_reproduces_the_legacy_stretch(
-    galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path
-) -> None:
+def test_galileo_at_the_profile_maximum_reproduces_the_legacy_stretch(galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path) -> None:
     """Galileo is the profile's maximum, so all three ways of running it agree there.
 
     Two claims in one run. First, `auto` at native resolution reproduces the
@@ -480,9 +467,7 @@ def test_galileo_at_the_profile_maximum_reproduces_the_legacy_stretch(
         assert all(count == BLOB_MAX_KEYPOINTS for count in counts.values())
         stored[label] = read_keypoints(database_path, keyframe_ids[0])
     assert np.array_equal(stored["auto"], stored["legacy"])
-    separations: Float32[ndarray, "num_native num_legacy"] = np.linalg.norm(
-        stored["dynamic"][:, None, :] - stored["legacy"][None, :, :], axis=2
-    )
+    separations: Float32[ndarray, "num_native num_legacy"] = np.linalg.norm(stored["dynamic"][:, None, :] - stored["legacy"][None, :, :], axis=2)
     nearest: Float32[ndarray, " num_native"] = separations.min(axis=1)
     assert float(np.median(nearest)) < 1.0, float(np.median(nearest))
     assert float(np.mean(nearest < 1.0)) > 0.75, float(np.mean(nearest < 1.0))
@@ -520,9 +505,7 @@ def test_kitti_survives_running_at_its_own_1226x370(tmp_path: Path) -> None:
     keyframe_ids: list[int] = [keyframe.keyframe_id for keyframe in meta.keyframes[:KITTI_FRAME_COUNT]]
     subset: FramesMeta = meta.filtered(keyframe_ids)
     image_names: list[str] = [keyframe.image_name for keyframe in subset.keyframes]
-    pairs: list[ImagePair] = [
-        (keyframe_ids[index], keyframe_ids[index + 1]) for index in range(KITTI_PAIR_COUNT)
-    ]
+    pairs: list[ImagePair] = [(keyframe_ids[index], keyframe_ids[index + 1]) for index in range(KITTI_PAIR_COUNT)]
     medians: dict[bool, float] = {}
     for native_resolution in (True, False):
         database_path: Path = tmp_path / f"kitti_{native_resolution}.db"
@@ -548,9 +531,7 @@ def test_kitti_survives_running_at_its_own_1226x370(tmp_path: Path) -> None:
 
 @requires_raco_models
 @pytest.mark.perf
-def test_the_fixed_engine_beats_the_dynamic_one_at_the_profile_maximum(
-    galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path
-) -> None:
+def test_the_fixed_engine_beats_the_dynamic_one_at_the_profile_maximum(galileo_input: FramesMeta, galileo_input_dir: Path, tmp_path: Path) -> None:
     """Galileo is the shape-dynamic profile's maximum, and there the fixed engine wins.
 
     This is the whole reason `select_raco_engine` decides per size group instead

@@ -28,7 +28,7 @@ from serde import serde
 
 from colsfm.frames_meta import CameraParams, FramesMeta
 from colsfm.geometry import MILLIMETRES_PER_METRE, relative_rotation_degrees
-from colsfm.reconstruction import RigReference, cam_from_rig_by_camera_params_id
+from colsfm.reconstruction import RigReference, cam_from_rig_by_camera_params_id, rig_sensor_from_rig
 
 
 @serde
@@ -136,15 +136,11 @@ def camera_params_id_by_camera_id(reconstruction: pycolmap.Reconstruction, frame
     Returns:
         `camera_params_id` per COLMAP `camera_id`, for the cameras the model kept.
     """
-    camera_params_id_by_folder: dict[str, int] = {
-        camera.sensor_name: camera_params_id for camera_params_id, camera in frames_meta.cameras.items()
-    }
+    camera_params_id_by_folder: dict[str, int] = {camera.sensor_name: camera_params_id for camera_params_id, camera in frames_meta.cameras.items()}
     return {image.camera_id: camera_params_id_by_folder[image.name.split("/")[0]] for image in reconstruction.images.values()}
 
 
-def extrinsic_deltas(
-    reconstruction: pycolmap.Reconstruction, frames_meta: FramesMeta, reference: RigReference
-) -> tuple[ExtrinsicChange, ...]:
+def extrinsic_deltas(reconstruction: pycolmap.Reconstruction, frames_meta: FramesMeta, reference: RigReference) -> tuple[ExtrinsicChange, ...]:
     """Compare a model's recovered rig extrinsics against the calibration.
 
     `IncrementalPipelineOptions.ba_refine_sensor_from_rig` defaults to on, so a
@@ -170,7 +166,7 @@ def extrinsic_deltas(
         sensor_id: pycolmap.sensor_t = pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id)
         if not rig.has_sensor(sensor_id):
             continue
-        difference: pycolmap.Rigid3d = rig.sensor_from_rig(sensor_id) * calibrated[camera_params_id].inverse()
+        difference: pycolmap.Rigid3d = rig_sensor_from_rig(rig, sensor_id) * calibrated[camera_params_id].inverse()
         deltas.append(
             ExtrinsicChange(
                 camera_params_id=camera_params_id,

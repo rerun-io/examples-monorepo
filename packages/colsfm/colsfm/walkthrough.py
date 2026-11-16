@@ -505,7 +505,7 @@ class WalkthroughObserver(PipelineObserver):
             self.config.dataset,
             self.console["export"],
         )
-        self.seconds_by_stage = dict(summary.stage_seconds)
+        self.seconds_by_stage = {str(stage): seconds for stage, seconds in summary.stage_seconds.items()}
         rr.send_blueprint(build_blueprint(self.stages, self.samples), make_active=True, make_default=True)
 
 

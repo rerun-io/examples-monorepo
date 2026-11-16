@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Final, Literal, TypeAlias
+from typing import Final, Literal, TypeAlias, get_args
 
 
 class SolverFailure(RuntimeError):
@@ -43,6 +43,26 @@ docstrings used to spell the same three names in prose beside a `str` annotation
 own `USER_SUCCESS` and `USER_FAILURE` cannot arrive here because nothing in this package
 installs an `IterationCallback`, which is the only thing that produces them.
 """
+
+
+def ceres_termination(name: str) -> CeresTermination:
+    """Narrow a termination type's bare name to `CeresTermination`.
+
+    Args:
+        name: E.g. `CONVERGENCE`, or a `TerminationType` printed as `TerminationType.CONVERGENCE`.
+
+    Returns:
+        The same name as the literal.
+
+    Raises:
+        ValueError: On a name Ceres does not report as a terminal state.
+    """
+    bare: str = name.rsplit(".", maxsplit=1)[-1]
+    for termination in get_args(CeresTermination):
+        if bare == termination:
+            return termination
+    raise ValueError(f"unknown Ceres termination {name!r}")
+
 
 BRIEF_REPORT_PATTERN: Final[re.Pattern[str]] = re.compile(r"Iterations:\s*(\d+),\s*Initial cost:\s*([0-9.eE+-]+),\s*Final cost:\s*([0-9.eE+-]+)")
 """`BundleAdjustmentSummary` exposes iterations and cost only inside `brief_report()`."""

@@ -74,9 +74,7 @@ def test_full_round_trip(scene: SyntheticScene, tmp_path: Path) -> None:
     stored: UInt32[ndarray, "n_matches 2"] = database.read_matches(first_image_id, second_image_id)
     assert np.array_equal(stored, matches_between(scene, first_image_id, second_image_id))
 
-    geometry: pycolmap.TwoViewGeometry = database.read_two_view_geometry(
-        first_image_id, second_image_id
-    )
+    geometry: pycolmap.TwoViewGeometry = database.read_two_view_geometry(first_image_id, second_image_id)
     assert geometry.config == int(pycolmap.TwoViewGeometryConfiguration.CALIBRATED)
     database.close()
 
@@ -98,9 +96,7 @@ def test_rig_and_frame_tables_exist(scene: SyntheticScene, tmp_path: Path) -> No
     assert rig.rig_id == RIG_ID
     assert rig.num_sensors() == 2
     assert rig.is_ref_sensor(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, REF_CAMERA_ID))
-    cam_from_rig: pycolmap.Rigid3d | None = rig.sensor_from_rig(
-        pycolmap.sensor_t(pycolmap.SensorType.CAMERA, SECOND_CAMERA_ID)
-    )
+    cam_from_rig: pycolmap.Rigid3d | None = rig.sensor_from_rig(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, SECOND_CAMERA_ID))
     assert cam_from_rig is not None
     assert np.allclose(cam_from_rig.translation, [-0.25, 0.0, 0.0])
 
@@ -122,9 +118,7 @@ def test_pose_prior_table(tmp_path: Path) -> None:
     image_id: int = database.write_image(image)
 
     prior: pycolmap.PosePrior = pycolmap.PosePrior()
-    prior.corr_data_id = pycolmap.data_t(
-        pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id), image_id
-    )
+    prior.corr_data_id = pycolmap.data_t(pycolmap.sensor_t(pycolmap.SensorType.CAMERA, camera_id), image_id)
     prior.position = np.array([1.0, 2.0, 3.0])
     prior.position_covariance = np.diag([0.01, 0.01, 0.04])
     prior.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
@@ -153,14 +147,12 @@ def test_descriptors_require_the_feature_descriptors_wrapper(tmp_path: Path) -> 
 
     raw: UInt8[ndarray, "5 128"] = np.zeros((5, 128), dtype=np.uint8)
     with pytest.raises(TypeError):
-        database.write_descriptors(image_id, raw)
+        database.write_descriptors(image_id, raw)  # pyrefly: ignore[bad-argument-type]  (the probe: a raw array is refused)
     database.close()
 
 
 @pytest.mark.parametrize("descriptor_dim", [64, 128, 256])
-def test_float_descriptors_round_trip_at_any_dimension(
-    tmp_path: Path, descriptor_dim: int
-) -> None:
+def test_float_descriptors_round_trip_at_any_dimension(tmp_path: Path, descriptor_dim: int) -> None:
     """ALIKED-style float32 descriptors of arbitrary width survive the database.
 
     `FeatureDescriptorsFloat.to_bytes()` reinterprets the float32 buffer as
@@ -173,12 +165,8 @@ def test_float_descriptors_round_trip_at_any_dimension(
     camera_id: int = database.write_camera(make_pinhole_camera(1))
     image_id: int = database.write_image(pycolmap.Image(name="a.png", camera_id=camera_id))
 
-    values: Float32[ndarray, "5 dim"] = (
-        np.arange(5 * descriptor_dim, dtype=np.float32).reshape(5, descriptor_dim) / 7.0
-    )
-    descriptors: pycolmap.FeatureDescriptorsFloat = pycolmap.FeatureDescriptorsFloat(
-        data=values, type=pycolmap.FeatureExtractorType.ALIKED_N32
-    )
+    values: Float32[ndarray, "5 dim"] = np.arange(5 * descriptor_dim, dtype=np.float32).reshape(5, descriptor_dim) / 7.0
+    descriptors: pycolmap.FeatureDescriptorsFloat = pycolmap.FeatureDescriptorsFloat(data=values, type=pycolmap.FeatureExtractorType.ALIKED_N32)
     database.write_descriptors(image_id, descriptors.to_bytes())
 
     stored: pycolmap.FeatureDescriptors = database.read_descriptors(image_id)
@@ -194,9 +182,7 @@ def test_float_descriptors_round_trip_at_any_dimension(
 
 def test_feature_extractor_types_include_aliked() -> None:
     """COLMAP 4.2 tags descriptors with a feature type, and ALIKED is one of them."""
-    names: set[str] = {
-        name for name in dir(pycolmap.FeatureExtractorType) if not name.startswith("_")
-    }
+    names: set[str] = {name for name in dir(pycolmap.FeatureExtractorType) if not name.startswith("_")}
     assert {"SIFT", "ALIKED_N16ROT", "ALIKED_N32"} <= names
 
 
@@ -215,9 +201,7 @@ def test_keypoints_store_any_column_width(tmp_path: Path) -> None:
     camera_id: int = database.write_camera(make_pinhole_camera(1))
     accepted: dict[int, bool] = {}
     for num_columns in (1, 2, 3, 4, 5, 6, 8):
-        image_id: int = database.write_image(
-            pycolmap.Image(name=f"cols{num_columns}.png", camera_id=camera_id)
-        )
+        image_id: int = database.write_image(pycolmap.Image(name=f"cols{num_columns}.png", camera_id=camera_id))
         keypoints: Float32[ndarray, "5 cols"] = np.zeros((5, num_columns), dtype=np.float32)
         try:
             database.write_keypoints(image_id, keypoints)

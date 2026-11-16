@@ -120,6 +120,15 @@ Extract evenly-spaced frames from video for downstream SfM processing.
 python tools/demos/video_to_image.py --video-path path/to/video.mp4 --output-dir /tmp/frames --rr-config.save /tmp/frames/output.rrd
 ```
 
+## TODO
+
+TODO: one package, two modes. pysfm (plain pycolmap: no prior trajectory, intrinsics estimated, rig discovered) and
+colsfm (cuSFM-style refinement: needs rig, calibration and a starting trajectory) are complementary. Pablo leans towards
+one package with two modes, for example pysfm bootstrapping the start trajectory that colsfm refines, sharing one
+rig-layer contract (rrd in, rrd out). Not decided: first define what each mode does and which features we want.
+
+The other half: [colsfm](../colsfm/README.md).
+
 ## Acknowledgements
 
 - [COLMAP](https://colmap.github.io/) / [pycolmap](https://github.com/colmap/pycolmap) — Structure-from-Motion and Multi-View Stereo

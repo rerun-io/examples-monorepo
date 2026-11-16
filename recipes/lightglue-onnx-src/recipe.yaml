@@ -15,9 +15,12 @@ package:
 source:
   git: https://github.com/fabio-sim/LightGlue-ONNX.git
   rev: ${{ rev }}
+  patches:
+    # torch 2.12 export fix for shape_as_tensor; reason and removal condition in the patch header.
+    - patches/shape-as-tensor-torch-2.12.patch
 
 build:
-  number: 0
+  number: 1
   noarch: python
   script:
     - rm -rf "$SP_DIR/lightglue_dynamo"

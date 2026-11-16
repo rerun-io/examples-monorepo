@@ -61,7 +61,7 @@ against the blob's 8 (2.4 %). The default here is COLMAP's own 0.1, measured at
 13 empty pairs (3.9 %) with a 10th-percentile match count of 116 against the
 blob's 118. `BLOB_MATCH_THRESHOLD` is kept for parity runs.
 
-**The LightGlue+ backend.** `MatchingOptions.backend = "raco"` runs LightGlue+ (`colsfm.matching_raco`) on a TensorRT
+**The LightGlue+ backend.** `MatchingOptions.backend = "raco"` runs LightGlue+ (`colsfm.matching_trt`) on a TensorRT
 engine (a run's default matcher is FlexGlue, below). It *does* see the per-match score, so it runs the real SSC
 (`select_by_square_covering`) before verification, at the blob's own 0.3 threshold, and skips the grid subsample below
 entirely. Everything above this paragraph describes the `pycolmap` path, the ablation for a machine with no engine.
@@ -128,7 +128,7 @@ MatchingBackend: TypeAlias = Literal["pycolmap", "raco", "flexglue", "flexglue_o
 `flexglue` is COLMAP's FlexGlue graphs on TensorRT (`colsfm.flexglue_trt`); `flexglue_ort` is COLMAP's own ONNX Runtime
 FlexGlue, kept as its parity reference. Both ignore the descriptors.
 
-`raco` is `colsfm.matching_raco`, the LightGlue+ that fabio-sim trained against RaCo-ALIKED. It has the per-match
+`raco` is `colsfm.matching_trt`, the LightGlue+ that fabio-sim trained against RaCo-ALIKED. It has the per-match
 score COLMAP's bindings hide and therefore runs the blob's real SSC spatial NMS rather than
 `subsample_matches_by_coverage`'s score-free stand-in.
 
@@ -797,9 +797,20 @@ def match_pairs(
     """
     if options.backend == "raco":
         # Imported here, not at module scope: TensorRT and `cuda-python` are only needed by this branch.
-        from colsfm.matching_raco import match_pairs_raco
+        from colsfm.matching_trt import LIGHTGLUE_PROFILE, match_pairs_tensorrt, normalize_keypoints_raco
+        from colsfm.model_assets import RACO_LIGHTGLUE_ONNX_PATH
 
-        return match_pairs_raco(database_path, list(pairs), options)
+        # LightGlue+ on RaCo-ALIKED: the blob's graph path with its own graph and keypoint frame, and the same profile
+        # so the two engines stay comparable (both are fed 2048 keypoints per image).
+        return match_pairs_tensorrt(
+            database_path,
+            list(pairs),
+            options,
+            onnx_path=RACO_LIGHTGLUE_ONNX_PATH,
+            profile=LIGHTGLUE_PROFILE,
+            normalize=normalize_keypoints_raco,
+            label="raco",
+        )
     if options.backend == "flexglue":
         # Imported here for the same reason: TensorRT, torch and cv2 are only needed by this branch.
         from colsfm.flexglue_trt import match_pairs_flexglue

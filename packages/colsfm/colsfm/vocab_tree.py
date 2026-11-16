@@ -318,7 +318,7 @@ def bow_matrix(
     image_of_descriptor: Int32[ndarray, "n_descriptors"],
     n_images: int,
     n_words: int,
-) -> sparse.csr_matrix:
+) -> sparse.csr_array:
     """Turn word assignments into L1-normalised TF-IDF rows.
 
     `docs/spec/bow.md` §7.2: the BoW vector is `v_w = tf_w * idf_w / sum_u (tf_u * idf_u)`
@@ -338,7 +338,7 @@ def bow_matrix(
         A `[n_images, n_words]` CSR matrix whose non-negative rows each sum to 1, except
         rows whose every word was dropped, which are empty.
     """
-    counts: sparse.csr_matrix = sparse.coo_matrix(
+    counts: sparse.csr_array = sparse.coo_array(
         (np.ones(len(word_of_descriptor), dtype=np.float32), (image_of_descriptor, word_of_descriptor)),
         shape=(n_images, n_words),
     ).tocsr()
@@ -348,11 +348,11 @@ def bow_matrix(
     seen: Bool[ndarray, "n_words"] = document_frequency > 0
     inverse_document_frequency[seen] = np.log(n_images / document_frequency[seen]).astype(np.float32)
 
-    weighted: sparse.csr_matrix = counts.multiply(inverse_document_frequency[None, :]).tocsr()
+    weighted: sparse.csr_array = counts.multiply(inverse_document_frequency[None, :]).tocsr()
     weighted.eliminate_zeros()
     row_sums: Float32[ndarray, "n_images"] = np.asarray(weighted.sum(axis=1)).ravel()
     row_sums[row_sums == 0.0] = 1.0
-    return (sparse.diags(1.0 / row_sums) @ weighted).tocsr().astype(np.float32)
+    return (sparse.diags_array(1.0 / row_sums) @ weighted).tocsr().astype(np.float32)
 
 
 def l1_score(query: Mapping[int, float], document: Mapping[int, float]) -> float:
@@ -373,7 +373,7 @@ def l1_score(query: Mapping[int, float], document: Mapping[int, float]) -> float
     return -0.5 * sum(abs(query[word] - document[word]) - abs(query[word]) - abs(document[word]) for word in shared)
 
 
-def all_pairs_l1_score(bow: sparse.csr_matrix) -> SimilarityMatrix:
+def all_pairs_l1_score(bow: sparse.csr_array) -> SimilarityMatrix:
     """Score every image pair through the inverted index.
 
     For non-negative weights `-0.5 * (|a - b| - a - b)` is exactly `min(a, b)`, so the
@@ -393,10 +393,12 @@ def all_pairs_l1_score(bow: sparse.csr_matrix) -> SimilarityMatrix:
     Returns:
         The symmetric score matrix, 1.0 on the diagonal.
     """
-    n_images: int = bow.shape[0]
+    # Sizes from the index pointers: scipy ships no stubs and its `shape` property reads as optional.
+    n_images: int = len(bow.indptr) - 1
     scores: SimilarityMatrix = np.zeros((n_images, n_images), dtype=np.float32)
-    columns: sparse.csc_matrix = bow.tocsc()
-    for word in range(bow.shape[1]):
+    columns: sparse.csc_array = bow.tocsc()
+    n_words: int = len(columns.indptr) - 1
+    for word in range(n_words):
         start: int = int(columns.indptr[word])
         end: int = int(columns.indptr[word + 1])
         if end - start < 2:
@@ -472,5 +474,5 @@ def vocab_similarity(
             word_batches.append(assign_words(block, tree))
             image_batches.append(np.repeat(np.arange(start, stop, dtype=np.int32), counts[start:stop]))
 
-    bow: sparse.csr_matrix = bow_matrix(np.concatenate(word_batches), np.concatenate(image_batches), n_images, tree.n_words)
+    bow: sparse.csr_array = bow_matrix(np.concatenate(word_batches), np.concatenate(image_batches), n_images, tree.n_words)
     return all_pairs_l1_score(bow), tree.n_words

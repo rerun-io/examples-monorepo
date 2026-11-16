@@ -7,7 +7,7 @@ columns. `run_native_extraction` sequences them over a list of `ExtractionGroup`
 reusing one `TensorRTSession` per engine.
 
 **Subsampling order**: gate first, then rank the survivors and keep the strongest `max_num_features`; the SSC thinning
-that selects points for LightGlue+ happens later, on its scores (`colsfm.matching_raco`).
+that selects points for LightGlue+ happens later, on its scores (`colsfm.matching_trt`).
 """
 
 from __future__ import annotations
@@ -90,8 +90,6 @@ class ImageTask:
     """Original height in pixels, from the image's camera."""
 
 
-
-
 @dataclass(frozen=True, slots=True)
 class FeatureBatch:
     """One execution's outputs, named and given a batch axis.
@@ -121,14 +119,10 @@ class FeatureBatch:
         Returns:
             The same numbers, as `[batch, ...]`.
         """
-        scores_bn: Float32[ndarray, "batch num_keypoints"] = np.asarray(outputs["scores"], dtype=np.float32).reshape(
-            batch_size, -1
-        )
+        scores_bn: Float32[ndarray, "batch num_keypoints"] = np.asarray(outputs["scores"], dtype=np.float32).reshape(batch_size, -1)
         return cls(
             keypoints_bn2=np.asarray(outputs["keypoints"], dtype=np.float32).reshape(batch_size, -1, 2),
-            descriptors_bnd=np.asarray(outputs["descriptors"], dtype=np.float32).reshape(
-                batch_size, scores_bn.shape[1], -1
-            ),
+            descriptors_bnd=np.asarray(outputs["descriptors"], dtype=np.float32).reshape(batch_size, scores_bn.shape[1], -1),
             scores_bn=scores_bn,
         )
 
@@ -149,14 +143,6 @@ class ExtractionGroup:
     """The group's engine's batch ceiling, when below the run's batch size (a large shape-dynamic group)."""
 
 
-
-
-
-
-
-
-
-
 def normalized_to_pixels(normalized_xy: NormalizedKeypoints, image_width: int, image_height: int) -> KeypointsXY:
     """Map ALIKED's normalised coordinates onto the original image.
 
@@ -172,9 +158,7 @@ def normalized_to_pixels(normalized_xy: NormalizedKeypoints, image_width: int, i
     Returns:
         Float32 `[num_keypoints, 2]` xy pixel coordinates.
     """
-    scale_xy: Float32[ndarray, " 2"] = np.asarray(
-        [(image_width - 1) / 2.0, (image_height - 1) / 2.0], dtype=np.float32
-    )
+    scale_xy: Float32[ndarray, " 2"] = np.asarray([(image_width - 1) / 2.0, (image_height - 1) / 2.0], dtype=np.float32)
     return np.ascontiguousarray((normalized_xy + np.float32(1.0)) * scale_xy, dtype=np.float32)
 
 
@@ -240,15 +224,9 @@ def store_feature_batch(
     with database_transaction(database):
         for index, task in enumerate(batch):
             scores: KeypointScores = features.scores_bn[index].reshape(-1)
-            kept: Bool[ndarray, " num_keypoints"] = select_keypoints(
-                scores, min_score=min_score, max_num_features=max_num_features
-            )
-            keypoints_xy: KeypointsXY = normalized_to_pixels(
-                features.keypoints_bn2[index].reshape(-1, 2)[kept], task.image_width, task.image_height
-            )
-            descriptors: Descriptors = np.ascontiguousarray(
-                features.descriptors_bnd[index].reshape(len(scores), -1)[kept]
-            )
+            kept: Bool[ndarray, " num_keypoints"] = select_keypoints(scores, min_score=min_score, max_num_features=max_num_features)
+            keypoints_xy: KeypointsXY = normalized_to_pixels(features.keypoints_bn2[index].reshape(-1, 2)[kept], task.image_width, task.image_height)
+            descriptors: Descriptors = np.ascontiguousarray(features.descriptors_bnd[index].reshape(len(scores), -1)[kept])
             database.write_keypoints(task.image_id, keypoints_xy)
             database.write_descriptors(
                 task.image_id,
@@ -378,11 +356,13 @@ def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], session: Tens
     with torch.cuda.stream(stream):
         for task, (name, rgb) in zip(tasks, frames.frames([task.name for task in tasks]), strict=True):
             if (int(rgb.shape[1]), int(rgb.shape[2])) != (task.image_height, task.image_width):
-                raise ValueError(f"The database camera says {task.image_width}x{task.image_height}, but frame {name} is {rgb.shape[2]}x{rgb.shape[1]}")
+                raise ValueError(
+                    f"The database camera says {task.image_width}x{task.image_height}, but frame {name} is {rgb.shape[2]}x{rgb.shape[1]}"
+                )
             image: Tensor = rgb[None].float()
             if (task.image_height, task.image_width) != (network_height, network_width):
-                image = torch.nn.functional.interpolate(image, size=(network_height, network_width), mode="bilinear", align_corners=False, antialias=False)
+                image = torch.nn.functional.interpolate(
+                    image, size=(network_height, network_width), mode="bilinear", align_corners=False, antialias=False
+                )
             resized.append(image)
         return torch.cat(resized).div_(255.0)
-
-

@@ -42,6 +42,7 @@ from colsfm.extrinsic_refinement import (
     solve_extrinsics,
 )
 from colsfm.frames_meta import FramesMeta, read_frames_meta
+from colsfm.geometry import img_from_cam
 from colsfm.pose_graph import quaternion_plus_jacobian_transpose
 from colsfm.reconstruction import RIG_ID, RigReference, camera_sensor_id
 
@@ -95,9 +96,7 @@ def _look_at(position_xyz: Vector3, yaw_deg: float) -> pycolmap.Rigid3d:
     about_z: Matrix3 = Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix()
     # Camera looks along its own +Z; the vehicle frame is FLU, so a camera pointing
     # forward has vehicle axes (x, y, z) = (right, down, forward) mapped accordingly.
-    forward_looking: Matrix3 = np.array(
-        [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=np.float64
-    )
+    forward_looking: Matrix3 = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=np.float64)
     return pycolmap.Rigid3d(pycolmap.Rotation3d(about_z @ forward_looking), position_xyz)
 
 
@@ -125,9 +124,7 @@ def _world_T_vehicle_at(frame_index: int) -> pycolmap.Rigid3d:
         The `world_T_vehicle` transform.
     """
     world_R_vehicle: Matrix3 = Rotation.from_euler("z", 6.0 * frame_index, degrees=True).as_matrix()
-    return pycolmap.Rigid3d(
-        pycolmap.Rotation3d(world_R_vehicle), np.array([0.5 * frame_index, 0.0, 0.0], dtype=np.float64)
-    )
+    return pycolmap.Rigid3d(pycolmap.Rotation3d(world_R_vehicle), np.array([0.5 * frame_index, 0.0, 0.0], dtype=np.float64))
 
 
 def _world_points(seed: int = 3) -> Float[ndarray, "n_points 3"]:
@@ -187,9 +184,7 @@ def build_rig_scene(num_frames: int = NUM_FRAMES) -> RigScene:
     for camera_params_id, vehicle_T_cam in sorted(truth.items()):
         if camera_params_id == REFERENCE_CAMERA_PARAMS_ID:
             continue
-        rig.add_sensor(
-            camera_sensor_id(camera_params_id), vehicle_T_cam.inverse() * reference.vehicle_T_reference
-        )
+        rig.add_sensor(camera_sensor_id(camera_params_id), vehicle_T_cam.inverse() * reference.vehicle_T_reference)
     reconstruction.add_rig(rig)
 
     image_id: int = 0
@@ -215,19 +210,16 @@ def build_rig_scene(num_frames: int = NUM_FRAMES) -> RigScene:
         reconstruction.add_image(image)
 
     points_xyz: Float[ndarray, "n_points 3"] = _world_points()
-    point3D_ids: list[int] = [
-        reconstruction.add_point3D(xyz, pycolmap.Track(), np.array([128, 128, 128], dtype=np.uint8))
-        for xyz in points_xyz
-    ]
+    point3D_ids: list[int] = [reconstruction.add_point3D(xyz, pycolmap.Track(), np.array([128, 128, 128], dtype=np.uint8)) for xyz in points_xyz]
 
     for one_image_id in sorted(reconstruction.images):
         image = reconstruction.image(one_image_id)
         camera: pycolmap.Camera = reconstruction.camera(image.camera_id)
         cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
-        points_in_cam: Float[ndarray, "n_points 3"] = (
-            points_xyz @ np.asarray(cam_from_world.rotation.matrix()).T + np.asarray(cam_from_world.translation)
+        points_in_cam: Float[ndarray, "n_points 3"] = points_xyz @ np.asarray(cam_from_world.rotation.matrix()).T + np.asarray(
+            cam_from_world.translation
         )
-        projected: Float[ndarray, "n_points 2"] = camera.img_from_cam(points_in_cam)
+        projected: Float[ndarray, "n_points 2"] = img_from_cam(camera, points_in_cam)
         visible: ndarray = (
             np.isfinite(projected).all(axis=1)
             & (points_in_cam[:, 2] > 0.3)
@@ -238,9 +230,7 @@ def build_rig_scene(num_frames: int = NUM_FRAMES) -> RigScene:
         )
         image.points2D = pycolmap.Point2DList([pycolmap.Point2D(xy) for xy in projected[visible]])
         for point2D_idx, point_index in enumerate(np.flatnonzero(visible)):
-            reconstruction.add_observation(
-                point3D_ids[int(point_index)], pycolmap.TrackElement(one_image_id, point2D_idx)
-            )
+            reconstruction.add_observation(point3D_ids[int(point_index)], pycolmap.TrackElement(one_image_id, point2D_idx))
 
     return RigScene(reconstruction=reconstruction, rig_reference=reference, truth_vehicle_T_cam=truth)
 
@@ -260,9 +250,7 @@ def perturb(pose: pycolmap.Rigid3d, translation_mm: float, rotation_deg: float) 
     axis = axis / np.linalg.norm(axis)
     direction: Vector3 = np.array([0.6, 0.48, -0.64], dtype=np.float64)
     direction = direction / np.linalg.norm(direction)
-    delta: pycolmap.Rigid3d = pycolmap.Rigid3d(
-        pycolmap.Rotation3d(axis * np.deg2rad(rotation_deg)), direction * translation_mm * 1e-3
-    )
+    delta: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(axis * np.deg2rad(rotation_deg)), direction * translation_mm * 1e-3)
     return pose * delta
 
 
@@ -365,9 +353,7 @@ def test_reprojection_cost_jacobian_matches_central_differences(rig_scene: RigSc
 
     # `quaternion_plus_jacobian_transpose` returns `4 * P.T`, so `P` recovers the local
     # 3-column Jacobian from the ambient 4-column one Ceres is handed.
-    plus_jacobian: Float[ndarray, "4 3"] = (
-        quaternion_plus_jacobian_transpose(quat_xyzw, np.empty((3, 4))).T / 4.0
-    )
+    plus_jacobian: Float[ndarray, "4 3"] = quaternion_plus_jacobian_transpose(quat_xyzw, np.empty((3, 4))).T / 4.0
     analytic: Float[ndarray, "n_residuals 6"] = np.concatenate(
         [
             quat_jacobian.reshape(num_residuals, 4) @ plus_jacobian,
@@ -410,9 +396,7 @@ def test_a_prebuilt_index_gathers_exactly_what_building_one_would(rig_scene: Rig
     """
     fresh: dict[int, CameraObservations] = camera_observations(rig_scene.reconstruction, rig_scene.rig_reference)
     index: ObservationIndex = build_observation_index(rig_scene.reconstruction)
-    reused: dict[int, CameraObservations] = camera_observations(
-        rig_scene.reconstruction, rig_scene.rig_reference, index
-    )
+    reused: dict[int, CameraObservations] = camera_observations(rig_scene.reconstruction, rig_scene.rig_reference, index)
 
     assert sorted(reused) == sorted(fresh)
     for camera_params_id, entry in fresh.items():
@@ -441,9 +425,7 @@ def test_camera_observations_reproject_exactly_at_the_true_extrinsics(rig_scene:
     observations = camera_observations(rig_scene.reconstruction, rig_scene.rig_reference)[3]
     truth: pycolmap.Rigid3d = rig_scene.truth_vehicle_T_cam[3]
     cost: RigReprojectionCost = RigReprojectionCost(observations, reprojection_sigma_px=4.0)
-    residuals: Float[ndarray, " n_residuals"] = np.empty(
-        2 * observations.points_in_vehicle.shape[0], dtype=np.float64
-    )
+    residuals: Float[ndarray, " n_residuals"] = np.empty(2 * observations.points_in_vehicle.shape[0], dtype=np.float64)
     assert cost.Evaluate(
         [
             np.asarray(truth.rotation.quat, dtype=np.float64).copy(),
@@ -480,9 +462,7 @@ def test_co_observed_pairs_reproduce_the_blobs_galileo_count(galileo_input_meta:
     cameras_by_rig_frame: dict[int, set[int]] = {}
     for keyframe in frames_meta.keyframes:
         cameras_by_rig_frame.setdefault(keyframe.synced_sample_id, set()).add(keyframe.camera_params_id)
-    total: int = sum(
-        len(cameras) * (len(cameras) - 1) // 2 for cameras in cameras_by_rig_frame.values()
-    )
+    total: int = sum(len(cameras) * (len(cameras) - 1) // 2 for cameras in cameras_by_rig_frame.values())
     assert total == 777
 
 
@@ -523,9 +503,7 @@ def _scene_with_miscalibrated_camera(
     """
     scene: RigScene = build_rig_scene()
     calibration: dict[int, pycolmap.Rigid3d] = dict(scene.truth_vehicle_T_cam)
-    calibration[camera_params_id] = perturb(
-        scene.truth_vehicle_T_cam[camera_params_id], translation_mm, rotation_deg
-    )
+    calibration[camera_params_id] = perturb(scene.truth_vehicle_T_cam[camera_params_id], translation_mm, rotation_deg)
     apply_extrinsics(scene.reconstruction, scene.rig_reference, calibration)
     return scene, calibration, camera_params_id
 
@@ -541,13 +519,9 @@ def test_weak_priors_recover_a_miscalibrated_camera() -> None:
         scene.reconstruction,
         scene.rig_reference,
         calibration,
-        ExtrinsicRefinementOptions(
-            extrinsic_translation_sigma_m=10.0, extrinsic_rotation_sigma_deg=180.0, verbose=False
-        ),
+        ExtrinsicRefinementOptions(extrinsic_translation_sigma_m=10.0, extrinsic_rotation_sigma_deg=180.0, verbose=False),
     )
-    recovered_mm, recovered_deg = _shift(
-        scene.truth_vehicle_T_cam[camera_params_id], refined[camera_params_id]
-    )
+    recovered_mm, recovered_deg = _shift(scene.truth_vehicle_T_cam[camera_params_id], refined[camera_params_id])
     assert stats.termination == "CONVERGENCE"
     assert recovered_mm < 1.0
     assert recovered_deg < 0.05
@@ -560,9 +534,7 @@ def test_strong_priors_hold_a_miscalibrated_camera_at_its_calibration() -> None:
         scene.reconstruction,
         scene.rig_reference,
         calibration,
-        ExtrinsicRefinementOptions(
-            extrinsic_translation_sigma_m=1e-6, extrinsic_rotation_sigma_deg=1e-4, verbose=False
-        ),
+        ExtrinsicRefinementOptions(extrinsic_translation_sigma_m=1e-6, extrinsic_rotation_sigma_deg=1e-4, verbose=False),
     )
     moved_mm, moved_deg = _shift(calibration[camera_params_id], refined[camera_params_id])
     assert moved_mm < 1.0
@@ -576,13 +548,9 @@ def test_the_reference_camera_never_moves() -> None:
         scene.reconstruction,
         scene.rig_reference,
         calibration,
-        ExtrinsicRefinementOptions(
-            extrinsic_translation_sigma_m=10.0, extrinsic_rotation_sigma_deg=180.0, verbose=False
-        ),
+        ExtrinsicRefinementOptions(extrinsic_translation_sigma_m=10.0, extrinsic_rotation_sigma_deg=180.0, verbose=False),
     )
-    moved_mm, moved_deg = _shift(
-        calibration[REFERENCE_CAMERA_PARAMS_ID], refined[REFERENCE_CAMERA_PARAMS_ID]
-    )
+    moved_mm, moved_deg = _shift(calibration[REFERENCE_CAMERA_PARAMS_ID], refined[REFERENCE_CAMERA_PARAMS_ID])
     assert moved_mm == 0.0
     assert moved_deg == 0.0
 
@@ -590,9 +558,7 @@ def test_the_reference_camera_never_moves() -> None:
 def test_the_solve_reports_the_blocks_it_built() -> None:
     """The reported counts are the parity evidence against the blob's log; check them."""
     scene, calibration, _ = _scene_with_miscalibrated_camera(20.0, 0.5)
-    _, stats = solve_extrinsics(
-        scene.reconstruction, scene.rig_reference, calibration, ExtrinsicRefinementOptions(verbose=False)
-    )
+    _, stats = solve_extrinsics(scene.reconstruction, scene.rig_reference, calibration, ExtrinsicRefinementOptions(verbose=False))
     assert stats.num_cameras == 4
     assert stats.num_reprojection_blocks == 3, "one per free camera; the reference has none"
     assert stats.num_absolute_prior_blocks == 3, "one per free camera; the pinned one is inert"
@@ -631,13 +597,10 @@ def test_apply_extrinsics_round_trips_through_the_rig() -> None:
     """Writing extrinsics into the rig and reading them back must be the identity."""
     scene: RigScene = build_rig_scene(num_frames=2)
     wanted: dict[int, pycolmap.Rigid3d] = {
-        camera_params_id: perturb(pose, 12.0, 0.3) if camera_params_id else pose
-        for camera_params_id, pose in scene.truth_vehicle_T_cam.items()
+        camera_params_id: perturb(pose, 12.0, 0.3) if camera_params_id else pose for camera_params_id, pose in scene.truth_vehicle_T_cam.items()
     }
     apply_extrinsics(scene.reconstruction, scene.rig_reference, wanted)
-    read_back: dict[int, pycolmap.Rigid3d] = scene.rig_reference.vehicle_T_cam_by_camera_params_id(
-        scene.reconstruction
-    )
+    read_back: dict[int, pycolmap.Rigid3d] = scene.rig_reference.vehicle_T_cam_by_camera_params_id(scene.reconstruction)
     translation_mm, rotation_deg = extrinsic_deltas(wanted, read_back)
     assert translation_mm < 1e-9
     assert rotation_deg < 1e-9

@@ -140,10 +140,13 @@ class RigReference:
 
         Returns:
             `cam_T_rig` for that camera.
+
+        Raises:
+            ValueError: When the camera's sensor carries no pose on the rig.
         """
         if camera_params_id == self.camera_params_id:
             return pycolmap.Rigid3d()
-        return reconstruction.rig(RIG_ID).sensor_from_rig(camera_sensor_id(camera_params_id))
+        return rig_sensor_from_rig(reconstruction.rig(RIG_ID), camera_sensor_id(camera_params_id))
 
     def vehicle_T_cam_by_camera_params_id(self, reconstruction: pycolmap.Reconstruction) -> dict[int, pycolmap.Rigid3d]:
         """Read every camera's `sensor_to_vehicle_transform` back out of the rig.
@@ -175,11 +178,7 @@ class RigReference:
             `world_T_vehicle` per `frame_id`, for every frame carrying a pose.
         """
         reference_T_vehicle: pycolmap.Rigid3d = self.vehicle_T_reference.inverse()
-        return {
-            frame_id: frame.rig_from_world.inverse() * reference_T_vehicle
-            for frame_id, frame in reconstruction.frames.items()
-            if frame.has_pose
-        }
+        return {frame_id: frame.rig_from_world.inverse() * reference_T_vehicle for frame_id, frame in reconstruction.frames.items() if frame.has_pose}
 
 
 def rig_reference(frames_meta: FramesMeta, reference_camera_params_id: int | None = None) -> RigReference:
@@ -315,21 +314,55 @@ def build_reconstruction(
         frame.rig_id = RIG_ID
         frame.rig_from_world = reference_T_vehicle * rig_frame.world_T_vehicle.inverse()
         for keyframe_id in rig_frame.keyframe_ids:
-            frame.add_data_id(
-                pycolmap.data_t(camera_sensor_id(keyframe_by_id[keyframe_id].camera_params_id), keyframe_id)
-            )
+            frame.add_data_id(pycolmap.data_t(camera_sensor_id(keyframe_by_id[keyframe_id].camera_params_id), keyframe_id))
         reconstruction.add_frame(frame)
         reconstruction.register_frame(frame.frame_id)
         # The images go in after their frame is registered, so one pass over the rig
         # frames builds the whole model.
         for keyframe_id in rig_frame.keyframe_ids:
             keyframe: KeyframeMeta = keyframe_by_id[keyframe_id]
-            image: pycolmap.Image = pycolmap.Image(
-                name=keyframe.image_name, camera_id=keyframe.camera_params_id, image_id=keyframe_id
-            )
+            image: pycolmap.Image = pycolmap.Image(name=keyframe.image_name, camera_id=keyframe.camera_params_id, image_id=keyframe_id)
             image.frame_id = rig_frame.synced_sample_id
             reconstruction.add_image(image)
     return PosedModel(reconstruction=reconstruction, reference=reference)
+
+
+def rig_sensor_from_rig(rig: pycolmap.Rig, sensor: pycolmap.sensor_t) -> pycolmap.Rigid3d:
+    """A non-reference sensor's `sensor_from_rig`, which the stubs type as optional (a sensor added without a pose).
+
+    Args:
+        rig: The rig.
+        sensor: One of its non-reference sensors.
+
+    Returns:
+        Its `sensor_from_rig`.
+
+    Raises:
+        ValueError: When the sensor carries no pose: the rig is not calibrated.
+    """
+    pose: pycolmap.Rigid3d | None = rig.sensor_from_rig(sensor)
+    if pose is None:
+        raise ValueError(f"sensor {sensor} is on the rig without a sensor_from_rig: the rig is not calibrated")
+    return pose
+
+
+def rig_from_world(reconstruction: pycolmap.Reconstruction, frame_id: int) -> pycolmap.Rigid3d:
+    """A posed frame's `rig_from_world`, which the stubs type as optional (an unposed frame has none).
+
+    Args:
+        reconstruction: The model.
+        frame_id: A frame with a pose.
+
+    Returns:
+        Its `rig_from_world`.
+
+    Raises:
+        ValueError: When the frame has no pose.
+    """
+    pose: pycolmap.Rigid3d | None = reconstruction.frame(frame_id).rig_from_world
+    if pose is None:
+        raise ValueError(f"frame {frame_id} has no pose")
+    return pose
 
 
 def registered_image_names(reconstruction: pycolmap.Reconstruction) -> set[str]:

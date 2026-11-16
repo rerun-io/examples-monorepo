@@ -34,6 +34,7 @@ from colsfm.retrieval import (
     BruteForceConfig,
     Candidate,
     Descriptors,
+    RetrievalBackend,
     RetrievalConfig,
     RetrievalIndex,
     RetrievalQuery,
@@ -107,17 +108,17 @@ def make_synthetic_corpus(
     loop_slots: int = round(loop_fraction * descriptors_per_image)
     neighbour_slots: int = round(neighbour_fraction * descriptors_per_image)
 
-    landmark_ids: Int32[ndarray, "n_images descriptors_per_image"] = np.arange(
-        n_images * descriptors_per_image, dtype=np.int32
-    ).reshape(n_images, descriptors_per_image)
+    landmark_ids: Int32[ndarray, "n_images descriptors_per_image"] = np.arange(n_images * descriptors_per_image, dtype=np.int32).reshape(
+        n_images, descriptors_per_image
+    )
     for image_id in range(1, n_images):
         landmark_ids[image_id, :neighbour_slots] = landmark_ids[image_id - 1, -neighbour_slots:]
     for image_id in range(loop_offset, 2 * loop_offset):
         landmark_ids[image_id, -loop_slots:] = landmark_ids[image_id - loop_offset, -loop_slots:]
 
-    landmarks: Float32[ndarray, "n_landmarks 128"] = generator.standard_normal(
-        (n_images * descriptors_per_image, ALIKED_DESCRIPTOR_DIM)
-    ).astype(np.float32)
+    landmarks: Float32[ndarray, "n_landmarks 128"] = generator.standard_normal((n_images * descriptors_per_image, ALIKED_DESCRIPTOR_DIM)).astype(
+        np.float32
+    )
     landmarks /= np.linalg.norm(landmarks, axis=1, keepdims=True)
 
     descriptors: dict[int, Descriptors] = {}
@@ -158,22 +159,16 @@ def test_revisit_partner_is_the_top_candidate_once_neighbours_are_excluded(
     """With the temporal gate on, `i + 50` outranks everything for every query."""
     gate_us: int = 5 * FRAME_PERIOD_US
     for query_id in range(synthetic_corpus.loop_offset):
-        candidates: list[Candidate] = synthetic_index.query(
-            query_id, top_k=20, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us
-        )
+        candidates: list[Candidate] = synthetic_index.query(query_id, top_k=20, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us)
         assert candidates, f"image {query_id} retrieved nothing"
         assert candidates[0].image_id == query_id + synthetic_corpus.loop_offset
         assert candidates[0].score > 0.1
 
 
-def test_query_excludes_itself_and_its_temporal_neighbours(
-    synthetic_corpus: SyntheticCorpus, synthetic_index: RetrievalIndex
-) -> None:
+def test_query_excludes_itself_and_its_temporal_neighbours(synthetic_corpus: SyntheticCorpus, synthetic_index: RetrievalIndex) -> None:
     """The gate removes the query and every image within `min_time_gap_us` of it."""
     gate_us: int = 5 * FRAME_PERIOD_US
-    candidates: list[Candidate] = synthetic_index.query(
-        10, top_k=20, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us
-    )
+    candidates: list[Candidate] = synthetic_index.query(10, top_k=20, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us)
     returned: set[int] = {candidate.image_id for candidate in candidates}
     assert returned.isdisjoint(set(range(6, 15)))
     assert 10 not in returned
@@ -188,15 +183,11 @@ def test_the_gate_is_what_removes_the_neighbours(synthetic_corpus: SyntheticCorp
     """
     unfiltered: list[Candidate] = synthetic_index.query(10, top_k=5)
     assert {candidate.image_id for candidate in unfiltered[1:3]} == {9, 11}
-    gated: list[Candidate] = synthetic_index.query(
-        10, top_k=5, min_time_gap_us=5 * FRAME_PERIOD_US, timestamps=synthetic_corpus.timestamps_us
-    )
+    gated: list[Candidate] = synthetic_index.query(10, top_k=5, min_time_gap_us=5 * FRAME_PERIOD_US, timestamps=synthetic_corpus.timestamps_us)
     assert {9, 11}.isdisjoint({candidate.image_id for candidate in gated})
 
 
-def test_scores_are_symmetric_and_match_the_known_overlap(
-    synthetic_corpus: SyntheticCorpus, synthetic_index: RetrievalIndex
-) -> None:
+def test_scores_are_symmetric_and_match_the_known_overlap(synthetic_corpus: SyntheticCorpus, synthetic_index: RetrievalIndex) -> None:
     """Mutual-nearest-neighbour votes recover the fraction of shared landmarks."""
     assert synthetic_index.score(10, 60) == pytest.approx(synthetic_corpus.loop_fraction, abs=0.05)
     assert synthetic_index.score(60, 10) == synthetic_index.score(10, 60)
@@ -234,7 +225,7 @@ def test_build_rejects_a_single_image() -> None:
 
 
 @pytest.mark.parametrize("backend", ["brute_force", "vocab"])
-def test_build_rejects_descriptors_of_different_widths_on_either_backend(backend: str) -> None:
+def test_build_rejects_descriptors_of_different_widths_on_either_backend(backend: RetrievalBackend) -> None:
     """A ragged corpus is a `ValueError`, as the docstring promises, on both paths.
 
     The check used to live inside the brute force's own stacking step, so the vocab path
@@ -251,9 +242,7 @@ def test_build_rejects_descriptors_of_different_widths_on_either_backend(backend
         build_retrieval_index(corpus, RetrievalConfig(backend=backend))
 
 
-def test_search_reports_what_the_temporal_gate_dropped_from_the_same_walk(
-    synthetic_corpus: SyntheticCorpus, synthetic_index: RetrievalIndex
-) -> None:
+def test_search_reports_what_the_temporal_gate_dropped_from_the_same_walk(synthetic_corpus: SyntheticCorpus, synthetic_index: RetrievalIndex) -> None:
     """`search` returns the hits and the gated count together, so a funnel can compose.
 
     The loop-closure stage used to issue a second, ungated query only to count the temporal
@@ -322,9 +311,7 @@ def _random_corpus(n_images: int, descriptors_per_image: int, seed: int) -> dict
     generator: np.random.Generator = np.random.default_rng(seed)
     corpus: dict[int, Descriptors] = {}
     for image_id in range(n_images):
-        rows: Float32[ndarray, "n 128"] = generator.standard_normal(
-            (descriptors_per_image, ALIKED_DESCRIPTOR_DIM), dtype=np.float32
-        )
+        rows: Float32[ndarray, "n 128"] = generator.standard_normal((descriptors_per_image, ALIKED_DESCRIPTOR_DIM), dtype=np.float32)
         corpus[image_id] = np.ascontiguousarray(rows / np.linalg.norm(rows, axis=1, keepdims=True))
     return corpus
 
@@ -498,7 +485,9 @@ def vocab_build() -> VocabBuild:
     for image_id in index.image_ids:
         index.query(image_id, top_k=20)
     query_seconds: float = time.perf_counter() - started
-    print(f"vocab retrieval: {VOCAB_PROBE_IMAGES} x 2048 -> {index.n_words} words, build {build_seconds:.1f} s, {len(index.image_ids)} queries {query_seconds:.2f} s")
+    print(
+        f"vocab retrieval: {VOCAB_PROBE_IMAGES} x 2048 -> {index.n_words} words, build {build_seconds:.1f} s, {len(index.image_ids)} queries {query_seconds:.2f} s"
+    )
     return VocabBuild(index=index, build_seconds=build_seconds, query_seconds=query_seconds)
 
 
@@ -603,9 +592,7 @@ def test_descriptors_round_trip_through_a_colmap_database(tmp_path: Path, synthe
         database.write_image(pycolmap.Image(image_id=image_id + 1, name=f"{image_id}.png", camera_id=1), use_image_id=True)
         database.write_descriptors(
             image_id + 1,
-            pycolmap.FeatureDescriptorsFloat(
-                data=synthetic_corpus.descriptors[image_id], type=pycolmap.FeatureExtractorType.ALIKED_N32
-            ).to_bytes(),
+            pycolmap.FeatureDescriptorsFloat(data=synthetic_corpus.descriptors[image_id], type=pycolmap.FeatureExtractorType.ALIKED_N32).to_bytes(),
         )
     database.close()
 
