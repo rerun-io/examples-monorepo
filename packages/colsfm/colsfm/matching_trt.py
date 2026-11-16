@@ -52,8 +52,10 @@ from typing import Final, TypeAlias
 
 import numpy as np
 import pycolmap
+import torch
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
+from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.database import (
     Descriptors,
@@ -68,7 +70,7 @@ from colsfm.matching import (
     select_by_square_covering,
     verify_and_report,
 )
-from colsfm.tensorrt_runtime import ShapeProfile, TensorRTSession, resolve_engine
+from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
 
 ImageFeatures: TypeAlias = tuple[KeypointsXY, Descriptors]
 """One image's keypoint pixels and its float descriptors, as the engine wants them."""
@@ -203,7 +205,7 @@ def _image_sizes(database: pycolmap.Database) -> dict[int, tuple[int, int]]:
 
 
 def match_one_pair(
-    session: TensorRTSession,
+    runtime: TensorRtDynamicRuntime,
     features: FeatureCache,
     sizes: dict[int, tuple[int, int]],
     pair: ImagePair,
@@ -217,7 +219,7 @@ def match_one_pair(
     scores as the keypoint response.
 
     Args:
-        session: The loaded LightGlue engine.
+        runtime: The loaded LightGlue engine (direct binding).
         features: The keypoint and descriptor source.
         sizes: `(width, height)` per `image_id`, for the normalisation.
         pair: The image pair, first image first.
@@ -236,14 +238,16 @@ def match_one_pair(
         return np.zeros((0, 2), dtype=np.int64)
     width0, height0 = sizes[image_id1]
     width1, height1 = sizes[image_id2]
-    outputs: dict[str, ndarray] = session.run(
-        {
-            "kpts0": normalize(keypoints0, width0, height0),
-            "kpts1": normalize(keypoints1, width1, height1),
-            "desc0": np.ascontiguousarray(descriptors0[None], dtype=np.float32),
-            "desc1": np.ascontiguousarray(descriptors1[None], dtype=np.float32),
-        }
-    )
+    host_inputs: dict[str, ndarray] = {
+        "kpts0": normalize(keypoints0, width0, height0),
+        "kpts1": normalize(keypoints1, width1, height1),
+        "desc0": np.ascontiguousarray(descriptors0[None], dtype=np.float32),
+        "desc1": np.ascontiguousarray(descriptors1[None], dtype=np.float32),
+    }
+    # Keypoints and descriptors come from the database on the host; the matches go back to it on the host.
+    outputs: dict[str, ndarray] = {
+        name: value.cpu().numpy() for name, value in runtime({name: torch.from_numpy(array).cuda() for name, array in host_inputs.items()}).items()
+    }
     candidates: MatchIndices = np.asarray(outputs["matches0"], dtype=np.int64).reshape(-1, 2)
     scores: MatchScores = np.asarray(outputs["mscores0"], dtype=np.float32).reshape(-1)
     accepted: Bool[ndarray, " num_candidates"] = (
@@ -316,11 +320,12 @@ def match_pairs_tensorrt(
     # LightGlue has no convolutional trunk; its attention stays fp32 (TF32) under the strongly typed build.
     engine_path: Path = resolve_engine(onnx_path, profile if profile is not None else LIGHTGLUE_PROFILE, precision="fp32")
     started: float = time.perf_counter()
-    with TensorRTSession(engine_path) as session, pycolmap.Database.open(database_path) as database:
+    runtime: TensorRtDynamicRuntime = TensorRtDynamicRuntime(engine_path, direct_binding=True)
+    with pycolmap.Database.open(database_path) as database:
         sizes: dict[int, tuple[int, int]] = _image_sizes(database)
         features: FeatureCache = FeatureCache(database)
         for pair in pairs:
-            matches: MatchIndices = match_one_pair(session, features, sizes, pair, options, normalize)
+            matches: MatchIndices = match_one_pair(runtime, features, sizes, pair, options, normalize)
             database.write_matches(pair[0], pair[1], matches.astype(np.uint32))
 
     # No spatial cap here: LightGlue+ already ran SSC on its scores before verification (`match_one_pair`).

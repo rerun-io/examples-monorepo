@@ -148,9 +148,7 @@ class TensorRtRuntime(_TrtEngine):
         # TrtBuildConfig.extra_output_patterns) may scale its leading dim by more
         # than the batch (e.g. batch*views), and undersized buffers corrupt memory.
         self._output_buffers: dict[str, Tensor] = {
-            spec.name: torch.empty(
-                tuple(int(dim) for dim in self._context.get_tensor_shape(spec.name)), dtype=spec.dtype, device=self._device
-            )
+            spec.name: torch.empty(tuple(int(dim) for dim in self._context.get_tensor_shape(spec.name)), dtype=spec.dtype, device=self._device)
             for spec in self._spec.outputs
         }
         # Static engines report the baked max batch through the context at every
@@ -218,14 +216,9 @@ class TensorRtRuntime(_TrtEngine):
         # always report the baked max batch, so padded rows are sliced off by
         # the per-sample ratio recorded at construction.
         if self._dynamic:
-            return {
-                name: tensor[: int(self._context.get_tensor_shape(name)[0])]
-                for name, tensor in self._output_buffers.items()
-            }
-        return {
-            name: tensor[: self._static_rows_per_sample[name] * batch_size]
-            for name, tensor in self._output_buffers.items()
-        }
+            return {name: tensor[: int(self._context.get_tensor_shape(name)[0])] for name, tensor in self._output_buffers.items()}
+        return {name: tensor[: self._static_rows_per_sample[name] * batch_size] for name, tensor in self._output_buffers.items()}
+
 
 class TensorRtDynamicRuntime(_TrtEngine):
     """TensorRT engine whose inputs may be dynamic in any dimension (one optimization profile).
@@ -238,19 +231,45 @@ class TensorRtDynamicRuntime(_TrtEngine):
     CUDA graphs are captured per distinct input-shape signature and kept for the
     runtime's lifetime, so a caller that walks many shapes should pass
     ``use_cuda_graph=False``.
+
+    ``direct_binding=True`` is the contract for callers that already hold their
+    inputs on the device and whose shapes change from call to call:
+
+    * **Inputs** are bound by address, not copied: each must be a contiguous CUDA
+      tensor of the binding's dtype. They are read on the runtime's stream after it
+      waits on the caller's current stream, so produce them on that stream; the
+      runtime records them on its stream, so the caching allocator keeps them until
+      the engine has read them even if the caller drops its reference.
+    * **Outputs** live in runtime-owned device buffers sized to the shape TensorRT
+      resolves for the call, grown (never shrunk) when a call needs more; nothing is
+      allocated at the profile's max shapes.
+    * **Ownership**: the returned tensors are views into those buffers, valid until
+      the next call, which may overwrite or reallocate them. Copy what you keep
+      (``.clone()``, or a host copy at the boundary that needs one).
+
+    CUDA graphs need fixed addresses, so ``direct_binding`` and ``use_cuda_graph``
+    exclude each other.
     """
 
-    def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False) -> None:
-        """Deserialize an engine and allocate max-shape I/O buffers.
+    def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False, direct_binding: bool = False) -> None:
+        """Deserialize an engine and allocate its I/O buffers.
 
         Args:
             engine_path: Machine-local engine built with shape profiles.
             use_cuda_graph: Capture and replay one CUDA graph per input-shape signature.
+            direct_binding: Bind device inputs in place and size outputs to each call (see the class docstring)
+                instead of copying into max-shape buffers.
 
         Raises:
             RuntimeError: If CUDA is unavailable or the engine cannot be deserialized.
+            ValueError: If ``direct_binding`` and ``use_cuda_graph`` are both set.
         """
+        if direct_binding and use_cuda_graph:
+            raise ValueError("direct_binding binds a new address per call; CUDA graph replay needs fixed addresses.")
         super().__init__(engine_path, use_cuda_graph=use_cuda_graph)
+        self.direct_binding: bool = direct_binding
+        self.device_index: int = torch.cuda.current_device()
+        """The CUDA device the context and stream were created on; direct-binding inputs must live there."""
         trt: Any = self._trt
         engine: Any = self._engine
         self.min_input_shapes: dict[str, tuple[int, ...]] = {}
@@ -274,21 +293,26 @@ class TensorRtDynamicRuntime(_TrtEngine):
                 self.min_input_shapes[name] = shape
                 self.max_input_shapes[name] = shape
             self._input_dtypes[name] = dtype
-        self._input_buffers: dict[str, Tensor] = {
-            name: torch.zeros(math.prod(shape), dtype=self._input_dtypes[name], device=self._device) for name, shape in self.max_input_shapes.items()
-        }
         self._active_shapes: dict[str, tuple[int, ...]] = {}
         for name, shape in self.max_input_shapes.items():
             self._set_input_shape(name, shape)
         self.max_output_shapes: dict[str, tuple[int, ...]] = {
             name: tuple(int(dim) for dim in self._context.get_tensor_shape(name)) for name in self._output_dtypes
         }
-        """Output shapes at the profile's max input shapes; the persistent buffer size."""
-        self._output_buffers: dict[str, Tensor] = {
-            name: torch.empty(math.prod(shape), dtype=self._output_dtypes[name], device=self._device) for name, shape in self.max_output_shapes.items()
-        }
-        for name, tensor in {**self._input_buffers, **self._output_buffers}.items():
-            self._context.set_tensor_address(name, int(tensor.data_ptr()))
+        """Output shapes at the profile's max input shapes; the persistent buffer size unless ``direct_binding``."""
+        self._input_buffers: dict[str, Tensor] = {}
+        self._output_buffers: dict[str, Tensor] = {}
+        if not direct_binding:
+            self._input_buffers = {
+                name: torch.zeros(math.prod(shape), dtype=self._input_dtypes[name], device=self._device)
+                for name, shape in self.max_input_shapes.items()
+            }
+            self._output_buffers = {
+                name: torch.empty(math.prod(shape), dtype=self._output_dtypes[name], device=self._device)
+                for name, shape in self.max_output_shapes.items()
+            }
+            for name, tensor in {**self._input_buffers, **self._output_buffers}.items():
+                self._context.set_tensor_address(name, int(tensor.data_ptr()))
         self._graphs: dict[tuple[tuple[str, tuple[int, ...]], ...], torch.cuda.CUDAGraph] = {}
         self.device_memory_bytes: int = int(engine.device_memory_size_v2)
         """Activation memory TensorRT reserves for the execution context (sized at the profile's max shapes)."""
@@ -298,7 +322,9 @@ class TensorRtDynamicRuntime(_TrtEngine):
         if self._active_shapes.get(name) == shape:
             return
         if not bool(self._context.set_input_shape(name, shape)):
-            raise ValueError(f"TensorRT rejected shape {shape} for input {name!r} (profile {self.min_input_shapes[name]}..{self.max_input_shapes[name]}).")
+            raise ValueError(
+                f"TensorRT rejected shape {shape} for input {name!r} (profile {self.min_input_shapes[name]}..{self.max_input_shapes[name]})."
+            )
         self._active_shapes[name] = shape
 
     def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -311,7 +337,9 @@ class TensorRtDynamicRuntime(_TrtEngine):
             Output views into runtime-owned buffers (overwritten by the next call), shaped by the context.
 
         Raises:
-            ValueError: If names, ranks, or shapes fall outside the engine's profile.
+            ValueError: If names, ranks, or shapes fall outside the engine's profile, an output shape is not resolved
+                by the input shapes (a negative, data-dependent dimension), or, with ``direct_binding``, an input is not
+                a contiguous CUDA tensor of its binding's dtype on the runtime's device.
         """
         if set(inputs) != set(self._input_dtypes):
             raise ValueError(f"Runtime expects inputs {tuple(self._input_dtypes)}, got {tuple(inputs)}.")
@@ -322,8 +350,35 @@ class TensorRtDynamicRuntime(_TrtEngine):
             if len(shape) != len(upper) or any(dim < low or dim > high for dim, low, high in zip(shape, lower, upper, strict=True)):
                 raise ValueError(f"Input {name!r} shape {shape} is outside the engine profile {lower}..{upper}.")
             self._set_input_shape(name, shape)
-            numel: int = math.prod(shape)
+        # Resolved once, before anything is bound or allocated: a negative dimension is data-dependent, and no buffer
+        # sized here could hold it (that needs TensorRT's output allocator, which this runtime does not implement).
+        output_shapes: dict[str, tuple[int, ...]] = {
+            name: tuple(int(dim) for dim in self._context.get_tensor_shape(name)) for name in self._output_dtypes
+        }
+        unresolved: dict[str, tuple[int, ...]] = {name: shape for name, shape in output_shapes.items() if any(dim < 0 for dim in shape)}
+        if unresolved:
+            raise ValueError(f"Output shapes {unresolved} are not resolved by the input shapes; data-dependent outputs are not supported.")
+        for name, tensor in inputs.items():
+            if self.direct_binding:
+                if tensor.dtype != self._input_dtypes[name] or not tensor.is_cuda or not tensor.is_contiguous():
+                    raise ValueError(
+                        f"Input {name!r} must be a contiguous CUDA {self._input_dtypes[name]} tensor to bind in place, got {tensor.dtype}."
+                    )
+                if tensor.device.index != self.device_index:
+                    raise ValueError(f"Input {name!r} is on {tensor.device}; the engine's context and stream are on cuda:{self.device_index}.")
+                tensor.record_stream(self._stream)
+                self._context.set_tensor_address(name, int(tensor.data_ptr()))
+                continue
+            numel: int = math.prod(tensor.shape)
             self._input_buffers[name][:numel].copy_(tensor.reshape(-1).to(dtype=self._input_dtypes[name]))
+        if self.direct_binding:
+            for name, dtype in self._output_dtypes.items():
+                # A resolved zero-size output still gets one element, so its address is a real allocation.
+                needed: int = max(math.prod(output_shapes[name]), 1)
+                buffer: Tensor | None = self._output_buffers.get(name)
+                if buffer is None or buffer.numel() < needed:
+                    self._output_buffers[name] = torch.empty(needed, dtype=dtype, device=self._device)
+                self._context.set_tensor_address(name, int(self._output_buffers[name].data_ptr()))
         if self._use_cuda_graph:
             key: tuple[tuple[str, tuple[int, ...]], ...] = tuple(sorted(self._active_shapes.items()))
             if key not in self._graphs:
@@ -331,11 +386,7 @@ class TensorRtDynamicRuntime(_TrtEngine):
             self._graphs[key].replay()
         else:
             self._execute()
-        outputs: dict[str, Tensor] = {}
-        for name, buffer in self._output_buffers.items():
-            out_shape: tuple[int, ...] = tuple(int(dim) for dim in self._context.get_tensor_shape(name))
-            outputs[name] = buffer[: math.prod(out_shape)].view(out_shape)
-        return outputs
+        return {name: buffer[: math.prod(output_shapes[name])].view(output_shapes[name]) for name, buffer in self._output_buffers.items()}
 
 
 def _torch_dtype(dtype: Any, trt: Any) -> torch.dtype:
