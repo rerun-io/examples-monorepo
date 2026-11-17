@@ -42,10 +42,21 @@ from trtkit.artifacts import build_once
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 from trtkit.trt_builder import onnx_content_hash
 
-from colsfm.database import ImagePair, KeypointsXY, MatchIndices, database_transaction
+from colsfm.database import ImagePair, KeypointsXY
 from colsfm.frames import FrameSource, open_frame_source
-from colsfm.matching import FLEXGLUE_MODEL_FILES, MatchingOptions, MatchReport, verify_and_report
+from colsfm.matching import (
+    FLEXGLUE_MODEL_FILES,
+    MatchingOptions,
+    MatchReport,
+    PairMatchStats,
+    require_no_geometries,
+    spatial_cap,
+    verification_options,
+    verifier_inputs,
+    write_and_count,
+)
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
+from colsfm.verification import ChunkedVerifier, PairToVerify
 
 DESCRIPTOR_SIZE: Final[int] = 512
 """FlexGlue's descriptor input side; the graph is static at 512x512 (COLMAP's default)."""
@@ -61,9 +72,6 @@ DESCRIPTOR_BATCH: Final[int] = 8
 
 MATCHER_STREAMS: Final[int] = 2
 """Matcher runtimes, one per CUDA stream, used in turn."""
-
-DOWNLOAD_CHUNK: Final[int] = 256
-"""Pairs whose matches are downloaded and written together."""
 
 GRAPH_REWRITE_VERSION: Final[int] = 3
 """Bumped whenever `prepare_matcher_graph` / `prepare_descriptor_graph` change what they write; part of the cached file name."""
@@ -380,6 +388,8 @@ class DenseImage:
     """Dense features `[1, 256, 64, 64]`."""
     keypoints: Tensor
     """Keypoints `[1, n, 2]` scaled into the 512x512 descriptor frame; `n` may be 0."""
+    keypoints_px: KeypointsXY
+    """The same keypoints in image pixels, on the host: what verification needs, kept so it reads nothing again."""
 
 
 class FlexGlueTensorRT:
@@ -390,7 +400,8 @@ class FlexGlueTensorRT:
       `DESCRIPTOR_BATCH` at a time by the fp16 descriptor engine.
     * Features and scaled keypoints stay in a GPU LRU (`DenseImage`); one upload per image.
     * The matcher runs on two CUDA streams in turn (a pair's tail overlaps the next pair's head: 9.7 vs 11.3 ms per
-      pair on the 5090) and its matches stay on the GPU until `flush` downloads a whole chunk at once.
+      pair on the 5090) and its matches stay on the GPU until `flush` downloads a whole chunk at once. Each chunk then
+      goes to `colsfm.verification.ChunkedVerifier`, whose CPU threads verify it while the GPU matches the next one.
     """
 
     def __init__(self, descriptor_engine: Path, matcher_engine: Path, *, cache_images: int = FEATURE_CACHE_IMAGES) -> None:
@@ -408,7 +419,7 @@ class FlexGlueTensorRT:
         self.cache_images: int = max(cache_images, 2 * DESCRIPTOR_BATCH)
         self.size: Tensor = torch.tensor([[DESCRIPTOR_SIZE, DESCRIPTOR_SIZE]], dtype=torch.float32, device=self.device)
         self.images: OrderedDict[int, DenseImage] = OrderedDict()
-        self.pending: list[tuple[ImagePair, Tensor, Tensor]] = []
+        self.pending: list[tuple[ImagePair, Tensor, Tensor, KeypointsXY, KeypointsXY]] = []
         self.nonfinite_pairs: int = 0
         """Pairs whose covisibility came back NaN or infinite: the engine miscomputed them, and they kept no match."""
         self.calls: int = 0
@@ -437,7 +448,7 @@ class FlexGlueTensorRT:
         for index, (image_id, _, keypoints) in enumerate(batch):
             scaled: Tensor = torch.from_numpy(keypoints * np.asarray(scales[index], dtype=np.float32)).to(self.device)[None]
             # One clone per image, so evicting an image frees it (a view would pin the whole batch).
-            self.images[image_id] = DenseImage(features=features[index : index + 1].clone(), keypoints=scaled)
+            self.images[image_id] = DenseImage(features=features[index : index + 1].clone(), keypoints=scaled, keypoints_px=keypoints)
             self.images.move_to_end(image_id)
         while len(self.images) > self.cache_images:
             self.images.popitem(last=False)
@@ -454,7 +465,13 @@ class FlexGlueTensorRT:
         self.images.move_to_end(pair[1])
         if first.keypoints.shape[1] == 0 or second.keypoints.shape[1] == 0:
             self.pending.append(
-                (pair, torch.full((int(first.keypoints.shape[1]),), -1, dtype=torch.int64, device=self.device), self.size.new_zeros(1))
+                (
+                    pair,
+                    torch.full((int(first.keypoints.shape[1]),), -1, dtype=torch.int64, device=self.device),
+                    self.size.new_zeros(1),
+                    first.keypoints_px,
+                    second.keypoints_px,
+                )
             )
             return
         slot: int = self.calls % MATCHER_STREAMS
@@ -475,29 +492,36 @@ class FlexGlueTensorRT:
                     "image_size1": self.size,
                 }
             )
-            self.pending.append((pair, outputs["matches0"][0].clone(), outputs["covisibility_score"].reshape(1).float()))
+            self.pending.append(
+                (pair, outputs["matches0"][0].clone(), outputs["covisibility_score"].reshape(1).float(), first.keypoints_px, second.keypoints_px)
+            )
 
-    def flush(self) -> list[tuple[ImagePair, MatchIndices]]:
+    def flush(self) -> list[PairToVerify]:
         """Download every pending pair's matches in one transfer.
 
         Returns:
-            Int64 `[num_matches, 2]` keypoint index pairs per pair, in launch order.
+            Each pair with its int64 `[num_matches, 2]` keypoint index pairs and both images' keypoint pixels, in launch
+            order: what the verifier needs, with nothing to read back from the database.
         """
         if not self.pending:
             return []
         current: torch.cuda.Stream = torch.cuda.current_stream(self.device)
         for stream in self.streams:
             current.wait_stream(stream)
-        lengths: list[int] = [len(matches0) for _, matches0, _ in self.pending]
-        everything: ndarray = torch.cat([matches0 for _, matches0, _ in self.pending]).cpu().numpy()
-        self.nonfinite_pairs += int((~torch.isfinite(torch.cat([covisibility for _, _, covisibility in self.pending]))).sum())
-        results: list[tuple[ImagePair, MatchIndices]] = []
+        lengths: list[int] = [len(matches0) for _, matches0, _, _, _ in self.pending]
+        everything: ndarray = torch.cat([matches0 for _, matches0, _, _, _ in self.pending]).cpu().numpy()
+        self.nonfinite_pairs += int((~torch.isfinite(torch.cat([covisibility for _, _, covisibility, _, _ in self.pending]))).sum())
+        results: list[PairToVerify] = []
         offset: int = 0
-        for (pair, _, _), length in zip(self.pending, lengths, strict=True):
+        for (pair, _, _, keypoints1, keypoints2), length in zip(self.pending, lengths, strict=True):
             matches0: ndarray = everything[offset : offset + length]
             offset += length
             rows: ndarray = np.flatnonzero(matches0 >= 0)
-            results.append((pair, np.stack([rows, matches0[rows]], axis=1).astype(np.int64)))
+            results.append(
+                PairToVerify(
+                    pair=pair, matches=np.stack([rows, matches0[rows]], axis=1).astype(np.int64), keypoints1=keypoints1, keypoints2=keypoints2
+                )
+            )
         self.pending = []
         return results
 
@@ -552,8 +576,12 @@ def _match_pairs_flexglue(
     frames: FrameSource,
 ) -> MatchReport:
     started: float = time.perf_counter()
+    require_no_geometries(database_path, pairs)
+    stats: dict[ImagePair, PairMatchStats] = {}
+    num_capped: int = 0
     with pycolmap.Database.open(database_path) as database:
         names: dict[int, str] = {image.image_id: image.name for image in database.read_all_images()}
+        cameras, sizes = verifier_inputs(database)
         flexglue: FlexGlueTensorRT = FlexGlueTensorRT(descriptor_engine, matcher_engine)
         # Images in the order the pair loop first needs them: the descriptor batches follow it.
         order: list[int] = list(dict.fromkeys(image_id for pair in pairs for image_id in pair))
@@ -576,25 +604,28 @@ def _match_pairs_flexglue(
                 ]
             )
 
-        def drain() -> None:
-            with database_transaction(database):
-                for (first, second), matches in flexglue.flush():
-                    database.write_matches(first, second, matches.astype(np.uint32))
-
-        for index, (image_id1, image_id2) in enumerate(pairs):
-            ensure(image_id1)
-            ensure(image_id2)
-            flexglue.enqueue((image_id1, image_id2))
-            if (index + 1) % DOWNLOAD_CHUNK == 0 or index + 1 == len(pairs):
-                drain()
-    matching_seconds: float = time.perf_counter() - started
-
-    # The same post-verification spatial cap as the COLMAP path (`flexglue_ort`, `pycolmap`), so the two FlexGlue
-    # backends hand the mapper the same observation budget.
-    report, dropped = verify_and_report(database_path, pairs, options, device="cuda", started=started, cap=True)
+        # Each downloaded chunk goes to the verifier's worker threads while the GPU matches the next one; `submit` hands
+        # back the chunks it had to finish to keep at most `options.verify.chunks_in_flight` in flight, and they are written
+        # (matches and geometries, one transaction) and dropped.
+        with ChunkedVerifier(
+            cameras,
+            verification_options(options),
+            spatial_cap(options, sizes),
+            options.verify,
+        ) as verifier:
+            for index, (image_id1, image_id2) in enumerate(pairs):
+                ensure(image_id1)
+                ensure(image_id2)
+                flexglue.enqueue((image_id1, image_id2))
+                if (index + 1) % options.verify.chunk_pairs == 0 or index + 1 == len(pairs):
+                    for finished in verifier.submit(flexglue.flush()):
+                        num_capped += write_and_count(database, finished, stats, write_matches=True)
+            for finished in verifier.finish():
+                num_capped += write_and_count(database, finished, stats, write_matches=True)
+    report: MatchReport = MatchReport(pair_stats=stats, device="cuda", elapsed_seconds=time.perf_counter() - started)
     print(
-        f"colsfm.matching[flexglue-trt]: {report.summary()} | matching {matching_seconds:.1f} s for {len(pairs)} pairs, "
-        f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped {dropped} inlier matches, "
-        f"{flexglue.nonfinite_pairs} pairs with a non-finite covisibility"
+        f"colsfm.matching[flexglue-trt]: {report.summary()} | matching and verification {report.elapsed_seconds:.1f} s for {len(pairs)} pairs, "
+        f"{flexglue.descriptor_images} images in {flexglue.descriptor_runs} descriptor batches, spatial cap dropped "
+        f"{num_capped} inlier matches, {flexglue.nonfinite_pairs} pairs with a non-finite covisibility"
     )
     return report

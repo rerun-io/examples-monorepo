@@ -81,7 +81,7 @@ from __future__ import annotations
 import math
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
@@ -99,14 +99,19 @@ from colsfm.database import (
     KeypointsXY,
     MatchIndices,
     count_two_view_geometries,
-    database_transaction,
-    pair_inlier_counts,
-    raw_match_counts,
     read_keypoints_batch,
 )
 from colsfm.features import DeviceChoice, ResolvedDevice, resolve_device
 from colsfm.frame_manifest import FrameSource
 from colsfm.pairs import write_pair_list
+from colsfm.verification import (
+    CapFunction,
+    ChunkedVerifier,
+    PairToVerify,
+    VerifiedPair,
+    VerifyChunking,
+    write_verified,
+)
 
 FLEXGLUE_MODEL_DIR: Final[Path] = DATA_DIR / "models" / "flexglue"
 """Where `colsfm-download-flexglue` puts FlexGlue's ONNX graphs (gitignored, like the RaCo exports)."""
@@ -327,6 +332,8 @@ class MatchingOptions:
     """Where `colsfm-download-flexglue` put the three FlexGlue graphs; `flexglue` only."""
     flexglue_min_covisibility: float = 0.5
     """FlexGlue's pair rejection: a pair whose predicted covisibility is below this keeps no match (COLMAP's default)."""
+    verify: VerifyChunking = VerifyChunking()
+    """How two-view verification is chunked and overlapped (`colsfm.verification`)."""
 
 
 DEFAULT_MATCHING_OPTIONS: Final[MatchingOptions] = MatchingOptions()
@@ -658,87 +665,97 @@ def _cover_squares(ordered_xy: KeypointsXY, ordered_indices: Sequence[int], widt
     return kept
 
 
-def _image_sizes(database: pycolmap.Database, image_ids: Sequence[int]) -> dict[int, tuple[int, int]]:
-    """Look up the pixel size of each image through its camera.
+def spatial_cap(options: MatchingOptions, sizes: Mapping[int, tuple[int, int]]) -> CapFunction | None:
+    """The post-verification spatial cap as a per-pair function, or None when nothing is capped.
+
+    Caps each pair's verified inliers to `match_limit`'s budget, sized from the first image
+    (`subsample_matches_by_coverage`); in `fixed` mode every pair gets the same budget.
+
+    Args:
+        options: The matching settings, for `match_limit`.
+        sizes: `(width, height)` per image id.
+
+    Returns:
+        The cap, or None under `--match-cap-mode off`.
+    """
+    if not options.match_limit.limits:
+        return None
+
+    def cap(pair: ImagePair, keypoints1: KeypointsXY, inliers: MatchIndices) -> MatchIndices:
+        width, height = sizes[pair[0]]
+        budget: int | None = options.match_limit.limit_for(width, height)
+        if budget is None or len(inliers) <= budget:
+            return inliers
+        return subsample_matches_by_coverage(keypoints1, inliers, width, height, budget)
+
+    return cap
+
+
+def require_no_geometries(database_path: Path, pairs: Sequence[ImagePair]) -> None:
+    """Refuse pairs that already have a two-view geometry row; read-only.
+
+    None can exist: every run starts from a fresh database, the loop stage verifies only pairs it matched itself, and
+    no matcher writes placeholder rows at the pinned COLMAP. A row would make the verifier's write fail on its unique
+    pair id, so it is reported here, by count, instead.
+
+    Args:
+        database_path: The database.
+        pairs: The pairs about to be verified.
+
+    Raises:
+        ValueError: When any pair already has a row.
+    """
+    existing: int = count_two_view_geometries(database_path, pairs)
+    if existing:
+        raise ValueError(f"{existing} of {len(pairs)} pairs already have a two-view geometry row; verification would collide with them")
+
+
+def verifier_inputs(database: pycolmap.Database) -> tuple[dict[int, pycolmap.Camera], dict[int, tuple[int, int]]]:
+    """Camera and pixel size per image id, read once.
 
     Args:
         database: An open database.
-        image_ids: Images to size.
 
     Returns:
-        `(width, height)` per `image_id`.
+        `(camera per image id, (width, height) per image id)`.
     """
     cameras: dict[int, pycolmap.Camera] = {camera.camera_id: camera for camera in database.read_all_cameras()}
-    images: dict[int, pycolmap.Image] = {image.image_id: image for image in database.read_all_images()}
-    sizes: dict[int, tuple[int, int]] = {}
-    for image_id in image_ids:
-        camera: pycolmap.Camera = cameras[images[image_id].camera_id]
-        sizes[image_id] = (int(camera.width), int(camera.height))
-    return sizes
+    camera_of: dict[int, pycolmap.Camera] = {image.image_id: cameras[image.camera_id] for image in database.read_all_images()}
+    return camera_of, {image_id: (int(camera.width), int(camera.height)) for image_id, camera in camera_of.items()}
 
 
-def cap_verified_matches(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions = DEFAULT_MATCHING_OPTIONS) -> int:
-    """Rewrite every over-full two-view geometry with a spatially spread subset.
-
-    Runs **after** verification, so the survivors are inliers of the same
-    essential-matrix RANSAC the blob verifies with; only the count changes. The
-    geometry's `E`/`F`/`H`, its configuration and its triangulation angle are kept
-    as verification estimated them.
-
-    The cap is per pair, because `MatchLimitPolicy`'s `image_area` kind derives
-    it from the first image's size; in `fixed` mode every pair gets the same one.
+def write_and_count(
+    database: pycolmap.Database, chunk: Sequence[VerifiedPair], stats: dict[ImagePair, PairMatchStats], *, write_matches: bool
+) -> int:
+    """Write one verified chunk and keep only its counts, so the chunk itself can be dropped.
 
     Args:
-        database_path: An existing COLMAP database holding verified geometries.
-        pairs: Pairs to cap, as `(min(image_id), max(image_id))`.
-        options: The matching settings, for `match_limit`.
+        database: An open database.
+        chunk: The verified pairs.
+        stats: Raw and inlier counts per pair, updated in place.
+        write_matches: Also write the raw matches (`colsfm.verification.write_verified`).
 
     Returns:
-        Total inlier matches removed across every pair; 0 when nothing is capped.
+        The inlier matches the spatial cap removed in this chunk.
     """
-    # Nothing is capped, so nothing needs reading: under `--match-cap-mode off` the
-    # keypoint read below is a whole pass over the database for a loop that would
-    # `continue` on every pair.
-    if not options.match_limit.limits:
-        return 0
-    removed: int = 0
-    first_image_ids: list[int] = sorted({pair[0] for pair in pairs})
-    # `read_keypoints_batch` owns the "leading xy columns" rule; spelling it a second time
-    # here is how the two readers drifted to different dtypes in the first place.
-    keypoints_by_image_id: dict[int, Keypoints] = read_keypoints_batch(database_path, first_image_ids)
-    with pycolmap.Database.open(database_path) as database:
-        sizes: dict[int, tuple[int, int]] = _image_sizes(database, first_image_ids)
-        # One transaction for the whole rewrite: SQLite gives an unbatched statement a
-        # transaction of its own, so this used to be one commit per capped pair.
-        with database_transaction(database):
-            for image_id1, image_id2 in pairs:
-                width, height = sizes[image_id1]
-                cap: int | None = options.match_limit.limit_for(width, height)
-                if cap is None:
-                    continue
-                geometry: pycolmap.TwoViewGeometry = database.read_two_view_geometry(image_id1, image_id2)
-                inliers: MatchIndices = np.asarray(geometry.inlier_matches, dtype=np.int64)
-                if len(inliers) <= cap:
-                    continue
-                kept: MatchIndices = subsample_matches_by_coverage(keypoints_by_image_id[image_id1], inliers, width, height, cap)
-                removed += len(inliers) - len(kept)
-                geometry.inlier_matches = kept.astype(np.uint32)
-                database.update_two_view_geometry(image_id1, image_id2, geometry)
-    return removed
+    write_verified(database, chunk, write_matches=write_matches)
+    stats.update({item.pair: PairMatchStats(raw_matches=len(item.matches), inlier_matches=item.num_inliers) for item in chunk})
+    return sum(item.num_capped for item in chunk)
 
 
 def verify_and_report(
     database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions, *, device: ResolvedDevice, started: float, cap: bool
 ) -> tuple[MatchReport, int]:
-    """Verify the raw matches every backend wrote, optionally cap them, and report: the tail all matchers share.
+    """Verify raw matches already in the database, in bounded chunks, and report: the tail of the backends that write
+    their matches themselves (COLMAP's matcher, LightGlue+). FlexGlue streams its chunks to the verifier instead.
 
-    Raw counts are read first, so a pair that fails verification still reports what it matched; then COLMAP's batch
-    `verify_matches` runs over the pair file and, with `cap`, `cap_verified_matches` spreads the inliers.
+    Each chunk's matches and keypoints are read, verified on `options.verify.threads` workers (`colsfm.verification`)
+    and its geometries written in one transaction, so memory holds `options.verify.chunks_in_flight` chunks at most.
 
     Args:
         database_path: The database holding the raw matches.
         pairs: The matched pairs.
-        options: Verification and match-limit settings.
+        options: Verification, chunking and match-limit settings.
         device: What the report names as the matching device.
         started: `time.perf_counter()` at the start of matching, for the report's wall time.
         cap: Apply the post-verification spatial cap (the backends without per-match scores; LightGlue+ runs SSC before
@@ -747,29 +764,34 @@ def verify_and_report(
     Returns:
         The report, and the inlier matches the cap removed (0 without it).
     """
-    raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
-    # `verify_matches` silently skips a pair that already has a geometry row. None can exist: every run starts from a
-    # fresh database, the loop stage verifies only pairs it matched itself, and at the pinned COLMAP neither its matcher
-    # (with `skip_geometric_verification`) nor ours writes placeholder rows. The rows used to be deleted here, and COLMAP
-    # rewrites the whole database (`VACUUM`) when it closes a connection that deleted anything: 3 s per call on MSD
-    # MGO05's 1.8 GB database, for deletes that found nothing. Checked instead, read-only, so a change that brings
-    # placeholders back fails here rather than silently skipping verification.
-    existing: int = count_two_view_geometries(database_path, pairs)
-    if existing:
-        raise ValueError(f"{existing} of {len(pairs)} pairs already have a two-view geometry row; verify_matches would skip them")
-    with tempfile.TemporaryDirectory(prefix="colsfm-pairs-") as scratch:
-        pair_list_path: Path = Path(scratch) / "pairs.txt"
-        write_pair_list(pair_list_path, pairs, database_path)
-        pycolmap.verify_matches(database_path, pair_list_path, verification_options(options))
-    dropped: int = cap_verified_matches(database_path, pairs, options) if cap else 0
-    elapsed_seconds: float = time.perf_counter() - started
-    inliers: dict[ImagePair, int] = pair_inlier_counts(database_path, pairs)
-    report: MatchReport = MatchReport(
-        pair_stats={pair: PairMatchStats(raw_matches=raw[pair], inlier_matches=inliers[pair]) for pair in pairs},
-        device=device,
-        elapsed_seconds=elapsed_seconds,
-    )
-    return report, dropped
+    require_no_geometries(database_path, pairs)
+    stats: dict[ImagePair, PairMatchStats] = {}
+    num_capped: int = 0
+    with pycolmap.Database.open(database_path) as database:
+        cameras, sizes = verifier_inputs(database)
+        with ChunkedVerifier(
+            cameras,
+            verification_options(options),
+            spatial_cap(options, sizes) if cap else None,
+            options.verify,
+        ) as verifier:
+            for first in range(0, len(pairs), options.verify.chunk_pairs):
+                chunk_pairs: Sequence[ImagePair] = pairs[first : first + options.verify.chunk_pairs]
+                keypoints: dict[int, Keypoints] = read_keypoints_batch(database_path, sorted({image_id for pair in chunk_pairs for image_id in pair}))
+                chunk: list[PairToVerify] = [
+                    PairToVerify(
+                        pair=pair,
+                        matches=np.asarray(database.read_matches(*pair), dtype=np.int64).reshape(-1, 2),
+                        keypoints1=keypoints[pair[0]],
+                        keypoints2=keypoints[pair[1]],
+                    )
+                    for pair in chunk_pairs
+                ]
+                for finished in verifier.submit(chunk):
+                    num_capped += write_and_count(database, finished, stats, write_matches=False)
+            for finished in verifier.finish():
+                num_capped += write_and_count(database, finished, stats, write_matches=False)
+    return MatchReport(pair_stats=stats, device=device, elapsed_seconds=time.perf_counter() - started), num_capped
 
 
 def match_pairs(
