@@ -13,7 +13,7 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
-pub use panorama::PanoramaRig;
+pub use panorama::{PanoramaRig, RollingShutter};
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -66,6 +66,8 @@ pub struct Vio<S: Scalar = f32> {
     overlap_timings: lag::OverlapTimings,
     /// The tile cut when the rig is one full panorama; see [`PanoramaRig`].
     panorama: Option<PanoramaRig>,
+    /// The rolling-shutter correction of a two-lens rig's keypoints; see [`RollingShutter`].
+    rolling_shutter: Option<RollingShutter>,
     /// The inertial bootstrap, when `config.vio_bootstrap` selects it.
     bootstrap: bootstrap::BootstrapPhase,
 }
@@ -123,11 +125,12 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
-        let (panorama, calibration) = if config.panorama_dual_fisheye {
-            let (rig, tiles) = PanoramaRig::expand_dual_fisheye(&config, calibration)?;
-            (Some(rig), tiles)
+        let (panorama, calibration, rolling_shutter) = if config.panorama_dual_fisheye {
+            let (rig, tiles, rolling_shutter) = PanoramaRig::expand_dual_fisheye(&config, calibration)?;
+            (Some(rig), tiles, rolling_shutter)
         } else {
-            PanoramaRig::expand(calibration)?
+            let (rig, calibration) = PanoramaRig::expand(calibration)?;
+            (rig, calibration, None)
         };
         let camera_count: usize = calibration.t_i_c.len();
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
@@ -159,6 +162,7 @@ impl<S: Scalar> Vio<S> {
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
             panorama,
+            rolling_shutter,
             bootstrap,
         })
     }
@@ -171,6 +175,12 @@ impl<S: Scalar> Vio<S> {
     /// The tile cut, when the rig is one full panorama.
     pub fn panorama(&self) -> Option<&PanoramaRig> {
         self.panorama.as_ref()
+    }
+
+    /// The rolling-shutter correction, when the rig has one: its frame counts say how many frames were corrected
+    /// and how many stayed raw because the gyro did not cover their time.
+    pub fn rolling_shutter(&self) -> Option<&RollingShutter> {
+        self.rolling_shutter.as_ref()
     }
 
     /// The stitched panorama of the last ingested dual-fisheye frameset, for
@@ -304,8 +314,8 @@ impl<S: Scalar> Vio<S> {
         self.frontend_imu.push_back(sample);
         self.bootstrap
             .push_imu(&mut self.estimator, sample, &self.calib_f32);
-        if let Some(rig) = &mut self.panorama {
-            rig.push_gyro(t_ns, gyro);
+        if let Some(rolling_shutter) = &mut self.rolling_shutter {
+            rolling_shutter.push_gyro(t_ns, calibrated(&self.calib_f32, &sample).1);
         }
         Ok(())
     }
@@ -498,8 +508,8 @@ impl<S: Scalar> Vio<S> {
                 slot.insert(*id, warp.translation.into());
             }
         }
-        if let Some(rig) = &self.panorama {
-            rig.correct_rolling_shutter(
+        if let Some(rolling_shutter) = &mut self.rolling_shutter {
+            rolling_shutter.correct(
                 &mut observations,
                 self.latest_state.as_ref().map(|state| state.bias_gyro),
             );

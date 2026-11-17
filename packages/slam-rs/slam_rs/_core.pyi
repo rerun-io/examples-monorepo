@@ -333,6 +333,10 @@ class Vio:
     def panorama_ingest_ns(self) -> int | None:
         """Wall time of the last dual-fisheye host ingest in ns: the CPU remap of both lenses, or on the GPU lane the
         lens byte copy (the stitch runs on the device); None for any other rig."""
+    @property
+    def rolling_shutter_frames(self) -> tuple[int, int] | None:
+        """``(corrected, no_coverage)``: frames the rolling-shutter correction moved, and frames left raw because the gyro
+        did not cover their time; None when the rig has no rolling-shutter correction."""
     def panorama_image(self) -> UInt8[ndarray, "h w"] | None:
         """The stitched 1920x960 panorama of the last dual-fisheye frameset (``config.panorama_dual_fisheye``), else None.
 

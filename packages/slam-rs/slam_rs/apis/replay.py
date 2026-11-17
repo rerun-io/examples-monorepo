@@ -291,6 +291,8 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         print(stage.summary())
     if isinstance(stage, VioStage) and (line := BootstrapLog.summary(stage.lockstep.vio, int(feed.frame_t_ns[0]))) is not None:
         print(line)
+    if isinstance(stage, VioStage) and (shutter := stage.lockstep.vio.rolling_shutter_frames) is not None:
+        print(f"rolling shutter: {shutter[0]} frames corrected, {shutter[1]} left raw (no gyro coverage at the frame time)")
     if isinstance(stage, VioStage) and stage.keypoints:
         print(
             f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "

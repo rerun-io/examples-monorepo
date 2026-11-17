@@ -16,11 +16,11 @@ mod dual_fisheye;
 use super::{ImageView, VioError};
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
-use crate::estimator::FlowObservations;
 use crate::frontend::flow::TrackKillMask;
 use crate::frontend::input::{FrameStorage, PackedImages};
 use crate::lie::{Se3, So3};
 use dual_fisheye::DualFisheyeIngest;
+pub use dual_fisheye::RollingShutter;
 use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use nalgebra::Vector3;
 use std::sync::Arc;
@@ -169,7 +169,7 @@ impl PanoramaRig {
     pub fn expand_dual_fisheye(
         config: &VioConfig,
         calibration: Calibration<f64>,
-    ) -> Result<(Self, Calibration<f64>), VioError> {
+    ) -> Result<(Self, Calibration<f64>, Option<RollingShutter>), VioError> {
         let expanded = dual_fisheye::expand(config, calibration)?;
         let geometry = expanded.geometry;
         let (tile_width, height) = (geometry.width(), geometry.height);
@@ -184,6 +184,7 @@ impl PanoramaRig {
                 dual: Some(Box::new(expanded.ingest)),
             },
             expanded.calibration,
+            expanded.rolling_shutter,
         ))
     }
 
@@ -436,25 +437,6 @@ impl PanoramaRig {
             })
         })??;
         Ok(Some(panorama.map_err(to_vio)?))
-    }
-
-    /// Keep a raw gyro sample (IMU frame) for the rolling-shutter correction.
-    pub(super) fn push_gyro(&mut self, t_ns: i64, gyro: [f64; 3]) {
-        if let Some(dual) = &mut self.dual {
-            dual.push_gyro(t_ns, gyro);
-        }
-    }
-
-    /// Remove the rolling shutter from the estimator's copy of the keypoints
-    /// (dual fisheye with `config.panorama_rolling_shutter`); a no-op otherwise.
-    pub(super) fn correct_rolling_shutter(
-        &self,
-        observations: &mut FlowObservations,
-        gyro_bias: Option<Vector3<f64>>,
-    ) {
-        if let Some(dual) = &self.dual {
-            dual.correct_rolling_shutter(observations, gyro_bias);
-        }
     }
 
     /// Wall time of the last dual-fisheye host ingest, ns: the CPU remap of

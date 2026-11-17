@@ -18,7 +18,7 @@ use kornia_image::ImageSize;
 use kornia_staging_3d::camera::{CameraModel, CameraModelKind, Equirectangular};
 use kornia_staging_imgproc::panorama::{LensStitch, RemapTable, TileGeometry};
 use nalgebra::Vector3;
-use std::collections::VecDeque;
+use kornia_staging_slam::init::inertial::{ImuSample, sample_at};
 use std::sync::Arc;
 
 /// Pixels around an invalid table pixel where a tracked keypoint is dropped:
@@ -28,8 +28,6 @@ pub const KILL_RADIUS_PX: usize = 4;
 /// Columns of one hemisphere tile's 180 deg, and its rows (pole to pole): the tiles of a 1920x960 panorama.
 const HEMISPHERE_PX: usize = 960;
 
-/// How long gyro samples are kept for the rolling-shutter rate, nanoseconds.
-const GYRO_KEEP_NS: i64 = 200_000_000;
 
 /// The stitch of two back-to-back cameras into the two 960-row hemisphere tiles of
 /// the panorama frame `P` with `margin_px` overlap columns: the one stitch the lane
@@ -71,6 +69,7 @@ pub fn stitch(
 /// The tile cameras, extrinsics and tables of one dual-fisheye rig.
 pub(super) struct Expanded {
     pub ingest: DualFisheyeIngest,
+    pub rolling_shutter: Option<RollingShutter>,
     pub calibration: Calibration<f64>,
     pub geometry: TileGeometry,
 }
@@ -150,21 +149,24 @@ pub(super) fn expand(
             imu_from_pano * Se3::new(turn, origin)
         })
         .collect();
-    let ingest: DualFisheyeIngest = DualFisheyeIngest {
-        tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
-        stitch,
-        readout_s,
-        rolling_shutter: config.panorama_rolling_shutter,
-        gyro: VecDeque::new(),
-        tile_camera: model,
-        last_ns: 0,
-    };
+    let rolling_shutter: Option<RollingShutter> =
+        (config.panorama_rolling_shutter && readout_s != 0.0).then(|| RollingShutter {
+            stitch: Arc::clone(&stitch),
+            readout_s,
+            tile_camera: model,
+            tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
+            gyro: Vec::new(),
+            corrected: 0,
+            no_coverage: 0,
+        });
+    let ingest: DualFisheyeIngest = DualFisheyeIngest { stitch, last_ns: 0 };
     let mut tiles: Calibration<f64> = calibration;
     tiles.intrinsics = vec![BasaltCamera::Equirectangular(tile); 2];
     tiles.t_i_c = t_i_c;
     tiles.resolution = vec![[geometry.width() as u32, geometry.height as u32]; 2];
     Ok(Expanded {
         ingest,
+        rolling_shutter,
         calibration: tiles,
         geometry,
     })
@@ -174,14 +176,6 @@ pub(super) fn expand(
 pub(super) struct DualFisheyeIngest {
     /// The two tables, shared with the frame storage that stitches through them.
     stitch: Arc<LensStitch>,
-    readout_s: f64,
-    rolling_shutter: bool,
-    /// Recent raw gyro samples (rig = IMU frame), oldest first.
-    gyro: VecDeque<(i64, Vector3<f64>)>,
-    /// Both tiles share one camera model; only their extrinsics differ.
-    tile_camera: Equirectangular<f64>,
-    /// `R_tile_imu` per tile.
-    tile_from_imu: [So3<f64>; 2],
     /// Wall time of the last host-side ingest ([`super::PanoramaRig::ingest`]), ns.
     last_ns: u64,
 }
@@ -190,8 +184,6 @@ impl std::fmt::Debug for DualFisheyeIngest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DualFisheyeIngest")
             .field("lens_size", &self.stitch.lens_size())
-            .field("readout_s", &self.readout_s)
-            .field("rolling_shutter", &self.rolling_shutter)
             .finish_non_exhaustive()
     }
 }
@@ -256,64 +248,76 @@ impl DualFisheyeIngest {
             killed,
         })
     }
+}
 
-    /// Keep a raw gyro sample for the rolling-shutter rate.
-    pub fn push_gyro(&mut self, t_ns: i64, gyro: [f64; 3]) {
-        self.gyro.push_back((t_ns, Vector3::from(gyro)));
-        while self
-            .gyro
-            .front()
-            .is_some_and(|&(t, _)| t < t_ns - GYRO_KEEP_NS)
-        {
-            self.gyro.pop_front();
-        }
+/// The rolling-shutter correction of a two-lens rig's tile keypoints (`config.panorama_rolling_shutter` with a
+/// non-zero readout): the rate of a frame is the calibrated gyro interpolated at the frame time, less the
+/// estimator's bias. The gyro buffer is trimmed by the frame times consumed, so how the IMU is batched does not
+/// change a correction.
+pub struct RollingShutter {
+    /// The tables whose fixed-point entries give each tile pixel's lens row.
+    stitch: Arc<LensStitch>,
+    readout_s: f64,
+    /// Both tiles share one camera model; only their extrinsics differ.
+    tile_camera: Equirectangular<f64>,
+    /// `R_tile_imu` per tile.
+    tile_from_imu: [So3<f64>; 2],
+    /// Calibrated gyro samples (IMU frame), oldest first, from the last one at or before the last corrected frame.
+    gyro: Vec<ImuSample>,
+    corrected: usize,
+    no_coverage: usize,
+}
+
+impl std::fmt::Debug for RollingShutter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RollingShutter")
+            .field("readout_s", &self.readout_s)
+            .field("corrected", &self.corrected)
+            .field("no_coverage", &self.no_coverage)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RollingShutter {
+    /// Keep one calibrated gyro sample (IMU frame).
+    pub fn push_gyro(&mut self, t_ns: i64, gyro: Vector3<f64>) {
+        self.gyro.push(ImuSample {
+            t_ns,
+            gyro,
+            accel: Vector3::zeros(),
+        });
     }
 
-    /// The gyro rate at frame time `t_ns` (IMU frame): the mean of the samples
-    /// inside the readout window around it, else the nearest within 20 ms.
-    fn gyro_rate(&self, t_ns: i64) -> Option<Vector3<f64>> {
-        let half: i64 = (0.5 * self.readout_s.abs() * 1e9) as i64;
-        let inside: Vec<Vector3<f64>> = self
-            .gyro
-            .iter()
-            .filter(|&&(t, _)| (t - t_ns).abs() <= half)
-            .map(|&(_, rate)| rate)
-            .collect();
-        if !inside.is_empty() {
-            return Some(inside.iter().sum::<Vector3<f64>>() / inside.len() as f64);
-        }
-        self.gyro
-            .iter()
-            .min_by_key(|&&(t, _)| (t - t_ns).abs())
-            .filter(|&&(t, _)| (t - t_ns).abs() <= 20_000_000)
-            .map(|&(_, rate)| rate)
+    /// Frames corrected so far, and frames left raw because the gyro did not cover their time.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.corrected, self.no_coverage)
     }
 
-    /// The estimator's copy of one frameset's keypoints with the rolling shutter
-    /// removed, when `config.panorama_rolling_shutter` is on and a gyro rate
-    /// exists at the frame time; otherwise unchanged. `gyro_bias` is the
-    /// estimator's latest bias (IMU frame), subtracted when known. A keypoint
-    /// whose lens row is unknown keeps its raw position.
-    pub fn correct_rolling_shutter(
-        &self,
-        observations: &mut FlowObservations,
-        gyro_bias: Option<Vector3<f64>>,
-    ) {
-        if !self.rolling_shutter {
+    /// The estimator's copy of one frameset's keypoints with the rolling shutter removed. `gyro_bias` is the
+    /// estimator's latest bias (IMU frame), subtracted when known. A frame the gyro does not cover on both sides
+    /// stays raw and is counted ([`Self::counts`]); a keypoint whose lens row is unknown keeps its raw position.
+    pub fn correct(&mut self, observations: &mut FlowObservations, gyro_bias: Option<Vector3<f64>>) {
+        let t_ns: i64 = observations.t_ns;
+        let before: usize = self.gyro.partition_point(|sample| sample.t_ns <= t_ns);
+        if before == 0 || self.gyro.last().is_none_or(|sample| sample.t_ns < t_ns) {
+            self.no_coverage += 1;
             return;
         }
-        let Some(rate) = self.gyro_rate(observations.t_ns) else {
-            return;
-        };
+        let (rate, _) = sample_at(&self.gyro, t_ns);
+        // Frames arrive in time order: what precedes this frame's left neighbour is never read again.
+        self.gyro.drain(..before - 1);
+        self.corrected += 1;
         let rate: Vector3<f64> = rate - gyro_bias.unwrap_or_else(Vector3::zeros);
+        let lens_height: usize = self.stitch.lens_size().height;
         for (tile, keypoints) in observations.cameras.iter_mut().enumerate() {
             let omega: Vector3<f64> = self.tile_from_imu[tile] * rate;
+            let table: &RemapTable = &self.stitch.tables()[tile];
             for pixel in keypoints.values_mut() {
                 if let Some([u, v]) = rolling_shutter_correct(
                     [f64::from(pixel.x), f64::from(pixel.y)],
                     &self.tile_camera,
-                    self.table(tile),
-                    self.lens_size().height,
+                    table,
+                    lens_height,
                     self.readout_s,
                     &omega,
                 ) {

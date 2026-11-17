@@ -112,7 +112,15 @@ fn config() -> VioConfig {
 }
 
 fn rig() -> (PanoramaRig, Calibration<f64>) {
-    PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses())).unwrap()
+    let (rig, tiles, _) =
+        PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses())).unwrap();
+    (rig, tiles)
+}
+
+fn rolling() -> (RollingShutter, PanoramaRig, Calibration<f64>) {
+    let (rig, tiles, rolling_shutter) =
+        PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses())).unwrap();
+    (rolling_shutter.unwrap(), rig, tiles)
 }
 
 #[test]
@@ -537,10 +545,8 @@ fn the_rolling_shutter_correction_recovers_the_global_shutter_pixel_at_one_rad_p
     }
 }
 
-#[test]
-fn the_rig_rotates_the_gyro_into_each_tile_and_skips_without_a_rate() {
-    let (mut rig, tiles) = rig();
-    let mut observations = FlowObservations::new(1_000_000_000, 2);
+fn two_keypoints(t_ns: i64) -> FlowObservations {
+    let mut observations = FlowObservations::new(t_ns, 2);
     observations.cameras[0].insert(
         crate::types::KeypointId(1),
         nalgebra::Vector2::new(300.0, 200.0),
@@ -549,35 +555,92 @@ fn the_rig_rotates_the_gyro_into_each_tile_and_skips_without_a_rate() {
         crate::types::KeypointId(2),
         nalgebra::Vector2::new(700.0, 800.0),
     );
+    observations
+}
+
+/// The rate of a frame is the gyro interpolated at the frame time, less the bias: two samples 1 ms apart
+/// straddle the frame, and the correction is the one the interpolated rate gives. A frame the gyro does not
+/// cover on both sides stays raw and is counted.
+#[test]
+fn the_rate_is_the_interpolated_gyro_at_the_frame_time_less_the_bias() {
+    let (mut rolling, rig, tiles) = rolling();
+    let t_ns: i64 = 1_000_000_000;
+    let mut observations = two_keypoints(t_ns);
     let raw = observations.clone();
-    rig.correct_rolling_shutter(&mut observations, None);
+    rolling.correct(&mut observations, None);
     assert_eq!(observations, raw, "no gyro sample, no correction");
-    let omega_imu = Vector3::new(0.4, -0.8, 0.3);
-    for step in -20..=20 {
-        rig.push_gyro(1_000_000_000 + step * 1_000_000, omega_imu.into());
-    }
-    rig.correct_rolling_shutter(&mut observations, None);
-    let dual = rig.dual.as_deref().unwrap();
+    assert_eq!(rolling.counts(), (0, 1));
+    let (a, b) = (Vector3::new(0.4, -0.8, 0.3), Vector3::new(1.0, 0.2, -0.5));
+    rolling.push_gyro(t_ns - 250_000, a);
+    rolling.correct(&mut observations, None);
+    assert_eq!(observations, raw, "a gyro that stops before the frame is no coverage");
+    assert_eq!(rolling.counts(), (0, 2));
+    rolling.push_gyro(t_ns + 750_000, b);
+    let bias = Vector3::new(0.01, -0.02, 0.03);
+    rolling.correct(&mut observations, Some(bias));
+    assert_eq!(rolling.counts(), (1, 2));
+    let rate = a * 0.75 + b * 0.25 - bias;
     for tile in 0..2 {
         let (_, raw_pixel) = raw.cameras[tile].iter().next().unwrap();
-        let omega_tile = tiles.t_i_c[tile].rotation.inverse() * omega_imu;
         let expected = rolling_shutter_correct(
             [f64::from(raw_pixel.x), f64::from(raw_pixel.y)],
             &tile_model(&tiles, tile),
-            dual.table(tile),
+            rig.tile_lut(tile).unwrap(),
             1920,
             READOUT_S,
-            &omega_tile,
+            &(tiles.t_i_c[tile].rotation.inverse() * rate),
         )
         .unwrap();
         let (_, got) = observations.cameras[tile].iter().next().unwrap();
         assert!(
             (f64::from(got.x) - expected[0]).abs() < 1e-3
-                && (f64::from(got.y) - expected[1]).abs() < 1e-3
+                && (f64::from(got.y) - expected[1]).abs() < 1e-3,
+            "tile {tile}: {got:?} vs {expected:?}"
         );
-        assert!(
-            (got - raw_pixel).norm() > 0.1,
-            "the correction moved tile {tile}'s keypoint"
-        );
+        assert!((got - raw_pixel).norm() > 0.1, "tile {tile} moved");
     }
+}
+
+/// Per-frame pushes, window-sized pushes and one push of the whole window give identical corrected
+/// observations: the buffer is trimmed by the frames consumed, not by the newest sample.
+#[test]
+fn the_correction_does_not_depend_on_how_the_imu_is_batched() {
+    let frame_ns: i64 = 33_000_000;
+    let frames: Vec<i64> = (1..=40).map(|k| k * frame_ns).collect();
+    let samples: Vec<(i64, Vector3<f64>)> = (0..=1_400)
+        .map(|k| {
+            let t = k * 1_000_000;
+            let s = t as f64 * 1e-9;
+            (t, Vector3::new((3.0 * s).sin(), 0.5 * (5.0 * s).cos(), 0.2 * s))
+        })
+        .collect();
+    // When each frame is corrected, all samples up to this time have been pushed.
+    let schedules: [&dyn Fn(i64) -> i64; 3] = [
+        &|t| t + 1_000_000,
+        &|t| (t / 300_000_000 + 1) * 300_000_000,
+        &|_| i64::MAX,
+    ];
+    let runs: Vec<Vec<FlowObservations>> = schedules
+        .iter()
+        .map(|pushed_until| {
+            let (mut rolling, _, _) = rolling();
+            let mut next = 0;
+            frames
+                .iter()
+                .map(|&t| {
+                    while next < samples.len() && samples[next].0 <= pushed_until(t) {
+                        rolling.push_gyro(samples[next].0, samples[next].1);
+                        next += 1;
+                    }
+                    let mut observations = two_keypoints(t);
+                    rolling.correct(&mut observations, None);
+                    assert_eq!(rolling.counts().1, 0, "frame {t} is covered");
+                    observations
+                })
+                .collect()
+        })
+        .collect();
+    assert!(runs[0] != frames.iter().map(|&t| two_keypoints(t)).collect::<Vec<_>>());
+    assert_eq!(runs[0], runs[1], "window-sized pushes");
+    assert_eq!(runs[0], runs[2], "one whole-window push");
 }

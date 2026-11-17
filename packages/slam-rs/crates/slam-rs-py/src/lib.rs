@@ -165,6 +165,14 @@ impl Vio {
         })
     }
 
+    /// `(corrected, no_coverage)`: frames whose keypoints the rolling-shutter
+    /// correction moved, and frames left raw because the gyro did not cover their
+    /// time; `None` when the rig has no rolling-shutter correction.
+    #[getter]
+    fn rolling_shutter_frames(&self) -> Option<(usize, usize)> {
+        self.inner.rolling_shutter().map(slam_rs::RollingShutter::counts)
+    }
+
     /// The stitched 1920x960 panorama of the last dual-fisheye frameset
     /// (`uint8[h, w]`, tile centres side by side), `None` for any other rig.
     /// On the GPU lane it is remapped on the host from the lens bytes, only when asked.
