@@ -2611,6 +2611,7 @@ dependencies = [
  "kornia-staging-slam",
  "log",
  "nalgebra",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

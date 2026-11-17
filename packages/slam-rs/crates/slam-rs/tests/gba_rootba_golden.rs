@@ -223,7 +223,7 @@ fn golden(seq: &str) {
 
     let config = VioConfig::default();
     let input = map_problem(&map, &edges, t_i_c, &config);
-    let (solved, report) = solve(&input, &rig, &config).unwrap();
+    let (solved, report) = solve(&input, &rig, &config, slam_rs::Backend::Cpu).unwrap();
     apply(&mut map, &input, &solved, t_i_c);
     let ours = report.final_cost.error;
     let (bal_f32, bal_f64) = (

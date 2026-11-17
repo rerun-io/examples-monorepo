@@ -18,31 +18,84 @@ use api::config::BackendMode;
 use fixture::*;
 
 fn pipeline_with_map(mode: Option<BackendMode>) -> api::Vio<f32> {
+    pipeline_on(mode, api::Backend::Cpu)
+}
+
+/// The CPU frontend, with the global BA's PCG on `gba`.
+fn pipeline_on(mode: Option<BackendMode>, gba: api::Backend) -> api::Vio<f32> {
     let mut config = config(false);
     config.backend_enabled = mode.is_some();
     config.backend_mode = mode.unwrap_or_default();
     // Keyframes leave the window, so the map holds more than it.
     config.vio_new_kf_keypoints_thresh = 0.9;
     config.vio_max_kfs = 3;
-    api::Vio::new(
+    api::Vio::with_backends(
         config,
         calibration(),
         api::frontend::flow::FrontendOptions {
             threads: 2,
             ..Default::default()
         },
+        api::Backends {
+            frontend: api::Backend::Cpu,
+            gba,
+        },
     )
     .unwrap()
 }
 
-#[test]
-fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
-    let frames: Vec<[Vec<u8>; 4]> = (0..FRAMES)
+fn frames() -> Vec<[Vec<u8>; 4]> {
+    (0..FRAMES)
         .map(|index| {
             let t_s = index as f64 * FRAME_NS as f64 / 1e9;
             std::array::from_fn(|camera| render(t_s, camera))
         })
-        .collect();
+        .collect()
+}
+
+/// The GBA records its lane; a build without the GPU lane refuses it by name
+/// instead of running the CPU.
+#[test]
+fn the_gba_records_its_lane() {
+    let frames = frames();
+    let mut cpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Cpu);
+    run(&frames, &mut cpu);
+    let result = cpu.finish_map(true).unwrap().unwrap();
+    assert_eq!(result.gba.unwrap().lane, api::Backend::Cpu);
+    #[cfg(not(feature = "gpu-wgpu"))]
+    {
+        let mut gpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Gpu);
+        run(&frames, &mut gpu);
+        let error = gpu.finish_map(true).unwrap_err().to_string();
+        assert!(error.contains("GPU lane cannot start"), "{error}");
+    }
+}
+
+/// The device lane lands in the CPU lane's band on the same map (DESIGN §7.4).
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+fn the_gpu_lane_lands_in_the_cpu_band() {
+    let frames = frames();
+    let mut cpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Cpu);
+    let mut gpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Gpu);
+    run(&frames, &mut cpu);
+    run(&frames, &mut gpu);
+    let (cpu, gpu) = (
+        cpu.finish_map(true).unwrap().unwrap(),
+        gpu.finish_map(true).unwrap().unwrap(),
+    );
+    let (c, g) = (cpu.gba.unwrap(), gpu.gba.unwrap());
+    assert_eq!(g.lane, api::Backend::Gpu);
+    let (cc, gc) = (c.report.final_cost.error, g.report.final_cost.error);
+    assert!((gc - cc).abs() <= 1e-3 * cc.max(1e-9), "{gc} vs {cc}");
+    for (a, b) in cpu.keyframe_poses.iter().zip(&gpu.keyframe_poses) {
+        assert!((a.translation - b.translation).norm() < 1e-3);
+    }
+}
+
+#[test]
+fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
+    let frames = frames();
     let mut off = pipeline_with_map(None);
     let mut on = pipeline_with_map(Some(BackendMode::Offline));
     let mut realtime = pipeline_with_map(Some(BackendMode::Realtime));

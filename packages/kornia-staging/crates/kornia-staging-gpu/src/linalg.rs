@@ -325,7 +325,10 @@ pub fn device_matvec<R: Runtime>(
 /// # Panics
 /// If the lengths differ or are not a multiple of six.
 pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
-    assert!(a.len() == b.len() && a.len() % 6 == 0, "six-entry groups");
+    assert!(
+        a.len() == b.len() && a.len().is_multiple_of(6),
+        "six-entry groups"
+    );
     let mut partial = [0.0f32; PCG_UNITS];
     for (k, (ga, gb)) in a.chunks_exact(6).zip(b.chunks_exact(6)).enumerate() {
         for (x, y) in ga.iter().zip(gb) {
@@ -484,7 +487,7 @@ impl<R: Runtime> GpuPcg<R> {
                 for it in first..=last {
                     kernels::launch_pcg_precondition(client, &buffers, it);
                     device.matvec(client, buffers.p, buffers.q, buffers.ustate);
-                    let replace = it as usize % GBA_CG_CHECK_EVERY == 0;
+                    let replace = (it as usize).is_multiple_of(GBA_CG_CHECK_EVERY);
                     kernels::launch_pcg_step(client, &buffers, it, replace, max, eta);
                     if replace {
                         device.matvec(client, buffers.x, buffers.q, buffers.ustate);
@@ -655,7 +658,10 @@ pub fn probe_pcg<R: Runtime>(client: &ComputeClient<R>) -> Result<(), GpuError> 
     let wrong = host
         .iter()
         .zip(&device)
-        .filter(|(h, d)| !((*h - *d).abs() <= PROBE_TOLERANCE * scale))
+        .filter(|(h, d)| {
+            let error = (*h - *d).abs();
+            error.is_nan() || error > PROBE_TOLERANCE * scale
+        })
         .count();
     if wrong == 0 && scale > 0.0 {
         Ok(())

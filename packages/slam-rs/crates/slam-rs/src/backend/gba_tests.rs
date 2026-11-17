@@ -449,7 +449,13 @@ fn the_result_is_applied_as_a_delta_on_the_current_pose() {
     let config = VioConfig::default();
     let edges = chain_edges(6);
     let input = map_problem(backend.map(), &edges, &backend.t_i_c, &config);
-    let (solved, _) = solve(&input, backend.gba_rig.as_ref().unwrap(), &config).unwrap();
+    let (solved, _) = solve(
+        &input,
+        backend.gba_rig.as_ref().unwrap(),
+        &config,
+        crate::Backend::Cpu,
+    )
+    .unwrap();
     // The map moved keyframe 1 (a host) after the problem was built.
     let moved = Se3::new(
         So3::exp(&Vector3::new(0.0, 0.01, 0.0)),

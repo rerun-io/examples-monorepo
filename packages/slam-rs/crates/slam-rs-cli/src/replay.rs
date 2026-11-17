@@ -4,7 +4,9 @@ use crate::clip::ReplayInput;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::replay::{feed_imu_through, percentile};
-use slam_rs::{Backend, BackendRequest, ImageView, Vio, VioResult, select_backend};
+use slam_rs::{
+    Backend, BackendRequest, Backends, GbaRequest, ImageView, Vio, VioResult, select_backend,
+};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -25,7 +27,7 @@ struct ReplayCounters {
 pub(super) fn replay(
     input: ReplayInput,
     config_path: &Path,
-    request: BackendRequest,
+    (request, gba_request): (BackendRequest, GbaRequest),
     threads: usize,
     load_s: f64,
     out: &Path,
@@ -53,15 +55,20 @@ pub(super) fn replay(
     let framesets = clip.framesets;
     let frameset_bytes: usize = clip.resolution_wh.iter().map(|&(w, h)| w * h).sum();
 
-    let backend: Backend =
-        select_backend(request).map_err(|error| format!("--backend gpu: {error}"))?;
-    eprintln!("slam-rs: frontend backend {}", backend.name());
+    let backends: Backends = select_backend(request, gba_request)
+        .map_err(|error| format!("--backend/--ba-backend gpu: {error}"))?;
+    let backend: Backend = backends.frontend;
+    eprintln!(
+        "slam-rs: frontend backend {}, GBA lane {}",
+        backend.name(),
+        backends.gba.name()
+    );
     let options = FrontendOptions {
         threads,
         ..FrontendOptions::default()
     };
     let setup_started: Instant = Instant::now();
-    let mut vio: Vio<f32> = Vio::with_backend(config, calibration, options, backend)
+    let mut vio: Vio<f32> = Vio::with_backends(config, calibration, options, backends)
         .map_err(|error| format!("Vio: {error}"))?;
     let setup_s: f64 = setup_started.elapsed().as_secs_f64();
 
@@ -157,6 +164,7 @@ pub(super) fn replay(
     let report = serde_json::json!({
         "segment_id": clip.segment_id,
         "lane": backend.name(),
+        "gba_lane": backends.gba.name(),
         "threads": threads,
         "framesets": framesets,
         "tracked": tracked,

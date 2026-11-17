@@ -40,6 +40,9 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
+# tests/gba_lanes.rs reads RootSLAM's exported GBA problems (Basalt calibrations).
+kornia-staging-3d = { workspace = true, features = ["serde"] }
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 approx.workspace = true

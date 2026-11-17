@@ -152,6 +152,9 @@ pub struct GbaRun {
     pub solve_s: f64,
     /// Wall seconds: problem back into the map.
     pub apply_s: f64,
+    /// Where the PCG ran (the CPU when `backend.gba_use_double`: the device
+    /// lane is f32 only).
+    pub lane: crate::Backend,
     /// Worker threads used.
     pub threads: usize,
     /// Whether it ran in f64.
@@ -185,6 +188,10 @@ pub enum GbaDriverError {
     /// The worker pool could not start.
     #[error("could not start the global BA's threads: {0}")]
     Threads(String),
+    /// The GPU lane was chosen and cannot start (a lane that fails while
+    /// solving is [`GbaError::Lane`]).
+    #[error("the global BA's GPU lane cannot start: {0}")]
+    GpuLane(String),
 }
 
 /// A world point as the window stores it: stereographic direction and
@@ -352,6 +359,7 @@ pub fn solve(
     input: &GbaInput,
     rig: &GbaRig,
     config: &VioConfig,
+    lane: crate::Backend,
 ) -> Result<(GbaProblem<f64>, GbaReport), GbaDriverError> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.gba_threads.get())
@@ -378,11 +386,47 @@ pub fn solve(
             .collect::<Option<_>>()
             .ok_or(GbaDriverError::NoRig)?;
         let (mut centred, centroid) = input.problem.centred::<f32>();
-        let report = solve_global(&mut centred, &cameras, &options, Some(&pool))?;
+        let report = match lane {
+            crate::Backend::Cpu => solve_global(&mut centred, &cameras, &options, Some(&pool))?,
+            crate::Backend::Gpu => solve_on_device(&mut centred, &cameras, &options, &pool)?,
+        };
         problem.uncentre_from(&centred, &centroid);
         report
     };
     Ok((problem, report))
+}
+
+/// The f32 solve with the PCG on the device (`kornia_staging_gpu::linalg`).
+#[cfg(feature = "gpu-wgpu")]
+fn solve_on_device(
+    problem: &mut GbaProblem<f32>,
+    cameras: &[GbaRigCamera<f32, CameraModelKind<f32>>],
+    options: &GbaOptions,
+    pool: &rayon::ThreadPool,
+) -> Result<GbaReport, GbaDriverError> {
+    let client = kornia_staging_gpu::runtime::gpu_client()
+        .map_err(|error| GbaDriverError::GpuLane(error.to_string()))?;
+    let mut device = kornia_staging_gpu::linalg::GpuPcg::new(client);
+    Ok(kornia_staging_slam::sqrt_ba::solve_global_with(
+        problem,
+        cameras,
+        options,
+        Some(pool),
+        Some(&mut device),
+    )?)
+}
+
+/// A build without the GPU lane: `select_backend` never chooses it.
+#[cfg(not(feature = "gpu-wgpu"))]
+fn solve_on_device(
+    _: &mut GbaProblem<f32>,
+    _: &[GbaRigCamera<f32, CameraModelKind<f32>>],
+    _: &GbaOptions,
+    _: &rayon::ThreadPool,
+) -> Result<GbaReport, GbaDriverError> {
+    Err(GbaDriverError::GpuLane(
+        crate::VioError::GpuUnavailable.to_string(),
+    ))
 }
 
 /// Take the free gauge out of a solution: the rigid transform `G` that best
@@ -473,6 +517,13 @@ pub fn apply(
 }
 
 impl MapBackend {
+    /// Where the global BA's PCG runs (CPU by default).
+    #[must_use]
+    pub fn with_gba_lane(mut self, lane: crate::Backend) -> Self {
+        self.gba_lane = lane;
+        self
+    }
+
     /// The rig the global BA projects through.
     #[must_use]
     pub fn with_gba_rig(mut self, rig: Option<GbaRig>) -> Self {
@@ -511,7 +562,7 @@ impl MapBackend {
         let input: GbaInput = map_problem(&self.map, &edges, &self.t_i_c, config);
         let build_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let (mut solved, report) = solve(&input, rig, config)?;
+        let (mut solved, report) = solve(&input, rig, config, self.gba_lane)?;
         let gauge: Se3<f64> = remove_gauge(&input.problem, &mut solved);
         let solve_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
@@ -530,6 +581,11 @@ impl MapBackend {
                 apply_s,
                 threads: config.gba_threads.get(),
                 use_double: config.gba_use_double,
+                lane: if config.gba_use_double {
+                    crate::Backend::Cpu
+                } else {
+                    self.gba_lane
+                },
             }),
         })
     }

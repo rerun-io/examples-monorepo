@@ -11,7 +11,10 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
-pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
+pub use select::{
+    BackendRequest, Backends, GbaRequest, device_probes_run, gpu_probe, probe_back_end,
+    select_backend,
+};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
@@ -120,6 +123,31 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
+        Self::with_backends(
+            config,
+            calibration,
+            options,
+            Backends {
+                frontend: backend,
+                gba: Backend::Cpu,
+            },
+        )
+    }
+
+    /// [`Self::with_backend`] with the global BA's PCG lane as well
+    /// ([`select_backend`] resolves both; [`Self::with_backend`] keeps the GBA on
+    /// the CPU).
+    ///
+    /// # Errors
+    /// As [`Self::with_backend`].
+    #[cfg_attr(not(feature = "backend"), allow(unused_variables))]
+    pub fn with_backends(
+        config: config::VioConfig,
+        calibration: calib::Calibration<f64>,
+        options: frontend::flow::FrontendOptions,
+        backends: Backends,
+    ) -> Result<Self, VioError> {
+        let backend: Backend = backends.frontend;
         let camera_count: usize = calibration.t_i_c.len();
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
@@ -141,7 +169,8 @@ impl<S: Scalar> Vio<S> {
                             .map(|t_i_c| t_i_c.cast::<f64>())
                             .collect(),
                     )
-                    .with_gba_rig(gba_rig(&calibration)),
+                    .with_gba_rig(gba_rig(&calibration))
+                    .with_gba_lane(backends.gba),
                     config.backend_mode,
                     config.backend_realtime_max_queued_queries.get(),
                 )

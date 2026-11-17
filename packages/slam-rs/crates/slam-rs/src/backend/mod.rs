@@ -105,6 +105,8 @@ pub struct MapBackend {
     /// The rig's camera models for the global BA ([`Self::finish`]); `None`
     /// when the rig has a model the GBA cannot project.
     gba_rig: Option<gba::GbaRig>,
+    /// Where the global BA's PCG runs (`select_backend`'s GBA lane).
+    gba_lane: crate::Backend,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -150,6 +152,7 @@ impl MapBackend {
             culled_over_budget: 0,
             t_i_c: Vec::new(),
             gba_rig: None,
+            gba_lane: crate::Backend::Cpu,
         }
     }
 

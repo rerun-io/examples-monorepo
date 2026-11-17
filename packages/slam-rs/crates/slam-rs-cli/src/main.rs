@@ -59,6 +59,27 @@ impl From<BackendArg> for slam_rs::BackendRequest {
     }
 }
 
+/// Where the global BA's PCG runs; `slam_rs::select_backend` resolves it.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum GbaArg {
+    /// The frontend's lane (the GPU when the frontend runs there and the back-end probe passes).
+    Follow,
+    /// The CPU.
+    Cpu,
+    /// The GPU, or an error naming why it cannot run.
+    Gpu,
+}
+
+impl From<GbaArg> for slam_rs::GbaRequest {
+    fn from(arg: GbaArg) -> Self {
+        match arg {
+            GbaArg::Follow => Self::Follow,
+            GbaArg::Cpu => Self::Cpu,
+            GbaArg::Gpu => Self::Gpu,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print the version of the core.
@@ -80,6 +101,9 @@ enum Command {
         /// The frontend backend (`--lane` is the old name).
         #[arg(long, alias = "lane", value_enum, default_value = "auto")]
         backend: BackendArg,
+        /// Where the global BA's PCG runs (benches and tests; the default follows the frontend).
+        #[arg(long, value_enum, default_value = "follow")]
+        ba_backend: GbaArg,
         /// Frontend worker threads (any count gives the same trajectory, D31).
         #[arg(long, default_value_t = 1)]
         threads: usize,
@@ -111,6 +135,7 @@ fn main() -> ExitCode {
             segment,
             config,
             backend,
+            ba_backend,
             threads,
             max_framesets,
             frames,
@@ -138,7 +163,7 @@ fn main() -> ExitCode {
                 replay(
                     input,
                     &config,
-                    backend.into(),
+                    (backend.into(), ba_backend.into()),
                     threads,
                     started.elapsed().as_secs_f64(),
                     &out,

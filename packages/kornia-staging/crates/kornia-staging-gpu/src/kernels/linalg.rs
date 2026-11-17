@@ -53,7 +53,7 @@ fn sum_tree(shared: &mut Shared<[f32]>, unit: usize, #[comptime] slots: usize) {
     for step in 0..comptime!(slots.ilog2() as usize) {
         let stride = slots >> (step + 1usize);
         if unit < stride {
-            shared[unit] = shared[unit] + shared[unit + stride];
+            shared[unit] += shared[unit + stride];
         }
         sync_cube();
     }
