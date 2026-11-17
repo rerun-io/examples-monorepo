@@ -118,6 +118,15 @@ pub struct VioConfig {
     /// geometry and is never matched, whatever this says.
     #[serde(rename = "config.optical_flow_stereo_matching")]
     pub optical_flow_stereo_matching: bool,
+    /// Let the GPU frontend's one-wait stereo stage (device stereo guesses,
+    /// one read per frameset) run for a rig whose cameras share one other
+    /// device model (KB4, double sphere, EUCM, equirectangular), not only for
+    /// Brown8 rigs. The device guesses of those models differ from the host's
+    /// by up to 1e-2 px, so this changes their GPU-lane results. `false` (the
+    /// default) keeps existing rigs' GPU results as they were: only Brown8 rigs
+    /// take the one-wait stage.
+    #[serde(rename = "config.optical_flow_gpu_one_wait_any_model")]
+    pub optical_flow_gpu_one_wait_any_model: bool,
     /// Forward-backward consistency gate, in squared pixels.
     #[serde(rename = "config.optical_flow_max_recovered_dist2")]
     pub optical_flow_max_recovered_dist2: f32,
@@ -340,6 +349,7 @@ impl Default for VioConfig {
             optical_flow_detection_max_threshold: 40,
             optical_flow_detection_nonoverlap: true,
             optical_flow_stereo_matching: true,
+            optical_flow_gpu_one_wait_any_model: false,
             optical_flow_max_recovered_dist2: 0.04,
             optical_flow_pattern: 51,
             optical_flow_max_iterations: 5,

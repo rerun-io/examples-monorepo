@@ -9,7 +9,7 @@ use crate::config::MatchingGuessType;
 use crate::frontend::flow::FrontendError;
 use crate::frontend::stages::StereoContext;
 use crate::gpu::{kernels, pyramid::GpuPyramid, submission};
-use kornia_staging_gpu::camera::DeviceCamera;
+use kornia_staging_gpu::camera::{DeviceCamera, MODEL_BROWN8};
 use kornia_staging_gpu::optical_flow::{
     FUSED_RUNS, FusedKltPlan, FusedLaunch, RUN_SOURCE_X, RUN_SOURCE_Y,
 };
@@ -85,6 +85,9 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
         let Some(model) = rig_device_model(cameras) else {
             return Ok(false);
         };
+        if model != MODEL_BROWN8 && !config.optical_flow_gpu_one_wait_any_model {
+            return Ok(false);
+        }
         let Some(arena) = pyramids.first().and_then(GpuPyramid::arena) else {
             return Ok(false);
         };

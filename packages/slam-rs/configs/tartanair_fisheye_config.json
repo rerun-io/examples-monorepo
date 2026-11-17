@@ -15,6 +15,7 @@
         "config.optical_flow_matching_guess_type": "REPROJ_AVG_DEPTH",
         "config.optical_flow_matching_default_depth": 2.0,
         "config.optical_flow_image_safe_radius": 470.0,
+        "config.optical_flow_gpu_one_wait_any_model": true,
         "config.optical_flow_recall_enable": false,
         "config.optical_flow_recall_all_cams": false,
         "config.optical_flow_recall_num_points_cell": true,

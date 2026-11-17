@@ -358,14 +358,15 @@ fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
     assert_eq!(lookahead.flush().unwrap(), reference.flush().unwrap());
 }
 
-/// A RoboCap rig (4 x KB4 640x360) takes the one-wait path once tracking starts.
+/// Framesets of a RoboCap rig (4 x KB4 640x360) on the GPU lane that took the
+/// one-wait path, with `config.optical_flow_gpu_one_wait_any_model` as given.
 #[cfg(feature = "gpu-wgpu")]
-#[test]
-#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
-fn gpu_kb4_rig_takes_one_wait() {
-    let config =
-        config::VioConfig::from_json_str(include_str!("../../../../configs/msdmo_config.json"))
-            .unwrap();
+fn kb4_rig_one_wait_framesets(any_model: bool) -> usize {
+    let config = config::VioConfig {
+        optical_flow_gpu_one_wait_any_model: any_model,
+        ..config::VioConfig::from_json_str(include_str!("../../../../configs/msdmo_config.json"))
+            .unwrap()
+    };
     let calibration = calib::Calibration::from_json_str(include_str!(
         "../../../../configs/robocap_calib_downscale3.json"
     ))
@@ -413,5 +414,22 @@ fn gpu_kb4_rig_takes_one_wait() {
         assert!(frame > 0 || !flow.gpu_one_wait, "the first frameset has no temporal pass");
         one_wait += usize::from(flow.gpu_one_wait);
     }
-    assert!(one_wait > 0, "KB4 one-wait never ran");
+    one_wait
+}
+
+/// With the key on, a RoboCap rig takes the one-wait path once tracking starts.
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_kb4_rig_takes_one_wait() {
+    assert!(kb4_rig_one_wait_framesets(true) > 0, "KB4 one-wait never ran");
+}
+
+/// With the default config a RoboCap rig keeps the host stereo guesses: only
+/// Brown8 rigs take the one-wait path unless the config asks for it.
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_kb4_rig_skips_one_wait_by_default() {
+    assert_eq!(kb4_rig_one_wait_framesets(false), 0, "KB4 took one-wait by default");
 }
