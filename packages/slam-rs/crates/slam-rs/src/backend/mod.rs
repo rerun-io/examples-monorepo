@@ -12,6 +12,7 @@
 
 pub mod covisibility;
 pub mod cull;
+pub mod gba;
 pub mod map;
 pub mod runner;
 pub mod snapshot;
@@ -23,6 +24,7 @@ use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
+pub use gba::{GbaDriverError, GbaRig, GbaRun, GbaSettings, MapResult};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::MapSnapshot;
@@ -100,6 +102,9 @@ pub struct MapBackend {
     culled_over_budget: usize,
     /// `T_i_c` per camera, which places the points of a [`BackendWork::view`].
     t_i_c: Vec<crate::lie::Se3<f64>>,
+    /// The rig's camera models for the global BA ([`Self::finish`]); `None`
+    /// when the rig has a model the GBA cannot project.
+    gba_rig: Option<gba::GbaRig>,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -144,6 +149,7 @@ impl MapBackend {
             culled: BTreeSet::new(),
             culled_over_budget: 0,
             t_i_c: Vec::new(),
+            gba_rig: None,
         }
     }
 

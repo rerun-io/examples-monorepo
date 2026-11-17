@@ -328,6 +328,37 @@ pub struct VioConfig {
     /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17).
     #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
     pub loop_closing_pgo_min_covisibility_weight: u32,
+
+    // ── the global BA at the end of a sequence (`Vio::finish_map`, PR d2) ──
+    // rootba `bal` as RootSLAM's CI runs it (`run_sequence.sh`, DESIGN §3.1).
+    /// LM attempts, accepted or rejected (rootba `max_num_iterations`).
+    #[serde(rename = "backend.gba_max_iterations")]
+    pub gba_max_iterations: usize,
+    /// PCG iteration cap per LM attempt.
+    #[serde(rename = "backend.gba_cg_max_iterations")]
+    pub gba_cg_max_iterations: usize,
+    /// PCG forcing sequence `eta`.
+    #[serde(rename = "backend.gba_cg_eta")]
+    pub gba_cg_eta: f64,
+    /// Huber threshold of the reprojection rows, pixels.
+    #[serde(rename = "backend.gba_huber_px")]
+    pub gba_huber_px: f64,
+    /// A keyframe with fewer observations keeps its pose-graph rows and loses
+    /// its reprojection rows (B22: rootba `--min-obs-per-kf` drops the keyframe).
+    #[serde(rename = "backend.gba_min_obs_per_kf")]
+    pub gba_min_obs_per_kf: usize,
+    /// Translation sigma of the pose-graph rows, metres (B21).
+    #[serde(rename = "backend.gba_pose_graph_sigma_translation")]
+    pub gba_pose_graph_sigma_translation: f64,
+    /// Rotation sigma of the pose-graph rows, radians (B21).
+    #[serde(rename = "backend.gba_pose_graph_sigma_rotation")]
+    pub gba_pose_graph_sigma_rotation: f64,
+    /// Threads of the global BA (the two-core budget, DESIGN §2).
+    #[serde(rename = "backend.gba_threads")]
+    pub gba_threads: std::num::NonZeroUsize,
+    /// Solve in f64 instead of f32 (rootba `--use-double`; a debug lane).
+    #[serde(rename = "backend.gba_use_double")]
+    pub gba_use_double: bool,
 }
 
 impl Default for VioConfig {
@@ -398,6 +429,15 @@ impl Default for VioConfig {
             map_max_keyframes: 1500,
             map_batch_cull_size: 30,
             loop_closing_pgo_min_covisibility_weight: 96,
+            gba_max_iterations: 20,
+            gba_cg_max_iterations: 500,
+            gba_cg_eta: 0.1,
+            gba_huber_px: 1.0,
+            gba_min_obs_per_kf: 10,
+            gba_pose_graph_sigma_translation: 0.05,
+            gba_pose_graph_sigma_rotation: 0.01,
+            gba_threads: std::num::NonZeroUsize::MIN.saturating_add(1),
+            gba_use_double: false,
         }
     }
 }
@@ -645,6 +685,32 @@ mod tests {
             let text = format!(r#"{{"value0":{{"{dead}":3}}}}"#);
             assert!(VioConfig::from_json_str(&text).is_err(), "{dead} parsed");
         }
+    }
+
+    /// The global BA keys (PR d2) default to rootba `bal` as RootSLAM's CI runs
+    /// it, two threads and f32, and a dataset config can override each.
+    #[test]
+    fn the_gba_keys_default_to_rootba_bal() {
+        let defaults = VioConfig::default();
+        assert_eq!(defaults.gba_max_iterations, 20);
+        assert_eq!(defaults.gba_cg_max_iterations, 500);
+        assert_eq!(defaults.gba_cg_eta, 0.1);
+        assert_eq!(defaults.gba_huber_px, 1.0);
+        assert_eq!(defaults.gba_min_obs_per_kf, 10);
+        assert_eq!(defaults.gba_pose_graph_sigma_translation, 0.05);
+        assert_eq!(defaults.gba_pose_graph_sigma_rotation, 0.01);
+        assert_eq!(defaults.gba_threads.get(), 2);
+        assert!(!defaults.gba_use_double);
+        let parsed = VioConfig::from_json_str(
+            r#"{"value0":{"backend.gba_max_iterations":5,"backend.gba_threads":8,
+            "backend.gba_use_double":true,"backend.gba_min_obs_per_kf":20}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.gba_max_iterations, 5);
+        assert_eq!(parsed.gba_threads.get(), 8);
+        assert!(parsed.gba_use_double);
+        assert_eq!(parsed.gba_min_obs_per_kf, 20);
+        assert!(VioConfig::from_json_str(r#"{"value0":{"backend.gba_threads":0}}"#).is_err());
     }
 
     /// `backend.mode` (DESIGN §2, §8): Offline by default, lowercase names, and

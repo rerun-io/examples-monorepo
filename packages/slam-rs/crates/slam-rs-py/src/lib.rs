@@ -6,6 +6,7 @@
 //! `ValueError`, never a panic.
 
 mod catalog;
+mod gba;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
@@ -361,6 +362,22 @@ impl Vio {
             return Ok(None);
         };
         MapSnapshot::build(&view.view, view.counters, mode).map(Some)
+    }
+
+    /// The map's keyframes at the end of a sequence, after a global BA on the
+    /// map when ``run_gba``, or ``None`` when ``backend.enabled`` is off.
+    ///
+    /// Takes every stamp first. The window is untouched, so the poses ``track``
+    /// returned stay the raw VIO; the map keeps the GBA's. Call it after
+    /// ``flush``. Raises ``ValueError`` when the rig has a camera model the GBA
+    /// cannot project.
+    fn finish_map(&mut self, py: Python<'_>, run_gba: bool) -> PyResult<Option<gba::MapResult>> {
+        let result = py
+            .detach(|| self.inner.finish_map(run_gba))
+            .map_err(value_error)?;
+        result
+            .map(|result| gba::MapResult::build(py, &result))
+            .transpose()
     }
 
     fn __repr__(&self) -> String {
@@ -1693,5 +1710,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FlowFrame>()?;
     module.add_class::<VioSnapshot>()?;
     module.add_class::<MapSnapshot>()?;
+    module.add_class::<gba::MapResult>()?;
+    module.add_class::<gba::GbaRun>()?;
     Ok(())
 }

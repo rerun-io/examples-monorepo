@@ -65,6 +65,9 @@ pub struct Vio<S: Scalar = f32> {
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
+    /// The global BA's knobs, for [`Self::finish_map`].
+    #[cfg(feature = "backend")]
+    gba_settings: crate::backend::GbaSettings,
 }
 
 pub use lag::OverlapTimings;
@@ -140,13 +143,16 @@ impl<S: Scalar> Vio<S> {
                             .iter()
                             .map(|t_i_c| t_i_c.cast::<f64>())
                             .collect(),
-                    ),
+                    )
+                    .with_gba_rig(gba_rig(&calibration)),
                     config.backend_mode,
                     config.backend_realtime_max_queued_queries.get(),
                 )
             })
             .transpose()
             .map_err(|error| VioError::BackendThread(error.to_string()))?;
+        #[cfg(feature = "backend")]
+        let gba_settings = crate::backend::GbaSettings::from(&config);
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
@@ -172,7 +178,41 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_runner,
+            #[cfg(feature = "backend")]
+            gba_settings,
         })
+    }
+
+    /// The map's keyframes at the end of a sequence, after a global BA on the
+    /// map when `run_gba` (DESIGN §3.1, §8). Every stamp the window has handed
+    /// over is taken first. The window is untouched, so the raw VIO poses stay
+    /// what [`Self::track`] returned; the map keeps the GBA's poses. Call it
+    /// after [`Self::flush`]: a later keyframe stamp writes the window's poses
+    /// over the GBA's for the keyframes still in the window. `None` when
+    /// `backend.enabled` is off.
+    ///
+    /// # Errors
+    ///
+    /// [`VioError::GlobalBa`] when the rig has a camera model the GBA cannot
+    /// project or the solver refuses the problem.
+    ///
+    /// # Panics
+    ///
+    /// Re-raises a panic of the back-end thread.
+    #[cfg(feature = "backend")]
+    pub fn finish_map(
+        &mut self,
+        run_gba: bool,
+    ) -> Result<Option<crate::backend::MapResult>, VioError> {
+        self.step_map();
+        let settings: crate::backend::GbaSettings = self.gba_settings.clone();
+        let Some(runner) = self.map_runner.as_mut() else {
+            return Ok(None);
+        };
+        runner
+            .update(|backend| backend.finish(run_gba, &settings))
+            .map(Some)
+            .map_err(|error| VioError::GlobalBa(error.to_string()))
     }
 
     /// Read the persistent keyframe map itself; `None` when `backend.enabled`
@@ -812,6 +852,24 @@ fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), V
 }
 
 /// Flatten an isometry into `[tx, ty, tz, qx, qy, qz, qw]`.
+/// The rig's staged camera models for the global BA; `None` (one warning) when
+/// a model has no staged projection, which leaves the GBA off for this rig.
+#[cfg(feature = "backend")]
+fn gba_rig(calibration: &calib::Calibration<f64>) -> Option<crate::backend::GbaRig> {
+    let models: Result<Vec<_>, _> = calibration
+        .intrinsics
+        .iter()
+        .map(calib::BasaltCamera::to_staged)
+        .collect();
+    match models {
+        Ok(models) => crate::backend::GbaRig::new(models, calibration.t_i_c.clone()),
+        Err(error) => {
+            log::warn!("the global BA is off for this rig: {error}");
+            None
+        }
+    }
+}
+
 fn pose_to_array(pose: &Isometry3<f64>) -> [f64; 7] {
     let rotation: UnitQuaternion<f64> = pose.rotation;
     [

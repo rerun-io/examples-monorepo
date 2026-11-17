@@ -201,6 +201,21 @@ impl KeyframeMap {
         }
     }
 
+    /// Move a landmark to a new direction and inverse distance in its host
+    /// camera (the global BA's write-back); host and observations stay. A
+    /// missing id is a no-op.
+    pub fn set_landmark_position(
+        &mut self,
+        id: LandmarkId,
+        direction: Vector2<f64>,
+        inv_dist: f64,
+    ) {
+        if let Some(landmark) = self.landmarks.get_mut(&id) {
+            landmark.direction = direction;
+            landmark.inv_dist = inv_dist;
+        }
+    }
+
     /// Delete a landmark and its index entries; a missing id is a no-op.
     pub fn remove_landmark(&mut self, id: LandmarkId) -> Option<MapLandmark> {
         let landmark: MapLandmark = self.landmarks.remove(&id)?;
