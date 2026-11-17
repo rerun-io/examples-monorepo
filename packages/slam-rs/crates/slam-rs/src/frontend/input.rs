@@ -60,11 +60,11 @@ impl LensStitch {
     fn remap(
         &self,
         tile: usize,
-        lens: &[u8],
+        lens: Vec<u8>,
         out: &mut Image<u16, 1>,
     ) -> Result<(), image::IngestError> {
         let layout = |_| image::IngestError::StitchTables;
-        let lens = Image::new(self.lens, lens.to_vec()).map_err(layout)?;
+        let lens = Image::new(self.lens, lens).map_err(layout)?;
         if out.size() != self.tile_size() {
             *out = image::zeros(self.tile_size().width, self.tile_size().height)?;
         }
@@ -277,7 +277,7 @@ impl<'a> FrameImage<'a> {
                 let mut image = host
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                stitch.remap(tile, bytes, &mut image)?;
+                stitch.remap(tile, bytes.to_vec(), &mut image)?;
                 Ok(body(&image))
             }
         }
@@ -341,17 +341,9 @@ impl FrameStorage {
                 stitch.check(lenses)?;
                 images.resize_with(2, image::empty);
                 for (tile, (image, view)) in images.iter_mut().zip(lenses).enumerate() {
-                    if view.stride == view.width {
-                        stitch.remap(tile, &view.data[..view.width * view.height], image)?;
-                    } else {
-                        let rows: Vec<u8> = (0..view.height)
-                            .flat_map(|row| {
-                                &view.data[row * view.stride..row * view.stride + view.width]
-                            })
-                            .copied()
-                            .collect();
-                        stitch.remap(tile, &rows, image)?;
-                    }
+                    let rows = (0..view.height)
+                        .flat_map(|row| &view.data[row * view.stride..][..view.width]);
+                    stitch.remap(tile, rows.copied().collect(), image)?;
                 }
                 Ok(())
             }

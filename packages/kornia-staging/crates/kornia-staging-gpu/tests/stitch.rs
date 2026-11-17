@@ -249,7 +249,7 @@ fn tables_the_gather_cannot_read_are_refused() {
     let luts = [synthetic_lut(0), synthetic_lut(1)];
     assert!(matches!(
         TileTables::upload(&client, [&luts[1], &luts[0]]),
-        Err(TableError::TileOrder { index: 0, tile: 1 })
+        Err(TableError::Geometry)
     ));
     let mut outside = synthetic_lut(1);
     outside.sample[17] = [256 * 99 + 1, 0];
@@ -265,7 +265,7 @@ fn tables_the_gather_cannot_read_are_refused() {
     short.sample.pop();
     assert!(matches!(
         TileTables::upload(&client, [&luts[0], &short]),
-        Err(TableError::Length { tile: 1, .. })
+        Err(TableError::Geometry)
     ));
     let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
     let mut builder = GpuPyramidBuilder::new(client);

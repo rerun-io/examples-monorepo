@@ -21,27 +21,10 @@ use crate::transfer::upload_inner;
 /// A pair of tile tables the device cannot use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TableError {
-    /// Table `index` is not tile `index`: tile `k` reads lens `k`, so the order is fixed.
-    #[error("table {index} is for tile {tile}; tables come in tile order 0, 1")]
-    TileOrder {
-        /// Position in the pair.
-        index: usize,
-        /// The table's own tile index.
-        tile: usize,
-    },
-    /// The two tables disagree on the tile or the source size.
-    #[error("the two tables have different tile geometry or source size")]
-    Mismatch,
-    /// A table does not hold one entry per tile pixel.
-    #[error("table {tile} holds {actual} entries, the tile has {expected} pixels")]
-    Length {
-        /// Tile index.
-        tile: usize,
-        /// Entries in the table.
-        actual: usize,
-        /// Tile pixels.
-        expected: usize,
-    },
+    /// The pair is not tile 0 then tile 1 of one geometry with one entry per tile pixel, over a level-1 source of
+    /// at least 2x2 pixels.
+    #[error("the tables are not tiles 0 and 1 of one geometry, one entry per pixel, over a 2x2 or larger source")]
+    Geometry,
     /// An entry is neither `LUT_INVALID` nor inside the level-1 image, so the gather would read outside it.
     #[error("table {tile} entry {pixel} lies outside the {width}x{height} level-1 image")]
     OutOfRange {
@@ -49,14 +32,6 @@ pub enum TableError {
         tile: usize,
         /// Row-major tile pixel.
         pixel: usize,
-        /// Level-1 width.
-        width: usize,
-        /// Level-1 height.
-        height: usize,
-    },
-    /// The level-1 image is below the bilinear gather's 2x2 reach.
-    #[error("a {width}x{height} level-1 source is too small")]
-    SourceTooSmall {
         /// Level-1 width.
         width: usize,
         /// Level-1 height.
@@ -97,45 +72,35 @@ impl<R: Runtime> TileTables<R> {
     /// * `tables` - Tile 0's and tile 1's tables, from `kornia_staging_imgproc::panorama::build_tile_lut`.
     ///
     /// # Errors
-    /// A table out of order, of the wrong length, with an entry outside the level-1 image, two tables that
-    /// disagree, or a device failure.
+    /// [`TableError::Geometry`] for tables out of order, of the wrong length or of two geometries,
+    /// [`TableError::OutOfRange`] for an entry outside the level-1 image, or a device failure.
     pub fn upload(
         client: &ComputeClient<R>,
         tables: [&TileLut; TILES],
     ) -> Result<Self, TableError> {
         let first = tables[0];
         let source = first.source_size;
-        if source.width < 2 || source.height < 2 {
-            return Err(TableError::SourceTooSmall {
-                width: source.width,
-                height: source.height,
-            });
-        }
         let tile = ImageSize {
             width: first.geometry.width(),
             height: first.geometry.height,
         };
+        let consistent = |index: usize, table: &TileLut| {
+            table.tile == index
+                && table.geometry == first.geometry
+                && table.source_size == source
+                && table.sample.len() == tile.width * tile.height
+        };
+        if source.width < 2
+            || source.height < 2
+            || !tables.iter().enumerate().all(|(i, t)| consistent(i, t))
+        {
+            return Err(TableError::Geometry);
+        }
         let limit = [
             256 * (source.width as u32 - 1),
             256 * (source.height as u32 - 1),
         ];
         for (index, table) in tables.iter().enumerate() {
-            if table.tile != index {
-                return Err(TableError::TileOrder {
-                    index,
-                    tile: table.tile,
-                });
-            }
-            if table.geometry != first.geometry || table.source_size != source {
-                return Err(TableError::Mismatch);
-            }
-            if table.sample.len() != tile.width * tile.height {
-                return Err(TableError::Length {
-                    tile: index,
-                    actual: table.sample.len(),
-                    expected: tile.width * tile.height,
-                });
-            }
             if let Some(pixel) = table
                 .sample
                 .iter()
