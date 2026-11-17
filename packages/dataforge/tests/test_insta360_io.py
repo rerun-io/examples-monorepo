@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import math
 from pathlib import Path
 
 import insta360_io
@@ -20,9 +20,6 @@ V6: str = (
 )
 """The X4 Air clip's V6 factory string (clip VID_20261116_125200_00_003)."""
 CROP: tuple[int, int, int, int, int, int] = (7680, 7680, 7424, 7424, 0, 0)
-
-CLIP: Path | None = Path(clip) if (clip := os.environ.get("SLAM_RS_INSV")) else None
-"""The X4 Air clip VID_20261116_125200_00_003.insv, from ``SLAM_RS_INSV``; the golden test skips without it."""
 
 
 def test_a_file_that_is_not_an_insv_clip_is_refused(tmp_path: Path) -> None:
@@ -65,11 +62,9 @@ def test_a_lens_of_the_wrong_size_or_layout_or_a_bad_string_is_refused() -> None
 
 
 @pytest.mark.golden
-def test_the_clip_reads_as_slam_rs_read_it() -> None:
+def test_the_clip_reads_as_slam_rs_read_it(insv_clip: Path) -> None:
     """Counts and lens strings of the X4 Air clip, as ``slam_rs._core.InsvClip`` returned them on the base branch (2026-11-17)."""
-    if CLIP is None or not CLIP.is_file():
-        pytest.skip(f"asset VID_20261116_125200_00_003.insv is absent: set SLAM_RS_INSV to the clip (now {CLIP})")
-    clip = insta360_io.InsvClip(str(CLIP))
+    clip = insta360_io.InsvClip(str(insv_clip))
     assert (clip.camera_type, clip.resolution, clip.lens_track, clip.window_crop) == ("Insta360 X4 Air", (1920, 1920), (1, 0), CROP)
     assert clip.num_frames == 7724
     times: Int64[ndarray, " n"]
@@ -80,3 +75,16 @@ def test_the_clip_reads_as_slam_rs_read_it() -> None:
     assert sorted(strings) == ["v1", "v2", "v3", "v6"]
     assert strings["v6"] == V6
     assert len(clip.lenses) == len(clip.lenses_v6) == 2
+
+
+@pytest.mark.golden
+def test_the_lenses_are_mei_cameras_with_the_factory_coefficients(insv_clip: Path) -> None:
+    """Lens 0 of the V6 string: xi 2.31494, d0..d12 as written; the V3 lenses carry seven coefficients."""
+    clip = insta360_io.InsvClip(str(insv_clip))
+    lens0 = clip.lenses_v6[0]
+    assert lens0.model == "mei_v6"
+    tokens: list[float] = [float(token) for token in V6.split("_")]
+    assert lens0.coefficients == [tokens[1], math.radians(100.0), *tokens[12:25]]
+    # 7096.760 px per unit at the 7680 px calibration frame, cropped to 7424 and scaled to the 1920 px track.
+    assert (lens0.fx, lens0.fy) == pytest.approx((7096.76 * 1920 / 7424, 7095.39 * 1920 / 7424), abs=1e-6)
+    assert [(lens.model, len(lens.coefficients)) for lens in clip.lenses] == [("mei_v3", 7)] * 2

@@ -1,4 +1,4 @@
-"""What the dataforge test modules share: the GPU-encoder gate, the raw-asset skip, the raw-root guard check, the projectaria reader oracle, rrd read-back, synthetic frames and archives, a loopback archive, and the published calibration reader.
+"""What the dataforge test modules share: the GPU-encoder gate, the raw-asset skip (and the Insta360 clip), the raw-root guard check, the projectaria reader oracle, rrd read-back, synthetic frames and archives, a loopback archive, and the published calibration reader.
 
 Each piece is here because two or more modules need exactly it: the read-back
 helpers go through the *public* reader (``RrdReader`` → ``ChunkStore`` → a
@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import struct
 import subprocess
 import threading
@@ -281,6 +282,20 @@ def raw_asset(what: str, path: Path) -> Path:
     except OSError as error:
         pytest.skip(f"{what} absent or unreadable: {path} ({type(error).__name__})")
     return path
+
+
+INSV_CLIP: str = "VID_20261116_125200_00_003.insv"
+"""The Insta360 X4 Air clip the Insta360 tests open (2.3 GB, 2026-11-16, 7724 framesets)."""
+
+
+@pytest.fixture(scope="session")
+def insv_clip() -> Path:
+    """The X4 Air clip at ``<raw root>/insta360/``, or where ``DATAFORGE_INSTA360_CLIP`` (else ``SLAM_RS_INSV``) names it; a skip without it."""
+    from dataforge import paths
+
+    override: str | None = os.environ.get("DATAFORGE_INSTA360_CLIP") or os.environ.get("SLAM_RS_INSV")
+    path: Path = Path(override) if override else paths.raw_root() / "insta360" / INSV_CLIP
+    return raw_asset(f"the Insta360 clip {INSV_CLIP} (set DATAFORGE_INSTA360_CLIP)", path)
 
 
 def column_rows(store: rrc.ChunkStore, column: str) -> pa.Table:
