@@ -552,15 +552,17 @@ impl<S: Scalar> Block<S> {
 /// Dot product over eight fixed lanes, then a fixed pairwise sum and the tail.
 #[inline]
 fn dot_lanes<S: Scalar>(a: &[S], b: &[S]) -> S {
-    let n8 = a.len() / 8 * 8;
+    debug_assert_eq!(a.len(), b.len());
+    let (a8, a_tail) = a.as_chunks::<8>();
+    let (b8, b_tail) = b.as_chunks::<8>();
     let mut acc = [S::zero(); 8];
-    for (ca, cb) in a[..n8].chunks_exact(8).zip(b[..n8].chunks_exact(8)) {
+    for (ca, cb) in a8.iter().zip(b8) {
         for i in 0..8 {
             acc[i] += ca[i] * cb[i];
         }
     }
     let mut sum = ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
-    for (x, y) in a[n8..].iter().zip(&b[n8..]) {
+    for (x, y) in a_tail.iter().zip(b_tail) {
         sum += *x * *y;
     }
     sum
