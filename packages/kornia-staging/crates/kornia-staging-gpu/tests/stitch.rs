@@ -203,10 +203,7 @@ fn synthetic_tables_cover_every_bilinear_phase_bit_exactly() {
 fn factory_tables_stitch_bit_exactly() {
     for (name, text) in [("V6", V6), ("V3", V3)] {
         let lenses = parse_lens_string(text, Some(CROP), [1920, 1920]).unwrap();
-        let stitch = LensStitch::new(FACTORY_TILE, LENS, |k, d| {
-            project(&lenses[k], d)
-        })
-        .unwrap();
+        let stitch = LensStitch::new(FACTORY_TILE, LENS, |k, d| project(&lenses[k], d)).unwrap();
         assert!(stitch
             .tables()
             .iter()
@@ -272,7 +269,13 @@ fn a_valid_table_uploads_and_other_lens_sizes_are_refused() {
 fn clip_frame(frame: usize) -> Option<(LensStitch, [Image<u8, 1>; 2])> {
     let (path, clip) = clip()?;
     let stitch = LensStitch::new(FACTORY_TILE, LENS, |k, d| {
-        project(&clip.lenses_v6.as_ref().expect("the clip carries a V6 string")[k], d)
+        project(
+            &clip
+                .lenses_v6
+                .as_ref()
+                .expect("the clip carries a V6 string")[k],
+            d,
+        )
     })
     .unwrap();
     let lenses = [0, 1].map(|k| decode(&path, clip.lens_track[k], frame));
