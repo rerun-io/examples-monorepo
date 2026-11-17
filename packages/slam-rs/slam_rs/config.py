@@ -37,8 +37,8 @@ class DatasetProperties:
     frameset_tolerance_ns: int = field(default=0, skip_if_default=True)
     """How far a camera's frame may sit from cam0's and still join its frameset; 0 demands the identical frame list in every camera.
 
-    EuRoC's cameras share stamps but a few sequences drop a frame in one camera
-    (MH_04_difficult cam1, V2_03_difficult cam0), so it matches framesets instead.
+    EuRoC's raw cameras share stamps, but the VSLAM-LAB conversion keeps cam1 by frame count, not by stamp:
+    MH_04_difficult loses one stereo pair and V2_03_difficult its last 295, so it matches framesets instead.
     """
 
 

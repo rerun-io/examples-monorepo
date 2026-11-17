@@ -1256,6 +1256,8 @@ mod tests {
 
     /// EuRoC's radtan4 cameras carry no valid radius: Basalt's `rpmax` 0, which
     /// must mean "no bound" all the way to the projection, not "nothing is valid".
+    /// `camera.rs` `radtan8_without_a_valid_radius_is_unbounded` pins that at the
+    /// camera; this test adds the catalog path: statics -> `Calibration` -> `SlamCamera`.
     #[test]
     fn a_catalog_radtan_camera_without_a_valid_radius_projects_unbounded() {
         use super::catalog::CameraStatics;

@@ -46,7 +46,16 @@ def test_every_tier_and_decode_path_is_known(benchmarks: Benchmarks) -> None:
 def test_the_tiers_are_the_ones_the_plan_names(benchmarks: Benchmarks) -> None:
     assert len(benchmarks.in_tier("smoke")) == 2
     assert len(benchmarks.in_tier("release")) == 3
-    assert len(benchmarks.in_tier("listed")) == 16
+    assert len(benchmarks.in_tier("listed")) == 5
+    # EuRoC has its own tier, so `--tier listed` runs the same five MSD clips on a catalog without vslam-lab-euroc.
+    assert [segment.segment_id for segment in benchmarks.in_tier("listed")] == [
+        "msd-index__MIO_others__MIO04_hand_shooter_hard",
+        "msd-index__MIPT_thrill_of_the_fight__MIPT03_thrillofthefight_fight_2",
+        "msd-g2__MGO_others__MGO14_flickering_light",
+        "msd-g2__MGO_others__MGO01_low_light",
+        "msd-g2__MGO_others__MGO13_sudden_movements",
+    ]
+    assert len(benchmarks.in_tier("euroc")) == 11
     assert {segment.dataset_name for segment in benchmarks.in_tier("smoke")} == {"msd-index", "msd-g2"}
 
 
@@ -178,7 +187,7 @@ def test_every_dataset_names_a_vendored_config_that_parses(settings: SlamConfig)
 def test_an_unknown_tier_is_rejected(settings: SlamConfig, tmp_path: Path) -> None:
     broken: Path = tmp_path / "broken.toml"
     broken.write_text(BENCHMARKS_PATH.read_text().replace('tier = "smoke"', 'tier = "sometimes"', 1))
-    with pytest.raises(ValueError, match="broken.toml.*sometimes.*smoke.*release.*listed"):
+    with pytest.raises(ValueError, match="broken.toml.*sometimes.*smoke.*release.*listed.*euroc"):
         load_benchmarks(settings, broken)
 
 
@@ -269,13 +278,13 @@ def test_baseline_duplicates_include_host(settings: SlamConfig, host: str, dupli
             assert parsed.segments[0].baseline[1].host == host
 
 
-def test_euroc_is_listed_with_every_sequence_and_no_baseline_yet(benchmarks: Benchmarks) -> None:
-    """RootSLAM's EMH/EV1/EV2 groups: all eleven sequences, listed until a baseline is measured on them."""
+def test_euroc_has_its_own_tier_with_every_sequence_and_no_baseline_yet(benchmarks: Benchmarks) -> None:
+    """RootSLAM's EMH/EV1/EV2 groups: all eleven sequences in the ``euroc`` tier, with no baseline yet."""
     euroc: list[ReferenceSegment] = [segment for segment in benchmarks.segments if segment.dataset_name == "vslam-lab-euroc"]
     assert [segment.segment_id.removeprefix("vslam-lab-euroc__")[:5] for segment in euroc] == [
         "MH_01", "MH_02", "MH_03", "MH_04", "MH_05", "V1_01", "V1_02", "V1_03", "V2_01", "V2_02", "V2_03",
     ]
-    assert all(segment.tier == "listed" and not segment.hold_out and segment.baseline == () for segment in euroc)
+    assert all(segment.tier == "euroc" and not segment.hold_out and segment.baseline == () for segment in euroc)
 
 
 def test_only_euroc_records_the_device_clock_in_video_time(settings: SlamConfig) -> None:

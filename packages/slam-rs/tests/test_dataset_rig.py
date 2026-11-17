@@ -5,11 +5,14 @@ EuRoC's ``video_time`` is the benchmark's own nanosecond clock, MSD's is relativ
 pose 1.4e18 ns late, and RootSLAM's scorer would associate nothing.
 """
 
+from pathlib import Path
+
 import pytest
+from rerun.catalog import DatasetEntry
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import tracking
-from slam_rs.apis import replay
+from slam_rs.apis import catalog_layer, dump_clip, replay
 from slam_rs.catalog_feed import MSD_RIG, CatalogSegment, RigProfile, dataset_rig, open_segment
 from slam_rs.config import SlamConfig
 from slam_rs.reference import Benchmarks
@@ -60,6 +63,30 @@ def test_the_gate_runs_a_euroc_segment_on_the_device_clock(
     assert seen == [EUROC_RIG]
 
 
+@pytest.mark.parametrize(("segment", "expected"), [(EUROC_SEGMENT, EUROC_RIG), ("msd-g2__MGO_others__MGO07_mapping_easy", MSD_RIG)])
+def test_the_catalog_layer_opens_a_segment_with_its_datasets_rig(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, segment: str, expected: RigProfile
+) -> None:
+    """Read as MSD, EuRoC's MH_04 and V2_03 were refused and the layer stored the capture start as its export offset."""
+
+    def resolved(sources: tuple[CatalogSegment, ...], *_args: object, **_kwargs: object) -> tuple[CatalogSegment, ...]:
+        # A bare handle: the stand-in feed stops the tool before it touches the dataset.
+        return tuple(CatalogSegment(s.url, s.dataset_name, s.segment_id, dataset=object.__new__(DatasetEntry)) for s in sources)
+
+    monkeypatch.setattr(catalog_layer, "resolve_catalog_segments", resolved)
+    seen: list[RigProfile] = _capture_profile(monkeypatch, catalog_layer)
+    with pytest.raises(_Opened):
+        catalog_layer.main(catalog_layer.Config(segment=segment, output_dir=tmp_path, decode_device="cpu"))
+    assert seen == [expected]
+
+
+def test_dump_clip_opens_a_euroc_segment_on_the_device_clock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[RigProfile] = _capture_profile(monkeypatch, dump_clip)
+    with pytest.raises(_Opened):
+        dump_clip.main(dump_clip.Config(segment=EUROC_SEGMENT, output=tmp_path))
+    assert seen == [EUROC_RIG]
+
+
 @pytest.mark.integration
 @pytest.mark.usefixtures("live_catalog")
 def test_euroc_opens_from_the_catalog_on_its_own_clock(settings: SlamConfig) -> None:
@@ -96,7 +123,8 @@ def test_only_frames_both_euroc_cameras_took_together_are_fed(settings: SlamConf
 
     The raw ASL has 2032 (MH_04) and 1921 (V2_03) stamps in both cameras. VSLAM-LAB keeps
     as many cam1 frames as cam0 has, so the converted cam1 lists 1 and 296 frames cam0 never took
-    (up to 20.6 s away): matching within 1 ms feeds 2031 and 1626 stereo framesets, never a pair taken apart.
+    (up to 20.6 s away): matching within 1 ms feeds 2031 and 1626 stereo framesets, and every pair it feeds
+    holds two frames with the same stamp. V2_03's lost 295 pairs are a known data issue of the conversion.
     """
     from rerun.catalog import CatalogClient
 
@@ -108,4 +136,6 @@ def test_only_frames_both_euroc_cameras_took_together_are_fed(settings: SlamConf
         include_ground_truth=False,
     ) as feed:
         assert len(feed.frame_t_ns) == framesets
-        assert bool((feed.index.frame_index >= 0).all())
+        stamps = feed.index.camera_t_ns
+        pairs = feed.index.frame_index
+        assert (stamps[0][pairs[:, 0]] == stamps[1][pairs[:, 1]]).all()
