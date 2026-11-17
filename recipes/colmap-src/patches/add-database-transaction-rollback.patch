@@ -1,0 +1,105 @@
+# Patch: DatabaseTransaction can roll back; pycolmap's `with DatabaseTransaction(db):` rolls back when the block raises.
+# Problem: at 137f2168 a transaction can only commit: `~DatabaseTransaction` runs END TRANSACTION, and the binding's
+#          __exit__ commits on an exception too, so a failed batch of writes leaves its prefix in the database.
+# Adds:    Database::RollbackTransaction (virtual, throws by default; SQLite: ROLLBACK TRANSACTION),
+#          DatabaseTransaction::Rollback, and __exit__(exc_type, ...) calling it when exc_type is not None.
+# Base:    colmap/colmap 137f21680c79d3f2fffbb1d11deb367162aa6f83. Hand-written; a hook upstream lacks.
+diff -ru a/src/colmap/scene/database.cc b/src/colmap/scene/database.cc
+--- a/src/colmap/scene/database.cc	2026-11-16 22:00:46.937627676 -0600
++++ b/src/colmap/scene/database.cc	2026-11-16 22:01:27.443909401 -0600
+@@ -7,6 +7,7 @@
+ #include "colmap/util/hash_containers.h"
+ 
+ #include <numeric>
++#include <stdexcept>
+ 
+ namespace colmap {
+ 
+@@ -312,7 +313,22 @@
+   database_->BeginTransaction();
+ }
+ 
+-DatabaseTransaction::~DatabaseTransaction() { database_->EndTransaction(); }
++DatabaseTransaction::~DatabaseTransaction() {
++  if (!ended_) {
++    database_->EndTransaction();
++  }
++}
++
++void DatabaseTransaction::Rollback() {
++  THROW_CHECK(!ended_);
++  ended_ = true;
++  database_->RollbackTransaction();
++}
++
++void Database::RollbackTransaction() const {
++  throw std::logic_error(
++      "This database implementation cannot roll back a transaction");
++}
+ 
+ FeatureDescriptorsFloat LoadRandomDatabaseDescriptors(const Database& database,
+                                                       int max_num_descriptors) {
+diff -ru a/src/colmap/scene/database.h b/src/colmap/scene/database.h
+--- a/src/colmap/scene/database.h	2026-11-16 22:00:46.787553388 -0600
++++ b/src/colmap/scene/database.h	2026-11-16 22:01:07.463237508 -0600
+@@ -331,6 +331,9 @@
+   // database, etc.
+   virtual void BeginTransaction() const = 0;
+   virtual void EndTransaction() const = 0;
++  // Discards everything written since `BeginTransaction`. The default throws;
++  // an implementation that can undo a transaction overrides it.
++  virtual void RollbackTransaction() const;
+ 
+  private:
+   friend class DatabaseTransaction;
+@@ -349,11 +352,16 @@
+   explicit DatabaseTransaction(Database* database);
+   ~DatabaseTransaction();
+ 
++  // Ends the transaction by discarding its writes; the destructor then does
++  // not commit.
++  void Rollback();
++
+  private:
+   NON_COPYABLE(DatabaseTransaction)
+   NON_MOVABLE(DatabaseTransaction)
+   Database* database_;
+   std::unique_lock<std::mutex> database_lock_;
++  bool ended_ = false;
+ };
+ 
+ // Loads random descriptors from random images in the database.
+diff -ru a/src/colmap/scene/database_sqlite.cc b/src/colmap/scene/database_sqlite.cc
+--- a/src/colmap/scene/database_sqlite.cc	2026-11-16 22:00:47.232557278 -0600
++++ b/src/colmap/scene/database_sqlite.cc	2026-11-16 22:01:07.463544496 -0600
+@@ -1842,6 +1842,11 @@
+     SQLITE3_EXEC(THROW_CHECK_NOTNULL(database_), "END TRANSACTION", nullptr);
+   }
+ 
++  void RollbackTransaction() const override {
++    SQLITE3_EXEC(
++        THROW_CHECK_NOTNULL(database_), "ROLLBACK TRANSACTION", nullptr);
++  }
++
+   void PrepareSQLStatements() {
+     sql_stmts_.clear();
+ 
+diff -ru a/src/pycolmap/scene/database.cc b/src/pycolmap/scene/database.cc
+--- a/src/pycolmap/scene/database.cc	2026-11-16 22:00:47.261557532 -0600
++++ b/src/pycolmap/scene/database.cc	2026-11-16 22:01:07.463655826 -0600
+@@ -23,7 +23,14 @@
+     transaction_ = std::make_unique<DatabaseTransaction>(database_);
+   }
+ 
+-  void Exit(const py::args&) { transaction_.reset(); }
++  // An exception leaving the `with` block rolls the transaction back; a normal
++  // exit commits it.
++  void Exit(const py::args& args) {
++    if (transaction_ && !args.empty() && !args[0].is_none()) {
++      transaction_->Rollback();
++    }
++    transaction_.reset();
++  }
+ 
+  private:
+   Database* database_;
