@@ -349,7 +349,7 @@ pub enum RejectReason {
         /// Unconstrained `|g|`, m/s^2.
         gravity_norm: f64,
     },
-    /// The solve failed numerically.
+    /// The solve failed numerically, or the refine and re-score passes ended without a stable inlier set.
     NotConverged,
 }
 
@@ -676,6 +676,9 @@ pub fn solve_inertial_init(
     // Refine, re-integrate, re-score; until the inlier set and biases settle.
     let mut refined: Option<refine::Refined> = None;
     let mut angles: Vec<f64> = Vec::new();
+    // Whether a pass ended with the inlier set and the biases unchanged. Without it, the refinement and the
+    // re-scored inlier set below describe different track sets, so the window is not accepted.
+    let mut settled: bool = false;
     for _pass in 0..5 {
         let used: Vec<usize> = (0..candidates.len()).filter(|&i| inlier[i]).collect();
         if used.len() < options.min_tracks {
@@ -745,6 +748,7 @@ pub fn solve_inertial_init(
         let stable: bool = new_inlier == inlier && !moved;
         inlier = new_inlier;
         if stable {
+            settled = true;
             break;
         }
     }
@@ -827,7 +831,7 @@ pub fn solve_inertial_init(
         .chain(gravity.iter())
         .chain(bias_gyro.iter())
         .all(|v| v.is_finite());
-    let verdict: InitVerdict = if !finite {
+    let verdict: InitVerdict = if !finite || !settled {
         InitVerdict::Rejected(RejectReason::NotConverged)
     } else if used.len() < options.min_tracks {
         InitVerdict::Rejected(RejectReason::TooFewTracks {

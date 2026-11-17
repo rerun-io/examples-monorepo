@@ -185,16 +185,16 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
         Wire::Bytes(s) => Some(String::from_utf8_lossy(s).into_owned()),
         _ => None,
     };
-    let submessage = |w: &Wire| -> Result<Vec<f64>, Insta360Error> {
+    // Fields 1 to 6 of a submessage, 0 when absent; every caller reads only these, so higher field numbers are
+    // ignored and no allocation depends on a field number from the file.
+    let submessage = |w: &Wire| -> Result<[f64; 6], Insta360Error> {
+        let mut values = [0.0; 6];
         let Wire::Bytes(s) = w else {
-            return Ok(Vec::new());
+            return Ok(values);
         };
-        let fields = protobuf_fields(s)?;
-        let max = fields.iter().map(|(n, _)| *n as usize).max().unwrap_or(0);
-        let mut values = vec![0.0; max];
-        for (n, v) in fields {
-            if n > 0 {
-                values[n as usize - 1] = v.number().unwrap_or(0.0);
+        for (n, v) in protobuf_fields(s)? {
+            if let Some(slot) = (n as usize).checked_sub(1).and_then(|i| values.get_mut(i)) {
+                *slot = v.number().unwrap_or(0.0);
             }
         }
         Ok(values)
@@ -209,7 +209,7 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
             111 => m.offset_v6 = text(&value),
             19 | 44 => {
                 let v = submessage(&value)?;
-                if v.len() >= 2 && v[0] > 0.0 && v[1] > 0.0 {
+                if v[0] > 0.0 && v[1] > 0.0 {
                     m.resolution = Some([v[0] as u32, v[1] as u32]);
                 }
             }
@@ -222,12 +222,11 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
             25 => m.rolling_shutter_ms = value.number(),
             27 => {
                 let v = submessage(&value)?;
-                if v.len() >= 4 && v[..4].iter().all(|&x| x > 0.0) {
-                    let at = |i: usize| v.get(i).copied().unwrap_or(0.0);
+                if v[..4].iter().all(|&x| x > 0.0) {
                     m.window_crop = Some(WindowCrop {
-                        src: [at(0) as u32, at(1) as u32],
-                        dst: [at(2) as u32, at(3) as u32],
-                        offset: [at(4) as i64, at(5) as i64],
+                        src: [v[0] as u32, v[1] as u32],
+                        dst: [v[2] as u32, v[3] as u32],
+                        offset: [v[4] as i64, v[5] as i64],
                     });
                 }
             }
@@ -235,8 +234,8 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
             62 => m.is_raw_gyro = value.number().is_some_and(|v| v != 0.0),
             65 => {
                 let v = submessage(&value)?;
-                m.acc_range_g = v.first().copied().filter(|&x| x > 0.0);
-                m.gyro_range_dps = v.get(1).copied().filter(|&x| x > 0.0);
+                m.acc_range_g = Some(v[0]).filter(|&x| x > 0.0);
+                m.gyro_range_dps = Some(v[1]).filter(|&x| x > 0.0);
             }
             80 => m.multi_track_order = value.number().unwrap_or(0.0) as u64,
             131 => m.stream_type = value.number().unwrap_or(0.0) as u64,
@@ -327,21 +326,23 @@ fn parse_imu(record: &[u8], m: &Insta360Metadata) -> Result<Vec<ImuSample>, Inst
     } else {
         // u64 t_ms, then six f64: accel in g, gyro in rad/s.
         let count = items(record, 56, "float IMU")?;
-        Ok((0..count)
+        (0..count)
             .map(|i| {
                 let b = &record[i * 56..];
                 let v = |k: usize| f64::from_bits(le(b, 8 + 8 * k, 8));
-                ImuSample {
-                    t_us: le(b, 0, 8) as i64 * 1000,
+                Ok(ImuSample {
+                    t_us: (le(b, 0, 8) as i64)
+                        .checked_mul(1000)
+                        .ok_or_else(|| malformed("float IMU time overflows microseconds"))?,
                     accel_m_s2: [
                         v(0) * STANDARD_GRAVITY,
                         v(1) * STANDARD_GRAVITY,
                         v(2) * STANDARD_GRAVITY,
                     ],
                     gyro_rad_s: [v(3), v(4), v(5)],
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -463,7 +464,7 @@ pub struct LensCalibration {
     /// frame (telemetry-parser `rig.rs::rotation`): `+Z` the nominal lens-0 axis, `+Y` image-down of lens 0 (the body
     /// axis toward the handle), `+X` right. `R_P_lens = Rv(0, 0, 90; lens 0) Rv(ypr_i; i)^T` with the vendor rotation
     /// `Rv` of [`parse_lens_string`]. Unlike `lens_from_rig_rotation`, lens 0 is not the identity here: the factory
-    /// relative rotation, not the nominal 180 deg, puts the two seams within 0.25 px (recon/09 section 1).
+    /// relative rotation, not the nominal 180 deg, puts the two seams within 0.25 px on the X4 Air clip.
     pub pano_from_lens_rotation: [[f64; 3]; 3],
     /// This lens's centre in the panorama frame `P`, metres, with the origin at the mean of the lens centres:
     /// `R_P_lens0 (translation_m - mean)`. The factory translations are in lens 0's frame, which `R_P_lens0` turns
@@ -502,8 +503,8 @@ impl LensCalibration {
     /// V3: `x_d = m_x R + 2 p1 m_x m_y + p2 (r2 + 2 m_x^2)`, `y_d = m_y R + p1 (r2 + 2 m_y^2) + 2 p2 m_x m_y`;
     /// V6: `x_d = m_x R + (r2 + 2 m_x^2) a + 2 m_x m_y b + d9 r2 + d11 r2^2`,
     /// `y_d = m_y R + (r2 + 2 m_y^2) b + 2 m_x m_y a + d10 r2 + d12 r2^2` with `a = d5 + d7 r2`, `b = d6 + d8 r2`;
-    /// `R = 1 + sum_i radial_i r2^(i+1)`; `u = fx x_d + cx`, `v = fy y_d + cy` (video-types `MeiDistortion`,
-    /// recon/03 section 5.1). The ray need not be unit length.
+    /// `R = 1 + sum_i radial_i r2^(i+1)`; `u = fx x_d + cx`, `v = fy y_d + cy` (video-types `MeiDistortion`).
+    /// The ray need not be unit length.
     ///
     /// # Returns
     /// `None` for a zero ray or one more than [`LENS_HALF_FIELD_RAD`] off the optical axis.
@@ -631,8 +632,13 @@ pub fn parse_lens_string(
         }
     };
     let per_lens = 11 + n_coeffs + 3;
+    if count.fract() != 0.0 || !(1.0..=8.0).contains(&count) {
+        return Err(malformed(format!(
+            "V{version} lens string states {count} lenses, not a whole number from 1 to 8"
+        )));
+    }
     let count = count as usize;
-    if count == 0 || body.len() != count * per_lens {
+    if body.len() != count * per_lens {
         return Err(malformed(format!(
             "V{version} lens string: {} tokens for {count} lenses of {per_lens}",
             body.len()
@@ -753,10 +759,12 @@ impl Insta360Clip {
         }
         let first = m.first_frame_timestamp_us;
         let exposures = &trailer.exposures_vin0;
-        let nearest = (0..exposures.len()).min_by_key(|&i| (exposures[i].t_us - first).abs());
+        // In i128, so times anywhere in i64 cannot overflow the difference.
+        let distance = |i: usize| (i128::from(exposures[i].t_us) - i128::from(first)).abs();
+        let nearest = (0..exposures.len()).min_by_key(|&i| distance(i));
         let period_us = 1e6 / m.frame_rate.unwrap_or(30.0);
         let first_frame_entry = nearest
-            .filter(|&i| ((exposures[i].t_us - first).abs() as f64) < 0.5 * period_us)
+            .filter(|&i| (distance(i) as f64) < 0.5 * period_us)
             .ok_or_else(|| {
                 malformed(format!(
                     "no exposure entry within half a frame of first_frame_timestamp {first}"
@@ -844,7 +852,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    // The real X4 Air strings (recon/03 section 5).
+    // The real X4 Air strings, from the clip VID_20261116_125200_00_003.insv.
     include!("../tests/common/x4air_lens.rs");
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
@@ -872,7 +880,7 @@ mod tests {
             (l0.radial.len(), l0.tangential.len(), l0.prism.len()),
             (3, 2, 0)
         );
-        // Image radius at 100 deg: 972.2 and 980.1 px (recon/03 section 5.3).
+        // Image radius at 100 deg: 972.2 and 980.1 px.
         assert!(
             close(l0.radius_px(100f64.to_radians()), 972.2, 0.1)
                 && close(l1.radius_px(100f64.to_radians()), 980.1, 0.1)
@@ -928,7 +936,17 @@ mod tests {
 
     #[test]
     fn malformed_lens_strings_are_errors_not_panics() {
-        for text in ["", "2_1_2", "2_x_197632", "1_2.3_197632", "2_1_2_3_132096"] {
+        // The last three state 1e30, 2.5 and -1 lenses: the count must be a whole number from 1 to 8.
+        for text in [
+            "",
+            "2_1_2",
+            "2_x_197632",
+            "1_2.3_197632",
+            "2_1_2_3_132096",
+            "1e30_1_197632",
+            "2.5_1_197632",
+            "-1_1_197632",
+        ] {
             assert!(
                 parse_lens_string(text, None, [1920, 1920]).is_err(),
                 "{text}"
@@ -989,6 +1007,27 @@ mod tests {
         varint_field(80, 1, &mut m);
         varint_field(131, 4, &mut m);
         m
+    }
+
+    #[test]
+    fn a_huge_submessage_field_number_allocates_nothing_and_is_ignored() {
+        // Field numbers 2^40 and 2^28 inside the resolution, crop and range submessages: no allocation sized by
+        // them (a panic or a multi-gigabyte buffer before), and the fields 1 to 6 still read.
+        let mut m = metadata(true);
+        for field in [19, 27, 65] {
+            let mut sub = Vec::new();
+            varint_field(1, 1920, &mut sub);
+            varint_field(2, 1920, &mut sub);
+            varint_field(1 << 40, 7, &mut sub);
+            varint_field(1 << 28, 7, &mut sub);
+            bytes_field(field, &sub, &mut m);
+        }
+        let parsed = parse_metadata(&m).unwrap();
+        assert_eq!(parsed.resolution, Some([1920, 1920]));
+        assert_eq!(
+            (parsed.acc_range_g, parsed.gyro_range_dps),
+            (Some(1920.0), Some(1920.0))
+        );
     }
 
     /// A file of `prefix` junk bytes then a trailer holding the given records in 256-byte slots.
@@ -1105,6 +1144,14 @@ mod tests {
             (4, exposures(&[1])),
         ]);
         assert!(read_trailer(&mut Cursor::new(file)).is_err());
+        // A time of 2^62 ms overflows i64 microseconds: an error, not a panic or a wrapped time.
+        let mut imu = (1u64 << 62).to_le_bytes().to_vec();
+        imu.extend_from_slice(&[0u8; 48]);
+        let file = trailer_file(&[(1, metadata(false)), (3, imu), (4, exposures(&[1]))]);
+        assert!(matches!(
+            read_trailer(&mut Cursor::new(file)),
+            Err(Insta360Error::Malformed(_))
+        ));
     }
 
     #[test]
@@ -1147,6 +1194,7 @@ mod tests {
                 exposures(&[1_000_100, 1_000_150, 1_000_200, 1_033_567, 1_066_934]),
             ),
         ]);
+        let video = file.clone();
         file.extend(bx(b"inst", &trailer[1000..]));
         let dir = std::env::temp_dir().join(format!("insta360-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1166,6 +1214,22 @@ mod tests {
         let mut out = Vec::new();
         assert!(reader.read_annex_b(&clip.tracks[0], 0, &mut out).unwrap());
         assert_eq!(out, [0, 0, 0, 1, 0x40, 0x01, 0, 0, 0, 1, 0x26, 0x01]);
+        // A first-frame time of i64::MIN and an exposure at i64::MAX: the distance between them does not overflow,
+        // and the clip is refused because no exposure is near the first frame.
+        let mut far_metadata = metadata(true);
+        varint_field(24, 1 << 63, &mut far_metadata);
+        let far = trailer_file(&[
+            (1, far_metadata),
+            (3, Vec::new()),
+            (4, exposures(&[i64::MAX as u64])),
+        ]);
+        let mut far_file = video;
+        far_file.extend(bx(b"inst", &far[1000..]));
+        std::fs::write(&path, &far_file).unwrap();
+        assert!(matches!(
+            Insta360Clip::open(&path),
+            Err(Insta360Error::Malformed(_))
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

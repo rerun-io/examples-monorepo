@@ -27,6 +27,8 @@ pub fn project(
     } else if comptime!(model == MODEL_EUCM) {
         eucm::project(params, offset, x, y, z, out, false)
     } else {
+        // MODEL_EQUIRECT. A kernel cannot panic, so this arm does not check the tag: the host takes tags from
+        // `DeviceCamera::model_id` and sizes every layout with `parameter_count`, which panics on any other tag.
         equirect::project(params, offset, x, y, z, out, false)
     }
 }
@@ -50,6 +52,8 @@ pub fn unproject(
     } else if comptime!(model == MODEL_EUCM) {
         eucm::unproject(params, offset, px, py, out)
     } else {
+        // MODEL_EQUIRECT. A kernel cannot panic, so this arm does not check the tag: the host takes tags from
+        // `DeviceCamera::model_id` and sizes every layout with `parameter_count`, which panics on any other tag.
         equirect::unproject(params, offset, px, py, out)
     }
 }
@@ -74,6 +78,8 @@ pub fn project_with_point_jacobian(
     } else if comptime!(model == MODEL_EUCM) {
         eucm::project(params, offset, x, y, z, out, true)
     } else {
+        // MODEL_EQUIRECT. A kernel cannot panic, so this arm does not check the tag: the host takes tags from
+        // `DeviceCamera::model_id` and sizes every layout with `parameter_count`, which panics on any other tag.
         equirect::project(params, offset, x, y, z, out, true)
     }
 }

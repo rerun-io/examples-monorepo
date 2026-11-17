@@ -1,9 +1,10 @@
-//! The factory projection and the hemisphere-tile table against the probe's Python oracle
-//! (`/tmp/slam-rs-fisheye-360/calib-probe/pano_lut.py`, recon/09), and on the real X4 Air clip.
+//! The factory projection and the hemisphere-tile table against values from an independent f64 Python
+//! implementation of the factory projection, and on the real X4 Air clip.
 //!
 //! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
 //! `cargo test -p kornia-staging-io --test insta360_pano -- --ignored` (`KORNIA_STAGING_INSV` names the clip). With
-//! `--release`, `evidence_pngs_and_timing` also writes tiles and panoramas to `KORNIA_STAGING_PANO_OUT`.
+//! `--release`, `evidence_pngs_and_timing` also writes tiles and panoramas to `KORNIA_STAGING_PANO_OUT` (default: a
+//! `kornia-staging-pano` directory in the system temporary directory).
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::panorama::{
     assemble_panorama, build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
@@ -19,7 +20,7 @@ const ORACLE_TILE: TileGeometry = TileGeometry {
     margin: 32,
 };
 
-/// pano_lut.py `project` of tile pixels (margin 32, 1024x960): (tile, tu, tv, u, v) at 1920 (V6 string).
+/// The independent f64 projection of tile pixels (margin 32, 1024x960): (tile, tu, tv, u, v) at 1920 (V6 string).
 const ORACLE_V6: [(usize, u32, u32, f64, f64); 40] = [
     (0, 0, 0, 949.4141190063, 66.6916695403),
     (0, 0, 240, 294.3453120156, 313.3967569318),
@@ -127,7 +128,7 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
             );
         }
     }
-    // R_P_lens of V6 lens 0 (pano_lut.py): within 0.63 deg of the identity, not the identity.
+    // R_P_lens of V6 lens 0 (independent f64 implementation): within 0.63 deg of the identity, not the identity.
     let r = lenses(V6)[0].pano_from_lens_rotation;
     assert!(
         (r[0][1] + 0.010977876806482231).abs() < 1e-12
@@ -137,7 +138,7 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
 
 #[test]
 fn the_lens_centres_sit_on_the_panorama_z_axis_about_the_midpoint() {
-    // recon/03 section 4: 33.1 mm baseline on the optical axis, 0.1-0.8 mm lateral; lens 0 looks along +Z.
+    // The X4 Air factory string gives a 33.1 mm baseline on the optical axis, 0.1-0.8 mm lateral; lens 0 looks along +Z.
     let lenses = lenses(V6);
     let [c0, c1] = [lenses[0].pano_centre_m, lenses[1].pano_centre_m];
     for k in 0..3 {
@@ -158,7 +159,7 @@ fn the_lens_centres_sit_on_the_panorama_z_axis_about_the_midpoint() {
 
 #[test]
 fn the_radial_part_gives_the_recon_radii() {
-    // recon/03 section 5.3: lens 0 (V3) image radius 294.9 / 607.6 / 900.2 / 972.2 px at 30 / 60 / 90 / 100 deg.
+    // Lens 0 (V3) image radius 294.9 / 607.6 / 900.2 / 972.2 px at 30 / 60 / 90 / 100 deg.
     let mut lens = lenses(V3)[0].clone();
     lens.tangential = vec![0.0; 2];
     (lens.fx, lens.fy) = (0.5 * (lens.fx + lens.fy), 0.5 * (lens.fx + lens.fy));
@@ -210,7 +211,7 @@ fn the_table_quantises_the_oracle_to_half_a_step() {
 
 #[test]
 fn invalid_pixels_sit_at_the_lens_edges() {
-    // With the same validity rule, pano_lut.py's projection gives these counts (ref.py, recon/09 lists 189 for the
+    // With the same validity rule, the independent f64 projection gives these counts (189 for the
     // open interval 0 < u < 1919 at margin 32; level 1 has no sample past full-res 1918).
     let lenses = lenses(V6);
     for (margin, counts) in [(32, [0, 244]), (64, [6787, 8427])] {
@@ -229,8 +230,8 @@ fn invalid_pixels_sit_at_the_lens_edges() {
                 .filter(|(_, s)| **s == LUT_INVALID)
             {
                 let (tu, tv) = (i % w, i / w);
-                // Only more than 95 deg of longitude from the lens axis (the frames cut the lenses at 95.9-99.1 deg,
-                // recon/03 section 5.3), and only within 200 rows (37.5 deg) of the equator.
+                // Only more than 95 deg of longitude from the lens axis (the frames cut the lenses at 95.9-99.1 deg),
+                // and only within 200 rows (37.5 deg) of the equator.
                 let lon = (tu as f64 - cx).abs() / g.focal();
                 assert!(
                     lon > 95f64.to_radians() && tv.abs_diff(480) < 200,
@@ -273,7 +274,7 @@ fn a_real_frame_pair_matches_the_oracle_remap() {
     let luts = [0, 1].map(|k| lut(&lenses[k], ORACLE_TILE, k));
     let tiles = tiles(&path, &clip, &luts, 12);
     for k in 0..2 {
-        // pano_lut.py `remap`: bilinear on the full-resolution lens picture at the factory projection, 0 outside.
+        // The independent `remap`: bilinear on the full-resolution lens picture at the factory projection, 0 outside.
         let lens = decode(&path, clip.lens_track[k], 12);
         let level1 = lens_level1(&lens).unwrap();
         let (mut sum, mut n, mut big, mut exact) = (0.0, 0usize, 0usize, 0.0f64);
@@ -316,8 +317,12 @@ fn a_real_frame_pair_matches_the_oracle_remap() {
 #[ignore = "writes evidence PNGs; needs the X4 Air clip VID_20261116_125200_00_003.insv and ffmpeg"]
 fn evidence_pngs_and_timing() {
     let Some((path, clip)) = clip() else { return };
-    let out = std::env::var("KORNIA_STAGING_PANO_OUT")
-        .unwrap_or_else(|_| "/tmp/slam-rs-fisheye-360/f4a-pano-lut/out".into());
+    let out = std::env::var("KORNIA_STAGING_PANO_OUT").unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join("kornia-staging-pano")
+            .to_string_lossy()
+            .into_owned()
+    });
     std::fs::create_dir_all(&out).unwrap();
     let g = TileGeometry::default();
     let started = Instant::now();

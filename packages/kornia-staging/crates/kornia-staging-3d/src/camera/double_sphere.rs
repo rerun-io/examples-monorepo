@@ -18,7 +18,8 @@ impl<S: Scalar> DoubleSphere<S> {
     /// # Arguments
     /// * `param` - `[fx, fy, cx, cy, xi, alpha]`, `xi` in `[-1, 1]`, `alpha` in `[0, 1]`.
     /// # Errors
-    /// Rejects non-finite parameters, nonpositive focals, or `xi`/`alpha` out of range.
+    /// Rejects non-finite parameters, nonpositive focals, `xi`/`alpha` out of range, or a domain bound that is not
+    /// finite (`xi = -1` with `alpha = 0.5`).
     pub fn new(param: [S; 6]) -> Result<Self, InvalidCalibration> {
         validate_parameters(&param)?;
         let [.., xi, alpha] = param;
@@ -31,6 +32,10 @@ impl<S: Scalar> DoubleSphere<S> {
             alpha / (S::one() - alpha)
         };
         let w2 = (w1 + xi) / (c::<S>(2.0) * w1 * xi + xi * xi + S::one()).sqrt();
+        // `xi = -1, alpha = 0.5` gives 0 / 0: a NaN bound would reject no point.
+        if !w2.is_finite() {
+            return Err(InvalidCalibration);
+        }
         Ok(Self { param, w2 })
     }
     /// Intrinsics in constructor order.

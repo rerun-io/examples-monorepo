@@ -153,11 +153,12 @@ pub fn read_moov<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, Mp4Error> {
 
 /// Read every HEVC video track of a file. Tracks of other codecs and handlers are skipped.
 pub fn read_hevc_tracks<R: Read + Seek>(reader: &mut R) -> Result<Vec<VideoTrack>, Mp4Error> {
+    let file_len = reader.seek(SeekFrom::End(0))?;
     let moov = read_moov(reader)?;
     let mut tracks = Vec::new();
     for (kind, trak) in children(&moov)? {
         if &kind == b"trak" {
-            tracks.extend(parse_trak(trak)?);
+            tracks.extend(parse_trak(trak, file_len)?);
         }
     }
     Ok(tracks)
@@ -167,7 +168,7 @@ fn full_box_version(b: &[u8]) -> Result<u8, Mp4Error> {
     Ok(be(b, 0, 1)? as u8)
 }
 
-fn parse_trak(trak: &[u8]) -> Result<Option<VideoTrack>, Mp4Error> {
+fn parse_trak(trak: &[u8], file_len: u64) -> Result<Option<VideoTrack>, Mp4Error> {
     let tkhd = need(trak, b"tkhd")?;
     let track_id = u32_at(tkhd, if full_box_version(tkhd)? == 1 { 20 } else { 12 })?;
     let mdia = need(trak, b"mdia")?;
@@ -207,7 +208,7 @@ fn parse_trak(trak: &[u8]) -> Result<Option<VideoTrack>, Mp4Error> {
         Some(elst) => first_media_time(elst)?,
         None => 0,
     };
-    let samples = sample_table(stbl, media_time)?;
+    let samples = sample_table(stbl, media_time, file_len)?;
     Ok(Some(VideoTrack {
         track_id,
         codec,
@@ -263,9 +264,41 @@ fn first_media_time(elst: &[u8]) -> Result<i64, Mp4Error> {
     Ok(0)
 }
 
-fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
+/// The samples of a track. `file_len` bounds a fixed-size `stsz`: the samples' bytes lie in the file.
+fn sample_table(stbl: &[u8], media_time: i64, file_len: u64) -> Result<Vec<Sample>, Mp4Error> {
     let stsz = need(stbl, b"stsz")?;
     let (fixed, count) = (u32_at(stsz, 4)?, u32_at(stsz, 8)? as usize);
+    // Bound the sample count before anything is allocated from it: by the stsz box size (one entry per sample), or
+    // for a fixed sample size by the file size, and then by the stts entry counts, which must add up to it.
+    let in_bounds = if fixed == 0 {
+        count
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(12))
+            .is_some_and(|end| end <= stsz.len())
+    } else {
+        (count as u64)
+            .checked_mul(u64::from(fixed))
+            .is_some_and(|bytes| bytes <= file_len)
+    };
+    if !in_bounds {
+        return Err(malformed(format!(
+            "stsz states {count} samples of size {fixed} in a {}-byte box of a {file_len}-byte file",
+            stsz.len()
+        )));
+    }
+    let stts = need(stbl, b"stts")?;
+    let mut stts_total = 0usize;
+    for i in 0..u32_at(stts, 4)? as usize {
+        stts_total += u32_at(stts, 8 + 8 * i)? as usize;
+        if stts_total > count {
+            break;
+        }
+    }
+    if stts_total != count {
+        return Err(malformed(format!(
+            "stts covers {stts_total} or more samples, stsz has {count}"
+        )));
+    }
     let sizes: Vec<u32> = (0..count)
         .map(|i| {
             if fixed != 0 {
@@ -299,9 +332,11 @@ fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
         .collect::<Result<_, Mp4Error>>()?;
     let mut offsets = Vec::with_capacity(count);
     for (r, &(first, per_chunk)) in runs.iter().enumerate() {
-        let last = runs
-            .get(r + 1)
-            .map_or(chunk_offsets.len(), |next| next.0 - 1);
+        let last = runs.get(r + 1).map_or(Ok(chunk_offsets.len()), |next| {
+            next.0
+                .checked_sub(1)
+                .ok_or_else(|| malformed("stsc run starts at chunk 0"))
+        })?;
         for chunk in first..=last {
             let mut offset = *chunk_offsets
                 .get(chunk.wrapping_sub(1))
@@ -311,7 +346,9 @@ fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
                     .get(offsets.len())
                     .ok_or_else(|| malformed("stsc describes more samples than stsz"))?;
                 offsets.push(offset);
-                offset += u64::from(size);
+                offset = offset
+                    .checked_add(u64::from(size))
+                    .ok_or_else(|| malformed("sample offset overflows 64 bits"))?;
             }
         }
     }
@@ -322,7 +359,6 @@ fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
         )));
     }
 
-    let stts = need(stbl, b"stts")?;
     let mut dts = Vec::with_capacity(count);
     let mut t = 0i64;
     for i in 0..u32_at(stts, 4)? as usize {
@@ -332,7 +368,9 @@ fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
         );
         for _ in 0..n {
             dts.push(t);
-            t += delta;
+            t = t
+                .checked_add(delta)
+                .ok_or_else(|| malformed("stts decode time overflows 64 bits"))?;
         }
     }
     let mut composition = vec![0i64; count];
@@ -362,17 +400,22 @@ fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
             dts.len()
         )));
     }
-    Ok((0..count)
-        .map(|i| Sample {
-            offset: offsets[i],
-            size: sizes[i],
-            dts: dts[i],
-            pts: dts[i] + composition[i] - media_time,
-            is_sync: sync
-                .as_ref()
-                .is_none_or(|s| s.binary_search(&(i as u32 + 1)).is_ok()),
+    (0..count)
+        .map(|i| {
+            Ok(Sample {
+                offset: offsets[i],
+                size: sizes[i],
+                dts: dts[i],
+                pts: dts[i]
+                    .checked_add(composition[i])
+                    .and_then(|t| t.checked_sub(media_time))
+                    .ok_or_else(|| malformed("presentation time overflows 64 bits"))?,
+                is_sync: sync
+                    .as_ref()
+                    .is_none_or(|s| s.binary_search(&(i as u32 + 1)).is_ok()),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Builders for synthetic MP4 files, shared by this crate's tests.
@@ -619,6 +662,101 @@ mod tests {
                 ]
             );
         }
+    }
+
+    /// An `stbl` payload: `stsz` (fixed size, count, per-sample sizes), `stts` rows, `stsc` rows and `co64` offsets.
+    fn stbl(
+        fixed: u32,
+        count: u32,
+        sizes: &[u32],
+        stts: &[[u32; 2]],
+        stsc: &[[u32; 3]],
+        co64: &[u64],
+    ) -> Vec<u8> {
+        let mut stsz = fixed.to_be_bytes().to_vec();
+        stsz.extend_from_slice(&count.to_be_bytes());
+        sizes
+            .iter()
+            .for_each(|s| stsz.extend_from_slice(&s.to_be_bytes()));
+        let rows = |n: usize, cells: Vec<u32>| {
+            let mut b = (n as u32).to_be_bytes().to_vec();
+            cells
+                .iter()
+                .for_each(|c| b.extend_from_slice(&c.to_be_bytes()));
+            b
+        };
+        let mut offsets = (co64.len() as u32).to_be_bytes().to_vec();
+        co64.iter()
+            .for_each(|o| offsets.extend_from_slice(&o.to_be_bytes()));
+        let mut out = full(b"stsz", 0, &stsz);
+        out.extend(full(b"stts", 0, &rows(stts.len(), stts.concat())));
+        out.extend(full(b"stsc", 0, &rows(stsc.len(), stsc.concat())));
+        out.extend(full(b"co64", 0, &offsets));
+        out
+    }
+
+    #[test]
+    fn sample_counts_beyond_the_box_or_file_size_are_errors_before_allocation() {
+        // A fixed sample size with 2^32 - 1 samples in a 1 MB file: 16 GB of sizes before, an error now.
+        let huge = stbl(
+            1,
+            u32::MAX,
+            &[],
+            &[[u32::MAX, 1]],
+            &[[1, u32::MAX, 1]],
+            &[0],
+        );
+        assert!(matches!(
+            sample_table(&huge, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // Per-sample sizes: 2^32 - 1 entries stated in a box that holds none.
+        let short = stbl(0, u32::MAX, &[], &[[u32::MAX, 1]], &[[1, 1, 1]], &[0]);
+        assert!(matches!(
+            sample_table(&short, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // One stts entry of 2^32 - 1 samples for a 2-sample table: 32 GB of decode times before, an error now.
+        let stts = stbl(0, 2, &[10, 20], &[[u32::MAX, 1]], &[[1, 2, 1]], &[100]);
+        assert!(matches!(
+            sample_table(&stts, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // The same table with a matching stts still reads.
+        let ok = stbl(0, 2, &[10, 20], &[[2, 1]], &[[1, 2, 1]], &[100]);
+        let samples = sample_table(&ok, 0, 1 << 20).unwrap();
+        assert_eq!((samples[1].offset, samples[1].dts), (110, 1));
+        let fixed = stbl(7, 2, &[], &[[2, 1]], &[[1, 2, 1]], &[100]);
+        assert_eq!(sample_table(&fixed, 0, 1 << 20).unwrap()[1].offset, 107);
+    }
+
+    #[test]
+    fn overflowing_table_values_are_errors_not_panics() {
+        // A second stsc run that starts at chunk 0.
+        let chunk0 = stbl(
+            0,
+            2,
+            &[10, 20],
+            &[[2, 1]],
+            &[[1, 1, 1], [0, 1, 1]],
+            &[100, 200],
+        );
+        assert!(matches!(
+            sample_table(&chunk0, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // A chunk offset 5 bytes below 2^64 followed by a 10-byte sample.
+        let offset = stbl(0, 2, &[10, 20], &[[2, 1]], &[[1, 2, 1]], &[u64::MAX - 5]);
+        assert!(matches!(
+            sample_table(&offset, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // A 64-bit edit-list media time that puts the presentation time past i64.
+        let ok = stbl(0, 2, &[10, 20], &[[2, 1]], &[[1, 2, 1]], &[100]);
+        assert!(matches!(
+            sample_table(&ok, i64::MIN, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
     }
 
     #[test]

@@ -5,11 +5,12 @@ const LENS: kornia_image::ImageSize = kornia_image::ImageSize {
     width: 1920,
     height: 1920,
 };
-const CLIP: &str = "/home/pablo/data/insta360/VID_20261116_125200_00_003.insv";
-
-/// The clip (`KORNIA_STAGING_INSV`, default [`CLIP`]) and an `ffmpeg`, or `None` with the missing asset named.
+/// The clip (`KORNIA_STAGING_INSV`) and an `ffmpeg`, or `None` with the missing asset named.
 fn clip() -> Option<(String, kornia_staging_io::insta360::Insta360Clip)> {
-    let path = std::env::var("KORNIA_STAGING_INSV").unwrap_or_else(|_| CLIP.into());
+    let Ok(path) = std::env::var("KORNIA_STAGING_INSV") else {
+        eprintln!("SKIP: KORNIA_STAGING_INSV is unset (it names the X4 Air clip VID_20261116_125200_00_003.insv)");
+        return None;
+    };
     if !std::path::Path::new(&path).is_file() {
         eprintln!("SKIP: asset {path} (VID_20261116_125200_00_003.insv) is absent");
         return None;
@@ -23,7 +24,7 @@ fn clip() -> Option<(String, kornia_staging_io::insta360::Insta360Clip)> {
         return None;
     }
     let clip = kornia_staging_io::insta360::Insta360Clip::open(&path).unwrap();
-    assert_eq!(clip.lens_track, [1, 0], "lens 0 is track 1 (recon/09)");
+    assert_eq!(clip.lens_track, [1, 0], "lens 0 is track 1: the clip states the reversed track order");
     Some((path, clip))
 }
 

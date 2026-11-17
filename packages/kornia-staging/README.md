@@ -94,6 +94,7 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |
 | Strided u8-shift8 ingestion and sparse u16 bilinear values/gradients (dense conversion uses upstream cast_and_scale) | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Floor-halved integer u16 Gaussian downsampling and reusable PyramidPlanU16 | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
+| Dual-fisheye to equirectangular hemisphere tiles: fixed-point LUT, integer bilinear remap, viewing panorama | new (slam-rs 360 lane, Insta360 dual-fisheye ingest) | kornia-rs / kornia-imgproc / `panorama` | staged | - |
 | Dequeue rejection metadata and matcher emission observer | RoboCap split investigation | kornia-staging-io / v4l::mplane; kornia-staging-sensors / matcher | staged | - |
 | Centered FAST cells, band scans, masks and deterministic selection | slam-rs `frontend/detect*`, `frontend/cell.rs` | kornia-rs / kornia-imgproc / `features` (private kernels; explicit backend module) | staged | - |
 | Mean-normalized SE(2) patches and sealed sampling patterns (private Sophus-style exponential preserves normalization and cubic small-angle term) | slam-rs `frontend/{patch,patterns,se2,simd,ldlt}.rs` | kornia-rs / kornia-imgproc / `optical_flow::patch_se2` | staged | - |
