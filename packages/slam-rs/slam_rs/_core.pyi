@@ -36,6 +36,23 @@ def device_probes_run() -> int:
     at 0.
     """
 
+def reanchor(
+    frame_t_ns: Int64[ndarray, " n"],
+    frame_poses: Float64[ndarray, "n 7"],
+    keyframe_t_ns: Int64[ndarray, " k"],
+    keyframe_poses: Float64[ndarray, "k 7"],
+) -> Float64[ndarray, "n 7"]:
+    """The final trajectory: each raw frame pose re-anchored on the optimized keyframes on both sides.
+
+    A frame between keyframes ``i`` and ``i+1`` blends ``T_i_opt T_i_raw^-1 T_f_raw`` and the same from ``i+1``
+    (translation lerp, rotation slerp, by time); a keyframe takes its optimized pose; frames outside the keyframes
+    take the nearest keyframe's correction. ``T_i_raw`` is the keyframe's own row in the frames. Poses are
+    ``[tx, ty, tz, qx, qy, qz, qw]``; timestamps increase strictly.
+
+    Raises:
+        ValueError: Timestamps that do not increase, a keyframe that is not a frame, or mismatched shapes.
+    """
+
 def select_backend(request: BackendRequest) -> Lane:
     """Resolve a backend request to the lane :class:`Vio` would run (``slam_rs::select_backend``).
 
@@ -79,7 +96,9 @@ class VioResult:
     def world_from_rig(self) -> Float64[ndarray, " 7"] | None:
         """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw).
 
-        Only ``Tracking`` supplies a pose; every other status returns ``None``.
+        Only ``Tracking`` supplies a pose; every other status returns ``None``. This is the raw, causal VIO; the
+        back end never moves it, and the pose-graph gauge (window fixed) makes it this frame's corrected pose too.
+        The corrected history of earlier frames is ``slam_rs.tracking.reanchored(poses, vio.map_snapshot())``.
         """
 
     @property
@@ -208,12 +227,50 @@ class GbaRun:
         """Whether it solved in f64 (``backend.gba_use_double``)."""
 
     def __repr__(self) -> str: ...
+class LoopCounts:
+    """What loop closing has done so far (all zero when it is off)."""
+
+    @property
+    def indexed(self) -> int:
+        """Keyframes described and added to the database."""
+
+    @property
+    def without_images(self) -> int:
+        """Queries that found no images for their keyframe."""
+
+    @property
+    def images_stripped(self) -> int:
+        """Keyframe stamps whose images were dropped before the back end took them (Realtime, behind)."""
+
+    @property
+    def with_candidates(self) -> int:
+        """Queries that retrieved at least one candidate."""
+
+    @property
+    def candidates(self) -> int:
+        """Candidates validated."""
+
+    @property
+    def verified(self) -> int:
+        """Loops that passed verification."""
+
+    @property
+    def fused(self) -> int:
+        """Loops fused at once."""
+
+    @property
+    def needs_pgo(self) -> int:
+        """Loops at or above the drift gate: the pose-graph optimization's triggers."""
+
+    @property
+    def optimized(self) -> int:
+        """Of those, closed by an applied pose-graph optimization."""
 
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
 
-    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses: what
-    the back end starts from, before any loop closure moves them.
+    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses as the
+    pose-graph optimization (PGO) corrected them; the raw poses are the window's.
     """
 
     @property
@@ -226,7 +283,23 @@ class MapSnapshot:
 
     @property
     def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """Raw keyframe poses ``T_w_i``, ``[tx, ty, tz, qx, qy, qz, qw]``."""
+        """Keyframe poses ``T_w_i`` as the map holds them (PGO-corrected), ``[tx, ty, tz, qx, qy, qz, qw]``."""
+
+    @property
+    def keyframe_raw_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """The window's keyframe poses, before any correction."""
+
+    @property
+    def pgo_epoch(self) -> int:
+        """Applied pose-graph optimizations so far (the correction epoch)."""
+
+    @property
+    def pgo_runs(self) -> Int64[ndarray, "n_pgo 5"]:
+        """Each applied PGO, oldest first: ``[current, candidate, moved, dropped_edges, iterations]``."""
+
+    @property
+    def pgo_us(self) -> tuple[int, int]:
+        """Wall time of the loops that ran a PGO (graph, solve, map write, fusion): total and slowest, microseconds."""
 
     @property
     def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
@@ -251,6 +324,26 @@ class MapSnapshot:
     @property
     def covisibility_weights(self) -> UInt32[ndarray, " n_edges"]:
         """Shared landmarks per covisibility edge."""
+
+    @property
+    def pose_graph_edges(self) -> Int64[ndarray, "n_pose_graph_edges 2"]:
+        """The edges a pose-graph optimization would take now, ``[from, to]`` keyframe timestamps."""
+
+    @property
+    def pose_graph_edge_kinds(self) -> UInt8[ndarray, " n_pose_graph_edges"]:
+        """Kind of each pose-graph edge: 0 spanning tree, 1 loop closure, 2 high covisibility."""
+
+    @property
+    def loop_edges(self) -> Int64[ndarray, "n_loops 2"]:
+        """Verified loops whose keyframes are still in the map, oldest first, as ``[current, candidate]`` timestamps."""
+
+    @property
+    def loop_fused(self) -> Bool[ndarray, " n_loops"]:
+        """Whether each loop's landmarks were fused, at once or after a PGO; otherwise it was left unapplied."""
+
+    @property
+    def loop_counts(self) -> LoopCounts:
+        """What loop closing has done so far."""
 
     @property
     def keyframes(self) -> int:

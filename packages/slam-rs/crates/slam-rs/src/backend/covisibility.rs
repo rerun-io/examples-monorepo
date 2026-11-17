@@ -202,6 +202,31 @@ impl CovisibilityGraph {
         }
     }
 
+    /// Raise the edge `a`-`b` by `by`, creating it at `by` (`incrementEdge`).
+    /// Does nothing if either node is missing or `a == b` (B19).
+    pub fn increment_edge(&mut self, a: FrameId, b: FrameId, by: u32) {
+        if a == b || !self.contains(a) || !self.contains(b) {
+            return;
+        }
+        for (from, to) in [(a, b), (b, a)] {
+            if let Some(node) = self.nodes.get_mut(&from) {
+                *node.edges.entry(to).or_insert(0) += by;
+            }
+        }
+    }
+
+    /// `id`'s `k` strongest neighbours, strongest first, equal weights by id
+    /// (`getTopCovisible`, which leaves ties in hash order).
+    pub fn top_covisible(&self, id: FrameId, k: usize) -> Vec<FrameId> {
+        let mut neighbours: Vec<(FrameId, u32)> = self.neighbours(id).collect();
+        neighbours.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        neighbours
+            .into_iter()
+            .take(k)
+            .map(|(other, _)| other)
+            .collect()
+    }
+
     /// Record a loop closure between two existing nodes; `false` if either is
     /// missing or they are the same.
     pub fn add_loop_closure(&mut self, a: FrameId, b: FrameId) -> bool {
@@ -402,6 +427,32 @@ mod tests {
         graph.decrement_edge(1, 42, 1);
         graph.decrement_edge(1, 5, 1);
         assert_eq!(graph, before, "B19: a missing edge or node is left alone");
+    }
+
+    #[test]
+    fn incrementing_creates_or_raises_an_edge_between_existing_nodes_only() {
+        let mut graph = hand_graph();
+        graph.increment_edge(4, 1, 3);
+        assert_eq!(graph.weight(1, 4), Some(3));
+        graph.increment_edge(1, 4, 2);
+        assert_eq!(graph.weight(4, 1), Some(5));
+        let before = graph.clone();
+        graph.increment_edge(1, 42, 1);
+        graph.increment_edge(2, 2, 1);
+        assert_eq!(graph, before, "B19: no node is created");
+    }
+
+    #[test]
+    fn the_island_takes_the_strongest_neighbours_ties_by_id() {
+        let graph = hand_graph();
+        assert_eq!(graph.top_covisible(3, 2), vec![5, 2]);
+        assert_eq!(graph.top_covisible(5, 1), vec![3], "80 vs 80: smaller id");
+        assert_eq!(
+            graph.top_covisible(3, 10),
+            vec![5, 2, 1, 4],
+            "4 hangs from 3 at weight 0"
+        );
+        assert!(graph.top_covisible(42, 3).is_empty());
     }
 
     #[test]

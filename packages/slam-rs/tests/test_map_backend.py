@@ -31,6 +31,8 @@ def _run(rig: RigFactory, texture: TextureFactory, mode: Literal["offline", "rea
         result: _core.VioResult = vio.track(index * 20_000_000, images)
         assert result.status == _core.VioStatus.Tracking
         assert result.world_from_rig is not None
+        # The live pose is the raw causal VIO; the corrected history comes from the map (``tracking.reanchored``), not from ``track``.
+        assert not hasattr(result, "world_from_rig_corrected")
         poses.append(result.world_from_rig)
     vio.flush()
     return poses, vio
@@ -58,6 +60,7 @@ def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(
     k: int = snapshot.keyframe_t_ns.shape[0]
     p: int = snapshot.point_ids.shape[0]
     e: int = snapshot.covisibility_edges.shape[0]
+    r: int = snapshot.pgo_epoch
     assert k >= 1
     assert snapshot.keyframes == k
     for array, dtype, shape in (
@@ -69,6 +72,8 @@ def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(
         (snapshot.points_world, np.float32, (p, 3)),
         (snapshot.covisibility_edges, np.int64, (e, 2)),
         (snapshot.covisibility_weights, np.uint32, (e,)),
+        (snapshot.keyframe_raw_poses, np.float64, (k, 7)),
+        (snapshot.pgo_runs, np.int64, (r, 5)),
     ):
         assert array.dtype == dtype
         assert array.shape == shape

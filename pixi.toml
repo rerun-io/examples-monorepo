@@ -2708,9 +2708,14 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 
 [feature.slam-rs.target.linux-64.dependencies]
 dav1d = "1.2.*"
+# dataforge (below) imports both at module load (transports, gen_humanego_depth), and slam-rs-register runs its register tool.
+requests = "*"
+depth-png = { path = "packages/depth-png" }
 
 [feature.slam-rs.target.linux-aarch64.dependencies]
 dav1d = "1.2.*"
+requests = "*"
+depth-png = { path = "packages/depth-png" }
 
 # Catalog result-layer publishing imports dataforge; dataforge is a linux-only
 # member, so the osx lane leaves it out.
@@ -2865,9 +2870,10 @@ inputs = [
 outputs = ["packages/slam-rs/slam_rs/_core.so"]
 description = "Build the Rust VIO core with the wgpu GPU frontend and install slam_rs._core in place"
 
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.slam-rs.tasks.slam-rs-clippy]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
-cmd = "cargo clippy --workspace --all-targets -- -D warnings"
+cmd = "cargo-clippy clippy --workspace --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Run clippy over the whole Rust workspace"
 
@@ -2902,7 +2908,7 @@ depends-on = ["lint", "typecheck", "deadcode", "tests", "tests-integration", "sl
 description = "Run Python, core native and recorder live-slam author checks; catalog and wgpu have named lanes"
 
 [feature.slam-rs.tasks.slam-rs-fmt]
-cmd = "cargo fmt --all"
+cmd = "cargo-fmt --all"
 cwd = "packages/slam-rs"
 description = "Format the Rust sources"
 
@@ -2938,7 +2944,7 @@ description = "Build the core, then run the package golden reference tests"
 # does not compile these optional modules.
 [feature.slam-rs.tasks.slam-rs-wgpu-clippy]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
-cmd = "cargo clippy -p slam-rs --features gpu-wgpu,gpu-test-support --all-targets -- -D warnings"
+cmd = "cargo-clippy clippy -p slam-rs --features gpu-wgpu,gpu-test-support --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Lint the portable wgpu lane, tests included, with warnings denied"
 
@@ -2986,9 +2992,10 @@ depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-stagin
 cmd = "cargo test --locked -p robocap-recorder --features gstreamer-capture,live-slam"
 cwd = "packages/slam-rs"
 
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.robocap-recorder.tasks.robocap-recorder-clippy]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
-cmd = "cargo clippy --locked -p robocap-recorder --features gstreamer-capture,live-slam --all-targets -- -D warnings"
+cmd = "cargo-clippy clippy --locked -p robocap-recorder --features gstreamer-capture,live-slam --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 
 [feature.robocap-cross]
@@ -3764,8 +3771,9 @@ depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-stagin
 cwd = "packages/robocap-live"
 description = "Run native scheduler, layer, SLAM and panel tests"
 
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.robocap-live.tasks.robocap-live-clippy]
-cmd = "cargo clippy --locked --workspace --all-targets -- -D warnings"
+cmd = "cargo-clippy clippy --locked --workspace --all-targets -- -D warnings"
 cwd = "packages/robocap-live"
 description = "Lint the Rust capture workspace with warnings denied"
 
@@ -3833,8 +3841,9 @@ rust = "1.98.*"
 # pyo3's build script needs an interpreter to configure crates/depth-png-py.
 python = "3.12.*"
 
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.depth-png-rust.tasks.depth-png-rust-check]
-cmd = "cargo fmt --all --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked -p depth-png"
+cmd = "cargo-fmt --all --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked -p depth-png"
 cwd = "packages/depth-png"
 description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
 
@@ -3910,20 +3919,21 @@ cmd = "cargo test --locked --offline --manifest-path target/patch/cubecl-wgpu-0.
 cwd = "packages/kornia-staging"
 description = "Test idle blocking, retained wakeups and poll worker shutdown"
 
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.kornia-staging.tasks.kornia-staging-gpu-test]
 depends-on = ["kornia-staging-cubecl-park-test", "kornia-staging-wgpu-poll-test"]
-cmd = "cargo test --locked -p kornia-staging-gpu --features wgpu && cargo clippy --locked -p kornia-staging-gpu --features wgpu --all-targets -- -D warnings"
+cmd = "cargo test --locked -p kornia-staging-gpu --features wgpu && cargo-clippy clippy --locked -p kornia-staging-gpu --features wgpu --all-targets -- -D warnings"
 cwd = "packages/kornia-staging"
 description = "Test portable GPU operations on the host device"
 
 [feature.kornia-staging.tasks.kornia-staging-fmt-check]
-cmd = "cargo fmt --all -- --check"
+cmd = "cargo-fmt --all -- --check"
 cwd = "packages/kornia-staging"
 description = "Check Rust formatting"
 
 [feature.kornia-staging.tasks.kornia-staging-clippy]
 depends-on = ["kornia-staging-patch-deps"]
-cmd = "cargo clippy --locked --workspace --exclude kornia-staging-gpu --all-targets --all-features -- -D warnings && cargo clippy --locked --workspace --exclude kornia-staging-gpu --all-targets --no-default-features -- -D warnings"
+cmd = "cargo-clippy clippy --locked --workspace --exclude kornia-staging-gpu --all-targets --all-features -- -D warnings && cargo-clippy clippy --locked --workspace --exclude kornia-staging-gpu --all-targets --no-default-features -- -D warnings"
 cwd = "packages/kornia-staging"
 description = "Check all Rust targets with warnings denied"
 
@@ -3940,6 +3950,14 @@ depends-on = ["kornia-staging-patch-deps"]
 cmd = "cargo test --locked --release -p kornia-staging-slam --test gba_rootba_export -- --ignored golden --nocapture"
 cwd = "packages/kornia-staging"
 description = "Run the global-BA golden lanes against rootba bal (MGO07, TM1)"
+
+# Golden parity against third-party reference outputs stored as .rrd on the NAS. `golden/` is a Cargo workspace of its
+# own: the Rerun 0.42 decoder it needs stays out of the staging lock and the gate's build. The env's cargo-clippy is
+# called directly, as `cargo clippy` would pick a rustup one from CARGO_HOME. Skips, naming the asset, when absent.
+[feature.kornia-staging.tasks.kornia-staging-golden]
+cmd = """bash -c 'export CARGO_TARGET_DIR=../target/golden; golden=${KORNIA_STAGING_BASALT_BRIEF:-/mnt/nas/ssd-8tb/scratch/slam-rs-rootslam/fixtures/b1/basalt_brief.rrd}; cargo fmt --check && "$CONDA_PREFIX/bin/cargo-clippy" clippy --locked --all-targets -- -D warnings && if [[ -f $golden ]]; then KORNIA_STAGING_BASALT_BRIEF=$golden cargo test --locked --release -- --ignored --nocapture; else echo "SKIP kornia-staging-golden: Basalt BRIEF golden $golden is absent (set KORNIA_STAGING_BASALT_BRIEF)"; fi'"""
+cwd = "packages/kornia-staging/golden"
+description = "Run the golden parity tests (Basalt BRIEF, matcher, HashBoW) against the NAS .rrd fixtures"
 
 [feature.kornia-staging.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test", "kornia-staging-patch-test", "kornia-staging-patch-integration"]

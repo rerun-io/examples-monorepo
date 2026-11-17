@@ -1,14 +1,20 @@
-"""A SLAM result augments the base rig on its original timeline."""
+"""The slam-rs result layer writes its runs under /world/runs on camera time, and animates the base rig only without a gt layer."""
 
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
 from fixture_types import Rows, RowsReader
+from rerun.catalog import DatasetEntry
 
+from slam_rs.apis import catalog_layer as catalog_layer_api
+from slam_rs.catalog_feed import CatalogSegment
 from slam_rs.catalog_layer import write_layer
 from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
@@ -27,18 +33,102 @@ def run() -> SegmentRun:
     )
 
 
-def test_layer_animates_the_base_rig_without_replacing_camera_data(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
-    """Absolute inertial poses return to camera time; the result carries no camera statics."""
+@pytest.mark.parametrize("run_root", ["/world/runs/slam_rs", "/world/runs/slam_rs_vio"])
+def test_layer_writes_both_runs_on_camera_time(tmp_path: Path, read_rows: RowsReader, run: SegmentRun, run_root: str) -> None:
+    """Absolute inertial poses return to camera time under the final and the raw VIO run; with the back end off (no ``final``) they are equal."""
     path: Path = tmp_path / "result.rrd"
     write_layer(path, "session", run, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu")
     rows: Rows = read_rows(path)
-    assert [row.t_ns for row in rows["/world/rig_00"]] == [1_000_000_000, 2_000_000_000]
-    np.testing.assert_allclose(rows["/world/rig_00"][-1].values["Transform3D:translation"], [[1, 2, 3]])
-    np.testing.assert_allclose(rows["/world/rig_00"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
-    assert [row.t_ns for row in rows["/world/runs/slam_rs/trail"]] == [2_000_000_000]
+    assert [row.t_ns for row in rows[f"{run_root}/rig"]] == [1_000_000_000, 2_000_000_000]
+    np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:translation"], [[1, 2, 3]])
+    np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
+    assert [row.t_ns for row in rows[f"{run_root}/trail"]] == [2_000_000_000]
+
+
+def test_the_final_run_is_the_re_anchored_trajectory_and_the_raw_run_the_vio(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """``slam_rs`` holds :attr:`SegmentRun.final`, ``slam_rs_vio`` the raw estimate; a base rig without ``gt`` follows the final run."""
+    final: Trajectory = replace(run.estimate, position_m=run.estimate.position_m + np.array([0.0, 0.0, 0.5]))
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", replace(run, final=final), clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=True)
+    rows: Rows = read_rows(path)
+    np.testing.assert_allclose(rows["/world/runs/slam_rs/rig"][-1].values["Transform3D:translation"], [[1, 2, 3.5]])
+    np.testing.assert_allclose(rows["/world/runs/slam_rs_vio/rig"][-1].values["Transform3D:translation"], [[1, 2, 3]])
+    assert rows["/world/rig_00"] == rows["/world/runs/slam_rs/rig"]
+    with pytest.raises(ValueError, match="timestamps"):
+        write_layer(tmp_path / "bad.rrd", "session", replace(run, final=replace(final, t_ns=final.t_ns + 1)), clock_offset_ns=0, profile="fast", backend="cpu")
+
+
+def test_layer_leaves_the_base_rig_and_its_sensors_to_the_dataset(tmp_path: Path, run: SegmentRun) -> None:
+    """The ground-truth layer owns ``/world/rig_00``: the result writes only under its two runs, no camera or IMU static."""
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", run, clock_offset_ns=0, profile="fast", backend="cpu")
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(path).stream().collect().stream()}
-    assert {"/world/runs/slam_rs/trajectory", "/world/runs/slam_rs/endpoints", "/world/runs/slam_rs"} <= entities
-    assert not any("/cam_" in entity or "/imu_" in entity for entity in entities)
+    parts: tuple[str, ...] = ("rig", "trajectory", "trail", "endpoints")
+    assert entities == {"/", "/world/runs/slam_rs", *(f"/world/runs/{name}/{part}" for name in ("slam_rs", "slam_rs_vio") for part in parts)}
+
+
+def test_without_ground_truth_the_final_run_also_animates_the_base_rig(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """A dataset with no ``gt`` layer (RoboCap) has no clash: the final run moves the rig its cameras and Follow view hang from."""
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", run, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu", animate_base_rig=True)
+    rows: Rows = read_rows(path)
+    assert rows["/world/rig_00"] == rows["/world/runs/slam_rs/rig"]
+
+
+class _FakeCalibration:
+    """Stands in for the compiled calibration; the tool only passes it on."""
+
+    @staticmethod
+    def from_catalog(*_args: object) -> "_FakeCalibration":
+        return _FakeCalibration()
+
+
+class _FakeVioConfig:
+    """Stands in for the compiled VIO config."""
+
+    @staticmethod
+    def from_json(_text: str) -> "_FakeVioConfig":
+        return _FakeVioConfig()
+
+
+class _FakeVio:
+    """A CPU estimator; the run itself comes from the patched ``drive``."""
+
+    gpu: bool = False
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+
+@pytest.mark.parametrize(("segment_id", "ground_truth_uri", "writes_base_rig"), [
+    ("msd-g2__MGO07", "file:///gt/MGO07.rrd", False),
+    ("robocap__session", None, True),
+])
+def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run: SegmentRun, segment_id: str, ground_truth_uri: str | None, writes_base_rig: bool,
+) -> None:
+    """``slam-rs-catalog-layer`` decides the clash from the catalog: an MSD segment with a ``gt`` layer keeps
+    ``/world/rig_00`` for the ground truth; a RoboCap session (no ``gt``) still has its rig animated by the final run."""
+    dataset: MagicMock = MagicMock(spec=DatasetEntry)
+    resolved: CatalogSegment = CatalogSegment("rerun+http://catalog", segment_id.split("__")[0], segment_id, dataset, ground_truth_uri)
+    feed: SimpleNamespace = SimpleNamespace(
+        export_offset_ns=0, imu=SimpleNamespace(cam_time_offset_ns=0), cameras=(), frame_t_ns=run.estimate.t_ns, camera_positions=(0, 1),
+    )
+    monkeypatch.setattr(catalog_layer_api, "resolve_catalog_segments", lambda _sources: (resolved,))
+    monkeypatch.setattr(catalog_layer_api, "select_decode_device", lambda _request: "cpu")
+    monkeypatch.setattr(catalog_layer_api, "open_segment", lambda *_args, **_kwargs: nullcontext(feed))
+    monkeypatch.setattr(catalog_layer_api, "_core", SimpleNamespace(Calibration=_FakeCalibration, VioConfig=_FakeVioConfig, Vio=_FakeVio))
+    monkeypatch.setattr(catalog_layer_api, "Lockstep", lambda vio: vio)
+    monkeypatch.setattr(catalog_layer_api, "drive", lambda *_args, **_kwargs: run)
+
+    catalog_layer_api.main(catalog_layer_api.Config(segment=segment_id, output_dir=tmp_path, catalog="rerun+http://catalog"))
+
+    output: Path = tmp_path / f"{segment_id}.rrd"
+    entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(output).stream().collect().stream()}
+    assert ("/world/rig_00" in entities) is writes_base_rig
+    assert {"/world/runs/slam_rs/rig", "/world/runs/slam_rs_vio/rig"} <= entities
+    dataset.register.assert_called_once()
+    assert dataset.register.call_args.args == ([output.resolve().as_uri()],)
 
 
 def test_incomplete_run_does_not_replace_a_previous_result(tmp_path: Path, run: SegmentRun) -> None:

@@ -1,4 +1,11 @@
-"""Log VIO estimates, ground truth, rig and window Pinhole cameras, and tracker statistics."""
+"""Log VIO estimates, ground truth, rig and window Pinhole cameras, and tracker statistics.
+
+The run names follow the catalog layer (f0, :mod:`slam_rs.catalog_layer`): the raw causal VIO, drawn live, is
+``/world/runs/slam_rs_vio``; the final run (the raw VIO re-anchored on the back end's map after the flush) is
+``/world/runs/slam_rs``, where the map, the loops and the pose graph are drawn too. Each run carries its own
+alignment to the ground truth. Until the final run exists, ``slam_rs`` repeats the raw run's alignment, so the map
+sits on the raw run while the replay plays.
+"""
 
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
@@ -13,6 +20,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
+from slam_rs.map_loops import log_loops, log_pose_graph
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
@@ -31,7 +39,9 @@ JPEG_QUALITY: int = 85
 """Quality of the full-resolution frames the tracking stages log; 960x960 grayscale lands around 38 kB."""
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
-"""Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
+"""The final run and the back end's map, beside the dataset's own ``/world/runs/gt`` (the catalog layer's ``slam_rs``)."""
+VIO_RUN_ENTITY: str = "/world/runs/slam_rs_vio"
+"""The raw causal VIO, drawn live: rig, trajectory, window, landmarks (the catalog layer's ``slam_rs_vio``)."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 MAP_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/keyframes"
@@ -50,8 +60,10 @@ VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
 
+FINAL_COLOR: tuple[int, int, int] = (255, 120, 40)
+"""The final run: orange, over the raw run's green."""
 ESTIMATE_COLOR: tuple[int, int, int] = (70, 220, 130)
-"""The port's own trajectory: green."""
+"""The raw VIO run: green."""
 GT_COLOR: tuple[int, int, int] = (235, 235, 235)
 """Ground truth: near-white, the reference every error is measured against."""
 KEYFRAME_COLOR: tuple[int, int, int, int] = (90, 200, 255, 255)
@@ -225,7 +237,7 @@ class VioLogger:
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
-        log_rig(self.cameras, f"{RUN_ENTITY}/rig")
+        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig")
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
         camera: CameraCalib = self.cameras[0]
         camera_intrinsics: Float64[ndarray, "3 3"] = image_from_camera(camera)
@@ -264,7 +276,7 @@ class VioLogger:
         self.estimate_position_m.append(pose[0:3].copy())
         self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
 
-        rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
+        rr.log(f"{VIO_RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
         log_keypoints(frame)
@@ -285,7 +297,10 @@ class VioLogger:
             # in the direction its own residuals are measured in; drawing it is
             # that solution inverted, not a second association and a second SVD.
             against_truth: AteResult | None = self._log_ate(estimated)
-            log_alignment(RUN_ENTITY, IDENTITY if against_truth is None else inverted(against_truth.alignment))
+            alignment: SimilarityTransform = IDENTITY if against_truth is None else inverted(against_truth.alignment)
+            # The map under the final run's entity sits on the raw run until :meth:`log_final_run` places it.
+            for run in (VIO_RUN_ENTITY, RUN_ENTITY):
+                log_alignment(run, alignment)
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
@@ -309,7 +324,7 @@ class VioLogger:
         a cursor halfway through a clip looks like a cursor at the end of it.
         """
         for entity, trajectory, color in (
-            (f"{RUN_ENTITY}/path", self.estimated(), ESTIMATE_COLOR),
+            (f"{VIO_RUN_ENTITY}/path", self.estimated(), ESTIMATE_COLOR),
             (f"{GT_ENTITY}/path", self.ground_truth_strip, GT_COLOR),
         ):
             if len(trajectory) < 2:
@@ -333,7 +348,7 @@ class VioLogger:
         t_ns: int = self.estimate_t_ns[-1]
         if len(self.estimate_position_m) >= 2:
             segment: Float64[ndarray, "2 3"] = np.array(self.estimate_position_m[-2:], dtype=np.float64)
-            rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
+            rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 2:
             return
@@ -346,7 +361,7 @@ class VioLogger:
         camera: CameraCalib = self.cameras[0]
         highest: int = self.highest_slots.get(family, -1)
         for k, (pose, color) in enumerate(zip(poses, colors, strict=True)):
-            slot: str = f"{RUN_ENTITY}/{family}/{k:02d}"
+            slot: str = f"{VIO_RUN_ENTITY}/{family}/{k:02d}"
             if k > highest:
                 rr.log(
                     f"{slot}/cam_00",
@@ -356,7 +371,7 @@ class VioLogger:
             rr.log(slot, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
             rr.log(f"{slot}/cam_00", self.pinholes[color])
         for k in range(len(poses), self.previous_counts.get(family, 0)):
-            rr.log(f"{RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
+            rr.log(f"{VIO_RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
         self.previous_counts[family] = len(poses)
         self.highest_slots[family] = max(highest, len(poses) - 1)
 
@@ -378,7 +393,7 @@ class VioLogger:
     def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
         """Draw the window's landmarks, coloured by the keyframe that hosts them."""
         rr.log(
-            f"{RUN_ENTITY}/landmarks",
+            f"{VIO_RUN_ENTITY}/landmarks",
             rr.Points3D(snapshot.landmark_positions, colors=track_colors(snapshot.landmark_hosts), radii=0.008),
         )
 
@@ -400,6 +415,27 @@ class VioLogger:
             t_ns: Video time of the cursor the caller set, usually the last frameset's.
         """
         self._log_map(map_snapshot, t_ns, final=True)
+        log_pose_graph(map_snapshot)
+
+    def log_final_run(self, final: Trajectory) -> None:
+        """Draw the final run's whole path at the cursor the caller set (the last frameset's), under its own alignment.
+
+        The alignment is fitted to the final run, not to the raw one, so a loop the back end closed lands on the ground
+        truth. It replaces the raw run's alignment on :data:`RUN_ENTITY` from this cursor on, so the final map drawn
+        there moves with it.
+
+        Args:
+            final: The raw VIO re-anchored on the flushed map (:func:`slam_rs.tracking.reanchored`), on ``video_time``.
+        """
+        if len(final) < 2:
+            return
+        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([final.position_m], colors=FINAL_COLOR, radii=0.004))
+        alignment: SimilarityTransform = IDENTITY
+        if len(self.ground_truth) and len(final) >= MIN_ASSOCIATED_POSES:
+            against_truth: AteResult = ate(final, self.ground_truth)
+            if against_truth.n_associated >= MIN_ASSOCIATED_POSES:
+                alignment = inverted(against_truth.alignment)
+        log_alignment(RUN_ENTITY, alignment)
 
     def _log_map(self, map_snapshot: _core.MapSnapshot, t_ns: int, *, final: bool) -> None:
         """Draw the back end's keyframes (window ones in the window colour) at the cursor, and its points when due or final."""
@@ -407,6 +443,7 @@ class VioLogger:
             map_snapshot.keyframe_active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
         )
         rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(map_snapshot.keyframe_poses[:, 0:3], colors=colors, radii=0.012))
+        log_loops(map_snapshot)
         self.map_keyframes_t_ns = t_ns
         if final or self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
             rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=MAP_POINT_COLOR, radii=0.004))
@@ -666,7 +703,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                     origin="/world",
                     name="world",
                     contents=["/world/**"],
-                    overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, GT_ENTITY)},
+                    overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, VIO_RUN_ENTITY, GT_ENTITY)},
                 ),
                 rrb.Vertical(*views),
                 column_shares=[2, 1],

@@ -20,6 +20,7 @@ gpu-wgpu = ["slam-rs/gpu-wgpu"]
 [dependencies]
 kornia-image.workspace = true
 kornia-staging-imgproc.workspace = true
+nalgebra = { workspace = true }
 # The back end (persistent map) is host-only and always on for Python.
 slam-rs = { workspace = true, features = ["backend"] }
 numpy = { workspace = true }

@@ -17,8 +17,8 @@ from slam_rs.trajectory import MIN_ASSOCIATED_POSES
 BENCHMARKS_PATH: Path = Path(__file__).resolve().parents[1] / "benchmarks.toml"
 """Checked-in regression cases and measured baselines."""
 
-Tier: TypeAlias = Literal["smoke", "release", "listed"]
-"""Smoke checks, release checks, or additional listed segments."""
+Tier: TypeAlias = Literal["smoke", "release", "listed", "euroc", "tumvi"]
+"""Smoke checks, release checks, additional listed MSD segments, EuRoC or TUM-VI (only on a catalog that holds ``vslam-lab-euroc`` / ``tum-vi``)."""
 DecodePath: TypeAlias = Literal["cpu_gray8_dav1d_1thread", "cpu_gray8_swscale_area_downscale3"]
 """Frozen pixel provenance.
 
@@ -27,7 +27,7 @@ H.264 streams are decoded on the same one decoder thread but reformatted straigh
 ``gray8`` at a third of their size in one ``swscale`` call with ``SWS_AREA``, which is
 the combined area-resampling operation selected for RoboCap.
 """
-TIER_BY_NAME: dict[str, Tier] = {"smoke": "smoke", "release": "release", "listed": "listed"}
+TIER_BY_NAME: dict[str, Tier] = {"smoke": "smoke", "release": "release", "listed": "listed", "euroc": "euroc", "tumvi": "tumvi"}
 """Valid tier names, in increasing cost order; the lookup is also how a manifest string becomes a :data:`Tier`."""
 DECODE_PATH_BY_NAME: dict[str, DecodePath] = {
     "cpu_gray8_dav1d_1thread": "cpu_gray8_dav1d_1thread",
@@ -87,8 +87,8 @@ class ReferenceSegment:
     """Frozen decode path that produced the gated pixels."""
     hold_out: bool = False
     """Whether this segment is excluded from tuning."""
-    baseline: tuple[Baseline, ...] = ()
-    """Measurements by profile and execution lane."""
+    baseline: tuple[Baseline, ...] = field(default=(), skip_if_default=True)
+    """Measurements by profile and execution lane; a segment nobody has measured yet has none."""
 
     def baseline_for(self, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"], host: str) -> Baseline | None:
         """Prefer this host's row; otherwise use the first row for the lane/profile."""

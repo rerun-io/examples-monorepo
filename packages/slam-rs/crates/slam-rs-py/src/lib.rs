@@ -77,7 +77,10 @@ impl VioResult {
         self.inner.t_ns
     }
 
-    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`.
+    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`: the raw,
+    /// causal VIO, which is also this frame's corrected pose (the pose-graph
+    /// gauge fixes the window). The corrected history is
+    /// `slam_rs.tracking.reanchored(poses, vio.map_snapshot())`.
     #[getter]
     fn world_from_rig<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.inner
@@ -675,8 +678,8 @@ fn backend_mode_name(mode: slam_rs::config::BackendMode) -> &'static str {
 /// The persistent keyframe map and the back end's counters, copied out (D51).
 ///
 /// Arrays are flat copies in id order; scalars are counts. The map's poses are
-/// the window's solved (or, once evicted, final) poses: what the back end
-/// starts from, before any loop closure moves them.
+/// the window's solved (or, once evicted, final) poses as the pose-graph
+/// optimization corrected them; the raw poses are the window's.
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug)]
 pub struct MapSnapshot {
@@ -684,6 +687,7 @@ pub struct MapSnapshot {
     keyframe_t_ns: Vec<i64>,
     /// `[tx, ty, tz, qx, qy, qz, qw]` per keyframe.
     keyframe_poses: Vec<f64>,
+    keyframe_raw_poses: Vec<f64>,
     keyframe_active: Vec<bool>,
     point_ids: Vec<i64>,
     point_hosts: Vec<i64>,
@@ -692,12 +696,66 @@ pub struct MapSnapshot {
     /// `[a, b]` per edge.
     covisibility_edges: Vec<i64>,
     covisibility_weights: Vec<u32>,
+    /// `[from, to]` per pose-graph edge.
+    pose_graph_edges: Vec<i64>,
+    /// 0 spanning tree, 1 loop closure, 2 high covisibility, per pose-graph edge.
+    pose_graph_edge_kinds: Vec<u8>,
     snapshot_stats: slam_rs::backend::MapStats,
     culls: slam_rs::backend::CullCounts,
     high_covisibility_weight: u32,
     median_keyframe_landmarks: usize,
     retained_bytes: usize,
     counters: slam_rs::backend::BackendCounters,
+    /// `[current, candidate]` per verified loop.
+    loop_edges: Vec<i64>,
+    loop_fused: Vec<bool>,
+    loop_counts: slam_rs::backend::LoopCounts,
+    pgo_epoch: u64,
+    /// `[current, candidate, moved, dropped_edges, iterations]` per applied PGO.
+    pgo_runs: Vec<i64>,
+}
+
+/// `[tx, ty, tz, qx, qy, qz, qw]` per pose, flat.
+fn flat_poses(poses: &[slam_rs::lie::Se3<f64>]) -> Vec<f64> {
+    let mut flat: Vec<f64> = Vec::with_capacity(7 * poses.len());
+    for pose in poses {
+        let quaternion: [f64; 4] = pose.rotation.quaternion_xyzw();
+        flat.extend_from_slice(&[
+            pose.translation.x,
+            pose.translation.y,
+            pose.translation.z,
+            quaternion[0],
+            quaternion[1],
+            quaternion[2],
+            quaternion[3],
+        ]);
+    }
+    flat
+}
+
+/// What loop closing has done so far (all zero when it is off).
+#[pyclass(module = "slam_rs._core", frozen, get_all, skip_from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct LoopCounts {
+    /// Keyframes described and added to the database.
+    indexed: u64,
+    /// Queries that found no images for their keyframe.
+    without_images: u64,
+    /// Keyframe stamps whose images were dropped before the back end took
+    /// them (Realtime, more stamps queued than the query cap).
+    images_stripped: u64,
+    /// Queries that retrieved at least one candidate.
+    with_candidates: u64,
+    /// Candidates validated.
+    candidates: u64,
+    /// Loops that passed verification.
+    verified: u64,
+    /// Loops fused at once.
+    fused: u64,
+    /// Loops at or above the drift gate: the pose-graph optimization's triggers.
+    needs_pgo: u64,
+    /// Of those, closed by an applied pose-graph optimization.
+    optimized: u64,
 }
 
 impl MapSnapshot {
@@ -712,19 +770,6 @@ impl MapSnapshot {
         counters: slam_rs::backend::BackendCounters,
         mode: slam_rs::config::BackendMode,
     ) -> PyResult<Self> {
-        let mut keyframe_poses: Vec<f64> = Vec::with_capacity(7 * snapshot.keyframe_poses.len());
-        for pose in &snapshot.keyframe_poses {
-            let quaternion: [f64; 4] = pose.rotation.quaternion_xyzw();
-            keyframe_poses.extend_from_slice(&[
-                pose.translation.x,
-                pose.translation.y,
-                pose.translation.z,
-                quaternion[0],
-                quaternion[1],
-                quaternion[2],
-                quaternion[3],
-            ]);
-        }
         let point_ids: Vec<i64> = snapshot
             .point_ids
             .iter()
@@ -737,7 +782,8 @@ impl MapSnapshot {
         Ok(Self {
             mode: backend_mode_name(mode),
             keyframe_t_ns: snapshot.keyframe_t_ns.clone(),
-            keyframe_poses,
+            keyframe_poses: flat_poses(&snapshot.keyframe_poses),
+            keyframe_raw_poses: flat_poses(&snapshot.keyframe_raw_poses),
             keyframe_active: snapshot.keyframe_active.clone(),
             point_ids,
             point_hosts: snapshot.point_hosts.clone(),
@@ -752,12 +798,43 @@ impl MapSnapshot {
                 .iter()
                 .map(|&(_, _, weight)| weight)
                 .collect(),
+            pose_graph_edges: snapshot
+                .pose_graph_edges
+                .iter()
+                .flat_map(|edge| [edge.from, edge.to])
+                .collect(),
+            pose_graph_edge_kinds: snapshot
+                .pose_graph_edges
+                .iter()
+                .map(|edge| match edge.kind {
+                    slam_rs::backend::PoseGraphEdgeKind::SpanningTree => 0,
+                    slam_rs::backend::PoseGraphEdgeKind::LoopClosure => 1,
+                    slam_rs::backend::PoseGraphEdgeKind::HighCovisibility => 2,
+                })
+                .collect(),
             snapshot_stats: snapshot.stats,
             culls: snapshot.culls,
             high_covisibility_weight: snapshot.high_covisibility_weight,
             median_keyframe_landmarks: snapshot.median_keyframe_landmarks,
             retained_bytes: snapshot.retained_bytes,
             counters,
+            loop_edges: snapshot
+                .loops
+                .iter()
+                .flat_map(|edge| [edge.current, edge.candidate])
+                .collect(),
+            loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
+            loop_counts: snapshot.loop_counts,
+            pgo_epoch: snapshot.correction.epoch,
+            pgo_runs: snapshot
+                .pgo_runs
+                .iter()
+                .flat_map(|run| {
+                    let counts = [run.moved, run.dropped_edges, run.iterations]
+                        .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+                    [run.current, run.candidate].into_iter().chain(counts)
+                })
+                .collect(),
         })
     }
 }
@@ -776,12 +853,47 @@ impl MapSnapshot {
         self.keyframe_t_ns.to_pyarray(py)
     }
 
-    /// Raw keyframe poses `T_w_i`, `[tx, ty, tz, qx, qy, qz, qw]`: `float64[k, 7]`.
+    /// Keyframe poses `T_w_i` as the map holds them (PGO-corrected),
+    /// `[tx, ty, tz, qx, qy, qz, qw]`: `float64[k, 7]`.
     #[getter]
     fn keyframe_poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
         self.keyframe_poses
             .to_pyarray(py)
             .reshape((self.keyframe_t_ns.len(), 7))
+    }
+
+    /// The window's keyframe poses, before any correction: `float64[k, 7]`.
+    #[getter]
+    fn keyframe_raw_poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.keyframe_raw_poses
+            .to_pyarray(py)
+            .reshape((self.keyframe_t_ns.len(), 7))
+    }
+
+    /// Applied pose-graph optimizations so far (the correction epoch).
+    #[getter]
+    fn pgo_epoch(&self) -> u64 {
+        self.pgo_epoch
+    }
+
+    /// Each applied PGO, oldest first: `[current, candidate, moved,
+    /// dropped_edges, iterations]` (the loop's keyframe timestamps, keyframes
+    /// moved, parallel edges dropped, LM steps): `int64[r, 5]`.
+    #[getter]
+    fn pgo_runs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.pgo_runs
+            .to_pyarray(py)
+            .reshape((self.pgo_runs.len() / 5, 5))
+    }
+
+    /// Wall time of the loops that ran a PGO (graph, solve, map write and
+    /// fusion), total and slowest, microseconds.
+    #[getter]
+    fn pgo_us(&self) -> (u64, u64) {
+        (
+            self.counters.pgo.total_ns / 1_000,
+            self.counters.pgo.max_ns / 1_000,
+        )
     }
 
     /// Whether each keyframe is still in the window: `bool[k]`.
@@ -822,6 +934,20 @@ impl MapSnapshot {
     #[getter]
     fn covisibility_weights<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
         self.covisibility_weights.to_pyarray(py)
+    }
+
+    /// The edges a pose-graph optimization would take now, `[from, to]` keyframe timestamps: `int64[g, 2]`.
+    #[getter]
+    fn pose_graph_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.pose_graph_edges
+            .to_pyarray(py)
+            .reshape((self.pose_graph_edge_kinds.len(), 2))
+    }
+
+    /// Kind of each pose-graph edge: 0 spanning tree, 1 loop closure, 2 high covisibility: `uint8[g]`.
+    #[getter]
+    fn pose_graph_edge_kinds<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u8>> {
+        self.pose_graph_edge_kinds.to_pyarray(py)
     }
 
     /// Map keyframes (RootSLAM's ``num_kfs``).
@@ -942,6 +1068,39 @@ impl MapSnapshot {
     #[getter]
     fn publish_total_us(&self) -> u64 {
         self.counters.publish.total_ns / 1_000
+    }
+
+    /// Verified loops whose keyframes are still in the map, oldest first, as
+    /// `[current, candidate]` keyframe timestamps: `int64[l, 2]`.
+    #[getter]
+    fn loop_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.loop_edges
+            .to_pyarray(py)
+            .reshape((self.loop_fused.len(), 2))
+    }
+
+    /// Whether each loop's landmarks were fused, at once or after a pose-graph
+    /// optimization (else it was left unapplied): `bool[l]`.
+    #[getter]
+    fn loop_fused<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.loop_fused.to_pyarray(py)
+    }
+
+    /// What loop closing has done so far.
+    #[getter]
+    fn loop_counts(&self) -> LoopCounts {
+        let counts = self.loop_counts;
+        LoopCounts {
+            indexed: counts.indexed,
+            without_images: counts.without_images,
+            images_stripped: counts.images_stripped,
+            with_candidates: counts.with_candidates,
+            candidates: counts.candidates,
+            verified: counts.verified,
+            fused: counts.fused,
+            needs_pgo: counts.needs_pgo,
+            optimized: counts.optimized,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -1705,6 +1864,56 @@ fn device_probes_run() -> usize {
     slam_rs::device_probes_run() + slam_rs::gba_probes_run()
 }
 
+/// `(t_ns, T_w_i)` rows from parallel timestamp and `[tx, ty, tz, qx, qy, qz, qw]` arrays.
+fn stamped_poses(
+    t_ns: &[i64],
+    poses: &PyReadonlyArray2<'_, f64>,
+    what: &str,
+) -> PyResult<Vec<(i64, slam_rs::lie::Se3<f64>)>> {
+    let poses = poses.as_array();
+    if poses.ncols() != 7 || poses.nrows() != t_ns.len() {
+        return Err(PyValueError::new_err(format!(
+            "{what}: {} timestamps need {} x 7 poses, got {:?}",
+            t_ns.len(),
+            t_ns.len(),
+            poses.shape()
+        )));
+    }
+    t_ns.iter()
+        .zip(poses.rows())
+        .map(|(&t_ns, row)| {
+            let rotation = slam_rs::lie::So3::from_quaternion_xyzw(row[3], row[4], row[5], row[6])
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!("{what}: no unit quaternion at {t_ns} ns"))
+                })?;
+            Ok((
+                t_ns,
+                slam_rs::lie::Se3::new(rotation, nalgebra::Vector3::new(row[0], row[1], row[2])),
+            ))
+        })
+        .collect()
+}
+
+/// The final trajectory: every raw frame pose re-anchored on the optimized
+/// keyframes on both sides (`slam_rs::backend::reanchor`, PR f1).
+#[pyfunction]
+fn reanchor<'py>(
+    py: Python<'py>,
+    frame_t_ns: numpy::PyReadonlyArray1<'_, i64>,
+    frame_poses: PyReadonlyArray2<'_, f64>,
+    keyframe_t_ns: numpy::PyReadonlyArray1<'_, i64>,
+    keyframe_poses: PyReadonlyArray2<'_, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let frames = stamped_poses(frame_t_ns.as_slice()?, &frame_poses, "frames")?;
+    let keyframes = stamped_poses(keyframe_t_ns.as_slice()?, &keyframe_poses, "keyframes")?;
+    let anchored = slam_rs::backend::reanchor(&frames, &keyframes)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let flat: Vec<f64> = flat_poses(&anchored);
+    numpy::ndarray::Array2::from_shape_vec((anchored.len(), 7), flat)
+        .map(|array| array.to_pyarray(py))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// The compiled core of the `slam_rs` package.
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1714,6 +1923,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
     module.add_function(wrap_pyfunction!(select_backend, module)?)?;
     module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
+    module.add_function(wrap_pyfunction!(reanchor, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
     module.add_class::<VioStatus>()?;
@@ -1725,5 +1935,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<MapSnapshot>()?;
     module.add_class::<gba::MapResult>()?;
     module.add_class::<gba::GbaRun>()?;
+    module.add_class::<LoopCounts>()?;
     Ok(())
 }

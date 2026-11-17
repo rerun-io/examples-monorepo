@@ -18,6 +18,7 @@ from slam_rs.catalog_feed import (
     LocalSegment,
     SegmentFeed,
     SegmentSource,
+    dataset_rig,
     open_segment,
     select_decode_device,
 )
@@ -25,8 +26,8 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
+from slam_rs.tracking import Lockstep, reanchored
+from slam_rs.trajectory import Trajectory, ate, coverage, write_scoring_csvs
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
@@ -63,7 +64,7 @@ class Config:
     window_s: float = DEFAULT_WINDOW_S
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
-    """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    """Where the final trajectory is written; defaults to ``data/<segment>/slam_rs.csv``. The raw VIO goes beside it as ``<stem>_vio.csv``."""
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
     backend: BackendRequest = "auto"
@@ -200,7 +201,11 @@ def main(config: Config) -> None:
     )
 
     with open_segment(
-        source, frame_stride=config.frame_stride, window_s=config.window_s, decode_device=select_decode_device(config.decode_device)
+        source,
+        profile=dataset_rig(settings.dataset(dataset_name)),
+        frame_stride=config.frame_stride,
+        window_s=config.window_s,
+        decode_device=select_decode_device(config.decode_device),
     ) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
@@ -245,8 +250,11 @@ def main(config: Config) -> None:
         stage.refuse_lost_framesets()
 
         estimate: Trajectory = stage.logger.estimated()
-        write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
-        print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")
+        # The final run: the raw VIO re-anchored on the flushed map's keyframes (the raw VIO itself with the back end off).
+        final: Trajectory = reanchored(estimate, stage.lockstep.vio.map_snapshot())
+        stage.logger.log_final_run(final)
+        vio_csv: Path = write_scoring_csvs(output_csv, final=final, raw=estimate, offset_ns=feed.export_offset_ns)
+        print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
         map_result: _core.MapResult | None = stage.lockstep.vio.finish_map(run_gba=config.gba)
         if map_result is not None and map_result.gba is not None:
             # At the cursor the flush left on the last frameset, beside the final map.
@@ -261,4 +269,5 @@ def main(config: Config) -> None:
         if len(reference) == 0:
             return
         print(f"vs ground truth, {coverage(reference, estimate):.1%} of its span covered")
-        print(ate(estimate, reference).summary())
+        print(f"raw VIO: {ate(estimate, reference).summary()}")
+        print(f"final: {ate(final, reference).summary()}")
