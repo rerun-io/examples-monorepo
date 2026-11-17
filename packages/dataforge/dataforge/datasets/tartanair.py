@@ -162,14 +162,50 @@ def aligned_window(num_frames: int, num_imu: int, frame_limit: int | None = None
 
     Returns:
         Kept frame indices, and the slice of kept IMU samples.
+
+    Raises:
+        ValueError: If ``frame_limit`` is below 1, or no frame lies inside the trimmed IMU span (an empty or too short
+            ``pose_lcam_front.txt`` or ``imu_time.txt``).
     """
+    if frame_limit is not None and frame_limit < 1:
+        raise ValueError(f"--frame-limit {frame_limit} keeps no frame: give 1 or more")
     imu: slice = slice(IMU_TRIM, num_imu - IMU_TRIM)
     frames_ns: Int64[ndarray, "n"] = np.arange(num_frames, dtype=np.int64) * FRAME_PERIOD_NS
     frames: Int64[ndarray, "k"] = np.flatnonzero((frames_ns >= imu.start * IMU_PERIOD_NS) & (frames_ns <= (imu.stop - 1) * IMU_PERIOD_NS))
+    if not frames.size:
+        raise ValueError(
+            f"no frame of pose_lcam_front.txt ({num_frames} rows) lies inside the IMU span of imu_time.txt ({num_imu} rows, "
+            f"{IMU_TRIM} trimmed at each end)"
+        )
     if frame_limit is not None:
         frames = frames[:frame_limit]
         imu = slice(imu.start, int(frames[-1]) * FRAME_PERIOD_NS // IMU_PERIOD_NS + 1)
     return frames, imu
+
+
+def read_imu(imu_dir: Path) -> tuple[Float64[ndarray, "m 3"], Float64[ndarray, "m 3"]]:
+    """Gyro and specific force of one trajectory (body NED), one row per sample of ``imu_time.txt`` on the 0.01 s clock.
+
+    Args:
+        imu_dir: The trajectory's ``imu/`` directory: ``imu_time.txt``, ``gyro.txt`` and ``acc.txt``.
+
+    Returns:
+        ``gyro.txt`` and ``acc.txt`` rows.
+
+    Raises:
+        ValueError: If ``imu_time.txt`` is not j * 0.01 s, or ``gyro.txt`` or ``acc.txt`` does not hold one
+            three-column row per sample of it.
+    """
+    imu_time_s: Float64[ndarray, "m"] = np.loadtxt(imu_dir / "imu_time.txt", ndmin=1)
+    if not np.allclose(imu_time_s, np.arange(imu_time_s.size) * IMU_PERIOD_NS / 1e9, atol=1e-6):
+        raise ValueError(f"{imu_dir / 'imu_time.txt'} is not j * 0.01 s")
+    rows: list[Float64[ndarray, "m 3"]] = []
+    for name in ("gyro.txt", "acc.txt"):
+        values: Float64[ndarray, "r c"] = np.loadtxt(imu_dir / name, ndmin=2)
+        if values.shape != (imu_time_s.size, 3):
+            raise ValueError(f"{imu_dir / name} holds an array of shape {values.shape}, not one row of 3 per sample of imu_time.txt ({imu_time_s.size})")
+        rows.append(values)
+    return rows[0], rows[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,11 +281,8 @@ class TartanAirDataset(DataforgeDataset[TartanAirConfig, TrajectorySource]):
         """Write the pending base and gt layers of one trajectory, after reading and checking its clocks."""
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
         poses: Float64[ndarray, "n 7"] = np.loadtxt(source.directory / "pose_lcam_front.txt", ndmin=2)
-        imu_dir: Path = source.directory / "imu"
-        imu_time_s: Float64[ndarray, "m"] = np.loadtxt(imu_dir / "imu_time.txt")
-        if not np.allclose(imu_time_s, np.arange(imu_time_s.size) * IMU_PERIOD_NS / 1e9, atol=1e-6):
-            raise ValueError(f"{imu_dir / 'imu_time.txt'} is not j * 0.01 s")
-        frames, imu = aligned_window(poses.shape[0], imu_time_s.size, self.config.frame_limit)
+        gyro_ned, accel_ned = read_imu(source.directory / "imu")
+        frames, imu = aligned_window(poses.shape[0], len(gyro_ned), self.config.frame_limit)
         frames_ns: Int64[ndarray, "k"] = frames * FRAME_PERIOD_NS
         translations, quaternions = rig_poses(poses[frames])
         gt: GtTrajectory = GtTrajectory(frames_ns, translations, quaternions)
@@ -258,13 +291,22 @@ class TartanAirDataset(DataforgeDataset[TartanAirConfig, TrajectorySource]):
             targets,
             pending,
             {
-                paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, frames, imu),
+                paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, frames, imu, gyro_ned, accel_ned),
                 paths.GT_LAYER: lambda recording: self.write_gt(recording, gt),
             },
         )
         return targets[paths.BASE_LAYER]
 
-    def write_base(self, recording: rr.RecordingStream, identity: SequenceIdentity, source: TrajectorySource, frames: Int64[ndarray, "k"], imu: slice) -> None:
+    def write_base(
+        self,
+        recording: rr.RecordingStream,
+        identity: SequenceIdentity,
+        source: TrajectorySource,
+        frames: Int64[ndarray, "k"],
+        imu: slice,
+        gyro_ned: Float64[ndarray, "n_imu 3"],
+        accel_ned: Float64[ndarray, "n_imu 3"],
+    ) -> None:
         """Videos and calibration of this set's cameras, the IMU in the rig frame with its synthetic noise model, the properties."""
         log_rig_node(recording, RIG, reference="imu_00", num_cameras=len(self.cameras), name="tartanair", kind="ego")
         frames_ns: Int64[ndarray, "k"] = frames * FRAME_PERIOD_NS
@@ -296,10 +338,9 @@ class TartanAirDataset(DataforgeDataset[TartanAirConfig, TrajectorySource]):
                     recording, RIG, index, name=camera.name, source_width=camera.width, source_height=camera.height, video_codec="av1", cq=VIDEO_CQ, gop=VIDEO_GOP
                 )
                 log_video_stream(recording, clip, schema.video_path(RIG, index), times_ns=frames_ns, frame_indices=frames)
-        imu_dir: Path = source.directory / "imu"
         imu_ns: Int64[ndarray, "m"] = np.arange(imu.start, imu.stop, dtype=np.int64) * IMU_PERIOD_NS
-        gyro: Float64[ndarray, "m 3"] = imu_in_rig(np.loadtxt(imu_dir / "gyro.txt", ndmin=2)[imu])
-        accel: Float64[ndarray, "m 3"] = imu_in_rig(np.loadtxt(imu_dir / "acc.txt", ndmin=2)[imu])
+        gyro: Float64[ndarray, "m 3"] = imu_in_rig(gyro_ned[imu])
+        accel: Float64[ndarray, "m 3"] = imu_in_rig(accel_ned[imu])
         log_imu(recording, RIG, 0, gyro=ImuChannel(imu_ns, gyro), accel=ImuChannel(imu_ns, accel), name="imu")
         imu_node: str = schema.imu_path(RIG, 0)
         recording.log(
