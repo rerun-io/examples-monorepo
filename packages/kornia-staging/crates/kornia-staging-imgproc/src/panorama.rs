@@ -193,7 +193,7 @@ pub fn hemisphere_tile_table(
     };
     Ok(RemapTable::build(geometry.size(), level1, |x, y| {
         let [bx, by, bz] = camera.unproject([x as f64, y as f64]).ok()?;
-        let in_p = if tile % 2 == 0 {
+        let in_p = if tile.is_multiple_of(2) {
             [bx, by, bz]
         } else {
             [-bx, by, -bz]
