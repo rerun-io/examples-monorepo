@@ -164,6 +164,14 @@ impl Vio {
         })
     }
 
+    /// `(corrected, no_coverage)`: frames whose keypoints the rolling-shutter
+    /// correction moved, and frames left raw because the gyro did not cover their
+    /// time; `None` when no camera states a readout.
+    #[getter]
+    fn rolling_shutter_frames(&self) -> Option<(usize, usize)> {
+        self.inner.rolling_shutter().map(slam_rs::RollingShutter::counts)
+    }
+
     /// Whether the frontend runs on the GPU.
     #[getter]
     fn gpu(&self) -> bool {

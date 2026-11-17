@@ -5,6 +5,7 @@ pub mod bootstrap;
 mod boundary;
 mod lag;
 mod lane;
+mod rolling_shutter;
 mod select;
 #[cfg(test)]
 mod tests;
@@ -12,6 +13,7 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
+pub use rolling_shutter::RollingShutter;
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -62,6 +64,8 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
+    /// The rolling-shutter correction of the estimator's keypoints, when a camera states a readout.
+    rolling_shutter: Option<RollingShutter>,
     /// The inertial bootstrap, when `config.vio_bootstrap` selects it.
     bootstrap: bootstrap::BootstrapPhase,
 }
@@ -122,6 +126,8 @@ impl<S: Scalar> Vio<S> {
         let camera_count: usize = calibration.t_i_c.len();
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
+        let rolling_shutter: Option<RollingShutter> = RollingShutter::for_calibration(&calibration)
+            .map_err(frontend::flow::FrontendError::from)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
@@ -145,6 +151,7 @@ impl<S: Scalar> Vio<S> {
             last_deferred: None,
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
+            rolling_shutter,
             bootstrap,
         })
     }
@@ -152,6 +159,12 @@ impl<S: Scalar> Vio<S> {
     /// The rig's calibration, as the frontend and the estimator read it.
     pub fn calibration(&self) -> &calib::Calibration<f32> {
         &self.calib_f32
+    }
+
+    /// The rolling-shutter correction, when the rig has one: its frame counts say how many frames were corrected
+    /// and how many stayed raw because the gyro did not cover their time.
+    pub fn rolling_shutter(&self) -> Option<&RollingShutter> {
+        self.rolling_shutter.as_ref()
     }
 
     /// Gravity in the world frame, `(0, 0, -calibration.gravity_ms2)`.
@@ -258,6 +271,9 @@ impl<S: Scalar> Vio<S> {
         self.frontend_imu.push_back(sample);
         self.bootstrap
             .push_imu(&mut self.estimator, sample, &self.calib_f32);
+        if let Some(rolling_shutter) = &mut self.rolling_shutter {
+            rolling_shutter.push_gyro(t_ns, calibrated(&self.calib_f32, &sample).1);
+        }
         Ok(())
     }
 
@@ -448,6 +464,12 @@ impl<S: Scalar> Vio<S> {
                     keypoints.transform(index);
                 slot.insert(*id, warp.translation.into());
             }
+        }
+        if let Some(rolling_shutter) = &mut self.rolling_shutter {
+            rolling_shutter.correct(
+                &mut observations,
+                self.latest_state.as_ref().map(|state| state.bias_gyro),
+            );
         }
         let observations = std::sync::Arc::new(observations);
         let (result_t_ns, outcome) = if self.frontend.config().port_frontend_lag {
