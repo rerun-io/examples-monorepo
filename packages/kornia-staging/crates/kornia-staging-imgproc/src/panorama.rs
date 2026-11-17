@@ -29,7 +29,7 @@ pub struct TileGeometry {
 }
 
 impl Default for TileGeometry {
-    /// 960 + 2 x 64 = 1088 by 960 (DESIGN v2 M1).
+    /// 960 + 2 x 64 = 1088 by 960.
     fn default() -> Self {
         Self {
             hemisphere_width: 960,

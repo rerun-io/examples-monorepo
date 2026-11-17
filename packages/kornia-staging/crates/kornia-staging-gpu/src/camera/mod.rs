@@ -1,8 +1,9 @@
 //! Device cameras using the staged CPU calibration and validity contract.
 //!
 //! Each model module holds inline `#[cube]` functions over a packed f32 parameter
-//! slice: `project`, `unproject` and `project_with_point_jacobian`, with the
-//! status codes in [`brown8`] mapped 1:1 to the CPU rejections. The packers below
+//! slice: `project` (a comptime flag adds the point Jacobian; Brown8 keeps a
+//! separate `project_with_point_jacobian`) and `unproject`, with the status codes
+//! in [`brown8`] mapped 1:1 to the CPU rejections. The packers below
 //! take every derived constant from the validated CPU f32 model, so CPU and device
 //! apply the same domain bounds.
 pub mod brown8;

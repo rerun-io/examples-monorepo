@@ -21,13 +21,13 @@ pub fn project(
     if comptime!(model == MODEL_BROWN8) {
         brown8::project(params, offset, x, y, z, out)
     } else if comptime!(model == MODEL_KB4) {
-        kb4::project(params, offset, x, y, z, out)
+        kb4::project(params, offset, x, y, z, out, false)
     } else if comptime!(model == MODEL_DOUBLE_SPHERE) {
-        double_sphere::project(params, offset, x, y, z, out)
+        double_sphere::project(params, offset, x, y, z, out, false)
     } else if comptime!(model == MODEL_EUCM) {
-        eucm::project(params, offset, x, y, z, out)
+        eucm::project(params, offset, x, y, z, out, false)
     } else {
-        equirect::project(params, offset, x, y, z, out)
+        equirect::project(params, offset, x, y, z, out, false)
     }
 }
 
@@ -68,12 +68,12 @@ pub fn project_with_point_jacobian(
     if comptime!(model == MODEL_BROWN8) {
         brown8::project_with_point_jacobian(params, offset, x, y, z, out)
     } else if comptime!(model == MODEL_KB4) {
-        kb4::project_with_point_jacobian(params, offset, x, y, z, out)
+        kb4::project(params, offset, x, y, z, out, true)
     } else if comptime!(model == MODEL_DOUBLE_SPHERE) {
-        double_sphere::project_with_point_jacobian(params, offset, x, y, z, out)
+        double_sphere::project(params, offset, x, y, z, out, true)
     } else if comptime!(model == MODEL_EUCM) {
-        eucm::project_with_point_jacobian(params, offset, x, y, z, out)
+        eucm::project(params, offset, x, y, z, out, true)
     } else {
-        equirect::project_with_point_jacobian(params, offset, x, y, z, out)
+        equirect::project(params, offset, x, y, z, out, true)
     }
 }

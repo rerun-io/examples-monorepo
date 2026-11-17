@@ -21,7 +21,7 @@ const STRIDE: usize = 9;
 const PROJECT: u32 = 0;
 const UNPROJECT: u32 = 1;
 const JACOBIAN: u32 = 2;
-/// Pixel parity bound (DESIGN 2.2).
+/// Pixel parity bound.
 const PIXEL_TOLERANCE: f32 = 1e-3;
 /// Jacobian bound, relative to the largest entry of the CPU row.
 const JACOBIAN_TOLERANCE: f32 = 1e-4;

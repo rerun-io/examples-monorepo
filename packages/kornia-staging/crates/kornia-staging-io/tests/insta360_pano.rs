@@ -9,27 +9,15 @@ use kornia_staging_imgproc::panorama::{
     assemble_panorama, build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
 };
 use kornia_staging_io::insta360::{parse_lens_string, Insta360Clip, LensCalibration, WindowCrop};
-use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 
-const V3: &str = "2_2.314940_7095.540_7093.970_3842.370_3863.400_0.100_0.165_90.630_0.000000_0.000000_0.000000_0.96273077_-2.06431413_4.31214333_0.00172895_-0.00121632_15360_7680_131_2.314940_7148.420_7149.100_11546.600_3864.040_-0.074_0.251_88.277_0.000805_0.000066_-0.033123_0.96663713_-1.95924056_3.78486657_0.00081582_0.00241697_15360_7680_131_197632";
-const V6: &str = "2_2.314940_7096.760_7095.390_3834.830_3864.120_0.119_0.407_90.629_0.000000_0.000000_0.000000_0.93861496_-1.68402135_2.19166017_3.85762072_0.00000000_-0.00495962_0.00156076_-0.00330722_0.00397486_0.00827898_-0.00125315_0.02416405_-0.00143547_15360_7680_131_2.314940_7149.220_7149.700_11543.300_3858.430_-0.212_0.339_88.279_0.000132_-0.000043_-0.033291_0.95675713_-1.80496192_2.88544273_1.76948690_0.00000000_0.00131924_0.00023973_0.00279902_-0.00570679_0.00069985_0.00064811_0.00799088_0.02677096_15360_7680_131_394240";
-const CROP: WindowCrop = WindowCrop {
-    src: [7680, 7680],
-    dst: [7424, 7424],
-    offset: [0, 0],
-};
-const LENS: ImageSize = ImageSize {
-    width: 1920,
-    height: 1920,
-};
+include!("common/x4air_lens.rs");
+include!("common/x4air_clip.rs");
 const ORACLE_TILE: TileGeometry = TileGeometry {
     hemisphere_width: 960,
     height: 960,
     margin: 32,
 };
-const CLIP: &str = "/home/pablo/data/insta360/VID_20261116_125200_00_003.insv";
 
 /// pano_lut.py `project` of tile pixels (margin 32, 1024x960): (tile, tu, tv, u, v) at 1920 (V6 string).
 const ORACLE_V6: [(usize, u32, u32, f64, f64); 40] = [
@@ -259,49 +247,6 @@ fn invalid_pixels_sit_at_the_lens_edges() {
             }
         }
     }
-}
-
-/// Luma (plane 0, no range conversion) of frame `frame` of video stream `track`, decoded by `ffmpeg`.
-fn decode(path: &str, track: usize, frame: usize) -> Image<u8, 1> {
-    let t = format!("{:.6}", (frame as f64 * 1001.0 - 100.0) / 30000.0);
-    let out = Command::new("ffmpeg")
-        .args([
-            "-v",
-            "error",
-            "-ss",
-            &t,
-            "-i",
-            path,
-            "-map",
-            &format!("0:v:{track}"),
-            "-frames:v",
-            "1",
-        ])
-        .args(["-f", "rawvideo", "-pix_fmt", "yuvj420p", "-"])
-        .output()
-        .expect("ffmpeg runs");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Image::new(LENS, out.stdout[..1920 * 1920].to_vec()).unwrap()
-}
-
-/// The clip and an `ffmpeg`, or `None` with the reason printed.
-fn clip() -> Option<(String, Insta360Clip)> {
-    let path = std::env::var("KORNIA_STAGING_INSV").unwrap_or_else(|_| CLIP.into());
-    if !Path::new(&path).is_file() {
-        eprintln!("SKIP: asset {path} (VID_20261116_125200_00_003.insv) is absent");
-        return None;
-    }
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        eprintln!("SKIP: no ffmpeg on PATH to decode the HEVC tracks");
-        return None;
-    }
-    let clip = Insta360Clip::open(&path).unwrap();
-    assert_eq!(clip.lens_track, [1, 0], "lens 0 is track 1 (recon/09)");
-    Some((path, clip))
 }
 
 fn tiles(path: &str, clip: &Insta360Clip, luts: &[TileLut; 2], frame: usize) -> [Image<u16, 1>; 2] {
