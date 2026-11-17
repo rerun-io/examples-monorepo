@@ -12,7 +12,8 @@ pub mod double_sphere;
 pub mod equirect;
 pub mod eucm;
 pub mod kb4;
-use kornia_staging_3d::camera::{BrownConrady, CameraModelKind, InvalidCalibration};
+pub mod mei;
+use kornia_staging_3d::camera::{BrownConrady, CameraModelKind, InvalidCalibration, MeiDistortion};
 
 /// Number of device parameters: OpenCV Brown8's twelve values plus valid radius.
 pub const BROWN8_PARAMETERS: usize = 13;
@@ -80,6 +81,8 @@ pub const MODEL_DOUBLE_SPHERE: u32 = 2;
 pub const MODEL_EUCM: u32 = 3;
 /// Model tag of [`DeviceCamera::Equirect`].
 pub const MODEL_EQUIRECT: u32 = 4;
+/// Model tag of [`DeviceCamera::Mei`].
+pub const MODEL_MEI: u32 = 5;
 
 /// Packed parameter count of the model tagged `model` (`MODEL_*`).
 ///
@@ -92,6 +95,7 @@ pub const fn parameter_count(model: u32) -> usize {
         MODEL_DOUBLE_SPHERE => double_sphere::PARAMETERS,
         MODEL_EUCM => eucm::PARAMETERS,
         MODEL_EQUIRECT => equirect::PARAMETERS,
+        MODEL_MEI => mei::PARAMETERS,
         _ => panic!("unknown device camera model tag"),
     }
 }
@@ -109,10 +113,12 @@ pub enum DeviceCamera {
     Eucm([f32; eucm::PARAMETERS]),
     /// [`equirect`]: `fx fy cx cy lon_max`.
     Equirect([f32; equirect::PARAMETERS]),
+    /// [`mei`]: `fx fy cx cy xi cos_half_field d0..d12`, V3 packed into the V6 terms.
+    Mei([f32; mei::PARAMETERS]),
 }
 impl DeviceCamera {
     /// Pack a validated CPU camera, or `None` when it needs the general CPU path
-    /// (pinhole, Fisheye624, Brown with prism or tilt terms, Mei: no device kernel for those).
+    /// (pinhole, Fisheye624, Brown with prism or tilt terms: no device kernel for those).
     pub fn from_model(model: &CameraModelKind<f32>) -> Option<Self> {
         Some(match model {
             CameraModelKind::BrownConrady(model) => {
@@ -138,9 +144,23 @@ impl DeviceCamera {
                 Self::Eucm(packed)
             }
             CameraModelKind::Equirectangular(model) => Self::Equirect(model.params()),
-            CameraModelKind::Pinhole(_)
-            | CameraModelKind::Fisheye624(_)
-            | CameraModelKind::Mei(_) => return None,
+            CameraModelKind::Mei(model) => {
+                let mut packed = [0.0; mei::PARAMETERS];
+                packed[..5].copy_from_slice(&model.params());
+                packed[5] = model.cos_half_field();
+                let d = &mut packed[6..];
+                match model.distortion() {
+                    MeiDistortion::V3 { k, p: [p1, p2] } => {
+                        // V6's tangential `a`, `b` are V3's `p2`, `p1`.
+                        d[..3].copy_from_slice(&k);
+                        d[5] = p2;
+                        d[6] = p1;
+                    }
+                    MeiDistortion::V6 { d: coefficients } => d.copy_from_slice(&coefficients),
+                }
+                Self::Mei(packed)
+            }
+            CameraModelKind::Pinhole(_) | CameraModelKind::Fisheye624(_) => return None,
         })
     }
     /// Model tag for comptime or in-kernel dispatch (`MODEL_*`).
@@ -151,6 +171,7 @@ impl DeviceCamera {
             Self::DoubleSphere(_) => MODEL_DOUBLE_SPHERE,
             Self::Eucm(_) => MODEL_EUCM,
             Self::Equirect(_) => MODEL_EQUIRECT,
+            Self::Mei(_) => MODEL_MEI,
         }
     }
     /// Packed parameters, in the layout the model module reads at its offset.
@@ -160,6 +181,7 @@ impl DeviceCamera {
             Self::Kb4(packed) => packed,
             Self::DoubleSphere(packed) | Self::Eucm(packed) => packed,
             Self::Equirect(packed) => packed,
+            Self::Mei(packed) => packed,
         }
     }
 }
@@ -178,7 +200,8 @@ mod conversion_tests {
                 MODEL_KB4,
                 MODEL_DOUBLE_SPHERE,
                 MODEL_EUCM,
-                MODEL_EQUIRECT
+                MODEL_EQUIRECT,
+                MODEL_MEI
             ]
             .map(parameter_count),
             [
@@ -186,10 +209,35 @@ mod conversion_tests {
                 kb4::PARAMETERS,
                 double_sphere::PARAMETERS,
                 eucm::PARAMETERS,
-                equirect::PARAMETERS
+                equirect::PARAMETERS,
+                mei::PARAMETERS
             ]
         );
-        assert!(std::panic::catch_unwind(|| parameter_count(MODEL_EQUIRECT + 1)).is_err());
+        assert!(std::panic::catch_unwind(|| parameter_count(MODEL_MEI + 1)).is_err());
+    }
+    #[test]
+    fn mei_packs_v3_into_the_v6_terms_and_the_cpu_field_bound() {
+        use kornia_staging_3d::camera::Mei;
+        let param = [1834.6, 1834.2, 960.242, 965.681, 2.31494];
+        let distortion = MeiDistortion::V3 {
+            k: [0.96, -2.06, 4.31],
+            p: [0.0017, -0.0012],
+        };
+        let model = Mei::new(param, 100f32.to_radians(), distortion).unwrap();
+        let device = DeviceCamera::from_model(&CameraModelKind::Mei(model)).unwrap();
+        assert_eq!(device.model_id(), MODEL_MEI);
+        let packed = device.device_parameters();
+        assert_eq!(packed.len(), parameter_count(MODEL_MEI));
+        assert_eq!(packed[..5], param);
+        assert_eq!(packed[5], model.cos_half_field());
+        assert_eq!(
+            packed[6..],
+            [0.96, -2.06, 4.31, 0.0, 0.0, -0.0012, 0.0017, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        let d: [f32; 13] = std::array::from_fn(|i| i as f32 * 1e-3);
+        let model = Mei::new(param, 1.5, MeiDistortion::V6 { d }).unwrap();
+        let device = DeviceCamera::from_model(&CameraModelKind::Mei(model)).unwrap();
+        assert_eq!(device.device_parameters()[6..], d);
     }
     #[test]
     fn prism_and_tilt_require_the_general_camera() {
