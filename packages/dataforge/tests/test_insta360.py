@@ -219,13 +219,14 @@ def test_the_clip_converts_into_mei_cameras_on_the_imu_with_their_readout_and_ex
     frame_ns: Int64[ndarray, " n"] = video_times(converted.targets[paths.BASE_LAYER], schema.video_path(0, 0))
     assert frame_ns.size == FRAMES
     for cam, lens in enumerate(clip.lenses_v6):
+        camera = lens.camera
         node: dict[str, object] = static_values(store, schema.cam_path(0, cam))
         assert (node["name"], node["camera_model"], node["stream_id"]) == (f"lens{cam}", "mei_v6", f"track{clip.lens_track[cam]}")
         assert node["rolling_shutter_readout_s"] == pytest.approx(clip.rolling_shutter_ms * 1e-3)
         pinhole: dict[str, object] = static_values(store, schema.pinhole_path(0, cam))
         assert pinhole["simplecv.components.DistortionModel"] == "mei_v6"
-        np.testing.assert_allclose(np.asarray(pinhole["simplecv.components.DistortionCoefficients"], dtype=np.float64), lens.coefficients, rtol=1e-7)  # stored as float32
-        np.testing.assert_allclose(np.asarray(pinhole["image_from_camera"], dtype=np.float64), [lens.fx, 0.0, 0.0, 0.0, lens.fy, 0.0, lens.cx, lens.cy, 1.0], rtol=1e-7)
+        np.testing.assert_allclose(np.asarray(pinhole["simplecv.components.DistortionCoefficients"], dtype=np.float64), camera.coefficients, rtol=1e-7)  # stored as float32
+        np.testing.assert_allclose(np.asarray(pinhole["image_from_camera"], dtype=np.float64), [camera.fx, 0.0, 0.0, 0.0, camera.fy, 0.0, camera.cx, camera.cy, 1.0], rtol=1e-7)
         np.testing.assert_array_equal(video_times(converted.targets[paths.BASE_LAYER], schema.video_path(0, cam)), frame_ns)
         exposure: pa.Table = store.reader(index=schema.TIMELINE, contents=f"{schema.cam_path(0, cam)}/exposure").to_arrow_table()
         assert exposure.num_rows == FRAMES
@@ -272,7 +273,8 @@ def test_the_panorama_layer_is_av1_on_the_base_frame_times(converted: Converted,
 def test_the_first_panorama_frame_is_the_stitch_within_38_db(converted: Converted, panorama_rrd: Path) -> None:
     import insta360_io
 
-    from dataforge.datasets.insta360 import PANO_ENTITY, gray_frames
+    from dataforge import paths
+    from dataforge.datasets.insta360 import PANO_ENTITY, gray_frames, stitch_from_recording
 
     chunks: list[rrc.Chunk] = [c for c in read_chunks(panorama_rrd) if c.entity_path == PANO_ENTITY and "VideoStream:sample" in c.to_record_batch().schema.names]
     rows: list[tuple[int, bytes]] = [
@@ -286,7 +288,7 @@ def test_the_first_panorama_frame_is_the_stitch_within_38_db(converted: Converte
     decoder = av.CodecContext.create("libdav1d", "r")
     decoded: UInt8[ndarray, "h w"] = (decoder.decode(av.Packet(first)) + decoder.decode(None))[0].to_ndarray(format="gray")  # pyrefly: ignore[missing-attribute]
     clip = insta360_io.InsvClip(str(converted.clip))
-    stitch = insta360_io.PanoramaStitch(dict(clip.factory_strings)["v6"], clip.window_crop, clip.resolution)
+    stitch: insta360_io.PanoramaStitch = stitch_from_recording(converted.targets[paths.BASE_LAYER])
     lenses: list[Iterator[UInt8[ndarray, "h w"]]] = [gray_frames(clip, clip.lens_track[cam], 1, batch_frames=1, threads=1) for cam in range(2)]
     expected: UInt8[ndarray, "960 1920"] = stitch.panorama(next(lenses[0]), next(lenses[1]))
     mse: float = float(np.mean((decoded.astype(np.float64) - expected.astype(np.float64)) ** 2))

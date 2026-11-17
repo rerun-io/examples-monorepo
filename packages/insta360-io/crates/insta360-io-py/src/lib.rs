@@ -2,9 +2,10 @@
 //! stitch of its two lens images into the hemisphere tiles and the viewing panorama
 //! (`kornia_staging_imgproc::panorama`).
 //!
-//! Ported 1:1 from `slam_rs._core` (`InsvClip`, `InsvLens`, `PanoramaStitch`), class and method names unchanged, so
-//! that callers move by changing the import. Every refusal raises `ValueError`, never a panic.
+//! `MeiCamera` is a lens camera as a calibration states it; `PanoramaStitch` takes two of them and the pose of camera 1
+//! in camera 0. Every refusal raises `ValueError`, never a panic.
 
+mod camera;
 mod insv;
 mod panorama;
 
@@ -18,6 +19,7 @@ fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
 
 #[pymodule]
 fn insta360_io(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    camera::register(module)?;
     insv::register(module)?;
     panorama::register(module)
 }

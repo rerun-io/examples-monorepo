@@ -34,8 +34,10 @@ noise) is a measured record in ``insta360_profiles.toml``, selected by the clip'
 that differs. The IMU noise model is a placeholder, marked as such in its ``source``.
 
 Panorama layer. ``panorama`` holds the 1920x960 viewing panorama at ``/world/rig_00/pano``, stitched on the CPU from
-the two lens images of every frameset (lens 0's hemisphere on the left) and encoded AV1 on NVENC, on the frame times.
-It is for viewing only: nothing reads it as input, and the lens brightness steps at the seams are not corrected.
+the two lens images of every frameset and encoded AV1 on NVENC, on the frame times. The stitch is built from the two
+cameras as the base recording states them (float32 statics), with the panorama frame slam-rs uses: camera 0's axes at
+the midpoint of the two camera centres, camera 0's hemisphere on the left. It is for viewing only: nothing reads it as
+input, and the lens brightness steps at the seams are not corrected.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ import insta360_io
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import rerun.chunk as rrc
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from serde import SerdeError, coerce, serde
@@ -71,7 +74,7 @@ PANORAMA_LAYER: str = "panorama"
 PANO_ENTITY: str = f"{schema.rig_path(RIG)}/pano"
 """Where the panorama layer puts its video."""
 PANORAMA_SIZE: tuple[int, int] = (1920, 960)
-"""Width and height of ``PanoramaStitch.panorama``."""
+"""Width and height of ``insta360_io.PanoramaStitch.panorama``."""
 RUN_SOURCE: str = "slam_rs"
 """The run layer the layouts show: slam-rs tracks these clips."""
 PROFILES_TOML: Path = Path(__file__).with_name("insta360_profiles.toml")
@@ -261,6 +264,47 @@ def gray_frames(clip: insta360_io.InsvClip, track: int, frames: int, *, batch_fr
     yield from (gray(frame) for frame in decoder.decode(None))
 
 
+def stitch_from_recording(base: Path) -> insta360_io.PanoramaStitch:
+    """The panorama stitch of a base recording's ``cam_00`` and ``cam_01``, from their statics as written (float32).
+
+    Each camera is its ``DistortionModel``, ``DistortionCoefficients`` and pinhole matrix; camera 1's pose in camera 0
+    is ``cam0_T_rig * cam1_T_rig^-1`` from the two ``Transform3D``s (``ChildFromParent``).
+
+    Raises:
+        ValueError: If a camera is not a Mei camera or its statics are missing.
+    """
+    entities: list[str] = [schema.cam_path(RIG, cam) for cam in range(2)] + [schema.pinhole_path(RIG, cam) for cam in range(2)]
+    statics: dict[str, object] = {}
+    for chunk in rrc.RrdReader(base).stream():
+        if chunk.is_static and chunk.entity_path in entities:
+            batch = chunk.to_record_batch()
+            statics.update({f"{chunk.entity_path}:{name}": batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")})
+    cameras: list[insta360_io.MeiCamera] = []
+    cam_T_rig: list[Float64[ndarray, "4 4"]] = []
+    for cam in range(2):
+        pinhole: str = schema.pinhole_path(RIG, cam)
+        node: str = schema.cam_path(RIG, cam)
+        missing: list[str] = [
+            key
+            for key in (f"{pinhole}:simplecv.components.DistortionModel", f"{pinhole}:simplecv.components.DistortionCoefficients", f"{pinhole}:Pinhole:image_from_camera", f"{node}:Transform3D:mat3x3", f"{node}:Transform3D:translation")
+            if not statics.get(key)
+        ]
+        if missing:
+            raise ValueError(f"{base}: camera {cam} lacks {missing}")
+        model: str = str(statics[f"{pinhole}:simplecv.components.DistortionModel"][0])  # pyrefly: ignore[bad-index]
+        coefficients: list[float] = list(statics[f"{pinhole}:simplecv.components.DistortionCoefficients"][0])  # pyrefly: ignore[bad-index]
+        # Rerun stores the 3x3 matrices column-major.
+        k: Float64[ndarray, "3 3"] = np.asarray(statics[f"{pinhole}:Pinhole:image_from_camera"][0], dtype=np.float64).reshape(3, 3).T  # pyrefly: ignore[bad-index]
+        cameras.append(insta360_io.MeiCamera(model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), coefficients))
+        pose: Float64[ndarray, "4 4"] = np.eye(4)
+        pose[:3, :3] = np.asarray(statics[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T  # pyrefly: ignore[bad-index]
+        pose[:3, 3] = np.asarray(statics[f"{node}:Transform3D:translation"][0], dtype=np.float64)  # pyrefly: ignore[bad-index]
+        cam_T_rig.append(pose)
+    cam0_T_cam1: Float64[ndarray, "4 4"] = cam_T_rig[0] @ np.linalg.inv(cam_T_rig[1])
+    width, height = (int(v) for v in statics[f"{schema.pinhole_path(RIG, 0)}:Pinhole:resolution"][0])  # pyrefly: ignore[bad-index]
+    return insta360_io.PanoramaStitch(cameras[0], cameras[1], cam0_T_cam1.tolist(), (width, height))
+
+
 @dataclass(frozen=True, slots=True)
 class ClipSource:
     """One ``.insv`` clip on disk."""
@@ -309,11 +353,9 @@ def read_capture(path: Path, profiles: list[DeviceProfile], frame_limit: int | N
     clip: insta360_io.InsvClip = insta360_io.InsvClip(str(path))
     width, height = clip.resolution
     frame_t_us, exposure_vin0 = clip.frame_exposures(False)
-    vin1_t_us, exposure_vin1 = clip.frame_exposures(True)
+    _, exposure_vin1 = clip.frame_exposures(True)
     if frame_t_us.size < 2:
         raise ValueError(f"{path}: {frame_t_us.size} exposure-record-4 entries; a clip needs two frames or more")
-    if vin1_t_us.size != frame_t_us.size:
-        raise ValueError(f"{path}: exposure record 12 (VIN1) holds {vin1_t_us.size} frame entries, record 4 {frame_t_us.size}")
     mode: CaptureMode = CaptureMode(
         camera_type=clip.camera_type,
         lens_width=width,
@@ -323,8 +365,6 @@ def read_capture(path: Path, profiles: list[DeviceProfile], frame_limit: int | N
     )
     profile: DeviceProfile = select_profile(profiles, mode)
     lenses: list[insta360_io.InsvLens] = clip.lenses_v6 or clip.lenses
-    if len(lenses) != 2:
-        raise ValueError(f"{path}: the factory lens string holds {len(lenses)} lenses; a dual fisheye has two")
     frames: int = clip.num_frames if frame_limit is None else min(frame_limit, clip.num_frames)
     frame_ns: Int64[ndarray, " n"] = frame_times_ns(frame_t_us[:frames], exposure_vin0[:frames], profile)
     imu_t_us, accel, gyro = clip.imu()
@@ -392,7 +432,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 pending,
                 {
                     paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, source, capture),
-                    PANORAMA_LAYER: lambda recording: self.write_panorama(recording, capture),
+                    PANORAMA_LAYER: lambda recording: self.write_panorama(recording, capture, targets[paths.BASE_LAYER]),
                 },
             )
         return targets[paths.BASE_LAYER]
@@ -423,12 +463,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         recording.log(imu_node, rr.AnyValues(applied_time_shift_ns=0, time_shift_source="none: frames carry the profile's time model"), static=True)
         lever_arm: Float64[ndarray, "3"] = capture.profile.lever_arm_m
         for cam, lens in enumerate(capture.lenses):
+            camera: insta360_io.MeiCamera = lens.camera
             track: int = clip.lens_track[cam]
             name: str = f"lens{cam}"
             node: str = schema.cam_path(RIG, cam)
             rr.log(
                 node,
-                rr.AnyValues(name=name, kind="rgb", camera_model=lens.model, rolling_shutter_readout_s=capture.readout_s),
+                rr.AnyValues(name=name, kind="rgb", camera_model=camera.model, rolling_shutter_readout_s=capture.readout_s),
                 static=True,
                 recording=recording,
             )
@@ -441,13 +482,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 recording=recording,
             )
             pinhole: rr.Pinhole = rr.Pinhole(
-                image_from_camera=[[lens.fx, 0.0, lens.cx], [0.0, lens.fy, lens.cy], [0.0, 0.0, 1.0]],
+                image_from_camera=[[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]],
                 width=width,
                 height=height,
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=0.05,
             )
-            distortion: CameraDistortion = CameraDistortion(lens.model, np.asarray(lens.coefficients, dtype=np.float64))
+            distortion: CameraDistortion = CameraDistortion(camera.model, np.asarray(camera.coefficients, dtype=np.float64))
             rr.log(schema.pinhole_path(RIG, cam), PinholeWithDistortion(pinhole, distortion), static=True, recording=recording)
             log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec="hevc", stream_id=f"track{track}")
             exposure: str = f"{node}/exposure"
@@ -488,16 +529,15 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             ),
         )
 
-    def write_panorama(self, recording: rr.RecordingStream, capture: Capture) -> None:
-        """Stitch every frameset's two lens images into the viewing panorama and log it as AV1 on the frame times."""
+    def write_panorama(self, recording: rr.RecordingStream, capture: Capture, base: Path) -> None:
+        """Stitch every frameset's two lens images into the viewing panorama and log it as AV1 on the frame times.
+
+        The stitch is built from the two cameras as the base recording states them (``stitch_from_recording``), so it
+        is the stitch of anything else that reads that recording.
+        """
         clip: insta360_io.InsvClip = capture.clip
         frames: int = int(capture.frame_ns.size)
-        # STAGE 2 SWAP: the stitch is built from the factory V6 string here; Phase 1's stitch takes the two cameras as
-        # written on the camera nodes and the pose of camera 1 in camera 0.
-        strings: dict[str, str] = dict(clip.factory_strings)
-        if "v6" not in strings:
-            raise ValueError("the panorama stitch is built from the V6 lens string, which this clip lacks")
-        stitch: insta360_io.PanoramaStitch = insta360_io.PanoramaStitch(strings["v6"], clip.window_crop, clip.resolution)
+        stitch: insta360_io.PanoramaStitch = stitch_from_recording(base)
         lens0, lens1 = (
             gray_frames(clip, clip.lens_track[cam], frames, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for cam in range(2)
         )
