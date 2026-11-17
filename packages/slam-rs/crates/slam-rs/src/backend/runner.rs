@@ -57,7 +57,6 @@ pub struct BackendCounters {
 }
 
 /// The work and what is waiting for it, behind the runner's mutex.
-#[derive(Debug)]
 struct State<B> {
     work: B,
     counters: BackendCounters,
@@ -113,7 +112,6 @@ enum Message {
 }
 
 /// The Realtime thread and the tracking side of its channel.
-#[derive(Debug)]
 struct Thread {
     sender: Option<Sender<Message>>,
     handle: Option<JoinHandle<()>>,
@@ -122,17 +120,7 @@ struct Thread {
     max_pending: u64,
 }
 
-impl std::fmt::Debug for Message {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stamp(_) => f.write_str("Stamp"),
-            Self::Flush(_) => f.write_str("Flush"),
-        }
-    }
-}
-
 /// The back end in one of its two modes.
-#[derive(Debug)]
 pub struct BackendRunner<B: BackendWork> {
     mode: BackendMode,
     state: Arc<Mutex<State<B>>>,
@@ -238,6 +226,25 @@ impl<B: BackendWork> BackendRunner<B> {
             counters.max_pending_stamps = thread.max_pending;
         }
         read(&state.work, &counters)
+    }
+}
+
+/// The mode, the work and what it has taken; never the wall-clock timings or
+/// the Realtime queue depth, which change run to run (`Vio`'s `Debug` is a
+/// determinism fingerprint).
+impl<B: BackendWork + std::fmt::Debug> std::fmt::Debug for BackendRunner<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = f.debug_struct("BackendRunner");
+        out.field("mode", &self.mode);
+        match self.state.lock() {
+            Ok(state) => out
+                .field("work", &state.work)
+                .field("stamps", &state.counters.stamps)
+                .field("queries_run", &state.counters.queries_run)
+                .field("queries_dropped", &state.counters.queries_dropped),
+            Err(_) => out.field("work", &"<the back-end thread panicked>"),
+        };
+        out.finish()
     }
 }
 
