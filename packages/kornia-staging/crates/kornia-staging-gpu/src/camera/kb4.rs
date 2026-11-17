@@ -25,8 +25,19 @@ fn distorted_radius(params: &[f32], offset: usize, theta: f32) -> f32 {
         * theta
 }
 
+/// Project one point with the CPU `project_with_status` rules.
+///
+/// # Arguments
+/// * `params`, `offset` - Ten packed KB4 values at `offset`.
+/// * `x`, `y`, `z` - Camera-frame coordinates; rays beyond 90 degrees are valid up to `theta_max`.
+/// * `out` - At least two entries, zero on rejection.
+///
+/// Returns 0 valid, 1 non-finite, 2 depth (on-axis, `z <= 0`), or 3 beyond `theta_max`.
+///
+/// With `jacobian`, also writes the 2x3 point Jacobian row-major into `out[2..8]` (at least eight entries,
+/// meaningful only for status 0).
 #[cube]
-fn project_status(
+pub fn project(
     params: &[f32],
     offset: usize,
     x: f32,
@@ -97,34 +108,6 @@ fn project_status(
         out[1usize] = 0.0f32;
     }
     status
-}
-
-/// Project one point with the CPU `project_with_status` rules.
-///
-/// # Arguments
-/// * `params`, `offset` - Ten packed KB4 values at `offset`.
-/// * `x`, `y`, `z` - Camera-frame coordinates; rays beyond 90 degrees are valid up to `theta_max`.
-/// * `out` - At least two entries, zero on rejection.
-///
-/// Returns 0 valid, 1 non-finite, 2 depth (on-axis, `z <= 0`), or 3 beyond `theta_max`.
-#[cube]
-pub fn project(params: &[f32], offset: usize, x: f32, y: f32, z: f32, out: &mut Array<f32>) -> u32 {
-    project_status(params, offset, x, y, z, out, false)
-}
-
-/// Project and write the 2x3 point Jacobian row-major into `out[2..8]`.
-///
-/// `out` holds at least eight entries; the Jacobian is meaningful only for status 0.
-#[cube]
-pub fn project_with_point_jacobian(
-    params: &[f32],
-    offset: usize,
-    x: f32,
-    y: f32,
-    z: f32,
-    out: &mut Array<f32>,
-) -> u32 {
-    project_status(params, offset, x, y, z, out, true)
 }
 
 /// Invert one pixel to a unit bearing with the CPU's bracketed Newton on theta.
