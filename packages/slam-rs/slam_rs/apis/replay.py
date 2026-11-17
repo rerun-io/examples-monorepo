@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -29,7 +30,7 @@ from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import FrameMode, StageTimes, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -90,6 +91,13 @@ class Config:
     """
     decode_threads: int = 1
     """PyAV decoder threads per camera stream (CPU decode); the Insta360 lenses decode at about 2.6x real time with 4."""
+    image_log_every: int = 1
+    """Log the camera images (and a stitched rig's panorama) on every n-th frameset; 0 logs none.
+
+    On a long clip the images dominate the recording's size, the replay's memory (a headless replay without
+    ``--rr-config.save`` holds everything it logs) and its wall time. Poses, keypoints and counters are logged
+    on every frameset regardless.
+    """
 
 
 @dataclass(slots=True)
@@ -148,26 +156,41 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
     # The stage that tracks needs the pixels its keypoints were computed on.
     mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
-    frameset: Frameset
-    for frameset in feed.framesets(stop_ns):
-        if config.max_framesets is not None and replayed >= config.max_framesets:
+    times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
+    framesets: Iterator[Frameset] = iter(feed.framesets(stop_ns))
+    while config.max_framesets is None or replayed < config.max_framesets:
+        waited: float = time.monotonic()
+        frameset: Frameset | None = next(framesets, None)
+        if frameset is None:
             break
+        times.add("decode", 1e3 * (time.monotonic() - waited))
+        log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
         replayed += 1
         if config.blank_cameras:
             frameset = dataclasses.replace(
                 frameset,
                 images=[np.zeros_like(image) if index in config.blank_cameras else image for index, image in enumerate(frameset.images)],
             )
-        log_frameset_inputs(feed, frameset, mode)
-        if stage is not None:
+        logged: float = time.monotonic()
+        log_frameset_inputs(feed, frameset, mode if log_images else "off")
+        times.add("log_inputs", 1e3 * (time.monotonic() - logged))
+        if isinstance(stage, VioStage):
+            stage.run(frameset, log_panorama=log_images)
+        elif stage is not None:
             stage.run(frameset)
 
     if isinstance(stage, VioStage):
         stage.flush()
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
+    print(times.summary())
     if stage is not None:
         print(stage.summary())
+    if isinstance(stage, VioStage) and stage.keypoints:
+        print(
+            f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "
+            f"mean {np.mean(stage.keypoints):.1f}, min {np.min(stage.keypoints)}, max {np.max(stage.keypoints)}"
+        )
     return replayed
 
 
@@ -190,6 +213,8 @@ def main(config: Config) -> None:
     Args:
         config: Parsed CLI options.
     """
+    if config.image_log_every < 0:
+        raise ValueError(f"--image-log-every {config.image_log_every}: a cadence of 0 (no images) or more")
     settings: SlamConfig = load_slam_config()
     benchmarks: Benchmarks = load_benchmarks(settings)
     listed: ReferenceSegment | None = next((s for s in benchmarks.segments if s.segment_id == config.segment), None)
