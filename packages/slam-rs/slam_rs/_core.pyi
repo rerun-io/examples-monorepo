@@ -648,3 +648,19 @@ class InsvClip:
     def read_samples(self, track: int, start: int, stop: int) -> tuple[list[bytes], Bool[ndarray, " n"]]:
         """Samples ``start..stop`` of one track as Annex B access units with parameter sets on IRAPs, and IRAP flags."""
 
+
+class PanoramaStitch:
+    """The dual-fisheye lane's stitch without ``Vio``: two lens images in, the 1920x960 viewing panorama out.
+
+    Built from the factory inputs ``Vio(dual_fisheye=...)`` takes; the same tables and host remap as the lane.
+    """
+
+    def __init__(
+        self, lens_string: str, window_crop_px: tuple[int, int, int, int, int, int] | None, lens_size: tuple[int, int], *, margin_px: int = 64
+    ) -> None:
+        """``lens_string``: raw V3/V6 factory string; ``window_crop_px``: its window crop or None; ``lens_size``: ``(width, height)``.
+
+        ``margin_px`` is the lane's tile overlap; the panorama's pixels do not depend on it. Raises ``ValueError`` on a bad string.
+        """
+    def panorama(self, lens0: UInt8[ndarray, "h w"], lens1: UInt8[ndarray, "h w"]) -> UInt8[ndarray, "960 1920"]:
+        """The panorama of lens 0's and lens 1's C-contiguous images (lens 0's hemisphere on the left); ``ValueError`` on a wrong size."""

@@ -48,6 +48,8 @@ def test_a_stereo_pipeline_has_no_bootstrap_report() -> None:
 
 def test_the_report_accessors_match_the_report_text() -> None:
     """Python reads the bootstrap report through typed getters; the JSON text is only written out, never parsed."""
+    from slam_rs.apis.insv_calibrate import first_attempt
+
     root: Path = SLAM_CONFIG_PATH.parent
     calibration = _core.Calibration.from_json((root / "crates/slam-rs/tests/fixtures/msdmi_calib.json").read_text())
     config: _core.VioConfig = _core.VioConfig.from_json((root / "configs/msdmi_config.json").read_text())
@@ -58,6 +60,7 @@ def test_the_report_accessors_match_the_report_text() -> None:
         assert vio.bootstrap_start_t_ns is None
         assert vio.bootstrap_accepted_at_t_ns is None
         assert vio.bootstrap_replayed == 0
+        assert first_attempt(vio) is None
 
 
 def test_blanked_cameras_track_nothing() -> None:

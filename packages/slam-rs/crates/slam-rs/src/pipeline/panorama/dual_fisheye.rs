@@ -80,7 +80,8 @@ impl DualFisheyeLenses {
     }
 
     /// The tables that stitch `lens` images into the two 960-row hemisphere tiles
-    /// with `margin_px` overlap columns. Tile `k` reads lens `k`.
+    /// with `margin_px` overlap columns: the one stitch the lane and the viewing
+    /// panorama ([`LensStitch::panorama`]) share. Tile `k` reads lens `k`.
     ///
     /// # Errors
     ///

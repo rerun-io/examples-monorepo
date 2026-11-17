@@ -15,7 +15,7 @@ from collections.abc import Callable
 import tyro
 
 
-def run[Config](config_type: type[Config], main: Callable[[Config], None]) -> None:
+def run[Config](config_type: type[Config], main: Callable[[Config], object]) -> None:
     """Parse the command line and run one tool, turning a user error into one sentence.
 
     Args:
