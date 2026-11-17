@@ -146,6 +146,26 @@ fn double_sphere_rejects_at_and_beyond_the_domain_edge() {
 }
 
 #[test]
+fn double_sphere_rejects_a_domain_bound_that_is_not_finite() {
+    // xi = -1, alpha = 0.5: w1 = 1 and w2 = 0 / sqrt(0).
+    assert_eq!(
+        DoubleSphere::new([1.0f64, 1.0, 0.0, 0.0, -1.0, 0.5]),
+        Err(InvalidCalibration)
+    );
+    assert_eq!(
+        DoubleSphere::new([1.0f32, 1.0, 0.0, 0.0, -1.0, 0.5]),
+        Err(InvalidCalibration)
+    );
+    // Its neighbours keep a finite bound and are accepted.
+    for ok in [
+        [1.0f64, 1.0, 0.0, 0.0, -1.0, 0.6],
+        [1.0, 1.0, 0.0, 0.0, -0.99, 0.5],
+    ] {
+        assert!(DoubleSphere::new(ok).unwrap().domain_bound().is_finite());
+    }
+}
+
+#[test]
 fn ds_and_eucm_calibrations_of_one_lens_agree_inside_80_degrees() {
     let ds = DoubleSphere::new(TUMVI_DS).unwrap();
     let eucm = Eucm::new(TUMVI_EUCM).unwrap();
