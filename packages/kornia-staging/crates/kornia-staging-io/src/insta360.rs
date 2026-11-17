@@ -390,7 +390,7 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer, Insta360E
     let index = read_at(file_len - FOOTER - 6 - index_size, index_size as usize)?;
     let mut records: [Option<Vec<u8>>; 3] = [None, None, None];
     let mut metadata = None;
-    for slot in index.chunks_exact(10) {
+    for slot in index.as_chunks::<10>().0 {
         let (id, size, offset) = (slot[0], le(slot, 2, 4), le(slot, 6, 4));
         let wanted = [
             RECORD_METADATA,
