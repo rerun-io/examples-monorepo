@@ -226,7 +226,7 @@ fn keyframe_stamp(
         keyframe_poses: window.iter().copied().collect(),
         landmarks,
         keypoints,
-        images: images.cloned(),
+        images: images.cloned().map(ImageSlot::new),
     }))
 }
 
@@ -556,6 +556,7 @@ fn fusion_folds_into_a_current_landmark_and_adds_an_observation_otherwise() {
         landmark(&views, &calib, 0, 1, KeypointId(2), A, &[A, A2]),
         landmark(&views, &calib, 0, 2, KeypointId(3), A, &[A, A2]),
         landmark(&views, &calib, 0, 3, KeypointId(50), D, &[D, C]),
+        landmark(&views, &calib, 0, 4, KeypointId(51), D, &[D, C]),
     ]);
     let m = |keypoint: Option<u64>, landmark: u64| LoopMatch {
         cam: 0,
@@ -572,6 +573,7 @@ fn fusion_folds_into_a_current_landmark_and_adds_an_observation_otherwise() {
             m(None, 3),     // redetected: observe 3 (B9: never fused by id)
             m(Some(50), 3), // 50 already took a fusion: skipped
             m(Some(70), 9), // the island landmark left the map: skipped
+            m(Some(51), 3), // 3 is still free: fused into 51
         ],
     );
     let image = TimeCamId::new(C, 0);
@@ -592,6 +594,10 @@ fn fusion_folds_into_a_current_landmark_and_adds_an_observation_otherwise() {
                 landmark: LandmarkId(3),
                 image,
                 pixel
+            },
+            LoopFusion::Fuse {
+                from: LandmarkId(3),
+                into: LandmarkId(51)
             },
         ]
     );
@@ -1087,4 +1093,24 @@ fn a_candidate_that_failed_after_its_reprojection_pass_leaves_the_next_one_as_it
         (decoy.candidate, decoy.stages.reprojection_matches),
         (E, POINTS)
     );
+}
+
+#[test]
+fn queued_stamps_past_the_query_cap_lose_their_images_before_the_back_end_takes_them() {
+    // Realtime, behind: only the newest `cap` stamps keep their images.
+    let image = || {
+        KeyframeImages(Arc::new(vec![
+            Image::from_size_val([4, 4].into(), 0u16).unwrap(),
+        ]))
+    };
+    let mut slots = crate::estimator::ImageSlots::new(2);
+    let queued: Vec<ImageSlot> = (0..4).map(|_| slots.hold(image())).collect();
+    let taken: Vec<bool> = queued.iter().map(|slot| slot.take().is_some()).collect();
+    assert_eq!(taken, [false, false, true, true]);
+    // The back end counts a stamp whose slot came empty, and its query runs without.
+    let mut s = scene(1, 0.05, false, LoopClosingConfig::default(), 100);
+    let loops = s.backend.loops.as_mut().unwrap();
+    loops.hold_images(D, &queued[0]);
+    assert_eq!(loops.counts().images_stripped, 1);
+    assert_eq!(loops.held_images(), 1, "C's images only");
 }

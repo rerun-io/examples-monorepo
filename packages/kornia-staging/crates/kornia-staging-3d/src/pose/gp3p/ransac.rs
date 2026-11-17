@@ -150,18 +150,16 @@ fn fit_triple(samples: &[GeneralizedCorrespondence]) -> Solutions {
     solutions
 }
 
-impl Gp3pEstimator<3> {
-    /// Every GP3P solution of the first three samples, appended to `out`.
-    pub fn fit(&self, samples: &[GeneralizedCorrespondence], out: &mut Vec<Gp3pPose>) {
-        out.extend_from_slice(fit_triple(samples).as_slice());
-    }
-}
-
-impl Gp3pEstimator<4> {
-    /// The GP3P solution of the first three samples that fits the fourth best,
-    /// appended to `out` (none when the triple has no solution).
+impl<const SAMPLE: usize> Gp3pEstimator<SAMPLE> {
+    /// The GP3P solutions of the first three samples, appended to `out`:
+    /// all of them (`SAMPLE == 3`), or the one that fits the fourth sample
+    /// best (`SAMPLE == 4`; none when the triple has no solution).
     pub fn fit(&self, samples: &[GeneralizedCorrespondence], out: &mut Vec<Gp3pPose>) {
         let solutions = fit_triple(samples);
+        if SAMPLE == 3 {
+            out.extend_from_slice(solutions.as_slice());
+            return;
+        }
         let best = solutions.as_slice().iter().min_by(|a, b| {
             samples[3]
                 .angular_residual(a)
@@ -176,13 +174,13 @@ mod interop {
     use super::{GeneralizedCorrespondence, Gp3pEstimator, Gp3pPose};
     use kornia_3d::ransac::Estimator;
 
-    impl Estimator for Gp3pEstimator<3> {
+    impl<const SAMPLE: usize> Estimator for Gp3pEstimator<SAMPLE> {
         type Model = Gp3pPose;
         type Sample = GeneralizedCorrespondence;
-        const SAMPLE_SIZE: usize = 3;
+        const SAMPLE_SIZE: usize = SAMPLE;
 
         fn fit(&self, samples: &[Self::Sample], out: &mut Vec<Self::Model>) {
-            Gp3pEstimator::<3>::fit(self, samples, out);
+            Gp3pEstimator::<SAMPLE>::fit(self, samples, out);
         }
 
         fn residual(&self, model: &Self::Model, sample: &Self::Sample) -> f64 {
@@ -190,23 +188,6 @@ mod interop {
         }
 
         /// No refit inside the driver: [`super::gp3p_ransac`] refines after it.
-        fn refit(&self, _inliers: &[Self::Sample], _out: &mut Vec<Self::Model>) {}
-    }
-
-    impl Estimator for Gp3pEstimator<4> {
-        type Model = Gp3pPose;
-        type Sample = GeneralizedCorrespondence;
-        const SAMPLE_SIZE: usize = 4;
-
-        fn fit(&self, samples: &[Self::Sample], out: &mut Vec<Self::Model>) {
-            Gp3pEstimator::<4>::fit(self, samples, out);
-        }
-
-        fn residual(&self, model: &Self::Model, sample: &Self::Sample) -> f64 {
-            sample.angular_residual(model)
-        }
-
-        /// See the sample-of-three estimator.
         fn refit(&self, _inliers: &[Self::Sample], _out: &mut Vec<Self::Model>) {}
     }
 }

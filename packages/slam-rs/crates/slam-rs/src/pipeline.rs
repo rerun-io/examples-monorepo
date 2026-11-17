@@ -74,6 +74,10 @@ pub struct Vio<S: Scalar = f32> {
     /// frontend of the next. Swapped with `frames`, never copied.
     #[cfg(feature = "backend")]
     lagged_frames: Option<(i64, frontend::input::FrameStorage)>,
+    /// The image slots of the keyframe stamps sent to the back end, bounded
+    /// by the Realtime query cap.
+    #[cfg(feature = "backend")]
+    image_slots: crate::estimator::ImageSlots,
 }
 
 pub use lag::OverlapTimings;
@@ -135,6 +139,8 @@ impl<S: Scalar> Vio<S> {
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
         #[cfg(feature = "backend")]
+        let query_cap: usize = config.backend_realtime_max_queued_queries.get();
+        #[cfg(feature = "backend")]
         let map_runner = config
             .backend_enabled
             .then(|| {
@@ -186,6 +192,8 @@ impl<S: Scalar> Vio<S> {
             keyframe_images: std::collections::BTreeMap::new(),
             #[cfg(feature = "backend")]
             lagged_frames: None,
+            #[cfg(feature = "backend")]
+            image_slots: crate::estimator::ImageSlots::new(query_cap),
         })
     }
 
@@ -255,7 +263,10 @@ impl<S: Scalar> Vio<S> {
         if let Some(runner) = self.map_runner.as_mut() {
             for mut stamp in self.estimator.take_map_stamps() {
                 if let crate::estimator::MapStamp::Keyframe(keyframe) = &mut stamp {
-                    keyframe.images = self.keyframe_images.remove(&keyframe.t_ns);
+                    keyframe.images = self
+                        .keyframe_images
+                        .remove(&keyframe.t_ns)
+                        .map(|images| self.image_slots.hold(images));
                     self.keyframe_images.retain(|&t_ns, _| t_ns > keyframe.t_ns);
                 }
                 runner.submit(stamp);

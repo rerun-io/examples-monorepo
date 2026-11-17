@@ -97,6 +97,62 @@ impl std::fmt::Debug for KeyframeImages {
     }
 }
 
+/// A keyframe stamp's images on their way to the back end, which takes them
+/// out; [`ImageSlots`] may empty the slot first. Equal when shared.
+#[derive(Debug, Clone)]
+pub struct ImageSlot(std::sync::Arc<std::sync::Mutex<Option<KeyframeImages>>>);
+
+impl ImageSlot {
+    /// A slot holding `images`.
+    pub fn new(images: KeyframeImages) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(images))))
+    }
+
+    /// Take the images out, if they are still there.
+    pub fn take(&self) -> Option<KeyframeImages> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+impl PartialEq for ImageSlot {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The slots of the keyframe stamps sent to the back end: the newest `cap`
+/// keep their images; an older one is emptied before the back end takes it
+/// (Realtime, behind), whose query it would drop anyway. This bounds the
+/// images queued stamps hold (retention, DESIGN §2.2).
+#[derive(Debug, Default)]
+pub struct ImageSlots {
+    cap: usize,
+    slots: std::collections::VecDeque<ImageSlot>,
+}
+
+impl ImageSlots {
+    /// Keep the images of the newest `cap` stamps.
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            slots: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// A slot for a new stamp's images; empties the oldest past the cap.
+    pub fn hold(&mut self, images: KeyframeImages) -> ImageSlot {
+        let slot = ImageSlot::new(images);
+        self.slots.push_back(slot.clone());
+        while self.slots.len() > self.cap {
+            self.slots.pop_front().and_then(|old| old.take());
+        }
+        slot
+    }
+}
+
 /// The window after a keyframe's solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframeStamp {
@@ -111,7 +167,7 @@ pub struct KeyframeStamp {
     pub keypoints: Keypoints,
     /// The new keyframe's images, which the pipeline attaches for loop closing
     /// (`None` from the estimator, and when the pipeline no longer holds them).
-    pub images: Option<KeyframeImages>,
+    pub images: Option<ImageSlot>,
 }
 
 /// Keyframes leaving the window, with their final values.
