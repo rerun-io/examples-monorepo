@@ -24,6 +24,7 @@ import rerun as rr
 import rerun.chunk as rrc
 from dataforge.logging_toolkit import log_video_stream
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
+from dataforge.writing import atomic_recording
 from jaxtyping import Int64
 from numpy import ndarray
 
@@ -126,8 +127,8 @@ def write_layer(config: Config) -> PanoLayer:
                 panoramas(), clip, source=FrameSource("gray8", width=PANORAMA_WIDTH, height=PANORAMA_HEIGHT), fps=30, gop=config.gop, cq=config.cq
             )
             times_ns: Int64[ndarray, " n"] = np.asarray(times, dtype=np.int64)
-            with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id) as rec:
-                rec.save(output)
+            # A derived layer of the base recording: it sends no RecordingInfo of its own (dataforge.writing.atomic_recording).
+            with atomic_recording(output, application_id=stores[0].application_id, recording_id=stores[0].recording_id, send_properties=False) as rec:
                 rec.send_property(
                     "pano_layer",
                     rr.AnyValues(

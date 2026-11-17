@@ -31,6 +31,7 @@ import numpy as np
 import rerun as rr
 from dataforge import schema
 from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_camera_source, log_imu, log_rig_node, time_column
+from dataforge.writing import atomic_recording
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
@@ -216,8 +217,7 @@ def main(config: Config) -> None:
     fits: list[Kb4Fit] = [kb4_fit(theta, lens.radius_px(theta.tolist())) for lens in lenses]
     crop: tuple[int, int, int, int, int, int] | None = clip.window_crop
 
-    with rr.RecordingStream("slam-rs-insv", recording_id=config.insv.stem) as rec:
-        rec.save(output)
+    with atomic_recording(output, application_id="slam-rs-insv", recording_id=config.insv.stem) as rec:
         rec.send_recording_name(config.insv.stem)
         rec.send_property("capture", rr.AnyValues(schema=schema.DATAFORGE_SCHEMA_VERSION, start_time_ns=start_ns, num_frames=frames, num_cameras=2))
         # Any: AnyValues takes its keys as **kwargs beside its own typed flags.
