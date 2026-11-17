@@ -459,7 +459,17 @@ pub struct LensCalibration {
     pub lens_from_rig_rotation: [[f64; 3]; 3],
     /// Translation of the `lens_from_rig` transform, metres. The rig origin is the midpoint of the two lens centres.
     pub lens_from_rig_translation_m: [f64; 3],
+    /// `R_P_lens`: rotation taking this lens's vectors into the panorama frame `P` (row-major). `P` is the vendor rig
+    /// frame (telemetry-parser `rig.rs::rotation`): `+Z` the nominal lens-0 axis, `+Y` image-down of lens 0 (the body
+    /// axis toward the handle), `+X` right. `R_P_lens = Rv(0, 0, 90; lens 0) Rv(ypr_i; i)^T` with the vendor rotation
+    /// `Rv` of [`parse_lens_string`]. Unlike `lens_from_rig_rotation`, lens 0 is not the identity here: the factory
+    /// relative rotation, not the nominal 180 deg, puts the two seams within 0.25 px (recon/09 section 1).
+    pub pano_from_lens_rotation: [[f64; 3]; 3],
 }
+
+/// Largest angle off the optical axis the factory model covers: lens class 131 has a 200 deg field
+/// (telemetry-parser `rig.rs`). Beyond it the image circle ends and [`LensCalibration::project`] returns `None`.
+pub const LENS_HALF_FIELD_RAD: f64 = 100.0 * std::f64::consts::PI / 180.0;
 
 impl LensCalibration {
     /// Pixels per radian at the optical axis, `f / (1 + xi)` with `f` the mean focal.
@@ -480,6 +490,64 @@ impl LensCalibration {
                 .map(|(i, k)| k * r2.powi(i as i32 + 1))
                 .sum::<f64>();
         0.5 * (self.fx + self.fy) * m * gain
+    }
+
+    /// The full factory projection: a ray in this lens's frame to a track pixel (pixel centres at integers).
+    ///
+    /// Mei sphere `m = (x, y) / (z + xi |d|)`, `r2 = |m|^2`, then
+    /// V3: `x_d = m_x R + 2 p1 m_x m_y + p2 (r2 + 2 m_x^2)`, `y_d = m_y R + p1 (r2 + 2 m_y^2) + 2 p2 m_x m_y`;
+    /// V6: `x_d = m_x R + (r2 + 2 m_x^2) a + 2 m_x m_y b + d9 r2 + d11 r2^2`,
+    /// `y_d = m_y R + (r2 + 2 m_y^2) b + 2 m_x m_y a + d10 r2 + d12 r2^2` with `a = d5 + d7 r2`, `b = d6 + d8 r2`;
+    /// `R = 1 + sum_i radial_i r2^(i+1)`; `u = fx x_d + cx`, `v = fy y_d + cy` (video-types `MeiDistortion`,
+    /// recon/03 section 5.1). The ray need not be unit length.
+    ///
+    /// # Returns
+    /// `None` for a zero ray or one more than [`LENS_HALF_FIELD_RAD`] off the optical axis.
+    pub fn project(&self, ray: [f64; 3]) -> Option<[f64; 2]> {
+        let [x, y, z] = ray;
+        let norm = (x * x + y * y + z * z).sqrt();
+        if norm == 0.0 || z < norm * LENS_HALF_FIELD_RAD.cos() {
+            return None;
+        }
+        let den = z + self.xi * norm;
+        let (mx, my) = (x / den, y / den);
+        let r2 = mx * mx + my * my;
+        let mut power = 1.0;
+        let mut gain = 1.0;
+        for k in &self.radial {
+            power *= r2;
+            gain += k * power;
+        }
+        let t = &self.tangential;
+        let (xd, yd) = if self.version == 3 {
+            (
+                mx * gain + 2.0 * t[0] * mx * my + t[1] * (r2 + 2.0 * mx * mx),
+                my * gain + t[0] * (r2 + 2.0 * my * my) + 2.0 * t[1] * mx * my,
+            )
+        } else {
+            let (a, b, p) = (t[0] + t[2] * r2, t[1] + t[3] * r2, &self.prism);
+            (
+                mx * gain
+                    + (r2 + 2.0 * mx * mx) * a
+                    + 2.0 * mx * my * b
+                    + p[0] * r2
+                    + p[2] * r2 * r2,
+                my * gain
+                    + (r2 + 2.0 * my * my) * b
+                    + 2.0 * mx * my * a
+                    + p[1] * r2
+                    + p[3] * r2 * r2,
+            )
+        };
+        Some([self.fx * xd + self.cx, self.fy * yd + self.cy])
+    }
+
+    /// [`LensCalibration::project`] of a ray given in the panorama frame `P` (rotated by `pano_from_lens_rotation^T`).
+    pub fn project_from_panorama(&self, ray_p: [f64; 3]) -> Option<[f64; 2]> {
+        let r = &self.pano_from_lens_rotation;
+        self.project(std::array::from_fn(|j| {
+            (0..3).map(|i| r[i][j] * ray_p[i]).sum()
+        }))
     }
 }
 
@@ -504,6 +572,22 @@ fn axis_rotation(axis: usize, deg: f64) -> Mat3 {
     r[a][b] = -s;
     r[b][a] = s;
     r
+}
+
+/// The vendor's world-to-lens rotation `Ry(pitch + 90) Rz(yaw) Rx(roll)`, times `Rz(180)` for lens 0 of two.
+fn vendor_rotation(ypr_deg: [f64; 3], first_of_two: bool) -> Mat3 {
+    let r = mul(
+        &mul(
+            &axis_rotation(1, ypr_deg[1] + 90.0),
+            &axis_rotation(2, ypr_deg[0]),
+        ),
+        &axis_rotation(0, ypr_deg[2]),
+    );
+    if first_of_two {
+        mul(&r, &axis_rotation(2, 180.0))
+    } else {
+        r
+    }
 }
 
 /// Parse a V3 or V6 lens string and state it for a `track_size` picture.
@@ -569,17 +653,7 @@ pub fn parse_lens_string(
             f64::from(track_size[1]) / window[1],
         ];
         let ypr_deg = [t[5], t[6], t[7]];
-        let mut r = mul(
-            &mul(
-                &axis_rotation(1, ypr_deg[1] + 90.0),
-                &axis_rotation(2, ypr_deg[0]),
-            ),
-            &axis_rotation(0, ypr_deg[2]),
-        );
-        if count == 2 && i == 0 {
-            r = mul(&r, &axis_rotation(2, 180.0));
-        }
-        rotations.push(r);
+        rotations.push(vendor_rotation(ypr_deg, count == 2 && i == 0));
         let coeffs = &t[11..11 + n_coeffs];
         lenses.push(LensCalibration {
             version,
@@ -595,6 +669,7 @@ pub fn parse_lens_string(
             translation_m: [t[8], t[9], t[10]],
             lens_from_rig_rotation: [[0.0; 3]; 3],
             lens_from_rig_translation_m: [0.0; 3],
+            pano_from_lens_rotation: [[0.0; 3]; 3],
         });
     }
     // Rig frame: lens 0's axes, origin at the mean of the lens centres. lens_from_rig = (R_i R_0^T, -R (c_i - o)).
@@ -602,7 +677,9 @@ pub fn parse_lens_string(
         lenses.iter().map(|l| l.translation_m[k]).sum::<f64>() / count as f64
     });
     let r0t = transpose(&rotations[0]);
+    let pano_base = vendor_rotation([0.0, 0.0, 90.0], count == 2);
     for (lens, r) in lenses.iter_mut().zip(&rotations) {
+        lens.pano_from_lens_rotation = mul(&pano_base, &transpose(r));
         let rot = mul(r, &r0t);
         let d: [f64; 3] = std::array::from_fn(|k| lens.translation_m[k] - origin[k]);
         lens.lens_from_rig_translation_m =
