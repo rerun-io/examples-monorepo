@@ -39,8 +39,7 @@ def angle_to_nearest_permutation_deg(rotation: Float64[ndarray, "3 3"]) -> float
 def x4_air() -> DeviceProfile:
     from dataforge.datasets.insta360 import load_profiles
 
-    (profile,) = load_profiles()
-    return profile
+    return next(profile for profile in load_profiles() if profile.name == "x4-air")
 
 
 def test_the_measured_imu_rotation_orthonormalises_to_0_13_deg_from_its_permutation() -> None:
@@ -48,7 +47,7 @@ def test_the_measured_imu_rotation_orthonormalises_to_0_13_deg_from_its_permutat
     from dataforge.datasets.insta360 import orthonormal
 
     profile: DeviceProfile = x4_air()
-    assert (profile.name, profile.version, profile.camera_type) == ("x4-air-1920", 1, "Insta360 X4 Air")
+    assert (profile.name, profile.version, profile.camera_type) == ("x4-air", 1, "Insta360 X4 Air")
     rotation: Float64[ndarray, "3 3"] = orthonormal(profile.pano_from_imu_measured)
     np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-12)
     assert np.linalg.det(rotation) == pytest.approx(1.0)
@@ -89,7 +88,7 @@ def test_a_hand_written_integer_widens_to_a_float(tmp_path: Path) -> None:
 
     path: Path = tmp_path / "profiles.toml"
     path.write_text(PROFILES_TOML.read_text().replace("frame_time_constant_s = -0.0001", "frame_time_constant_s = 0"))
-    (profile,) = load_profiles(path)
+    profile: DeviceProfile = next(profile for profile in load_profiles(path) if profile.name == "x4-air")
     assert profile.frame_time_constant_s == 0.0
 
 
@@ -99,7 +98,7 @@ def test_a_hand_written_integer_widens_to_a_float(tmp_path: Path) -> None:
         ({}, None),
         ({"readout_s": None}, None),
         ({"readout_s": 0.015882978}, None),
-        ({"lens_width": 2880, "lens_height": 2880}, "lens size 2880x2880 is not 1920x1920"),
+        ({"lens_type": 113}, "lens type 113 is not 131"),
         ({"frame_rate_hz": 59.94}, "frame rate 59.9400 Hz is not 29.97"),
         ({"readout_s": 0.0079}, "rolling-shutter readout 7.9000 ms is not 15.8830"),
         ({"camera_type": "Insta360 X5"}, "no device profile for a 'Insta360 X5'"),
@@ -108,12 +107,30 @@ def test_a_hand_written_integer_widens_to_a_float(tmp_path: Path) -> None:
 def test_the_clip_mode_selects_the_profile_or_names_what_differs(change: dict[str, object], reason: str | None) -> None:
     from dataforge.datasets.insta360 import CaptureMode, select_profile
 
-    mode: CaptureMode = replace(CaptureMode("Insta360 X4 Air", 1920, 1920, 29.9697, 0.015883), **change)  # pyrefly: ignore[bad-argument-type]
+    mode: CaptureMode = replace(CaptureMode("Insta360 X4 Air", 131, 29.9697, 0.015883), **change)  # pyrefly: ignore[bad-argument-type]
     if reason is None:
-        assert select_profile([x4_air()], mode).name == "x4-air-1920"
+        assert select_profile([x4_air()], mode).name == "x4-air"
     else:
         with pytest.raises(ValueError, match=reason):
             select_profile([x4_air()], mode)
+
+
+X5_V3: str = (
+    "2_2.000000_4267.220_4267.930_2693.490_2692.190_0.073_0.192_89.740_0.000000_0.000000_0.000000_0.19010369_2.01127100"
+    "_-3.03693724_0.00169806_-0.00122825_10752_5376_113_2.000000_4249.040_4248.200_8059.560_2694.530_-0.294_0.371_90.620"
+    "_-0.000469_0.000039_-0.032061_0.18495527_2.02530622_-3.03083992_-0.00055454_0.00157740_10752_5376_113_197632"
+)
+"""The V3 lens string of the X5 clip VID_20261113_145021_00_003."""
+
+
+def test_an_x5_clip_selects_the_x5_profile_by_its_lens_type() -> None:
+    from dataforge.datasets.insta360 import CaptureMode, lens_type, load_profiles, select_profile
+
+    assert lens_type(X5_V3) == 113
+    with pytest.raises(ValueError, match=r"lens types \[113, 131\]"):
+        lens_type(X5_V3.replace("_10752_5376_113_197632", "_10752_5376_131_197632"))
+    profile: DeviceProfile = select_profile(load_profiles(), CaptureMode("Insta360 X5", 113, 29.9688, 0.021244))
+    assert (profile.name, profile.readout_s) == ("x5", 0.021244)
 
 
 def test_frames_land_on_the_middle_row_time_and_a_non_increasing_model_is_refused() -> None:
@@ -212,7 +229,7 @@ def test_the_clip_converts_into_mei_cameras_on_the_imu_with_their_readout_and_ex
     store: rrc.ChunkStore = read_back(converted.targets[paths.BASE_LAYER])
     insta360: dict[str, object] = recording_properties(store, "insta360")
     assert sorted(insta360) == ["camera_type", "firmware", "pano_from_imu", "profile", "profile_version", "source_file"]
-    assert (insta360["source_file"], insta360["firmware"], insta360["profile"], insta360["profile_version"]) == (converted.clip.name, clip.firmware, "x4-air-1920", 1)
+    assert (insta360["source_file"], insta360["firmware"], insta360["profile"], insta360["profile_version"]) == (converted.clip.name, clip.firmware, "x4-air", 1)
     assert recording_properties(store, "capture")["num_frames"] == FRAMES
     assert static_values(store, schema.rig_path(0))["reference"] == "imu_00"
     assert clip.rolling_shutter_ms is not None

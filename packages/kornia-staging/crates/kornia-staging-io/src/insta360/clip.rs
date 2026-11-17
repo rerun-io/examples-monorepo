@@ -51,7 +51,8 @@ impl Insta360Clip {
     ///
     /// # Errors
     /// Besides malformed input: two lens tracks of different sizes, a lens string that is not two supported lenses,
-    /// and a vin0 or vin1 exposure record (absent or short) without an entry for every frame are refused by name.
+    /// and a vin0 or vin1 exposure record without an entry for every frame are refused by name. A clip without a
+    /// vin1 record (the X5 writes only record 4) gives both lenses the vin0 entries.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Insta360Error> {
         let path = path.as_ref().to_path_buf();
         let mut file = BufReader::new(File::open(&path)?);
@@ -105,8 +106,8 @@ impl Insta360Clip {
         };
         let frames = clip.frames();
         for (name, record) in [
-            ("vin0 (record 4)", &clip.trailer.exposures_vin0),
-            ("vin1 (record 12)", &clip.trailer.exposures_vin1),
+            ("vin0 (record 4)", clip.trailer.exposures_vin0.as_slice()),
+            ("vin1 (record 12)", clip.vin1_record()),
         ] {
             if record.len() < first_frame_entry + frames {
                 return Err(Insta360Error::Unsupported(format!(
@@ -127,14 +128,24 @@ impl Insta360Clip {
             .min(self.tracks[1].samples.len())
     }
 
-    /// Exposure entries of the clip's frames in one sensor record (frame `i` is entry `first_frame_entry + i`).
+    /// Exposure entries of the clip's frames in one sensor record (frame `i` is entry `first_frame_entry + i`); vin1
+    /// is the vin0 record when the clip has no record 12.
     pub fn frame_exposures(&self, vin1: bool) -> &[Exposure] {
         let record = if vin1 {
-            &self.trailer.exposures_vin1
+            self.vin1_record()
         } else {
             &self.trailer.exposures_vin0
         };
         &record[self.first_frame_entry..self.first_frame_entry + self.frames()]
+    }
+
+    /// Record 12, or record 4 when the clip has no record 12.
+    fn vin1_record(&self) -> &[Exposure] {
+        if self.trailer.exposures_vin1.is_empty() {
+            &self.trailer.exposures_vin0
+        } else {
+            &self.trailer.exposures_vin1
+        }
     }
 
     /// Open the file for reading samples.
@@ -295,11 +306,15 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_or_short_vin1_record_is_refused_by_name() {
-        unsupported(
-            open("no-vin1", &two_tracks(), &records(metadata(true), None)),
-            "vin1",
-        );
+    fn an_absent_vin1_record_gives_both_lenses_the_vin0_entries() {
+        let clip = open("no-vin1", &two_tracks(), &records(metadata(true), None)).unwrap();
+        assert_eq!(clip.frame_exposures(true), clip.frame_exposures(false));
+        assert_eq!(clip.frame_exposures(true).len(), 2);
+        std::fs::remove_dir_all(clip.path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_short_vin1_record_is_refused_by_name() {
         // Frame 0 is entry 2, so two frames need four entries.
         unsupported(
             open(

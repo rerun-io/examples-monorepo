@@ -502,7 +502,7 @@ Local device captures: each `.insv` clip directly in `--root` is one sequence. `
 (`packages/insta360-io`) reads the clip; the two HEVC lens tracks are remuxed sample for sample. Each lens is a
 camera with its factory model, `mei_v6` (`mei_v3` without a V6 string), posed in the IMU frame through the device
 profile. What the file does not carry (IMU-to-rig rotation, lever arm, frame-time model, readout, IMU noise) is a
-measured record in `dataforge/datasets/insta360_profiles.toml`, chosen by the clip's camera type, lens size, frame
+measured record in `dataforge/datasets/insta360_profiles.toml`, chosen by the clip's camera type, lens type, frame
 rate and readout: a clip outside every measured mode is refused, naming the property that differs. The `panorama`
 layer needs AV1 NVENC. The module docstring states the frames, the clock and the rolling-shutter convention.
 

@@ -158,7 +158,7 @@ fn malformed_or_unsupported_lens_strings_are_named_errors_not_panics() {
         let error = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap_err();
         assert!(error.to_string().contains(&format!("{bad:?}")), "{error}");
     }
-    // A lens type other than 131 has no measured field of view.
+    // A lens type other than 131 and 113 has no measured field of view.
     let text = V3.replacen("_15360_7680_131_", "_15360_7680_132_", 1);
     let error = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap_err();
     assert!(error.to_string().contains("type 132"), "{error}");
@@ -166,6 +166,48 @@ fn malformed_or_unsupported_lens_strings_are_named_errors_not_panics() {
     let text = V3.replacen("_7095.540_", "_-7095.540_", 1);
     let error = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap_err();
     assert!(error.to_string().contains("no valid camera"), "{error}");
+}
+
+// The Insta360 X5 clip VID_20261113_145021_00_003's V3 string (lens type 113) and window crop.
+const X5_V3: &str = "2_2.000000_4267.220_4267.930_2693.490_2692.190_0.073_0.192_89.740_0.000000_0.000000_0.000000_0.19010369_2.01127100_-3.03693724_0.00169806_-0.00122825_10752_5376_113_2.000000_4249.040_4248.200_8059.560_2694.530_-0.294_0.371_90.620_-0.000469_0.000039_-0.032061_0.18495527_2.02530622_-3.03083992_-0.00055454_0.00157740_10752_5376_113_197632";
+const X5_CROP: WindowCrop = WindowCrop {
+    src: [5376, 5376],
+    dst: [5312, 5312],
+    offset: [0, 0],
+};
+
+#[test]
+fn the_x5_string_of_lens_type_113_gives_two_lenses_at_3840() {
+    let lenses = parse_lens_string(X5_V3, Some(X5_CROP), [3840, 3840]).unwrap();
+    let [l0, l1] = [lenses[0].camera.params(), lenses[1].camera.params()];
+    // fx 4267.22 at 5376 px, scaled to the 5312 px window, then to 3840: 4267.22 * 3840 / 5312.
+    assert!(close(l0[0], 4267.22 * 3840.0 / 5312.0, 1e-9), "{l0:?}");
+    assert!(
+        close(l0[2], 1923.830, 1e-3) && close(l0[3], 1922.890, 1e-3),
+        "{l0:?}"
+    );
+    assert!(
+        close(l1[2], 1916.652, 1e-3) && close(l1[3], 1924.582, 1e-3),
+        "{l1:?}"
+    );
+    assert_eq!(l0[4], 2.0);
+    assert!(close(
+        lenses[0].camera.half_field_rad(),
+        100f64.to_radians(),
+        1e-15
+    ));
+    // The two lenses look opposite ways and sit about 32 mm apart.
+    let relative = lenses[0].pano_from_lens.inverse() * lenses[1].pano_from_lens;
+    assert!(close(relative.rotation.angle().to_degrees(), 180.0, 1.0));
+    let distance = (lenses[0].pano_from_lens.translation.vector
+        - lenses[1].pano_from_lens.translation.vector)
+        .norm();
+    assert!(close(distance, 0.032, 0.002), "{distance}");
+    // A ray just inside 100 degrees off lens 0's axis projects inside the 3840 px image; just outside does not.
+    let ray = |deg: f64| [deg.to_radians().sin(), 0.0, deg.to_radians().cos()];
+    let [u, _] = lenses[0].camera.project(ray(99.99)).unwrap();
+    assert!(u > 3800.0 && u < 3839.0, "{u}");
+    assert!(lenses[0].camera.project(ray(100.01)).is_err());
 }
 
 // Bits of the pre-move `LensCalibration` (kornia-staging-io `parse_lens_string`, `project`,
