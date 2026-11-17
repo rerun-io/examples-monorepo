@@ -31,6 +31,10 @@ JPEG_QUALITY: int = 85
 """Quality of the full-resolution frames the tracking stages log; 960x960 grayscale lands around 38 kB."""
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
+PANORAMA_ENTITY: str = f"{RUN_ENTITY}/panorama"
+"""The stitched 1920x960 panorama of a dual-fisheye rig, with the tracked keypoints of both tiles drawn on it."""
+PANORAMA_WIDTH: int = 1920
+"""Width of that panorama: two 960-column hemispheres."""
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
@@ -180,6 +184,8 @@ class VioLogger:
     """The segment's frameset times: the cadence used to draw ground truth."""
     tile_origins: tuple[int, int] | None = None
     """``Vio.panorama_tile_origins``: the frontend tracks two hemisphere tiles of camera 0's panorama; None otherwise."""
+    stitched: bool = False
+    """The tiles are stitched from two fisheye lenses: keypoints go on :data:`PANORAMA_ENTITY`, not on camera 0."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -235,7 +241,10 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
-        log_keypoints(frame, self.tile_origins, self.cameras[0].width)
+        if self.stitched:
+            log_keypoints(frame, self.tile_origins, PANORAMA_WIDTH, PANORAMA_ENTITY)
+        else:
+            log_keypoints(frame, self.tile_origins, self.cameras[0].width)
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
@@ -435,6 +444,23 @@ class VioStage:
         """
         for held, result in self.lockstep.push(frameset):
             self._log_result(held, result)
+        self._log_panorama(frameset.t_ns)
+
+    def _log_panorama(self, t_ns: int) -> None:
+        """Draw a stitched rig's panorama and its tracked keypoints on every frameset, tracked or not.
+
+        Before the estimator has a state it reports no pose, and :meth:`VioLogger.log`
+        draws nothing; the frontend still runs, and this is where it shows.
+        """
+        if not self.logger.stitched or self.logger.tile_origins is None:
+            return
+        pano: UInt8[ndarray, "h w"] | None = self.lockstep.vio.panorama_image()
+        frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
+        if pano is None or frame is None or frame.t_ns != t_ns:
+            return
+        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
+        rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=85))
+        log_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""

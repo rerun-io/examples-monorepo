@@ -10,7 +10,7 @@ from numpy import ndarray
 
 pytest.importorskip("dataforge", reason="the converter writes through dataforge's exoego:v2 helpers (linux-only)")
 
-from slam_rs.apis.insv import Config, Kb4Fit, kb4_fit, main
+from slam_rs.apis.insv import X4_AIR, Config, Kb4Fit, angle_to_nearest_permutation_deg, kb4_fit, main, orthonormal
 
 CLIP: Path = Path(os.environ.get("SLAM_RS_INSV", "/home/pablo/data/insta360/VID_20261116_125200_00_003.insv"))
 """The X4 Air clip VID_20261116_125200_00_003.insv; integration tests skip when it is absent."""
@@ -34,6 +34,24 @@ def test_kb4_fit_of_the_factory_v3_curve_of_lens_0_is_within_a_few_hundredths_of
     fit: Kb4Fit = kb4_fit(theta, radius)
     assert fit.focal_px == pytest.approx(553.5, abs=0.05)
     assert fit.max_residual_px < 0.05
+
+
+def test_the_measured_imu_rotation_orthonormalises_to_0_13_deg_from_its_permutation() -> None:
+    """recon/09: R_P_imu is 0.13 deg from x_P = -z_imu, y_P = +x_imu, z_P = -y_imu."""
+    rotation: Float64[ndarray, "3 3"] = orthonormal(X4_AIR.pano_from_imu_measured)
+    np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-12)
+    assert np.linalg.det(rotation) == pytest.approx(1.0)
+    assert np.abs(rotation - X4_AIR.pano_from_imu_measured).max() < 1e-4
+    assert angle_to_nearest_permutation_deg(rotation) == pytest.approx(0.13, abs=0.02)
+    permutation: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    assert angle_to_nearest_permutation_deg(permutation) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_orthonormal_returns_a_proper_rotation_for_a_reflection_free_input() -> None:
+    noisy: Float64[ndarray, "3 3"] = np.eye(3) + np.array([[0.0, 0.01, 0.0], [0.0, 0.0, 0.02], [0.005, 0.0, 0.0]])
+    rotation: Float64[ndarray, "3 3"] = orthonormal(noisy)
+    np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-12)
+    assert np.linalg.det(rotation) == pytest.approx(1.0)
 
 
 @pytest.mark.integration
@@ -63,15 +81,24 @@ def test_the_first_three_seconds_convert_into_a_recording_the_feed_reads(tmp_pat
     ):
         assert column in columns, column
 
+    from slam_rs import _core
+
+    lenses: list[_core.InsvLens] = _core.InsvClip(str(CLIP)).lenses_v6
     with open_segment(LocalSegment(output), include_ground_truth=False) as feed:
         lens0, lens1 = feed.cameras
         assert (lens0.model, lens0.width, lens0.height) == ("kb4", 1920, 1920)
-        assert (lens0.cx, lens0.cy) == pytest.approx((960.242, 965.681), abs=1e-3)
-        assert (lens1.cx, lens1.cy) == pytest.approx((966.509, 965.847), abs=1e-3)
-        assert (lens0.fx, lens1.fx) == pytest.approx((553.5, 557.7), abs=0.05)
-        # The rig origin is the midpoint: the lens centres sit 33.1 mm apart, along the optical axis.
+        assert (lens0.cx, lens0.cy) == pytest.approx((lenses[0].cx, lenses[0].cy), abs=1e-3)
+        assert (lens1.cx, lens1.cy) == pytest.approx((lenses[1].cx, lenses[1].cy), abs=1e-3)
+        assert (lens0.fx, lens1.fx) == pytest.approx((553.5, 557.7), abs=0.1)
+        # The rig frame is the IMU: the lens centres sit 33.3 mm apart (V6 string; V3 says 33.1 mm) along the lens
+        # axis, z_P = -y_imu (recon/09).
         baseline: Float64[ndarray, " 3"] = lens1.imu_T_cam[:3, 3] - lens0.imu_T_cam[:3, 3]
-        assert np.linalg.norm(baseline) == pytest.approx(0.0331, abs=1e-4)
-        assert abs(baseline[2]) > 0.99 * np.linalg.norm(baseline)
-        assert feed.imu.cam_time_offset_ns == 1_600_000
+        assert np.linalg.norm(baseline) == pytest.approx(0.03329, abs=1e-4)
+        assert baseline[1] > 0.99 * np.linalg.norm(baseline), "lens 1 sits behind lens 0: +y_imu"
+        # Lens 0 looks along z_P = -y_imu.
+        assert lens0.imu_T_cam[1, 2] == pytest.approx(-1.0, abs=1e-3)
+        assert feed.imu.cam_time_offset_ns == 0, "IMU times are the trailer's, no gyro_timestamp shift"
+        assert feed.insta360 is not None
+        assert feed.insta360.readout_s == pytest.approx(0.015883)
+        assert feed.insta360.window_crop == (7680, 7680, 7424, 7424, 0, 0)
         assert len(feed.frame_t_ns) == 90

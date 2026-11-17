@@ -293,6 +293,8 @@ class RigProfile:
     ``property:capture:start_time_ns``; RoboCap records the device clock itself,
     and that is what trajectory CSV exports use.
     """
+    decode_threads: int = 1
+    """PyAV decoder threads per camera stream; 1 is the single-threaded reference decode, more use frame threading."""
 
     def __post_init__(self) -> None:
         """Refuse a profile the feed cannot honour, before anything reads a recording with it.
@@ -304,6 +306,8 @@ class RigProfile:
             raise ValueError(f"downscale must be at least 1; got {self.downscale}")
         if self.frameset_tolerance_ns < 0:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
+        if self.decode_threads < 1:
+            raise ValueError(f"decode_threads must be at least 1; got {self.decode_threads}")
 
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
@@ -408,8 +412,8 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     )
 
 
-def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
-    """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread.
+def decode_gray(mp4_bytes: bytes, downscale: int = 1, threads: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
+    """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread unless ``threads`` asks for more.
 
     ``reformat(format="gray8")`` performs the limited-to-full range expansion the
     MSD streams need; reading the raw Y plane instead is a systematic photometric
@@ -431,6 +435,7 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
     Args:
         mp4_bytes: MP4 produced by :func:`wrap_mp4`.
         downscale: Integer factor to shrink each frame by.
+        threads: Decoder threads; above one PyAV decodes with frame threading (same pixels, more latency).
 
     Yields:
         One grayscale image per frame, in decode order.
@@ -443,8 +448,8 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
     container: av.container.InputContainer = av.open(BytesIO(mp4_bytes), mode="r")
     with container:
         stream = container.streams.video[0]
-        stream.thread_count = 1
-        stream.thread_type = "NONE"
+        stream.thread_count = threads
+        stream.thread_type = "NONE" if threads == 1 else "FRAME"
         for frame in container.decode(stream):
             gray = (
                 frame.reformat(format="gray8")
@@ -483,6 +488,42 @@ class _VideoIndex:
     """Codec of the elementary stream."""
     fps: int
     """Nominal frame rate, rounded from the timestamps."""
+
+
+@dataclass(slots=True, frozen=True)
+class Insta360Factory:
+    """The factory lens calibration an Insta360 recording carries, as slam-rs's Rust core parses it."""
+
+    lens_string: str
+    """The raw factory lens string (``property:insta360:offset_v6``)."""
+    window_crop: tuple[int, int, int, int, int, int] | None
+    """``(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`` the lens string is stated through; None when the clip has none."""
+    readout_s: float
+    """Rolling-shutter readout of one lens image, seconds; positive reads the rows top to bottom."""
+
+    def vio_argument(self) -> tuple[str, tuple[int, int, int, int, int, int] | None, float]:
+        """The ``dual_fisheye`` argument of ``slam_rs._core.Vio``."""
+        return (self.lens_string, self.window_crop, self.readout_s)
+
+
+def read_insta360_factory(properties: pa.Table) -> Insta360Factory | None:
+    """The Insta360 factory calibration from a recording's properties, or None when it is not an Insta360 recording.
+
+    Raises:
+        ValueError: If the recording names a V6 lens string but not the readout written beside it.
+    """
+    if "property:insta360:offset_v6" not in properties.column_names:
+        return None
+    crop_column: str = "property:insta360:window_crop"
+    crop: list[int] = [int(value) for value in _static_values(properties, crop_column)] if crop_column in properties.column_names else []
+    readout_column: str = "property:insta360:rolling_shutter_readout_s"
+    if readout_column not in properties.column_names:
+        raise ValueError("an Insta360 recording without rolling_shutter_readout_s: convert it again with slam-rs-insv")
+    return Insta360Factory(
+        lens_string=_static_string(properties, "property:insta360:offset_v6"),
+        window_crop=(crop[0], crop[1], crop[2], crop[3], crop[4], crop[5]) if len(crop) == 6 else None,
+        readout_s=float(_static_values(properties, readout_column)[0]),
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -538,6 +579,8 @@ class SegmentFeed:
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
     gravity_ms2: float | None = None
     """Gravity magnitude in m/s² the recording states on its IMU node (``gravity_ms2``), or None when it states none."""
+    insta360: Insta360Factory | None = None
+    """The factory lens calibration of an Insta360 recording (recognised by its ``insta360`` property), else None."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -699,7 +742,7 @@ class SegmentFeed:
             from slam_rs.cuda_decode import decode_gray_cuda
 
             return decode_gray_cuda(payload, (camera.height, camera.width), self.profile.downscale)
-        return decode_gray(payload, self.profile.downscale)
+        return decode_gray(payload, self.profile.downscale, self.profile.decode_threads)
 
     def _window_payload(self, position: int, start: int, stop: int) -> tuple[bytes, int]:
         """Muxed window and its first source-frame index, before frameset matching."""
@@ -1093,6 +1136,7 @@ def _build_feed(
         cached_payloads=cached_payloads,
         decode_device=decode_device,
         gravity_ms2=gravity_ms2,
+        insta360=read_insta360_factory(properties),
     )
 
 

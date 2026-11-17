@@ -34,3 +34,13 @@ vio_config = "configs/tartanair_fisheye_config.json"
 [[dataset]]
 name = "tartanair-equirect"
 vio_config = "configs/tartanair_equirect_config.json"
+
+# Insta360 X4 Air (slam-rs-insv): the same .rrd through the panorama lane (two lenses stitched into two
+# hemisphere tiles, two-centre extrinsics, rolling-shutter corrected keypoints) and as a plain two-lens KB4 rig.
+[[dataset]]
+name = "insta360"
+vio_config = "configs/insta360_config.json"
+
+[[dataset]]
+name = "insta360-native"
+vio_config = "configs/insta360_native_config.json"
