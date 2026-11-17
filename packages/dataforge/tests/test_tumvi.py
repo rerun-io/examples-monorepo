@@ -10,14 +10,16 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
+import av
 import cv2
 import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
-from conftest import column_rows, read_back, recording_properties  # pyrefly: ignore[missing-import]
-from jaxtyping import Float64, UInt16
+from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
+from jaxtyping import Float64, UInt8, UInt16
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 
 from dataforge import paths, schema
 from dataforge.basalt import CalibratedCamera, Kb4Intrinsics
@@ -92,6 +94,56 @@ MOCAP_ROWS: tuple[str, ...] = (
 """mocap0 rows (w-first quaternion) with a 2 s pause before the last: the rig left the room and came back."""
 
 
+T_CN_CNM1: Float64[ndarray, "4 4"] = np.array(
+    [
+        [0.9999994457734953, -0.0008233639921576076, -0.0006561436136444361, -0.10106110275180535],
+        [0.0007916877528168117, 0.9988994619156757, -0.04689603624058988, -0.0019764575873431013],
+        [0.0006940340102242531, 0.04689549078870055, 0.9988995601463054, -0.0011756424802046581],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+)
+"""camchain.yaml's cam1 ``T_cn_cnm1``: cam1 <- cam0, as Kalibr estimated it."""
+FRAME_VALUES: tuple[int, ...] = (4096, 8192, 12288)
+"""The synthetic 16-bit frames' uniform value per stereo pair; their upper 8 bits are 16, 32, 48."""
+REAL_SEQUENCE: str = "room1"
+"""The real sequence the 16 -> 8 bit check reads one frame of."""
+REAL_FRAME: int = 100
+"""That frame's stereo-pair number."""
+
+
+def rig_T_cam(camera: CalibratedCamera) -> Float64[ndarray, "4 4"]:
+    """A camera's rig pose as a 4x4, built from the stored xyzw quaternion and translation."""
+    pose = camera.rig_pose
+    matrix: Float64[ndarray, "4 4"] = np.eye(4)
+    matrix[:3, :3] = Rotation.from_quat([pose.qx, pose.qy, pose.qz, pose.qw]).as_matrix()
+    matrix[:3, 3] = [pose.px, pose.py, pose.pz]
+    return matrix
+
+
+def decode_gray8(samples: list[bytes]) -> list[UInt8[ndarray, "h w"]]:
+    """A camera's VideoStream samples, in order, through dav1d and ``reformat(format="gray8")``: slam-rs's CPU decode."""
+    decoder = av.CodecContext.create("libdav1d", "r")
+    frames: list[UInt8[ndarray, "h w"]] = []
+    for sample in samples:
+        for frame in decoder.decode(av.Packet(sample)):
+            gray = frame.reformat(format="gray8")
+            plane = gray.planes[0]
+            frames.append(np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)[:, : gray.width].copy())
+    for frame in decoder.decode(None):
+        gray = frame.reformat(format="gray8")
+        plane = gray.planes[0]
+        frames.append(np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)[:, : gray.width].copy())
+    return frames
+
+
+def video_samples(store: rrc.ChunkStore, camera: int, count: int | None = None) -> list[bytes]:
+    """The first ``count`` (default all) encoded samples of one camera, in ``video_time`` order."""
+    column: pa.ChunkedArray = column_rows(store, f"{schema.video_path(0, camera)}:VideoStream:sample").column(1)
+    rows: pa.Array = column.combine_chunks().flatten()
+    samples: list[bytes] = [np.asarray(row.values, dtype=np.uint8).tobytes() for row in rows[:count]]
+    return samples
+
+
 def tumvi_sequence(root: Path, name: str = "room1") -> Path:
     """A three-pair TUM-VI sequence as the 512_16 tarball extracts it, plus one cam0 frame cam1 lacks."""
     sequence: Path = root / f"dataset-{name}_512_16"
@@ -101,7 +153,7 @@ def tumvi_sequence(root: Path, name: str = "room1") -> Path:
     for camera, stamps in (("cam0", (*STAMPS, CAM0_ONLY)), ("cam1", STAMPS)):
         (sequence / f"mav0/{camera}/data").mkdir(parents=True)
         for index, stamp in enumerate(stamps):
-            frame: UInt16[ndarray, "128 160"] = np.full((128, 160), 4096 * (index + 1), dtype=np.uint16)
+            frame: UInt16[ndarray, "128 160"] = np.full((128, 160), FRAME_VALUES[min(index, len(FRAME_VALUES) - 1)], dtype=np.uint16)
             cv2.imwrite(str(sequence / f"mav0/{camera}/data/{stamp}.png"), frame)
         (sequence / f"mav0/{camera}/data.csv").write_text("#timestamp [ns],filename\n" + "".join(f"{stamp},{stamp}.png\n" for stamp in stamps))
     (sequence / "mav0/imu0").mkdir()
@@ -163,11 +215,11 @@ def test_the_camchain_is_kb4_with_each_camera_posed_in_the_imu_frame(tmp_path: P
         ]
     )
     imu_T_cam1: Float64[ndarray, "4 4"] = np.linalg.inv(cam1_T_imu)
-    pose = cameras[1].rig_pose
-    np.testing.assert_allclose([pose.px, pose.py, pose.pz], imu_T_cam1[:3, 3], atol=1e-12)
-    # The stereo baseline (T_cn_cnm1's translation) is what the two poses imply: ~10.1 cm.
-    pose0 = cameras[0].rig_pose
-    assert np.linalg.norm(np.subtract([pose.px, pose.py, pose.pz], [pose0.px, pose0.py, pose0.pz])) == pytest.approx(0.10108, abs=1e-4)
+    np.testing.assert_allclose(rig_T_cam(cameras[1]), imu_T_cam1, atol=1e-9)
+    # Kalibr's T_cn_cnm1 (cam1 <- cam0) is direction-sensitive, unlike the baseline's length: a missing inversion or a
+    # quaternion order slip fails it.
+    cam1_T_cam0: Float64[ndarray, "4 4"] = np.linalg.inv(rig_T_cam(cameras[1])) @ rig_T_cam(cameras[0])
+    np.testing.assert_allclose(cam1_T_cam0, T_CN_CNM1, atol=1e-6)
 
 
 def test_a_camchain_with_another_distortion_model_is_refused_naming_the_file(tmp_path: Path) -> None:
@@ -203,7 +255,7 @@ def test_stamps_that_do_not_increase_are_refused() -> None:
         pair_stereo(cam0, cam0)
 
 
-def test_mocap_splits_into_spans_where_the_rig_left_the_room() -> None:
+def test_mocap_splits_into_spans_at_every_gap_over_one_second() -> None:
     times_ns = np.array([0, 8_000_000, 16_000_000, 3_000_000_000, 3_008_000_000], dtype=np.int64)
     assert mocap_spans(times_ns) == (MocapSpan(0, 16_000_000, 3), MocapSpan(3_000_000_000, 3_008_000_000, 2))
     assert mocap_spans(np.array([], dtype=np.int64)) == ()
@@ -295,7 +347,16 @@ def test_a_sequence_converts_to_the_base_schema_on_its_stereo_pairs(tmp_path: Pa
     for camera in (0, 1):
         video: pa.Table = column_rows(store, f"{schema.video_path(0, camera)}:VideoStream:sample")
         assert video.column(schema.TIMELINE).cast(pa.int64()).to_pylist() == list(STAMPS), "only the stereo pairs, unshifted"
-    assert column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars").num_rows == 30
+    for camera in (0, 1):
+        # 16-bit frames reach the video as their upper 8 bits, in pair order, through slam-rs's decode.
+        means: list[float] = [float(frame.mean()) for frame in decode_gray8(video_samples(store, camera))]
+        np.testing.assert_allclose(means, [value >> 8 for value in FRAME_VALUES], atol=2)
+    accel: pa.Table = column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars")
+    gyro: pa.Table = column_rows(store, f"{schema.gyro_path(0, 0)}:Scalars:scalars")
+    assert accel.num_rows == gyro.num_rows == 30
+    # imu0/data.csv is gyro (rad/s) then accel (m/s^2): the rows hold gyro 0.1,-0.08,0.02 and accel -0.35,0,9.92.
+    np.testing.assert_allclose(accel.column(1).to_pylist()[0], [-0.35, 0.0, 9.92])
+    np.testing.assert_allclose(gyro.column(1).to_pylist()[0], [0.1, -0.08, 0.02])
     rig: dict[str, object] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().to_pylist()[0]
     assert rig[f"{schema.rig_path(0)}:reference"] == ["imu_00"]
     static: dict[str, list[list[float]]] = store.reader(index=None, contents="/world/**").to_arrow_table().to_pylist()[0]
@@ -308,3 +369,25 @@ def test_a_sequence_converts_to_the_base_schema_on_its_stereo_pairs(tmp_path: Pa
     assert sorted(column.name for column in store.schema().index_columns()) == sorted([schema.FRAME_INDEX, schema.TIMELINE])
     for layer in (paths.GT_LAYER, paths.SENSOR_METADATA_LAYER):
         assert paths.rrd_path(tmp_path / "out", layer=layer, identity=identity).is_file()
+
+
+@pytest.mark.integration
+def test_a_real_frame_reaches_the_video_as_the_upper_8_of_its_12_significant_bits() -> None:
+    """room1 pair 100 of the converted base against its raw cam0 PNG.
+
+    TUM-VI's PNGs carry ~12 significant bits (values in steps of 16, ~4 % of pixels in steps of 4); the video keeps the
+    top 8, so the decoded frame is the raw frame shifted right by 8, within the AV1 (cq 32) error. Needs the raw tree
+    under ``DATAFORGE_RAW_ROOT`` and the converted base under ``DATAFORGE_OUTPUT_ROOT``.
+    """
+    sequence: Path = paths.raw_root() / "tum-vi" / f"dataset-{REAL_SEQUENCE}_512_16"
+    index: Path = raw_asset("TUM-VI raw cam0 index", sequence / "mav0/cam0/data.csv")
+    identity = SequenceIdentity("tum-vi", (REAL_SEQUENCE,))
+    base: Path = raw_asset("converted TUM-VI base", paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity))
+    stamp: int = read_camera_index(index.read_bytes())[REAL_FRAME].timestamp_ns
+    raw: UInt16[ndarray, "512 512"] = cv2.imread(str(sequence / f"mav0/cam0/data/{stamp}.png"), cv2.IMREAD_UNCHANGED)
+    assert raw.dtype == np.uint16 and np.all(raw % 4 == 0) and np.mean(raw % 16 == 0) > 0.9, "TUM-VI's 16-bit PNGs step by 16 (a few by 4)"
+    store: rrc.ChunkStore = read_back(base)
+    decoded: UInt8[ndarray, "512 512"] = decode_gray8(video_samples(store, 0, REAL_FRAME + 1))[REAL_FRAME]
+    difference: Float64[ndarray, "512 512"] = np.abs(decoded.astype(np.float64) - (raw >> 8).astype(np.float64))
+    assert difference.mean() < 2.0
+    assert np.percentile(difference, 99) <= 8

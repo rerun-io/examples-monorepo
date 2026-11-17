@@ -481,10 +481,12 @@ readers in `tumvi_source.py`. One sequence is three layers under
 - `base`: cam0 and cam1 as AV1 videos at their KB4 pinholes (Kalibr's
   equidistant model; `rig_T_cam` = `T_cam_imu` inverted, the rig frame is
   the IMU's), only the frames both cameras share by stamp (the capture
-  properties count the rest), the 200 Hz IMU;
+  properties count the rest), the 200 Hz IMU. The PNGs carry ~12
+  significant bits (steps of 16); the 8-bit video keeps the top 8;
 - `gt`: mocap0, world_T_imu0, every sample. Outside the motion-capture room
   there is none, so corridor, magistrale and slides runs have ground truth at
-  their start and end only; `property:gt:span_*` lists the spans;
+  their start and end only; `property:gt:span_*` lists the spans between
+  gaps over 1 s (in-room occlusions split them too: room2 has 6);
 - `sensor_metadata`: `dso/imu_config.yaml` as `ImuCalibration` on the IMU node,
   with `applied_time_shift_ns` 0.
 

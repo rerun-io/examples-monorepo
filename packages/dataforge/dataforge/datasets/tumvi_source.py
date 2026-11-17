@@ -14,7 +14,9 @@ pyserde record; unknown keys are allowed (their schema is not ours to police). K
 frame is the IMU frame, so a camera's rig pose is its inverse (basalt's ``T_imu_cam``).
 
 mocap0 is not continuous: the motion-capture system covers one room, so the corridor, magistrale and slides runs have
-ground truth at their start and their end only. ``mocap_spans`` names those spans.
+ground truth at their start and their end only. ``mocap_spans`` splits mocap0 at every gap over 1 s: the exits from
+the room, and also the short occlusions inside it (room1 has 2 spans, room2 6, room3 5), so a span count is not a
+count of room visits.
 """
 
 from __future__ import annotations
@@ -37,8 +39,9 @@ from dataforge.euroc import CameraRow
 NUM_CAMERAS: int = 2
 """TUM-VI is one stereo pair, ``cam0`` (left) and ``cam1``."""
 MOCAP_GAP_NS: int = 1_000_000_000
-"""A pause in mocap0 longer than this starts a new span: the rig left the motion-capture room (samples run at ~120 Hz,
-and the room sequences' own dropouts stay under 3.5 s, so 1 s splits real exits and short occlusions alike)."""
+"""A pause in mocap0 longer than this starts a new span (samples run at ~120 Hz). It splits the exits from the room and
+also the in-room occlusions, which stay under 3.5 s: a span is a stretch of mocap without a gap over 1 s, not a
+visit to the room. The registered ``gt`` layers carry spans by this rule."""
 
 
 def row_major_4x4(rows: list[list[float]]) -> Float64[ndarray, "4 4"]:
@@ -52,7 +55,12 @@ def row_major_4x4(rows: list[list[float]]) -> Float64[ndarray, "4 4"]:
 @serde(type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class KalibrCamera:
-    """One ``cam<N>`` block of camchain.yaml."""
+    """One ``cam<N>`` block of camchain.yaml.
+
+    simplecv's ``KalibrCamWithExtrinsic`` (``simplecv.data.ego.robocap_ego``) reads the same block, but takes any model
+    string and plain lists. This class is the strict door: it refuses another projection or distortion model and a
+    wrong-length vector when the file is read, not later in ``kb4_camera``.
+    """
 
     cam_T_imu: Float64[ndarray, "4 4"] = field(rename="T_cam_imu", deserializer=row_major_4x4)
     """Kalibr's ``T_cam_imu``: maps a point in the IMU frame into this camera's frame."""
@@ -82,7 +90,12 @@ class Camchain:
 @serde(type_check=coerce)
 @dataclass(frozen=True, slots=True)
 class ImuNoise:
-    """A whole ``dso/imu_config.yaml``: Kalibr's continuous-time IMU noise model and the sample rate."""
+    """A whole ``dso/imu_config.yaml``: Kalibr's continuous-time IMU noise model and the sample rate.
+
+    ``dataforge.datasets.robocap._KalibrImu`` reads the same five keys, but it is private to that converter and makes
+    every key optional (RoboCap's vendor files may omit some), so it would accept an imu_config without a noise term.
+    Here every key is required; sharing one strict class would change RoboCap's door, which this converter does not own.
+    """
 
     accelerometer_noise_density: float
     """m/s^2/sqrt(Hz)."""
@@ -194,7 +207,7 @@ class MocapSpan:
 
 
 def mocap_spans(times_ns: Int64[ndarray, "n_poses"]) -> tuple[MocapSpan, ...]:
-    """Split mocap0's stamps where the rig was out of the motion-capture room (a pause over ``MOCAP_GAP_NS``)."""
+    """Split mocap0's stamps at every pause over ``MOCAP_GAP_NS`` (exits from the room and in-room occlusions alike)."""
     if times_ns.size == 0:
         return ()
     breaks: Bool[ndarray, "n_gaps"] = np.diff(times_ns) > MOCAP_GAP_NS

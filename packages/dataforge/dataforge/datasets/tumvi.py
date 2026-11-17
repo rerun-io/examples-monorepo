@@ -6,10 +6,11 @@ Each local ``dataset-<name>_512_16`` directory (``tumvi_source`` describes the l
 * **base**: the stereo pair as one AV1 video per camera at its KB4 (equidistant) pinhole, ``rig_T_cam`` = Kalibr's
   ``T_cam_imu`` inverted; the 200 Hz IMU; the capture properties. Only frames both cameras took at the same stamp are
   kept (the cameras are hardware-synchronized; a frame only one camera has is dropped and counted in the properties).
-  The 16-bit PNGs go to the encoder as they are, so the video holds their upper 8 bits (as an 8-bit release would).
+  The 16-bit PNGs go to the encoder as they are. They carry ~12 significant bits (values in steps of 16); the 8-bit
+  video keeps the top 8 (room1's median grey is ~29), while RootSLAM reads the 16-bit PNGs.
 * **gt**: mocap0, world_T_imu0, every sample, on ``rig_00``, plus its path and the root ``ViewCoordinates``. Outside
   the motion-capture room there is none, so the corridor, magistrale and slides runs have ground truth at their start
-  and end only; the layer's properties list those spans.
+  and end only; the layer's properties list the spans between gaps over 1 s (in-room occlusions split them too).
 * **sensor_metadata**: imu_config.yaml's noise model as simplecv's ``ImuCalibration`` on the IMU node, with
   ``applied_time_shift_ns`` 0: TUM-VI's camera and IMU stamps are already on one clock, and nothing is shifted here.
 
