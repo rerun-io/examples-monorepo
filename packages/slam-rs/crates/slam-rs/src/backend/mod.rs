@@ -21,7 +21,6 @@ use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
-pub use cull::CovisibilityThreshold;
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 
 /// The map's knobs, read from [`VioConfig`].
@@ -37,9 +36,8 @@ pub struct MapConfig {
     pub max_keyframes: usize,
     /// `config.map_batch_cull_size`.
     pub batch_cull_size: usize,
-    /// `config.loop_closing_pgo_min_covisibility_weight`, or
-    /// `backend.high_covisibility_landmark_ratio` when that is unset.
-    pub high_covisibility: CovisibilityThreshold,
+    /// `config.loop_closing_pgo_min_covisibility_weight` (shared landmarks).
+    pub high_covisibility: u32,
 }
 
 impl From<&VioConfig> for MapConfig {
@@ -50,12 +48,7 @@ impl From<&VioConfig> for MapConfig {
             redundancy_exclude_hosted: config.map_redundancy_exclude_hosted_lms,
             max_keyframes: config.map_max_keyframes,
             batch_cull_size: config.map_batch_cull_size,
-            high_covisibility: match config.loop_closing_pgo_min_covisibility_weight {
-                Some(weight) => CovisibilityThreshold::Fixed(weight),
-                None => CovisibilityThreshold::PerMedianLandmarks(
-                    config.backend_high_covisibility_landmark_ratio,
-                ),
-            },
+            high_covisibility: config.loop_closing_pgo_min_covisibility_weight,
         }
     }
 }
@@ -175,9 +168,9 @@ impl MapBackend {
         &self.active
     }
 
-    /// The shared-landmark count at which an edge is "high", for the map as it is.
+    /// The shared-landmark count at which an edge is "high" (at least 1).
     pub fn high_covisibility_weight(&self) -> u32 {
-        self.config.high_covisibility.weight(&self.map)
+        self.config.high_covisibility.max(1)
     }
 
     /// Whether culling must leave `id` alone: the root, a window keyframe, or a
@@ -243,8 +236,7 @@ impl MapBackend {
     /// lowest score first (equal scores by id). As in RootSLAM
     /// (`handleGraphScoreChange`), every cull re-ranks the keyframes it touched
     /// before the next pick: graph neighbours, loop partners and the observers of
-    /// the landmarks it took. The high-covisibility weight is fixed for the batch,
-    /// from the map as the batch starts.
+    /// the landmarks it took.
     fn cull_over_budget(&mut self) -> Vec<FrameId> {
         let high_weight: u32 = self.high_covisibility_weight();
         let score = |backend: &Self, id: FrameId| {

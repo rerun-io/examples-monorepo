@@ -286,17 +286,19 @@ pub struct VioConfig {
     /// Keyframes culled per batch once the map exceeds its budget.
     #[serde(rename = "config.map_batch_cull_size")]
     pub map_batch_cull_size: usize,
-    /// Fixed shared-landmark count at which a covisibility edge is "high". `None`
-    /// (the default) derives it from the map, see
-    /// [`Self::backend_high_covisibility_landmark_ratio`]; RootSLAM ships one
-    /// value per dataset (MG 100, MI 70, MO 50).
+    /// Shared landmarks at which a covisibility edge is "high": it lowers the
+    /// culling graph score and becomes a pose-graph edge. RootSLAM counts
+    /// observations here and ships one value per dataset (MG 100, MI 70, MO 50);
+    /// this port counts landmarks. 96 gives the high edges per map keyframe that
+    /// RootSLAM's thresholds give on its loop-closing-off runs where the keyframe
+    /// budget does not bind: MGO07 1.04 (RootSLAM 1.07), MGO13 0.30 (0.30). On
+    /// MIPB08 the budget binds, and the batch cull takes keyframes with many
+    /// high edges first, so the count feeds back: 0.009 at 96 against 0.026 (92
+    /// gives 0.028 on that map, but 1.19 and 0.36 on MG). No multiple of the
+    /// median landmarks per keyframe fits: it would be 0.65 on MGO07, 1.85 on
+    /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17).
     #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
-    pub loop_closing_pgo_min_covisibility_weight: Option<u32>,
-    /// With no fixed weight, an edge is "high" at this multiple of the median
-    /// number of landmarks a map keyframe sees (phase1/kf-density.md: MG 97,
-    /// MIO 70, MIP 65, MO 67 against RootSLAM's 100/70/70/50).
-    #[serde(rename = "backend.high_covisibility_landmark_ratio")]
-    pub backend_high_covisibility_landmark_ratio: f64,
+    pub loop_closing_pgo_min_covisibility_weight: u32,
 }
 
 impl Default for VioConfig {
@@ -364,8 +366,7 @@ impl Default for VioConfig {
             map_redundancy_exclude_hosted_lms: false,
             map_max_keyframes: 1500,
             map_batch_cull_size: 30,
-            loop_closing_pgo_min_covisibility_weight: None,
-            backend_high_covisibility_landmark_ratio: 1.2,
+            loop_closing_pgo_min_covisibility_weight: 96,
         }
     }
 }
@@ -558,8 +559,8 @@ mod tests {
     }
 
     /// One default set for the persistent map (DESIGN §8, phase1/kf-density.md):
-    /// RootSLAM's MSD values where they are one value, and the per-map
-    /// covisibility rule instead of a per-dataset weight.
+    /// RootSLAM's MSD values where they are one value, and one shared-landmark
+    /// covisibility weight instead of a per-dataset observation count.
     #[test]
     fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
         let defaults = VioConfig::default();
@@ -569,8 +570,7 @@ mod tests {
         assert!(!defaults.map_redundancy_exclude_hosted_lms);
         assert_eq!(defaults.map_max_keyframes, 1500);
         assert_eq!(defaults.map_batch_cull_size, 30);
-        assert_eq!(defaults.loop_closing_pgo_min_covisibility_weight, None);
-        assert_eq!(defaults.backend_high_covisibility_landmark_ratio, 1.2);
+        assert_eq!(defaults.loop_closing_pgo_min_covisibility_weight, 96);
         for (name, text) in every_fixture() {
             let config = VioConfig::from_json_str(text).unwrap();
             let mut normalised = config.clone();
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(parity.map_max_keyframes, 3000);
         assert_eq!(parity.map_batch_cull_size, 10);
         assert!(!parity.map_enable_culling);
-        assert_eq!(parity.loop_closing_pgo_min_covisibility_weight, Some(100));
+        assert_eq!(parity.loop_closing_pgo_min_covisibility_weight, 100);
         assert_eq!(
             VioConfig::from_json_str(&parity.to_json_string().unwrap()).unwrap(),
             parity

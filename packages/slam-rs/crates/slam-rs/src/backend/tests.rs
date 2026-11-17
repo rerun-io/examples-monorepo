@@ -20,7 +20,7 @@ fn config(max_keyframes: usize, batch: usize) -> MapConfig {
         redundancy_exclude_hosted: false,
         max_keyframes,
         batch_cull_size: batch,
-        high_covisibility: CovisibilityThreshold::Fixed(2),
+        high_covisibility: 2,
     }
 }
 
@@ -245,7 +245,7 @@ fn an_over_budget_map_culls_its_lowest_scored_inactive_keyframes() {
 fn the_batch_re_ranks_after_each_cull() {
     let mut backend = MapBackend::new(
         MapConfig {
-            high_covisibility: CovisibilityThreshold::Fixed(100),
+            high_covisibility: 100,
             ..config(5, 2)
         },
         vec![[640, 480]; 2],

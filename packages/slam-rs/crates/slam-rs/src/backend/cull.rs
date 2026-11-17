@@ -20,27 +20,6 @@ use crate::types::FrameId;
 use super::covisibility::CovisibilityGraph;
 use super::map::KeyframeMap;
 
-/// When a covisibility edge counts as "high".
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CovisibilityThreshold {
-    /// A fixed shared-landmark count (RootSLAM's per-dataset value).
-    Fixed(u32),
-    /// This multiple of the median number of landmarks a map keyframe sees.
-    PerMedianLandmarks(f64),
-}
-
-impl CovisibilityThreshold {
-    /// The shared-landmark count for `map` as it is now; at least 1.
-    pub fn weight(&self, map: &KeyframeMap) -> u32 {
-        match *self {
-            Self::Fixed(weight) => weight.max(1),
-            Self::PerMedianLandmarks(ratio) => {
-                ((ratio * map.median_keyframe_landmarks() as f64).round() as u32).max(1)
-            }
-        }
-    }
-}
-
 /// RootSLAM's culling score of keyframe `id` (`computeKeyframeScore`): low is
 /// replaceable. `0.4` graph (few strong edges), `0.2` loops, `0.1` distance
 /// from the middle of the map's time span, `0.1` image coverage, `0.2`
@@ -83,18 +62,6 @@ mod tests {
             map.upsert_keyframe(id, Se3::identity(), None);
         }
         map
-    }
-
-    #[test]
-    fn the_per_map_threshold_follows_the_median_keyframe() {
-        let map = map_with(&[1, 2, 3]);
-        assert_eq!(CovisibilityThreshold::Fixed(70).weight(&map), 70);
-        assert_eq!(CovisibilityThreshold::Fixed(0).weight(&map), 1);
-        assert_eq!(
-            CovisibilityThreshold::PerMedianLandmarks(1.2).weight(&map),
-            1,
-            "no landmarks yet"
-        );
     }
 
     #[test]

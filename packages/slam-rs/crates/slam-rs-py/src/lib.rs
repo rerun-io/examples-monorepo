@@ -353,8 +353,8 @@ impl Vio {
     /// ``observations`` are RootSLAM's ``stats_map.json`` counts; ``culled_redundant``
     /// and ``culled_over_budget`` count each culling rule; ``covisibility_edges``,
     /// ``high_covisibility_weight`` (shared landmarks) and ``high_covisibility_edges``
-    /// describe the graph; ``median_keyframe_landmarks`` is what the per-map weight
-    /// scales; ``retained_bytes`` is the map's payload (a lower bound on its heap);
+    /// describe the graph; ``median_keyframe_landmarks`` is the median number of
+    /// landmarks a map keyframe sees; ``retained_bytes`` is the map's payload (a lower bound on its heap);
     /// ``step_count``, ``step_total_us`` and ``step_max_us`` time the inline steps.
     #[getter]
     fn map_stats(&self) -> Option<std::collections::BTreeMap<&'static str, u64>> {

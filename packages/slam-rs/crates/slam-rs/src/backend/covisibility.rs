@@ -16,7 +16,8 @@
 //! - an edge counts shared *landmarks*; RootSLAM counts every observation of
 //!   the other keyframe, so a landmark seen by two of its cameras counts twice;
 //! - "high covisibility" is a threshold passed in at query time, not a set kept
-//!   in step with one fixed value, so the threshold can follow the map;
+//!   in step with one fixed value (the default, 96 shared landmarks, matches
+//!   RootSLAM's high edges per keyframe: see `VioConfig`);
 //! - every order is by id (`BTreeMap`), so ties resolve to the smaller id.
 
 use std::collections::{BTreeMap, BTreeSet};
