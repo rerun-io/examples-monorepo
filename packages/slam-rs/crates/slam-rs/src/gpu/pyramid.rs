@@ -42,11 +42,15 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
         out: &mut [GpuPyramid<R>],
     ) -> Result<(), PyramidError> {
         let images = FrameImages::Packed(packed);
-        match self.inner.prepare_packed(
-            packed.bytes(),
-            images.iter().map(|image| image.size()),
-            out,
-        )? {
+        let prepared = match packed.half_of() {
+            Some(full) => self.inner.prepare_half(packed.bytes(), full, out)?,
+            None => self.inner.prepare_packed(
+                packed.bytes(),
+                images.iter().map(|image| image.size()),
+                out,
+            )?,
+        };
+        match prepared {
             Some(launch) => self
                 .launches
                 .dispatch(&self.client, super::submission::Launch::Pyramid(launch))?,
@@ -127,7 +131,7 @@ mod tests {
             })
             .collect();
         let mut packed = PackedImages::default();
-        packed.fill(&views);
+        packed.fill(&views, false);
         let mut pyramids: Vec<_> = (0..2)
             .map(|_| builder.allocate(65, 49, 2).unwrap())
             .collect();

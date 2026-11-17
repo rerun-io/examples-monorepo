@@ -110,14 +110,14 @@ fn a_failed_cell_queue_flush_cannot_publish_previous_frame_keys() {
         width: 640,
         height: 480,
         stride: 640,
-    }]);
+    }], false);
     let mut packed_b = PackedImages::default();
     packed_b.fill(&[crate::ImageView {
         data: &bytes_b,
         width: 640,
         height: 480,
         stride: 640,
-    }]);
+    }], false);
     builder.build_packed(&packed_a, &mut pyramids).unwrap();
     scan.inner.use_level0(&mut builder.inner);
     scan.submit_cells(FrameImages::Packed(&packed_a), &[Some(select)])

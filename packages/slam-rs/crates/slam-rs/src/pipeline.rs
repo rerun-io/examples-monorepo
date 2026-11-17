@@ -19,6 +19,13 @@ pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 
+/// Widest camera image the frontend tracks at full resolution. A rig whose every camera is wider (the Insta360
+/// X5 and the X4 Air's high-resolution mode, 3840 px lenses) is tracked on its images reduced by two, on the device
+/// on the GPU lane: the calibration is halved once here ([`calib::Calibration::half_resolution`]), so the tracker,
+/// the estimator and every pose see a 1920 px rig, and the tracker's cost stays that of the 1920 px mode.
+/// Keypoints and `Vio::calibration` are in the reduced pixels.
+pub const MAX_FULL_RESOLUTION_WIDTH: u32 = 2048;
+
 /// Frameset pipeline with optional one-frame estimator lag (D17, D24, M7).
 /// First preintegrate for the frontend prediction, run optical flow, then run
 /// the estimator's independent preintegrator, measurement, optimization and
@@ -47,6 +54,8 @@ pub struct Vio<S: Scalar = f32> {
     frames: frontend::input::FrameStorage,
     /// Reusable lookahead input, filled by the same lane as the current frame.
     next_frames: frontend::input::PackedImages,
+    /// Every camera is tracked on its images reduced by two; see [`MAX_FULL_RESOLUTION_WIDTH`].
+    half: bool,
     /// `img->masks`, always empty here: masks come from Monado.
     masks: Vec<kornia_staging_imgproc::features::CellMasks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
@@ -124,6 +133,16 @@ impl<S: Scalar> Vio<S> {
         backend: Backend,
     ) -> Result<Self, VioError> {
         let camera_count: usize = calibration.t_i_c.len();
+        let half: bool = !calibration.resolution.is_empty()
+            && calibration
+                .resolution
+                .iter()
+                .all(|[width, _]| *width > MAX_FULL_RESOLUTION_WIDTH);
+        let calibration = if half {
+            calibration.half_resolution()
+        } else {
+            calibration
+        };
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let rolling_shutter: Option<RollingShutter> = RollingShutter::for_calibration(&calibration)
@@ -143,6 +162,7 @@ impl<S: Scalar> Vio<S> {
             calib_f32,
             frames: frontend::input::FrameStorage::new(backend == Backend::Gpu),
             next_frames: frontend::input::PackedImages::default(),
+            half,
             masks: vec![kornia_staging_imgproc::features::CellMasks::default(); camera_count],
             camera_count,
             last_frame_t_ns: None,
@@ -342,7 +362,7 @@ impl<S: Scalar> Vio<S> {
             && let Some((next_t_ns, next_images)) = lookahead
         {
             let vio = &mut *prepared.vio;
-            vio.next_frames.fill(next_images);
+            vio.next_frames.fill(next_images, vio.half);
             vio.frontend
                 .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
         }
@@ -429,7 +449,7 @@ impl<S: Scalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        self.frames.fill(images)?;
+        self.frames.fill(images, self.half)?;
         Ok(PreparedTrack {
             vio: self,
             t_ns,
