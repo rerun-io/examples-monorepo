@@ -23,6 +23,7 @@ def test_the_factory_string_crop_and_readout_become_the_vio_argument() -> None:
         }
     )
     factory: Insta360Factory | None = read_insta360_factory(table)
+    assert factory is not None
     assert factory == Insta360Factory(lens_string="2_2.31_x", window_crop=(7680, 7680, 7424, 7424, 0, 0), readout_s=0.015883)
     assert factory.vio_argument() == ("2_2.31_x", (7680, 7680, 7424, 7424, 0, 0), 0.015883)
 
