@@ -1,0 +1,43 @@
+# Insta360 device profiles: the calibration a clip does not carry, measured per body and video mode.
+#
+# Read by dataforge.datasets.insta360 (DeviceProfiles, load_profiles). A clip takes the profile whose camera type,
+# lens size, frame rate and rolling-shutter readout match its own; a clip outside every profile's measured mode is
+# refused with the property that differs. Bump `version` whenever a measured number changes: converted recordings
+# name the profile and its version.
+
+[[profile]]
+name = "x4-air-1920"
+version = 1
+provenance = "gyro-visual epipolar fit on the clip VID_20261116_125200_00_003 (2026-11-16, no board)"
+camera_type = "Insta360 X4 Air"
+lens_width = 1920
+lens_height = 1920
+# Measured from the exposure-record stamps: 29.9697 Hz on the clip.
+frame_rate_hz = 29.97
+frame_rate_tolerance_hz = 0.05
+# Metadata rolling_shutter 15.883 ms; free fits 13-21 ms (lens 1), 11-31 ms (lens 0); rows top to bottom in both lenses.
+readout_s = 0.015883
+readout_tolerance_s = 0.00001
+# R_P_imu as fitted (rows: P axes in IMU coordinates), epipolar joint fit of segments 40-60 s and 190-210 s; 0.13 deg
+# from the permutation x_P = -z_imu, y_P = +x_imu, z_P = -y_imu; the two segments agree within 0.2 deg. The converter
+# orthonormalises it.
+pano_from_imu_measured = [
+    [-0.00092, 0.00149, -1.00000],
+    [1.00000, -0.00138, -0.00092],
+    [-0.00138, -1.00000, -0.00149],
+]
+# Vector from the IMU to the lens midpoint, metres, in P. Not measured; +-3 cm ablations are still to run.
+lever_arm_m = [0.0, 0.0, 0.0]
+# Frame time = exposure-record-4 stamp + slope * record-4 shutter + constant: the mid-exposure time of the middle row
+# on the IMU clock. Joint epipolar fit with the shutter term: -0.435 * shutter - 0.13 ms (rms 0.035 rad/s), rounded.
+frame_time_shutter_slope = -0.44
+frame_time_constant_s = -0.0001
+
+# Placeholder until the unit's IMU is measured; the slam-rs feed refuses an IMU without all five numbers.
+[profile.imu_noise]
+gyro_noise_density = 0.0028
+accel_noise_density = 0.016
+gyro_bias_random_walk = 0.0001
+accel_bias_random_walk = 0.001
+rate_hz = 1000.0
+source = "placeholder: consumer MEMS (TDK ICM-40609 class, values not measured on this unit)"

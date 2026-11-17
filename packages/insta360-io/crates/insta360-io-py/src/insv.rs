@@ -1,6 +1,8 @@
 //! Python access to an Insta360 `.insv` clip through `kornia_staging_io::insta360`.
+use crate::camera::MeiCamera;
 use crate::value_error;
-use kornia_staging_io::insta360::{Insta360Clip, LensCalibration};
+use kornia_staging_3d::camera::formats::insta360::FactoryLens;
+use kornia_staging_io::insta360::Insta360Clip;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
@@ -10,48 +12,36 @@ use pyo3::types::PyBytes;
 #[pyclass(module = "insta360_io", frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct InsvLens {
-    core: LensCalibration,
+    core: FactoryLens,
 }
 
 #[pymethods]
 impl InsvLens {
-    /// Principal point x, track pixels.
+    /// The lens camera, for the video track's pixels.
     #[getter]
-    fn cx(&self) -> f64 {
-        self.core.cx
+    fn camera(&self) -> MeiCamera {
+        MeiCamera {
+            camera: self.core.camera,
+        }
     }
 
-    /// Principal point y, track pixels.
-    #[getter]
-    fn cy(&self) -> f64 {
-        self.core.cy
-    }
-
-    /// `R_P_lens`, row-major: lens vectors into the panorama frame `P` (+Z lens-0 axis, +Y toward the handle).
+    /// `R_P_lens`, row-major: lens vectors into the vendor rig frame `P` (+Z lens-0 axis, +Y toward the handle).
     #[getter]
     fn pano_from_lens_rotation(&self) -> [[f64; 3]; 3] {
-        self.core.pano_from_lens_rotation
+        let r = self.core.pano_from_lens.rotation;
+        std::array::from_fn(|row| std::array::from_fn(|column| r[(row, column)]))
     }
 
     /// Lens centre in `P`, metres; the origin is the midpoint of the lens centres.
     #[getter]
     fn pano_centre_m(&self) -> [f64; 3] {
-        self.core.pano_centre_m
-    }
-
-    /// Image radius in track pixels of rays `theta` radians off the axis, through the radial part of the model.
-    fn radius_px<'py>(&self, py: Python<'py>, theta: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
-        theta
-            .iter()
-            .map(|&t| self.core.radius_px(t))
-            .collect::<Vec<_>>()
-            .to_pyarray(py)
+        self.core.pano_from_lens.translation.vector.into()
     }
 }
 
-impl From<&LensCalibration> for InsvLens {
-    fn from(l: &LensCalibration) -> Self {
-        Self { core: l.clone() }
+impl From<&FactoryLens> for InsvLens {
+    fn from(l: &FactoryLens) -> Self {
+        Self { core: *l }
     }
 }
 
@@ -137,7 +127,12 @@ impl InsvClip {
     /// V6 factory calibration per lens, in lens order; empty when the clip has no V6 string.
     #[getter]
     fn lenses_v6(&self) -> Vec<InsvLens> {
-        self.clip.lenses_v6.iter().map(InsvLens::from).collect()
+        self.clip
+            .lenses_v6
+            .iter()
+            .flatten()
+            .map(InsvLens::from)
+            .collect()
     }
 
     /// The window crop the lens strings are stated through: `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`.
@@ -161,15 +156,10 @@ impl InsvClip {
         (self.clip.tracks[0].width, self.clip.tracks[0].height)
     }
 
-    /// Frames per track.
+    /// Frames of the clip: those present in both lens tracks.
     #[getter]
     fn num_frames(&self) -> usize {
-        self.clip
-            .tracks
-            .iter()
-            .map(|t| t.samples.len())
-            .min()
-            .unwrap_or(0)
+        self.clip.frames()
     }
 
     /// IMU samples: times (trailer clock, us), accel `(n, 3)` m/s^2, gyro `(n, 3)` rad/s.

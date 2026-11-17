@@ -130,6 +130,7 @@ dependencies = [
  "kornia-staging-3d",
  "kornia-staging-imgproc",
  "kornia-staging-io",
+ "nalgebra",
  "numpy",
  "pyo3",
 ]
@@ -180,6 +181,7 @@ dependencies = [
  "kornia-algebra",
  "kornia-staging-algebra",
  "nalgebra",
+ "serde",
  "thiserror",
 ]
 
@@ -198,6 +200,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
  "kornia-staging-algebra",
  "nalgebra",
  "rayon",
@@ -508,6 +511,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "serde"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
 ]
 
 [[package]]

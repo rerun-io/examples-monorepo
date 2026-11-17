@@ -3,29 +3,48 @@
 ``InsvClip`` reads a clip's container index and trailer: metadata, the factory lens calibration, IMU samples, per-frame
 exposure and the two HEVC lens tracks as Annex B access units. ``PanoramaStitch`` turns the two lens images of a
 frameset into the 1920x960 viewing panorama through the two hemisphere tiles, on the CPU, with the same tables and
-integer remap as slam-rs's dual-fisheye lane. Every refusal raises ``ValueError``.
+integer remap as slam-rs's dual-fisheye lane, from two ``MeiCamera``s and the pose of camera 1 in camera 0. Every
+refusal raises ``ValueError``.
 """
-
-from collections.abc import Sequence
 
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 
-class InsvLens:
-    """One lens of an Insta360 factory calibration at the track resolution, window crop applied (Mei sphere model)."""
+class MeiCamera:
+    """A unified (Mei) sphere camera with the Insta360 factory distortion, as a calibration states it."""
 
+    def __init__(self, model: str, fx: float, fy: float, cx: float, cy: float, coefficients: list[float]) -> None:
+        """``model`` ``mei_v3`` (``xi, half_field_rad, k1, k2, k3, p1, p2``) or ``mei_v6`` (``xi, half_field_rad, d0 .. d12``).
+
+        Raises ``ValueError`` on an unknown model, a wrong coefficient count or invalid values.
+        """
     @property
-    def cx(self) -> float: ...
+    def model(self) -> str: ...
+    @property
+    def fx(self) -> float:
+        """Focal along x, pixels (Mei form)."""
+    @property
+    def fy(self) -> float: ...
+    @property
+    def cx(self) -> float:
+        """Principal point x, pixels (pixel centres at integers)."""
     @property
     def cy(self) -> float: ...
     @property
+    def coefficients(self) -> list[float]:
+        """The coefficients in the order of ``model``."""
+
+class InsvLens:
+    """One lens of an Insta360 factory calibration at the track resolution, window crop applied."""
+
+    @property
+    def camera(self) -> MeiCamera: ...
+    @property
     def pano_from_lens_rotation(self) -> list[list[float]]:
-        """``R_P_lens``, row-major: lens vectors into the panorama frame P."""
+        """``R_P_lens``, row-major: lens vectors into the vendor rig frame P."""
     @property
     def pano_centre_m(self) -> list[float]:
         """Lens centre in P, metres, origin at the midpoint of the lens centres."""
-    def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
-        """Image radius in track pixels of rays ``theta`` radians off the axis (radial part of the model only)."""
 
 class InsvClip:
     """An Insta360 ``.insv`` clip: trailer metadata, factory lenses, IMU, frame times and the two HEVC lens tracks."""
@@ -68,12 +87,16 @@ class InsvClip:
         """Samples ``start..stop`` of one track as Annex B access units with parameter sets on IRAPs, and IRAP flags."""
 
 class PanoramaStitch:
-    """Two lens images in, the 1920x960 viewing panorama out, through the two hemisphere tiles (default 64 px margin)."""
+    """Two lens images in, the 1920x960 viewing panorama out, through the two hemisphere tiles.
 
-    def __init__(self, lens_string: str, window_crop_px: tuple[int, int, int, int, int, int] | None, lens_size: tuple[int, int]) -> None:
-        """``lens_string``: raw V3/V6 factory string; ``window_crop_px``: its window crop or None; ``lens_size``: ``(width, height)``.
+    The panorama frame is camera 0's axes at the midpoint of the two camera centres: camera 0's hemisphere on the left
+    half (looking along its +Z), camera 1's on the right (-Z).
+    """
 
-        Raises ``ValueError`` on a bad string or a lens below 4x4.
+    def __init__(self, camera0: MeiCamera, camera1: MeiCamera, cam0_from_cam1: list[list[float]], lens_size: tuple[int, int]) -> None:
+        """``cam0_from_cam1``: the pose of camera 1 in camera 0 (only its rotation enters the tables); ``lens_size``: ``(width, height)``.
+
+        Raises ``ValueError`` on a matrix that is not a rigid transform or a lens below 4x4.
         """
     def panorama(self, lens0: UInt8[ndarray, "h w"], lens1: UInt8[ndarray, "h w"]) -> UInt8[ndarray, "960 1920"]:
-        """The panorama of lens 0's and lens 1's C-contiguous images (lens 0's hemisphere on the left); ``ValueError`` on a wrong size."""
+        """The panorama of lens 0's and lens 1's C-contiguous images; ``ValueError`` on a wrong size."""

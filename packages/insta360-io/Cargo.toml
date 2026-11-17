@@ -17,6 +17,7 @@ kornia-image = { version = "0.2", default-features = false }
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d" }
 kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }
 kornia-staging-io = { path = "../kornia-staging/crates/kornia-staging-io" }
+nalgebra = "0.35"
 numpy = "0.29"
 pyo3 = "0.29"
 

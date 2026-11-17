@@ -2759,19 +2759,6 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Build the core, then replay a segment in the viewer (GPU frontend when available)"
 
-# e.g. `pixi run -e slam-rs slam-rs-insv --insv clip.insv [--output clip.rrd] [--max-frames 90]`
-[feature.slam-rs.tasks.slam-rs-insv]
-cmd = "python tools/apps/insv.py"
-cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
-description = "Build the core, then convert an Insta360 .insv clip (two HEVC lens tracks, IMU, factory lenses) to an exoego:v2 .rrd"
-
-[feature.slam-rs.tasks.slam-rs-insv-panorama]
-cmd = "python tools/apps/insv_panorama.py"
-cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
-description = "Build the core, then write an Insta360 recording's stitched panorama as a derived, viewing-only AV1 layer (<stem>.pano.rrd)"
-
 # e.g. `pixi run -e slam-rs slam-rs-insv-calibrate --rrd clip.rrd [--rotation-spans-s 40 190] [--scan-windows-s 20 60 100]`
 [feature.slam-rs.tasks.slam-rs-insv-calibrate]
 cmd = "python tools/apps/insv_calibrate.py"
@@ -3861,7 +3848,7 @@ description = "rustfmt, clippy and the core crate's tests for packages/depth-png
 # ═══════════════════════════════════════════════════════════════════════════
 # The Python module insta360_io is a pixi-build source package (packages/insta360-io/recipe.yaml), consumed as
 # `insta360-io = { path = "packages/insta360-io" }`; its Python tests live with its consumer (packages/dataforge/tests).
-# This feature only checks the binding's Rust workspace: rustfmt and clippy with warnings denied.
+# This feature checks the binding's Rust workspace: rustfmt, clippy with warnings denied, and the stitch-plan tests.
 [feature.insta360-io-rust]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -3872,9 +3859,9 @@ python = "3.12.*"
 
 # Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
 [feature.insta360-io-rust.tasks.insta360-io-rust-check]
-cmd = "cargo-fmt --all --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings"
+cmd = "cargo-fmt --all --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace"
 cwd = "packages/insta360-io"
-description = "rustfmt and clippy for packages/insta360-io"
+description = "rustfmt, clippy and the stitch-plan tests for packages/insta360-io"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tsdf-rs (Rust core + PyO3 module; metrictrail, mast3r-slam and mvs take the conda build)
