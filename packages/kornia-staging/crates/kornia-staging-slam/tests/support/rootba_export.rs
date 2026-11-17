@@ -1,6 +1,7 @@
 //! RootSLAM's exported GBA problems (rootba `bal` input) and rootba's logs,
 //! read at test time; shared by the CPU golden (`gba_rootba_export.rs`) and the
-//! device lane's band and speed lanes (`kornia-staging-gpu/tests/gba_lanes.rs`).
+//! device lane's band and speed lanes (`kornia-staging-gpu/tests/gba_lanes.rs`)
+//! and a consumer's driver golden, each through `#[path]`.
 //! Assets: `<runs>/<SEQ>/map/{map,pose_graph}.json` and
 //! `output.<SEQ>.{balpgf,balpgd}.log` (default runs root
 //! `/mnt/nas/ssd-8tb/scratch/rootslam/runs`, override `GBA_EXPORT_RUNS`), and
@@ -12,10 +13,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use kornia_staging_3d::camera::{formats::BasaltCamera, CameraModelKind};
+use kornia_staging_3d::camera::{CameraModelKind, formats::BasaltCamera};
 use kornia_staging_algebra::{
-    lie::{RigidTransform, Rotation3},
     Scalar,
+    lie::{RigidTransform, Rotation3},
 };
 use kornia_staging_slam::sqrt_ba::{
     GbaCamera, GbaLandmark, GbaObservation, GbaProblem, GbaRigCamera, RelPoseConstraint,
@@ -29,46 +30,46 @@ use serde::Deserialize;
 /// `map/map.json`.
 #[derive(Deserialize)]
 pub struct MapJson {
-    keyframes: Vec<KeyframeJson>,
-    landmarks: Vec<LandmarkJson>,
-    observations: Vec<ObservationJson>,
+    pub keyframes: Vec<KeyframeJson>,
+    pub landmarks: Vec<LandmarkJson>,
+    pub observations: Vec<ObservationJson>,
 }
 
 #[derive(Deserialize)]
 pub struct KeyframeJson {
-    id: u64,
+    pub id: u64,
     /// `[qw, qx, qy, qz, tx, ty, tz]`.
     #[serde(rename = "T_w_i")]
-    world_from_imu: [f64; 7],
+    pub world_from_imu: [f64; 7],
 }
 
 #[derive(Deserialize)]
 pub struct LandmarkJson {
-    id: u64,
-    p_w: [f64; 3],
+    pub id: u64,
+    pub p_w: [f64; 3],
 }
 
 #[derive(Deserialize)]
 pub struct ObservationJson {
-    lm_id: u64,
-    kf_id: u64,
-    cam_id: usize,
-    pos: [f64; 2],
+    pub lm_id: u64,
+    pub kf_id: u64,
+    pub cam_id: usize,
+    pub pos: [f64; 2],
 }
 
 /// `map/pose_graph.json`.
 #[derive(Deserialize)]
 pub struct PoseGraphJson {
-    edges: Vec<EdgeJson>,
+    pub edges: Vec<EdgeJson>,
 }
 
 #[derive(Deserialize)]
 pub struct EdgeJson {
-    kf_id_a: u64,
-    kf_id_b: u64,
+    pub kf_id_a: u64,
+    pub kf_id_b: u64,
     /// `[qw, qx, qy, qz, tx, ty, tz]`.
     #[serde(rename = "T_a_b")]
-    a_from_b: [f64; 7],
+    pub a_from_b: [f64; 7],
 }
 
 /// Basalt calibration file: `{"value0": {...}}`.
@@ -355,7 +356,11 @@ pub fn load(seq: &str) -> Export {
         "{seq}: {} keyframes, {} landmarks, {} observations, {} pose-graph rows (dropped {} obs, {} landmarks)",
         problem.imu_from_world.len(),
         problem.landmarks.len(),
-        problem.landmarks.iter().map(|l| l.observations.len()).sum::<usize>(),
+        problem
+            .landmarks
+            .iter()
+            .map(|l| l.observations.len())
+            .sum::<usize>(),
         problem.rel_poses.len(),
         dropped.observations,
         landmarks - dropped.kept_landmarks.len()
