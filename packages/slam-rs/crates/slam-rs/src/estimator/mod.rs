@@ -152,7 +152,8 @@ pub struct SqrtKeypointVio<S: Scalar> {
     last_state_t_ns: i64,
     /// `imu_meas`, one preintegration per consecutive state pair.
     imu_meas: BTreeMap<i64, IntegratedImuMeasurement<S>>,
-    /// `g`, `(0, 0, -9.81)` unless the caller overrides it.
+    /// `g`, as the caller gives it: the pipeline ([`crate::Vio`]) passes
+    /// `(0, 0, -config.vio_gravity_ms2)`; [`Self::with_default_gravity`] uses `(0, 0, -9.81)`.
     g: Vector3<S>,
     /// `prev_opt_flow_res`, kept so a new keyframe can gather every
     /// observation of a keypoint across the live window.
@@ -407,7 +408,8 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         })
     }
 
-    /// Construct with gravity `(0, 0, -9.81)`.
+    /// Construct with gravity `(0, 0, -9.81)`. The pipeline does not use this:
+    /// it takes the magnitude from `config.vio_gravity_ms2`.
     ///
     /// # Errors
     /// As [`Self::new`].

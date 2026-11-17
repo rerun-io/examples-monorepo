@@ -188,9 +188,10 @@ pub struct Accepted {
 /// Whether some camera pair can triangulate inside one frameset: a baseline
 /// of at least `min_baseline` and a shared field of view.
 ///
-/// The overlap test is the frontend's own stereo-matching guess: a 16 x 16
-/// grid of pixels of camera `i` is unprojected, placed at 1, 3 and 10 m, and
-/// projected into camera `j`; one valid in-image projection is an overlap.
+/// The overlap test is this function's own, not the frontend's stereo
+/// matching (the two can disagree): a 16 x 16 grid of pixels of camera `i` is
+/// unprojected, placed at 1, 3 and 10 m, and projected into camera `j`; one
+/// valid in-image projection is an overlap.
 pub fn rig_has_stereo(calibration: &Calibration<f64>, min_baseline: f64) -> bool {
     let cameras: Vec<Option<SlamCamera<f64>>> = calibration
         .intrinsics
@@ -206,12 +207,12 @@ pub fn rig_has_stereo(calibration: &Calibration<f64>, min_baseline: f64) -> bool
             let (Some(cam_i), Some(cam_j)) = (&cameras[i], &cameras[j]) else {
                 continue;
             };
-            let t_ci: Se3<f64> = calibration.t_i_c[i];
-            let t_cj: Se3<f64> = calibration.t_i_c[j];
-            if (t_ci.translation - t_cj.translation).norm() < min_baseline {
+            let t_i_ci: Se3<f64> = calibration.t_i_c[i];
+            let t_i_cj: Se3<f64> = calibration.t_i_c[j];
+            if (t_i_ci.translation - t_i_cj.translation).norm() < min_baseline {
                 continue;
             }
-            let j_from_i: Se3<f64> = t_cj.inverse() * t_ci;
+            let j_from_i: Se3<f64> = t_i_cj.inverse() * t_i_ci;
             let [w_i, h_i] = calibration.resolution[i];
             let [w_j, h_j] = calibration.resolution[j];
             for gy in 0..16 {
@@ -258,11 +259,12 @@ pub fn uses_inertial(config: &VioConfig, calibration: &Calibration<f64>) -> bool
 /// that camera's frame; the frame index is the frameset's position in
 /// `window`. A rolling-shutter camera's pixels are already corrected (rotated
 /// by the gyro over each row's time offset from the frameset time, in
-/// `Vio::finish_track`) when they get here; the solver's sensitivity table
-/// makes that mandatory for the Insta360 (uncorrected +-8 ms gave 6-16 %
-/// scale error). Before the bootstrap accepts there is no gyro bias estimate,
-/// so that correction uses the raw gyro rate (the static calibration's bias is
-/// not applied either; it is zero for the Insta360 rig).
+/// `Vio::finish_track`) when they get here; that is mandatory for the
+/// Insta360: in the solver's Monte Carlo `sensitivity_study`
+/// (`kornia_staging_slam::init::inertial` tests), an uncorrected +-8 ms
+/// readout gave 6-16 % scale error. Before the bootstrap accepts there is no
+/// gyro bias estimate, so that correction uses the raw gyro rate (the static
+/// calibration's bias is not applied either; it is zero for the Insta360 rig).
 pub fn prepare_bearings(
     window: &[Arc<FlowObservations>],
     cameras: &[SlamCamera<f64>],
@@ -382,8 +384,11 @@ impl InertialBootstrap {
         self.newest_imu_t_ns = Some(sample.timestamp_ns);
         self.imu.push_back(sample);
         if self.frames.is_empty() {
-            // Before the first frameset keep one second.
-            let keep_after: i64 = sample.timestamp_ns - 1_000_000_000;
+            // Before the first frameset keep the timeout's span (at least one
+            // second), so a caller that pushes IMU ahead of the framesets still
+            // has the IMU the first frameset needs; `push_frame` trims the rest.
+            let keep_after: i64 =
+                sample.timestamp_ns - seconds_to_ns(self.options.timeout_s.max(1.0));
             while self.imu.len() > 1
                 && self
                     .imu
@@ -570,6 +575,7 @@ impl InertialBootstrap {
         self.trim_imu();
         let first: i64 = self.frames.front().map_or(t_ns, |f| f.t_ns);
         if t_ns - first < self.window_ns {
+            self.check_timeout(t_ns - first_ever)?;
             return Ok(BootstrapStep::Buffering);
         }
         let (outcome, tracks) = self.attempt()?;
@@ -603,7 +609,14 @@ impl InertialBootstrap {
             self.window_ns = seconds_to_ns(self.options.window_s);
             self.slide();
         }
-        let seconds: f64 = (t_ns - first_ever) as f64 * 1e-9;
+        self.check_timeout(t_ns - first_ever)?;
+        Ok(BootstrapStep::Buffering)
+    }
+
+    /// [`BootstrapError::NeverAccepted`] once `elapsed_ns` since the first
+    /// frameset is past the timeout; checked on every frameset.
+    fn check_timeout(&self, elapsed_ns: i64) -> Result<(), BootstrapError> {
+        let seconds: f64 = elapsed_ns as f64 * 1e-9;
         if seconds > self.options.timeout_s {
             return Err(BootstrapError::NeverAccepted {
                 seconds,
@@ -615,7 +628,7 @@ impl InertialBootstrap {
                     .map_or_else(String::new, |a| a.verdict.clone()),
             });
         }
-        Ok(BootstrapStep::Buffering)
+        Ok(())
     }
 }
 
@@ -690,13 +703,8 @@ impl<S: Scalar> Vio<S> {
             BootstrapStep::Buffering => return Ok(self.result(VioStatus::NoVisualFeatures, t_ns)),
             BootstrapStep::Accepted(accepted) => accepted,
         };
-        let BootstrapPhase::Running(driver) =
-            std::mem::replace(&mut self.bootstrap, BootstrapPhase::Off)
-        else {
-            unreachable!("checked above");
-        };
-        let config: VioConfig = self.frontend.config().clone();
         let calibration: Calibration<S> = driver.calibration.cast();
+        let config: VioConfig = self.frontend.config().clone();
         let initial: InitialState<S> = InitialState {
             t_ns: accepted.initial.t_ns,
             t_w_i: accepted.initial.t_w_i.cast(),
@@ -716,20 +724,27 @@ impl<S: Scalar> Vio<S> {
         for sample in &accepted.imu {
             fresh.push_imu(*sample);
         }
-        self.estimator = fresh;
-        self.bootstrap = BootstrapPhase::Done(Box::new(driver.into_report()));
 
+        // Replay into the local estimator; `self` changes only once the replay
+        // has succeeded, so an error leaves the pipeline still bootstrapping.
         let pool = self.frontend.cpu_pool();
         let count: usize = accepted.frames.len();
         let mut last: Option<estimator::FrameOutcome<S>> = None;
         for (index, frame) in accepted.frames.into_iter().enumerate() {
-            let outcome = self.estimator.process_frame(frame, pool.as_ref())?;
+            let outcome = fresh.process_frame(frame, pool.as_ref())?;
             if index + 1 < count {
-                self.estimator.finish_deferred_keyframe(pool.as_ref())?;
+                fresh.finish_deferred_keyframe(pool.as_ref())?;
             } else {
                 last = Some(outcome);
             }
         }
+        self.estimator = fresh;
+        let BootstrapPhase::Running(driver) =
+            std::mem::replace(&mut self.bootstrap, BootstrapPhase::Off)
+        else {
+            unreachable!("checked above");
+        };
+        self.bootstrap = BootstrapPhase::Done(Box::new(driver.into_report()));
         let outcome = last.unwrap_or(estimator::FrameOutcome::NoVisualFeatures);
         self.accept_outcome(t_ns, outcome)
     }

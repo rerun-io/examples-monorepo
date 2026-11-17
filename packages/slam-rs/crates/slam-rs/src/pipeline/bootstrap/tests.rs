@@ -283,6 +283,56 @@ fn never_accepting_is_a_typed_error_with_a_bounded_buffer() {
     }
 }
 
+/// Push the IMU through `imu_ahead_s` first, then framesets `0..frames`;
+/// return the first step that is not `Buffering`, or `None`.
+fn imu_first(
+    imu_ahead_s: f64,
+    options: BootstrapOptions,
+    frames: i64,
+) -> Option<Result<BootstrapStep, BootstrapError>> {
+    let mut run = Run::new(-1.0, options);
+    while run.next_imu * 1_000_000 <= seconds_to_ns(imu_ahead_s) {
+        run.driver.push_imu(run.walk.imu(run.next_imu * 1_000_000));
+        run.next_imu += 1;
+    }
+    for k in 0..frames {
+        run.driver.predict(k * FRAME_NS);
+        match run.driver.push_frame(run.frame(k)) {
+            Ok(BootstrapStep::Buffering) => {}
+            other => return Some(other),
+        }
+    }
+    None
+}
+
+/// A caller may push IMU seconds ahead of the framesets: the framesets are
+/// still buffered and solved, or the timeout fires; the driver never buffers
+/// forever.
+#[test]
+fn imu_pushed_far_ahead_still_ends_the_bootstrap() {
+    // 5 s of IMU, then the 150 framesets it covers: the 2 s window is solved.
+    let step = imu_first(5.0, BootstrapOptions::default(), 150);
+    assert!(
+        matches!(step, Some(Ok(BootstrapStep::Accepted(_)))),
+        "{step:?}"
+    );
+    // 40 s of IMU ahead of a 4 s timeout: the first framesets fall before the
+    // IMU kept, and the timeout still fires on a buffering frameset.
+    let options = BootstrapOptions {
+        timeout_s: 4.0,
+        ..BootstrapOptions::default()
+    };
+    match imu_first(40.0, options, 300) {
+        Some(Err(BootstrapError::NeverAccepted {
+            seconds, attempts, ..
+        })) => {
+            assert!((4.0..4.1).contains(&seconds), "{seconds}");
+            assert_eq!(attempts, 0);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn estimator_starts_from_the_solved_window_and_tracks_monocular() {
     let mut run = Run::new(-1.0, BootstrapOptions::default());

@@ -9,7 +9,8 @@ use kornia_image::Image;
 use kornia_staging_imgproc::panorama::{assemble_panorama, lens_level1, remap_tile};
 use std::f64::consts::PI;
 
-/// The X4 Air clip's V6 factory string (recon/09), as `kornia-staging-io`'s tests hold it.
+/// The Insta360 X4 Air clip's V6 factory string, the one `kornia-staging-io`'s tests hold
+/// (`tests/common/x4air_lens.rs`).
 const V6: &str = "2_2.314940_7096.760_7095.390_3834.830_3864.120_0.119_0.407_90.629_0.000000_0.000000_0.000000_0.93861496_-1.68402135_2.19166017_3.85762072_0.00000000_-0.00495962_0.00156076_-0.00330722_0.00397486_0.00827898_-0.00125315_0.02416405_-0.00143547_15360_7680_131_2.314940_7149.220_7149.700_11543.300_3858.430_-0.212_0.339_88.279_0.000132_-0.000043_-0.033291_0.95675713_-1.80496192_2.88544273_1.76948690_0.00000000_0.00131924_0.00023973_0.00279902_-0.00570679_0.00069985_0.00064811_0.00799088_0.02677096_15360_7680_131_394240";
 const CROP: WindowCrop = WindowCrop {
     src: [7680, 7680],
@@ -22,7 +23,8 @@ fn lenses() -> DualFisheyeLenses {
     DualFisheyeLenses::parse(V6, Some(CROP), [1920, 1920], READOUT_S).unwrap()
 }
 
-/// `R_imu_P` of recon/09 (the nearest permutation): `x_P = -z_imu, y_P = x_imu, z_P = -y_imu`.
+/// `R_imu_P` of the X4 Air (the permutation nearest the epipolar fit on that clip, 0.13 deg
+/// away): `x_P = -z_imu, y_P = x_imu, z_P = -y_imu`.
 fn imu_from_pano() -> Se3<f64> {
     let p_from_imu = Matrix3::new(0.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0);
     let r: So3<f64> = So3::from_unit_quaternion(UnitQuaternion::from_rotation_matrix(
@@ -277,6 +279,36 @@ fn the_standalone_stitch_gives_the_lanes_panorama() {
             .panorama(&views[..1])
             .is_err()
     );
+}
+
+/// A margin past half a hemisphere or a lens below 4x4 is refused before the
+/// tables are built (a typo in the margin would otherwise allocate GBs).
+#[test]
+fn a_wide_margin_or_a_tiny_lens_is_refused_before_the_tables() {
+    let lens = ImageSize {
+        width: 1920,
+        height: 1920,
+    };
+    for margin in [481, 2000] {
+        let refused = lenses().stitch(lens, margin);
+        assert!(
+            matches!(&refused, Err(VioError::Panorama(message)) if message.contains("margin")),
+            "margin {margin}: {refused:?}"
+        );
+    }
+    for tiny in [[3, 1920], [1920, 3]] {
+        let refused = lenses().stitch(
+            ImageSize {
+                width: tiny[0],
+                height: tiny[1],
+            },
+            64,
+        );
+        assert!(
+            matches!(&refused, Err(VioError::Panorama(message)) if message.contains("4x4")),
+            "lens {tiny:?}: {refused:?}"
+        );
+    }
 }
 
 #[test]
