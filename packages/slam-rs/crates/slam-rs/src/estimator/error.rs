@@ -53,6 +53,17 @@ pub enum EstimatorError {
     /// without letting arrival order reach a decision (D17).
     #[error("vio_enforce_realtime is not available in offline mode")]
     EnforceRealtime,
+    /// The first frameset is not the one the solved initial state belongs to.
+    #[error("the initial state is for {expected_t_ns} ns, the first frameset is at {t_ns} ns")]
+    InitialStateTime {
+        /// The initial state's timestamp.
+        expected_t_ns: i64,
+        /// The first frameset's timestamp.
+        t_ns: i64,
+    },
+    /// An initial velocity sigma that is not positive and finite.
+    #[error("initial velocity sigma {0} is not positive and finite")]
+    InitialVelocitySigma(f64),
     /// `vio_max_states` or `vio_max_kfs` is not positive, so the window has no
     /// size.
     #[error("window sizes must be positive, got max_states={max_states} max_kfs={max_kfs}")]

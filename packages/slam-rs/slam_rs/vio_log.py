@@ -416,6 +416,10 @@ class VioStage:
     """The estimator and the D17 hold, which the V2 gate drives the same way."""
     logger: VioLogger
     """Where the trajectories, the window, the landmarks and the counters go."""
+    blank_cameras: tuple[int, ...] = ()
+    """Cameras fed black images (the mono-inertial proxy); they must never hold a keypoint."""
+    blank_keypoints: int = 0
+    """Keypoints the frontend reported in a blanked camera, summed over framesets; must stay 0."""
 
     @property
     def elapsed_ms(self) -> list[float]:
@@ -435,6 +439,12 @@ class VioStage:
         """
         for held, result in self.lockstep.push(frameset):
             self._log_result(held, result)
+        if self.blank_cameras:
+            # A camera with no keypoint can connect no landmark: the proxy is
+            # mono only if this stays zero (DESIGN H3).
+            frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
+            if frame is not None:
+                self.blank_keypoints += sum(len(frame.ids(camera)) for camera in self.blank_cameras)
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""

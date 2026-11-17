@@ -298,6 +298,9 @@ class Vio:
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
+    def bootstrap_report(self) -> str | None:
+        """The inertial bootstrap's attempts as JSON (``config.vio_bootstrap``), or None on the stereo start."""
+
     def __repr__(self) -> str: ...
 
 class VioConfig:
@@ -317,6 +320,8 @@ class VioConfig:
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
     vio_gravity_ms2: float
     """Magnitude of gravity in m/s²; the feed sets the recording's own value when it carries one."""
+    vio_bootstrap: str
+    """``config.vio_bootstrap``: ``"stereo"`` (default), ``"inertial"`` or ``"auto"``; anything else raises ``ValueError``."""
 
     def __repr__(self) -> str: ...
 

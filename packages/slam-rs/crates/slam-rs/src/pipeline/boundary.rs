@@ -21,8 +21,9 @@ pub enum VioStatus {
     /// The lagged frontend accepted this frameset, but no estimate is ready.
     /// Do not retry it: submit the next frame or call [`Vio::flush`].
     Buffered,
-    /// The first keyframe lacked stereo structure. No pose exists yet. This
-    /// frameset was consumed: submit the next one, keeping frontend tracks.
+    /// No pose exists yet: the first keyframe lacked stereo structure, or the
+    /// inertial bootstrap is still buffering its window. This frameset was
+    /// consumed: submit the next one, keeping frontend tracks.
     NoVisualFeatures,
 }
 
@@ -165,6 +166,9 @@ pub enum VioError {
     /// Frame-boundary IMU accumulation failed.
     #[error(transparent)]
     Accumulate(#[from] crate::imu::AccumulateError),
+    /// The inertial bootstrap gave up or could not start.
+    #[error(transparent)]
+    Bootstrap(#[from] super::bootstrap::BootstrapError),
     /// The operating system refused the estimator thread (D84 solve or lagged frameset).
     #[error("the lagged estimator thread did not start: {0}")]
     EstimatorThread(String),

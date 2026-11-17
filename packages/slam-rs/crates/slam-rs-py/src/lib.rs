@@ -343,6 +343,16 @@ impl Vio {
             .map_err(value_error)
     }
 
+    /// The inertial bootstrap's attempts as JSON (`config.vio_bootstrap`),
+    /// or None on the stereo start.
+    fn bootstrap_report(&self) -> PyResult<Option<String>> {
+        self.inner
+            .bootstrap_report()
+            .map(slam_rs::bootstrap::BootstrapReport::to_json)
+            .transpose()
+            .map_err(value_error)
+    }
+
     /// The window, its landmarks and the last measured frame's statistics.
     ///
     /// `None` until a frameset has been measured: before that the window is
@@ -808,6 +818,31 @@ impl VioConfig {
     #[setter]
     fn set_vio_gravity_ms2(&mut self, gravity: f64) {
         self.inner.vio_gravity_ms2 = gravity;
+    }
+
+    /// `config.vio_bootstrap`: `"stereo"` (the default), `"inertial"` or `"auto"`.
+    #[getter]
+    fn vio_bootstrap(&self) -> &'static str {
+        match self.inner.vio_bootstrap {
+            slam_rs::config::VioBootstrap::Stereo => "stereo",
+            slam_rs::config::VioBootstrap::Inertial => "inertial",
+            slam_rs::config::VioBootstrap::Auto => "auto",
+        }
+    }
+
+    #[setter]
+    fn set_vio_bootstrap(&mut self, value: &str) -> PyResult<()> {
+        self.inner.vio_bootstrap = match value {
+            "stereo" => slam_rs::config::VioBootstrap::Stereo,
+            "inertial" => slam_rs::config::VioBootstrap::Inertial,
+            "auto" => slam_rs::config::VioBootstrap::Auto,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "vio_bootstrap must be stereo, inertial or auto, not {other:?}"
+                )));
+            }
+        };
+        Ok(())
     }
 
     fn __repr__(&self) -> String {
