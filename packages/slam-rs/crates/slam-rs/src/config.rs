@@ -222,6 +222,32 @@ pub struct VioConfig {
     #[serde(rename = "port.klt_exit_step_px")]
     pub port_klt_exit_step_px: Option<f32>,
 
+    // ── panorama lane (read only when the rig holds a full panorama) ───
+    /// Columns each hemisphere tile reaches past its 180-degree half of the
+    /// panorama, on each side, in panorama pixels. A multiple of the cell size
+    /// keeps the margin whole cells.
+    #[serde(rename = "config.panorama_tile_margin_px")]
+    pub panorama_tile_margin_px: u32,
+    /// Tracked keypoints above this absolute latitude, degrees, are dropped;
+    /// detection skips every cell row whose centre lies above it.
+    #[serde(rename = "config.panorama_track_max_latitude_deg")]
+    pub panorama_track_max_latitude_deg: f32,
+    /// Stitch two fisheye lens images into the two tiles (the Insta360 lane).
+    /// The caller then hands the factory lens calibration to
+    /// `Vio::with_panorama_lenses`; false keeps every rig as it is.
+    #[serde(rename = "config.panorama_dual_fisheye")]
+    pub panorama_dual_fisheye: bool,
+    /// Dual-fisheye tiles: tile `k`'s ray origin is lens `k`'s centre (true)
+    /// or both tiles share the lens midpoint (false: parallax between the
+    /// lenses is ignored).
+    #[serde(rename = "config.panorama_two_centre")]
+    pub panorama_two_centre: bool,
+    /// Dual-fisheye tiles: hand the estimator rolling-shutter corrected
+    /// keypoints (each rotated to the middle row's time with the gyro); the
+    /// frontend keeps tracking the raw positions.
+    #[serde(rename = "config.panorama_rolling_shutter")]
+    pub panorama_rolling_shutter: bool,
+
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
     #[serde(rename = "config.vio_linearization_type")]
@@ -347,6 +373,12 @@ impl Default for VioConfig {
             port_keyframe_solve_deferred: false,
             port_frontend_lag: false,
             port_klt_exit_step_px: None,
+
+            panorama_tile_margin_px: 64,
+            panorama_track_max_latitude_deg: 75.0,
+            panorama_dual_fisheye: false,
+            panorama_two_centre: true,
+            panorama_rolling_shutter: false,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,

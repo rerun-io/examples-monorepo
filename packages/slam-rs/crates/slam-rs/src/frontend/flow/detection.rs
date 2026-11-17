@@ -79,6 +79,14 @@ impl<
     ) -> Result<(), FrontendError> {
         let config = self.detector_config();
         let mark = std::time::Instant::now();
+        // The frame's masks, then the static detection-only cells, in that
+        // order; with no static cells this is the frame's list unchanged.
+        for camera in cameras.clone() {
+            let combined: &mut CellMasks = &mut self.detect_masks[camera];
+            combined.masks.clear();
+            combined.extend(&self.masks[camera]);
+            combined.extend(&self.detection_masks[camera]);
+        }
         let Self {
             stages,
             side_detectors,
@@ -88,7 +96,7 @@ impl<
             detection_grids,
             cells,
             occupancy_grid,
-            masks,
+            detect_masks: masks,
             ..
         } = self;
         let detector = stages.detector();

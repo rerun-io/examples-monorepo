@@ -491,6 +491,42 @@ class _VideoIndex:
 
 
 @dataclass(slots=True, frozen=True)
+class Insta360Factory:
+    """The factory lens calibration an Insta360 recording carries, as slam-rs's Rust core parses it."""
+
+    lens_string: str
+    """The raw factory lens string (``property:insta360:offset_v6``)."""
+    window_crop: tuple[int, int, int, int, int, int] | None
+    """``(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`` the lens string is stated through; None when the clip has none."""
+    readout_s: float
+    """Rolling-shutter readout of one lens image, seconds; positive reads the rows top to bottom."""
+
+    def vio_argument(self) -> tuple[str, tuple[int, int, int, int, int, int] | None, float]:
+        """The ``dual_fisheye`` argument of ``slam_rs._core.Vio``."""
+        return (self.lens_string, self.window_crop, self.readout_s)
+
+
+def read_insta360_factory(properties: pa.Table) -> Insta360Factory | None:
+    """The Insta360 factory calibration from a recording's properties, or None when it is not an Insta360 recording.
+
+    Raises:
+        ValueError: If the recording names a V6 lens string but not the readout written beside it.
+    """
+    if "property:insta360:offset_v6" not in properties.column_names:
+        return None
+    crop_column: str = "property:insta360:window_crop"
+    crop: list[int] = [int(value) for value in _static_values(properties, crop_column)] if crop_column in properties.column_names else []
+    readout_column: str = "property:insta360:rolling_shutter_readout_s"
+    if readout_column not in properties.column_names:
+        raise ValueError("an Insta360 recording without rolling_shutter_readout_s: convert it again with slam-rs-insv")
+    return Insta360Factory(
+        lens_string=_static_string(properties, "property:insta360:offset_v6"),
+        window_crop=(crop[0], crop[1], crop[2], crop[3], crop[4], crop[5]) if len(crop) == 6 else None,
+        readout_s=float(_static_values(properties, readout_column)[0]),
+    )
+
+
+@dataclass(slots=True, frozen=True)
 class SegmentFeed:
     """One segment's calibration, inertial data, ground truth and grayscale framesets."""
 
@@ -543,6 +579,8 @@ class SegmentFeed:
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
     gravity_ms2: float | None = None
     """Gravity magnitude in m/s² the recording states on its IMU node (``gravity_ms2``), or None when it states none."""
+    insta360: Insta360Factory | None = None
+    """The factory lens calibration of an Insta360 recording (recognised by its ``insta360`` property), else None."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -1098,6 +1136,7 @@ def _build_feed(
         cached_payloads=cached_payloads,
         decode_device=decode_device,
         gravity_ms2=gravity_ms2,
+        insta360=read_insta360_factory(properties),
     )
 
 

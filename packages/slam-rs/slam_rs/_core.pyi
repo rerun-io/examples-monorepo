@@ -258,6 +258,7 @@ class Vio:
         threads: int = 1,
         max_keypoints: int | None = None,
         backend: BackendRequest = "auto",
+        dual_fisheye: tuple[str, tuple[int, int, int, int, int, int] | None, float] | None = None,
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
 
@@ -284,6 +285,23 @@ class Vio:
 
     @property
     def camera_count(self) -> int: ...
+    @property
+    def panorama_tile_origins(self) -> tuple[int, int] | None:
+        """Panorama column of each hemisphere tile's column 0 when the rig is one full panorama, else None.
+
+        Tile ``k``'s pixel ``(x, y)`` is the panorama's ``((x + origins[k]) mod W, y)``.
+        """
+    @property
+    def panorama_ingest_ns(self) -> int | None:
+        """Wall time of the last dual-fisheye host ingest in ns: the CPU remap of both lenses, or on the GPU lane the
+        lens byte copy (the stitch runs on the device); None for any other rig."""
+    def panorama_image(self) -> UInt8[ndarray, "h w"] | None:
+        """The stitched 1920x960 panorama of the last dual-fisheye frameset (``dual_fisheye`` given), else None.
+
+        On the GPU lane it is remapped on the host from the lens bytes, only when asked: no device read-back.
+        """
+    def rolling_shutter_corrected(self, tile: int, pixels: Float64[ndarray, "n 2"], omega_imu: tuple[float, float, float]) -> Float64[ndarray, "n 2"]:
+        """Tile pixels with the rolling shutter removed for a gyro rate in the IMU frame, as the estimator's copy gets them."""
     @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""
@@ -382,6 +400,9 @@ class VioConfig:
     """Magnitude of gravity in m/s²; the feed sets the recording's own value when it carries one."""
     vio_bootstrap: str
     """``config.vio_bootstrap``: ``"stereo"`` (default), ``"inertial"`` or ``"auto"``; anything else raises ``ValueError``."""
+    @property
+    def panorama_dual_fisheye(self) -> bool:
+        """``config.panorama_dual_fisheye``: the caller hands ``Vio`` the factory lenses (``dual_fisheye``)."""
 
     def __repr__(self) -> str: ...
 
@@ -542,3 +563,88 @@ def catalog_pair_imu(gyro_t_ns: Int64[ndarray, " n_gyro"], gyro_rad_s: Float64[n
 def catalog_rig_profile(dataset: str) -> "RigProfile":
     """Return the camera selection and clock rules owned by Rust."""
     ...
+
+
+class InsvLens:
+    """One lens of an Insta360 factory calibration at the track resolution, window crop applied (Mei sphere model)."""
+
+    @property
+    def version(self) -> int: ...
+    @property
+    def xi(self) -> float: ...
+    @property
+    def fx(self) -> float: ...
+    @property
+    def fy(self) -> float: ...
+    @property
+    def cx(self) -> float: ...
+    @property
+    def cy(self) -> float: ...
+    @property
+    def px_per_rad(self) -> float: ...
+    @property
+    def radial(self) -> list[float]: ...
+    @property
+    def tangential(self) -> list[float]: ...
+    @property
+    def prism(self) -> list[float]: ...
+    @property
+    def ypr_deg(self) -> list[float]: ...
+    @property
+    def translation_m(self) -> list[float]: ...
+    @property
+    def lens_from_rig_rotation(self) -> list[list[float]]:
+        """Rig -> lens rotation, row-major. The rig frame has lens 0's axes."""
+    @property
+    def pano_from_lens_rotation(self) -> list[list[float]]:
+        """``R_P_lens``, row-major: lens vectors into the panorama frame P."""
+    @property
+    def pano_centre_m(self) -> list[float]:
+        """Lens centre in P, metres, origin at the midpoint of the lens centres."""
+    @property
+    def lens_from_rig_translation_m(self) -> list[float]:
+        """Rig -> lens translation in metres; the rig origin is the midpoint of the two lens centres."""
+    def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
+        """Image radius in track pixels of rays ``theta`` radians off the axis (radial part of the model only)."""
+
+
+class InsvClip:
+    """An Insta360 ``.insv`` clip: trailer metadata, factory lenses, IMU, frame times and the two HEVC lens tracks."""
+
+    def __init__(self, path: str) -> None:
+        """Read the container index and the trailer; raises ``ValueError`` on a malformed file."""
+    @property
+    def camera_type(self) -> str: ...
+    @property
+    def firmware(self) -> str: ...
+    @property
+    def first_frame_timestamp_us(self) -> int: ...
+    @property
+    def rolling_shutter_ms(self) -> float | None: ...
+    @property
+    def gyro_timestamp_ms(self) -> float | None: ...
+    @property
+    def factory_strings(self) -> list[tuple[str, str]]:
+        """Raw lens strings present in the metadata, as ``(version name, string)``: ``v1``, ``v2``, ``v3``, ``v6``."""
+    @property
+    def lens_track(self) -> tuple[int, int]:
+        """Video track index of lens 0 and lens 1."""
+    @property
+    def lenses(self) -> list[InsvLens]: ...
+    @property
+    def lenses_v6(self) -> list[InsvLens]:
+        """V6 factory calibration per lens (lens order); empty without a V6 string."""
+    @property
+    def window_crop(self) -> tuple[int, int, int, int, int, int] | None:
+        """``(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`` of the lens strings."""
+    @property
+    def resolution(self) -> tuple[int, int]: ...
+    @property
+    def num_frames(self) -> int: ...
+    def imu(self) -> tuple[Int64[ndarray, " n"], Float64[ndarray, "n 3"], Float64[ndarray, "n 3"]]:
+        """Times on the trailer clock (us), accel (m/s^2) and gyro (rad/s) in the IMU's axes."""
+    def frame_exposures(self, vin1: bool) -> tuple[Int64[ndarray, " n_frames"], Float64[ndarray, " n_frames"]]:
+        """Per-frame exposure entries of record 4 (``vin1=False``) or 12: times (us) and exposure times (s)."""
+    def read_samples(self, track: int, start: int, stop: int) -> tuple[list[bytes], Bool[ndarray, " n"]]:
+        """Samples ``start..stop`` of one track as Annex B access units with parameter sets on IRAPs, and IRAP flags."""
+

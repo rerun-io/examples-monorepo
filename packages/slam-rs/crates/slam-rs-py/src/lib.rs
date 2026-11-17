@@ -6,6 +6,7 @@
 //! `ValueError`, never a panic.
 
 mod catalog;
+mod insv;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
@@ -210,26 +211,99 @@ impl Vio {
     /// back. Invalid input and runtime initialization panics also raise
     /// `ValueError` (D32). `threads` controls only the CPU pool and is accepted
     /// but inert on the GPU lane.
+    ///
+    /// `dual_fisheye` (with `config.panorama_dual_fisheye`) is the factory
+    /// calibration a two-lens rig is stitched from: `(lens_string, window_crop,
+    /// readout_s)`, the raw V3/V6 string, the window crop
+    /// `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` or `None`, and the
+    /// signed rolling-shutter readout (positive = top to bottom). Rust parses it.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto"))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto", dual_fisheye = None))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
         backend: &str,
+        dual_fisheye: Option<(String, Option<[i64; 6]>, f64)>,
     ) -> PyResult<Self> {
         let request: BackendRequest = backend.parse().map_err(PyValueError::new_err)?;
         let backend: Backend = slam_rs::select_backend(request).map_err(value_error)?;
+        let lenses: Option<slam_rs::DualFisheyeLenses> = dual_fisheye
+            .map(|(text, crop, readout_s)| {
+                let size: [u32; 2] = *calibration.inner.resolution.first().ok_or_else(|| {
+                    PyValueError::new_err("a dual-fisheye rig needs its lens cameras")
+                })?;
+                slam_rs::DualFisheyeLenses::parse(&text, window_crop(crop)?, size, readout_s)
+                    .map_err(value_error)
+            })
+            .transpose()?;
         Ok(Self {
-            inner: slam_rs::Vio::with_backend(
+            inner: slam_rs::Vio::with_panorama_lenses(
                 config.inner.clone(),
                 calibration.inner.clone(),
                 frontend_options(threads, max_keypoints),
                 backend,
+                lenses,
             )
             .map_err(value_error)?,
         })
+    }
+
+    /// The stitched 1920x960 panorama of the last dual-fisheye frameset
+    /// (`uint8[h, w]`, tile centres side by side), `None` for any other rig.
+    /// On the GPU lane it is remapped on the host from the lens bytes, only when asked.
+    fn panorama_image<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<u8>>>> {
+        let Some(pano) = self.inner.panorama_image().map_err(value_error)? else {
+            return Ok(None);
+        };
+        let (width, height) = (pano.width(), pano.height());
+        Ok(Some(
+            numpy::ndarray::Array2::from_shape_vec((height, width), pano.as_slice().to_vec())
+                .map_err(value_error)?
+                .to_pyarray(py),
+        ))
+    }
+
+    /// Wall time of the last dual-fisheye host ingest in ns (the CPU remap of
+    /// both lenses; on the GPU lane the lens byte copy, the stitch itself runs on
+    /// the device), `None` for any other rig.
+    #[getter]
+    fn panorama_ingest_ns(&self) -> Option<u64> {
+        self.inner
+            .panorama()
+            .and_then(|rig| rig.dual_fisheye_ingest_ns())
+    }
+
+    /// Rolling-shutter correction of tile pixels (`float64[n, 2]`) for a gyro
+    /// rate `omega_imu` (rad/s, IMU frame), exactly as the estimator's copy is
+    /// corrected; rows that cannot be corrected come back unchanged. Raises on
+    /// a rig that is not a dual fisheye.
+    fn rolling_shutter_corrected<'py>(
+        &self,
+        py: Python<'py>,
+        tile: usize,
+        pixels: &Bound<'py, PyAny>,
+        omega_imu: [f64; 3],
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let rig = self
+            .inner
+            .panorama()
+            .filter(|rig| rig.tile_lut(0).is_some())
+            .ok_or_else(|| PyValueError::new_err("not a dual-fisheye rig"))?;
+        if tile > 1 {
+            return Err(PyIndexError::new_err(format!("tile {tile}")));
+        }
+        let rows: Vec<[f64; 2]> = float64_pairs(pixels, "pixels")?;
+        let corrected: Vec<Vec<f64>> = rig
+            .rolling_shutter_corrected(tile, &rows, omega_imu)
+            .into_iter()
+            .map(|pixel| pixel.to_vec())
+            .collect();
+        if corrected.is_empty() {
+            return Ok(PyArray2::zeros(py, [0, 2], false));
+        }
+        Ok(PyArray2::from_vec2(py, &corrected)?)
     }
 
     /// Whether the frontend runs on the GPU.
@@ -251,6 +325,19 @@ impl Vio {
     #[getter]
     fn camera_count(&self) -> usize {
         self.inner.frontend().camera_count()
+    }
+
+    /// Panorama column of each hemisphere tile's column 0, before wrapping,
+    /// when the rig is one full panorama; `None` otherwise.
+    ///
+    /// The frontend then tracks two tiles: tile `k`'s pixel `(x, y)` is the
+    /// panorama's `((x + origins[k]) mod W, y)`.
+    #[getter]
+    fn panorama_tile_origins(&self) -> Option<(i64, i64)> {
+        self.inner.panorama().map(|rig| {
+            let [first, second] = rig.tile_origins();
+            (first, second)
+        })
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
@@ -892,6 +979,39 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
         .collect())
 }
 
+fn float64_pairs(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 2]>> {
+    let array: &Bound<'_, PyArray2<f64>> = object
+        .cast::<PyArray2<f64>>()
+        .map_err(|_| PyValueError::new_err(format!("{name} must be a 2-D float64 numpy array")))?;
+    if array.shape()[1] != 2 {
+        return Err(PyValueError::new_err(format!(
+            "{name} must have shape (n, 2), got {:?}",
+            array.shape()
+        )));
+    }
+    let readonly = array.readonly();
+    let values: &[f64] = contiguous(&readonly, name, name)?;
+    Ok(values.as_chunks::<2>().0.to_vec())
+}
+
+fn u32_arg(value: i64) -> PyResult<u32> {
+    u32::try_from(value).map_err(|_| PyValueError::new_err(format!("{value} is not a size")))
+}
+
+/// A factory window crop `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` from Python.
+fn window_crop(
+    crop: Option<[i64; 6]>,
+) -> PyResult<Option<kornia_staging_io::insta360::WindowCrop>> {
+    crop.map(|[sw, sh, dw, dh, ox, oy]| {
+        Ok(kornia_staging_io::insta360::WindowCrop {
+            src: [u32_arg(sw)?, u32_arg(sh)?],
+            dst: [u32_arg(dw)?, u32_arg(dh)?],
+            offset: [ox, oy],
+        })
+    })
+    .transpose()
+}
+
 /// VIO configuration read from JSON. Omitted keys retain constructor defaults.
 #[pyclass(module = "slam_rs._core", skip_from_py_object)]
 #[derive(Debug, Clone)]
@@ -936,6 +1056,12 @@ impl VioConfig {
     #[setter]
     fn set_optical_flow_image_safe_radius(&mut self, radius: f32) {
         self.inner.optical_flow_image_safe_radius = radius;
+    }
+
+    /// `config.panorama_dual_fisheye`: the caller hands `Vio` the factory lenses.
+    #[getter]
+    fn panorama_dual_fisheye(&self) -> bool {
+        self.inner.panorama_dual_fisheye
     }
 
     /// `config.vio_gravity_ms2`: the magnitude of gravity, m/s². A dataset fact
@@ -1531,6 +1657,7 @@ fn device_probes_run() -> usize {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     catalog::register(module)?;
+    insv::register(module)?;
     module.add("__version__", slam_rs::VERSION)?;
     // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
