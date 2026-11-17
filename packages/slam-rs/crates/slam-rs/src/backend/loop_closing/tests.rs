@@ -835,6 +835,69 @@ fn realtime_and_offline_give_the_same_final_trajectory_through_a_pose_graph_opti
 }
 
 #[test]
+fn the_global_ba_starts_from_the_map_after_loops_and_pgo() {
+    // k0: `Vio::finish_map` is `runner.update(|b| b.finish(..))` with no flush
+    // before it. The update must take every queued stamp, the revisit's query and
+    // its PGO included, before the GBA reads the map; a GBA that ran first would
+    // start from the raw poses.
+    let loops = LoopClosingConfig::default();
+    let mut scene = scene(1, 0.3, true, loops.clone(), 100);
+    let calib = calibration(1);
+    let config = VioConfig {
+        backend_loop_closing: loops,
+        ..VioConfig::default()
+    };
+    let models: Vec<_> = calib
+        .intrinsics
+        .iter()
+        .map(|camera| camera.to_staged().unwrap())
+        .collect();
+    let mut runner_in = |mode: crate::config::BackendMode| {
+        let backend = MapBackend::new(map_config(100), calib.resolution.clone())
+            .with_extrinsics(calib.t_i_c.clone())
+            .with_loop_closing(&config, &calib)
+            .with_gba_rig(crate::backend::GbaRig::new(models.clone(), &calib.t_i_c));
+        let mut runner = crate::backend::BackendRunner::new(backend, mode, 16).unwrap();
+        for stamp in &mut scene.stamps {
+            runner.submit(copy_stamp(stamp));
+        }
+        runner
+    };
+    // The map after loops and PGO, flushed on its own.
+    let mut flushed = runner_in(crate::config::BackendMode::Offline);
+    flushed.flush();
+    let after_pgo = crate::backend::MapSnapshot::clone(&flushed.view().view);
+    assert_eq!(
+        after_pgo.correction.epoch, 1,
+        "one pose-graph optimization ran"
+    );
+    assert_ne!(
+        after_pgo.keyframe_poses, after_pgo.keyframe_raw_poses,
+        "the PGO moved no keyframe"
+    );
+    for mode in [
+        crate::config::BackendMode::Offline,
+        crate::config::BackendMode::Realtime,
+    ] {
+        let mut runner = runner_in(mode);
+        let result = runner
+            .update(|backend| backend.finish(true, &config))
+            .unwrap();
+        assert!(result.gba.is_some(), "{mode:?}: the GBA ran");
+        assert_eq!(result.keyframe_t_ns, after_pgo.keyframe_t_ns, "{mode:?}");
+        assert_eq!(
+            result.keyframe_poses_before_gba, after_pgo.keyframe_poses,
+            "{mode:?}: the GBA did not start from the map after loops and PGO"
+        );
+        assert_eq!(
+            runner.view().view.correction.epoch,
+            1,
+            "{mode:?}: the PGO ran before the GBA"
+        );
+    }
+}
+
+#[test]
 fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
     let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
     let t_i_c = calibration(1).t_i_c;
