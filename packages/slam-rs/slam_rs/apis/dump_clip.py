@@ -25,7 +25,7 @@ from serde import coerce, serde
 from serde.json import to_json
 
 from slam_rs import _core
-from slam_rs.catalog_feed import CatalogSegment, Frameset, open_segment
+from slam_rs.catalog_feed import CatalogSegment, Frameset, dataset_rig, open_segment
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.reference import Benchmarks, DecodePath, ReferenceSegment, load_benchmarks, resolved_flow_config
 
@@ -126,6 +126,7 @@ def main(config: Config) -> None:
 
     with open_segment(
         CatalogSegment(settings.catalog_url, segment.dataset_name, segment.segment_id),
+        profile=dataset_rig(settings.dataset(segment.dataset_name)),
         window_s=config.window_s,
     ) as feed:
         calibration_text: str

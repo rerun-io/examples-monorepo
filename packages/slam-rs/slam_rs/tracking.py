@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_calibration import ImuCalib
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, dataset_rig, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -307,7 +307,7 @@ def run_segment(
     """
     source = source or CatalogSegment(catalog or settings.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
-    with open_segment(source, decode_device="cpu") as feed:
+    with open_segment(source, profile=dataset_rig(settings.dataset(segment.dataset_name)), decode_device="cpu") as feed:
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)

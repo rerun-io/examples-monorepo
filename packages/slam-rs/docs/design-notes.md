@@ -89,6 +89,8 @@ frame = vio.flow_frame()        # the keypoints of the last accepted frameset, o
 
 - Tiers: `smoke` (MIO10, MGO09), `release` (MIO07, MGO07, MIO14),
   and `listed` (the other five); the two hold-outs stay excluded from tuning.
+  `euroc` holds EuRoC's eleven sequences (catalog dataset `vslam-lab-euroc`),
+  apart so the MSD tiers run on a catalog without it.
 - Inputs and ground truth come from the catalog; an unavailable catalog fails
   integration tests. RoboCap has no ground truth and receives no ATE verdict.
 - Prefer the baseline for the host, lane and profile; otherwise use the first
