@@ -66,6 +66,9 @@ class Lockstep:
     elapsed_ms: list[float] = field(default_factory=list)
     """Wall time per yielded pose. Lag mode adds startup frontend time to the
     final drain; calls waiting for stereo do not yield a pose."""
+    consumed_ms: list[float] = field(default_factory=list)
+    """Wall time of every ``track`` call that consumed a frameset, posed or not (a bootstrapping or
+    stereo-waiting frameset included); refusals for want of IMU are not in it."""
     _buffered: Frameset | None = None
     """The accepted frame still waiting for a lagged estimate."""
     _buffered_flow: _core.FlowFrame | None = None
@@ -126,6 +129,7 @@ class Lockstep:
             if result.status == _core.VioStatus.NeedMoreImu:
                 self.retries += 1
                 return
+            self.consumed_ms.append(elapsed_ms)
             self.pending.pop(0)
             if result.status == _core.VioStatus.Buffered:
                 self._buffered = held

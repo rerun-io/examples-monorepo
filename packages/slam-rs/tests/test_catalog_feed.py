@@ -25,6 +25,7 @@ from slam_rs.catalog_feed import (
     CatalogSegment,
     Frameset,
     ImuStream,
+    RigProfile,
     SegmentFeed,
     _rig_trajectory,
     _shared_codec,
@@ -106,9 +107,29 @@ def test_radtan8_keeps_eight_coefficients() -> None:
     assert calib.distortion_valid_radius == pytest.approx(2.72764)
 
 
+@pytest.mark.parametrize(
+    ("distortion_model", "coefficients", "model"),
+    [("double_sphere", [-0.17, 0.59], "ds"), ("eucm", [0.63, 1.04], "eucm"), ("equirectangular", [np.pi], "equirectangular")],
+)
+def test_wide_angle_and_panorama_models_keep_their_coefficients(distortion_model: str, coefficients: list[float], model: str) -> None:
+    """The intrinsics come from the pinhole matrix; the catalog coefficients are only the model's own terms."""
+    slots: Float64[ndarray, " 8"] = np.zeros(8, dtype=np.float64)
+    slots[: len(coefficients)] = coefficients
+    calib: CameraCalib = camera_calib(0, _kb4_statics(distortion_model=distortion_model, distortion_coefficients=slots))
+    assert calib.model == model
+    np.testing.assert_allclose(calib.distortion, coefficients)
+    assert (calib.fx, calib.cx) == pytest.approx((420.5274, 469.4826))
+
+
 def test_an_unknown_distortion_model_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported distortion model"):
-        camera_calib(0, _kb4_statics(distortion_model="double_sphere"))
+        camera_calib(0, _kb4_statics(distortion_model="unified"))
+
+
+def test_decode_threads_must_be_positive() -> None:
+    assert RigProfile(decode_threads=4).decode_threads == 4
+    with pytest.raises(ValueError, match="decode_threads"):
+        RigProfile(decode_threads=0)
 
 
 def test_the_extrinsic_is_inverted_only_for_child_from_parent() -> None:

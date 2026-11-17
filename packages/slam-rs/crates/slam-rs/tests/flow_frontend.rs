@@ -522,7 +522,9 @@ struct EmptyScan {
 }
 
 impl slam_rs::frontend::detect::FrameCornerScan for EmptyScan {
-    fn fork_frame(&self) -> Option<Box<Self>> { self.independent.then(|| Box::new(self.clone())) }
+    fn fork_frame(&self) -> Option<Box<Self>> {
+        self.independent.then(|| Box::new(self.clone()))
+    }
 }
 
 impl CornerScan for EmptyScan {
@@ -608,6 +610,37 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
         match &expected {
             None => expected = Some(actual),
             Some(expected) => assert_eq!(&actual, expected),
+        }
+    }
+}
+
+/// With stereo matching off a stereo rig shares no keypoint id between
+/// cameras, and every camera detects on its own, even with
+/// `optical_flow_detection_nonoverlap` off.
+#[test]
+fn stereo_matching_off_shares_no_id_and_every_camera_detects() {
+    for nonoverlap in [true, false] {
+        let off: VioConfig = VioConfig {
+            optical_flow_stereo_matching: false,
+            optical_flow_detection_nonoverlap: nonoverlap,
+            ..config()
+        };
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> =
+            FrameToFrameOpticalFlow::new(off, &rig(2), FrontendOptions::default()).unwrap();
+        assert!(!flow.matches_into(1));
+        for shift in [0, 1] {
+            let images = [dotted_image(shift), dotted_image(shift)];
+            flow.process_frame(i64::from(shift), &images, &PosePrediction::default(), &[])
+                .unwrap();
+            let [zero, one] = [&flow.frame().cameras[0], &flow.frame().cameras[1]];
+            assert!(
+                zero.ids.iter().all(|id| one.get(*id).is_none()),
+                "nonoverlap {nonoverlap}"
+            );
+            assert!(
+                !zero.ids.is_empty() && !one.ids.is_empty(),
+                "nonoverlap {nonoverlap}"
+            );
         }
     }
 }

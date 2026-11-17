@@ -62,6 +62,10 @@ pub struct FrameToFrameOpticalFlow<
     cameras: Vec<RigCamera<f32>>,
     /// `E`, one 4x4 essential matrix per camera.
     essential: Vec<Matrix4<f32>>,
+    /// Whether camera 0 and this camera have epipolar geometry, so that new
+    /// camera-0 keypoints may be matched into it: `false` for camera 0 itself
+    /// and for a camera that shares camera 0's centre.
+    stereo_pairs: Vec<bool>,
     /// One detection grid per camera, derived from that camera's image size.
     detection_grids: Vec<CellGrid>,
     /// The occupancy grid, shaped from camera 0 as `cells` is.
@@ -333,16 +337,21 @@ impl<
             return Err(FrontendError::NoCameras);
         }
         // Each essential matrix uses that camera's pose relative to camera 0.
-        let essential: Vec<Matrix4<f32>> = (0..num_cams)
+        // `T_c0_c0`, and any camera at camera 0's centre, has no baseline and
+        // so no essential matrix: its entry is zero and it is never matched.
+        let essential_or_none: Vec<Option<Matrix4<f32>>> = (0..num_cams)
             .map(|index| {
                 if index == 0 {
-                    // `T_c0_c0` has no baseline, so `t.normalized()` would be
-                    // NaN; nothing reads index 0 either way.
-                    return Matrix4::zeros();
+                    return None;
                 }
                 let t_i_j: Se3<f32> = calib.t_i_c[0].inverse() * calib.t_i_c[index];
-                cast_matrix4(&compute_essential(&t_i_j.cast::<f64>()))
+                compute_essential(&t_i_j.cast::<f64>()).map(|essential| cast_matrix4(&essential))
             })
+            .collect();
+        let stereo_pairs: Vec<bool> = essential_or_none.iter().map(Option::is_some).collect();
+        let essential: Vec<Matrix4<f32>> = essential_or_none
+            .into_iter()
+            .map(|essential| essential.unwrap_or_else(Matrix4::zeros))
             .collect();
 
         // `detectKeypointsWithCells` derives its grid from the image it is given
@@ -393,6 +402,7 @@ impl<
             calib,
             cameras,
             essential,
+            stereo_pairs,
             detection_grids,
             occupancy_grid,
             pattern: PhantomData,
@@ -465,6 +475,15 @@ impl<
     /// If `camera` is outside the rig.
     pub fn essential(&self, camera: usize) -> Matrix4<f32> {
         self.essential[camera]
+    }
+
+    /// Whether new camera-0 keypoints are matched into `camera`: stereo
+    /// matching is on and the pair has epipolar geometry (distinct centres).
+    ///
+    /// # Panics
+    /// If `camera` is outside the rig.
+    pub fn matches_into(&self, camera: usize) -> bool {
+        self.config.optical_flow_stereo_matching && self.stereo_pairs[camera]
     }
 
     /// The configuration this frontend runs.
@@ -702,7 +721,8 @@ impl<
                 depth: self.depth_guess,
                 last_detect_count: self.last_detect_count,
                 eligible: self.t_ns.is_some()
-                    && self.masks.iter().all(|masks| masks.masks.is_empty()),
+                    && self.masks.iter().all(|masks| masks.masks.is_empty())
+                    && (1..num_cams).all(|camera| self.matches_into(camera)),
             },
             &mut self.timings,
         )?;
@@ -740,7 +760,11 @@ impl<
         // reads them itself, which is the read the detector used to make on
         // every frameset.
         let mark: std::time::Instant = std::time::Instant::now();
-        self.stages.detector().scanner_mut().take_cells().map_err(Into::into)?;
+        self.stages
+            .detector()
+            .scanner_mut()
+            .take_cells()
+            .map_err(Into::into)?;
         self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {

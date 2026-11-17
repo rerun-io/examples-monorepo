@@ -293,6 +293,8 @@ class RigProfile:
     ``property:capture:start_time_ns``; RoboCap records the device clock itself,
     and that is what trajectory CSV exports use.
     """
+    decode_threads: int = 1
+    """PyAV decoder threads per camera stream; 1 is the single-threaded reference decode, more use frame threading."""
 
     def __post_init__(self) -> None:
         """Refuse a profile the feed cannot honour, before anything reads a recording with it.
@@ -304,6 +306,8 @@ class RigProfile:
             raise ValueError(f"downscale must be at least 1; got {self.downscale}")
         if self.frameset_tolerance_ns < 0:
             raise ValueError(f"frameset_tolerance_ns cannot be negative; got {self.frameset_tolerance_ns}")
+        if self.decode_threads < 1:
+            raise ValueError(f"decode_threads must be at least 1; got {self.decode_threads}")
 
 MSD_RIG: RigProfile = RigProfile()
 """The Monado SLAM Dataset rigs: every camera, native resolution, one clock, paired inertial channels."""
@@ -408,8 +412,8 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     )
 
 
-def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
-    """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread.
+def decode_gray(mp4_bytes: bytes, downscale: int = 1, threads: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
+    """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread unless ``threads`` asks for more.
 
     ``reformat(format="gray8")`` performs the limited-to-full range expansion the
     MSD streams need; reading the raw Y plane instead is a systematic photometric
@@ -431,6 +435,7 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
     Args:
         mp4_bytes: MP4 produced by :func:`wrap_mp4`.
         downscale: Integer factor to shrink each frame by.
+        threads: Decoder threads; above one PyAV decodes with frame threading (same pixels, more latency).
 
     Yields:
         One grayscale image per frame, in decode order.
@@ -443,8 +448,8 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1) -> Iterator[UInt8[ndarray,
     container: av.container.InputContainer = av.open(BytesIO(mp4_bytes), mode="r")
     with container:
         stream = container.streams.video[0]
-        stream.thread_count = 1
-        stream.thread_type = "NONE"
+        stream.thread_count = threads
+        stream.thread_type = "NONE" if threads == 1 else "FRAME"
         for frame in container.decode(stream):
             gray = (
                 frame.reformat(format="gray8")
@@ -697,7 +702,7 @@ class SegmentFeed:
             from slam_rs.cuda_decode import decode_gray_cuda
 
             return decode_gray_cuda(payload, (camera.height, camera.width), self.profile.downscale)
-        return decode_gray(payload, self.profile.downscale)
+        return decode_gray(payload, self.profile.downscale, self.profile.decode_threads)
 
     def _window_payload(self, position: int, start: int, stop: int) -> tuple[bytes, int]:
         """Muxed window and its first source-frame index, before frameset matching."""

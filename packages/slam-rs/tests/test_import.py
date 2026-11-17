@@ -197,6 +197,9 @@ def test_the_pipeline_tracks_a_shifted_scene_and_reports_its_window(pipeline: Pi
         "frontend_imu",
     }
     assert all(milliseconds >= 0.0 for milliseconds in snapshot.timings_ms.values())
+    # The device-path flags are GPU facts: the CPU lane takes neither.
+    assert snapshot.gpu_one_wait is False
+    assert snapshot.gpu_lookahead is False
     # The three the frontend measures itself ran on every frameset this drive
     # tracked; the preintegration only runs once the estimator has published a
     # state, which it has by the last of them.

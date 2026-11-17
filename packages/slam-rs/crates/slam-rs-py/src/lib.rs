@@ -329,6 +329,25 @@ impl Vio {
             .map_err(value_error)
     }
 
+    /// What the frontend lane cost on the last frameset that ran it, in ms:
+    /// `imu` (its motion preintegration), `pyramid`, `detect`, `track` and
+    /// `stereo`. Unlike a snapshot's timings it exists before the estimator has
+    /// a state, so a bootstrapping run can be timed too.
+    #[getter]
+    fn frontend_timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
+        let timings = self.inner.frontend_timings();
+        [
+            ("imu", timings.imu_ns),
+            ("pyramid", timings.flow.pyramid_ns),
+            ("detect", timings.flow.detect_ns),
+            ("track", timings.flow.track_ns),
+            ("stereo", timings.flow.stereo_ns),
+        ]
+        .into_iter()
+        .map(|(name, ns)| (name, ns as f64 / 1e6))
+        .collect()
+    }
+
     /// The window, its landmarks and the last measured frame's statistics.
     ///
     /// `None` until a frameset has been measured: before that the window is
@@ -571,6 +590,20 @@ impl VioSnapshot {
     #[getter]
     fn frame_update(&self) -> &'static str {
         self.frame_update
+    }
+
+    /// The GPU lane collected this frameset's temporal and stereo results in
+    /// one device wait (one-wait); always false on the CPU lane.
+    #[getter]
+    fn gpu_one_wait(&self) -> bool {
+        self.frontend_timings.flow.gpu_one_wait
+    }
+
+    /// The GPU lane reused this frameset's timestamp-bound lookahead image
+    /// upload; always false on the CPU lane.
+    #[getter]
+    fn gpu_lookahead(&self) -> bool {
+        self.frontend_timings.flow.gpu_lookahead
     }
 
     /// Wall time each stage took on the last frame, milliseconds.

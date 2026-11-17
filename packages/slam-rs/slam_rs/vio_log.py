@@ -1,5 +1,6 @@
 """Log VIO estimates, ground truth, rig and window Pinhole cameras, and tracker statistics."""
 
+import time
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -403,6 +404,34 @@ def log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
 
 
 @dataclass(slots=True)
+class StageTimes:
+    """Per-frameset wall time of each replay stage, in milliseconds, in the order the stages were first seen."""
+
+    columns: dict[str, list[float]] = field(default_factory=dict)
+    """Stage name to one sample per frameset that ran it."""
+
+    def add(self, stage: str, milliseconds: float) -> None:
+        """Record one frameset's time for one stage.
+
+        Args:
+            stage: Stage name.
+            milliseconds: Wall time.
+        """
+        self.columns.setdefault(stage, []).append(milliseconds)
+
+    def summary(self) -> str:
+        """One line: each stage's median and mean, with its own count where it differs from the longest column."""
+        if not self.columns:
+            return "ms per frameset: nothing timed"
+        framesets: int = max(len(samples) for samples in self.columns.values())
+        parts: list[str] = []
+        for stage, samples in self.columns.items():
+            count: str = "" if len(samples) == framesets else f" (n={len(samples)})"
+            parts.append(f"{stage} {np.median(samples):.1f} / {np.mean(samples):.1f}{count}")
+        return f"ms per frameset, median / mean over {framesets}: " + ", ".join(parts)
+
+
+@dataclass(slots=True)
 class VioStage:
     """The whole pipeline over one segment, and the Rerun layer it draws.
 
@@ -414,6 +443,12 @@ class VioStage:
     """The estimator and the D17 hold, which the V2 gate drives the same way."""
     logger: VioLogger
     """Where the trajectories, the window, the landmarks and the counters go."""
+    times: StageTimes = field(default_factory=StageTimes)
+    """Per-frameset wall time of each stage: ``track`` (the whole call),
+    the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
+    rest of the call: bootstrap, estimator and glue) and the ``log`` work after it."""
+    keypoints: list[int] = field(default_factory=list)
+    """Keypoints the frontend holds after each frameset, summed over cameras."""
 
     @property
     def elapsed_ms(self) -> list[float]:
@@ -431,8 +466,24 @@ class VioStage:
         Args:
             frameset: The frameset to track, with the samples since the previous one.
         """
+        started: float = time.monotonic()
+        consumed: int = len(self.lockstep.consumed_ms)
         for held, result in self.lockstep.push(frameset):
             self._log_result(held, result)
+        vio: _core.Vio = self.lockstep.vio
+        calls: list[float] = self.lockstep.consumed_ms[consumed:]
+        if calls:
+            # The breakdown belongs to the last call; a frameset released from the IMU hold adds a second one.
+            frontend: dict[str, float] = vio.frontend_timings_ms
+            flow: float = frontend["pyramid"] + frontend["detect"] + frontend["track"] + frontend["stereo"]
+            self.times.add("track", sum(calls))
+            self.times.add("frontend", flow)
+            self.times.add("imu", frontend["imu"])
+            self.times.add("estimator", calls[-1] - flow - frontend["imu"])
+            frame: _core.FlowFrame | None = vio.flow_frame()
+            if frame is not None:
+                self.keypoints.append(sum(len(frame.ids(camera)) for camera in range(vio.camera_count)))
+        self.times.add("log", 1e3 * (time.monotonic() - started) - sum(calls))
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""
