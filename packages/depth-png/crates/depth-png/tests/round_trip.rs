@@ -154,8 +154,10 @@ fn banded_pngs_read_as_one_stream_in_the_png_crate() {
     let mut raw = vec![0; reader.output_buffer_size().unwrap()];
     reader.next_frame(&mut raw).unwrap();
     let samples: Vec<u16> = raw
-        .chunks_exact(2)
-        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_be_bytes(*pair))
         .collect();
     assert_eq!(samples, depth);
 }

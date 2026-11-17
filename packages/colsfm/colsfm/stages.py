@@ -29,7 +29,6 @@ from colsfm.database import (
     ImagePair,
     Keypoints,
     create_database,
-    delete_image_pairs,
     pairs_with_matches,
     read_descriptors_from_database,
     read_keypoints_batch,
@@ -337,6 +336,8 @@ class LoopClosureStageResult:
     means a caller — a viewer, a notebook — can read them instead of parsing stdout.
     None on the two paths that return before the search: loop closure switched off, and
     a database with no descriptors."""
+    excluded_pairs: tuple[ImagePair, ...] = ()
+    """Pairs this stage matched that the mapper should leave out (`loop_pairs_in_mapper="accepted"`); empty otherwise."""
 
 
 def _warn_about_closed_loop_gates(pose_graph_config: PoseGraphConfig) -> None:
@@ -392,7 +393,7 @@ def run_loop_closure_stage(
         enabled: Whether to run at all.
         frames: The run's frame source, for a matcher that reads pixels; one is opened per call when None.
         loop_pairs_in_mapper: `PipelineOptions.loop_pairs_in_mapper`: with `"accepted"`, the image pairs this stage
-            matched only to measure a candidate it then rejected are deleted from the database again.
+            matched only to measure a candidate it then rejected are returned as `excluded_pairs`, for the mapper to leave out.
 
     Returns:
         The loop edges and how many extra pairs were matched to find them.
@@ -442,13 +443,10 @@ def run_loop_closure_stage(
 
         result: LoopClosureResult = verify_loop_plan(plan, read_matches)
     edges: list[PoseGraphEdge] = list(result.edges)
-    num_dropped: int = 0
-    if loop_pairs_in_mapper == "accepted" and missing_pairs:
-        # The mapper reads every verified two-view geometry in the database, so a pair matched here only to measure a
-        # rejected candidate would still feed its long cross-revisit tracks to the triangulator.
-        dropped: list[ImagePair] = pairs_outside_accepted_edges(plan, edges, missing_pairs)
-        delete_image_pairs(database_path, dropped)
-        num_dropped = len(dropped)
+    # The mapper reads every verified two-view geometry in the database, so a pair matched here only to measure a
+    # rejected candidate would feed its cross-revisit tracks to the triangulator. Under "accepted" those pairs are left
+    # out when the mapper builds its correspondence graph (`MappingOptions.excluded_pairs`); nothing is deleted.
+    excluded: tuple[ImagePair, ...] = tuple(pairs_outside_accepted_edges(plan, edges, missing_pairs)) if loop_pairs_in_mapper == "accepted" else ()
     # Print the counters, not just the edge count: zero edges is the normal outcome on a
     # short or a low-recall sequence, and only the rejection breakdown says which it was.
     print(
@@ -458,9 +456,9 @@ def run_loop_closure_stage(
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified, {result.diagnostics.counters.not_best} not the best of their rig frame, "
         f"{result.diagnostics.counters.below_good_loop} best below {plan.config.good_loop_threshold} inliers, over {len(plan.image_pairs)} image pairs; "
-        f"{num_dropped} of the {len(missing_pairs)} pairs matched here left out of the mapper ({loop_pairs_in_mapper})"
+        f"{len(excluded)} of the {len(missing_pairs)} pairs matched here left out of the mapper ({loop_pairs_in_mapper})"
     )
-    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics)
+    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, excluded_pairs=excluded)
 
 
 @dataclass(frozen=True, slots=True)
