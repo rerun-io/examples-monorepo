@@ -14,9 +14,11 @@ from dataforge.transports import (
     IntegrityError,
     StaleLocalFile,
     content_digest,
+    extract_zip_members,
     hf_fetch,
     hf_fetch_verified,
     hf_lfs_files,
+    hf_zip,
     http_fetch,
     http_index,
     local_verify,
@@ -470,3 +472,22 @@ def test_dataset_configs_reject_unpinned_revision(revision: str) -> None:
     for config in (Show3dConfig, MsdConfig):
         with pytest.raises(ValueError, match="pin a full commit sha"):
             config(revision=revision)
+
+
+def test_extract_zip_members_lands_the_chosen_members_and_skips_complete_ones(tmp_path: Path, hub: HubStore) -> None:
+    hub.add(HUB_REPO, "env/imu.zip", zip_bytes({"env/P000/imu/acc.txt": b"0 0 9.8\n", "env/P001/imu/acc.txt": b"x" * 5000}), lfs=True)
+    report = FetchReport()
+    with hf_zip(transports.HfFileSystem(), HUB_REPO, HUB_REVISION, "env/imu.zip") as archive:
+        extract_zip_members(archive, [info for info in archive.infolist() if info.filename.startswith("env/P000/")], tmp_path, report)
+        assert (tmp_path / "env/P000/imu/acc.txt").read_bytes() == b"0 0 9.8\n"
+        assert not (tmp_path / "env/P001").exists() and not list(tmp_path.rglob("*.part"))
+        extract_zip_members(archive, [archive.getinfo("env/P000/imu/acc.txt")], tmp_path, report)
+    assert (report.fetched, report.fetched_bytes, report.skipped) == (1, 8, 1)
+    assert [(call.kind, call.revision, call.paths) for call in hub.calls] == [("open", HUB_REVISION, ("env/imu.zip",))]
+
+
+def test_extract_zip_members_refuses_a_path_outside_the_root(tmp_path: Path, hub: HubStore) -> None:
+    hub.add(HUB_REPO, "evil.zip", zip_bytes({"env/../../evil.txt": b"x"}))
+    with hf_zip(transports.HfFileSystem(), HUB_REPO, HUB_REVISION, "evil.zip") as archive, pytest.raises(ValueError, match="outside"):
+        extract_zip_members(archive, archive.infolist(), tmp_path / "root", FetchReport())
+    assert not list(tmp_path.rglob("evil.txt"))

@@ -35,8 +35,8 @@ fn panorama_config(stereo_matching: bool) -> VioConfig {
     }
 }
 
-fn expanded(width: u32, height: u32, config: &VioConfig) -> (PanoramaRig, Calibration<f64>) {
-    let (rig, tiles) = PanoramaRig::expand(config, panorama_calibration(width, height)).unwrap();
+fn expanded(width: u32, height: u32) -> (PanoramaRig, Calibration<f64>) {
+    let (rig, tiles) = PanoramaRig::expand(panorama_calibration(width, height)).unwrap();
     (rig.expect("a full panorama expands"), tiles)
 }
 
@@ -50,12 +50,11 @@ pub(super) fn tile_model(tiles: &Calibration<f64>, tile: usize) -> Equirectangul
 
 #[test]
 fn tiles_have_the_designed_sizes_origins_and_cameras() {
-    let config = panorama_config(false);
     for (width, height, tile_width, origins, cells) in [
         (2048, 1024, 1152, [448, 1472], (18, 16)),
         (1920, 960, 1088, [416, 1376], (17, 15)),
     ] {
-        let (rig, tiles) = expanded(width, height, &config);
+        let (rig, tiles) = expanded(width, height);
         assert_eq!(rig.tile_size(), (tile_width, height as usize));
         assert_eq!(rig.tile_origins(), origins);
         assert!(rig.tile_lut(0).is_none());
@@ -85,7 +84,7 @@ fn a_rig_without_a_full_panorama_is_returned_unchanged() {
     let calibration =
         Calibration::from_json_str(include_str!("../../../tests/fixtures/msdmg_calib.json"))
             .unwrap();
-    let (rig, same) = PanoramaRig::expand(&VioConfig::default(), calibration.clone()).unwrap();
+    let (rig, same) = PanoramaRig::expand(calibration.clone()).unwrap();
     assert!(rig.is_none());
     assert_eq!(same.t_i_c, calibration.t_i_c);
     assert_eq!(same.intrinsics, calibration.intrinsics);
@@ -97,14 +96,36 @@ fn a_panorama_beside_other_cameras_is_refused() {
     calibration.intrinsics.push(calibration.intrinsics[0]);
     calibration.resolution.push(calibration.resolution[0]);
     calibration.t_i_c.push(calibration.t_i_c[0]);
-    let error = PanoramaRig::expand(&VioConfig::default(), calibration).unwrap_err();
+    let error = PanoramaRig::expand(calibration).unwrap_err();
     assert!(matches!(error, VioError::Panorama(_)), "{error}");
+}
+
+#[test]
+fn a_width_that_puts_an_outer_tile_pixel_on_lon_max_is_refused() {
+    // `W % 4 == 2`: the rounded tile origin puts one outer pixel centre exactly
+    // at `lon_max`.
+    for width in [1922, 2050] {
+        let error = PanoramaRig::expand(panorama_calibration(width, 960)).unwrap_err();
+        assert!(matches!(error, VioError::Panorama(_)), "{error}");
+    }
+    // A multiple of 4 keeps both outer pixel centres half a pixel inside.
+    for width in [1920, 2048] {
+        let (_, tiles) = expanded(width, 960);
+        let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
+            panic!("equirectangular tiles");
+        };
+        let tile_width: f64 = f64::from(tiles.resolution[0][0]);
+        for x in [0.0, tile_width - 1.0] {
+            let slack: f64 = p.lon_max * p.fx - (x - p.cx).abs();
+            assert!((slack - 0.5).abs() < 1e-9, "{width}: {slack}");
+        }
+    }
 }
 
 #[test]
 fn the_crop_is_a_pure_copy_with_horizontal_wrap() {
     let (width, height): (usize, usize) = (1920, 960);
-    let (mut rig, _) = expanded(width as u32, height as u32, &panorama_config(false));
+    let (mut rig, _) = expanded(width as u32, height as u32);
     let stride: usize = width + 3;
     let value = |x: usize, y: usize| ((x * 7 + y * 13) % 251) as u8;
     let mut data: Vec<u8> = vec![0; stride * height];
@@ -150,7 +171,7 @@ fn the_crop_is_a_pure_copy_with_horizontal_wrap() {
 
 #[test]
 fn a_frameset_that_is_not_one_panorama_is_refused() {
-    let (mut rig, _) = expanded(2048, 1024, &panorama_config(false));
+    let (mut rig, _) = expanded(2048, 1024);
     let data: Vec<u8> = vec![0; 2048 * 1024];
     let wrong = ImageView {
         width: 1024,
@@ -172,7 +193,7 @@ fn a_frameset_that_is_not_one_panorama_is_refused() {
 #[test]
 fn a_bearing_lands_in_its_tile_where_the_panorama_model_puts_it() {
     let (width, height) = (2048_u32, 1024_u32);
-    let (rig, tiles) = expanded(width, height, &panorama_config(false));
+    let (rig, tiles) = expanded(width, height);
     let pano = Equirectangular::<f64>::panorama(width, height).unwrap();
     let models = [tile_model(&tiles, 0), tile_model(&tiles, 1)];
     // Rotation taking a panorama-frame bearing into each tile's frame.
@@ -235,7 +256,7 @@ fn a_bearing_lands_in_its_tile_where_the_panorama_model_puts_it() {
 fn detection_masks_are_whole_cells_over_the_margins_and_the_polar_rows() {
     let config = panorama_config(false);
     for (width, height, polar_rows) in [(2048_u32, 1024_u32, [0, 15]), (1920, 960, [0, 14])] {
-        let (rig, tiles) = expanded(width, height, &config);
+        let (rig, tiles) = expanded(width, height);
         let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
             panic!("equirectangular tiles");
         };
@@ -300,7 +321,7 @@ fn textured_panorama(width: usize, height: usize, shift: usize) -> Vec<u8> {
 fn track_tiles(stereo_matching: bool) -> FrameToFrameOpticalFlow<Pattern51> {
     let (width, height): (usize, usize) = (1024, 512);
     let config = panorama_config(stereo_matching);
-    let (mut rig, tiles) = expanded(width as u32, height as u32, &config);
+    let (mut rig, tiles) = expanded(width as u32, height as u32);
     let mut flow = FrameToFrameOpticalFlow::<Pattern51>::new(
         config.clone(),
         &tiles,
@@ -379,15 +400,23 @@ fn a_shared_centre_is_never_matched_even_with_stereo_matching_on() {
 fn tracks_above_the_latitude_limit_are_dropped() {
     let (width, height): (usize, usize) = (1024, 512);
     let config = panorama_config(false);
-    let (mut rig, tiles) = expanded(width as u32, height as u32, &config);
-    let mut run = |limit: Option<f32>| {
+    let (mut rig, tiles) = expanded(width as u32, height as u32);
+    let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
+        panic!("equirectangular tiles");
+    };
+    let limit: f64 = 40_f64.to_radians();
+    let kill_masks = rig.track_kill_masks(p.fy, p.cy, limit);
+    let mut run = |limited: bool| {
         let mut flow = FrameToFrameOpticalFlow::<Pattern51>::new(
             config.clone(),
             &tiles,
             FrontendOptions::default(),
         )
         .unwrap();
-        flow.set_track_latitude_limits(vec![limit; 2]).unwrap();
+        if limited {
+            flow.set_track_kill_masks(kill_masks.iter().cloned().map(Some).collect())
+                .unwrap();
+        }
         for (frame, shift) in [0, 1].into_iter().enumerate() {
             let data = textured_panorama(width, height, shift);
             rig.crop(&[ImageView {
@@ -415,13 +444,10 @@ fn tracks_above_the_latitude_limit_are_dropped() {
         }
         flow
     };
-    let limit: f32 = 40_f32.to_radians();
-    let free = run(None);
-    let limited = run(Some(limit));
-    let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
-        panic!("equirectangular tiles");
-    };
-    let latitude = |y: f32| ((f64::from(y) - p.cy) / p.fy).abs() as f32;
+    let free = run(false);
+    let limited = run(true);
+    // The mask holds whole rows: a keypoint is judged by its rounded row.
+    let latitude = |y: f32| ((f64::from(y.round()) - p.cy) / p.fy).abs();
     let tracked_above = |flow: &FrameToFrameOpticalFlow<Pattern51>| {
         let watermark = flow.last_keypoint_id_before_frame();
         (0..flow.frame().cameras[0].len())

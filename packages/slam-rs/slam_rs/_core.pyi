@@ -77,7 +77,7 @@ class BootstrapAttempt:
 
     @property
     def last_t_ns(self) -> int:
-        """Last frameset of the window, ns."""
+        """Last frameset of the window, ns: when the attempt ran."""
 
     @property
     def frames(self) -> int:
@@ -88,20 +88,57 @@ class BootstrapAttempt:
         """Tracks handed to the solver."""
 
     @property
+    def tracks_used(self) -> int:
+        """Inlier tracks of the solve."""
+
+    @property
     def verdict(self) -> str:
-        """``Accepted`` or the rejection reason."""
+        """The verdict's name: ``Accepted`` or the rejection reason, e.g. ``LowExcitation``."""
 
     @property
     def accepted(self) -> bool:
-        """Whether the verdict accepted."""
+        """Whether the solver accepted the window."""
+
+    @property
+    def excitation_mps2(self) -> float:
+        """Excitation, m/s^2."""
 
     @property
     def residual_rms_rad(self) -> float | None:
         """RMS bearing error of the solve, rad; None when the attempt reports none."""
 
     @property
+    def condition(self) -> float | None:
+        """Condition number of the reduced linear system; None when the attempt reports none."""
+
+    @property
+    def gravity_norm_unconstrained(self) -> float | None:
+        """Unconstrained ``|g|``, m/s^2; None when the attempt reports none."""
+
+    @property
     def scale_sigma(self) -> float | None:
         """Relative 1-sigma of the speed; None when the attempt reports none."""
+
+    def __repr__(self) -> str: ...
+
+class BootstrapReport:
+    """Every attempt of the inertial bootstrap and where it started the estimator."""
+
+    @property
+    def attempts(self) -> list[BootstrapAttempt]:
+        """The attempts in order."""
+
+    @property
+    def start_t_ns(self) -> int | None:
+        """The accepted window's first frameset, ns (the estimator's first state); None before a window is accepted."""
+
+    @property
+    def accepted_at_t_ns(self) -> int | None:
+        """The frameset that completed the accepted window, ns (the first pose published); None before a window is accepted."""
+
+    @property
+    def replayed(self) -> int:
+        """Framesets replayed into the fresh estimator."""
 
     def __repr__(self) -> str: ...
 
@@ -285,6 +322,8 @@ class Vio:
 
     @property
     def camera_count(self) -> int: ...
+    def bearings(self, camera: int, pixels: Float32[ndarray, "n 2"]) -> Float64[ndarray, "n 3"]:
+        """Unit bearings of frontend camera ``camera``'s pixels in frontend camera 0's frame (P on a panorama rig); NaN where a pixel does not unproject."""
     @property
     def panorama_tile_origins(self) -> tuple[int, int] | None:
         """Panorama column of each hemisphere tile's column 0 when the rig is one full panorama, else None.
@@ -353,24 +392,8 @@ class Vio:
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
-    def bootstrap_report(self) -> str | None:
-        """The inertial bootstrap's attempts as JSON (``config.vio_bootstrap``), or None on the stereo start."""
-
-    @property
-    def bootstrap_attempts(self) -> list[BootstrapAttempt]:
-        """The inertial bootstrap's attempts in order; empty on the stereo start."""
-
-    @property
-    def bootstrap_start_t_ns(self) -> int | None:
-        """The accepted bootstrap window's first frameset (the estimator's first state); None before one is accepted."""
-
-    @property
-    def bootstrap_accepted_at_t_ns(self) -> int | None:
-        """The frameset that completed the accepted bootstrap window (the first pose published); None before one is accepted."""
-
-    @property
-    def bootstrap_replayed(self) -> int:
-        """Framesets the bootstrap replayed into the fresh estimator; 0 on the stereo start."""
+    def bootstrap_report(self) -> BootstrapReport | None:
+        """The inertial bootstrap's attempts so far (``config.vio_bootstrap``), or None on the stereo start."""
 
     @property
     def frontend_timings_ms(self) -> dict[str, float]:

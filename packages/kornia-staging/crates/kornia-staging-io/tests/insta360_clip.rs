@@ -47,7 +47,7 @@ fn the_x4_air_clip_reads_whole() -> Result<(), Box<dyn std::error::Error>> {
     let imu = &clip.trailer.imu;
     let rate = (imu.len() - 1) as f64 / ((imu[imu.len() - 1].t_us - imu[0].t_us) as f64 * 1e-6);
     assert!((rate - 997.2).abs() < 0.5, "{rate}");
-    assert_eq!(clip.first_frame_entry, 8);
+    assert_eq!((clip.first_frame_entry, clip.frames()), (8, 7724));
     assert_eq!(
         clip.frame_exposures(false)[0].t_us,
         m.first_frame_timestamp_us

@@ -7,15 +7,13 @@ use crate::ImageView;
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
 use crate::frontend::flow::{FrameToFrameOpticalFlow, FrontendOptions, PosePrediction};
-use crate::frontend::input::{FrameImages, FrameStorage, LensStitch, PackedImages};
+use crate::frontend::input::{FrameImages, FrameStorage, PackedImages};
 use crate::frontend::parallel::WorkPool;
 use crate::pipeline::PanoramaRig;
 use kornia_image::{Image, ImageSize};
 use kornia_staging_gpu::GpuRuntime;
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
-use kornia_staging_imgproc::panorama::{
-    TileGeometry, TileLut, build_tile_lut, lens_level1, remap_tile,
-};
+use kornia_staging_imgproc::panorama::{LensStitch, RemapTable, TileGeometry, lens_level1, remap};
 use std::f64::consts::{PI, TAU};
 use std::sync::Arc;
 
@@ -46,7 +44,7 @@ fn tile_rig() -> (VioConfig, Calibration<f64>) {
     calibration.resolution = vec![[1920, 960]];
     calibration.t_i_c.truncate(1);
     calibration.vignette.clear();
-    let (rig, tiles) = PanoramaRig::expand(&config, calibration).unwrap();
+    let (rig, tiles) = PanoramaRig::expand(calibration).unwrap();
     assert!(rig.is_some());
     assert_eq!(tiles.resolution, vec![[1088, 960]; 2]);
     (config, tiles)
@@ -71,21 +69,26 @@ fn gpu_flow(config: &VioConfig, tiles: &Calibration<f64>) -> GpuFlow {
     .unwrap()
 }
 
-/// Tables of two synthetic back-to-back equidistant lenses (560 px/rad, 100 deg half field) over the default tile.
-fn tables() -> [TileLut; 2] {
-    [0, 1].map(|tile| {
-        build_tile_lut(TileGeometry::default(), tile, LENS, move |d| {
-            // Lens 1 looks along -Z: its frame is P turned 180 deg about Y.
-            let [x, y, z] = if tile == 0 { d } else { [-d[0], d[1], -d[2]] };
-            let theta = z.clamp(-1.0, 1.0).acos();
-            let rho = x.hypot(y);
-            if theta > 100f64.to_radians() || rho == 0.0 {
-                return (theta == 0.0).then_some([959.5, 959.5]);
-            }
-            let r = 560.0 * theta / rho;
-            Some([959.5 + r * x, 959.5 + r * y])
-        })
+/// The stitch of two synthetic back-to-back equidistant lenses (560 px/rad, 100 deg half field) into the 1088x960
+/// tiles.
+fn lens_stitch() -> LensStitch {
+    let geometry = TileGeometry {
+        hemisphere_width: 960,
+        height: 960,
+        margin: 64,
+    };
+    LensStitch::new(geometry, LENS, |tile, d| {
+        // Lens 1 looks along -Z: its frame is P turned 180 deg about Y.
+        let [x, y, z] = if tile == 0 { d } else { [-d[0], d[1], -d[2]] };
+        let theta = z.clamp(-1.0, 1.0).acos();
+        let rho = x.hypot(y);
+        if theta > 100f64.to_radians() || rho == 0.0 {
+            return (theta == 0.0).then_some([959.5, 959.5]);
+        }
+        let r = 560.0 * theta / rho;
+        Some([959.5 + r * x, 959.5 + r * y])
     })
+    .unwrap()
 }
 
 /// A blocky texture, moved by `shift` pixels per frame.
@@ -102,7 +105,7 @@ fn lens_image(lens: usize, shift: usize) -> Vec<u8> {
         .collect()
 }
 
-fn cpu_tiles(lenses: &[Vec<u8>; 2], luts: &[TileLut; 2]) -> Vec<Image<u16, 1>> {
+fn cpu_tiles(lenses: &[Vec<u8>; 2], luts: &[RemapTable; 2]) -> Vec<Image<u16, 1>> {
     (0..2)
         .map(|k| {
             let lens = Image::new(LENS, lenses[k].clone()).unwrap();
@@ -114,7 +117,7 @@ fn cpu_tiles(lenses: &[Vec<u8>; 2], luts: &[TileLut; 2]) -> Vec<Image<u16, 1>> {
                 0u16,
             )
             .unwrap();
-            remap_tile(&lens_level1(&lens).unwrap(), &luts[k], &mut tile).unwrap();
+            remap(&lens_level1(&lens).unwrap(), &luts[k], &mut tile).unwrap();
             tile
         })
         .collect()
@@ -123,8 +126,7 @@ fn cpu_tiles(lenses: &[Vec<u8>; 2], luts: &[TileLut; 2]) -> Vec<Image<u16, 1>> {
 #[test]
 fn lens_images_through_the_device_stitch_track_like_the_cpu_remapped_tiles() {
     let (config, tiles) = tile_rig();
-    let luts = tables();
-    let stitch = Arc::new(LensStitch::new(luts.clone(), LENS).unwrap());
+    let stitch = Arc::new(lens_stitch());
     let mut lens_flow = gpu_flow(&config, &tiles);
     let mut tile_flow = gpu_flow(&config, &tiles);
     let mut packed = PackedImages::default();
@@ -141,7 +143,7 @@ fn lens_images_through_the_device_stitch_track_like_the_cpu_remapped_tiles() {
             })
             .collect();
         packed.fill_lenses(&views, &stitch).unwrap();
-        let expected = cpu_tiles(&lenses, &luts);
+        let expected = cpu_tiles(&lenses, stitch.tables());
 
         // The CPU lane's storage and the GPU fallback's host tiles are the CPU remap.
         dense.fill_lenses(&views, &stitch).unwrap();
@@ -183,8 +185,7 @@ fn lens_images_through_the_device_stitch_track_like_the_cpu_remapped_tiles() {
 
 #[test]
 fn lens_images_of_the_wrong_size_or_count_are_refused() {
-    let luts = tables();
-    let stitch = Arc::new(LensStitch::new(luts.clone(), LENS).unwrap());
+    let stitch = Arc::new(lens_stitch());
     let data = vec![0u8; 1918 * 1920];
     let small = ImageView {
         data: &data,
@@ -202,6 +203,4 @@ fn lens_images_of_the_wrong_size_or_count_are_refused() {
         stride: 1920,
     };
     assert!(packed.fill_lenses(&[view], &stitch).is_err());
-    let [first, second] = luts;
-    assert!(LensStitch::new([second, first], LENS).is_err());
 }

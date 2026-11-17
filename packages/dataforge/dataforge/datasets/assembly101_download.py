@@ -5,13 +5,11 @@ manifest; single members of the mirror's 72 GB ``AssemblyPoses.zip`` (read over 
 whole archive); and the gated official repo's ``annotations/``.
 """
 
-import io
-import shutil
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Literal, cast
-from zipfile import ZipFile, ZipInfo
+from typing import Literal
+from zipfile import ZipInfo
 
 import httpx
 from huggingface_hub import HfApi, HfFileSystem, RepoFile, hf_hub_download
@@ -26,7 +24,18 @@ from dataforge.datasets.assembly101_source import (
     SHARED_POSE_MEMBER,
     VIDEO_DIR,
 )
-from dataforge.transports import STAGING_DIR, FetchReport, FileIntegrity, IntegrityError, hf_file_info, matches_file, publish_verified
+from dataforge.transports import (
+    STAGING_DIR,
+    FetchReport,
+    FileIntegrity,
+    IntegrityError,
+    extract_zip_members,
+    hf_file_info,
+    hf_zip,
+    matches_file,
+    publish_verified,
+    transfer_error,
+)
 
 POSES_ZIP: str = "AssemblyPoses.zip"
 MIRROR_SHARED_DIRS: tuple[str, ...] = ("assemblyhands-toolkit/calib/nimble_json_calib",)
@@ -66,19 +75,6 @@ def list_mirror(api: HfApi, path: str) -> list[RemoteFile]:
     return [repo_file("mirror", entry) for entry in tree if isinstance(entry, RepoFile)]
 
 
-def open_poses_zip(filesystem: HfFileSystem) -> ZipFile:
-    """Range-read the pinned archive; 16 MiB blocks keep big members fast and small ones cheap."""
-    handle: io.IOBase = filesystem.open(f"datasets/{MIRROR_REPO}@{MIRROR_REVISION}/{POSES_ZIP}", "rb", block_size=16 * 1024 * 1024)
-    return ZipFile(cast(IO[bytes], handle))
-
-
-def transfer_error(where: str, error: HfHubHTTPError | httpx.HTTPError) -> RuntimeError:
-    """Name the file and the status only: the Hub's own message carries the signed CDN URL of the redirect."""
-    response: httpx.Response | None = error.response if isinstance(error, HfHubHTTPError | httpx.HTTPStatusError) else None
-    status: str = f"HTTP {response.status_code}" if response is not None else "no response"
-    return RuntimeError(f"{where}: {type(error).__name__} ({status})")
-
-
 def remote_index(api: HfApi, filesystem: HfFileSystem) -> RemoteIndex:
     """List the mirror's videos, calibration and the zip's central directory; downloads no content."""
     sequences: dict[str, list[RemoteFile]] = {}
@@ -90,7 +86,7 @@ def remote_index(api: HfApi, filesystem: HfFileSystem) -> RemoteIndex:
         for entry in api.get_paths_info(MIRROR_REPO, list(MIRROR_SHARED_FILES), repo_type="dataset", revision=MIRROR_REVISION)
         if isinstance(entry, RepoFile)
     ]
-    with open_poses_zip(filesystem) as archive:
+    with hf_zip(filesystem, MIRROR_REPO, MIRROR_REVISION, POSES_ZIP) as archive:
         members: list[ZipInfo] = [info for info in archive.infolist() if not info.is_dir()]
     for info in members:
         _, member, name = info.filename.split("/")
@@ -148,24 +144,11 @@ def fetch_hub_files(repo: str, revision: str, files: list[RemoteFile], local_dir
 
 
 def fetch_members(filesystem: HfFileSystem, files: list[RemoteFile], root: Path, report: FetchReport) -> None:
-    """Extract members in archive order through a ``.part`` file; a partial member restarts, CRC-32 is checked on read."""
+    """Extract the members through ``extract_zip_members``: archive order, ``.part`` staging, CRC-32 checked on read."""
     if not files:
         return
     try:
-        with open_poses_zip(filesystem) as archive:
-            infos: list[ZipInfo] = sorted((archive.getinfo(remote.path) for remote in files), key=lambda info: info.header_offset)
-            by_path: dict[str, RemoteFile] = {remote.path: remote for remote in files}
-            for info in infos:
-                target: Path = root / info.filename
-                target.parent.mkdir(parents=True, exist_ok=True)
-                temporary: Path = target.with_name(f"{target.name}.part")
-                with archive.open(info) as source, temporary.open("wb") as output:
-                    shutil.copyfileobj(source, output, length=8 * 1024 * 1024)
-                try:
-                    publish_verified(temporary, target, by_path[info.filename].integrity)
-                except IntegrityError as error:
-                    temporary.unlink()
-                    raise ValueError(f"{error}; deleted") from None
-                report.count(True, info.file_size)
+        with hf_zip(filesystem, MIRROR_REPO, MIRROR_REVISION, POSES_ZIP) as archive:
+            extract_zip_members(archive, [archive.getinfo(remote.path) for remote in files], root, report)
     except (HfHubHTTPError, httpx.HTTPError) as error:
         raise transfer_error(f"{MIRROR_REPO}@{MIRROR_REVISION[:8]}/{POSES_ZIP}", error) from None

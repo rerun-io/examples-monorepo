@@ -480,6 +480,8 @@ central directory through HTTP `Range` requests and fetches only the chosen
 trajectories' members (`--trajectories <Env>/<easy|hard>/P0NN ...`), so the
 default subset is about 13 GB instead of 35 GB of whole zips. It can restart:
 a member already on disk at its size is skipped, and every member's CRC is checked.
+The range reads go through `dataforge.transports.hf_zip` (`HfFileSystem`, 16 MiB
+blocks), the same opener Assembly101 uses.
 
 One trajectory converts three ways, one catalog dataset per `--camera-set`, so
 the same motion runs through each camera model: `pinhole` (`lcam_front` +

@@ -12,6 +12,7 @@ test-fixtures = []
 [dependencies]
 nalgebra.workspace = true
 kornia-staging-algebra.workspace = true
+kornia-staging-3d.workspace = true
 thiserror.workspace = true
 kornia-imgproc.workspace = true
 kornia-image.workspace = true

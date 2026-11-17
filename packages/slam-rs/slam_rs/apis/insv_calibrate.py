@@ -9,14 +9,15 @@ It reports, and changes nothing:
    the gyro-integrated ones in closed form, with the gyro bias as a free constant.
 2. The frame time offset, two ways: (a) the residual of that alignment over a grid of offsets of the gyro window,
    and (b) the inertial bootstrap's own residual over the same grid on several 2 s windows, with the frame times
-   handed to ``Vio`` shifted (no re-conversion). Both are "extra offset to add to the converter's per-frame model"
-   (``slam-rs-insv --extra-frame-offset-ms``), relative to the frame times of the recording at hand.
+   handed to ``Vio`` shifted (no re-conversion). Both are the extra frame time offset to add to the device profile's
+   per-frame model, relative to the frame times of the recording at hand.
 3. The rolling-shutter readout as a check: the bootstrap residual with the recording's readout, none, and its
    sign flipped (the readout handed to ``Vio``; ``config.panorama_rolling_shutter`` stays as the dataset sets it).
 """
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from itertools import takewhile
 from pathlib import Path
 
 import numpy as np
@@ -25,11 +26,11 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
-from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, open_segment
+from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
 from slam_rs.tracking import vio_for_feed
-from slam_rs.vio_log import PANORAMA_HEIGHT, PANORAMA_WIDTH
+from slam_rs.vio_log import PANORAMA_HEIGHT
 
 CAUCHY_RAD: float = 2.0 * np.pi / PANORAMA_HEIGHT
 """Smallest Cauchy scale of the epipolar fit: 2 panorama pixels."""
@@ -37,30 +38,12 @@ MIN_MATCHES: int = 30
 """A frame pair with fewer common tracks gives no relative pose."""
 
 
-def orthonormal(matrix: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
-    """The rotation nearest to ``matrix`` (SVD polar factor, determinant +1)."""
-    u, _, vt = np.linalg.svd(matrix)
-    rotation: Float64[ndarray, "3 3"] = u @ vt
-    if np.linalg.det(rotation) < 0:
-        rotation = u @ np.diag([1.0, 1.0, -1.0]) @ vt
-    return rotation
-
-
-def nearest_permutation(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
-    """The signed axis permutation nearest to ``rotation``, row by row."""
-    permutation: Float64[ndarray, "3 3"] = np.zeros((3, 3))
-    for row in range(3):
-        column: int = int(np.argmax(np.abs(rotation[row])))
-        permutation[row, column] = np.sign(rotation[row, column])
-    return permutation
-
-
 @dataclass
 class Config:
     """Measure R_P_imu, the frame time offset and the rolling-shutter readout of a converted Insta360 recording."""
 
     rrd: Path
-    """Recording written by ``slam-rs-insv``."""
+    """Converted Insta360 recording."""
     dataset: str = "insta360"
     """Dataset whose VIO config (``slam.toml``) the frontend and the bootstrap run with."""
     rotation_spans_s: tuple[float, ...] = (40.0, 190.0)
@@ -70,7 +53,8 @@ class Config:
     scan_windows_s: tuple[float, ...] = (20.0, 60.0, 100.0, 140.0, 180.0, 220.0)
     """Start of each bootstrap window, seconds after the first frame; empty skips the bootstrap scan and the shutter check."""
     window_s: float = 2.3
-    """Frames decoded per bootstrap window; the bootstrap's first attempt needs 2 s of them."""
+    """Frames decoded per bootstrap window; the bootstrap's first attempt needs 2 s of them. The window's framesets are held
+    for its repeated runs: about 70 framesets of two 1920x1920 gray images (0.5 GB) at the default."""
     offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9))
     """Offsets added to the frame times, ms, for both offset estimators."""
     backend: BackendRequest = "cpu"
@@ -219,16 +203,10 @@ def rotation_angle_deg(rotation: Float64[ndarray, "3 3"]) -> float:
     return float(np.degrees(Rotation.from_matrix(rotation).magnitude()))
 
 
-def tile_bearings(pixels_xy: Float64[ndarray, "n 2"], origin: int) -> Float64[ndarray, "n 3"]:
-    """Unit bearings in P of hemisphere-tile pixels; the tile's column 0 is panorama column ``origin``.
-
-    Panorama column ``c`` is longitude ``(c + 0.5) 2 pi / W - pi / 2`` and row ``r`` latitude ``(H / 2 - 0.5 - r) 2 pi / W``;
-    the bearing is ``(cos lat sin lon, -sin lat, cos lat cos lon)`` (``TileGeometry::bearing``).
-    """
-    step: float = 2.0 * np.pi / PANORAMA_WIDTH
-    lon: Float64[ndarray, " n"] = (pixels_xy[:, 0] + origin + 0.5) * step - np.pi / 2
-    lat: Float64[ndarray, " n"] = (PANORAMA_HEIGHT / 2 - 0.5 - pixels_xy[:, 1]) * step
-    return np.stack([np.cos(lat) * np.sin(lon), -np.sin(lat), np.cos(lat) * np.cos(lon)], axis=1)
+def nearest_axis_permutation(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
+    """The signed axis permutation (rotation of the cube group) nearest to ``rotation``."""
+    group: Rotation = Rotation.create_group("O")
+    return group[int(np.argmin((group * Rotation.from_matrix(rotation).inv()).magnitude()))].as_matrix()
 
 
 def relative_pose(rays0: Float64[ndarray, "n 3"], rays1: Float64[ndarray, "n 3"], seed: Float64[ndarray, "3 3"], iterations: int = 30) -> PairPose:
@@ -259,7 +237,7 @@ def relative_pose(rays0: Float64[ndarray, "n 3"], rays1: Float64[ndarray, "n 3"]
         direction /= np.linalg.norm(direction)
         if np.linalg.norm(delta) < 1e-9:
             break
-    return PairPose(rotation=orthonormal(rotation), direction=direction)
+    return PairPose(rotation=Rotation.from_matrix(rotation).as_matrix(), direction=direction)
 
 
 def integrated_gyro(imu: ImuStream, t0_ns: Int64[ndarray, " n"], t1_ns: Int64[ndarray, " n"], offset_ms: float) -> Float64[ndarray, "n 3"]:
@@ -291,7 +269,8 @@ def visual_pairs(frames: list[TrackedFrame], imu: ImuStream, current_pano_R_imu:
 
 
 def fit_hand_eye(pairs: VisualPairs, imu: ImuStream, offset_ms: float, iterations: int = 30) -> HandEyeFit:
-    """``R_P_imu`` and the gyro bias with ``v = R (g - b dt)``: Kabsch for R, least squares for b, Huber weights, alternated."""
+    """``R_P_imu`` and the gyro bias with ``v = R (g - b dt)``: weighted Kabsch (``align_vectors``) for R, least squares for b,
+    Huber weights, alternated."""
     gyro: Float64[ndarray, "n 3"] = integrated_gyro(imu, pairs.t0_ns, pairs.t1_ns, offset_ms)
     dt_s: Float64[ndarray, " n"] = (pairs.t1_ns - pairs.t0_ns) * 1e-9
     weights: Float64[ndarray, " n"] = np.ones(dt_s.size)
@@ -299,8 +278,7 @@ def fit_hand_eye(pairs: VisualPairs, imu: ImuStream, offset_ms: float, iteration
     rotation: Float64[ndarray, "3 3"] = np.eye(3)
     errors: Float64[ndarray, " n"] = np.zeros(dt_s.size)
     for _ in range(iterations):
-        u, _, vt = np.linalg.svd((weights[:, None] * pairs.pano_rotvecs).T @ (gyro - np.outer(dt_s, bias)))
-        rotation = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+        rotation = Rotation.align_vectors(pairs.pano_rotvecs, gyro - np.outer(dt_s, bias), weights=weights)[0].as_matrix()
         bias = (weights * dt_s) @ (gyro - pairs.pano_rotvecs @ rotation) / float(weights @ dt_s**2)
         errors = np.linalg.norm(pairs.pano_rotvecs - (gyro - np.outer(dt_s, bias)) @ rotation.T, axis=1) / dt_s
         weights = np.minimum(1.0, 3.0 * float(np.median(errors)) / np.maximum(errors, 1e-12))
@@ -342,14 +320,16 @@ def offset_summary(scans: list[WindowScan]) -> tuple[float, float]:
 
 def first_attempt(vio: _core.Vio) -> _core.BootstrapAttempt | None:
     """The inertial bootstrap's first attempt, or None before the first solve (and on the stereo start)."""
-    attempts: list[_core.BootstrapAttempt] = vio.bootstrap_attempts
-    return attempts[0] if attempts else None
+    report: _core.BootstrapReport | None = vio.bootstrap_report()
+    return report.attempts[0] if report is not None and report.attempts else None
 
 
 def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_ns: int, stop_at_attempt: bool) -> list[TrackedFrame]:
-    """Track framesets with their times shifted by ``offset_ns``, pushing the IMU one sample ahead; the tracks in P."""
-    origins: tuple[int, int] | None = vio.panorama_tile_origins
-    if origins is None:
+    """Track framesets with their times shifted by ``offset_ns``, pushing the IMU one sample ahead; the tracks in P.
+
+    Only the tracks are kept, so ``framesets`` may be a stream of any length.
+    """
+    if vio.panorama_tile_origins is None:
         raise ValueError("the dataset config does not stitch a panorama: run with an Insta360 dataset (config.panorama_dual_fisheye)")
     frames: list[TrackedFrame] = []
     pushed: int = 0
@@ -367,7 +347,7 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
                 TrackedFrame(
                     t_ns=frameset.t_ns,
                     ids=np.concatenate([flow.ids(tile) for tile in range(2)]).astype(np.int64),
-                    bearings=np.concatenate([tile_bearings(flow.positions(tile).astype(np.float64), origins[tile]) for tile in range(2)]),
+                    bearings=np.concatenate([vio.bearings(tile, flow.positions(tile)) for tile in range(2)]),
                 )
             )
         if stop_at_attempt and first_attempt(vio) is not None:
@@ -375,8 +355,38 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
     return frames
 
 
+def scan_window(
+    feed: SegmentFeed,
+    vio_config: _core.VioConfig,
+    backend: BackendRequest,
+    framesets: list[Frameset],
+    imu: ImuStream,
+    start_s: float,
+    offsets_ms: tuple[float, ...],
+    recording_readout_s: float,
+) -> tuple[WindowScan, ShutterCheck]:
+    """Estimator (b) and the shutter check on one window: one ``Vio`` per offset (and per readout at offset 0), each run
+    until the bootstrap's first attempt."""
+
+    def attempt(offset_ms: float, readout_s: float) -> _core.BootstrapAttempt | None:
+        vio: _core.Vio = vio_for_feed(feed, vio_config, backend, readout_s)
+        drive(vio, framesets, imu, int(round(offset_ms * 1e6)), True)
+        return first_attempt(vio)
+
+    results: list[_core.BootstrapAttempt | None] = [attempt(offset_ms, recording_readout_s) for offset_ms in offsets_ms]
+    scan: WindowScan = WindowScan(
+        start_s=start_s,
+        offsets_ms=offsets_ms,
+        residual_rad=tuple(None if result is None else result.residual_rms_rad for result in results),
+        verdicts=tuple("none" if result is None else result.verdict for result in results),
+    )
+    at_zero: _core.BootstrapAttempt | None = results[offsets_ms.index(0.0)] if 0.0 in offsets_ms else attempt(0.0, recording_readout_s)
+    values: list[float | None] = [None if check is None else check.residual_rms_rad for check in (at_zero, attempt(0.0, 0.0), attempt(0.0, -recording_readout_s))]
+    return scan, ShutterCheck(start_s=start_s, on=values[0], off=values[1], flipped=values[2])
+
+
 def print_report(report: CalibrationReport, offsets_ms: tuple[float, ...]) -> None:
-    """The report as plain-text tables, then the converter flags it implies."""
+    """The report as plain-text tables, then the device-profile values it implies."""
     np.set_printoptions(precision=5, suppress=True)
     rotation: RotationReport = report.rotation
     print("\n1. R_P_imu (IMU -> panorama P), 5-DoF pair fits aligned with the gyro")
@@ -418,7 +428,8 @@ def print_report(report: CalibrationReport, offsets_ms: tuple[float, ...]) -> No
         print("| window start (s) | recording's readout | none | sign flipped |\n|---|---|---|---|")
         for check in report.shutter:
             print("| " + " | ".join([f"{check.start_s:.0f}"] + ["-" if value is None else f"{1e3 * value:.3f}" for value in (check.on, check.off, check.flipped)]) + " |")
-        print(f"\nconverter flags implied (relative to this recording's frame times): --extra-frame-offset-ms {mean_ms:.1f}")
+        print(f"\nextra frame time offset, ms (relative to this recording's frame times): {mean_ms:+.1f}")
+    print(f"IMU to rig rotation (R_P_imu, joint fit):\n{rotation.joint.pano_R_imu}")
 
 
 def main(config: Config) -> CalibrationReport:
@@ -426,25 +437,23 @@ def main(config: Config) -> CalibrationReport:
     vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text(config.dataset, profile="fast"))
     with open_segment(LocalSegment(config.rrd), profile=RigProfile(decode_threads=config.decode_threads), window_s=1.0, include_ground_truth=False) as feed:
         if feed.insta360 is None or feed.insta360.pano_from_imu is None:
-            raise ValueError(f"{config.rrd}: no insta360 pano_from_imu property; convert it again with slam-rs-insv")
+            raise ValueError(f"{config.rrd}: no insta360 pano_from_imu property; convert the recording again")
         current: Float64[ndarray, "3 3"] = feed.insta360.pano_from_imu
         first_ns: int = int(feed.frame_t_ns[0])
 
-        def new_vio(readout_s: float) -> _core.Vio:
-            return vio_for_feed(feed, vio_config, config.backend, readout_s)
-
-        def read(start_s: float, length_s: float) -> tuple[list[Frameset], ImuStream]:
+        def read(start_s: float, length_s: float) -> tuple[Iterable[Frameset], ImuStream]:
+            """The span's framesets as a stream (decoded as they are consumed) and its IMU with 0.5 s either side."""
             start_ns: int = first_ns + int(start_s * 1e9)
             stop_ns: int = start_ns + int(length_s * 1e9)
-            framesets: list[Frameset] = [frameset for frameset in feed.framesets(stop_ns, start_ns) if frameset.t_ns <= stop_ns]
+            framesets: Iterable[Frameset] = takewhile(lambda frameset: frameset.t_ns <= stop_ns, feed.framesets(stop_ns, start_ns))
             return framesets, feed.imu_between(start_ns - 500_000_000, stop_ns + 500_000_000)
 
         spans: list[SpanFit] = []
         all_pairs: list[VisualPairs] = []
         for start_s in config.rotation_spans_s:
             framesets, imu = read(start_s, config.span_s)
-            pairs: VisualPairs = visual_pairs(drive(new_vio(feed.insta360.readout_s), framesets, imu, 0, False), imu, current)
-            del framesets
+            tracked: list[TrackedFrame] = drive(vio_for_feed(feed, vio_config, config.backend, feed.insta360.readout_s), framesets, imu, 0, False)
+            pairs: VisualPairs = visual_pairs(tracked, imu, current)
             curve: Float64[ndarray, " n_offsets"] = rate_offset_curve(pairs, imu, fit_hand_eye(pairs, imu, 0.0), config.offsets_ms)
             rate_offset_ms: float = parabola_minimum(np.asarray(config.offsets_ms), curve)
             fit: HandEyeFit = fit_hand_eye(pairs, imu, rate_offset_ms)
@@ -458,7 +467,7 @@ def main(config: Config) -> CalibrationReport:
         )
         joint_imu: ImuStream = feed.imu_between(int(joint_pairs.t0_ns.min()) - 500_000_000, int(joint_pairs.t1_ns.max()) + 500_000_000)
         joint: HandEyeFit = fit_hand_eye(joint_pairs, joint_imu, float(np.mean([span.rate_offset_ms for span in spans])))
-        permutation: Float64[ndarray, "3 3"] = nearest_permutation(joint.pano_R_imu)
+        permutation: Float64[ndarray, "3 3"] = nearest_axis_permutation(joint.pano_R_imu)
         rotation: RotationReport = RotationReport(
             spans=spans,
             joint=joint,
@@ -469,27 +478,10 @@ def main(config: Config) -> CalibrationReport:
         )
         report: CalibrationReport = CalibrationReport(current_pano_R_imu=current, readout_s=feed.insta360.readout_s, rotation=rotation)
         for start_s in config.scan_windows_s:
-            framesets, imu = read(start_s, config.window_s)
-
-            def attempt(offset_ms: float, readout_s: float) -> _core.BootstrapAttempt | None:
-                vio: _core.Vio = new_vio(readout_s)
-                drive(vio, framesets, imu, int(round(offset_ms * 1e6)), True)  # noqa: B023 - called inside this iteration only
-                return first_attempt(vio)
-
-            readout_s: float = feed.insta360.readout_s
-            results: list[_core.BootstrapAttempt | None] = [attempt(offset_ms, readout_s) for offset_ms in config.offsets_ms]
-            report.scans.append(
-                WindowScan(
-                    start_s=start_s,
-                    offsets_ms=config.offsets_ms,
-                    residual_rad=tuple(None if result is None else result.residual_rms_rad for result in results),
-                    verdicts=tuple("none" if result is None else result.verdict for result in results),
-                )
-            )
-            at_zero: _core.BootstrapAttempt | None = results[config.offsets_ms.index(0.0)] if 0.0 in config.offsets_ms else attempt(0.0, readout_s)
-            checks: list[_core.BootstrapAttempt | None] = [at_zero, attempt(0.0, 0.0), attempt(0.0, -readout_s)]
-            values: list[float | None] = [None if check is None else check.residual_rms_rad for check in checks]
-            report.shutter.append(ShutterCheck(start_s=start_s, on=values[0], off=values[1], flipped=values[2]))
-            print(f"window {start_s:.0f} s: minimum {report.scans[-1].minimum_ms()} ms; shutter on/off/flipped {values}", flush=True)
+            stream, imu = read(start_s, config.window_s)
+            scan, check = scan_window(feed, vio_config, config.backend, list(stream), imu, start_s, config.offsets_ms, feed.insta360.readout_s)
+            report.scans.append(scan)
+            report.shutter.append(check)
+            print(f"window {start_s:.0f} s: minimum {scan.minimum_ms()} ms; shutter on/off/flipped {[check.on, check.off, check.flipped]}", flush=True)
     print_report(report, config.offsets_ms)
     return report

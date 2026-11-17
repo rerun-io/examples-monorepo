@@ -23,9 +23,10 @@ import torch
 from jaxtyping import UInt8
 from serde import serde
 from serde.json import to_json
+from simplecv.stage_times import StageSummary, StageTimes
 from torch import Tensor
 
-from posekit.apis.hands_bench import EXAMPLES, StageSummary, StageTimes
+from posekit.apis.hands_bench import EXAMPLES
 from posekit.body_run import BodyRunIdentity, body_run_identity
 from posekit.models import AnnotatedBodyPose3dConfig, BodyPose3dConfig
 from posekit.models.base import SegmentationPrompts

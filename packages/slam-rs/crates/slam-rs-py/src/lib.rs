@@ -5,6 +5,7 @@
 //! thread can keep decoding. A bad dtype, rank, shape or memory layout raises
 //! `ValueError`, never a panic.
 
+mod bootstrap;
 mod catalog;
 mod insv;
 mod panorama;
@@ -122,75 +123,6 @@ impl VioResult {
     }
 }
 
-/// One solve attempt of the inertial bootstrap (`config.vio_bootstrap`).
-#[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
-#[derive(Debug, Clone)]
-pub struct BootstrapAttempt {
-    inner: slam_rs::bootstrap::BootstrapAttempt,
-}
-
-#[pymethods]
-impl BootstrapAttempt {
-    /// First frameset of the window, ns.
-    #[getter]
-    fn first_t_ns(&self) -> i64 {
-        self.inner.first_t_ns
-    }
-
-    /// Last frameset of the window, ns.
-    #[getter]
-    fn last_t_ns(&self) -> i64 {
-        self.inner.last_t_ns
-    }
-
-    /// Framesets in the window.
-    #[getter]
-    fn frames(&self) -> usize {
-        self.inner.frames
-    }
-
-    /// Tracks handed to the solver.
-    #[getter]
-    fn tracks(&self) -> usize {
-        self.inner.tracks
-    }
-
-    /// `Accepted` or the rejection reason.
-    #[getter]
-    fn verdict(&self) -> &str {
-        &self.inner.verdict
-    }
-
-    /// Whether the verdict accepted.
-    #[getter]
-    fn accepted(&self) -> bool {
-        self.inner.accepted
-    }
-
-    /// RMS bearing error of the solve, rad; `None` when the attempt reports none.
-    #[getter]
-    fn residual_rms_rad(&self) -> Option<f64> {
-        self.inner.residual_rms_rad
-    }
-
-    /// Relative 1-sigma of the speed; `None` when the attempt reports none.
-    #[getter]
-    fn scale_sigma(&self) -> Option<f64> {
-        self.inner.scale_sigma
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "BootstrapAttempt(verdict={:?}, accepted={}, frames={}, first_t_ns={}, last_t_ns={})",
-            self.inner.verdict,
-            self.inner.accepted,
-            self.inner.frames,
-            self.inner.first_t_ns,
-            self.inner.last_t_ns
-        )
-    }
-}
-
 /// The estimator, driven one frameset at a time (D16, D17).
 ///
 /// The default runs frontend and estimator in sequence. With `port.frontend_lag`,
@@ -295,6 +227,52 @@ impl Vio {
     #[getter]
     fn camera_count(&self) -> usize {
         self.inner.frontend().camera_count()
+    }
+
+    /// Unit bearings of frontend camera `camera`'s pixels (`float32[n, 2]`, as
+    /// `FlowFrame.positions` gives them) in frontend camera 0's frame:
+    /// `float64[n, 3]`, NaN where the pixel does not unproject. On a panorama
+    /// rig the frontend cameras are the hemisphere tiles and camera 0's frame is
+    /// the panorama frame `P`.
+    fn bearings<'py>(
+        &self,
+        py: Python<'py>,
+        camera: usize,
+        pixels: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let array: &Bound<'_, PyArray2<f32>> = pixels
+            .cast::<PyArray2<f32>>()
+            .map_err(|_| PyValueError::new_err("pixels must be a 2-D float32 numpy array"))?;
+        if array.shape()[1] != 2 {
+            return Err(PyValueError::new_err(format!(
+                "pixels must have shape (n, 2), got {:?}",
+                array.shape()
+            )));
+        }
+        let readonly = array.readonly();
+        let values: &[f32] = contiguous(&readonly, "pixels", "pixels")?;
+        let calibration: CoreCalibration<f64> = self.inner.calibration().cast();
+        if camera >= calibration.intrinsics.len() {
+            return Err(PyIndexError::new_err(format!(
+                "camera {camera} out of range for {} cameras",
+                calibration.intrinsics.len()
+            )));
+        }
+        let model = slam_rs::camera::SlamCamera::from_model(&calibration.intrinsics[camera])
+            .map_err(value_error)?;
+        let to_first = calibration.t_i_c[0].rotation.inverse() * calibration.t_i_c[camera].rotation;
+        let bearings: Vec<f64> = values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[x, y]| {
+                let mut point = Default::default();
+                model.unproject(&[f64::from(x), f64::from(y)].into(), &mut point);
+                let bearing = to_first * point.xyz();
+                [bearing.x, bearing.y, bearing.z]
+            })
+            .collect();
+        bearings.into_pyarray(py).reshape((values.len() / 2, 3))
     }
 
     /// Panorama column of each hemisphere tile's column 0, before wrapping,
@@ -474,57 +452,10 @@ impl Vio {
         .collect()
     }
 
-    /// The inertial bootstrap's attempts as JSON (`config.vio_bootstrap`),
-    /// or None on the stereo start.
-    fn bootstrap_report(&self) -> PyResult<Option<String>> {
-        self.inner
-            .bootstrap_report()
-            .map(slam_rs::bootstrap::BootstrapReport::to_json)
-            .transpose()
-            .map_err(value_error)
-    }
-
-    /// The inertial bootstrap's attempts in order; empty on the stereo start.
-    #[getter]
-    fn bootstrap_attempts(&self) -> Vec<BootstrapAttempt> {
-        self.inner
-            .bootstrap_report()
-            .map(|report| {
-                report
-                    .attempts
-                    .iter()
-                    .map(|attempt| BootstrapAttempt {
-                        inner: attempt.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// The accepted bootstrap window's first frameset, ns: the estimator's first
-    /// state. `None` before a window is accepted and on the stereo start.
-    #[getter]
-    fn bootstrap_start_t_ns(&self) -> Option<i64> {
-        self.inner
-            .bootstrap_report()
-            .and_then(|report| report.start_t_ns)
-    }
-
-    /// The frameset that completed the accepted bootstrap window, ns: the first
-    /// pose published. `None` before a window is accepted and on the stereo start.
-    #[getter]
-    fn bootstrap_accepted_at_t_ns(&self) -> Option<i64> {
-        self.inner
-            .bootstrap_report()
-            .and_then(|report| report.accepted_at_t_ns)
-    }
-
-    /// Framesets the bootstrap replayed into the fresh estimator; 0 on the stereo start.
-    #[getter]
-    fn bootstrap_replayed(&self) -> usize {
-        self.inner
-            .bootstrap_report()
-            .map_or(0, |report| report.replayed)
+    /// The inertial bootstrap's attempts so far (`config.vio_bootstrap`), or
+    /// None on the stereo start.
+    fn bootstrap_report(&self) -> Option<bootstrap::BootstrapReport> {
+        self.inner.bootstrap_report().map(Into::into)
     }
 
     /// The window, its landmarks and the last measured frame's statistics.
@@ -956,9 +887,9 @@ fn u32_arg(value: i64) -> PyResult<u32> {
 /// A factory window crop `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` from Python.
 fn window_crop(
     crop: Option<[i64; 6]>,
-) -> PyResult<Option<kornia_staging_io::insta360::WindowCrop>> {
+) -> PyResult<Option<kornia_staging_3d::camera::formats::insta360::WindowCrop>> {
     crop.map(|[sw, sh, dw, dh, ox, oy]| {
-        Ok(kornia_staging_io::insta360::WindowCrop {
+        Ok(kornia_staging_3d::camera::formats::insta360::WindowCrop {
             src: [u32_arg(sw)?, u32_arg(sh)?],
             dst: [u32_arg(dw)?, u32_arg(dh)?],
             offset: [ox, oy],
@@ -1619,7 +1550,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
-    module.add_class::<BootstrapAttempt>()?;
+    module.add_class::<bootstrap::BootstrapAttempt>()?;
+    module.add_class::<bootstrap::BootstrapReport>()?;
     module.add_class::<VioStatus>()?;
     module.add_class::<Calibration>()?;
     module.add_class::<VioConfig>()?;

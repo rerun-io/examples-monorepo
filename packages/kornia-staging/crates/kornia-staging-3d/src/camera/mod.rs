@@ -2,7 +2,7 @@
 //!
 //! Pixel `(0, 0)` is the centre of the top-left pixel. Bearings are unit length.
 //! Matrices are row-major plain arrays. Intrinsic columns follow each constructor.
-//! KB4, double sphere and EUCM admit rear rays inside their calibrated domain;
+//! KB4, double sphere, EUCM and Mei admit rear rays inside their calibrated domain;
 //! equirectangular admits every direction in its longitude window except the poles;
 //! checked Fisheye624 requires positive depth. The negative optical axis has no
 //! unique azimuth. Optimizers can use [`CameraModel::project_unchecked`] outside the
@@ -28,8 +28,9 @@ pub mod formats;
 pub use brown::BrownConrady;
 mod fisheye624;
 pub use fisheye624::Fisheye624;
-pub mod insta360;
 mod kb4;
+mod mei;
+pub use mei::{Mei, MeiDistortion};
 mod pinhole;
 pub use kb4::KannalaBrandt4;
 pub use pinhole::Pinhole;
@@ -185,6 +186,8 @@ pub enum CameraModelKind<S: Scalar> {
     Eucm(Eucm<S>),
     /// Longitude-latitude panorama or panorama tile.
     Equirectangular(Equirectangular<S>),
+    /// Unified (Mei) sphere with the Insta360 factory distortion.
+    Mei(Mei<S>),
 }
 impl<S: Scalar> CameraModelKind<S> {
     /// Project a point through the selected family.
@@ -199,6 +202,7 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::DoubleSphere(v) => v.project(point),
             Self::Eucm(v) => v.project(point),
             Self::Equirectangular(v) => v.project(point),
+            Self::Mei(v) => v.project(point),
         }
     }
     /// Project without validity checks.
@@ -211,6 +215,7 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::DoubleSphere(v) => v.project_unchecked(point),
             Self::Eucm(v) => v.project_unchecked(point),
             Self::Equirectangular(v) => v.project_unchecked(point),
+            Self::Mei(v) => v.project_unchecked(point),
         }
     }
     /// Project without validity checks, optionally writing the row-major point Jacobian.
@@ -228,6 +233,7 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::DoubleSphere(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
             Self::Eucm(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
             Self::Equirectangular(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::Mei(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
         }
     }
     /// Project once and retain both the pixel and checked-domain status.
@@ -246,6 +252,7 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::DoubleSphere(v) => v.project_with_status(point, jacobian, None),
             Self::Eucm(v) => v.project_with_status(point, jacobian, None),
             Self::Equirectangular(v) => v.project_with_status(point, jacobian, None),
+            Self::Mei(v) => v.project_with_status(point, jacobian, None),
         }
     }
     /// Return a unit bearing.
@@ -260,6 +267,7 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::DoubleSphere(v) => v.unproject(pixel),
             Self::Eucm(v) => v.unproject(pixel),
             Self::Equirectangular(v) => v.unproject(pixel),
+            Self::Mei(v) => v.unproject(pixel),
         }
     }
 }

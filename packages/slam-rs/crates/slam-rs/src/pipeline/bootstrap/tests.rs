@@ -5,6 +5,7 @@
 use super::*;
 use crate::config::VioConfig;
 use crate::estimator::{FrameOutcome, SqrtKeypointVio};
+use crate::lie::So3;
 use crate::types::KeypointId;
 use nalgebra::{Matrix3, Vector2};
 
@@ -132,6 +133,7 @@ fn frameset(
 struct Run {
     walk: Walk,
     calibration: Calibration<f64>,
+    calib_f32: Calibration<f32>,
     points: Vec<Vector3<f64>>,
     driver: InertialBootstrap,
     /// Next IMU sample index (1 kHz), pushed as the feed would: just past each frameset.
@@ -145,6 +147,7 @@ impl Run {
         let driver = InertialBootstrap::new(calibration.clone(), GRAVITY, options).unwrap();
         Self {
             walk,
+            calib_f32: calibration.cast(),
             calibration,
             points: room(),
             driver,
@@ -154,10 +157,14 @@ impl Run {
     /// Push the IMU up to 2 ms past frameset `k`, as the feed does.
     fn imu_through(&mut self, k: i64) {
         while self.next_imu * 1_000_000 <= k * FRAME_NS + 2_000_000 {
-            self.driver
-                .push_imu(self.walk.imu(self.next_imu * 1_000_000));
-            self.next_imu += 1;
+            self.push_next_imu();
         }
+    }
+    fn push_next_imu(&mut self) {
+        let sample: CombinedImuSample = self.walk.imu(self.next_imu * 1_000_000);
+        self.driver
+            .push_imu(sample, super::super::calibrated(&self.calib_f32, &sample));
+        self.next_imu += 1;
     }
     fn frame(&self, k: i64) -> Arc<FlowObservations> {
         frameset(&self.walk, &self.calibration, &self.points, k * FRAME_NS)
@@ -166,7 +173,6 @@ impl Run {
     fn until_accepted(&mut self, max_frames: i64) -> Result<(i64, Box<Accepted>), BootstrapError> {
         for k in 0..max_frames {
             self.imu_through(k);
-            self.driver.predict(k * FRAME_NS);
             if let BootstrapStep::Accepted(accepted) = self.driver.push_frame(self.frame(k))? {
                 return Ok((k, accepted));
             }
@@ -197,7 +203,13 @@ fn accepts_a_walking_window_and_hands_over_the_whole_buffer() {
     assert!(!accepted.imu.is_empty() && accepted.imu[0].timestamp_ns <= 0);
     let report = run.driver.report();
     assert_eq!(report.attempts.len(), 1);
-    assert_eq!(report.start_t_ns, Some(0));
+    // Nothing is stamped before the caller commits the start.
+    assert_eq!(report.start_t_ns, None);
+    assert_eq!(
+        run.driver.buffered_frames(),
+        62,
+        "the window stays buffered"
+    );
 
     let r_w_b0: Matrix3<f64> = accepted.initial.t_w_i.rotation.matrix();
     let gravity: Vector3<f64> = r_w_b0.transpose() * Vector3::new(0.0, 0.0, -GRAVITY);
@@ -216,58 +228,139 @@ fn accepts_a_walking_window_and_hands_over_the_whole_buffer() {
         "{v_body:?} vs {v_body_truth:?}"
     );
     assert!(accepted.initial.velocity_sigma >= 0.05);
+    let report = run.driver.commit();
+    assert_eq!(
+        (report.start_t_ns, report.accepted_at_t_ns, report.replayed),
+        (Some(0), Some(61 * FRAME_NS), 62)
+    );
 }
 
+fn inertial_vio() -> Vio<f64> {
+    let config =
+        VioConfig::with_overlay(MSDMI_CONFIG, r#"{"config.vio_bootstrap": "inertial"}"#).unwrap();
+    Vio::new(
+        config,
+        calibration(),
+        crate::frontend::flow::FrontendOptions::default(),
+    )
+    .unwrap()
+}
+
+/// Push the walk's IMU at 1 kHz through `through_ns` into `vio`, from sample `next`.
+fn push_walk_imu(vio: &mut Vio<f64>, walk: &Walk, next: &mut i64, through_ns: i64) {
+    while *next * 1_000_000 <= through_ns {
+        let sample = walk.imu(*next * 1_000_000);
+        vio.push_imu(
+            sample.timestamp_ns,
+            sample.gyro.to_array(),
+            sample.accel.to_array(),
+        )
+        .unwrap();
+        *next += 1;
+    }
+}
+
+/// Before any state the frontend gets the gyro's rotation between framesets,
+/// from the pipeline's own frontend preintegration.
 #[test]
 fn gyro_prediction_follows_the_rotation() {
-    let mut run = Run::new(-1.0, BootstrapOptions::default());
-    run.imu_through(0);
-    run.driver.predict(0);
+    let walk = Walk { static_s: -1.0 };
+    let mut vio = inertial_vio();
+    let mut next: i64 = -50;
+    push_walk_imu(&mut vio, &walk, &mut next, 2_000_000);
+    vio.drop_frontend_imu_through(0);
     for k in 1..20 {
-        run.imu_through(k);
-        let prediction = run.driver.predict(k * FRAME_NS);
+        push_walk_imu(&mut vio, &walk, &mut next, k * FRAME_NS + 2_000_000);
+        let prediction = vio
+            .gyro_prediction((k - 1) * FRAME_NS, k * FRAME_NS)
+            .unwrap();
+        vio.last_frame_t_ns = Some(k * FRAME_NS);
         let predicted: Matrix3<f64> = (prediction.t_w_i_previous.rotation.inverse()
             * prediction.t_w_i_current.rotation)
             .matrix()
             .cast();
         let t0: f64 = (k - 1) as f64 * FRAME_NS as f64 * 1e-9;
         let t1: f64 = k as f64 * FRAME_NS as f64 * 1e-9;
-        let truth: Matrix3<f64> = run.walk.rotation(t0).transpose() * run.walk.rotation(t1);
-        // Frobenius norm of R^T R' - I is sqrt(2) times the angle; f32 poses.
+        let truth: Matrix3<f64> = walk.rotation(t0).transpose() * walk.rotation(t1);
+        // Frobenius norm of R^T R' - I is sqrt(2) times the angle. The
+        // pipeline's preintegration holds each 1 kHz sample over its interval,
+        // so it lags the truth by about half a sample: up to 2.2e-4 rad here,
+        // 0.07 px at the MSD cameras' 300 px/rad.
         let error: f64 = (truth.transpose() * predicted - Matrix3::identity()).norm();
-        assert!(error < 2e-5, "frameset {k}: {error}");
+        assert!(error < 5e-4, "frameset {k}: {error}");
         assert_eq!(prediction.t_w_i_current.translation, Vector3::zeros());
     }
 }
 
+/// After a still start the schedule is: a 2 s window, the 3 s window, then
+/// the 3 s window slid by 0.5 s per rejection, so attempts are 0.5 s of
+/// framesets apart and never on consecutive framesets.
 #[test]
 fn slides_past_a_still_start_then_accepts() {
     let mut run = Run::new(3.0, BootstrapOptions::default());
     let (_, accepted) = run.until_accepted(200).unwrap();
     let report = run.driver.report();
+    assert_eq!(verdict_name(&report.attempts[0].verdict), "LowExcitation");
+    assert!(report.attempts.len() >= 3);
+    assert!(report.attempts.last().unwrap().accepted());
+    let span = |a: &BootstrapAttempt| (a.last_t_ns - a.first_t_ns) as f64 * 1e-9;
+    let frame_s: f64 = FRAME_NS as f64 * 1e-9;
     assert!(
-        report.attempts[0].verdict.starts_with("LowExcitation"),
+        (span(&report.attempts[0]) - 2.0).abs() <= frame_s,
         "{:?}",
         report.attempts[0]
     );
-    assert!(report.attempts.len() >= 3);
+    for pair in report.attempts.windows(2) {
+        assert!((span(&pair[1]) - 3.0).abs() <= frame_s, "{:?}", pair[1]);
+        let gap: f64 = (pair[1].last_t_ns - pair[0].last_t_ns) as f64 * 1e-9;
+        assert!(
+            gap >= 0.5 - frame_s,
+            "attempts {gap} s apart: {:?}",
+            pair[1]
+        );
+    }
+    let slid = &report.attempts[2];
     assert!(
-        report.attempts.iter().any(|a| a.first_t_ns > 0),
-        "the window never slid"
+        (slid.first_t_ns as f64 * 1e-9 - 0.5).abs() <= frame_s,
+        "the third window starts 0.5 s in: {slid:?}"
     );
-    assert!(report.attempts.last().unwrap().accepted);
-    assert!(accepted.initial.t_ns >= 500_000_000);
     let first = accepted.initial.t_ns;
     assert_eq!(accepted.frames[0].t_ns, first);
 }
 
+/// A rig at rest for longer than the timeout is "not yet": the bootstrap
+/// waits, and accepts once the rig moves.
+#[test]
+fn a_still_start_longer_than_the_timeout_still_accepts() {
+    let mut run = Run::new(35.0, BootstrapOptions::default());
+    let (k, accepted) = run.until_accepted(1_300).unwrap();
+    assert!(
+        k * FRAME_NS > seconds_to_ns(35.0),
+        "accepted at frameset {k}"
+    );
+    let report = run.driver.report();
+    assert!(report.attempts.len() > 60);
+    assert!(
+        report
+            .attempts
+            .iter()
+            .filter(|a| a.last_t_ns < seconds_to_ns(35.0))
+            .all(|a| verdict_name(&a.verdict) == "LowExcitation")
+    );
+    assert!(accepted.initial.t_ns > seconds_to_ns(30.0));
+}
+
+/// Windows with excitation that never solve (no tracks at all) end the
+/// bootstrap once they span the timeout, on that frameset and every later
+/// one; the buffer stays bounded.
 #[test]
 fn never_accepting_is_a_typed_error_with_a_bounded_buffer() {
     let options = BootstrapOptions {
         timeout_s: 4.0,
         ..BootstrapOptions::default()
     };
-    let mut run = Run::new(1e6, options);
+    let mut run = Run::new(-1.0, options);
+    run.points.clear();
     let error = run.until_accepted(400).unwrap_err();
     match error {
         BootstrapError::NeverAccepted {
@@ -277,10 +370,18 @@ fn never_accepting_is_a_typed_error_with_a_bounded_buffer() {
         } => {
             assert!((4.0..4.6).contains(&seconds), "{seconds}");
             assert!(attempts >= 3);
-            assert!(last_verdict.starts_with("LowExcitation"), "{last_verdict}");
+            assert_eq!(last_verdict, "TooFewTracks");
         }
         other => panic!("{other:?}"),
     }
+    let attempts: usize = run.driver.report().attempts.len();
+    let k: i64 = 400;
+    run.imu_through(k);
+    assert!(matches!(
+        run.driver.push_frame(run.frame(k)),
+        Err(BootstrapError::NeverAccepted { .. })
+    ));
+    assert_eq!(run.driver.report().attempts.len(), attempts);
 }
 
 /// Push the IMU through `imu_ahead_s` first, then framesets `0..frames`;
@@ -292,11 +393,9 @@ fn imu_first(
 ) -> Option<Result<BootstrapStep, BootstrapError>> {
     let mut run = Run::new(-1.0, options);
     while run.next_imu * 1_000_000 <= seconds_to_ns(imu_ahead_s) {
-        run.driver.push_imu(run.walk.imu(run.next_imu * 1_000_000));
-        run.next_imu += 1;
+        run.push_next_imu();
     }
     for k in 0..frames {
-        run.driver.predict(k * FRAME_NS);
         match run.driver.push_frame(run.frame(k)) {
             Ok(BootstrapStep::Buffering) => {}
             other => return Some(other),
@@ -305,9 +404,9 @@ fn imu_first(
     None
 }
 
-/// A caller may push IMU seconds ahead of the framesets: the framesets are
-/// still buffered and solved, or the timeout fires; the driver never buffers
-/// forever.
+/// A caller may push IMU seconds ahead of the framesets: the framesets the
+/// IMU kept still covers are buffered and solved, the others are dropped; the
+/// driver never buffers forever.
 #[test]
 fn imu_pushed_far_ahead_still_ends_the_bootstrap() {
     // 5 s of IMU, then the 150 framesets it covers: the 2 s window is solved.
@@ -316,21 +415,13 @@ fn imu_pushed_far_ahead_still_ends_the_bootstrap() {
         matches!(step, Some(Ok(BootstrapStep::Accepted(_)))),
         "{step:?}"
     );
-    // 40 s of IMU ahead of a 4 s timeout: the first framesets fall before the
-    // IMU kept, and the timeout still fires on a buffering frameset.
+    // 40 s of IMU ahead of a 4 s timeout: the IMU kept starts at 36 s, so
+    // the first 300 framesets (10 s) fall before it and are dropped.
     let options = BootstrapOptions {
         timeout_s: 4.0,
         ..BootstrapOptions::default()
     };
-    match imu_first(40.0, options, 300) {
-        Some(Err(BootstrapError::NeverAccepted {
-            seconds, attempts, ..
-        })) => {
-            assert!((4.0..4.1).contains(&seconds), "{seconds}");
-            assert_eq!(attempts, 0);
-        }
-        other => panic!("{other:?}"),
-    }
+    assert!(imu_first(40.0, options, 300).is_none());
 }
 
 #[test]
@@ -381,10 +472,15 @@ fn estimator_starts_from_the_solved_window_and_tracks_monocular() {
 }
 
 #[test]
-fn stereo_stays_the_default_and_is_not_written_out() {
+fn stereo_stays_the_default_and_is_written_out() {
     let config: VioConfig = VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
     assert_eq!(config.vio_bootstrap, VioBootstrap::Stereo);
-    assert!(!config.to_json_string().unwrap().contains("vio_bootstrap"));
+    assert!(
+        config
+            .to_json_string()
+            .unwrap()
+            .contains(r#""config.vio_bootstrap": "stereo""#)
+    );
     let inertial =
         VioConfig::with_overlay(MSDMI_CONFIG, r#"{"config.vio_bootstrap": "inertial"}"#).unwrap();
     assert_eq!(inertial.vio_bootstrap, VioBootstrap::Inertial);
@@ -422,4 +518,48 @@ fn frontend_lag_is_refused_with_the_bootstrap() {
         error,
         Some(VioError::Bootstrap(BootstrapError::FrontendLag))
     );
+}
+
+/// A replay that fails leaves the pipeline bootstrapping with the accepted
+/// window still buffered and no start in the report; the estimator is the
+/// one it had.
+#[test]
+fn a_failed_replay_changes_nothing() {
+    let walk = Walk { static_s: -1.0 };
+    let calibration: Calibration<f64> = calibration();
+    let points: Vec<Vector3<f64>> = room();
+    let mut vio = inertial_vio();
+    let mut next: i64 = -50;
+    let mut result = None;
+    for k in 0..70 {
+        push_walk_imu(&mut vio, &walk, &mut next, k * FRAME_NS + 2_000_000);
+        let mut frame: FlowObservations =
+            (*frameset(&walk, &calibration, &points, k * FRAME_NS)).clone();
+        if k == 5 {
+            // The solver ignores a camera the rig does not have; the estimator refuses it.
+            frame.cameras.push(Default::default());
+        }
+        match vio.bootstrap_track(Arc::new(frame)) {
+            Ok(r) => assert_eq!(r.status, VioStatus::NoVisualFeatures, "frameset {k}"),
+            Err(error) => {
+                result = Some((k, error));
+                break;
+            }
+        }
+    }
+    let (k, error) = result.expect("the replay of the accepted window fails");
+    assert_eq!(k, 61);
+    assert!(matches!(error, VioError::Estimator(_)), "{error:?}");
+    let BootstrapPhase::Running(driver) = &vio.bootstrap else {
+        panic!("the pipeline left the bootstrap");
+    };
+    assert_eq!(driver.buffered_frames(), 62);
+    let report = driver.report();
+    assert_eq!(report.attempts.len(), 1);
+    assert!(report.attempts[0].accepted());
+    assert_eq!(
+        (report.start_t_ns, report.accepted_at_t_ns, report.replayed),
+        (None, None, 0)
+    );
+    assert!(vio.estimator.state().is_none());
 }

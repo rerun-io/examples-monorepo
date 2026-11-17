@@ -2,6 +2,7 @@
 mod synth;
 
 use super::*;
+use nalgebra::Matrix3;
 use synth::{generate, Motion, Rig, Scenario, Synthetic};
 
 fn solve(data: &Synthetic, options: &InertialInitOptions) -> InertialInitOutcome {
@@ -575,4 +576,136 @@ fn an_unsettled_refine_loop_is_not_accepted() {
     assert!(solve(&data, &InertialInitOptions::default())
         .accepted()
         .is_some());
+}
+
+/// The reduced data of the clean two-centre scenario, for the refinement's own tests.
+struct RefineFixture {
+    data: Synthetic,
+    cameras: Vec<linear::Camera>,
+    preint: preintegration::Preintegrated,
+    /// 40 inlier tracks of the solved window and their solved points.
+    tracks: Vec<(Vec<BearingObservation>, Vector3<f64>)>,
+}
+
+impl RefineFixture {
+    fn new() -> Self {
+        let data = generate(&Scenario::clean(Rig::TwoCentre, 2.0));
+        let cameras: Vec<linear::Camera> = data
+            .t_i_c
+            .iter()
+            .map(|t| linear::Camera {
+                r_ic: t.rotation.matrix(),
+                t_ic: t.translation,
+            })
+            .collect();
+        let zero: Vector3<f64> = Vector3::zeros();
+        let preint = preintegration::preintegrate(&data.imu, &data.frame_times_ns, &zero, &zero)
+            .expect("covered");
+        let solution = solve(&data, &InertialInitOptions::default())
+            .solution
+            .expect("the clean window solves");
+        let tracks = solution
+            .points_body0
+            .iter()
+            .take(40)
+            .map(|(id, point)| {
+                let track = data
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == *id)
+                    .expect("an input track");
+                (track.observations.clone(), *point)
+            })
+            .collect();
+        Self {
+            data,
+            cameras,
+            preint,
+            tracks,
+        }
+    }
+
+    fn observations(&self) -> Vec<&[BearingObservation]> {
+        self.tracks.iter().map(|(o, _)| o.as_slice()).collect()
+    }
+
+    fn problem<'a>(&'a self, tracks: &'a [&'a [BearingObservation]]) -> refine::Problem<'a> {
+        let options = InertialInitOptions::default();
+        refine::Problem {
+            preint: &self.preint,
+            cameras: &self.cameras,
+            tracks,
+            huber: options.huber_rad,
+            bearing_sigma: options.bearing_sigma_rad,
+            estimate_accel_bias: true,
+            gyro_bias_prior: Vector3::zeros(),
+            gyro_bias_sigma: options.gyro_bias_sigma,
+            accel_bias_sigma: options.accel_bias_sigma,
+        }
+    }
+
+    /// The truth with the velocity off by a few cm/s, and the solved points.
+    fn state(&self) -> refine::State {
+        refine::State {
+            velocity: self.data.truth.velocity_body0 + Vector3::new(0.03, -0.02, 0.01),
+            gravity: self.data.truth.gravity_body0,
+            bias_gyro: Vector3::zeros(),
+            bias_accel: Vector3::zeros(),
+            points: self.tracks.iter().map(|(_, p)| *p).collect(),
+        }
+    }
+}
+
+/// One iteration from an offset state ends at the limit, not "converged"; the
+/// same start with the default limit converges.
+#[test]
+fn iteration_exhaustion_is_not_convergence() {
+    let fixture = RefineFixture::new();
+    let tracks = fixture.observations();
+    let problem = fixture.problem(&tracks);
+    let short = refine::refine(&problem, fixture.state(), 1);
+    assert_eq!(short.outcome, RefineOutcome::IterationLimit);
+    let full = refine::refine(&problem, fixture.state(), 30);
+    assert_eq!(full.outcome, RefineOutcome::Converged);
+    assert!(full.information.is_some());
+}
+
+/// A point with no observation has a zero Hessian: the factorisation fails,
+/// and the reduced information is undefined instead of missing that point.
+#[test]
+fn an_undetermined_point_leaves_no_reduced_information() {
+    let fixture = RefineFixture::new();
+    let mut tracks = fixture.observations();
+    let mut state = fixture.state();
+    assert!(refine::reduced_information(&fixture.problem(&tracks), &state).is_some());
+    tracks.push(&[]);
+    state.points.push(Vector3::new(1.0, 2.0, 3.0));
+    assert!(refine::reduced_information(&fixture.problem(&tracks), &state).is_none());
+}
+
+/// The scale sigma is a Cholesky solve: rank-deficient, indefinite or
+/// non-finite information, or a NaN variance, gives no sigma (a rejection),
+/// never a clamped zero.
+#[test]
+fn scale_sigma_needs_positive_definite_finite_information() {
+    let velocity: Vector3<f64> = Vector3::new(2.0, 0.0, 0.0);
+    let information: DMatrix<f64> = DMatrix::from_diagonal(&DVector::from_vec(vec![
+        400.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+    ]));
+    // sqrt(sigma2 / 400) / |v| = sqrt(4 / 400) / 2.
+    let sigma: f64 = scale_sigma(&information, &velocity, 4.0).expect("positive definite");
+    assert!((sigma - 0.05).abs() < 1e-15, "{sigma}");
+
+    let mut rank_deficient = information.clone();
+    rank_deficient[(4, 4)] = 0.0;
+    assert_eq!(scale_sigma(&rank_deficient, &velocity, 4.0), None);
+    let mut indefinite = information.clone();
+    indefinite[(0, 0)] = -400.0;
+    assert_eq!(scale_sigma(&indefinite, &velocity, 4.0), None);
+    let mut not_finite = information.clone();
+    not_finite[(2, 7)] = f64::NAN;
+    not_finite[(7, 2)] = f64::NAN;
+    assert_eq!(scale_sigma(&not_finite, &velocity, 4.0), None);
+    assert_eq!(scale_sigma(&information, &velocity, f64::NAN), None);
+    assert_eq!(scale_sigma(&information, &velocity, f64::INFINITY), None);
 }

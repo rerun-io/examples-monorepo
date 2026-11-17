@@ -3,7 +3,7 @@
 //! factory lens calibration; and the rolling-shutter correction of the tiles'
 //! keypoints (the readout convention is [`DualFisheyeLenses::readout_s`]'s).
 //!
-//! Frames: `P` is the panorama frame of `kornia_staging_io::insta360` (`+Z` the
+//! Frames: `P` is the panorama frame of `kornia_staging_3d::camera::formats::insta360` (`+Z` the
 //! lens-0 axis, `+Y` toward the handle). Tile `k`'s camera frame is `P` turned
 //! by `k * pi` about `Y`; its origin is lens `k`'s centre (two-centre lane) or
 //! the lens midpoint (central lane).
@@ -13,12 +13,11 @@ use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
 use crate::estimator::FlowObservations;
 use crate::frontend::flow::TrackKillMask;
-use crate::frontend::input::LensStitch;
 use crate::lie::{Se3, So3};
 use kornia_image::ImageSize;
+use kornia_staging_3d::camera::formats::insta360::{FactoryLens, WindowCrop, parse_lens_string};
 use kornia_staging_3d::camera::{CameraModel, Equirectangular};
-use kornia_staging_imgproc::panorama::{LUT_INVALID, TileGeometry, TileLut, build_tile_lut};
-use kornia_staging_io::insta360::{LensCalibration, WindowCrop, parse_lens_string};
+use kornia_staging_imgproc::panorama::{LensStitch, RemapTable, TileGeometry};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -27,6 +26,9 @@ use std::sync::Arc;
 /// the radius of the 51-point patch at level 0 plus one pixel of rounding.
 pub const KILL_RADIUS_PX: usize = 4;
 
+/// Columns of one hemisphere tile's 180 deg, and its rows (pole to pole): the tiles of a 1920x960 panorama.
+const HEMISPHERE_PX: usize = 960;
+
 /// How long gyro samples are kept for the rolling-shutter rate, nanoseconds.
 const GYRO_KEEP_NS: i64 = 200_000_000;
 
@@ -34,7 +36,7 @@ const GYRO_KEEP_NS: i64 = 200_000_000;
 #[derive(Debug, Clone)]
 pub struct DualFisheyeLenses {
     /// The two lenses, in lens order (not track order), at the lens image's pixels.
-    pub lenses: [LensCalibration; 2],
+    pub lenses: [FactoryLens; 2],
     /// Rolling-shutter readout time of one lens image, seconds: row `v` of an
     /// `H`-row image is read at `t + readout_s * (v - (H - 1) / 2) / H` relative
     /// to the frame time `t`. Positive reads top to bottom; negative bottom to top.
@@ -53,10 +55,9 @@ impl DualFisheyeLenses {
         lens_size: [u32; 2],
         readout_s: f64,
     ) -> Result<Self, VioError> {
-        let lenses: Vec<LensCalibration> =
-            parse_lens_string(lens_string, window_crop, lens_size)
-                .map_err(|error| VioError::Panorama(format!("factory lens string: {error}")))?;
-        let lenses: [LensCalibration; 2] = lenses.try_into().map_err(|all: Vec<_>| {
+        let lenses: Vec<FactoryLens> = parse_lens_string(lens_string, window_crop, lens_size)
+            .map_err(|error| VioError::Panorama(format!("factory lens string: {error}")))?;
+        let lenses: [FactoryLens; 2] = lenses.try_into().map_err(|all: Vec<_>| {
             VioError::Panorama(format!(
                 "a dual fisheye has two lenses; the string holds {}",
                 all.len()
@@ -72,15 +73,15 @@ impl DualFisheyeLenses {
 
     /// `T_P_lens`: lens `k`'s pose in the panorama frame (factory rotation and centre).
     pub fn pano_from_lens(&self, lens: usize) -> Se3<f64> {
-        let lens: &LensCalibration = &self.lenses[lens];
+        let lens: &FactoryLens = &self.lenses[lens];
         Se3::new(
-            rotation(&lens.pano_from_lens_rotation),
-            Vector3::from(lens.pano_centre_m),
+            rotation(lens.pano_from_lens.rotation.matrix()),
+            lens.pano_from_lens.translation.vector,
         )
     }
 
-    /// The tables that stitch `lens` images into the two 960-row hemisphere tiles
-    /// with `margin_px` overlap columns: the one stitch the lane and the viewing
+    /// The stitch of `lens` images into the two 960-row hemisphere tiles with
+    /// `margin_px` overlap columns: the one stitch the lane and the viewing
     /// panorama ([`LensStitch::panorama`]) share. Tile `k` reads lens `k`.
     ///
     /// # Errors
@@ -89,34 +90,25 @@ impl DualFisheyeLenses {
     /// or a lens image below 4x4, before any table is built.
     pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
         let geometry: TileGeometry = TileGeometry {
+            hemisphere_width: HEMISPHERE_PX,
+            height: HEMISPHERE_PX,
             margin: margin_px,
-            ..TileGeometry::default()
         };
-        if margin_px > geometry.hemisphere_width / 2 {
-            return Err(VioError::Panorama(format!(
-                "a {margin_px} px margin is wider than half the {} px hemisphere",
-                geometry.hemisphere_width
-            )));
-        }
-        if lens.width < 4 || lens.height < 4 {
-            return Err(VioError::Panorama(format!(
-                "a {}x{} lens image is below 4x4",
-                lens.width, lens.height
-            )));
-        }
-        let luts: [TileLut; 2] = std::array::from_fn(|k| {
-            build_tile_lut(geometry, k, lens, |ray| {
-                self.lenses[k].project_from_panorama(ray)
-            })
-        });
-        Ok(LensStitch::new(luts, lens)?)
+        LensStitch::new(geometry, lens, |k, ray| {
+            let lens: &FactoryLens = &self.lenses[k];
+            let local = lens
+                .pano_from_lens
+                .rotation
+                .inverse_transform_vector(&Vector3::from(ray));
+            lens.camera.project(local.into()).ok()
+        })
+        .map_err(|error| VioError::Panorama(error.to_string()))
     }
 }
 
-fn rotation(rows: &[[f64; 3]; 3]) -> So3<f64> {
-    let matrix: Matrix3<f64> = Matrix3::from_fn(|row, column| rows[row][column]);
+fn rotation(matrix: &Matrix3<f64>) -> So3<f64> {
     So3::from_unit_quaternion(UnitQuaternion::from_rotation_matrix(
-        &nalgebra::Rotation3::from_matrix(&matrix),
+        &nalgebra::Rotation3::from_matrix(matrix),
     ))
 }
 
@@ -171,31 +163,26 @@ pub(super) fn expand(
     // Built once per rig: the GPU lane uploads these tables once and the lookahead
     // recognises the stitch by identity.
     let stitch: Arc<LensStitch> =
-        Arc::new(lenses.stitch(lens_size, config.panorama_tile_margin_px as usize)?);
-    let geometry: TileGeometry = stitch.luts()[0].geometry;
-    let focal: f64 = geometry.focal();
-    let [cx, cy] = geometry.principal();
+        Arc::new(lenses.stitch(lens_size, super::TILE_MARGIN_PX)?);
+    let geometry: TileGeometry = stitch.geometry();
+    let model: Equirectangular<f64> = geometry
+        .camera()
+        .map_err(|error| VioError::Panorama(format!("tile camera: {error:?}")))?;
+    let [fx, fy, cx, cy, lon_max] = model.params();
     let tile: EquirectangularParams<f64> = EquirectangularParams {
-        fx: focal,
-        fy: focal,
+        fx,
+        fy,
         cx,
         cy,
-        lon_max: geometry.lon_max(),
+        lon_max,
     };
     let t_i_c: Vec<Se3<f64>> = (0..2)
         .map(|k| {
-            let origin: Vector3<f64> = if config.panorama_two_centre {
-                Vector3::from(lenses.lenses[k].pano_centre_m)
-            } else {
-                Vector3::zeros()
-            };
+            let origin: Vector3<f64> = lenses.lenses[k].pano_from_lens.translation.vector;
             let turn: So3<f64> = So3::exp(&Vector3::new(0.0, std::f64::consts::PI * k as f64, 0.0));
             imu_from_pano * Se3::new(turn, origin)
         })
         .collect();
-    let model: Equirectangular<f64> =
-        Equirectangular::new([tile.fx, tile.fy, tile.cx, tile.cy, tile.lon_max])
-            .map_err(|error| VioError::Panorama(format!("tile camera: {error:?}")))?;
     let ingest: DualFisheyeIngest = DualFisheyeIngest {
         tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
         stitch,
@@ -249,8 +236,8 @@ impl DualFisheyeIngest {
     }
 
     /// The lookup table of tile `k`.
-    pub fn lut(&self, tile: usize) -> &TileLut {
-        &self.stitch.luts()[tile]
+    pub fn table(&self, tile: usize) -> &RemapTable {
+        &self.stitch.tables()[tile]
     }
 
     /// The stitch the frame storage takes the lens images through.
@@ -271,17 +258,16 @@ impl DualFisheyeIngest {
 
     /// Per tile, whether each pixel's table entry is invalid (outside the lens).
     pub fn invalid(&self, tile: usize) -> Vec<bool> {
-        self.lut(tile)
-            .sample
+        self.table(tile)
+            .samples()
             .iter()
-            .map(|&sample| sample == LUT_INVALID)
+            .map(|&sample| sample == RemapTable::INVALID)
             .collect()
     }
 
     /// Per tile, the invalid pixels grown by [`KILL_RADIUS_PX`] (Chebyshev).
     pub fn kill_mask(&self, tile: usize) -> Arc<TrackKillMask> {
-        let geometry: &TileGeometry = &self.lut(tile).geometry;
-        let (width, height) = (geometry.width(), geometry.height);
+        let ImageSize { width, height } = self.stitch.tile_size();
         let invalid: Vec<bool> = self.invalid(tile);
         let mut killed: Vec<bool> = vec![false; width * height];
         let radius: usize = KILL_RADIUS_PX;
@@ -359,7 +345,7 @@ impl DualFisheyeIngest {
                 if let Some([u, v]) = rolling_shutter_correct(
                     [f64::from(pixel.x), f64::from(pixel.y)],
                     &self.tile_camera,
-                    self.lut(tile),
+                    self.table(tile),
                     self.lens_size().height,
                     self.readout_s,
                     &omega,
@@ -371,10 +357,12 @@ impl DualFisheyeIngest {
     }
 }
 
-/// Lens row (full-resolution) under a tile pixel: bilinear over the four table
-/// neighbours when all are valid, else the nearest one's, else `None`.
-pub fn lens_row(lut: &TileLut, pixel: [f64; 2]) -> Option<f64> {
-    let (width, height) = (lut.geometry.width(), lut.geometry.height);
+/// Lens row (full-resolution) under a tile pixel, from the table's fixed-point
+/// entries (`qy / 128`: an entry is the level-1 row in 1/256 px): bilinear over
+/// the four table neighbours when all are valid, else the nearest one's, else
+/// `None`.
+pub fn lens_row(table: &RemapTable, pixel: [f64; 2]) -> Option<f64> {
+    let ImageSize { width, height } = table.dst_size();
     let [u, v] = pixel;
     if !(u >= 0.0 && v >= 0.0 && u <= (width - 1) as f64 && v <= (height - 1) as f64) {
         return None;
@@ -382,15 +370,18 @@ pub fn lens_row(lut: &TileLut, pixel: [f64; 2]) -> Option<f64> {
     let (x0, y0) = (u.floor() as usize, v.floor() as usize);
     let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
     let (ax, ay) = (u - x0 as f64, v - y0 as f64);
-    let row = |x: usize, y: usize| f64::from(lut.source_row[y * width + x]);
-    let corners: [f64; 4] = [row(x0, y0), row(x1, y0), row(x0, y1), row(x1, y1)];
-    if corners.iter().all(|value| value.is_finite()) {
-        let top: f64 = corners[0] * (1.0 - ax) + corners[1] * ax;
-        let bottom: f64 = corners[2] * (1.0 - ax) + corners[3] * ax;
+    let row = |x: usize, y: usize| {
+        let q: [u32; 2] = table.samples()[y * width + x];
+        (q != RemapTable::INVALID).then(|| f64::from(q[1]) / 128.0)
+    };
+    if let (Some(r00), Some(r10), Some(r01), Some(r11)) =
+        (row(x0, y0), row(x1, y0), row(x0, y1), row(x1, y1))
+    {
+        let top: f64 = r00 * (1.0 - ax) + r10 * ax;
+        let bottom: f64 = r01 * (1.0 - ax) + r11 * ax;
         return Some(top * (1.0 - ay) + bottom * ay);
     }
-    let nearest: f64 = row(u.round() as usize, v.round() as usize);
-    nearest.is_finite().then_some(nearest)
+    row(u.round() as usize, v.round() as usize)
 }
 
 /// One keypoint observed by a rolling-shutter lens, moved to where a global
@@ -406,12 +397,12 @@ pub fn lens_row(lut: &TileLut, pixel: [f64; 2]) -> Option<f64> {
 pub fn rolling_shutter_correct(
     pixel: [f64; 2],
     camera: &Equirectangular<f64>,
-    lut: &TileLut,
+    table: &RemapTable,
     lens_height: usize,
     readout_s: f64,
     omega: &Vector3<f64>,
 ) -> Option<[f64; 2]> {
-    let row: f64 = lens_row(lut, pixel)?;
+    let row: f64 = lens_row(table, pixel)?;
     let height: f64 = lens_height as f64;
     let dt: f64 = readout_s * (row - 0.5 * (height - 1.0)) / height;
     let bearing: Vector3<f64> = Vector3::from(camera.unproject(pixel).ok()?);

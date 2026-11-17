@@ -12,7 +12,7 @@
 //! at every iteration; the reduced system has 8 (or 11) unknowns.
 use super::linear::{tangent_basis, Camera};
 use super::preintegration::Preintegrated;
-use super::BearingObservation;
+use super::{BearingObservation, RefineOutcome};
 use kornia_staging_algebra::lie::Rotation3;
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
@@ -45,17 +45,19 @@ pub(super) struct Problem<'a> {
 #[derive(Debug, Clone)]
 pub(super) struct Refined {
     pub state: State,
-    pub converged: bool,
+    pub outcome: RefineOutcome,
     /// Undamped reduced information matrix at the solution, in the order
-    /// velocity (3), gravity tangent (2), gyro bias (3), accel bias (3).
-    pub information: DMatrix<f64>,
+    /// velocity (3), gravity tangent (2), gyro bias (3), accel bias (3);
+    /// `None` when it is not defined (see [`reduced_information`]).
+    pub information: Option<DMatrix<f64>>,
     /// Robust data cost at the solution, whitened by the bearing sigma.
     pub data_cost: f64,
     /// Number of observations.
     pub observations: usize,
 }
 
-const MAX_Y: usize = 11;
+/// Reduced unknowns with the accelerometer bias: velocity, gravity tangent, both biases.
+pub(super) const MAX_Y: usize = 11;
 type RowJ = SMatrix<f64, 3, MAX_Y>;
 
 /// Huber cost and IRLS weight for a squared residual norm.
@@ -283,21 +285,40 @@ pub(super) fn gravity_basis(gravity: &Vector3<f64>) -> SMatrix<f64, 3, 2> {
 
 /// Levenberg-Marquardt with Marquardt diagonal scaling and a multiplicative
 /// damping schedule.
+///
+/// The loop ends [`RefineOutcome::Converged`] when an accepted step lowers the
+/// cost by less than `1e-10` of it (or moves the state by less than `1e-12`),
+/// or when no damping lowers the cost and the least-damped step predicted no
+/// more than that (the state is a minimum to rounding). A failed search with
+/// a larger predicted decrease is [`RefineOutcome::Stalled`], and running out
+/// of iterations is [`RefineOutcome::IterationLimit`].
 pub(super) fn refine(problem: &Problem<'_>, initial: State, max_iterations: usize) -> Refined {
     let ny: usize = if problem.estimate_accel_bias { 11 } else { 8 };
     let mut state: State = initial;
     let mut cost: f64 = data_cost(problem, &state) + prior_cost(problem, &state);
     let mut lambda: f64 = 1e-4;
-    let mut converged: bool = false;
+    let mut outcome: RefineOutcome = RefineOutcome::IterationLimit;
     for _ in 0..max_iterations {
         let basis = gravity_basis(&state.gravity);
         let normal = linearize(problem, &state, &basis, ny);
         let mut accepted: bool = false;
+        // The quadratic model's decrease `-g . step` of the least-damped step
+        // that solved; NaN until one solves.
+        let mut predicted: f64 = f64::NAN;
         for _ in 0..12 {
             let Some((dy, dps)) = solve_step(&normal, lambda, ny) else {
                 lambda *= 10.0;
                 continue;
             };
+            if predicted.is_nan() {
+                predicted = -(normal.g_y.dot(&dy)
+                    + normal
+                        .g_p
+                        .iter()
+                        .zip(&dps)
+                        .map(|(g, d)| g.dot(d))
+                        .sum::<f64>());
+            }
             let candidate = apply(&state, &dy, &dps, &basis, problem.estimate_accel_bias);
             let new_cost: f64 = data_cost(problem, &candidate) + prior_cost(problem, &candidate);
             if new_cost.is_finite() && new_cost < cost {
@@ -307,42 +328,56 @@ pub(super) fn refine(problem: &Problem<'_>, initial: State, max_iterations: usiz
                 lambda = (lambda / 3.0).max(1e-12);
                 accepted = true;
                 if decrease < 1e-10 || dy.norm() < 1e-12 {
-                    converged = true;
+                    outcome = RefineOutcome::Converged;
                 }
                 break;
             }
             lambda *= 4.0;
         }
         if !accepted {
-            // No decrease at any damping: the state is a minimum to rounding.
-            converged = true;
+            // `<=` is false for NaN: a search where no step solved is a stall.
+            outcome = if predicted <= 1e-10 * cost {
+                RefineOutcome::Converged
+            } else {
+                RefineOutcome::Stalled
+            };
         }
-        if converged {
+        if outcome != RefineOutcome::IterationLimit {
             break;
-        }
-    }
-    // The information always carries the accelerometer bias with its prior,
-    // estimated or not: a bias held at zero is still uncertain, and leaving it
-    // out would let a fixed wrong bias look like scale information.
-    let consider = Problem {
-        estimate_accel_bias: true,
-        ..*problem
-    };
-    let basis = gravity_basis(&state.gravity);
-    let normal = linearize(&consider, &state, &basis, MAX_Y);
-    let mut information: DMatrix<f64> = normal.h_yy.clone();
-    for (hpp, hpy) in normal.h_pp.iter().zip(&normal.h_py) {
-        if let Some(inv) = hpp.try_inverse() {
-            let hpy_n = hpy.columns(0, MAX_Y);
-            information -= hpy_n.transpose() * (inv * hpy_n);
         }
     }
     let observations: usize = problem.tracks.iter().map(|t| t.len()).sum();
     Refined {
         data_cost: data_cost(problem, &state),
+        information: reduced_information(problem, &state),
         state,
-        converged,
-        information,
+        outcome,
         observations,
     }
+}
+
+/// The undamped information of velocity, gravity tangent and both biases
+/// with every point eliminated (Schur complement), at `state`.
+///
+/// It always carries the accelerometer bias with its prior, estimated or not:
+/// a bias held at zero is still uncertain, and leaving it out would let a
+/// fixed wrong bias look like scale information. `None` when a point's
+/// Hessian is not positive definite (the point is not determined, so neither
+/// is the reduced information) or a number is not finite.
+pub(super) fn reduced_information(problem: &Problem<'_>, state: &State) -> Option<DMatrix<f64>> {
+    let consider = Problem {
+        estimate_accel_bias: true,
+        ..*problem
+    };
+    let basis = gravity_basis(&state.gravity);
+    let normal = linearize(&consider, state, &basis, MAX_Y);
+    let mut information: DMatrix<f64> = normal.h_yy;
+    for (hpp, hpy) in normal.h_pp.iter().zip(&normal.h_py) {
+        let point = hpp.cholesky()?;
+        information -= hpy.transpose() * point.solve(hpy);
+    }
+    information
+        .iter()
+        .all(|v| v.is_finite())
+        .then_some(information)
 }

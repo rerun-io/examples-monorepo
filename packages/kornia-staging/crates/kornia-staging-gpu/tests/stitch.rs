@@ -7,30 +7,41 @@
 #![allow(unsafe_code)]
 #![cfg(feature = "wgpu")]
 use kornia_image::{Image, ImageSize};
+use kornia_staging_3d::camera::formats::insta360::{parse_lens_string, FactoryLens, WindowCrop};
+use kornia_staging_3d::camera::CameraModel;
 use kornia_staging_gpu::{
     pyramid::{GpuPyramid, GpuPyramidBuilder},
     runtime::gpu_client,
-    stitch::{TableError, TileTables},
+    stitch::TileTables,
     GpuRuntime,
 };
-use kornia_staging_imgproc::panorama::{
-    build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
-};
+use kornia_staging_imgproc::panorama::{lens_level1, remap, LensStitch, RemapTable, TileGeometry};
 use kornia_staging_imgproc::pyramid::PyramidPlanU16;
-use kornia_staging_io::insta360::{parse_lens_string, WindowCrop};
 
 const LEVELS: usize = 3;
 include!("../../kornia-staging-io/tests/common/x4air_lens.rs");
 include!("../../kornia-staging-io/tests/common/x4air_clip.rs");
 
-/// The CPU stitch of one lens: `lens_level1` then `remap_tile`.
-fn cpu_tile(lens: &Image<u8, 1>, lut: &TileLut) -> Image<u16, 1> {
-    let size = ImageSize {
-        width: lut.geometry.width(),
-        height: lut.geometry.height,
-    };
-    let mut tile = Image::from_size_val(size, 0u16).unwrap();
-    remap_tile(&lens_level1(lens).unwrap(), lut, &mut tile).unwrap();
+/// The factory projection of a ray in the panorama frame.
+fn project(lens: &FactoryLens, d: [f64; 3]) -> Option<[f64; 2]> {
+    let local = lens
+        .pano_from_lens
+        .rotation
+        .inverse_transform_vector(&d.into());
+    lens.camera.project(local.into()).ok()
+}
+
+/// The 1088x960 tiles of a 1920x960 panorama.
+const FACTORY_TILE: TileGeometry = TileGeometry {
+    hemisphere_width: 960,
+    height: 960,
+    margin: 64,
+};
+
+/// The CPU stitch of one lens: `lens_level1` then `remap`.
+fn cpu_tile(lens: &Image<u8, 1>, table: &RemapTable) -> Image<u16, 1> {
+    let mut tile = Image::from_size_val(table.dst_size(), 0u16).unwrap();
+    remap(&lens_level1(lens).unwrap(), table, &mut tile).unwrap();
     tile
 }
 
@@ -87,9 +98,9 @@ fn assert_tile_pyramid(expected: &Image<u16, 1>, gpu: &GpuPyramid<GpuRuntime>, l
 }
 
 /// Stitch `lenses` on both lanes and compare every tile level.
-fn assert_stitch_matches(luts: &[TileLut; 2], lenses: &[Image<u8, 1>; 2], label: &str) {
+fn assert_stitch_matches(stitch: &LensStitch, lenses: &[Image<u8, 1>; 2], label: &str) {
     let client = gpu_client().unwrap();
-    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let tables = TileTables::upload(&client, stitch).unwrap();
     let mut builder = GpuPyramidBuilder::new(client);
     let tile = tables.tile_size();
     let mut pyramids: Vec<_> = (0..2)
@@ -97,7 +108,7 @@ fn assert_stitch_matches(luts: &[TileLut; 2], lenses: &[Image<u8, 1>; 2], label:
         .collect();
     device_pyramids(&mut builder, &tables, lenses, &mut pyramids);
     for k in 0..2 {
-        let expected = cpu_tile(&lenses[k], &luts[k]);
+        let expected = cpu_tile(&lenses[k], &stitch.tables()[k]);
         assert_tile_pyramid(&expected, &pyramids[k], &format!("{label}, tile {k}"));
     }
 }
@@ -119,10 +130,10 @@ fn noise(size: ImageSize, seed: u32) -> Image<u8, 1> {
     Image::new(size, pixels).unwrap()
 }
 
-/// A 256 x 264 tile over a 100 x 90 level-1 source: the first 256 rows hold every `(ax, ay)` phase pair once,
-/// at scattered `(x0, y0)`; the last 8 rows hold the right and bottom edges (`x0 = w - 1`, `y0 = h - 1`, phase 0,
-/// where the clamp matters) and invalid entries.
-fn synthetic_lut(tile: usize) -> TileLut {
+/// A 256 x 264 tile over a 100 x 90 level-1 source (200x180 lenses): the first 256 rows hold every `(ax, ay)` phase
+/// pair once, at scattered `(x0, y0)`; the last 8 rows hold the right and bottom edges (`x0 = w - 1`, `y0 = h - 1`,
+/// phase 0, where the clamp matters) and invalid entries.
+fn synthetic_stitch() -> LensStitch {
     let geometry = TileGeometry {
         hemisphere_width: 248,
         height: 264,
@@ -133,38 +144,39 @@ fn synthetic_lut(tile: usize) -> TileLut {
         height: 90,
     };
     let (w, h) = (source_size.width as u32, source_size.height as u32);
-    let sample = (0..geometry.width() * geometry.height)
-        .map(|p| {
-            let p = p as u32;
-            let (column, row) = (p % 256, p / 256);
-            if row < 256 {
-                let (ax, ay) = (column, row);
-                let x0 = (p * 7 + tile as u32 * 13) % (w - 1);
-                let y0 = (p * 11 + tile as u32 * 5) % (h - 1);
-                [256 * x0 + ax, 256 * y0 + ay]
-            } else {
-                match column % 4 {
-                    0 => [256 * (w - 1), 256 * (column % h)],
-                    1 => [256 * (column % w), 256 * (h - 1)],
-                    2 => [256 * (w - 1), 256 * (h - 1)],
-                    _ => LUT_INVALID,
+    let table = |tile: u32| {
+        let sample = (0..geometry.width() * geometry.height)
+            .map(|p| {
+                let p = p as u32;
+                let (column, row) = (p % 256, p / 256);
+                if row < 256 {
+                    let (ax, ay) = (column, row);
+                    let x0 = (p * 7 + tile * 13) % (w - 1);
+                    let y0 = (p * 11 + tile * 5) % (h - 1);
+                    [256 * x0 + ax, 256 * y0 + ay]
+                } else {
+                    match column % 4 {
+                        0 => [256 * (w - 1), 256 * (column % h)],
+                        1 => [256 * (column % w), 256 * (h - 1)],
+                        2 => [256 * (w - 1), 256 * (h - 1)],
+                        _ => RemapTable::INVALID,
+                    }
                 }
-            }
-        })
-        .collect::<Vec<_>>();
-    TileLut {
-        geometry,
-        tile,
-        source_size,
-        source_row: vec![0.0; sample.len()],
-        sample,
-    }
+            })
+            .collect();
+        RemapTable::from_raw(geometry.size(), source_size, sample).unwrap()
+    };
+    let lens = ImageSize {
+        width: 200,
+        height: 180,
+    };
+    LensStitch::from_tables(geometry, [table(0), table(1)], lens).unwrap()
 }
 
 #[test]
 fn synthetic_tables_cover_every_bilinear_phase_bit_exactly() {
-    let luts = [synthetic_lut(0), synthetic_lut(1)];
-    assert!(luts[0].invalid_count() > 0);
+    let stitch = synthetic_stitch();
+    assert!(stitch.tables()[0].samples().contains(&RemapTable::INVALID));
     // 200x180 lenses reduce to the 100x90 source; 201x181 does too, through the odd-geometry ingest path.
     for (size, label) in [
         (
@@ -183,7 +195,7 @@ fn synthetic_tables_cover_every_bilinear_phase_bit_exactly() {
         ),
     ] {
         let lenses = [noise(size, 1), noise(size, 2)];
-        assert_stitch_matches(&luts, &lenses, label);
+        assert_stitch_matches(&stitch, &lenses, label);
     }
 }
 
@@ -191,22 +203,24 @@ fn synthetic_tables_cover_every_bilinear_phase_bit_exactly() {
 fn factory_tables_stitch_bit_exactly() {
     for (name, text) in [("V6", V6), ("V3", V3)] {
         let lenses = parse_lens_string(text, Some(CROP), [1920, 1920]).unwrap();
-        let luts = [0, 1].map(|k| {
-            build_tile_lut(TileGeometry::default(), k, LENS, |d| {
-                lenses[k].project_from_panorama(d)
-            })
-        });
-        assert!(luts.iter().all(|lut| lut.invalid_count() > 0));
+        let stitch = LensStitch::new(FACTORY_TILE, LENS, |k, d| {
+            project(&lenses[k], d)
+        })
+        .unwrap();
+        assert!(stitch
+            .tables()
+            .iter()
+            .all(|table| table.samples().contains(&RemapTable::INVALID)));
         let images = [noise(LENS, 3), noise(LENS, 4)];
-        assert_stitch_matches(&luts, &images, name);
+        assert_stitch_matches(&stitch, &images, name);
     }
 }
 
 #[test]
 fn a_reused_stitch_carries_only_the_newest_frameset() {
-    let luts = [synthetic_lut(0), synthetic_lut(1)];
+    let stitch = synthetic_stitch();
     let client = gpu_client().unwrap();
-    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let tables = TileTables::upload(&client, &stitch).unwrap();
     let mut builder = GpuPyramidBuilder::new(client);
     let mut pyramids: Vec<_> = (0..2)
         .map(|_| builder.allocate(256, 264, LEVELS).unwrap())
@@ -221,38 +235,21 @@ fn a_reused_stitch_carries_only_the_newest_frameset() {
     device_pyramids(&mut builder, &tables, &second, &mut pyramids);
     for k in 0..2 {
         assert_tile_pyramid(
-            &cpu_tile(&second[k], &luts[k]),
+            &cpu_tile(&second[k], &stitch.tables()[k]),
             &pyramids[k],
             "second frameset",
         );
     }
 }
 
+/// A valid table uploads (the table type refuses malformed ones on the CPU, see `kornia-staging-imgproc`); lens
+/// images of another size are refused at the stitch.
 #[test]
-fn tables_the_gather_cannot_read_are_refused() {
+fn a_valid_table_uploads_and_other_lens_sizes_are_refused() {
     let client = gpu_client().unwrap();
-    let luts = [synthetic_lut(0), synthetic_lut(1)];
-    assert!(matches!(
-        TileTables::upload(&client, [&luts[1], &luts[0]]),
-        Err(TableError::Geometry)
-    ));
-    let mut outside = synthetic_lut(1);
-    outside.sample[17] = [256 * 99 + 1, 0];
-    assert!(matches!(
-        TileTables::upload(&client, [&luts[0], &outside]),
-        Err(TableError::OutOfRange {
-            tile: 1,
-            pixel: 17,
-            ..
-        })
-    ));
-    let mut short = synthetic_lut(1);
-    short.sample.pop();
-    assert!(matches!(
-        TileTables::upload(&client, [&luts[0], &short]),
-        Err(TableError::Geometry)
-    ));
-    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let stitch = synthetic_stitch();
+    let tables = TileTables::upload(&client, &stitch).unwrap();
+    assert_eq!(tables.tile_size(), stitch.tile_size());
     let mut builder = GpuPyramidBuilder::new(client);
     let mut pyramids: Vec<_> = (0..2)
         .map(|_| builder.allocate(256, 264, LEVELS).unwrap())
@@ -272,22 +269,21 @@ fn tables_the_gather_cannot_read_are_refused() {
 }
 
 /// The clip's tables and frame `frame`'s two lens images in lens order, or `None` with the missing asset named.
-fn clip_frame(frame: usize) -> Option<([TileLut; 2], [Image<u8, 1>; 2])> {
+fn clip_frame(frame: usize) -> Option<(LensStitch, [Image<u8, 1>; 2])> {
     let (path, clip) = clip()?;
-    let luts = [0, 1].map(|k| {
-        build_tile_lut(TileGeometry::default(), k, LENS, |d| {
-            clip.lenses_v6[k].project_from_panorama(d)
-        })
-    });
+    let stitch = LensStitch::new(FACTORY_TILE, LENS, |k, d| {
+        project(&clip.lenses_v6.as_ref().expect("the clip carries a V6 string")[k], d)
+    })
+    .unwrap();
     let lenses = [0, 1].map(|k| decode(&path, clip.lens_track[k], frame));
-    Some((luts, lenses))
+    Some((stitch, lenses))
 }
 
 #[test]
 #[ignore = "needs the X4 Air clip VID_20261116_125200_00_003.insv (KORNIA_STAGING_INSV) and ffmpeg"]
 fn a_real_frame_pair_stitches_bit_exactly() {
-    let Some((luts, lenses)) = clip_frame(3862) else {
+    let Some((stitch, lenses)) = clip_frame(3862) else {
         return;
     };
-    assert_stitch_matches(&luts, &lenses, "frame 3862");
+    assert_stitch_matches(&stitch, &lenses, "frame 3862");
 }

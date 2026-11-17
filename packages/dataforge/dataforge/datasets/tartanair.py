@@ -1,6 +1,8 @@
 """TartanAir V2: one trajectory, three camera sets on the same motion, with exact ground truth and a noise-free IMU.
 
-``download`` range-extracts the chosen trajectories from Hugging Face (``tartanair_download``); ``convert`` writes,
+``download`` range-reads the chosen trajectories' members out of the environment-wide zips on Hugging Face (one zip per
+camera and one for the IMU, ``<Env>/Data_<easy|hard>/<archive>.zip``, each holding every trajectory) through
+``dataforge.transports.hf_zip``; ``convert`` writes,
 per trajectory, one recording for the ``--camera-set`` it is given, so the same motion runs with each camera model:
 
 * ``pinhole``: ``lcam_front`` + ``rcam_front``, 640x640, f = 320 px, 0.25 m baseline (``brown_conrady``, all zero).
@@ -26,7 +28,7 @@ body being ``lcam_front``. Here:
 
 Clock: frame k is at k * 0.1 s and IMU sample j at j * 0.01 s on ``video_time``, from 0 (``capture:start_time_ns`` = 0).
 The IMU is synthesised from a pose spline whose ends swing (|accel| up to 94 m/s^2), so ``IMU_TRIM`` samples are dropped
-at each end and only frames inside the remaining IMU span are kept. Ground truth is the pose file at the kept frames.
+at each end and only frames with a remaining IMU sample at or before them and one strictly after them are kept. Ground truth is the pose file at the kept frames.
 """
 
 from __future__ import annotations
@@ -35,11 +37,14 @@ import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
+from zipfile import ZipInfo
 
 import httpx
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+from huggingface_hub import HfFileSystem
+from huggingface_hub.errors import HfHubHTTPError
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -48,12 +53,16 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
-from dataforge.datasets.tartanair_download import HF_BASE_URL, HF_REVISION, extract_members, http_range
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import GtTrajectory, ImuChannel, log_camera_source, log_gt_path, log_imu, log_rig_node, log_video_stream
+from dataforge.transports import FetchReport, extract_zip_members, hf_zip, transfer_error
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
+HF_REPO: str = "theairlabcmu/tartanair2"
+"""The Hub dataset; no login needed."""
+HF_REVISION: str = "0d2d145e973832742a2aaa04b7d2ebffc8d82817"
+"""The ``theairlabcmu/tartanair2`` revision COLMAP's TartanAir V2 benchmark pins."""
 CameraSet: TypeAlias = Literal["pinhole", "fisheye", "equirect"]
 """``--camera-set``: which cameras one recording carries; also the catalog dataset (``tartanair-<set>``)."""
 RIG: int = 0
@@ -153,33 +162,36 @@ def imu_in_rig(values_ned: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
 
 
 def aligned_window(num_frames: int, num_imu: int, frame_limit: int | None = None) -> tuple[Int64[ndarray, "k"], slice]:
-    """Frames and IMU samples to keep: the IMU without its spline ends, and the frames inside the IMU span.
+    """Frames and IMU samples to keep: the IMU without its spline ends, and the frames that IMU covers.
+
+    A frame is covered when a kept sample lies at or before it and another strictly after it: the estimator and the
+    bootstrap integrate up to a frame only once a later sample has arrived.
 
     Args:
         num_frames: Frames of the trajectory, frame k at k * 0.1 s.
         num_imu: IMU samples, sample j at j * 0.01 s.
-        frame_limit: Keep only this many frames, and the IMU up to the last of them.
+        frame_limit: Keep only this many frames, and the IMU up to the first sample after the last of them.
 
     Returns:
         Kept frame indices, and the slice of kept IMU samples.
 
     Raises:
-        ValueError: If ``frame_limit`` is below 1, or no frame lies inside the trimmed IMU span (an empty or too short
+        ValueError: If ``frame_limit`` is below 1, or the trimmed IMU covers no frame (an empty or too short
             ``pose_lcam_front.txt`` or ``imu_time.txt``).
     """
     if frame_limit is not None and frame_limit < 1:
         raise ValueError(f"--frame-limit {frame_limit} keeps no frame: give 1 or more")
     imu: slice = slice(IMU_TRIM, num_imu - IMU_TRIM)
     frames_ns: Int64[ndarray, "n"] = np.arange(num_frames, dtype=np.int64) * FRAME_PERIOD_NS
-    frames: Int64[ndarray, "k"] = np.flatnonzero((frames_ns >= imu.start * IMU_PERIOD_NS) & (frames_ns <= (imu.stop - 1) * IMU_PERIOD_NS))
+    frames: Int64[ndarray, "k"] = np.flatnonzero((frames_ns >= imu.start * IMU_PERIOD_NS) & (frames_ns < (imu.stop - 1) * IMU_PERIOD_NS))
     if not frames.size:
         raise ValueError(
             f"no frame of pose_lcam_front.txt ({num_frames} rows) lies inside the IMU span of imu_time.txt ({num_imu} rows, "
-            f"{IMU_TRIM} trimmed at each end)"
+            f"{IMU_TRIM} trimmed at each end, one sample needed after the frame)"
         )
     if frame_limit is not None:
         frames = frames[:frame_limit]
-        imu = slice(imu.start, int(frames[-1]) * FRAME_PERIOD_NS // IMU_PERIOD_NS + 1)
+        imu = slice(imu.start, int(frames[-1]) * FRAME_PERIOD_NS // IMU_PERIOD_NS + 2)
     return frames, imu
 
 
@@ -231,8 +243,6 @@ class TartanAirConfig(FrameLimitedConfig):
     """Raw tree, ``<root>/<Env>/Data_<difficulty>/P0NN/``, as the zips name their members."""
     trajectories: tuple[str, ...] = DEFAULT_TRAJECTORIES
     """``<Env>/<easy|hard>/P0NN`` to download and convert."""
-    workers: int = 8
-    """Members fetched at once by ``download``."""
 
     @property
     def name(self) -> str:
@@ -257,15 +267,22 @@ class TartanAirDataset(DataforgeDataset[TartanAirConfig, TrajectorySource]):
     def download(self) -> None:
         """Fetch every camera of every set, the IMU and the pose files of each trajectory; complete members are skipped."""
         archives: tuple[str, ...] = ("imu", *(f"image_{camera.name}" for cameras in CAMERA_SETS.values() for camera in cameras))
-        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
-            for trajectory in self.config.trajectories:
-                prefix: str = f"{self.trajectory_dir(trajectory).relative_to(self.config.root).as_posix()}/"
-                for archive in archives:
-                    fetch, size = http_range(client, f"{HF_BASE_URL}{prefix.rsplit('/', 2)[0]}/{archive}.zip")
-                    count, written = extract_members(fetch, size, prefix, self.config.root, workers=self.config.workers)
-                    if not count:
-                        raise FileNotFoundError(f"{archive}.zip at {HF_REVISION} holds no member under {prefix}")
-                    print(f"{trajectory} {archive}: {count} members, {written / 1e6:.1f} MB fetched")
+        filesystem: HfFileSystem = HfFileSystem()
+        report: FetchReport = FetchReport()
+        for trajectory in self.config.trajectories:
+            prefix: str = f"{self.trajectory_dir(trajectory).relative_to(self.config.root).as_posix()}/"
+            for archive in archives:
+                zip_path: str = f"{prefix.rsplit('/', 2)[0]}/{archive}.zip"
+                try:
+                    with hf_zip(filesystem, HF_REPO, HF_REVISION, zip_path) as zip_file:
+                        members: list[ZipInfo] = [info for info in zip_file.infolist() if info.filename.startswith(prefix) and not info.is_dir()]
+                        if not members:
+                            raise FileNotFoundError(f"{zip_path} at {HF_REVISION} holds no member under {prefix}")
+                        extract_zip_members(zip_file, members, self.config.root, report)
+                except (HfHubHTTPError, httpx.HTTPError) as error:
+                    raise transfer_error(f"{HF_REPO}@{HF_REVISION[:8]}/{zip_path}", error) from None
+                print(f"{trajectory} {archive}: {len(members)} members")
+        print(f"tartanair: {report.summary()}")
 
     def discover(self) -> list[tuple[SequenceIdentity, TrajectorySource]]:
         """Every configured trajectory whose poses, IMU and this set's cameras are on disk."""

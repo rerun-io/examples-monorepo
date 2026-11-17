@@ -4,6 +4,8 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+pub mod insta360;
+
 /// Pinhole, `fx fy cx cy`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PinholeParams<S> {
@@ -103,6 +105,67 @@ pub struct EucmParams<S> {
     pub alpha: S,
     /// Ellipsoid shape parameter.
     pub beta: S,
+}
+
+/// Equirectangular panorama or tile, `fx fy cx cy lon_max`; not a Basalt model.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EquirectangularParams<S> {
+    /// Pixels per radian of longitude.
+    pub fx: S,
+    /// Pixels per radian of latitude.
+    pub fy: S,
+    /// Column of longitude zero (+Z), pixels.
+    pub cx: S,
+    /// Row of latitude zero, pixels.
+    pub cy: S,
+    /// Longitude half-window, radians, in `(0, pi]`.
+    pub lon_max: S,
+}
+
+/// Unified (Mei) sphere with the Insta360 factory distortion, `fx fy cx cy xi half_field_rad` and the
+/// distortion; not a Basalt model. Catalog names: `mei_v3` (`xi, half_field_rad, k1, k2, k3, p1, p2`) and
+/// `mei_v6` (`xi, half_field_rad, d0 .. d12`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MeiParams<S> {
+    /// Focal length along image x, pixels.
+    pub fx: S,
+    /// Focal length along image y, pixels.
+    pub fy: S,
+    /// Principal point x, pixels.
+    pub cx: S,
+    /// Principal point y, pixels.
+    pub cy: S,
+    /// Sphere offset.
+    pub xi: S,
+    /// Largest angle off the optical axis that projects, radians.
+    pub half_field_rad: S,
+    /// Distortion of the normalized sphere point.
+    pub distortion: MeiDistortion<S>,
+}
+
+impl<S: Scalar> TryFrom<MeiParams<S>> for Mei<S> {
+    type Error = InvalidCalibration;
+    fn try_from(p: MeiParams<S>) -> Result<Self, Self::Error> {
+        Mei::new(
+            [p.fx, p.fy, p.cx, p.cy, p.xi],
+            p.half_field_rad,
+            p.distortion,
+        )
+    }
+}
+impl<S: Scalar> From<Mei<S>> for MeiParams<S> {
+    fn from(v: Mei<S>) -> Self {
+        let [fx, fy, cx, cy, xi] = v.params();
+        Self {
+            fx,
+            fy,
+            cx,
+            cy,
+            xi,
+            half_field_rad: v.half_field_rad(),
+            distortion: v.distortion(),
+        }
+    }
 }
 
 /// Basalt schemas for the five supported camera families.
@@ -411,6 +474,7 @@ impl<S: Scalar> TryFrom<CameraModelKind<S>> for BasaltCamera<S> {
             CameraModelKind::Equirectangular(_) => Err(ConversionError::Unsupported(
                 "equirectangular in Basalt".into(),
             )),
+            CameraModelKind::Mei(_) => Err(ConversionError::Unsupported("mei in Basalt".into())),
         }
     }
 }

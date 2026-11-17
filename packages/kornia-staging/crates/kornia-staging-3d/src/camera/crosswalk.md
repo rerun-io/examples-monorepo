@@ -16,6 +16,7 @@ A subset fixes omitted coefficients to zero. A dash indicates no exact mapping p
 | `fisheye624`, Fisheye62 subset | 11 with s0..s3=0 | — | — | — | Six angular and two tangential coefficients, prism zero | — |
 | `double_sphere` | — | — | ds | ds | — | — |
 | `eucm` | 16 EUCM: fx,fy,cx,cy,alpha,beta | — | eucm | eucm | — | — |
+| `mei`, V3 / V6: Insta360 factory lens string (`formats::insta360`) | — | — | — | — | — | — |
 | `equirectangular` | 17 EQUIRECTANGULAR: w,h (full panorama only) | — | — | — | — | — |
 | Unsupported thin-prism fisheye | 10 THIN_PRISM_FISHEYE: fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,sx1,sy1 | — | — | — | Not Fisheye624: distortion acts before radial scaling | — |
 | Unsupported Apple radial magnification | No exact mapping | Brown8 fit is approximate | — | — | — | — |

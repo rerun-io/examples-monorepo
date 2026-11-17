@@ -78,12 +78,6 @@ impl FrontendLane {
         Ok(on_lane!(self, |flow| flow.set_detection_masks(masks))?)
     }
 
-    /// Per-camera track latitude limits; see
-    /// [`frontend::flow::FrameToFrameOpticalFlow::set_track_latitude_limits`].
-    pub fn set_track_latitude_limits(&mut self, limits: Vec<Option<f32>>) -> Result<(), VioError> {
-        Ok(on_lane!(self, |flow| flow.set_track_latitude_limits(limits))?)
-    }
-
     /// Per-camera track kill masks; see
     /// [`frontend::flow::FrameToFrameOpticalFlow::set_track_kill_masks`].
     pub fn set_track_kill_masks(

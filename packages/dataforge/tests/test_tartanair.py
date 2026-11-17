@@ -1,6 +1,6 @@
-"""tartanair: range extraction of one trajectory's zip members, and the NED -> RDF conversions of the converter.
+"""tartanair: the download of one trajectory's zip members, and the NED -> RDF conversions of the converter.
 
-The unit tests use an in-memory zip and hand-made poses and IMU samples. The integration test converts the first
+The unit tests use in-memory zips on the fake Hub and hand-made poses and IMU samples. The integration test converts the first
 2 s of a downloaded trajectory and reads the layers back the way a consumer does; it skips naming the trajectory
 when the raw data is not on this machine.
 """
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 from conftest import zip_bytes  # pyrefly: ignore[missing-import]
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
@@ -22,30 +22,30 @@ if TYPE_CHECKING:
     from dataforge.datasets.tartanair import CameraSet
 
 
-def test_extract_members_fetches_only_the_prefix_and_resumes(tmp_path: Path) -> None:
-    from dataforge.datasets.tartanair_download import extract_members
+def test_download_lands_only_the_trajectory_members_from_the_pinned_zips_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hub_fake import HubStore  # pyrefly: ignore[missing-import]
 
-    archive: bytes = zip_bytes({"Env/Data_easy/P000/pose_lcam_front.txt": b"0 0 0 0 0 0 1\n", "Env/Data_easy/P001/pose_lcam_front.txt": b"x" * 5000})
-    requests: list[tuple[int, int]] = []
+    from dataforge.datasets import tartanair
+    from dataforge.datasets.tartanair import CAMERA_SETS, HF_REPO, HF_REVISION, TartanAirConfig
 
-    def fetch(start: int, stop: int) -> bytes:
-        requests.append((start, stop))
-        return archive[start:stop]
-
-    assert extract_members(fetch, len(archive), "Env/Data_easy/P000/", tmp_path) == (1, 14)
-    assert (tmp_path / "Env/Data_easy/P000/pose_lcam_front.txt").read_bytes() == b"0 0 0 0 0 0 1\n"
-    assert not (tmp_path / "Env/Data_easy/P001").exists()
-    first: int = len(requests)
-    assert extract_members(fetch, len(archive), "Env/Data_easy/P000/", tmp_path) == (1, 0)
-    assert len(requests) - first < first, "a complete member is not fetched again"
-
-
-def test_extract_members_refuses_a_path_outside_the_destination(tmp_path: Path) -> None:
-    from dataforge.datasets.tartanair_download import extract_members
-
-    archive: bytes = zip_bytes({"Env/../../evil.txt": b"x"})
-    with pytest.raises(ValueError, match="outside"):
-        extract_members(lambda start, stop: archive[start:stop], len(archive), "Env/", tmp_path)
+    hub = HubStore({HF_REPO: HF_REVISION})
+    archives: list[str] = ["imu", *(f"image_{camera.name}" for cameras in CAMERA_SETS.values() for camera in cameras)]
+    for archive in archives:
+        members: dict[str, bytes] = {f"Env/Data_easy/{number}/{archive}/{number}.txt": number.encode() * 100 for number in ("P000", "P001")}
+        hub.add(HF_REPO, f"Env/Data_easy/{archive}.zip", zip_bytes(members), lfs=True)
+    hub.install(monkeypatch, tartanair)
+    config = TartanAirConfig(root=tmp_path, trajectories=("Env/easy/P000",))
+    config.setup().download()
+    landed: list[str] = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*.txt"))
+    assert landed == sorted(f"Env/Data_easy/P000/{archive}/P000.txt" for archive in archives)
+    assert [call.paths[0] for call in hub.calls] == [f"Env/Data_easy/{archive}.zip" for archive in archives]
+    assert capsys.readouterr().out.rstrip().endswith("0 already complete")
+    config.setup().download()
+    assert capsys.readouterr().out.rstrip().endswith(f"; {len(archives)} already complete")
+    with pytest.raises(FileNotFoundError, match="no member under Env/Data_easy/P002/"):
+        TartanAirConfig(root=tmp_path, trajectories=("Env/easy/P002",)).setup().download()
 
 
 def test_rig_pose_of_a_north_east_down_pose_in_the_z_up_world() -> None:
@@ -107,12 +107,27 @@ def test_equirect_image_centre_looks_left_and_front_is_three_quarters_across() -
     assert camera.cx + camera.fx * longitude == pytest.approx(3 * 2048 / 4 - 0.5)
 
 
-def test_frames_and_imu_share_one_clock_and_the_spline_ends_are_dropped() -> None:
-    from dataforge.datasets.tartanair import aligned_window
+@pytest.mark.parametrize(
+    ("num_frames", "num_imu", "frame_limit", "expected_frames", "expected_imu"),
+    [
+        (91, 900, 20, np.arange(1, 21), (10, 202)),  # the review's case: 2.00 s is the last frame, 2.01 s the last sample
+        (91, 900, None, np.arange(1, 89), (10, 890)),  # 8.89 s is the last sample, after the 8.8 s frame
+        (91, 901, None, np.arange(1, 89), (10, 891)),  # the last trimmed sample lands on 8.9 s: that frame goes
+        (91, 900, 1, np.array([1]), (10, 12)),  # one frame: 0.10 s, with 0.11 s after it
+        (3, 31, None, np.array([1]), (10, 21)),  # the shortest source that keeps a frame: samples 0.10 .. 0.20 s
+    ],
+)
+def test_every_kept_frame_has_an_imu_sample_strictly_after_it(
+    num_frames: int, num_imu: int, frame_limit: int | None, expected_frames: Int64[ndarray, "k"], expected_imu: tuple[int, int]
+) -> None:
+    from dataforge.datasets.tartanair import FRAME_PERIOD_NS, IMU_PERIOD_NS, IMU_TRIM, aligned_window
 
-    frames, imu = aligned_window(num_frames=91, num_imu=900)
-    assert (imu.start, imu.stop) == (10, 890)  # 0.10 s .. 8.89 s
-    np.testing.assert_array_equal(frames, np.arange(1, 89))  # frames at 0.1 .. 8.8 s, inside the IMU span
+    frames, imu = aligned_window(num_frames=num_frames, num_imu=num_imu, frame_limit=frame_limit)
+    np.testing.assert_array_equal(frames, expected_frames)
+    assert (imu.start, imu.stop) == expected_imu
+    assert imu.start >= IMU_TRIM and imu.stop <= num_imu - IMU_TRIM  # inside the trimmed source
+    assert imu.start * IMU_PERIOD_NS <= frames[0] * FRAME_PERIOD_NS  # a sample at or before the first frame
+    assert (imu.stop - 1) * IMU_PERIOD_NS > frames[-1] * FRAME_PERIOD_NS  # and one strictly after the last
 
 
 @pytest.mark.parametrize(
@@ -121,6 +136,7 @@ def test_frames_and_imu_share_one_clock_and_the_spline_ends_are_dropped() -> Non
         (0, 900, None, "no frame of pose_lcam_front.txt"),
         (91, 0, None, "no frame of pose_lcam_front.txt"),
         (91, 15, None, "no frame of pose_lcam_front.txt"),  # 15 samples keep none after the 10-sample trims
+        (91, 21, None, "no frame of pose_lcam_front.txt"),  # one kept sample, on frame 1: no sample after it
         (91, 900, 0, "--frame-limit 0"),
     ],
 )
@@ -191,7 +207,7 @@ def test_two_seconds_of_a_real_trajectory_agree_across_gt_gyro_and_frames(
     gyro = column_rows(base, f"{schema.gyro_path(0, 0)}:Scalars:scalars")
     gyro_ns: list[int] = [stamp.value for stamp in gyro[schema.TIMELINE]]
     rates: Float64[ndarray, "n 3"] = np.array(gyro[1].to_pylist()).reshape(-1, 3)
-    assert gyro_ns[0] == frame_ns[0] and gyro_ns[-1] == frame_ns[-1]
+    assert gyro_ns[0] == frame_ns[0] and gyro_ns[-1] == frame_ns[-1] + 10_000_000  # one sample strictly after the last frame
     # Body rates in the rig frame integrate (right-multiplied, trapezoid over 0.01 s steps) to the GT relative rotation.
     for first, last in ((0, 10), (10, 19), (0, 19)):
         integrated: Rotation = Rotation.identity()

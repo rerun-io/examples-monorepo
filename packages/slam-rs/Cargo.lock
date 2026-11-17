@@ -3210,6 +3210,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
  "kornia-staging-algebra",
  "nalgebra",
  "rayon",
@@ -6776,6 +6777,7 @@ name = "slam-rs-py"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-staging-3d",
  "kornia-staging-imgproc",
  "kornia-staging-io",
  "numpy",
