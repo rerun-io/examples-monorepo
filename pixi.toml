@@ -2759,6 +2759,13 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Build the core, then replay a segment in the viewer (GPU frontend when available)"
 
+# e.g. `pixi run -e slam-rs slam-rs-insv --insv clip.insv [--output clip.rrd] [--max-frames 90]`
+[feature.slam-rs.tasks.slam-rs-insv]
+cmd = "python tools/apps/insv.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then convert an Insta360 .insv clip (two HEVC lens tracks, IMU, factory lenses) to an exoego:v2 .rrd"
+
 [feature.slam-rs.tasks.slam-rs-robocap-probe]
 cmd = "python tools/apps/robocap_probe.py"
 cwd = "packages/slam-rs"

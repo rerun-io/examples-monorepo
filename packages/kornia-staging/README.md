@@ -81,6 +81,8 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Camera trait, pinhole, robust KB4; ProjectionReject extends upstream with OutsideDomain/NonFinite | slam-rs camera.rs; robocap-live kornia_ext/fisheye.rs | kornia-rs / kornia-3d / camera | staged | [#822](https://github.com/kornia/kornia-rs/issues/822), [#481](https://github.com/kornia/kornia-rs/issues/481) |
 | Brown4/5/8/12/14, analytic derivatives and robust inverse | slam-rs radtan8; simplecv Brown–Conrady | kornia-rs / kornia-3d / camera | staged | - |
 | Fisheye624 / Fisheye62, analytic derivatives and robust inverse | simplecv fisheye624.py; handfit SymForce test oracles | kornia-rs / kornia-3d / camera | staged | - |
+| Double sphere and EUCM, closed-form inverse, Basalt validity domains incl. rear rays | slam-rs Basalt `ds`/`eucm` and catalog `double_sphere`/`eucm` cameras (TUM-VI, EuRoC) | kornia-rs / kornia-3d / camera | staged | - |
+| Equirectangular panorama and longitude-window tile, poles rejected | slam-rs catalog `equirectangular` cameras (360 lane); COLMAP EQUIRECTANGULAR | kornia-rs / kornia-3d / camera | staged | - |
 | Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
@@ -101,6 +103,7 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Rust MPLANE capture (no C), clock flags, leased MMAP planes and copied/borrowed luma | robocap-live `capture/camera.rs`, `v4l2_mplane.c`; robocap-recorder `camera.rs`, `native/camera.c` (C cores ported to Rust) | kornia-rs / kornia-io / v4l::mplane | staged | - |
 | Annex-B splitter and subprocess H.264 encoder | robocap-live log/video.rs | kornia-rs / kornia-io::video | staged | - |
 | H.264/AV1 packets to borrowed luma planes with explicit limited/full/unknown range | slam-rs-cli decode.rs + native/dav1d.c | kornia-rs / kornia-io::video | staged | - |
+| Minimal MP4 demuxer (HEVC tracks), HEVC Annex B remux, Insta360 `.insv` trailer and factory lens reader | new (slam-rs fisheye/360) | kornia-rs / kornia-io::container | staged | - |
 | N-camera body rig and IMU corrections | slam-rs calib.rs, robocap-live frame.rs | kornia-slam / kornia-sensors::rig | deferred: no consumer reads it | - |
 | Runtime frames, IMU combiner and timestamp matcher | `robocap-types`, `robocap-live/{source,capture}` + `robocap-recorder/live_slam.rs` | kornia-slam `kornia-sensors` (`imu` module and frame exports) | staged | - |
 | Nanosecond midpoint preintegrator; proposal to reconcile with upstream PreintegratedImu | slam-rs `imu/preintegration.rs` | kornia-slam / kornia-sensors / imu | staged | - |

@@ -1,11 +1,11 @@
 //! Homogeneous SLAM camera policy over staged calibration models.
 
-use kornia_staging_algebra::Scalar;
 use kornia_staging_3d::camera as staged;
+use kornia_staging_algebra::Scalar;
 use nalgebra::{Matrix2x4, Vector2, Vector4};
 
 use crate::calib::{BasaltCamera, Calibration};
-use crate::lie::{c};
+use crate::lie::c;
 
 /// Something a camera model cannot do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -58,6 +58,9 @@ impl<S: Scalar> SlamCamera<S> {
             staged::CameraModelKind::Kb4(_) => "kb4",
             staged::CameraModelKind::BrownConrady(_) => "pinhole-radtan8",
             staged::CameraModelKind::Fisheye624(_) => "fisheye624",
+            staged::CameraModelKind::DoubleSphere(_) => "ds",
+            staged::CameraModelKind::Eucm(_) => "eucm",
+            staged::CameraModelKind::Equirectangular(_) => "equirectangular",
         }
     }
 
@@ -75,6 +78,18 @@ impl<S: Scalar> SlamCamera<S> {
             }
             staged::CameraModelKind::Fisheye624(v) => {
                 let [fx, fy, cx, cy, ..] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::DoubleSphere(v) => {
+                let [fx, fy, cx, cy, ..] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::Eucm(v) => {
+                let [fx, fy, cx, cy, ..] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::Equirectangular(v) => {
+                let [fx, fy, cx, cy, _] = v.params();
                 [fx, fy, cx, cy]
             }
         }
@@ -185,6 +200,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::calib::{EquirectangularParams, ExtendedUnifiedParams, UnifiedParams};
     use nalgebra::SVector;
     fn pinhole<S: Scalar>(
         params: SVector<S, 4>,
@@ -193,9 +209,7 @@ mod tests {
             inner: staged::CameraModelKind::Pinhole(staged::Pinhole::new(params.into())?),
         })
     }
-    fn kb4<S: Scalar>(
-        params: SVector<S, 8>,
-    ) -> Result<SlamCamera<S>, staged::InvalidCalibration> {
+    fn kb4<S: Scalar>(params: SVector<S, 8>) -> Result<SlamCamera<S>, staged::InvalidCalibration> {
         Ok(SlamCamera {
             inner: staged::CameraModelKind::Kb4(staged::KannalaBrandt4::new(params.into())?),
         })
@@ -360,13 +374,62 @@ mod tests {
     }
 
     #[test]
-    fn the_variant_rejects_the_three_deferred_models() {
+    fn double_sphere_eucm_and_equirectangular_reach_the_staged_models_and_ucm_stays_deferred() {
         let calibration: Calibration<f64> =
             Calibration::from_json_str(include_str!("../tests/fixtures/euroc_ds_calib.json"))
                 .unwrap();
+        let ds = SlamCamera::from_model(&calibration.intrinsics[0]).unwrap();
+        assert_eq!(ds.name(), "ds");
+        assert_abs_diff_eq!(
+            ds.focal_and_principal_point()[2],
+            365.89440762590147,
+            epsilon = 0.0
+        );
+        let mut uv: Vector2<f64> = Vector2::zeros();
+        // A rear ray at 100 degrees is inside this calibration's domain.
+        let (s, c) = 100f64.to_radians().sin_cos();
+        assert!(ds.project_point(&Vector4::new(s, 0.0, c, 1.0), &mut uv, None));
+        let eucm = BasaltCamera::ExtendedUnified(ExtendedUnifiedParams {
+            fx: 460.8,
+            fy: 459.4,
+            cx: 365.9,
+            cy: 249.3,
+            alpha: 0.59,
+            beta: 1.13,
+        });
+        assert_eq!(SlamCamera::from_model(&eucm).unwrap().name(), "eucm");
+        let pano = BasaltCamera::Equirectangular(EquirectangularParams {
+            fx: 1920.0 / std::f64::consts::TAU,
+            fy: 960.0 / std::f64::consts::PI,
+            cx: 959.5,
+            cy: 479.5,
+            lon_max: std::f64::consts::PI,
+        });
+        let pano = SlamCamera::from_model(&pano).unwrap();
+        assert_eq!(pano.name(), "equirectangular");
+        assert!(pano.project_point(&Vector4::new(0.0, 0.0, -1.0, 1.0), &mut uv, None));
+        assert_abs_diff_eq!(uv[0], 1919.5, epsilon = 1e-9);
+        let bad = BasaltCamera::Equirectangular(EquirectangularParams {
+            fx: 1.0,
+            fy: 1.0,
+            cx: 0.0,
+            cy: 0.0,
+            lon_max: 4.0,
+        });
         assert_eq!(
-            SlamCamera::from_model(&calibration.intrinsics[0]),
-            Err(CameraError::UnsupportedModel { model: "ds" })
+            SlamCamera::from_model(&bad),
+            Err(CameraError::InvalidCalibration)
+        );
+        let ucm = BasaltCamera::Unified(UnifiedParams {
+            fx: 1.0,
+            fy: 1.0,
+            cx: 0.0,
+            cy: 0.0,
+            alpha: 0.5,
+        });
+        assert_eq!(
+            SlamCamera::from_model(&ucm),
+            Err(CameraError::UnsupportedModel { model: "ucm" })
         );
     }
 

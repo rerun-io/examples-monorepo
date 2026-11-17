@@ -1,0 +1,640 @@
+//! A minimal ISO-BMFF (MP4) demuxer for HEVC video tracks.
+//!
+//! It reads only what a remux needs: the top-level box walk (32-bit, 64-bit and to-end-of-file sizes), `moov`
+//! wherever it sits, and for each `hvc1`/`hev1` track the `hvcC` parameter sets and the sample table. Box layouts
+//! follow ISO/IEC 14496-12 (sample tables, edit lists) and ISO/IEC 14496-15 section 8.3.3 (`hvcC`).
+use std::io::{Read, Seek, SeekFrom};
+
+/// Why a file could not be demuxed.
+#[derive(Debug, thiserror::Error)]
+pub enum Mp4Error {
+    /// The underlying reader failed.
+    #[error("mp4 read failed: {0}")]
+    Io(#[from] std::io::Error),
+    /// A box or table is shorter than its header says, or a field is out of range.
+    #[error("malformed mp4: {0}")]
+    Malformed(String),
+    /// The file has no `moov` box.
+    #[error("mp4 has no moov box")]
+    NoMoov,
+}
+
+/// One coded sample of a track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    /// Absolute byte offset of the sample in the file.
+    pub offset: u64,
+    /// Sample size in bytes.
+    pub size: u32,
+    /// Decode time in track timescale units.
+    pub dts: i64,
+    /// Presentation time in track timescale units: DTS plus the `ctts` offset, minus the edit list's media time.
+    pub pts: i64,
+    /// Whether the sample is a sync sample (`stss`; every sample when the table is absent).
+    pub is_sync: bool,
+}
+
+/// One HEVC video track: its decoder configuration and its samples in decode order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoTrack {
+    /// `tkhd` track id.
+    pub track_id: u32,
+    /// Sample entry four-character code, `hvc1` or `hev1`.
+    pub codec: [u8; 4],
+    /// Coded width from the sample entry, pixels.
+    pub width: u16,
+    /// Coded height from the sample entry, pixels.
+    pub height: u16,
+    /// `mdhd` timescale, ticks per second.
+    pub timescale: u32,
+    /// Bytes in each NAL length prefix (`lengthSizeMinusOne + 1`).
+    pub nal_length_size: u8,
+    /// VPS, SPS and PPS NAL units from `hvcC`, in that order, without length prefixes.
+    pub parameter_sets: Vec<Vec<u8>>,
+    /// Samples in decode order.
+    pub samples: Vec<Sample>,
+}
+
+fn malformed(what: impl Into<String>) -> Mp4Error {
+    Mp4Error::Malformed(what.into())
+}
+
+fn be(b: &[u8], at: usize, n: usize) -> Result<u64, Mp4Error> {
+    let bytes = b.get(at..at + n).ok_or_else(|| {
+        malformed(format!(
+            "field at {at}+{n} past the end of a {}-byte box",
+            b.len()
+        ))
+    })?;
+    Ok(bytes.iter().fold(0u64, |acc, &x| (acc << 8) | u64::from(x)))
+}
+
+fn u32_at(b: &[u8], at: usize) -> Result<u32, Mp4Error> {
+    Ok(be(b, at, 4)? as u32)
+}
+
+/// Child boxes of a box payload: `(type, payload)` pairs. Sizes 0 (to the end) and 1 (64-bit) are supported.
+/// A child box: its type and its payload.
+type Child<'a> = ([u8; 4], &'a [u8]);
+
+fn children(b: &[u8]) -> Result<Vec<Child<'_>>, Mp4Error> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 8 <= b.len() {
+        let size = u32_at(b, at)? as u64;
+        let kind: [u8; 4] = [b[at + 4], b[at + 5], b[at + 6], b[at + 7]];
+        let (header, size) = match size {
+            0 => (8, (b.len() - at) as u64),
+            1 => (16, be(b, at + 8, 8)?),
+            s => (8, s),
+        };
+        let end = usize::try_from(size)
+            .ok()
+            .and_then(|s| at.checked_add(s))
+            .filter(|&e| e <= b.len() && size >= header as u64);
+        let end = end.ok_or_else(|| {
+            malformed(format!(
+                "box {} at {at} has size {size}",
+                String::from_utf8_lossy(&kind)
+            ))
+        })?;
+        out.push((kind, &b[at + header..end]));
+        at = end;
+    }
+    Ok(out)
+}
+
+fn child<'a>(b: &'a [u8], kind: &[u8; 4]) -> Result<Option<&'a [u8]>, Mp4Error> {
+    Ok(children(b)?
+        .into_iter()
+        .find(|(k, _)| k == kind)
+        .map(|(_, p)| p))
+}
+
+fn need<'a>(b: &'a [u8], kind: &[u8; 4]) -> Result<&'a [u8], Mp4Error> {
+    child(b, kind)?
+        .ok_or_else(|| malformed(format!("missing {} box", String::from_utf8_lossy(kind))))
+}
+
+/// Find `moov` among the top-level boxes and return its payload. The walk seeks over every other box, so a `moov`
+/// at the end of a multi-gigabyte file costs one read of its own size.
+pub fn read_moov<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, Mp4Error> {
+    let file_len = reader.seek(SeekFrom::End(0))?;
+    let mut at = 0u64;
+    while at + 8 <= file_len {
+        reader.seek(SeekFrom::Start(at))?;
+        let mut header = [0u8; 16];
+        reader.read_exact(&mut header[..8])?;
+        let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let (header_len, size) = match size32 {
+            0 => (8u64, file_len - at),
+            1 => {
+                reader.read_exact(&mut header[8..16])?;
+                (16, be(&header, 8, 8)?)
+            }
+            s => (8, u64::from(s)),
+        };
+        if size < header_len || at.checked_add(size).is_none_or(|end| end > file_len) {
+            return Err(malformed(format!(
+                "top-level box at {at} has size {size} in a {file_len}-byte file"
+            )));
+        }
+        if &header[4..8] == b"moov" {
+            let len =
+                usize::try_from(size - header_len).map_err(|_| malformed("moov too large"))?;
+            let mut moov = vec![0u8; len];
+            reader.read_exact(&mut moov)?;
+            return Ok(moov);
+        }
+        at += size;
+    }
+    Err(Mp4Error::NoMoov)
+}
+
+/// Read every HEVC video track of a file. Tracks of other codecs and handlers are skipped.
+pub fn read_hevc_tracks<R: Read + Seek>(reader: &mut R) -> Result<Vec<VideoTrack>, Mp4Error> {
+    let moov = read_moov(reader)?;
+    let mut tracks = Vec::new();
+    for (kind, trak) in children(&moov)? {
+        if &kind == b"trak" {
+            tracks.extend(parse_trak(trak)?);
+        }
+    }
+    Ok(tracks)
+}
+
+fn full_box_version(b: &[u8]) -> Result<u8, Mp4Error> {
+    Ok(be(b, 0, 1)? as u8)
+}
+
+fn parse_trak(trak: &[u8]) -> Result<Option<VideoTrack>, Mp4Error> {
+    let tkhd = need(trak, b"tkhd")?;
+    let track_id = u32_at(tkhd, if full_box_version(tkhd)? == 1 { 20 } else { 12 })?;
+    let mdia = need(trak, b"mdia")?;
+    if &need(mdia, b"hdlr")?
+        .get(8..12)
+        .ok_or_else(|| malformed("short hdlr"))?
+        != b"vide"
+    {
+        return Ok(None);
+    }
+    let mdhd = need(mdia, b"mdhd")?;
+    let timescale = u32_at(mdhd, if full_box_version(mdhd)? == 1 { 20 } else { 12 })?;
+    let stbl = need(need(mdia, b"minf")?, b"stbl")?;
+    let stsd = need(stbl, b"stsd")?;
+    let Some((codec, entry)) = children(stsd.get(8..).ok_or_else(|| malformed("short stsd"))?)?
+        .into_iter()
+        .next()
+    else {
+        return Err(malformed("empty stsd"));
+    };
+    if &codec != b"hvc1" && &codec != b"hev1" {
+        return Ok(None);
+    }
+    // VisualSampleEntry: 6 reserved, data_reference_index, 16 pre-defined/reserved, width, height, then 50 more bytes.
+    let (width, height) = (be(entry, 24, 2)? as u16, be(entry, 26, 2)? as u16);
+    let hvcc = need(
+        entry
+            .get(78..)
+            .ok_or_else(|| malformed("short visual sample entry"))?,
+        b"hvcC",
+    )?;
+    let (nal_length_size, parameter_sets) = parse_hvcc(hvcc)?;
+    let media_time = match child(trak, b"edts")?
+        .map(|edts| need(edts, b"elst"))
+        .transpose()?
+    {
+        Some(elst) => first_media_time(elst)?,
+        None => 0,
+    };
+    let samples = sample_table(stbl, media_time)?;
+    Ok(Some(VideoTrack {
+        track_id,
+        codec,
+        width,
+        height,
+        timescale,
+        nal_length_size,
+        parameter_sets,
+        samples,
+    }))
+}
+
+/// `hvcC`: the NAL length size and the VPS, SPS and PPS arrays (ISO/IEC 14496-15 section 8.3.3.1.2).
+fn parse_hvcc(b: &[u8]) -> Result<(u8, Vec<Vec<u8>>), Mp4Error> {
+    let nal_length_size = (be(b, 21, 1)? as u8 & 0x03) + 1;
+    let arrays = be(b, 22, 1)? as usize;
+    let mut at = 23usize;
+    let mut sets: Vec<(u8, Vec<u8>)> = Vec::new();
+    for _ in 0..arrays {
+        let nal_type = be(b, at, 1)? as u8 & 0x3f;
+        let count = be(b, at + 1, 2)? as usize;
+        at += 3;
+        for _ in 0..count {
+            let len = be(b, at, 2)? as usize;
+            let nal = b
+                .get(at + 2..at + 2 + len)
+                .ok_or_else(|| malformed("hvcC NAL past the end"))?;
+            if (32..=34).contains(&nal_type) {
+                sets.push((nal_type, nal.to_vec()));
+            }
+            at += 2 + len;
+        }
+    }
+    sets.sort_by_key(|(t, _)| *t);
+    Ok((nal_length_size, sets.into_iter().map(|(_, n)| n).collect()))
+}
+
+/// The media time of the first non-empty edit (`media_time == -1` is an empty edit).
+fn first_media_time(elst: &[u8]) -> Result<i64, Mp4Error> {
+    let v1 = full_box_version(elst)? == 1;
+    let (entry, count) = (if v1 { 20 } else { 12 }, u32_at(elst, 4)? as usize);
+    for i in 0..count {
+        let at = 8 + i * entry;
+        let media_time = if v1 {
+            be(elst, at + 8, 8)? as i64
+        } else {
+            i64::from(u32_at(elst, at + 4)? as i32)
+        };
+        if media_time != -1 {
+            return Ok(media_time);
+        }
+    }
+    Ok(0)
+}
+
+fn sample_table(stbl: &[u8], media_time: i64) -> Result<Vec<Sample>, Mp4Error> {
+    let stsz = need(stbl, b"stsz")?;
+    let (fixed, count) = (u32_at(stsz, 4)?, u32_at(stsz, 8)? as usize);
+    let sizes: Vec<u32> = (0..count)
+        .map(|i| {
+            if fixed != 0 {
+                Ok(fixed)
+            } else {
+                u32_at(stsz, 12 + 4 * i)
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    let chunk_offsets: Vec<u64> = if let Some(stco) = child(stbl, b"stco")? {
+        (0..u32_at(stco, 4)? as usize)
+            .map(|i| Ok(u64::from(u32_at(stco, 8 + 4 * i)?)))
+            .collect::<Result<_, Mp4Error>>()?
+    } else {
+        let co64 = need(stbl, b"co64")?;
+        (0..u32_at(co64, 4)? as usize)
+            .map(|i| be(co64, 8 + 8 * i, 8))
+            .collect::<Result<_, _>>()?
+    };
+
+    // stsc runs: chunks [first_chunk, next.first_chunk) hold samples_per_chunk samples each.
+    let stsc = need(stbl, b"stsc")?;
+    let runs: Vec<(usize, usize)> = (0..u32_at(stsc, 4)? as usize)
+        .map(|i| {
+            Ok((
+                u32_at(stsc, 8 + 12 * i)? as usize,
+                u32_at(stsc, 12 + 12 * i)? as usize,
+            ))
+        })
+        .collect::<Result<_, Mp4Error>>()?;
+    let mut offsets = Vec::with_capacity(count);
+    for (r, &(first, per_chunk)) in runs.iter().enumerate() {
+        let last = runs
+            .get(r + 1)
+            .map_or(chunk_offsets.len(), |next| next.0 - 1);
+        for chunk in first..=last {
+            let mut offset = *chunk_offsets
+                .get(chunk.wrapping_sub(1))
+                .ok_or_else(|| malformed(format!("stsc names chunk {chunk}")))?;
+            for _ in 0..per_chunk {
+                let size = *sizes
+                    .get(offsets.len())
+                    .ok_or_else(|| malformed("stsc describes more samples than stsz"))?;
+                offsets.push(offset);
+                offset += u64::from(size);
+            }
+        }
+    }
+    if offsets.len() != count {
+        return Err(malformed(format!(
+            "stsc covers {} samples, stsz has {count}",
+            offsets.len()
+        )));
+    }
+
+    let stts = need(stbl, b"stts")?;
+    let mut dts = Vec::with_capacity(count);
+    let mut t = 0i64;
+    for i in 0..u32_at(stts, 4)? as usize {
+        let (n, delta) = (
+            u32_at(stts, 8 + 8 * i)?,
+            i64::from(u32_at(stts, 12 + 8 * i)?),
+        );
+        for _ in 0..n {
+            dts.push(t);
+            t += delta;
+        }
+    }
+    let mut composition = vec![0i64; count];
+    if let Some(ctts) = child(stbl, b"ctts")? {
+        let mut s = 0usize;
+        for i in 0..u32_at(ctts, 4)? as usize {
+            let (n, offset) = (
+                u32_at(ctts, 8 + 8 * i)? as usize,
+                i64::from(u32_at(ctts, 12 + 8 * i)? as i32),
+            );
+            for slot in composition.iter_mut().skip(s).take(n) {
+                *slot = offset;
+            }
+            s += n;
+        }
+    }
+    let sync: Option<Vec<u32>> = child(stbl, b"stss")?
+        .map(|stss| {
+            (0..u32_at(stss, 4)? as usize)
+                .map(|i| u32_at(stss, 8 + 4 * i))
+                .collect::<Result<_, _>>()
+        })
+        .transpose()?;
+    if dts.len() != count {
+        return Err(malformed(format!(
+            "stts covers {} samples, stsz has {count}",
+            dts.len()
+        )));
+    }
+    Ok((0..count)
+        .map(|i| Sample {
+            offset: offsets[i],
+            size: sizes[i],
+            dts: dts[i],
+            pts: dts[i] + composition[i] - media_time,
+            is_sync: sync
+                .as_ref()
+                .is_none_or(|s| s.binary_search(&(i as u32 + 1)).is_ok()),
+        })
+        .collect())
+}
+
+/// Builders for synthetic MP4 files, shared by this crate's tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    /// A box: big-endian 32-bit size, type, payload.
+    pub fn bx(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A full box: version and flags, then the payload.
+    pub fn full(kind: &[u8; 4], version: u8, payload: &[u8]) -> Vec<u8> {
+        let mut body = vec![version, 0, 0, 0];
+        body.extend_from_slice(payload);
+        bx(kind, &body)
+    }
+
+    fn table(rows: &[&[u32]]) -> Vec<u8> {
+        let mut out = (rows.len() as u32).to_be_bytes().to_vec();
+        for row in rows {
+            for v in *row {
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        out
+    }
+
+    /// The parts of one synthetic HEVC track.
+    pub struct TrackSpec<'a> {
+        pub track_id: u32,
+        pub sizes: &'a [u32],
+        pub chunk_offsets: &'a [u64],
+        pub stsc: &'a [[u32; 3]],
+        pub stts: &'a [[u32; 2]],
+        pub ctts: &'a [[u32; 2]],
+        pub stss: Option<&'a [u32]>,
+        pub media_time: i32,
+        pub co64: bool,
+        pub parameter_sets: &'a [(u8, &'a [u8])],
+    }
+
+    /// A `trak` box for an `hvc1` track with the given tables.
+    pub fn trak(spec: &TrackSpec) -> Vec<u8> {
+        let mut tkhd = vec![0u8; 8];
+        tkhd.extend_from_slice(&spec.track_id.to_be_bytes());
+        tkhd.extend_from_slice(&[0u8; 68]);
+        let mut mdhd = vec![0u8; 8];
+        mdhd.extend_from_slice(&30000u32.to_be_bytes());
+        mdhd.extend_from_slice(&[0u8; 8]);
+        let mut hdlr = vec![0u8; 4];
+        hdlr.extend_from_slice(b"vide");
+        hdlr.extend_from_slice(&[0u8; 13]);
+        let mut hvcc = vec![1u8; 21];
+        hvcc.push(0xfc | 3);
+        hvcc.push(spec.parameter_sets.len() as u8);
+        for (t, nal) in spec.parameter_sets {
+            hvcc.push(0x80 | t);
+            hvcc.extend_from_slice(&1u16.to_be_bytes());
+            hvcc.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+            hvcc.extend_from_slice(nal);
+        }
+        let mut entry = vec![0u8; 78];
+        entry[24..26].copy_from_slice(&1920u16.to_be_bytes());
+        entry[26..28].copy_from_slice(&1080u16.to_be_bytes());
+        entry.extend(bx(b"hvcC", &hvcc));
+        let mut stsd_body = 1u32.to_be_bytes().to_vec();
+        stsd_body.extend(bx(b"hvc1", &entry));
+        let mut stsz = vec![0u8; 4];
+        stsz.extend_from_slice(&(spec.sizes.len() as u32).to_be_bytes());
+        for s in spec.sizes {
+            stsz.extend_from_slice(&s.to_be_bytes());
+        }
+        let offsets = if spec.co64 {
+            let mut b = (spec.chunk_offsets.len() as u32).to_be_bytes().to_vec();
+            for o in spec.chunk_offsets {
+                b.extend_from_slice(&o.to_be_bytes());
+            }
+            full(b"co64", 0, &b)
+        } else {
+            let rows: Vec<[u32; 1]> = spec.chunk_offsets.iter().map(|&o| [o as u32]).collect();
+            full(
+                b"stco",
+                0,
+                &table(&rows.iter().map(|r| &r[..]).collect::<Vec<_>>()),
+            )
+        };
+        let mut stbl = full(b"stsd", 0, &stsd_body);
+        stbl.extend(full(
+            b"stts",
+            0,
+            &table(&spec.stts.iter().map(|r| &r[..]).collect::<Vec<_>>()),
+        ));
+        stbl.extend(full(
+            b"ctts",
+            0,
+            &table(&spec.ctts.iter().map(|r| &r[..]).collect::<Vec<_>>()),
+        ));
+        stbl.extend(full(
+            b"stsc",
+            0,
+            &table(&spec.stsc.iter().map(|r| &r[..]).collect::<Vec<_>>()),
+        ));
+        stbl.extend(full(b"stsz", 0, &stsz));
+        stbl.extend(offsets);
+        if let Some(stss) = spec.stss {
+            let rows: Vec<[u32; 1]> = stss.iter().map(|&s| [s]).collect();
+            stbl.extend(full(
+                b"stss",
+                0,
+                &table(&rows.iter().map(|r| &r[..]).collect::<Vec<_>>()),
+            ));
+        }
+        let mut elst = 1u32.to_be_bytes().to_vec();
+        elst.extend_from_slice(&0u32.to_be_bytes());
+        elst.extend_from_slice(&spec.media_time.to_be_bytes());
+        elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        let mut mdia = full(b"mdhd", 0, &mdhd);
+        mdia.extend(full(b"hdlr", 0, &hdlr));
+        mdia.extend(bx(b"minf", &bx(b"stbl", &stbl)));
+        let mut trak = full(b"tkhd", 0, &tkhd);
+        trak.extend(bx(b"edts", &full(b"elst", 0, &elst)));
+        trak.extend(bx(b"mdia", &mdia));
+        bx(b"trak", &trak)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::*;
+    use super::*;
+    use std::io::Cursor;
+
+    const VPS: &[u8] = &[0x40, 0x01, 0xaa];
+    const SPS: &[u8] = &[0x42, 0x01, 0xbb];
+    const PPS: &[u8] = &[0x44, 0x01, 0xcc];
+
+    fn spec<'a>(
+        sizes: &'a [u32],
+        offsets: &'a [u64],
+        stsc: &'a [[u32; 3]],
+        co64: bool,
+    ) -> TrackSpec<'a> {
+        TrackSpec {
+            track_id: 1,
+            sizes,
+            chunk_offsets: offsets,
+            stsc,
+            stts: &[[4, 1001]],
+            ctts: &[[2, 0], [2, 2002]],
+            stss: Some(&[1, 3]),
+            media_time: 1001,
+            co64,
+            parameter_sets: &[(34, PPS), (32, VPS), (33, SPS)],
+        }
+    }
+
+    #[test]
+    fn moov_at_the_end_after_a_64_bit_mdat_is_found() {
+        let mut file = bx(b"ftyp", b"isom");
+        // A 64-bit mdat header (size == 1) with 4 payload bytes.
+        file.extend_from_slice(&1u32.to_be_bytes());
+        file.extend_from_slice(b"mdat");
+        file.extend_from_slice(&20u64.to_be_bytes());
+        file.extend_from_slice(&[9, 9, 9, 9]);
+        file.extend(bx(
+            b"moov",
+            &trak(&spec(&[10, 20, 30, 40], &[100, 200], &[[1, 2, 1]], false)),
+        ));
+        file.extend(bx(b"inst", &[7u8; 12]));
+        let tracks = read_hevc_tracks(&mut Cursor::new(file)).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(
+            tracks[0].parameter_sets,
+            vec![VPS.to_vec(), SPS.to_vec(), PPS.to_vec()]
+        );
+        assert_eq!(tracks[0].nal_length_size, 4);
+        assert_eq!(
+            (tracks[0].width, tracks[0].height, tracks[0].timescale),
+            (1920, 1080, 30000)
+        );
+    }
+
+    #[test]
+    fn a_size_zero_box_runs_to_the_end_of_the_file() {
+        let mut file = bx(b"ftyp", b"isom");
+        file.extend_from_slice(&0u32.to_be_bytes());
+        file.extend_from_slice(b"moov");
+        file.extend(trak(&spec(
+            &[10, 20, 30, 40],
+            &[100, 200],
+            &[[1, 2, 1]],
+            false,
+        )));
+        assert_eq!(read_hevc_tracks(&mut Cursor::new(file)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn missing_moov_and_truncated_boxes_are_errors() {
+        assert!(matches!(
+            read_moov(&mut Cursor::new(bx(b"ftyp", b"isom"))),
+            Err(Mp4Error::NoMoov)
+        ));
+        let mut file = bx(b"ftyp", b"isom");
+        file.extend_from_slice(&100u32.to_be_bytes());
+        file.extend_from_slice(b"moov");
+        assert!(matches!(
+            read_moov(&mut Cursor::new(file)),
+            Err(Mp4Error::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn sample_tables_expand_with_stco_and_co64_alike() {
+        // Chunk 1 holds two samples, chunks 2-3 one each: stsc runs (1, 2) then (2, 1).
+        let stsc = [[1, 2, 1], [2, 1, 1]];
+        for co64 in [false, true] {
+            let offsets: [u64; 3] = if co64 {
+                [5_000_000_000, 6_000_000_000, 7_000_000_000]
+            } else {
+                [100, 500, 900]
+            };
+            let file = bx(
+                b"moov",
+                &trak(&spec(&[10, 20, 30, 40], &offsets, &stsc, co64)),
+            );
+            let samples = read_hevc_tracks(&mut Cursor::new(file))
+                .unwrap()
+                .remove(0)
+                .samples;
+            let got: Vec<(u64, u32, i64, i64, bool)> = samples
+                .iter()
+                .map(|s| (s.offset, s.size, s.dts, s.pts, s.is_sync))
+                .collect();
+            assert_eq!(
+                got,
+                vec![
+                    (offsets[0], 10, 0, -1001, true),
+                    (offsets[0] + 10, 20, 1001, 0, false),
+                    (offsets[1], 30, 2002, 3003, true),
+                    (offsets[2], 40, 3003, 4004, false),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_that_disagrees_with_stsz_is_an_error() {
+        let file = bx(
+            b"moov",
+            &trak(&spec(
+                &[10, 20, 30, 40, 50],
+                &[100, 200],
+                &[[1, 2, 1]],
+                false,
+            )),
+        );
+        assert!(matches!(
+            read_hevc_tracks(&mut Cursor::new(file)),
+            Err(Mp4Error::Malformed(_))
+        ));
+    }
+}

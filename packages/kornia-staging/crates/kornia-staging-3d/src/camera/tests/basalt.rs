@@ -152,6 +152,15 @@ fn synthetic<S: Precision>() {
         true,
         S::STEP < 1e-3,
     );
+    use super::double_sphere::{EUROC_DS, EUROC_EUCM, TUMVI_DS, TUMVI_EUCM};
+    for params in [TUMVI_DS, EUROC_DS] {
+        let build = |p| DoubleSphere::new(p).unwrap();
+        grid::<S, _, 6, 6>(params.map(S::from_literal), build, |_, _| true, true, true);
+    }
+    for params in [TUMVI_EUCM, EUROC_EUCM] {
+        let build = |p| Eucm::new(p).unwrap();
+        grid::<S, _, 6, 6>(params.map(S::from_literal), build, |_, _| true, true, true);
+    }
     let mut brown = [S::zero(); 18];
     brown[..12].copy_from_slice(
         &[
