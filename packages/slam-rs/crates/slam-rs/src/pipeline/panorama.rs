@@ -3,7 +3,7 @@
 //! The frontend and the estimator keep seeing "N cameras, N images". This module
 //! is the one place where a rig whose calibration holds a full panorama becomes
 //! two hemisphere-tile cameras, and each frameset's panorama becomes two tile
-//! images (DESIGN §4.1, §13 M1). Tile `k` is centred on panorama longitude
+//! images. Tile `k` is centred on panorama longitude
 //! `k * pi`, is `W / 2 + 2 * margin` pixels wide, and its camera is the panorama
 //! camera turned by `k * 180` degrees about its own vertical axis.
 //!

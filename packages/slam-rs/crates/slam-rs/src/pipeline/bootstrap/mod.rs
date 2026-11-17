@@ -259,11 +259,12 @@ pub fn uses_inertial(config: &VioConfig, calibration: &Calibration<f64>) -> bool
 /// that camera's frame; the frame index is the frameset's position in
 /// `window`. A rolling-shutter camera's pixels are already corrected (rotated
 /// by the gyro over each row's time offset from the frameset time, in
-/// `Vio::finish_track`) when they get here; the solver's sensitivity table
-/// makes that mandatory for the Insta360 (uncorrected +-8 ms gave 6-16 %
-/// scale error). Before the bootstrap accepts there is no gyro bias estimate,
-/// so that correction uses the raw gyro rate (the static calibration's bias is
-/// not applied either; it is zero for the Insta360 rig).
+/// `Vio::finish_track`) when they get here; that is mandatory for the
+/// Insta360: in the solver's Monte Carlo `sensitivity_study`
+/// (`kornia_staging_slam::init::inertial` tests), an uncorrected +-8 ms
+/// readout gave 6-16 % scale error. Before the bootstrap accepts there is no
+/// gyro bias estimate, so that correction uses the raw gyro rate (the static
+/// calibration's bias is not applied either; it is zero for the Insta360 rig).
 pub fn prepare_bearings(
     window: &[Arc<FlowObservations>],
     cameras: &[SlamCamera<f64>],

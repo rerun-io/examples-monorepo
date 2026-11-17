@@ -238,7 +238,8 @@ pub struct VioConfig {
     #[serde(rename = "config.panorama_dual_fisheye")]
     pub panorama_dual_fisheye: bool,
     /// Dual-fisheye tiles: tile `k`'s ray origin is lens `k`'s centre (true)
-    /// or both tiles share the lens midpoint (false, the central A/B lane).
+    /// or both tiles share the lens midpoint (false: parallax between the
+    /// lenses is ignored).
     #[serde(rename = "config.panorama_two_centre")]
     pub panorama_two_centre: bool,
     /// Dual-fisheye tiles: hand the estimator rolling-shutter corrected

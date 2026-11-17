@@ -1,7 +1,7 @@
 //! The dual-fisheye source (the Insta360 lane): two lens images in, the two
 //! hemisphere tiles out, through fixed-point lookup tables built once from the
-//! factory lens calibration (DESIGN §4.2, §13 M2); and the rolling-shutter
-//! correction of the tiles' keypoints (DESIGN §4.5, §13 M5, §13.1).
+//! factory lens calibration; and the rolling-shutter correction of the tiles'
+//! keypoints (the readout convention is [`DualFisheyeLenses::readout_s`]'s).
 //!
 //! Frames: `P` is the panorama frame of `kornia_staging_io::insta360` (`+Z` the
 //! lens-0 axis, `+Y` toward the handle). Tile `k`'s camera frame is `P` turned
@@ -170,7 +170,7 @@ pub(super) fn expand(
         height: lens_h as usize,
     };
     // Built once per rig: the GPU lane uploads these tables once and the lookahead
-    // recognises the stitch by identity (F5).
+    // recognises the stitch by identity.
     let stitch: Arc<LensStitch> =
         Arc::new(lenses.stitch(lens_size, config.panorama_tile_margin_px as usize)?);
     let geometry: TileGeometry = stitch.luts()[0].geometry;
