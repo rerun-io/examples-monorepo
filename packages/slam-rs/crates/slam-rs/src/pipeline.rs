@@ -1,6 +1,7 @@
 //! Vio sequencing, optional frontend lag, and deferred-solver ownership.
 
 use kornia_staging_algebra::Scalar;
+pub mod bootstrap;
 mod boundary;
 mod lag;
 mod lane;
@@ -61,6 +62,8 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
+    /// The inertial bootstrap, when `config.vio_bootstrap` selects it.
+    bootstrap: bootstrap::BootstrapPhase,
 }
 
 pub use lag::OverlapTimings;
@@ -117,6 +120,7 @@ impl<S: Scalar> Vio<S> {
         backend: Backend,
     ) -> Result<Self, VioError> {
         let camera_count: usize = calibration.t_i_c.len();
+        let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
@@ -141,6 +145,7 @@ impl<S: Scalar> Vio<S> {
             last_deferred: None,
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
+            bootstrap,
         })
     }
 
@@ -220,7 +225,10 @@ impl<S: Scalar> Vio<S> {
     /// accepted sample to both preintegrators, so the two could only differ by
     /// a bug.
     pub fn last_imu_t_ns(&self) -> Option<i64> {
-        self.estimator.newest_imu_t_ns()
+        match self.bootstrap.running() {
+            Some(driver) => driver.newest_imu_t_ns(),
+            None => self.estimator.newest_imu_t_ns(),
+        }
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
@@ -241,7 +249,10 @@ impl<S: Scalar> Vio<S> {
                 accel: accel.into(),
             };
         self.frontend_imu.push_back(sample);
-        self.estimator.push_imu(sample);
+        match self.bootstrap.running_mut() {
+            Some(driver) => driver.push_imu(sample),
+            None => self.estimator.push_imu(sample),
+        }
         Ok(())
     }
 
@@ -358,7 +369,11 @@ impl<S: Scalar> Vio<S> {
         check_frameset(images, self.camera_count)?;
         self.frontend
             .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
-        if !self.estimator.imu_covers_frame(t_ns) {
+        let covered: bool = match self.bootstrap.running() {
+            Some(driver) => driver.imu_covers_frame(t_ns),
+            None => self.estimator.imu_covers_frame(t_ns),
+        };
+        if !covered {
             return Ok(PreparedTrack {
                 vio: self,
                 t_ns,
@@ -387,7 +402,10 @@ impl<S: Scalar> Vio<S> {
                 // only the interval a lagged first state could still need.
                 let keep_after = self.last_frame_t_ns.unwrap_or(t_ns);
                 self.drop_frontend_imu_through(keep_after);
-                frontend::flow::PosePrediction::default()
+                match self.bootstrap.running_mut() {
+                    Some(driver) => driver.predict(t_ns),
+                    None => frontend::flow::PosePrediction::default(),
+                }
             }
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
@@ -435,6 +453,8 @@ impl<S: Scalar> Vio<S> {
                 return Ok(self.result(VioStatus::Buffered, t_ns));
             };
             completed
+        } else if self.bootstrap.running().is_some() {
+            return self.bootstrap_track(observations);
         } else {
             (
                 t_ns,
