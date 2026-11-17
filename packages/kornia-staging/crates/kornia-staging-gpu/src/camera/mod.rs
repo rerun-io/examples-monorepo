@@ -80,6 +80,17 @@ pub const MODEL_EUCM: u32 = 3;
 /// Model tag of [`DeviceCamera::Equirect`].
 pub const MODEL_EQUIRECT: u32 = 4;
 
+/// Packed parameter count of the model tagged `model` (`MODEL_*`).
+pub const fn parameter_count(model: u32) -> usize {
+    match model {
+        MODEL_BROWN8 => BROWN8_PARAMETERS,
+        MODEL_KB4 => kb4::PARAMETERS,
+        MODEL_DOUBLE_SPHERE => double_sphere::PARAMETERS,
+        MODEL_EUCM => eucm::PARAMETERS,
+        _ => equirect::PARAMETERS,
+    }
+}
+
 /// A camera the device functions can evaluate, with its packed parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DeviceCamera {

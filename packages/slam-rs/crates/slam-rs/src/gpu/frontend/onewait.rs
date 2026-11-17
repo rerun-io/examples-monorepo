@@ -1,7 +1,7 @@
 //! Device selection connects temporal KLT to stereo without an intermediate read.
 
 use crate::camera::SlamCamera;
-use crate::gpu::kernels::onewait::{CAMERA_PARAMS_START, PER_CAMERA_PARAMS};
+use crate::gpu::kernels::onewait::{camera_params_start, per_camera_params};
 use cubecl::prelude::*;
 
 use super::GpuStages;
@@ -9,8 +9,7 @@ use crate::config::MatchingGuessType;
 use crate::frontend::flow::FrontendError;
 use crate::frontend::stages::StereoContext;
 use crate::gpu::{kernels, pyramid::GpuPyramid, submission};
-use kornia_staging_3d::camera::CameraModelKind;
-use kornia_staging_gpu::camera::Brown8;
+use kornia_staging_gpu::camera::DeviceCamera;
 use kornia_staging_gpu::optical_flow::{
     FUSED_RUNS, FusedKltPlan, FusedLaunch, RUN_SOURCE_X, RUN_SOURCE_Y,
 };
@@ -18,7 +17,7 @@ use kornia_staging_gpu::runtime::GpuError;
 use kornia_staging_gpu::runtime::guarded;
 use kornia_staging_imgproc::features::{CellGrid, CellSelect};
 use kornia_staging_imgproc::optical_flow::patch_se2::Pattern;
-use kornia_staging_slam::tracking::optical_flow::{TrackPhase, PatchTracker};
+use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackPhase};
 
 pub(super) enum Phase {
     Off,
@@ -36,9 +35,21 @@ pub(super) struct OneWait<P: Pattern, R: Runtime> {
     grid: CellGrid,
     cameras: usize,
     camera_models: Vec<SlamCamera<f32>>,
-    device_cameras: Vec<Brown8>,
+    device_cameras: Vec<DeviceCamera>,
+    /// Comptime model tag shared by every camera of the rig.
+    model: u32,
     cells: usize,
     pub(super) phase: Phase,
+}
+
+/// The rig's shared device-camera model tag, or `None` when a camera needs the
+/// general CPU path or the rig mixes models (each model is its own kernel).
+pub(crate) fn rig_device_model(cameras: &[crate::camera::RigCamera<f32>]) -> Option<u32> {
+    let mut models = cameras.iter().map(|camera| {
+        DeviceCamera::from_model(&camera.model.inner).map(|device| device.model_id())
+    });
+    let first = models.next()??;
+    models.all(|model| model == Some(first)).then_some(first)
 }
 
 impl<P: Pattern, R: Runtime> GpuStages<P, R> {
@@ -68,12 +79,12 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
             || cameras.len() < 2
             || !config.optical_flow_detection_nonoverlap
             || !selects.iter().all(|other| *other == Some(select))
-            || !cameras
-                .iter()
-                .all(|camera| matches!(&camera.model.inner, CameraModelKind::BrownConrady(model) if Brown8::from_brown_conrady(model).is_some()))
         {
             return Ok(false);
         }
+        let Some(model) = rig_device_model(cameras) else {
+            return Ok(false);
+        };
         let Some(arena) = pyramids.first().and_then(GpuPyramid::arena) else {
             return Ok(false);
         };
@@ -104,8 +115,8 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 let device_cameras = cameras
                     .iter()
                     .map(|camera| {
-                        let CameraModelKind::BrownConrady(model) = &camera.model.inner else { unreachable!("Brown8 eligibility checked"); };
-                        Brown8::from_brown_conrady(model).ok_or(crate::camera::CameraError::InvalidCalibration)
+                        DeviceCamera::from_model(&camera.model.inner)
+                            .ok_or(crate::camera::CameraError::InvalidCalibration)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 slot.insert(guarded(
@@ -115,7 +126,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                     || {
                         Ok::<_, FrontendError>(OneWait {
                             params: self.client.empty(
-                                (CAMERA_PARAMS_START + lanes * PER_CAMERA_PARAMS)
+                                (camera_params_start(model) + lanes * per_camera_params(model))
                                     * size_of::<f32>(),
                             ),
                             selected: self.client.empty((1 + cells * 2) * size_of::<f32>()),
@@ -126,6 +137,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                             cameras: cameras.len(),
                             camera_models: cameras.iter().map(|camera| camera.model).collect(),
                             device_cameras,
+                            model,
                             cells,
                             phase: Phase::Off,
                         })
@@ -215,6 +227,7 @@ impl<P: Pattern, R: Runtime> GpuStages<P, R> {
                 klt,
                 grid: state.grid,
                 cameras: state.cameras,
+                model: state.model,
                 cells: state.cells,
                 temporal_io: temporal_io.clone(),
                 temporal_len: FUSED_RUNS * temporal_len.max(1),
@@ -293,6 +306,7 @@ pub(in crate::gpu) struct StereoLaunch {
     klt: Box<FusedLaunch>,
     grid: CellGrid,
     cameras: usize,
+    model: u32,
     cells: usize,
     temporal_io: cubecl::server::Handle,
     temporal_len: usize,
@@ -309,6 +323,7 @@ impl StereoLaunch {
             klt,
             grid,
             cameras,
+            model,
             cells,
             temporal_io,
             temporal_len,
@@ -351,7 +366,7 @@ impl StereoLaunch {
                 ),
                 BufferArg::from_raw_parts(
                     stereo_params.clone(),
-                    CAMERA_PARAMS_START + PER_CAMERA_PARAMS * (cameras - 1),
+                    camera_params_start(model) + per_camera_params(model) * (cameras - 1),
                 ),
                 BufferArg::from_raw_parts(selected.clone(), 1 + cells * 2),
                 columns,
@@ -371,11 +386,12 @@ impl StereoLaunch {
                 BufferArg::from_raw_parts(selected.clone(), 1 + cells * 2),
                 BufferArg::from_raw_parts(
                     stereo_params.clone(),
-                    CAMERA_PARAMS_START + PER_CAMERA_PARAMS * (cameras - 1),
+                    camera_params_start(model) + per_camera_params(model) * (cameras - 1),
                 ),
                 BufferArg::from_raw_parts(io.clone(), FUSED_RUNS * count),
                 cells,
                 count,
+                model,
             );
         }
         // SAFETY: The prepared pass follows stereo_inputs on the same client stream.
@@ -385,3 +401,43 @@ impl StereoLaunch {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::rig_device_model;
+    use crate::calib::Calibration;
+    use crate::camera::RigCamera;
+    use kornia_staging_gpu::camera::{MODEL_BROWN8, MODEL_KB4};
+
+    fn rig(text: &str) -> Vec<RigCamera<f32>> {
+        RigCamera::from_calibration(
+            &Calibration::<f64>::from_json_str(text)
+                .unwrap()
+                .cast::<f32>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn one_wait_takes_any_single_model_device_rig() {
+        let msd = rig(include_str!("../../../tests/fixtures/msdmg_calib.json"));
+        let robocap = rig(include_str!(
+            "../../../../../configs/robocap_calib_downscale3.json"
+        ));
+        assert_eq!(rig_device_model(&msd), Some(MODEL_BROWN8));
+        assert_eq!(rig_device_model(&robocap), Some(MODEL_KB4));
+        // Mixed models compile to different kernels: the rig stays on the host path.
+        let mixed = [msd[0], robocap[1]];
+        assert_eq!(rig_device_model(&mixed), None);
+        assert_eq!(rig_device_model(&[]), None);
+        // A camera without a device model (Brown with prism terms) keeps the rig off.
+        let mut parameters = [0.0f32; 18];
+        parameters[..5].copy_from_slice(&[400.0, 400.0, 320.0, 240.0, 0.01]);
+        parameters[12] = 1e-4;
+        let prism = kornia_staging_3d::camera::BrownConrady::new(parameters, None).unwrap();
+        let mut general = msd.clone();
+        general[1].model.inner = kornia_staging_3d::camera::CameraModelKind::BrownConrady(prism);
+        assert_eq!(rig_device_model(&general), None);
+    }
+}
