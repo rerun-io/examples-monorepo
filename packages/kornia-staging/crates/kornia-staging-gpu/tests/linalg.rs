@@ -244,6 +244,8 @@ fn the_device_pcg_follows_the_cpu_lane_iteration_by_iteration() {
         assert_eq!(gpu_term, PcgTermination::MaxIterations);
         assert!(max_rel(&gpu, &cpu) < 1e-4, "{its}: {}", max_rel(&gpu, &cpu));
         assert_eq!(lane.last_solve().syncs, its.div_ceil(8) + 1, "{its}");
+        // One exclusive section per iteration and one per state read.
+        assert_eq!(lane.last_solve().sections, its + its.div_ceil(8), "{its}");
     }
 }
 
