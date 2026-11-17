@@ -20,6 +20,8 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
+from dataforge.transports import FileIntegrity, attempts_of, publish_verified
+
 HF_REVISION: str = "0d2d145e973832742a2aaa04b7d2ebffc8d82817"
 """The ``theairlabcmu/tartanair2`` revision COLMAP's TartanAir V2 benchmark pins."""
 HF_BASE_URL: str = f"https://huggingface.co/datasets/theairlabcmu/tartanair2/resolve/{HF_REVISION}/"
@@ -89,7 +91,8 @@ def extract_members(fetch: RangeFetch, size: int, prefix: str, destination: Path
         (members under ``prefix``, bytes written this call).
 
     Raises:
-        ValueError: A member name leaves ``destination``, or a written file's size is not the member's.
+        ValueError: A member name leaves ``destination``, or a written file's size is not the member's
+            (``dataforge.transports.IntegrityError``).
         zipfile.BadZipFile: A member's CRC does not match.
     """
     local: threading.local = threading.local()
@@ -111,9 +114,7 @@ def extract_members(fetch: RangeFetch, size: int, prefix: str, destination: Path
         target.parent.mkdir(parents=True, exist_ok=True)
         staged: Path = target.with_name(target.name + ".part")
         staged.write_bytes(archive().read(info))  # zipfile checks the CRC on a full read
-        if staged.stat().st_size != info.file_size:
-            raise ValueError(f"{staged} holds {staged.stat().st_size} bytes, the zip says {info.file_size}")
-        staged.replace(target)
+        publish_verified(staged, target, FileIntegrity(size_bytes=info.file_size, algorithm=None, digest=None))
         return info.file_size
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -143,7 +144,8 @@ def http_range(client: httpx.Client, url: str) -> tuple[RangeFetch, int]:
 
     def fetch(start: int, stop: int) -> bytes:
         problem: str = ""
-        for attempt in range(ATTEMPTS):
+        # The label is the resolve URL: the signed CDN URL stays out of the waiting lines.
+        for _ in attempts_of(url, ATTEMPTS):
             try:
                 response: httpx.Response = client.get(resolved[0], headers={"Range": f"bytes={start}-{stop - 1}"})
                 if response.status_code == 206 and len(response.content) == stop - start:
@@ -153,8 +155,6 @@ def http_range(client: httpx.Client, url: str) -> tuple[RangeFetch, int]:
                     resolve()
             except httpx.HTTPError as error:
                 problem = repr(error)
-            if attempt + 1 < ATTEMPTS:
-                time.sleep(2.0**attempt)
         raise OSError(f"{url} bytes {start}-{stop - 1}: {problem} after {ATTEMPTS} attempts")
 
     return fetch, int(resolve().headers["content-range"].rsplit("/", 1)[1])
