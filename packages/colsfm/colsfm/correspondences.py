@@ -83,7 +83,8 @@ def load_correspondences(
     cache_options.image_names = {image.name for image in reconstruction.images.values()}
     with pycolmap.Database.open(database_path) as database:
         database_cache: pycolmap.DatabaseCache = pycolmap.DatabaseCache.create(database, cache_options)
-        pair_order: list[int] = [int(pair_id) for pair_id in database.read_two_view_geometry_num_inliers()[0]]
+        # The rows `DatabaseCache` itself read (`ReadTwoViewGeometries`, in row order), for the rebuild below.
+        geometry_rows: tuple[list[int], list[pycolmap.TwoViewGeometry]] = database.read_two_view_geometries()
 
     image_id_by_name: dict[str, int] = {image.name: image_id for image_id, image in reconstruction.images.items()}
     mismatched: list[str] = []
@@ -102,7 +103,7 @@ def load_correspondences(
     if num_loaded == 0:
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 
-    graph: pycolmap.CorrespondenceGraph = graph_without_pairs(database_cache, pair_order, excluded_pairs)
+    graph: pycolmap.CorrespondenceGraph = graph_without_pairs(database_cache, geometry_rows, excluded_pairs)
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
     return Correspondences(
         database_cache=database_cache,
@@ -114,19 +115,25 @@ def load_correspondences(
 
 
 def graph_without_pairs(
-    database_cache: pycolmap.DatabaseCache, pair_order: Sequence[int], excluded_pairs: Collection[tuple[int, int]]
+    database_cache: pycolmap.DatabaseCache,
+    geometry_rows: tuple[Sequence[int], Sequence[pycolmap.TwoViewGeometry]],
+    excluded_pairs: Collection[tuple[int, int]],
 ) -> pycolmap.CorrespondenceGraph:
-    """The cache's correspondence graph without the given image pairs, rebuilt pair by pair.
+    """The cache's correspondence graph without the given image pairs, rebuilt from the database's own rows.
 
     `DatabaseCache` has no pair filter, and leaving a pair out here is what lets a stage take back pairs it matched only
     for its own use without deleting database rows (COLMAP runs a full `VACUUM` when it closes a connection that
-    deleted anything). The rebuild runs for every load, an empty set included, so there is one path; it copies the
-    cache's own pairs with their inlier matches, so `min_num_matches` and the watermark rule stay COLMAP's.
+    deleted anything). The rebuild runs for every load, an empty set included, so there is one path.
+
+    It replays what `DatabaseCache::Load` did: the same rows (`ReadTwoViewGeometries`), in their order, each added with
+    its stored geometry, so every correspondence list comes out in the same order, many-to-one matches included. Which
+    rows the cache accepted (configuration, `min_num_matches`, the watermark rule, the selected images) stays COLMAP's
+    decision: a row is replayed only when the cache's graph holds its pair.
 
     Args:
         database_cache: The loaded cache.
-        pair_order: Pair ids in the database's own row order, the order `DatabaseCache` added them in; the graph's
-            correspondence lists, and so triangulation, depend on it.
+        geometry_rows: `Database.read_two_view_geometries()` of the database the cache was loaded from: pair ids and
+            geometries in row order.
         excluded_pairs: Pairs `(min id, max id)` to leave out.
 
     Returns:
@@ -139,13 +146,13 @@ def graph_without_pairs(
         if cached.exists_image(image_id):
             graph.add_image(image_id, len(image.points2D))
     in_cache: set[int] = set(cached.image_pairs())
-    for pair_id in pair_order:
-        if pair_id not in in_cache:
+    for pair_id, geometry in zip(*geometry_rows, strict=True):
+        if int(pair_id) not in in_cache:
             continue
-        image_id1, image_id2 = pycolmap.pair_id_to_image_pair(pair_id)
+        image_id1, image_id2 = pycolmap.pair_id_to_image_pair(int(pair_id))
         if (min(image_id1, image_id2), max(image_id1, image_id2)) in excluded:
             continue
-        graph.add_two_view_geometry(image_id1, image_id2, cached.extract_two_view_geometry(image_id1, image_id2, True))
+        graph.add_two_view_geometry(image_id1, image_id2, geometry)
     graph.finalize()
     return graph
 

@@ -6,10 +6,14 @@ loop stage, while the GPU sat idle. Here each chunk of pairs is verified on a fi
 the matcher hands it over (`pycolmap.estimate_two_view_geometry` releases the GIL: 7.7x on 8 threads, measured), and
 the matcher keeps working on the next chunk meanwhile.
 
-Memory stays bounded by construction: at most `verify_chunks_in_flight` chunks are verifying at once. `submit` blocks on the
-oldest one before it takes another, so a CPU that falls behind holds the matcher back instead of letting chunks pile
-up. Peak memory is about `verify_chunks_in_flight` chunks, whatever the length of the run, and the rule is the same on every
-machine.
+Memory stays bounded by construction: `ChunkedVerifier.verified` admits a chunk only while fewer than
+`verify_chunks_in_flight` are verifying. When the window is full it finishes the oldest and hands it to the caller, who
+writes and drops it, before it asks the producer for the next one; so a CPU that falls behind holds the matcher back
+instead of letting chunks pile up. Memory holds `verify_chunks_in_flight` verifying chunks plus the one the producer is
+building, whatever the length of the run, and the rule is the same on every machine.
+
+Each chunk is written in one transaction (`colsfm.database.database_transaction`), so a failure leaves the earlier
+chunks and none of the failing one.
 
 The result is what COLMAP's verifier writes (`WriteVerifiedTwoViewGeometry` in `feature_matching_utils.cc` at the
 pinned COLMAP): the same `EstimateTwoViewGeometry`, an `UNDEFINED` result is not stored, and a `DEGENERATE` result or
@@ -21,7 +25,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Final
@@ -54,6 +58,10 @@ class VerifyChunking:
         """
         if min(self.verify_chunk_pairs, self.verify_threads, self.verify_chunks_in_flight) < 1:
             raise ValueError(f"verify_chunk_pairs, verify_threads and verify_chunks_in_flight must be at least 1, got {self}")
+
+
+DEFAULT_VERIFY_CHUNKING: Final[VerifyChunking] = VerifyChunking()
+"""256 pairs per chunk, up to 8 threads, 2 chunks in flight."""
 
 
 CapFunction = Callable[[ImagePair, KeypointsXY, MatchIndices], MatchIndices]
@@ -141,14 +149,14 @@ def verify_pair(
 
 
 class ChunkedVerifier:
-    """Verifies chunks of pairs on worker threads, at most `verify_chunks_in_flight` at a time, results in submission order."""
+    """A pool of verifier threads; `verified` runs chunks through it in order, at most `verify_chunks_in_flight` at once."""
 
     def __init__(
         self,
         cameras: Mapping[int, pycolmap.Camera],
         options: pycolmap.TwoViewGeometryOptions,
         cap: CapFunction | None = None,
-        chunking: VerifyChunking = VerifyChunking(),
+        chunking: VerifyChunking = DEFAULT_VERIFY_CHUNKING,
     ) -> None:
         """Start the worker pool.
 
@@ -156,56 +164,62 @@ class ChunkedVerifier:
             cameras: Camera per image id.
             options: Verification settings.
             cap: The spatial cap, or None.
-            chunking: The worker threads, and the chunks verifying at once before `submit` waits for the oldest.
+            chunking: The worker threads, and the chunks admitted at once.
         """
         self._cameras: Mapping[int, pycolmap.Camera] = cameras
         self._options: pycolmap.TwoViewGeometryOptions = options
         self._cap: CapFunction | None = cap
         self._chunks_in_flight: int = chunking.verify_chunks_in_flight
         self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=chunking.verify_threads, thread_name_prefix="colsfm-verify")
-        self._in_flight: deque[list[Future[VerifiedPair]]] = deque()
 
-    def submit(self, chunk: Sequence[PairToVerify]) -> list[list[VerifiedPair]]:
-        """Queue one chunk; return the chunks that had to finish to keep at most `verify_chunks_in_flight` in flight.
+    def verified(self, chunks: Iterable[Sequence[PairToVerify]]) -> Iterator[list[VerifiedPair]]:
+        """Verify `chunks` and yield each one finished, in the order they came.
+
+        A chunk is pulled from `chunks` and admitted only while fewer than `verify_chunks_in_flight` are in flight; when
+        the window is full, the oldest is finished and yielded first. A finished oldest chunk is yielded as soon as it is
+        seen, so the caller can write and drop it early. A failure in a worker or in the producer is raised here; the
+        chunks still in flight are cancelled (a running estimate is waited for when the pool shuts down).
 
         Args:
-            chunk: The pairs.
+            chunks: The chunks, produced lazily (FlexGlue downloads the next one only when it is asked for).
 
-        Returns:
-            Finished chunks, oldest first; often none.
+        Yields:
+            Each chunk's verified pairs, in its own order.
         """
-        self._in_flight.append(
-            [
-                self._pool.submit(verify_pair, item, self._cameras[item.pair[0]], self._cameras[item.pair[1]], self._options, self._cap)
-                for item in chunk
-            ]
-        )
-        finished: list[list[VerifiedPair]] = []
-        while len(self._in_flight) > self._chunks_in_flight:
-            finished.append([future.result() for future in self._in_flight.popleft()])
-        return finished
-
-    def finish(self) -> list[list[VerifiedPair]]:
-        """Wait for every chunk still in flight.
-
-        Returns:
-            The remaining chunks, oldest first.
-        """
-        finished: list[list[VerifiedPair]] = []
-        while self._in_flight:
-            finished.append([future.result() for future in self._in_flight.popleft()])
-        return finished
+        in_flight: deque[list[Future[VerifiedPair]]] = deque()
+        try:
+            for chunk in chunks:
+                while in_flight and (len(in_flight) >= self._chunks_in_flight or all(future.done() for future in in_flight[0])):
+                    # Results first, then the pop: a chunk whose result raises stays in `in_flight` and is cancelled below.
+                    finished: list[VerifiedPair] = [future.result() for future in in_flight[0]]
+                    in_flight.popleft()
+                    yield finished
+                in_flight.append(
+                    [
+                        self._pool.submit(verify_pair, item, self._cameras[item.pair[0]], self._cameras[item.pair[1]], self._options, self._cap)
+                        for item in chunk
+                    ]
+                )
+            while in_flight:
+                last: list[VerifiedPair] = [future.result() for future in in_flight[0]]
+                in_flight.popleft()
+                yield last
+        finally:
+            for futures in in_flight:
+                for future in futures:
+                    future.cancel()
 
     def __enter__(self) -> ChunkedVerifier:
         return self
 
     def __exit__(self, *_: object) -> None:
-        self._in_flight.clear()
         self._pool.shutdown(wait=True, cancel_futures=True)
 
 
 def write_verified(database: pycolmap.Database, chunk: Sequence[VerifiedPair], *, write_matches: bool) -> None:
     """Write one verified chunk in one transaction: the raw matches when the matcher did not, and every stored geometry.
+
+    All or nothing: if any write raises, the transaction rolls back and the chunk leaves no row behind.
 
     Args:
         database: An open database.

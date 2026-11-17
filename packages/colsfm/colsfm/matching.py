@@ -48,10 +48,12 @@ measured: a pair with 400 LightGlue matches and `min_num_inliers = 1e6` leaves a
 empty `matches` row. Reporting "raw matches and inliers per pair", which is what
 tells a stale threshold apart from a genuinely textureless pair, therefore needs
 matching and verification split: `match_image_pairs` with
-`skip_geometric_verification`, then COLMAP's own batch `verify_matches` over the
-same pair file. That is also the blob's order. `verify_matches` silently skips any pair that already has a geometry row; at the
-pinned COLMAP the skipped-verification pass writes none (older COLMAP wrote an
-`UNDEFINED` placeholder per pair), and `verify_and_report` checks that none exists.
+`skip_geometric_verification`, then `verify_and_report`, which verifies the stored
+matches in bounded chunks on worker threads (`colsfm.verification`, COLMAP's own
+estimator and write rules). That is also the blob's order. A pair must not already
+have a geometry row (the write would collide); at the pinned COLMAP the
+skipped-verification pass writes none (older COLMAP wrote an `UNDEFINED`
+placeholder per pair), and `verify_and_report` checks that none exists.
 
 **The score threshold.** The blob's 0.3 is calibrated for its own LightGlue
 engine. COLMAP's graph scores differently, and at 0.3 the low-texture
@@ -81,7 +83,7 @@ from __future__ import annotations
 import math
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
@@ -275,8 +277,8 @@ class MatchingOptions:
     read: the engine is LightGlue+, its score gate is
     `tensorrt_min_score`, its thinning is `select_by_square_covering`, and it
     runs on CUDA device 0 or not at all. Verification is the same
-    `pycolmap.verify_matches` call on both paths, so `min_num_inliers`,
-    `max_error_px`, `confidence` and `num_threads` still apply."""
+    `colsfm.verification` path on every backend, so `min_num_inliers`,
+    `max_error_px`, `confidence` and `verify` still apply."""
     variant: MatcherVariant = "ALIKED_LIGHTGLUE"
     """Matcher COLMAP runs; LightGlue is what the blob uses."""
     min_score: float = DEFAULT_MIN_SCORE
@@ -769,16 +771,12 @@ def verify_and_report(
     num_capped: int = 0
     with pycolmap.Database.open(database_path) as database:
         cameras, sizes = verifier_inputs(database)
-        with ChunkedVerifier(
-            cameras,
-            verification_options(options),
-            spatial_cap(options, sizes) if cap else None,
-            options.verify,
-        ) as verifier:
+
+        def stored_chunks() -> Iterator[list[PairToVerify]]:
             for first in range(0, len(pairs), options.verify.verify_chunk_pairs):
                 chunk_pairs: Sequence[ImagePair] = pairs[first : first + options.verify.verify_chunk_pairs]
                 keypoints: dict[int, Keypoints] = read_keypoints_batch(database_path, sorted({image_id for pair in chunk_pairs for image_id in pair}))
-                chunk: list[PairToVerify] = [
+                yield [
                     PairToVerify(
                         pair=pair,
                         matches=np.asarray(database.read_matches(*pair), dtype=np.int64).reshape(-1, 2),
@@ -787,9 +785,9 @@ def verify_and_report(
                     )
                     for pair in chunk_pairs
                 ]
-                for finished in verifier.submit(chunk):
-                    num_capped += write_and_count(database, finished, stats, write_matches=False)
-            for finished in verifier.finish():
+
+        with ChunkedVerifier(cameras, verification_options(options), spatial_cap(options, sizes) if cap else None, options.verify) as verifier:
+            for finished in verifier.verified(stored_chunks()):
                 num_capped += write_and_count(database, finished, stats, write_matches=False)
     return MatchReport(pair_stats=stats, device=device, elapsed_seconds=time.perf_counter() - started), num_capped
 
@@ -803,9 +801,10 @@ def match_pairs(
     """Match and verify a list of image pairs, writing the results into the database.
 
     Both images of every pair must already carry keypoints and descriptors (see
-    `colsfm.features.extract_features`). Matching and verification both run
-    inside COLMAP, in two phases so that the raw match count survives a pair that
-    fails verification; the database ends up with both tables filled.
+    `colsfm.features.extract_features`). Matching runs first and verification after
+    it (`colsfm.verification`; FlexGlue overlaps the two chunk by chunk), so the raw
+    match count survives a pair that fails verification; the database ends up with
+    both tables filled.
 
     Args:
         database_path: An existing COLMAP database.

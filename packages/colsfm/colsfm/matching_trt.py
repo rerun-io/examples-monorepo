@@ -14,7 +14,7 @@ four steps map across exactly, in the blob's own order
 | `NormalizedKeyPoints`: `(kpts - [w/2, h/2]) / (max(w, h)/2)` | `normalize_keypoints` |
 | `PostProcess`: keep `mscores0 > match_threshold` (0.3, a strict `>`) | `MatchingOptions.tensorrt_min_score` |
 | `ApplyNonMaximumSuppression`: SSC to `match_top_k` on the LightGlue score | `colsfm.matching.select_by_square_covering` |
-| `TwoViewVerification`: essential-matrix RANSAC, `n_inliers < 10` empties the pair | `pycolmap.verify_matches` with the same options the pycolmap backend uses |
+| `TwoViewVerification`: essential-matrix RANSAC, `n_inliers < 10` empties the pair | `colsfm.verification` (`pycolmap.estimate_two_view_geometry`, COLMAP's write rules) with the same options the pycolmap backend uses |
 
 So this path has no divergence 2 (NOTES.md, "Where colsfm deviates"): the real
 SSC runs, on the real scores, *before* verification. The post-verification grid
@@ -290,9 +290,9 @@ def match_pairs_tensorrt(
 
     Both images of every pair must already carry keypoints and float descriptors
     — from either feature backend, since both write the same two columns.
-    Matching happens here, verification in COLMAP's own batch `verify_matches`
-    over the same pair file, which is the blob's order and the same call the
-    pycolmap backend makes.
+    Matching happens here and writes the raw matches; `verify_and_report` then
+    verifies them in bounded chunks (`colsfm.verification`), which is the blob's
+    order and the same path the pycolmap backend takes.
 
     Args:
         database_path: An existing COLMAP database.

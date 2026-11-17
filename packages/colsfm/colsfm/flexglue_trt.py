@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -529,8 +529,9 @@ class FlexGlueTensorRT:
 def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions, frames: FrameSource | None = None) -> MatchReport:
     """Match and verify a pair list with FlexGlue on TensorRT, writing both tables into the database.
 
-    The same contract as `colsfm.matching_trt.match_pairs_tensorrt`: raw matches are written per pair, then COLMAP's
-    batch `verify_matches` runs over the same pair file.
+    The same contract as `colsfm.matching_trt.match_pairs_tensorrt` (both tables filled), but streamed: each downloaded
+    chunk is verified on `colsfm.verification`'s worker threads while the GPU matches the next one, and the chunk's raw
+    matches and geometries are written together.
 
     Args:
         database_path: An existing COLMAP database whose images carry keypoints.
@@ -604,23 +605,18 @@ def _match_pairs_flexglue(
                 ]
             )
 
-        # Each downloaded chunk goes to the verifier's worker threads while the GPU matches the next one; `submit` hands
-        # back the chunks it had to finish to keep at most `options.verify.verify_chunks_in_flight` in flight, and they are written
-        # (matches and geometries, one transaction) and dropped.
-        with ChunkedVerifier(
-            cameras,
-            verification_options(options),
-            spatial_cap(options, sizes),
-            options.verify,
-        ) as verifier:
+        def downloaded_chunks() -> Iterator[list[PairToVerify]]:
             for index, (image_id1, image_id2) in enumerate(pairs):
                 ensure(image_id1)
                 ensure(image_id2)
                 flexglue.enqueue((image_id1, image_id2))
                 if (index + 1) % options.verify.verify_chunk_pairs == 0 or index + 1 == len(pairs):
-                    for finished in verifier.submit(flexglue.flush()):
-                        num_capped += write_and_count(database, finished, stats, write_matches=True)
-            for finished in verifier.finish():
+                    yield flexglue.flush()
+
+        # The verifier pulls the next chunk from the GPU only while its window has room, so a CPU that falls behind holds
+        # the matcher back; each finished chunk is written (matches and geometries, one transaction) and dropped.
+        with ChunkedVerifier(cameras, verification_options(options), spatial_cap(options, sizes), options.verify) as verifier:
+            for finished in verifier.verified(downloaded_chunks()):
                 num_capped += write_and_count(database, finished, stats, write_matches=True)
     report: MatchReport = MatchReport(pair_stats=stats, device="cuda", elapsed_seconds=time.perf_counter() - started)
     print(
