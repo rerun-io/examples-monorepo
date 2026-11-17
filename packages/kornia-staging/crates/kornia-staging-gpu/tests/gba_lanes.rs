@@ -10,7 +10,8 @@
 //! `GBA_LANES_THREADS` (CPU lane threads, default 2), `GBA_LANES_ABLATE`
 //! (sequences that also run the host ablation lanes, default `MGO13`). One
 //! `LANE` line per run, one `STEP` line (one LM step against cpu64) and one
-//! `BAND` line per sequence; the test asserts the §7.4 bands at the end.
+//! `BAND` line per sequence; the test asserts the §7.4 bands at the end
+//! (MGO13 with its accepted tolerance, see `kf_band_mm`).
 //!
 //! Host ablation lanes (`solve_global_with` with a host [`PcgLane`]): the
 //! reduced system's f64-accumulated matvec with the PCG scalars summed in f64
@@ -266,17 +267,17 @@ fn rel_err(a: &[f64], reference: &[f64]) -> f64 {
 /// DESIGN §7.4 bands for the device lane against the CPU lanes.
 const COST_REL_BAND: f64 = 1e-3;
 const STEP_REL_BAND: f64 = 1e-3;
-/// Keyframe position RMS: 5 mm on TUM-VI, 1 mm on MSD.
+/// Keyframe position RMS: 5 mm on TUM-VI, 1 mm on MSD, except MGO13: its
+/// device lane sits 1.1 mm from both CPU lanes, the f32 floor of that map
+/// (the f64-summed host ablation lands as far away), and Pablo accepted that
+/// tolerance (2026-11-17, DESIGN §7.3). Only MGO13 gets 1.2 mm.
 fn kf_band_mm(seq: &str) -> f64 {
-    if seq.starts_with("TM") {
-        5.0
-    } else {
-        1.0
+    match seq {
+        "MGO13" => 1.2,
+        s if s.starts_with("TM") => 5.0,
+        _ => 1.0,
     }
 }
-/// Named misses, to be resolved with Pablo (PR e1 review): the band fails
-/// here and the test says so instead of failing.
-const KNOWN_MISSES: &[&str] = &["MGO13 kf_rms"];
 
 #[test]
 #[ignore = "reads RootSLAM's exported GBA problems from the NAS; a benchmark"]
@@ -395,11 +396,5 @@ fn band_and_speed_on_exported_problems() {
             }
         }
     }
-    let (known, unknown): (Vec<_>, Vec<_>) = misses
-        .into_iter()
-        .partition(|m| KNOWN_MISSES.iter().any(|k| m.starts_with(k)));
-    for m in &known {
-        println!("KNOWN-MISS {m}");
-    }
-    assert!(unknown.is_empty(), "band misses: {unknown:#?}");
+    assert!(misses.is_empty(), "band misses: {misses:#?}");
 }
