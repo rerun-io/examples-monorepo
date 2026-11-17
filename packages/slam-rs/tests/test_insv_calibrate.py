@@ -2,7 +2,7 @@
 
 The synthetic rig rotates and translates through a static cloud of points seen on the whole sphere. Its gyro
 carries a bias and white noise; its images are taken ``EXTRA_OFFSET_MS`` after their stamps, the error the
-tool must find. The bearings are expressed in the panorama frame P, the gyro in the IMU frame.
+tool must find. The bearings are expressed in the rig frame P (camera 0's axes), the gyro in the IMU frame.
 """
 
 import os
@@ -42,7 +42,7 @@ TRUE_PANO_R_IMU: Float64[ndarray, "3 3"] = Rotation.from_rotvec(np.radians([0.6,
 BIAS: Float64[ndarray, " 3"] = np.array([0.004, -0.003, 0.002])
 EXTRA_OFFSET_MS: float = 3.0
 PIXEL_RAD: float = np.pi / 960.0
-"""One panorama pixel, radians."""
+"""About two lens pixels at the centre of a 1920 px X4 Air lens, radians."""
 
 
 def angular_rate(t_s: Float64[ndarray, " n"]) -> Float64[ndarray, "n 3"]:
@@ -154,14 +154,14 @@ def test_the_real_clip_gives_the_converters_rotation() -> None:
 def test_the_bootstrap_scan_finds_a_known_shift_of_the_frame_times_on_the_real_clip() -> None:
     """Estimator (b) through ``Vio`` on one 2.3 s window of the clip: frame times shifted by a known offset move the
     scan's minimum by minus that offset, with the recording's readout, none and the sign flipped. There is no synthetic
-    version: the scan runs the dual-fisheye lane, whose inertial bootstrap needs two lens images of a moving 3D scene
+    version: the scan runs the native two-lens rig, whose inertial bootstrap needs two lens images of a moving 3D scene
     with matching IMU, and the unit fixtures give only a still rig with flat textures, on which no offset is observable.
     """
     if CLIP_RRD is None or not CLIP_RRD.is_file():
         pytest.skip(f"the converted Insta360 clip VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
     shift_ns: int = 3_000_000
     offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9, 2))
-    vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text("insta360", profile="fast"))
+    vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text("insta360-native", profile="fast"))
     with open_segment(LocalSegment(CLIP_RRD), profile=RigProfile(decode_threads=4), window_s=1.0, include_ground_truth=False) as feed:
         start_ns: int = int(feed.frame_t_ns[0]) + 60_000_000_000
         stop_ns: int = start_ns + 2_300_000_000
