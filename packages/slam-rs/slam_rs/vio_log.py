@@ -10,10 +10,11 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
+from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
-from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
+from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, log_panorama_keypoints, track_colors
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
@@ -244,10 +245,12 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
-        if self.stitched:
-            log_keypoints(frame, self.tile_origins, PANORAMA_WIDTH, PANORAMA_ENTITY)
+        if self.tile_origins is None:
+            log_keypoints(frame)
+        elif self.stitched:
+            log_panorama_keypoints(frame, self.tile_origins, PANORAMA_WIDTH, PANORAMA_ENTITY)
         else:
-            log_keypoints(frame, self.tile_origins, self.cameras[0].width)
+            log_panorama_keypoints(frame, self.tile_origins, self.cameras[0].width, camera_entity(0))
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
@@ -417,34 +420,6 @@ def log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
 
 
 @dataclass(slots=True)
-class StageTimes:
-    """Per-frameset wall time of each replay stage, in milliseconds, in the order the stages were first seen."""
-
-    columns: dict[str, list[float]] = field(default_factory=dict)
-    """Stage name to one sample per frameset that ran it."""
-
-    def add(self, stage: str, milliseconds: float) -> None:
-        """Record one frameset's time for one stage.
-
-        Args:
-            stage: Stage name.
-            milliseconds: Wall time.
-        """
-        self.columns.setdefault(stage, []).append(milliseconds)
-
-    def summary(self) -> str:
-        """One line: each stage's median and mean, with its own count where it differs from the longest column."""
-        if not self.columns:
-            return "ms per frameset: nothing timed"
-        framesets: int = max(len(samples) for samples in self.columns.values())
-        parts: list[str] = []
-        for stage, samples in self.columns.items():
-            count: str = "" if len(samples) == framesets else f" (n={len(samples)})"
-            parts.append(f"{stage} {np.median(samples):.1f} / {np.mean(samples):.1f}{count}")
-        return f"ms per frameset, median / mean over {framesets}: " + ", ".join(parts)
-
-
-@dataclass(slots=True)
 class VioStage:
     """The whole pipeline over one segment, and the Rerun layer it draws.
 
@@ -467,19 +442,6 @@ class VioStage:
     def elapsed_ms(self) -> list[float]:
         """Wall time each ``track`` call that tracked took, in frameset order."""
         return self.lockstep.elapsed_ms
-
-    @property
-    def blank_cameras(self) -> tuple[int, ...]:
-        """Cameras fed black images (the mono-inertial proxy); they must never hold a keypoint."""
-        return self.lockstep.blank_cameras
-
-    @property
-    def blank_keypoints(self) -> int:
-        """Keypoints the frontend reported in a blanked camera over the run; must stay 0.
-
-        A camera with no keypoint can connect no landmark: the proxy is mono only if this stays zero.
-        """
-        return self.lockstep.blank_keypoints
 
     @property
     def pending(self) -> list[Frameset]:
@@ -538,7 +500,7 @@ class VioStage:
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
         rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
         if not self.logger.estimate_t_ns or self.logger.estimate_t_ns[-1] != t_ns:
-            log_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
+            log_panorama_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""

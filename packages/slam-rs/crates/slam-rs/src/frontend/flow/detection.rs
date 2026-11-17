@@ -307,10 +307,10 @@ impl<
         if self.cameras.len() > 1 {
             self.prepare_tracks(None);
         }
-        // With stereo matching off every camera detects on its own, whatever
+        // With no camera matched every camera detects on its own, whatever
         // `optical_flow_detection_nonoverlap` says.
         let side_detect: bool = self.config.optical_flow_detection_nonoverlap
-            || !self.config.optical_flow_stereo_matching;
+            || !self.matched.iter().any(|&matched| matched);
         self.stages.stereo(
             kornia_staging_slam::tracking::optical_flow::TrackPhase::Matching {
                 ids: &self.passes[0].ids,
@@ -335,7 +335,7 @@ impl<
             // A camera nothing is matched into keeps its whole image: masking
             // its cam-0 overlap would leave that region with no keypoints.
             for camera in 1..self.cameras.len() {
-                if self.matches_into(camera) {
+                if self.matched[camera] {
                     self.append_cam0_overlap_masks(camera);
                 }
             }
@@ -353,7 +353,7 @@ impl<
     fn filter_points_for_cam(&mut self, camera: usize) {
         self.to_remove.clear();
         // No epipolar geometry, nothing to check a shared id against: drop it.
-        let checkable: bool = self.stereo_pairs[camera];
+        let checkable: bool = self.matched[camera];
         let essential: Matrix4<f32> = self.essential[camera];
         let threshold: f32 = self.config.optical_flow_epipolar_error;
 

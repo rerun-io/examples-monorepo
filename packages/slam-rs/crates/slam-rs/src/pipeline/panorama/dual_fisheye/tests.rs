@@ -49,26 +49,24 @@ fn lens_calibration(lenses: &DualFisheyeLenses) -> Calibration<f64> {
     calibration
 }
 
-fn config(two_centre: bool) -> VioConfig {
+fn config() -> VioConfig {
     VioConfig {
         optical_flow_detection_grid_size: 64,
         optical_flow_stereo_matching: false,
         panorama_dual_fisheye: true,
-        panorama_two_centre: two_centre,
         panorama_rolling_shutter: true,
         ..VioConfig::default()
     }
 }
 
-fn rig(two_centre: bool) -> (PanoramaRig, Calibration<f64>) {
+fn rig() -> (PanoramaRig, Calibration<f64>) {
     let lenses = lenses();
-    PanoramaRig::expand_dual_fisheye(&config(two_centre), lens_calibration(&lenses), lenses)
-        .unwrap()
+    PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses), lenses).unwrap()
 }
 
 #[test]
 fn tiles_are_the_designed_hemisphere_cameras() {
-    let (rig, tiles) = rig(true);
+    let (rig, tiles) = rig();
     assert!(rig.tile_lut(0).is_some() && rig.tile_lut(1).is_some());
     assert_eq!(rig.tile_size(), (1088, 960));
     assert_eq!(rig.tile_origins(), [-64, 896]);
@@ -79,61 +77,55 @@ fn tiles_are_the_designed_hemisphere_cameras() {
     assert_eq!((p.cx, p.cy), (543.5, 479.5));
     assert!((p.lon_max - 1088.0 / (2.0 * 960.0 / PI)).abs() < 1e-12);
     assert_eq!(tiles.resolution, vec![[1088, 960]; 2]);
-    // Two centres 33.1 mm apart; the central lane puts both at the midpoint.
+    // Each tile is centred on its own lens: two centres 33.1 mm apart.
     let baseline = (tiles.t_i_c[0].translation - tiles.t_i_c[1].translation).norm();
     assert!((baseline - 0.0331).abs() < 3e-4, "{baseline}");
-    let (_, central) = super::super::PanoramaRig::expand_dual_fisheye(
-        &config(false),
-        lens_calibration(&lenses()),
-        lenses(),
-    )
-    .unwrap();
-    assert!((central.t_i_c[0].translation - central.t_i_c[1].translation).norm() < 1e-12);
-    assert!((central.t_i_c[0].translation - imu_from_pano().translation).norm() < 1e-12);
 }
 
 #[test]
 fn a_far_point_lands_where_the_tile_camera_and_the_table_agree() {
     let lenses = lenses();
-    for two_centre in [true, false] {
-        let (rig, tiles) = rig(two_centre);
-        for tile in 0..2 {
-            let model = tile_model(&tiles, tile);
-            let lut = rig.tile_lut(tile).unwrap();
-            let lens_from_imu: Se3<f64> = (imu_from_pano() * lenses.pano_from_lens(tile)).inverse();
-            let mut checked = 0;
-            for tv in (40..920).step_by(97) {
-                for tu in (70..1018).step_by(89) {
-                    let index = tv * 1088 + tu;
-                    if lut.samples()[index] == RemapTable::INVALID {
-                        continue;
-                    }
-                    let bearing = Vector3::from(model.unproject([tu as f64, tv as f64]).unwrap());
-                    // 10 km along the tile pixel's ray, in the IMU frame, seen through the lens's factory model.
-                    let point: Vector3<f64> = tiles.t_i_c[tile] * (bearing * 1.0e4);
-                    let ray: Vector3<f64> = lens_from_imu * point;
-                    let [u, v] = lenses.lenses[tile]
-                        .camera
-                        .project([ray.x, ray.y, ray.z])
-                        .unwrap();
-                    let [qx, qy] = lut.samples()[index];
-                    let (tu_lens, tv_lens) = (f64::from(qx) / 128.0, f64::from(qy) / 128.0);
-                    assert!(
-                        (tu_lens - u).abs() < 0.05 && (tv_lens - v).abs() < 0.05,
-                        "tile {tile} ({tu}, {tv}): table ({tu_lens}, {tv_lens}) vs model ({u}, {v})"
-                    );
-                    checked += 1;
+    let (rig, tiles) = rig();
+    for tile in 0..2 {
+        let model = tile_model(&tiles, tile);
+        let lut = rig.tile_lut(tile).unwrap();
+        let lens_from_imu: Se3<f64> = (imu_from_pano() * lenses.pano_from_lens(tile)).inverse();
+        let mut checked = 0;
+        for tv in (40..920).step_by(97) {
+            for tu in (70..1018).step_by(89) {
+                let index = tv * 1088 + tu;
+                if lut.samples()[index] == RemapTable::INVALID {
+                    continue;
                 }
+                let bearing = Vector3::from(model.unproject([tu as f64, tv as f64]).unwrap());
+                // 10 km along the tile pixel's ray, in the IMU frame, seen through the lens's factory model.
+                let point: Vector3<f64> = tiles.t_i_c[tile] * (bearing * 1.0e4);
+                let ray: Vector3<f64> = lens_from_imu * point;
+                let [u, v] = lenses.lenses[tile]
+                    .camera
+                    .project([ray.x, ray.y, ray.z])
+                    .unwrap();
+                let [qx, qy] = lut.samples()[index];
+                let (tu_lens, tv_lens) = (f64::from(qx) / 128.0, f64::from(qy) / 128.0);
+                assert!(
+                    (tu_lens - u).abs() < 0.05 && (tv_lens - v).abs() < 0.05,
+                    "tile {tile} ({tu}, {tv}): table ({tu_lens}, {tv_lens}) vs model ({u}, {v})"
+                );
+                checked += 1;
             }
-            assert!(checked > 80, "{checked}");
         }
+        assert!(checked > 80, "{checked}");
     }
 }
 
 #[test]
-fn a_near_point_shows_the_lens_offset_parallax_between_the_two_lanes() {
-    let (_, two) = rig(true);
-    let (_, central) = rig(false);
+fn a_near_point_shows_the_lens_offset_parallax_against_a_shared_centre() {
+    let (_, two) = rig();
+    // Both tiles at the lens midpoint instead: parallax between the lenses ignored.
+    let mut central = two.clone();
+    for pose in &mut central.t_i_c {
+        pose.translation = imu_from_pano().translation;
+    }
     // 1 m from the midpoint, perpendicular to the lens axis (longitude 90 deg in P, on the equator).
     let point: Vector3<f64> = imu_from_pano() * Vector3::new(1.0, 0.0, 0.0);
     let model = tile_model(&two, 0);
@@ -167,7 +159,7 @@ fn textured_lens(seed: u32) -> Vec<u8> {
 
 #[test]
 fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_remap() {
-    let (mut rig, _) = rig(true);
+    let (mut rig, _) = rig();
     // A padded stride: the CPU lane reads the rows in place, no dense copy first.
     let stride: usize = 1924;
     let lenses_px: [Vec<u8>; 2] = [textured_lens(1), textured_lens(2)];
@@ -254,7 +246,7 @@ fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_rem
 
 #[test]
 fn the_standalone_stitch_gives_the_lanes_panorama() {
-    let (mut rig, _) = rig(true);
+    let (mut rig, _) = rig();
     let lenses_px: [Vec<u8>; 2] = [textured_lens(3), textured_lens(4)];
     let views: Vec<ImageView<'_>> = lenses_px
         .iter()
@@ -323,11 +315,11 @@ fn a_wide_margin_or_a_tiny_lens_is_refused_before_the_tables() {
 
 #[test]
 fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
-    let (rig, tiles) = rig(true);
+    let (rig, tiles) = rig();
     let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
         panic!("equirectangular")
     };
-    let masks = rig.detection_masks(&config(true), p.fy, p.cy).unwrap();
+    let masks = rig.detection_masks(&config(), p.fy, p.cy).unwrap();
     let masked_cells: usize = masks[0].masks.len();
     for (tile, cells) in masks.iter().enumerate() {
         let lut = rig.tile_lut(tile).unwrap();
@@ -361,7 +353,7 @@ fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
 
 #[test]
 fn the_kill_mask_covers_invalid_pixels_and_their_patch_radius() {
-    let (rig, _) = rig(true);
+    let (rig, _) = rig();
     let dual = rig.dual.as_deref().unwrap();
     for tile in 0..2 {
         let mask = dual.kill_mask(tile);
@@ -383,7 +375,7 @@ fn the_key_and_the_lenses_must_agree() {
     let lenses = lenses();
     let off = VioConfig {
         panorama_dual_fisheye: false,
-        ..config(true)
+        ..config()
     };
     assert!(
         PanoramaRig::expand_dual_fisheye(&off, lens_calibration(&lenses), lenses.clone()).is_err()
@@ -391,7 +383,7 @@ fn the_key_and_the_lenses_must_agree() {
     let mut swapped = lens_calibration(&lenses);
     swapped.t_i_c.swap(0, 1);
     assert!(
-        PanoramaRig::expand_dual_fisheye(&config(true), swapped, lenses).is_err(),
+        PanoramaRig::expand_dual_fisheye(&config(), swapped, lenses).is_err(),
         "lens order is checked"
     );
 }
@@ -476,7 +468,7 @@ fn the_rolling_shutter_correction_recovers_the_global_shutter_pixel_at_one_rad_p
 
 #[test]
 fn the_rig_rotates_the_gyro_into_each_tile_and_skips_without_a_rate() {
-    let (mut rig, tiles) = rig(true);
+    let (mut rig, tiles) = rig();
     let mut observations = FlowObservations::new(1_000_000_000, 2);
     observations.cameras[0].insert(
         crate::types::KeypointId(1),

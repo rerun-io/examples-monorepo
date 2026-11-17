@@ -19,11 +19,21 @@ use super::{ImageView, VioError};
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
 use crate::estimator::FlowObservations;
+use crate::frontend::flow::TrackKillMask;
 use crate::frontend::input::{FrameStorage, PackedImages};
 use crate::lie::{Se3, So3};
 use dual_fisheye::DualFisheyeIngest;
 use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use nalgebra::Vector3;
+use std::sync::Arc;
+
+/// Columns each hemisphere tile reaches past its 180-degree half of the
+/// panorama, on each side, in panorama pixels: one 64 px detection cell.
+pub(super) const TILE_MARGIN_PX: usize = 64;
+
+/// Tracked keypoints above this absolute latitude, degrees, are dropped, and
+/// detection skips every cell row whose centre lies above it.
+const TRACK_MAX_LATITUDE_DEG: f64 = 75.0;
 
 /// One panorama camera expanded into two hemisphere tiles.
 #[derive(Debug)]
@@ -50,10 +60,11 @@ impl PanoramaRig {
     /// # Errors
     ///
     /// [`VioError::Panorama`] when a full panorama shares the rig with other
-    /// cameras, is not `fx = W / 2pi` with an even width, or when the margin
-    /// leaves a tile wider than the panorama.
+    /// cameras, is not `fx = W / 2pi` with an even width, when the margin
+    /// leaves a tile wider than the panorama, or when a tile's outer pixel
+    /// centre is not half a pixel inside its `lon_max` (a width that is not a
+    /// multiple of 4, for `cx = (W - 1) / 2`).
     pub fn expand(
-        config: &VioConfig,
         calibration: Calibration<f64>,
     ) -> Result<(Option<Self>, Calibration<f64>), VioError> {
         let full: Vec<EquirectangularParams<f64>> = calibration
@@ -86,7 +97,7 @@ impl PanoramaRig {
                 pano.fx
             )));
         }
-        let margin: usize = config.panorama_tile_margin_px as usize;
+        let margin: usize = TILE_MARGIN_PX;
         let tile_width: usize = width / 2 + 2 * margin;
         if tile_width > width {
             return Err(VioError::Panorama(format!(
@@ -97,10 +108,23 @@ impl PanoramaRig {
         // centred position, and the tile's principal point absorbs the rest, so
         // the crop stays a pure copy for any panorama `cx`.
         let origin: i64 = (pano.cx - (tile_width as f64 - 1.0) / 2.0).round() as i64;
+        // `lon_max` is `W / 4 + margin` columns from the tile's principal point.
+        // Each outer pixel centre must stay at least half a pixel inside it, or
+        // its rounding decides on which side of `lon_max` it lands. With
+        // `cx = (W - 1) / 2` that holds exactly when `W` is a multiple of 4.
+        let tile_cx: f64 = pano.cx - origin as f64;
+        let reach: f64 = tile_cx.max(tile_width as f64 - 1.0 - tile_cx) + 0.5;
+        if reach > width as f64 / 4.0 + margin as f64 + 1e-9 {
+            return Err(VioError::Panorama(format!(
+                "a {width}-wide panorama with cx = {} puts a tile's outer pixel on its lon_max; \
+                 use a width that is a multiple of 4 with cx = (W - 1) / 2",
+                pano.cx
+            )));
+        }
         let tile = EquirectangularParams {
             fx: pano.fx,
             fy: pano.fy,
-            cx: pano.cx - origin as f64,
+            cx: tile_cx,
             cy: pano.cy,
             lon_max: std::f64::consts::FRAC_PI_2 + margin as f64 / pano.fx,
         };
@@ -135,8 +159,7 @@ impl PanoramaRig {
     ///
     /// Tile `k`: `fx = fy = 960 / pi`, principal point at the tile centre,
     /// `lon_max` to the tile's outer pixel edge; `T_imu_tile_k = T_imu_P *
-    /// (Ry(k pi), c_k)` with `c_k` lens `k`'s centre in `P`
-    /// (`config.panorama_two_centre`) or zero (central lane). The panorama they
+    /// (Ry(k pi), c_k)` with `c_k` lens `k`'s centre in `P`. The panorama they
     /// form is 1920x960: tile columns `[margin, margin + 960)` of tile 0, then
     /// of tile 1.
     ///
@@ -184,7 +207,7 @@ impl PanoramaRig {
 
     /// Detection cells for both tiles: the margin columns (the other
     /// hemisphere's half of the seam) and every cell row whose centre lies above
-    /// `config.panorama_track_max_latitude_deg`. Whole grid-aligned cells.
+    /// [`TRACK_MAX_LATITUDE_DEG`]. Whole grid-aligned cells.
     ///
     /// # Errors
     ///
@@ -198,8 +221,8 @@ impl PanoramaRig {
         let cell: usize = config.optical_flow_detection_grid_size as usize;
         let grid: CellGrid = CellGrid::new(self.tile_width, self.height, cell)
             .map_err(|error| VioError::Panorama(error.to_string()))?;
-        let margin: usize = config.panorama_tile_margin_px as usize;
-        let limit: f64 = f64::from(config.panorama_track_max_latitude_deg).to_radians();
+        let margin: usize = TILE_MARGIN_PX;
+        let limit: f64 = TRACK_MAX_LATITUDE_DEG.to_radians();
         let mut masks: CellMasks = CellMasks::default();
         for (column, row) in grid.cells() {
             let x: usize = grid.x_start + column * cell;
@@ -242,6 +265,30 @@ impl PanoramaRig {
                 tile_masks
             })
             .collect())
+    }
+
+    /// Track kill masks for both tiles: every row whose latitude
+    /// `(v - cy) / fy` lies above `limit_rad`, plus, for stitched tiles, the
+    /// pixels whose patch would read outside the lens.
+    pub fn track_kill_masks(&self, fy: f64, cy: f64, limit_rad: f64) -> Vec<Arc<TrackKillMask>> {
+        (0..2)
+            .map(|tile| {
+                let mut mask: TrackKillMask = match &self.dual {
+                    Some(dual) => Arc::unwrap_or_clone(dual.kill_mask(tile)),
+                    None => TrackKillMask {
+                        width: self.tile_width,
+                        height: self.height,
+                        killed: vec![false; self.tile_width * self.height],
+                    },
+                };
+                for (row, killed) in mask.killed.chunks_exact_mut(self.tile_width).enumerate() {
+                    if ((row as f64 - cy) / fy).abs() > limit_rad {
+                        killed.fill(true);
+                    }
+                }
+                Arc::new(mask)
+            })
+            .collect()
     }
 
     /// Cut the panorama into the two tiles; a pure copy with horizontal wrap.
@@ -426,7 +473,7 @@ impl PanoramaRig {
     }
 }
 
-/// The two tiles' cells and latitude limits on a freshly built frontend.
+/// The two tiles' detection cells and track kill masks on a freshly built frontend.
 ///
 /// # Errors
 ///
@@ -442,12 +489,15 @@ pub(super) fn configure(
             "tile cameras must be equirectangular".to_owned(),
         ));
     };
-    let limit: f32 = config.panorama_track_max_latitude_deg.to_radians();
     frontend.set_detection_masks(panorama.detection_masks(config, tile.fy, tile.cy)?)?;
-    frontend.set_track_latitude_limits(vec![Some(limit); 2])?;
-    if let Some(dual) = &panorama.dual {
-        frontend.set_track_kill_masks(vec![Some(dual.kill_mask(0)), Some(dual.kill_mask(1))])?;
-    }
+    let limit: f64 = TRACK_MAX_LATITUDE_DEG.to_radians();
+    frontend.set_track_kill_masks(
+        panorama
+            .track_kill_masks(tile.fy, tile.cy, limit)
+            .into_iter()
+            .map(Some)
+            .collect(),
+    )?;
     Ok(())
 }
 

@@ -151,7 +151,7 @@ impl<S: Scalar> Vio<S> {
                     "config.panorama_dual_fisheye needs the factory lens calibration".to_owned(),
                 ));
             }
-            None => PanoramaRig::expand(&config, calibration)?,
+            None => PanoramaRig::expand(calibration)?,
         };
         let camera_count: usize = calibration.t_i_c.len();
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;

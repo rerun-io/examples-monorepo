@@ -163,7 +163,7 @@ pub(super) fn expand(
     // Built once per rig: the GPU lane uploads these tables once and the lookahead
     // recognises the stitch by identity.
     let stitch: Arc<LensStitch> =
-        Arc::new(lenses.stitch(lens_size, config.panorama_tile_margin_px as usize)?);
+        Arc::new(lenses.stitch(lens_size, super::TILE_MARGIN_PX)?);
     let geometry: TileGeometry = stitch.geometry();
     let model: Equirectangular<f64> = geometry
         .camera()
@@ -178,11 +178,7 @@ pub(super) fn expand(
     };
     let t_i_c: Vec<Se3<f64>> = (0..2)
         .map(|k| {
-            let origin: Vector3<f64> = if config.panorama_two_centre {
-                lenses.lenses[k].pano_from_lens.translation.vector
-            } else {
-                Vector3::zeros()
-            };
+            let origin: Vector3<f64> = lenses.lenses[k].pano_from_lens.translation.vector;
             let turn: So3<f64> = So3::exp(&Vector3::new(0.0, std::f64::consts::PI * k as f64, 0.0));
             imu_from_pano * Se3::new(turn, origin)
         })
