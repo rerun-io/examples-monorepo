@@ -50,6 +50,10 @@ and doctests for every workspace member except GPU, in both feature modes,
 plus Python patch-preparation tests.
 Run `pixi run -e kornia-staging-dev --frozen kornia-staging-gpu-test`
 for the opt-in GPU tests and Clippy on the host device.
+Run `pixi run -e kornia-staging-dev --frozen kornia-staging-golden` for the golden
+parity tests (Basalt BRIEF, matcher, HashBoW) in `golden/`, a
+test-only Cargo workspace without a destination: it reads third-party reference outputs stored as `.rrd`
+on the NAS, skips when they are absent, and stays out of the gate's build.
 CPU-only bare Cargo commands also require these workspace patches.
 Prepare the pinned CubeCL trees with `kornia-staging-patch-deps` before bare Cargo;
 consumer workspace roots must repeat the three `[patch.crates-io]` overrides. Run each affected consumer's gate
@@ -84,11 +88,15 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
+| Generalized (non-central) 3-point absolute pose (GP3P), tangent-plane refinement on the staged LM driver; seeded adaptive RANSAC estimator with an optional acceptance-ratio bound on upstream `kornia_3d::ransac` (feature `ransac`) | RootSLAM `loop_closing.cpp` `estimateAbsolutePose` (OpenGV GP3P) | kornia-rs / kornia-3d / pose::gp3p, ransac::estimators | staged | - |
 | Inverted-file bag-of-words database with DBoW2's L1 query (`queryL1`) | dpretrieval `crates/dbow` (DBoW2 `TemplatedDatabase`) | kornia-rs / kornia-bow / database | staged | - |
+| Database entry removal and filtered query (f64 score sums) | RootSLAM `hash_bow.h` (`HashBowST::remove_from_database`, time filter) | kornia-rs / kornia-bow / database | staged | - |
+| HashBoW: vocabulary-free 16-bit words of permuted descriptor bits, L1 term frequencies, frame/camera keys, minimum-age filter, frame removal; always sorted, per-frame top N | RootSLAM `hash_bow.h` | kornia-rs / kornia-bow / hash_bow | staged | - |
 | Integer area resize | slam-rs `area.rs`, `area/kernels.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | Scaled zero-border bilinear remap | robocap-live `kornia_ext/remap.rs` | kornia-rs / kornia-imgproc / interpolation::remap | staged | - |
 | Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |
+| Basalt oriented BRIEF at given u16 keypoints (intensity-centroid angle, `pattern_31` as `i8`, optional box smoothing), bit-identical to Basalt; 256-bit Hamming and mutual matcher with strict ties | RootSLAM `keypoints.cpp` (`computeAngles`, `computeDescriptors`, `matchDescriptors`) | kornia-rs / kornia-imgproc / features | staged | - |
 | Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |
 | Strided u8-shift8 ingestion and sparse u16 bilinear values/gradients (dense conversion uses upstream cast_and_scale) | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Floor-halved integer u16 Gaussian downsampling and reusable PyramidPlanU16 | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |
@@ -108,6 +116,7 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Per-landmark Householder/Givens elimination and back-substitution | slam-rs `linearize/landmark_block.rs` | kornia-slam / kornia-slam / sqrt_ba | staged | - |
 | Absolute-QR assembly and deterministic dense reduction | `slam-rs/linearize/{abs_qr,dense_hb}.rs`, `ba_base.rs` prior kernels | kornia-slam / kornia-slam / `sqrt_ba` | staged | - |
 | Global square-root BA in f32: landmark QR blocks, Givens landmark damping with exact undo, Jacobi scaling, implicit block-Jacobi PCG with a pose-major reduction, LM, rootba rel-pose rows | RootSLAM `thirdparty/rootba` (`qr/`, `solver/linearizor_qr.cpp`, `rel_pose_block.hpp`) | kornia-slam / kornia-slam / `sqrt_ba::{global, damping, pcg, rel_pose}`; goldens vs rootba `bal`: `pixi run -e kornia-staging --frozen kornia-staging-gba-golden` | staged | - |
+| SE(3) pose-graph optimization: RootSLAM's Ceres `PoseGraph3dErrorTerm` residual with analytic Jacobians, exact minimum-degree block-sparse f64 Cholesky over 6x6 blocks, LM with fixed-pose gauge, per-edge information and RootSLAM's keep-first rule for parallel edges (replaces upstream kornia-3d's dense, numeric-Jacobian `pgo` for map-sized graphs) | RootSLAM `loop_closing.cpp` / `loop_closing.h` Ceres PGO | kornia-slam / kornia-slam / `pgo` | staged | - |
 | CubeCL runtime, storage/subgroup probes and typed failures; pinned patch preparation | slam-rs `gpu/runtime.rs`, patches and prepare helper | proposed kornia-gpu / runtime; CubeCL patches | staged | [#1135](https://github.com/kornia/kornia-rs/issues/1135), [#1139](https://github.com/kornia/kornia-rs/issues/1139) |
 | Wgpu polling wakeup | cubecl-wgpu 0.11.0-pre.3 compute/{poll,stream,timings} | cubecl-wgpu | staged (temporary patch) | - |
 | Persistent u16 GPU pyramids | slam-rs `gpu/pyramid.rs`, `gpu/kernels/pyramid.rs` | proposed kornia-gpu / `pyramid` | staged | [#1135](https://github.com/kornia/kornia-rs/issues/1135), [#1139](https://github.com/kornia/kornia-rs/issues/1139) |
