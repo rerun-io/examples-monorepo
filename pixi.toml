@@ -2756,14 +2756,18 @@ description = "Build the core, then score catalog segments against ground truth 
 [feature.slam-rs.tasks.slam-rs-replay]
 cmd = "python tools/apps/replay.py"
 cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
+depends-on = [{ task = "slam-rs-build", environment = "slam-rs-cuda" }]
+# NVDEC decode by default: `pixi run slam-rs-replay` takes slam-rs-cuda; `-e slam-rs` keeps the CPU decoder.
+default-environment = "slam-rs-cuda"
 description = "Build the core, then replay a segment in the viewer (GPU frontend when available)"
 
 # e.g. `pixi run -e slam-rs slam-rs-insv-calibrate --rrd clip.rrd [--rotation-spans-s 40 190] [--scan-windows-s 20 60 100]`
 [feature.slam-rs.tasks.slam-rs-insv-calibrate]
 cmd = "python tools/apps/insv_calibrate.py"
 cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
+depends-on = [{ task = "slam-rs-build", environment = "slam-rs-cuda" }]
+# NVDEC decode by default: `pixi run slam-rs-insv-calibrate` takes slam-rs-cuda; `-e slam-rs` keeps the CPU decoder.
+default-environment = "slam-rs-cuda"
 description = "Build the core, then measure a converted Insta360 recording's R_P_imu, frame time offset and rolling-shutter readout from its own pixels (prints the converter flags)"
 
 [feature.slam-rs.tasks.slam-rs-robocap-probe]
