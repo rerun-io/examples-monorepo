@@ -36,6 +36,10 @@ def test_reference_profile_preserves_vendored_text() -> None:
         assert settings.vio_config_text(dataset.name) == (settings.package_root / dataset.vio_config).read_text()
 
 
+DATASET_KEY_PREFIXES: tuple[str, ...] = ("config.", "backend.loop_closing")
+"""What a dataset config may set: RootSLAM's keys and the per-dataset loop gates; ``port.*`` knobs come from overlays."""
+
+
 def test_fast_profile_changes_only_its_declared_keys() -> None:
     """The fast profile changes only its four declared keys.
 
@@ -51,16 +55,19 @@ def test_fast_profile_changes_only_its_declared_keys() -> None:
         assert fast["value0"].pop("port.redetect_survivor_ratio") == 0.85
         assert fast["value0"].pop("port.frame_update_max_iterations") == 5
         assert fast["value0"].pop("port.klt_exit_step_px") == 0.05
-        assert all(key.startswith("config.") for key in reference["value0"])
+        assert all(key.startswith(DATASET_KEY_PREFIXES) for key in reference["value0"])
         assert fast == reference
 
 
 def test_no_vendored_config_carries_a_port_key() -> None:
-    """Port-only knobs are supplied by overlays, leaving dataset configurations unchanged."""
+    """Port-only knobs are supplied by overlays, leaving dataset configurations unchanged.
+
+    A dataset config holds RootSLAM's ``config.*`` keys and, for EuRoC and TUM-VI, its loop gates (Pablo, option a).
+    """
     settings: SlamConfig = load_slam_config()
     for dataset in settings.datasets:
         values: dict = json.loads((settings.package_root / dataset.vio_config).read_text())["value0"]
-        assert all(key.startswith("config.") for key in values), dataset.name
+        assert all(key.startswith(DATASET_KEY_PREFIXES) for key in values), dataset.name
 
 
 @pytest.mark.parametrize(

@@ -339,7 +339,11 @@ pub struct VioConfig {
     /// high edges first, so the count feeds back: 0.009 at 96 against 0.026 (92
     /// gives 0.028 on that map, but 1.19 and 0.36 on MG). No multiple of the
     /// median landmarks per keyframe fits: it would be 0.65 on MGO07, 1.85 on
-    /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17).
+    /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17). EuRoC and TUM-VI set
+    /// their own (Pablo, option a: loop settings per dataset): RootSLAM's 120 and
+    /// 150 observations at a1's MG ratio 96 / 100 give 115 and 144. That ratio
+    /// is carried over, not re-derived from those datasets' high edges per
+    /// keyframe.
     #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
     pub loop_closing_pgo_min_covisibility_weight: u32,
     /// Loop detection, verification and fusion (PR b2, DESIGN §3 rows 7-11).
@@ -586,6 +590,8 @@ mod tests {
     const MSDMI_JSON: &str = include_str!("../../../configs/msdmi_config.json");
     const MSDMG_JSON: &str = include_str!("../../../configs/msdmg_config.json");
     const MSDMO_JSON: &str = include_str!("../../../configs/msdmo_config.json");
+    const EUROC_JSON: &str = include_str!("../../../configs/euroc_config.json");
+    const TUMVI_JSON: &str = include_str!("../../../configs/tumvi_config.json");
 
     fn every_fixture() -> [(&'static str, &'static str); 3] {
         [
@@ -689,7 +695,9 @@ mod tests {
 
     /// One default set for the persistent map (DESIGN §8, phase1/kf-density.md):
     /// RootSLAM's MSD values where they are one value, and one shared-landmark
-    /// covisibility weight instead of a per-dataset observation count.
+    /// covisibility weight instead of a per-dataset observation count. The
+    /// loop gates are the exception (Pablo, option a): each dataset config sets
+    /// RootSLAM's own values (the tests below); the MSD configs set none.
     #[test]
     fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
         let defaults = VioConfig::default();
@@ -731,6 +739,58 @@ mod tests {
             let text = format!(r#"{{"value0":{{"{dead}":3}}}}"#);
             assert!(VioConfig::from_json_str(&text).is_err(), "{dead} parsed");
         }
+    }
+
+    /// RootSLAM's loop gates for one dataset, mapped as for MSD: the PnP
+    /// minimums as they are, the inlier ratio on the final PnP (B1), RANSAC
+    /// adaptive (RootSLAM's count is the fixed-schedule cap, which only
+    /// `rootslam-parity` turns on), and the covisibility weight in landmarks.
+    fn assert_loop_gates(text: &str, gates: (usize, usize, f64), covisibility: u32) {
+        let config = VioConfig::from_json_str(text).unwrap();
+        let loops = &config.backend_loop_closing;
+        assert_eq!(
+            (
+                loops.pnp_min_inliers,
+                loops.reprojected_pnp_min_inliers,
+                loops.pnp_inliers_ratio
+            ),
+            gates
+        );
+        assert_eq!(loops.pnp_ransac_fixed_iterations, None, "adaptive");
+        assert_eq!(
+            LoopClosingConfig {
+                pnp_min_inliers: 10,
+                reprojected_pnp_min_inliers: 20,
+                pnp_inliers_ratio: 0.5,
+                ..loops.clone()
+            },
+            LoopClosingConfig::default(),
+            "only the gates differ"
+        );
+        assert_eq!(
+            config.loop_closing_pgo_min_covisibility_weight,
+            covisibility
+        );
+    }
+
+    /// RootSLAM msdmg / msdmi / msdmo: 10 / 20 / 0.5, 100 observations -> 96.
+    #[test]
+    fn msd_loop_gates_are_rootslams_msd_values() {
+        for (_, text) in every_fixture() {
+            assert_loop_gates(text, (10, 20, 0.5), 96);
+        }
+    }
+
+    /// RootSLAM euroc: 10 / 30 / 0.7, 120 observations -> 115.
+    #[test]
+    fn euroc_loop_gates_are_rootslams_euroc_values() {
+        assert_loop_gates(EUROC_JSON, (10, 30, 0.7), 115);
+    }
+
+    /// RootSLAM tumvi_512: 20 / 30 / 0.6, 150 observations -> 144.
+    #[test]
+    fn tumvi_loop_gates_are_rootslams_tumvi_512_values() {
+        assert_loop_gates(TUMVI_JSON, (20, 30, 0.6), 144);
     }
 
     /// The global BA keys (PR d2) default to rootba `bal` as RootSLAM's CI runs

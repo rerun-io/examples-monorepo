@@ -51,6 +51,8 @@
         "config.vio_marg_lost_landmarks": true,
         "config.vio_fix_long_term_keyframes": false,
         "config.vio_kf_marg_feature_ratio": 0.1,
-        "config.vio_kf_marg_criteria": "KF_MARG_DEFAULT"
+        "config.vio_kf_marg_criteria": "KF_MARG_DEFAULT",
+        "config.loop_closing_pgo_min_covisibility_weight": 115,
+        "backend.loop_closing": {"reprojected_pnp_min_inliers": 30, "pnp_inliers_ratio": 0.7}
     }
 }
