@@ -142,12 +142,13 @@ def test_the_first_attempt_is_read_from_the_report_text() -> None:
     assert first_attempt('{"attempts":[],"start_t_ns":null,"accepted_at_t_ns":null,"replayed":0}') is None
 
 
-CLIP_RRD: Path = Path(os.environ.get("SLAM_RS_INSTA360_RRD", "/home/pablo/data/insta360/VID_20261116_125200_00_003.rrd"))
+CLIP_RRD: Path | None = Path(clip) if (clip := os.environ.get("SLAM_RS_INSTA360_RRD")) else None
+"""The converted Insta360 clip VID_20261116_125200_00_003.rrd, from ``SLAM_RS_INSTA360_RRD``; the integration test skips without it."""
 
 
 @pytest.mark.integration
 def test_the_real_clip_gives_the_converters_rotation() -> None:
-    if not CLIP_RRD.is_file():
-        pytest.skip(f"the converted Insta360 clip {CLIP_RRD} (set SLAM_RS_INSTA360_RRD) is absent")
+    if CLIP_RRD is None or not CLIP_RRD.is_file():
+        pytest.skip(f"the converted Insta360 clip VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
     report = main(Config(rrd=CLIP_RRD, rotation_spans_s=(40.0,), span_s=20.0, scan_windows_s=()))
     assert report.rotation.spans[0].angle_to_current_deg < 0.5

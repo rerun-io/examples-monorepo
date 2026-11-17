@@ -26,8 +26,8 @@ V6: str = (
 """The X4 Air clip's V6 factory string, as the Rust lane's tests hold it."""
 CROP: tuple[int, int, int, int, int, int] = (7680, 7680, 7424, 7424, 0, 0)
 
-CLIP_RRD: Path = Path(os.environ.get("SLAM_RS_INSTA360_RRD", "/home/pablo/data/insta360/VID_20261116_125200_00_003.rrd"))
-"""The Insta360 clip's recording (``slam-rs-insv`` output); the integration test skips without it."""
+CLIP_RRD: Path | None = Path(clip) if (clip := os.environ.get("SLAM_RS_INSTA360_RRD")) else None
+"""The Insta360 clip's recording VID_20261116_125200_00_003.rrd (``slam-rs-insv`` output), from ``SLAM_RS_INSTA360_RRD``; the integration test skips without it."""
 MIN_PSNR_DB: float = 38.0
 """Floor for the first decoded layer frame against the stitch at the default cq 34 (measured 41.7 dB on 2026-11-17)."""
 
@@ -87,8 +87,8 @@ def _psnr_db(a: UInt8[ndarray, "h w"], b: UInt8[ndarray, "h w"]) -> float:
 
 @pytest.mark.integration
 def test_the_first_90_frames_of_the_clip_become_an_av1_layer_on_the_frame_times(tmp_path: Path) -> None:
-    if not CLIP_RRD.is_file():
-        pytest.skip(f"the Insta360 clip recording {CLIP_RRD} is absent (set SLAM_RS_INSTA360_RRD)")
+    if CLIP_RRD is None or not CLIP_RRD.is_file():
+        pytest.skip(f"the Insta360 clip recording VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
     layer: PanoLayer = write_layer(Config(rrd=CLIP_RRD, output=tmp_path / "clip.pano.rrd", max_frames=90))
     assert layer.frames == 90
 

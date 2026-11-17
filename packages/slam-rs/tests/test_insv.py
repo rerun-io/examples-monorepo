@@ -12,8 +12,8 @@ pytest.importorskip("dataforge", reason="the converter writes through dataforge'
 
 from slam_rs.apis.insv import X4_AIR, Config, Kb4Fit, angle_to_nearest_permutation_deg, kb4_fit, main, orthonormal
 
-CLIP: Path = Path(os.environ.get("SLAM_RS_INSV", "/home/pablo/data/insta360/VID_20261116_125200_00_003.insv"))
-"""The X4 Air clip VID_20261116_125200_00_003.insv; integration tests skip when it is absent."""
+CLIP: Path | None = Path(clip) if (clip := os.environ.get("SLAM_RS_INSV")) else None
+"""The X4 Air clip VID_20261116_125200_00_003.insv, from ``SLAM_RS_INSV``; integration tests skip without it."""
 
 
 def test_kb4_fit_recovers_a_kb4_curve_exactly() -> None:
@@ -56,8 +56,8 @@ def test_orthonormal_returns_a_proper_rotation_for_a_reflection_free_input() -> 
 
 @pytest.mark.integration
 def test_the_first_three_seconds_convert_into_a_recording_the_feed_reads(tmp_path: Path) -> None:
-    if not CLIP.is_file():
-        pytest.skip(f"asset {CLIP} (VID_20261116_125200_00_003.insv, set SLAM_RS_INSV) is absent")
+    if CLIP is None or not CLIP.is_file():
+        pytest.skip(f"asset VID_20261116_125200_00_003.insv is absent: set SLAM_RS_INSV to the clip (now {CLIP})")
     from rerun.chunk import RrdReader
 
     from slam_rs.catalog_feed import LocalSegment, open_segment
