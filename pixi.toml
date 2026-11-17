@@ -2708,9 +2708,14 @@ slam-rs = { path = "packages/slam-rs", editable = true }
 
 [feature.slam-rs.target.linux-64.dependencies]
 dav1d = "1.2.*"
+# dataforge (below) imports both at module load (transports, gen_humanego_depth), and slam-rs-register runs its register tool.
+requests = "*"
+depth-png = { path = "packages/depth-png" }
 
 [feature.slam-rs.target.linux-aarch64.dependencies]
 dav1d = "1.2.*"
+requests = "*"
+depth-png = { path = "packages/depth-png" }
 
 # Catalog result-layer publishing imports dataforge; dataforge is a linux-only
 # member, so the osx lane leaves it out.

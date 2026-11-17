@@ -27,18 +27,33 @@ def run() -> SegmentRun:
     )
 
 
-def test_layer_animates_the_base_rig_without_replacing_camera_data(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
-    """Absolute inertial poses return to camera time; the result carries no camera statics."""
+@pytest.mark.parametrize("run_root", ["/world/runs/slam_rs", "/world/runs/slam_rs_vio"])
+def test_layer_writes_both_runs_on_camera_time(tmp_path: Path, read_rows: RowsReader, run: SegmentRun, run_root: str) -> None:
+    """Absolute inertial poses return to camera time under the final and the raw VIO run; until re-anchoring they are equal."""
     path: Path = tmp_path / "result.rrd"
     write_layer(path, "session", run, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu")
     rows: Rows = read_rows(path)
-    assert [row.t_ns for row in rows["/world/rig_00"]] == [1_000_000_000, 2_000_000_000]
-    np.testing.assert_allclose(rows["/world/rig_00"][-1].values["Transform3D:translation"], [[1, 2, 3]])
-    np.testing.assert_allclose(rows["/world/rig_00"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
-    assert [row.t_ns for row in rows["/world/runs/slam_rs/trail"]] == [2_000_000_000]
+    assert [row.t_ns for row in rows[f"{run_root}/rig"]] == [1_000_000_000, 2_000_000_000]
+    np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:translation"], [[1, 2, 3]])
+    np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
+    assert [row.t_ns for row in rows[f"{run_root}/trail"]] == [2_000_000_000]
+
+
+def test_layer_leaves_the_base_rig_and_its_sensors_to_the_dataset(tmp_path: Path, run: SegmentRun) -> None:
+    """The ground-truth layer owns ``/world/rig_00``: the result writes only under its two runs, no camera or IMU static."""
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", run, clock_offset_ns=0, profile="fast", backend="cpu")
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(path).stream().collect().stream()}
-    assert {"/world/runs/slam_rs/trajectory", "/world/runs/slam_rs/endpoints", "/world/runs/slam_rs"} <= entities
-    assert not any("/cam_" in entity or "/imu_" in entity for entity in entities)
+    parts: tuple[str, ...] = ("rig", "trajectory", "trail", "endpoints")
+    assert entities == {"/", "/world/runs/slam_rs", *(f"/world/runs/{name}/{part}" for name in ("slam_rs", "slam_rs_vio") for part in parts)}
+
+
+def test_without_ground_truth_the_final_run_also_animates_the_base_rig(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """A dataset with no ``gt`` layer (RoboCap) has no clash: the final run moves the rig its cameras and Follow view hang from."""
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", run, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu", animate_base_rig=True)
+    rows: Rows = read_rows(path)
+    assert rows["/world/rig_00"] == rows["/world/runs/slam_rs/rig"]
 
 
 def test_incomplete_run_does_not_replace_a_previous_result(tmp_path: Path, run: SegmentRun) -> None:
