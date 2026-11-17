@@ -28,3 +28,19 @@ def test_no_loop_gives_no_segment() -> None:
     segments, kept = loop_segments(np.array([10], dtype=np.int64), np.zeros((1, 7)), np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=bool))
     assert segments.shape == (0, 2, 3)
     assert kept.shape == (0,)
+
+
+def test_a_pgo_correction_is_a_segment_from_the_raw_to_the_corrected_keyframe() -> None:
+    from slam_rs.map_loops import PGO_CORRECTIONS_ENTITY, correction_segments
+
+    assert PGO_CORRECTIONS_ENTITY == "/world/runs/slam_rs/pgo/corrections"
+    raw: Float64[ndarray, "k 7"] = np.zeros((3, 7), dtype=np.float64)
+    raw[:, 0] = [1.0, 2.0, 3.0]
+    raw[:, 6] = 1.0
+    corrected: Float64[ndarray, "k 7"] = raw.copy()
+    corrected[0, 1] = 0.5
+    # A rotation alone moves no position: no segment.
+    corrected[2, 5:7] = [np.sqrt(0.5), np.sqrt(0.5)]
+    segments: Float64[ndarray, "m 2 3"] = correction_segments(raw, corrected)
+    assert segments.shape == (1, 2, 3)
+    np.testing.assert_array_equal(segments[0], [[1.0, 0.0, 0.0], [1.0, 0.5, 0.0]])

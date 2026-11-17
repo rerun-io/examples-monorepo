@@ -14,6 +14,7 @@ pub mod covisibility;
 pub mod cull;
 pub mod loop_closing;
 pub mod map;
+pub mod pgo;
 pub mod runner;
 pub mod snapshot;
 
@@ -26,6 +27,7 @@ use crate::types::FrameId;
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
+pub use pgo::{MapCorrection, PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::{MapSnapshot, SnapshotLoop};
 
@@ -88,7 +90,7 @@ pub enum MapEvent {
         current: FrameId,
         /// The keyframe it closes a loop with.
         candidate: FrameId,
-        /// Fused, left for the pose-graph optimization, or stale.
+        /// Fused, optimized then fused, left unapplied, or stale.
         outcome: LoopOutcome,
     },
 }

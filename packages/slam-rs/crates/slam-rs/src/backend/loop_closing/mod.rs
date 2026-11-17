@@ -26,9 +26,8 @@
 //! The island stays pinned against culling from detection to
 //! [`MapBackend::apply_loop`] (B10). Apply measures the drift the loop would
 //! correct; a small one fuses at once (landmark fusion, [`LoopFusion`], B9, and
-//! a loop edge in the covisibility graph); a large one is kept as a verified
-//! loop for the pose-graph optimization (PR c2), which RootSLAM runs before it
-//! fuses.
+//! a loop edge in the covisibility graph); a large one first runs the pose-graph
+//! optimization ([`super::pgo`], PR c2), then fuses the same way.
 
 mod window;
 
@@ -43,6 +42,7 @@ use kornia_staging_imgproc::features::{
 };
 use nalgebra::{Vector2, Vector3, Vector4};
 
+use super::pgo::PgoState;
 use super::{MapBackend, MapEvent};
 use crate::calib::Calibration;
 use crate::camera::SlamCamera;
@@ -133,8 +133,17 @@ pub enum LoopOutcome {
         /// Observations of island landmarks added to the current keyframe.
         observations_added: usize,
     },
-    /// Drift at or above the gate: left for the pose-graph optimization (c2).
+    /// Drift at or above the gate, the pose-graph optimization off or refused:
+    /// nothing changed.
     NeedsPgo,
+    /// Drift at or above the gate: the pose-graph optimization moved the map,
+    /// then landmarks were fused and a loop edge added (c2).
+    Optimized {
+        /// Island landmarks folded into current ones.
+        landmarks_fused: usize,
+        /// Observations of island landmarks added to the current keyframe.
+        observations_added: usize,
+    },
     /// The current or candidate keyframe left the map first (not pinned).
     Stale,
 }
@@ -176,8 +185,10 @@ pub struct LoopCounts {
     pub verified: u64,
     /// Loops fused at once.
     pub fused: u64,
-    /// Loops left for the pose-graph optimization.
+    /// Loops at or above the drift gate: the pose-graph optimization's triggers.
     pub needs_pgo: u64,
+    /// Of those, closed by an applied pose-graph optimization.
+    pub optimized: u64,
 }
 
 /// Loop-closing state beside the map: the HashBoW database, the descriptors of
@@ -192,6 +203,8 @@ pub struct LoopClosing {
     images: BTreeMap<FrameId, KeyframeImages>,
     events: Vec<LoopEvent>,
     counts: LoopCounts,
+    /// What the pose-graph optimization has done (PR c2).
+    pub(super) pgo: PgoState,
 }
 
 impl LoopClosing {
@@ -223,6 +236,7 @@ impl LoopClosing {
             images: BTreeMap::new(),
             events: Vec::new(),
             counts: LoopCounts::default(),
+            pgo: PgoState::default(),
         }))
     }
 
@@ -234,6 +248,16 @@ impl LoopClosing {
     /// The counters.
     pub fn counts(&self) -> LoopCounts {
         self.counts
+    }
+
+    /// What the pose-graph optimization has done.
+    pub fn pgo(&self) -> &PgoState {
+        &self.pgo
+    }
+
+    /// The section this loop closing runs with.
+    pub fn config(&self) -> &LoopClosingConfig {
+        &self.config
     }
 
     /// Keyframes whose images wait for their query.
@@ -251,6 +275,7 @@ impl LoopClosing {
         self.bow.remove_frame(keyframe);
         self.descriptors.remove(&keyframe);
         self.images.remove(&keyframe);
+        self.pgo.raw.remove(&keyframe);
     }
 
     /// Release the images of a query that will not run.
@@ -763,8 +788,9 @@ impl MapBackend {
 
     /// Apply a verified loop (`handle_loop_detection`): measure the drift it
     /// would correct; below the gate, fuse its landmarks and add the loop edge;
-    /// at or above it, keep it for the pose-graph optimization. Unpins the
-    /// island either way and records the event.
+    /// at or above it, run the pose-graph optimization first
+    /// (`handle_loop_closure`), or with it off keep the loop unapplied. Unpins
+    /// the island either way and records the event.
     pub fn apply_loop(&mut self, detection: LoopDetection) -> LoopEvent {
         let pins = detection
             .island
@@ -788,7 +814,22 @@ impl MapBackend {
             self.map.contains_keyframe(detection.candidate),
         ) {
             if drift_m >= min_m || drift_deg >= min_deg {
-                LoopOutcome::NeedsPgo
+                if self.optimize_loop(&detection) {
+                    self.graph
+                        .add_loop_closure(detection.candidate, detection.current);
+                    match self.fuse(detection.current, &detection.matches) {
+                        LoopOutcome::Fused {
+                            landmarks_fused,
+                            observations_added,
+                        } => LoopOutcome::Optimized {
+                            landmarks_fused,
+                            observations_added,
+                        },
+                        other => other,
+                    }
+                } else {
+                    LoopOutcome::NeedsPgo
+                }
             } else {
                 self.graph
                     .add_loop_closure(detection.candidate, detection.current);
@@ -812,6 +853,10 @@ impl MapBackend {
             match outcome {
                 LoopOutcome::Fused { .. } => loops.counts.fused += 1,
                 LoopOutcome::NeedsPgo => loops.counts.needs_pgo += 1,
+                LoopOutcome::Optimized { .. } => {
+                    loops.counts.needs_pgo += 1;
+                    loops.counts.optimized += 1;
+                }
                 LoopOutcome::Stale => {}
             }
             loops.events.push(event.clone());

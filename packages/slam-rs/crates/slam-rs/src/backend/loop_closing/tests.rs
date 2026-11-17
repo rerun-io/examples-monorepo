@@ -593,8 +593,12 @@ fn the_reprojection_pass_reads_the_image_and_leaves_the_keyframe_as_it_was() {
 }
 
 #[test]
-fn a_large_drift_is_kept_for_the_pose_graph_and_changes_no_map_entry() {
-    let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
+fn with_the_pose_graph_off_a_large_drift_changes_no_map_entry() {
+    let off = LoopClosingConfig {
+        pgo: false,
+        ..LoopClosingConfig::default()
+    };
+    let mut s = scene(1, 0.3, true, off, 100);
     let before = (s.backend.map().clone(), s.backend.graph().clone());
     s.backend.query(C);
     let event = &s.backend.loop_closing().unwrap().events()[0];
@@ -602,6 +606,122 @@ fn a_large_drift_is_kept_for_the_pose_graph_and_changes_no_map_entry() {
     assert!((event.drift_m - 0.3).abs() < 1e-6);
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
     assert_eq!(s.backend.loop_closing().unwrap().counts().needs_pgo, 1);
+}
+
+#[test]
+fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
+    let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
+    let t_i_c = calibration(1).t_i_c;
+    let before = s.backend.map().clone();
+    let kept = LandmarkId::from(keypoint_id(0, SEEN, 0));
+    let kept_before = before.landmark_world(kept, &t_i_c).unwrap();
+    s.backend.query(C);
+    let loops = s.backend.loop_closing().unwrap();
+    let event = &loops.events()[0];
+    assert_eq!(
+        event.outcome,
+        LoopOutcome::Optimized {
+            landmarks_fused: 10,
+            observations_added: POINTS - 10
+        }
+    );
+    assert!((event.drift_m - 0.3).abs() < 1e-6);
+    assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 1));
+    let map = s.backend.map();
+    for id in [C, D] {
+        assert_eq!(
+            map.keyframe(id).unwrap().pose,
+            before.keyframe(id).unwrap().pose,
+            "the window is the gauge"
+        );
+    }
+    for id in [A, A2] {
+        let x = map.keyframe(id).unwrap().pose.translation.x;
+        assert!(
+            x > 0.15 && x < 0.35,
+            "the island follows the current drift: {x}"
+        );
+    }
+    let run = loops.pgo().runs[0];
+    assert_eq!(
+        (
+            run.current,
+            run.candidate,
+            run.keyframes,
+            run.fixed,
+            run.loop_edges,
+            run.moved
+        ),
+        (C, A, 4, 2, 2, 2)
+    );
+    let host = map.keyframe(A).unwrap().pose * before.keyframe(A).unwrap().pose.inverse();
+    let kept_after = map.landmark_world(kept, &t_i_c).unwrap();
+    assert!(
+        (kept_after - host * kept_before).norm() < 1e-9,
+        "a landmark moves with its host"
+    );
+    assert_eq!(
+        s.backend.graph().loop_closures(C).collect::<Vec<_>>(),
+        vec![A]
+    );
+    let snapshot = s.backend.snapshot(&t_i_c);
+    assert_eq!(snapshot.correction.epoch, 1);
+    assert_eq!(
+        snapshot
+            .correction
+            .poses
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![A, A2]
+    );
+    assert_eq!(snapshot.correction.poses[&A], map.keyframe(A).unwrap().pose);
+    let row_a = snapshot
+        .keyframe_t_ns
+        .iter()
+        .position(|&id| id == A)
+        .unwrap();
+    assert_eq!(snapshot.keyframe_raw_poses[row_a], Se3::identity());
+    assert_eq!(
+        snapshot.keyframe_poses[row_a],
+        map.keyframe(A).unwrap().pose
+    );
+    assert_eq!(snapshot.pgo_runs.len(), 1);
+    assert_eq!(snapshot.pgo_solve_ns.0.len(), 1);
+    assert!(!snapshot.loops[0].fused);
+}
+
+#[test]
+fn a_small_drift_runs_no_pose_graph() {
+    let mut s = scene(1, 0.05, true, LoopClosingConfig::default(), 100);
+    s.backend.query(C);
+    let loops = s.backend.loop_closing().unwrap();
+    assert!(matches!(
+        loops.events()[0].outcome,
+        LoopOutcome::Fused { .. }
+    ));
+    assert!(loops.pgo().runs.is_empty());
+    assert_eq!(
+        s.backend.map_correction(),
+        crate::backend::MapCorrection::default()
+    );
+}
+
+#[test]
+fn two_runs_of_a_large_drift_loop_give_the_same_pose_graph_and_map() {
+    let run = || {
+        let mut s = scene(2, 0.3, true, LoopClosingConfig::default(), 100);
+        s.backend.query(C);
+        let loops = s.backend.loop_closing().unwrap();
+        (
+            loops.events().to_vec(),
+            loops.pgo().clone(),
+            s.backend.map().clone(),
+        )
+    };
+    let (first, second) = (run(), run());
+    assert_eq!(first.1.runs.len(), 1);
+    assert_eq!(first, second);
 }
 
 #[test]

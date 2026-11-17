@@ -7,7 +7,7 @@ exact: no ``Any``, and every array carries its dtype.
 from collections.abc import Sequence
 from typing import ClassVar, Literal
 
-from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32
+from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32, UInt64
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
@@ -99,8 +99,8 @@ class VioResult:
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
 
-    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses: what
-    the back end starts from, before any loop closure moves them.
+    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses as the
+    pose-graph optimization (PGO) corrected them; the raw poses are the window's.
     """
 
     @property
@@ -113,7 +113,35 @@ class MapSnapshot:
 
     @property
     def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """Raw keyframe poses ``T_w_i``, ``[tx, ty, tz, qx, qy, qz, qw]``."""
+        """Keyframe poses ``T_w_i`` as the map holds them (PGO-corrected), ``[tx, ty, tz, qx, qy, qz, qw]``."""
+
+    @property
+    def keyframe_raw_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """The window's keyframe poses, before any correction."""
+
+    @property
+    def pgo_epoch(self) -> int:
+        """Applied pose-graph optimizations so far (the correction epoch)."""
+
+    @property
+    def pgo_failures(self) -> int:
+        """Pose-graph optimizations the solver refused."""
+
+    @property
+    def pgo_loops(self) -> Int64[ndarray, "n_pgo 2"]:
+        """``[current, candidate]`` keyframe timestamps of each applied PGO."""
+
+    @property
+    def pgo_cost(self) -> Float64[ndarray, "n_pgo 2"]:
+        """``[before, after]`` cost of each applied PGO."""
+
+    @property
+    def pgo_moved(self) -> UInt32[ndarray, " n_pgo"]:
+        """Keyframes each applied PGO moved."""
+
+    @property
+    def pgo_solve_us(self) -> UInt64[ndarray, " n_pgo"]:
+        """Wall time of each applied PGO's solve, microseconds."""
 
     @property
     def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
@@ -149,11 +177,11 @@ class MapSnapshot:
 
     @property
     def loop_fused(self) -> Bool[ndarray, " n_loops"]:
-        """Whether each loop was fused at once; otherwise it waits for the pose-graph optimization."""
+        """Whether each loop was fused at once; otherwise it was at or above the drift gate, the PGO's."""
 
     @property
     def loop_counts(self) -> dict[str, int]:
-        """Loop-closing counters: indexed, without_images, with_candidates, candidates, verified, fused, needs_pgo."""
+        """Loop-closing counters: indexed, without_images, with_candidates, candidates, verified, fused, needs_pgo, optimized."""
 
     @property
     def keyframes(self) -> int:

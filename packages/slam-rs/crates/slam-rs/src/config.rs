@@ -360,7 +360,7 @@ pub enum BriefTests {
 /// The `backend.loop_closing` section: RootSLAM's `config.loop_closing_*` MSD
 /// values, with each RootSLAM bug the port fixes at its fixed behaviour (DESIGN
 /// §4). `configs/profiles/rootslam-parity.json` sets the knobs (B1, B5, B15,
-/// B16) to RootSLAM's behaviour. Missing keys keep these values; unknown keys
+/// B16, and the PGO's B12 and edge order) to RootSLAM's behaviour. Missing keys keep these values; unknown keys
 /// are refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -419,6 +419,17 @@ pub struct LoopClosingConfig {
     pub min_drift_reduction_m: f64,
     /// The same rule for rotation, in degrees (`min_rot_reduction_deg`).
     pub min_rot_reduction_deg: f64,
+    /// Run the pose-graph optimization on a loop at or above the drift gate
+    /// (PR c2); off, such a loop changes nothing.
+    pub pgo: bool,
+    /// `[translation m, rotation rad]` sigma of every pose-graph edge (B12).
+    /// RootSLAM weighs every edge with I6 (1 m counts as 1 rad); parity `[1, 1]`.
+    pub pgo_edge_sigmas: [f64; 2],
+    /// List the current loop's edges before the map's, so an island keyframe
+    /// with an edge to the current keyframe keeps the loop's measurement.
+    /// RootSLAM lists them last, and its first-edge-wins rule drops them; parity
+    /// `false`.
+    pub pgo_loop_edges_first: bool,
 }
 
 impl Default for LoopClosingConfig {
@@ -450,6 +461,9 @@ impl Default for LoopClosingConfig {
             reprojected_pnp_min_inliers: 20,
             min_drift_reduction_m: 0.1,
             min_rot_reduction_deg: 2.0,
+            pgo: true,
+            pgo_edge_sigmas: [0.05, 0.01],
+            pgo_loop_edges_first: true,
         }
     }
 }
@@ -773,8 +787,8 @@ mod tests {
     }
 
     /// `backend.loop_closing` (PR b2): RootSLAM's MSD values with the fixed
-    /// behaviour of B1, B5, B15 and B16 by default; the `rootslam-parity`
-    /// profile sets those four to RootSLAM's; a partial section keeps the other
+    /// behaviour of B1, B5, B15, B16 and the PGO's B12 and edge order by
+    /// default; the `rootslam-parity` profile sets those to RootSLAM's; a partial section keeps the other
     /// defaults; unknown keys are refused.
     #[test]
     fn loop_closing_defaults_fix_the_bugs_and_the_parity_profile_restores_them() {
@@ -802,6 +816,16 @@ mod tests {
         assert_eq!(loops.query_cameras, LoopQueryCameras::Cam0);
         assert_eq!(loops.pnp_ransac_fixed_iterations, Some(35));
         assert_eq!(loops.brief_tests, BriefTests::Raw);
+        assert_eq!(loops.pgo_edge_sigmas, [1.0, 1.0]);
+        assert!(!loops.pgo_loop_edges_first);
+        assert_eq!(
+            (
+                defaults.pgo,
+                defaults.pgo_edge_sigmas,
+                defaults.pgo_loop_edges_first
+            ),
+            (true, [0.05, 0.01], true)
+        );
         let fast = VioConfig::with_overlay(
             r#"{"value0":{}}"#,
             include_str!("../../../configs/profiles/fast.json"),
@@ -821,6 +845,8 @@ mod tests {
                 query_cameras: LoopQueryCameras::All,
                 pnp_ransac_fixed_iterations: None,
                 brief_tests: BriefTests::Box,
+                pgo_edge_sigmas: [0.05, 0.01],
+                pgo_loop_edges_first: true,
                 ..loops.clone()
             },
             defaults

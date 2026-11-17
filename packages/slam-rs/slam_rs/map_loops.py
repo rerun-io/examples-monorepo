@@ -1,7 +1,8 @@
-"""The back end's verified loops, drawn as line strips under the run (DESIGN §8, PR b2).
+"""The back end's verified loops and pose-graph corrections, drawn as line strips under the run (DESIGN §8, PRs b2, c2).
 
 A loop links the keyframe that found it to the keyframe it closes with. Fused loops (small drift, landmarks merged at
-once) and loops that wait for the pose-graph optimization get different colours.
+once) and loops at or above the drift gate (the pose-graph optimization's) get different colours. A correction links a
+keyframe's raw (window) position to where the pose-graph optimization moved it.
 """
 
 import numpy as np
@@ -16,7 +17,11 @@ LOOPS_ENTITY: str = "/world/runs/slam_rs/loops"
 FUSED_LOOP_COLOR: tuple[int, int, int, int] = (255, 70, 200, 255)
 """A loop whose landmarks were fused at once: magenta."""
 PGO_LOOP_COLOR: tuple[int, int, int, int] = (255, 225, 40, 255)
-"""A verified loop left for the pose-graph optimization: yellow."""
+"""A verified loop at or above the drift gate, for the pose-graph optimization: yellow."""
+PGO_CORRECTIONS_ENTITY: str = "/world/runs/slam_rs/pgo/corrections"
+"""Where the pose-graph corrections go."""
+PGO_CORRECTION_COLOR: tuple[int, int, int, int] = (120, 160, 255, 255)
+"""A keyframe's raw-to-corrected move: blue."""
 
 
 def loop_segments(
@@ -44,8 +49,24 @@ def loop_segments(
     return segments, loop_fused[kept]
 
 
+def correction_segments(raw_poses: Float64[ndarray, "k 7"], corrected_poses: Float64[ndarray, "k 7"]) -> Float64[ndarray, "m 2 3"]:
+    """The ``[raw, corrected]`` positions of each keyframe whose position the pose-graph optimization moved.
+
+    Args:
+        raw_poses: The window's ``[tx, ty, tz, qx, qy, qz, qw]`` per keyframe.
+        corrected_poses: The map's, after the corrections.
+
+    Returns:
+        One segment per moved keyframe, in keyframe order.
+    """
+    moved: Bool[ndarray, " k"] = np.any(raw_poses[:, 0:3] != corrected_poses[:, 0:3], axis=1)
+    return np.stack([raw_poses[moved, 0:3], corrected_poses[moved, 0:3]], axis=1)
+
+
 def log_loops(map_snapshot: _core.MapSnapshot) -> None:
-    """Draw the snapshot's loops at the current cursor (none drawn is logged as an empty set, which clears old ones)."""
+    """Draw the snapshot's loops and corrections at the current cursor (an empty set is logged too, which clears old ones)."""
     segments, fused = loop_segments(map_snapshot.keyframe_t_ns, map_snapshot.keyframe_poses, map_snapshot.loop_edges, map_snapshot.loop_fused)
     colors: UInt8[ndarray, "m 4"] = np.where(fused[:, None], np.array(FUSED_LOOP_COLOR, dtype=np.uint8), np.array(PGO_LOOP_COLOR, dtype=np.uint8))
     rr.log(LOOPS_ENTITY, rr.LineStrips3D(list(segments), colors=colors, radii=0.006))
+    corrections: Float64[ndarray, "m 2 3"] = correction_segments(map_snapshot.keyframe_raw_poses, map_snapshot.keyframe_poses)
+    rr.log(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D(list(corrections), colors=PGO_CORRECTION_COLOR, radii=0.004))

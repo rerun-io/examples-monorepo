@@ -4,6 +4,7 @@
 
 use nalgebra::{Vector3, Vector4};
 
+use super::pgo::{MapCorrection, PgoRun, SolveTimes};
 use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
 use crate::landmark::StereographicParam;
 use crate::lie::Se3;
@@ -15,8 +16,10 @@ pub struct MapSnapshot {
     /// Map keyframes, oldest first.
     pub keyframe_t_ns: Vec<FrameId>,
     /// `T_w_i` of each keyframe as the map holds it: the window's solved (or,
-    /// once evicted, final) pose. Loop closing has not moved any yet.
+    /// once evicted, final) pose, as the pose-graph optimization corrected it.
     pub keyframe_poses: Vec<Se3<f64>>,
+    /// The window's pose of each keyframe, before any correction.
+    pub keyframe_raw_poses: Vec<Se3<f64>>,
     /// Whether each keyframe is still in the window.
     pub keyframe_active: Vec<bool>,
     /// Map landmarks the snapshot could place, in id order.
@@ -41,6 +44,14 @@ pub struct MapSnapshot {
     pub loop_counts: LoopCounts,
     /// Verified loops whose two keyframes are still in the map, oldest first.
     pub loops: Vec<SnapshotLoop>,
+    /// The PGO's corrections and epoch, for re-anchoring (PR f1).
+    pub correction: MapCorrection,
+    /// Applied PGOs, oldest first.
+    pub pgo_runs: Vec<PgoRun>,
+    /// PGOs the solver refused.
+    pub pgo_failures: u64,
+    /// Wall time of each applied PGO's solve.
+    pub pgo_solve_ns: SolveTimes,
 }
 
 /// One verified loop in a [`MapSnapshot`].
@@ -52,7 +63,8 @@ pub struct SnapshotLoop {
     pub candidate: FrameId,
     /// Final PnP inliers.
     pub inliers: usize,
-    /// Fused at once (`false`: left for the pose-graph optimization).
+    /// Fused at once (`false`: at or above the drift gate, the pose-graph
+    /// optimization's).
     pub fused: bool,
 }
 
@@ -90,9 +102,17 @@ impl MapBackend {
             points_world.push(point);
         }
         let graph = self.graph();
+        let pgo = self.loops.as_ref().map(|loops| loops.pgo());
         MapSnapshot {
             keyframe_t_ns: keyframes.keys().copied().collect(),
             keyframe_poses: keyframes.values().map(|keyframe| keyframe.pose).collect(),
+            keyframe_raw_poses: keyframes
+                .iter()
+                .map(|(id, keyframe)| {
+                    pgo.and_then(|pgo| pgo.raw.get(id).copied())
+                        .unwrap_or(keyframe.pose)
+                })
+                .collect(),
             keyframe_active: keyframes
                 .keys()
                 .map(|id| self.active.contains(id))
@@ -139,6 +159,10 @@ impl MapBackend {
                     fused: matches!(event.outcome, LoopOutcome::Fused { .. }),
                 })
                 .collect(),
+            correction: self.map_correction(),
+            pgo_runs: pgo.map(|pgo| pgo.runs.clone()).unwrap_or_default(),
+            pgo_failures: pgo.map_or(0, |pgo| pgo.failures),
+            pgo_solve_ns: pgo.map(|pgo| pgo.solve_ns.clone()).unwrap_or_default(),
         }
     }
 }
