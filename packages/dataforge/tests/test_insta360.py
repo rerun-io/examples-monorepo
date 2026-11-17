@@ -181,15 +181,14 @@ class Converted(NamedTuple):
     """Layer files by layer name; the panorama exists only once ``panorama_rrd`` ran."""
 
 
-def convert_layers(clip: Path, output_root: Path, layers: tuple[str, ...]) -> dict[str, Path]:
-    """Convert the clip's first ``FRAMES`` framesets into ``layers`` under ``output_root``."""
+def convert_layers(clip: Path, output_root: Path, *, panorama: bool) -> dict[str, Path]:
+    """Convert the clip's first ``FRAMES`` framesets under ``output_root``: the base, and the panorama if asked."""
     from dataforge.datasets.insta360 import ClipSource, Insta360Config
     from dataforge.identity import SequenceIdentity
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("DATAFORGE_OUTPUT_ROOT", str(output_root))
-        dataset = Insta360Config(root=clip.parent, frame_limit=FRAMES).setup()
-        dataset.layers = layers
+        dataset = Insta360Config(root=clip.parent, frame_limit=FRAMES, panorama=panorama).setup()
         identity: SequenceIdentity = SequenceIdentity(dataset.config.name, (clip.stem,))
         dataset.convert(identity, ClipSource(clip), force=False)
         return dataset.targets(identity)
@@ -197,20 +196,25 @@ def convert_layers(clip: Path, output_root: Path, layers: tuple[str, ...]) -> di
 
 @pytest.fixture(scope="module")
 def converted(insv_clip: Path, tmp_path_factory: pytest.TempPathFactory) -> Converted:
-    """The base layer of the clip's first framesets (no GPU needed)."""
-    from dataforge import paths
+    """The base layer of the clip's first framesets (no GPU needed): a default conversion writes no panorama."""
+    from dataforge.datasets.insta360 import PANORAMA_LAYER
 
     root: Path = tmp_path_factory.mktemp("insta360")
-    return Converted(insv_clip, root, convert_layers(insv_clip, root, (paths.BASE_LAYER,)))
+    targets: dict[str, Path] = convert_layers(insv_clip, root, panorama=False)
+    assert not targets[PANORAMA_LAYER].exists()
+    return Converted(insv_clip, root, targets)
 
 
 @pytest.fixture(scope="module")
 def panorama_rrd(converted: Converted, nvenc_ffmpeg: Path) -> Path:
-    """The panorama layer beside ``converted``'s base layer."""
+    """The panorama layer added beside ``converted``'s base layer, which it leaves as written."""
     from dataforge import paths
     from dataforge.datasets.insta360 import PANORAMA_LAYER
 
-    return convert_layers(converted.clip, converted.root, (paths.BASE_LAYER, PANORAMA_LAYER))[PANORAMA_LAYER]
+    base_mtime_ns: int = converted.targets[paths.BASE_LAYER].stat().st_mtime_ns
+    panorama: Path = convert_layers(converted.clip, converted.root, panorama=True)[PANORAMA_LAYER]
+    assert converted.targets[paths.BASE_LAYER].stat().st_mtime_ns == base_mtime_ns
+    return panorama
 
 
 def video_times(rrd: Path, entity: str) -> Int64[ndarray, " n"]:

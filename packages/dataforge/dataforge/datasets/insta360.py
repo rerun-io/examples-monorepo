@@ -1,4 +1,4 @@
-"""Insta360 dual-fisheye ``.insv`` clips: one base recording per clip, and a derived panorama layer for viewing.
+"""Insta360 dual-fisheye ``.insv`` clips: one base recording per clip, and on request a derived panorama layer.
 
 The clip is read by ``insta360_io`` (packages/insta360-io: kornia-staging's ``.insv`` reader and CPU stitch). Its two
 HEVC lens tracks are remuxed, not re-encoded: each sample becomes an Annex B access unit with the parameter sets in
@@ -33,11 +33,30 @@ noise) is a measured record in ``insta360_profiles.toml``, selected by the clip'
 (from the exposure stamps) and readout; a clip outside every profile's measured mode is refused, naming the property
 that differs. The IMU noise model is a placeholder, marked as such in its ``source``.
 
-Panorama layer. ``panorama`` holds the 1920x960 viewing panorama at ``/world/rig_00/pano``, stitched on the CPU from
-the two lens images of every frameset and encoded AV1 on NVENC, on the frame times. The stitch is built from the two
-cameras as the base recording states them (float32 statics), with the panorama frame slam-rs uses: camera 0's axes at
-the midpoint of the two camera centres, camera 0's hemisphere on the left. It is for viewing only: nothing reads it as
-input, and the lens brightness steps at the seams are not corrected.
+Panorama layer (``--panorama``; off by default). ``panorama`` holds the 1920x960 equirectangular panorama at
+``/world/rig_00/pano``, stitched on the CPU from the two lens images of every frameset and encoded AV1 on NVENC, on
+the frame times. It is a derived output: nothing reads it as input, slam-rs tracks the two lens cameras of the base,
+and the lens brightness steps at the seams are not corrected. The stitch reads the two cameras from the base
+recording as written (float32 statics), so a later ``--panorama`` run adds the layer beside an existing base without
+writing the base again. On clip B (X4 Air, 1920) the base alone takes about 13 s, with the panorama about 131 s.
+
+Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)``
+(pixel centres at integers) looks along longitude ``lon = (u + 0.5) pi / 960 - pi / 2``, ``lon = atan2(x, z)`` in
+``E``, and latitude ``lat = (v + 0.5) pi / 960 - pi / 2``, ``+y`` down: the left half is camera 0's hemisphere (centre
+column 480 = camera 0's ``+Z``), the right half camera 1's (column 1440 = ``-Z``). Each half is stitched from its own
+camera centre (only camera 1's rotation in camera 0 enters the tables), so the panorama ignores the lens-centre
+baseline: 33.3 mm on the X4 Air, 31.9 mm on the X5.
+
+From the native poses to the panorama. ``E`` is fixed in the rig: ``T_cam0_E = (I, c1 / 2)``, with ``c1`` camera 1's
+centre in camera 0 (the translation of ``cam0_T_cam1``, from the ``cam_00`` and ``cam_01`` ``Transform3D``s,
+``ChildFromParent``, as ``stitch_from_recording`` reads them). A COLMAP ``EQUIRECTANGULAR`` camera ``C`` (single
+centre; ``u = W (lon_C + pi) / (2 pi)`` in pixel-corner coordinates, image centre = ``+Z_C``, ``+y`` down) sees this
+panorama with its columns a quarter turn on, ``lon_E = lon_C + pi / 2``, so ``T_cam0_C = (Ry(+90 deg), c1 / 2)`` with
+``Ry(+90 deg) = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]`` (``+Z_C`` is camera 0's ``+X``). slam-rs reports ``world_from_rig``
+in the IMU frame ``imu_00`` (the rig reference), so a tracked pose ``T_world_imu`` becomes
+``T_world_C = T_world_imu * T_imu_cam0 * T_cam0_C`` (COLMAP's ``cam_from_world`` is its inverse), with ``T_imu_cam0``
+the inverse of the ``cam_00`` ``Transform3D``. Every factor is a static of the base, so the transform needs no file of
+its own; with the profiles' zero lever arm the midpoint, and so the panorama centre, is the IMU origin.
 """
 
 from __future__ import annotations
@@ -70,7 +89,7 @@ from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
 RIG: int = 0
 """One rig per clip."""
 PANORAMA_LAYER: str = "panorama"
-"""The derived viewing panorama: an AV1 ``VideoStream`` at ``PANO_ENTITY`` on the frame times."""
+"""The derived panorama, written only under ``--panorama``: an AV1 ``VideoStream`` at ``PANO_ENTITY`` on the frame times."""
 PANO_ENTITY: str = f"{schema.rig_path(RIG)}/pano"
 """Where the panorama layer puts its video."""
 PANORAMA_SIZE: tuple[int, int] = (1920, 960)
@@ -398,7 +417,7 @@ def read_capture(path: Path, profiles: list[DeviceProfile], frame_limit: int | N
 
 @dataclass
 class Insta360Config(FrameLimitedConfig):
-    """Insta360 dual-fisheye ``.insv`` clips (local device captures) as a two-camera + IMU rig, with a panorama layer."""
+    """Insta360 dual-fisheye ``.insv`` clips (local device captures) as a two-camera + IMU rig."""
 
     command: ClassVar[str] = "insta360"
     """Registry key and CLI subcommand."""
@@ -409,6 +428,9 @@ class Insta360Config(FrameLimitedConfig):
     """Directory holding the ``.insv`` clips; each clip is one sequence."""
     batch_frames: int = 300
     """Samples read and sent per call, so a clip is never held in memory whole."""
+    panorama: bool = False
+    """Also write the panorama layer (CPU stitch + AV1 NVENC, about 10x the base's time). Run again with it to add the
+    layer beside bases already written."""
     decode_threads: int = 4
     """PyAV threads per lens decoder of the panorama layer."""
     pano_cq: int = 34
@@ -418,7 +440,7 @@ class Insta360Config(FrameLimitedConfig):
 
 
 class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
-    """Converts ``.insv`` clips into a base layer (lens videos, IMU, calibration) and a panorama layer."""
+    """Converts ``.insv`` clips into a base layer (lens videos, IMU, calibration) and, on request, a panorama layer."""
 
     layers: tuple[str, ...] = (paths.BASE_LAYER, PANORAMA_LAYER)
 
@@ -432,8 +454,10 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         return [(SequenceIdentity(self.config.name, (path.stem,)), ClipSource(path)) for path in sorted(self.config.root.glob("*.insv"))]
 
     def convert(self, identity: SequenceIdentity, source: ClipSource, *, force: bool) -> Path:
-        """Write the pending base and panorama layers of one clip."""
+        """Write the pending layers of one clip: the base, and the panorama under ``--panorama``."""
         targets, pending = self.pending_layers(identity, force=force, roots=[self.config.root])
+        if not self.config.panorama:
+            pending = [layer for layer in pending if layer != PANORAMA_LAYER]
         if pending:
             capture: Capture = read_capture(source.path, load_profiles(), self.config.frame_limit)
             self.write_layers(
@@ -540,7 +564,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         )
 
     def write_panorama(self, recording: rr.RecordingStream, capture: Capture, base: Path) -> None:
-        """Stitch every frameset's two lens images into the viewing panorama and log it as AV1 on the frame times.
+        """Stitch every frameset's two lens images into the panorama (frame ``E``, module docstring) and log it as AV1 on the frame times.
 
         The stitch is built from the two cameras as the base recording states them (``stitch_from_recording``), so it
         is the stitch of anything else that reads that recording.
