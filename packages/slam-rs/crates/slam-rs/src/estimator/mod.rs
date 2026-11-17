@@ -31,6 +31,7 @@ use kornia_staging_sensors::imu::{CombinedImuSample, IntegratedImuMeasurement, N
 mod deferred;
 mod error;
 mod frame_update;
+mod initial;
 mod optimize;
 mod report;
 mod schedule;
@@ -58,6 +59,7 @@ use crate::types::{
 use kornia_staging_sensors::imu::ImuNoise;
 
 pub use error::{EstimatorError, WindowRole};
+pub use initial::InitialState;
 pub use report::{FlowObservations, FrameOutcome, FrameStats, StageTimings};
 
 use deferred::DeferredKeyframe;
@@ -186,6 +188,9 @@ pub struct SqrtKeypointVio<S: Scalar> {
     initial_bias_gyro: Vector3<S>,
     /// See [`Self::initial_bias_gyro`].
     initial_bias_accel: Vector3<S>,
+    /// A first state solved elsewhere (the inertial bootstrap); `None` keeps
+    /// the stereo start. See [`Self::with_initial_state`].
+    initial_state: Option<InitialState<S>>,
 
     /// `imu_data_queue`, unbounded here: Offline mode
     /// never drops a sample and never blocks (D17, D24).
@@ -388,6 +393,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             noise,
             initial_bias_gyro: Vector3::zeros(),
             initial_bias_accel: Vector3::zeros(),
+            initial_state: None,
             imu_queue: VecDeque::new(),
             pending: None,
             newest_imu_t_ns: None,
@@ -558,15 +564,31 @@ impl<S: Scalar> SqrtKeypointVio<S> {
                 }
             };
 
-            // zero velocity, zero translation, and the rotation that
-            // takes the measured acceleration onto +Z.
-            let vel_w_i_init: Vector3<S> = Vector3::zeros();
-            let initial_pose = Se3::new(gravity_from_first_accel(&accel), Vector3::zeros());
-            if self.count_initial_landmarks(&frame, initial_pose)? < MIN_LANDMARK_SUPPORT {
-                self.frame_count += 1;
-                self.prev_frame = Some(frame);
-                return Ok(FrameOutcome::NoVisualFeatures);
-            }
+            let (initial_pose, vel_w_i_init): (Se3<S>, Vector3<S>) = match self.initial_state {
+                // A solved first state: its landmarks come from temporal
+                // triangulation at the next keyframe, so the stereo gate
+                // does not apply.
+                Some(initial) => {
+                    if initial.t_ns != frame.t_ns {
+                        return Err(EstimatorError::InitialStateTime {
+                            expected_t_ns: initial.t_ns,
+                            t_ns: frame.t_ns,
+                        });
+                    }
+                    (initial.t_w_i, initial.vel_w_i)
+                }
+                None => {
+                    // zero velocity, zero translation, and the rotation that
+                    // takes the measured acceleration onto +Z.
+                    let initial_pose = Se3::new(gravity_from_first_accel(&accel), Vector3::zeros());
+                    if self.count_initial_landmarks(&frame, initial_pose)? < MIN_LANDMARK_SUPPORT {
+                        self.frame_count += 1;
+                        self.prev_frame = Some(frame);
+                        return Ok(FrameOutcome::NoVisualFeatures);
+                    }
+                    (initial_pose, Vector3::zeros())
+                }
+            };
             self.t_w_i_init = initial_pose;
 
             self.last_state_t_ns = frame.t_ns;

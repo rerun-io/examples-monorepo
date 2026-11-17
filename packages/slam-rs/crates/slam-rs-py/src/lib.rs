@@ -5,6 +5,7 @@
 //! thread can keep decoding. A bad dtype, rank, shape or memory layout raises
 //! `ValueError`, never a panic.
 
+mod bootstrap;
 mod catalog;
 
 use kornia_image::Image;
@@ -332,7 +333,7 @@ impl Vio {
     /// What the frontend lane cost on the last frameset that ran it, in ms:
     /// `imu` (its motion preintegration), `pyramid`, `detect`, `track` and
     /// `stereo`. Unlike a snapshot's timings it exists before the estimator has
-    /// a state.
+    /// a state, so a bootstrapping run can be timed too.
     #[getter]
     fn frontend_timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
         let timings = self.inner.frontend_timings();
@@ -346,6 +347,12 @@ impl Vio {
         .into_iter()
         .map(|(name, ns)| (name, ns as f64 / 1e6))
         .collect()
+    }
+
+    /// The inertial bootstrap's attempts so far (`config.vio_bootstrap`), or
+    /// None on the stereo start.
+    fn bootstrap_report(&self) -> Option<bootstrap::BootstrapReport> {
+        self.inner.bootstrap_report().map(Into::into)
     }
 
     /// The window, its landmarks and the last measured frame's statistics.
@@ -816,6 +823,29 @@ impl VioConfig {
     #[setter]
     fn set_optical_flow_image_safe_radius(&mut self, radius: f32) {
         self.inner.optical_flow_image_safe_radius = radius;
+    }
+
+    /// `config.vio_bootstrap`: `"stereo"` (the default) or `"inertial"`.
+    #[getter]
+    fn vio_bootstrap(&self) -> &'static str {
+        match self.inner.vio_bootstrap {
+            slam_rs::config::VioBootstrap::Stereo => "stereo",
+            slam_rs::config::VioBootstrap::Inertial => "inertial",
+        }
+    }
+
+    #[setter]
+    fn set_vio_bootstrap(&mut self, value: &str) -> PyResult<()> {
+        self.inner.vio_bootstrap = match value {
+            "stereo" => slam_rs::config::VioBootstrap::Stereo,
+            "inertial" => slam_rs::config::VioBootstrap::Inertial,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "vio_bootstrap must be stereo or inertial, not {other:?}"
+                )));
+            }
+        };
+        Ok(())
     }
 
     fn __repr__(&self) -> String {
@@ -1396,6 +1426,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
+    module.add_class::<bootstrap::BootstrapAttempt>()?;
+    module.add_class::<bootstrap::BootstrapReport>()?;
     module.add_class::<VioStatus>()?;
     module.add_class::<Calibration>()?;
     module.add_class::<VioConfig>()?;
