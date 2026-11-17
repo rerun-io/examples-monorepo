@@ -6,8 +6,6 @@ frameset into the 1920x960 viewing panorama through the two hemisphere tiles, on
 integer remap as slam-rs's dual-fisheye lane. Every refusal raises ``ValueError``.
 """
 
-from collections.abc import Sequence
-
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 
@@ -24,8 +22,17 @@ class InsvLens:
     @property
     def pano_centre_m(self) -> list[float]:
         """Lens centre in P, metres, origin at the midpoint of the lens centres."""
-    def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
-        """Image radius in track pixels of rays ``theta`` radians off the axis (radial part of the model only)."""
+    @property
+    def fx(self) -> float:
+        """Focal along x, track pixels (Mei form)."""
+    @property
+    def fy(self) -> float: ...
+    @property
+    def model(self) -> str:
+        """``mei_v3`` or ``mei_v6``."""
+    @property
+    def coefficients(self) -> list[float]:
+        """``xi, half_field_rad, k1, k2, k3, p1, p2`` (``mei_v3``) or ``xi, half_field_rad, d0 .. d12`` (``mei_v6``)."""
 
 class InsvClip:
     """An Insta360 ``.insv`` clip: trailer metadata, factory lenses, IMU, frame times and the two HEVC lens tracks."""

@@ -1,6 +1,6 @@
 //! Python access to an Insta360 `.insv` clip through `kornia_staging_io::insta360`.
 use crate::value_error;
-use kornia_staging_io::insta360::{Insta360Clip, LensCalibration};
+use kornia_staging_io::insta360::{Insta360Clip, LensCalibration, LENS_HALF_FIELD_RAD};
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
@@ -39,13 +39,36 @@ impl InsvLens {
         self.core.pano_centre_m
     }
 
-    /// Image radius in track pixels of rays `theta` radians off the axis, through the radial part of the model.
-    fn radius_px<'py>(&self, py: Python<'py>, theta: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
-        theta
-            .iter()
-            .map(|&t| self.core.radius_px(t))
-            .collect::<Vec<_>>()
-            .to_pyarray(py)
+    // STAGE 2 SWAP: these four getters read today's `LensCalibration`; Phase 1's `Mei` camera replaces them.
+    /// Focal along x, track pixels (Mei form: pixels per unit of the sphere-projected point).
+    #[getter]
+    fn fx(&self) -> f64 {
+        self.core.fx
+    }
+
+    /// Focal along y, track pixels.
+    #[getter]
+    fn fy(&self) -> f64 {
+        self.core.fy
+    }
+
+    /// Camera model name in a calibration: `mei_v3` or `mei_v6`.
+    #[getter]
+    fn model(&self) -> String {
+        format!("mei_v{}", self.core.version)
+    }
+
+    /// Coefficients in the order of `model`: `xi, half_field_rad, k1 k2 k3, p1 p2` (`mei_v3`) or
+    /// `xi, half_field_rad, d0 .. d12` (`mei_v6`).
+    #[getter]
+    fn coefficients(&self) -> Vec<f64> {
+        let lens = &self.core;
+        [lens.xi, LENS_HALF_FIELD_RAD]
+            .into_iter()
+            .chain(lens.radial.iter().copied())
+            .chain(lens.tangential.iter().copied())
+            .chain(lens.prism.iter().copied())
+            .collect()
     }
 }
 
