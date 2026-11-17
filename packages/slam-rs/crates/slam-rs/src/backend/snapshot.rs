@@ -4,7 +4,7 @@
 
 use nalgebra::{Vector3, Vector4};
 
-use super::pgo::{MapCorrection, PgoRun, SolveTimes};
+use super::pgo::{MapCorrection, PgoRun};
 use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats, PoseGraphEdge};
 use crate::landmark::StereographicParam;
 use crate::lie::Se3;
@@ -51,10 +51,6 @@ pub struct MapSnapshot {
     pub correction: MapCorrection,
     /// Applied PGOs, oldest first.
     pub pgo_runs: Vec<PgoRun>,
-    /// PGOs the solver refused.
-    pub pgo_failures: u64,
-    /// Wall time of each applied PGO's solve.
-    pub pgo_solve_ns: SolveTimes,
 }
 
 /// One verified loop in a [`MapSnapshot`].
@@ -64,8 +60,8 @@ pub struct SnapshotLoop {
     pub current: FrameId,
     /// The keyframe it closes with.
     pub candidate: FrameId,
-    /// Fused at once (`false`: at or above the drift gate, the pose-graph
-    /// optimization's).
+    /// Its landmarks were fused, at once or after a pose-graph optimization
+    /// (`false`: left unapplied, the optimization off or refused).
     pub fused: bool,
 }
 
@@ -153,13 +149,14 @@ impl MapBackend {
                 .map(|event| SnapshotLoop {
                     current: event.detection.current,
                     candidate: event.detection.candidate,
-                    fused: matches!(event.outcome, LoopOutcome::Fused { .. }),
+                    fused: matches!(
+                        event.outcome,
+                        LoopOutcome::Fused { .. } | LoopOutcome::Optimized { .. }
+                    ),
                 })
                 .collect(),
             correction: self.map_correction(),
             pgo_runs: pgo.map(|pgo| pgo.runs.clone()).unwrap_or_default(),
-            pgo_failures: pgo.map_or(0, |pgo| pgo.failures),
-            pgo_solve_ns: pgo.map(|pgo| pgo.solve_ns.clone()).unwrap_or_default(),
         }
     }
 }

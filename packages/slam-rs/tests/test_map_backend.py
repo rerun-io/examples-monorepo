@@ -75,10 +75,7 @@ def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(
         (snapshot.covisibility_edges, np.int64, (e, 2)),
         (snapshot.covisibility_weights, np.uint32, (e,)),
         (snapshot.keyframe_raw_poses, np.float64, (k, 7)),
-        (snapshot.pgo_loops, np.int64, (r, 2)),
-        (snapshot.pgo_cost, np.float64, (r, 2)),
-        (snapshot.pgo_moved, np.uint32, (r,)),
-        (snapshot.pgo_solve_us, np.uint64, (r,)),
+        (snapshot.pgo_runs, np.int64, (r, 5)),
     ):
         assert array.dtype == dtype
         assert array.shape == shape

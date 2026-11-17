@@ -519,11 +519,15 @@ impl MapBackend {
         let Some(detection) = self.detect_loop(keyframe) else {
             return Vec::new();
         };
+        let started = std::time::Instant::now();
         let event: LoopEvent = self.apply_loop(detection);
+        let pgo_ns = matches!(event.outcome, LoopOutcome::Optimized { .. })
+            .then(|| crate::duration_ns(started));
         vec![MapEvent::LoopVerified {
             current: event.detection.current,
             candidate: event.detection.candidate,
             outcome: event.outcome,
+            pgo_ns,
         }]
     }
 

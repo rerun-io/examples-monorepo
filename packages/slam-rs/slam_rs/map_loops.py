@@ -1,8 +1,8 @@
 """The back end's verified loops, pose-graph corrections and pose graph, drawn as line strips under the run (DESIGN §8, PRs b2, c2, f1).
 
-A loop links the keyframe that found it to the keyframe it closes with. Fused loops (small drift, landmarks merged at
-once) and loops at or above the drift gate (the pose-graph optimization's) get different colours. A correction links a
-keyframe's raw (window) position to where the pose-graph optimization moved it.
+A loop links the keyframe that found it to the keyframe it closes with. Fused loops (landmarks merged, at once or after
+a pose-graph optimization) and loops left unapplied get different colours. A correction links a keyframe's raw (window)
+position to where the pose-graph optimization moved it.
 """
 
 import numpy as np
@@ -15,9 +15,9 @@ from slam_rs import _core
 LOOPS_ENTITY: str = "/world/runs/slam_rs/loops"
 """Where the loop edges go, beside the map's keyframes and points."""
 FUSED_LOOP_COLOR: tuple[int, int, int, int] = (255, 70, 200, 255)
-"""A loop whose landmarks were fused at once: magenta."""
+"""A loop whose landmarks were fused (at once or after a pose-graph optimization): magenta."""
 PGO_LOOP_COLOR: tuple[int, int, int, int] = (255, 225, 40, 255)
-"""A verified loop at or above the drift gate, for the pose-graph optimization: yellow."""
+"""A verified loop left unapplied (at or above the drift gate, the pose-graph optimization off or refused): yellow."""
 PGO_CORRECTIONS_ENTITY: str = "/world/runs/slam_rs/pgo/corrections"
 """Where the pose-graph corrections go."""
 PGO_CORRECTION_COLOR: tuple[int, int, int, int] = (120, 160, 255, 255)

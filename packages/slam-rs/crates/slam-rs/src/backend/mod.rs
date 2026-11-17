@@ -94,6 +94,9 @@ pub enum MapEvent {
         candidate: FrameId,
         /// Fused, optimized then fused, left unapplied, or stale.
         outcome: LoopOutcome,
+        /// Wall time of the apply, when it ran a pose-graph optimization
+        /// (graph, solve, map write and fusion; PR c2). It differs run to run.
+        pgo_ns: Option<u64>,
     },
 }
 
