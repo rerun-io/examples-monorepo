@@ -161,7 +161,10 @@ temporary local catalog. Results no longer write `/world/rig_00` where a `gt`
 layer exists, but the isolation stays: a `slam_rs` layer registered before that
 change (or any other layer that writes the rig) would still merge into the
 ground truth, and the catalog API has no per-layer filter, so the GT-only
-catalog is the one read that is correct whatever else is registered. The worker must be able to read
+catalog is the one read that is correct whatever else is registered. Remove the
+isolation, and read ground truth from the merged catalog, when no catalog that
+slam-rs reads still carries a `slam_rs` layer written before this change, that is
+when `slam-rs-catalog-layer` has regenerated every registered `slam_rs` layer. The worker must be able to read
 that registered URI; a `file://` URI requires the input storage mounted at the
 same path. An inaccessible source fails explicitly, without using merged poses
 as ground truth. No raw dataset files are parsed or copied.

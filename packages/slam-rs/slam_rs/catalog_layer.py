@@ -47,6 +47,9 @@ def write_layer(
     losses, interior gaps and non-finite runs cannot replace an existing result.
     ``animate_base_rig`` also writes the final poses on ``/world/rig_00``; only
     for a dataset without a ``gt`` layer, where nothing else moves the rig.
+    The caller decides from the catalog, so a dataset's ground truth must be
+    registered as the layer named ``gt``: a base layer, or a layer by another
+    name, that animates the rig would clash again without an error.
     """
     if problem := run.unexplained_loss():
         raise ValueError(problem)
