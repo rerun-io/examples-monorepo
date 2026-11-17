@@ -159,7 +159,6 @@ pub fn build_tile_lut(
 /// When the lens image is smaller than 3x3.
 pub fn lens_level1(lens: &Image<u8, 1>) -> Result<Image<u16, 1>, ImageError> {
     let mut level0 = Image::from_size_val(lens.size(), 0u16)?;
-    widen_u8_shift8_strided_unchecked(lens.as_slice(), lens.width(), &mut level0);
     let mut level1 = Image::from_size_val(
         ImageSize {
             width: lens.width() / 2,
@@ -167,8 +166,27 @@ pub fn lens_level1(lens: &Image<u8, 1>) -> Result<Image<u16, 1>, ImageError> {
         },
         0u16,
     )?;
-    pyrdown_floor_u16(&level0, &mut level1)?;
+    lens_level1_into(lens.as_slice(), lens.width(), &mut level0, &mut level1)?;
     Ok(level1)
+}
+
+/// [`lens_level1`] into caller-owned images, without allocating: `level0` takes the lens size, `level1` its floor half.
+///
+/// # Arguments
+/// * `lens` - Lens bytes, `stride` per row, covering `stride * level0.height()` (checked by the caller, as for
+///   [`widen_u8_shift8_strided_unchecked`]).
+/// * `stride` - Row pitch in bytes, at least `level0.width()`.
+///
+/// # Errors
+/// When `level1` is not `level0`'s floor half or `level0` is smaller than 3x3.
+pub fn lens_level1_into(
+    lens: &[u8],
+    stride: usize,
+    level0: &mut Image<u16, 1>,
+    level1: &mut Image<u16, 1>,
+) -> Result<(), ImageError> {
+    widen_u8_shift8_strided_unchecked(lens, stride, level0);
+    pyrdown_floor_u16(level0, level1)
 }
 
 /// Gather tile level 0 from a lens's level-1 image through `lut`.

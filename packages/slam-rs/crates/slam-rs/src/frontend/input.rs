@@ -1,9 +1,7 @@
 //! Explicit dense or retained byte inputs for one frontend frame.
 use crate::{ImageView, image};
 use kornia_image::{Image, ImageSize};
-use kornia_staging_imgproc::color::widen_u8_shift8_strided_unchecked;
-use kornia_staging_imgproc::panorama::{TileLut, assemble_panorama, remap_tile};
-use kornia_staging_imgproc::pyramid::pyrdown_floor_u16;
+use kornia_staging_imgproc::panorama::{TileLut, assemble_panorama, lens_level1_into, remap_tile};
 use std::sync::{Arc, Mutex};
 
 /// The dual-fisheye ingest: two lens images become the two hemisphere tiles through tables built once on the CPU
@@ -97,8 +95,7 @@ impl LensStitch {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let [level0, level1] = &mut *scratch;
-        widen_u8_shift8_strided_unchecked(lens, stride, level0);
-        pyrdown_floor_u16(level0, level1).map_err(layout)?;
+        lens_level1_into(lens, stride, level0, level1).map_err(layout)?;
         remap_tile(level1, &self.luts[tile], out).map_err(layout)
     }
     /// The viewing panorama of two lens images without a pipeline: [`Self::remap`] of each tile, then
