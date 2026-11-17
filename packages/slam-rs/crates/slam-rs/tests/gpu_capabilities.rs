@@ -2,17 +2,18 @@
 #![cfg(feature = "gpu-wgpu")]
 #![allow(clippy::unwrap_used)]
 
+use slam_rs::config::BackendMode;
 use slam_rs::{
-    Backend, BackendRequest, Backends, GbaRequest, Vio, device_probes_run, probe_back_end,
-    select_backend,
+    Backend, BackendRequest, Backends, GbaRequest, Vio, device_probes_run, gba_probes_run,
+    probe_back_end, select_backend,
 };
 
 mod common;
 
 /// The selector and the GPU frontend share one cached validation: the first
-/// request runs the storage and subgroup probes once, the GBA lane adds its one
-/// round trip, and neither repeated selection nor repeated GPU pipeline
-/// construction runs another.
+/// request runs the storage and subgroup probes once, the GBA lane runs its
+/// one round trip (counted apart), and neither repeated selection nor repeated
+/// GPU pipeline construction runs another of either.
 #[test]
 fn repeated_selection_and_construction_probe_the_device_once() {
     let gpu = Backends {
@@ -27,9 +28,10 @@ fn repeated_selection_and_construction_probe_the_device_once() {
     probe_back_end().unwrap();
     let after_first: usize = device_probes_run();
     assert!(
-        (1..=3).contains(&after_first),
-        "one validation is one storage, one subgroup and one GBA probe, ran {after_first}"
+        (1..=2).contains(&after_first),
+        "one validation is one storage and one subgroup probe, ran {after_first}"
     );
+    assert_eq!(gba_probes_run(), 1, "the GBA round trip runs once");
     for _ in 0..3 {
         assert_eq!(
             select_backend(BackendRequest::Auto, GbaRequest::Follow).unwrap(),
@@ -39,18 +41,27 @@ fn repeated_selection_and_construction_probe_the_device_once() {
             select_backend(BackendRequest::Gpu, GbaRequest::Gpu).unwrap(),
             gpu
         );
-        let vio: Vio<f32> = Vio::with_backend(
-            common::config(),
-            common::calibration(),
-            Default::default(),
-            Backend::Gpu,
-        )
-        .unwrap();
-        assert_eq!(vio.backend(), Backend::Gpu);
+        // A pipeline built on a named frontend (the RoboCap paths) with the
+        // map on: its GBA follows the frontend, from the cached round trip.
+        for (frontend, gba) in [(Backend::Gpu, Backend::Gpu), (Backend::Cpu, Backend::Cpu)] {
+            let vio: Vio<f32> = Vio::with_backend(
+                common::config().with_backend(Some(BackendMode::Offline)),
+                common::calibration(),
+                Default::default(),
+                frontend,
+            )
+            .unwrap();
+            assert_eq!((vio.backend(), vio.gba_lane()), (frontend, gba));
+        }
     }
     assert_eq!(
         device_probes_run(),
         after_first,
         "pipeline construction probed the device again"
+    );
+    assert_eq!(
+        gba_probes_run(),
+        1,
+        "pipeline construction ran another round trip"
     );
 }

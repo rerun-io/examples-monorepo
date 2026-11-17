@@ -180,6 +180,12 @@ impl Vio {
         self.inner.backend().name()
     }
 
+    /// Where the global BA's PCG runs: `"cpu"` or `"gpu"`.
+    #[getter]
+    fn gba_lane(&self) -> &'static str {
+        self.inner.gba_lane().name()
+    }
+
     /// Cameras this estimator expects in every frameset.
     ///
     /// Read off the frontend rather than mirrored, so it cannot drift from the
@@ -1688,14 +1694,15 @@ fn select_backend(request: &str) -> PyResult<&'static str> {
         .name())
 }
 
-/// How many device capability probes this process has run.
+/// How many device probes this process has run: capability validations plus
+/// GBA round trips.
 ///
-/// Validation runs once per process, so this is 0 before the first `auto` or
-/// `gpu` request and stays at its first value after it. The unit test tier
-/// asserts it stays at 0.
+/// Each runs once per process, so this is 0 before the first `auto` or `gpu`
+/// request and stays at its first value after it. The unit test tier asserts
+/// it stays at 0.
 #[pyfunction]
 fn device_probes_run() -> usize {
-    slam_rs::device_probes_run()
+    slam_rs::device_probes_run() + slam_rs::gba_probes_run()
 }
 
 /// The compiled core of the `slam_rs` package.

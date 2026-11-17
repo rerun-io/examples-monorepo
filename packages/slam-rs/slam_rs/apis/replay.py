@@ -226,7 +226,7 @@ def main(config: Config) -> None:
             vio: _core.Vio = _core.Vio(
                 _core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend, ba_backend=config.ba_backend
             )
-            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
+            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else "") + f", GBA lane: {vio.gba_lane}")
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(

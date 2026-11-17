@@ -29,11 +29,11 @@ the CPU and ``backend="gpu"`` is refused.
 """
 
 def device_probes_run() -> int:
-    """How many device capability probes this process has run.
+    """How many device probes this process has run: capability validations plus GBA round trips.
 
-    Validation of the default device runs once per process, so this is 0
-    before the first ``auto`` or ``gpu`` request and constant after it. The
-    unit test tier asserts it stays at 0.
+    Each runs once per process, so this is 0 before the first ``auto`` or
+    ``gpu`` request and constant after it. The unit test tier asserts it stays
+    at 0.
     """
 
 def select_backend(request: BackendRequest) -> Lane:
@@ -490,6 +490,9 @@ class Vio:
     @property
     def backend(self) -> Lane:
         """The lane this pipeline runs: ``"cpu"`` or ``"gpu"``."""
+    @property
+    def gba_lane(self) -> Lane:
+        """Where the global BA's PCG runs: ``"cpu"`` or ``"gpu"``."""
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
         """Add one uncalibrated IMU sample.
 
