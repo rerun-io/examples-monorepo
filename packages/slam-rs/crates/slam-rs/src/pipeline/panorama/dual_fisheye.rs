@@ -174,7 +174,6 @@ pub(super) fn expand(
     let ingest: DualFisheyeIngest = DualFisheyeIngest {
         tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
         stitch,
-        lens_size,
         readout_s: lenses.readout_s,
         rolling_shutter: config.panorama_rolling_shutter,
         gyro: VecDeque::new(),
@@ -194,7 +193,6 @@ pub(super) fn expand(
 
 /// Per-rig state of the dual-fisheye ingest; every buffer is reused.
 pub(super) struct DualFisheyeIngest {
-    lens_size: ImageSize,
     /// The two tables, shared with the frame storage that stitches through them.
     stitch: Arc<LensStitch>,
     readout_s: f64,
@@ -212,7 +210,7 @@ pub(super) struct DualFisheyeIngest {
 impl std::fmt::Debug for DualFisheyeIngest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DualFisheyeIngest")
-            .field("lens_size", &self.lens_size)
+            .field("lens_size", &self.stitch.lens_size())
             .field("readout_s", &self.readout_s)
             .field("rolling_shutter", &self.rolling_shutter)
             .finish_non_exhaustive()
@@ -222,7 +220,7 @@ impl std::fmt::Debug for DualFisheyeIngest {
 impl DualFisheyeIngest {
     /// Lens image `(width, height)` each frameset must carry twice.
     pub fn lens_size(&self) -> ImageSize {
-        self.lens_size
+        self.stitch.lens_size()
     }
 
     /// The lookup table of tile `k`.
@@ -296,7 +294,7 @@ impl DualFisheyeIngest {
                     pixel,
                     &self.tile_camera,
                     self.lut(tile),
-                    self.lens_size.height,
+                    self.lens_size().height,
                     self.readout_s,
                     &omega,
                 )
@@ -361,7 +359,7 @@ impl DualFisheyeIngest {
                     [f64::from(pixel.x), f64::from(pixel.y)],
                     &self.tile_camera,
                     self.lut(tile),
-                    self.lens_size.height,
+                    self.lens_size().height,
                     self.readout_s,
                     &omega,
                 ) {
