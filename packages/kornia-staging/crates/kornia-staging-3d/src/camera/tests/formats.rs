@@ -41,6 +41,7 @@ fn every_supported_colmap_id_round_trips_and_restrictions_are_checked() {
         (8, 4, true),
         (9, 5, true),
         (11, 16, false),
+        (16, 6, false),
     ] {
         let mut params = if tied {
             vec![400.0, 320.5, 240.5]
@@ -93,4 +94,40 @@ fn basalt_preserves_supported_named_parameters() {
         let camera = CameraModelKind::try_from(&source).unwrap();
         assert_eq!(BasaltCamera::try_from(camera).unwrap(), source);
     }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn colmap_equirectangular_is_a_full_panorama_and_eucm_keeps_its_order() {
+    use crate::camera::formats::ColmapCamera;
+    let source = ColmapCamera {
+        model_id: 17,
+        params: vec![1920.0, 960.0],
+    };
+    let camera = CameraModelKind::try_from(&source).unwrap();
+    assert_eq!(
+        camera,
+        CameraModelKind::Equirectangular(Equirectangular::panorama(1920, 960).unwrap())
+    );
+    assert_eq!(camera.to_colmap(17).unwrap(), source);
+    let tile = CameraModelKind::Equirectangular(
+        Equirectangular::hemisphere_tile(1920, 960, 960.0 / std::f64::consts::PI, 1.7).unwrap(),
+    );
+    assert!(tile.to_colmap(17).is_err());
+    for params in [vec![1920.5, 960.0], vec![0.0, 960.0], vec![1920.0]] {
+        assert!(CameraModelKind::try_from(&ColmapCamera {
+            model_id: 17,
+            params
+        })
+        .is_err());
+    }
+    let eucm = CameraModelKind::try_from(&ColmapCamera {
+        model_id: 16,
+        params: vec![400.0, 410.0, 320.5, 240.5, 0.6, 1.1],
+    })
+    .unwrap();
+    assert_eq!(
+        eucm,
+        CameraModelKind::Eucm(Eucm::new([400.0, 410.0, 320.0, 240.0, 0.6, 1.1]).unwrap())
+    );
 }

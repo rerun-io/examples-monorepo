@@ -2,9 +2,11 @@
 //!
 //! Pixel `(0, 0)` is the centre of the top-left pixel. Bearings are unit length.
 //! Matrices are row-major plain arrays. Intrinsic columns follow each constructor.
-//! KB4 admits rear rays on its increasing branch; checked Fisheye624 requires
-//! positive depth. The negative optical axis has no unique azimuth. Optimizers can use
-//! [`CameraModel::project_unchecked`] outside the checked domain.
+//! KB4, double sphere and EUCM admit rear rays inside their calibrated domain;
+//! equirectangular admits every direction in its longitude window except the poles;
+//! checked Fisheye624 requires positive depth. The negative optical axis has no
+//! unique azimuth. Optimizers can use [`CameraModel::project_unchecked`] outside the
+//! checked domain.
 //!
 //! ```
 //! use kornia_staging_3d::camera::{CameraModel, Pinhole};
@@ -15,6 +17,12 @@
 
 mod angular;
 mod brown;
+mod double_sphere;
+mod equirectangular;
+mod eucm;
+pub use double_sphere::DoubleSphere;
+pub use equirectangular::Equirectangular;
+pub use eucm::Eucm;
 #[cfg(feature = "serde")]
 pub mod formats;
 pub use brown::BrownConrady;
@@ -170,6 +178,12 @@ pub enum CameraModelKind<S: Scalar> {
     BrownConrady(BrownConrady<S>),
     /// Four-term angular camera.
     Kb4(KannalaBrandt4<S>),
+    /// Double sphere wide-angle camera.
+    DoubleSphere(DoubleSphere<S>),
+    /// Enhanced unified wide-angle camera.
+    Eucm(Eucm<S>),
+    /// Longitude-latitude panorama or panorama tile.
+    Equirectangular(Equirectangular<S>),
 }
 impl<S: Scalar> CameraModelKind<S> {
     /// Project a point through the selected family.
@@ -181,6 +195,9 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::Fisheye624(v) => v.project(point),
             Self::BrownConrady(v) => v.project(point),
             Self::Kb4(v) => v.project(point),
+            Self::DoubleSphere(v) => v.project(point),
+            Self::Eucm(v) => v.project(point),
+            Self::Equirectangular(v) => v.project(point),
         }
     }
     /// Project without validity checks.
@@ -190,6 +207,9 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::Fisheye624(v) => v.project_unchecked(point),
             Self::BrownConrady(v) => v.project_unchecked(point),
             Self::Kb4(v) => v.project_unchecked(point),
+            Self::DoubleSphere(v) => v.project_unchecked(point),
+            Self::Eucm(v) => v.project_unchecked(point),
+            Self::Equirectangular(v) => v.project_unchecked(point),
         }
     }
     /// Project without validity checks, optionally writing the row-major point Jacobian.
@@ -204,6 +224,9 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::Fisheye624(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
             Self::BrownConrady(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
             Self::Kb4(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::DoubleSphere(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::Eucm(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
+            Self::Equirectangular(v) => v.project_unchecked_with_jacobians(point, jacobian, None),
         }
     }
     /// Project once and retain both the pixel and checked-domain status.
@@ -219,6 +242,9 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::Fisheye624(v) => v.project_with_status(point, jacobian, None),
             Self::BrownConrady(v) => v.project_with_status(point, jacobian, None),
             Self::Kb4(v) => v.project_with_status(point, jacobian, None),
+            Self::DoubleSphere(v) => v.project_with_status(point, jacobian, None),
+            Self::Eucm(v) => v.project_with_status(point, jacobian, None),
+            Self::Equirectangular(v) => v.project_with_status(point, jacobian, None),
         }
     }
     /// Return a unit bearing.
@@ -230,6 +256,9 @@ impl<S: Scalar> CameraModelKind<S> {
             Self::Fisheye624(v) => v.unproject(pixel),
             Self::BrownConrady(v) => v.unproject(pixel),
             Self::Kb4(v) => v.unproject(pixel),
+            Self::DoubleSphere(v) => v.unproject(pixel),
+            Self::Eucm(v) => v.unproject(pixel),
+            Self::Equirectangular(v) => v.unproject(pixel),
         }
     }
 }
