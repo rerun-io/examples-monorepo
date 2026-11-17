@@ -344,9 +344,10 @@ impl<S: Scalar> Vio<S> {
     ) -> Result<VioResult, VioError> {
         if let Some((next_t_ns, next_images)) = lookahead {
             check_frameset(next_images, self.camera_count)?;
+            let shift = usize::from(self.half);
             self.frontend.check_frameset(
                 next_t_ns,
-                next_images.iter().map(|image| (image.width, image.height)),
+                next_images.iter().map(|image| (image.width >> shift, image.height >> shift)),
             )?;
             if next_t_ns <= t_ns {
                 return Err(frontend::flow::FrontendError::NonMonotonicFrameset {
@@ -408,8 +409,12 @@ impl<S: Scalar> Vio<S> {
         // coverage predicate is the estimator's, and `process_frame` still runs
         // it as its second line.
         check_frameset(images, self.camera_count)?;
-        self.frontend
-            .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
+        // A half-resolution rig takes full-size frames and tracks them reduced by two.
+        let shift = usize::from(self.half);
+        self.frontend.check_frameset(
+            t_ns,
+            images.iter().map(|image| (image.width >> shift, image.height >> shift)),
+        )?;
         if !self.bootstrap.imu_covers_frame(&self.estimator, t_ns) {
             return Ok(PreparedTrack {
                 vio: self,
