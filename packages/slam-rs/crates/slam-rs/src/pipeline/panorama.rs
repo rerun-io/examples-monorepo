@@ -65,7 +65,6 @@ impl PanoramaRig {
     /// centre is not half a pixel inside its `lon_max` (a width that is not a
     /// multiple of 4, for `cx = (W - 1) / 2`).
     pub fn expand(
-        config: &VioConfig,
         calibration: Calibration<f64>,
     ) -> Result<(Option<Self>, Calibration<f64>), VioError> {
         let full: Vec<EquirectangularParams<f64>> = calibration

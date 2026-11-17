@@ -46,7 +46,7 @@ fn tile_rig() -> (VioConfig, Calibration<f64>) {
     calibration.resolution = vec![[1920, 960]];
     calibration.t_i_c.truncate(1);
     calibration.vignette.clear();
-    let (rig, tiles) = PanoramaRig::expand(&config, calibration).unwrap();
+    let (rig, tiles) = PanoramaRig::expand(calibration).unwrap();
     assert!(rig.is_some());
     assert_eq!(tiles.resolution, vec![[1088, 960]; 2]);
     (config, tiles)
