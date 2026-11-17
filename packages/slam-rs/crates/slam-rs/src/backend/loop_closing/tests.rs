@@ -12,7 +12,8 @@ use nalgebra::{Vector2, Vector3, Vector4};
 
 use super::*;
 use crate::backend::{BackendWork, MapConfig};
-use crate::calib::{BasaltCamera, PinholeParams};
+use crate::calib::{BasaltCamera, Calibration, PinholeParams};
+use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp, StampLandmark};
 use crate::landmark::StereographicParam;
 use crate::lie::So3;
@@ -242,6 +243,14 @@ fn map_config(max_keyframes: usize) -> MapConfig {
     }
 }
 
+/// The back end on `calib` with these map knobs and `config`'s loop closing.
+fn backend_on(calib: &Calibration<f64>, config: &VioConfig, map: MapConfig) -> MapBackend {
+    let rig = crate::backend::BackendRig::new(calib).unwrap();
+    let mut backend = MapBackend::new(config, rig, crate::Backend::Cpu);
+    backend.config = map;
+    backend
+}
+
 fn scene(
     cameras: usize,
     drift: f64,
@@ -287,9 +296,7 @@ fn scene_with(setup: Setup) -> Scene {
         backend_loop_closing: loops,
         ..VioConfig::default()
     };
-    let mut backend = MapBackend::new(map_config(max_keyframes), calib.resolution.clone())
-        .with_extrinsics(calib.t_i_c.clone())
-        .with_loop_closing(&config, &calib);
+    let mut backend = backend_on(&calib, &config, map_config(max_keyframes));
     let mut stamps: Vec<MapStamp> = Vec::new();
     let mut record = |backend: &mut MapBackend, mut stamp: MapStamp| {
         stamps.push(copy_stamp(&mut stamp));
@@ -694,7 +701,7 @@ fn a_revisit_is_verified_fused_and_linked_to_its_island() {
         );
         assert_eq!(loops.held_images(), 0, "images dropped after the query");
         assert_eq!(loops.counts().fused, 1);
-        let snapshot = s.backend.snapshot(&calibration(cameras).t_i_c);
+        let snapshot = s.backend.snapshot();
         assert_eq!(snapshot.loop_counts.verified, 1);
         assert_eq!(snapshot.loops.len(), 1);
         assert!(snapshot.loops[0].fused);
@@ -761,7 +768,7 @@ fn a_graph_the_solver_refuses_releases_the_loop_unapplied_and_records_it_once() 
     assert!(loops.pgo().runs.is_empty());
     assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 0));
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
-    assert_eq!(s.backend.snapshot(&calibration(1).t_i_c).pgo_epoch, 0);
+    assert_eq!(s.backend.snapshot().pgo_epoch, 0);
 }
 
 #[test]
@@ -776,9 +783,7 @@ fn realtime_and_offline_give_the_same_final_trajectory_through_a_pose_graph_opti
         ..VioConfig::default()
     };
     let mut run = |mode: crate::config::BackendMode| -> crate::backend::MapSnapshot {
-        let backend = MapBackend::new(map_config(100), calib.resolution.clone())
-            .with_extrinsics(calib.t_i_c.clone())
-            .with_loop_closing(&config, &calib);
+        let backend = backend_on(&calib, &config, map_config(100));
         let mut runner = crate::backend::BackendRunner::new(backend, mode, 16).unwrap();
         for stamp in &mut scene.stamps {
             runner.submit(copy_stamp(stamp));
@@ -873,7 +878,7 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
         s.backend.graph().loop_closures(C).collect::<Vec<_>>(),
         vec![A]
     );
-    let snapshot = s.backend.snapshot(&t_i_c);
+    let snapshot = s.backend.snapshot();
     assert_eq!(snapshot.pgo_epoch, 1);
     let corrected: Vec<FrameId> = snapshot
         .keyframe_t_ns
@@ -916,7 +921,7 @@ fn a_small_drift_runs_no_pose_graph() {
         LoopOutcome::Fused { .. }
     ));
     assert!(loops.pgo().runs.is_empty());
-    let snapshot = s.backend.snapshot(&calibration(1).t_i_c);
+    let snapshot = s.backend.snapshot();
     assert_eq!(snapshot.pgo_epoch, 0);
     assert_eq!(snapshot.keyframe_raw_poses, snapshot.keyframe_poses);
 }

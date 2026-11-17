@@ -44,9 +44,9 @@ use nalgebra::{Vector2, Vector3, Vector4};
 
 use super::pgo::PgoState;
 use super::{MapBackend, MapEvent};
-use crate::calib::Calibration;
+use crate::calib::BasaltCamera;
 use crate::camera::SlamCamera;
-use crate::config::{BriefTests, LoopClosingConfig, LoopQueryCameras, VioConfig};
+use crate::config::{BriefTests, LoopClosingConfig, LoopQueryCameras};
 use crate::estimator::{ImageSlot, KeyframeImages};
 use crate::lie::Se3;
 use crate::types::{CamId, FrameId, KeypointId, LandmarkId, TimeCamId};
@@ -214,13 +214,12 @@ impl LoopClosing {
     /// outside HashBoW's range.
     pub fn new(
         config: &LoopClosingConfig,
-        calibration: &Calibration<f64>,
+        intrinsics: &[BasaltCamera<f64>],
     ) -> Result<Option<Self>, String> {
         if !config.enabled {
             return Ok(None);
         }
-        let cameras = calibration
-            .intrinsics
+        let cameras = intrinsics
             .iter()
             .map(SlamCamera::from_model)
             .collect::<Result<Vec<_>, _>>()
@@ -500,18 +499,6 @@ fn seed(current: FrameId, candidate: FrameId, pass: u64) -> u64 {
 }
 
 impl MapBackend {
-    /// Turn loop closing on for this rig, as `config.backend_loop_closing`
-    /// says. A camera model loop closing cannot use leaves it off, with a
-    /// warning: the map still runs.
-    #[must_use]
-    pub fn with_loop_closing(mut self, config: &VioConfig, calibration: &Calibration<f64>) -> Self {
-        match LoopClosing::new(&config.backend_loop_closing, calibration) {
-            Ok(loops) => self.loops = loops,
-            Err(error) => log::warn!("loop closing off: {error}"),
-        }
-        self
-    }
-
     /// The loop-closing state; `None` when it is off.
     pub fn loop_closing(&self) -> Option<&LoopClosing> {
         self.loops.as_ref()
@@ -691,9 +678,9 @@ impl MapBackend {
         let mut correspondences: Vec<GeneralizedCorrespondence> = Vec::with_capacity(matches.len());
         for m in matches {
             let (Some(point), Some(camera), Some(t_i_c)) = (
-                self.map.landmark_world(m.landmark, &self.t_i_c),
+                self.map.landmark_world(m.landmark, &self.rig.t_i_c),
                 loops.cameras.get(m.cam),
-                self.t_i_c.get(m.cam),
+                self.rig.t_i_c.get(m.cam),
             ) else {
                 continue;
             };
@@ -773,7 +760,7 @@ impl MapBackend {
         };
         let mut found: Vec<LoopMatch> = Vec::new();
         for (cam, (camera, image)) in loops.cameras.iter().zip(images.0.iter()).enumerate() {
-            let (Some(t_i_c), Some(by_id)) = (self.t_i_c.get(cam), described.get(cam)) else {
+            let (Some(t_i_c), Some(by_id)) = (self.rig.t_i_c.get(cam), described.get(cam)) else {
                 continue;
             };
             let matched: BTreeSet<LandmarkId> = matches
@@ -788,7 +775,7 @@ impl MapBackend {
                     continue;
                 }
                 let (Some(point), Some(target)) = (
-                    self.map.landmark_world(landmark, &self.t_i_c),
+                    self.map.landmark_world(landmark, &self.rig.t_i_c),
                     by_id.get(&KeypointId(landmark.0)),
                 ) else {
                     continue;

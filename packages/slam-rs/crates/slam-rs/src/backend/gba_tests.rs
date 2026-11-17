@@ -8,7 +8,7 @@ use kornia_staging_3d::camera::{CameraModelKind, Pinhole};
 use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
 
 use super::*;
-use crate::backend::{MapConfig, PoseGraphEdge, PoseGraphEdgeKind};
+use crate::backend::{BackendRig, MapConfig, PoseGraphEdge, PoseGraphEdgeKind};
 use crate::estimator::StampLandmark;
 use crate::landmark::StereographicParam;
 use crate::lie::So3;
@@ -95,9 +95,15 @@ fn synthetic_map(
             Se3::new(So3::exp(&r) * pose.rotation, pose.translation + d)
         })
         .collect();
-    let mut backend = MapBackend::new(config(), vec![[640, 480]; CAMERAS])
-        .with_extrinsics(t_i_c())
-        .with_gba_rig(Some(rig.clone()));
+    let backend_rig = BackendRig {
+        intrinsics: Vec::new(),
+        t_i_c: t_i_c(),
+        resolutions: vec![[640, 480]; CAMERAS],
+    };
+    let mut backend = MapBackend::new(&VioConfig::default(), backend_rig, crate::Backend::Cpu);
+    backend.config = config();
+    backend.loops = None;
+    backend.gba_rig = Some(rig.clone());
     for (k, pose) in noisy.iter().enumerate() {
         backend.map.upsert_keyframe(k as i64 + 1, *pose, None);
     }
@@ -229,18 +235,23 @@ fn a_zero_error_map_keeps_every_pose_and_world_z() {
 #[test]
 fn host_relative_landmarks_become_world_points_once_and_round_trip() {
     let (backend, _) = synthetic_map(6, 40, Vector3::zeros(), 0.0, 0.0, 0.3);
-    let input = map_problem(backend.map(), &[], &backend.t_i_c, &VioConfig::default());
+    let input = map_problem(
+        backend.map(),
+        &[],
+        &backend.rig.t_i_c,
+        &VioConfig::default(),
+    );
     assert!(!input.landmarks.is_empty());
     for (id, landmark) in input.landmarks.iter().zip(&input.problem.landmarks) {
         let stored = backend.map().landmark(*id).unwrap();
         let host = backend.map().keyframe(stored.host.frame_id).unwrap().pose;
         let bearing = StereographicParam::<f64>::unproject(&stored.direction);
         let p_c = Vector3::new(bearing[0], bearing[1], bearing[2]) / stored.inv_dist;
-        let expected = host * backend.t_i_c[stored.host.cam_id] * p_c;
+        let expected = host * backend.rig.t_i_c[stored.host.cam_id] * p_c;
         assert!((landmark.position - expected).norm() < 1e-12);
         // And back, against the same host pose.
         let (direction, inv_dist) = host_relative(
-            &(host * backend.t_i_c[stored.host.cam_id]),
+            &(host * backend.rig.t_i_c[stored.host.cam_id]),
             &landmark.position,
         )
         .unwrap();
@@ -292,7 +303,12 @@ fn sparse_keyframes_keep_their_pose_graph_rows_and_landmarks_need_two_finite_obs
         to: 7,
         kind: PoseGraphEdgeKind::SpanningTree,
     });
-    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &VioConfig::default());
+    let input = map_problem(
+        backend.map(),
+        &edges,
+        &backend.rig.t_i_c,
+        &VioConfig::default(),
+    );
     assert_eq!(input.keyframes, (1..=7).collect::<Vec<i64>>());
     let k7 = input.keyframes.iter().position(|&id| id == 7).unwrap();
     assert!(
@@ -348,7 +364,12 @@ fn pose_graph_rows_are_the_graph_edges_measured_from_the_input_poses() {
         to: 99,
         kind: PoseGraphEdgeKind::HighCovisibility,
     });
-    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &VioConfig::default());
+    let input = map_problem(
+        backend.map(),
+        &edges,
+        &backend.rig.t_i_c,
+        &VioConfig::default(),
+    );
     assert_eq!(input.problem.rel_poses.len(), 5);
     for c in &input.problem.rel_poses {
         let a = backend
@@ -444,7 +465,7 @@ fn a_drifted_synthetic_map_recovers_in_f32_and_f64_far_from_the_origin() {
 fn the_solution_is_written_into_the_map() {
     let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01, 0.3);
     let config = VioConfig::default();
-    let input = map_problem(backend.map(), &chain_edges(6), &backend.t_i_c, &config);
+    let input = map_problem(backend.map(), &chain_edges(6), &backend.rig.t_i_c, &config);
     let (solved, _) = solve(
         &input,
         backend.gba_rig.as_ref().unwrap(),
@@ -452,7 +473,7 @@ fn the_solution_is_written_into_the_map() {
         crate::Backend::Cpu,
     )
     .unwrap();
-    apply(&mut backend.map, &input, &solved, &backend.t_i_c);
+    apply(&mut backend.map, &input, &solved, &backend.rig.t_i_c);
     for (&id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
         let pose = backend.map().keyframe(id).unwrap().pose;
         assert!(
@@ -461,7 +482,10 @@ fn the_solution_is_written_into_the_map() {
         );
     }
     for (&id, landmark) in input.landmarks.iter().zip(&solved.landmarks) {
-        let stored = backend.map().landmark_world(id, &backend.t_i_c).unwrap();
+        let stored = backend
+            .map()
+            .landmark_world(id, &backend.rig.t_i_c)
+            .unwrap();
         assert!(
             (stored - landmark.position).norm() < 1e-9,
             "landmark {id:?}"
@@ -476,7 +500,7 @@ fn the_solution_is_written_into_the_map() {
 fn a_tilted_solution_is_rotated_back_and_keeps_its_cost() {
     let (backend, _) = synthetic_map(8, 120, Vector3::new(30.0, -20.0, 1.0), 0.0, 0.0, 0.3);
     let config = VioConfig::default();
-    let input = map_problem(backend.map(), &chain_edges(8), &backend.t_i_c, &config);
+    let input = map_problem(backend.map(), &chain_edges(8), &backend.rig.t_i_c, &config);
     let tilt = Se3::new(
         So3::exp(&Vector3::new(2f64.to_radians(), -1f64.to_radians(), 0.3)),
         Vector3::new(0.5, -0.2, 0.1),
@@ -556,7 +580,8 @@ fn the_report_carries_the_iteration_scalars_and_stage_walls() {
 #[test]
 fn the_gba_needs_the_rig() {
     let (backend, _) = synthetic_map(4, 30, Vector3::zeros(), 0.0, 0.0, 0.3);
-    let mut backend = backend.with_gba_rig(None);
+    let mut backend = backend;
+    backend.gba_rig = None;
     assert!(backend.finish(false, &VioConfig::default()).is_ok());
     assert!(matches!(
         backend.finish(true, &VioConfig::default()),

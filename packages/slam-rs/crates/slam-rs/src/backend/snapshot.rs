@@ -68,13 +68,13 @@ impl MapBackend {
     /// landmark it cannot place, or whose position overflows `f32`, is left out
     /// of the points (it still counts in `stats`), as RootSLAM's map export
     /// keeps only finite positions.
-    pub fn snapshot(&self, t_i_c: &[Se3<f64>]) -> MapSnapshot {
+    pub fn snapshot(&self) -> MapSnapshot {
         let keyframes = self.map.keyframes();
         let mut point_ids: Vec<LandmarkId> = Vec::with_capacity(self.map.landmarks().len());
         let mut point_hosts: Vec<FrameId> = Vec::with_capacity(self.map.landmarks().len());
         let mut points_world: Vec<[f32; 3]> = Vec::with_capacity(self.map.landmarks().len());
         for (&id, landmark) in self.map.landmarks() {
-            let Some(point_w) = self.map.landmark_world(id, t_i_c) else {
+            let Some(point_w) = self.map.landmark_world(id, &self.rig.t_i_c) else {
                 continue;
             };
             let point: [f32; 3] = [point_w.x as f32, point_w.y as f32, point_w.z as f32];
