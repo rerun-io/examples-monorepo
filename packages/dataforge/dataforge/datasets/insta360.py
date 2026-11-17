@@ -26,10 +26,10 @@ The value is the clip's own ``rolling_shutter_ms`` when it states one (the profi
 else the profile's.
 
 Exposure. Each camera's per-frame exposure time is a series at ``cam_NN/exposure``: record 4 (VIN0) for lens 0 and
-record 12 (VIN1) for lens 1, on the frame times.
+record 12 (VIN1) for lens 1 (record 4 again on a clip without record 12, the X5), on the frame times.
 
 Device profile. What the file does not carry (``R_P_imu``, the lever arm, the frame-time model, the readout, the IMU
-noise) is a measured record in ``insta360_profiles.toml``, selected by the clip's camera type, lens size, frame rate
+noise) is a measured record in ``insta360_profiles.toml``, selected by the clip's camera type, lens type, frame rate
 (from the exposure stamps) and readout; a clip outside every profile's measured mode is refused, naming the property
 that differs. The IMU noise model is a placeholder, marked as such in its ``source``.
 
@@ -113,10 +113,9 @@ class DeviceProfile:
     """Where the numbers were measured."""
     camera_type: str
     """``InsvClip.camera_type`` of the body."""
-    lens_width: int
-    """Lens track width, pixels, of the measured mode."""
-    lens_height: int
-    """Lens track height, pixels."""
+    lens_type: int
+    """Lens type of the factory lens strings (131 X4 Air, 113 X5). The lens size is not a property of the profile:
+    the reader states the factory lenses at the track resolution, so one profile serves every resolution."""
     frame_rate_hz: float
     """Frame rate of the measured mode."""
     frame_rate_tolerance_hz: float
@@ -139,8 +138,8 @@ class DeviceProfile:
     def __post_init__(self) -> None:
         if self.frame_rate_tolerance_hz < 0.0 or self.readout_tolerance_s < 0.0:
             raise ValueError(f"profile {self.name}: a tolerance is negative")
-        if self.lens_width < 1 or self.lens_height < 1 or self.frame_rate_hz <= 0.0 or self.readout_s <= 0.0:
-            raise ValueError(f"profile {self.name}: lens size, frame rate and readout must be positive")
+        if self.frame_rate_hz <= 0.0 or self.readout_s <= 0.0:
+            raise ValueError(f"profile {self.name}: frame rate and readout must be positive")
 
 
 @serde(deny_unknown_fields=True, type_check=coerce)
@@ -170,10 +169,8 @@ class CaptureMode:
 
     camera_type: str
     """``InsvClip.camera_type``."""
-    lens_width: int
-    """Lens track width, pixels."""
-    lens_height: int
-    """Lens track height, pixels."""
+    lens_type: int
+    """The lens type both lenses of the V3 factory string state."""
     frame_rate_hz: float
     """From the median exposure-record-4 stamp interval."""
     readout_s: float | None
@@ -185,8 +182,8 @@ def mode_differences(profile: DeviceProfile, mode: CaptureMode) -> list[str]:
     differences: list[str] = []
     if mode.camera_type != profile.camera_type:
         differences.append(f"camera type {mode.camera_type!r} is not {profile.camera_type!r}")
-    if (mode.lens_width, mode.lens_height) != (profile.lens_width, profile.lens_height):
-        differences.append(f"lens size {mode.lens_width}x{mode.lens_height} is not {profile.lens_width}x{profile.lens_height}")
+    if mode.lens_type != profile.lens_type:
+        differences.append(f"lens type {mode.lens_type} is not {profile.lens_type}")
     if abs(mode.frame_rate_hz - profile.frame_rate_hz) > profile.frame_rate_tolerance_hz:
         differences.append(f"frame rate {mode.frame_rate_hz:.4f} Hz is not {profile.frame_rate_hz} +- {profile.frame_rate_tolerance_hz} Hz")
     if mode.readout_s is not None and abs(mode.readout_s - profile.readout_s) > profile.readout_tolerance_s:
@@ -344,6 +341,21 @@ class Capture:
         return int(min(self.imu_ns[0], self.frame_ns[0]))
 
 
+def lens_type(v3: str) -> int:
+    """The lens type both lenses of a V3 factory lens string state: the last per-lens token.
+
+    Raises:
+        ValueError: If the two lenses state different types.
+    """
+    tokens: list[str] = v3.split("_")
+    count: int = int(float(tokens[0]))
+    per_lens: int = (len(tokens) - 2) // count
+    types: set[int] = {int(float(tokens[per_lens * (k + 1)])) for k in range(count)}
+    if len(types) != 1:
+        raise ValueError(f"the V3 lens string states lens types {sorted(types)}; a profile needs one")
+    return types.pop()
+
+
 def read_capture(path: Path, profiles: list[DeviceProfile], frame_limit: int | None) -> Capture:
     """Open ``path``, select its profile and compute the frame times.
 
@@ -351,15 +363,13 @@ def read_capture(path: Path, profiles: list[DeviceProfile], frame_limit: int | N
         ValueError: If the clip lacks two lenses or a sensor record, or no profile was measured in its mode.
     """
     clip: insta360_io.InsvClip = insta360_io.InsvClip(str(path))
-    width, height = clip.resolution
     frame_t_us, exposure_vin0 = clip.frame_exposures(False)
     _, exposure_vin1 = clip.frame_exposures(True)
     if frame_t_us.size < 2:
         raise ValueError(f"{path}: {frame_t_us.size} exposure-record-4 entries; a clip needs two frames or more")
     mode: CaptureMode = CaptureMode(
         camera_type=clip.camera_type,
-        lens_width=width,
-        lens_height=height,
+        lens_type=lens_type(dict(clip.factory_strings)["v3"]),
         frame_rate_hz=1e6 / float(np.median(np.diff(frame_t_us))),
         readout_s=None if clip.rolling_shutter_ms is None else clip.rolling_shutter_ms * 1e-3,
     )
