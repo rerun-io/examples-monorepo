@@ -199,8 +199,10 @@ mod tests {
             };
             let camera = CameraParts::from_catalog_statics(0, &raw, 2)?;
             assert_eq!((camera.model.as_str(), camera.cx), (model, 479.5));
-            let basalt = super::super::camera_model_from_parts(&camera, 0).unwrap();
-            let slam = crate::camera::SlamCamera::from_model(&basalt).unwrap();
+            let failed = |e: &dyn std::error::Error| CatalogError(e.to_string());
+            let basalt =
+                super::super::camera_model_from_parts(&camera, 0).map_err(|e| failed(&e))?;
+            let slam = crate::camera::SlamCamera::from_model(&basalt).map_err(|e| failed(&e))?;
             assert_eq!(slam.name(), model);
             let mut live = raw;
             live.distortion_coefficients[coefficients.len() - 1] = 0.5;
