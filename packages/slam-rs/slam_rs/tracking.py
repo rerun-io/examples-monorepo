@@ -140,7 +140,7 @@ class Lockstep:
             if self.blank_cameras:
                 blanked: _core.FlowFrame | None = self.vio.flow_frame()
                 if blanked is not None:
-                    self.blank_keypoints += sum(len(blanked.ids(camera)) for camera in self.blank_cameras)
+                    self.blank_keypoints += sum(blanked.num_tracks(camera) for camera in self.blank_cameras)
             if result.status == _core.VioStatus.Buffered:
                 self._buffered = held
                 self._buffered_flow = self.vio.flow_frame()

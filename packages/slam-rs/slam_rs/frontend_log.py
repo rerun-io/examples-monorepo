@@ -75,7 +75,7 @@ def panorama_positions(
     ids: list[Int64[ndarray, " n"]] = []
     positions: list[Float32[ndarray, "n 2"]] = []
     for tile, origin in enumerate(tile_origins):
-        tile_positions: Float32[ndarray, "n 2"] = frame.positions(tile).copy()
+        tile_positions: Float32[ndarray, "n 2"] = frame.positions(tile)
         tile_positions[:, 0] = np.mod(tile_positions[:, 0] + np.float32(origin), np.float32(panorama_width))
         ids.append(frame.ids(tile))
         positions.append(tile_positions)
