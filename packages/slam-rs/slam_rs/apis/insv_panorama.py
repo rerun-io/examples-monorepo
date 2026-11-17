@@ -43,8 +43,6 @@ class Config:
     """The Insta360 base recording (``slam-rs-insv`` output)."""
     output: Path | None = None
     """Destination layer; defaults to ``<recording stem>.pano.rrd`` beside the recording."""
-    margin_px: int = 64
-    """The lane's tile overlap (``config.panorama_tile_margin_px`` of the insta360 config); recorded, pixels do not depend on it."""
     cq: int = 34
     """NVENC constant-quality target: a viewing layer, not an analysis input."""
     gop: int = 30
@@ -111,7 +109,7 @@ def write_layer(config: Config) -> PanoLayer:
         if factory is None:
             raise ValueError(f"{config.rrd}: not an Insta360 recording (no insta360 property)")
         lens = feed.cameras[0]
-        stitch = _core.PanoramaStitch(factory.lens_string, factory.window_crop, (lens.width, lens.height), margin_px=config.margin_px)
+        stitch = _core.PanoramaStitch(factory.lens_string, factory.window_crop, (lens.width, lens.height))
         offset_ns: int = feed.imu.cam_time_offset_ns
 
         def panoramas() -> Iterator[bytes]:
@@ -140,7 +138,6 @@ def write_layer(config: Config) -> PanoLayer:
                         source_segment=feed.segment_id,
                         stitch="slam_rs._core.PanoramaStitch (dual-fisheye lane tables + host remap)",
                         lens_string_version="v6",
-                        margin_px=config.margin_px,
                         codec="av1",
                         cq=config.cq,
                         gop=config.gop,
