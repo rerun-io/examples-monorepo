@@ -25,8 +25,9 @@ from slam_rs.reference import (
 )
 
 
-def test_benchmarks_hold_ten_segments(benchmarks: Benchmarks) -> None:
-    assert len(benchmarks.segments) == 10
+def test_benchmarks_hold_ten_msd_and_eleven_euroc_segments(benchmarks: Benchmarks) -> None:
+    assert len(benchmarks.segments) == 21
+    assert sum(segment.dataset_name == "vslam-lab-euroc" for segment in benchmarks.segments) == 11
     assert benchmarks.schema_version == 1
 
 
@@ -45,7 +46,7 @@ def test_every_tier_and_decode_path_is_known(benchmarks: Benchmarks) -> None:
 def test_the_tiers_are_the_ones_the_plan_names(benchmarks: Benchmarks) -> None:
     assert len(benchmarks.in_tier("smoke")) == 2
     assert len(benchmarks.in_tier("release")) == 3
-    assert len(benchmarks.in_tier("listed")) == 5
+    assert len(benchmarks.in_tier("listed")) == 16
     assert {segment.dataset_name for segment in benchmarks.in_tier("smoke")} == {"msd-index", "msd-g2"}
 
 
@@ -112,9 +113,9 @@ def test_flow_config_loads_the_datasets_own_basalt_config(benchmarks: Benchmarks
         assert loaded["config.vio_marg_lost_landmarks"] is True, segment.segment_id
         assert json.loads(default)["value0"]["config.vio_marg_lost_landmarks"] is False
         assert config.to_json() != default, segment.segment_id
-    # The two devices differ in the radius and the port sees that difference.
+    # The devices differ in the radius (EuRoC's pinhole rig has none) and the port sees that difference.
     radii: set[float] = {resolved_flow_config(settings, segment)[0].optical_flow_image_safe_radius for segment in benchmarks.segments}
-    assert radii == {472.0, 340.0}
+    assert radii == {472.0, 340.0, 0.0}
 
 
 def test_resolved_flow_config_hands_back_the_very_string_it_parsed(
@@ -223,7 +224,7 @@ def test_malformed_toml_is_refused_with_the_file_name(tmp_path: Path) -> None:
 
 
 def test_dataset_settings_cover_unlisted_odyssey_and_preserve_holdouts(benchmarks: Benchmarks, settings: SlamConfig) -> None:
-    assert {dataset.name for dataset in settings.datasets} == {"msd-index", "msd-g2", "msd-odyssey"}
+    assert {dataset.name for dataset in settings.datasets} == {"msd-index", "msd-g2", "msd-odyssey", "vslam-lab-euroc"}
     assert sum(segment.hold_out for segment in benchmarks.segments) == 2
     assert {segment.segment_id.split("__")[-1].split("_")[0] for segment in benchmarks.in_tier("release")} == {"MIO07", "MGO07", "MIO14"}
 
@@ -266,6 +267,32 @@ def test_baseline_duplicates_include_host(settings: SlamConfig, host: str, dupli
         else:
             parsed: Benchmarks = load_benchmarks(settings, path)
             assert parsed.segments[0].baseline[1].host == host
+
+
+def test_euroc_is_listed_with_every_sequence_and_no_baseline_yet(benchmarks: Benchmarks) -> None:
+    """RootSLAM's EMH/EV1/EV2 groups: all eleven sequences, listed until a baseline is measured on them."""
+    euroc: list[ReferenceSegment] = [segment for segment in benchmarks.segments if segment.dataset_name == "vslam-lab-euroc"]
+    assert [segment.segment_id.removeprefix("vslam-lab-euroc__")[:5] for segment in euroc] == [
+        "MH_01", "MH_02", "MH_03", "MH_04", "MH_05", "V1_01", "V1_02", "V1_03", "V2_01", "V2_02", "V2_03",
+    ]
+    assert all(segment.tier == "listed" and not segment.hold_out and segment.baseline == () for segment in euroc)
+
+
+def test_only_euroc_records_the_device_clock_in_video_time(settings: SlamConfig) -> None:
+    """VSLAM-LAB keeps the benchmark's own stamps on ``video_time``; MSD's are relative to the capture start."""
+    assert {dataset.name for dataset in settings.datasets if dataset.video_time_is_absolute} == {"vslam-lab-euroc"}
+
+
+def test_euroc_config_differs_from_msd_only_in_sensor_facts(settings: SlamConfig) -> None:
+    """A pinhole rig has no fisheye circle to mask, and its recall patch norms are RootSLAM's EuRoC values."""
+    msd: dict = json.loads(settings.vio_config_text("msd-g2"))["value0"]
+    euroc: dict = json.loads(settings.vio_config_text("vslam-lab-euroc"))["value0"]
+    assert {key for key in msd if msd[key] != euroc[key]} == {
+        "config.optical_flow_image_safe_radius",
+        "config.optical_flow_recall_max_patch_norms",
+    }
+    assert msd.keys() == euroc.keys()
+    assert euroc["config.optical_flow_image_safe_radius"] == 0.0
 
 
 def test_runtime_settings_round_trip_through_toml(settings: SlamConfig) -> None:

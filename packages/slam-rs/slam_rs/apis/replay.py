@@ -18,6 +18,7 @@ from slam_rs.catalog_feed import (
     LocalSegment,
     SegmentFeed,
     SegmentSource,
+    dataset_rig,
     open_segment,
     select_decode_device,
 )
@@ -184,7 +185,11 @@ def main(config: Config) -> None:
     )
 
     with open_segment(
-        source, frame_stride=config.frame_stride, window_s=config.window_s, decode_device=select_decode_device(config.decode_device)
+        source,
+        profile=dataset_rig(settings.dataset(dataset_name)),
+        frame_stride=config.frame_stride,
+        window_s=config.window_s,
+        decode_device=select_decode_device(config.decode_device),
     ) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "

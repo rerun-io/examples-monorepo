@@ -16,12 +16,36 @@ into `blueprints/` beside them. A download is skipped when every layer of its
 recordings is already there, so it is safe to re-run and it picks up clips added
 to a tier.
 
+## EuRoC
+
+EuRoC MAV (RootSLAM's EMH/EV1/EV2 groups, 11 sequences) is the catalog dataset
+`vslam-lab-euroc`: dataforge's VSLAM-LAB conversion (`dataforge-vslam-lab-rrd` on
+the NAS). Its `video_time` is the benchmark's own nanosecond clock, which
+`slam.toml` states (`video_time_is_absolute`), and its cameras are radtan with no
+valid radius (Basalt's `rpmax` 0, no bound). The IMU model slam-rs reads is
+Basalt's, the one RootSLAM ran EuRoC with, imported as the `sensor_metadata`
+layer rather than VSLAM-LAB's OKVIS sigmas. On pablo-dl-server the registration
+root is `/mnt/nas/ssd-8tb/datasets/vslam-lab-euroc-catalog` (`base` and `gt`
+link to the conversion), registered once, skipping duplicates:
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/vslam-lab-euroc-catalog
+python ../dataforge/tools/apps/register.py vslam-lab --benchmark euroc        # dataforge env: base + gt
+pixi run -e slam-rs slam-rs-import-imu-calibration --dataset vslam-lab-euroc \
+  --catalog rerun+http://127.0.0.1:51235 --applied-time-shift-ns 0 --no-register \
+  --calibration <rootslam>/data/euroc/euroc_ds_calib.json --output-dir $DATAFORGE_OUTPUT_ROOT/sensor_metadata
+python ../dataforge/tools/apps/register.py vslam-lab --benchmark euroc        # adds sensor_metadata
+```
+
+The eleven segments are listed in `benchmarks.toml` with no baseline yet; score
+them with RootSLAM's `evaluate.py` against `mav0/state_groundtruth_estimate0/data.csv`.
+
 ## The gate
 
 ```bash
 pixi run -e slam-rs slam-rs-gate --tier smoke              # two short clips
 pixi run -e slam-rs slam-rs-gate --tier release            # three longer clips (MIO07, MIO14, MGO07)
-pixi run -e slam-rs slam-rs-gate --tier listed             # the other five gated clips
+pixi run -e slam-rs slam-rs-gate --tier listed             # the other five MSD clips and EuRoC's eleven (no baseline yet)
 pixi run -e slam-rs slam-rs-gate --tier release --backend cpu   # any tier on the CPU lane
 ```
 
@@ -54,8 +78,8 @@ whole pipeline. Long segments want `--max-framesets`. Without a display, add
 
 Every tool takes `--catalog <url>`; the default in `slam.toml` is the local
 server the quickstart starts. A catalog that already holds the datasets
-`msd-index`, `msd-g2` and `msd-odyssey` under the same recording ids works
-unchanged.
+`msd-index`, `msd-g2`, `msd-odyssey` (and `vslam-lab-euroc`) under the same
+recording ids works unchanged.
 
 ## Where the recordings came from
 

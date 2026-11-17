@@ -16,6 +16,12 @@ vio_config = "configs/msdmg_config.json"
 name = "msd-odyssey"
 vio_config = "configs/msdmo_config.json"
 
+# EuRoC MAV (RootSLAM's EMH/EV1/EV2) as VSLAM-LAB's dataforge conversion; its video_time is the benchmark clock.
+[[dataset]]
+name = "vslam-lab-euroc"
+vio_config = "configs/euroc_config.json"
+video_time_is_absolute = true
+
 [robocap]
 device_id = "f408193e6447b3b0"
 vio_config = "configs/msdmo_config.json"

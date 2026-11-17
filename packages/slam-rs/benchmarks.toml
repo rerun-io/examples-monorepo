@@ -373,6 +373,84 @@ gt_rmse_cm = 77.16547338163446
 median_tracker_ms = 8.876016363501549
 measured_on = "2026-09-10"
 
+# EuRoC MAV, RootSLAM's EMH/EV1/EV2: listed with no baseline until one is measured on them.
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_01_easy"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_02_easy"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_03_medium"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_04_difficult"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_05_difficult"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V1_01_easy"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V1_02_medium"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V1_03_difficult"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V2_01_easy"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V2_02_medium"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V2_03_difficult"
+tier = "listed"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
 [robocap]
 has_ground_truth = false
 decode_path = "cpu_gray8_swscale_area_downscale3"

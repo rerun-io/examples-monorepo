@@ -87,8 +87,8 @@ class ReferenceSegment:
     """Frozen decode path that produced the gated pixels."""
     hold_out: bool = False
     """Whether this segment is excluded from tuning."""
-    baseline: tuple[Baseline, ...] = ()
-    """Measurements by profile and execution lane."""
+    baseline: tuple[Baseline, ...] = field(default=(), skip_if_default=True)
+    """Measurements by profile and execution lane; a segment nobody has measured yet has none."""
 
     def baseline_for(self, lane: Literal["cpu", "gpu"], profile: Literal["reference", "fast"], host: str) -> Baseline | None:
         """Prefer this host's row; otherwise use the first row for the lane/profile."""

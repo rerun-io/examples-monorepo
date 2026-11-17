@@ -102,6 +102,7 @@ from slam_rs.catalog_timing import (
 from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
+from slam_rs.config import DatasetProperties
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -310,6 +311,11 @@ MSD_RIG: RigProfile = RigProfile()
 
 ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
 """RoboCap selection, downscale and clock rules from the Rust core."""
+
+
+def dataset_rig(dataset: DatasetProperties) -> RigProfile:
+    """How a ``[[dataset]]`` of ``slam.toml`` is read: MSD's profile, on the clock its settings state."""
+    return replace(MSD_RIG, video_time_is_absolute=dataset.video_time_is_absolute)
 
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
