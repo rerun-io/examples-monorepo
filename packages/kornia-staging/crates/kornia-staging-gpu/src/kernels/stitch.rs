@@ -2,10 +2,10 @@
 use super::layout::*;
 use cubecl::prelude::*;
 
-/// `kornia_staging_imgproc::panorama::remap_tile` on the device, one unit per tile pixel and one cube row of
-/// `CUBE_POS_Z` per tile. The table holds `(qx, qy)` pairs in 1/256 px of the level-1 lens image; the host refuses
-/// any entry that is neither `LUT_INVALID` nor inside `[0, 256 (w - 1)] x [0, 256 (h - 1)]`, so `qx > max_qx` is
-/// exactly the invalid test. All arithmetic is `u32`, as on the CPU: the largest sum, `65535 * 65536 + 32768`,
+/// `kornia_staging_imgproc::panorama::remap` on the device, one unit per tile pixel and one cube row of
+/// `CUBE_POS_Z` per tile. The table holds `(qx, qy)` pairs in 1/256 px of the level-1 lens image; a
+/// `RemapTable` holds only `RemapTable::INVALID` or entries inside `[0, 256 (w - 1)] x [0, 256 (h - 1)]`, so
+/// `qx > max_qx` is exactly the invalid test. All arithmetic is `u32`, as on the CPU: the largest sum, `65535 * 65536 + 32768`,
 /// fits.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
