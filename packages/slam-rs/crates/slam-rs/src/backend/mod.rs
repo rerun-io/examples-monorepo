@@ -260,12 +260,12 @@ impl MapBackend {
             }
             self.map.upsert_keyframe(id, *pose, keypoints);
         }
-        if let (Some(loops), Some(images), true) = (
+        if let (Some(loops), Some(slot), true) = (
             self.loops.as_mut(),
             &stamp.images,
             added.contains(&stamp.t_ns),
         ) {
-            loops.hold_images(stamp.t_ns, images.clone());
+            loops.hold_images(stamp.t_ns, slot);
         }
         self.map.merge_landmarks(&stamp.landmarks);
         for id in added {

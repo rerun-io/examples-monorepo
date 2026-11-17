@@ -721,6 +721,9 @@ pub struct LoopCounts {
     indexed: u64,
     /// Queries that found no images for their keyframe.
     without_images: u64,
+    /// Keyframe stamps whose images were dropped before the back end took
+    /// them (Realtime, more stamps queued than the query cap).
+    images_stripped: u64,
     /// Queries that retrieved at least one candidate.
     with_candidates: u64,
     /// Candidates validated.
@@ -1070,6 +1073,7 @@ impl MapSnapshot {
         LoopCounts {
             indexed: counts.indexed,
             without_images: counts.without_images,
+            images_stripped: counts.images_stripped,
             with_candidates: counts.with_candidates,
             candidates: counts.candidates,
             verified: counts.verified,

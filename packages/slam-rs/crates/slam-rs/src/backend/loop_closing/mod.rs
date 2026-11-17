@@ -47,7 +47,7 @@ use super::{MapBackend, MapEvent};
 use crate::calib::Calibration;
 use crate::camera::SlamCamera;
 use crate::config::{BriefTests, LoopClosingConfig, LoopQueryCameras, VioConfig};
-use crate::estimator::KeyframeImages;
+use crate::estimator::{ImageSlot, KeyframeImages};
 use crate::lie::Se3;
 use crate::types::{CamId, FrameId, KeypointId, LandmarkId, TimeCamId};
 
@@ -99,8 +99,7 @@ pub struct LoopDetection {
     /// The keyframe it closes a loop with.
     pub candidate: FrameId,
     /// The candidate and its covisibility neighbours, pinned with the current
-    /// and candidate keyframes until applied (until the pose-graph
-    /// optimization takes it, for [`LoopOutcome::NeedsPgo`]).
+    /// and candidate keyframes until applied.
     pub island: Vec<FrameId>,
     /// `T_w_i` of the current keyframe from PnP against the island.
     pub corrected_pose: Se3<f64>,
@@ -172,6 +171,9 @@ pub struct LoopCounts {
     /// Queries that found no images for their keyframe (dropped, culled, or a
     /// lagged pipeline that no longer held them).
     pub without_images: u64,
+    /// Keyframe stamps whose images the pipeline dropped before the back end
+    /// took them (Realtime, more stamps queued than the query cap).
+    pub images_stripped: u64,
     /// Queries that retrieved at least one candidate.
     pub with_candidates: u64,
     /// Candidates validated.
@@ -197,9 +199,6 @@ pub struct LoopClosing {
     descriptors: BTreeMap<FrameId, KeyframeDescriptors>,
     images: BTreeMap<FrameId, KeyframeImages>,
     events: Vec<LoopEvent>,
-    /// Current keyframes of the [`LoopOutcome::NeedsPgo`] events the
-    /// pose-graph optimization has not taken yet.
-    awaiting_pgo: BTreeSet<FrameId>,
     counts: LoopCounts,
     /// What the pose-graph optimization has done (PR c2).
     pub(super) pgo: PgoState,
@@ -243,7 +242,6 @@ impl LoopClosing {
             descriptors: BTreeMap::new(),
             images: BTreeMap::new(),
             events: Vec::new(),
-            awaiting_pgo: BTreeSet::new(),
             counts: LoopCounts::default(),
             pgo: PgoState::default(),
         }))
@@ -274,9 +272,13 @@ impl LoopClosing {
         self.images.len()
     }
 
-    /// Hold a new keyframe's images until its query.
-    pub(super) fn hold_images(&mut self, keyframe: FrameId, images: KeyframeImages) {
-        self.images.insert(keyframe, images);
+    /// Hold a new keyframe's images until its query; count a slot the
+    /// pipeline emptied first.
+    pub(super) fn hold_images(&mut self, keyframe: FrameId, slot: &ImageSlot) {
+        match slot.take() {
+            Some(images) => _ = self.images.insert(keyframe, images),
+            None => self.counts.images_stripped += 1,
+        }
     }
 
     /// A culled keyframe leaves the database; a dropped query frees its images.
@@ -366,8 +368,8 @@ pub(crate) fn retrieve(
         if config.query_cameras == LoopQueryCameras::Cam0 && *cam != 0 {
             continue;
         }
-        for hit in bow.query(bag, 0, Some(before)) {
-            let score = best.entry(hit.id.frame).or_insert(hit.score);
+        for hit in bow.query_frames(bag, 0, Some(before)) {
+            let score = best.entry(hit.frame).or_insert(hit.score);
             *score = score.max(hit.score);
         }
     }
@@ -466,7 +468,8 @@ pub(crate) fn fusion_plan(
             .filter(|&id| id != m.landmark && map.landmark(id).is_some());
         match into {
             Some(into) => {
-                if used.insert(m.landmark) && used.insert(into) {
+                if !used.contains(&m.landmark) && !used.contains(&into) {
+                    used.extend([m.landmark, into]);
                     plan.push(LoopFusion::Fuse {
                         from: m.landmark,
                         into,
@@ -852,7 +855,7 @@ impl MapBackend {
                 LoopOutcome::Stale => {}
             }
         }
-        self.release(&detection);
+        self.unpin(detection.keyframes());
         let event = LoopEvent {
             detection,
             drift_m,
@@ -863,47 +866,6 @@ impl MapBackend {
             loops.events.push(event.clone());
         }
         event
-    }
-
-    /// Verified loops waiting for the pose-graph optimization, oldest first.
-    pub fn loops_awaiting_pgo(&self) -> impl Iterator<Item = &LoopEvent> {
-        self.loops.iter().flat_map(|loops| {
-            loops
-                .events
-                .iter()
-                .filter(|event| loops.awaiting_pgo.contains(&event.detection.current))
-        })
-    }
-
-    /// The pose-graph optimization (c2) has taken the loop found at
-    /// `current`: unpin its keyframes (those another waiting loop holds stay
-    /// pinned) and hand it back, with the matches the fusion after the
-    /// optimization reads. `None` when no loop waits there.
-    pub fn finish_pgo_loop(&mut self, current: FrameId) -> Option<LoopDetection> {
-        let loops = self.loops.as_mut()?;
-        if !loops.awaiting_pgo.remove(&current) {
-            return None;
-        }
-        let event = loops
-            .events
-            .iter()
-            .rfind(|event| event.detection.current == current)?;
-        let detection: LoopDetection = event.detection.clone();
-        self.release(&detection);
-        Some(detection)
-    }
-
-    /// Unpin a loop's keyframes but those a waiting loop still holds.
-    fn release(&mut self, detection: &LoopDetection) {
-        let held: BTreeSet<FrameId> = self
-            .loops_awaiting_pgo()
-            .flat_map(|event| event.detection.keyframes())
-            .collect();
-        let free: Vec<FrameId> = detection
-            .keyframes()
-            .filter(|id| !held.contains(id))
-            .collect();
-        self.unpin(free);
     }
 
     /// Carry out [`fusion_plan`] and raise the covisibility edges it creates

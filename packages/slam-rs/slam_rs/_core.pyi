@@ -134,6 +134,10 @@ class LoopCounts:
         """Queries that found no images for their keyframe."""
 
     @property
+    def images_stripped(self) -> int:
+        """Keyframe stamps whose images were dropped before the back end took them (Realtime, behind)."""
+
+    @property
     def with_candidates(self) -> int:
         """Queries that retrieved at least one candidate."""
 
