@@ -197,6 +197,20 @@ pub struct VioConfig {
     /// detection skips every cell row whose centre lies above it.
     #[serde(rename = "config.panorama_track_max_latitude_deg")]
     pub panorama_track_max_latitude_deg: f32,
+    /// Stitch two fisheye lens images into the two tiles (the Insta360 lane).
+    /// The caller then hands the factory lens calibration to
+    /// `Vio::with_panorama_lenses`; false keeps every rig as it is.
+    #[serde(rename = "config.panorama_dual_fisheye")]
+    pub panorama_dual_fisheye: bool,
+    /// Dual-fisheye tiles: tile `k`'s ray origin is lens `k`'s centre (true)
+    /// or both tiles share the lens midpoint (false, the central A/B lane).
+    #[serde(rename = "config.panorama_two_centre")]
+    pub panorama_two_centre: bool,
+    /// Dual-fisheye tiles: hand the estimator rolling-shutter corrected
+    /// keypoints (each rotated to the middle row's time with the gyro); the
+    /// frontend keeps tracking the raw positions.
+    #[serde(rename = "config.panorama_rolling_shutter")]
+    pub panorama_rolling_shutter: bool,
 
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
@@ -319,6 +333,9 @@ impl Default for VioConfig {
 
             panorama_tile_margin_px: 64,
             panorama_track_max_latitude_deg: 75.0,
+            panorama_dual_fisheye: false,
+            panorama_two_centre: true,
+            panorama_rolling_shutter: false,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,

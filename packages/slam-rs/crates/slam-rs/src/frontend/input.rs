@@ -188,6 +188,23 @@ impl FrameStorage {
         }
         Ok(())
     }
+    /// Take level-0 images the caller already built at the pyramid's `u16`
+    /// format (the dual-fisheye remap), with no byte round trip. Returns false,
+    /// touching nothing, on packed storage: the device upload takes bytes.
+    pub(crate) fn fill_dense_u16(&mut self, sources: &[Image<u16, 1>]) -> bool {
+        let Self::Dense(images) = self else {
+            return false;
+        };
+        images.resize_with(sources.len(), image::empty);
+        for (image, source) in images.iter_mut().zip(sources) {
+            if image.size() == source.size() {
+                image.as_slice_mut().copy_from_slice(source.as_slice());
+            } else {
+                image.clone_from(source);
+            }
+        }
+        true
+    }
     pub(crate) fn view(&self) -> FrameImages<'_> {
         match self {
             Self::Dense(images) => FrameImages::Dense(images),

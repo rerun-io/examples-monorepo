@@ -160,7 +160,14 @@ impl<
         self.finish_track_points(camera, camera);
         self.frame.cameras[camera].clear();
         let limit: Option<f32> = self.track_latitude_limits[camera];
+        let kill: Option<&super::TrackKillMask> = self.track_kill_masks[camera].as_deref();
         for (slot, id) in self.tracked_ids.iter().enumerate() {
+            if let Some(kill) = kill {
+                let position: Vector2<f32> = self.tracked.get(slot).translation.into();
+                if kill.kills(position.x, position.y) {
+                    continue;
+                }
+            }
             if let Some(limit) = limit {
                 // Latitude about the camera's own y axis: `atan2(y, hypot(x, z))`.
                 let mut bearing: Vector4<f32> = Vector4::zeros();

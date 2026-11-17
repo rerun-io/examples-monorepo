@@ -12,7 +12,7 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
-pub use panorama::{PanoramaRig, PanoramaSource};
+pub use panorama::{DualFisheyeLenses, PanoramaRig, PanoramaSource};
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -120,7 +120,36 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
-        let (panorama, calibration) = PanoramaRig::expand(&config, calibration)?;
+        Self::with_panorama_lenses(config, calibration, options, backend, None)
+    }
+
+    /// [`Self::with_backend`] for a two-lens rig stitched into panorama tiles
+    /// (`config.panorama_dual_fisheye`): `lenses` is the factory calibration
+    /// the tiles are built from; `None` builds every other rig.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_backend`], plus [`VioError::Panorama`] when the key and
+    /// the lenses disagree or the rig is not two lens images.
+    pub fn with_panorama_lenses(
+        config: config::VioConfig,
+        calibration: calib::Calibration<f64>,
+        options: frontend::flow::FrontendOptions,
+        backend: Backend,
+        lenses: Option<DualFisheyeLenses>,
+    ) -> Result<Self, VioError> {
+        let (panorama, calibration) = match lenses {
+            Some(lenses) => {
+                let (rig, tiles) = PanoramaRig::expand_dual_fisheye(&config, calibration, lenses)?;
+                (Some(rig), tiles)
+            }
+            None if config.panorama_dual_fisheye => {
+                return Err(VioError::Panorama(
+                    "config.panorama_dual_fisheye needs the factory lens calibration".to_owned(),
+                ));
+            }
+            None => PanoramaRig::expand(&config, calibration)?,
+        };
         let camera_count: usize = calibration.t_i_c.len();
         let mut frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         if let Some(rig) = &panorama {
@@ -277,6 +306,9 @@ impl<S: Scalar> Vio<S> {
             };
         self.frontend_imu.push_back(sample);
         self.estimator.push_imu(sample);
+        if let Some(rig) = &mut self.panorama {
+            rig.push_gyro(t_ns, gyro);
+        }
         Ok(())
     }
 
@@ -342,10 +374,7 @@ impl<S: Scalar> Vio<S> {
         {
             let vio = &mut *prepared.vio;
             match &mut vio.panorama {
-                Some(rig) => {
-                    rig.crop(next_images)?;
-                    vio.next_frames.fill(&rig.tile_views());
-                }
+                Some(rig) => rig.ingest_packed(next_images, &mut vio.next_frames)?,
                 None => vio.next_frames.fill(next_images),
             }
             vio.frontend
@@ -428,10 +457,7 @@ impl<S: Scalar> Vio<S> {
         self.frontend_timings.imu_ns = duration_ns(mark);
 
         match &mut self.panorama {
-            Some(rig) => {
-                rig.crop(images)?;
-                self.frames.fill(&rig.tile_views())?;
-            }
+            Some(rig) => rig.ingest(images, &mut self.frames)?,
             None => self.frames.fill(images)?,
         }
         Ok(PreparedTrack {
@@ -468,6 +494,12 @@ impl<S: Scalar> Vio<S> {
                     keypoints.transform(index);
                 slot.insert(*id, warp.translation.into());
             }
+        }
+        if let Some(rig) = &self.panorama {
+            rig.correct_rolling_shutter(
+                &mut observations,
+                self.latest_state.as_ref().map(|state| state.bias_gyro),
+            );
         }
         let observations = std::sync::Arc::new(observations);
         let (result_t_ns, outcome) = if self.frontend.config().port_frontend_lag {

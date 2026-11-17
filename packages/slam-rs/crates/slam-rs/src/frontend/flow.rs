@@ -48,6 +48,32 @@ use kornia_staging_imgproc::features::{
 use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 use kornia_staging_slam::tracking::optical_flow::{CpuPatchTracker, PatchTracker, TrackInput};
 
+/// Pixels of one camera where a tracked keypoint is dropped: the rounded
+/// keypoint position indexes `killed`, row-major `width x height`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackKillMask {
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// One flag per pixel; true drops a keypoint whose rounded position lands there.
+    pub killed: Vec<bool>,
+}
+
+impl TrackKillMask {
+    /// Whether a keypoint at `(x, y)` is dropped; positions off the image are.
+    pub fn kills(&self, x: f32, y: f32) -> bool {
+        let (column, row) = (x.round(), y.round());
+        if !(column >= 0.0 && row >= 0.0)
+            || column as usize >= self.width
+            || row as usize >= self.height
+        {
+            return true;
+        }
+        self.killed[row as usize * self.width + column as usize]
+    }
+}
+
 /// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
 /// [`FrameToFrameOpticalFlow::with_stages`] selects implementations without
 /// exposing a concrete pyramid in the driver's public signatures.
@@ -100,6 +126,9 @@ pub struct FrameToFrameOpticalFlow<
     /// Per camera, the largest absolute latitude (radians, about the camera's
     /// own y axis) a tracked keypoint may reach; `None` keeps every track.
     track_latitude_limits: Vec<Option<f32>>,
+    /// Per camera, the pixels where a tracked keypoint is dropped (its patch
+    /// would read pixels the image does not hold); `None` keeps every track.
+    track_kill_masks: Vec<Option<std::sync::Arc<TrackKillMask>>>,
 
     stages: F,
     /// The source keypoint ids of each lane of the batch in flight, in map order
@@ -385,6 +414,7 @@ impl<
             detection_masks: vec![CellMasks::default(); num_cams],
             detect_masks: vec![CellMasks::default(); num_cams],
             track_latitude_limits: vec![None; num_cams],
+            track_kill_masks: vec![None; num_cams],
             snapshot: FrameState::default(),
             timings: FlowTimings::default(),
             passes: (0..num_cams).map(|_| TrackInput::default()).collect(),
@@ -550,6 +580,36 @@ impl<
             });
         }
         self.track_latitude_limits = limits;
+        Ok(())
+    }
+
+    /// Drop tracked keypoints that land on a marked pixel, one optional mask
+    /// per camera, each the camera's own size.
+    ///
+    /// # Errors
+    /// [`FrontendError::DetectionMasks`] when the count is not the camera count
+    /// or a mask is not its camera's size.
+    pub fn set_track_kill_masks(
+        &mut self,
+        masks: Vec<Option<std::sync::Arc<TrackKillMask>>>,
+    ) -> Result<(), FrontendError> {
+        if masks.len() != self.cameras.len() {
+            return Err(FrontendError::DetectionMasks {
+                camera: masks.len(),
+                reason: "one track kill mask per camera",
+            });
+        }
+        for (camera, mask) in masks.iter().enumerate() {
+            if let Some(mask) = mask
+                && [mask.width as u32, mask.height as u32] != self.cameras[camera].resolution
+            {
+                return Err(FrontendError::DetectionMasks {
+                    camera,
+                    reason: "a track kill mask must be its camera's size",
+                });
+            }
+        }
+        self.track_kill_masks = masks;
         Ok(())
     }
 
