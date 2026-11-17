@@ -292,13 +292,9 @@ impl InertialBootstrap {
     }
 
     /// Framesets buffered now; at most the grown window's.
+    #[cfg(test)]
     pub fn buffered_frames(&self) -> usize {
         self.frames.len()
-    }
-
-    /// IMU samples buffered now.
-    pub fn buffered_imu(&self) -> usize {
-        self.imu.len()
     }
 
     /// The newest IMU timestamp buffered.
