@@ -1,6 +1,6 @@
-"""tartanair: range extraction of one trajectory's zip members, and the NED -> RDF conversions of the converter.
+"""tartanair: the download of one trajectory's zip members, and the NED -> RDF conversions of the converter.
 
-The unit tests use an in-memory zip and hand-made poses and IMU samples. The integration test converts the first
+The unit tests use in-memory zips on the fake Hub and hand-made poses and IMU samples. The integration test converts the first
 2 s of a downloaded trajectory and reads the layers back the way a consumer does; it skips naming the trajectory
 when the raw data is not on this machine.
 """
@@ -22,30 +22,30 @@ if TYPE_CHECKING:
     from dataforge.datasets.tartanair import CameraSet
 
 
-def test_extract_members_fetches_only_the_prefix_and_resumes(tmp_path: Path) -> None:
-    from dataforge.datasets.tartanair_download import extract_members
+def test_download_lands_only_the_trajectory_members_from_the_pinned_zips_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hub_fake import HubStore  # pyrefly: ignore[missing-import]
 
-    archive: bytes = zip_bytes({"Env/Data_easy/P000/pose_lcam_front.txt": b"0 0 0 0 0 0 1\n", "Env/Data_easy/P001/pose_lcam_front.txt": b"x" * 5000})
-    requests: list[tuple[int, int]] = []
+    from dataforge.datasets import tartanair
+    from dataforge.datasets.tartanair import CAMERA_SETS, HF_REPO, HF_REVISION, TartanAirConfig
 
-    def fetch(start: int, stop: int) -> bytes:
-        requests.append((start, stop))
-        return archive[start:stop]
-
-    assert extract_members(fetch, len(archive), "Env/Data_easy/P000/", tmp_path) == (1, 14)
-    assert (tmp_path / "Env/Data_easy/P000/pose_lcam_front.txt").read_bytes() == b"0 0 0 0 0 0 1\n"
-    assert not (tmp_path / "Env/Data_easy/P001").exists()
-    first: int = len(requests)
-    assert extract_members(fetch, len(archive), "Env/Data_easy/P000/", tmp_path) == (1, 0)
-    assert len(requests) - first < first, "a complete member is not fetched again"
-
-
-def test_extract_members_refuses_a_path_outside_the_destination(tmp_path: Path) -> None:
-    from dataforge.datasets.tartanair_download import extract_members
-
-    archive: bytes = zip_bytes({"Env/../../evil.txt": b"x"})
-    with pytest.raises(ValueError, match="outside"):
-        extract_members(lambda start, stop: archive[start:stop], len(archive), "Env/", tmp_path)
+    hub = HubStore({HF_REPO: HF_REVISION})
+    archives: list[str] = ["imu", *(f"image_{camera.name}" for cameras in CAMERA_SETS.values() for camera in cameras)]
+    for archive in archives:
+        members: dict[str, bytes] = {f"Env/Data_easy/{number}/{archive}/{number}.txt": number.encode() * 100 for number in ("P000", "P001")}
+        hub.add(HF_REPO, f"Env/Data_easy/{archive}.zip", zip_bytes(members), lfs=True)
+    hub.install(monkeypatch, tartanair)
+    config = TartanAirConfig(root=tmp_path, trajectories=("Env/easy/P000",))
+    config.setup().download()
+    landed: list[str] = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*.txt"))
+    assert landed == sorted(f"Env/Data_easy/P000/{archive}/P000.txt" for archive in archives)
+    assert [call.paths[0] for call in hub.calls] == [f"Env/Data_easy/{archive}.zip" for archive in archives]
+    assert capsys.readouterr().out.rstrip().endswith("0 already complete")
+    config.setup().download()
+    assert capsys.readouterr().out.rstrip().endswith(f"; {len(archives)} already complete")
+    with pytest.raises(FileNotFoundError, match="no member under Env/Data_easy/P002/"):
+        TartanAirConfig(root=tmp_path, trajectories=("Env/easy/P002",)).setup().download()
 
 
 def test_rig_pose_of_a_north_east_down_pose_in_the_z_up_world() -> None:

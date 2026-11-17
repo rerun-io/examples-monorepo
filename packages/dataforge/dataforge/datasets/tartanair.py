@@ -1,6 +1,8 @@
 """TartanAir V2: one trajectory, three camera sets on the same motion, with exact ground truth and a noise-free IMU.
 
-``download`` range-extracts the chosen trajectories from Hugging Face (``tartanair_download``); ``convert`` writes,
+``download`` range-reads the chosen trajectories' members out of the environment-wide zips on Hugging Face (one zip per
+camera and one for the IMU, ``<Env>/Data_<easy|hard>/<archive>.zip``, each holding every trajectory) through
+``dataforge.transports.hf_zip``; ``convert`` writes,
 per trajectory, one recording for the ``--camera-set`` it is given, so the same motion runs with each camera model:
 
 * ``pinhole``: ``lcam_front`` + ``rcam_front``, 640x640, f = 320 px, 0.25 m baseline (``brown_conrady``, all zero).
@@ -35,11 +37,14 @@ import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, Literal, TypeAlias
+from zipfile import ZipInfo
 
 import httpx
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+from huggingface_hub import HfFileSystem
+from huggingface_hub.errors import HfHubHTTPError
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
@@ -48,12 +53,16 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
-from dataforge.datasets.tartanair_download import HF_BASE_URL, HF_REVISION, extract_members, http_range
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import GtTrajectory, ImuChannel, log_camera_source, log_gt_path, log_imu, log_rig_node, log_video_stream
+from dataforge.transports import FetchReport, extract_zip_members, hf_zip, transfer_error
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
 from dataforge.world_up import WORLD_UP_VIEW_COORDINATES
 
+HF_REPO: str = "theairlabcmu/tartanair2"
+"""The Hub dataset; no login needed."""
+HF_REVISION: str = "0d2d145e973832742a2aaa04b7d2ebffc8d82817"
+"""The ``theairlabcmu/tartanair2`` revision COLMAP's TartanAir V2 benchmark pins."""
 CameraSet: TypeAlias = Literal["pinhole", "fisheye", "equirect"]
 """``--camera-set``: which cameras one recording carries; also the catalog dataset (``tartanair-<set>``)."""
 RIG: int = 0
@@ -234,8 +243,6 @@ class TartanAirConfig(FrameLimitedConfig):
     """Raw tree, ``<root>/<Env>/Data_<difficulty>/P0NN/``, as the zips name their members."""
     trajectories: tuple[str, ...] = DEFAULT_TRAJECTORIES
     """``<Env>/<easy|hard>/P0NN`` to download and convert."""
-    workers: int = 8
-    """Members fetched at once by ``download``."""
 
     @property
     def name(self) -> str:
@@ -260,15 +267,22 @@ class TartanAirDataset(DataforgeDataset[TartanAirConfig, TrajectorySource]):
     def download(self) -> None:
         """Fetch every camera of every set, the IMU and the pose files of each trajectory; complete members are skipped."""
         archives: tuple[str, ...] = ("imu", *(f"image_{camera.name}" for cameras in CAMERA_SETS.values() for camera in cameras))
-        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
-            for trajectory in self.config.trajectories:
-                prefix: str = f"{self.trajectory_dir(trajectory).relative_to(self.config.root).as_posix()}/"
-                for archive in archives:
-                    fetch, size = http_range(client, f"{HF_BASE_URL}{prefix.rsplit('/', 2)[0]}/{archive}.zip")
-                    count, written = extract_members(fetch, size, prefix, self.config.root, workers=self.config.workers)
-                    if not count:
-                        raise FileNotFoundError(f"{archive}.zip at {HF_REVISION} holds no member under {prefix}")
-                    print(f"{trajectory} {archive}: {count} members, {written / 1e6:.1f} MB fetched")
+        filesystem: HfFileSystem = HfFileSystem()
+        report: FetchReport = FetchReport()
+        for trajectory in self.config.trajectories:
+            prefix: str = f"{self.trajectory_dir(trajectory).relative_to(self.config.root).as_posix()}/"
+            for archive in archives:
+                zip_path: str = f"{prefix.rsplit('/', 2)[0]}/{archive}.zip"
+                try:
+                    with hf_zip(filesystem, HF_REPO, HF_REVISION, zip_path) as zip_file:
+                        members: list[ZipInfo] = [info for info in zip_file.infolist() if info.filename.startswith(prefix) and not info.is_dir()]
+                        if not members:
+                            raise FileNotFoundError(f"{zip_path} at {HF_REVISION} holds no member under {prefix}")
+                        extract_zip_members(zip_file, members, self.config.root, report)
+                except (HfHubHTTPError, httpx.HTTPError) as error:
+                    raise transfer_error(f"{HF_REPO}@{HF_REVISION[:8]}/{zip_path}", error) from None
+                print(f"{trajectory} {archive}: {len(members)} members")
+        print(f"tartanair: {report.summary()}")
 
     def discover(self) -> list[tuple[SequenceIdentity, TrajectorySource]]:
         """Every configured trajectory whose poses, IMU and this set's cameras are on disk."""

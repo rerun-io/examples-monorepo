@@ -32,8 +32,6 @@ paths = ["dataforge", "tests"]
 # Tyro-facing verb entry points and config fields (the CLI shims call them), plus the
 # keyword-only parameters a test fake must accept to match the real catalog API.
 ignore_names = [
-    # tartanair_download.RangeFile: io protocol methods zipfile calls.
-    "seekable", "tell",
     # Shared SelfCap API used by selfcap-curate and selfcap-soma (outside these scan paths).
     "SOMA_XLO", "SOMA_METRICS", "SOMA_JOINTS", "SOMA_EARS", "SAPIENS2_XYZ",
     "SOMA_LAYER",  # Public layer-name contract retained by the SelfCap schema review.
