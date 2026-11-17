@@ -4,14 +4,17 @@
 mod gp3p_common;
 
 use gp3p_common::{observe, pose_error, random_pose, rig, scene, Rng};
+use kornia_3d::ransac::Estimator;
 use kornia_staging_3d::pose::gp3p::ransac::{
-    gp3p_ransac, Gp3pRansacConfig, Gp3pRansacResult, IterationSchedule, ROOTSLAM_ITERATIONS,
+    gp3p_ransac, Gp3pEstimator, Gp3pRansacConfig, Gp3pRansacResult, IterationSchedule,
+    ROOTSLAM_ITERATIONS,
 };
-use kornia_staging_3d::pose::gp3p::{GeneralizedCorrespondence, Gp3pError, Gp3pPose};
+use kornia_staging_3d::pose::gp3p::{gp3p, GeneralizedCorrespondence, Gp3pError, Gp3pPose};
 use kornia_staging_algebra::lie::RigidTransform;
 use nalgebra::Vector3;
 
-/// RootSLAM's threshold is 5e-5 (0.57°); synthetic noise of 1 mrad sits well inside.
+/// Bearing noise of the noisy scenes. RootSLAM's threshold of 5e-5 is
+/// `1 - cos(10 mrad)`, so 1 mrad sits well inside it.
 const NOISE: f64 = 1e-3;
 
 fn run(c: &[GeneralizedCorrespondence], config: &Gp3pRansacConfig) -> Gp3pRansacResult {
@@ -55,12 +58,8 @@ fn noisy_recovery_within_tolerance() {
         let rig = rig(&mut rng, 4, 0.1);
         let truth = random_pose(&mut rng);
         let (c, truth_mask) = scene(&mut rng, &rig, &truth, 150, 0.6, NOISE);
-        let config = Gp3pRansacConfig {
-            // 1 - cos(2 mrad) ≈ 2e-6: about 2σ for 1 mrad bearing noise.
-            threshold: 1e-5,
-            ..Gp3pRansacConfig::default()
-        };
-        let result = run(&c, &config);
+        // The shipped threshold: 1 - cos(10 mrad), ten times the noise.
+        let result = run(&c, &Gp3pRansacConfig::default());
         let (r, t) = error(&result, &truth);
         worst = (worst.0.max(r), worst.1.max(t));
         // 90 inliers at 1 mrad, 1-8 m deep: well under 0.1° and a few cm.
@@ -95,7 +94,6 @@ fn refinement_improves_on_the_ransac_hypothesis() {
         let truth = random_pose(&mut rng);
         let (c, _) = scene(&mut rng, &rig, &truth, 120, 0.7, NOISE);
         let base = Gp3pRansacConfig {
-            threshold: 1e-5,
             seed,
             ..Gp3pRansacConfig::default()
         };
@@ -135,7 +133,6 @@ fn same_seed_same_result_on_any_thread() {
     ] {
         let config = Gp3pRansacConfig {
             schedule,
-            threshold: 1e-5,
             seed: 7,
             ..Gp3pRansacConfig::default()
         };
@@ -160,7 +157,6 @@ fn different_seeds_draw_different_hypotheses() {
     let poses: Vec<[u64; 3]> = (0..8)
         .map(|seed| {
             let config = Gp3pRansacConfig {
-                threshold: 1e-5,
                 seed,
                 refine: false,
                 ..Gp3pRansacConfig::default()
@@ -181,7 +177,6 @@ fn adaptive_count_reaches_the_cap_only_at_low_inlier_ratios() {
     };
     let config = |seed| Gp3pRansacConfig {
         schedule,
-        threshold: 1e-5,
         seed,
         ..Gp3pRansacConfig::default()
     };
@@ -207,7 +202,6 @@ fn parity_schedule_never_exceeds_opengv_draws() {
         let (c, _) = fixture(400 + seed, 100, ratio);
         let config = Gp3pRansacConfig {
             schedule: IterationSchedule::rootslam_parity(),
-            threshold: 1e-5,
             ..Gp3pRansacConfig::default()
         };
         if let Some(result) = gp3p_ransac(&c, &config).unwrap() {
@@ -237,7 +231,6 @@ fn b15_adaptive_finds_low_inlier_loops_that_the_fixed_cap_misses() {
         {
             let config = Gp3pRansacConfig {
                 schedule,
-                threshold: 1e-5,
                 seed,
                 ..Gp3pRansacConfig::default()
             };
@@ -325,4 +318,151 @@ fn default_is_rootslam_threshold_with_adaptive_schedule() {
         .map(|i| observe(&mut rng, &rig, i % 2, &truth, 0.0))
         .collect();
     assert_eq!(run(&c, &config).num_inliers, 20);
+}
+
+/// `ceil(log(1 - p) / log(1 - w^k))`, at least one draw.
+fn draws_for(w: f64, k: i32, p: f64) -> u32 {
+    if w >= 1.0 {
+        return 1;
+    }
+    ((1.0 - p).ln() / (1.0 - w.powi(k)).ln()).ceil().max(1.0) as u32
+}
+
+/// A caller that rejects every loop below `w_min` inliers (B1) gains nothing
+/// from draws past the count that finds a `w_min` model with probability `p`.
+#[test]
+fn min_inlier_ratio_bounds_the_draws_below_the_acceptance_ratio() {
+    for (w_min, expected) in [(0.5, 52), (0.7, 17)] {
+        assert_eq!(draws_for(w_min, 3, 0.999), expected);
+        for (seed, w) in [(0, 0.12), (1, 0.1), (2, 0.0)] {
+            let (c, _) = fixture(800 + seed, 150, w);
+            let config = Gp3pRansacConfig {
+                min_inlier_ratio: Some(w_min),
+                seed,
+                ..Gp3pRansacConfig::default()
+            };
+            let iterations = gp3p_ransac(&c, &config).unwrap().unwrap().iterations;
+            assert_eq!(iterations, expected, "w_min {w_min}, w {w}");
+            // Without the bound the same input runs to the cap.
+            let unbounded = Gp3pRansacConfig {
+                min_inlier_ratio: None,
+                ..config
+            };
+            let iterations = gp3p_ransac(&c, &unbounded).unwrap().unwrap().iterations;
+            assert_eq!(iterations, 500, "w {w}");
+        }
+    }
+    // The parity schedule bounds with its own sample of four and p = 0.99,
+    // never above its cap.
+    let (c, _) = fixture(810, 150, 0.1);
+    for (w_min, expected) in [(0.5, 36), (0.9, draws_for(0.9, 4, 0.99))] {
+        let config = Gp3pRansacConfig {
+            schedule: IterationSchedule::rootslam_parity(),
+            min_inlier_ratio: Some(w_min),
+            ..Gp3pRansacConfig::default()
+        };
+        let iterations = gp3p_ransac(&c, &config).unwrap().unwrap().iterations;
+        assert_eq!(iterations, expected, "parity w_min {w_min}");
+    }
+}
+
+#[test]
+fn min_inlier_ratio_does_not_change_an_accepted_loop() {
+    for seed in 0..10 {
+        let (c, truth) = fixture(900 + seed, 100, 0.8);
+        let unbounded = Gp3pRansacConfig {
+            seed,
+            ..Gp3pRansacConfig::default()
+        };
+        let bounded = Gp3pRansacConfig {
+            min_inlier_ratio: Some(0.7),
+            ..unbounded
+        };
+        let result = run(&c, &bounded);
+        assert_eq!(result, run(&c, &unbounded), "seed {seed}");
+        assert!(error(&result, &truth).0 < 2e-3, "seed {seed}");
+    }
+}
+
+#[test]
+fn invalid_min_inlier_ratio_is_refused() {
+    let (c, _) = fixture(5, 20, 1.0);
+    for ratio in [0.0, -0.1, 1.5, f64::NAN, f64::INFINITY] {
+        let config = Gp3pRansacConfig {
+            min_inlier_ratio: Some(ratio),
+            ..Gp3pRansacConfig::default()
+        };
+        assert_eq!(
+            gp3p_ransac(&c, &config),
+            Err(Gp3pError::InvalidMinInlierRatio),
+            "{ratio}"
+        );
+    }
+    // w_min = 1: one draw. Exact bearings, so that draw has the true solution
+    // (a noisy triple can lose it).
+    let mut rng = Rng::new(6);
+    let rig = rig(&mut rng, 4, 0.1);
+    let truth = random_pose(&mut rng);
+    let (c, mask) = scene(&mut rng, &rig, &truth, 20, 1.0, 0.0);
+    let config = Gp3pRansacConfig {
+        min_inlier_ratio: Some(1.0),
+        ..Gp3pRansacConfig::default()
+    };
+    let result = run(&c, &config);
+    assert_eq!(result.iterations, 1);
+    assert_eq!(result.inliers, mask);
+}
+
+/// The parity knob: of several GP3P solutions, the sample's fourth
+/// correspondence keeps the true one (OpenGV `AbsolutePoseSacProblem`).
+#[test]
+fn parity_estimator_keeps_the_solution_that_fits_the_fourth_point() {
+    let mut multi = 0;
+    for seed in 0..500 {
+        let mut rng = Rng::new(40_000 + seed);
+        let cameras = 2 + (seed % 3) as usize;
+        let rig = rig(&mut rng, cameras, 0.0);
+        let truth = random_pose(&mut rng);
+        let sample: Vec<GeneralizedCorrespondence> = (0..4)
+            .map(|i| observe(&mut rng, &rig, i % cameras, &truth, 0.0))
+            .collect();
+        if gp3p(&sample[..3]).unwrap().len() < 2 {
+            continue;
+        }
+        multi += 1;
+        let mut models = Vec::new();
+        Gp3pEstimator::<4>.fit(&sample, &mut models);
+        assert_eq!(models.len(), 1, "seed {seed}");
+        let (r, t) = pose_error(&models[0], &truth);
+        assert!(r < 1e-7 && t < 1e-7, "seed {seed}: {r} {t}");
+        // The sample-of-three estimator returns every solution instead.
+        let mut all = Vec::new();
+        Gp3pEstimator::<3>.fit(&sample[..3], &mut all);
+        assert!(all.len() >= 2, "seed {seed}");
+    }
+    assert!(
+        multi >= 200,
+        "only {multi} of 500 triples had several solutions"
+    );
+}
+
+#[test]
+fn parity_ransac_recovers_a_clean_central_scene() {
+    for (seed, ratio) in [(0, 1.0), (1, 0.9), (2, 1.0), (3, 0.9)] {
+        let mut rng = Rng::new(50_000 + seed);
+        let rig = rig(&mut rng, 3, 0.0);
+        let truth = random_pose(&mut rng);
+        let (c, truth_mask) = scene(&mut rng, &rig, &truth, 60, ratio, 0.0);
+        let config = Gp3pRansacConfig {
+            schedule: IterationSchedule::rootslam_parity(),
+            seed,
+            ..Gp3pRansacConfig::default()
+        };
+        for refine in [false, true] {
+            let result = run(&c, &Gp3pRansacConfig { refine, ..config });
+            let (r, t) = error(&result, &truth);
+            assert!(r < 1e-9 && t < 1e-8, "seed {seed} refine {refine}: {r} {t}");
+            assert_eq!(result.inliers, truth_mask, "seed {seed} refine {refine}");
+        }
+    }
 }

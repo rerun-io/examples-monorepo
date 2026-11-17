@@ -15,7 +15,7 @@ kornia-algebra.workspace = true
 kornia-image = { workspace = true, optional = true }
 thiserror.workspace = true
 nalgebra.workspace = true
-rand = { version = "0.10", optional = true, default-features = false, features = ["chacha"] }
+rand = { workspace = true, optional = true, features = ["chacha"] }
 
 [dev-dependencies]
 kornia-tensor.workspace = true

@@ -11,11 +11,22 @@
 //! RootSLAM (`loop_closing.cpp:583-605`) runs OpenGV's `Ransac` with a sample of
 //! four (three for GP3P, the fourth picks among its solutions), confidence 0.99
 //! and `max_iterations_` 20-35, then refines on the inliers and re-selects them.
-//! OpenGV's count is adaptive too, but the cap binds: at 30 % inliers a sample of
-//! four is all-inlier with probability 0.8 %, so 36 draws find one 25 % of the
-//! time (bug B15). [`IterationSchedule::Adaptive`] samples three, scores every
-//! solution, and caps at 500 with `p = 0.999`; [`IterationSchedule::RootSlamParity`]
-//! keeps OpenGV's sampling, confidence and cap for the rootslam-parity profile.
+//! OpenGV's count is adaptive too, but the cap binds (bug B15). At 30 % inliers
+//! a sample of four is all-inlier with probability 0.8 %, so 36 draws contain
+//! one only 25 % of the time; that is a lower bound, because a sample whose
+//! three GP3P points are inliers often succeeds when the fourth is an outlier
+//! (the outlier then picks among solutions that include the truth). Measured
+//! on 100 synthetic scenes at w = 0.3 (`tests/gp3p_ransac.rs`), the parity
+//! schedule finds the pose in about half of them, the adaptive one in all.
+//! [`IterationSchedule::Adaptive`] samples three, scores every solution, and caps
+//! at 500 with `p = 0.999`; [`IterationSchedule::RootSlamParity`] keeps OpenGV's
+//! sampling, confidence and cap for the rootslam-parity profile.
+//!
+//! A caller that rejects loops below an inlier ratio (RootSLAM's
+//! `pnp_inliers_ratio`, DESIGN B1) passes it as
+//! [`Gp3pRansacConfig::min_inlier_ratio`]: the draws then stop once an
+//! acceptable model would have been found with the schedule's confidence, so a
+//! rejected candidate costs about 52 draws at 0.5 (17 at 0.7) instead of the cap.
 
 use super::{refine, solve, validate, GeneralizedCorrespondence, Gp3pError, Gp3pPose, Solutions};
 use kornia_3d::ransac::{
@@ -25,9 +36,10 @@ use kornia_staging_algebra::lie::RigidTransform;
 use rand::rngs::ChaCha8Rng;
 use rand::SeedableRng;
 
-/// RootSLAM's `loop_closing_pnp_ransac_threshold`: `1 - cos(angle)`, about 0.57°.
+/// RootSLAM's `loop_closing_pnp_ransac_threshold`: `1 - cos(angle)`, about
+/// 0.57° (10 mrad).
 pub const ROOTSLAM_THRESHOLD: f64 = 5e-5;
-/// RootSLAM's `loop_closing_pnp_ransac_iterations` on MSD (20 on EuRoC).
+/// RootSLAM's `loop_closing_pnp_ransac_iterations` on MSD and EuRoC (20 on TUM-VI).
 pub const ROOTSLAM_ITERATIONS: u32 = 35;
 
 /// How many hypotheses RANSAC draws.
@@ -45,6 +57,14 @@ pub enum IterationSchedule {
     /// picks among the GP3P solutions, confidence 0.99, and at most
     /// `iterations + 1` draws (OpenGV breaks on `iterations_ > max_iterations_`).
     /// For the rootslam-parity profile only.
+    ///
+    /// Two known differences from OpenGV's draw count: here every draw counts,
+    /// also one whose triple has no solution, where OpenGV skips a draw whose
+    /// `computeModelCoefficients` fails (up to `10 x max_iterations_` skips)
+    /// without counting it; and the solver drops roots with a negative depth,
+    /// which OpenGV keeps and scores. Draws without a solution are frequent
+    /// (40-57 % of random triples at w = 0.3), so OpenGV evaluates somewhat
+    /// more hypotheses for the same cap.
     RootSlamParity {
         /// `loop_closing_pnp_ransac_iterations`.
         iterations: u32,
@@ -81,6 +101,13 @@ pub struct Gp3pRansacConfig {
     pub seed: u64,
     /// Refine on the inliers and re-select them, as RootSLAM does.
     pub refine: bool,
+    /// The smallest inlier ratio the caller accepts (`None`: no bound). The
+    /// draws stop after `ceil(log(1 - p) / log(1 - w_min^k))` (sample size `k`
+    /// and confidence `p` of the schedule) when that is below the schedule's
+    /// cap: by then a model with `w_min` inliers would have been drawn with
+    /// probability `p`, and a model below `w_min` is rejected by the caller.
+    /// Must lie in `(0, 1]`. The rootslam-parity profile passes `None`.
+    pub min_inlier_ratio: Option<f64>,
 }
 
 impl Default for Gp3pRansacConfig {
@@ -90,6 +117,7 @@ impl Default for Gp3pRansacConfig {
             schedule: IterationSchedule::default(),
             seed: 0,
             refine: true,
+            min_inlier_ratio: None,
         }
     }
 }
@@ -183,19 +211,28 @@ pub fn gp3p_ransac(
         });
     }
     validate(correspondences)?;
+    if config
+        .min_inlier_ratio
+        .is_some_and(|w| !(w > 0.0 && w <= 1.0))
+    {
+        return Err(Gp3pError::InvalidMinInlierRatio);
+    }
     let consensus = ThresholdConsensus {
         threshold: config.threshold,
     };
     let mut sampler = UniformSampler::new(ChaCha8Rng::seed_from_u64(config.seed));
     // The driver's own RNG only feeds SPRT, which is off; seed it anyway.
     let mut rng = ChaCha8Rng::seed_from_u64(config.seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
-    let (confidence, max_iters) = match config.schedule {
+    let (confidence, cap, sample) = match config.schedule {
         IterationSchedule::Adaptive {
             confidence,
             max_iterations,
-        } => (confidence, max_iterations),
-        IterationSchedule::RootSlamParity { iterations } => (0.99, iterations.saturating_add(1)),
+        } => (confidence, max_iterations, 3),
+        IterationSchedule::RootSlamParity { iterations } => (0.99, iterations.saturating_add(1), 4),
     };
+    let max_iters = config
+        .min_inlier_ratio
+        .map_or(cap, |w| cap.min(draws_for(w, sample, confidence)));
     let ransac = RansacConfig {
         max_iters,
         confidence,
@@ -243,4 +280,21 @@ pub fn gp3p_ransac(
         inliers,
         iterations: result.num_iters,
     }))
+}
+
+/// Draws that contain an all-inlier sample of `sample` points with probability
+/// `confidence` at inlier ratio `w`: `ceil(log(1 - p) / log(1 - w^k))`, at least
+/// one (upstream's adaptive formula).
+fn draws_for(w: f64, sample: i32, confidence: f64) -> u32 {
+    let all_inlier = w.powi(sample);
+    if all_inlier >= 1.0 {
+        return 1;
+    }
+    let draws = (1.0 - confidence).ln() / (1.0 - all_inlier).ln();
+    if draws.is_finite() {
+        // Saturating float-to-int cast.
+        draws.ceil().max(1.0) as u32
+    } else {
+        u32::MAX
+    }
 }

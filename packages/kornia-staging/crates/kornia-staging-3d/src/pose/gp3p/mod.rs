@@ -20,6 +20,10 @@
 //! refinement on inliers that RootSLAM runs after RANSAC.
 
 use kornia_staging_algebra::lie::{RigidTransform, Rotation3};
+use kornia_staging_algebra::optim::solvers::{
+    levenberg_marquardt, marquardt_scaling, predicted_reduction, DampingRule, LmConfig, LmProblem,
+    ScalingFloor,
+};
 use nalgebra::{Matrix2x3, Matrix3, Matrix6, UnitQuaternion, Vector3, Vector6};
 
 #[cfg(feature = "ransac")]
@@ -151,6 +155,9 @@ pub enum Gp3pError {
     /// The three world points are collinear or coincident: the pose is not determined.
     #[error("the world points are collinear")]
     CollinearPoints,
+    /// A RANSAC `min_inlier_ratio` outside `(0, 1]`.
+    #[error("min_inlier_ratio must lie in (0, 1]")]
+    InvalidMinInlierRatio,
 }
 
 /// Check every correspondence: finite coordinates and unit bearings.
@@ -670,47 +677,118 @@ pub(crate) fn solve(triple: &[GeneralizedCorrespondence; 3], out: &mut Solutions
     }
 }
 
-/// Levenberg–Marquardt iterations of [`refine`].
-const REFINE_ITERATIONS: usize = 20;
+/// Limits of [`refine`]: Levenberg damping from 1e-4, ×10 per rejected step,
+/// at most 50 candidates (accepted or rejected).
+const REFINE_LIMITS: LmConfig<f64> = LmConfig {
+    max_iterations: 50,
+    relative_tolerance: 1e-15,
+    absolute_tolerance: 0.0,
+    initial_damping: 1e-4,
+    max_damping: 1e10,
+};
 
 /// Nonlinear least-squares refinement of `T_w_b` on the given correspondences
-/// (RootSLAM refines on the RANSAC inliers, `loop_closing.cpp:601-602`).
+/// (RootSLAM refines on the RANSAC inliers, `loop_closing.cpp:601-602`), with
+/// the staged Levenberg–Marquardt driver
+/// ([`levenberg_marquardt`](kornia_staging_algebra::optim::solvers::levenberg_marquardt)).
 ///
 /// The residual is the bearing error in the tangent plane of each bearing, two
 /// rows per correspondence, `sin` of the angle to first order. OpenGV's
 /// `optimize_nonlinear` minimises the squared `1 - cos` instead, whose gradient
 /// vanishes quadratically at the optimum, so its numeric-difference LM stops on
-/// tolerance short of the minimum. Returns `initial` unchanged with fewer than
-/// three correspondences; never returns a pose with a higher cost than `initial`.
+/// tolerance short of the minimum.
+///
+/// A correspondence behind its camera (`f · u <= 0`, angle above 90°) is out of
+/// the residual's domain: the tangent-plane error vanishes again at the
+/// antipode. Such a row costs 1, its value at 90°, and adds nothing to the
+/// step, so the cost never rewards a pose that puts points behind the camera.
+/// RANSAC inliers (`1 - cos < threshold`) are always in front.
+///
+/// Returns `initial` unchanged with fewer than three correspondences; never
+/// returns a pose with a higher cost than `initial`.
 pub fn refine(correspondences: &[GeneralizedCorrespondence], initial: &Gp3pPose) -> Gp3pPose {
     if correspondences.len() < 3 {
         return *initial;
     }
-    let tangent: Vec<Matrix2x3<f64>> = correspondences
-        .iter()
-        .map(|c| tangent_basis(&c.bearing))
-        .collect();
-    let cost = |pose: &Gp3pPose| -> f64 {
-        correspondences
+    let mut problem = RefineProblem::new(correspondences, *initial);
+    levenberg_marquardt(
+        &mut problem,
+        &REFINE_LIMITS,
+        DampingRule::Levenberg { factor: 10.0 },
+    );
+    problem.pose
+}
+
+/// [`refine`] as an [`LmProblem`]: right perturbation `R' = R exp(ω)`,
+/// `t' = t + R ν`, step `(ν, ω)`.
+struct RefineProblem<'a> {
+    correspondences: &'a [GeneralizedCorrespondence],
+    tangent: Vec<Matrix2x3<f64>>,
+    pose: Gp3pPose,
+    energy: f64,
+    candidate: Gp3pPose,
+    candidate_energy: f64,
+    /// Normal equations at `pose`, kept across rejected steps.
+    normal: Option<(Matrix6<f64>, Vector6<f64>)>,
+}
+
+impl<'a> RefineProblem<'a> {
+    fn new(correspondences: &'a [GeneralizedCorrespondence], pose: Gp3pPose) -> Self {
+        let tangent = correspondences
             .iter()
-            .zip(&tangent)
+            .map(|c| tangent_basis(&c.bearing))
+            .collect();
+        let mut problem = Self {
+            correspondences,
+            tangent,
+            pose,
+            energy: 0.0,
+            candidate: pose,
+            candidate_energy: 0.0,
+            normal: None,
+        };
+        problem.energy = problem.cost(&pose);
+        problem
+    }
+
+    fn cost(&self, pose: &Gp3pPose) -> f64 {
+        self.correspondences
+            .iter()
+            .zip(&self.tangent)
             .map(|(c, b)| {
-                let v: Vector3<f64> = pose.point_in_body(&c.point) - c.origin;
-                (b * v.normalize()).norm_squared()
+                let u: Vector3<f64> = (pose.point_in_body(&c.point) - c.origin).normalize();
+                if u.dot(&c.bearing) > 0.0 {
+                    (b * u).norm_squared()
+                } else {
+                    1.0
+                }
             })
             .sum()
-    };
-    let mut pose = *initial;
-    let mut current = cost(&pose);
-    let mut lambda = 1e-4;
-    for _ in 0..REFINE_ITERATIONS {
+    }
+}
+
+impl LmProblem<f64> for RefineProblem<'_> {
+    type Normal = (Matrix6<f64>, Vector6<f64>);
+    type Step = Vector6<f64>;
+
+    fn energy(&self) -> f64 {
+        self.energy
+    }
+
+    fn linearize(&mut self) -> Self::Normal {
+        if let Some(normal) = self.normal {
+            return normal;
+        }
         let mut h: Matrix6<f64> = Matrix6::zeros();
         let mut g: Vector6<f64> = Vector6::zeros();
-        for (c, b) in correspondences.iter().zip(&tangent) {
-            let pb: Vector3<f64> = pose.point_in_body(&c.point);
+        for (c, b) in self.correspondences.iter().zip(&self.tangent) {
+            let pb: Vector3<f64> = self.pose.point_in_body(&c.point);
             let v: Vector3<f64> = pb - c.origin;
             let norm = v.norm();
             let u: Vector3<f64> = v / norm;
+            if u.dot(&c.bearing) <= 0.0 {
+                continue;
+            }
             let r = b * u;
             // dv/d(ν, ω) for R' = R exp(ω), t' = t + R ν: [-I | hat(pb)].
             let du: Matrix3<f64> = (Matrix3::identity() - u * u.transpose()) / norm;
@@ -722,37 +800,37 @@ pub fn refine(correspondences: &[GeneralizedCorrespondence], initial: &Gp3pPose)
             h += j.transpose() * j;
             g += j.transpose() * r;
         }
-        let mut improved = false;
-        while lambda < 1e10 {
-            let mut damped = h;
-            for i in 0..6 {
-                damped[(i, i)] += lambda * h[(i, i)].max(1e-12);
-            }
-            let Some(step) = damped.cholesky().map(|ch| ch.solve(&(-g))) else {
-                lambda *= 10.0;
-                continue;
-            };
-            let omega: Vector3<f64> = step.fixed_rows::<3>(3).into_owned();
-            let candidate = Gp3pPose {
-                rotation: pose.rotation * nalgebra::Rotation3::new(omega).into_inner(),
-                translation: pose.translation + pose.rotation * step.fixed_rows::<3>(0),
-            };
-            let next = cost(&candidate);
-            if next < current {
-                let converged = (current - next) <= 1e-15 * current || step.amax() < 1e-14;
-                pose = candidate;
-                current = next;
-                lambda = (lambda * 0.1).max(1e-10);
-                improved = !converged;
-                break;
-            }
-            lambda *= 10.0;
-        }
-        if !improved {
-            break;
-        }
+        self.normal = Some((h, g));
+        (h, g)
     }
-    pose
+
+    fn solve_damped(&self, normal: &Self::Normal, lambda: f64) -> Option<Self::Step> {
+        let (h, g) = normal;
+        let mut diagonal: Vector6<f64> = h.diagonal();
+        marquardt_scaling(&mut diagonal, ScalingFloor::default());
+        let damped: Matrix6<f64> = h + Matrix6::from_diagonal(&(diagonal * lambda));
+        damped.cholesky().map(|ch| ch.solve(&(-g)))
+    }
+
+    fn predicted_reduction(&self, normal: &Self::Normal, step: &Self::Step) -> f64 {
+        predicted_reduction(step, &normal.0, &normal.1)
+    }
+
+    fn try_step(&mut self, step: Self::Step) -> f64 {
+        let omega: Vector3<f64> = step.fixed_rows::<3>(3).into_owned();
+        self.candidate = Gp3pPose {
+            rotation: self.pose.rotation * nalgebra::Rotation3::new(omega).into_inner(),
+            translation: self.pose.translation + self.pose.rotation * step.fixed_rows::<3>(0),
+        };
+        self.candidate_energy = self.cost(&self.candidate);
+        self.candidate_energy
+    }
+
+    fn accept(&mut self) {
+        self.pose = self.candidate;
+        self.energy = self.candidate_energy;
+        self.normal = None;
+    }
 }
 
 /// Two unit vectors orthogonal to unit `f`, as rows.

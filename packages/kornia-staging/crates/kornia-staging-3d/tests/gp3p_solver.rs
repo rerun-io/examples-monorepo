@@ -66,6 +66,7 @@ fn exact_recovery_wide_baseline_rig() {
 #[test]
 fn noisy_minimal_solution_stays_close() {
     let mut max_rotation = 0.0f64;
+    let mut lost = Vec::new();
     for seed in 0..300 {
         let mut rng = Rng::new(10_000 + seed);
         let rig = rig(&mut rng, 4, 0.1);
@@ -73,18 +74,26 @@ fn noisy_minimal_solution_stays_close() {
         let c: Vec<GeneralizedCorrespondence> = (0..3)
             .map(|i| observe(&mut rng, &rig, i, &truth, 1e-4))
             .collect();
-        let Ok(poses) = gp3p(&c) else { continue };
-        if let Some((r, _)) = poses
+        // Noise can push a true root through a double root into a complex
+        // pair; such a triple has no solution near the truth. Count them.
+        let nearest = gp3p(&c)
+            .unwrap()
             .iter()
-            .map(|p| pose_error(p, &truth))
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-        {
-            max_rotation = max_rotation.max(r.min(0.5));
+            .map(|p| pose_error(p, &truth).0)
+            .min_by(f64::total_cmp);
+        match nearest {
+            Some(r) if r < 0.1 => max_rotation = max_rotation.max(r),
+            _ => lost.push(seed),
         }
     }
-    // Minimal solutions amplify noise; the median case is what matters, but
-    // even the worst stays within a few degrees at 0.1 mrad of bearing noise.
-    assert!(max_rotation < 0.1, "worst rotation {max_rotation}");
+    eprintln!("worst rotation {max_rotation} rad, no solution near the truth: {lost:?}");
+    // Minimal solutions amplify noise, but the solution near the truth stays
+    // within a few degrees at 0.1 mrad of bearing noise, and it is seldom lost.
+    assert!(
+        lost.len() <= 3,
+        "{} of 300 lost the truth: {lost:?}",
+        lost.len()
+    );
 }
 
 #[test]
@@ -235,5 +244,42 @@ fn to_and_from_rigid_transform_round_trip() {
         let back = Gp3pPose::from_rigid_transform(&t).to_rigid_transform();
         assert!((back.rotation.matrix() - t.rotation.matrix()).amax() < 1e-14);
         assert_eq!(back.translation, t.translation);
+    }
+}
+
+/// A correspondence behind its camera (`f · u <= 0`) is not a fit: the
+/// tangent-plane residual `B u` vanishes at the antipode `u = -f`, so the
+/// refinement must not pull the pose toward putting points there.
+#[test]
+fn refine_does_not_fit_points_behind_the_camera() {
+    for seed in 0..20 {
+        let mut rng = Rng::new(60_000 + seed);
+        let rig = rig(&mut rng, 2, 0.1);
+        let truth = random_pose(&mut rng);
+        let near = truth
+            * RigidTransform::exp_decoupled(&nalgebra::Vector6::new(
+                0.02, -0.01, 0.015, 0.01, -0.008, 0.012,
+            ));
+        // 10 exact inliers of `truth`, and 30 bearings that are antipodal under `near`.
+        let mut c: Vec<GeneralizedCorrespondence> = (0..10)
+            .map(|i| observe(&mut rng, &rig, i % 2, &truth, 0.0))
+            .collect();
+        c.extend((0..30).map(|i| {
+            let mut o = observe(&mut rng, &rig, i % 2, &near, 0.0);
+            o.bearing = -o.bearing;
+            o
+        }));
+        let start = Gp3pPose::from_rigid_transform(&near);
+        for o in &c[10..] {
+            assert!(o.angular_residual(&start) > 1.999, "seed {seed}");
+        }
+        let refined = refine(&c, &start);
+        let (r, t) = pose_error(&refined, &truth);
+        // The 30 rows behind cost 30 in total, so the relative tolerance stops
+        // a little earlier than on inliers alone.
+        assert!(
+            r < 1e-7 && t < 1e-6,
+            "seed {seed}: rotation {r}, translation {t}"
+        );
     }
 }
