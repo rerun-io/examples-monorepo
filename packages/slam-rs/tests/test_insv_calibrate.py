@@ -14,12 +14,10 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from slam_rs.apis.insv_calibrate import (
-    BootstrapAttempt,
     Config,
     TrackedFrame,
     WindowScan,
     epipolar_residuals,
-    first_attempt,
     fit_hand_eye,
     main,
     offset_summary,
@@ -129,17 +127,6 @@ def test_the_bootstrap_scan_recovers_the_offset_over_noisy_windows() -> None:
     mean_ms, spread_ms = offset_summary(scans)
     assert mean_ms == pytest.approx(-2.0, abs=0.5)
     assert spread_ms < 1.0
-
-
-def test_the_first_attempt_is_read_from_the_report_text() -> None:
-    text: str = (
-        '{"attempts":[{"first_t_ns":1,"last_t_ns":2,"frames":61,"tracks":3653,"verdict":"Accepted","accepted":true,'
-        '"excitation_mps2":2.2,"tracks_used":913,"residual_rms_rad":0.0021,"condition":14.5,"gravity_norm_unconstrained":9.79,'
-        '"scale_sigma":0.0028,"velocity_world":[0,0,0],"gravity_body0":[0,0,9.8],"bias_gyro":[0,0,0],"bias_accel":[0,0,0]}],'
-        '"start_t_ns":1,"accepted_at_t_ns":2,"replayed":61}'
-    )
-    assert first_attempt(text) == BootstrapAttempt(verdict="Accepted", accepted=True, frames=61, residual_rms_rad=0.0021, scale_sigma=0.0028)
-    assert first_attempt('{"attempts":[],"start_t_ns":null,"accepted_at_t_ns":null,"replayed":0}') is None
 
 
 CLIP_RRD: Path | None = Path(clip) if (clip := os.environ.get("SLAM_RS_INSTA360_RRD")) else None

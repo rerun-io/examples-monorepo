@@ -1,7 +1,7 @@
 """Replay catalog or local recordings through the Rust core and log ground-truth comparisons."""
 
 import dataclasses
-import json
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -215,25 +215,40 @@ def _write_bootstrap_report(stage: VioStage, output_csv: Path, first_t_ns: int) 
         output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
         first_t_ns: The segment's first frameset time, the origin of the printed seconds.
     """
-    report_text: str | None = stage.lockstep.vio.bootstrap_report()
+    vio: _core.Vio = stage.lockstep.vio
+    report_text: str | None = vio.bootstrap_report()
     if report_text is None:
         return
     report_path: Path = output_csv.with_suffix(".bootstrap.json")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text)
-    report: dict = json.loads(report_text)
-    verdicts: list[str] = [attempt["verdict"].split(" ")[0] for attempt in report["attempts"]]
-    start: int | None = report["start_t_ns"]
+    verdicts: list[str] = [attempt.verdict.split(" ")[0] for attempt in vio.bootstrap_attempts]
+    start: int | None = vio.bootstrap_start_t_ns
+    accepted_at: int | None = vio.bootstrap_accepted_at_t_ns
     print(
         f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; "
         + (
             f"started at {(start - first_t_ns) * 1e-9:.2f} s, first pose at "
-            f"{(report['accepted_at_t_ns'] - first_t_ns) * 1e-9:.2f} s, {report['replayed']} framesets replayed"
-            if start is not None
+            f"{(accepted_at - first_t_ns) * 1e-9:.2f} s, {vio.bootstrap_replayed} framesets replayed"
+            if start is not None and accepted_at is not None
             else "no window accepted"
         )
         + f" -> {report_path}"
     )
+
+
+def _write_bootstrap_report_after_failure(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
+    """Write the bootstrap report of a replay that raised; a writer error is printed, so the replay's own error propagates.
+
+    Args:
+        stage: The pipeline stage that ran.
+        output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
+        first_t_ns: The segment's first frameset time, the origin of the printed seconds.
+    """
+    try:
+        _write_bootstrap_report(stage, output_csv, first_t_ns)
+    except (OSError, ValueError) as error:
+        print(f"inertial bootstrap report not written: {error!r}", file=sys.stderr)
 
 
 def main(config: Config) -> None:
@@ -322,12 +337,14 @@ def main(config: Config) -> None:
             rr.send_blueprint(vio_blueprint(feed.cameras))
         try:
             _replay(feed, config, stage)
-        finally:
+        except BaseException:
             # Written even when the run stops: a bootstrap that never accepts raises, and its attempts are the diagnosis.
             if isinstance(stage, VioStage):
-                _write_bootstrap_report(stage, output_csv, int(feed.frame_t_ns[0]))
+                _write_bootstrap_report_after_failure(stage, output_csv, int(feed.frame_t_ns[0]))
+            raise
         if not isinstance(stage, VioStage):
             return
+        _write_bootstrap_report(stage, output_csv, int(feed.frame_t_ns[0]))
         # The per-frameset segments show where the run had got to; these show
         # where it went, at every cursor and for one copy of each path.
         stage.logger.log_complete_paths()
