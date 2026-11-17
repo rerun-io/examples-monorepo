@@ -129,10 +129,16 @@ fn right_front() -> KannalaBrandt4<f64> {
 }
 
 mod brown;
+mod double_sphere;
+mod equirectangular;
+mod eucm;
 mod fisheye624;
 #[cfg(feature = "serde")]
 mod formats;
+#[cfg(feature = "serde")]
+mod insta360;
 mod kb4;
+mod mei;
 mod pinhole;
 mod regressions;
 
