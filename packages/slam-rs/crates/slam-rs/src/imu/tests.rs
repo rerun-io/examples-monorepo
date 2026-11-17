@@ -190,7 +190,7 @@ fn gravity_init_aligns_the_accelerometer_with_world_up() {
         let up: Vector3<f64> = rotation * (accel / accel.norm());
         assert_abs_diff_eq!(up, Vector3::new(0.0, 0.0, 1.0), epsilon = 1e-12);
         // The rig-frame gravity is minus the measured specific force.
-        let g_body: Vector3<f64> = rotation.inverse() * gravity::<f64>();
+        let g_body: Vector3<f64> = rotation.inverse() * gravity::<f64>(9.81);
         assert_abs_diff_eq!(g_body.normalize(), -accel.normalize(), epsilon = 1e-12);
     }
 }
@@ -225,7 +225,7 @@ fn gravity_init_handles_the_degenerate_directions() {
 #[test]
 fn gravity_init_recovers_roll_and_pitch() {
     let mut rng: Rng = Rng::new(0x5eed_000b);
-    let g: Vector3<f64> = gravity::<f64>();
+    let g: Vector3<f64> = gravity::<f64>(9.81);
     for _ in 0..64 {
         let truth: So3<f64> = So3::exp(&(rng.vector3() * 1.2));
         // What a rig at rest measures: minus gravity, in the rig frame.

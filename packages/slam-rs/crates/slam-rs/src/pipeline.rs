@@ -162,8 +162,7 @@ impl<S: Scalar> Vio<S> {
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
-        let gravity: Vector3<S> =
-            Vector3::new(S::zero(), S::zero(), crate::lie::c(-config.vio_gravity_ms2));
+        let gravity: Vector3<S> = crate::imu::gravity(config.vio_gravity_ms2);
         let estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::new(gravity, calibration.cast(), config)?;
         Ok(Self {
@@ -209,7 +208,7 @@ impl<S: Scalar> Vio<S> {
 
     /// Gravity in the world frame, `(0, 0, -config.vio_gravity_ms2)`.
     fn gravity(&self) -> Vector3<f64> {
-        Vector3::new(0.0, 0.0, -self.frontend.config().vio_gravity_ms2)
+        crate::imu::gravity(self.frontend.config().vio_gravity_ms2)
     }
 
     /// Every frameset rule, on the panorama when the rig is one.

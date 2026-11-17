@@ -340,7 +340,7 @@ fn estimator_starts_from_the_solved_window_and_tracks_monocular() {
     let config: VioConfig = VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
     let initial = accepted.initial;
     let mut estimator: SqrtKeypointVio<f64> = SqrtKeypointVio::with_initial_state(
-        crate::imu::gravity(),
+        crate::imu::gravity(9.81),
         run.calibration.clone(),
         config,
         initial,

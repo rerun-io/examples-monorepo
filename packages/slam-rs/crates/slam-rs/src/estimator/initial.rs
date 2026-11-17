@@ -96,7 +96,7 @@ mod tests {
 
     fn estimator(state: InitialState<f64>) -> Result<SqrtKeypointVio<f64>, EstimatorError> {
         SqrtKeypointVio::with_initial_state(
-            crate::imu::gravity(),
+            crate::imu::gravity(9.81),
             Calibration::from_json_str(MSDMI_CALIB).unwrap(),
             VioConfig::from_json_str(MSDMI_CONFIG).unwrap(),
             state,

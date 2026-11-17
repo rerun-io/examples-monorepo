@@ -641,8 +641,7 @@ impl<S: Scalar> Vio<S> {
             bias_accel: accepted.initial.bias_accel.map(S::from_literal),
             velocity_sigma: S::from_literal(accepted.initial.velocity_sigma),
         };
-        let gravity: nalgebra::Vector3<S> =
-            nalgebra::Vector3::new(S::zero(), S::zero(), crate::lie::c(-config.vio_gravity_ms2));
+        let gravity: nalgebra::Vector3<S> = crate::imu::gravity(config.vio_gravity_ms2);
         let mut fresh = estimator::SqrtKeypointVio::with_initial_state(
             gravity,
             calibration,
