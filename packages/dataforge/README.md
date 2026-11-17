@@ -478,7 +478,7 @@ msd's gt. After that the zip may go.
 as one zip per camera that holds every trajectory. `download` reads each zip's
 central directory through HTTP `Range` requests and fetches only the chosen
 trajectories' members (`--trajectories <Env>/<easy|hard>/P0NN ...`), so the
-default subset is 13 GB instead of the 40 GB of whole zips. It can restart:
+default subset is about 13 GB instead of 35 GB of whole zips. It can restart:
 a member already on disk at its size is skipped, and every member's CRC is checked.
 
 One trajectory converts three ways, one catalog dataset per `--camera-set`, so
