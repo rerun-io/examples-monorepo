@@ -264,8 +264,19 @@ fn rel_err(a: &[f64], reference: &[f64]) -> f64 {
     (diff / norm).sqrt()
 }
 
-/// DESIGN §7.4 bands for the device lane against the CPU lanes.
-const COST_REL_BAND: f64 = 1e-3;
+/// DESIGN §7.4 bands for the device lane against the cpu-f64 oracle.
+/// Final cost against cpu-f64: 1e-3, except MGO13 at 4e-3. On MGO13 cpu-f32
+/// also sits 3.6e-3 from f64, and gpu vs cpu-f32 is 1.8e-5. The cause is the
+/// same f32 floor as the KF band Pablo accepted (LM stops at 20 attempts in a
+/// flat valley); this tolerance extends that decision, as the lead reported to
+/// the coordinator (2026-11-17).
+fn cost_band(seq: &str) -> f64 {
+    if seq == "MGO13" {
+        4e-3
+    } else {
+        1e-3
+    }
+}
 const STEP_REL_BAND: f64 = 1e-3;
 /// Keyframe position RMS: 5 mm on TUM-VI, 1 mm on MSD, except MGO13: its
 /// device lane sits 1.1 mm from both CPU lanes, the f32 floor of that map
@@ -373,27 +384,23 @@ fn band_and_speed_on_exported_problems() {
             }
         }
         println!("{band}");
-        // The device lane is in band when it is within it of either CPU lane:
-        // cpu-f32, or the cpu-f64 oracle (cpu-f32 itself leaves the oracle on
-        // some maps, and a device lane that matches the oracle is no regression).
-        if let Some(g) = first("gpu") {
-            let against = |f: &dyn Fn(&Run) -> f64| {
-                ["cpu", "cpu64"]
-                    .iter()
-                    .filter_map(|lane| first(lane).map(f))
-                    .fold(f64::INFINITY, f64::min)
-            };
-            let rel = against(&|c: &Run| cost_rel(g, c).abs());
-            if rel > COST_REL_BAND {
-                misses.push(format!("{seq} cost: rel {rel:.3e} > {COST_REL_BAND}"));
+        // The device lane must be within its band of the cpu-f64 oracle.
+        // cpu-f32 vs cpu-f64 is reported above as information only: its gaps
+        // (MGO05 cost, TM2 keyframes) are a CPU-lane issue, filed apart.
+        if let (Some(g), Some(oracle)) = (first("gpu"), first("cpu64")) {
+            let rel = cost_rel(g, oracle).abs();
+            if rel.is_nan() || rel > cost_band(seq) {
+                misses.push(format!("{seq} cost: rel {rel:.3e} > {}", cost_band(seq)));
             }
-            let rms = against(&|c: &Run| kabsch_rms_mm(&g.solved, &c.solved));
-            if rms > kf_band_mm(seq) {
+            let rms = kabsch_rms_mm(&g.solved, &oracle.solved);
+            if rms.is_nan() || rms > kf_band_mm(seq) {
                 misses.push(format!(
                     "{seq} kf_rms: {rms:.3} mm > {} mm",
                     kf_band_mm(seq)
                 ));
             }
+        } else {
+            misses.push(format!("{seq}: the band needs a gpu and a cpu64 run"));
         }
     }
     assert!(misses.is_empty(), "band misses: {misses:#?}");
