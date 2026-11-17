@@ -61,13 +61,6 @@ pub enum VioBootstrap {
     Inertial,
 }
 
-impl VioBootstrap {
-    /// The default; not written out, so existing configs keep their bytes.
-    pub fn is_stereo(&self) -> bool {
-        *self == Self::Stereo
-    }
-}
-
 /// Something that went wrong reading a config.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -328,10 +321,7 @@ pub struct VioConfig {
     #[serde(rename = "config.vio_kf_marg_criteria")]
     pub vio_kf_marg_criteria: KeyframeMargCriteria,
     /// How the first state is found; see [`VioBootstrap`].
-    #[serde(
-        rename = "config.vio_bootstrap",
-        skip_serializing_if = "VioBootstrap::is_stereo"
-    )]
+    #[serde(rename = "config.vio_bootstrap")]
     pub vio_bootstrap: VioBootstrap,
 }
 
