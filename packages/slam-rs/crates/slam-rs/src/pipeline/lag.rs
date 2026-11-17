@@ -128,7 +128,11 @@ impl<S: Scalar> Vio<S> {
             crate::imu::accumulate_to(
                 &mut pim,
                 None,
-                || samples.next().map(|sample| self.calibrated(sample)),
+                || {
+                    samples
+                        .next()
+                        .map(|sample| super::calibrated(&self.calib_f32, sample))
+                },
                 latest.t_ns,
                 until_ns,
                 &self.frontend_noise,

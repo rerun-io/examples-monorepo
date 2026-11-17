@@ -1,7 +1,6 @@
 """Replay catalog or local recordings through the Rust core and log ground-truth comparisons."""
 
 import dataclasses
-import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -28,12 +27,16 @@ from slam_rs.catalog_feed import (
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
+from slam_rs.rig import TIMELINE
 from slam_rs.tracking import Lockstep, vio_for_feed
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import FrameMode, StageTimes, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import RUN_ENTITY, FrameMode, StageTimes, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
+
+BOOTSTRAP_ENTITY: str = f"{RUN_ENTITY}/bootstrap"
+"""Where the inertial bootstrap's attempts go, one row per attempt at the frameset that ran it."""
 
 Stage: TypeAlias = Literal["input", "frontend", "vio"]
 """How far a replay runs: the estimator's inputs, the optical-flow frontend over them, or the whole pipeline."""
@@ -137,6 +140,90 @@ class FrontendStage:
         )
 
 
+@dataclass(slots=True)
+class BootstrapLog:
+    """The inertial bootstrap in the result recording: each attempt when it happens, the status as a recording property.
+
+    The attempts are logged as the run makes them, so a bootstrap that never accepts and stops the run is still in
+    the recording. Nothing is logged on the stereo start.
+    """
+
+    logged: int = 0
+    """Attempts already in the recording."""
+    accepted: bool = False
+    """Whether the recording already holds the accepted status."""
+
+    def log_new(self, vio: _core.Vio) -> None:
+        """Log the attempts made since the last call, at their own frameset time, and the status when it changed.
+
+        Args:
+            vio: The pipeline that runs the bootstrap.
+        """
+        report: _core.BootstrapReport | None = vio.bootstrap_report()
+        if report is None:
+            return
+        attempts: list[_core.BootstrapAttempt] = report.attempts
+        for attempt in attempts[self.logged :]:
+            rr.set_time(TIMELINE, duration=np.timedelta64(attempt.last_t_ns, "ns"))
+            rr.log(
+                BOOTSTRAP_ENTITY,
+                rr.AnyValues(
+                    verdict=attempt.verdict,
+                    accepted=attempt.accepted,
+                    first_t_ns=attempt.first_t_ns,
+                    frames=attempt.frames,
+                    tracks=attempt.tracks,
+                    tracks_used=attempt.tracks_used,
+                ),
+            )
+            quality: dict[str, float | None] = {
+                "window_s": (attempt.last_t_ns - attempt.first_t_ns) * 1e-9,
+                "excitation_mps2": attempt.excitation_mps2,
+                "residual_rms_rad": attempt.residual_rms_rad,
+                "condition": attempt.condition,
+                "gravity_norm_unconstrained": attempt.gravity_norm_unconstrained,
+                "scale_sigma": attempt.scale_sigma,
+            }
+            for name, value in quality.items():
+                if value is not None:
+                    rr.log(f"{BOOTSTRAP_ENTITY}/{name}", rr.Scalars(value))
+        accepted: bool = report.start_t_ns is not None
+        if len(attempts) == self.logged and accepted == self.accepted:
+            return
+        self.logged = len(attempts)
+        self.accepted = accepted
+        # A recording property holds the latest value: on a run that stops this is the status where it stopped.
+        rr.send_property(
+            "bootstrap",
+            rr.AnyValues(
+                status="accepted" if accepted else "bootstrapping",
+                attempts=len(attempts),
+                start_t_ns=report.start_t_ns,
+                accepted_at_t_ns=report.accepted_at_t_ns,
+                replayed=report.replayed,
+            ),
+        )
+
+    @staticmethod
+    def summary(vio: _core.Vio, first_t_ns: int) -> str | None:
+        """One line on the bootstrap for the console, or None on the stereo start.
+
+        Args:
+            vio: The pipeline that ran.
+            first_t_ns: The segment's first frameset time, the origin of the printed seconds.
+        """
+        report: _core.BootstrapReport | None = vio.bootstrap_report()
+        if report is None:
+            return None
+        verdicts: list[str] = [attempt.verdict for attempt in report.attempts]
+        if report.start_t_ns is None or report.accepted_at_t_ns is None:
+            return f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; no window accepted"
+        return (
+            f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; started at {(report.start_t_ns - first_t_ns) * 1e-9:.2f} s, "
+            f"first pose at {(report.accepted_at_t_ns - first_t_ns) * 1e-9:.2f} s, {report.replayed} framesets replayed"
+        )
+
+
 def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage | None) -> int:
     """Log every frameset's inputs and drive whichever stage was built over them.
 
@@ -158,6 +245,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
     times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
     framesets: Iterator[Frameset] = iter(feed.framesets(stop_ns))
+    bootstrap: BootstrapLog = BootstrapLog()
     while config.max_framesets is None or replayed < config.max_framesets:
         waited: float = time.monotonic()
         frameset: Frameset | None = next(framesets, None)
@@ -176,66 +264,26 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
         if isinstance(stage, VioStage):
             stage.run(frameset, log_panorama=log_images)
+            bootstrap.log_new(stage.lockstep.vio)
         elif stage is not None:
             stage.run(frameset)
 
     if isinstance(stage, VioStage):
         stage.flush()
+        bootstrap.log_new(stage.lockstep.vio)
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
     print(times.summary())
     if stage is not None:
         print(stage.summary())
+    if isinstance(stage, VioStage) and (line := BootstrapLog.summary(stage.lockstep.vio, int(feed.frame_t_ns[0]))) is not None:
+        print(line)
     if isinstance(stage, VioStage) and stage.keypoints:
         print(
             f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "
             f"mean {np.mean(stage.keypoints):.1f}, min {np.min(stage.keypoints)}, max {np.max(stage.keypoints)}"
         )
     return replayed
-
-
-def _write_bootstrap_report(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
-    """Write the inertial bootstrap's attempts beside the trajectory and print one line on them; nothing on the stereo start.
-
-    Args:
-        stage: The pipeline stage that ran.
-        output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
-        first_t_ns: The segment's first frameset time, the origin of the printed seconds.
-    """
-    vio: _core.Vio = stage.lockstep.vio
-    report_text: str | None = vio.bootstrap_report()
-    if report_text is None:
-        return
-    report_path: Path = output_csv.with_suffix(".bootstrap.json")
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report_text)
-    verdicts: list[str] = [attempt.verdict.split(" ")[0] for attempt in vio.bootstrap_attempts]
-    start: int | None = vio.bootstrap_start_t_ns
-    accepted_at: int | None = vio.bootstrap_accepted_at_t_ns
-    print(
-        f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; "
-        + (
-            f"started at {(start - first_t_ns) * 1e-9:.2f} s, first pose at "
-            f"{(accepted_at - first_t_ns) * 1e-9:.2f} s, {vio.bootstrap_replayed} framesets replayed"
-            if start is not None and accepted_at is not None
-            else "no window accepted"
-        )
-        + f" -> {report_path}"
-    )
-
-
-def _write_bootstrap_report_after_failure(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
-    """Write the bootstrap report of a replay that raised; a writer error is printed, so the replay's own error propagates.
-
-    Args:
-        stage: The pipeline stage that ran.
-        output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
-        first_t_ns: The segment's first frameset time, the origin of the printed seconds.
-    """
-    try:
-        _write_bootstrap_report(stage, output_csv, first_t_ns)
-    except (OSError, ValueError) as error:
-        print(f"inertial bootstrap report not written: {error!r}", file=sys.stderr)
 
 
 def main(config: Config) -> None:
@@ -318,16 +366,9 @@ def main(config: Config) -> None:
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
-        try:
-            _replay(feed, config, stage)
-        except BaseException:
-            # Written even when the run stops: a bootstrap that never accepts raises, and its attempts are the diagnosis.
-            if isinstance(stage, VioStage):
-                _write_bootstrap_report_after_failure(stage, output_csv, int(feed.frame_t_ns[0]))
-            raise
+        _replay(feed, config, stage)
         if not isinstance(stage, VioStage):
             return
-        _write_bootstrap_report(stage, output_csv, int(feed.frame_t_ns[0]))
         # The per-frameset segments show where the run had got to; these show
         # where it went, at every cursor and for one copy of each path.
         stage.logger.log_complete_paths()

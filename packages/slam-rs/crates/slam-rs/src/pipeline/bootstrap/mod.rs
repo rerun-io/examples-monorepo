@@ -7,27 +7,37 @@
 //! hands each frameset's observations to [`InertialBootstrap`] instead of the
 //! estimator:
 //!
-//! 1. The frontend gets a gyro-only rotation prediction ([`InertialBootstrap::predict`]),
-//!    so the KLT has a guess before any state exists.
-//! 2. The observations and a copy of the IMU are buffered. When the buffer
-//!    spans the window (2 s), the observations become unit bearings
-//!    ([`prepare_bearings`]) and `kornia_staging_slam::init::inertial::solve_inertial_init`
-//!    runs. A rolling-shutter rig's observations arrive already corrected:
+//! 1. The frontend gets a gyro-only rotation prediction: [`Vio`]'s own
+//!    frontend preintegration from an identity state at rest with zero
+//!    biases, of which only the rotation is kept. The KLT has a guess before
+//!    any state exists.
+//! 2. The observations and the IMU (raw, and calibrated once as it arrives)
+//!    are buffered. When the buffer spans the window (2 s), the observations
+//!    become unit bearings ([`prepare_bearings`]) and
+//!    `kornia_staging_slam::init::inertial::solve_inertial_init` runs. A
+//!    rolling-shutter rig's observations arrive already corrected:
 //!    `Vio::finish_track` corrects the estimator's copy before it reaches
 //!    either the bootstrap or the estimator, so the buffer, the bearings and
 //!    the replayed framesets are the same corrected observations.
-//! 3. On a rejection the window grows to 3 s once; then it slides by 0.5 s
-//!    and starts at 2 s again. Every attempt is logged and kept in the
+//! 3. On a rejection of the first window it grows to 3 s. Each later
+//!    rejection slides the 3 s window by 0.5 s, so the next attempt comes
+//!    0.5 s of framesets later: one solve per 0.5 s, never two on
+//!    consecutive framesets. Every attempt is logged and kept in the
 //!    [`BootstrapReport`].
 //! 4. On acceptance [`Vio`] builds a fresh estimator with
 //!    [`estimator::SqrtKeypointVio::with_initial_state`] at the window's
 //!    first frameset, pushes the buffered IMU, replays the buffered
 //!    framesets through the normal `process_frame` and continues live.
 //!    The replayed framesets publish no pose: the first pose is the
-//!    frameset that completed the accepted window.
-//! 5. The buffer holds at most the grown window. If no window is accepted
-//!    within [`BootstrapOptions::timeout_s`] of the first frameset,
-//!    `track` fails with [`BootstrapError::NeverAccepted`].
+//!    frameset that completed the accepted window. The driver keeps its
+//!    buffers and its report names no start until the replay has succeeded
+//!    ([`InertialBootstrap::commit`]); a replay error leaves it as the
+//!    attempt left it, so the next frameset solves again.
+//! 5. The buffer holds at most the grown window. A window without
+//!    excitation (the rig at rest) means "not yet" and costs no time; once
+//!    the windows that had excitation span [`BootstrapOptions::timeout_s`]
+//!    without an acceptance, `track` fails with
+//!    [`BootstrapError::NeverAccepted`] on that frameset and every later one.
 //!
 //! Frameset times must be on the IMU clock and refer to the instant the
 //! observations describe (for a rolling-shutter camera: the middle row's
@@ -37,15 +47,15 @@ use crate::calib::{BasaltCamera, Calibration};
 use crate::camera::SlamCamera;
 use crate::config::{VioBootstrap, VioConfig};
 use crate::estimator::{self, FlowObservations, InitialState};
-use crate::frontend::flow::PosePrediction;
-use crate::lie::{Se3, So3};
+use crate::imu::Popped;
+use crate::lie::Se3;
 use kornia_staging_algebra::Scalar;
 use kornia_staging_sensors::imu::CombinedImuSample;
 use kornia_staging_slam::init::inertial::{
     BearingObservation, FeatureTrack, ImuSample, InertialInitError, InertialInitOptions,
-    InertialInitOutcome, InertialInitProblem, InitVerdict, sample_at, solve_inertial_init,
+    InertialInitOutcome, InertialInitProblem, InitVerdict, RejectReason, solve_inertial_init,
 };
-use nalgebra::{UnitQuaternion, Vector3, Vector4};
+use nalgebra::{Vector3, Vector4};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
@@ -54,11 +64,12 @@ use std::sync::Arc;
 pub struct BootstrapOptions {
     /// First window length, seconds.
     pub window_s: f64,
-    /// Length the window grows to after a rejection, seconds.
+    /// Length the window grows to after the first rejection, seconds.
     pub grow_s: f64,
-    /// Slide after a rejection at the grown length, seconds.
+    /// Slide of the grown window after each later rejection, seconds.
     pub slide_s: f64,
-    /// Give up when no window is accepted this long after the first frameset.
+    /// Give up once the windows with excitation span this long without an
+    /// acceptance, seconds.
     pub timeout_s: f64,
     /// Floor of the velocity prior's sigma, m/s.
     pub velocity_sigma_floor: f64,
@@ -79,8 +90,24 @@ impl Default for BootstrapOptions {
     }
 }
 
+/// The name of a verdict: `Accepted` or the rejection reason's name.
+pub fn verdict_name(verdict: &InitVerdict) -> &'static str {
+    match verdict {
+        InitVerdict::Accepted => "Accepted",
+        InitVerdict::Rejected(reason) => match reason {
+            RejectReason::LowExcitation { .. } => "LowExcitation",
+            RejectReason::LowParallax { .. } => "LowParallax",
+            RejectReason::TooFewTracks { .. } => "TooFewTracks",
+            RejectReason::IllConditioned { .. } => "IllConditioned",
+            RejectReason::ResidualTooHigh { .. } => "ResidualTooHigh",
+            RejectReason::GravityNormInconsistent { .. } => "GravityNormInconsistent",
+            RejectReason::NotConverged => "NotConverged",
+        },
+    }
+}
+
 /// One solve attempt.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BootstrapAttempt {
     /// First frameset of the window, ns.
     pub first_t_ns: i64,
@@ -90,10 +117,8 @@ pub struct BootstrapAttempt {
     pub frames: usize,
     /// Tracks handed to the solver.
     pub tracks: usize,
-    /// `Accepted` or the rejection reason.
-    pub verdict: String,
-    /// Whether the verdict accepted.
-    pub accepted: bool,
+    /// The solver's verdict, with the numbers behind a rejection.
+    pub verdict: InitVerdict,
     /// Excitation, m/s^2.
     pub excitation_mps2: f64,
     /// Inlier tracks.
@@ -116,8 +141,15 @@ pub struct BootstrapAttempt {
     pub bias_accel: Option<[f64; 3]>,
 }
 
+impl BootstrapAttempt {
+    /// Whether the solver accepted the window.
+    pub fn accepted(&self) -> bool {
+        self.verdict == InitVerdict::Accepted
+    }
+}
+
 /// Every attempt and where the bootstrap started the estimator.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BootstrapReport {
     /// Attempts in order.
     pub attempts: Vec<BootstrapAttempt>,
@@ -129,30 +161,20 @@ pub struct BootstrapReport {
     pub replayed: usize,
 }
 
-impl BootstrapReport {
-    /// The report as JSON, for tools that log it.
-    ///
-    /// # Errors
-    /// A non-finite number in a quality field.
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-}
-
 /// Why the bootstrap stopped.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum BootstrapError {
-    /// No window was accepted in time.
+    /// The windows with excitation spanned the timeout without an acceptance.
     #[error(
-        "inertial bootstrap: no window accepted in {seconds:.1} s after {attempts} attempts; last verdict {last_verdict}"
+        "inertial bootstrap: no window accepted over {seconds:.1} s of windows with excitation after {attempts} attempts; last verdict {last_verdict}"
     )]
     NeverAccepted {
-        /// Seconds since the first frameset.
+        /// Seconds of framesets covered by windows that had excitation.
         seconds: f64,
         /// Attempts made.
         attempts: usize,
-        /// The last attempt's verdict.
-        last_verdict: String,
+        /// The last attempt's verdict name.
+        last_verdict: &'static str,
     },
     /// The solver refused the window as malformed.
     #[error("inertial bootstrap: {0}")]
@@ -170,11 +192,12 @@ pub enum BootstrapError {
 pub enum BootstrapStep {
     /// Still buffering or the attempt was rejected.
     Buffering,
-    /// A window was accepted: start from it.
+    /// A window was accepted: start from it, then [`InertialBootstrap::commit`].
     Accepted(Box<Accepted>),
 }
 
-/// An accepted window and what the estimator needs to start from it.
+/// An accepted window and what the estimator needs to start from it: copies
+/// of the driver's buffers, which it keeps until the start is committed.
 #[derive(Debug)]
 pub struct Accepted {
     /// The first state, at the first buffered frameset.
@@ -233,13 +256,16 @@ pub struct InertialBootstrap {
     cameras: Vec<SlamCamera<f64>>,
     calibration: Calibration<f64>,
     gravity_magnitude: f64,
+    /// Raw samples, for the estimator a commit starts.
     imu: VecDeque<CombinedImuSample>,
-    newest_imu_t_ns: Option<i64>,
+    /// The same samples calibrated as they arrived, for the solver.
+    imu_calibrated: VecDeque<ImuSample>,
     frames: VecDeque<Arc<FlowObservations>>,
     window_ns: i64,
-    first_t_ns: Option<i64>,
-    orientation: UnitQuaternion<f64>,
-    orientation_t_ns: Option<i64>,
+    /// Frameset time covered by windows that had excitation, ns.
+    excited_ns: i64,
+    /// The last attempt's last frameset.
+    last_attempt_t_ns: Option<i64>,
     report: BootstrapReport,
 }
 
@@ -272,11 +298,10 @@ impl InertialBootstrap {
             calibration,
             gravity_magnitude,
             imu: VecDeque::new(),
-            newest_imu_t_ns: None,
+            imu_calibrated: VecDeque::new(),
             frames: VecDeque::new(),
-            first_t_ns: None,
-            orientation: UnitQuaternion::identity(),
-            orientation_t_ns: None,
+            excited_ns: 0,
+            last_attempt_t_ns: None,
             report: BootstrapReport::default(),
         })
     }
@@ -284,11 +309,6 @@ impl InertialBootstrap {
     /// The attempts so far.
     pub fn report(&self) -> &BootstrapReport {
         &self.report
-    }
-
-    /// Take the report, for the pipeline to keep after acceptance.
-    pub fn into_report(self) -> BootstrapReport {
-        self.report
     }
 
     /// Framesets buffered now; at most the grown window's.
@@ -299,18 +319,21 @@ impl InertialBootstrap {
 
     /// The newest IMU timestamp buffered.
     pub fn newest_imu_t_ns(&self) -> Option<i64> {
-        self.newest_imu_t_ns
+        self.imu.back().map(|s| s.timestamp_ns)
     }
 
     /// Whether the IMU reaches strictly past `t_ns` (the estimator's rule).
     pub fn imu_covers_frame(&self, t_ns: i64) -> bool {
-        self.newest_imu_t_ns.is_some_and(|newest| newest > t_ns)
+        self.newest_imu_t_ns().is_some_and(|newest| newest > t_ns)
     }
 
-    /// Buffer one raw sample; the caller has checked its order.
-    pub fn push_imu(&mut self, sample: CombinedImuSample) {
-        self.newest_imu_t_ns = Some(sample.timestamp_ns);
+    /// Buffer one raw sample and its calibrated value; the caller has checked
+    /// its order.
+    pub fn push_imu(&mut self, sample: CombinedImuSample, calibrated: Popped<f64>) {
+        let (t_ns, gyro, accel) = calibrated;
         self.imu.push_back(sample);
+        self.imu_calibrated
+            .push_back(ImuSample { t_ns, gyro, accel });
         if self.frames.is_empty() {
             // Before the first frameset keep the timeout's span (at least one
             // second), so a caller that pushes IMU ahead of the framesets still
@@ -323,76 +346,22 @@ impl InertialBootstrap {
                     .front()
                     .is_some_and(|s| s.timestamp_ns < keep_after)
             {
-                self.imu.pop_front();
+                self.pop_imu();
             }
         }
     }
 
-    fn calibrated(&self, sample: &CombinedImuSample) -> ImuSample {
-        ImuSample {
-            t_ns: sample.timestamp_ns,
-            gyro: self
-                .calibration
-                .calib_gyro_bias
-                .calibrated(&Vector3::from(sample.gyro.to_array())),
-            accel: self
-                .calibration
-                .calib_accel_bias
-                .calibrated(&Vector3::from(sample.accel.to_array())),
-        }
+    fn pop_imu(&mut self) {
+        self.imu.pop_front();
+        self.imu_calibrated.pop_front();
     }
 
-    /// Gyro-only rotation prediction from the previous frameset to `t_ns`
-    /// (translation zero, gyro bias zero), so the KLT has a guess before any
-    /// state exists. The caller has checked IMU coverage.
-    pub fn predict(&mut self, t_ns: i64) -> PosePrediction {
-        let previous: UnitQuaternion<f64> = self.orientation;
-        if let Some(t0) = self.orientation_t_ns {
-            // Mid-point integration over (t0, t_ns] with the samples on both
-            // sides of each end held constant to the edge.
-            let samples: Vec<ImuSample> = self.imu.iter().map(|s| self.calibrated(s)).collect();
-            let mut q: UnitQuaternion<f64> = previous;
-            let mut t_a: i64 = t0;
-            let gyro_at = |t: i64| -> Vector3<f64> {
-                if samples.is_empty() {
-                    Vector3::zeros()
-                } else {
-                    sample_at(&samples, t).0
-                }
-            };
-            let mut knots: Vec<i64> = samples
-                .iter()
-                .map(|s| s.t_ns)
-                .filter(|&t| t > t0 && t < t_ns)
-                .collect();
-            knots.push(t_ns);
-            let mut gyro_a: Vector3<f64> = gyro_at(t0);
-            for t_b in knots {
-                let gyro_b: Vector3<f64> = gyro_at(t_b);
-                let dt: f64 = (t_b - t_a) as f64 * 1e-9;
-                q *= UnitQuaternion::from_scaled_axis((gyro_a + gyro_b) * (0.5 * dt));
-                t_a = t_b;
-                gyro_a = gyro_b;
-            }
-            self.orientation = q;
-        }
-        self.orientation_t_ns = Some(t_ns);
-        let pose = |q: &UnitQuaternion<f64>| -> Se3<f32> {
-            Se3::new(So3::from_unit_quaternion(*q), Vector3::zeros()).cast()
-        };
-        PosePrediction {
-            t_w_i_previous: pose(&previous),
-            t_w_i_current: pose(&self.orientation),
-        }
-    }
-
-    fn attempt(&self) -> Result<(InertialInitOutcome, usize), BootstrapError> {
+    fn attempt(&mut self) -> Result<(InertialInitOutcome, usize), BootstrapError> {
         let window: Vec<Arc<FlowObservations>> = self.frames.iter().cloned().collect();
         let tracks: Vec<FeatureTrack> = prepare_bearings(&window, &self.cameras);
         let frame_times: Vec<i64> = window.iter().map(|f| f.t_ns).collect();
-        let imu: Vec<ImuSample> = self.imu.iter().map(|s| self.calibrated(s)).collect();
         let problem = InertialInitProblem {
-            imu: &imu,
+            imu: self.imu_calibrated.make_contiguous(),
             frame_times_ns: &frame_times,
             tracks: &tracks,
             t_i_c: &self.calibration.t_i_c,
@@ -415,11 +384,7 @@ impl InertialBootstrap {
             last_t_ns,
             frames: self.frames.len(),
             tracks,
-            verdict: match outcome.verdict {
-                InitVerdict::Accepted => "Accepted".to_owned(),
-                InitVerdict::Rejected(reason) => format!("{reason:?}"),
-            },
-            accepted: outcome.accepted().is_some(),
+            verdict: outcome.verdict,
             excitation_mps2: q.excitation_mps2,
             tracks_used: q.tracks_used,
             residual_rms_rad: q.residual_rms_rad,
@@ -432,7 +397,7 @@ impl InertialBootstrap {
             bias_accel: s.map(|s| s.bias_accel.into()),
         };
         log::info!(
-            "inertial bootstrap attempt {}: window {:.2} s, {} framesets, {} tracks ({} used): {}; excitation {:.3} m/s^2, residual {:?} rad, condition {:?}, |g| {:?}, scale sigma {:?}",
+            "inertial bootstrap attempt {}: window {:.2} s, {} framesets, {} tracks ({} used): {:?}; excitation {:.3} m/s^2, residual {:?} rad, condition {:?}, |g| {:?}, scale sigma {:?}",
             self.report.attempts.len() + 1,
             (last_t_ns - first_t_ns) as f64 * 1e-9,
             attempt.frames,
@@ -445,6 +410,16 @@ impl InertialBootstrap {
             attempt.gravity_norm_unconstrained,
             attempt.scale_sigma,
         );
+        // A window at rest is "not yet": only windows with excitation count
+        // toward the timeout, each for the framesets since the last attempt.
+        if !matches!(
+            outcome.verdict,
+            InitVerdict::Rejected(RejectReason::LowExcitation { .. })
+        ) {
+            self.excited_ns +=
+                last_t_ns - self.last_attempt_t_ns.unwrap_or(first_t_ns).max(first_t_ns);
+        }
+        self.last_attempt_t_ns = Some(last_t_ns);
         self.report.attempts.push(attempt);
     }
 
@@ -466,21 +441,26 @@ impl InertialBootstrap {
             return;
         };
         while self.imu.len() > 1 && self.imu.get(1).is_some_and(|s| s.timestamp_ns <= first) {
-            self.imu.pop_front();
+            self.pop_imu();
         }
     }
 
     /// Buffer a frameset and, when the window is full, solve it.
     ///
+    /// On acceptance the buffers stay as they are and the report names no
+    /// start: the caller replays copies of them and then calls
+    /// [`Self::commit`].
+    ///
     /// # Errors
-    /// [`BootstrapError::NeverAccepted`] past the timeout, and malformed
-    /// windows from the solver.
+    /// [`BootstrapError::NeverAccepted`] once the windows with excitation
+    /// span the timeout (on that frameset and every later one), and
+    /// malformed windows from the solver.
     pub fn push_frame(
         &mut self,
         frame: Arc<FlowObservations>,
     ) -> Result<BootstrapStep, BootstrapError> {
+        self.check_timeout()?;
         let t_ns: i64 = frame.t_ns;
-        let first_ever: i64 = *self.first_t_ns.get_or_insert(t_ns);
         self.frames.push_back(frame);
         // A window starts where the IMU does: the solver integrates from its
         // first frameset.
@@ -495,7 +475,6 @@ impl InertialBootstrap {
         self.trim_imu();
         let first: i64 = self.frames.front().map_or(t_ns, |f| f.t_ns);
         if t_ns - first < self.window_ns {
-            self.check_timeout(t_ns - first_ever)?;
             return Ok(BootstrapStep::Buffering);
         }
         let (outcome, tracks) = self.attempt()?;
@@ -514,29 +493,35 @@ impl InertialBootstrap {
                 bias_accel: solution.bias_accel,
                 velocity_sigma,
             };
-            self.report.start_t_ns = Some(first);
-            self.report.accepted_at_t_ns = Some(t_ns);
-            self.report.replayed = self.frames.len();
             return Ok(BootstrapStep::Accepted(Box::new(Accepted {
                 initial,
-                frames: self.frames.drain(..).collect(),
-                imu: self.imu.drain(..).collect(),
+                frames: self.frames.iter().cloned().collect(),
+                imu: self.imu.iter().copied().collect(),
             })));
         }
         if self.window_ns < seconds_to_ns(self.options.grow_s) {
             self.window_ns = seconds_to_ns(self.options.grow_s);
         } else {
-            self.window_ns = seconds_to_ns(self.options.window_s);
             self.slide();
         }
-        self.check_timeout(t_ns - first_ever)?;
+        self.check_timeout()?;
         Ok(BootstrapStep::Buffering)
     }
 
-    /// [`BootstrapError::NeverAccepted`] once `elapsed_ns` since the first
-    /// frameset is past the timeout; checked on every frameset.
-    fn check_timeout(&self, elapsed_ns: i64) -> Result<(), BootstrapError> {
-        let seconds: f64 = elapsed_ns as f64 * 1e-9;
+    /// The estimator started from the accepted window: stamp the start and
+    /// hand over the report.
+    pub fn commit(self) -> BootstrapReport {
+        let mut report: BootstrapReport = self.report;
+        report.start_t_ns = self.frames.front().map(|f| f.t_ns);
+        report.accepted_at_t_ns = self.frames.back().map(|f| f.t_ns);
+        report.replayed = self.frames.len();
+        report
+    }
+
+    /// [`BootstrapError::NeverAccepted`] once the windows with excitation
+    /// span more than the timeout.
+    fn check_timeout(&self) -> Result<(), BootstrapError> {
+        let seconds: f64 = self.excited_ns as f64 * 1e-9;
         if seconds > self.options.timeout_s {
             return Err(BootstrapError::NeverAccepted {
                 seconds,
@@ -545,14 +530,15 @@ impl InertialBootstrap {
                     .report
                     .attempts
                     .last()
-                    .map_or_else(String::new, |a| a.verdict.clone()),
+                    .map_or("", |a| verdict_name(&a.verdict)),
             });
         }
         Ok(())
     }
 }
 
-/// Where a [`Vio`] is in its start.
+/// Where a [`Vio`] is in its start, and so who owns the IMU: the driver while
+/// it runs, the estimator otherwise.
 #[derive(Debug, Clone)]
 pub(super) enum BootstrapPhase {
     /// The stereo start.
@@ -584,17 +570,54 @@ impl BootstrapPhase {
         )?)))
     }
 
-    pub(super) fn running_mut(&mut self) -> Option<&mut InertialBootstrap> {
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self, Self::Running(_))
+    }
+
+    /// The newest IMU timestamp the owner holds.
+    pub(super) fn newest_imu_t_ns<S: Scalar>(
+        &self,
+        estimator: &estimator::SqrtKeypointVio<S>,
+    ) -> Option<i64> {
         match self {
-            Self::Running(driver) => Some(driver),
-            _ => None,
+            Self::Running(driver) => driver.newest_imu_t_ns(),
+            Self::Off | Self::Done(_) => estimator.newest_imu_t_ns(),
         }
     }
 
-    pub(super) fn running(&self) -> Option<&InertialBootstrap> {
+    /// Whether the owner's IMU reaches strictly past `t_ns`.
+    pub(super) fn imu_covers_frame<S: Scalar>(
+        &self,
+        estimator: &estimator::SqrtKeypointVio<S>,
+        t_ns: i64,
+    ) -> bool {
         match self {
-            Self::Running(driver) => Some(driver),
-            _ => None,
+            Self::Running(driver) => driver.imu_covers_frame(t_ns),
+            Self::Off | Self::Done(_) => estimator.imu_covers_frame(t_ns),
+        }
+    }
+
+    /// Hand one raw sample to the owner; the driver also takes its calibrated value.
+    pub(super) fn push_imu<S: Scalar>(
+        &mut self,
+        estimator: &mut estimator::SqrtKeypointVio<S>,
+        sample: CombinedImuSample,
+        calibration: &Calibration<f32>,
+    ) {
+        match self {
+            Self::Running(driver) => {
+                driver.push_imu(sample, super::calibrated(calibration, &sample))
+            }
+            Self::Off | Self::Done(_) => estimator.push_imu(sample),
+        }
+    }
+
+    /// Whether the frontend gets a gyro-only rotation prediction before the
+    /// first state; the stereo start gives it identity.
+    pub(super) fn predicts_rotation(&self) -> bool {
+        match self {
+            Self::Running(_) => true,
+            Self::Off | Self::Done(_) => false,
         }
     }
 }
@@ -616,7 +639,7 @@ impl<S: Scalar> Vio<S> {
         observations: Arc<FlowObservations>,
     ) -> Result<VioResult, VioError> {
         let t_ns: i64 = observations.t_ns;
-        let Some(driver) = self.bootstrap.running_mut() else {
+        let BootstrapPhase::Running(driver) = &mut self.bootstrap else {
             unreachable!("bootstrap_track runs only while bootstrapping");
         };
         let accepted: Box<Accepted> = match driver.push_frame(observations)? {
@@ -633,19 +656,17 @@ impl<S: Scalar> Vio<S> {
             bias_accel: accepted.initial.bias_accel.map(S::from_literal),
             velocity_sigma: S::from_literal(accepted.initial.velocity_sigma),
         };
-        let gravity: nalgebra::Vector3<S> = crate::imu::gravity(config.vio_gravity_ms2);
-        let mut fresh = estimator::SqrtKeypointVio::with_initial_state(
-            gravity,
-            calibration,
-            config,
-            initial,
-        )?;
+        let gravity: Vector3<S> = self.gravity().map(S::from_literal);
+        let mut fresh =
+            estimator::SqrtKeypointVio::with_initial_state(gravity, calibration, config, initial)?;
         for sample in &accepted.imu {
             fresh.push_imu(*sample);
         }
 
-        // Replay into the local estimator; `self` changes only once the replay
-        // has succeeded, so an error leaves the pipeline still bootstrapping.
+        // Replay into the local estimator. Nothing of `self` has changed so
+        // far (the driver still holds the window, its report names no start):
+        // an error here returns with the pipeline still bootstrapping, and the
+        // next frameset solves again.
         let pool = self.frontend.cpu_pool();
         let count: usize = accepted.frames.len();
         let mut last: Option<estimator::FrameOutcome<S>> = None;
@@ -663,7 +684,7 @@ impl<S: Scalar> Vio<S> {
         else {
             unreachable!("checked above");
         };
-        self.bootstrap = BootstrapPhase::Done(Box::new(driver.into_report()));
+        self.bootstrap = BootstrapPhase::Done(Box::new(driver.commit()));
         let outcome = last.unwrap_or(estimator::FrameOutcome::NoVisualFeatures);
         self.accept_outcome(t_ns, outcome)
     }
