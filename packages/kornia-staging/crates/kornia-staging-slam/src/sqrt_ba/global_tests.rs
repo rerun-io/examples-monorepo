@@ -566,9 +566,13 @@ fn sparse_keyframes_keep_their_pose_graph_rows() {
             pixel: [1.0, 1.0],
         }],
     });
-    let (obs, lms) = problem.drop_sparse_observations(10);
-    assert_eq!(obs, single);
-    assert!(lms >= 1);
+    let landmarks = problem.landmarks.len();
+    let dropped = problem.drop_sparse_observations(10);
+    assert_eq!(dropped.observations, single);
+    assert_eq!(dropped.keyframes, 1);
+    // The one-observation landmark (the last) goes.
+    assert!(!dropped.kept_landmarks.contains(&(landmarks - 1)));
+    assert_eq!(dropped.kept_landmarks.len(), problem.landmarks.len());
     assert!(problem.landmarks.iter().all(|l| l.observations.len() >= 2));
     assert!(problem
         .landmarks

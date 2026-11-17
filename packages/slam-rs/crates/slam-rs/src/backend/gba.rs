@@ -27,7 +27,7 @@
 //!
 //! The window never reads the map, so the raw VIO poses do not change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use kornia_staging_3d::camera::{
@@ -213,9 +213,6 @@ fn world_point(
     *world_from_camera * (Vector3::new(bearing[0], bearing[1], bearing[2]) / inv_dist)
 }
 
-/// A landmark in world coordinates with its (keyframe, camera, pixel) observations.
-type WorldLandmark = (LandmarkId, Vector3<f64>, Vec<(FrameId, usize, [f64; 2])>);
-
 /// The map as a global BA problem (DESIGN §3.1). `edges` are the pose-graph
 /// edges; an edge to a keyframe the map does not hold is skipped.
 pub fn map_problem(
@@ -225,9 +222,12 @@ pub fn map_problem(
     config: &VioConfig,
 ) -> GbaInput {
     let keyframes = map.keyframes();
+    let ids: Vec<FrameId> = keyframes.keys().copied().collect();
     let mut counts = GbaCounts::default();
-    // Landmarks in world coordinates, once, with their keyframe observations.
-    let mut world: Vec<WorldLandmark> = Vec::new();
+    // Landmarks in world coordinates, once, with their observations; a
+    // keyframe index is into `ids` until the compaction below.
+    let mut landmark_ids: Vec<LandmarkId> = Vec::new();
+    let mut landmarks: Vec<GbaLandmark<f64>> = Vec::new();
     for (&id, landmark) in map.landmarks() {
         let (Some(host), Some(extrinsic)) = (
             keyframes.get(&landmark.host.frame_id),
@@ -244,44 +244,35 @@ pub fn map_problem(
             counts.nonfinite_landmarks += 1;
             continue;
         }
-        let observations: Vec<(FrameId, usize, [f64; 2])> = landmark
+        let observations: Vec<GbaObservation<f64>> = landmark
             .obs
             .iter()
-            .filter(|(image, _)| {
-                keyframes.contains_key(&image.frame_id) && image.cam_id < t_i_c.len()
-            })
-            .map(|(image, pixel)| {
-                (
-                    image.frame_id,
-                    image.cam_id,
-                    [f64::from(pixel.x), f64::from(pixel.y)],
-                )
+            .filter(|(image, _)| image.cam_id < t_i_c.len())
+            .filter_map(|(image, pixel)| {
+                Some(GbaObservation {
+                    keyframe: ids.binary_search(&image.frame_id).ok()?,
+                    camera: image.cam_id,
+                    pixel: [f64::from(pixel.x), f64::from(pixel.y)],
+                })
             })
             .collect();
         if observations.len() >= 2 {
-            world.push((id, position, observations));
+            landmark_ids.push(id);
+            landmarks.push(GbaLandmark {
+                position,
+                observations,
+            });
         }
     }
-    // B22: a keyframe under `min_obs_per_kf` loses its reprojection rows.
-    let mut per_keyframe: BTreeMap<FrameId, usize> = BTreeMap::new();
-    for (_, _, observations) in &world {
-        for (frame, _, _) in observations {
-            *per_keyframe.entry(*frame).or_insert(0) += 1;
-        }
-    }
-    let sparse = |frame: &FrameId| {
-        per_keyframe
-            .get(frame)
-            .is_some_and(|&n| n < config.gba_min_obs_per_kf)
+    let mut problem = GbaProblem {
+        imu_from_world: keyframes.values().map(|k| k.pose.inverse()).collect(),
+        landmarks,
+        rel_poses: Vec::new(),
     };
-    counts.keyframes_without_reprojection =
-        per_keyframe.keys().filter(|frame| sparse(frame)).count();
-    for (_, _, observations) in &mut world {
-        let before: usize = observations.len();
-        observations.retain(|(frame, _, _)| !sparse(frame));
-        counts.dropped_observations += before - observations.len();
-    }
-    world.retain(|(_, _, observations)| observations.len() >= 2);
+    // B22: a keyframe under `min_obs_per_kf` loses its reprojection rows.
+    let sparse = problem.drop_sparse_observations(config.gba_min_obs_per_kf);
+    counts.keyframes_without_reprojection = sparse.keyframes;
+    counts.dropped_observations = sparse.observations;
     let edges: Vec<&PoseGraphEdge> = edges
         .iter()
         .filter(|e| {
@@ -289,16 +280,25 @@ pub fn map_problem(
         })
         .collect();
     // A keyframe is a variable when a row touches it.
-    let mut used: std::collections::BTreeSet<FrameId> =
-        edges.iter().flat_map(|e| [e.from, e.to]).collect();
+    let mut used: BTreeSet<FrameId> = edges.iter().flat_map(|e| [e.from, e.to]).collect();
     used.extend(
-        world
+        problem
+            .landmarks
             .iter()
-            .flat_map(|(_, _, obs)| obs.iter().map(|(frame, _, _)| *frame)),
+            .flat_map(|l| &l.observations)
+            .map(|o| ids[o.keyframe]),
     );
     let index: BTreeMap<FrameId, usize> = used.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    for observation in problem
+        .landmarks
+        .iter_mut()
+        .flat_map(|l| &mut l.observations)
+    {
+        observation.keyframe = index[&ids[observation.keyframe]];
+    }
     let pose = |id: FrameId| keyframes[&id].pose;
-    let rel_poses: Vec<RelPoseConstraint<f64>> = edges
+    problem.imu_from_world = used.iter().map(|&id| pose(id).inverse()).collect();
+    problem.rel_poses = edges
         .iter()
         .map(|e| {
             RelPoseConstraint::with_sigmas(
@@ -310,32 +310,18 @@ pub fn map_problem(
             )
         })
         .collect();
-    let landmarks: Vec<GbaLandmark<f64>> = world
-        .iter()
-        .map(|(_, position, observations)| GbaLandmark {
-            position: *position,
-            observations: observations
-                .iter()
-                .map(|&(frame, camera, pixel)| GbaObservation {
-                    keyframe: index[&frame],
-                    camera,
-                    pixel,
-                })
-                .collect(),
-        })
-        .collect();
     counts.keyframes = used.len();
-    counts.landmarks = landmarks.len();
-    counts.observations = landmarks.iter().map(|l| l.observations.len()).sum();
-    counts.pose_graph_rows = rel_poses.len();
+    counts.landmarks = problem.landmarks.len();
+    counts.observations = problem.landmarks.iter().map(|l| l.observations.len()).sum();
+    counts.pose_graph_rows = problem.rel_poses.len();
     GbaInput {
-        problem: GbaProblem {
-            imu_from_world: used.iter().map(|&id| pose(id).inverse()).collect(),
-            landmarks,
-            rel_poses,
-        },
         keyframes: used.into_iter().collect(),
-        landmarks: world.into_iter().map(|(id, _, _)| id).collect(),
+        landmarks: sparse
+            .kept_landmarks
+            .iter()
+            .map(|&i| landmark_ids[i])
+            .collect(),
+        problem,
         counts,
     }
 }
