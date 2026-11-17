@@ -674,7 +674,6 @@ pub struct MapSnapshot {
     counters: slam_rs::backend::BackendCounters,
     /// `[current, candidate]` per verified loop.
     loop_edges: Vec<i64>,
-    loop_inliers: Vec<u32>,
     loop_fused: Vec<bool>,
     loop_counts: slam_rs::backend::LoopCounts,
     pgo_epoch: u64,
@@ -703,6 +702,28 @@ fn flat_poses(poses: &[slam_rs::lie::Se3<f64>]) -> Vec<f64> {
         ]);
     }
     flat
+}
+
+/// What loop closing has done so far (all zero when it is off).
+#[pyclass(module = "slam_rs._core", frozen, get_all, skip_from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct LoopCounts {
+    /// Keyframes described and added to the database.
+    indexed: u64,
+    /// Queries that found no images for their keyframe.
+    without_images: u64,
+    /// Queries that retrieved at least one candidate.
+    with_candidates: u64,
+    /// Candidates validated.
+    candidates: u64,
+    /// Loops that passed verification.
+    verified: u64,
+    /// Loops fused at once.
+    fused: u64,
+    /// Loops at or above the drift gate: the pose-graph optimization's triggers.
+    needs_pgo: u64,
+    /// Of those, closed by an applied pose-graph optimization.
+    optimized: u64,
 }
 
 impl MapSnapshot {
@@ -755,11 +776,6 @@ impl MapSnapshot {
                 .loops
                 .iter()
                 .flat_map(|edge| [edge.current, edge.candidate])
-                .collect(),
-            loop_inliers: snapshot
-                .loops
-                .iter()
-                .map(|edge| u32::try_from(edge.inliers).unwrap_or(u32::MAX))
                 .collect(),
             loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
             loop_counts: snapshot.loop_counts,
@@ -1030,12 +1046,6 @@ impl MapSnapshot {
             .reshape((self.loop_fused.len(), 2))
     }
 
-    /// Final PnP inliers of each loop: `uint32[l]`.
-    #[getter]
-    fn loop_inliers<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
-        self.loop_inliers.to_pyarray(py)
-    }
-
     /// Whether each loop was fused at once (else it was at or above the drift
     /// gate, the pose-graph optimization's): `bool[l]`.
     #[getter]
@@ -1043,22 +1053,20 @@ impl MapSnapshot {
         self.loop_fused.to_pyarray(py)
     }
 
-    /// Loop-closing counters: keyframes indexed, queries without images, queries
-    /// with candidates, candidates validated, loops verified, fused, at or
-    /// above the drift gate, and closed by an applied pose-graph optimization.
+    /// What loop closing has done so far.
     #[getter]
-    fn loop_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+    fn loop_counts(&self) -> LoopCounts {
         let counts = self.loop_counts;
-        std::collections::BTreeMap::from([
-            ("indexed", counts.indexed),
-            ("without_images", counts.without_images),
-            ("with_candidates", counts.with_candidates),
-            ("candidates", counts.candidates),
-            ("verified", counts.verified),
-            ("fused", counts.fused),
-            ("needs_pgo", counts.needs_pgo),
-            ("optimized", counts.optimized),
-        ])
+        LoopCounts {
+            indexed: counts.indexed,
+            without_images: counts.without_images,
+            with_candidates: counts.with_candidates,
+            candidates: counts.candidates,
+            verified: counts.verified,
+            fused: counts.fused,
+            needs_pgo: counts.needs_pgo,
+            optimized: counts.optimized,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -1837,5 +1845,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FlowFrame>()?;
     module.add_class::<VioSnapshot>()?;
     module.add_class::<MapSnapshot>()?;
+    module.add_class::<LoopCounts>()?;
     Ok(())
 }

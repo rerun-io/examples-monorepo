@@ -76,7 +76,16 @@ fn allocated_by<T>(body: impl FnOnce() -> T) -> (T, usize) {
 const MAX_KEYFRAMES: usize = 6;
 
 fn pipeline_with_map(deferred: bool, mode: Option<api::config::BackendMode>) -> api::Vio<f32> {
+    pipeline_with(deferred, mode, false)
+}
+
+fn pipeline_with(
+    deferred: bool,
+    mode: Option<api::config::BackendMode>,
+    lag: bool,
+) -> api::Vio<f32> {
     let mut config = config(deferred);
+    config.port_frontend_lag = lag;
     config.backend_enabled = mode.is_some();
     config.backend_mode = mode.unwrap_or_default();
     // More keyframes and a short keyframe budget, so
@@ -148,6 +157,45 @@ fn the_map_never_moves_a_vio_pose_while_it_culls() {
         on.read_map(|map_backend| check_map(&on, map_backend, deferred, queries_run))
             .unwrap();
     }
+}
+
+/// With `port.frontend_lag` (robocap-live turns it on) the estimator finishes
+/// frameset t-1 beside the frontend of t, which already holds t's images:
+/// loop closing must still describe each keyframe from its own images.
+#[test]
+fn a_lagged_pipeline_hands_loop_closing_its_keyframe_images() {
+    let mut vio = pipeline_with(false, Some(api::config::BackendMode::Offline), true);
+    let t0: i64 = 1_000_000_000;
+    let mut imu_t: i64 = t0 - 100_000_000;
+    for index in 0..FRAMES {
+        let t_ns: i64 = t0 + index * FRAME_NS;
+        while imu_t <= t_ns + 5_000_000 {
+            let t_s = ((imu_t - t0) as f64 / 1e9).max(0.0);
+            let accel = acceleration(t_s) + nalgebra::Vector3::new(0.0, 0.0, 9.81);
+            vio.push_imu(imu_t, [0.0; 3], accel.into()).unwrap();
+            imu_t += 5_000_000;
+        }
+        let frames: [Vec<u8>; 4] =
+            std::array::from_fn(|camera| render((t_ns - t0) as f64 / 1e9, camera));
+        let views: Vec<api::ImageView<'_>> = frames
+            .iter()
+            .map(|data| api::ImageView {
+                width: WIDTH,
+                height: HEIGHT,
+                stride: WIDTH,
+                data,
+            })
+            .collect();
+        vio.track(t_ns, &views).unwrap();
+    }
+    vio.flush().unwrap();
+    vio.read_map(|map_backend| {
+        let loops = map_backend.loop_closing().unwrap();
+        assert!(loops.counts().indexed > 3, "{:?}", loops.counts());
+        assert_eq!(loops.counts().without_images, 0, "{:?}", loops.counts());
+        assert_eq!(loops.held_images(), 0);
+    })
+    .unwrap();
 }
 
 /// What the map holds after the run, and what it costs.
