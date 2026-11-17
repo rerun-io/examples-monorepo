@@ -96,16 +96,9 @@ class VioResult:
     def world_from_rig(self) -> Float64[ndarray, " 7"] | None:
         """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw).
 
-        Only ``Tracking`` supplies a pose; every other status returns ``None``.
-        """
-
-    @property
-    def world_from_rig_corrected(self) -> Float64[ndarray, " 7"] | None:
-        """``world_from_rig`` re-anchored online, causally, on the keyframes the back end's pose-graph optimization corrected.
-
-        It moves the frame with its last keyframe, using only corrections published by this call. The
-        pose-graph gauge fixes the window, so it equals ``world_from_rig`` bit for bit unless that keyframe
-        moved, and always with the back end off. ``None`` when ``world_from_rig`` is.
+        Only ``Tracking`` supplies a pose; every other status returns ``None``. This is the raw, causal VIO; the
+        back end never moves it, and the pose-graph gauge (window fixed) makes it this frame's corrected pose too.
+        The corrected history of earlier frames is ``slam_rs.tracking.reanchored(poses, vio.map_snapshot())``.
         """
 
     @property

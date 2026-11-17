@@ -13,8 +13,8 @@
 pub mod anchor;
 pub mod covisibility;
 pub mod cull;
-pub mod loop_closing;
 pub mod gba;
+pub mod loop_closing;
 pub mod map;
 pub mod pgo;
 pub mod runner;
@@ -26,10 +26,10 @@ use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
-pub use anchor::{AnchorError, CorrectionBoard, OnlineAnchor, reanchor};
+pub use anchor::{AnchorError, reanchor};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
-pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
+pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use pgo::{MapCorrection, PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
@@ -122,9 +122,6 @@ pub struct MapBackend {
     t_i_c: Vec<crate::lie::Se3<f64>>,
     /// Loop closing (PR b2); `None` when it is off.
     loops: Option<LoopClosing>,
-    /// Where each applied PGO posts its [`MapCorrection`] for the tracking
-    /// thread's online re-anchoring (PR f1). A clone shares the board.
-    corrections: std::sync::Arc<CorrectionBoard>,
     /// The rig's camera models for the global BA ([`Self::finish`]); `None`
     /// when the rig has a model the GBA cannot project.
     gba_rig: Option<gba::GbaRig>,
@@ -175,15 +172,9 @@ impl MapBackend {
             culled_over_budget: 0,
             t_i_c: Vec::new(),
             loops: None,
-            corrections: std::sync::Arc::default(),
             gba_rig: None,
             gba_lane: crate::Backend::Cpu,
         }
-    }
-
-    /// The board the PGO posts its corrections on, for an [`OnlineAnchor`].
-    pub fn correction_board(&self) -> std::sync::Arc<CorrectionBoard> {
-        std::sync::Arc::clone(&self.corrections)
     }
 
     /// The rig's `T_i_c` per camera, so a view can place the map's points.

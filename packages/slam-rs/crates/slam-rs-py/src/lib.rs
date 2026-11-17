@@ -77,23 +77,16 @@ impl VioResult {
         self.inner.t_ns
     }
 
-    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`.
+    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`: the raw,
+    /// causal VIO, which is also this frame's corrected pose (the pose-graph
+    /// gauge fixes the window). The corrected history is
+    /// `slam_rs.tracking.reanchored(poses, vio.map_snapshot())`.
     #[getter]
     fn world_from_rig<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.inner
             .pose
             .as_ref()
             .map(|pose| pose.world_from_rig.as_slice().to_pyarray(py))
-    }
-
-    /// The same pose re-anchored online, causally, on the keyframes the
-    /// back end's pose-graph optimization corrected (PR f1).
-    #[getter]
-    fn world_from_rig_corrected<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
-        self.inner
-            .pose
-            .as_ref()
-            .map(|pose| pose.world_from_rig_corrected.as_slice().to_pyarray(py))
     }
 
     /// Rig velocity in the world frame, m/s.
