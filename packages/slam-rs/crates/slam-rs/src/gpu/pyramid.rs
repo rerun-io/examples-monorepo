@@ -6,12 +6,13 @@ impl From<GpuError> for PyramidError {
     }
 }
 
-use crate::frontend::input::{FrameImages, LensStitch, PackedImages};
+use crate::frontend::input::{FrameImages, PackedImages};
 use crate::pyramid::{Pyramid, PyramidBuilder, PyramidError};
 use cubecl::prelude::*;
 use kornia_image::{Image, ImageSize};
 pub use kornia_staging_gpu::pyramid::GpuPyramid;
-use kornia_staging_gpu::stitch::{TableError, TileTables};
+use kornia_staging_gpu::stitch::TileTables;
+use kornia_staging_imgproc::panorama::LensStitch;
 
 /// Schedule persistent device pyramids with the frontend frame queue.
 pub struct GpuPyramidBuilder<R: Runtime> {
@@ -51,23 +52,12 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
         let images = FrameImages::Packed(packed);
         let prepared = match packed.stitch() {
             Some(stitch) => {
-                let tables =
-                    match self.tables.take() {
-                        Some((owner, tables)) if std::sync::Arc::ptr_eq(&owner, stitch) => {
-                            (owner, tables)
-                        }
-                        _ => {
-                            let [first, second] = stitch.luts();
-                            let tables = TileTables::upload(&self.client, [first, second])
-                                .map_err(|error| match error {
-                                    TableError::Gpu(error) => PyramidError::from(error),
-                                    _ => {
-                                        PyramidError::Image(crate::image::IngestError::StitchTables)
-                                    }
-                                })?;
-                            (stitch.clone(), tables)
-                        }
-                    };
+                let tables = match self.tables.take() {
+                    Some((owner, tables)) if std::sync::Arc::ptr_eq(&owner, stitch) => {
+                        (owner, tables)
+                    }
+                    _ => (stitch.clone(), TileTables::upload(&self.client, stitch)?),
+                };
                 let tables = &self.tables.insert(tables).1;
                 self.inner
                     .prepare_lenses(packed.bytes(), stitch.lens_size(), tables, out)?

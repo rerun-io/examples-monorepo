@@ -58,9 +58,15 @@ pub enum IngestError {
         /// Lens height the tables were built for.
         expected_height: usize,
     },
-    /// Two tile tables that are not tile 0 then tile 1 of one geometry over the lens's level 1.
-    #[error("the stitch tables are not tiles 0 and 1 of one geometry over this lens size")]
-    StitchTables,
+    /// A dual-fisheye frameset that is not two lens images.
+    #[error("a dual-fisheye frameset holds two lens images, not {count}")]
+    LensCount {
+        /// Images supplied.
+        count: usize,
+    },
+    /// The host stitch refused the lens bytes.
+    #[error(transparent)]
+    Stitch(#[from] kornia_staging_imgproc::panorama::StitchError),
 }
 
 /// Allocate a dense zero-filled frame after checking its allocation bounds.

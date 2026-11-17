@@ -13,11 +13,10 @@ use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
 use crate::estimator::FlowObservations;
 use crate::frontend::flow::TrackKillMask;
-use crate::frontend::input::LensStitch;
 use crate::lie::{Se3, So3};
 use kornia_image::ImageSize;
 use kornia_staging_3d::camera::{CameraModel, Equirectangular};
-use kornia_staging_imgproc::panorama::{LUT_INVALID, TileGeometry, TileLut, build_tile_lut};
+use kornia_staging_imgproc::panorama::{LensStitch, RemapTable, TileGeometry};
 use kornia_staging_io::insta360::{LensCalibration, WindowCrop, parse_lens_string};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use std::collections::VecDeque;
@@ -26,6 +25,9 @@ use std::sync::Arc;
 /// Pixels around an invalid table pixel where a tracked keypoint is dropped:
 /// the radius of the 51-point patch at level 0 plus one pixel of rounding.
 pub const KILL_RADIUS_PX: usize = 4;
+
+/// Columns of one hemisphere tile's 180 deg, and its rows (pole to pole): the tiles of a 1920x960 panorama.
+const HEMISPHERE_PX: usize = 960;
 
 /// How long gyro samples are kept for the rolling-shutter rate, nanoseconds.
 const GYRO_KEEP_NS: i64 = 200_000_000;
@@ -79,8 +81,8 @@ impl DualFisheyeLenses {
         )
     }
 
-    /// The tables that stitch `lens` images into the two 960-row hemisphere tiles
-    /// with `margin_px` overlap columns: the one stitch the lane and the viewing
+    /// The stitch of `lens` images into the two 960-row hemisphere tiles with
+    /// `margin_px` overlap columns: the one stitch the lane and the viewing
     /// panorama ([`LensStitch::panorama`]) share. Tile `k` reads lens `k`.
     ///
     /// # Errors
@@ -89,27 +91,14 @@ impl DualFisheyeLenses {
     /// or a lens image below 4x4, before any table is built.
     pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
         let geometry: TileGeometry = TileGeometry {
+            hemisphere_width: HEMISPHERE_PX,
+            height: HEMISPHERE_PX,
             margin: margin_px,
-            ..TileGeometry::default()
         };
-        if margin_px > geometry.hemisphere_width / 2 {
-            return Err(VioError::Panorama(format!(
-                "a {margin_px} px margin is wider than half the {} px hemisphere",
-                geometry.hemisphere_width
-            )));
-        }
-        if lens.width < 4 || lens.height < 4 {
-            return Err(VioError::Panorama(format!(
-                "a {}x{} lens image is below 4x4",
-                lens.width, lens.height
-            )));
-        }
-        let luts: [TileLut; 2] = std::array::from_fn(|k| {
-            build_tile_lut(geometry, k, lens, |ray| {
-                self.lenses[k].project_from_panorama(ray)
-            })
-        });
-        Ok(LensStitch::new(luts, lens)?)
+        LensStitch::new(geometry, lens, |k, ray| {
+            self.lenses[k].project_from_panorama(ray)
+        })
+        .map_err(|error| VioError::Panorama(error.to_string()))
     }
 }
 
@@ -172,15 +161,17 @@ pub(super) fn expand(
     // recognises the stitch by identity.
     let stitch: Arc<LensStitch> =
         Arc::new(lenses.stitch(lens_size, config.panorama_tile_margin_px as usize)?);
-    let geometry: TileGeometry = stitch.luts()[0].geometry;
-    let focal: f64 = geometry.focal();
-    let [cx, cy] = geometry.principal();
+    let geometry: TileGeometry = stitch.geometry();
+    let model: Equirectangular<f64> = geometry
+        .camera()
+        .map_err(|error| VioError::Panorama(format!("tile camera: {error:?}")))?;
+    let [fx, fy, cx, cy, lon_max] = model.params();
     let tile: EquirectangularParams<f64> = EquirectangularParams {
-        fx: focal,
-        fy: focal,
+        fx,
+        fy,
         cx,
         cy,
-        lon_max: geometry.lon_max(),
+        lon_max,
     };
     let t_i_c: Vec<Se3<f64>> = (0..2)
         .map(|k| {
@@ -193,9 +184,6 @@ pub(super) fn expand(
             imu_from_pano * Se3::new(turn, origin)
         })
         .collect();
-    let model: Equirectangular<f64> =
-        Equirectangular::new([tile.fx, tile.fy, tile.cx, tile.cy, tile.lon_max])
-            .map_err(|error| VioError::Panorama(format!("tile camera: {error:?}")))?;
     let ingest: DualFisheyeIngest = DualFisheyeIngest {
         tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
         stitch,
@@ -249,8 +237,8 @@ impl DualFisheyeIngest {
     }
 
     /// The lookup table of tile `k`.
-    pub fn lut(&self, tile: usize) -> &TileLut {
-        &self.stitch.luts()[tile]
+    pub fn table(&self, tile: usize) -> &RemapTable {
+        &self.stitch.tables()[tile]
     }
 
     /// The stitch the frame storage takes the lens images through.
@@ -271,17 +259,16 @@ impl DualFisheyeIngest {
 
     /// Per tile, whether each pixel's table entry is invalid (outside the lens).
     pub fn invalid(&self, tile: usize) -> Vec<bool> {
-        self.lut(tile)
-            .sample
+        self.table(tile)
+            .samples()
             .iter()
-            .map(|&sample| sample == LUT_INVALID)
+            .map(|&sample| sample == RemapTable::INVALID)
             .collect()
     }
 
     /// Per tile, the invalid pixels grown by [`KILL_RADIUS_PX`] (Chebyshev).
     pub fn kill_mask(&self, tile: usize) -> Arc<TrackKillMask> {
-        let geometry: &TileGeometry = &self.lut(tile).geometry;
-        let (width, height) = (geometry.width(), geometry.height);
+        let ImageSize { width, height } = self.stitch.tile_size();
         let invalid: Vec<bool> = self.invalid(tile);
         let mut killed: Vec<bool> = vec![false; width * height];
         let radius: usize = KILL_RADIUS_PX;
@@ -359,7 +346,7 @@ impl DualFisheyeIngest {
                 if let Some([u, v]) = rolling_shutter_correct(
                     [f64::from(pixel.x), f64::from(pixel.y)],
                     &self.tile_camera,
-                    self.lut(tile),
+                    self.table(tile),
                     self.lens_size().height,
                     self.readout_s,
                     &omega,
@@ -371,10 +358,12 @@ impl DualFisheyeIngest {
     }
 }
 
-/// Lens row (full-resolution) under a tile pixel: bilinear over the four table
-/// neighbours when all are valid, else the nearest one's, else `None`.
-pub fn lens_row(lut: &TileLut, pixel: [f64; 2]) -> Option<f64> {
-    let (width, height) = (lut.geometry.width(), lut.geometry.height);
+/// Lens row (full-resolution) under a tile pixel, from the table's fixed-point
+/// entries (`qy / 128`: an entry is the level-1 row in 1/256 px): bilinear over
+/// the four table neighbours when all are valid, else the nearest one's, else
+/// `None`.
+pub fn lens_row(table: &RemapTable, pixel: [f64; 2]) -> Option<f64> {
+    let ImageSize { width, height } = table.dst_size();
     let [u, v] = pixel;
     if !(u >= 0.0 && v >= 0.0 && u <= (width - 1) as f64 && v <= (height - 1) as f64) {
         return None;
@@ -382,15 +371,18 @@ pub fn lens_row(lut: &TileLut, pixel: [f64; 2]) -> Option<f64> {
     let (x0, y0) = (u.floor() as usize, v.floor() as usize);
     let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
     let (ax, ay) = (u - x0 as f64, v - y0 as f64);
-    let row = |x: usize, y: usize| f64::from(lut.source_row[y * width + x]);
-    let corners: [f64; 4] = [row(x0, y0), row(x1, y0), row(x0, y1), row(x1, y1)];
-    if corners.iter().all(|value| value.is_finite()) {
-        let top: f64 = corners[0] * (1.0 - ax) + corners[1] * ax;
-        let bottom: f64 = corners[2] * (1.0 - ax) + corners[3] * ax;
+    let row = |x: usize, y: usize| {
+        let q: [u32; 2] = table.samples()[y * width + x];
+        (q != RemapTable::INVALID).then(|| f64::from(q[1]) / 128.0)
+    };
+    if let (Some(r00), Some(r10), Some(r01), Some(r11)) =
+        (row(x0, y0), row(x1, y0), row(x0, y1), row(x1, y1))
+    {
+        let top: f64 = r00 * (1.0 - ax) + r10 * ax;
+        let bottom: f64 = r01 * (1.0 - ax) + r11 * ax;
         return Some(top * (1.0 - ay) + bottom * ay);
     }
-    let nearest: f64 = row(u.round() as usize, v.round() as usize);
-    nearest.is_finite().then_some(nearest)
+    row(u.round() as usize, v.round() as usize)
 }
 
 /// One keypoint observed by a rolling-shutter lens, moved to where a global
@@ -406,12 +398,12 @@ pub fn lens_row(lut: &TileLut, pixel: [f64; 2]) -> Option<f64> {
 pub fn rolling_shutter_correct(
     pixel: [f64; 2],
     camera: &Equirectangular<f64>,
-    lut: &TileLut,
+    table: &RemapTable,
     lens_height: usize,
     readout_s: f64,
     omega: &Vector3<f64>,
 ) -> Option<[f64; 2]> {
-    let row: f64 = lens_row(lut, pixel)?;
+    let row: f64 = lens_row(table, pixel)?;
     let height: f64 = lens_height as f64;
     let dt: f64 = readout_s * (row - 0.5 * (height - 1.0)) / height;
     let bearing: Vector3<f64> = Vector3::from(camera.unproject(pixel).ok()?);
