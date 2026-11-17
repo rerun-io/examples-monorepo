@@ -80,7 +80,17 @@ What reaches slam-rs:
 - IMU noise: `dso/imu_config.yaml` (Kalibr's inflated values: accel 0.0028,
   gyro 0.00016, accel walk 0.00086, gyro walk 0.000022), on the
   `sensor_metadata` layer with `applied_time_shift_ns` 0. RootSLAM ran Basalt's
-  values from `tumvi_512_ds_calib.json` (0.016, 0.000282, 0.001, 0.0001);
+  values from `tumvi_512_ds_calib.json` (0.016, 0.000282, 0.001, 0.0001).
+  This differs from EuRoC, whose layer carries the model RootSLAM ran. The
+  reason is an A/B on all 20 sequences (GPU lane, `fast`, lambda 1e-7, Basalt's
+  sigmas through a local override, group-mean SE(3) ATE in cm, imu_config →
+  Basalt): TC 43.0 → 38.6, TM 174.3 → 222.8, TR 10.5 → 7.7, TS 83.5 → 148.1;
+  all 20: 78.7 → 101.0. Basalt's model is better on TR (5 of 6) and TC, and
+  worse on TM and TS, so it does not win, and the layer keeps the model the
+  dataset ships. The GPU lane is deterministic (a second draw of both arms
+  gave byte-identical trajectories), so these differences are the estimator's
+  response to the noise model, not draw noise. On TR the IMU model is a
+  confounder for a comparison with RootSLAM;
 - not carried: the ds calibration's static biases (`calib_accel_bias`,
   `calib_gyro_bias`) and its vignette;
 - pixels: the PNGs carry ~12 significant bits (values in steps of 16, a few
