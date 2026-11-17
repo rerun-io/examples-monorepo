@@ -330,7 +330,13 @@ pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
         "six-entry groups"
     );
     let mut partial = [0.0f32; PCG_UNITS];
-    for (k, (ga, gb)) in a.chunks_exact(6).zip(b.chunks_exact(6)).enumerate() {
+    for (k, (ga, gb)) in a
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<6>().0)
+        .enumerate()
+    {
         for (x, y) in ga.iter().zip(gb) {
             partial[k % PCG_UNITS] += x * y;
         }
