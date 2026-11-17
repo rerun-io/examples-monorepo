@@ -188,9 +188,10 @@ pub struct Accepted {
 /// Whether some camera pair can triangulate inside one frameset: a baseline
 /// of at least `min_baseline` and a shared field of view.
 ///
-/// The overlap test is the frontend's own stereo-matching guess: a 16 x 16
-/// grid of pixels of camera `i` is unprojected, placed at 1, 3 and 10 m, and
-/// projected into camera `j`; one valid in-image projection is an overlap.
+/// The overlap test is this function's own, not the frontend's stereo
+/// matching (the two can disagree): a 16 x 16 grid of pixels of camera `i` is
+/// unprojected, placed at 1, 3 and 10 m, and projected into camera `j`; one
+/// valid in-image projection is an overlap.
 pub fn rig_has_stereo(calibration: &Calibration<f64>, min_baseline: f64) -> bool {
     let cameras: Vec<Option<SlamCamera<f64>>> = calibration
         .intrinsics
@@ -206,12 +207,12 @@ pub fn rig_has_stereo(calibration: &Calibration<f64>, min_baseline: f64) -> bool
             let (Some(cam_i), Some(cam_j)) = (&cameras[i], &cameras[j]) else {
                 continue;
             };
-            let t_ci: Se3<f64> = calibration.t_i_c[i];
-            let t_cj: Se3<f64> = calibration.t_i_c[j];
-            if (t_ci.translation - t_cj.translation).norm() < min_baseline {
+            let t_i_ci: Se3<f64> = calibration.t_i_c[i];
+            let t_i_cj: Se3<f64> = calibration.t_i_c[j];
+            if (t_i_ci.translation - t_i_cj.translation).norm() < min_baseline {
                 continue;
             }
-            let j_from_i: Se3<f64> = t_cj.inverse() * t_ci;
+            let j_from_i: Se3<f64> = t_i_cj.inverse() * t_i_ci;
             let [w_i, h_i] = calibration.resolution[i];
             let [w_j, h_j] = calibration.resolution[j];
             for gy in 0..16 {

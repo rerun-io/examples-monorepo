@@ -19,7 +19,8 @@ pub(crate) fn noise_from_calibration<S: Scalar>(
         calib.discrete_time_gyro_noise_std().map(|x| x * x),
     )
 }
-/// Gravity in the world frame.
+/// Gravity in the world frame, `(0, 0, -9.81)`. The pipeline takes the
+/// magnitude from `config.vio_gravity_ms2` instead.
 pub fn gravity<S: Scalar>() -> Vector3<S> {
     Vector3::new(S::zero(), S::zero(), c(-9.81))
 }
