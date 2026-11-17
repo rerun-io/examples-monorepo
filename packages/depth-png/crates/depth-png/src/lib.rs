@@ -584,10 +584,10 @@ impl<'a> UpLayout<'a> {
             Some(table) => {
                 let band_rows = u32::from_be_bytes(table.get(..4)?.try_into().ok()?) as usize;
                 let offsets: Vec<usize> = table[4..]
-                    .chunks_exact(4)
-                    .map(|offset| {
-                        u32::from_be_bytes([offset[0], offset[1], offset[2], offset[3]]) as usize
-                    })
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|offset| u32::from_be_bytes(*offset) as usize)
                     .collect();
                 let consistent = band_rows > 0
                     && table.len() % 4 == 0

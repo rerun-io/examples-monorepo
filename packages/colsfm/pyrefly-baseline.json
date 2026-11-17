@@ -1612,6 +1612,13 @@
     },
     {
       "column": 1,
+      "path": "tests/test_correspondence_exclusion.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
       "path": "tests/test_mapping_point_filters.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `mapping_helpers`",
@@ -1833,6 +1840,15 @@
       "name": "missing-import",
       "concise_description": "Cannot find module `pyceres`",
       "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_verification.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error",
+      "line": 11,
+      "stop_line": 11
     }
   ]
 }

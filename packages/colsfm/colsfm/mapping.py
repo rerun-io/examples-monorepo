@@ -282,6 +282,10 @@ class MappingOptions:
     CASPAR does not apply."""
     verbose: bool = True
     """Print one line per triangulation pass and per outer round, as cuSFM does."""
+    excluded_pairs: frozenset[tuple[int, int]] = frozenset()
+    """Image pairs `(min id, max id)` the correspondence graph leaves out although the database holds their verified
+    geometry: the loop stage's rejected candidates under `loop_pairs_in_mapper="accepted"`. Left out when the graph is
+    built (`colsfm.correspondences.load_correspondences`), so no stage deletes database rows."""
     round_callback: RoundCallback | None = None
     """Called once at the end of every outer round, after the round's filter and solve.
 
@@ -740,7 +744,9 @@ def run_mapping(
         )
 
     correspondence_started: float = time.perf_counter()
-    correspondences: Correspondences = load_correspondences(reconstruction, database_path, mapping_config.min_num_matches_per_pair)
+    correspondences: Correspondences = load_correspondences(
+        reconstruction, database_path, mapping_config.min_num_matches_per_pair, excluded_pairs=resolved_options.excluded_pairs
+    )
     correspondence_seconds: float = time.perf_counter() - correspondence_started
 
     triangulator: pycolmap.IncrementalTriangulator = pycolmap.IncrementalTriangulator(

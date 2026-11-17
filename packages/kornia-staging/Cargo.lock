@@ -2567,6 +2567,7 @@ dependencies = [
  "kornia-tensor",
  "nalgebra",
  "proptest",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2672,6 +2673,8 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "criterion",
+ "kornia-3d",
+ "kornia-algebra",
  "kornia-image",
  "kornia-staging-3d",
  "kornia-staging-algebra",
@@ -2679,6 +2682,8 @@ dependencies = [
  "nalgebra",
  "proptest",
  "rayon",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

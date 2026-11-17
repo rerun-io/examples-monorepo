@@ -109,3 +109,23 @@ fn catalog_inputs_match_python_fixture() -> anyhow::Result<()> {
     println!("{report}");
     Ok(())
 }
+
+/// This reader knows only the RoboCap and MSD G2 rigs, so it refuses a EuRoC segment before it
+/// connects instead of reading it with MSD's rules (EuRoC's `video_time` is the device clock and
+/// its framesets are matched; `slam.toml` states both and the Python readers take them from there).
+#[test]
+fn a_euroc_segment_is_refused_not_read_as_msd() {
+    let Err(error) = catalog::load(
+        "rerun+http://127.0.0.1:1",
+        "vslam-lab-euroc__MH_01_easy",
+        None,
+    ) else {
+        panic!("a EuRoC segment was accepted");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported dataset \"vslam-lab-euroc\""),
+        "{error}"
+    );
+}
