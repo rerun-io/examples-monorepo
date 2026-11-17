@@ -292,6 +292,13 @@ class Vio:
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
+    @property
+    def map_stats(self) -> dict[str, int] | None:
+        """The persistent map's ``keyframes``, ``landmarks`` and ``observations`` counts.
+
+        None when ``backend.enabled`` is off. Current up to the last solved keyframe.
+        """
+
     def __repr__(self) -> str: ...
 
 class VioConfig:

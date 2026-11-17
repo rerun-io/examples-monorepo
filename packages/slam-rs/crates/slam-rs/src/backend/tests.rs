@@ -1,0 +1,391 @@
+//! The map against hand-built stamp sequences, and the culling protection as a
+//! property (B10, B19).
+
+#![allow(clippy::unwrap_used)]
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use nalgebra::{Vector2, Vector3};
+use proptest::prelude::*;
+
+use super::*;
+use crate::estimator::StampLandmark;
+use crate::lie::{Se3, So3};
+use crate::types::{CamId, KeypointId, LandmarkId, TimeCamId};
+
+fn config(max_keyframes: usize, batch: usize) -> MapConfig {
+    MapConfig {
+        enable_culling: true,
+        max_redundancy_score: 0.9,
+        redundancy_exclude_hosted: false,
+        max_keyframes,
+        batch_cull_size: batch,
+        high_covisibility: CovisibilityThreshold::Fixed(2),
+    }
+}
+
+fn pose(x: f64) -> Se3<f64> {
+    Se3::new(So3::identity(), Vector3::new(x, 0.0, 0.0))
+}
+
+fn landmark(id: u64, host: FrameId, obs: &[(FrameId, CamId)]) -> StampLandmark {
+    StampLandmark {
+        id: LandmarkId(id),
+        host: TimeCamId::new(host, 0),
+        direction: Vector2::new(0.0, 0.0),
+        inv_dist: 0.5,
+        obs: obs
+            .iter()
+            .map(|&(frame, cam)| (TimeCamId::new(frame, cam), Vector2::new(1.0, 1.0)))
+            .collect(),
+    }
+}
+
+fn keyframe(t_ns: FrameId, window: &[FrameId], landmarks: Vec<StampLandmark>) -> MapStamp {
+    MapStamp::Keyframe(Box::new(KeyframeStamp {
+        t_ns,
+        keyframe_poses: window.iter().map(|&id| (id, pose(id as f64))).collect(),
+        landmarks,
+        keypoints: vec![vec![(KeypointId(t_ns as u64), Vector2::new(2.0, 3.0))]; 2],
+    }))
+}
+
+fn marg(ids: &[FrameId], x: f64, landmarks: Vec<StampLandmark>) -> MapStamp {
+    MapStamp::Marginalized(MargStamp {
+        keyframe_poses: ids.iter().map(|&id| (id, pose(x))).collect(),
+        landmarks,
+    })
+}
+
+fn backend(max_keyframes: usize, batch: usize) -> MapBackend {
+    MapBackend::new(config(max_keyframes, batch), vec![[640, 480]; 2])
+}
+
+#[test]
+fn keyframe_stamps_build_the_map_and_the_graph() {
+    let mut backend = backend(100, 10);
+    assert_eq!(
+        backend.step(keyframe(1, &[1], vec![])),
+        vec![MapEvent::KeyframeAdded(1)]
+    );
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![
+            landmark(10, 1, &[(1, 0), (2, 0)]),
+            landmark(11, 1, &[(1, 0), (1, 1), (2, 1)]),
+            landmark(12, 2, &[(2, 0)]),
+        ],
+    ));
+    backend.step(keyframe(
+        3,
+        &[1, 2, 3],
+        vec![
+            landmark(10, 1, &[(1, 0), (2, 0), (3, 0)]),
+            landmark(13, 2, &[(2, 0), (3, 1)]),
+        ],
+    ));
+    // 12 has one observation: dropped. 10 gains keyframe 3.
+    assert_eq!(
+        backend.stats(),
+        MapStats {
+            keyframes: 3,
+            landmarks: 3,
+            observations: 3 + 3 + 2
+        }
+    );
+    assert_eq!(backend.active_keyframes(), &BTreeSet::from([1, 2, 3]));
+    let graph = backend.graph();
+    assert_eq!(graph.root(), Some(1));
+    // 2 shares 10 and 11 with 1 (11 counts once over two cameras).
+    assert_eq!(graph.weight(1, 2), Some(2));
+    // 3 shares 10 with 1, and 10 and 13 with 2.
+    assert_eq!(graph.weight(1, 3), Some(1));
+    assert_eq!(graph.weight(2, 3), Some(2));
+    assert_eq!(graph.parent(3), Some(2));
+    assert_eq!(backend.map().keyframe(3).unwrap().keypoints[1].len(), 1);
+    assert_eq!(backend.map().keyframe(2).unwrap().pose, pose(2.0));
+}
+
+#[test]
+fn a_marginalization_stamp_writes_final_values_and_releases_the_keyframe() {
+    let mut backend = backend(100, 10);
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![landmark(10, 1, &[(1, 0), (2, 0)])],
+    ));
+    let mut last = landmark(10, 1, &[(1, 0), (2, 0)]);
+    last.inv_dist = 0.125;
+    let events = backend.step(marg(&[1], 7.0, vec![last]));
+    assert_eq!(events, vec![MapEvent::KeyframeMarginalized(1)]);
+    assert_eq!(backend.map().keyframe(1).unwrap().pose, pose(7.0));
+    assert_eq!(
+        backend.map().landmark(LandmarkId(10)).unwrap().inv_dist,
+        0.125
+    );
+    assert_eq!(backend.active_keyframes(), &BTreeSet::from([2]));
+    // An eviction the map never saw changes nothing.
+    assert!(backend.step(marg(&[99], 0.0, vec![])).is_empty());
+}
+
+/// Five keyframes all see landmarks 10 and 11; keyframe 2 sees nothing else,
+/// so it is fully redundant when it leaves the window.
+fn redundant_map() -> MapBackend {
+    let mut backend = backend(100, 10);
+    let seen_by_all = |id| landmark(id, 1, &[(1, 0), (2, 0), (3, 0), (4, 0), (5, 0)]);
+    backend.step(keyframe(1, &[1], vec![]));
+    for t in 2..=5 {
+        let window: Vec<FrameId> = (1..=t).collect();
+        backend.step(keyframe(t, &window, vec![seen_by_all(10), seen_by_all(11)]));
+    }
+    backend.step(keyframe(
+        6,
+        &[1, 2, 3, 4, 5, 6],
+        vec![
+            landmark(20, 3, &[(3, 0), (6, 0)]),
+            landmark(21, 1, &[(1, 0), (3, 1), (6, 1)]),
+        ],
+    ));
+    backend
+}
+
+#[test]
+fn a_redundant_keyframe_is_culled_as_it_leaves_and_never_comes_back() {
+    let mut backend = redundant_map();
+    assert_eq!(backend.graph().weight(2, 3), Some(2));
+    let events = backend.step(marg(&[2], 2.0, vec![]));
+    assert_eq!(
+        events,
+        vec![
+            MapEvent::KeyframeMarginalized(2),
+            MapEvent::KeyframeCulled {
+                id: 2,
+                reason: CullReason::Redundant
+            }
+        ]
+    );
+    assert!(!backend.map().contains_keyframe(2));
+    assert!(!backend.graph().contains(2));
+    assert_eq!(backend.graph().parent(3), Some(1), "3's parent was 2");
+    // A late stamp naming the culled keyframe does not bring it back.
+    backend.step(keyframe(
+        7,
+        &[2, 7],
+        vec![landmark(30, 2, &[(2, 0), (7, 0)])],
+    ));
+    assert!(!backend.map().contains_keyframe(2));
+    assert!(backend.map().landmark(LandmarkId(30)).is_none());
+}
+
+#[test]
+fn the_root_and_pinned_keyframes_are_never_culled() {
+    let mut backend = redundant_map();
+    // Keyframe 1 is the root: redundant or not, it stays.
+    let events = backend.step(marg(&[1], 1.0, vec![]));
+    assert_eq!(events, vec![MapEvent::KeyframeMarginalized(1)]);
+    assert!(backend.map().contains_keyframe(1));
+    // B10: a pinned keyframe survives its redundancy cull.
+    backend.pin([2]);
+    assert!(backend.is_protected(2));
+    let events = backend.step(marg(&[2], 2.0, vec![]));
+    assert_eq!(events, vec![MapEvent::KeyframeMarginalized(2)]);
+    assert!(backend.map().contains_keyframe(2));
+    backend.unpin([2]);
+    assert!(!backend.is_protected(2));
+}
+
+#[test]
+fn an_over_budget_map_culls_its_lowest_scored_inactive_keyframes() {
+    let mut backend = backend(4, 2);
+    backend.step(keyframe(1, &[1], vec![]));
+    for t in 2..=4 {
+        backend.step(keyframe(
+            t,
+            &[t - 1, t],
+            vec![landmark(t as u64, t - 1, &[(t - 1, 0), (t, 0)])],
+        ));
+        backend.step(marg(&[t - 1], (t - 1) as f64, vec![]));
+    }
+    assert_eq!(backend.map().keyframes().len(), 4);
+    let events = backend.step(keyframe(
+        5,
+        &[4, 5],
+        vec![landmark(5, 4, &[(4, 0), (5, 0)])],
+    ));
+    let culled: Vec<FrameId> = events
+        .iter()
+        .filter_map(|event| match event {
+            MapEvent::KeyframeCulled {
+                id,
+                reason: CullReason::OverBudget,
+            } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    // 1 is the root, 4 and 5 are in the window: only 2 and 3 can go, 3 first
+    // (the middle of the time span scores lowest).
+    assert_eq!(culled, vec![3, 2]);
+    assert_eq!(
+        backend
+            .map()
+            .keyframes()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 4, 5]
+    );
+}
+
+// ── property: culling never touches a protected keyframe ────────────────
+
+/// One step of a random session.
+#[derive(Debug, Clone)]
+enum Step {
+    /// A new keyframe; the window keeps the newest `window` keyframes. Each
+    /// landmark is `(host offset back, observing offsets back)`.
+    Keyframe {
+        window: usize,
+        landmarks: Vec<(usize, Vec<(usize, CamId)>)>,
+    },
+    /// Evict the oldest window keyframe.
+    Marginalize,
+    /// Pin the keyframe this far back from the newest.
+    Pin(usize),
+    /// Release every pin.
+    UnpinAll,
+}
+
+fn step() -> impl Strategy<Value = Step> {
+    let landmark = (
+        0usize..4,
+        prop::collection::vec((0usize..6, 0usize..2), 1..5),
+    );
+    prop_oneof![
+        4 => (2usize..5, prop::collection::vec(landmark, 0..8))
+            .prop_map(|(window, landmarks)| Step::Keyframe { window, landmarks }),
+        3 => Just(Step::Marginalize),
+        1 => (0usize..10).prop_map(Step::Pin),
+        1 => Just(Step::UnpinAll),
+    ]
+}
+
+/// What must survive a step that marginalizes `releasing` (if any): the root,
+/// every pinned keyframe, and every window keyframe but the one leaving.
+fn protected(
+    backend: &MapBackend,
+    pinned: &BTreeSet<FrameId>,
+    releasing: Option<FrameId>,
+) -> BTreeSet<FrameId> {
+    let mut protected: BTreeSet<FrameId> = backend.active_keyframes().clone();
+    if let Some(releasing) = releasing {
+        protected.remove(&releasing);
+    }
+    protected.extend(pinned.iter().copied());
+    protected.extend(backend.graph().root());
+    protected
+}
+
+/// Step `backend` and fail if a culled keyframe was in `protected`.
+fn checked_step(
+    backend: &mut MapBackend,
+    stamp: MapStamp,
+    protected: &BTreeSet<FrameId>,
+) -> Result<(), TestCaseError> {
+    for event in backend.step(stamp) {
+        if let MapEvent::KeyframeCulled { id, .. } = event {
+            prop_assert!(!protected.contains(&id), "culled protected keyframe {}", id);
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn culling_never_removes_a_protected_keyframe_and_the_map_stays_consistent(
+        steps in prop::collection::vec(step(), 1..60),
+        max_keyframes in 3usize..8,
+    ) {
+        let mut backend = MapBackend::new(
+            MapConfig { max_redundancy_score: 0.5, ..config(max_keyframes, 2) },
+            vec![[640, 480]; 2],
+        );
+        let mut made: Vec<FrameId> = Vec::new();
+        let mut window: Vec<FrameId> = Vec::new();
+        let mut pinned: BTreeSet<FrameId> = BTreeSet::new();
+        let mut next_landmark: u64 = 0;
+        for step in steps {
+            match step {
+                Step::Keyframe { window: size, landmarks } => {
+                    let t = made.len() as FrameId + 1;
+                    made.push(t);
+                    window.push(t);
+                    let landmarks = landmarks
+                        .into_iter()
+                        .map(|(host_back, obs)| {
+                            next_landmark += 1;
+                            let back = |offset: usize| window[window.len() - 1 - offset.min(window.len() - 1)];
+                            let host = back(host_back);
+                            let mut obs: Vec<(FrameId, CamId)> = obs.into_iter().map(|(o, cam)| (back(o), cam)).collect();
+                            obs.push((host, 0));
+                            landmark(next_landmark, host, &obs)
+                        })
+                        .collect();
+                    let mut guard = protected(&backend, &pinned, None);
+                    guard.extend(window.iter().copied());
+                    checked_step(&mut backend, keyframe(t, &window, landmarks), &guard)?;
+                    while window.len() > size {
+                        let oldest = window.remove(0);
+                        let guard = protected(&backend, &pinned, Some(oldest));
+                        checked_step(&mut backend, marg(&[oldest], 0.0, vec![]), &guard)?;
+                    }
+                }
+                Step::Marginalize => {
+                    if window.len() > 1 {
+                        let oldest = window.remove(0);
+                        let guard = protected(&backend, &pinned, Some(oldest));
+                        checked_step(&mut backend, marg(&[oldest], 0.0, vec![]), &guard)?;
+                    }
+                }
+                Step::Pin(back) => {
+                    if let Some(&id) = made.iter().rev().nth(back) {
+                        backend.pin([id]);
+                        pinned.insert(id);
+                    }
+                }
+                Step::UnpinAll => {
+                    backend.unpin(made.clone());
+                    pinned.clear();
+                }
+            }
+            let map = backend.map();
+            prop_assert_eq!(
+                backend.graph().node_ids().collect::<Vec<_>>(),
+                map.keyframes().keys().copied().collect::<Vec<_>>()
+            );
+            prop_assert_eq!(
+                backend.active_keyframes().iter().copied().collect::<Vec<_>>(),
+                window.iter().copied().filter(|id| map.contains_keyframe(*id)).collect::<Vec<_>>()
+            );
+            for id in backend.active_keyframes() {
+                prop_assert!(map.contains_keyframe(*id));
+            }
+            let mut by_keyframe: BTreeMap<FrameId, BTreeSet<LandmarkId>> = BTreeMap::new();
+            for (&landmark_id, landmark) in map.landmarks() {
+                prop_assert!(landmark.obs.len() >= 2);
+                prop_assert!(map.contains_keyframe(landmark.host.frame_id));
+                for image in landmark.obs.keys().chain([&landmark.host]) {
+                    prop_assert!(map.contains_keyframe(image.frame_id));
+                    by_keyframe.entry(image.frame_id).or_default().insert(landmark_id);
+                }
+            }
+            for &id in map.keyframes().keys() {
+                prop_assert_eq!(
+                    map.landmarks_of_keyframe(id),
+                    by_keyframe.remove(&id).unwrap_or_default()
+                );
+            }
+        }
+    }
+}

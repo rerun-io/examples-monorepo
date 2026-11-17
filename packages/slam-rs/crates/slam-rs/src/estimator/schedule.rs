@@ -184,6 +184,8 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             states_to_marg_all,
             states_to_marg_vel_bias,
         };
+        // The evicted keyframes' final values, before the window drops them.
+        self.stamp_marginalized(&schedule.kfs_to_marg);
         let inputs: MarginalizeInputs<'_, S> = MarginalizeInputs {
             schedule: &schedule,
             imu_lin_data: Some(self.imu_lin_data()),

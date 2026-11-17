@@ -258,6 +258,43 @@ pub struct VioConfig {
     /// Which keyframe-removal rule applies.
     #[serde(rename = "config.vio_kf_marg_criteria")]
     pub vio_kf_marg_criteria: KeyframeMargCriteria,
+
+    // ── the persistent map (back end, cargo feature `backend`) ──────────
+    // One default set for every dataset (DESIGN §8). Keys RootSLAM also has
+    // keep its `config.` names; keys of this port are under `backend.`.
+    /// Build the persistent keyframe map beside the window. Read only by builds
+    /// with the `backend` feature; the raw VIO poses are the same either way.
+    #[serde(rename = "backend.enabled")]
+    pub backend_enabled: bool,
+    /// Cull keyframes: redundant ones as they leave the window, and the
+    /// lowest-scored ones in batches when the map is over its budget.
+    #[serde(rename = "config.map_enable_culling")]
+    pub map_enable_culling: bool,
+    /// A keyframe leaving the window is culled when at least this fraction of
+    /// the landmarks it sees are seen by more than three keyframes.
+    #[serde(rename = "config.map_max_redundancy_score")]
+    pub map_max_redundancy_score: f64,
+    /// Leave the landmarks a keyframe hosts out of its redundancy score.
+    #[serde(rename = "config.map_redundancy_exclude_hosted_lms")]
+    pub map_redundancy_exclude_hosted_lms: bool,
+    /// Keyframe budget of the map; above it, [`Self::map_batch_cull_size`]
+    /// keyframes are culled at once.
+    #[serde(rename = "config.map_max_keyframes")]
+    pub map_max_keyframes: usize,
+    /// Keyframes culled per batch once the map exceeds its budget.
+    #[serde(rename = "config.map_batch_cull_size")]
+    pub map_batch_cull_size: usize,
+    /// Fixed shared-landmark count at which a covisibility edge is "high". `None`
+    /// (the default) derives it from the map, see
+    /// [`Self::backend_high_covisibility_landmark_ratio`]; RootSLAM ships one
+    /// value per dataset (MG 100, MI 70, MO 50).
+    #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
+    pub loop_closing_pgo_min_covisibility_weight: Option<u32>,
+    /// With no fixed weight, an edge is "high" at this multiple of the median
+    /// number of landmarks a map keyframe sees (phase1/kf-density.md: MG 97,
+    /// MIO 70, MIP 65, MO 67 against RootSLAM's 100/70/70/50).
+    #[serde(rename = "backend.high_covisibility_landmark_ratio")]
+    pub backend_high_covisibility_landmark_ratio: f64,
 }
 
 impl Default for VioConfig {
@@ -318,6 +355,15 @@ impl Default for VioConfig {
             vio_fix_long_term_keyframes: false,
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
+
+            backend_enabled: true,
+            map_enable_culling: true,
+            map_max_redundancy_score: 0.9,
+            map_redundancy_exclude_hosted_lms: false,
+            map_max_keyframes: 1500,
+            map_batch_cull_size: 30,
+            loop_closing_pgo_min_covisibility_weight: None,
+            backend_high_covisibility_landmark_ratio: 1.2,
         }
     }
 }
@@ -506,6 +552,53 @@ mod tests {
             let written: String = once.to_json_string().unwrap();
             let twice: VioConfig = VioConfig::from_json_str(&written).unwrap();
             assert_eq!(once, twice, "{name} did not round trip");
+        }
+    }
+
+    /// One default set for the persistent map (DESIGN §8, phase1/kf-density.md):
+    /// RootSLAM's MSD values where they are one value, and the per-map
+    /// covisibility rule instead of a per-dataset weight.
+    #[test]
+    fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
+        let defaults = VioConfig::default();
+        assert!(defaults.backend_enabled);
+        assert!(defaults.map_enable_culling);
+        assert_eq!(defaults.map_max_redundancy_score, 0.9);
+        assert!(!defaults.map_redundancy_exclude_hosted_lms);
+        assert_eq!(defaults.map_max_keyframes, 1500);
+        assert_eq!(defaults.map_batch_cull_size, 30);
+        assert_eq!(defaults.loop_closing_pgo_min_covisibility_weight, None);
+        assert_eq!(defaults.backend_high_covisibility_landmark_ratio, 1.2);
+        for (name, text) in every_fixture() {
+            let config = VioConfig::from_json_str(text).unwrap();
+            let mut normalised = config.clone();
+            normalised.backend_enabled = defaults.backend_enabled;
+            assert_eq!(config, normalised, "{name} sets a map key");
+        }
+
+        let parity = VioConfig::from_json_str(
+            r#"{"value0":{"backend.enabled":false,"config.map_max_keyframes":3000,
+            "config.map_batch_cull_size":10,"config.map_enable_culling":false,
+            "config.loop_closing_pgo_min_covisibility_weight":100}}"#,
+        )
+        .unwrap();
+        assert!(!parity.backend_enabled);
+        assert_eq!(parity.map_max_keyframes, 3000);
+        assert_eq!(parity.map_batch_cull_size, 10);
+        assert!(!parity.map_enable_culling);
+        assert_eq!(parity.loop_closing_pgo_min_covisibility_weight, Some(100));
+        assert_eq!(
+            VioConfig::from_json_str(&parity.to_json_string().unwrap()).unwrap(),
+            parity
+        );
+        // RootSLAM keys with no reader here stay refused (B20).
+        for dead in [
+            "config.map_covisibility_min_weight",
+            "config.map_covisibility_max_size",
+            "config.map_debug",
+        ] {
+            let text = format!(r#"{{"value0":{{"{dead}":3}}}}"#);
+            assert!(VioConfig::from_json_str(&text).is_err(), "{dead} parsed");
         }
     }
 

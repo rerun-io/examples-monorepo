@@ -12,6 +12,11 @@ pub use pipeline::{
     device_probes_run, gpu_probe, select_backend,
 };
 
+// The persistent keyframe map (and, in later PRs, loop closing and the global
+// BA): host only. wasm, iOS and embedded builds leave it out and stay threadless;
+// the pixi build, the CLI and the Python bindings turn it on.
+#[cfg(feature = "backend")]
+pub mod backend;
 pub mod ba_base;
 pub mod calib;
 pub mod camera;

@@ -348,6 +348,21 @@ impl Vio {
         .map(Some)
     }
 
+    /// The persistent map's size: ``keyframes``, ``landmarks`` and
+    /// ``observations`` (RootSLAM's ``stats_map.json`` counts), or `None` when
+    /// ``backend.enabled`` is off. Current up to the last solved keyframe.
+    #[getter]
+    fn map_stats(&self) -> Option<std::collections::BTreeMap<&'static str, usize>> {
+        self.inner.map_backend().map(|map_backend| {
+            let stats = map_backend.stats();
+            std::collections::BTreeMap::from([
+                ("keyframes", stats.keyframes),
+                ("landmarks", stats.landmarks),
+                ("observations", stats.observations),
+            ])
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!("Vio(camera_count={})", self.camera_count())
     }
