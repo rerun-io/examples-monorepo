@@ -32,11 +32,11 @@ JPEG_QUALITY: int = 85
 """Quality of the full-resolution frames the tracking stages log; 960x960 grayscale lands around 38 kB."""
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
+"""Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 PANORAMA_ENTITY: str = f"{RUN_ENTITY}/panorama"
 """The stitched 1920x960 panorama of a dual-fisheye rig, with the tracked keypoints of both tiles drawn on it."""
 PANORAMA_WIDTH: int = 1920
 """Width of that panorama: two 960-column hemispheres."""
-"""Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 VIO_STATS_ENTITY: str = "/stats/vio"
@@ -526,7 +526,7 @@ class VioStage:
         if pano is None or frame is None or frame.t_ns != t_ns:
             return
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
-        rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=85))
+        rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
         log_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
 
     def flush(self) -> None:

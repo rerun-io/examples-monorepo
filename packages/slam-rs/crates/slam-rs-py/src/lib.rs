@@ -940,15 +940,15 @@ impl VioConfig {
         self.inner.optical_flow_image_safe_radius = radius;
     }
 
-    /// `config.vio_gravity_ms2`: the magnitude of gravity, m/s². A dataset fact
-    /// (TartanAir synthesises its IMU with 9.8), so the feed sets it from the
-    /// recording when the recording carries one.
     /// `config.panorama_dual_fisheye`: the caller hands `Vio` the factory lenses.
     #[getter]
     fn panorama_dual_fisheye(&self) -> bool {
         self.inner.panorama_dual_fisheye
     }
 
+    /// `config.vio_gravity_ms2`: the magnitude of gravity, m/s². A dataset fact
+    /// (TartanAir synthesises its IMU with 9.8), so the feed sets it from the
+    /// recording when the recording carries one.
     #[getter]
     fn vio_gravity_ms2(&self) -> f64 {
         self.inner.vio_gravity_ms2
