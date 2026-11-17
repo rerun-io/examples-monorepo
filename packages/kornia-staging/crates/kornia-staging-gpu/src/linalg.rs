@@ -11,9 +11,9 @@
 //! interleaves with frontend work on the same device.
 //!
 //! The block-Jacobi inverses come from the host, factored in f64 (DESIGN §7.3:
-//! portable devices have no f64). The PCG scalars are f32 sums in one fixed
-//! order ([`fixed_order_dot`] states it), where the CPU lane sums in f64; the
-//! S4 band (DESIGN §7.4) measures what that costs.
+//! portable devices have no f64). The PCG scalars are compensated f32 sums in
+//! one fixed order ([`fixed_order_dot`] states it), where the CPU lane sums in
+//! f64; the S4 band (DESIGN §7.4) measures what is left.
 use std::time::Instant;
 
 use cubecl::prelude::*;
@@ -317,10 +317,10 @@ pub fn device_matvec<R: Runtime>(
     )
 }
 
-/// `a . b` in the order of the device PCG's sums: unit `u` of
-/// [`PCG_UNITS`] adds the six entries of groups `u, u + 256, ...` in order,
-/// then a fixed pairwise tree adds the units. The host mirror of the device
-/// sum, for tests.
+/// `a . b` in the order of the device PCG's sums: unit `u` of [`PCG_UNITS`]
+/// adds the six entries of groups `u, u + 256, ...` in order into a Neumaier
+/// (compensated) sum, then a fixed pairwise tree of TwoSums adds the units and
+/// carries their errors. The host mirror of the device sum, for tests.
 ///
 /// # Panics
 /// If the lengths differ or are not a multiple of six.
@@ -329,7 +329,7 @@ pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
         a.len() == b.len() && a.len().is_multiple_of(6),
         "six-entry groups"
     );
-    let mut partial = [0.0f32; PCG_UNITS];
+    let (mut hi, mut lo) = ([0.0f32; PCG_UNITS], [0.0f32; PCG_UNITS]);
     for (k, (ga, gb)) in a
         .as_chunks::<6>()
         .0
@@ -337,18 +337,30 @@ pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
         .zip(b.as_chunks::<6>().0)
         .enumerate()
     {
+        let u = k % PCG_UNITS;
         for (x, y) in ga.iter().zip(gb) {
-            partial[k % PCG_UNITS] += x * y;
+            let (sum, value) = (hi[u], x * y);
+            let t = sum + value;
+            lo[u] += if sum.abs() >= value.abs() {
+                (sum - t) + value
+            } else {
+                (value - t) + sum
+            };
+            hi[u] = t;
         }
     }
     let mut stride = PCG_UNITS / 2;
     while stride > 0 {
         for u in 0..stride {
-            partial[u] += partial[u + stride];
+            let (a, b) = (hi[u], hi[u + stride]);
+            let s = a + b;
+            let bb = s - a;
+            hi[u] = s;
+            lo[u] += lo[u + stride] + ((a - (s - bb)) + (b - bb));
         }
         stride /= 2;
     }
-    partial[0]
+    hi[0] + lo[0]
 }
 
 /// `a . b` on the device, by the kernel that sums the PCG's scalars.
@@ -494,10 +506,22 @@ impl<R: Runtime> GpuPcg<R> {
                     kernels::launch_pcg_precondition(client, &buffers, it);
                     device.matvec(client, buffers.p, buffers.q, buffers.ustate);
                     let replace = (it as usize).is_multiple_of(GBA_CG_CHECK_EVERY);
-                    kernels::launch_pcg_step(client, &buffers, it, replace, max, eta);
+                    let mode = if replace {
+                        kernels::ADVANCE
+                    } else {
+                        kernels::STEP
+                    };
+                    kernels::launch_pcg_update(client, &buffers, it, mode, max, eta);
                     if replace {
                         device.matvec(client, buffers.x, buffers.q, buffers.ustate);
-                        kernels::launch_pcg_replace(client, &buffers, it, max, eta);
+                        kernels::launch_pcg_update(
+                            client,
+                            &buffers,
+                            it,
+                            kernels::REPLACE,
+                            max,
+                            eta,
+                        );
                     }
                 }
                 let bytes = read_buffers(client, vec![ustate.0.clone()], "the PCG state")?;
@@ -527,7 +551,7 @@ impl<R: Runtime> GpuPcg<R> {
             _ => {
                 return Err(GpuError::PcgLayout {
                     what: "termination",
-                })
+                });
             }
         };
         self.last = DeviceSolveStats {

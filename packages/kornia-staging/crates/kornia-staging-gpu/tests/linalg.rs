@@ -162,20 +162,37 @@ fn the_device_dot_is_the_fixed_order_sum() {
             .zip(&b)
             .map(|(x, y)| f64::from((x * y).abs()))
             .sum();
-        // FMA contraction is the device compiler's choice: within a few ulps
-        // of the stated order, and that order within the f32 bound of the sum.
-        assert!(
-            f64::from((device - host).abs()) <= 4.0 * f64::from(f32::EPSILON) * magnitude,
-            "{groups}: device {device} vs host order {host}"
-        );
-        assert!(
-            (f64::from(host) - exact).abs() <= 64.0 * f64::from(f32::EPSILON) * magnitude,
-            "{groups}: {host} vs {exact}"
-        );
+        // Compensated: the products' own rounding (half an ulp each) plus
+        // one rounding of the result; FMA contraction stays inside that bound.
+        let eps = f64::from(f32::EPSILON);
+        for (what, value) in [("device", device), ("host order", host)] {
+            assert!(
+                (f64::from(value) - exact).abs() <= eps * (0.5 * magnitude + exact.abs()),
+                "{groups}: {what} {value} vs {exact}"
+            );
+        }
         assert_eq!(
             device.to_bits(),
             device_dot(&client, &a, &b).unwrap().to_bits()
         );
+    }
+    // Exact products that cancel: a plain f32 sum loses every small term
+    // next to 1e8 (one ulp there is 8); the compensated sum keeps them all.
+    for groups in [1usize, 300, 4000] {
+        let a: Vec<f32> = (0..groups)
+            .flat_map(|k| [1e8, 1.0, -1e8, 0.5, 0.25 * (k % 3) as f32, -0.125])
+            .collect();
+        let b = vec![1.0f32; a.len()];
+        let exact: f64 = a.iter().zip(&b).map(|(x, y)| f64::from(x * y)).sum();
+        for (what, value) in [
+            ("device", device_dot(&client, &a, &b).unwrap()),
+            ("host order", fixed_order_dot(&a, &b)),
+        ] {
+            assert!(
+                (f64::from(value) - exact).abs() <= f64::from(f32::EPSILON) * exact.abs(),
+                "{groups}: {what} {value} vs {exact}"
+            );
+        }
     }
 }
 
