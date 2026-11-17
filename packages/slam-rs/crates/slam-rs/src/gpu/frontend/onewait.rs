@@ -411,7 +411,7 @@ mod tests {
     use super::rig_device_model;
     use crate::calib::Calibration;
     use crate::camera::RigCamera;
-    use kornia_staging_gpu::camera::{MODEL_BROWN8, MODEL_KB4};
+    use kornia_staging_gpu::camera::{MODEL_BROWN8, MODEL_KB4, MODEL_MEI};
 
     fn rig(text: &str) -> Vec<RigCamera<f32>> {
         RigCamera::from_calibration(
@@ -442,8 +442,8 @@ mod tests {
         let mut general = msd.clone();
         general[1].model.inner = kornia_staging_3d::camera::CameraModelKind::BrownConrady(prism);
         assert_eq!(rig_device_model(&general), None);
-        // A Mei (`mei_v3` / `mei_v6`) rig has no device kernel: the one-wait path stays off and the frontend runs
-        // its host paths, with or without `optical_flow_gpu_one_wait_any_model`.
+        // A Mei (`mei_v3` / `mei_v6`) rig has a device model too; like the other non-Brown8 models it takes the
+        // one-wait stage only with `optical_flow_gpu_one_wait_any_model`.
         let mei = kornia_staging_3d::camera::Mei::new(
             [400.0, 400.0, 320.0, 240.0, 2.3],
             1.75,
@@ -457,6 +457,6 @@ mod tests {
         for camera in &mut lenses {
             camera.model.inner = kornia_staging_3d::camera::CameraModelKind::Mei(mei);
         }
-        assert_eq!(rig_device_model(&lenses), None);
+        assert_eq!(rig_device_model(&lenses), Some(MODEL_MEI));
     }
 }
