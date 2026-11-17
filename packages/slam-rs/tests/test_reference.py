@@ -305,14 +305,20 @@ def test_tum_vi_has_its_own_tier_with_rootslams_four_groups_and_no_baseline(benc
     assert all(segment.tier == "tumvi" and not segment.hold_out and segment.baseline == () for segment in tumvi)
 
 
-def test_tum_vi_config_differs_from_msd_only_in_its_image_facts(settings: SlamConfig) -> None:
-    """RootSLAM's tumvi_512_config: a 40 px detection grid on the 512 px images and a 320 px fisheye mask; the rest is msdmg's."""
+def test_tum_vi_config_differs_from_msd_only_where_rootslams_tumvi_config_does(settings: SlamConfig) -> None:
+    """RootSLAM's tumvi_512_config: a 40 px detection grid on the 512 px images, a 320 px fisheye mask and LM from lambda 1e-7.
+
+    Both stacks reset lambda to ``vio_lm_lambda_initial`` on every optimize, so the key is carried. ``vio_use_lm`` is
+    read by neither stack; it is copied as RootSLAM writes it. The rest is msdmg's.
+    """
     msd: dict = json.loads(settings.vio_config_text("msd-g2"))["value0"]
     tumvi: dict = json.loads(settings.vio_config_text("tum-vi"))["value0"]
     assert msd.keys() == tumvi.keys()
     assert {key: tumvi[key] for key in msd if msd[key] != tumvi[key]} == {
         "config.optical_flow_detection_grid_size": 40,
         "config.optical_flow_image_safe_radius": 320.0,
+        "config.vio_use_lm": False,
+        "config.vio_lm_lambda_initial": 1e-7,
     }
 
 

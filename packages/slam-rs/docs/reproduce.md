@@ -82,22 +82,34 @@ What reaches slam-rs:
   `sensor_metadata` layer with `applied_time_shift_ns` 0. RootSLAM ran Basalt's
   values from `tumvi_512_ds_calib.json` (0.016, 0.000282, 0.001, 0.0001);
 - not carried: the ds calibration's static biases (`calib_accel_bias`,
-  `calib_gyro_bias`) and its vignette; the 16-bit frames reach the feed as their
-  upper 8 bits (AV1, 8-bit).
+  `calib_gyro_bias`) and its vignette;
+- pixels: the PNGs carry ~12 significant bits (values in steps of 16, a few
+  in steps of 4); the AV1 video is 8-bit and keeps the top 8 (room1's median
+  grey is ~29). RootSLAM reads the 16-bit PNGs, so 4 of the 12 bits are a
+  difference between the two runs. `test_tumvi.py` pins the path (synthetic
+  frames, and room1 pair 100 against its raw PNG when both are present). A
+  higher-bit-depth video path is a follow-up.
 
 `configs/tumvi_config.json` is RootSLAM's `tumvi_512_config.json`, key by key,
 for the keys slam-rs reads: it is `msdmg_config.json` with a 40 px detection
-grid and a 320 px fisheye mask (the recall patch norms are the MSD values
-already). Not carried: `vio_use_lm` false and `vio_lm_lambda_initial` 1e-7
-(slam-rs parses `vio_use_lm` but always runs the damped solve, so it keeps
-msdmg's 1e-4), and every key slam-rs does not read (`map_*`, `mapper_*`,
-`loop_closing_*`, `vio_filter_iteration`, `vio_outlier_threshold`, the LM damping
-variants, `optical_flow_predict_with_imu`).
+grid, a 320 px fisheye mask and `vio_lm_lambda_initial` 1e-7 (the recall patch
+norms are the MSD values already). Both stacks reset lambda to
+`vio_lm_lambda_initial` on every optimize (RootSLAM `sqrt_keypoint_vio.cpp`,
+slam-rs D11), so the key means the same in both. `vio_use_lm` is read by
+neither stack; it is copied as RootSLAM writes it (false). Not carried: every
+key outside slam-rs's `VioConfig`, notably `vio_triangulate_with_all_cams`
+true (RootSLAM triangulates new landmarks from every camera, a behaviour
+difference), and also `vio_erase_old_vis_data`,
+`vio_covisibility_query_frequency`, `enable_loop_closing`, `map_*`,
+`mapper_*`, `loop_closing_*`, `vio_filter_iteration`, `vio_outlier_threshold`,
+the other LM damping variants and `optical_flow_predict_with_imu`. These keys
+are not TUM-VI-specific: RootSLAM's msdmg and EuRoC configs carry them too.
 
 Ground truth is `mav0/mocap0/data.csv` (world_T_imu0, every sample). The
 motion-capture system covers one room, so the corridor, magistrale and slides
 runs have ground truth at their start and end only; the `gt` layer's properties
-list those spans (`property:gt:span_start_ns`, `span_stop_ns`). On TM, ATE
+list the spans between gaps over 1 s (`property:gt:span_start_ns`,
+`span_stop_ns`; in-room occlusions split them too, so room2 has 6). On TM, ATE
 measures whether the start-to-end loop closed.
 
 Convert and register once (from the repository root; the output root must be an
@@ -105,8 +117,8 @@ absolute path on local disk):
 
 ```bash
 export DATAFORGE_OUTPUT_ROOT=<absolute rrd root>
-pixi run -e dataforge-dev dataforge-convert --jobs 2 tum-vi --root <dir holding dataset-*_512_16>
-pixi run -e dataforge-dev dataforge-register tum-vi --root <same dir>   # base + gt + sensor_metadata
+pixi run -e dataforge --frozen dataforge-convert --jobs 2 tum-vi --root <dir holding dataset-*_512_16>
+pixi run -e dataforge --frozen dataforge-register tum-vi --root <same dir>   # base + gt + sensor_metadata
 ```
 
 The twenty segments are the `tumvi` tier of `benchmarks.toml`, with no baseline
