@@ -120,7 +120,7 @@ def test_the_bootstrap_scan_recovers_the_offset_over_noisy_windows() -> None:
     grid: Float64[ndarray, " n_offsets"] = np.asarray(offsets_ms)
     scans: list[WindowScan] = []
     for start_s in range(6):
-        # The solver residual doubles 5 ms from its minimum (DESIGN 13.1); a rejected window reports no residual.
+        # The solver residual doubles 5 ms from its minimum; a rejected window reports no residual.
         residual: Float64[ndarray, " n_offsets"] = 2e-3 * (1 + ((grid + 2.0) / 5.0) ** 2) * (1 + rng.normal(scale=0.03, size=grid.size))
         values: list[float | None] = [None if index == 16 else float(value) for index, value in enumerate(residual)]
         scans.append(WindowScan(start_s=float(start_s), offsets_ms=offsets_ms, residual_rad=tuple(values), verdicts=("Accepted",) * grid.size))

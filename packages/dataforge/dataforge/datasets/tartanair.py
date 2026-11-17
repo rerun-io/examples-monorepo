@@ -81,7 +81,7 @@ DEFAULT_TRAJECTORIES: tuple[str, ...] = (
     "OldTownSummer/easy/P000",
     "OldTownFall/hard/P001",
 )
-"""The subset (recon 05 section 4): two ArchViz smoke trajectories, a 15 s ArchViz one for VIO start-up, two long outdoor ones."""
+"""The subset: two ArchViz smoke trajectories, a 15 s ArchViz one for VIO start-up, two long outdoor ones."""
 
 
 @dataclass(frozen=True, slots=True)

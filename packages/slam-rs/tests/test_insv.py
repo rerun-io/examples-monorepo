@@ -27,7 +27,7 @@ def test_kb4_fit_recovers_a_kb4_curve_exactly() -> None:
 
 
 def test_kb4_fit_of_the_factory_v3_curve_of_lens_0_is_within_a_few_hundredths_of_a_pixel() -> None:
-    """Lens 0 of the X4 Air at 1920 px (recon/03 section 5.3): Mei xi 2.31494, mean focal 1834.85, V3 k1..k3."""
+    """Lens 0 of the X4 Air at 1920 px (factory strings of the clip VID_20261116_125200_00_003): Mei xi 2.31494, mean focal 1834.85, V3 k1..k3."""
     theta: Float64[ndarray, " n"] = np.linspace(0.0, np.deg2rad(97.0), 2000)
     m: Float64[ndarray, " n"] = np.sin(theta) / (np.cos(theta) + 2.31494)
     radius: Float64[ndarray, " n"] = 0.5 * (7095.54 + 7093.97) * 1920 / 7424 * m * (1 + 0.96273077 * m**2 - 2.06431413 * m**4 + 4.31214333 * m**6)
@@ -37,7 +37,7 @@ def test_kb4_fit_of_the_factory_v3_curve_of_lens_0_is_within_a_few_hundredths_of
 
 
 def test_the_measured_imu_rotation_orthonormalises_to_0_13_deg_from_its_permutation() -> None:
-    """recon/09: R_P_imu is 0.13 deg from x_P = -z_imu, y_P = +x_imu, z_P = -y_imu."""
+    """The measured R_P_imu is 0.13 deg from x_P = -z_imu, y_P = +x_imu, z_P = -y_imu."""
     rotation: Float64[ndarray, "3 3"] = orthonormal(X4_AIR.pano_from_imu_measured)
     np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-12)
     assert np.linalg.det(rotation) == pytest.approx(1.0)
@@ -91,7 +91,7 @@ def test_the_first_three_seconds_convert_into_a_recording_the_feed_reads(tmp_pat
         assert (lens1.cx, lens1.cy) == pytest.approx((lenses[1].cx, lenses[1].cy), abs=1e-3)
         assert (lens0.fx, lens1.fx) == pytest.approx((553.5, 557.7), abs=0.1)
         # The rig frame is the IMU: the lens centres sit 33.3 mm apart (V6 string; V3 says 33.1 mm) along the lens
-        # axis, z_P = -y_imu (recon/09).
+        # axis, z_P = -y_imu.
         baseline: Float64[ndarray, " 3"] = lens1.imu_T_cam[:3, 3] - lens0.imu_T_cam[:3, 3]
         assert np.linalg.norm(baseline) == pytest.approx(0.03329, abs=1e-4)
         assert baseline[1] > 0.99 * np.linalg.norm(baseline), "lens 1 sits behind lens 0: +y_imu"

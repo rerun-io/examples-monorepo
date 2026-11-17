@@ -64,7 +64,7 @@ def test_the_report_accessors_match_the_report_text() -> None:
 
 
 def test_blanked_cameras_track_nothing() -> None:
-    """A black image gives the frontend nothing to detect or track (DESIGN H3)."""
+    """A black image gives the frontend nothing to detect or track."""
     root: Path = SLAM_CONFIG_PATH.parent
     calibration = _core.Calibration.from_json((root / "crates/slam-rs/tests/fixtures/msdmi_calib.json").read_text())
     config: _core.VioConfig = _core.VioConfig.from_json((root / "configs/msdmi_config.json").read_text())

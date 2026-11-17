@@ -9,8 +9,8 @@ The cameras carry a four-coefficient Kannala-Brandt fit of the factory (V6) radi
 tangential and prism terms do not fit KB4; the raw factory strings and the window crop are kept in the ``insta360``
 recording property, and slam-rs rebuilds the full model from them in Rust for the panorama stitch.
 
-The X4 Air device profile (:data:`X4_AIR`) applies the calibration the phase-A probe measured on this clip
-(``recon/09-calibration-probe.md``, 2026-11-16, no board):
+The X4 Air device profile (:data:`X4_AIR`) applies the calibration a gyro-visual epipolar fit measured on the clip
+VID_20261116_125200_00_003 (2026-11-16, no board):
 
 - Rig frame = IMU frame (``reference = 'imu_00'``). Each lens camera is ``T_imu_lens = T_imu_P * T_P_lens``, with
   ``T_P_lens`` the factory rotation and centre in the panorama frame ``P`` (``kornia_staging_io::insta360``:
@@ -69,18 +69,18 @@ class DeviceProfile:
 
 X4_AIR: DeviceProfile = DeviceProfile(
     name="Insta360 X4 Air",
-    # recon/09 section 0, R_rig_imu (P <- imu), epipolar joint fit of segments 40-60 s and 190-210 s; 0.13 deg from the
+    # R_rig_imu (P <- imu), epipolar joint fit of segments 40-60 s and 190-210 s; 0.13 deg from the
     # permutation x_P = -z_imu, y_P = +x_imu, z_P = -y_imu; the two segments agree within 0.2 deg.
     pano_from_imu_measured=np.array(
         [[-0.00092, 0.00149, -1.00000], [1.00000, -0.00138, -0.00092], [-0.00138, -1.00000, -0.00149]], dtype=np.float64
     ),
-    # recon/09 section 2: t_d = -0.435 * shutter - 0.13 ms (joint epipolar fit with the shutter term, rms 0.035 rad/s);
-    # DESIGN 13.1 rounds it to -0.44 * shutter - 0.1 ms. gyro(t_frame + t_d) matches the frame.
+    # t_d = -0.435 * shutter - 0.13 ms (joint epipolar fit with the shutter term, rms 0.035 rad/s), rounded here
+    # to -0.44 * shutter - 0.1 ms. gyro(t_frame + t_d) matches the frame.
     frame_time_shutter_slope=-0.44,
     frame_time_constant_s=-0.1e-3,
-    # recon/09 section 3: metadata rolling_shutter 15.883 ms; free fits 13-21 ms (lens 1), 11-31 ms (lens 0); rows top to bottom.
+    # Metadata rolling_shutter 15.883 ms; free fits 13-21 ms (lens 1), 11-31 ms (lens 0); rows top to bottom.
     readout_s=15.883e-3,
-    provenance="recon/09-calibration-probe.md (slam-rs fisheye-360, 2026-11-16): gyro-visual fit on VID_20261116_125200_00_003",
+    provenance="gyro-visual epipolar fit on the clip VID_20261116_125200_00_003",
 )
 """The X4 Air profile measured on the clip VID_20261116_125200_00_003."""
 
@@ -122,7 +122,7 @@ class Config:
     batch_frames: int = 300
     """Samples read and sent per call, so the clip is never held in memory whole."""
     lever_arm_m: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    """Vector from the IMU to the lens midpoint, metres, in the panorama frame P (DESIGN 13 M6: run +-3 cm ablations)."""
+    """Vector from the IMU to the lens midpoint, metres, in the panorama frame P (not measured; +-3 cm ablations are still to run)."""
     extra_frame_offset_ms: float = 0.0
     """Constant added to every frame time on top of the profile's per-frame model, ms (set by a later calibration scan)."""
 
@@ -188,7 +188,7 @@ def main(config: Config) -> None:
     frame_t_us, exposure_vin0 = clip.frame_exposures(False)
     vin1_t_us, exposure_vin1 = clip.frame_exposures(True)
     imu_t_us, accel, gyro = clip.imu()
-    # IMU on the trailer clock as stored: recon/09 measured the time offset WITHOUT the vendor's gyro_timestamp shift.
+    # IMU on the trailer clock as stored: the gyro-visual fit measured the time offset WITHOUT the vendor's gyro_timestamp shift.
     imu_ns: Int64[ndarray, " n_imu"] = imu_t_us * 1000
     # Effective frame time on the IMU clock (the middle row's mid-exposure): the exposure-record stamp plus the
     # profile's per-frame offset, from the record-4 shutter time, plus the constant a calibration scan may add.

@@ -84,7 +84,7 @@ class Config:
     blank_cameras: tuple[int, ...] = ()
     """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording.
 
-    A stereo-off switch is not a valid proxy (DESIGN H3): stereo observations
+    A stereo-off switch is not a valid proxy: stereo observations
     would still reach the estimator and give it metric scale. Black images give
     the frontend nothing to detect or track, and the run fails if a blanked
     camera ever reports a keypoint.

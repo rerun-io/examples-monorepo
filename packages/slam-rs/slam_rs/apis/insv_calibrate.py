@@ -5,7 +5,7 @@ It reports, and changes nothing:
 1. ``R_P_imu``, the rotation from the IMU frame to the panorama frame P. The lane's own frontend tracks the two
    hemisphere tiles over chosen spans; each consecutive frame pair gets a relative pose (rotation and translation
    direction, robust epipolar fit on the sphere, seeded from the gyro under the recording's current calibration).
-   Rotation-only fits are biased indoors (recon/09 section 2). The visual rotation vectors are then aligned with
+   Rotation-only fits are biased indoors. The visual rotation vectors are then aligned with
    the gyro-integrated ones in closed form, with the gyro bias as a free constant.
 2. The frame time offset, two ways: (a) the residual of that alignment over a grid of offsets of the gyro window,
    and (b) the inertial bootstrap's own residual over the same grid on several 2 s windows, with the frame times
