@@ -91,8 +91,9 @@ pub struct TileLut {
     pub source_row: Vec<f32>,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl TileLut {
-    /// Number of invalid tile pixels.
+    /// Number of invalid tile pixels (tests only).
     pub fn invalid_count(&self) -> usize {
         self.sample.iter().filter(|&&s| s == LUT_INVALID).count()
     }
