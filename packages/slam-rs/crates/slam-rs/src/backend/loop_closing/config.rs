@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 pub enum LoopQueryCameras {
     /// Every camera's bag queries; a keyframe scores its best (query camera,
     /// entry camera) pair.
-    #[default]
     All,
-    /// Camera 0 only, as RootSLAM (`rootslam-parity`).
+    /// Camera 0 only, as RootSLAM. The default since k1: on the MG sequences
+    /// with loops (10) it beat `all` on both means, final 2.458 vs 2.599 cm and
+    /// +LC 4.929 vs 4.946 cm (Offline, deterministic: run-to-run band 0).
+    #[default]
     Cam0,
 }
 
@@ -98,8 +100,8 @@ pub struct LoopClosingConfig {
 }
 
 impl Default for LoopClosingConfig {
-    /// RootSLAM's `msdmg_config.json` values; B1 at 0.5, B5 all cameras, B15
-    /// adaptive, B16 box tests.
+    /// RootSLAM's `msdmg_config.json` values; B1 at 0.5, B5 camera 0 (k1's
+    /// A/B), B15 adaptive, B16 box tests.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -107,7 +109,7 @@ impl Default for LoopClosingConfig {
             num_frames_to_match: 10,
             frames_to_match_threshold: 0.02,
             frame_time_margin_s: 20.0,
-            query_cameras: LoopQueryCameras::All,
+            query_cameras: LoopQueryCameras::Cam0,
             brief_tests: BriefTests::Box,
             max_hamming_distance: 70,
             second_best_test_ratio: 1.2,
@@ -148,7 +150,7 @@ mod tests {
         let defaults = VioConfig::default().backend_loop_closing;
         assert!(defaults.enabled);
         assert_eq!(defaults.pnp_inliers_ratio, 0.5);
-        assert_eq!(defaults.query_cameras, LoopQueryCameras::All);
+        assert_eq!(defaults.query_cameras, LoopQueryCameras::Cam0);
         assert_eq!(defaults.pnp_ransac_fixed_iterations, None);
         assert_eq!(defaults.brief_tests, BriefTests::Box);
         assert_eq!(
@@ -190,7 +192,6 @@ mod tests {
         assert_eq!(
             LoopClosingConfig {
                 pnp_inliers_ratio: 0.5,
-                query_cameras: LoopQueryCameras::All,
                 pnp_ransac_fixed_iterations: None,
                 brief_tests: BriefTests::Box,
                 pgo_edge_sigmas: [0.05, 0.01],

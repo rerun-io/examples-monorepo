@@ -19,7 +19,12 @@ query, raw BRIEF tests, OpenGV's RANSAC schedule capped at 35 draws, inlier
 ratio 0, I6 pose-graph edges), for parity checks against RootSLAM runs only.
 It keeps the bug fixes (B3, B4, B8 and the others), so it reproduces
 RootSLAM's verification gates, not its candidate supply: compare loop counts
-per revisit window, not totals. tests/test_config_profiles.py checks overlays
+per revisit window, not totals. The k1 A/B (DESIGN §4: fast plus one knob at
+its parity value, MG, Offline, run-to-run band 0) moved one default: B5 queries
+camera 0 only (MG with loops: final 2.458 vs 2.599 cm, +LC 4.929 vs 4.946 cm).
+B1, B12 and B15 keep the fixed value; B16 keeps it for lack of runs. RootSLAM's
+TUM-VI loop gates (20 / 30 inliers) regress MG and are not applied anywhere.
+tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 
