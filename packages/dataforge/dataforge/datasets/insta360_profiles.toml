@@ -44,7 +44,7 @@ source = "placeholder: consumer MEMS (TDK ICM-40609 class, values not measured o
 
 [[profile]]
 name = "x5"
-version = 1
+version = 2
 provenance = "insv_calibrate on the clip VID_20261113_145021_00_003 (2026-11-17, no board), over a first conversion with R_P_imu of the X4 Air and frame times at the record-4 stamps"
 camera_type = "Insta360 X5"
 lens_type = 113
@@ -58,7 +58,10 @@ readout_tolerance_s = 0.00001
 # R_P_imu: insv_calibrate's joint fit of spans 10-30 s and 45-65 s (spans agree within 0.49 deg), which it states in
 # camera 0's axes, turned into the vendor frame P by the factory R_P_lens0: R_P_imu = R_P_lens0 R_cam0_imu. It lies
 # 0.067 deg from the first conversion's value and 0.09 deg from the permutation x_P = -z_imu, y_P = +x_imu,
-# z_P = -y_imu. The converter orthonormalises it.
+# z_P = -y_imu. The conversion is checked on two clips: on A, insv_calibrate's 'current' rotation equals
+# R_lens0_P R_P_imu(x4-air) within 0.0001 deg, so its output is in camera 0's axes; on B, R_P_lens0 times the base
+# recording's R_cam0_imu gives the x4-air value within 0.006 deg, and B's camera-0 span fits (0.16, 0.21 deg from
+# R_cam0_imu) convert to within 0.21 deg of it. The converter orthonormalises it.
 pano_from_imu_measured = [
     [0.00008, 0.00127, -1.00000],
     [1.00000, -0.00083, 0.00008],
