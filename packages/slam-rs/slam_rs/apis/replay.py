@@ -28,7 +28,7 @@ from slam_rs.catalog_feed import (
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import Lockstep, vio_for_feed
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, StageTimes, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
@@ -194,19 +194,6 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     return replayed
 
 
-def dual_fisheye_argument(feed: SegmentFeed, vio_config: _core.VioConfig) -> tuple[str, tuple[int, int, int, int, int, int] | None, float] | None:
-    """The factory lenses ``Vio`` stitches from when the dataset config asks for the dual-fisheye lane, else None.
-
-    Raises:
-        ValueError: If the config asks for the stitch but the recording carries no Insta360 factory calibration.
-    """
-    if not vio_config.panorama_dual_fisheye:
-        return None
-    if feed.insta360 is None:
-        raise ValueError(f"{feed.segment_id}: config.panorama_dual_fisheye needs an Insta360 recording (no insta360 property)")
-    return feed.insta360.vio_argument()
-
-
 def _write_bootstrap_report(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
     """Write the inertial bootstrap's attempts beside the trajectory and print one line on them; nothing on the stereo start.
 
@@ -300,8 +287,6 @@ def main(config: Config) -> None:
         )
         if not feed.has_ground_truth:
             print("ground truth absent, not scored")
-        if feed.gravity_ms2 is not None:
-            vio_config.vio_gravity_ms2 = feed.gravity_ms2
         log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
@@ -317,9 +302,7 @@ def main(config: Config) -> None:
             # host with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(
-                _core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend, dual_fisheye=dual_fisheye_argument(feed, vio_config)
-            )
+            vio: _core.Vio = vio_for_feed(feed, vio_config, config.backend)
             print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
             unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
             if unknown:

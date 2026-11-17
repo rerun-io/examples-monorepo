@@ -29,6 +29,7 @@ from slam_rs.apis.insv import nearest_permutation, orthonormal
 from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
+from slam_rs.tracking import vio_for_feed
 from slam_rs.vio_log import PANORAMA_HEIGHT, PANORAMA_WIDTH
 
 CAUCHY_RAD: float = 2.0 * np.pi / PANORAMA_HEIGHT
@@ -410,13 +411,10 @@ def main(config: Config) -> CalibrationReport:
         if feed.insta360 is None or feed.insta360.pano_from_imu is None:
             raise ValueError(f"{config.rrd}: no insta360 pano_from_imu property; convert it again with slam-rs-insv")
         current: Float64[ndarray, "3 3"] = feed.insta360.pano_from_imu
-        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
         first_ns: int = int(feed.frame_t_ns[0])
 
         def new_vio(readout_s: float) -> _core.Vio:
-            assert feed.insta360 is not None
-            argument: tuple[str, tuple[int, int, int, int, int, int] | None, float] = feed.insta360.vio_argument()
-            return _core.Vio(calibration, vio_config, backend=config.backend, dual_fisheye=(argument[0], argument[1], readout_s))
+            return vio_for_feed(feed, vio_config, config.backend, readout_s)
 
         def read(start_s: float, length_s: float) -> tuple[list[Frameset], ImuStream]:
             start_ns: int = first_ns + int(start_s * 1e9)
