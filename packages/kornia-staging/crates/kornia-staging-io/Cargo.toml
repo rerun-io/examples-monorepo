@@ -16,7 +16,7 @@ workspace = true
 
 [dependencies]
 kornia-image.workspace = true
-kornia-staging-3d.workspace = true
+kornia-staging-3d = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 openh264 = { workspace = true, optional = true }
 

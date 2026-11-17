@@ -61,6 +61,7 @@ impl<S: Scalar> SlamCamera<S> {
             staged::CameraModelKind::DoubleSphere(_) => "ds",
             staged::CameraModelKind::Eucm(_) => "eucm",
             staged::CameraModelKind::Equirectangular(_) => "equirectangular",
+            staged::CameraModelKind::Mei(_) => "mei",
         }
     }
 
@@ -89,6 +90,10 @@ impl<S: Scalar> SlamCamera<S> {
                 [fx, fy, cx, cy]
             }
             staged::CameraModelKind::Equirectangular(v) => {
+                let [fx, fy, cx, cy, _] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::Mei(v) => {
                 let [fx, fy, cx, cy, _] = v.params();
                 [fx, fy, cx, cy]
             }

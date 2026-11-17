@@ -19,6 +19,7 @@ gpu-wgpu = ["slam-rs/gpu-wgpu"]
 
 [dependencies]
 kornia-image.workspace = true
+kornia-staging-3d.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-io.workspace = true
 slam-rs = { workspace = true }

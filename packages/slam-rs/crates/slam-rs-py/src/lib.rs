@@ -956,9 +956,9 @@ fn u32_arg(value: i64) -> PyResult<u32> {
 /// A factory window crop `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` from Python.
 fn window_crop(
     crop: Option<[i64; 6]>,
-) -> PyResult<Option<kornia_staging_io::insta360::WindowCrop>> {
+) -> PyResult<Option<kornia_staging_3d::camera::formats::insta360::WindowCrop>> {
     crop.map(|[sw, sh, dw, dh, ox, oy]| {
-        Ok(kornia_staging_io::insta360::WindowCrop {
+        Ok(kornia_staging_3d::camera::formats::insta360::WindowCrop {
             src: [u32_arg(sw)?, u32_arg(sh)?],
             dst: [u32_arg(dw)?, u32_arg(dh)?],
             offset: [ox, oy],

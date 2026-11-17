@@ -1,6 +1,8 @@
 //! Python access to an Insta360 `.insv` clip through `kornia_staging_io::insta360`.
 use crate::value_error;
-use kornia_staging_io::insta360::{Insta360Clip, LensCalibration};
+use kornia_staging_3d::camera::MeiDistortion;
+use kornia_staging_3d::camera::formats::insta360::FactoryLens;
+use kornia_staging_io::insta360::Insta360Clip;
 use numpy::{PyArray1, PyArray2, ToPyArray};
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
@@ -10,7 +12,7 @@ use pyo3::types::PyBytes;
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct InsvLens {
-    core: LensCalibration,
+    core: FactoryLens,
 }
 
 #[pymethods]
@@ -18,40 +20,57 @@ impl InsvLens {
     /// Principal point x, track pixels.
     #[getter]
     fn cx(&self) -> f64 {
-        self.core.cx
+        self.core.camera.params()[2]
     }
 
     /// Principal point y, track pixels.
     #[getter]
     fn cy(&self) -> f64 {
-        self.core.cy
+        self.core.camera.params()[3]
     }
 
     /// `R_P_lens`, row-major: lens vectors into the panorama frame `P` (+Z lens-0 axis, +Y toward the handle).
     #[getter]
     fn pano_from_lens_rotation(&self) -> [[f64; 3]; 3] {
-        self.core.pano_from_lens_rotation
+        let r = self.core.pano_from_lens.rotation;
+        std::array::from_fn(|row| std::array::from_fn(|column| r[(row, column)]))
     }
 
     /// Lens centre in `P`, metres; the origin is the midpoint of the lens centres.
     #[getter]
     fn pano_centre_m(&self) -> [f64; 3] {
-        self.core.pano_centre_m
+        self.core.pano_from_lens.translation.vector.into()
     }
 
     /// Image radius in track pixels of rays `theta` radians off the axis, through the radial part of the model.
     fn radius_px<'py>(&self, py: Python<'py>, theta: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
+        let [fx, fy, _, _, xi] = self.core.camera.params();
+        let distortion = self.core.camera.distortion();
+        let radial: &[f64] = match &distortion {
+            MeiDistortion::V3 { k, .. } => k,
+            MeiDistortion::V6 { d } => &d[..5],
+        };
         theta
             .iter()
-            .map(|&t| self.core.radius_px(t))
+            .map(|&t| {
+                let m = t.sin() / (t.cos() + xi);
+                let r2 = m * m;
+                let gain = 1.0
+                    + radial
+                        .iter()
+                        .enumerate()
+                        .map(|(i, k)| k * r2.powi(i as i32 + 1))
+                        .sum::<f64>();
+                0.5 * (fx + fy) * m * gain
+            })
             .collect::<Vec<_>>()
             .to_pyarray(py)
     }
 }
 
-impl From<&LensCalibration> for InsvLens {
-    fn from(l: &LensCalibration) -> Self {
-        Self { core: l.clone() }
+impl From<&FactoryLens> for InsvLens {
+    fn from(l: &FactoryLens) -> Self {
+        Self { core: *l }
     }
 }
 
@@ -137,14 +156,26 @@ impl InsvClip {
     /// V6 factory calibration per lens, in lens order; empty when the clip has no V6 string.
     #[getter]
     fn lenses_v6(&self) -> Vec<InsvLens> {
-        self.clip.lenses_v6.iter().map(InsvLens::from).collect()
+        self.clip
+            .lenses_v6
+            .iter()
+            .flatten()
+            .map(InsvLens::from)
+            .collect()
     }
 
     /// The window crop the lens strings are stated through: `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`.
     #[getter]
     fn window_crop(&self) -> Option<(u32, u32, u32, u32, i64, i64)> {
         self.clip.trailer.metadata.window_crop.map(|c| {
-            (c.src[0], c.src[1], c.dst[0], c.dst[1], c.offset[0], c.offset[1])
+            (
+                c.src[0],
+                c.src[1],
+                c.dst[0],
+                c.dst[1],
+                c.offset[0],
+                c.offset[1],
+            )
         })
     }
 
@@ -154,15 +185,10 @@ impl InsvClip {
         (self.clip.tracks[0].width, self.clip.tracks[0].height)
     }
 
-    /// Frames per track.
+    /// Frames of the clip: those present in both lens tracks.
     #[getter]
     fn num_frames(&self) -> usize {
-        self.clip
-            .tracks
-            .iter()
-            .map(|t| t.samples.len())
-            .min()
-            .unwrap_or(0)
+        self.clip.frames()
     }
 
     /// IMU samples: times (trailer clock, us), accel `(n, 3)` m/s^2, gyro `(n, 3)` rad/s.

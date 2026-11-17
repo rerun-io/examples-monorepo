@@ -59,18 +59,21 @@ fn malformed(what: impl Into<String>) -> Mp4Error {
     Mp4Error::Malformed(what.into())
 }
 
-fn be(b: &[u8], at: usize, n: usize) -> Result<u64, Mp4Error> {
-    let bytes = b.get(at..at + n).ok_or_else(|| {
-        malformed(format!(
-            "field at {at}+{n} past the end of a {}-byte box",
-            b.len()
-        ))
-    })?;
-    Ok(bytes.iter().fold(0u64, |acc, &x| (acc << 8) | u64::from(x)))
+/// The `N` bytes at `at`, or an error naming the field past the end of the box.
+fn field<const N: usize>(b: &[u8], at: usize) -> Result<[u8; N], Mp4Error> {
+    b.get(at..)
+        .and_then(|rest| rest.first_chunk::<N>())
+        .copied()
+        .ok_or_else(|| {
+            malformed(format!(
+                "field at {at}+{N} past the end of a {}-byte box",
+                b.len()
+            ))
+        })
 }
 
 fn u32_at(b: &[u8], at: usize) -> Result<u32, Mp4Error> {
-    Ok(be(b, at, 4)? as u32)
+    Ok(u32::from_be_bytes(field(b, at)?))
 }
 
 /// Child boxes of a box payload: `(type, payload)` pairs. Sizes 0 (to the end) and 1 (64-bit) are supported.
@@ -85,7 +88,7 @@ fn children(b: &[u8]) -> Result<Vec<Child<'_>>, Mp4Error> {
         let kind: [u8; 4] = [b[at + 4], b[at + 5], b[at + 6], b[at + 7]];
         let (header, size) = match size {
             0 => (8, (b.len() - at) as u64),
-            1 => (16, be(b, at + 8, 8)?),
+            1 => (16, u64::from_be_bytes(field(b, at + 8)?)),
             s => (8, s),
         };
         let end = usize::try_from(size)
@@ -130,7 +133,7 @@ pub fn read_moov<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, Mp4Error> {
             0 => (8u64, file_len - at),
             1 => {
                 reader.read_exact(&mut header[8..16])?;
-                (16, be(&header, 8, 8)?)
+                (16, u64::from_be_bytes(field(&header, 8)?))
             }
             s => (8, u64::from(s)),
         };
@@ -165,7 +168,7 @@ pub fn read_hevc_tracks<R: Read + Seek>(reader: &mut R) -> Result<Vec<VideoTrack
 }
 
 fn full_box_version(b: &[u8]) -> Result<u8, Mp4Error> {
-    Ok(be(b, 0, 1)? as u8)
+    Ok(field::<1>(b, 0)?[0])
 }
 
 fn parse_trak(trak: &[u8], file_len: u64) -> Result<Option<VideoTrack>, Mp4Error> {
@@ -193,7 +196,10 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Option<VideoTrack>, Mp4Error
         return Ok(None);
     }
     // VisualSampleEntry: 6 reserved, data_reference_index, 16 pre-defined/reserved, width, height, then 50 more bytes.
-    let (width, height) = (be(entry, 24, 2)? as u16, be(entry, 26, 2)? as u16);
+    let (width, height) = (
+        u16::from_be_bytes(field(entry, 24)?),
+        u16::from_be_bytes(field(entry, 26)?),
+    );
     let hvcc = need(
         entry
             .get(78..)
@@ -223,16 +229,16 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Option<VideoTrack>, Mp4Error
 
 /// `hvcC`: the NAL length size and the VPS, SPS and PPS arrays (ISO/IEC 14496-15 section 8.3.3.1.2).
 fn parse_hvcc(b: &[u8]) -> Result<(u8, Vec<Vec<u8>>), Mp4Error> {
-    let nal_length_size = (be(b, 21, 1)? as u8 & 0x03) + 1;
-    let arrays = be(b, 22, 1)? as usize;
+    let nal_length_size = (field::<1>(b, 21)?[0] & 0x03) + 1;
+    let arrays = usize::from(field::<1>(b, 22)?[0]);
     let mut at = 23usize;
     let mut sets: Vec<(u8, Vec<u8>)> = Vec::new();
     for _ in 0..arrays {
-        let nal_type = be(b, at, 1)? as u8 & 0x3f;
-        let count = be(b, at + 1, 2)? as usize;
+        let nal_type = field::<1>(b, at)?[0] & 0x3f;
+        let count = usize::from(u16::from_be_bytes(field(b, at + 1)?));
         at += 3;
         for _ in 0..count {
-            let len = be(b, at, 2)? as usize;
+            let len = usize::from(u16::from_be_bytes(field(b, at)?));
             let nal = b
                 .get(at + 2..at + 2 + len)
                 .ok_or_else(|| malformed("hvcC NAL past the end"))?;
@@ -253,7 +259,7 @@ fn first_media_time(elst: &[u8]) -> Result<i64, Mp4Error> {
     for i in 0..count {
         let at = 8 + i * entry;
         let media_time = if v1 {
-            be(elst, at + 8, 8)? as i64
+            i64::from_be_bytes(field(elst, at + 8)?)
         } else {
             i64::from(u32_at(elst, at + 4)? as i32)
         };
@@ -316,8 +322,8 @@ fn sample_table(stbl: &[u8], media_time: i64, file_len: u64) -> Result<Vec<Sampl
     } else {
         let co64 = need(stbl, b"co64")?;
         (0..u32_at(co64, 4)? as usize)
-            .map(|i| be(co64, 8 + 8 * i, 8))
-            .collect::<Result<_, _>>()?
+            .map(|i| Ok(u64::from_be_bytes(field(co64, 8 + 8 * i)?)))
+            .collect::<Result<_, Mp4Error>>()?
     };
 
     // stsc runs: chunks [first_chunk, next.first_chunk) hold samples_per_chunk samples each.

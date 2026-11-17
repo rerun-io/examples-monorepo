@@ -4,10 +4,12 @@
 //! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
 //! `cargo test -p kornia-staging-io --test insta360_pano -- --ignored` (`KORNIA_STAGING_INSV` names the clip).
 use kornia_image::{Image, ImageSize};
+use kornia_staging_3d::camera::formats::insta360::{parse_lens_string, FactoryLens, WindowCrop};
+use kornia_staging_3d::camera::{CameraModel, Mei, MeiDistortion};
 use kornia_staging_imgproc::panorama::{
     build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
 };
-use kornia_staging_io::insta360::{parse_lens_string, Insta360Clip, LensCalibration, WindowCrop};
+use kornia_staging_io::insta360::Insta360Clip;
 
 include!("common/x4air_lens.rs");
 include!("common/x4air_clip.rs");
@@ -104,12 +106,21 @@ const ORACLE_V3: [(usize, u32, u32, f64, f64); 40] = [
     (1, 1023, 959, 941.4863106716, 1874.8103991097),
 ];
 
-fn lenses(text: &str) -> Vec<LensCalibration> {
+fn lenses(text: &str) -> Vec<FactoryLens> {
     parse_lens_string(text, Some(CROP), [1920, 1920]).unwrap()
 }
 
-fn lut(lens: &LensCalibration, geometry: TileGeometry, tile: usize) -> TileLut {
-    build_tile_lut(geometry, tile, LENS, |d| lens.project_from_panorama(d))
+/// The factory projection of a ray in the panorama frame.
+fn project(lens: &FactoryLens, d: [f64; 3]) -> Option<[f64; 2]> {
+    let local = lens
+        .pano_from_lens
+        .rotation
+        .inverse_transform_vector(&d.into());
+    lens.camera.project(local.into()).ok()
+}
+
+fn lut(lens: &FactoryLens, geometry: TileGeometry, tile: usize) -> TileLut {
+    build_tile_lut(geometry, tile, LENS, |d| project(lens, d))
 }
 
 #[test]
@@ -118,7 +129,7 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
         let lenses = lenses(text);
         for &(k, tu, tv, u, v) in oracle {
             let d = ORACLE_TILE.bearing(k, f64::from(tu), f64::from(tv));
-            let [pu, pv] = lenses[k].project_from_panorama(d).unwrap();
+            let [pu, pv] = project(&lenses[k], d).unwrap();
             assert!(
                 (pu - u).abs() < 1e-6 && (pv - v).abs() < 1e-6,
                 "lens {k} ({tu}, {tv}): ({pu}, {pv}) vs ({u}, {v})"
@@ -126,10 +137,10 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
         }
     }
     // R_P_lens of V6 lens 0 (independent f64 implementation): within 0.63 deg of the identity, not the identity.
-    let r = lenses(V6)[0].pano_from_lens_rotation;
+    let r = lenses(V6)[0].pano_from_lens.rotation;
     assert!(
-        (r[0][1] + 0.010977876806482231).abs() < 1e-12
-            && (r[2][0] - 0.007103414994941127).abs() < 1e-12
+        (r[(0, 1)] + 0.010977876806482231).abs() < 1e-12
+            && (r[(2, 0)] - 0.007103414994941127).abs() < 1e-12
     );
 }
 
@@ -137,7 +148,7 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
 fn the_lens_centres_sit_on_the_panorama_z_axis_about_the_midpoint() {
     // The X4 Air factory string gives a 33.1 mm baseline on the optical axis, 0.1-0.8 mm lateral; lens 0 looks along +Z.
     let lenses = lenses(V6);
-    let [c0, c1] = [lenses[0].pano_centre_m, lenses[1].pano_centre_m];
+    let [c0, c1] = [0, 1].map(|k| lenses[k].pano_from_lens.translation.vector);
     for k in 0..3 {
         assert!(
             (c0[k] + c1[k]).abs() < 1e-12,
@@ -157,9 +168,24 @@ fn the_lens_centres_sit_on_the_panorama_z_axis_about_the_midpoint() {
 #[test]
 fn the_radial_part_gives_the_recon_radii() {
     // Lens 0 (V3) image radius 294.9 / 607.6 / 900.2 / 972.2 px at 30 / 60 / 90 / 100 deg.
-    let mut lens = lenses(V3)[0].clone();
-    lens.tangential = vec![0.0; 2];
-    (lens.fx, lens.fy) = (0.5 * (lens.fx + lens.fy), 0.5 * (lens.fx + lens.fy));
+    // The radial part alone: no tangential terms and the mean focal.
+    let factory = lenses(V3)[0].camera;
+    let [fx, fy, cx, cy, xi] = factory.params();
+    let MeiDistortion::V3 { k, .. } = factory.distortion() else {
+        panic!("a V3 string gives V3 lenses")
+    };
+    let f = 0.5 * (fx + fy);
+    let lens = Mei::new(
+        [f, f, cx, cy, xi],
+        factory.half_field_rad(),
+        MeiDistortion::V3 { k, p: [0.0; 2] },
+    )
+    .unwrap();
+    let radius_px = |theta: f64| {
+        let m = theta.sin() / (theta.cos() + xi);
+        let r2 = m * m;
+        f * m * (1.0 + k[0] * r2 + k[1] * r2 * r2 + k[2] * r2 * r2 * r2)
+    };
     for (deg, radius) in [
         (30.0f64, 294.9),
         (60.0, 607.6),
@@ -170,14 +196,14 @@ fn the_radial_part_gives_the_recon_radii() {
         let [u, v] = lens
             .project([t.sin() * 0.6, t.sin() * 0.8, t.cos()])
             .unwrap();
-        let r = (u - lens.cx).hypot(v - lens.cy);
+        let r = (u - cx).hypot(v - cy);
         assert!(
-            (r - lens.radius_px(t)).abs() < 1e-9 && (r - radius).abs() < 0.1,
+            (r - radius_px(t)).abs() < 1e-9 && (r - radius).abs() < 0.1,
             "{deg}: {r}"
         );
     }
     assert!(
-        lens.project([1.0, 0.0, -0.18]).is_none(),
+        lens.project([1.0, 0.0, -0.18]).is_err(),
         "100.2 deg is past the lens coverage"
     );
 }
@@ -267,7 +293,10 @@ fn tiles(path: &str, clip: &Insta360Clip, luts: &[TileLut; 2], frame: usize) -> 
 #[ignore = "needs the X4 Air clip VID_20261116_125200_00_003.insv (KORNIA_STAGING_INSV) and ffmpeg"]
 fn a_real_frame_pair_matches_the_oracle_remap() {
     let Some((path, clip)) = clip() else { return };
-    let lenses = &clip.lenses_v6;
+    let lenses = clip
+        .lenses_v6
+        .as_ref()
+        .expect("the clip carries a V6 string");
     let luts = [0, 1].map(|k| lut(&lenses[k], ORACLE_TILE, k));
     let tiles = tiles(&path, &clip, &luts, 12);
     for k in 0..2 {
@@ -277,7 +306,7 @@ fn a_real_frame_pair_matches_the_oracle_remap() {
         let (mut sum, mut n, mut big, mut exact) = (0.0, 0usize, 0usize, 0.0f64);
         for (i, &value) in tiles[k].as_slice().iter().enumerate() {
             let d = ORACLE_TILE.bearing(k, (i % 1024) as f64, (i / 1024) as f64);
-            let [u, v] = lenses[k].project_from_panorama(d).unwrap();
+            let [u, v] = project(&lenses[k], d).unwrap();
             if !(0.0..1919.0).contains(&u) || !(0.0..1919.0).contains(&v) {
                 continue;
             }

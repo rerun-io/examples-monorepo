@@ -141,24 +141,9 @@ mod vector3_json {
 }
 
 pub use kornia_staging_3d::camera::formats::{
-    DoubleSphereParams, EucmParams as ExtendedUnifiedParams, Kb4Params, PinholeParams,
-    Radtan8Params,
+    DoubleSphereParams, EquirectangularParams, EucmParams as ExtendedUnifiedParams, Kb4Params,
+    PinholeParams, Radtan8Params,
 };
-
-/// Equirectangular panorama or tile; not a Basalt model, carried for catalog cameras.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct EquirectangularParams<S> {
-    /// Pixels per radian of longitude.
-    pub fx: S,
-    /// Pixels per radian of latitude.
-    pub fy: S,
-    /// Column of longitude zero (+Z), pixels.
-    pub cx: S,
-    /// Row of latitude zero, pixels.
-    pub cy: S,
-    /// Longitude half-window, radians, in `(0, pi]`.
-    pub lon_max: S,
-}
 
 /// Unified / Mei.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
