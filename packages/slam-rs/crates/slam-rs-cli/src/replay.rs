@@ -1,5 +1,6 @@
 //! Timed replay and its trajectory/summary outputs.
 
+use crate::ReplayOutputs;
 use crate::clip::ReplayInput;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
@@ -28,9 +29,9 @@ pub(super) fn replay(
     request: BackendRequest,
     threads: usize,
     load_s: f64,
-    out: &Path,
-    summary: &Path,
+    outputs: &ReplayOutputs,
 ) -> Result<(), String> {
+    let summary: &Path = &outputs.summary;
     let ReplayInput {
         clip,
         calibration,
@@ -148,7 +149,10 @@ pub(super) fn replay(
     }
     let flush_ms = flush_started.elapsed().as_secs_f64() * 1e3;
     let wall_s: f64 = started.elapsed().as_secs_f64();
-    std::fs::write(out, poses).map_err(|error| format!("{}: {error}", out.display()))?;
+    // Until re-anchoring on the optimised keyframes lands, the final trajectory is the raw VIO.
+    for path in std::iter::once(&outputs.out).chain(&outputs.out_vio) {
+        std::fs::write(path, &poses).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
 
     let mean_ms: f64 = track_ms.iter().sum::<f64>() / track_ms.len().max(1) as f64;
     let mut sorted: Vec<f64> = track_ms.clone();

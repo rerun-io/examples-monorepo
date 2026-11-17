@@ -114,3 +114,9 @@ def test_every_tool_task_builds_the_one_gpu_enabled_core_first() -> None:
     for name in ("slam-rs-gate", "slam-rs-replay", "slam-rs-demo", "slam-rs-wgpu-test", "slam-rs-robocap-probe", "slam-rs-robocap-fleet", "slam-rs-bench-track"):
         assert "slam-rs-build" in list(tasks[name]["depends-on"]), name  # type: ignore[arg-type]
     assert list(features["slam-rs-nvdec"]["tasks"]["slam-rs-catalog-layer"]["depends-on"]) == ["slam-rs-build"]  # type: ignore[arg-type]
+
+
+def test_the_register_tool_imports_in_this_environment() -> None:
+    """``slam-rs-register`` runs dataforge's register tool in the slam-rs env, so everything it imports must resolve here."""
+    pytest.importorskip("dataforge", reason="dataforge is a Linux-only member; the osx lane registers nothing")
+    importlib.import_module("dataforge.apis.register")
