@@ -59,6 +59,29 @@ def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3
     return HUE_RAMP[hashed % np.uint64(len(HUE_RAMP))]
 
 
+def panorama_positions(
+    frame: _core.FlowFrame, tile_origins: tuple[int, int], panorama_width: int
+) -> tuple[Int64[ndarray, " n_tracks"], Float32[ndarray, "n_tracks 2"]]:
+    """Both hemisphere tiles' keypoints in the panorama's pixels: ``x`` shifted by the tile origin and wrapped.
+
+    Args:
+        frame: What the frontend produced for one frameset of the two tiles.
+        tile_origins: ``Vio.panorama_tile_origins``.
+        panorama_width: Panorama width in pixels.
+
+    Returns:
+        The keypoint ids of both tiles and their panorama positions, tile 0 first.
+    """
+    ids: list[Int64[ndarray, " n"]] = []
+    positions: list[Float32[ndarray, "n 2"]] = []
+    for tile, origin in enumerate(tile_origins):
+        tile_positions: Float32[ndarray, "n 2"] = frame.positions(tile)
+        tile_positions[:, 0] = np.mod(tile_positions[:, 0] + np.float32(origin), np.float32(panorama_width))
+        ids.append(frame.ids(tile))
+        positions.append(tile_positions)
+    return np.concatenate(ids), np.concatenate(positions)
+
+
 def log_keypoints(frame: _core.FlowFrame) -> None:
     """Draw one frameset's tracked keypoints on the camera images.
 
@@ -78,6 +101,19 @@ def log_keypoints(frame: _core.FlowFrame) -> None:
             rr.Points2D(frame.positions(index), colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX),
         )
 
+
+
+def log_panorama_keypoints(frame: _core.FlowFrame, tile_origins: tuple[int, int], panorama_width: int, entity: str) -> None:
+    """Draw both hemisphere tiles' tracked keypoints on one panorama image, in :func:`log_keypoints`' palette.
+
+    Args:
+        frame: What a panorama rig's frontend produced for one frameset.
+        tile_origins: ``Vio.panorama_tile_origins``.
+        panorama_width: Panorama width in pixels.
+        entity: The panorama image the keypoints are drawn on (camera 0 for an equirect source).
+    """
+    ids, positions = panorama_positions(frame, tile_origins, panorama_width)
+    rr.log(f"{entity}/keypoints", rr.Points2D(positions, colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX))
 
 @dataclass(slots=True)
 class FrontendLogger:

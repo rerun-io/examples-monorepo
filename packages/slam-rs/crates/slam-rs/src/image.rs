@@ -44,6 +44,29 @@ pub enum IngestError {
         /// Elements actually supplied.
         len: usize,
     },
+    /// A lens image is not the size the stitch tables read.
+    #[error(
+        "lens image is {width}x{height}; the stitch tables read {expected_width}x{expected_height}"
+    )]
+    LensSize {
+        /// Supplied width.
+        width: usize,
+        /// Supplied height.
+        height: usize,
+        /// Lens width the tables were built for.
+        expected_width: usize,
+        /// Lens height the tables were built for.
+        expected_height: usize,
+    },
+    /// A dual-fisheye frameset that is not two lens images.
+    #[error("a dual-fisheye frameset holds two lens images, not {count}")]
+    LensCount {
+        /// Images supplied.
+        count: usize,
+    },
+    /// The host stitch refused the lens bytes.
+    #[error(transparent)]
+    Stitch(#[from] kornia_staging_imgproc::panorama::StitchError),
 }
 
 /// Allocate a dense zero-filled frame after checking its allocation bounds.

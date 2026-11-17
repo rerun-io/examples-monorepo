@@ -6776,6 +6776,7 @@ name = "slam-rs-py"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-staging-3d",
  "kornia-staging-imgproc",
  "numpy",
  "pyo3",

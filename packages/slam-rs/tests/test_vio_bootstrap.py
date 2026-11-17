@@ -80,7 +80,7 @@ def test_blanked_cameras_track_nothing() -> None:
 
 @pytest.mark.parametrize(
     "dataset",
-    ["insta360_native_config", "tartanair_fisheye_config", "tartanair_pinhole_config"],
+    ["insta360_config", "insta360_native_config", "tartanair_equirect_config", "tartanair_fisheye_config", "tartanair_pinhole_config"],
 )
 def test_rigs_that_start_in_motion_bootstrap_inertially(dataset: str) -> None:
     """The Insta360 has no stereo pair and every TartanAir clip starts moving: the stereo start cannot work there."""
@@ -105,6 +105,8 @@ def still_rig_until_first_attempt(rig: RigFactory, texture: TextureFactory) -> _
 
 def test_a_still_rigs_first_attempt_is_a_typed_low_excitation_rejection(rig: RigFactory, texture: TextureFactory) -> None:
     """The first attempt of a rig at rest: a 2 s window rejected for low excitation, read through typed getters."""
+    from slam_rs.apis.insv_calibrate import first_attempt
+
     vio: _core.Vio = still_rig_until_first_attempt(rig, texture)
     report: _core.BootstrapReport | None = vio.bootstrap_report()
     assert report is not None
@@ -115,6 +117,8 @@ def test_a_still_rigs_first_attempt_is_a_typed_low_excitation_rejection(rig: Rig
     assert attempt.frames == attempt.last_t_ns // FRAME_PERIOD_NS + 1
     assert attempt.excitation_mps2 < 0.25
     assert (report.start_t_ns, report.accepted_at_t_ns, report.replayed) == (None, None, 0)
+    first: _core.BootstrapAttempt | None = first_attempt(vio)
+    assert first is not None and first.last_t_ns == attempt.last_t_ns
 
 
 def test_each_attempt_goes_into_the_recording_once_at_its_own_time(

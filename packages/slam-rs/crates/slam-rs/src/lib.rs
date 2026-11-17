@@ -8,7 +8,7 @@
 mod pipeline;
 pub use pipeline::bootstrap;
 pub use pipeline::{
-    Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView, OverlapTimings,
+    Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView, OverlapTimings, PanoramaRig, RollingShutter,
     PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
     device_probes_run, gpu_probe, select_backend,
 };

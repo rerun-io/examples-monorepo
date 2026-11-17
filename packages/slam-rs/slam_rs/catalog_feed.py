@@ -597,7 +597,7 @@ class SegmentFeed:
         offset_ns: int = self.imu.cam_time_offset_ns
         return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
-    def framesets(self, stop_ns: int | None = None) -> Iterator[Frameset]:
+    def framesets(self, stop_ns: int | None = None, start_ns: int | None = None) -> Iterator[Frameset]:
         """Decode the segment and yield one frameset at a time.
 
         By default, video, inertial samples and ground truth are fetched one
@@ -621,6 +621,10 @@ class SegmentFeed:
                 end of the segment. Framesets up to the end of the window that
                 covers it are still yielded, because a window is the unit that is
                 read.
+            start_ns: First frameset time worth yielding; windows that end before it
+                are not fetched, and the frames of the window that covers it are
+                decoded but not yielded. The first yielded frameset carries every
+                inertial sample since that window's start. None starts at the beginning.
 
         Yields:
             Framesets in time order, every :attr:`frame_stride`-th one.
@@ -646,6 +650,8 @@ class SegmentFeed:
             if stop_ns is not None and window_first_ns > stop_ns:
                 break
             window_last_ns: int = int(self.frame_t_ns[stop - 1])
+            if start_ns is not None and window_last_ns < start_ns:
+                continue
             window_imu: ImuStream = self.imu_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
             if len(window_imu) and emitted_imu_t_ns > -(2**62) and int(window_imu.t_ns[0]) > emitted_imu_t_ns + 1:
                 raise ValueError(
@@ -682,9 +688,9 @@ class SegmentFeed:
                             f"{self.segment_id}: cam_{rig_camera:02d} decoded {current.shape}, calibration says {(camera.height, camera.width)}"
                         )
                     images.append(current)
-                if frameset_index % self.frame_stride:
-                    continue
                 t_ns: int = int(self.frame_t_ns[frameset_index])
+                if frameset_index % self.frame_stride or (start_ns is not None and t_ns < start_ns):
+                    continue
                 lead_index: int = int(np.searchsorted(window_imu.t_ns, t_ns, side="right"))
                 lead_ns: int = int(window_imu.t_ns[min(lead_index, len(window_imu) - 1)]) if len(window_imu) else t_ns
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))

@@ -11,8 +11,8 @@ mod catalog;
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
 use numpy::{
-    PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
-    ToPyArray,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2,
+    PyUntypedArrayMethods, ToPyArray,
 };
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -142,6 +142,7 @@ impl Vio {
     /// back. Invalid input and runtime initialization panics also raise
     /// `ValueError` (D32). `threads` controls only the CPU pool and is accepted
     /// but inert on the GPU lane.
+    ///
     #[new]
     #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto"))]
     fn new(
@@ -164,6 +165,39 @@ impl Vio {
         })
     }
 
+    /// `(corrected, no_coverage)`: frames whose keypoints the rolling-shutter
+    /// correction moved, and frames left raw because the gyro did not cover their
+    /// time; `None` when the rig has no rolling-shutter correction.
+    #[getter]
+    fn rolling_shutter_frames(&self) -> Option<(usize, usize)> {
+        self.inner.rolling_shutter().map(slam_rs::RollingShutter::counts)
+    }
+
+    /// The stitched 1920x960 panorama of the last dual-fisheye frameset
+    /// (`uint8[h, w]`, tile centres side by side), `None` for any other rig.
+    /// On the GPU lane it is remapped on the host from the lens bytes, only when asked.
+    fn panorama_image<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<u8>>>> {
+        let Some(pano) = self.inner.panorama_image().map_err(value_error)? else {
+            return Ok(None);
+        };
+        let (width, height) = (pano.width(), pano.height());
+        Ok(Some(
+            numpy::ndarray::Array2::from_shape_vec((height, width), pano.into_vec())
+                .map_err(value_error)?
+                .into_pyarray(py),
+        ))
+    }
+
+    /// Wall time of the last dual-fisheye host ingest in ns (the CPU remap of
+    /// both lenses; on the GPU lane the lens byte copy, the stitch itself runs on
+    /// the device), `None` for any other rig.
+    #[getter]
+    fn panorama_ingest_ns(&self) -> Option<u64> {
+        self.inner
+            .panorama()
+            .and_then(|rig| rig.dual_fisheye_ingest_ns())
+    }
+
     /// Whether the frontend runs on the GPU.
     #[getter]
     fn gpu(&self) -> bool {
@@ -183,6 +217,65 @@ impl Vio {
     #[getter]
     fn camera_count(&self) -> usize {
         self.inner.frontend().camera_count()
+    }
+
+    /// Unit bearings of frontend camera `camera`'s pixels (`float32[n, 2]`, as
+    /// `FlowFrame.positions` gives them) in frontend camera 0's frame:
+    /// `float64[n, 3]`, NaN where the pixel does not unproject. On a panorama
+    /// rig the frontend cameras are the hemisphere tiles and camera 0's frame is
+    /// the panorama frame `P`.
+    fn bearings<'py>(
+        &self,
+        py: Python<'py>,
+        camera: usize,
+        pixels: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let array: &Bound<'_, PyArray2<f32>> = pixels
+            .cast::<PyArray2<f32>>()
+            .map_err(|_| PyValueError::new_err("pixels must be a 2-D float32 numpy array"))?;
+        if array.shape()[1] != 2 {
+            return Err(PyValueError::new_err(format!(
+                "pixels must have shape (n, 2), got {:?}",
+                array.shape()
+            )));
+        }
+        let readonly = array.readonly();
+        let values: &[f32] = contiguous(&readonly, "pixels", "pixels")?;
+        let calibration: CoreCalibration<f64> = self.inner.calibration().cast();
+        if camera >= calibration.intrinsics.len() {
+            return Err(PyIndexError::new_err(format!(
+                "camera {camera} out of range for {} cameras",
+                calibration.intrinsics.len()
+            )));
+        }
+        let model = slam_rs::camera::SlamCamera::from_model(&calibration.intrinsics[camera])
+            .map_err(value_error)?;
+        let to_first = calibration.t_i_c[0].rotation.inverse() * calibration.t_i_c[camera].rotation;
+        let bearings: Vec<f64> = values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[x, y]| {
+                let mut point = Default::default();
+                model.unproject(&[f64::from(x), f64::from(y)].into(), &mut point);
+                let bearing = to_first * point.xyz();
+                [bearing.x, bearing.y, bearing.z]
+            })
+            .collect();
+        bearings.into_pyarray(py).reshape((values.len() / 2, 3))
+    }
+
+    /// Panorama column of each hemisphere tile's column 0, before wrapping,
+    /// when the rig is one full panorama; `None` otherwise.
+    ///
+    /// The frontend then tracks two tiles: tile `k`'s pixel `(x, y)` is the
+    /// panorama's `((x + origins[k]) mod W, y)`.
+    #[getter]
+    fn panorama_tile_origins(&self) -> Option<(i64, i64)> {
+        self.inner.panorama().map(|rig| {
+            let [first, second] = rig.tile_origins();
+            (first, second)
+        })
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
@@ -823,6 +916,12 @@ impl VioConfig {
     #[setter]
     fn set_optical_flow_image_safe_radius(&mut self, radius: f32) {
         self.inner.optical_flow_image_safe_radius = radius;
+    }
+
+    /// `config.panorama_dual_fisheye`: stitch the rig's two back-to-back cameras into two hemisphere tiles.
+    #[getter]
+    fn panorama_dual_fisheye(&self) -> bool {
+        self.inner.panorama_dual_fisheye
     }
 
     /// `config.vio_bootstrap`: `"stereo"` (the default) or `"inertial"`.

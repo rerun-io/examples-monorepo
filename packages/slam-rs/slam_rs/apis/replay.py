@@ -95,7 +95,7 @@ class Config:
     decode_threads: int = 1
     """PyAV decoder threads per camera stream (CPU decode); the Insta360 lenses decode at about 2.6x real time with 4."""
     image_log_every: int = 1
-    """Log the camera images on every n-th frameset; 0 logs none.
+    """Log the camera images (and a stitched rig's panorama) on every n-th frameset; 0 logs none.
 
     On a long clip the images dominate the recording's size, the replay's memory (a headless replay without
     ``--rr-config.save`` holds everything it logs) and its wall time. Poses, keypoints and counters are logged
@@ -276,7 +276,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         log_frameset_inputs(feed, frameset, mode if log_images else "off")
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
         if isinstance(stage, VioStage):
-            stage.run(frameset)
+            stage.run(frameset, log_panorama=log_images)
             bootstrap.log_new(stage.lockstep.vio)
         elif stage is not None:
             stage.run(frameset)
@@ -291,6 +291,8 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         print(stage.summary())
     if isinstance(stage, VioStage) and (line := BootstrapLog.summary(stage.lockstep.vio, int(feed.frame_t_ns[0]))) is not None:
         print(line)
+    if isinstance(stage, VioStage) and (shutter := stage.lockstep.vio.rolling_shutter_frames) is not None:
+        print(f"rolling shutter: {shutter[0]} frames corrected, {shutter[1]} left raw (no gyro coverage at the frame time)")
     if isinstance(stage, VioStage) and stage.keypoints:
         print(
             f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "
@@ -374,6 +376,8 @@ def main(config: Config) -> None:
                     cameras=feed.cameras,
                     ground_truth=truth,
                     frame_t_ns=feed.frame_t_ns,
+                    tile_origins=vio.panorama_tile_origins,
+                    stitched=vio_config.panorama_dual_fisheye,
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
