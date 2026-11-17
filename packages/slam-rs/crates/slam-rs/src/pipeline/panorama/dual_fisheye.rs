@@ -89,9 +89,8 @@ impl DualFisheyeLenses {
     /// or a lens image below 4x4, before any table is built.
     pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
         let geometry: TileGeometry = TileGeometry {
-            hemisphere_width: 960,
-            height: 960,
             margin: margin_px,
+            ..TileGeometry::default()
         };
         if margin_px > geometry.hemisphere_width / 2 {
             return Err(VioError::Panorama(format!(
