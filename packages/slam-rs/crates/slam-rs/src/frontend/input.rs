@@ -2,7 +2,7 @@
 use crate::{ImageView, image};
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::color::widen_u8_shift8_strided_unchecked;
-use kornia_staging_imgproc::panorama::{TileLut, remap_tile};
+use kornia_staging_imgproc::panorama::{TileLut, assemble_panorama, remap_tile};
 use kornia_staging_imgproc::pyramid::pyrdown_floor_u16;
 use std::sync::{Arc, Mutex};
 
@@ -100,6 +100,20 @@ impl LensStitch {
         widen_u8_shift8_strided_unchecked(lens, stride, level0);
         pyrdown_floor_u16(level0, level1).map_err(layout)?;
         remap_tile(level1, &self.luts[tile], out).map_err(layout)
+    }
+    /// The viewing panorama of two lens images without a pipeline: [`Self::remap`] of each tile, then
+    /// [`assemble_panorama`], the lane's own host stitch (what `PanoramaRig::panorama_image` logs).
+    ///
+    /// # Errors
+    /// A lens view of the wrong size or count.
+    pub fn panorama(&self, lenses: &[ImageView<'_>]) -> Result<Image<u8, 1>, image::IngestError> {
+        self.check(lenses)?;
+        let mut tiles = [image::empty(), image::empty()];
+        for (tile, (out, view)) in tiles.iter_mut().zip(lenses).enumerate() {
+            self.remap(tile, view.data, view.stride, out)?;
+        }
+        assemble_panorama([&tiles[0], &tiles[1]], self.luts[0].geometry)
+            .map_err(|_| image::IngestError::StitchTables)
     }
     fn check(&self, lenses: &[ImageView<'_>]) -> Result<(), image::IngestError> {
         match lenses
