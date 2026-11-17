@@ -465,6 +465,10 @@ pub struct LensCalibration {
     /// `Rv` of [`parse_lens_string`]. Unlike `lens_from_rig_rotation`, lens 0 is not the identity here: the factory
     /// relative rotation, not the nominal 180 deg, puts the two seams within 0.25 px (recon/09 section 1).
     pub pano_from_lens_rotation: [[f64; 3]; 3],
+    /// This lens's centre in the panorama frame `P`, metres, with the origin at the mean of the lens centres:
+    /// `R_P_lens0 (translation_m - mean)`. The factory translations are in lens 0's frame, which `R_P_lens0` turns
+    /// into `P`; on the X4 Air the two centres sit about 16.56 mm either side of the origin along `Z`.
+    pub pano_centre_m: [f64; 3],
 }
 
 /// Largest angle off the optical axis the factory model covers: lens class 131 has a 200 deg field
@@ -670,6 +674,7 @@ pub fn parse_lens_string(
             lens_from_rig_rotation: [[0.0; 3]; 3],
             lens_from_rig_translation_m: [0.0; 3],
             pano_from_lens_rotation: [[0.0; 3]; 3],
+            pano_centre_m: [0.0; 3],
         });
     }
     // Rig frame: lens 0's axes, origin at the mean of the lens centres. lens_from_rig = (R_i R_0^T, -R (c_i - o)).
@@ -685,6 +690,12 @@ pub fn parse_lens_string(
         lens.lens_from_rig_translation_m =
             std::array::from_fn(|row| -(0..3).map(|k| rot[row][k] * d[k]).sum::<f64>());
         lens.lens_from_rig_rotation = rot;
+    }
+    let pano_from_lens0 = lenses[0].pano_from_lens_rotation;
+    for lens in &mut lenses {
+        let d: [f64; 3] = std::array::from_fn(|k| lens.translation_m[k] - origin[k]);
+        lens.pano_centre_m =
+            std::array::from_fn(|row| (0..3).map(|k| pano_from_lens0[row][k] * d[k]).sum::<f64>());
     }
     Ok(lenses)
 }
