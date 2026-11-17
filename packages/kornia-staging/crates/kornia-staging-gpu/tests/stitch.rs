@@ -1,0 +1,387 @@
+//! The device stitch against the CPU remap, bit for bit: `lens_level1` + `remap_tile` and the CPU pyramid of the
+//! CPU tile.
+//!
+//! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
+//! `cargo test -p kornia-staging-gpu --features wgpu --test stitch -- --ignored` (`KORNIA_STAGING_INSV` names the
+//! clip). `device_stitch_timing` prints the per-frameset time; run it with `--release`.
+#![allow(unsafe_code)]
+#![cfg(feature = "wgpu")]
+use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
+
+use kornia_image::{Image, ImageSize};
+use kornia_staging_gpu::{
+    pyramid::{GpuPyramid, GpuPyramidBuilder},
+    runtime::gpu_client,
+    stitch::{TableError, TileTables},
+    GpuRuntime,
+};
+use kornia_staging_imgproc::panorama::{
+    build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
+};
+use kornia_staging_imgproc::pyramid::PyramidPlanU16;
+use kornia_staging_io::insta360::{parse_lens_string, Insta360Clip, WindowCrop};
+
+const LEVELS: usize = 3;
+/// The factory strings of the X4 Air clip, as in `kornia-staging-io/tests/insta360_pano.rs`.
+const V3: &str = "2_2.314940_7095.540_7093.970_3842.370_3863.400_0.100_0.165_90.630_0.000000_0.000000_0.000000_0.96273077_-2.06431413_4.31214333_0.00172895_-0.00121632_15360_7680_131_2.314940_7148.420_7149.100_11546.600_3864.040_-0.074_0.251_88.277_0.000805_0.000066_-0.033123_0.96663713_-1.95924056_3.78486657_0.00081582_0.00241697_15360_7680_131_197632";
+const V6: &str = "2_2.314940_7096.760_7095.390_3834.830_3864.120_0.119_0.407_90.629_0.000000_0.000000_0.000000_0.93861496_-1.68402135_2.19166017_3.85762072_0.00000000_-0.00495962_0.00156076_-0.00330722_0.00397486_0.00827898_-0.00125315_0.02416405_-0.00143547_15360_7680_131_2.314940_7149.220_7149.700_11543.300_3858.430_-0.212_0.339_88.279_0.000132_-0.000043_-0.033291_0.95675713_-1.80496192_2.88544273_1.76948690_0.00000000_0.00131924_0.00023973_0.00279902_-0.00570679_0.00069985_0.00064811_0.00799088_0.02677096_15360_7680_131_394240";
+const CROP: WindowCrop = WindowCrop {
+    src: [7680, 7680],
+    dst: [7424, 7424],
+    offset: [0, 0],
+};
+const LENS: ImageSize = ImageSize {
+    width: 1920,
+    height: 1920,
+};
+const CLIP: &str = "/home/pablo/data/insta360/VID_20261116_125200_00_003.insv";
+
+/// The CPU stitch of one lens: `lens_level1` then `remap_tile`.
+fn cpu_tile(lens: &Image<u8, 1>, lut: &TileLut) -> Image<u16, 1> {
+    let size = ImageSize {
+        width: lut.geometry.width(),
+        height: lut.geometry.height,
+    };
+    let mut tile = Image::from_size_val(size, 0u16).unwrap();
+    remap_tile(&lens_level1(lens).unwrap(), lut, &mut tile).unwrap();
+    tile
+}
+
+/// Lens 0's then lens 1's bytes, padded to whole words, as `prepare_lenses` takes them.
+fn packed(lenses: &[Image<u8, 1>; 2]) -> bytes::Bytes {
+    let mut bytes: Vec<u8> = lenses
+        .iter()
+        .flat_map(|lens| lens.as_slice().iter().copied())
+        .collect();
+    bytes.resize(bytes.len().next_multiple_of(4), 0);
+    bytes::Bytes::from(bytes)
+}
+
+/// Run the device stitch for one frameset and return the two tile pyramids.
+fn device_pyramids(
+    builder: &mut GpuPyramidBuilder<GpuRuntime>,
+    tables: &TileTables<GpuRuntime>,
+    lenses: &[Image<u8, 1>; 2],
+    pyramids: &mut [GpuPyramid<GpuRuntime>],
+) {
+    let client = gpu_client().unwrap();
+    let launch = builder
+        .prepare_lenses(&packed(lenses), lenses[0].size(), tables, pyramids)
+        .unwrap()
+        .expect("two tiles fit one arena");
+    // SAFETY: prepared on this process's shared client.
+    unsafe { launch.run(&client) };
+}
+
+/// Every level of the device tile pyramid equals the CPU pyramid of the CPU tile; the message names the worst
+/// pixel.
+fn assert_tile_pyramid(expected: &Image<u16, 1>, gpu: &GpuPyramid<GpuRuntime>, label: &str) {
+    let mut cpu = PyramidPlanU16::new(expected.size(), LEVELS).unwrap();
+    cpu.run(expected).unwrap();
+    assert_eq!(gpu.num_levels(), cpu.levels().len(), "{label}");
+    let mut actual = Image::from_size_val(expected.size(), 0u16).unwrap();
+    for (level, want) in cpu.levels().iter().enumerate() {
+        gpu.read_level_into(level, &mut actual).unwrap();
+        assert_eq!(actual.size(), want.size(), "{label}, level {level}");
+        let worst = actual
+            .as_slice()
+            .iter()
+            .zip(want.as_slice())
+            .enumerate()
+            .find(|(_, (a, b))| a != b);
+        assert!(
+            worst.is_none(),
+            "{label}, level {level}: first difference at pixel {:?} of {}x{}; integer arithmetic must be exact",
+            worst.map(|(i, (a, b))| (i % want.width(), i / want.width(), *a, *b)),
+            want.width(),
+            want.height()
+        );
+    }
+}
+
+/// Stitch `lenses` on both lanes and compare every tile level.
+fn assert_stitch_matches(luts: &[TileLut; 2], lenses: &[Image<u8, 1>; 2], label: &str) {
+    let client = gpu_client().unwrap();
+    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client);
+    let tile = tables.tile_size();
+    let mut pyramids: Vec<_> = (0..2)
+        .map(|_| builder.allocate(tile.width, tile.height, LEVELS).unwrap())
+        .collect();
+    device_pyramids(&mut builder, &tables, lenses, &mut pyramids);
+    for k in 0..2 {
+        let expected = cpu_tile(&lenses[k], &luts[k]);
+        assert_tile_pyramid(&expected, &pyramids[k], &format!("{label}, tile {k}"));
+    }
+}
+
+/// A deterministic full-range byte image.
+fn noise(size: ImageSize, seed: u32) -> Image<u8, 1> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    let pixels = (0..size.width * size.height)
+        .map(|i| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            // Saturated runs exercise the largest products of the integer rule.
+            match i % 97 {
+                0..=5 => 255,
+                6..=9 => 0,
+                _ => (state >> 24) as u8,
+            }
+        })
+        .collect();
+    Image::new(size, pixels).unwrap()
+}
+
+/// A 256 x 264 tile over a 100 x 90 level-1 source: the first 256 rows hold every `(ax, ay)` phase pair once,
+/// at scattered `(x0, y0)`; the last 8 rows hold the right and bottom edges (`x0 = w - 1`, `y0 = h - 1`, phase 0,
+/// where the clamp matters) and invalid entries.
+fn synthetic_lut(tile: usize) -> TileLut {
+    let geometry = TileGeometry {
+        hemisphere_width: 248,
+        height: 264,
+        margin: 4,
+    };
+    let source_size = ImageSize {
+        width: 100,
+        height: 90,
+    };
+    let (w, h) = (source_size.width as u32, source_size.height as u32);
+    let sample = (0..geometry.width() * geometry.height)
+        .map(|p| {
+            let p = p as u32;
+            let (column, row) = (p % 256, p / 256);
+            if row < 256 {
+                let (ax, ay) = (column, row);
+                let x0 = (p * 7 + tile as u32 * 13) % (w - 1);
+                let y0 = (p * 11 + tile as u32 * 5) % (h - 1);
+                [256 * x0 + ax, 256 * y0 + ay]
+            } else {
+                match column % 4 {
+                    0 => [256 * (w - 1), 256 * (column % h)],
+                    1 => [256 * (column % w), 256 * (h - 1)],
+                    2 => [256 * (w - 1), 256 * (h - 1)],
+                    _ => LUT_INVALID,
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    TileLut {
+        geometry,
+        tile,
+        source_size,
+        source_row: vec![0.0; sample.len()],
+        sample,
+    }
+}
+
+#[test]
+fn synthetic_tables_cover_every_bilinear_phase_bit_exactly() {
+    let luts = [synthetic_lut(0), synthetic_lut(1)];
+    assert!(luts[0].invalid_count() > 0);
+    // 200x180 lenses reduce to the 100x90 source; 201x181 does too, through the odd-geometry ingest path.
+    for (size, label) in [
+        (
+            ImageSize {
+                width: 200,
+                height: 180,
+            },
+            "even lens",
+        ),
+        (
+            ImageSize {
+                width: 201,
+                height: 181,
+            },
+            "odd lens",
+        ),
+    ] {
+        let lenses = [noise(size, 1), noise(size, 2)];
+        assert_stitch_matches(&luts, &lenses, label);
+    }
+}
+
+#[test]
+fn factory_tables_stitch_bit_exactly() {
+    for (name, text) in [("V6", V6), ("V3", V3)] {
+        let lenses = parse_lens_string(text, Some(CROP), [1920, 1920]).unwrap();
+        let luts = [0, 1].map(|k| {
+            build_tile_lut(TileGeometry::default(), k, LENS, |d| {
+                lenses[k].project_from_panorama(d)
+            })
+        });
+        assert!(luts.iter().all(|lut| lut.invalid_count() > 0));
+        let images = [noise(LENS, 3), noise(LENS, 4)];
+        assert_stitch_matches(&luts, &images, name);
+    }
+}
+
+#[test]
+fn a_reused_stitch_carries_only_the_newest_frameset() {
+    let luts = [synthetic_lut(0), synthetic_lut(1)];
+    let client = gpu_client().unwrap();
+    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client);
+    let mut pyramids: Vec<_> = (0..2)
+        .map(|_| builder.allocate(256, 264, LEVELS).unwrap())
+        .collect();
+    let size = ImageSize {
+        width: 200,
+        height: 180,
+    };
+    let first = [noise(size, 5), noise(size, 6)];
+    let second = [noise(size, 7), noise(size, 8)];
+    device_pyramids(&mut builder, &tables, &first, &mut pyramids);
+    device_pyramids(&mut builder, &tables, &second, &mut pyramids);
+    for k in 0..2 {
+        assert_tile_pyramid(
+            &cpu_tile(&second[k], &luts[k]),
+            &pyramids[k],
+            "second frameset",
+        );
+    }
+}
+
+#[test]
+fn tables_the_gather_cannot_read_are_refused() {
+    let client = gpu_client().unwrap();
+    let luts = [synthetic_lut(0), synthetic_lut(1)];
+    assert!(matches!(
+        TileTables::upload(&client, [&luts[1], &luts[0]]),
+        Err(TableError::Geometry)
+    ));
+    let mut outside = synthetic_lut(1);
+    outside.sample[17] = [256 * 99 + 1, 0];
+    assert!(matches!(
+        TileTables::upload(&client, [&luts[0], &outside]),
+        Err(TableError::OutOfRange {
+            tile: 1,
+            pixel: 17,
+            ..
+        })
+    ));
+    let mut short = synthetic_lut(1);
+    short.sample.pop();
+    assert!(matches!(
+        TileTables::upload(&client, [&luts[0], &short]),
+        Err(TableError::Geometry)
+    ));
+    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client);
+    let mut pyramids: Vec<_> = (0..2)
+        .map(|_| builder.allocate(256, 264, LEVELS).unwrap())
+        .collect();
+    let wrong = ImageSize {
+        width: 198,
+        height: 180,
+    };
+    assert!(builder
+        .prepare_lenses(
+            &packed(&[noise(wrong, 1), noise(wrong, 2)]),
+            wrong,
+            &tables,
+            &mut pyramids
+        )
+        .is_err());
+}
+
+/// Luma (plane 0, no range conversion) of frame `frame` of video stream `track`, decoded by `ffmpeg`.
+fn decode(path: &str, track: usize, frame: usize) -> Image<u8, 1> {
+    let t = format!("{:.6}", (frame as f64 * 1001.0 - 100.0) / 30000.0);
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-ss", &t, "-i", path])
+        .args(["-map", &format!("0:v:{track}"), "-frames:v", "1"])
+        .args(["-f", "rawvideo", "-pix_fmt", "yuvj420p", "-"])
+        .output()
+        .expect("ffmpeg runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Image::new(LENS, out.stdout[..1920 * 1920].to_vec()).unwrap()
+}
+
+/// The clip's tables and frame `frame`'s two lens images in lens order, or `None` with the missing asset named.
+fn clip_frame(frame: usize) -> Option<([TileLut; 2], [Image<u8, 1>; 2])> {
+    let path = std::env::var("KORNIA_STAGING_INSV").unwrap_or_else(|_| CLIP.into());
+    if !Path::new(&path).is_file() {
+        eprintln!("SKIP: asset {path} (VID_20261116_125200_00_003.insv) is absent");
+        return None;
+    }
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("SKIP: no ffmpeg on PATH to decode the HEVC tracks");
+        return None;
+    }
+    let clip = Insta360Clip::open(&path).unwrap();
+    assert_eq!(clip.lens_track, [1, 0], "lens 0 is track 1 (recon/09)");
+    let luts = [0, 1].map(|k| {
+        build_tile_lut(TileGeometry::default(), k, LENS, |d| {
+            clip.lenses_v6[k].project_from_panorama(d)
+        })
+    });
+    let lenses = [0, 1].map(|k| decode(&path, clip.lens_track[k], frame));
+    Some((luts, lenses))
+}
+
+#[test]
+#[ignore = "needs the X4 Air clip VID_20261116_125200_00_003.insv (KORNIA_STAGING_INSV) and ffmpeg"]
+fn a_real_frame_pair_stitches_bit_exactly() {
+    let Some((luts, lenses)) = clip_frame(3862) else {
+        return;
+    };
+    assert_stitch_matches(&luts, &lenses, "frame 3862");
+}
+
+#[test]
+#[ignore = "timing; needs the X4 Air clip VID_20261116_125200_00_003.insv and ffmpeg; run with --release"]
+fn device_stitch_timing() {
+    let Some((luts, lenses)) = clip_frame(3862) else {
+        return;
+    };
+    let client = gpu_client().unwrap();
+    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
+    let mut builder = GpuPyramidBuilder::new(client);
+    let tile = tables.tile_size();
+    let mut pyramids: Vec<_> = (0..2)
+        .map(|_| builder.allocate(tile.width, tile.height, LEVELS).unwrap())
+        .collect();
+    let bytes = packed(&lenses);
+    let mut coarse = Image::from_size_val(tile, 0u16).unwrap();
+    let median = |mut samples: Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let device = (0..60)
+        .map(|_| {
+            let start = Instant::now();
+            let client = gpu_client().unwrap();
+            let launch = builder
+                .prepare_lenses(&bytes, LENS, &tables, &mut pyramids)
+                .unwrap()
+                .unwrap();
+            // SAFETY: prepared on this process's shared client.
+            unsafe { launch.run(&client) };
+            // The wait: one small read of the last level of the last tile, after every launch.
+            pyramids[1].read_level_into(LEVELS, &mut coarse).unwrap();
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .skip(10)
+        .collect();
+    let cpu = (0..20)
+        .map(|_| {
+            let start = Instant::now();
+            for k in 0..2 {
+                std::hint::black_box(cpu_tile(&lenses[k], &luts[k]));
+            }
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    eprintln!(
+        "device stitch (upload 2 x 1920x1920 u8, lens reduce, gather, 3-level tile pyramids, one small read): median {:.3} ms over 50; \
+         CPU lens_level1 + remap_tile, both lenses, one thread: median {:.3} ms over 20",
+        median(device),
+        median(cpu)
+    );
+}

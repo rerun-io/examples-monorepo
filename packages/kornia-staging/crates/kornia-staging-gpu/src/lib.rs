@@ -23,6 +23,8 @@ pub type GpuRuntime = cubecl_wgpu::WgpuRuntime;
 
 pub mod pyramid;
 
+pub mod stitch;
+
 pub mod features;
 
 pub mod optical_flow;

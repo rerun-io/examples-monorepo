@@ -44,6 +44,23 @@ pub enum IngestError {
         /// Elements actually supplied.
         len: usize,
     },
+    /// A lens image is not the size the stitch tables read.
+    #[error(
+        "lens image is {width}x{height}; the stitch tables read {expected_width}x{expected_height}"
+    )]
+    LensSize {
+        /// Supplied width.
+        width: usize,
+        /// Supplied height.
+        height: usize,
+        /// Lens width the tables were built for.
+        expected_width: usize,
+        /// Lens height the tables were built for.
+        expected_height: usize,
+    },
+    /// Two tile tables that are not tile 0 then tile 1 of one geometry over the lens's level 1.
+    #[error("the stitch tables are not tiles 0 and 1 of one geometry over this lens size")]
+    StitchTables,
 }
 
 /// Allocate a dense zero-filled frame after checking its allocation bounds.
