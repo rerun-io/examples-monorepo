@@ -3,11 +3,11 @@
 //!
 //! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
 //! `cargo test -p kornia-staging-io --test insta360_pano -- --ignored` (`KORNIA_STAGING_INSV` names the clip).
-use kornia_image::{Image, ImageSize};
+use kornia_image::Image;
 use kornia_staging_3d::camera::formats::insta360::{parse_lens_string, FactoryLens, WindowCrop};
 use kornia_staging_3d::camera::{CameraModel, Mei, MeiDistortion};
 use kornia_staging_imgproc::panorama::{
-    build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
+    hemisphere_tile_table, lens_level1, remap, RemapTable, TileGeometry,
 };
 use kornia_staging_io::insta360::Insta360Clip;
 
@@ -119,8 +119,66 @@ fn project(lens: &FactoryLens, d: [f64; 3]) -> Option<[f64; 2]> {
     lens.camera.project(local.into()).ok()
 }
 
-fn lut(lens: &FactoryLens, geometry: TileGeometry, tile: usize) -> TileLut {
-    build_tile_lut(geometry, tile, LENS, |d| project(lens, d))
+const FACTORY_TILE: TileGeometry = TileGeometry {
+    hemisphere_width: 960,
+    height: 960,
+    margin: 64,
+};
+
+fn lut(lens: &FactoryLens, geometry: TileGeometry, tile: usize) -> RemapTable {
+    hemisphere_tile_table(geometry, tile, LENS, |d| project(lens, d)).unwrap()
+}
+
+/// The oracle's bearing in `P` of tile `k`'s pixel `(tu, tv)`: `lon = (tu - cx) / F + k pi`, `lat = (cy - tv) / F`,
+/// `(cos lat sin lon, -sin lat, cos lat cos lon)`, `F = hemisphere_width / pi`.
+fn bearing(g: TileGeometry, k: usize, tu: f64, tv: f64) -> [f64; 3] {
+    let f = g.hemisphere_width as f64 / std::f64::consts::PI;
+    let lon = (tu - (g.width() as f64 - 1.0) / 2.0) / f + k as f64 * std::f64::consts::PI;
+    let lat = ((g.height as f64 - 1.0) / 2.0 - tv) / f;
+    let (sin_lon, cos_lon) = lon.sin_cos();
+    let (sin_lat, cos_lat) = lat.sin_cos();
+    [cos_lat * sin_lon, -sin_lat, cos_lat * cos_lon]
+}
+
+/// FNV-1a 64 of the entries, little-endian words.
+fn fnv(samples: &[[u32; 2]]) -> u64 {
+    samples
+        .iter()
+        .flatten()
+        .flat_map(|w| w.to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
+#[test]
+fn the_tables_equal_the_previous_tile_builder_bit_for_bit() {
+    // Hashes of the tables `build_tile_lut` (the per-tile builder this composition replaced, at 1e945306f) made from
+    // the same lenses, geometry and lens size.
+    let expected: [(&str, usize, [u64; 2]); 4] = [
+        ("V6", 64, [0xade3_53c9_6ebe_345f, 0x3316_c18a_d409_f0ba]),
+        ("V6", 32, [0x31d8_0768_c8ef_efc2, 0x615d_042b_e633_9d4c]),
+        ("V3", 64, [0x4e6f_698f_9556_8403, 0x6e73_4fd8_ea11_abb3]),
+        ("V3", 32, [0x0bcd_5f0e_20ed_1af2, 0x0fae_3a3b_fb6f_2dd3]),
+    ];
+    for (name, margin, hashes) in expected {
+        let lenses = lenses(if name == "V6" { V6 } else { V3 });
+        for k in 0..2 {
+            let table = lut(
+                &lenses[k],
+                TileGeometry {
+                    margin,
+                    ..FACTORY_TILE
+                },
+                k,
+            );
+            assert_eq!(
+                fnv(table.samples()),
+                hashes[k],
+                "{name} margin {margin} tile {k}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -128,7 +186,7 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
     for (text, oracle) in [(V6, &ORACLE_V6), (V3, &ORACLE_V3)] {
         let lenses = lenses(text);
         for &(k, tu, tv, u, v) in oracle {
-            let d = ORACLE_TILE.bearing(k, f64::from(tu), f64::from(tv));
+            let d = bearing(ORACLE_TILE, k, f64::from(tu), f64::from(tv));
             let [pu, pv] = project(&lenses[k], d).unwrap();
             assert!(
                 (pu - u).abs() < 1e-6 && (pv - v).abs() < 1e-6,
@@ -214,10 +272,11 @@ fn the_table_quantises_the_oracle_to_half_a_step() {
     let lenses = lenses(V6);
     let luts = [0, 1].map(|k| lut(&lenses[k], ORACLE_TILE, k));
     for &(k, tu, tv, u, v) in &ORACLE_V6 {
-        let s = luts[k].sample[tv as usize * 1024 + tu as usize];
+        let s = luts[k].samples()[tv as usize * 1024 + tu as usize];
         if u > 1918.0 {
             assert_eq!(
-                s, LUT_INVALID,
+                s,
+                RemapTable::INVALID,
                 "{k} ({tu}, {tv}) is past the last level-1 sample"
             );
             continue;
@@ -227,8 +286,6 @@ fn the_table_quantises_the_oracle_to_half_a_step() {
             ex.abs() <= 0.5 + 1e-3 && ey.abs() <= 0.5 + 1e-3,
             "{k} ({tu}, {tv}): {ex} {ey}"
         );
-        let row = luts[k].source_row[tv as usize * 1024 + tu as usize];
-        assert!((f64::from(row) - v).abs() < 1e-3);
     }
 }
 
@@ -240,22 +297,27 @@ fn invalid_pixels_sit_at_the_lens_edges() {
     for (margin, counts) in [(32, [0, 244]), (64, [6787, 8427])] {
         let g = TileGeometry {
             margin,
-            ..TileGeometry::default()
+            ..FACTORY_TILE
         };
         for k in 0..2 {
             let t = lut(&lenses[k], g, k);
-            assert_eq!(t.invalid_count(), counts[k], "margin {margin} tile {k}");
-            let (w, [cx, _]) = (g.width(), g.principal());
+            let invalid = t
+                .samples()
+                .iter()
+                .filter(|&&s| s == RemapTable::INVALID)
+                .count();
+            assert_eq!(invalid, counts[k], "margin {margin} tile {k}");
+            let (w, cx) = (g.width(), (g.width() as f64 - 1.0) / 2.0);
             for (i, _) in t
-                .sample
+                .samples()
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| **s == LUT_INVALID)
+                .filter(|(_, s)| **s == RemapTable::INVALID)
             {
                 let (tu, tv) = (i % w, i / w);
                 // Only more than 95 deg of longitude from the lens axis (the frames cut the lenses at 95.9-99.1 deg),
                 // and only within 200 rows (37.5 deg) of the equator.
-                let lon = (tu as f64 - cx).abs() / g.focal();
+                let lon = (tu as f64 - cx).abs() * std::f64::consts::PI / 960.0;
                 assert!(
                     lon > 95f64.to_radians() && tv.abs_diff(480) < 200,
                     "{tu} {tv}"
@@ -263,28 +325,26 @@ fn invalid_pixels_sit_at_the_lens_edges() {
             }
             if margin == 32 && k == 1 {
                 assert!(t
-                    .sample
+                    .samples()
                     .iter()
                     .enumerate()
-                    .all(|(i, s)| *s != LUT_INVALID
+                    .all(|(i, s)| *s != RemapTable::INVALID
                         || (i % w >= 1019 && (438..=504).contains(&(i / w)))));
             }
         }
     }
 }
 
-fn tiles(path: &str, clip: &Insta360Clip, luts: &[TileLut; 2], frame: usize) -> [Image<u16, 1>; 2] {
+fn tiles(
+    path: &str,
+    clip: &Insta360Clip,
+    luts: &[RemapTable; 2],
+    frame: usize,
+) -> [Image<u16, 1>; 2] {
     std::array::from_fn(|k| {
-        let mut tile = Image::from_size_val(
-            ImageSize {
-                width: luts[k].geometry.width(),
-                height: 960,
-            },
-            0u16,
-        )
-        .unwrap();
+        let mut tile = Image::from_size_val(luts[k].dst_size(), 0u16).unwrap();
         let lens = decode(path, clip.lens_track[k], frame);
-        remap_tile(&lens_level1(&lens).unwrap(), &luts[k], &mut tile).unwrap();
+        remap(&lens_level1(&lens).unwrap(), &luts[k], &mut tile).unwrap();
         tile
     })
 }
@@ -305,7 +365,7 @@ fn a_real_frame_pair_matches_the_oracle_remap() {
         let level1 = lens_level1(&lens).unwrap();
         let (mut sum, mut n, mut big, mut exact) = (0.0, 0usize, 0usize, 0.0f64);
         for (i, &value) in tiles[k].as_slice().iter().enumerate() {
-            let d = ORACLE_TILE.bearing(k, (i % 1024) as f64, (i / 1024) as f64);
+            let d = bearing(ORACLE_TILE, k, (i % 1024) as f64, (i / 1024) as f64);
             let [u, v] = project(&lenses[k], d).unwrap();
             if !(0.0..1919.0).contains(&u) || !(0.0..1919.0).contains(&v) {
                 continue;

@@ -6,7 +6,9 @@ use crate::frontend::input::FrameStorage;
 use crate::pipeline::panorama::PanoramaRig;
 use crate::pipeline::panorama::tests::tile_model;
 use kornia_image::Image;
-use kornia_staging_imgproc::panorama::{assemble_panorama, lens_level1, remap_tile};
+use kornia_staging_imgproc::panorama::{
+    assemble_panorama, hemisphere_tile_table, lens_level1, remap,
+};
 use std::f64::consts::PI;
 
 /// The Insta360 X4 Air clip's V6 factory string, the one `kornia-staging-io`'s tests hold
@@ -103,7 +105,7 @@ fn a_far_point_lands_where_the_tile_camera_and_the_table_agree() {
             for tv in (40..920).step_by(97) {
                 for tu in (70..1018).step_by(89) {
                     let index = tv * 1088 + tu;
-                    if lut.sample[index] == LUT_INVALID {
+                    if lut.samples()[index] == RemapTable::INVALID {
                         continue;
                     }
                     let bearing = Vector3::from(model.unproject([tu as f64, tv as f64]).unwrap());
@@ -114,7 +116,7 @@ fn a_far_point_lands_where_the_tile_camera_and_the_table_agree() {
                         .camera
                         .project([ray.x, ray.y, ray.z])
                         .unwrap();
-                    let [qx, qy] = lut.sample[index];
+                    let [qx, qy] = lut.samples()[index];
                     let (tu_lens, tv_lens) = (f64::from(qx) / 128.0, f64::from(qy) / 128.0);
                     assert!(
                         (tu_lens - u).abs() < 0.05 && (tv_lens - v).abs() < 0.05,
@@ -207,7 +209,7 @@ fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_rem
                 0u16,
             )
             .unwrap();
-            remap_tile(
+            remap(
                 &lens_level1(&lens).unwrap(),
                 rig.tile_lut(tile).unwrap(),
                 &mut reference,
@@ -216,7 +218,7 @@ fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_rem
             reference
         })
         .collect();
-    let geometry: TileGeometry = rig.tile_lut(0).unwrap().geometry;
+    let geometry: TileGeometry = rig.dual.as_deref().unwrap().stitch().geometry();
     let panorama: Image<u8, 1> =
         assemble_panorama([&references[0], &references[1]], geometry).unwrap();
     // The CPU lane (dense) remaps on the host; the GPU lane (packed) keeps the lens bytes for the device
@@ -273,15 +275,18 @@ fn the_standalone_stitch_gives_the_lanes_panorama() {
     // The panorama is the tile centres, so any margin gives the same pixels.
     for margin in [64, 0] {
         let stitch = lenses().stitch(lens, margin).unwrap();
-        let standalone = stitch.panorama(&views).unwrap();
+        let standalone = stitch
+            .panorama([&lenses_px[0], &lenses_px[1]], 1920)
+            .unwrap();
         assert_eq!((standalone.width(), standalone.height()), (1920, 960));
         assert_eq!(standalone.as_slice(), lane.as_slice(), "margin {margin}");
     }
+    // Lens bytes shorter than a lens image are refused.
     assert!(
         lenses()
             .stitch(lens, 64)
             .unwrap()
-            .panorama(&views[..1])
+            .panorama([&lenses_px[0], &lenses_px[1][1..]], 1920)
             .is_err()
     );
 }
@@ -332,8 +337,8 @@ fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
             assert_eq!(rect.y % 64.0, 0.0);
         }
         let mut invalid = 0;
-        for (index, sample) in lut.sample.iter().enumerate() {
-            if *sample != LUT_INVALID {
+        for (index, sample) in lut.samples().iter().enumerate() {
+            if *sample != RemapTable::INVALID {
                 continue;
             }
             invalid += 1;
@@ -409,16 +414,19 @@ fn equidistant(tile: usize, ray_p: [f64; 3]) -> Option<[f64; 2]> {
 
 #[test]
 fn the_rolling_shutter_correction_recovers_the_global_shutter_pixel_at_one_rad_per_second() {
-    let geometry = TileGeometry::default();
-    let focal = geometry.focal();
-    let [cx, cy] = geometry.principal();
-    let camera = Equirectangular::new([focal, focal, cx, cy, geometry.lon_max()]).unwrap();
+    let geometry = TileGeometry {
+        hemisphere_width: 960,
+        height: 960,
+        margin: 64,
+    };
+    let camera = geometry.camera().unwrap();
     let lens = ImageSize {
         width: 1920,
         height: 1920,
     };
     for tile in 0..2 {
-        let lut = build_tile_lut(geometry, tile, lens, |ray| equidistant(tile, ray));
+        let lut =
+            hemisphere_tile_table(geometry, tile, lens, |ray| equidistant(tile, ray)).unwrap();
         // Tile camera frame = P turned by k pi about Y.
         let pano_from_tile = So3::exp(&Vector3::new(0.0, PI * tile as f64, 0.0));
         for omega in [
@@ -493,7 +501,7 @@ fn the_rig_rotates_the_gyro_into_each_tile_and_skips_without_a_rate() {
         let expected = rolling_shutter_correct(
             [f64::from(raw_pixel.x), f64::from(raw_pixel.y)],
             &tile_model(&tiles, tile),
-            dual.lut(tile),
+            dual.table(tile),
             1920,
             READOUT_S,
             &omega_tile,

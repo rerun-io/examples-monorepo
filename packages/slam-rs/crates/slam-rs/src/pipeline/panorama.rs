@@ -384,7 +384,7 @@ impl PanoramaRig {
         if view.len() != 2 {
             return Ok(None);
         }
-        let geometry = dual.lut(0).geometry;
+        let geometry = dual.stitch().geometry();
         let to_vio = |error: kornia_image::ImageError| VioError::Panorama(error.to_string());
         let panorama = view.get(0).with_dense(|tile0| {
             view.get(1).with_dense(|tile1| {
@@ -421,8 +421,8 @@ impl PanoramaRig {
     }
 
     /// The lookup table of tile `k` (dual fisheye), `None` for equirect.
-    pub fn tile_lut(&self, tile: usize) -> Option<&kornia_staging_imgproc::panorama::TileLut> {
-        self.dual.as_deref().map(|dual| dual.lut(tile))
+    pub fn tile_lut(&self, tile: usize) -> Option<&kornia_staging_imgproc::panorama::RemapTable> {
+        self.dual.as_deref().map(|dual| dual.table(tile))
     }
 }
 

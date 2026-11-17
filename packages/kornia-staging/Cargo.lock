@@ -2625,6 +2625,7 @@ dependencies = [
  "criterion",
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
  "kornia-staging-algebra",
  "nalgebra",
  "proptest",
