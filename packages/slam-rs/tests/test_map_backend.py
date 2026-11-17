@@ -31,6 +31,10 @@ def _run(rig: RigFactory, texture: TextureFactory, mode: Literal["offline", "rea
         result: _core.VioResult = vio.track(index * 20_000_000, images)
         assert result.status == _core.VioStatus.Tracking
         assert result.world_from_rig is not None
+        # No loop closes on a still rig: the online corrected pose is the raw one, bit for bit, in every mode.
+        corrected: Float64[ndarray, "7"] | None = result.world_from_rig_corrected
+        assert corrected is not None
+        np.testing.assert_array_equal(corrected, result.world_from_rig)
         poses.append(result.world_from_rig)
     vio.flush()
     return poses, vio

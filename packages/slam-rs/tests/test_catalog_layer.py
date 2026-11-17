@@ -35,7 +35,7 @@ def run() -> SegmentRun:
 
 @pytest.mark.parametrize("run_root", ["/world/runs/slam_rs", "/world/runs/slam_rs_vio"])
 def test_layer_writes_both_runs_on_camera_time(tmp_path: Path, read_rows: RowsReader, run: SegmentRun, run_root: str) -> None:
-    """Absolute inertial poses return to camera time under the final and the raw VIO run; until re-anchoring they are equal."""
+    """Absolute inertial poses return to camera time under the final and the raw VIO run; with the back end off (no ``final``) they are equal."""
     path: Path = tmp_path / "result.rrd"
     write_layer(path, "session", run, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu")
     rows: Rows = read_rows(path)
@@ -43,6 +43,19 @@ def test_layer_writes_both_runs_on_camera_time(tmp_path: Path, read_rows: RowsRe
     np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:translation"], [[1, 2, 3]])
     np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
     assert [row.t_ns for row in rows[f"{run_root}/trail"]] == [2_000_000_000]
+
+
+def test_the_final_run_is_the_re_anchored_trajectory_and_the_raw_run_the_vio(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """``slam_rs`` holds :attr:`SegmentRun.final`, ``slam_rs_vio`` the raw estimate; a base rig without ``gt`` follows the final run."""
+    final: Trajectory = replace(run.estimate, position_m=run.estimate.position_m + np.array([0.0, 0.0, 0.5]))
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", replace(run, final=final), clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=True)
+    rows: Rows = read_rows(path)
+    np.testing.assert_allclose(rows["/world/runs/slam_rs/rig"][-1].values["Transform3D:translation"], [[1, 2, 3.5]])
+    np.testing.assert_allclose(rows["/world/runs/slam_rs_vio/rig"][-1].values["Transform3D:translation"], [[1, 2, 3]])
+    assert rows["/world/rig_00"] == rows["/world/runs/slam_rs/rig"]
+    with pytest.raises(ValueError, match="timestamps"):
+        write_layer(tmp_path / "bad.rrd", "session", replace(run, final=replace(final, t_ns=final.t_ns + 1)), clock_offset_ns=0, profile="fast", backend="cpu")
 
 
 def test_layer_leaves_the_base_rig_and_its_sensors_to_the_dataset(tmp_path: Path, run: SegmentRun) -> None:

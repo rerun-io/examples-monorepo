@@ -17,7 +17,7 @@ from numpy import ndarray
 
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE
 from slam_rs.tracking import SegmentRun
-from slam_rs.trajectory import shift_clock
+from slam_rs.trajectory import Trajectory, shift_clock
 
 POSE_SOURCE: str = "slam_rs"
 """Catalog layer name, and DataForge run name of the final (optimised, non-causal) trajectory."""
@@ -53,19 +53,24 @@ def write_layer(
     """
     if problem := run.unexplained_loss():
         raise ValueError(problem)
-    positions: Float64[ndarray, "n 3"] = run.estimate.position_m
-    rotations: Float64[ndarray, "n 4"] = np.roll(run.estimate.quaternion_wxyz, -1, axis=1)
+    final: Trajectory = run.estimate if run.final is None else run.final
+    if not np.array_equal(final.t_ns, run.estimate.t_ns):
+        raise ValueError("the final trajectory must have the raw VIO's timestamps")
+    positions: Float64[ndarray, "n 3"] = final.position_m
+    rotations: Float64[ndarray, "n 4"] = np.roll(final.quaternion_wxyz, -1, axis=1)
+    raw_positions: Float64[ndarray, "n 3"] = run.estimate.position_m
+    raw_rotations: Float64[ndarray, "n 4"] = np.roll(run.estimate.quaternion_wxyz, -1, axis=1)
     times: Int64[ndarray, " n"] = shift_clock(run.estimate, -clock_offset_ns).t_ns
-    if not np.isfinite(positions).all() or not np.isfinite(rotations).all() or not np.all(np.diff(times) > 0):
+    finite: bool = all(np.isfinite(array).all() for array in (positions, rotations, raw_positions, raw_rotations))
+    if not finite or not np.all(np.diff(times) > 0):
         raise ValueError("refusing non-finite poses or non-increasing timestamps")
     progress: Float64[ndarray, " n_edges"] = np.linspace(0.0, 1.0, len(positions) - 1)
     gradient: UInt8[ndarray, "n_edges 3"] = np.column_stack([255 * progress, 255 * (1 - progress), np.zeros_like(progress)]).astype(np.uint8)
     root: str = schema.run_path(POSE_SOURCE)
     with atomic_recording(path, application_id="dataforge", recording_id=segment_id, send_properties=False) as rec:
         rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-        # Until re-anchoring on the optimised keyframes lands, the final run is the raw VIO.
-        for source, colors in ((POSE_SOURCE, gradient), (VIO_SOURCE, np.tile(np.array(VIO_COLOR, dtype=np.uint8), (len(progress), 1)))):
-            _log_run(rec, source, times, positions, rotations, colors)
+        _log_run(rec, POSE_SOURCE, times, positions, rotations, gradient)
+        _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, np.tile(np.array(VIO_COLOR, dtype=np.uint8), (len(progress), 1)))
         if animate_base_rig:
             rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                              columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))

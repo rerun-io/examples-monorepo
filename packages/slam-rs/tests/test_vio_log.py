@@ -557,6 +557,47 @@ def test_the_map_is_drawn_under_the_run_as_keyframes_join_and_ends_on_the_final_
     assert np.isfinite(final.points_world).all()
 
 
+def test_the_final_map_draws_the_pose_graph_and_the_keyframes_before_and_after_pgo(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """After the flush the run carries ``pgo/{before,after}`` (DESIGN §8, PR f1) and the pose graph; the final trajectory lands on the map keyframes."""
+    from slam_rs.map_loops import PGO_AFTER_ENTITY, PGO_BEFORE_ENTITY, POSE_GRAPH_ENTITY
+    from slam_rs.tracking import reanchored
+
+    assert (PGO_BEFORE_ENTITY, PGO_AFTER_ENTITY, POSE_GRAPH_ENTITY) == (
+        "/world/runs/slam_rs/pgo/before", "/world/runs/slam_rs/pgo/after", "/world/runs/slam_rs/pose_graph"
+    )
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "pgo.rrd", read_rows)
+    final_map: _core.MapSnapshot | None = vio.map_snapshot()
+    assert final_map is not None
+    k: int = final_map.keyframe_t_ns.shape[0]
+    assert k >= 2
+    g: int = final_map.pose_graph_edges.shape[0]
+    assert final_map.pose_graph_edges.dtype == np.int64
+    assert final_map.pose_graph_edge_kinds.dtype == np.uint8
+    assert final_map.pose_graph_edge_kinds.shape == (g,)
+    assert g >= k - 1, "the spanning tree alone links every keyframe"
+    assert np.isin(final_map.pose_graph_edges, final_map.keyframe_t_ns).all()
+    last: int = logged.tracked[-1]
+    before = [values["LineStrips3D:strips"] for t, values in logged.rows[PGO_BEFORE_ENTITY] if t == last]
+    after = [values["LineStrips3D:strips"] for t, values in logged.rows[PGO_AFTER_ENTITY] if t == last]
+    graph = [values["LineStrips3D:strips"] for t, values in logged.rows[POSE_GRAPH_ENTITY] if t == last]
+    np.testing.assert_allclose(np.asarray(after[-1][0], dtype=np.float64), final_map.keyframe_poses[:, 0:3], atol=1e-6)
+    # No loop closes on this run: before and after are the same path.
+    np.testing.assert_allclose(np.asarray(before[-1][0], dtype=np.float64), final_map.keyframe_raw_poses[:, 0:3], atol=1e-6)
+    assert len(graph[-1]) == g
+
+    estimate: Trajectory = logged.logger.estimated()
+    final: Trajectory = reanchored(estimate, final_map)
+    np.testing.assert_array_equal(final.t_ns, estimate.t_ns)
+    rows: Int64[ndarray, " k"] = np.searchsorted(estimate.t_ns, final_map.keyframe_t_ns)
+    np.testing.assert_array_equal(estimate.t_ns[rows], final_map.keyframe_t_ns)
+    np.testing.assert_allclose(final.position_m[rows], final_map.keyframe_poses[:, 0:3], atol=1e-12)
+    assert reanchored(estimate, None) is estimate
+
+
 def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
     rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:

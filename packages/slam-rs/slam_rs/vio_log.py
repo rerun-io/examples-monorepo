@@ -13,7 +13,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
-from slam_rs.map_loops import log_loops
+from slam_rs.map_loops import log_loops, log_pose_graph
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
@@ -51,6 +51,10 @@ VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
 
+FINAL_PATH_ENTITY: str = f"{RUN_ENTITY}/final"
+"""The final run (the raw VIO re-anchored on the map's keyframes), drawn once after the flush."""
+FINAL_COLOR: tuple[int, int, int] = (255, 120, 40)
+"""The final run: orange, over the raw run's green."""
 ESTIMATE_COLOR: tuple[int, int, int] = (70, 220, 130)
 """The port's own trajectory: green."""
 GT_COLOR: tuple[int, int, int] = (235, 235, 235)
@@ -401,6 +405,16 @@ class VioLogger:
             t_ns: Video time of the cursor the caller set, usually the last frameset's.
         """
         self._log_map(map_snapshot, t_ns, final=True)
+        log_pose_graph(map_snapshot)
+
+    def log_final_path(self, final: Trajectory) -> None:
+        """Draw the final run once, static, in the run's frame (its alignment is the raw run's).
+
+        Args:
+            final: The raw VIO re-anchored on the flushed map (:func:`slam_rs.tracking.reanchored`), on ``video_time``.
+        """
+        if len(final) >= 2:
+            rr.log(FINAL_PATH_ENTITY, rr.LineStrips3D([final.position_m], colors=FINAL_COLOR, radii=0.004), static=True)
 
     def _log_map(self, map_snapshot: _core.MapSnapshot, t_ns: int, *, final: bool) -> None:
         """Draw the back end's keyframes (window ones in the window colour) at the cursor, and its points when due or final."""

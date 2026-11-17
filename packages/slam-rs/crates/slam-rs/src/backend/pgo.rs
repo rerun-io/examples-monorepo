@@ -228,6 +228,9 @@ pub struct MapCorrection {
     /// Corrected `T_w_i` of each map keyframe a PGO moved. Every other map
     /// keyframe keeps its raw pose.
     pub poses: BTreeMap<FrameId, Se3<f64>>,
+    /// The pose each of those keyframes had before its first correction (the
+    /// window's), so a reader can move a frame by `T_corr · T_raw⁻¹` (PR f1).
+    pub raw: BTreeMap<FrameId, Se3<f64>>,
 }
 
 impl MapBackend {
@@ -287,6 +290,7 @@ impl MapBackend {
             moved: moved.len(),
         });
         loops.pgo.solve_ns.0.push(solve_ns);
+        self.corrections.publish(self.map_correction());
         true
     }
 
@@ -295,14 +299,15 @@ impl MapBackend {
         let Some(loops) = self.loops.as_ref() else {
             return MapCorrection::default();
         };
+        let moved = loops
+            .pgo
+            .raw
+            .iter()
+            .filter_map(|(&id, &raw)| Some((id, raw, self.map.keyframe(id)?.pose)));
         MapCorrection {
             epoch: loops.pgo.epoch(),
-            poses: loops
-                .pgo
-                .raw
-                .keys()
-                .filter_map(|&id| Some((id, self.map.keyframe(id)?.pose)))
-                .collect(),
+            poses: moved.clone().map(|(id, _, pose)| (id, pose)).collect(),
+            raw: moved.map(|(id, raw, _)| (id, raw)).collect(),
         }
     }
 }

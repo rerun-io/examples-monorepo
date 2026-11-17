@@ -1,0 +1,253 @@
+//! Per-frame poses re-anchored on the corrected keyframes (RootSLAM §IV;
+//! DESIGN §2, §3 row 15, §4 B13, §8, PR f1).
+//!
+//! The window never reads the map (DESIGN §11 Q3), so the raw VIO pose of a
+//! frame keeps the drift it had when it was tracked. Two readers move it onto
+//! the keyframes the back end corrected:
+//!
+//! - **Online, causal** ([`OnlineAnchor`]): the pose a `track` call returns
+//!   beside the raw one. It reads only the corrections the back end has
+//!   published by then ([`CorrectionBoard`], newest epoch only) and moves the
+//!   frame with its last keyframe: `T_f = T_k_corr · T_k_raw⁻¹ · T_f_raw`. The
+//!   pose-graph gauge fixes the window and the newest keyframe, so for a live
+//!   frame that correction is the identity and the pose is the raw one, bit for
+//!   bit; RootSLAM's causal output (`lc_rt`) is its raw VIO for the same reason.
+//! - **Final, two-sided** ([`reanchor`]): once the sequence ends, each frame
+//!   between keyframes `i` and `i+1` takes both keyframes' corrections and
+//!   blends the two results, `T_left = T_i_opt · T_i_raw⁻¹ · T_f_raw`,
+//!   `T_right = T_i+1_opt · T_i+1_raw⁻¹ · T_f_raw`, translation lerped and
+//!   rotation slerped at `α = (t_f − t_i) / (t_i+1 − t_i)`. This is
+//!   `merge_frames_keyframes.py:63-150`. A keyframe's raw pose is the frame's
+//!   own raw pose, so a keyframe lands on its optimized pose exactly.
+//!
+//! B13: RootSLAM's online path (`vio.cpp:642-680`) interpolates the two
+//! keyframe poses and drops the frame's own raw motion; both readers here move
+//! the frame by the relative correction instead.
+
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use super::pgo::MapCorrection;
+use crate::lie::{Se3, So3};
+use crate::types::FrameId;
+
+/// Why [`reanchor`] refused its inputs.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AnchorError {
+    /// Frame or keyframe timestamps must increase strictly.
+    #[error("{what} timestamps must increase strictly: {t_ns} ns follows {previous_t_ns} ns")]
+    NotIncreasing {
+        /// `"frame"` or `"keyframe"`.
+        what: &'static str,
+        /// The earlier timestamp.
+        previous_t_ns: i64,
+        /// The one that does not follow it.
+        t_ns: i64,
+    },
+    /// A keyframe is not one of the frames, so it has no raw pose.
+    #[error("keyframe at {t_ns} ns is not one of the frames")]
+    KeyframeNotAFrame {
+        /// The keyframe.
+        t_ns: i64,
+    },
+}
+
+fn strictly_increasing(what: &'static str, poses: &[(i64, Se3<f64>)]) -> Result<(), AnchorError> {
+    match poses.windows(2).find(|pair| pair[1].0 <= pair[0].0) {
+        Some(pair) => Err(AnchorError::NotIncreasing {
+            what,
+            previous_t_ns: pair[0].0,
+            t_ns: pair[1].0,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The final, non-causal trajectory: every frame re-anchored on the optimized
+/// keyframes on both sides (module docs). Frames before the first keyframe or
+/// after the last take that keyframe's correction alone; with no keyframe the
+/// frames come back unchanged.
+///
+/// `frames` are the raw per-frame poses and `keyframes` the optimized keyframe
+/// poses, each `(t_ns, T_w_i)` in strictly increasing time; every keyframe must
+/// be one of the frames.
+///
+/// # Errors
+///
+/// [`AnchorError`] when the timestamps do not increase or a keyframe is not a
+/// frame.
+pub fn reanchor(
+    frames: &[(i64, Se3<f64>)],
+    keyframes: &[(i64, Se3<f64>)],
+) -> Result<Vec<Se3<f64>>, AnchorError> {
+    strictly_increasing("frame", frames)?;
+    strictly_increasing("keyframe", keyframes)?;
+    // `T_opt · T_raw⁻¹` per keyframe, the left factor of both candidates.
+    let corrections: Vec<(i64, Se3<f64>)> = keyframes
+        .iter()
+        .map(|&(t_ns, optimized)| {
+            let row: usize = frames
+                .binary_search_by_key(&t_ns, |&(frame_t_ns, _)| frame_t_ns)
+                .map_err(|_| AnchorError::KeyframeNotAFrame { t_ns })?;
+            Ok((t_ns, optimized * frames[row].1.inverse()))
+        })
+        .collect::<Result<_, AnchorError>>()?;
+    if corrections.is_empty() {
+        return Ok(frames.iter().map(|&(_, pose)| pose).collect());
+    }
+    Ok(frames
+        .iter()
+        .map(|&(t_ns, raw)| {
+            let next: usize = corrections.partition_point(|&(kf_t_ns, _)| kf_t_ns < t_ns);
+            if let Some(&(kf_t_ns, _)) = corrections.get(next)
+                && kf_t_ns == t_ns
+            {
+                return keyframes[next].1;
+            }
+            if next == 0 {
+                return corrections[0].1 * raw;
+            }
+            let Some(&(t1, right)) = corrections.get(next) else {
+                return corrections[next - 1].1 * raw;
+            };
+            let (t0, left) = corrections[next - 1];
+            let alpha: f64 = (t_ns - t0) as f64 / (t1 - t0) as f64;
+            interpolate(&(left * raw), &(right * raw), alpha)
+        })
+        .collect())
+}
+
+impl super::MapSnapshot {
+    /// [`reanchor`] on this map's keyframes, for frames as
+    /// [`crate::VioPose::world_from_rig`] holds them: `(t_ns, [tx, ty, tz, qx,
+    /// qy, qz, qw])`.
+    ///
+    /// # Errors
+    ///
+    /// As [`reanchor`].
+    pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
+        let frames: Vec<(i64, Se3<f64>)> = frames
+            .iter()
+            .map(|&(t_ns, pose)| (t_ns, pose_from_array(&pose)))
+            .collect();
+        let keyframes: Vec<(i64, Se3<f64>)> = self
+            .keyframe_t_ns
+            .iter()
+            .copied()
+            .zip(self.keyframe_poses.iter().copied())
+            .collect();
+        Ok(reanchor(&frames, &keyframes)?
+            .iter()
+            .map(pose_to_array)
+            .collect())
+    }
+}
+
+/// `[tx, ty, tz, qx, qy, qz, qw]` as a transform; a zero quaternion (never
+/// one the pipeline returns) is the identity rotation.
+fn pose_from_array(pose: &[f64; 7]) -> Se3<f64> {
+    Se3::new(
+        So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6]).unwrap_or_else(So3::identity),
+        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
+    )
+}
+
+fn pose_to_array(pose: &Se3<f64>) -> [f64; 7] {
+    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
+    [
+        pose.translation.x,
+        pose.translation.y,
+        pose.translation.z,
+        x,
+        y,
+        z,
+        w,
+    ]
+}
+
+/// Translation lerped, rotation slerped on the shortest arc: `scipy`'s
+/// `Slerp([0, 1], [left, right])(alpha)`.
+fn interpolate(left: &Se3<f64>, right: &Se3<f64>, alpha: f64) -> Se3<f64> {
+    let relative: So3<f64> = left.rotation.inverse() * right.rotation;
+    Se3::new(
+        left.rotation * So3::exp(&(relative.log() * alpha)),
+        left.translation + (right.translation - left.translation) * alpha,
+    )
+}
+
+/// The newest [`MapCorrection`] the back end published, for the tracking
+/// thread. Its lock guards only an `Arc` swap, so a reader never waits for a
+/// step or a pose-graph solve.
+#[derive(Debug, Default)]
+pub struct CorrectionBoard {
+    latest: Mutex<Arc<MapCorrection>>,
+}
+
+impl CorrectionBoard {
+    fn slot(&self) -> MutexGuard<'_, Arc<MapCorrection>> {
+        // A panic while swapping an `Arc` leaves a whole value behind.
+        self.latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Post `correction` when it is newer than the one on the board; an older
+    /// or equal epoch is ignored, so readers only ever move forward.
+    pub fn publish(&self, correction: MapCorrection) {
+        let mut slot = self.slot();
+        if correction.epoch > slot.epoch {
+            *slot = Arc::new(correction);
+        }
+    }
+
+    /// The newest correction posted (epoch 0, empty, before the first).
+    pub fn latest(&self) -> Arc<MapCorrection> {
+        Arc::clone(&self.slot())
+    }
+}
+
+/// The online, causal re-anchoring of [`crate::VioResult`]'s corrected pose
+/// (module docs).
+#[derive(Debug, Clone)]
+pub struct OnlineAnchor {
+    board: Arc<CorrectionBoard>,
+    /// The newest keyframe the window has taken so far.
+    last_keyframe: Option<FrameId>,
+}
+
+impl OnlineAnchor {
+    /// Read corrections from `board`.
+    pub fn new(board: Arc<CorrectionBoard>) -> Self {
+        Self {
+            board,
+            last_keyframe: None,
+        }
+    }
+
+    /// The window took frame `t_ns` as a keyframe: later frames anchor on it.
+    pub fn keyframe(&mut self, t_ns: FrameId) {
+        self.last_keyframe = Some(t_ns);
+    }
+
+    /// `raw` moved by the last keyframe's correction as published now; `raw`
+    /// itself (the same bits) when that keyframe has none.
+    pub fn correct(&self, raw: &Se3<f64>) -> Se3<f64> {
+        let Some(keyframe) = self.last_keyframe else {
+            return *raw;
+        };
+        match self.board.latest().delta(keyframe) {
+            Some(delta) => delta * *raw,
+            None => *raw,
+        }
+    }
+}
+
+impl MapCorrection {
+    /// `T_corr · T_raw⁻¹` of `keyframe`; `None` when no pose-graph
+    /// optimization moved it.
+    pub fn delta(&self, keyframe: FrameId) -> Option<Se3<f64>> {
+        Some(*self.poses.get(&keyframe)? * self.raw.get(&keyframe)?.inverse())
+    }
+}
+
+#[cfg(test)]
+mod tests;

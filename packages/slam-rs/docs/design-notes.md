@@ -139,8 +139,10 @@ remains the default for other tools and cap use.
 
 The layer writes two runs: the final trajectory under `/world/runs/slam_rs/{rig,
 trajectory,trail,endpoints}` and the raw causal VIO under the same parts of
-`/world/runs/slam_rs_vio`, plus run metadata on `/world/runs/slam_rs`. Until
-re-anchoring on the optimised keyframes lands, the two runs are equal. The
+`/world/runs/slam_rs_vio`, plus run metadata on `/world/runs/slam_rs`. The final
+run is the raw VIO re-anchored on the map's keyframes (two-sided, as RootSLAM's
+`merge_frames_keyframes.py`; `slam_rs::backend::anchor`); with the back end off the
+two runs are equal. The
 dataset's `gt` layer owns `/world/rig_00`; the result does not write there, so a
 merged query of the rig reads ground truth only. A dataset without a `gt` layer
 (RoboCap) has no clash, and there the final run also animates `/world/rig_00`,
