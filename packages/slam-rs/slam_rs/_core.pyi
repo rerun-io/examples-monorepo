@@ -285,6 +285,8 @@ class Vio:
 
     @property
     def camera_count(self) -> int: ...
+    def bearings(self, camera: int, pixels: Float32[ndarray, "n 2"]) -> Float64[ndarray, "n 3"]:
+        """Unit bearings of frontend camera ``camera``'s pixels in frontend camera 0's frame (P on a panorama rig); NaN where a pixel does not unproject."""
     @property
     def panorama_tile_origins(self) -> tuple[int, int] | None:
         """Panorama column of each hemisphere tile's column 0 when the rig is one full panorama, else None.
