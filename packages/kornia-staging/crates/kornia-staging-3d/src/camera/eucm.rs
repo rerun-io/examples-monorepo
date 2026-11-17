@@ -36,6 +36,10 @@ impl<S: Scalar> Eucm<S> {
     pub fn params(&self) -> [S; 6] {
         self.param
     }
+    /// Domain bound `w`: a point is valid when `z > -w * rho`.
+    pub fn domain_bound(&self) -> S {
+        self.w
+    }
 }
 impl<S: Scalar> CameraModel<S> for Eucm<S> {
     type IntrinsicJacobian = [[S; 6]; 2];

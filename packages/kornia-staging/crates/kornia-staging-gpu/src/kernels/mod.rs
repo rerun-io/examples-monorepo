@@ -23,7 +23,7 @@ pub(crate) mod klt_fused;
 
 /// IEEE float classification for device code.
 pub mod finite;
-mod trig;
+pub(crate) mod trig;
 
 #[cfg(all(test, feature = "wgpu"))]
 mod tests;

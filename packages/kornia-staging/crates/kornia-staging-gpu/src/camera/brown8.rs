@@ -101,6 +101,60 @@ pub fn project(params: &[f32], offset: usize, x: f32, y: f32, z: f32, out: &mut 
     status
 }
 
+/// Project one point and write the 2x3 point Jacobian row-major into `out[2..8]`.
+///
+/// Same statuses as [`project`]; `out` holds at least eight entries and the Jacobian
+/// is meaningful only for status 0. A separate function so that `project`, which the
+/// slam-rs one-wait kernel inlines, keeps its generated source.
+#[cube]
+pub fn project_with_point_jacobian(
+    params: &[f32],
+    offset: usize,
+    x: f32,
+    y: f32,
+    z: f32,
+    out: &mut Array<f32>,
+) -> u32 {
+    let mut status = u32::cast_from(VALID);
+    out[0usize] = 0.0f32;
+    out[1usize] = 0.0f32;
+    if !is_finite(x) || !is_finite(y) || !is_finite(z) {
+        status = NON_FINITE;
+    } else if z < comptime!(<f32 as Scalar>::sophus_epsilon_sqrt()) {
+        status = BELOW_DEPTH;
+    } else {
+        let nx = x / z;
+        let ny = y / z;
+        let radius = params[offset + 12usize];
+        if radius > 0.0f32 && nx * nx + ny * ny > radius * radius {
+            status = OUTSIDE_DOMAIN;
+        } else {
+            let mut d = Array::<f32>::new(5usize);
+            let finite_radius = distort(params, offset, nx, ny, &mut d, true);
+            let fx = params[offset];
+            let fy = params[offset + 1usize];
+            let px = fx * d[0usize] + params[offset + 2usize];
+            let py = fy * d[1usize] + params[offset + 3usize];
+            if !finite_radius || !is_finite(px) || !is_finite(py) {
+                status = NON_FINITE;
+            } else {
+                out[0usize] = px;
+                out[1usize] = py;
+                // d[2..5] is the symmetric distortion Jacobian in normalized coordinates.
+                let sx = fx / z;
+                let sy = fy / z;
+                out[2usize] = sx * d[2usize];
+                out[3usize] = sx * d[3usize];
+                out[4usize] = -sx * (d[2usize] * nx + d[3usize] * ny);
+                out[5usize] = sy * d[3usize];
+                out[6usize] = sy * d[4usize];
+                out[7usize] = -sy * (d[3usize] * nx + d[4usize] * ny);
+            }
+        }
+    }
+    status
+}
+
 /// Invert one pixel with the CPU's 80-step, 20-backtrack damped Newton solve.
 ///
 /// # Arguments
