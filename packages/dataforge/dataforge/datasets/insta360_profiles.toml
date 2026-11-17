@@ -55,12 +55,14 @@ frame_rate_tolerance_hz = 0.05
 # none and the sign flipped).
 readout_s = 0.021244
 readout_tolerance_s = 0.00001
-# R_P_imu, insv_calibrate's joint fit of spans 10-30 s and 45-65 s: 0.29 deg from the X4 Air's permutation
-# x_P = -z_imu, y_P = +x_imu, z_P = -y_imu; the two spans agree within 0.49 deg. The converter orthonormalises it.
+# R_P_imu: insv_calibrate's joint fit of spans 10-30 s and 45-65 s (spans agree within 0.49 deg), which it states in
+# camera 0's axes, turned into the vendor frame P by the factory R_P_lens0: R_P_imu = R_P_lens0 R_cam0_imu. It lies
+# 0.067 deg from the first conversion's value and 0.09 deg from the permutation x_P = -z_imu, y_P = +x_imu,
+# z_P = -y_imu. The converter orthonormalises it.
 pano_from_imu_measured = [
-    [-0.00444, -0.00072, -0.99999],
-    [0.99999, -0.00245, -0.00444],
-    [-0.00245, -1.00000, 0.00073],
+    [0.00008, 0.00127, -1.00000],
+    [1.00000, -0.00083, 0.00008],
+    [-0.00083, -1.00000, -0.00127],
 ]
 # Not measured, as on the X4 Air.
 lever_arm_m = [0.0, 0.0, 0.0]
