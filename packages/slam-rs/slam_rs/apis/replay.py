@@ -207,6 +207,35 @@ def dual_fisheye_argument(feed: SegmentFeed, vio_config: _core.VioConfig) -> tup
     return feed.insta360.vio_argument()
 
 
+def _write_bootstrap_report(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
+    """Write the inertial bootstrap's attempts beside the trajectory and print one line on them; nothing on the stereo start.
+
+    Args:
+        stage: The pipeline stage that ran.
+        output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
+        first_t_ns: The segment's first frameset time, the origin of the printed seconds.
+    """
+    report_text: str | None = stage.lockstep.vio.bootstrap_report()
+    if report_text is None:
+        return
+    report_path: Path = output_csv.with_suffix(".bootstrap.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report_text)
+    report: dict = json.loads(report_text)
+    verdicts: list[str] = [attempt["verdict"].split(" ")[0] for attempt in report["attempts"]]
+    start: int | None = report["start_t_ns"]
+    print(
+        f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; "
+        + (
+            f"started at {(start - first_t_ns) * 1e-9:.2f} s, first pose at "
+            f"{(report['accepted_at_t_ns'] - first_t_ns) * 1e-9:.2f} s, {report['replayed']} framesets replayed"
+            if start is not None
+            else "no window accepted"
+        )
+        + f" -> {report_path}"
+    )
+
+
 def main(config: Config) -> None:
     """Replay one segment, log it, write the trajectory and report the error.
 
@@ -292,7 +321,12 @@ def main(config: Config) -> None:
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
-        _replay(feed, config, stage)
+        try:
+            _replay(feed, config, stage)
+        finally:
+            # Written even when the run stops: a bootstrap that never accepts raises, and its attempts are the diagnosis.
+            if isinstance(stage, VioStage):
+                _write_bootstrap_report(stage, output_csv, int(feed.frame_t_ns[0]))
         if not isinstance(stage, VioStage):
             return
         # The per-frameset segments show where the run had got to; these show
@@ -304,25 +338,6 @@ def main(config: Config) -> None:
             print(f"blanked cameras {list(stage.blank_cameras)}: {stage.blank_keypoints} keypoints over the run")
             if stage.blank_keypoints:
                 raise SystemExit(f"blanked cameras {list(stage.blank_cameras)} reported {stage.blank_keypoints} keypoints: not a mono proxy")
-        report_text: str | None = stage.lockstep.vio.bootstrap_report()
-        if report_text is not None:
-            report_path: Path = output_csv.with_suffix(".bootstrap.json")
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(report_text)
-            report: dict = json.loads(report_text)
-            verdicts: list[str] = [attempt["verdict"].split(" ")[0] for attempt in report["attempts"]]
-            start: int | None = report["start_t_ns"]
-            print(
-                f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; "
-                + (
-                    f"started at {(start - int(feed.frame_t_ns[0])) * 1e-9:.2f} s, first pose at "
-                    f"{(report['accepted_at_t_ns'] - int(feed.frame_t_ns[0])) * 1e-9:.2f} s, {report['replayed']} framesets replayed"
-                    if start is not None
-                    else "no window accepted"
-                )
-                + f" -> {report_path}"
-            )
-
         estimate: Trajectory = stage.logger.estimated()
         write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
         print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")
