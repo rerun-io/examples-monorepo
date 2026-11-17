@@ -325,8 +325,8 @@ def offset_summary(scans: list[WindowScan]) -> tuple[float, float]:
 
 def first_attempt(vio: _core.Vio) -> _core.BootstrapAttempt | None:
     """The inertial bootstrap's first attempt, or None before the first solve (and on the stereo start)."""
-    attempts: list[_core.BootstrapAttempt] = vio.bootstrap_attempts
-    return attempts[0] if attempts else None
+    report: _core.BootstrapReport | None = vio.bootstrap_report()
+    return report.attempts[0] if report is not None and report.attempts else None
 
 
 def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_ns: int, stop_at_attempt: bool) -> list[TrackedFrame]:

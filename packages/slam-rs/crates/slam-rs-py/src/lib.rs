@@ -5,6 +5,7 @@
 //! thread can keep decoding. A bad dtype, rank, shape or memory layout raises
 //! `ValueError`, never a panic.
 
+mod bootstrap;
 mod catalog;
 mod insv;
 mod panorama;
@@ -118,75 +119,6 @@ impl VioResult {
         format!(
             "VioResult(status=VioStatus.{:?}, t_ns={})",
             self.inner.status, self.inner.t_ns
-        )
-    }
-}
-
-/// One solve attempt of the inertial bootstrap (`config.vio_bootstrap`).
-#[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
-#[derive(Debug, Clone)]
-pub struct BootstrapAttempt {
-    inner: slam_rs::bootstrap::BootstrapAttempt,
-}
-
-#[pymethods]
-impl BootstrapAttempt {
-    /// First frameset of the window, ns.
-    #[getter]
-    fn first_t_ns(&self) -> i64 {
-        self.inner.first_t_ns
-    }
-
-    /// Last frameset of the window, ns.
-    #[getter]
-    fn last_t_ns(&self) -> i64 {
-        self.inner.last_t_ns
-    }
-
-    /// Framesets in the window.
-    #[getter]
-    fn frames(&self) -> usize {
-        self.inner.frames
-    }
-
-    /// Tracks handed to the solver.
-    #[getter]
-    fn tracks(&self) -> usize {
-        self.inner.tracks
-    }
-
-    /// `Accepted` or the rejection reason.
-    #[getter]
-    fn verdict(&self) -> &str {
-        &self.inner.verdict
-    }
-
-    /// Whether the verdict accepted.
-    #[getter]
-    fn accepted(&self) -> bool {
-        self.inner.accepted
-    }
-
-    /// RMS bearing error of the solve, rad; `None` when the attempt reports none.
-    #[getter]
-    fn residual_rms_rad(&self) -> Option<f64> {
-        self.inner.residual_rms_rad
-    }
-
-    /// Relative 1-sigma of the speed; `None` when the attempt reports none.
-    #[getter]
-    fn scale_sigma(&self) -> Option<f64> {
-        self.inner.scale_sigma
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "BootstrapAttempt(verdict={:?}, accepted={}, frames={}, first_t_ns={}, last_t_ns={})",
-            self.inner.verdict,
-            self.inner.accepted,
-            self.inner.frames,
-            self.inner.first_t_ns,
-            self.inner.last_t_ns
         )
     }
 }
@@ -474,57 +406,10 @@ impl Vio {
         .collect()
     }
 
-    /// The inertial bootstrap's attempts as JSON (`config.vio_bootstrap`),
-    /// or None on the stereo start.
-    fn bootstrap_report(&self) -> PyResult<Option<String>> {
-        self.inner
-            .bootstrap_report()
-            .map(slam_rs::bootstrap::BootstrapReport::to_json)
-            .transpose()
-            .map_err(value_error)
-    }
-
-    /// The inertial bootstrap's attempts in order; empty on the stereo start.
-    #[getter]
-    fn bootstrap_attempts(&self) -> Vec<BootstrapAttempt> {
-        self.inner
-            .bootstrap_report()
-            .map(|report| {
-                report
-                    .attempts
-                    .iter()
-                    .map(|attempt| BootstrapAttempt {
-                        inner: attempt.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// The accepted bootstrap window's first frameset, ns: the estimator's first
-    /// state. `None` before a window is accepted and on the stereo start.
-    #[getter]
-    fn bootstrap_start_t_ns(&self) -> Option<i64> {
-        self.inner
-            .bootstrap_report()
-            .and_then(|report| report.start_t_ns)
-    }
-
-    /// The frameset that completed the accepted bootstrap window, ns: the first
-    /// pose published. `None` before a window is accepted and on the stereo start.
-    #[getter]
-    fn bootstrap_accepted_at_t_ns(&self) -> Option<i64> {
-        self.inner
-            .bootstrap_report()
-            .and_then(|report| report.accepted_at_t_ns)
-    }
-
-    /// Framesets the bootstrap replayed into the fresh estimator; 0 on the stereo start.
-    #[getter]
-    fn bootstrap_replayed(&self) -> usize {
-        self.inner
-            .bootstrap_report()
-            .map_or(0, |report| report.replayed)
+    /// The inertial bootstrap's attempts so far (`config.vio_bootstrap`), or
+    /// None on the stereo start.
+    fn bootstrap_report(&self) -> Option<bootstrap::BootstrapReport> {
+        self.inner.bootstrap_report().map(Into::into)
     }
 
     /// The window, its landmarks and the last measured frame's statistics.
@@ -1619,7 +1504,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
-    module.add_class::<BootstrapAttempt>()?;
+    module.add_class::<bootstrap::BootstrapAttempt>()?;
+    module.add_class::<bootstrap::BootstrapReport>()?;
     module.add_class::<VioStatus>()?;
     module.add_class::<Calibration>()?;
     module.add_class::<VioConfig>()?;
