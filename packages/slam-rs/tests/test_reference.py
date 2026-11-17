@@ -224,7 +224,7 @@ def test_malformed_toml_is_refused_with_the_file_name(tmp_path: Path) -> None:
 
 def test_dataset_settings_cover_unlisted_odyssey_and_preserve_holdouts(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     assert {dataset.name for dataset in settings.datasets} == {
-        "msd-index", "msd-g2", "msd-odyssey", "tartanair-pinhole", "tartanair-fisheye", "tartanair-equirect",
+        "msd-index", "msd-g2", "msd-odyssey", "tartanair-pinhole", "tartanair-fisheye", "tartanair-equirect", "insta360", "insta360-native",
     }
     assert sum(segment.hold_out for segment in benchmarks.segments) == 2
     assert {segment.segment_id.split("__")[-1].split("_")[0] for segment in benchmarks.in_tier("release")} == {"MIO07", "MGO07", "MIO14"}

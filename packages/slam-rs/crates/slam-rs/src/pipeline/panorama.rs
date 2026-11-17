@@ -11,10 +11,17 @@
 //! never wrap, and a tile never crosses a lens seam. A track that leaves its tile
 //! ends; the other tile detects the point again.
 
+mod dual_fisheye;
+
+pub use dual_fisheye::DualFisheyeLenses;
+
 use super::{ImageView, VioError};
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
+use crate::estimator::FlowObservations;
+use crate::frontend::input::{FrameStorage, PackedImages};
 use crate::lie::{Se3, So3};
+use dual_fisheye::DualFisheyeIngest;
 use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use nalgebra::Vector3;
 
@@ -25,14 +32,14 @@ pub enum PanoramaSource {
     /// is a crop with horizontal wrap, a pure pixel copy; both tile cameras share
     /// the panorama's centre.
     Equirect,
-    /// Two fisheye lens images remapped through a prebuilt lookup table; the
-    /// tile cameras sit at the two lens centres. Planned for the next phase:
-    /// [`PanoramaRig::expand`] does not select it yet.
+    /// Two fisheye lens images remapped through prebuilt fixed-point lookup
+    /// tables; the tile cameras sit at the two lens centres (or the midpoint).
+    /// Selected by [`PanoramaRig::expand_dual_fisheye`].
     DualFisheye,
 }
 
 /// One panorama camera expanded into two hemisphere tiles.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PanoramaRig {
     source: PanoramaSource,
     /// Panorama size in pixels.
@@ -42,8 +49,11 @@ pub struct PanoramaRig {
     tile_width: usize,
     /// Panorama column of each tile's column 0 (may be negative: it wraps).
     origins: [i64; 2],
-    /// The two tiles of the last cropped frameset.
+    /// The two tiles of the last frameset as bytes: the crop (equirect), or
+    /// the narrowed remap the GPU lane uploads (dual fisheye).
     tiles: [Vec<u8>; 2],
+    /// Tables, buffers and rolling-shutter state of the dual-fisheye source.
+    dual: Option<Box<DualFisheyeIngest>>,
 }
 
 impl PanoramaRig {
@@ -128,8 +138,48 @@ impl PanoramaRig {
                 tile_width,
                 origins: [origin, origin + (width / 2) as i64],
                 tiles: [vec![0; tile_width * height], vec![0; tile_width * height]],
+                dual: None,
             }),
             tiles,
+        ))
+    }
+
+    /// Expand a two-lens rig (lens cameras posed in the IMU frame, lens order)
+    /// into two equirectangular hemisphere tiles stitched from the lens images
+    /// through the factory model; see [`DualFisheyeLenses`].
+    ///
+    /// Tile `k`: `fx = fy = 960 / pi`, principal point at the tile centre,
+    /// `lon_max` to the tile's outer pixel edge; `T_imu_tile_k = T_imu_P *
+    /// (Ry(k pi), c_k)` with `c_k` lens `k`'s centre in `P`
+    /// (`config.panorama_two_centre`) or zero (central lane). The panorama they
+    /// form is 1920x960: tile columns `[margin, margin + 960)` of tile 0, then
+    /// of tile 1.
+    ///
+    /// # Errors
+    ///
+    /// [`VioError::Panorama`] when `config.panorama_dual_fisheye` is off, the
+    /// rig is not two equal even-sized lens images, or lens 1's extrinsics
+    /// disagree with lens 0's and the factory rig.
+    pub fn expand_dual_fisheye(
+        config: &VioConfig,
+        calibration: Calibration<f64>,
+        lenses: DualFisheyeLenses,
+    ) -> Result<(Self, Calibration<f64>), VioError> {
+        let expanded = dual_fisheye::expand(config, calibration, lenses)?;
+        let geometry = expanded.geometry;
+        let (tile_width, height) = (geometry.width(), geometry.height);
+        let margin: i64 = geometry.margin as i64;
+        Ok((
+            Self {
+                source: PanoramaSource::DualFisheye,
+                width: 2 * geometry.hemisphere_width,
+                height,
+                tile_width,
+                origins: [-margin, geometry.hemisphere_width as i64 - margin],
+                tiles: [vec![0; tile_width * height], vec![0; tile_width * height]],
+                dual: Some(Box::new(expanded.ingest)),
+            },
+            expanded.calibration,
         ))
     }
 
@@ -191,7 +241,33 @@ impl PanoramaRig {
                 });
             }
         }
-        Ok(vec![masks.clone(), masks])
+        let Some(dual) = &self.dual else {
+            return Ok(vec![masks.clone(), masks]);
+        };
+        // Dual fisheye: also every cell holding a pixel the lens does not cover.
+        Ok((0..2)
+            .map(|tile| {
+                let invalid: Vec<bool> = dual.invalid(tile);
+                let mut tile_masks: CellMasks = masks.clone();
+                for (column, row) in grid.cells() {
+                    let (x, y) = (grid.x_start + column * cell, grid.y_start + row * cell);
+                    let rect = MaskRect {
+                        x: x as f32,
+                        y: y as f32,
+                        w: cell as f32,
+                        h: cell as f32,
+                    };
+                    let holds_invalid: bool = (y..y + cell).any(|r| {
+                        invalid[r * self.tile_width + x..r * self.tile_width + x + cell]
+                            .contains(&true)
+                    });
+                    if holds_invalid && !tile_masks.masks.contains(&rect) {
+                        tile_masks.masks.push(rect);
+                    }
+                }
+                tile_masks
+            })
+            .collect())
     }
 
     /// Cut the panorama into the two tiles; a pure copy with horizontal wrap.
@@ -226,12 +302,29 @@ impl PanoramaRig {
     }
 
     /// The frameset rules for the panorama input: one image, panorama-sized,
-    /// with its rows in bounds.
+    /// with its rows in bounds (equirect), or the two lens images (dual fisheye).
     ///
     /// # Errors
     ///
     /// The same errors the per-camera checks give.
     pub fn check(&self, images: &[ImageView<'_>]) -> Result<(), VioError> {
+        if let Some(dual) = &self.dual {
+            super::check_frameset(images, 2)?;
+            let size = dual.lens_size();
+            for (camera, image) in images.iter().enumerate() {
+                if (image.width, image.height) != (size.width, size.height) {
+                    return Err(crate::frontend::flow::FrontendError::FrameSizeMismatch {
+                        camera,
+                        expected_width: size.width,
+                        expected_height: size.height,
+                        actual_width: image.width,
+                        actual_height: image.height,
+                    }
+                    .into());
+                }
+            }
+            return Ok(());
+        }
         super::check_frameset(images, 1)?;
         let image: &ImageView<'_> = &images[0];
         if (image.width, image.height) != (self.width, self.height) {
@@ -245,6 +338,109 @@ impl PanoramaRig {
             .into());
         }
         Ok(())
+    }
+}
+
+impl PanoramaRig {
+    /// Turn a checked frameset into the frontend's two tile images in `frames`.
+    ///
+    /// Equirect: the crop, widened by the normal fill. Dual fisheye: the remap
+    /// writes `u16` level 0 directly into dense (CPU) storage; packed (GPU)
+    /// storage gets the narrowed bytes ([`DualFisheyeIngest::narrow_tiles_for_device_upload`]).
+    ///
+    /// # Errors
+    ///
+    /// When the frameset is refused or an image operation fails.
+    pub(super) fn ingest(
+        &mut self,
+        images: &[ImageView<'_>],
+        frames: &mut FrameStorage,
+    ) -> Result<(), VioError> {
+        self.check(images)?;
+        let Some(dual) = &mut self.dual else {
+            self.crop(images)?;
+            frames.fill(&self.tile_views())?;
+            return Ok(());
+        };
+        dual.remap(images)?;
+        if !frames.fill_dense_u16(dual.tiles()) {
+            dual.narrow_tiles_for_device_upload(&mut self.tiles);
+            frames.fill(&self.tile_views())?;
+        }
+        Ok(())
+    }
+
+    /// The same for the GPU lane's lookahead upload, which takes bytes.
+    ///
+    /// # Errors
+    ///
+    /// When the frameset is refused or an image operation fails.
+    pub(super) fn ingest_packed(
+        &mut self,
+        images: &[ImageView<'_>],
+        packed: &mut PackedImages,
+    ) -> Result<(), VioError> {
+        self.check(images)?;
+        match &mut self.dual {
+            Some(dual) => {
+                dual.remap(images)?;
+                dual.narrow_tiles_for_device_upload(&mut self.tiles);
+            }
+            None => self.crop(images)?,
+        }
+        packed.fill(&self.tile_views());
+        Ok(())
+    }
+
+    /// Keep a raw gyro sample (IMU frame) for the rolling-shutter correction.
+    pub(super) fn push_gyro(&mut self, t_ns: i64, gyro: [f64; 3]) {
+        if let Some(dual) = &mut self.dual {
+            dual.push_gyro(t_ns, gyro);
+        }
+    }
+
+    /// Remove the rolling shutter from the estimator's copy of the keypoints
+    /// (dual fisheye with `config.panorama_rolling_shutter`); a no-op otherwise.
+    pub(super) fn correct_rolling_shutter(
+        &self,
+        observations: &mut FlowObservations,
+        gyro_bias: Option<Vector3<f64>>,
+    ) {
+        if let Some(dual) = &self.dual {
+            dual.correct_rolling_shutter(observations, gyro_bias);
+        }
+    }
+
+    /// The `u16` tiles of the last dual-fisheye frameset, `None` for equirect.
+    pub fn dual_fisheye_tiles(&self) -> Option<&[kornia_image::Image<u16, 1>; 2]> {
+        self.dual.as_deref().map(DualFisheyeIngest::tiles)
+    }
+
+    /// [`DualFisheyeLenses`]' rolling-shutter correction of tile `tile`'s pixels
+    /// for a gyro rate `omega_imu` (IMU frame), as the estimator's copy gets it;
+    /// a pixel that cannot be corrected comes back unchanged, and every pixel
+    /// does on an equirect rig.
+    pub fn rolling_shutter_corrected(
+        &self,
+        tile: usize,
+        pixels: &[[f64; 2]],
+        omega_imu: [f64; 3],
+    ) -> Vec<[f64; 2]> {
+        match &self.dual {
+            Some(dual) => dual.corrected_pixels(tile, pixels, Vector3::from(omega_imu)),
+            None => pixels.to_vec(),
+        }
+    }
+
+    /// Wall time of the last dual-fisheye ingest, `[lens level 1, gather]` ns
+    /// over both lenses; `None` for equirect.
+    pub fn dual_fisheye_ingest_ns(&self) -> Option<[u64; 2]> {
+        self.dual.as_deref().map(DualFisheyeIngest::last_ns)
+    }
+
+    /// The lookup table of tile `k` (dual fisheye), `None` for equirect.
+    pub fn tile_lut(&self, tile: usize) -> Option<&kornia_staging_imgproc::panorama::TileLut> {
+        self.dual.as_deref().map(|dual| dual.lut(tile))
     }
 }
 
@@ -267,6 +463,9 @@ pub(super) fn configure(
     let limit: f32 = config.panorama_track_max_latitude_deg.to_radians();
     frontend.set_detection_masks(panorama.detection_masks(config, tile.fy, tile.cy)?)?;
     frontend.set_track_latitude_limits(vec![Some(limit); 2])?;
+    if let Some(dual) = &panorama.dual {
+        frontend.set_track_kill_masks(vec![Some(dual.kill_mask(0)), Some(dual.kill_mask(1))])?;
+    }
     Ok(())
 }
 

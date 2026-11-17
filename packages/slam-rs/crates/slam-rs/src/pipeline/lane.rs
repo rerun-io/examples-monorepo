@@ -84,6 +84,15 @@ impl FrontendLane {
         Ok(on_lane!(self, |flow| flow.set_track_latitude_limits(limits))?)
     }
 
+    /// Per-camera track kill masks; see
+    /// [`frontend::flow::FrameToFrameOpticalFlow::set_track_kill_masks`].
+    pub fn set_track_kill_masks(
+        &mut self,
+        masks: Vec<Option<std::sync::Arc<frontend::flow::TrackKillMask>>>,
+    ) -> Result<(), VioError> {
+        Ok(on_lane!(self, |flow| flow.set_track_kill_masks(masks))?)
+    }
+
     /// Share the CPU frontend's workers with the synchronous estimator.
     pub(super) fn cpu_pool(&self) -> Option<crate::frontend::parallel::WorkPool> {
         match self {

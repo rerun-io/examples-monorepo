@@ -52,6 +52,12 @@ pub struct InsvLens {
     /// Translation of rig -> lens, metres; the rig origin is the midpoint of the lens centres.
     #[pyo3(get)]
     lens_from_rig_translation_m: [f64; 3],
+    /// `R_P_lens`, row-major: lens vectors into the panorama frame `P` (+Z lens-0 axis, +Y toward the handle).
+    #[pyo3(get)]
+    pano_from_lens_rotation: [[f64; 3]; 3],
+    /// Lens centre in `P`, metres; the origin is the midpoint of the lens centres.
+    #[pyo3(get)]
+    pano_centre_m: [f64; 3],
     core: LensCalibration,
 }
 
@@ -84,6 +90,8 @@ impl From<&LensCalibration> for InsvLens {
             translation_m: l.translation_m,
             lens_from_rig_rotation: l.lens_from_rig_rotation,
             lens_from_rig_translation_m: l.lens_from_rig_translation_m,
+            pano_from_lens_rotation: l.pano_from_lens_rotation,
+            pano_centre_m: l.pano_centre_m,
             core: l.clone(),
         }
     }
@@ -166,6 +174,20 @@ impl InsvClip {
     #[getter]
     fn lenses(&self) -> Vec<InsvLens> {
         self.clip.lenses.iter().map(InsvLens::from).collect()
+    }
+
+    /// V6 factory calibration per lens, in lens order; empty when the clip has no V6 string.
+    #[getter]
+    fn lenses_v6(&self) -> Vec<InsvLens> {
+        self.clip.lenses_v6.iter().map(InsvLens::from).collect()
+    }
+
+    /// The window crop the lens strings are stated through: `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`.
+    #[getter]
+    fn window_crop(&self) -> Option<(u32, u32, u32, u32, i64, i64)> {
+        self.clip.trailer.metadata.window_crop.map(|c| {
+            (c.src[0], c.src[1], c.dst[0], c.dst[1], c.offset[0], c.offset[1])
+        })
     }
 
     /// Track width and height in pixels.

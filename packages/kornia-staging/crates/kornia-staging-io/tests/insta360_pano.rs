@@ -148,6 +148,27 @@ fn the_factory_projection_reproduces_the_oracle_to_a_micropixel() {
 }
 
 #[test]
+fn the_lens_centres_sit_on_the_panorama_z_axis_about_the_midpoint() {
+    // recon/03 section 4: 33.1 mm baseline on the optical axis, 0.1-0.8 mm lateral; lens 0 looks along +Z.
+    let lenses = lenses(V6);
+    let [c0, c1] = [lenses[0].pano_centre_m, lenses[1].pano_centre_m];
+    for k in 0..3 {
+        assert!(
+            (c0[k] + c1[k]).abs() < 1e-12,
+            "centres are symmetric about the origin"
+        );
+    }
+    assert!(
+        (c0[2] - 0.01656).abs() < 2e-4,
+        "lens 0 at +16.56 mm on Z: {c0:?}"
+    );
+    assert!(
+        c0[0].hypot(c0[1]) < 1e-3,
+        "lateral offset below 1 mm: {c0:?}"
+    );
+}
+
+#[test]
 fn the_radial_part_gives_the_recon_radii() {
     // recon/03 section 5.3: lens 0 (V3) image radius 294.9 / 607.6 / 900.2 / 972.2 px at 30 / 60 / 90 / 100 deg.
     let mut lens = lenses(V3)[0].clone();

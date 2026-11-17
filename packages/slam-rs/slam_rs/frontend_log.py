@@ -82,7 +82,9 @@ def panorama_positions(
     return np.concatenate(ids), np.concatenate(positions)
 
 
-def log_keypoints(frame: _core.FlowFrame, tile_origins: tuple[int, int] | None = None, panorama_width: int = 0) -> None:
+def log_keypoints(
+    frame: _core.FlowFrame, tile_origins: tuple[int, int] | None = None, panorama_width: int = 0, panorama_entity: str | None = None
+) -> None:
     """Draw one frameset's tracked keypoints on the camera images.
 
     Two rungs draw this layer — the frontend's own and the estimator's, whose
@@ -95,10 +97,12 @@ def log_keypoints(frame: _core.FlowFrame, tile_origins: tuple[int, int] | None =
         frame: What a frontend produced for one frameset.
         tile_origins: For a panorama rig, ``Vio.panorama_tile_origins``: both tiles are drawn on camera 0's panorama.
         panorama_width: Panorama width in pixels; read only with ``tile_origins``.
+        panorama_entity: Image the panorama keypoints are drawn on; None draws them on camera 0 (an equirect source).
     """
     if tile_origins is not None:
         ids, positions = panorama_positions(frame, tile_origins, panorama_width)
-        rr.log(f"{camera_entity(0)}/keypoints", rr.Points2D(positions, colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX))
+        entity: str = panorama_entity if panorama_entity is not None else camera_entity(0)
+        rr.log(f"{entity}/keypoints", rr.Points2D(positions, colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX))
         return
     for index in range(frame.camera_count):
         ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
