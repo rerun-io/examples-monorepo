@@ -18,7 +18,7 @@ IMU_ENTITY: str = "/world/rig_00/imu_00"
 TIMELINE: str = "video_time"
 """The one index both datasets carry: nanoseconds since ``property:capture:start_time_ns``."""
 
-CameraModelName: TypeAlias = Literal["kb4", "radtan8"]
+CameraModelName: TypeAlias = Literal["kb4", "radtan8", "ds", "eucm", "equirectangular"]
 """Projection models V0 supports, using the accepted calibration names."""
 
 
@@ -50,7 +50,8 @@ class CameraCalib:
     model: CameraModelName
     """Projection model."""
     distortion: Float64[ndarray, " n_coeffs"]
-    """Exactly the coefficients the model uses: 4 for kb4, ``k1 k2 p1 p2 k3 k4 k5 k6`` for radtan8."""
+    """Exactly the coefficients the model uses: 4 for kb4, ``k1 k2 p1 p2 k3 k4 k5 k6`` for radtan8, ``xi alpha`` for ds,
+    ``alpha beta`` for eucm, ``lon_max`` (radians) for equirectangular."""
     distortion_valid_radius: float | None
     """The valid radius ``rpmax``, when the recording carries one."""
     imu_T_cam: Float64[ndarray, "4 4"]

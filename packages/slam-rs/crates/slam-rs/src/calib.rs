@@ -140,40 +140,24 @@ mod vector3_json {
     }
 }
 
-pub use kornia_staging_3d::camera::formats::{Kb4Params, PinholeParams, Radtan8Params};
+pub use kornia_staging_3d::camera::formats::{
+    DoubleSphereParams, EucmParams as ExtendedUnifiedParams, Kb4Params, PinholeParams,
+    Radtan8Params,
+};
 
-/// Double sphere.
+/// Equirectangular panorama or tile; not a Basalt model, carried for catalog cameras.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct DoubleSphereParams<S> {
-    /// Focal length along image x, pixels.
+pub struct EquirectangularParams<S> {
+    /// Pixels per radian of longitude.
     pub fx: S,
-    /// Focal length along image y, pixels.
+    /// Pixels per radian of latitude.
     pub fy: S,
-    /// Principal point x, pixels.
+    /// Column of longitude zero (+Z), pixels.
     pub cx: S,
-    /// Principal point y, pixels.
+    /// Row of latitude zero, pixels.
     pub cy: S,
-    /// Offset between the two projection spheres.
-    pub xi: S,
-    /// Blend between the two spheres.
-    pub alpha: S,
-}
-
-/// Extended unified.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct ExtendedUnifiedParams<S> {
-    /// Focal length along image x, pixels.
-    pub fx: S,
-    /// Focal length along image y, pixels.
-    pub fy: S,
-    /// Principal point x, pixels.
-    pub cx: S,
-    /// Principal point y, pixels.
-    pub cy: S,
-    /// Blend parameter.
-    pub alpha: S,
-    /// Ellipsoid shape parameter.
-    pub beta: S,
+    /// Longitude half-window, radians, in `(0, pi]`.
+    pub lon_max: S,
 }
 
 /// Unified / Mei.
@@ -193,10 +177,11 @@ pub struct UnifiedParams<S> {
 
 /// One camera's projection model.
 ///
-/// Six variants can be parsed. `ds`, `eucm` and `ucm` have no projection
-/// implementation and return `CameraError::UnsupportedModel` from
-/// the staged model converter. Parsing them first lets the
-/// error name the unsupported model rather than an unrelated JSON field.
+/// Seven variants can be parsed. `ucm` has no projection implementation and
+/// returns `CameraError::UnsupportedModel` from the staged model converter.
+/// Parsing it first lets the error name the unsupported model rather than an
+/// unrelated JSON field. `equirectangular` is this crate's extension for catalog
+/// panoramas; Basalt has no such model.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "camera_type", content = "intrinsics")]
 pub enum BasaltCamera<S> {
@@ -218,6 +203,9 @@ pub enum BasaltCamera<S> {
     /// `ucm`.
     #[serde(rename = "ucm")]
     Unified(UnifiedParams<S>),
+    /// `equirectangular`.
+    #[serde(rename = "equirectangular")]
+    Equirectangular(EquirectangularParams<S>),
 }
 
 impl<S: Copy> BasaltCamera<S> {
@@ -230,6 +218,7 @@ impl<S: Copy> BasaltCamera<S> {
             Self::DoubleSphere(_) => "ds",
             Self::ExtendedUnified(_) => "eucm",
             Self::Unified(_) => "ucm",
+            Self::Equirectangular(_) => "equirectangular",
         }
     }
 
@@ -246,6 +235,7 @@ impl<S: Copy> BasaltCamera<S> {
             Self::DoubleSphere(p) => vec![p.fx, p.fy, p.cx, p.cy, p.xi, p.alpha],
             Self::ExtendedUnified(p) => vec![p.fx, p.fy, p.cx, p.cy, p.alpha, p.beta],
             Self::Unified(p) => vec![p.fx, p.fy, p.cx, p.cy, p.alpha],
+            Self::Equirectangular(p) => vec![p.fx, p.fy, p.cx, p.cy, p.lon_max],
         }
     }
 
@@ -318,6 +308,13 @@ impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
                 cy: convert(p.cy),
                 alpha: convert(p.alpha),
             }),
+            Self::Equirectangular(p) => BasaltCamera::Equirectangular(EquirectangularParams {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                lon_max: convert(p.lon_max),
+            }),
         }
     }
 }
@@ -330,12 +327,21 @@ impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
         kornia_staging_3d::camera::CameraModelKind<S>,
         kornia_staging_3d::camera::formats::ConversionError,
     > {
-        use kornia_staging_3d::camera::formats::{BasaltCamera as Supported, ConversionError};
+        use kornia_staging_3d::camera::{
+            CameraModelKind, Equirectangular,
+            formats::{BasaltCamera as Supported, ConversionError},
+        };
         let supported = match *self {
             Self::Pinhole(p) => Supported::Pinhole(p),
             Self::Kb4(p) => Supported::Kb4(p),
             Self::PinholeRadtan8(p) => Supported::PinholeRadtan8(p),
-            _ => return Err(ConversionError::Unsupported(self.name().into())),
+            Self::DoubleSphere(p) => Supported::DoubleSphere(p),
+            Self::ExtendedUnified(p) => Supported::Eucm(p),
+            Self::Equirectangular(p) => {
+                let camera = Equirectangular::new([p.fx, p.fy, p.cx, p.cy, p.lon_max])?;
+                return Ok(CameraModelKind::Equirectangular(camera));
+            }
+            Self::Unified(_) => return Err(ConversionError::Unsupported(self.name().into())),
         };
         (&supported).try_into()
     }
@@ -875,6 +881,16 @@ fn camera_model_from_parts<S: Scalar>(
                 cy,
                 alpha: d[0],
                 beta: d[1],
+            }))
+        }
+        "equirectangular" => {
+            expect(1, "equirectangular")?;
+            Ok(BasaltCamera::Equirectangular(EquirectangularParams {
+                fx,
+                fy,
+                cx,
+                cy,
+                lon_max: d[0],
             }))
         }
         "ucm" => {
