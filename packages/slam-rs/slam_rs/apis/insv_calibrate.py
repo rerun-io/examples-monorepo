@@ -24,7 +24,7 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from slam_rs import BackendRequest, _core
-from slam_rs.apis.insv import orthonormal
+from slam_rs.apis.insv import nearest_permutation, orthonormal
 from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
@@ -217,15 +217,6 @@ def rotation_log(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, " 3"]:
 def rotation_angle_deg(rotation: Float64[ndarray, "3 3"]) -> float:
     """Angle of ``rotation`` in degrees."""
     return float(np.degrees(np.linalg.norm(rotation_log(rotation))))
-
-
-def nearest_permutation(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
-    """The signed axis permutation nearest to ``rotation``, row by row."""
-    permutation: Float64[ndarray, "3 3"] = np.zeros((3, 3))
-    for row in range(3):
-        column: int = int(np.argmax(np.abs(rotation[row])))
-        permutation[row, column] = np.sign(rotation[row, column])
-    return permutation
 
 
 def tile_bearings(pixels_xy: Float64[ndarray, "n 2"], origin: int) -> Float64[ndarray, "n 3"]:

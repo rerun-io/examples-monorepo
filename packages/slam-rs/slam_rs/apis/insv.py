@@ -97,12 +97,18 @@ def orthonormal(matrix: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
     return rotation
 
 
-def angle_to_nearest_permutation_deg(rotation: Float64[ndarray, "3 3"]) -> float:
-    """Angle in degrees between ``rotation`` and the signed axis permutation nearest to it."""
+def nearest_permutation(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
+    """The signed axis permutation nearest to ``rotation``, row by row."""
     permutation: Float64[ndarray, "3 3"] = np.zeros((3, 3))
     for row in range(3):
         column: int = int(np.argmax(np.abs(rotation[row])))
         permutation[row, column] = np.sign(rotation[row, column])
+    return permutation
+
+
+def angle_to_nearest_permutation_deg(rotation: Float64[ndarray, "3 3"]) -> float:
+    """Angle in degrees between ``rotation`` and the signed axis permutation nearest to it."""
+    permutation: Float64[ndarray, "3 3"] = nearest_permutation(rotation)
     cosine: float = (float(np.trace(permutation.T @ rotation)) - 1.0) / 2.0
     return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
