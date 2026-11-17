@@ -12,8 +12,8 @@ mod panorama;
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
 use numpy::{
-    PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
-    ToPyArray,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2,
+    PyUntypedArrayMethods, ToPyArray,
 };
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -260,9 +260,9 @@ impl Vio {
         };
         let (width, height) = (pano.width(), pano.height());
         Ok(Some(
-            numpy::ndarray::Array2::from_shape_vec((height, width), pano.as_slice().to_vec())
+            numpy::ndarray::Array2::from_shape_vec((height, width), pano.into_vec())
                 .map_err(value_error)?
-                .to_pyarray(py),
+                .into_pyarray(py),
         ))
     }
 

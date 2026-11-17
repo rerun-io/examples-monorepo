@@ -1,7 +1,7 @@
 //! The dual-fisheye lane's stitch without a pipeline, for the derived viewing panorama.
 use crate::{gray_array, gray_pixels, value_error, window_crop};
 use kornia_image::ImageSize;
-use numpy::{PyArray2, ToPyArray};
+use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;
 use slam_rs::ImageView;
 use slam_rs::frontend::input::LensStitch;
@@ -71,7 +71,7 @@ impl PanoramaStitch {
         Ok(
             numpy::ndarray::Array2::from_shape_vec((pano.height(), pano.width()), pano.into_vec())
                 .map_err(value_error)?
-                .to_pyarray(py),
+                .into_pyarray(py),
         )
     }
 }
