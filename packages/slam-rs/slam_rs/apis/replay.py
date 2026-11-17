@@ -79,7 +79,7 @@ class Config:
     """
     decode_device: DecodeRequest = "auto"
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
-    vio_bootstrap: Literal["stereo", "inertial", "auto"] | None = None
+    vio_bootstrap: Literal["stereo", "inertial"] | None = None
     """Override ``config.vio_bootstrap``: how the estimator gets its first state. None keeps the dataset config's."""
     blank_cameras: tuple[int, ...] = ()
     """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording.
