@@ -11,8 +11,11 @@
 //!    so the KLT has a guess before any state exists.
 //! 2. The observations and a copy of the IMU are buffered. When the buffer
 //!    spans the window (2 s), the observations become unit bearings
-//!    ([`prepare_bearings`], the seam where rolling-shutter correction goes)
-//!    and `kornia_staging_slam::init::inertial::solve_inertial_init` runs.
+//!    ([`prepare_bearings`]) and `kornia_staging_slam::init::inertial::solve_inertial_init`
+//!    runs. A rolling-shutter rig's observations arrive already corrected:
+//!    `Vio::finish_track` corrects the estimator's copy before it reaches
+//!    either the bootstrap or the estimator, so the buffer, the bearings and
+//!    the replayed framesets are the same corrected observations.
 //! 3. On a rejection the window grows to 3 s once; then it slides by 0.5 s
 //!    and starts at 2 s again. Every attempt is logged and kept in the
 //!    [`BootstrapReport`].
@@ -28,7 +31,7 @@
 //!
 //! Frameset times must be on the IMU clock and refer to the instant the
 //! observations describe (for a rolling-shutter camera: the middle row's
-//! mid-exposure, with the rows corrected in [`prepare_bearings`]).
+//! mid-exposure, with the rows already corrected to it upstream).
 use super::{Vio, VioError, VioResult, VioStatus};
 use crate::calib::{BasaltCamera, Calibration};
 use crate::camera::SlamCamera;
@@ -253,10 +256,13 @@ pub fn uses_inertial(config: &VioConfig, calibration: &Calibration<f64>) -> bool
 ///
 /// Each pixel is unprojected through its camera's model to a unit bearing in
 /// that camera's frame; the frame index is the frameset's position in
-/// `window`. A rolling-shutter camera corrects each bearing here (rotate it
-/// by the gyro over its row's time offset from the frameset time) before the
-/// solver sees it; the solver's sensitivity table makes that mandatory for
-/// the Insta360 (uncorrected +-8 ms gave 6-16 % scale error).
+/// `window`. A rolling-shutter camera's pixels are already corrected (rotated
+/// by the gyro over each row's time offset from the frameset time, in
+/// `Vio::finish_track`) when they get here; the solver's sensitivity table
+/// makes that mandatory for the Insta360 (uncorrected +-8 ms gave 6-16 %
+/// scale error). Before the bootstrap accepts there is no gyro bias estimate,
+/// so that correction uses the raw gyro rate (the static calibration's bias is
+/// not applied either; it is zero for the Insta360 rig).
 pub fn prepare_bearings(
     window: &[Arc<FlowObservations>],
     cameras: &[SlamCamera<f64>],

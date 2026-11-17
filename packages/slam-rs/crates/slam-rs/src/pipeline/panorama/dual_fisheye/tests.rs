@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
+use crate::ImageView;
 use crate::frontend::input::FrameStorage;
 use crate::pipeline::panorama::{PanoramaRig, PanoramaSource};
 use kornia_image::Image;
