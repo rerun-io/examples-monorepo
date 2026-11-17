@@ -6078,6 +6078,7 @@ dependencies = [
  "kornia-staging-algebra",
  "kornia-staging-gpu",
  "kornia-staging-imgproc",
+ "kornia-staging-io",
  "kornia-staging-sensors",
  "kornia-staging-slam",
  "log",
