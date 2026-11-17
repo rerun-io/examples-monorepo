@@ -26,9 +26,8 @@
 //! The island stays pinned against culling from detection to
 //! [`MapBackend::apply_loop`] (B10). Apply measures the drift the loop would
 //! correct; a small one fuses at once (landmark fusion, [`LoopFusion`], B9, and
-//! a loop edge in the covisibility graph); a large one stays pinned, with its
-//! matches, for the pose-graph optimization (PR c2, [`super::pgo`]), which
-//! runs at once and then fuses the same way ([`MapBackend::close_with_pgo`]).
+//! a loop edge in the covisibility graph); a large one first runs the
+//! pose-graph optimization ([`super::pgo`], PR c2), then fuses the same way.
 
 mod window;
 
@@ -137,11 +136,8 @@ pub enum LoopOutcome {
         /// Observations of island landmarks added to the current keyframe.
         observations_added: usize,
     },
-    /// Drift at or above the gate: left for the pose-graph optimization (c2),
-    /// which takes it with [`MapBackend::finish_pgo_loop`]; until then its
-    /// keyframes stay pinned and its matches kept for the fusion after it.
-    /// With the optimization on it runs at once; a loop it refused stays
-    /// `NeedsPgo`, released and unapplied.
+    /// Drift at or above the gate, but the pose-graph optimization is off or
+    /// refused the graph: nothing changed, and the keyframes are unpinned.
     NeedsPgo,
     /// Drift at or above the gate: the pose-graph optimization moved the map,
     /// then landmarks were fused and a loop edge added (c2).
@@ -524,16 +520,10 @@ impl MapBackend {
             return Vec::new();
         };
         let event: LoopEvent = self.apply_loop(detection);
-        let pgo: bool = self.loops.as_ref().is_some_and(|loops| loops.config.pgo);
-        let outcome: LoopOutcome = if event.outcome == LoopOutcome::NeedsPgo && pgo {
-            self.close_with_pgo(event.detection.current)
-        } else {
-            event.outcome
-        };
         vec![MapEvent::LoopVerified {
             current: event.detection.current,
             candidate: event.detection.candidate,
-            outcome,
+            outcome: event.outcome,
         }]
     }
 
@@ -801,9 +791,10 @@ impl MapBackend {
     }
 
     /// Apply a verified loop (`handle_loop_detection`): measure the drift it
-    /// would correct; below the gate, fuse its landmarks, add the loop edge
-    /// and unpin its keyframes; at or above it, keep it, pinned, for the
-    /// pose-graph optimization ([`Self::finish_pgo_loop`]). Records the event.
+    /// would correct; below the gate, fuse its landmarks and add the loop edge;
+    /// at or above it, run the pose-graph optimization first
+    /// (`handle_loop_closure`), then do the same. Unpins its keyframes either
+    /// way and records the event.
     pub fn apply_loop(&mut self, detection: LoopDetection) -> LoopEvent {
         let gates: Option<(f64, f64)> = self.loops.as_ref().map(|loops| {
             (
@@ -821,7 +812,22 @@ impl MapBackend {
             self.map.contains_keyframe(detection.candidate),
         ) {
             if drift_m >= min_m || drift_deg >= min_deg {
-                LoopOutcome::NeedsPgo
+                if self.optimize_loop(&detection) {
+                    self.graph
+                        .add_loop_closure(detection.candidate, detection.current);
+                    match self.fuse(detection.current, &detection.matches) {
+                        LoopOutcome::Fused {
+                            landmarks_fused,
+                            observations_added,
+                        } => LoopOutcome::Optimized {
+                            landmarks_fused,
+                            observations_added,
+                        },
+                        other => other,
+                    }
+                } else {
+                    LoopOutcome::NeedsPgo
+                }
             } else {
                 self.graph
                     .add_loop_closure(detection.candidate, detection.current);
@@ -834,16 +840,15 @@ impl MapBackend {
             loops.counts.verified += 1;
             match outcome {
                 LoopOutcome::Fused { .. } => loops.counts.fused += 1,
-                LoopOutcome::NeedsPgo => {
+                LoopOutcome::NeedsPgo => loops.counts.needs_pgo += 1,
+                LoopOutcome::Optimized { .. } => {
                     loops.counts.needs_pgo += 1;
-                    loops.awaiting_pgo.insert(detection.current);
+                    loops.counts.optimized += 1;
                 }
-                LoopOutcome::Optimized { .. } | LoopOutcome::Stale => {}
+                LoopOutcome::Stale => {}
             }
         }
-        if outcome != LoopOutcome::NeedsPgo {
-            self.release(&detection);
-        }
+        self.release(&detection);
         let event = LoopEvent {
             detection,
             drift_m,
@@ -882,51 +887,6 @@ impl MapBackend {
         let detection: LoopDetection = event.detection.clone();
         self.release(&detection);
         Some(detection)
-    }
-
-    /// `handle_loop_closure` for the loop waiting at `current` (PR c2): run
-    /// its pose-graph optimization, take it back with [`Self::finish_pgo_loop`],
-    /// then add the loop edge and fuse its matches. Its event becomes
-    /// [`LoopOutcome::Optimized`]. A graph the solver refuses releases the loop
-    /// unapplied ([`LoopOutcome::NeedsPgo`]).
-    pub(super) fn close_with_pgo(&mut self, current: FrameId) -> LoopOutcome {
-        let Some(waiting) = self
-            .loops_awaiting_pgo()
-            .find(|event| event.detection.current == current)
-            .map(|event| event.detection.clone())
-        else {
-            return LoopOutcome::NeedsPgo;
-        };
-        let optimized: bool = self.optimize_loop(&waiting);
-        let Some(detection) = self.finish_pgo_loop(current) else {
-            return LoopOutcome::NeedsPgo;
-        };
-        if !optimized {
-            return LoopOutcome::NeedsPgo;
-        }
-        self.graph
-            .add_loop_closure(detection.candidate, detection.current);
-        let outcome = match self.fuse(detection.current, &detection.matches) {
-            LoopOutcome::Fused {
-                landmarks_fused,
-                observations_added,
-            } => LoopOutcome::Optimized {
-                landmarks_fused,
-                observations_added,
-            },
-            other => other,
-        };
-        if let Some(loops) = self.loops.as_mut() {
-            loops.counts.optimized += 1;
-            if let Some(event) = loops
-                .events
-                .iter_mut()
-                .rfind(|event| event.detection.current == current)
-            {
-                event.outcome = outcome;
-            }
-        }
-        outcome
     }
 
     /// Unpin a loop's keyframes but those a waiting loop still holds.

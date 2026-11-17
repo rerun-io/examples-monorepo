@@ -1,4 +1,4 @@
-//! The PGO's graph, gauge and delta apply on hand-built maps (PR c2).
+//! The PGO's graph, gauge and apply on hand-built maps (PR c2).
 
 #![allow(clippy::unwrap_used)]
 
@@ -42,13 +42,12 @@ fn loop_config() -> LoopClosingConfig {
 fn parity_config() -> LoopClosingConfig {
     LoopClosingConfig {
         pgo_edge_sigmas: [1.0, 1.0],
-        pgo_loop_edges_first: false,
         ..LoopClosingConfig::default()
     }
 }
 
 #[test]
-fn the_graph_takes_tree_past_loop_and_strong_edges_then_the_loop_measured_from_the_map() {
+fn the_graph_takes_the_loop_then_tree_past_loop_and_strong_edges_measured_from_the_map() {
     let poses: Vec<Se3<f64>> = (0..6).map(|i| at(i as f64, 0.1 * i as f64)).collect();
     // 1-2-3-4-5-6 tree at weight 100; skips at 40 (below 50) except 4-6 at 80.
     let (map, mut graph) = chain_map(&poses, 100, 40);
@@ -56,28 +55,23 @@ fn the_graph_takes_tree_past_loop_and_strong_edges_then_the_loop_measured_from_t
     graph.add_loop_closure(1, 4);
     let corrected = at(0.2, 0.05);
     let active = BTreeSet::from([5, 6]);
-    for (config, sqrt_info, loop_first) in [
+    for (config, sqrt_info) in [
         (
             loop_config(),
             Matrix6::from_diagonal(&Vector6::new(20.0, 20.0, 20.0, 100.0, 100.0, 100.0)),
-            true,
         ),
-        (parity_config(), Matrix6::identity(), false),
+        (parity_config(), Matrix6::identity()),
     ] {
         let graph = PoseGraph::build(&map, &graph, 50, &active, (6, &[1, 2], &corrected), &config);
         assert_eq!(graph.ids, vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(graph.copy, poses);
         assert_eq!(graph.loop_edges, 2);
         let pairs: Vec<(usize, usize)> = graph.edges.iter().map(|e| (e.from, e.to)).collect();
-        // Tree (parent -> child), the past loop 1-4, the strong 4-6; then the loop.
-        let map_pairs = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (0, 3), (3, 5)];
+        // The loop first (B29); then the tree (parent -> child), the past
+        // loop 1-4, the strong 4-6.
         let loop_pairs = vec![(0, 5), (1, 5)];
-        let expected: Vec<(usize, usize)> = if loop_first {
-            loop_pairs.iter().chain(&map_pairs).copied().collect()
-        } else {
-            map_pairs.iter().chain(&loop_pairs).copied().collect()
-        };
-        assert_eq!(pairs, expected);
+        let map_pairs = vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (0, 3), (3, 5)];
+        assert_eq!(pairs, [loop_pairs, map_pairs].concat());
         for edge in &graph.edges {
             let to_pose = if (edge.from, edge.to) == (0, 5) || (edge.from, edge.to) == (1, 5) {
                 corrected
@@ -119,41 +113,29 @@ fn the_gauge_is_the_window_and_the_newest_keyframe_and_they_stay_bit_identical()
 }
 
 #[test]
-fn the_delta_keeps_a_window_write_made_after_the_copy_and_skips_new_and_culled_keyframes() {
-    // B11: RootSLAM writes the stale optimized copy back.
-    let poses: Vec<Se3<f64>> = (0..5).map(|i| at(i as f64, 0.05 * i as f64)).collect();
-    let (mut map, graph) = chain_map(&poses, 100, 0);
-    let active = BTreeSet::from([5]);
+fn an_island_keyframe_with_a_map_edge_to_the_current_one_keeps_the_loop_measurement() {
+    // B29: RootSLAM lists the loop's edges last, so the duplicate pair keeps
+    // the map's (drifted) measurement and drops the loop's.
+    let poses: Vec<Se3<f64>> = (0..4).map(|i| at(i as f64, 0.1 * i as f64)).collect();
+    let (map, graph) = chain_map(&poses, 100, 0);
+    // Keyframe 3 is in the island and shares the tree edge 3-4 with the current one.
+    let corrected = at(0.5, 0.05);
     let pose_graph = PoseGraph::build(
         &map,
         &graph,
         50,
-        &active,
-        (5, &[1], &at(0.3, 0.2)),
+        &BTreeSet::from([4]),
+        (4, &[1, 3], &corrected),
         &loop_config(),
     );
-    let (optimized, _) = pose_graph.solve().unwrap();
-    // While the PGO ran: keyframe 3 was rewritten, 2 culled, 6 added.
-    let now_3 = at(2.5, 0.4);
-    map.upsert_keyframe(3, now_3, None);
-    map.remove_keyframe(2);
-    map.upsert_keyframe(6, at(9.0, 0.0), None);
-    let moved = apply_delta(&mut map, &pose_graph, &optimized);
-    assert_eq!(moved, vec![1, 3, 4]);
-    assert_eq!(
-        map.keyframe(1).unwrap().pose,
-        optimized[0],
-        "unchanged since the copy"
-    );
-    let expected_3 = optimized[2] * pose_graph.copy[2].inverse() * now_3;
-    assert_eq!(map.keyframe(3).unwrap().pose, expected_3);
-    assert_ne!(map.keyframe(3).unwrap().pose, optimized[2]);
-    assert!(map.keyframe(2).is_none(), "a culled keyframe stays culled");
-    assert_eq!(map.keyframe(5).unwrap().pose, poses[4], "the gauge");
-    assert_eq!(
-        map.keyframe(6).unwrap().pose,
-        at(9.0, 0.0),
-        "not in the graph"
+    let (optimized, report) = pose_graph.solve().unwrap();
+    assert_eq!(report.dropped_edges, 1);
+    // Every kept edge agrees with the loop, so the solve meets it exactly.
+    let measured = poses[2].inverse() * corrected;
+    let solved = optimized[2].inverse() * optimized[3];
+    assert!(
+        (solved.translation - measured.translation).norm() < 1e-6,
+        "{solved:?} vs the loop's {measured:?}"
     );
 }
 
@@ -184,7 +166,7 @@ fn landmarks_move_with_their_host_keyframe() {
         &loop_config(),
     );
     let (optimized, _) = pose_graph.solve().unwrap();
-    apply_delta(&mut map, &pose_graph, &optimized);
+    apply(&mut map, &pose_graph, &optimized);
     let after = map.landmark_world(LandmarkId(7), &t_i_c).unwrap();
     let expected = optimized[0] * pose_graph.copy[0].inverse() * before;
     assert!((after - expected).norm() < 1e-12, "{after} vs {expected}");
@@ -245,7 +227,7 @@ fn a_loop_recovers_a_synthetic_drift() {
         &loop_config(),
     );
     let (optimized, report) = pose_graph.solve().unwrap();
-    apply_delta(&mut map, &pose_graph, &optimized);
+    apply(&mut map, &pose_graph, &optimized);
     let after = worst(&map);
     assert!(before > 1.0, "{before}");
     assert!(after < 0.15 * before, "{before} -> {after}, {report:?}");
