@@ -4,12 +4,14 @@ use kornia_staging_algebra::Scalar;
 mod boundary;
 mod lag;
 mod lane;
+mod select;
 #[cfg(test)]
 mod tests;
 
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
+pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};

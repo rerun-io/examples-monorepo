@@ -4,21 +4,19 @@ import hashlib
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal
 
 import orjson
 from serde import coerce, serde
 from serde.json import to_json
 
-from slam_rs import _core
+from slam_rs import BackendRequest, Lane, _core
 from slam_rs.catalog_feed import CatalogSegment, resolve_catalog_segments
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb
 from slam_rs.reference import GATE_RATIO, SMOKE_SEGMENTS, Baseline, Benchmarks, Measurement, ReferenceSegment, Tier, gate_failures, load_benchmarks
 from slam_rs.tracking import SegmentRun, run_segment
 from slam_rs.trajectory import AteResult, ScoringResult, extent_m, nonfinite_position_text, score_trajectory
-
-Lane: TypeAlias = Literal["cpu", "gpu"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,12 +75,17 @@ class ClipResult:
 def measure(
     settings: SlamConfig,
     segment: ReferenceSegment,
-    gpu: bool = False,
+    lane: Lane = "cpu",
     profile: Literal["reference", "fast"] = "fast",
     catalog: str | None = None,
     source: CatalogSegment | None = None,
 ) -> ClipResult:
-    """Replay a catalog segment and associate estimates with ground truth."""
+    """Replay a catalog segment on a resolved lane and associate estimates with ground truth.
+
+    The gate tool resolves its ``--backend`` request once (:func:`slam_rs._core.select_backend`)
+    and passes the lane here, so every clip of one report runs on the lane the report names.
+    Decoding stays on the CPU: the baselines are frozen on the single-threaded dav1d path (D28).
+    """
     if source is None:
         source = resolve_catalog_segments(
             (CatalogSegment(catalog or settings.catalog_url, segment.dataset_name, segment.segment_id),), require_ground_truth=True
@@ -91,10 +94,9 @@ def measure(
         raise ValueError(f"source {source.dataset_name}/{source.segment_id} does not match segment {segment.dataset_name}/{segment.segment_id}")
     if not source.has_ground_truth:
         raise ValueError(f"{segment.segment_id}: ground-truth layer absent")
-    run: SegmentRun = run_segment(settings, segment, gpu=gpu, profile=profile, source=source)
+    run: SegmentRun = run_segment(settings, segment, backend=lane, profile=profile, source=source)
     scoring: ScoringResult = score_trajectory(run.estimate, run.ground_truth)
     against_gt: AteResult | None = scoring.result
-    lane: Lane = this_lane(gpu)
     hostname: str = this_machine().hostname
     baseline: Baseline | None = segment.baseline_for(lane, profile, hostname)
     return ClipResult(
@@ -171,13 +173,6 @@ class GateReport:
     """Completed clips in run order."""
 
 
-def this_lane(gpu: bool) -> Lane:
-    """Refuse unsupported GPU requests before reading data."""
-    if gpu and _core.gpu_backend is None:
-        raise ValueError("--gpu needs a core built with a GPU cargo feature")
-    return "gpu" if gpu else "cpu"
-
-
 @dataclass(slots=True)
 class Config:
     """Score selected catalog segments."""
@@ -192,13 +187,12 @@ class Config:
     """Select a benchmark tier instead of explicit ids."""
     output_json: Path = Path("gate.json")
     """Measurement output."""
-    gpu: bool = False
-    """Use the GPU frontend."""
+    backend: BackendRequest = "auto"
+    """Frontend: auto runs the GPU when this host can, otherwise the CPU with one warning; gpu fails instead; cpu forces it."""
 
 
 def main(config: Config) -> None:
     """Validate sources, measure each segment, and persist results after each run."""
-    lane: Lane = this_lane(config.gpu)
     settings: SlamConfig = load_slam_config()
     benchmarks: Benchmarks = load_benchmarks(settings)
     segments: tuple[ReferenceSegment, ...] = (
@@ -206,6 +200,10 @@ def main(config: Config) -> None:
     )
     if not segments:
         raise ValueError("--segments named no clip")
+    # Resolved after the selection is checked and before any data is read, so
+    # `--backend gpu` on a host without one fails at once.
+    lane: Lane = _core.select_backend(config.backend)
+    print(f"gate lane: {lane}", flush=True)
     sources: tuple[CatalogSegment, ...] = resolve_catalog_segments(
         tuple(CatalogSegment(config.catalog or settings.catalog_url, segment.dataset_name, segment.segment_id) for segment in segments),
         require_ground_truth=True,
@@ -216,7 +214,7 @@ def main(config: Config) -> None:
     config_digests: dict[str, str] = {}
     config.output_json.parent.mkdir(parents=True, exist_ok=True)
     for segment, source in zip(segments, sources, strict=True):
-        result: ClipResult = measure(settings, segment, config.gpu, config.profile, source=source)
+        result: ClipResult = measure(settings, segment, lane, config.profile, source=source)
         if segment.dataset_name in config_digests and config_digests[segment.dataset_name] != result.config_sha256:
             raise RuntimeError(f"{segment.dataset_name}: configuration changed during replay")
         config_digests[segment.dataset_name] = result.config_sha256

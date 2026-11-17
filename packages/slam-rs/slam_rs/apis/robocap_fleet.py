@@ -10,6 +10,7 @@ import orjson
 from serde import coerce, serde
 from serde.json import to_json
 
+from slam_rs import BackendRequest
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.machine import Machine, this_machine, this_peak_rss_mb, this_temperature_c
 from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
@@ -175,8 +176,8 @@ class Config:
 
     catalog: str | None = None
     """Catalog URL; defaults to slam.toml."""
-    gpu: bool = False
-    """Use the GPU frontend."""
+    backend: BackendRequest = "auto"
+    """Frontend: auto runs the GPU when this host can, otherwise the CPU with one warning; gpu fails instead; cpu forces it."""
     session: str = "s00000015"
     """RoboCap session id; regression reference comes from benchmarks.toml. Defaults to session 15."""
     seconds: float = 0.0
@@ -197,7 +198,7 @@ def measure(settings: SlamConfig, session: RobocapSession, config: Config, machi
     reference: Trajectory = read_trajectory(reference_path) if reference_path else empty_trajectory()
     before: float | None = this_temperature_c()
     run: SegmentRun = run_robocap(
-        settings, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, gpu=config.gpu
+        settings, session, seconds=config.seconds, window_s=config.window_s, profile=config.profile, catalog=config.catalog, backend=config.backend
     )
     after: float | None = this_temperature_c()
     scoring: ScoringResult = score_trajectory(run.estimate, reference if len(reference) else None)

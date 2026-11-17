@@ -9,15 +9,17 @@ import numpy as np
 import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs import _core
+from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
     CatalogSegment,
+    DecodeRequest,
     Frameset,
     LocalSegment,
     SegmentFeed,
     SegmentSource,
     open_segment,
+    select_decode_device,
 )
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
@@ -63,13 +65,16 @@ class Config:
     """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
-    gpu: bool = False
-    """Run the frontend's pyramid, patch build and KLT tracker on the GPU through CubeCL.
+    backend: BackendRequest = "auto"
+    """Where ``--stage vio`` runs the frontend's pyramid, patch build and KLT tracker.
 
-    The default is the CPU port. A core built without a GPU cargo feature refuses this
-    rather than quietly running on the CPU, and so does a host with no usable
-    GPU: the run stops with one sentence naming what is absent.
+    ``auto`` runs them on the GPU through CubeCL when this host can, otherwise
+    on the CPU with one warning that names the reason. ``gpu`` stops with that
+    reason instead of falling back; ``cpu`` forces the CPU port. ``--stage
+    frontend`` always runs the CPU frontend.
     """
+    decode_device: DecodeRequest = "auto"
+    """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
 
 
 @dataclass(slots=True)
@@ -178,7 +183,9 @@ def main(config: Config) -> None:
         f"replaying {config.segment} ({f'{listed.tier} tier' if listed is not None else 'not in the reference set: ground truth only'}) from {origin}"
     )
 
-    with open_segment(source, frame_stride=config.frame_stride, window_s=config.window_s) as feed:
+    with open_segment(
+        source, frame_stride=config.frame_stride, window_s=config.window_s, decode_device=select_decode_device(config.decode_device)
+    ) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
             f"{'attached' if feed.has_ground_truth else 'absent'}, clock offset {feed.capture_start_time_ns} ns"
@@ -196,11 +203,12 @@ def main(config: Config) -> None:
         elif config.stage == "vio":
             truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
             # Everything this constructor refuses is the caller's own request —
-            # a configuration this port does not run, or ``--gpu`` on a host
-            # with no driver, no device or no adapter — and the shim
+            # a configuration this port does not run, or ``--backend gpu`` on a
+            # host with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, gpu=config.gpu)
+            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend)
+            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(

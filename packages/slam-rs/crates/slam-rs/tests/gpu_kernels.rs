@@ -106,6 +106,7 @@ fn a_batch_of_two_passes_answers_what_two_calls_do() {
 
     let mut tracker: GpuPatchTracker<Pattern51, _> = GpuPatchTracker::new(
         client.clone(),
+        kornia_staging_gpu::runtime::default_capabilities().unwrap(),
         MAX_KEYPOINTS,
         LEVELS + 1,
         MAX_ITERATIONS,
@@ -257,6 +258,7 @@ fn fused_temporal_batch_matches_cpu() {
     }
     let mut tracker = GpuPatchTracker::<Pattern51, _>::new(
         client,
+        kornia_staging_gpu::runtime::default_capabilities().unwrap(),
         33,
         LEVELS + 1,
         MAX_ITERATIONS,

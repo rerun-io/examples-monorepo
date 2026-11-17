@@ -11,6 +11,7 @@ from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
+from slam_rs import BackendRequest, Lane
 from slam_rs.catalog_calibration import CameraStatics
 from slam_rs.catalog_feed import RigProfile
 from slam_rs.catalog_timing import ImuStream
@@ -19,13 +20,31 @@ from slam_rs.rig import CameraCalib, ImuCalib
 __version__: str
 
 gpu_backend: Literal["wgpu"] | None
-"""Which GPU runtime this build's frontend carries, or None for the CPU-only default build.
+"""Which GPU runtime this build's frontend carries, or None for a CPU-only build.
 
-A core built with the ``gpu-wgpu`` cargo feature carries ``"wgpu"``; nothing a
-caller passes to ``gpu=True`` names the runtime, this does, and it is what a
-fleet row's lane is named from (:func:`slam_rs.apis.gate.this_lane`).
-``None`` is the default build, whose ``gpu=True`` is refused.
+Every pixi build task builds the core with the ``gpu-wgpu`` cargo feature, which
+carries ``"wgpu"``. ``None`` is a build without it (the cargo default of the core
+crate, kept for wasm, iOS and embedded consumers): there ``backend="auto"`` runs
+the CPU and ``backend="gpu"`` is refused.
 """
+
+def device_probes_run() -> int:
+    """How many device capability probes this process has run.
+
+    Validation of the default device runs once per process, so this is 0
+    before the first ``auto`` or ``gpu`` request and constant after it. The
+    unit test tier asserts it stays at 0.
+    """
+
+def select_backend(request: BackendRequest) -> Lane:
+    """Resolve a backend request to the lane :class:`Vio` would run (``slam_rs::select_backend``).
+
+    ``auto`` returns ``"gpu"`` when this build carries the GPU frontend and the
+    host has an adapter that passes the storage and subgroup probes; otherwise
+    it returns ``"cpu"`` and writes one warning, naming the reason, to stderr
+    (once per process). ``"gpu"`` raises ``ValueError`` with that reason instead.
+    The probe runs once per process.
+    """
 
 class VioStatus:
     """How far the estimator has got.
@@ -193,28 +212,24 @@ class Vio:
         *,
         threads: int = 1,
         max_keypoints: int | None = None,
-        gpu: bool = False,
+        backend: BackendRequest = "auto",
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
 
-        ``gpu`` runs the frontend's pyramid, patch build and KLT tracker through
-        CubeCL on this host's GPU instead of the CPU port. The default is the
-        CPU, which is what every accuracy reference was produced on. A core
-        built without the ``gpu-wgpu`` cargo feature raises ``ValueError`` for
-        ``gpu=True`` rather than quietly running on the CPU, and so does a host
-        that has the feature and no GPU to run it on: a missing driver library,
-        a driver that will not initialise, no visible device and no graphics
-        adapter each raise ``ValueError`` naming what is absent. None of them is
-        a ``PanicException``, which is what CubeCL's own unwrapped bring-up
-        would otherwise produce. A failure no probe anticipates is caught rather
-        than raised, so it is a ``ValueError`` too — with the runtime's own panic
-        message left on stderr, which is the only account of a case the probe did
-        not know to ask about.
+        ``backend`` chooses the frontend through :func:`select_backend`. The
+        default ``"auto"`` runs the pyramid, patch build and KLT tracker through
+        CubeCL on this host's GPU when it can, and otherwise the CPU port with
+        one warning that names the reason. ``"gpu"`` raises ``ValueError``
+        instead of falling back: in a core built without the ``gpu-wgpu`` cargo
+        feature, and on a host with no adapter, a driver that will not
+        initialise, or a device that fails the storage or subgroup probe. None
+        of them is a ``PanicException``: a failure the probe catches is a
+        ``ValueError`` too, with the runtime's own panic message left on
+        stderr. ``"cpu"`` always runs the CPU port.
 
         ``threads`` is **inert on the GPU lane**: only the CPU patch tracker
         reads it and the GPU tracker holds no work pool. It is accepted rather
-        than refused alongside ``gpu=True`` so one call site can select either
-        lane.
+        than refused on the GPU lane so one call site can select either lane.
 
         Raises ``ValueError`` on everything :class:`OpticalFlow` refuses, and on
         a config asking for a path this port does not have:
@@ -227,6 +242,9 @@ class Vio:
     @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""
+    @property
+    def backend(self) -> Lane:
+        """The lane this pipeline runs: ``"cpu"`` or ``"gpu"``."""
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
         """Add one uncalibrated IMU sample.
 

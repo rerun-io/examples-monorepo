@@ -29,7 +29,7 @@ def still_frameset(index: int, images: list[UInt8[ndarray, "h w"]]) -> Frameset:
 @pytest.mark.parametrize("lag", [False, True])
 def test_blank_start_has_no_snapshot_and_stereo_starts_the_world(rig: RigFactory, texture: TextureFactory, lag: bool) -> None:
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": lag}}))
-    vio: _core.Vio = _core.Vio(rig(2), config)
+    vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
     blank: UInt8[ndarray, "h w"] = np.zeros((FRAME, FRAME), dtype=np.uint8)
     for t_ns in range(0, 181_000_000, 1_000_000):
         vio.push_imu(t_ns, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
@@ -61,7 +61,7 @@ def test_blank_start_has_no_snapshot_and_stereo_starts_the_world(rig: RigFactory
 @pytest.mark.parametrize("blank_frames", [3, 8])
 def test_lockstep_publishes_no_pose_until_stereo_starts(rig: RigFactory, texture: TextureFactory, lag: bool, blank_frames: int) -> None:
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": lag}}))
-    lockstep: Lockstep = Lockstep(_core.Vio(rig(2), config))
+    lockstep: Lockstep = Lockstep(_core.Vio(rig(2), config, backend="cpu"))
     blank: UInt8[ndarray, "h w"] = np.zeros((FRAME, FRAME), dtype=np.uint8)
     timestamps: list[int] = []
     for index in range(8):
@@ -77,7 +77,7 @@ def test_lockstep_publishes_no_pose_until_stereo_starts(rig: RigFactory, texture
 
 def test_lagged_results_and_final_drain(rig: RigFactory, texture: TextureFactory) -> None:
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": True}}))
-    vio: _core.Vio = _core.Vio(rig(2), config)
+    vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
     assert vio.flush() is None
     for t_ns in range(0, 61_000_000, 1_000_000):
         vio.push_imu(t_ns, [0.0, 0.0, 0.0], [0.0, 0.0, 9.81])
@@ -100,7 +100,7 @@ def test_lagged_results_and_final_drain(rig: RigFactory, texture: TextureFactory
 
 def test_lockstep_pairs_delayed_results_with_their_images_and_keypoints(rig: RigFactory, texture: TextureFactory) -> None:
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": True}}))
-    lockstep: Lockstep = Lockstep(_core.Vio(rig(2), config))
+    lockstep: Lockstep = Lockstep(_core.Vio(rig(2), config, backend="cpu"))
     timestamps: list[int] = []
     for index in range(3):
         frameset: Frameset = still_frameset(index, [texture(index, 0), texture(index - 2, 0)])
@@ -130,7 +130,7 @@ def test_lagged_viewer_layer_keeps_all_frame_timestamps(
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": True}}))
     timestamps: Int64[ndarray, "n"] = np.arange(0, 240_000_000, 20_000_000, dtype=np.int64)
     stage: VioStage = VioStage(
-        Lockstep(_core.Vio(rig(2), config)),
+        Lockstep(_core.Vio(rig(2), config, backend="cpu")),
         VioLogger(cameras=cameras, ground_truth=empty_trajectory(), frame_t_ns=timestamps),
     )
     for index, time in enumerate(timestamps):

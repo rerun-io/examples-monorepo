@@ -2,12 +2,14 @@
 //! Python catalog, evaluation and logging live in `slam_rs`; bindings live in
 //! `slam-rs-py`. The CLI currently provides only `version`.
 //! [`Vio`] buffers IMU samples and processes frames synchronously, returning final
-//! values with deterministic replay (D17). GPU frontend support is feature-gated.
+//! values with deterministic replay (D17). GPU frontend support is feature-gated;
+//! [`select_backend`] is the one place a tool chooses between the two frontends.
 
 mod pipeline;
 pub use pipeline::{
-    Backend, FrontendLane, FrontendTimings, ImageView, OverlapTimings, PreparedTrack, Vio,
-    VioError, VioPose, VioResult, VioStatus, check_imu_sample,
+    Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView, OverlapTimings,
+    PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
+    device_probes_run, gpu_probe, select_backend,
 };
 
 pub mod ba_base;
@@ -42,7 +44,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Which GPU runtime this build's frontend carries, or `None` for the CPU-only
 /// default.
 ///
-/// Nothing a caller can pass through `gpu: bool` names the runtime a build
+/// Nothing a caller can pass as a backend request names the runtime a build
 /// carries. This is that fact, and it is read on the Python side
 /// (`_core.gpu_backend`) to name the lane a fleet row was measured on.
 ///
@@ -51,8 +53,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "gpu-core")]
 pub const GPU_BACKEND: Option<&str> = Some(kornia_staging_gpu::runtime::BACKEND_NAME);
 
-/// Which GPU runtime this build's frontend carries: none, this being the
-/// off-by-default CPU port the fleet installs.
+/// Which GPU runtime this build's frontend carries: none. The core crate keeps
+/// `gpu-wgpu` off by default so that wasm, iOS and embedded builds stay CPU-only;
+/// the pixi build tasks, the CLI and the Python bindings turn it on.
 #[cfg(not(feature = "gpu-core"))]
 pub const GPU_BACKEND: Option<&str> = None;
 

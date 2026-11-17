@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import socket
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -43,6 +44,26 @@ if TYPE_CHECKING:
 
 # beartype runs under pytest only; code that cannot run under it reads this (test_frameset_matching.py checks it).
 os.environ.setdefault("PIXI_DEV_MODE", "1")
+
+
+@pytest.fixture(autouse=True)
+def unit_tests_stay_off_the_gpu(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail an unmarked (unit) test that selected a non-CPU backend.
+
+    The core is built with the GPU frontend and every tool defaults to ``auto``,
+    so a unit test that forgets ``backend="cpu"`` would probe the device. The
+    process's probe counter must not move during a unit test.
+    """
+    from slam_rs import _core
+
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("golden"):
+        yield
+        return
+    before: int = _core.device_probes_run()
+    yield
+    assert _core.device_probes_run() == before, (
+        f"{request.node.nodeid} probed the GPU: unit tests must pass backend='cpu' (or stub the selector); mark it integration if it needs the device"
+    )
 
 
 @pytest.fixture(scope="session")
@@ -151,7 +172,7 @@ def pipeline(rig: RigFactory) -> PipelineFactory:
     from slam_rs import _core
 
     def build(camera_count: int) -> _core.Vio:
-        return _core.Vio(rig(camera_count), _core.VioConfig())
+        return _core.Vio(rig(camera_count), _core.VioConfig(), backend="cpu")
 
     return build
 

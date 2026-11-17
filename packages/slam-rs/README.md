@@ -18,7 +18,7 @@ cd examples-monorepo/packages/slam-rs
 pixi run -e slam-rs slam-rs-demo
 ```
 
-One command: it builds the core (about two minutes the first time), fetches
+One command: it builds the core with its GPU frontend (a few minutes the first time), fetches
 three short recordings of the
 [Monado SLAM Dataset](https://huggingface.co/datasets/pablovela5620/msd-rrd)
 (about 50 MB), starts a local Rerun catalog, registers them, and opens the
@@ -27,6 +27,12 @@ against ground truth. The terminal prints the ATE when the clip ends. You need
 [pixi](https://pixi.sh), a screen, and Linux. The catalog stays running for
 the next run.
 
+Every slam-rs tool runs the frontend on the GPU by default. With no backend flag
+(`--backend auto`) it uses the GPU frontend when the host has a Vulkan or Metal
+adapter that passes the subgroup check; otherwise it runs on the CPU and prints
+one warning that names the reason. `--backend cpu` forces the CPU lane;
+`--backend gpu` fails instead of falling back. The estimator always runs on the CPU.
+
 Then, when you want more:
 
 ```bash
@@ -34,13 +40,21 @@ pixi run -e slam-rs slam-rs-gate --tier smoke      # score the two short smoke c
 pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
 pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
 pixi run -e slam-rs slam-rs-gate --tier release    # three longer clips; --tier listed scores the other five
-pixi run -e slam-rs slam-rs-wgpu-build             # the GPU frontend; then --gpu on any tool
-pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment <id> --output-dir <dir>   # a catalog segment's slam_rs layer, on the GPU
-pixi run -e slam-rs python tools/apps/replay.py --stage vio --rrd base.rrd --gt-rrd gt.rrd   # your own recording, no catalog
+pixi run -e slam-rs slam-rs-gate --backend cpu     # the same clips on the CPU lane
+pixi run -e slam-rs slam-rs-replay --stage vio --segment <id>                     # any segment in the viewer
+pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment <id> --output-dir <dir>   # a catalog segment's slam_rs layer
+pixi run -e slam-rs slam-rs-replay --stage vio --rrd base.rrd --gt-rrd gt.rrd     # your own recording, no catalog
 ```
 
-`slam-rs-catalog-layer` runs on the GPU by default: it builds the wgpu core first and decodes with NVDEC, so it lives in the
-`slam-rs-cuda` environment; it falls back to the CPU only without a GPU adapter, and warns when it does.
+Every task builds the core first, so no manual build step is needed. Decoding
+follows the same rule as the frontend: NVDEC when CUDA is available, otherwise
+the CPU decoder (PyAV with dav1d). Only the `slam-rs-cuda` environment carries
+the CUDA torch stack for NVDEC; the `slam-rs` environment stays small and
+portable (Linux x86-64 and aarch64 without CUDA, and `slam-rs-osx` on macOS), so
+it decodes on the CPU and says so once. Two measurements always decode on the
+CPU: the gate, whose baselines are frozen on the single-threaded dav1d path, and
+the RoboCap fleet rows, which compare machines and so need the same pixels on
+every machine.
 
 The gate prints the ATE beside the baseline and pass or fail; on a host that
 recorded no baseline the speed clause is reported, not gated. `slam-rs-serve`
@@ -140,16 +154,22 @@ its keypoints and solves the whole sliding window at keyframes, the newest
 state alone in between. KLT stops each level when its update is below 0.05 pixels.
 `--profile reference` runs the unmodified dataset configuration.
 
-The **GPU lane** (`--gpu`) runs the frontend as CubeCL kernels through wgpu.
-Its estimator runs on one CPU thread; the CPU lane can use its work pool.
-Both lanes are checked against the same trajectory accuracy gates.
+The **GPU lane** runs the frontend as CubeCL kernels through wgpu, and it is
+the default: every tool asks `slam_rs::select_backend` (the Rust CLI directly,
+the Python tools through `slam_rs._core`) and gets the GPU when the host can run
+it. `--backend cpu` selects the **CPU lane**. The GPU lane's estimator runs on
+one CPU thread; the CPU lane can use its work pool. Both lanes are checked
+against the same trajectory accuracy gates, each against its own baselines.
+The core crate keeps the `gpu-wgpu` cargo feature off by default, so wasm, iOS
+and embedded builds stay CPU-only; the pixi build task, the Python package and
+the CLI builds turn it on.
 The design decisions are listed in
 [docs/design-notes.md](docs/design-notes.md#decision-references).
 
 The GPU lane uses fused KLT on every device. Each point uses 16 subgroup
 lanes; larger power-of-two subgroups hold multiple point groups. Startup
-checks the required subgroup operations and reports an error naming the
-CPU lane if they are unsupported. Templates stay in registers and both
+checks the required subgroup operations; if they are unsupported, `auto`
+runs the CPU lane with one warning and `--backend gpu` fails with the reason. Templates stay in registers and both
 tracking directions run in one launch per phase. The fast profile's exit
 threshold works on both lanes.
 Replay summaries count frames using one-wait, lookahead and packed uploads.

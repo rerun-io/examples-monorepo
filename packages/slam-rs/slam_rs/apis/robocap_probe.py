@@ -11,12 +11,14 @@ from jaxtyping import Float64
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs import _core
+from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
     ROBOCAP_RIG,
     CatalogSegment,
+    DecodeRequest,
     Frameset,
     open_segment,
+    select_decode_device,
 )
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
@@ -36,8 +38,10 @@ class Config:
     """Viewer, save and headless behaviour."""
     catalog: str | None = None
     """Catalog URL; defaults to slam.toml."""
-    gpu: bool = False
-    """Use the GPU frontend."""
+    backend: BackendRequest = "auto"
+    """Frontend: auto runs the GPU when this host can, otherwise the CPU with one warning; gpu fails instead; cpu forces it."""
+    decode_device: DecodeRequest = "auto"
+    """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
     reference_csv: Path | None = None
     """Optional regression trajectory; defaults to benchmarks.toml."""
     session: str = "s00000015"
@@ -77,6 +81,7 @@ def main(config: Config) -> None:
         CatalogSegment(config.catalog or settings.catalog_url, "robocap", session.segment_id),
         profile=ROBOCAP_RIG,
         window_s=config.window_s,
+        decode_device=select_decode_device(config.decode_device),
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         first_ns: int = int(feed.frame_t_ns[0])
@@ -98,7 +103,7 @@ def main(config: Config) -> None:
         # invariant asserts and the rows at the held frameset's own time are one
         # contract, not two copies of one.
         stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(calibration, flow_config, gpu=config.gpu)),
+            lockstep=Lockstep(vio=_core.Vio(calibration, flow_config, backend=config.backend)),
             logger=VioLogger(cameras=feed.cameras, ground_truth=empty_trajectory(), frame_t_ns=feed.frame_t_ns),
         )
 

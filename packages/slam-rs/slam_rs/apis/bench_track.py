@@ -268,7 +268,7 @@ def run_lane(lane: Lane, round_index: int, framesets: Framesets, config: _core.V
         The round's per-call timings, wall time and CPU samples.
     """
     calibration: _core.Calibration = _core.Calibration.from_catalog(framesets.cameras, framesets.imu)
-    lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, config, gpu=lane == "gpu"))
+    lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, config, backend=lane))
 
     sampler: CpuSampler = CpuSampler()
     sampler.start()

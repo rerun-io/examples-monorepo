@@ -163,6 +163,68 @@ pub fn guarded<T, E: From<GpuError>>(
     }
 }
 
+/// Capability probes (storage or subgroup) run by this process so far.
+static CAPABILITY_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many capability probes ([`probe_storage`], [`probe_subgroups`]) this
+/// process has run. Lets a caller prove that repeated construction on a
+/// validated device runs no new probes.
+pub fn capability_probes_run() -> usize {
+    CAPABILITY_PROBES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Proof that a device passed the storage and subgroup probes that the
+/// kernels need. Only [`validate_device`] and [`default_capabilities`] make
+/// one, so a plan given one does not probe the device again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceCapabilities {
+    subgroup_width: usize,
+}
+
+impl DeviceCapabilities {
+    /// The subgroup width the probe measured (a power of two, at least 16).
+    pub fn subgroup_width(&self) -> usize {
+        self.subgroup_width
+    }
+}
+
+/// Run the storage and subgroup probes on `client`.
+///
+/// Use this for a client you built yourself; for the process's default
+/// client use the cached [`default_capabilities`].
+///
+/// # Errors
+/// The first probe failure.
+pub fn validate_device<R: Runtime>(
+    client: &ComputeClient<R>,
+) -> Result<DeviceCapabilities, GpuError> {
+    probe_storage(client)?;
+    Ok(DeviceCapabilities {
+        subgroup_width: probe_subgroups(client)?,
+    })
+}
+
+/// Validate the process's default client ([`gpu_client`]) once.
+///
+/// The one owner of capability validation for the default device: the first
+/// call builds the client and runs [`validate_device`] under exclusive access;
+/// every later call, success or failure, returns the cached result. Backend
+/// selection and plan construction both read it.
+///
+/// # Errors
+/// [`GpuError::NoAdapter`], [`GpuError::ClientPanicked`], or the probe failure.
+#[cfg(feature = "wgpu")]
+pub fn default_capabilities() -> Result<DeviceCapabilities, GpuError> {
+    static CAPABILITIES: std::sync::OnceLock<Result<DeviceCapabilities, GpuError>> =
+        std::sync::OnceLock::new();
+    *CAPABILITIES.get_or_init(|| {
+        let client = gpu_client()?;
+        transfer::execute_exclusive(&client, "capability validation", || {
+            validate_device(&client)
+        })
+    })
+}
+
 /// Copy known u8, u16, u32 and f32 patterns on the device to verify storage support.
 ///
 /// # Errors
@@ -170,6 +232,7 @@ pub fn guarded<T, E: From<GpuError>>(
 pub fn probe_storage<R: cubecl::prelude::Runtime>(
     client: &cubecl::prelude::ComputeClient<R>,
 ) -> Result<(), GpuError> {
+    CAPABILITY_PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     use cubecl::prelude::CubeElement;
 
     /// One width: a pattern no zeroing or truncation reproduces.
@@ -283,6 +346,7 @@ fn subgroup_probe(out: &mut [u32]) {
 /// # Errors
 /// Returns [`GpuError::SubgroupRoundTrip`] if any operation or width is unsupported.
 pub fn probe_subgroups<R: Runtime>(client: &ComputeClient<R>) -> Result<usize, GpuError> {
+    CAPABILITY_PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     guarded(GpuError::SubgroupRoundTrip, || {
         if !client
             .features()

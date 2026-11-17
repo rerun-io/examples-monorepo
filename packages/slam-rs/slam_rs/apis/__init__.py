@@ -2,7 +2,7 @@
 
 Every one of these tools reaches a user error the same way — a benchmark id that
 is not in the reference set, a recording that is not on this machine, a
-configuration the port does not run, ``--gpu`` on a host with no driver — and
+configuration the port does not run, ``--backend gpu`` on a host with no driver — and
 what the operator should see for all of them is one sentence and a non-zero
 exit, not a traceback through the feed. :func:`run` is where that conversion
 lives, in the shim rather than in ``main``: every test drives ``main(Config(…))``

@@ -16,7 +16,7 @@ pub use submission::LaunchList;
 #[cfg(test)]
 mod runtime;
 use kornia_staging_gpu::runtime::gpu_client;
-use kornia_staging_gpu::runtime::probe_storage;
+use kornia_staging_gpu::runtime::default_capabilities;
 mod frontend;
 pub use frontend::GpuStages;
 mod track;
@@ -36,12 +36,14 @@ pub fn gpu_stages<P: kornia_staging_imgproc::optical_flow::patch_se2::Pattern>(
     max_recovered_dist2: f32,
     cameras: usize,
 ) -> Result<GpuStages<P, GpuRuntime>, crate::frontend::flow::FrontendError> {
+    // Validated once per process; backend selection reads the same result.
+    let capabilities = default_capabilities()?;
     let client = gpu_client()?;
     kornia_staging_gpu::transfer::execute_exclusive(&client, "frontend construction", || {
-        probe_storage(&client)?;
         let launches = LaunchList::default();
         let tracker = GpuPatchTracker::new(
             client.clone(),
+            capabilities,
             capacity,
             num_levels,
             max_iterations,

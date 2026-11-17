@@ -20,11 +20,16 @@ to a tier.
 
 ```bash
 pixi run -e slam-rs slam-rs-gate --tier smoke              # two short clips
-pixi run -e slam-rs slam-rs-gate --tier release            # three longer clips (MIO07, MIO14, MGO07), CPU lane
+pixi run -e slam-rs slam-rs-gate --tier release            # three longer clips (MIO07, MIO14, MGO07)
 pixi run -e slam-rs slam-rs-gate --tier listed             # the other five gated clips
-pixi run -e slam-rs slam-rs-wgpu-build                     # once: the GPU core; the gate never rebuilds what it is handed
-pixi run -e slam-rs slam-rs-gate --tier release --gpu      # any tier on the GPU lane
+pixi run -e slam-rs slam-rs-gate --tier release --backend cpu   # any tier on the CPU lane
 ```
+
+The gate builds the core first and runs on the GPU lane when the host has a
+usable adapter (`--backend auto`, the default); it prints the lane it chose and
+records it in the report, and each lane is scored against its own baselines.
+Decoding stays on the CPU's single-threaded dav1d path, on which the baselines
+were measured.
 
 The acceptance rules (tracking, association, the 10 % RMSE band, speed gated on
 the baseline host only, the no-baseline case) are in one place:
@@ -36,8 +41,8 @@ segment on the catalog rather than the ten gated ones.
 
 ```bash
 cd packages/slam-rs
-pixi run -e slam-rs python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy
-pixi run -e slam-rs python tools/apps/replay.py --stage vio --gpu --profile reference --segment msd-g2__MGO_others__MGO07_mapping_easy
+pixi run -e slam-rs slam-rs-replay --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy
+pixi run -e slam-rs slam-rs-replay --stage vio --backend cpu --profile reference --segment msd-g2__MGO_others__MGO07_mapping_easy
 ```
 
 `--stage input` (the default) logs only what the estimator is fed; `--stage

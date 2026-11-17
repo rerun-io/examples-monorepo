@@ -177,8 +177,10 @@ pub enum VioError {
 ///
 /// The stage traits make the choice a construction-time one (decision D21): the
 /// CPU implementations stay in the crate permanently and a GPU build only adds a
-/// second pair. `Cpu` is the default everywhere — the fleet's installs, the
-/// gates and the accuracy references all run it.
+/// second pair. `Cpu` is the enum's default and what [`Vio::new`] builds, for
+/// embedders that build the core without the GPU feature. The slam-rs tools
+/// choose through [`crate::select_backend`], whose default request is `Auto`:
+/// the GPU when it can run, otherwise the CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
     /// The ported CPU frontend.
