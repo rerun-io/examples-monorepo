@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use kornia_bow::BoW;
 
-/// Id of a database entry: the order in which it was added, from 0.
+/// Id of a database entry: the order in which it was added, from 0. Ids of removed entries are not reused.
 pub type EntryId = u32;
 
 /// One query result: an entry and its L1 similarity, in `[0, 1]` (1 for identical bags of words).
@@ -39,7 +39,9 @@ pub struct QueryResult {
 #[derive(Clone, Debug, Default)]
 pub struct Database {
     inverted: HashMap<u32, Vec<(EntryId, f32)>>,
-    len: u32,
+    /// The indexed words of each live entry, for removal.
+    direct: HashMap<EntryId, Vec<u32>>,
+    next: EntryId,
 }
 
 impl Database {
@@ -48,14 +50,19 @@ impl Database {
         Self::default()
     }
 
-    /// Number of entries added.
+    /// Number of entries added and not removed.
     pub fn len(&self) -> usize {
-        self.len as usize
+        self.direct.len()
     }
 
-    /// `true` when no entry has been added.
+    /// `true` when no entry is live.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.direct.is_empty()
+    }
+
+    /// `true` when `entry` was added and not removed.
+    pub fn contains(&self, entry: EntryId) -> bool {
+        self.direct.contains_key(&entry)
     }
 
     /// Add an L1-normalized bag of words (as [`kornia_bow::Vocabulary::transform`] returns it).
@@ -64,38 +71,84 @@ impl Database {
     ///
     /// The id of the new entry.
     pub fn add(&mut self, bow: &BoW) -> EntryId {
-        let entry = self.len;
-        self.len += 1;
+        let entry = self.next;
+        self.next += 1;
+        let mut words = Vec::with_capacity(bow.0.len());
         for &(word, weight) in bow.0.iter().filter(|&&(_, w)| w != 0.0) {
             self.inverted.entry(word).or_default().push((entry, weight));
+            words.push(word);
         }
+        self.direct.insert(entry, words);
         entry
+    }
+
+    /// Remove an entry, so no later query returns it.
+    ///
+    /// # Returns
+    ///
+    /// `false` when `entry` is not live.
+    pub fn remove(&mut self, entry: EntryId) -> bool {
+        let Some(words) = self.direct.remove(&entry) else {
+            return false;
+        };
+        for word in words {
+            if let Some(postings) = self.inverted.get_mut(&word) {
+                postings.retain(|&(e, _)| e != entry);
+                if postings.is_empty() {
+                    self.inverted.remove(&word);
+                }
+            }
+        }
+        true
     }
 
     /// The entries most similar to `bow` by L1 similarity, best first.
     ///
     /// Only entries that share a word with `bow` are scored. For L1-normalized vectors
     /// `|q - d|_1 = 2 + sum over shared words of (|q_w - d_w| - |q_w| - |d_w|)`, so each entry accumulates that
-    /// sum over the shared words alone (DBoW2's `queryL1`). Equal scores keep entry order.
+    /// sum over the shared words alone (DBoW2's `queryL1`), in f64. Equal scores keep entry order.
     ///
     /// # Arguments
     ///
     /// * `bow` - The L1-normalized query bag of words.
     /// * `max_results` - The number of results to keep; `0` keeps every scored entry.
     pub fn query(&self, bow: &BoW, max_results: usize) -> Vec<QueryResult> {
-        let mut sums = vec![0.0f32; self.len()];
-        let mut scored = vec![false; self.len()];
+        self.query_where(bow, max_results, |_| true)
+    }
+
+    /// [`Database::query`] over the entries `keep` accepts; the others are neither scored nor counted.
+    ///
+    /// ```
+    /// use kornia_bow::BoW;
+    /// use kornia_staging_bow::Database;
+    ///
+    /// let mut db = Database::new();
+    /// let bow = BoW(vec![(3, 1.0)]);
+    /// db.add(&bow);
+    /// db.add(&bow);
+    /// let results = db.query_where(&bow, 0, |entry| entry != 0);
+    /// assert_eq!(results.iter().map(|r| r.entry).collect::<Vec<_>>(), vec![1]);
+    /// ```
+    pub fn query_where(
+        &self,
+        bow: &BoW,
+        max_results: usize,
+        keep: impl Fn(EntryId) -> bool,
+    ) -> Vec<QueryResult> {
+        let mut sums = vec![0.0f64; self.next as usize];
+        let mut scored = vec![false; self.next as usize];
         for &(word, q) in bow.0.iter().filter(|&&(_, w)| w != 0.0) {
             for &(entry, d) in self.inverted.get(&word).into_iter().flatten() {
+                let (q, d) = (f64::from(q), f64::from(d));
                 sums[entry as usize] += (q - d).abs() - q.abs() - d.abs();
                 scored[entry as usize] = true;
             }
         }
-        let mut results: Vec<QueryResult> = (0..self.len)
-            .filter(|&entry| scored[entry as usize])
+        let mut results: Vec<QueryResult> = (0..self.next)
+            .filter(|&entry| scored[entry as usize] && keep(entry))
             .map(|entry| QueryResult {
                 entry,
-                score: -sums[entry as usize] / 2.0,
+                score: (-sums[entry as usize] / 2.0) as f32,
             })
             .collect();
         results.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -155,6 +208,25 @@ mod tests {
         assert_eq!(entries, vec![0, 1, 2]);
     }
 
+    #[test]
+    fn removed_entries_are_never_returned_and_ids_are_not_reused() {
+        let mut db = Database::new();
+        let a = db.add(&bow(&[(1, 1.0), (2, 1.0)]));
+        let b = db.add(&bow(&[(1, 1.0)]));
+        assert!(db.remove(a));
+        assert!(!db.remove(a));
+        assert!(!db.contains(a) && db.contains(b));
+        assert_eq!(db.len(), 1);
+        let entries: Vec<_> = db
+            .query(&bow(&[(1, 1.0), (2, 1.0)]), 0)
+            .iter()
+            .map(|r| r.entry)
+            .collect();
+        assert_eq!(entries, vec![b]);
+        assert_eq!(db.add(&bow(&[(2, 1.0)])), 2);
+        assert!(db.query(&bow(&[(9, 1.0)]), 0).is_empty());
+    }
+
     fn arbitrary_bow() -> impl Strategy<Value = BoW> {
         proptest::collection::btree_map(0u32..40, 0.01f32..1.0, 1..12).prop_map(|words| {
             let mut bow = BoW(words.into_iter().collect());
@@ -175,6 +247,26 @@ mod tests {
                 let expected = q.l1_similarity(&entries[r.entry as usize]);
                 prop_assert!((r.score - expected).abs() < 1e-5, "{} vs {}", r.score, expected);
             }
+        }
+
+        /// Removing an entry gives the results of a database that never had it.
+        #[test]
+        fn removal_equals_never_adding(entries in proptest::collection::vec(arbitrary_bow(), 1..8), q in arbitrary_bow(), drop in 0usize..8) {
+            let drop = (drop % entries.len()) as EntryId;
+            let mut db = Database::new();
+            for e in &entries {
+                db.add(e);
+            }
+            db.remove(drop);
+            let all = db.query(&q, 0);
+            let filtered = {
+                let mut full = Database::new();
+                for e in &entries {
+                    full.add(e);
+                }
+                full.query_where(&q, 0, |entry| entry != drop)
+            };
+            prop_assert_eq!(all, filtered);
         }
     }
 }
