@@ -807,10 +807,10 @@ impl<'a, S: Scalar, C: GbaCamera<S>> Solver<'a, S, C> {
         let rows =
             rel.keyframes
                 .iter()
-                .zip(rel.values.chunks_exact(72))
+                .zip(rel.values.as_chunks::<72>().0)
                 .map(|(keyframes, values)| ReducedBlock {
                     keyframes,
-                    values,
+                    values: values.as_slice(),
                     stride: 6,
                     offset: 0,
                     rows: 6,
