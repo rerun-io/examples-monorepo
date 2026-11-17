@@ -14,11 +14,15 @@ A subset fixes omitted coefficients to zero. A dash indicates no exact mapping p
 | `kb4`, radial subsets | 8 SIMPLE_RADIAL_FISHEYE: f,cx,cy,k1; 9 RADIAL_FISHEYE: f,cx,cy,k1,k2 | Remaining KB4 terms zero | kb4 subset | equidistant subset | — | equid4 subset |
 | `fisheye624` | 11 RAD_TAN_THIN_PRISM_FISHEYE: fx,fy,cx,cy,k0..k5,p0,p1,s0..s3 | Neither Brown14 nor four-term fisheye | — | — | FISHEYE624 / FisheyeRadTanThinPrism; fx=fy | — |
 | `fisheye624`, Fisheye62 subset | 11 with s0..s3=0 | — | — | — | Six angular and two tangential coefficients, prism zero | — |
+| `double_sphere` | — | — | ds | ds | — | — |
+| `eucm` | 16 EUCM: fx,fy,cx,cy,alpha,beta | — | eucm | eucm | — | — |
+| `equirectangular` | 17 EQUIRECTANGULAR: w,h (full panorama only) | — | — | — | — | — |
 | Unsupported thin-prism fisheye | 10 THIN_PRISM_FISHEYE: fx,fy,cx,cy,k1,k2,p1,p2,k3,k4,sx1,sy1 | — | — | — | Not Fisheye624: distortion acts before radial scaling | — |
 | Unsupported Apple radial magnification | No exact mapping | Brown8 fit is approximate | — | — | — | — |
 
 COLMAP uses pixel centre (0.5,0.5) at the top left. These cameras use (0,0).
-Import subtracts 0.5 from cx,cy; export adds 0.5. Brown p1 is the y-axis
+Import subtracts 0.5 from cx,cy; export adds 0.5. COLMAP 17 maps to fx=w/2pi, fy=h/pi,
+cx=w/2-0.5, cy=h/2-0.5, lon_max=pi; only that full panorama exports. Brown p1 is the y-axis
 term; Fisheye624 p_x (COLMAP p0) is the x-axis term. Basalt rpmax and
 SDK visibility masks are separate domain metadata and cannot be discarded
 by a lossless conversion.
