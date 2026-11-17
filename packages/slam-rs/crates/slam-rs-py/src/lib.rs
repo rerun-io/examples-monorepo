@@ -1032,13 +1032,12 @@ impl VioConfig {
         self.inner.vio_gravity_ms2 = gravity;
     }
 
-    /// `config.vio_bootstrap`: `"stereo"` (the default), `"inertial"` or `"auto"`.
+    /// `config.vio_bootstrap`: `"stereo"` (the default) or `"inertial"`.
     #[getter]
     fn vio_bootstrap(&self) -> &'static str {
         match self.inner.vio_bootstrap {
             slam_rs::config::VioBootstrap::Stereo => "stereo",
             slam_rs::config::VioBootstrap::Inertial => "inertial",
-            slam_rs::config::VioBootstrap::Auto => "auto",
         }
     }
 
@@ -1047,10 +1046,9 @@ impl VioConfig {
         self.inner.vio_bootstrap = match value {
             "stereo" => slam_rs::config::VioBootstrap::Stereo,
             "inertial" => slam_rs::config::VioBootstrap::Inertial,
-            "auto" => slam_rs::config::VioBootstrap::Auto,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "vio_bootstrap must be stereo, inertial or auto, not {other:?}"
+                    "vio_bootstrap must be stereo or inertial, not {other:?}"
                 )));
             }
         };

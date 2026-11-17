@@ -20,7 +20,7 @@ def test_the_stereo_start_is_the_default_and_is_not_written_out() -> None:
     assert "vio_bootstrap" not in config.to_json()
 
 
-@pytest.mark.parametrize("value", ["inertial", "auto", "stereo"])
+@pytest.mark.parametrize("value", ["inertial", "stereo"])
 def test_the_key_round_trips(value: str) -> None:
     config: _core.VioConfig = _core.VioConfig()
     config.vio_bootstrap = value
@@ -32,7 +32,7 @@ def test_the_key_round_trips(value: str) -> None:
 
 def test_an_unknown_value_is_refused() -> None:
     config: _core.VioConfig = _core.VioConfig()
-    with pytest.raises(ValueError, match="stereo, inertial or auto"):
+    with pytest.raises(ValueError, match="stereo or inertial"):
         config.vio_bootstrap = "mono"
 
 

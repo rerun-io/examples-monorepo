@@ -397,7 +397,7 @@ class VioConfig:
     vio_gravity_ms2: float
     """Magnitude of gravity in m/s²; the feed sets the recording's own value when it carries one."""
     vio_bootstrap: str
-    """``config.vio_bootstrap``: ``"stereo"`` (default), ``"inertial"`` or ``"auto"``; anything else raises ``ValueError``."""
+    """``config.vio_bootstrap``: ``"stereo"`` (default) or ``"inertial"``; anything else raises ``ValueError``."""
     @property
     def panorama_dual_fisheye(self) -> bool:
         """``config.panorama_dual_fisheye``: the caller hands ``Vio`` the factory lenses (``dual_fisheye``)."""

@@ -6,7 +6,7 @@ use super::*;
 use crate::config::VioConfig;
 use crate::estimator::{FrameOutcome, SqrtKeypointVio};
 use crate::types::KeypointId;
-use nalgebra::Matrix3;
+use nalgebra::{Matrix3, Vector2};
 
 const MSDMI_CONFIG: &str = include_str!("../../../../../configs/msdmi_config.json");
 const MSDMI_CALIB: &str = include_str!("../../../tests/fixtures/msdmi_calib.json");
@@ -403,28 +403,6 @@ fn stereo_stays_the_default_and_is_not_written_out() {
     .unwrap();
     assert!(vio.bootstrap_report().is_none());
     assert!(matches!(vio.bootstrap, BootstrapPhase::Off));
-}
-
-#[test]
-fn auto_picks_stereo_for_an_overlapping_pair_only() {
-    let stereo: Calibration<f64> = calibration();
-    assert!(rig_has_stereo(&stereo, 0.05));
-    assert!(!rig_has_stereo(&stereo, 0.5), "the MSD baseline is 13 cm");
-    let mut back_to_back: Calibration<f64> = calibration();
-    let flip = So3::exp(&Vector3::new(0.0, std::f64::consts::PI, 0.0));
-    back_to_back.t_i_c[1] = Se3::new(
-        back_to_back.t_i_c[0].rotation * flip,
-        Vector3::new(0.0, 0.0, -0.1),
-    );
-    back_to_back.t_i_c[0].translation = Vector3::new(0.0, 0.0, 0.1);
-    assert!(
-        !rig_has_stereo(&back_to_back, 0.05),
-        "back-to-back lenses share no view"
-    );
-    let auto: VioConfig =
-        VioConfig::with_overlay(MSDMI_CONFIG, r#"{"config.vio_bootstrap": "auto"}"#).unwrap();
-    assert!(!uses_inertial(&auto, &stereo));
-    assert!(uses_inertial(&auto, &back_to_back));
 }
 
 #[test]

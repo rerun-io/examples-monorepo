@@ -45,7 +45,7 @@ use kornia_staging_slam::init::inertial::{
     BearingObservation, FeatureTrack, ImuSample, InertialInitError, InertialInitOptions,
     InertialInitOutcome, InertialInitProblem, InitVerdict, solve_inertial_init,
 };
-use nalgebra::{UnitQuaternion, Vector2, Vector3, Vector4};
+use nalgebra::{UnitQuaternion, Vector3, Vector4};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
@@ -183,74 +183,6 @@ pub struct Accepted {
     pub frames: Vec<Arc<FlowObservations>>,
     /// Every buffered IMU sample, raw (the estimator calibrates on pop).
     pub imu: Vec<CombinedImuSample>,
-}
-
-/// Whether some camera pair can triangulate inside one frameset: a baseline
-/// of at least `min_baseline` and a shared field of view.
-///
-/// The overlap test is this function's own, not the frontend's stereo
-/// matching (the two can disagree): a 16 x 16 grid of pixels of camera `i` is
-/// unprojected, placed at 1, 3 and 10 m, and projected into camera `j`; one
-/// valid in-image projection is an overlap.
-pub fn rig_has_stereo(calibration: &Calibration<f64>, min_baseline: f64) -> bool {
-    let cameras: Vec<Option<SlamCamera<f64>>> = calibration
-        .intrinsics
-        .iter()
-        .map(|m| SlamCamera::from_model(m).ok())
-        .collect();
-    let n: usize = calibration.t_i_c.len().min(cameras.len());
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            let (Some(cam_i), Some(cam_j)) = (&cameras[i], &cameras[j]) else {
-                continue;
-            };
-            let t_i_ci: Se3<f64> = calibration.t_i_c[i];
-            let t_i_cj: Se3<f64> = calibration.t_i_c[j];
-            if (t_i_ci.translation - t_i_cj.translation).norm() < min_baseline {
-                continue;
-            }
-            let j_from_i: Se3<f64> = t_i_cj.inverse() * t_i_ci;
-            let [w_i, h_i] = calibration.resolution[i];
-            let [w_j, h_j] = calibration.resolution[j];
-            for gy in 0..16 {
-                for gx in 0..16 {
-                    let pixel = Vector2::new(
-                        (f64::from(gx) + 0.5) / 16.0 * f64::from(w_i),
-                        (f64::from(gy) + 0.5) / 16.0 * f64::from(h_i),
-                    );
-                    let mut ray: Vector4<f64> = Vector4::zeros();
-                    if !cam_i.unproject(&pixel, &mut ray) {
-                        continue;
-                    }
-                    for depth in [1.0, 3.0, 10.0] {
-                        let p_i: Vector3<f64> = ray.xyz() * depth;
-                        let p_j: Vector3<f64> =
-                            j_from_i.rotation.matrix() * p_i + j_from_i.translation;
-                        let mut projected: Vector2<f64> = Vector2::zeros();
-                        if cam_j.project_point(&p_j.push(1.0), &mut projected, None)
-                            && (0.0..f64::from(w_j)).contains(&projected.x)
-                            && (0.0..f64::from(h_j)).contains(&projected.y)
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Whether this config and rig run the inertial bootstrap.
-pub fn uses_inertial(config: &VioConfig, calibration: &Calibration<f64>) -> bool {
-    match config.vio_bootstrap {
-        VioBootstrap::Stereo => false,
-        VioBootstrap::Inertial => true,
-        VioBootstrap::Auto => !rig_has_stereo(calibration, config.vio_min_triangulation_dist),
-    }
 }
 
 /// Turn a window's framesets into bearing tracks: the observation seam.
@@ -649,7 +581,7 @@ impl BootstrapPhase {
         config: &VioConfig,
         calibration: &Calibration<f64>,
     ) -> Result<Self, VioError> {
-        if !uses_inertial(config, calibration) {
+        if config.vio_bootstrap != VioBootstrap::Inertial {
             return Ok(Self::Off);
         }
         if config.port_frontend_lag {
