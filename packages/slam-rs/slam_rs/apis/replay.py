@@ -26,7 +26,7 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep
-from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
+from slam_rs.trajectory import Trajectory, ate, coverage, write_scoring_csvs
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
@@ -63,7 +63,7 @@ class Config:
     window_s: float = DEFAULT_WINDOW_S
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
-    """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    """Where the final trajectory is written; defaults to ``data/<segment>/slam_rs.csv``. The raw VIO goes beside it as ``<stem>_vio.csv``."""
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
     backend: BackendRequest = "auto"
@@ -232,8 +232,9 @@ def main(config: Config) -> None:
         stage.refuse_lost_framesets()
 
         estimate: Trajectory = stage.logger.estimated()
-        write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
-        print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")
+        # Until re-anchoring on the optimised keyframes lands, the final run is the raw VIO.
+        vio_csv: Path = write_scoring_csvs(output_csv, final=estimate, raw=estimate, offset_ns=feed.export_offset_ns)
+        print(f"{len(estimate)} tracked poses -> {output_csv}, {vio_csv} (absolute ns)")
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")
             return

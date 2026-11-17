@@ -7,8 +7,11 @@ Build with `--features catalog` to read RoboCap and MSD G2 segments directly:
 cargo build --offline --release -p slam-rs-cli --features catalog,gpu-wgpu
 slam-rs replay --catalog "$SLAM_RS_CATALOG_URL" \
   --segment msd-g2__MGO_others__MGO07_mapping_easy --max-framesets 1596 \
-  --config resolved-config.json --out poses.csv --summary summary.json
+  --config resolved-config.json --out slam_rs.csv --out-vio slam_rs_vio.csv --summary summary.json
 ```
+
+`--out` is the final trajectory and the optional `--out-vio` the raw VIO, both on the
+clip's frameset clock; until re-anchoring on the optimised keyframes lands, the two are equal.
 
 `--backend` defaults to `auto`: the GPU frontend when the build has `gpu-wgpu` and
 the host has a usable adapter, otherwise the CPU with one warning (the choice is
