@@ -43,7 +43,7 @@ use kornia_staging_algebra::Scalar;
 use kornia_staging_sensors::imu::CombinedImuSample;
 use kornia_staging_slam::init::inertial::{
     BearingObservation, FeatureTrack, ImuSample, InertialInitError, InertialInitOptions,
-    InertialInitOutcome, InertialInitProblem, InitVerdict, solve_inertial_init,
+    InertialInitOutcome, InertialInitProblem, InitVerdict, sample_at, solve_inertial_init,
 };
 use nalgebra::{UnitQuaternion, Vector3, Vector4};
 use std::collections::{BTreeMap, VecDeque};
@@ -354,18 +354,10 @@ impl InertialBootstrap {
             let mut q: UnitQuaternion<f64> = previous;
             let mut t_a: i64 = t0;
             let gyro_at = |t: i64| -> Vector3<f64> {
-                let upper: usize = samples.partition_point(|s| s.t_ns <= t);
-                match (
-                    upper.checked_sub(1).map(|i| &samples[i]),
-                    samples.get(upper),
-                ) {
-                    (Some(a), Some(b)) => {
-                        let w: f64 = (t - a.t_ns) as f64 / (b.t_ns - a.t_ns) as f64;
-                        a.gyro * (1.0 - w) + b.gyro * w
-                    }
-                    (Some(a), None) => a.gyro,
-                    (None, Some(b)) => b.gyro,
-                    (None, None) => Vector3::zeros(),
+                if samples.is_empty() {
+                    Vector3::zeros()
+                } else {
+                    sample_at(&samples, t).0
                 }
             };
             let mut knots: Vec<i64> = samples
