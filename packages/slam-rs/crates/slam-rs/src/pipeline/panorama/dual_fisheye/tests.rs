@@ -170,7 +170,9 @@ fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_rem
         .iter()
         .map(|dense| {
             dense
-                .chunks_exact(1920)
+                .as_chunks::<1920>()
+                .0
+                .iter()
                 .flat_map(|row| row.iter().copied().chain([7u8; 4]))
                 .collect()
         })
