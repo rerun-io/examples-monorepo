@@ -15,12 +15,15 @@ from dataforge.datasets.vslam_lab_source import (
     Calibration,
     FrameIndex,
     ImuStream,
+    StereoPairs,
     StreamName,
+    pair_by_stamp,
     read_calibration,
     read_euroc_gt,
     read_frame_index,
     read_imu,
     read_poses,
+    read_stamped_frames,
 )
 from dataforge.logging_toolkit import GtTrajectory
 
@@ -217,3 +220,50 @@ def test_imu_and_gt_stamps_written_as_float_literals_are_read_exactly(tmp_path: 
 def test_an_imu_csv_with_a_missing_column_or_cell_names_the_file(tmp_path: Path, body: str) -> None:
     with pytest.raises(ValueError, match="imu_0.csv"):
         read_imu(write(tmp_path, "imu_0.csv", body))
+
+
+def frames(stream: str, *stamps: int) -> FrameIndex:
+    """A stream of ``<stamp>.png`` frames, as EuRoC names them."""
+    return FrameIndex(times_ns=np.array(stamps, dtype=np.int64), paths=tuple(f"{stream}/{stamp}.png" for stamp in stamps))
+
+
+def test_stereo_frames_pair_by_stamp_and_frames_without_a_partner_are_dropped_and_counted() -> None:
+    period: int = 50_000_000
+    # cam1 lacks the frame at 2 periods, adds one cam0 lacks at 4.5 periods and three after cam0's last frame.
+    cam0: FrameIndex = frames("rgb_0", *(period * step for step in (0, 1, 2, 3, 4, 5)))
+    cam1: FrameIndex = frames("rgb_1", *(period * step for step in (0, 1, 3)), period * 9 // 2, *(period * step for step in (5, 6, 7, 8)))
+    pairs: StereoPairs = pair_by_stamp(cam0, cam1, tolerance_ns=1_000_000)
+    kept: list[int] = [period * step for step in (0, 1, 3, 5)]
+    assert pairs.left.times_ns.tolist() == kept
+    assert pairs.right.times_ns.tolist() == kept
+    assert pairs.right.paths == tuple(f"rgb_1/{stamp}.png" for stamp in kept)
+    assert (pairs.unmatched_left, pairs.unmatched_right) == (2, 4)
+
+
+def test_a_pair_within_the_tolerance_is_kept_and_one_beyond_it_is_dropped() -> None:
+    pairs: StereoPairs = pair_by_stamp(frames("rgb_0", 0, 50_000_000), frames("rgb_1", 999_999, 51_000_001), tolerance_ns=1_000_000)
+    assert pairs.left.times_ns.tolist() == [0]
+    assert pairs.right.times_ns.tolist() == [999_999]
+    assert (pairs.unmatched_left, pairs.unmatched_right) == (1, 1)
+
+
+def test_a_tolerance_wide_enough_to_pair_one_frame_twice_is_refused() -> None:
+    with pytest.raises(ValueError, match="half a frame period"):
+        pair_by_stamp(frames("rgb_0", 0, 50_000_000), frames("rgb_1", 25_000_000), tolerance_ns=30_000_000)
+
+
+def test_stamps_out_of_order_are_refused() -> None:
+    with pytest.raises(ValueError, match="right stamps are not strictly increasing"):
+        pair_by_stamp(frames("rgb_0", 0), frames("rgb_1", 50, 0), tolerance_ns=1)
+
+
+def test_a_stream_directory_lists_every_frame_in_stamp_order_and_refuses_a_name_that_is_not_a_stamp(tmp_path: Path) -> None:
+    (tmp_path / "rgb_1").mkdir()
+    for stamp in (1403636579813555456, 999, 1403636579763555584):
+        (tmp_path / f"rgb_1/{stamp}.png").touch()
+    listed: FrameIndex = read_stamped_frames(tmp_path, "rgb_1")
+    assert listed.times_ns.tolist() == [999, 1403636579763555584, 1403636579813555456]
+    assert listed.paths == ("rgb_1/999.png", "rgb_1/1403636579763555584.png", "rgb_1/1403636579813555456.png")
+    (tmp_path / "rgb_1/thumbnail.png").touch()
+    with pytest.raises(ValueError, match="rgb_1: a frame is not named by its nanosecond stamp"):
+        read_stamped_frames(tmp_path, "rgb_1")

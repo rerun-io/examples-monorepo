@@ -458,7 +458,7 @@ overrides `catalog_blueprints` (`segment_blueprint` and `card_blueprint` take a
 `video_time` carries the benchmark's own nanosecond stamps, **unshifted**
 (Unix epoch on both), so a trajectory read back from the catalog lines up
 1:1 with the upstream file and with any estimate stamped on the same clock;
-`frame_index` is the row of `rgb.csv`. Two facts of VSLAM-LAB's conversion a
+`frame_index` is the row of `rgb.csv` (on EuRoC, of the stereo pairs below). Two facts of VSLAM-LAB's conversion a
 consumer should know: on TUM, `rgb.csv` pairs each RGB frame with the nearest
 depth frame (within 20 ms) and gives both the RGB stamp; on EuRoC, VSLAM-LAB
 writes `groundtruth.csv` from TUM's `supp_v2` files, cam0 positions at 20 Hz
@@ -470,6 +470,102 @@ TUM's is `groundtruth.csv`; EuRoC's is EuRoC's own
 (`<EUROC>/<room>/<seq>/<seq>.zip`, unless its retention is MINIMAL) to
 `<seq>/state_groundtruth_estimate0.csv`, read by the same EuRoC reader as
 msd's gt. After that the zip may go.
+
+#### EuRoC stereo: pairs by stamp, not by row
+
+VSLAM-LAB writes EuRoC's `rgb.csv` by row count: row *i* holds cam0's *i*-th
+and cam1's *i*-th frame, for the first min(n_cam0, n_cam1) rows. The ASL
+cameras are hardware-synced and share stamps, but not every sequence has the
+same frames in both. On V2_03_difficult cam1 has 415 frames more than cam0,
+so only 1626 of `rgb.csv`'s 1922 rows hold two frames taken together (the
+others are up to 20.6 s apart); MH_04_difficult has one cam0 frame without a
+partner, so its rows are all one frame apart. The converter therefore takes
+EuRoC's `rgb_0` and `rgb_1` from every frame in `rgb_0/` and `rgb_1/`
+(VSLAM-LAB moves all of them there) and keeps each cam0 frame with the cam1
+frame within 1 ms (`STEREO_PAIR_TOLERANCE_NS`); a frame without a partner is
+dropped, and `convert` prints the counts. `frame_index` is then the row of
+that pairing. V2_03 keeps 1921 pairs and MH_04 2032, all at equal stamps; on
+the other nine sequences the pairs are exactly the frames `rgb.csv` lists
+(same stamps, same files), so their base layers need no reconversion.
+
+Base layers converted before this rule hold `rgb.csv`'s rows. To replace
+V2_03's and MH_04's, stage the two sequences in VSLAM-LAB's layout on a local
+disk from the raw ASL sequences (the frames stay where they are, as
+symlinks; `calibration.yaml` is the one VSLAM-LAB wrote, kept in the old
+conversion's sidecars), then convert into a local output root:
+
+```bash
+export ASL=<ASL root: <seq>/mav0/>  SIDECARS=<old vslam-lab rrd tree>/sidecars  STAGE=<local dir>
+pixi run -e dataforge --frozen python -I - V2_03_difficult MH_04_difficult <<'EOF'
+import csv
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+asl, sidecars, stage = (Path(os.environ[name]) for name in ("ASL", "SIDECARS", "STAGE"))
+for seq in sys.argv[1:]:
+    mav0, out = asl / seq / "mav0", stage / "VSLAM-LAB-Benchmark/EUROC" / seq
+    out.mkdir(parents=True)
+    shutil.copy(sidecars / f"vslam-lab-euroc__{seq}/calibration.yaml", out)  # the calibration.yaml VSLAM-LAB wrote
+    shutil.copy(mav0 / "state_groundtruth_estimate0/data.csv", out / "state_groundtruth_estimate0.csv")
+    for cam in (0, 1):
+        (out / f"rgb_{cam}").symlink_to(mav0 / f"cam{cam}/data")  # every frame, read in place
+    # rgb.csv and imu_0.csv as VSLAM-LAB's create_rgb_csv (rows paired by count) and create_imu_csv write them
+    cams = [pd.read_csv(mav0 / f"cam{cam}/data.csv", comment="#", header=None, usecols=[0, 1]) for cam in (0, 1)]
+    rows = [[t0, f"rgb_0/{n0}", t1, f"rgb_1/{n1}"] for (t0, n0), (t1, n1) in zip(cams[0].values.tolist(), cams[1].values.tolist())]
+    imu = pd.read_csv(mav0 / "imu0/data.csv", comment="#", header=None, sep=r"[\s,]+", engine="python")
+    imu[0] = imu[0].astype("int64")
+    for name, header, body in (
+        ("rgb.csv", ["ts_rgb_0 (ns)", "path_rgb_0", "ts_rgb_1 (ns)", "path_rgb_1"], rows),
+        ("imu_0.csv", ["ts (ns)", "wx (rad s^-1)", "wy (rad s^-1)", "wz (rad s^-1)", "ax (m s^-2)", "ay (m s^-2)", "az (m s^-2)"], imu.astype(object).values.tolist()),
+    ):
+        with (out / name).open("w", newline="") as stream:
+            csv.writer(stream).writerows([header, *body])
+    print(f"{out}: rgb.csv {len(rows)} rows, imu_0.csv {len(imu)} rows")
+EOF
+DATAFORGE_RAW_ROOT=$STAGE DATAFORGE_OUTPUT_ROOT=$STAGE/rrd pixi run -e dataforge --frozen dataforge-convert vslam-lab --benchmark euroc
+```
+
+`convert` prints `V2_03_difficult: 1921 stereo pairs within 1000000 ns;
+dropped 1 rgb_0 and 415 rgb_1 frames without a partner` and `MH_04_difficult:
+2032 stereo pairs ...; dropped 1 rgb_0 and 0 rgb_1`. Check the written layer,
+not the log: both cameras' `video_time` stamps must be equal, 1921 and 2032
+of them, so the largest pair gap is 0 ms:
+
+```bash
+pixi run -e dataforge --frozen python -I - $STAGE/rrd/base/*.rrd <<'EOF'
+import sys
+import numpy as np
+import pyarrow as pa
+import rerun.chunk as rrc
+from dataforge import schema
+
+for path in sys.argv[1:]:
+    table = rrc.ChunkStore.from_chunks(list(rrc.RrdReader(path).stream())).reader(index=schema.TIMELINE).to_arrow_table()
+    cams = [table.select([schema.TIMELINE, f"{schema.video_path(0, i)}:VideoStream:sample"]).drop_null()[schema.TIMELINE].cast(pa.int64()).to_numpy() for i in (0, 1)]
+    gap = np.abs(cams[1][np.clip(np.searchsorted(cams[1], cams[0]), 0, cams[1].size - 1)] - cams[0])
+    print(f"{path}: cam0 {cams[0].size}, cam1 {cams[1].size}, pairs within 1 ms {int((gap <= 1_000_000).sum())}, largest gap {gap.max() / 1e6:.3f} ms")
+EOF
+```
+
+Only `base` changes: `gt` and `sensor_metadata` do not read frames (and a
+catalog may carry its own `sensor_metadata`, as `vslam-lab-euroc` carries
+Basalt's), so swap the base layer alone. Copy the two files next to the
+catalog's registration root, never over a registered file, and swap them in
+with the bounded `dataforge-swap-layer`; then point the root's two `base/`
+entries at the new files so a later `dataforge-register --replace` from that
+root registers the same ones:
+
+```bash
+mkdir -p <registration root>/base-stamp-paired && cp $STAGE/rrd/base/*.rrd <registration root>/base-stamp-paired/
+pixi run -e dataforge --frozen dataforge-swap-layer --catalog-url <url> --catalog-name vslam-lab-euroc --layer base \
+  --files <registration root>/base-stamp-paired/vslam-lab-euroc__V2_03_difficult.rrd <registration root>/base-stamp-paired/vslam-lab-euroc__MH_04_difficult.rrd
+ln -sfn ../base-stamp-paired/vslam-lab-euroc__V2_03_difficult.rrd <registration root>/base/vslam-lab-euroc__V2_03_difficult.rrd
+ln -sfn ../base-stamp-paired/vslam-lab-euroc__MH_04_difficult.rrd <registration root>/base/vslam-lab-euroc__MH_04_difficult.rrd
+```
 
 ### Environment variables
 
