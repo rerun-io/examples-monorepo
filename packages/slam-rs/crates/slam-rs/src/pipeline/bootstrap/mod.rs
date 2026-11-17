@@ -382,8 +382,11 @@ impl InertialBootstrap {
         self.newest_imu_t_ns = Some(sample.timestamp_ns);
         self.imu.push_back(sample);
         if self.frames.is_empty() {
-            // Before the first frameset keep one second.
-            let keep_after: i64 = sample.timestamp_ns - 1_000_000_000;
+            // Before the first frameset keep the timeout's span (at least one
+            // second), so a caller that pushes IMU ahead of the framesets still
+            // has the IMU the first frameset needs; `push_frame` trims the rest.
+            let keep_after: i64 =
+                sample.timestamp_ns - seconds_to_ns(self.options.timeout_s.max(1.0));
             while self.imu.len() > 1
                 && self
                     .imu
@@ -570,6 +573,7 @@ impl InertialBootstrap {
         self.trim_imu();
         let first: i64 = self.frames.front().map_or(t_ns, |f| f.t_ns);
         if t_ns - first < self.window_ns {
+            self.check_timeout(t_ns - first_ever)?;
             return Ok(BootstrapStep::Buffering);
         }
         let (outcome, tracks) = self.attempt()?;
@@ -603,7 +607,14 @@ impl InertialBootstrap {
             self.window_ns = seconds_to_ns(self.options.window_s);
             self.slide();
         }
-        let seconds: f64 = (t_ns - first_ever) as f64 * 1e-9;
+        self.check_timeout(t_ns - first_ever)?;
+        Ok(BootstrapStep::Buffering)
+    }
+
+    /// [`BootstrapError::NeverAccepted`] once `elapsed_ns` since the first
+    /// frameset is past the timeout; checked on every frameset.
+    fn check_timeout(&self, elapsed_ns: i64) -> Result<(), BootstrapError> {
+        let seconds: f64 = elapsed_ns as f64 * 1e-9;
         if seconds > self.options.timeout_s {
             return Err(BootstrapError::NeverAccepted {
                 seconds,
@@ -615,7 +626,7 @@ impl InertialBootstrap {
                     .map_or_else(String::new, |a| a.verdict.clone()),
             });
         }
-        Ok(BootstrapStep::Buffering)
+        Ok(())
     }
 }
 
