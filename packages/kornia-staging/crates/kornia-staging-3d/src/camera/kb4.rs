@@ -120,6 +120,10 @@ impl<S: Scalar> KannalaBrandt4<S> {
     pub fn max_angle(&self) -> S {
         self.theta_max
     }
+    /// Distorted normalized radius at `max_angle`, the inverse's domain limit.
+    pub fn max_radius(&self) -> S {
+        self.r_max
+    }
     /// Unit ray at the physical branch endpoint in a pixel's azimuth.
     ///
     /// Callers with a saturation policy may use this after `OutsideDomain`.

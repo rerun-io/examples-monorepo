@@ -1,13 +1,24 @@
-//! Brown8 cameras using the staged CPU calibration and validity contract.
+//! Device cameras using the staged CPU calibration and validity contract.
+//!
+//! Each model module holds inline `#[cube]` functions over a packed f32 parameter
+//! slice: `project`, `unproject` and `project_with_point_jacobian`, with the
+//! status codes in [`brown8`] mapped 1:1 to the CPU rejections. The packers below
+//! take every derived constant from the validated CPU f32 model, so CPU and device
+//! apply the same domain bounds.
 pub mod brown8;
-use kornia_staging_3d::camera::{BrownConrady, InvalidCalibration};
+pub mod dispatch;
+pub mod double_sphere;
+pub mod equirect;
+pub mod eucm;
+pub mod kb4;
+use kornia_staging_3d::camera::{BrownConrady, CameraModelKind, InvalidCalibration};
 
 /// Number of device parameters: OpenCV Brown8's twelve values plus valid radius.
 pub const BROWN8_PARAMETERS: usize = 13;
 
 /// Validated f32 Brown8 coefficients for inline GPU projection and inversion.
 /// Zero device radius means no calibrated radius bound.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Brown8 {
     parameters: [f32; BROWN8_PARAMETERS],
 }
@@ -55,6 +66,94 @@ impl Brown8 {
     /// Validated device coefficients for inline use by a larger compute kernel.
     pub fn device_parameters(&self) -> [f32; BROWN8_PARAMETERS] {
         self.parameters
+    }
+}
+
+/// Model tag of [`DeviceCamera::Brown8`].
+pub const MODEL_BROWN8: u32 = 0;
+/// Model tag of [`DeviceCamera::Kb4`].
+pub const MODEL_KB4: u32 = 1;
+/// Model tag of [`DeviceCamera::DoubleSphere`].
+pub const MODEL_DOUBLE_SPHERE: u32 = 2;
+/// Model tag of [`DeviceCamera::Eucm`].
+pub const MODEL_EUCM: u32 = 3;
+/// Model tag of [`DeviceCamera::Equirect`].
+pub const MODEL_EQUIRECT: u32 = 4;
+
+/// Packed parameter count of the model tagged `model` (`MODEL_*`).
+pub const fn parameter_count(model: u32) -> usize {
+    match model {
+        MODEL_BROWN8 => BROWN8_PARAMETERS,
+        MODEL_KB4 => kb4::PARAMETERS,
+        MODEL_DOUBLE_SPHERE => double_sphere::PARAMETERS,
+        MODEL_EUCM => eucm::PARAMETERS,
+        _ => equirect::PARAMETERS,
+    }
+}
+
+/// A camera the device functions can evaluate, with its packed parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeviceCamera {
+    /// [`brown8`]: OpenCV twelve plus valid radius.
+    Brown8(Brown8),
+    /// [`kb4`]: `fx fy cx cy k1 k2 k3 k4 theta_max r_max`.
+    Kb4([f32; kb4::PARAMETERS]),
+    /// [`double_sphere`]: `fx fy cx cy xi alpha w2`.
+    DoubleSphere([f32; double_sphere::PARAMETERS]),
+    /// [`eucm`]: `fx fy cx cy alpha beta w`.
+    Eucm([f32; eucm::PARAMETERS]),
+    /// [`equirect`]: `fx fy cx cy lon_max`.
+    Equirect([f32; equirect::PARAMETERS]),
+}
+impl DeviceCamera {
+    /// Pack a validated CPU camera, or `None` when it needs the general CPU path
+    /// (pinhole, Fisheye624, Brown with prism or tilt terms).
+    pub fn from_model(model: &CameraModelKind<f32>) -> Option<Self> {
+        Some(match model {
+            CameraModelKind::BrownConrady(model) => {
+                Self::Brown8(Brown8::from_brown_conrady(model)?)
+            }
+            CameraModelKind::Kb4(model) => {
+                let mut packed = [0.0; kb4::PARAMETERS];
+                packed[..8].copy_from_slice(&model.params());
+                packed[8] = model.max_angle();
+                packed[9] = model.max_radius();
+                Self::Kb4(packed)
+            }
+            CameraModelKind::DoubleSphere(model) => {
+                let mut packed = [0.0; double_sphere::PARAMETERS];
+                packed[..6].copy_from_slice(&model.params());
+                packed[6] = model.domain_bound();
+                Self::DoubleSphere(packed)
+            }
+            CameraModelKind::Eucm(model) => {
+                let mut packed = [0.0; eucm::PARAMETERS];
+                packed[..6].copy_from_slice(&model.params());
+                packed[6] = model.domain_bound();
+                Self::Eucm(packed)
+            }
+            CameraModelKind::Equirectangular(model) => Self::Equirect(model.params()),
+            CameraModelKind::Pinhole(_) | CameraModelKind::Fisheye624(_) => return None,
+        })
+    }
+    /// Model tag for comptime or in-kernel dispatch (`MODEL_*`).
+    pub fn model_id(&self) -> u32 {
+        match self {
+            Self::Brown8(_) => MODEL_BROWN8,
+            Self::Kb4(_) => MODEL_KB4,
+            Self::DoubleSphere(_) => MODEL_DOUBLE_SPHERE,
+            Self::Eucm(_) => MODEL_EUCM,
+            Self::Equirect(_) => MODEL_EQUIRECT,
+        }
+    }
+    /// Packed parameters, in the layout the model module reads at its offset.
+    pub fn device_parameters(&self) -> &[f32] {
+        match self {
+            Self::Brown8(camera) => &camera.parameters,
+            Self::Kb4(packed) => packed,
+            Self::DoubleSphere(packed) | Self::Eucm(packed) => packed,
+            Self::Equirect(packed) => packed,
+        }
     }
 }
 

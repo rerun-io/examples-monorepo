@@ -37,6 +37,10 @@ impl<S: Scalar> DoubleSphere<S> {
     pub fn params(&self) -> [S; 6] {
         self.param
     }
+    /// Domain bound `w2`: a point is valid when `z > -w2 * |p|`.
+    pub fn domain_bound(&self) -> S {
+        self.w2
+    }
 }
 impl<S: Scalar> CameraModel<S> for DoubleSphere<S> {
     type IntrinsicJacobian = [[S; 6]; 2];

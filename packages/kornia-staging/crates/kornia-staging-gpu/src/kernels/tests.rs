@@ -111,3 +111,53 @@ fn small_angle_trig_stays_within_two_ulps_of_the_cpu() {
     }
     println!("small-angle sin/cos maximum ULP errors: {worst:?}");
 }
+
+#[cubecl::prelude::cube(launch_unchecked)]
+fn inverse_trig_probe(input: &[f32], output: &mut [f32]) {
+    use cubecl::prelude::*;
+    let i = ABSOLUTE_POS;
+    if i * 2 < input.len() {
+        output[2 * i] = f32::atan2(input[2 * i], input[2 * i + 1]);
+        output[2 * i + 1] = f32::acos(f32::clamp(input[2 * i + 1], -1.0f32, 1.0f32));
+    }
+}
+
+/// Native atan2/acos accuracy on this device against f64, the evidence behind the
+/// camera models' choice of a native `atan2` (see `camera/kb4.rs`).
+#[test]
+fn native_inverse_trig_error_against_f64() {
+    use cubecl::prelude::*;
+    let mut pairs = Vec::new();
+    for i in 0..=4096 {
+        // Directions over the whole circle, at several magnitudes.
+        let angle = (i as f64 / 4096.0 * 2.0 - 1.0) * std::f64::consts::PI;
+        for scale in [1e-3f64, 1.0, 640.0] {
+            pairs.push([(angle.sin() * scale) as f32, (angle.cos() * scale) as f32]);
+        }
+    }
+    let values = pairs.as_flattened();
+    let client = gpu_client().unwrap();
+    let input = client.create_from_slice(f32::as_bytes(values));
+    let output = client.empty(std::mem::size_of_val(values));
+    unsafe {
+        inverse_trig_probe::launch_unchecked::<GpuRuntime>(
+            &client,
+            CubeCount::Static(pairs.len().div_ceil(256) as u32, 1, 1),
+            CubeDim::new_1d(256),
+            BufferArg::from_raw_parts(input, values.len()),
+            BufferArg::from_raw_parts(output.clone(), values.len()),
+        );
+    }
+    let bytes = client.read_one(output).unwrap();
+    let actual = f32::from_bytes(&bytes);
+    let (mut atan2_worst, mut acos_worst) = (0f64, 0f64);
+    for (i, [y, x]) in pairs.iter().enumerate() {
+        let atan2 = f64::from(*y).atan2(f64::from(*x));
+        atan2_worst = atan2_worst.max((f64::from(actual[2 * i]) - atan2).abs());
+        let cosine = f64::from(x.clamp(-1.0, 1.0));
+        acos_worst = acos_worst.max((f64::from(actual[2 * i + 1]) - cosine.acos()).abs());
+    }
+    println!("native f32 atan2 worst |error| = {atan2_worst:e} rad, acos = {acos_worst:e} rad");
+    // 1e-3 px at 1000 px/rad needs 1e-6 rad; the camera parity tests hold the tighter per-model bound.
+    assert!(atan2_worst < 1e-6, "atan2 error {atan2_worst:e} rad");
+}
