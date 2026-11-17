@@ -37,6 +37,8 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
+# The stitch tests parse the factory calibration strings and open the clip.
+kornia-staging-io.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 nalgebra.workspace = true

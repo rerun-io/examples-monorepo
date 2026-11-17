@@ -9,6 +9,9 @@ pub(crate) use layout::MAX_CUBES_PER_DIM;
 pub(crate) use pyramid::{launch_ingest, launch_subsample, launch_subsample_batch};
 pub(crate) use sampling::launch_copy_level0;
 
+mod stitch;
+pub(crate) use stitch::launch_gather;
+
 mod cell_select;
 mod fast;
 mod fast_cell;
