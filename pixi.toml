@@ -3479,6 +3479,8 @@ platforms = ["linux-64", "linux-aarch64"]
 python = "3.12.*"
 # Gen-HumanEgo's millimetre depth PNGs: Up-filter encode and decode in Rust (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
+# Insta360 .insv clips: the clip reader and the CPU dual-fisheye stitch, in Rust (packages/insta360-io).
+insta360-io = { path = "packages/insta360-io" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
 requests = "*"
@@ -3853,6 +3855,26 @@ python = "3.12.*"
 cmd = "cargo-fmt --all --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked -p depth-png"
 cwd = "packages/depth-png"
 description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# insta360-io (PyO3 module over kornia-staging's Insta360 reader and stitch; dataforge takes the conda build)
+# ═══════════════════════════════════════════════════════════════════════════
+# The Python module insta360_io is a pixi-build source package (packages/insta360-io/recipe.yaml), consumed as
+# `insta360-io = { path = "packages/insta360-io" }`; its Python tests live with its consumer (packages/dataforge/tests).
+# This feature only checks the binding's Rust workspace: rustfmt and clippy with warnings denied.
+[feature.insta360-io-rust]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.insta360-io-rust.dependencies]
+rust = "1.98.*"
+# pyo3's build script needs an interpreter to configure crates/insta360-io-py.
+python = "3.12.*"
+
+# Call the env's cargo-fmt/cargo-clippy directly (see gsplat-rust-check for why).
+[feature.insta360-io-rust.tasks.insta360-io-rust-check]
+cmd = "cargo-fmt --all --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings"
+cwd = "packages/insta360-io"
+description = "rustfmt and clippy for packages/insta360-io"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tsdf-rs (Rust core + PyO3 module; metrictrail, mast3r-slam and mvs take the conda build)
@@ -4303,6 +4325,7 @@ agent-traces-dev = { features = ["agent-traces", "dev"], solve-group = "agent-tr
 kornia-staging = { features = ["kornia-staging"], solve-group = "kornia-staging", no-default-feature = true }
 kornia-staging-dev = { features = ["kornia-staging", "dev"], solve-group = "kornia-staging", no-default-feature = true }
 depth-png-rust = { features = ["depth-png-rust"], no-default-feature = true }
+insta360-io-rust = { features = ["insta360-io-rust"], no-default-feature = true }
 tsdf-rs-rust = { features = ["tsdf-rs-rust"], no-default-feature = true }
 arkitscenes-download = { features = [
     "common",
