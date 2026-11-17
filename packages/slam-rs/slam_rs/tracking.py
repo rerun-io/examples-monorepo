@@ -69,6 +69,11 @@ class Lockstep:
     consumed_ms: list[float] = field(default_factory=list)
     """Wall time of every ``track`` call that consumed a frameset, posed or not (a bootstrapping or
     stereo-waiting frameset included); refusals for want of IMU are not in it."""
+    blank_cameras: tuple[int, ...] = ()
+    """Cameras fed black images (the mono-inertial proxy); they must never hold a keypoint."""
+    blank_keypoints: int = 0
+    """Keypoints the frontend reported in a blanked camera, summed over every ``track`` call that consumed a
+    frameset (an IMU-hold release consumes two in one push); must stay 0."""
     _buffered: Frameset | None = None
     """The accepted frame still waiting for a lagged estimate."""
     _buffered_flow: _core.FlowFrame | None = None
@@ -131,6 +136,10 @@ class Lockstep:
                 return
             self.consumed_ms.append(elapsed_ms)
             self.pending.pop(0)
+            if self.blank_cameras:
+                blanked: _core.FlowFrame | None = self.vio.flow_frame()
+                if blanked is not None:
+                    self.blank_keypoints += sum(len(blanked.ids(camera)) for camera in self.blank_cameras)
             if result.status == _core.VioStatus.Buffered:
                 self._buffered = held
                 self._buffered_flow = self.vio.flow_frame()

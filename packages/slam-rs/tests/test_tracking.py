@@ -164,6 +164,41 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
         stage.refuse_lost_framesets()
 
 
+def test_the_blank_camera_guard_counts_every_frameset_a_hold_release_tracks(
+    pipeline: PipelineFactory, camera: CameraFactory, texture: TextureFactory, tmp_path: Path
+) -> None:
+    """The mono-proxy guard sees each frameset, also the two that one IMU-hold release tracks.
+
+    Camera 1 is watched but not blanked, so it does hold keypoints. One stage gets
+    each frameset's samples with the frameset; the other has its first frameset
+    held and released with the second, in one push. Both track the same images
+    to the same poses, so both must count the same keypoints.
+    """
+    batches: list[Int64[ndarray, " n_samples"]] = [
+        np.arange(step * FRAME_PERIOD_NS, (step + 1) * FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64) for step in range(3)
+    ]
+    held_batches: list[Int64[ndarray, " n_samples"]] = [batches[0][:1], np.concatenate([batches[0][1:], batches[1]]), batches[2]]
+    rr.init("slam-rs-tracking-test", recording_id="blank-guard")
+    rr.save(tmp_path / "blank-guard.rrd")
+    counts: list[int] = []
+    for split in (batches, held_batches):
+        stage: VioStage = VioStage(
+            lockstep=Lockstep(vio=pipeline(2), blank_cameras=(1,)),
+            logger=VioLogger(
+                cameras=(camera(0, 0.0), camera(1, 0.1)),
+                ground_truth=empty_trajectory(),
+                frame_t_ns=np.arange(3, dtype=np.int64) * FRAME_PERIOD_NS,
+            ),
+        )
+        for step, batch in enumerate(split):
+            stage.run(frameset(step, texture, batch))
+        counts.append(stage.blank_keypoints)
+    rr.disconnect()
+
+    assert counts[0] > 0
+    assert counts[1] == counts[0]
+
+
 def test_the_estimator_is_configured_from_basalts_own_two_files(settings: SlamConfig) -> None:
     """The RoboCap estimator uses the two configuration files named by its settings.
     Both files are checked into the package, so configuration needs no external bundle.

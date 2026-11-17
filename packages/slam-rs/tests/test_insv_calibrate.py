@@ -14,12 +14,10 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 
 from slam_rs.apis.insv_calibrate import (
-    BootstrapAttempt,
     Config,
     TrackedFrame,
     WindowScan,
     epipolar_residuals,
-    first_attempt,
     fit_hand_eye,
     main,
     offset_summary,
@@ -122,7 +120,7 @@ def test_the_bootstrap_scan_recovers_the_offset_over_noisy_windows() -> None:
     grid: Float64[ndarray, " n_offsets"] = np.asarray(offsets_ms)
     scans: list[WindowScan] = []
     for start_s in range(6):
-        # The solver residual doubles 5 ms from its minimum (DESIGN 13.1); a rejected window reports no residual.
+        # The solver residual doubles 5 ms from its minimum; a rejected window reports no residual.
         residual: Float64[ndarray, " n_offsets"] = 2e-3 * (1 + ((grid + 2.0) / 5.0) ** 2) * (1 + rng.normal(scale=0.03, size=grid.size))
         values: list[float | None] = [None if index == 16 else float(value) for index, value in enumerate(residual)]
         scans.append(WindowScan(start_s=float(start_s), offsets_ms=offsets_ms, residual_rad=tuple(values), verdicts=("Accepted",) * grid.size))
@@ -131,23 +129,13 @@ def test_the_bootstrap_scan_recovers_the_offset_over_noisy_windows() -> None:
     assert spread_ms < 1.0
 
 
-def test_the_first_attempt_is_read_from_the_report_text() -> None:
-    text: str = (
-        '{"attempts":[{"first_t_ns":1,"last_t_ns":2,"frames":61,"tracks":3653,"verdict":"Accepted","accepted":true,'
-        '"excitation_mps2":2.2,"tracks_used":913,"residual_rms_rad":0.0021,"condition":14.5,"gravity_norm_unconstrained":9.79,'
-        '"scale_sigma":0.0028,"velocity_world":[0,0,0],"gravity_body0":[0,0,9.8],"bias_gyro":[0,0,0],"bias_accel":[0,0,0]}],'
-        '"start_t_ns":1,"accepted_at_t_ns":2,"replayed":61}'
-    )
-    assert first_attempt(text) == BootstrapAttempt(verdict="Accepted", accepted=True, frames=61, residual_rms_rad=0.0021, scale_sigma=0.0028)
-    assert first_attempt('{"attempts":[],"start_t_ns":null,"accepted_at_t_ns":null,"replayed":0}') is None
-
-
-CLIP_RRD: Path = Path(os.environ.get("SLAM_RS_INSTA360_RRD", "/home/pablo/data/insta360/VID_20261116_125200_00_003.rrd"))
+CLIP_RRD: Path | None = Path(clip) if (clip := os.environ.get("SLAM_RS_INSTA360_RRD")) else None
+"""The converted Insta360 clip VID_20261116_125200_00_003.rrd, from ``SLAM_RS_INSTA360_RRD``; the integration test skips without it."""
 
 
 @pytest.mark.integration
 def test_the_real_clip_gives_the_converters_rotation() -> None:
-    if not CLIP_RRD.is_file():
-        pytest.skip(f"the converted Insta360 clip {CLIP_RRD} (set SLAM_RS_INSTA360_RRD) is absent")
+    if CLIP_RRD is None or not CLIP_RRD.is_file():
+        pytest.skip(f"the converted Insta360 clip VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
     report = main(Config(rrd=CLIP_RRD, rotation_spans_s=(40.0,), span_s=20.0, scan_windows_s=()))
     assert report.rotation.spans[0].angle_to_current_deg < 0.5

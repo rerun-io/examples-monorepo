@@ -115,6 +115,40 @@ def test_frames_and_imu_share_one_clock_and_the_spline_ends_are_dropped() -> Non
     np.testing.assert_array_equal(frames, np.arange(1, 89))  # frames at 0.1 .. 8.8 s, inside the IMU span
 
 
+@pytest.mark.parametrize(
+    ("num_frames", "num_imu", "frame_limit", "message"),
+    [
+        (0, 900, None, "no frame of pose_lcam_front.txt"),
+        (91, 0, None, "no frame of pose_lcam_front.txt"),
+        (91, 15, None, "no frame of pose_lcam_front.txt"),  # 15 samples keep none after the 10-sample trims
+        (91, 900, 0, "--frame-limit 0"),
+    ],
+)
+def test_an_empty_or_too_short_trajectory_is_refused_with_a_sentence(num_frames: int, num_imu: int, frame_limit: int | None, message: str) -> None:
+    from dataforge.datasets.tartanair import aligned_window
+    with pytest.raises(ValueError, match=message):
+        aligned_window(num_frames=num_frames, num_imu=num_imu, frame_limit=frame_limit)
+
+
+def _imu_files(directory: Path, samples: int, gyro_rows: int, acc_rows: int) -> Path:
+    directory.mkdir()
+    np.savetxt(directory / "imu_time.txt", np.arange(samples) * 0.01)
+    np.savetxt(directory / "gyro.txt", np.zeros((gyro_rows, 3)))
+    np.savetxt(directory / "acc.txt", np.zeros((acc_rows, 3)))
+    return directory
+
+
+def test_the_imu_files_must_hold_one_row_per_sample(tmp_path: Path) -> None:
+    from dataforge.datasets.tartanair import read_imu
+
+    gyro, accel = read_imu(_imu_files(tmp_path / "whole", 30, 30, 30))
+    assert gyro.shape == accel.shape == (30, 3)
+    with pytest.raises(ValueError, match=r"gyro\.txt holds an array of shape \(29, 3\)"):
+        read_imu(_imu_files(tmp_path / "short_gyro", 30, 29, 30))
+    with pytest.raises(ValueError, match=r"acc\.txt holds an array of shape \(31, 3\)"):
+        read_imu(_imu_files(tmp_path / "long_acc", 30, 30, 31))
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize("camera_set", ["pinhole", "fisheye", "equirect"])
 def test_two_seconds_of_a_real_trajectory_agree_across_gt_gyro_and_frames(

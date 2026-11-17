@@ -5,7 +5,7 @@ It reports, and changes nothing:
 1. ``R_P_imu``, the rotation from the IMU frame to the panorama frame P. The lane's own frontend tracks the two
    hemisphere tiles over chosen spans; each consecutive frame pair gets a relative pose (rotation and translation
    direction, robust epipolar fit on the sphere, seeded from the gyro under the recording's current calibration).
-   Rotation-only fits are biased indoors (recon/09 section 2). The visual rotation vectors are then aligned with
+   Rotation-only fits are biased indoors. The visual rotation vectors are then aligned with
    the gyro-integrated ones in closed form, with the gyro bias as a free constant.
 2. The frame time offset, two ways: (a) the residual of that alignment over a grid of offsets of the gyro window,
    and (b) the inertial bootstrap's own residual over the same grid on several 2 s windows, with the frame times
@@ -22,8 +22,6 @@ from pathlib import Path
 import numpy as np
 from jaxtyping import Float64, Int64
 from numpy import ndarray
-from serde import serde
-from serde.json import from_json
 
 from slam_rs import BackendRequest, _core
 from slam_rs.apis.insv import orthonormal
@@ -111,29 +109,6 @@ class HandEyeFit:
     """Weighted RMS of the rate residual."""
     weights: Float64[ndarray, " n"]
     """Robust weight of each pair."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class BootstrapAttempt:
-    """The fields of one bootstrap attempt the scan reads (the report has more; Rust owns its format)."""
-
-    verdict: str
-    """``Accepted`` or the rejection reason."""
-    accepted: bool
-    """Whether the window was accepted."""
-    frames: int
-    """Framesets in the window."""
-    residual_rms_rad: float | None
-    """RMS bearing error of the solve, rad."""
-    scale_sigma: float | None
-    """Relative 1-sigma of the speed."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class _BootstrapReport:
-    attempts: list[BootstrapAttempt]
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,9 +357,9 @@ def offset_summary(scans: list[WindowScan]) -> tuple[float, float]:
     return float(np.mean(minima)), float(np.std(minima, ddof=1)) if len(minima) > 1 else 0.0
 
 
-def first_attempt(report_text: str) -> BootstrapAttempt | None:
-    """The bootstrap report's first attempt, or None before the first solve."""
-    attempts: list[BootstrapAttempt] = from_json(_BootstrapReport, report_text).attempts
+def first_attempt(vio: _core.Vio) -> _core.BootstrapAttempt | None:
+    """The inertial bootstrap's first attempt, or None before the first solve (and on the stereo start)."""
+    attempts: list[_core.BootstrapAttempt] = vio.bootstrap_attempts
     return attempts[0] if attempts else None
 
 
@@ -412,8 +387,7 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
                     bearings=np.concatenate([tile_bearings(flow.positions(tile).astype(np.float64), origins[tile]) for tile in range(2)]),
                 )
             )
-        report: str | None = vio.bootstrap_report()
-        if stop_at_attempt and report is not None and first_attempt(report) is not None:
+        if stop_at_attempt and first_attempt(vio) is not None:
             break
     return frames
 
@@ -517,14 +491,13 @@ def main(config: Config) -> CalibrationReport:
         for start_s in config.scan_windows_s:
             framesets, imu = read(start_s, config.window_s)
 
-            def attempt(offset_ms: float, readout_s: float) -> BootstrapAttempt | None:
+            def attempt(offset_ms: float, readout_s: float) -> _core.BootstrapAttempt | None:
                 vio: _core.Vio = new_vio(readout_s)
                 drive(vio, framesets, imu, int(round(offset_ms * 1e6)), True)  # noqa: B023 - called inside this iteration only
-                text: str | None = vio.bootstrap_report()
-                return None if text is None else first_attempt(text)
+                return first_attempt(vio)
 
             readout_s: float = feed.insta360.readout_s
-            results: list[BootstrapAttempt | None] = [attempt(offset_ms, readout_s) for offset_ms in config.offsets_ms]
+            results: list[_core.BootstrapAttempt | None] = [attempt(offset_ms, readout_s) for offset_ms in config.offsets_ms]
             report.scans.append(
                 WindowScan(
                     start_s=start_s,
@@ -533,8 +506,8 @@ def main(config: Config) -> CalibrationReport:
                     verdicts=tuple("none" if result is None else result.verdict for result in results),
                 )
             )
-            at_zero: BootstrapAttempt | None = results[config.offsets_ms.index(0.0)] if 0.0 in config.offsets_ms else attempt(0.0, readout_s)
-            checks: list[BootstrapAttempt | None] = [at_zero, attempt(0.0, 0.0), attempt(0.0, -readout_s)]
+            at_zero: _core.BootstrapAttempt | None = results[config.offsets_ms.index(0.0)] if 0.0 in config.offsets_ms else attempt(0.0, readout_s)
+            checks: list[_core.BootstrapAttempt | None] = [at_zero, attempt(0.0, 0.0), attempt(0.0, -readout_s)]
             values: list[float | None] = [None if check is None else check.residual_rms_rad for check in checks]
             report.shutter.append(ShutterCheck(start_s=start_s, on=values[0], off=values[1], flipped=values[2]))
             print(f"window {start_s:.0f} s: minimum {report.scans[-1].minimum_ms()} ms; shutter on/off/flipped {values}", flush=True)

@@ -31,7 +31,7 @@ from slam_rs import _core
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, LocalSegment, RigProfile, open_segment
 
 PANO_ENTITY: str = "/world/rig_00/pano"
-"""Where the layer puts the panorama video (DESIGN §3)."""
+"""Where the layer puts the panorama video."""
 PANO_WIDTH: int = 1920
 PANO_HEIGHT: int = 960
 
