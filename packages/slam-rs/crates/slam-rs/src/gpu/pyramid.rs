@@ -6,17 +6,20 @@ impl From<GpuError> for PyramidError {
     }
 }
 
-use crate::frontend::input::{FrameImages, PackedImages};
+use crate::frontend::input::{FrameImages, LensStitch, PackedImages};
 use crate::pyramid::{Pyramid, PyramidBuilder, PyramidError};
 use cubecl::prelude::*;
 use kornia_image::{Image, ImageSize};
 pub use kornia_staging_gpu::pyramid::GpuPyramid;
+use kornia_staging_gpu::stitch::{TableError, TileTables};
 
 /// Schedule persistent device pyramids with the frontend frame queue.
 pub struct GpuPyramidBuilder<R: Runtime> {
     pub(super) inner: kornia_staging_gpu::pyramid::GpuPyramidBuilder<R>,
     client: ComputeClient<R>,
     launches: super::submission::LaunchList,
+    /// The stitch tables on this device, uploaded on the first lens frameset of a stitch.
+    tables: Option<(std::sync::Arc<LensStitch>, TileTables<R>)>,
 }
 impl<R: Runtime> GpuPyramidBuilder<R> {
     pub fn new(client: ComputeClient<R>, launches: super::submission::LaunchList) -> Self {
@@ -24,6 +27,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
             inner: kornia_staging_gpu::pyramid::GpuPyramidBuilder::new(client.clone()),
             client,
             launches,
+            tables: None,
         }
     }
     pub(super) fn build_images(
@@ -36,17 +40,45 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
     }
 }
 impl<R: Runtime> GpuPyramidBuilder<R> {
+    /// Fill the camera pyramids from retained bytes. For lens images ([`PackedImages::fill_lenses`]) this is the
+    /// device stitch: the two lens images go up, and the two tile pyramids are made on the device from the
+    /// stitch's tables, uploaded once. When the arena cannot batch, each tile is remapped on the host and built.
     pub(super) fn build_packed(
         &mut self,
         packed: &PackedImages,
         out: &mut [GpuPyramid<R>],
     ) -> Result<(), PyramidError> {
         let images = FrameImages::Packed(packed);
-        match self.inner.prepare_packed(
-            packed.bytes(),
-            images.iter().map(|image| image.size()),
-            out,
-        )? {
+        let prepared = match packed.stitch() {
+            Some(stitch) => {
+                let tables =
+                    match self.tables.take() {
+                        Some((owner, tables)) if std::sync::Arc::ptr_eq(&owner, stitch) => {
+                            (owner, tables)
+                        }
+                        _ => {
+                            let [first, second] = stitch.luts();
+                            let tables = TileTables::upload(&self.client, [first, second])
+                                .map_err(|error| match error {
+                                    TableError::Gpu(error) => PyramidError::from(error),
+                                    _ => {
+                                        PyramidError::Image(crate::image::IngestError::StitchTables)
+                                    }
+                                })?;
+                            (stitch.clone(), tables)
+                        }
+                    };
+                let tables = &self.tables.insert(tables).1;
+                self.inner
+                    .prepare_lenses(packed.bytes(), stitch.lens_size(), tables, out)?
+            }
+            None => self.inner.prepare_packed(
+                packed.bytes(),
+                images.iter().map(|image| image.size()),
+                out,
+            )?,
+        };
+        match prepared {
             Some(launch) => self
                 .launches
                 .dispatch(&self.client, super::submission::Launch::Pyramid(launch))?,
