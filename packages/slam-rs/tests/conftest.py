@@ -74,6 +74,33 @@ def settings() -> SlamConfig:
     return load_slam_config()
 
 
+@pytest.fixture(scope="session")
+def av1_nvenc() -> None:
+    """A skip when this machine cannot encode AV1 on the GPU, which the panorama layer does.
+
+    The same probe as dataforge's ``nvenc_ffmpeg`` fixture: a listed encoder is not enough (an RTX 3060 lists
+    av1_nvenc and has no AV1 encoder), so one real frame is encoded.
+    """
+    import subprocess
+
+    from dataforge.video_encoding import require_av1_nvenc, resolve_ffmpeg
+
+    try:
+        ffmpeg: Path = resolve_ffmpeg()
+        require_av1_nvenc(ffmpeg)
+    except (FileNotFoundError, RuntimeError) as error:
+        pytest.skip(f"no av1_nvenc: {error}")
+    probe: subprocess.CompletedProcess[str] = subprocess.run(
+        [str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", "color=size=256x256:rate=1", "-frames:v", "1", "-c:v", "av1_nvenc", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if probe.returncode:
+        pytest.skip(f"AV1 NVENC unavailable: {probe.stderr.strip()}")
+
+
 @pytest.fixture
 def live_catalog(settings: SlamConfig) -> None:
     """Skip when the catalog server the integration/golden tests read from is not reachable.

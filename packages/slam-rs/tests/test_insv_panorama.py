@@ -81,6 +81,7 @@ def _psnr_db(a: UInt8[ndarray, "h w"], b: UInt8[ndarray, "h w"]) -> float:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("av1_nvenc")
 def test_the_first_90_frames_of_the_clip_become_an_av1_layer_on_the_frame_times(tmp_path: Path) -> None:
     if CLIP_RRD is None or not CLIP_RRD.is_file():
         pytest.skip(f"the Insta360 clip recording VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
