@@ -2,33 +2,27 @@
 //! DESIGN §2, §3 row 15, §4 B13, §8, PR f1).
 //!
 //! The window never reads the map (DESIGN §11 Q3), so the raw VIO pose of a
-//! frame keeps the drift it had when it was tracked. Two readers move it onto
-//! the keyframes the back end corrected:
+//! frame keeps the drift it had when it was tracked. [`reanchor`] moves the
+//! frames onto the keyframes the back end corrected, two-sided and non-causal:
+//! each frame between keyframes `i` and `i+1` takes both keyframes'
+//! corrections and blends the two results, `T_left = T_i_opt · T_i_raw⁻¹ ·
+//! T_f_raw`, `T_right = T_i+1_opt · T_i+1_raw⁻¹ · T_f_raw`, translation lerped
+//! and rotation slerped at `α = (t_f − t_i) / (t_i+1 − t_i)`. This is
+//! `merge_frames_keyframes.py:63-150`. A keyframe's raw pose is the frame's own
+//! raw pose, so a keyframe lands on its optimized pose exactly.
 //!
-//! - **Online, causal** ([`OnlineAnchor`]): the pose a `track` call returns
-//!   beside the raw one. It reads only the corrections the back end has
-//!   published by then ([`CorrectionBoard`], newest epoch only) and moves the
-//!   frame with its last keyframe: `T_f = T_k_corr · T_k_raw⁻¹ · T_f_raw`. The
-//!   pose-graph gauge fixes the window and the newest keyframe, so for a live
-//!   frame that correction is the identity and the pose is the raw one, bit for
-//!   bit; RootSLAM's causal output (`lc_rt`) is its raw VIO for the same reason.
-//! - **Final, two-sided** ([`reanchor`]): once the sequence ends, each frame
-//!   between keyframes `i` and `i+1` takes both keyframes' corrections and
-//!   blends the two results, `T_left = T_i_opt · T_i_raw⁻¹ · T_f_raw`,
-//!   `T_right = T_i+1_opt · T_i+1_raw⁻¹ · T_f_raw`, translation lerped and
-//!   rotation slerped at `α = (t_f − t_i) / (t_i+1 − t_i)`. This is
-//!   `merge_frames_keyframes.py:63-150`. A keyframe's raw pose is the frame's
-//!   own raw pose, so a keyframe lands on its optimized pose exactly.
+//! There is no online corrected pose (DESIGN §1, §8, f1 review): the pose-graph
+//! gauge fixes the window and the newest map keyframe, so a live frame's
+//! correction is the identity and the pose `track` returns is already the
+//! corrected pose of the current frame. The corrected history so far is
+//! [`super::MapSnapshot::reanchor`] on the frames tracked up to the newest map
+//! keyframe (all of them after `Vio::flush`).
 //!
 //! B13: RootSLAM's online path (`vio.cpp:642-680`) interpolates the two
-//! keyframe poses and drops the frame's own raw motion; both readers here move
-//! the frame by the relative correction instead.
+//! keyframe poses and drops the frame's own raw motion; [`reanchor`] moves the
+//! frame by the relative correction instead.
 
-use std::sync::{Arc, Mutex, MutexGuard};
-
-use super::pgo::MapCorrection;
 use crate::lie::{Se3, So3};
-use crate::types::FrameId;
 
 /// Why [`reanchor`] refused its inputs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -172,81 +166,6 @@ fn interpolate(left: &Se3<f64>, right: &Se3<f64>, alpha: f64) -> Se3<f64> {
         left.rotation * So3::exp(&(relative.log() * alpha)),
         left.translation + (right.translation - left.translation) * alpha,
     )
-}
-
-/// The newest [`MapCorrection`] the back end published, for the tracking
-/// thread. Its lock guards only an `Arc` swap, so a reader never waits for a
-/// step or a pose-graph solve.
-#[derive(Debug, Default)]
-pub struct CorrectionBoard {
-    latest: Mutex<Arc<MapCorrection>>,
-}
-
-impl CorrectionBoard {
-    fn slot(&self) -> MutexGuard<'_, Arc<MapCorrection>> {
-        // A panic while swapping an `Arc` leaves a whole value behind.
-        self.latest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Post `correction` when it is newer than the one on the board; an older
-    /// or equal epoch is ignored, so readers only ever move forward.
-    pub fn publish(&self, correction: MapCorrection) {
-        let mut slot = self.slot();
-        if correction.epoch > slot.epoch {
-            *slot = Arc::new(correction);
-        }
-    }
-
-    /// The newest correction posted (epoch 0, empty, before the first).
-    pub fn latest(&self) -> Arc<MapCorrection> {
-        Arc::clone(&self.slot())
-    }
-}
-
-/// The online, causal re-anchoring of [`crate::VioResult`]'s corrected pose
-/// (module docs).
-#[derive(Debug, Clone)]
-pub struct OnlineAnchor {
-    board: Arc<CorrectionBoard>,
-    /// The newest keyframe the window has taken so far.
-    last_keyframe: Option<FrameId>,
-}
-
-impl OnlineAnchor {
-    /// Read corrections from `board`.
-    pub fn new(board: Arc<CorrectionBoard>) -> Self {
-        Self {
-            board,
-            last_keyframe: None,
-        }
-    }
-
-    /// The window took frame `t_ns` as a keyframe: later frames anchor on it.
-    pub fn keyframe(&mut self, t_ns: FrameId) {
-        self.last_keyframe = Some(t_ns);
-    }
-
-    /// `raw` moved by the last keyframe's correction as published now; `raw`
-    /// itself (the same bits) when that keyframe has none.
-    pub fn correct(&self, raw: &Se3<f64>) -> Se3<f64> {
-        let Some(keyframe) = self.last_keyframe else {
-            return *raw;
-        };
-        match self.board.latest().delta(keyframe) {
-            Some(delta) => delta * *raw,
-            None => *raw,
-        }
-    }
-}
-
-impl MapCorrection {
-    /// `T_corr · T_raw⁻¹` of `keyframe`; `None` when no pose-graph
-    /// optimization moved it.
-    pub fn delta(&self, keyframe: FrameId) -> Option<Se3<f64>> {
-        Some(*self.poses.get(&keyframe)? * self.raw.get(&keyframe)?.inverse())
-    }
 }
 
 #[cfg(test)]

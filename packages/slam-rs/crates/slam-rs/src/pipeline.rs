@@ -78,10 +78,6 @@ pub struct Vio<S: Scalar = f32> {
     /// by the Realtime query cap.
     #[cfg(feature = "backend")]
     image_slots: crate::estimator::ImageSlots,
-    /// The online re-anchoring of [`VioPose::world_from_rig_corrected`];
-    /// `None` when `backend.enabled` is off.
-    #[cfg(feature = "backend")]
-    anchor: Option<crate::backend::OnlineAnchor>,
 }
 
 pub use lag::OverlapTimings;
@@ -145,32 +141,28 @@ impl<S: Scalar> Vio<S> {
         #[cfg(feature = "backend")]
         let query_cap: usize = config.backend_realtime_max_queued_queries.get();
         #[cfg(feature = "backend")]
-        let (map_runner, anchor) = config
+        let map_runner = config
             .backend_enabled
             .then(|| {
-                let map_backend = crate::backend::MapBackend::new(
-                    crate::backend::MapConfig::from(&config),
-                    calibration.resolution.clone(),
-                )
-                .with_extrinsics(
-                    calibration
-                        .t_i_c
-                        .iter()
-                        .map(|t_i_c| t_i_c.cast::<f64>())
-                        .collect(),
-                )
-                .with_loop_closing(&config, &calibration);
-                let anchor = crate::backend::OnlineAnchor::new(map_backend.correction_board());
                 crate::backend::BackendRunner::new(
-                    map_backend,
+                    crate::backend::MapBackend::new(
+                        crate::backend::MapConfig::from(&config),
+                        calibration.resolution.clone(),
+                    )
+                    .with_extrinsics(
+                        calibration
+                            .t_i_c
+                            .iter()
+                            .map(|t_i_c| t_i_c.cast::<f64>())
+                            .collect(),
+                    )
+                    .with_loop_closing(&config, &calibration),
                     config.backend_mode,
                     config.backend_realtime_max_queued_queries.get(),
                 )
-                .map(|runner| (runner, anchor))
             })
             .transpose()
-            .map_err(|error| VioError::BackendThread(error.to_string()))?
-            .unzip();
+            .map_err(|error| VioError::BackendThread(error.to_string()))?;
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
@@ -202,8 +194,6 @@ impl<S: Scalar> Vio<S> {
             lagged_frames: None,
             #[cfg(feature = "backend")]
             image_slots: crate::estimator::ImageSlots::new(query_cap),
-            #[cfg(feature = "backend")]
-            anchor,
         })
     }
 
@@ -650,13 +640,6 @@ impl<S: Scalar> Vio<S> {
     ) -> Result<VioResult, VioError> {
         #[cfg(feature = "backend")]
         self.hold_keyframe_images(t_ns, &outcome);
-        #[cfg(feature = "backend")]
-        if let (Some(anchor), estimator::FrameOutcome::Measured(stats)) =
-            (self.anchor.as_mut(), &outcome)
-            && stats.took_keyframe
-        {
-            anchor.keyframe(t_ns);
-        }
         self.step_map();
         // The estimator initialises inside the same `process_frame` that
         // measures, so a `Measured` outcome always has a state and
@@ -694,7 +677,6 @@ impl<S: Scalar> Vio<S> {
                         .into(),
                     *state.t_w_i.rotation.cast::<f64>().quaternion(),
                 )),
-                world_from_rig_corrected: self.corrected_pose(&state.t_w_i),
                 velocity: state
                     .vel_w_i
                     .map(kornia_staging_algebra::Scalar::to_f64)
@@ -709,21 +691,6 @@ impl<S: Scalar> Vio<S> {
                     .into(),
             });
         VioResult { status, t_ns, pose }
-    }
-
-    /// [`VioPose::world_from_rig_corrected`] of the state `t_w_i`: the raw pose
-    /// itself, through the same conversion, unless the online anchor moves it.
-    fn corrected_pose(&self, t_w_i: &crate::lie::Se3<S>) -> [f64; 7] {
-        let raw: crate::lie::Se3<f64> = t_w_i.cast();
-        #[cfg(feature = "backend")]
-        let raw = match &self.anchor {
-            Some(anchor) => anchor.correct(&raw),
-            None => raw,
-        };
-        pose_to_array(&Isometry3::from_parts(
-            raw.translation.into(),
-            *raw.rotation.quaternion(),
-        ))
     }
 
     /// `processImu(curr_t_ns)`.

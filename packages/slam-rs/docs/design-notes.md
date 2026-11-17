@@ -62,6 +62,10 @@ result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
 ```
 
 `track` returns a status and world-from-rig pose: `Tracking`, or `NeedMoreImu` with no state change; retry the same frameset.
+The pose is the raw, causal VIO: the back end never moves it, and because the pose-graph optimization holds the
+window and the newest map keyframe fixed, it is also the corrected pose of the current frame. Past frames are
+corrected after the fact: `slam_rs.tracking.reanchored(poses, vio.map_snapshot())` (Rust `MapSnapshot::reanchor`)
+re-anchors the frames tracked so far on the map's keyframes, two-sided; after `flush()` that is the final trajectory.
 `snapshot()` copies the last measured window and landmarks; it stays on the previous measurement during `NeedMoreImu`.
 `flow_frame()` copies the last accepted frameset’s keypoints; both accessors return `None` before their first result.
 

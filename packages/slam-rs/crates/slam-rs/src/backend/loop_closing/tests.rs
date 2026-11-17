@@ -816,16 +816,6 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
         vec![A, A2]
     );
     assert_eq!(snapshot.correction.poses[&A], map.keyframe(A).unwrap().pose);
-    // f1: the raw pose beside it, and the same correction on the tracking
-    // thread's board, so an online anchor on A moves a frame by A's delta.
-    assert_eq!(snapshot.correction.raw[&A], Se3::identity());
-    assert_eq!(*s.backend.correction_board().latest(), snapshot.correction);
-    let mut anchor = crate::backend::OnlineAnchor::new(s.backend.correction_board());
-    anchor.keyframe(A);
-    assert_eq!(
-        anchor.correct(&Se3::identity()),
-        map.keyframe(A).unwrap().pose
-    );
     let row_a = snapshot
         .keyframe_t_ns
         .iter()

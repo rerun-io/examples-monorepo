@@ -73,15 +73,12 @@ pub struct VioResult {
 /// The pose, velocity and biases estimated for a tracked frameset.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct VioPose {
-    /// Rig pose in the world frame, `[tx, ty, tz, qx, qy, qz, qw]`.
+    /// Rig pose in the world frame, `[tx, ty, tz, qx, qy, qz, qw]`: the raw,
+    /// causal VIO. The back end never moves it, and under the pose-graph gauge
+    /// (window and newest map keyframe fixed) it is also the corrected pose of
+    /// this frame. The corrected history of earlier frames is
+    /// `MapSnapshot::reanchor` (feature `backend`) on these poses.
     pub world_from_rig: [f64; 7],
-    /// The same pose re-anchored online on the keyframes the back end's
-    /// pose-graph optimization corrected, causally: only corrections published
-    /// by this call, moved with the last keyframe
-    /// ([`crate::backend::OnlineAnchor`], PR f1). The gauge keeps the window
-    /// fixed, so it equals `world_from_rig` bit for bit unless that keyframe
-    /// was moved; always equal with the back end off.
-    pub world_from_rig_corrected: [f64; 7],
     /// Rig velocity in the world frame, m/s.
     pub velocity: [f64; 3],
     /// Gyroscope bias estimate, rad/s.

@@ -25,7 +25,7 @@ use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
-pub use anchor::{AnchorError, CorrectionBoard, OnlineAnchor, reanchor};
+pub use anchor::{AnchorError, reanchor};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
@@ -120,9 +120,6 @@ pub struct MapBackend {
     t_i_c: Vec<crate::lie::Se3<f64>>,
     /// Loop closing (PR b2); `None` when it is off.
     loops: Option<LoopClosing>,
-    /// Where each applied PGO posts its [`MapCorrection`] for the tracking
-    /// thread's online re-anchoring (PR f1). A clone shares the board.
-    corrections: std::sync::Arc<CorrectionBoard>,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -168,13 +165,7 @@ impl MapBackend {
             culled_over_budget: 0,
             t_i_c: Vec::new(),
             loops: None,
-            corrections: std::sync::Arc::default(),
         }
-    }
-
-    /// The board the PGO posts its corrections on, for an [`OnlineAnchor`].
-    pub fn correction_board(&self) -> std::sync::Arc<CorrectionBoard> {
-        std::sync::Arc::clone(&self.corrections)
     }
 
     /// The rig's `T_i_c` per camera, so a view can place the map's points.

@@ -139,14 +139,8 @@ fn the_map_never_moves_a_vio_pose_while_it_culls() {
         realtime.finish_deferred_keyframe().unwrap();
         realtime.flush_backend();
         assert_eq!(realtime.map_snapshot(), on.map_snapshot());
-        // f1: no loop closes here, so the online corrected pose is the raw
-        // one bit for bit (the comparison with `without` above covers it too),
-        // and Realtime and Offline give the same final trajectory.
-        for result in &with.results {
-            if let Some(pose) = result.pose {
-                assert_eq!(pose.world_from_rig_corrected, pose.world_from_rig);
-            }
-        }
+        // f1: without a loop, Realtime and Offline give the same final
+        // trajectory.
         let raw = |results: &[api::VioResult]| -> Vec<(i64, [f64; 7])> {
             results
                 .iter()

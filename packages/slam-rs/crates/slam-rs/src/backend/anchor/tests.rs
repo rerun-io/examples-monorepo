@@ -2,9 +2,6 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
 use nalgebra::Vector3;
 
 use super::*;
@@ -88,67 +85,4 @@ fn no_keyframe_returns_the_frames_and_bad_inputs_are_refused() {
         reanchor(&unordered, &[]),
         Err(AnchorError::NotIncreasing { what: "frame", .. })
     ));
-}
-
-fn correction(epoch: u64, moved: &[(FrameId, Se3<f64>, Se3<f64>)]) -> MapCorrection {
-    MapCorrection {
-        epoch,
-        poses: moved
-            .iter()
-            .map(|&(id, _, corrected)| (id, corrected))
-            .collect(),
-        raw: moved.iter().map(|&(id, raw, _)| (id, raw)).collect(),
-    }
-}
-
-#[test]
-fn online_is_identity_without_a_correction_and_one_sided_from_the_last_keyframe() {
-    let board = Arc::new(CorrectionBoard::default());
-    let mut anchor = OnlineAnchor::new(Arc::clone(&board));
-    let raw = pose(3.0, 1.0, 0.3);
-    // No keyframe, then no correction: the raw bits.
-    assert_eq!(anchor.correct(&raw), raw);
-    anchor.keyframe(100);
-    assert_eq!(anchor.correct(&raw), raw);
-
-    // Keyframe 100 moved by `delta`: a later frame moves with it.
-    let kf_raw = pose(2.5, 0.8, 0.25);
-    let delta = pose(-0.4, 0.2, -0.1);
-    board.publish(correction(1, &[(100, kf_raw, delta * kf_raw)]));
-    assert!(close(&anchor.correct(&raw), &(delta * raw), 1e-12));
-
-    // A newer keyframe the correction did not move: one-sided from it, so the
-    // older keyframe's correction no longer applies.
-    anchor.keyframe(200);
-    assert_eq!(anchor.correct(&raw), raw);
-}
-
-#[test]
-fn online_reads_only_corrections_published_so_far_and_never_an_older_epoch() {
-    let board = Arc::new(CorrectionBoard::default());
-    let mut anchor = OnlineAnchor::new(Arc::clone(&board));
-    anchor.keyframe(100);
-    let raw = pose(1.0, 0.0, 0.0);
-    let kf_raw = pose(0.9, 0.0, 0.0);
-    // Before the back end publishes, the frame keeps its raw pose: causal.
-    let before = anchor.correct(&raw);
-    assert_eq!(before, raw);
-    let first = pose(0.1, 0.0, 0.0);
-    let second = pose(0.2, 0.0, 0.0);
-    board.publish(correction(2, &[(100, kf_raw, second * kf_raw)]));
-    // An older epoch arriving late is ignored.
-    board.publish(correction(1, &[(100, kf_raw, first * kf_raw)]));
-    assert_eq!(board.latest().epoch, 2);
-    assert!(close(&anchor.correct(&raw), &(second * raw), 1e-12));
-    // The answer given before the publish stays what it was.
-    assert_eq!(before, raw);
-}
-
-#[test]
-fn a_delta_needs_both_the_raw_and_the_corrected_pose() {
-    let mut half = correction(1, &[(7, pose(1.0, 0.0, 0.0), pose(2.0, 0.0, 0.0))]);
-    assert!(close(&half.delta(7).unwrap(), &pose(1.0, 0.0, 0.0), 1e-12));
-    assert!(half.delta(8).is_none());
-    half.raw = BTreeMap::new();
-    assert!(half.delta(7).is_none());
 }
