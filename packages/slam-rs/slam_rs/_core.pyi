@@ -169,6 +169,14 @@ class VioSnapshot:
         """What the non-keyframe frame update did: ``not_attempted``, ``taken``, or ``declined_<precondition>``."""
 
     @property
+    def gpu_one_wait(self) -> bool:
+        """The GPU lane collected this frameset's temporal and stereo results in one device wait; always False on the CPU lane."""
+
+    @property
+    def gpu_lookahead(self) -> bool:
+        """The GPU lane reused this frameset's lookahead image upload; always False on the CPU lane."""
+
+    @property
     def timings_ms(self) -> dict[str, float]:
         """Wall time each stage took on the last frame, in milliseconds.
 
