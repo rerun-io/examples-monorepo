@@ -567,41 +567,15 @@ class InsvLens:
     """One lens of an Insta360 factory calibration at the track resolution, window crop applied (Mei sphere model)."""
 
     @property
-    def version(self) -> int: ...
-    @property
-    def xi(self) -> float: ...
-    @property
-    def fx(self) -> float: ...
-    @property
-    def fy(self) -> float: ...
-    @property
     def cx(self) -> float: ...
     @property
     def cy(self) -> float: ...
-    @property
-    def px_per_rad(self) -> float: ...
-    @property
-    def radial(self) -> list[float]: ...
-    @property
-    def tangential(self) -> list[float]: ...
-    @property
-    def prism(self) -> list[float]: ...
-    @property
-    def ypr_deg(self) -> list[float]: ...
-    @property
-    def translation_m(self) -> list[float]: ...
-    @property
-    def lens_from_rig_rotation(self) -> list[list[float]]:
-        """Rig -> lens rotation, row-major. The rig frame has lens 0's axes."""
     @property
     def pano_from_lens_rotation(self) -> list[list[float]]:
         """``R_P_lens``, row-major: lens vectors into the panorama frame P."""
     @property
     def pano_centre_m(self) -> list[float]:
         """Lens centre in P, metres, origin at the midpoint of the lens centres."""
-    @property
-    def lens_from_rig_translation_m(self) -> list[float]:
-        """Rig -> lens translation in metres; the rig origin is the midpoint of the two lens centres."""
     def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
         """Image radius in track pixels of rays ``theta`` radians off the axis (radial part of the model only)."""
 
