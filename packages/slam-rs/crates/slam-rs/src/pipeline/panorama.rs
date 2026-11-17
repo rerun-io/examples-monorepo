@@ -416,6 +416,28 @@ impl PanoramaRig {
         self.dual.as_deref().map(DualFisheyeIngest::tiles)
     }
 
+    /// [`DualFisheyeLenses`]' rolling-shutter correction of tile `tile`'s pixels
+    /// for a gyro rate `omega_imu` (IMU frame), as the estimator's copy gets it;
+    /// a pixel that cannot be corrected comes back unchanged, and every pixel
+    /// does on an equirect rig.
+    pub fn rolling_shutter_corrected(
+        &self,
+        tile: usize,
+        pixels: &[[f64; 2]],
+        omega_imu: [f64; 3],
+    ) -> Vec<[f64; 2]> {
+        match &self.dual {
+            Some(dual) => dual.corrected_pixels(tile, pixels, Vector3::from(omega_imu)),
+            None => pixels.to_vec(),
+        }
+    }
+
+    /// Wall time of the last dual-fisheye ingest, `[lens level 1, gather]` ns
+    /// over both lenses; `None` for equirect.
+    pub fn dual_fisheye_ingest_ns(&self) -> Option<[u64; 2]> {
+        self.dual.as_deref().map(DualFisheyeIngest::last_ns)
+    }
+
     /// The lookup table of tile `k` (dual fisheye), `None` for equirect.
     pub fn tile_lut(&self, tile: usize) -> Option<&kornia_staging_imgproc::panorama::TileLut> {
         self.dual.as_deref().map(|dual| dual.lut(tile))

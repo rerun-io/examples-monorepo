@@ -189,6 +189,7 @@ pub(super) fn expand(
         rolling_shutter: config.panorama_rolling_shutter,
         gyro: VecDeque::new(),
         tile_camera: model,
+        last_ns: [0; 2],
     };
     let mut tiles: Calibration<f64> = calibration;
     tiles.intrinsics = vec![BasaltCamera::Equirectangular(tile); 2];
@@ -218,6 +219,8 @@ pub(super) struct DualFisheyeIngest {
     tile_camera: Equirectangular<f64>,
     /// `R_tile_imu` per tile.
     tile_from_imu: [So3<f64>; 2],
+    /// Wall time of the last [`Self::remap`]: lens level 1 (both lenses), then the gather, ns.
+    last_ns: [u64; 2],
 }
 
 impl std::fmt::Debug for DualFisheyeIngest {
@@ -249,12 +252,22 @@ impl DualFisheyeIngest {
     /// Lens luma (lens order) -> level 1 -> table gather, into the `u16` tiles.
     pub fn remap(&mut self, images: &[ImageView<'_>]) -> Result<(), VioError> {
         let to_vio = |error: ImageError| VioError::Panorama(error.to_string());
+        self.last_ns = [0; 2];
         for (lens, image) in images.iter().enumerate() {
+            let mark: std::time::Instant = std::time::Instant::now();
             widen_u8_shift8_strided_unchecked(image.data, image.stride, &mut self.level0);
             pyrdown_floor_u16(&self.level0, &mut self.level1).map_err(to_vio)?;
+            let reduced: std::time::Instant = std::time::Instant::now();
             remap_tile(&self.level1, &self.luts[lens], &mut self.tiles[lens]).map_err(to_vio)?;
+            self.last_ns[0] += (reduced - mark).as_nanos() as u64;
+            self.last_ns[1] += reduced.elapsed().as_nanos() as u64;
         }
         Ok(())
+    }
+
+    /// Wall time of the last remap: `[lens level 1, gather]` over both lenses, ns.
+    pub fn last_ns(&self) -> [u64; 2] {
+        self.last_ns
     }
 
     /// Swap point for the GPU lane: the CPU-remapped tiles narrowed to bytes
@@ -305,6 +318,30 @@ impl DualFisheyeIngest {
             height,
             killed,
         })
+    }
+
+    /// [`rolling_shutter_correct`] of tile pixels for a gyro rate in the IMU frame.
+    pub fn corrected_pixels(
+        &self,
+        tile: usize,
+        pixels: &[[f64; 2]],
+        omega_imu: Vector3<f64>,
+    ) -> Vec<[f64; 2]> {
+        let omega: Vector3<f64> = self.tile_from_imu[tile] * omega_imu;
+        pixels
+            .iter()
+            .map(|&pixel| {
+                rolling_shutter_correct(
+                    pixel,
+                    &self.tile_camera,
+                    &self.luts[tile],
+                    self.lens_size.height,
+                    self.readout_s,
+                    &omega,
+                )
+                .unwrap_or(pixel)
+            })
+            .collect()
     }
 
     /// Keep a raw gyro sample for the rolling-shutter rate.

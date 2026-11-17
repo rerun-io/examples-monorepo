@@ -213,6 +213,7 @@ class Vio:
         threads: int = 1,
         max_keypoints: int | None = None,
         backend: BackendRequest = "auto",
+        dual_fisheye: tuple[str, tuple[int, int, int, int, int, int] | None, float] | None = None,
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
 
@@ -245,6 +246,13 @@ class Vio:
 
         Tile ``k``'s pixel ``(x, y)`` is the panorama's ``((x + origins[k]) mod W, y)``.
         """
+    @property
+    def panorama_ingest_ns(self) -> tuple[int, int] | None:
+        """Wall time of the last dual-fisheye ingest, ``(lens_level1_ns, remap_ns)`` over both lenses; None otherwise."""
+    def panorama_image(self) -> UInt8[ndarray, "h w"] | None:
+        """The stitched 1920x960 panorama of the last dual-fisheye frameset (``dual_fisheye`` given), else None."""
+    def rolling_shutter_corrected(self, tile: int, pixels: Float64[ndarray, "n 2"], omega_imu: tuple[float, float, float]) -> Float64[ndarray, "n 2"]:
+        """Tile pixels with the rolling shutter removed for a gyro rate in the IMU frame, as the estimator's copy gets them."""
     @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""
@@ -317,6 +325,9 @@ class VioConfig:
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
     vio_gravity_ms2: float
     """Magnitude of gravity in m/s²; the feed sets the recording's own value when it carries one."""
+    @property
+    def panorama_dual_fisheye(self) -> bool:
+        """``config.panorama_dual_fisheye``: the caller hands ``Vio`` the factory lenses (``dual_fisheye``)."""
 
     def __repr__(self) -> str: ...
 
@@ -510,6 +521,12 @@ class InsvLens:
     def lens_from_rig_rotation(self) -> list[list[float]]:
         """Rig -> lens rotation, row-major. The rig frame has lens 0's axes."""
     @property
+    def pano_from_lens_rotation(self) -> list[list[float]]:
+        """``R_P_lens``, row-major: lens vectors into the panorama frame P."""
+    @property
+    def pano_centre_m(self) -> list[float]:
+        """Lens centre in P, metres, origin at the midpoint of the lens centres."""
+    @property
     def lens_from_rig_translation_m(self) -> list[float]:
         """Rig -> lens translation in metres; the rig origin is the midpoint of the two lens centres."""
     def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
@@ -539,6 +556,12 @@ class InsvClip:
         """Video track index of lens 0 and lens 1."""
     @property
     def lenses(self) -> list[InsvLens]: ...
+    @property
+    def lenses_v6(self) -> list[InsvLens]:
+        """V6 factory calibration per lens (lens order); empty without a V6 string."""
+    @property
+    def window_crop(self) -> tuple[int, int, int, int, int, int] | None:
+        """``(src_w, src_h, dst_w, dst_h, offset_x, offset_y)`` of the lens strings."""
     @property
     def resolution(self) -> tuple[int, int]: ...
     @property
