@@ -260,7 +260,7 @@ def hf_zip(filesystem: HfFileSystem, repo_id: str, revision: str, path: str) -> 
 
     ``HfFileSystem`` retries a failed or rate-limited (429) block a bounded number of times.
     """
-    handle = filesystem.open(f"datasets/{repo_id}@{revision}/{path}", "rb", block_size=HF_ZIP_BLOCK_BYTES)
+    handle: object = filesystem.open(f"datasets/{repo_id}@{revision}/{path}", "rb", block_size=HF_ZIP_BLOCK_BYTES)
     return ZipFile(cast(IO[bytes], handle))
 
 
