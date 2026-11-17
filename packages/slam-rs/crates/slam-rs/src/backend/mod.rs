@@ -27,7 +27,7 @@ use crate::types::{FrameId, LandmarkId};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
-pub use pgo::{MapCorrection, PgoRun, PgoState};
+pub use pgo::{PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::{MapSnapshot, SnapshotLoop};
 

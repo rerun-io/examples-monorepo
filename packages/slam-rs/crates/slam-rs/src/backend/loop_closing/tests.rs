@@ -734,7 +734,7 @@ fn a_graph_the_solver_refuses_releases_the_loop_unapplied_and_records_it_once() 
     assert!(loops.pgo().runs.is_empty());
     assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 0));
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
-    assert_eq!(s.backend.map_correction().epoch, 0);
+    assert_eq!(s.backend.snapshot(&calibration(1).t_i_c).pgo_epoch, 0);
 }
 
 #[test]
@@ -794,17 +794,20 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
         vec![A]
     );
     let snapshot = s.backend.snapshot(&t_i_c);
-    assert_eq!(snapshot.correction.epoch, 1);
-    assert_eq!(
-        snapshot
-            .correction
-            .poses
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![A, A2]
-    );
-    assert_eq!(snapshot.correction.poses[&A], map.keyframe(A).unwrap().pose);
+    assert_eq!(snapshot.pgo_epoch, 1);
+    let corrected: Vec<FrameId> = snapshot
+        .keyframe_t_ns
+        .iter()
+        .zip(
+            snapshot
+                .keyframe_poses
+                .iter()
+                .zip(&snapshot.keyframe_raw_poses),
+        )
+        .filter(|(_, (pose, raw))| pose != raw)
+        .map(|(&id, _)| id)
+        .collect();
+    assert_eq!(corrected, vec![A, A2]);
     let row_a = snapshot
         .keyframe_t_ns
         .iter()
@@ -833,10 +836,9 @@ fn a_small_drift_runs_no_pose_graph() {
         LoopOutcome::Fused { .. }
     ));
     assert!(loops.pgo().runs.is_empty());
-    assert_eq!(
-        s.backend.map_correction(),
-        crate::backend::MapCorrection::default()
-    );
+    let snapshot = s.backend.snapshot(&calibration(1).t_i_c);
+    assert_eq!(snapshot.pgo_epoch, 0);
+    assert_eq!(snapshot.keyframe_raw_poses, snapshot.keyframe_poses);
 }
 
 #[test]

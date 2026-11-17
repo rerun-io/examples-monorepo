@@ -23,8 +23,8 @@
 //!    keyframe changes between the copy and the apply and B11 cannot occur.
 //!    Landmarks are host-relative and move with their host keyframe.
 //!
-//! Every applied PGO raises the epoch of the [`MapCorrection`] that the
-//! snapshot publishes for re-anchoring (PR f1).
+//! Every applied PGO raises the PGO epoch that the snapshot publishes for
+//! re-anchoring (PR f1).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -161,20 +161,10 @@ pub struct PgoState {
 }
 
 impl PgoState {
-    /// Applied PGOs so far; the [`MapCorrection`] epoch.
+    /// Applied PGOs so far; a reader re-anchors when it changes.
     pub fn epoch(&self) -> u64 {
         self.runs.len() as u64
     }
-}
-
-/// The corrections every applied PGO left on the map, for re-anchoring (PR f1).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MapCorrection {
-    /// Applied PGOs so far; a reader re-anchors when it changes.
-    pub epoch: u64,
-    /// Corrected `T_w_i` of each map keyframe a PGO moved. Every other map
-    /// keyframe keeps its raw pose.
-    pub poses: BTreeMap<FrameId, Se3<f64>>,
 }
 
 impl MapBackend {
@@ -227,22 +217,6 @@ impl MapBackend {
             iterations: report.iterations,
         });
         true
-    }
-
-    /// The corrections the PGO left on the map, with its epoch.
-    pub fn map_correction(&self) -> MapCorrection {
-        let Some(loops) = self.loops.as_ref() else {
-            return MapCorrection::default();
-        };
-        MapCorrection {
-            epoch: loops.pgo.epoch(),
-            poses: loops
-                .pgo
-                .raw
-                .keys()
-                .filter_map(|&id| Some((id, self.map.keyframe(id)?.pose)))
-                .collect(),
-        }
     }
 }
 

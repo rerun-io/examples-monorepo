@@ -777,7 +777,7 @@ impl MapSnapshot {
                 .collect(),
             loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
             loop_counts: snapshot.loop_counts,
-            pgo_epoch: snapshot.correction.epoch,
+            pgo_epoch: snapshot.pgo_epoch,
             pgo_runs: snapshot
                 .pgo_runs
                 .iter()

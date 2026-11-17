@@ -2,7 +2,7 @@
 //! bindings and the Rerun layer. Everything is copied, in id order, so a
 //! snapshot stays valid while the back end goes on (D51).
 
-use super::pgo::{MapCorrection, PgoRun};
+use super::pgo::PgoRun;
 use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
@@ -41,8 +41,9 @@ pub struct MapSnapshot {
     pub loop_counts: LoopCounts,
     /// Verified loops whose two keyframes are still in the map, oldest first.
     pub loops: Vec<SnapshotLoop>,
-    /// The PGO's corrections and epoch, for re-anchoring (PR f1).
-    pub correction: MapCorrection,
+    /// Applied PGOs so far, for re-anchoring (PR f1): a reader re-anchors
+    /// when it changes.
+    pub pgo_epoch: u64,
     /// Applied PGOs, oldest first.
     pub pgo_runs: Vec<PgoRun>,
 }
@@ -128,7 +129,7 @@ impl MapBackend {
                     ),
                 })
                 .collect(),
-            correction: self.map_correction(),
+            pgo_epoch: pgo.map_or(0, |pgo| pgo.epoch()),
             pgo_runs: pgo.map(|pgo| pgo.runs.clone()).unwrap_or_default(),
         }
     }
