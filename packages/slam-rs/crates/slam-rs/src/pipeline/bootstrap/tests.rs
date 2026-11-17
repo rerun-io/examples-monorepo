@@ -547,7 +547,9 @@ fn a_failed_replay_changes_nothing() {
             }
         }
     }
-    let (k, error) = result.expect("the replay of the accepted window fails");
+    let Some((k, error)) = result else {
+        panic!("the replay of the accepted window did not fail");
+    };
     assert_eq!(k, 61);
     assert!(matches!(error, VioError::Estimator(_)), "{error:?}");
     let BootstrapPhase::Running(driver) = &vio.bootstrap else {
