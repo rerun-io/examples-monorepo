@@ -403,14 +403,22 @@ fn tracks_above_the_latitude_limit_are_dropped() {
     let (width, height): (usize, usize) = (1024, 512);
     let config = panorama_config(false);
     let (mut rig, tiles) = expanded(width as u32, height as u32, &config);
-    let mut run = |limit: Option<f32>| {
+    let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
+        panic!("equirectangular tiles");
+    };
+    let limit: f64 = 40_f64.to_radians();
+    let kill_masks = rig.track_kill_masks(p.fy, p.cy, limit);
+    let mut run = |limited: bool| {
         let mut flow = FrameToFrameOpticalFlow::<Pattern51>::new(
             config.clone(),
             &tiles,
             FrontendOptions::default(),
         )
         .unwrap();
-        flow.set_track_latitude_limits(vec![limit; 2]).unwrap();
+        if limited {
+            flow.set_track_kill_masks(kill_masks.iter().cloned().map(Some).collect())
+                .unwrap();
+        }
         for (frame, shift) in [0, 1].into_iter().enumerate() {
             let data = textured_panorama(width, height, shift);
             rig.crop(&[ImageView {
@@ -438,13 +446,10 @@ fn tracks_above_the_latitude_limit_are_dropped() {
         }
         flow
     };
-    let limit: f32 = 40_f32.to_radians();
-    let free = run(None);
-    let limited = run(Some(limit));
-    let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
-        panic!("equirectangular tiles");
-    };
-    let latitude = |y: f32| ((f64::from(y) - p.cy) / p.fy).abs() as f32;
+    let free = run(false);
+    let limited = run(true);
+    // The mask holds whole rows: a keypoint is judged by its rounded row.
+    let latitude = |y: f32| ((f64::from(y.round()) - p.cy) / p.fy).abs();
     let tracked_above = |flow: &FrameToFrameOpticalFlow<Pattern51>| {
         let watermark = flow.last_keypoint_id_before_frame();
         (0..flow.frame().cameras[0].len())

@@ -32,9 +32,17 @@ pub enum FrontendError {
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]
     NoCameras,
-    /// Per-camera detection masks or latitude limits that do not fit the rig.
+    /// Per-camera detection masks that do not fit the rig.
     #[error("detection masks for camera {camera}: {reason}")]
     DetectionMasks {
+        /// The camera at fault, or the list count when the count is wrong.
+        camera: usize,
+        /// What the masks must be.
+        reason: &'static str,
+    },
+    /// Per-camera track kill masks that do not fit the rig.
+    #[error("track kill masks for camera {camera}: {reason}")]
+    TrackKillMasks {
         /// The camera at fault, or the list count when the count is wrong.
         camera: usize,
         /// What the masks must be.

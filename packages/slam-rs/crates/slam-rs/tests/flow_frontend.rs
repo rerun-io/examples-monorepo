@@ -616,7 +616,7 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
 
 /// The new keys at their defaults reproduce today's frontend output exactly:
 /// stereo matching on (spelled out in the JSON), no detection-only cells and
-/// no latitude limits set, against a frontend built with none of them named.
+/// no track kill masks set, against a frontend built with none of them named.
 #[test]
 fn the_panorama_keys_at_their_defaults_change_no_observation() {
     let frames = [
@@ -637,7 +637,7 @@ fn the_panorama_keys_at_their_defaults_change_no_observation() {
     named
         .set_detection_masks(vec![CellMasks::default(); 3])
         .unwrap();
-    named.set_track_latitude_limits(vec![None; 3]).unwrap();
+    named.set_track_kill_masks(vec![None; 3]).unwrap();
     for (t_ns, images) in frames.iter().enumerate() {
         plain
             .process_frame(t_ns as i64, images, &PosePrediction::default(), &[])

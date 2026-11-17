@@ -19,11 +19,13 @@ use super::{ImageView, VioError};
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
 use crate::estimator::FlowObservations;
+use crate::frontend::flow::TrackKillMask;
 use crate::frontend::input::{FrameStorage, PackedImages};
 use crate::lie::{Se3, So3};
 use dual_fisheye::DualFisheyeIngest;
 use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use nalgebra::Vector3;
+use std::sync::Arc;
 
 /// Columns each hemisphere tile reaches past its 180-degree half of the
 /// panorama, on each side, in panorama pixels: one 64 px detection cell.
@@ -266,6 +268,30 @@ impl PanoramaRig {
             .collect())
     }
 
+    /// Track kill masks for both tiles: every row whose latitude
+    /// `(v - cy) / fy` lies above `limit_rad`, plus, for stitched tiles, the
+    /// pixels whose patch would read outside the lens.
+    pub fn track_kill_masks(&self, fy: f64, cy: f64, limit_rad: f64) -> Vec<Arc<TrackKillMask>> {
+        (0..2)
+            .map(|tile| {
+                let mut mask: TrackKillMask = match &self.dual {
+                    Some(dual) => Arc::unwrap_or_clone(dual.kill_mask(tile)),
+                    None => TrackKillMask {
+                        width: self.tile_width,
+                        height: self.height,
+                        killed: vec![false; self.tile_width * self.height],
+                    },
+                };
+                for (row, killed) in mask.killed.chunks_exact_mut(self.tile_width).enumerate() {
+                    if ((row as f64 - cy) / fy).abs() > limit_rad {
+                        killed.fill(true);
+                    }
+                }
+                Arc::new(mask)
+            })
+            .collect()
+    }
+
     /// Cut the panorama into the two tiles; a pure copy with horizontal wrap.
     ///
     /// # Errors
@@ -448,7 +474,7 @@ impl PanoramaRig {
     }
 }
 
-/// The two tiles' cells and latitude limits on a freshly built frontend.
+/// The two tiles' detection cells and track kill masks on a freshly built frontend.
 ///
 /// # Errors
 ///
@@ -464,12 +490,15 @@ pub(super) fn configure(
             "tile cameras must be equirectangular".to_owned(),
         ));
     };
-    let limit: f32 = (TRACK_MAX_LATITUDE_DEG as f32).to_radians();
     frontend.set_detection_masks(panorama.detection_masks(config, tile.fy, tile.cy)?)?;
-    frontend.set_track_latitude_limits(vec![Some(limit); 2])?;
-    if let Some(dual) = &panorama.dual {
-        frontend.set_track_kill_masks(vec![Some(dual.kill_mask(0)), Some(dual.kill_mask(1))])?;
-    }
+    let limit: f64 = TRACK_MAX_LATITUDE_DEG.to_radians();
+    frontend.set_track_kill_masks(
+        panorama
+            .track_kill_masks(tile.fy, tile.cy, limit)
+            .into_iter()
+            .map(Some)
+            .collect(),
+    )?;
     Ok(())
 }
 
