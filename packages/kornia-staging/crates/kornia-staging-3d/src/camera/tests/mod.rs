@@ -154,3 +154,41 @@ fn inverse_stops_backtracking_when_the_candidate_cannot_move() {
 
 #[cfg(feature = "serde")]
 mod basalt;
+
+#[test]
+fn to_f32_narrows_every_parameter_and_refuses_an_invalid_narrowed_model() {
+    let kb4 = [400.0, 400.0, 320.0, 240.0, 0.01, -0.002, 0.0003, 0.0];
+    let mut fisheye = [0.0; 16];
+    fisheye[..4].copy_from_slice(&[400.0, 400.0, 320.0, 240.0]);
+    let models = [
+        CameraModelKind::Pinhole(Pinhole::new([400.1, 410.2, 320.3, 240.4]).unwrap()),
+        CameraModelKind::Kb4(KannalaBrandt4::new(kb4).unwrap()),
+        CameraModelKind::BrownConrady(BrownConrady::new([1.0; 18], Some(0.7)).unwrap()),
+        CameraModelKind::Fisheye624(Fisheye624::new(fisheye).unwrap()),
+    ];
+    for model in models {
+        let narrowed = model.to_f32().unwrap();
+        let expected = match model {
+            CameraModelKind::Pinhole(m) => {
+                CameraModelKind::Pinhole(Pinhole::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::Kb4(m) => {
+                CameraModelKind::Kb4(KannalaBrandt4::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::BrownConrady(m) => CameraModelKind::BrownConrady(
+                BrownConrady::new(
+                    m.params().map(|v| v as f32),
+                    m.valid_radius().map(|v| v as f32),
+                )
+                .unwrap(),
+            ),
+            CameraModelKind::Fisheye624(m) => {
+                CameraModelKind::Fisheye624(Fisheye624::new(m.params().map(|v| v as f32)).unwrap())
+            }
+        };
+        assert_eq!(narrowed, expected);
+    }
+    // A focal length past f32's range narrows to infinity: no camera.
+    let huge = CameraModelKind::Pinhole(Pinhole::new([1e300, 400.0, 320.0, 240.0]).unwrap());
+    assert!(huge.to_f32().is_none());
+}

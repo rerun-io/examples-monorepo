@@ -30,9 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use kornia_staging_3d::camera::{
-    BrownConrady, CameraModelKind, Fisheye624, KannalaBrandt4, Pinhole,
-};
+use kornia_staging_3d::camera::CameraModelKind;
 use kornia_staging_slam::sqrt_ba::{
     GbaError, GbaLandmark, GbaObservation, GbaOptions, GbaProblem, GbaReport, GbaRigCamera,
     PcgOptions, RelPoseConstraint, solve_global,
@@ -68,28 +66,9 @@ impl GbaRig {
                 imu_from_camera: *t,
             })
             .collect();
-        (cameras.len() == t_i_c.len() && cameras.iter().all(|c| cast_model(&c.model).is_some()))
+        (cameras.len() == t_i_c.len() && cameras.iter().all(|c| c.model.to_f32().is_some()))
             .then_some(Self { cameras })
     }
-}
-
-/// A staged camera model in f32.
-fn cast_model(model: &CameraModelKind<f64>) -> Option<CameraModelKind<f32>> {
-    let narrow = |v: f64| v as f32;
-    Some(match model {
-        CameraModelKind::Pinhole(m) => {
-            CameraModelKind::Pinhole(Pinhole::new(m.params().map(narrow)).ok()?)
-        }
-        CameraModelKind::Kb4(m) => {
-            CameraModelKind::Kb4(KannalaBrandt4::new(m.params().map(narrow)).ok()?)
-        }
-        CameraModelKind::BrownConrady(m) => CameraModelKind::BrownConrady(
-            BrownConrady::new(m.params().map(narrow), m.valid_radius().map(narrow)).ok()?,
-        ),
-        CameraModelKind::Fisheye624(m) => {
-            CameraModelKind::Fisheye624(Fisheye624::new(m.params().map(narrow)).ok()?)
-        }
-    })
 }
 
 /// The LM options from `backend.gba_*`: rootba `bal`'s, no pose held constant.
@@ -321,7 +300,7 @@ pub fn solve(
             .iter()
             .map(|c| {
                 Some(GbaRigCamera {
-                    model: cast_model(&c.model)?,
+                    model: c.model.to_f32()?,
                     imu_from_camera: c.imu_from_camera.cast(),
                 })
             })
