@@ -284,9 +284,8 @@ impl KeyframeMap {
     /// Landmark `id` in the world frame: `T_w_i(host) * t_i_c[cam] *
     /// unproject(direction) / inv_dist`, as the window builds it. `None` for an
     /// unknown landmark, host or camera, or a point at infinity (`inv_dist <= 0`)
-    /// or not finite. The global BA places landmarks by its own rule
-    /// (`gba::map_problem`), which keeps a finite point with a negative
-    /// `inv_dist`.
+    /// or not finite. The snapshot, loop closing and the global BA all place
+    /// landmarks with it.
     pub fn landmark_world(
         &self,
         id: LandmarkId,

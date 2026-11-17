@@ -12,7 +12,7 @@
 //! - one `T_i_w` per map keyframe that has a row; cameras are fixed;
 //! - one world point per landmark with at least two observations and a finite
 //!   position (RootSLAM's export rule, `map_database.cpp:934-944`), computed once
-//!   from its host-relative form;
+//!   by [`KeyframeMap::landmark_world`], the map's one conversion and validity rule;
 //! - a keyframe with fewer than `min_obs_per_kf` observations loses its
 //!   reprojection rows and keeps its pose-graph rows (B22: rootba drops it);
 //! - one rel-pose row per pose-graph edge (spanning tree, loop closures,
@@ -37,13 +37,12 @@ use kornia_staging_slam::sqrt_ba::{
     GbaError, GbaLandmark, GbaObservation, GbaOptions, GbaProblem, GbaReport, GbaRigCamera,
     PcgOptions, RelPoseConstraint, solve_global,
 };
-use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector2, Vector3, Vector4};
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
 use super::map::host_relative;
 use super::{KeyframeMap, MapBackend, PoseGraphEdge};
 
 use crate::config::VioConfig;
-use crate::landmark::StereographicParam;
 use crate::lie::{Se3, So3};
 use crate::types::{FrameId, LandmarkId};
 /// The solver's report types, for callers that read a [`GbaRun`].
@@ -121,7 +120,8 @@ pub struct GbaCounts {
     pub pose_graph_rows: usize,
     /// Observations of keyframes under `min_obs_per_kf`.
     pub dropped_observations: usize,
-    /// Landmarks without a finite world position (at infinity).
+    /// Landmarks without a world position ([`KeyframeMap::landmark_world`]: at
+    /// infinity, or an unknown host or camera).
     pub nonfinite_landmarks: usize,
 }
 
@@ -188,18 +188,6 @@ pub enum GbaDriverError {
     Threads(String),
 }
 
-/// The world position of a host-relative landmark: the GBA's own rule, which
-/// keeps a finite point with a negative `inv_dist` (see
-/// [`KeyframeMap::landmark_world`]).
-fn world_point(
-    world_from_camera: &Se3<f64>,
-    direction: &Vector2<f64>,
-    inv_dist: f64,
-) -> Vector3<f64> {
-    let bearing: Vector4<f64> = StereographicParam::unproject(direction);
-    *world_from_camera * (Vector3::new(bearing[0], bearing[1], bearing[2]) / inv_dist)
-}
-
 /// The map as a global BA problem (DESIGN §3.1). `edges` are the pose-graph
 /// edges; an edge to a keyframe the map does not hold is skipped.
 pub fn map_problem(
@@ -216,21 +204,10 @@ pub fn map_problem(
     let mut landmark_ids: Vec<LandmarkId> = Vec::new();
     let mut landmarks: Vec<GbaLandmark<f64>> = Vec::new();
     for (&id, landmark) in map.landmarks() {
-        let (Some(host), Some(extrinsic)) = (
-            keyframes.get(&landmark.host.frame_id),
-            t_i_c.get(landmark.host.cam_id),
-        ) else {
-            continue;
-        };
-        let position: Vector3<f64> = world_point(
-            &(host.pose * *extrinsic),
-            &landmark.direction,
-            landmark.inv_dist,
-        );
-        if !position.iter().all(|v| v.is_finite()) {
+        let Some(position) = map.landmark_world(id, t_i_c) else {
             counts.nonfinite_landmarks += 1;
             continue;
-        }
+        };
         let observations: Vec<GbaObservation<f64>> = landmark
             .obs
             .iter()

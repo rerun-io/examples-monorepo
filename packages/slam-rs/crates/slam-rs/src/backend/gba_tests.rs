@@ -10,6 +10,7 @@ use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
 use super::*;
 use crate::backend::{MapConfig, PoseGraphEdge, PoseGraphEdgeKind};
 use crate::estimator::StampLandmark;
+use crate::landmark::StereographicParam;
 use crate::lie::So3;
 use crate::types::{LandmarkId, TimeCamId};
 
