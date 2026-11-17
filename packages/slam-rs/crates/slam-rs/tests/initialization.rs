@@ -46,7 +46,7 @@ fn nine_landmarks_wait_and_ten_start_with_fresh_imu_and_prior() {
 
 fn check_threshold<S: Scalar>() {
     let make = || {
-        SqrtKeypointVio::<S>::with_default_gravity(common::calibration().cast(), common::config())
+        SqrtKeypointVio::<S>::new(common::calibration().cast(), common::config())
             .unwrap()
     };
     let mut waiting = make();

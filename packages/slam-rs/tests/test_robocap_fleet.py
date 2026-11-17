@@ -27,7 +27,7 @@ def test_reference_csv_is_scored_without_a_ground_truth_gate(
     )
     path: Path = tmp_path / "reference.csv"
     write_trajectory(path, truth)
-    run: SegmentRun = SegmentRun(truth, 30, 0, 3.0, empty_trajectory(), 2.0, "a" * 64)
+    run: SegmentRun = SegmentRun(truth, 30, 0, 3.0, empty_trajectory(), 2.0, "a" * 64, "b" * 64)
     monkeypatch.setattr(robocap_fleet, "run_robocap", lambda *_args, **_kwargs: run)
     measurement: tuple[RobocapRow, Trajectory] = measure(
         settings, benchmarks.robocap.sessions[0], Config(reference_csv=path), Machine("test", "x86_64", "test", 1)
@@ -103,7 +103,7 @@ def test_scoring_refusal_preserves_outputs_and_cost(
     reference: Path = tmp_path / "reference.csv"
     write_trajectory(reference, truth)
     output: Path = tmp_path / "output.json"
-    run: SegmentRun = SegmentRun(estimate, 20, 0, 2.0, empty_trajectory(), 4.0, "a" * 64)
+    run: SegmentRun = SegmentRun(estimate, 20, 0, 2.0, empty_trajectory(), 4.0, "a" * 64, "b" * 64)
     if failure == "no-reference":
         benchmarks = replace(benchmarks, robocap=replace(benchmarks.robocap, sessions=(replace(benchmarks.robocap.sessions[0], reference_csv=None),)))
     monkeypatch.setattr(robocap_fleet, "load_slam_config", lambda: settings)

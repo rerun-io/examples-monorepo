@@ -259,10 +259,6 @@ pub struct VioConfig {
     /// Minimum baseline before a landmark is triangulated, in metres.
     #[serde(rename = "config.vio_min_triangulation_dist")]
     pub vio_min_triangulation_dist: f64,
-    /// Magnitude of gravity, m/s², along world -Z; the dataset's own value
-    /// (TartanAir synthesises its IMU with 9.8).
-    #[serde(rename = "config.vio_gravity_ms2")]
-    pub vio_gravity_ms2: f64,
     /// Levenberg-Marquardt iteration budget per frame.
     #[serde(rename = "config.vio_max_iterations")]
     pub vio_max_iterations: i32,
@@ -360,7 +356,6 @@ impl Default for VioConfig {
             vio_obs_std_dev: 0.5,
             vio_obs_huber_thresh: 1.0,
             vio_min_triangulation_dist: 0.05,
-            vio_gravity_ms2: 9.81,
             vio_max_iterations: 7,
             vio_enforce_realtime: false,
             vio_use_lm: true,

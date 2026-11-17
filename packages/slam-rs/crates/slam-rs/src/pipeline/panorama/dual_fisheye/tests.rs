@@ -9,6 +9,9 @@ use kornia_image::Image;
 use kornia_staging_imgproc::panorama::{
     assemble_panorama, hemisphere_tile_table, lens_level1, remap,
 };
+use kornia_staging_3d::camera::MeiDistortion;
+use nalgebra::{Matrix3, UnitQuaternion};
+use kornia_staging_3d::camera::formats::insta360::{FactoryLens, WindowCrop, parse_lens_string};
 use std::f64::consts::PI;
 
 /// The Insta360 X4 Air clip's V6 factory string, the one `kornia-staging-io`'s tests hold
@@ -21,8 +24,56 @@ const CROP: WindowCrop = WindowCrop {
 };
 const READOUT_S: f64 = 0.015883;
 
-fn lenses() -> DualFisheyeLenses {
-    DualFisheyeLenses::parse(V6, Some(CROP), [1920, 1920], READOUT_S).unwrap()
+/// The two factory lenses of the clip, in lens order, at the 1920x1920 lens image's pixels.
+struct Lenses {
+    lenses: Vec<FactoryLens>,
+}
+
+impl Lenses {
+    /// `T_P_lens` in the factory rig frame.
+    fn pano_from_lens(&self, k: usize) -> Se3<f64> {
+        let pose = &self.lenses[k].pano_from_lens;
+        Se3::new(
+            So3::from_unit_quaternion(UnitQuaternion::from_rotation_matrix(&pose.rotation)),
+            pose.translation.vector,
+        )
+    }
+}
+
+fn lenses() -> Lenses {
+    Lenses {
+        lenses: parse_lens_string(V6, Some(CROP), [1920, 1920]).unwrap(),
+    }
+}
+
+/// The two lens cameras as `mei_v6` calibration models.
+fn mei(lenses: &Lenses, k: usize) -> BasaltCamera<f64> {
+    let camera = &lenses.lenses[k].camera;
+    let [fx, fy, cx, cy, xi] = camera.params();
+    let MeiDistortion::V6 { d } = camera.distortion() else {
+        panic!("a V6 string");
+    };
+    BasaltCamera::MeiV6(crate::calib::MeiV6Params {
+        fx,
+        fy,
+        cx,
+        cy,
+        xi,
+        half_field_rad: camera.half_field_rad(),
+        d,
+    })
+}
+
+/// [`stitch`] of the clip's two lenses as the calibration states them.
+fn two_camera_stitch(lens: ImageSize, margin: usize) -> Result<LensStitch, VioError> {
+    let calibration = lens_calibration(&lenses());
+    let models = [0, 1].map(|k| calibration.intrinsics[k].to_staged().unwrap());
+    stitch(
+        [&models[0], &models[1]],
+        &(calibration.t_i_c[0].inverse() * calibration.t_i_c[1]),
+        lens,
+        margin,
+    )
 }
 
 /// `R_imu_P` of the X4 Air (the permutation nearest the epipolar fit on that clip, 0.13 deg
@@ -36,7 +87,7 @@ fn imu_from_pano() -> Se3<f64> {
 }
 
 /// A two-lens rig as the converter writes it: `T_imu_lens = T_imu_P * T_P_lens`.
-fn lens_calibration(lenses: &DualFisheyeLenses) -> Calibration<f64> {
+fn lens_calibration(lenses: &Lenses) -> Calibration<f64> {
     let mut calibration =
         Calibration::from_json_str(include_str!("../../../../tests/fixtures/msdmg_calib.json"))
             .unwrap();
@@ -44,7 +95,8 @@ fn lens_calibration(lenses: &DualFisheyeLenses) -> Calibration<f64> {
         .map(|k| imu_from_pano() * lenses.pano_from_lens(k))
         .collect();
     calibration.resolution = vec![[1920, 1920]; 2];
-    calibration.intrinsics.truncate(2);
+    calibration.intrinsics = vec![mei(lenses, 0), mei(lenses, 1)];
+    calibration.readout_s = vec![Some(READOUT_S); 2];
     calibration.vignette.clear();
     calibration
 }
@@ -60,8 +112,7 @@ fn config() -> VioConfig {
 }
 
 fn rig() -> (PanoramaRig, Calibration<f64>) {
-    let lenses = lenses();
-    PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses), lenses).unwrap()
+    PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses())).unwrap()
 }
 
 #[test]
@@ -266,7 +317,7 @@ fn the_standalone_stitch_gives_the_lanes_panorama() {
     };
     // The panorama is the tile centres, so any margin gives the same pixels.
     for margin in [64, 0] {
-        let stitch = lenses().stitch(lens, margin).unwrap();
+        let stitch = two_camera_stitch(lens, margin).unwrap();
         let standalone = stitch
             .panorama([&lenses_px[0], &lenses_px[1]], 1920)
             .unwrap();
@@ -275,8 +326,7 @@ fn the_standalone_stitch_gives_the_lanes_panorama() {
     }
     // Lens bytes shorter than a lens image are refused.
     assert!(
-        lenses()
-            .stitch(lens, 64)
+        two_camera_stitch(lens, 64)
             .unwrap()
             .panorama([&lenses_px[0], &lenses_px[1][1..]], 1920)
             .is_err()
@@ -292,14 +342,14 @@ fn a_wide_margin_or_a_tiny_lens_is_refused_before_the_tables() {
         height: 1920,
     };
     for margin in [481, 2000] {
-        let refused = lenses().stitch(lens, margin);
+        let refused = two_camera_stitch(lens, margin);
         assert!(
             matches!(&refused, Err(VioError::Panorama(message)) if message.contains("margin")),
             "margin {margin}: {refused:?}"
         );
     }
     for tiny in [[3, 1920], [1920, 3]] {
-        let refused = lenses().stitch(
+        let refused = two_camera_stitch(
             ImageSize {
                 width: tiny[0],
                 height: tiny[1],
@@ -370,22 +420,43 @@ fn the_kill_mask_covers_invalid_pixels_and_their_patch_radius() {
     }
 }
 
+/// The lane's tables are `LensStitch::new` over the two cameras with `P` = camera 0's axes: tile 0 projects the
+/// bearing through camera 0, tile 1 projects `R^T d` (`R` = camera 1's rotation in camera 0) through camera 1, the
+/// arithmetic dataforge's panorama layer (`insta360_io::PanoramaStitch`) uses.
 #[test]
-fn the_key_and_the_lenses_must_agree() {
-    let lenses = lenses();
-    let off = VioConfig {
-        panorama_dual_fisheye: false,
-        ..config()
+fn the_lane_tables_are_lens_stitch_of_the_two_cameras_and_their_relative_rotation() {
+    let calibration = lens_calibration(&lenses());
+    let (rig, _) = rig();
+    let models = [0, 1].map(|k| calibration.intrinsics[k].to_staged().unwrap());
+    let relative: nalgebra::Rotation3<f64> = nalgebra::Rotation3::from_matrix_unchecked(
+        (calibration.t_i_c[0].inverse() * calibration.t_i_c[1])
+            .rotation
+            .matrix(),
+    );
+    let geometry = TileGeometry {
+        hemisphere_width: 960,
+        height: 960,
+        margin: super::super::TILE_MARGIN_PX,
     };
-    assert!(
-        PanoramaRig::expand_dual_fisheye(&off, lens_calibration(&lenses), lenses.clone()).is_err()
-    );
-    let mut swapped = lens_calibration(&lenses);
-    swapped.t_i_c.swap(0, 1);
-    assert!(
-        PanoramaRig::expand_dual_fisheye(&config(), swapped, lenses).is_err(),
-        "lens order is checked"
-    );
+    let lens = ImageSize {
+        width: 1920,
+        height: 1920,
+    };
+    let expected = LensStitch::new(geometry, lens, |k, d| {
+        let local: Vector3<f64> = if k == 0 {
+            Vector3::from(d)
+        } else {
+            relative.inverse_transform_vector(&Vector3::from(d))
+        };
+        models[k].project(local.into()).ok()
+    })
+    .unwrap();
+    for k in 0..2 {
+        assert!(
+            rig.tile_lut(k).unwrap().samples() == expected.tables()[k].samples(),
+            "tile {k}"
+        );
+    }
 }
 
 /// An equidistant test lens looking along tile `k`'s axis: `r = 560 theta` about the image centre.

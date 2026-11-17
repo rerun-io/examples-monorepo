@@ -145,39 +145,23 @@ impl Vio {
     /// `ValueError` (D32). `threads` controls only the CPU pool and is accepted
     /// but inert on the GPU lane.
     ///
-    /// `dual_fisheye` (with `config.panorama_dual_fisheye`) is the factory
-    /// calibration a two-lens rig is stitched from: `(lens_string, window_crop,
-    /// readout_s)`, the raw V3/V6 string, the window crop
-    /// `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` or `None`, and the
-    /// signed rolling-shutter readout (positive = top to bottom). Rust parses it.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto", dual_fisheye = None))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto"))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
         backend: &str,
-        dual_fisheye: Option<(String, Option<[i64; 6]>, f64)>,
     ) -> PyResult<Self> {
         let request: BackendRequest = backend.parse().map_err(PyValueError::new_err)?;
         let backend: Backend = slam_rs::select_backend(request).map_err(value_error)?;
-        let lenses: Option<slam_rs::DualFisheyeLenses> = dual_fisheye
-            .map(|(text, crop, readout_s)| {
-                let size: [u32; 2] = *calibration.inner.resolution.first().ok_or_else(|| {
-                    PyValueError::new_err("a dual-fisheye rig needs its lens cameras")
-                })?;
-                slam_rs::DualFisheyeLenses::parse(&text, window_crop(crop)?, size, readout_s)
-                    .map_err(value_error)
-            })
-            .transpose()?;
         Ok(Self {
-            inner: slam_rs::Vio::with_panorama_lenses(
+            inner: slam_rs::Vio::with_backend(
                 config.inner.clone(),
                 calibration.inner.clone(),
                 frontend_options(threads, max_keypoints),
                 backend,
-                lenses,
             )
             .map_err(value_error)?,
         })
@@ -950,19 +934,6 @@ impl VioConfig {
         self.inner.panorama_dual_fisheye
     }
 
-    /// `config.vio_gravity_ms2`: the magnitude of gravity, m/s². A dataset fact
-    /// (TartanAir synthesises its IMU with 9.8), so the feed sets it from the
-    /// recording when the recording carries one.
-    #[getter]
-    fn vio_gravity_ms2(&self) -> f64 {
-        self.inner.vio_gravity_ms2
-    }
-
-    #[setter]
-    fn set_vio_gravity_ms2(&mut self, gravity: f64) {
-        self.inner.vio_gravity_ms2 = gravity;
-    }
-
     /// `config.vio_bootstrap`: `"stereo"` (the default) or `"inertial"`.
     #[getter]
     fn vio_bootstrap(&self) -> &'static str {
@@ -1085,6 +1056,18 @@ impl Calibration {
                 values.to_pyarray(py).reshape((4, 4))
             })
             .collect()
+    }
+
+    /// Gravity magnitude, m/s²: the recording's, or 9.81 when it states none.
+    #[getter]
+    fn gravity_ms2(&self) -> f64 {
+        self.inner.gravity_ms2
+    }
+
+    /// Rolling-shutter readout per camera, seconds, `None` where the camera states none.
+    #[getter]
+    fn readout_s(&self) -> Vec<Option<f64>> {
+        self.inner.readout_s.clone()
     }
 
     /// IMU sample rate in Hz.
@@ -1465,6 +1448,7 @@ fn camera_parts(object: &Bound<'_, PyAny>, index: usize) -> PyResult<CoreCameraP
             &what,
             "a float or None",
         )?,
+        readout_s: extract_attribute(object, "readout_s", &what, "a float or None")?,
         imu_t_cam_row_major,
     })
 }
@@ -1479,6 +1463,7 @@ fn imu_parts(object: &Bound<'_, PyAny>) -> PyResult<CoreImuParts<f64>> {
         gyro_bias_std: extract_attribute(object, "gyro_bias_std", what, "a float")?,
         accel_bias_std: extract_attribute(object, "accel_bias_std", what, "a float")?,
         cam_time_offset_ns: extract_attribute(object, "cam_time_offset_ns", what, "an integer")?,
+        gravity_ms2: extract_attribute(object, "gravity_ms2", what, "a float or None")?,
     })
 }
 

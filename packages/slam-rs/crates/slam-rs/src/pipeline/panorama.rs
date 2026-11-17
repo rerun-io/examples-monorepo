@@ -13,7 +13,6 @@
 
 mod dual_fisheye;
 
-pub use dual_fisheye::DualFisheyeLenses;
 
 use super::{ImageView, VioError};
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
@@ -153,27 +152,26 @@ impl PanoramaRig {
         ))
     }
 
-    /// Expand a two-lens rig (lens cameras posed in the IMU frame, lens order)
-    /// into two equirectangular hemisphere tiles stitched from the lens images
-    /// through the factory model; see [`DualFisheyeLenses`].
+    /// Expand a two-lens rig (back-to-back cameras posed in the IMU frame) into
+    /// two equirectangular hemisphere tiles stitched from the lens images through
+    /// the calibration's camera models; see [`stitch`].
     ///
     /// Tile `k`: `fx = fy = 960 / pi`, principal point at the tile centre,
     /// `lon_max` to the tile's outer pixel edge; `T_imu_tile_k = T_imu_P *
-    /// (Ry(k pi), c_k)` with `c_k` lens `k`'s centre in `P`. The panorama they
+    /// (Ry(k pi), c_k)` with `c_k` camera `k`'s centre in `P` (camera 0's axes at
+    /// the midpoint of the two centres). The panorama they
     /// form is 1920x960: tile columns `[margin, margin + 960)` of tile 0, then
     /// of tile 1.
     ///
     /// # Errors
     ///
-    /// [`VioError::Panorama`] when `config.panorama_dual_fisheye` is off, the
-    /// rig is not two equal even-sized lens images, or lens 1's extrinsics
-    /// disagree with lens 0's and the factory rig.
+    /// [`VioError::Panorama`] when the rig is not two equal even-sized lens
+    /// images, a camera model does not convert, or the two readouts differ.
     pub fn expand_dual_fisheye(
         config: &VioConfig,
         calibration: Calibration<f64>,
-        lenses: DualFisheyeLenses,
     ) -> Result<(Self, Calibration<f64>), VioError> {
-        let expanded = dual_fisheye::expand(config, calibration, lenses)?;
+        let expanded = dual_fisheye::expand(config, calibration)?;
         let geometry = expanded.geometry;
         let (tile_width, height) = (geometry.width(), geometry.height);
         let margin: i64 = geometry.margin as i64;

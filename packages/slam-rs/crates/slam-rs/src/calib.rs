@@ -42,6 +42,14 @@ pub enum CalibError {
         /// Number of `resolution` entries.
         resolutions: usize,
     },
+    /// `rolling_shutter_readout_s`, when present, must have one entry per camera.
+    #[error("calibration is ragged: {cameras} cameras, {readouts} rolling-shutter readouts")]
+    RaggedReadouts {
+        /// Number of cameras.
+        cameras: usize,
+        /// Number of `rolling_shutter_readout_s` entries.
+        readouts: usize,
+    },
     /// A camera model name outside the six supported calibration variants.
     #[error("camera {index}: unknown camera model {model:?}")]
     UnknownCameraModel {
@@ -160,6 +168,48 @@ pub struct UnifiedParams<S> {
     pub alpha: S,
 }
 
+/// Unified (Mei) sphere with the Insta360 V3 factory distortion: `mei_v3`, coefficients
+/// `xi, half_field_rad, k1, k2, k3, p1, p2` after `fx fy cx cy`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MeiV3Params<S> {
+    /// Focal length along image x, pixels.
+    pub fx: S,
+    /// Focal length along image y, pixels.
+    pub fy: S,
+    /// Principal point x, pixels.
+    pub cx: S,
+    /// Principal point y, pixels.
+    pub cy: S,
+    /// Sphere offset.
+    pub xi: S,
+    /// Largest angle off the optical axis that projects, radians.
+    pub half_field_rad: S,
+    /// Radial `k1 k2 k3`.
+    pub k: [S; 3],
+    /// Tangential `p1 p2`.
+    pub p: [S; 2],
+}
+
+/// Unified (Mei) sphere with the Insta360 V6 factory distortion: `mei_v6`, coefficients
+/// `xi, half_field_rad, d0 .. d12` after `fx fy cx cy`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MeiV6Params<S> {
+    /// Focal length along image x, pixels.
+    pub fx: S,
+    /// Focal length along image y, pixels.
+    pub fy: S,
+    /// Principal point x, pixels.
+    pub cx: S,
+    /// Principal point y, pixels.
+    pub cy: S,
+    /// Sphere offset.
+    pub xi: S,
+    /// Largest angle off the optical axis that projects, radians.
+    pub half_field_rad: S,
+    /// `d0..d4` radial, `d5..d8` tangential, `d9..d12` thin prism.
+    pub d: [S; 13],
+}
+
 /// One camera's projection model.
 ///
 /// Seven variants can be parsed. `ucm` has no projection implementation and
@@ -191,6 +241,12 @@ pub enum BasaltCamera<S> {
     /// `equirectangular`.
     #[serde(rename = "equirectangular")]
     Equirectangular(EquirectangularParams<S>),
+    /// `mei_v3`.
+    #[serde(rename = "mei_v3")]
+    MeiV3(MeiV3Params<S>),
+    /// `mei_v6`.
+    #[serde(rename = "mei_v6")]
+    MeiV6(MeiV6Params<S>),
 }
 
 impl<S: Copy> BasaltCamera<S> {
@@ -204,6 +260,8 @@ impl<S: Copy> BasaltCamera<S> {
             Self::ExtendedUnified(_) => "eucm",
             Self::Unified(_) => "ucm",
             Self::Equirectangular(_) => "equirectangular",
+            Self::MeiV3(_) => "mei_v3",
+            Self::MeiV6(_) => "mei_v6",
         }
     }
 
@@ -221,6 +279,15 @@ impl<S: Copy> BasaltCamera<S> {
             Self::ExtendedUnified(p) => vec![p.fx, p.fy, p.cx, p.cy, p.alpha, p.beta],
             Self::Unified(p) => vec![p.fx, p.fy, p.cx, p.cy, p.alpha],
             Self::Equirectangular(p) => vec![p.fx, p.fy, p.cx, p.cy, p.lon_max],
+            Self::MeiV3(p) => [p.fx, p.fy, p.cx, p.cy, p.xi, p.half_field_rad]
+                .into_iter()
+                .chain(p.k)
+                .chain(p.p)
+                .collect(),
+            Self::MeiV6(p) => [p.fx, p.fy, p.cx, p.cy, p.xi, p.half_field_rad]
+                .into_iter()
+                .chain(p.d)
+                .collect(),
         }
     }
 
@@ -300,6 +367,25 @@ impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
                 cy: convert(p.cy),
                 lon_max: convert(p.lon_max),
             }),
+            Self::MeiV3(p) => BasaltCamera::MeiV3(MeiV3Params {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                xi: convert(p.xi),
+                half_field_rad: convert(p.half_field_rad),
+                k: p.k.map(convert),
+                p: p.p.map(convert),
+            }),
+            Self::MeiV6(p) => BasaltCamera::MeiV6(MeiV6Params {
+                fx: convert(p.fx),
+                fy: convert(p.fy),
+                cx: convert(p.cx),
+                cy: convert(p.cy),
+                xi: convert(p.xi),
+                half_field_rad: convert(p.half_field_rad),
+                d: p.d.map(convert),
+            }),
         }
     }
 }
@@ -313,7 +399,7 @@ impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
         kornia_staging_3d::camera::formats::ConversionError,
     > {
         use kornia_staging_3d::camera::{
-            CameraModelKind, Equirectangular,
+            CameraModelKind, Equirectangular, Mei, MeiDistortion,
             formats::{BasaltCamera as Supported, ConversionError},
         };
         let supported = match *self {
@@ -325,6 +411,16 @@ impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
             Self::Equirectangular(p) => {
                 let camera = Equirectangular::new([p.fx, p.fy, p.cx, p.cy, p.lon_max])?;
                 return Ok(CameraModelKind::Equirectangular(camera));
+            }
+            Self::MeiV3(p) => {
+                let distortion = MeiDistortion::V3 { k: p.k, p: p.p };
+                let camera = Mei::new([p.fx, p.fy, p.cx, p.cy, p.xi], p.half_field_rad, distortion)?;
+                return Ok(CameraModelKind::Mei(camera));
+            }
+            Self::MeiV6(p) => {
+                let distortion = MeiDistortion::V6 { d: p.d };
+                let camera = Mei::new([p.fx, p.fy, p.cx, p.cy, p.xi], p.half_field_rad, distortion)?;
+                return Ok(CameraModelKind::Mei(camera));
             }
             Self::Unified(_) => return Err(ConversionError::Unsupported(self.name().into())),
         };
@@ -477,9 +573,17 @@ pub struct Calibration<S: Scalar> {
     pub gyro_bias_std: Vector3<S>,
     /// Continuous-time accelerometer bias random walk.
     pub accel_bias_std: Vector3<S>,
+    /// Gravity magnitude, m/s²: the recording's when it states one, else [`DEFAULT_GRAVITY_MS2`].
+    pub gravity_ms2: f64,
+    /// Rolling-shutter readout per camera, seconds from the first row to the last (the frame time is the middle
+    /// row's); `None` for a global-shutter camera or one whose recording states none.
+    pub readout_s: Vec<Option<f64>>,
     /// Keys the struct does not model, such as EuRoC's mocap block.
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
+
+/// Gravity magnitude, m/s², of a calibration that states none.
+pub const DEFAULT_GRAVITY_MS2: f64 = 9.81;
 
 /// The wire form: what cereal actually writes, before the quaternions are
 /// normalized and the lists checked against each other.
@@ -503,6 +607,9 @@ struct CalibrationJson<S: Scalar> {
     #[serde(with = "vector3_json")]
     accel_bias_std: Vector3<S>,
     cam_time_offset_ns: i64,
+    gravity_ms2: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    rolling_shutter_readout_s: Vec<Option<f64>>,
     #[serde(flatten)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -523,6 +630,8 @@ impl<S: Scalar> Default for CalibrationJson<S> {
             gyro_bias_std: Vector3::repeat(S::from_literal(0.0001)),
             accel_bias_std: Vector3::repeat(S::from_literal(0.001)),
             cam_time_offset_ns: 0,
+            gravity_ms2: DEFAULT_GRAVITY_MS2,
+            rolling_shutter_readout_s: Vec::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -543,6 +652,8 @@ impl<S: Scalar> Default for Calibration<S> {
             accel_noise_std: Vector3::repeat(S::from_literal(0.016)),
             gyro_bias_std: Vector3::repeat(S::from_literal(0.0001)),
             accel_bias_std: Vector3::repeat(S::from_literal(0.001)),
+            gravity_ms2: DEFAULT_GRAVITY_MS2,
+            readout_s: Vec::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -568,13 +679,15 @@ pub struct CameraParts<S> {
     /// Principal point y, pixels.
     pub cy: S,
     /// Catalog model name. Accepts `kb4`, `radtan8`, `pinhole-radtan8`,
-    /// `pinhole`, `ds`, `eucm` and `ucm`.
+    /// `pinhole`, `ds`, `eucm`, `equirectangular`, `mei_v3`, `mei_v6` and `ucm`.
     pub model: String,
     /// Exactly the coefficients the model uses: four for `kb4`, eight for
     /// `radtan8` in the order `k1 k2 p1 p2 k3 k4 k5 k6`.
     pub distortion: Vec<S>,
     /// The recording's `rpmax`, required for `radtan8` and ignored by other models.
     pub distortion_valid_radius: Option<S>,
+    /// Rolling-shutter readout, seconds, when the camera states one.
+    pub readout_s: Option<f64>,
     /// The camera pose in the IMU frame as a 4x4 matrix, flattened in C order
     /// (row by row) — what `numpy.ndarray.ravel()` gives for the
     /// `CameraCalib.imu_T_cam` field.
@@ -601,6 +714,8 @@ pub struct ImuParts<S> {
     pub accel_bias_std: S,
     /// Added to a camera timestamp to reach the IMU clock.
     pub cam_time_offset_ns: i64,
+    /// Gravity magnitude, m/s², when the recording states one.
+    pub gravity_ms2: Option<f64>,
 }
 
 impl<S: Scalar + Serialize + DeserializeOwned> Calibration<S> {
@@ -620,6 +735,16 @@ impl<S: Scalar + Serialize + DeserializeOwned> Calibration<S> {
                 resolutions: raw.resolution.len(),
             });
         }
+        let readout_s: Vec<Option<f64>> = if raw.rolling_shutter_readout_s.is_empty() {
+            vec![None; raw.intrinsics.len()]
+        } else if raw.rolling_shutter_readout_s.len() == raw.intrinsics.len() {
+            raw.rolling_shutter_readout_s
+        } else {
+            return Err(CalibError::RaggedReadouts {
+                cameras: raw.intrinsics.len(),
+                readouts: raw.rolling_shutter_readout_s.len(),
+            });
+        };
         if !raw.unknown.is_empty() {
             let names: Vec<&str> = raw.unknown.keys().map(String::as_str).collect();
             log::warn!(
@@ -647,6 +772,8 @@ impl<S: Scalar + Serialize + DeserializeOwned> Calibration<S> {
             accel_noise_std: raw.accel_noise_std,
             gyro_bias_std: raw.gyro_bias_std,
             accel_bias_std: raw.accel_bias_std,
+            gravity_ms2: raw.gravity_ms2,
+            readout_s,
             unknown: raw.unknown,
         })
     }
@@ -666,6 +793,12 @@ impl<S: Scalar + Serialize + DeserializeOwned> Calibration<S> {
             gyro_bias_std: self.gyro_bias_std,
             accel_bias_std: self.accel_bias_std,
             cam_time_offset_ns: self.cam_time_offset_ns,
+            gravity_ms2: self.gravity_ms2,
+            rolling_shutter_readout_s: if self.readout_s.iter().all(Option::is_none) {
+                Vec::new()
+            } else {
+                self.readout_s.clone()
+            },
             unknown: self.unknown.clone(),
         };
         Ok(serde_json::to_string_pretty(&Value0 { value0: raw })?)
@@ -711,6 +844,8 @@ impl<S: Scalar> Calibration<S> {
             accel_noise_std: convert3(&self.accel_noise_std),
             gyro_bias_std: convert3(&self.gyro_bias_std),
             accel_bias_std: convert3(&self.accel_bias_std),
+            gravity_ms2: self.gravity_ms2,
+            readout_s: self.readout_s.clone(),
             unknown: self.unknown.clone(),
         }
     }
@@ -755,6 +890,8 @@ impl<S: Scalar> Calibration<S> {
             accel_noise_std: Vector3::repeat(imu.accel_noise_std),
             gyro_bias_std: Vector3::repeat(imu.gyro_bias_std),
             accel_bias_std: Vector3::repeat(imu.accel_bias_std),
+            gravity_ms2: imu.gravity_ms2.unwrap_or(DEFAULT_GRAVITY_MS2),
+            readout_s: cameras.iter().map(|camera| camera.readout_s).collect(),
             unknown: BTreeMap::new(),
         })
     }
@@ -866,6 +1003,31 @@ fn camera_model_from_parts<S: Scalar>(
                 cy,
                 alpha: d[0],
                 beta: d[1],
+            }))
+        }
+        "mei_v3" => {
+            expect(7, "mei_v3")?;
+            Ok(BasaltCamera::MeiV3(MeiV3Params {
+                fx,
+                fy,
+                cx,
+                cy,
+                xi: d[0],
+                half_field_rad: d[1],
+                k: [d[2], d[3], d[4]],
+                p: [d[5], d[6]],
+            }))
+        }
+        "mei_v6" => {
+            expect(15, "mei_v6")?;
+            Ok(BasaltCamera::MeiV6(MeiV6Params {
+                fx,
+                fy,
+                cx,
+                cy,
+                xi: d[0],
+                half_field_rad: d[1],
+                d: std::array::from_fn(|i| d[2 + i]),
             }))
         }
         "equirectangular" => {
@@ -1177,6 +1339,7 @@ mod tests {
             model: model.to_owned(),
             distortion,
             distortion_valid_radius: None,
+            readout_s: None,
             imu_t_cam_row_major,
         }
     }
@@ -1189,6 +1352,7 @@ mod tests {
             gyro_bias_std: 3.445_397_083_168e-5,
             accel_bias_std: 0.000_196_315_048_921_8,
             cam_time_offset_ns: 14_902_432,
+            gravity_ms2: None,
         }
     }
 
@@ -1229,6 +1393,89 @@ mod tests {
         let text: String = calib.to_json_string().unwrap();
         let reread: Calibration<f64> = Calibration::from_json_str(&text).unwrap();
         assert_close(&calib, &reread, "from_catalog_parts");
+    }
+
+    /// `mei_v3` / `mei_v6` from catalog parts reach the staged Mei camera: the same pixels as the model built
+    /// directly, a point Jacobian, an unproject that round-trips, and a JSON round trip; a wrong count is refused.
+    #[test]
+    fn mei_cameras_come_from_catalog_parts() {
+        use crate::camera::SlamCamera;
+        use kornia_staging_3d::camera::{CameraModel, Mei, MeiDistortion};
+        use nalgebra::{Matrix2x4, Vector2, Vector4};
+        let d: [f64; 13] = [
+            -0.005, 0.0016, -0.0033, 0.004, 0.0083, -0.0013, 0.024, -0.0014, 0.001, 0.0002, -0.0003,
+            0.0001, 0.00005,
+        ];
+        let v3: [f64; 7] = [2.3149, 100f64.to_radians(), 0.12, -0.05, 0.01, 0.001, -0.002];
+        let v6: Vec<f64> = [2.3149, 100f64.to_radians()].into_iter().chain(d).collect();
+        let direct: [Mei<f64>; 2] = [
+            Mei::new(
+                [420.5, 421.0, 480.0, 270.0, v3[0]],
+                v3[1],
+                MeiDistortion::V3 {
+                    k: [v3[2], v3[3], v3[4]],
+                    p: [v3[5], v3[6]],
+                },
+            )
+            .unwrap(),
+            Mei::new([420.5, 421.0, 480.0, 270.0, v6[0]], v6[1], MeiDistortion::V6 { d })
+                .unwrap(),
+        ];
+        let cameras: Vec<CameraParts<f64>> =
+            vec![a_camera("mei_v3", v3.to_vec()), a_camera("mei_v6", v6.clone())];
+        let calib: Calibration<f64> = Calibration::from_catalog_parts(&cameras, &an_imu()).unwrap();
+        assert_eq!(calib.intrinsics[0].params()[4..], v3);
+        assert_eq!(calib.intrinsics[1].params()[4..], v6[..]);
+        for (k, model) in direct.iter().enumerate() {
+            let camera: SlamCamera<f64> = SlamCamera::from_model(&calib.intrinsics[k]).unwrap();
+            assert_eq!(camera.name(), ["mei_v3", "mei_v6"][k]);
+            let point: Vector4<f64> = Vector4::new(0.3, -0.2, 0.9, 1.0);
+            let (mut pixel, mut jacobian) = (Vector2::zeros(), Matrix2x4::zeros());
+            assert!(camera.project_point(&point, &mut pixel, Some(&mut jacobian)));
+            assert_eq!([pixel.x, pixel.y], model.project([0.3, -0.2, 0.9]).unwrap());
+            assert!(jacobian.norm() > 0.0);
+            let mut ray: Vector4<f64> = Vector4::zeros();
+            assert!(camera.unproject(&pixel, &mut ray));
+            let bearing = point.xyz().normalize();
+            assert!((ray.xyz() - bearing).norm() < 1e-9, "{k}: {ray:?}");
+        }
+        let reread: Calibration<f64> =
+            Calibration::from_json_str(&calib.to_json_string().unwrap()).unwrap();
+        assert_eq!(reread.intrinsics, calib.intrinsics);
+        assert!(matches!(
+            Calibration::from_catalog_parts(&[a_camera("mei_v6", v3.to_vec())], &an_imu()),
+            Err(CalibError::WrongCoefficientCount { expected: 15, .. })
+        ));
+    }
+
+    /// Gravity and the rolling-shutter readout are the recording's: a catalog rig carries what its nodes state, a
+    /// calibration file that states none gets 9.81 and no readout, and the JSON keeps both.
+    #[test]
+    fn gravity_and_readout_come_from_the_recording() {
+        let mut cameras: Vec<CameraParts<f64>> = vec![
+            a_camera("kb4", vec![0.19, 0.04, -0.23, 0.09]),
+            a_camera("kb4", vec![0.19, 0.05, -0.24, 0.10]),
+        ];
+        cameras[1].readout_s = Some(0.0159);
+        let imu: ImuParts<f64> = ImuParts {
+            gravity_ms2: Some(9.8),
+            ..an_imu()
+        };
+        let calib: Calibration<f64> = Calibration::from_catalog_parts(&cameras, &imu).unwrap();
+        assert_eq!(calib.gravity_ms2, 9.8);
+        assert_eq!(calib.readout_s, vec![None, Some(0.0159)]);
+        let reread: Calibration<f64> =
+            Calibration::from_json_str(&calib.to_json_string().unwrap()).unwrap();
+        assert_eq!((reread.gravity_ms2, reread.readout_s), (9.8, vec![None, Some(0.0159)]));
+        assert_eq!(calib.cast::<f32>().gravity_ms2, 9.8);
+
+        let stated_none: Calibration<f64> =
+            Calibration::from_catalog_parts(&cameras[..1], &an_imu()).unwrap();
+        assert_eq!(stated_none.gravity_ms2, DEFAULT_GRAVITY_MS2);
+        let file: Calibration<f64> = Calibration::from_json_str(MSDMI).unwrap();
+        assert_eq!(file.gravity_ms2, 9.81);
+        assert!(file.readout_s.iter().all(Option::is_none));
+        assert_eq!(file.readout_s.len(), file.camera_count());
     }
 
     /// Both `radtan8` and `pinhole-radtan8` must select the same variant.

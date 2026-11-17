@@ -61,7 +61,10 @@ impl<S: Scalar> SlamCamera<S> {
             staged::CameraModelKind::DoubleSphere(_) => "ds",
             staged::CameraModelKind::Eucm(_) => "eucm",
             staged::CameraModelKind::Equirectangular(_) => "equirectangular",
-            staged::CameraModelKind::Mei(_) => "mei",
+            staged::CameraModelKind::Mei(v) => match v.distortion() {
+                staged::MeiDistortion::V3 { .. } => "mei_v3",
+                staged::MeiDistortion::V6 { .. } => "mei_v6",
+            },
         }
     }
 

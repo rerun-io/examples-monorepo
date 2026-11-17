@@ -76,6 +76,7 @@ def _kb4_statics(
         transform_translation=np.array([1.0, 2.0, 3.0]),
         transform_relation=transform_relation,
         distortion_valid_radius=distortion_valid_radius,
+        rolling_shutter_readout_s=None,
     )
 
 

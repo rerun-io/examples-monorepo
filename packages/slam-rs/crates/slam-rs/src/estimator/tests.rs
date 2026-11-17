@@ -8,7 +8,7 @@ const CONFIG: &str = include_str!("../../../../configs/msdmi_config.json");
 
 /// The fixture rig and config, `f32` as the shipped lane runs.
 fn estimator() -> SqrtKeypointVio<f32> {
-    SqrtKeypointVio::with_default_gravity(
+    SqrtKeypointVio::new(
         Calibration::<f64>::from_json_str(CALIB).unwrap().cast(),
         VioConfig::from_json_str(CONFIG).unwrap(),
     )
@@ -34,7 +34,7 @@ fn a_scalar_outside_its_domain_is_refused_before_the_estimator_exists() {
     let refuse_config = |mutate: &dyn Fn(&mut VioConfig)| -> EstimatorError {
         let mut config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
         mutate(&mut config);
-        SqrtKeypointVio::<f32>::with_default_gravity(
+        SqrtKeypointVio::<f32>::new(
             Calibration::<f64>::from_json_str(CALIB).unwrap().cast(),
             config,
         )
@@ -43,7 +43,7 @@ fn a_scalar_outside_its_domain_is_refused_before_the_estimator_exists() {
     let refuse_calibration = |mutate: &dyn Fn(&mut Calibration<f64>)| -> EstimatorError {
         let mut calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
         mutate(&mut calibration);
-        SqrtKeypointVio::<f32>::with_default_gravity(
+        SqrtKeypointVio::<f32>::new(
             calibration.cast(),
             VioConfig::from_json_str(CONFIG).unwrap(),
         )
@@ -160,7 +160,7 @@ fn a_rig_whose_intrinsics_and_extrinsics_disagree_is_refused() {
     let mut calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
     calibration.intrinsics.pop();
     let refused: EstimatorError =
-        SqrtKeypointVio::new(Vector3::new(0.0, 0.0, -9.81), calibration, config).unwrap_err();
+        SqrtKeypointVio::new(calibration, config).unwrap_err();
     assert!(
         matches!(
             refused,

@@ -18,7 +18,7 @@ IMU_ENTITY: str = "/world/rig_00/imu_00"
 TIMELINE: str = "video_time"
 """The one index both datasets carry: nanoseconds since ``property:capture:start_time_ns``."""
 
-CameraModelName: TypeAlias = Literal["kb4", "radtan8", "ds", "eucm", "equirectangular"]
+CameraModelName: TypeAlias = Literal["kb4", "radtan8", "ds", "eucm", "equirectangular", "mei_v3", "mei_v6"]
 """Projection models V0 supports, using the accepted calibration names."""
 
 
@@ -51,9 +51,13 @@ class CameraCalib:
     """Projection model."""
     distortion: Float64[ndarray, " n_coeffs"]
     """Exactly the coefficients the model uses: 4 for kb4, ``k1 k2 p1 p2 k3 k4 k5 k6`` for radtan8, ``xi alpha`` for ds,
-    ``alpha beta`` for eucm, ``lon_max`` (radians) for equirectangular."""
+    ``alpha beta`` for eucm, ``lon_max`` (radians) for equirectangular, ``xi half_field_rad`` then ``k1 k2 k3 p1 p2``
+    (mei_v3) or ``d0 .. d12`` (mei_v6)."""
     distortion_valid_radius: float | None
     """The valid radius ``rpmax``, when the recording carries one."""
+    readout_s: float | None
+    """Rolling-shutter readout, seconds from the first row to the last (the frame time is the middle row's), from the
+    camera node's ``rolling_shutter_readout_s``; None for a global shutter or a recording that states none."""
     imu_T_cam: Float64[ndarray, "4 4"]
     """Camera pose in the IMU frame: the inverse of the stored ``ChildFromParent`` transform."""
 
@@ -74,5 +78,7 @@ class ImuCalib:
     """Accelerometer bias random walk."""
     cam_time_offset_ns: int
     """Common shift added to cameras, IMU and GT to restore the estimator time origin; not a relative correction."""
+    gravity_ms2: float | None
+    """Gravity magnitude, m/s², from the IMU node's ``gravity_ms2``; None when the recording states none (9.81 applies)."""
     imu_T_body: Float64[ndarray, "4 4"]
     """Body pose in the IMU frame; the identity whenever the rig reference is the IMU."""

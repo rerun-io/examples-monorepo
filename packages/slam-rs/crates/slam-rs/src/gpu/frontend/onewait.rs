@@ -442,5 +442,21 @@ mod tests {
         let mut general = msd.clone();
         general[1].model.inner = kornia_staging_3d::camera::CameraModelKind::BrownConrady(prism);
         assert_eq!(rig_device_model(&general), None);
+        // A Mei (`mei_v3` / `mei_v6`) rig has no device kernel: the one-wait path stays off and the frontend runs
+        // its host paths, with or without `optical_flow_gpu_one_wait_any_model`.
+        let mei = kornia_staging_3d::camera::Mei::new(
+            [400.0, 400.0, 320.0, 240.0, 2.3],
+            1.75,
+            kornia_staging_3d::camera::MeiDistortion::V3 {
+                k: [0.1, 0.0, 0.0],
+                p: [0.0; 2],
+            },
+        )
+        .unwrap();
+        let mut lenses = msd.clone();
+        for camera in &mut lenses {
+            camera.model.inner = kornia_staging_3d::camera::CameraModelKind::Mei(mei);
+        }
+        assert_eq!(rig_device_model(&lenses), None);
     }
 }

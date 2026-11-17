@@ -45,7 +45,6 @@ impl<S: Scalar> SqrtKeypointVio<S> {
     ///
     /// As [`Self::new`], and [`EstimatorError::InitialVelocitySigma`].
     pub fn with_initial_state(
-        g: Vector3<S>,
         calibration: Calibration<S>,
         config: VioConfig,
         initial: InitialState<S>,
@@ -54,7 +53,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         if !(sigma.is_finite() && sigma > 0.0) {
             return Err(EstimatorError::InitialVelocitySigma(sigma));
         }
-        let mut estimator: Self = Self::new(g, calibration, config)?;
+        let mut estimator: Self = Self::new(calibration, config)?;
         let velocity_sqrt_weight: S = S::one() / initial.velocity_sigma;
         for i in 0..3 {
             estimator.marg_data.h[(6 + i, 6 + i)] = velocity_sqrt_weight;
@@ -96,7 +95,6 @@ mod tests {
 
     fn estimator(state: InitialState<f64>) -> Result<SqrtKeypointVio<f64>, EstimatorError> {
         SqrtKeypointVio::with_initial_state(
-            crate::imu::gravity(9.81),
             Calibration::from_json_str(MSDMI_CALIB).unwrap(),
             VioConfig::from_json_str(MSDMI_CONFIG).unwrap(),
             state,
@@ -117,7 +115,7 @@ mod tests {
     /// is the stereo start's prior.
     #[test]
     fn velocity_prior_joins_the_stereo_prior() {
-        let stereo = SqrtKeypointVio::<f64>::with_default_gravity(
+        let stereo = SqrtKeypointVio::<f64>::new(
             Calibration::from_json_str(MSDMI_CALIB).unwrap(),
             VioConfig::from_json_str(MSDMI_CONFIG).unwrap(),
         )

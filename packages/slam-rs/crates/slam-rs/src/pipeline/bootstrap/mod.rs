@@ -561,8 +561,8 @@ impl BootstrapPhase {
         if config.port_frontend_lag {
             return Err(BootstrapError::FrontendLag.into());
         }
-        // The dataset's own magnitude (`config.vio_gravity_ms2`), as the estimator uses.
-        let gravity_magnitude: f64 = config.vio_gravity_ms2;
+        // The recording's own magnitude, as the estimator uses.
+        let gravity_magnitude: f64 = calibration.gravity_ms2;
         Ok(Self::Running(Box::new(InertialBootstrap::new(
             calibration.clone(),
             gravity_magnitude,
@@ -656,9 +656,8 @@ impl<S: Scalar> Vio<S> {
             bias_accel: accepted.initial.bias_accel.map(S::from_literal),
             velocity_sigma: S::from_literal(accepted.initial.velocity_sigma),
         };
-        let gravity: Vector3<S> = self.gravity().map(S::from_literal);
         let mut fresh =
-            estimator::SqrtKeypointVio::with_initial_state(gravity, calibration, config, initial)?;
+            estimator::SqrtKeypointVio::with_initial_state(calibration, config, initial)?;
         for sample in &accepted.imu {
             fresh.push_imu(*sample);
         }

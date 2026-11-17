@@ -638,8 +638,7 @@ mod tests {
         config.port_frame_update_max_iterations = iterations;
         let calibration: Calibration<f64> = Calibration::from_json_str(calib).unwrap();
         let gravity: Vector3<f64> = Vector3::new(0.0, 0.0, -9.81);
-        let mut vio: SqrtKeypointVio<f64> =
-            SqrtKeypointVio::new(gravity, calibration, config).unwrap();
+        let mut vio: SqrtKeypointVio<f64> = SqrtKeypointVio::new(calibration, config).unwrap();
 
         // The host keyframe, frozen as a marginalized pose block is.
         vio.kf_ids.insert(HOST_T_NS);

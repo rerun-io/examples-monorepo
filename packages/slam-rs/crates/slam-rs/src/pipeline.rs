@@ -13,7 +13,7 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
-pub use panorama::{DualFisheyeLenses, PanoramaRig};
+pub use panorama::PanoramaRig;
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -123,35 +123,11 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
-        Self::with_panorama_lenses(config, calibration, options, backend, None)
-    }
-
-    /// [`Self::with_backend`] for a two-lens rig stitched into panorama tiles
-    /// (`config.panorama_dual_fisheye`): `lenses` is the factory calibration
-    /// the tiles are built from; `None` builds every other rig.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::with_backend`], plus [`VioError::Panorama`] when the key and
-    /// the lenses disagree or the rig is not two lens images.
-    pub fn with_panorama_lenses(
-        config: config::VioConfig,
-        calibration: calib::Calibration<f64>,
-        options: frontend::flow::FrontendOptions,
-        backend: Backend,
-        lenses: Option<DualFisheyeLenses>,
-    ) -> Result<Self, VioError> {
-        let (panorama, calibration) = match lenses {
-            Some(lenses) => {
-                let (rig, tiles) = PanoramaRig::expand_dual_fisheye(&config, calibration, lenses)?;
-                (Some(rig), tiles)
-            }
-            None if config.panorama_dual_fisheye => {
-                return Err(VioError::Panorama(
-                    "config.panorama_dual_fisheye needs the factory lens calibration".to_owned(),
-                ));
-            }
-            None => PanoramaRig::expand(calibration)?,
+        let (panorama, calibration) = if config.panorama_dual_fisheye {
+            let (rig, tiles) = PanoramaRig::expand_dual_fisheye(&config, calibration)?;
+            (Some(rig), tiles)
+        } else {
+            PanoramaRig::expand(calibration)?
         };
         let camera_count: usize = calibration.t_i_c.len();
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
@@ -162,9 +138,8 @@ impl<S: Scalar> Vio<S> {
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
-        let gravity: Vector3<S> = crate::imu::gravity(config.vio_gravity_ms2);
         let estimator: estimator::SqrtKeypointVio<S> =
-            estimator::SqrtKeypointVio::new(gravity, calibration.cast(), config)?;
+            estimator::SqrtKeypointVio::new(calibration.cast(), config)?;
         Ok(Self {
             frontend,
             estimator,
@@ -211,9 +186,9 @@ impl<S: Scalar> Vio<S> {
         }
     }
 
-    /// Gravity in the world frame, `(0, 0, -config.vio_gravity_ms2)`.
+    /// Gravity in the world frame, `(0, 0, -calibration.gravity_ms2)`.
     fn gravity(&self) -> Vector3<f64> {
-        crate::imu::gravity(self.frontend.config().vio_gravity_ms2)
+        crate::imu::gravity(self.calib_f32.gravity_ms2)
     }
 
     /// Every frameset rule, on the panorama when the rig is one.

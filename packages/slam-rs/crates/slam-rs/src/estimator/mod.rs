@@ -152,8 +152,7 @@ pub struct SqrtKeypointVio<S: Scalar> {
     last_state_t_ns: i64,
     /// `imu_meas`, one preintegration per consecutive state pair.
     imu_meas: BTreeMap<i64, IntegratedImuMeasurement<S>>,
-    /// `g`, as the caller gives it: the pipeline ([`crate::Vio`]) passes
-    /// `(0, 0, -config.vio_gravity_ms2)`; [`Self::with_default_gravity`] uses `(0, 0, -9.81)`.
+    /// `g`, `(0, 0, -calibration.gravity_ms2)`.
     g: Vector3<S>,
     /// `prev_opt_flow_res`, kept so a new keyframe can gather every
     /// observation of a keypoint across the live window.
@@ -300,11 +299,8 @@ impl<S: Scalar> SqrtKeypointVio<S> {
     /// by, takes the square root of or compares against is outside its domain:
     /// `NonPositiveScalar`, `NegativeScalar` and `DampingRangeReversed` name
     /// the field and the value.
-    pub fn new(
-        g: Vector3<S>,
-        calibration: Calibration<S>,
-        config: VioConfig,
-    ) -> Result<Self, EstimatorError> {
+    pub fn new(calibration: Calibration<S>, config: VioConfig) -> Result<Self, EstimatorError> {
+        let g: Vector3<S> = gravity::<S>(calibration.gravity_ms2);
         if config.vio_linearization_type != LinearizationType::AbsQr || !config.vio_sqrt_marg {
             return Err(EstimatorError::UnsupportedPath {
                 linearization: config.vio_linearization_type,
@@ -406,18 +402,6 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             scratch: OptimizeScratch::default(),
             deferred: None,
         })
-    }
-
-    /// Construct with gravity `(0, 0, -9.81)`. The pipeline does not use this:
-    /// it takes the magnitude from `config.vio_gravity_ms2`.
-    ///
-    /// # Errors
-    /// As [`Self::new`].
-    pub fn with_default_gravity(
-        calibration: Calibration<S>,
-        config: VioConfig,
-    ) -> Result<Self, EstimatorError> {
-        Self::new(gravity::<S>(9.81), calibration, config)
     }
 
     /// `takeLongTermKeyframe()` : the next `measure` moves the

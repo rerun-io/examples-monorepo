@@ -180,9 +180,8 @@ class Lockstep:
 
 
 def vio_for_feed(feed: SegmentFeed, vio_config: _core.VioConfig, backend: BackendRequest, readout_s: float | None = None) -> _core.Vio:
-    """A ``Vio`` over the feed's rig with what the recording states applied: its gravity and its Insta360 factory lenses.
+    """A ``Vio`` over the feed's rig with the Insta360 factory lenses the recording states (gravity is in the calibration).
 
-    ``vio_config.vio_gravity_ms2`` takes the recording's gravity when it states one (it is set on ``vio_config`` itself).
     The factory lenses go to ``Vio`` when the config asks for the dual-fisheye lane.
 
     Args:
@@ -194,8 +193,6 @@ def vio_for_feed(feed: SegmentFeed, vio_config: _core.VioConfig, backend: Backen
     Raises:
         ValueError: If the config asks for the stitch but the recording carries no Insta360 factory calibration.
     """
-    if feed.gravity_ms2 is not None:
-        vio_config.vio_gravity_ms2 = feed.gravity_ms2
     dual_fisheye: tuple[str, tuple[int, int, int, int, int, int] | None, float] | None = None
     if vio_config.panorama_dual_fisheye:
         if feed.insta360 is None:
@@ -227,6 +224,9 @@ class SegmentRun:
     Taken where the text is parsed, so a tool that exports it cannot name a
     config the estimator did not read.
     """
+    calibration_sha256: str
+    """SHA-256 of the calibration JSON the estimator was built from: the recording-derived settings (gravity, readouts,
+    lenses) that the config text does not hold."""
     dropped: tuple[DroppedFrameset, ...] = ()
     """Explicitly rejected input timestamps, on the exported device clock."""
 
@@ -244,7 +244,7 @@ class SegmentRun:
         return None
 
 
-def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
+def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str, calibration: _core.Calibration) -> SegmentRun:
     """Track framesets with IMU hold/retry; export estimates and truth on the device clock."""
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
@@ -289,6 +289,7 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         lost=replayed - len(t_ns),
         wall_s=wall_s,
         config_sha256=config_sha256,
+        calibration_sha256=config_text_sha256(calibration.to_json()),
         ground_truth=shift_clock(feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])), feed.export_offset_ns),
         median_tracker_ms=float(np.median(lockstep.elapsed_ms)) if lockstep.elapsed_ms else float("nan"),
         dropped=tuple(DroppedFrameset(drop.t_ns + feed.export_offset_ns, drop.reason) for drop in lockstep.dropped),
@@ -316,8 +317,11 @@ def run_segment(
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend=backend))
-        return drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
+        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, flow, backend=backend))
+        return drive(
+            feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text), calibration=calibration
+        )
 
 
 def robocap_estimator_files(
@@ -411,4 +415,4 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text))
+        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text), calibration=calibration)

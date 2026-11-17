@@ -16,6 +16,8 @@ pub struct CameraStatics {
     pub transform_translation: [f64; 3],
     pub transform_relation: i64,
     pub distortion_valid_radius: Option<f64>,
+    /// The camera node's `rolling_shutter_readout_s`, when the camera states one.
+    pub rolling_shutter_readout_s: Option<f64>,
 }
 
 /// Catalog noise densities, random walks, frequency, and the already-applied clock shift.
@@ -26,6 +28,8 @@ pub struct ImuStatics {
     pub gyro_bias_random_walk: Option<f64>,
     pub accel_bias_random_walk: Option<f64>,
     pub applied_time_shift_ns: i64,
+    /// The IMU node's `gravity_ms2`, when the recording states one.
+    pub gravity_ms2: Option<f64>,
 }
 
 impl CameraParts<f64> {
@@ -55,6 +59,9 @@ impl CameraParts<f64> {
             "double_sphere" => ("ds", 2),
             "eucm" => ("eucm", 2),
             "equirectangular" => ("equirectangular", 1),
+            // xi, half_field_rad, then the factory distortion (CONTRACT.md order).
+            "mei_v3" => ("mei_v3", 7),
+            "mei_v6" => ("mei_v6", 15),
             other => return Err(invalid(format!("unsupported distortion model {other:?}"))),
         };
         if raw.distortion_coefficients.len() < count {
@@ -99,6 +106,7 @@ impl CameraParts<f64> {
             model: model.into(),
             distortion: raw.distortion_coefficients[..count].to_vec(),
             distortion_valid_radius: raw.distortion_valid_radius,
+            readout_s: raw.rolling_shutter_readout_s,
             imu_t_cam_row_major: pose,
         })
     }
@@ -133,6 +141,7 @@ impl ImuParts<f64> {
                 .applied_time_shift_ns
                 .checked_neg()
                 .ok_or_else(|| CatalogError("IMU time shift overflow".into()))?,
+            gravity_ms2: raw.gravity_ms2,
         })
     }
 }
@@ -153,6 +162,7 @@ mod tests {
             transform_translation: [2.0, 3.0, 4.0],
             transform_relation: 2,
             distortion_valid_radius: None,
+            rolling_shutter_readout_s: None,
         };
         let camera = CameraParts::from_catalog_statics(0, &raw, 3)?;
         assert_eq!(
@@ -196,6 +206,7 @@ mod tests {
                 transform_translation: [0.0; 3],
                 transform_relation: 2,
                 distortion_valid_radius: None,
+                rolling_shutter_readout_s: None,
             };
             let camera = CameraParts::from_catalog_statics(0, &raw, 2)?;
             assert_eq!((camera.model.as_str(), camera.cx), (model, 479.5));

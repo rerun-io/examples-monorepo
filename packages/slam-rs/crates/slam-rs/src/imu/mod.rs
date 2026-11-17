@@ -20,7 +20,7 @@ pub(crate) fn noise_from_calibration<S: Scalar>(
     )
 }
 /// Gravity in the world frame, `(0, 0, -magnitude)`; the pipeline passes
-/// `config.vio_gravity_ms2`.
+/// the calibration's `gravity_ms2`.
 pub fn gravity<S: Scalar>(magnitude: f64) -> Vector3<S> {
     Vector3::new(S::zero(), S::zero(), c(-magnitude))
 }

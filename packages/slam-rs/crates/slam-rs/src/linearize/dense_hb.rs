@@ -111,7 +111,7 @@ mod tests {
         config.vio_min_frames_after_kf = 5;
         config.vio_new_kf_keypoints_thresh = 2.0;
         let mut candidate =
-            SqrtKeypointVio::<S>::with_default_gravity(calibration.cast(), config).unwrap();
+            SqrtKeypointVio::<S>::new(calibration.cast(), config).unwrap();
         let mut observations = FlowObservations::new(0, calibration.t_i_c.len());
         for id in 0..36 {
             let point = calibration.t_i_c[0]

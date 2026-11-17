@@ -1,12 +1,12 @@
-//! The dual-fisheye source (the Insta360 lane): two lens images in, the two
+//! The dual-fisheye source: two back-to-back cameras' images in, the two
 //! hemisphere tiles out, through fixed-point lookup tables built once from the
-//! factory lens calibration; and the rolling-shutter correction of the tiles'
-//! keypoints (the readout convention is [`DualFisheyeLenses::readout_s`]'s).
+//! calibration's two camera models; and the rolling-shutter correction of the
+//! tiles' keypoints. Readout: row `v` of an `H`-row lens image is read at
+//! `t + readout_s * (v - (H - 1) / 2) / H` relative to the frame time `t`.
 //!
-//! Frames: `P` is the panorama frame of `kornia_staging_3d::camera::formats::insta360` (`+Z` the
-//! lens-0 axis, `+Y` toward the handle). Tile `k`'s camera frame is `P` turned
-//! by `k * pi` about `Y`; its origin is lens `k`'s centre (two-centre lane) or
-//! the lens midpoint (central lane).
+//! Frames: `P` has camera 0's axes and its origin at the midpoint of the two
+//! camera centres. Tile `k`'s camera frame is `P` turned by `k * pi` about `Y`;
+//! its origin is camera `k`'s centre.
 
 use super::super::VioError;
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
@@ -15,10 +15,9 @@ use crate::estimator::FlowObservations;
 use crate::frontend::flow::TrackKillMask;
 use crate::lie::{Se3, So3};
 use kornia_image::ImageSize;
-use kornia_staging_3d::camera::formats::insta360::{FactoryLens, WindowCrop, parse_lens_string};
-use kornia_staging_3d::camera::{CameraModel, Equirectangular};
+use kornia_staging_3d::camera::{CameraModel, CameraModelKind, Equirectangular};
 use kornia_staging_imgproc::panorama::{LensStitch, RemapTable, TileGeometry};
-use nalgebra::{Matrix3, UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -32,84 +31,41 @@ const HEMISPHERE_PX: usize = 960;
 /// How long gyro samples are kept for the rolling-shutter rate, nanoseconds.
 const GYRO_KEEP_NS: i64 = 200_000_000;
 
-/// The factory calibration the dual-fisheye lane is built from.
-#[derive(Debug, Clone)]
-pub struct DualFisheyeLenses {
-    /// The two lenses, in lens order (not track order), at the lens image's pixels.
-    pub lenses: [FactoryLens; 2],
-    /// Rolling-shutter readout time of one lens image, seconds: row `v` of an
-    /// `H`-row image is read at `t + readout_s * (v - (H - 1) / 2) / H` relative
-    /// to the frame time `t`. Positive reads top to bottom; negative bottom to top.
-    pub readout_s: f64,
-}
-
-impl DualFisheyeLenses {
-    /// Parse a factory lens string (V3 or V6) for `lens_size` lens images.
-    ///
-    /// # Errors
-    ///
-    /// [`VioError::Panorama`] when the string does not parse or holds other than two lenses.
-    pub fn parse(
-        lens_string: &str,
-        window_crop: Option<WindowCrop>,
-        lens_size: [u32; 2],
-        readout_s: f64,
-    ) -> Result<Self, VioError> {
-        let lenses: Vec<FactoryLens> = parse_lens_string(lens_string, window_crop, lens_size)
-            .map_err(|error| VioError::Panorama(format!("factory lens string: {error}")))?;
-        let lenses: [FactoryLens; 2] = lenses.try_into().map_err(|all: Vec<_>| {
-            VioError::Panorama(format!(
-                "a dual fisheye has two lenses; the string holds {}",
-                all.len()
-            ))
-        })?;
-        if !readout_s.is_finite() {
-            return Err(VioError::Panorama(format!(
-                "readout time {readout_s} s is not finite"
-            )));
-        }
-        Ok(Self { lenses, readout_s })
-    }
-
-    /// `T_P_lens`: lens `k`'s pose in the panorama frame (factory rotation and centre).
-    pub fn pano_from_lens(&self, lens: usize) -> Se3<f64> {
-        let lens: &FactoryLens = &self.lenses[lens];
-        Se3::new(
-            rotation(lens.pano_from_lens.rotation.matrix()),
-            lens.pano_from_lens.translation.vector,
-        )
-    }
-
-    /// The stitch of `lens` images into the two 960-row hemisphere tiles with
-    /// `margin_px` overlap columns: the one stitch the lane and the viewing
-    /// panorama ([`LensStitch::panorama`]) share. Tile `k` reads lens `k`.
-    ///
-    /// # Errors
-    ///
-    /// [`VioError::Panorama`] for a margin wider than half a hemisphere (480 px)
-    /// or a lens image below 4x4, before any table is built.
-    pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
-        let geometry: TileGeometry = TileGeometry {
-            hemisphere_width: HEMISPHERE_PX,
-            height: HEMISPHERE_PX,
-            margin: margin_px,
+/// The stitch of two back-to-back cameras into the two 960-row hemisphere tiles of
+/// the panorama frame `P` with `margin_px` overlap columns: the one stitch the lane
+/// and a viewing panorama ([`LensStitch::panorama`]) share. Tile `k` reads camera `k`.
+///
+/// `P` has camera 0's axes; tile 0 looks along camera 0's `+Z`, tile 1 along `-Z`.
+/// `cam0_from_cam1` is camera 1's pose in camera 0; only its rotation enters the
+/// tables (the tiles see the far field).
+///
+/// # Errors
+///
+/// [`VioError::Panorama`] for a margin wider than half a hemisphere (480 px)
+/// or a lens image below 4x4, before any table is built.
+pub fn stitch(
+    cameras: [&CameraModelKind<f64>; 2],
+    cam0_from_cam1: &Se3<f64>,
+    lens: ImageSize,
+    margin_px: usize,
+) -> Result<LensStitch, VioError> {
+    let geometry: TileGeometry = TileGeometry {
+        hemisphere_width: HEMISPHERE_PX,
+        height: HEMISPHERE_PX,
+        margin: margin_px,
+    };
+    // The arithmetic of dataforge's panorama layer, so both stitch the same pixels.
+    let relative: nalgebra::Rotation3<f64> =
+        nalgebra::Rotation3::from_matrix_unchecked(cam0_from_cam1.rotation.matrix());
+    LensStitch::new(geometry, lens, |k, ray| {
+        let local: Vector3<f64> = if k == 0 {
+            Vector3::from(ray)
+        } else {
+            relative.inverse_transform_vector(&Vector3::from(ray))
         };
-        LensStitch::new(geometry, lens, |k, ray| {
-            let lens: &FactoryLens = &self.lenses[k];
-            let local = lens
-                .pano_from_lens
-                .rotation
-                .inverse_transform_vector(&Vector3::from(ray));
-            lens.camera.project(local.into()).ok()
-        })
-        .map_err(|error| VioError::Panorama(error.to_string()))
-    }
-}
-
-fn rotation(matrix: &Matrix3<f64>) -> So3<f64> {
-    So3::from_unit_quaternion(UnitQuaternion::from_rotation_matrix(
-        &nalgebra::Rotation3::from_matrix(matrix),
-    ))
+        cameras[k].project(local.into()).ok()
+    })
+    .map_err(|error| VioError::Panorama(error.to_string()))
 }
 
 /// The tile cameras, extrinsics and tables of one dual-fisheye rig.
@@ -119,20 +75,11 @@ pub(super) struct Expanded {
     pub geometry: TileGeometry,
 }
 
-/// Turn a two-lens calibration (lens cameras posed in the IMU frame) into the
-/// two tile cameras and build the lookup tables.
+/// Turn a two-camera calibration (back-to-back cameras posed in the IMU frame)
+/// into the two tile cameras and build the lookup tables.
 ///
-/// `T_imu_P` comes from lens 0: `T_imu_lens0 * T_P_lens0^-1`; lens 1 must agree.
-pub(super) fn expand(
-    config: &VioConfig,
-    calibration: Calibration<f64>,
-    lenses: DualFisheyeLenses,
-) -> Result<Expanded, VioError> {
-    if !config.panorama_dual_fisheye {
-        return Err(VioError::Panorama(
-            "factory lenses were given but config.panorama_dual_fisheye is false".to_owned(),
-        ));
-    }
+/// `P`: camera 0's axes, origin at the midpoint of the two camera centres.
+pub(super) fn expand(config: &VioConfig, calibration: Calibration<f64>) -> Result<Expanded, VioError> {
     if calibration.intrinsics.len() != 2 || calibration.resolution.len() != 2 {
         return Err(VioError::Panorama(format!(
             "a dual fisheye rig has two lens cameras; this rig has {}",
@@ -146,24 +93,41 @@ pub(super) fn expand(
             calibration.resolution
         )));
     }
-    let imu_from_pano: Se3<f64> = calibration.t_i_c[0] * lenses.pano_from_lens(0).inverse();
-    let check: Se3<f64> =
-        (imu_from_pano * lenses.pano_from_lens(1)).inverse() * calibration.t_i_c[1];
-    if check.rotation.log().norm() > 1e-3 || check.translation.norm() > 1e-3 {
-        return Err(VioError::Panorama(format!(
-            "lens 1's extrinsics disagree with lens 0's and the factory rig by {:.2e} rad, {:.2e} m",
-            check.rotation.log().norm(),
-            check.translation.norm()
-        )));
-    }
+    let readout_s: f64 = match calibration.readout_s.as_slice() {
+        [first, second] if first == second => first.unwrap_or(0.0),
+        [] => 0.0,
+        other => {
+            return Err(VioError::Panorama(format!(
+                "the two lenses must share one rolling-shutter readout; got {other:?}"
+            )));
+        }
+    };
+    let models: Vec<CameraModelKind<f64>> = calibration
+        .intrinsics
+        .iter()
+        .map(|camera| {
+            camera
+                .to_staged()
+                .map_err(|error| VioError::Panorama(format!("lens camera: {error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    let imu_from_pano: Se3<f64> = Se3::new(
+        calibration.t_i_c[0].rotation,
+        (calibration.t_i_c[0].translation + calibration.t_i_c[1].translation) * 0.5,
+    );
     let lens_size: ImageSize = ImageSize {
         width: lens_w as usize,
         height: lens_h as usize,
     };
     // Built once per rig: the GPU lane uploads these tables once and the lookahead
     // recognises the stitch by identity.
-    let stitch: Arc<LensStitch> =
-        Arc::new(lenses.stitch(lens_size, super::TILE_MARGIN_PX)?);
+    let cam0_from_cam1: Se3<f64> = calibration.t_i_c[0].inverse() * calibration.t_i_c[1];
+    let stitch: Arc<LensStitch> = Arc::new(stitch(
+        [&models[0], &models[1]],
+        &cam0_from_cam1,
+        lens_size,
+        super::TILE_MARGIN_PX,
+    )?);
     let geometry: TileGeometry = stitch.geometry();
     let model: Equirectangular<f64> = geometry
         .camera()
@@ -178,7 +142,7 @@ pub(super) fn expand(
     };
     let t_i_c: Vec<Se3<f64>> = (0..2)
         .map(|k| {
-            let origin: Vector3<f64> = lenses.lenses[k].pano_from_lens.translation.vector;
+            let origin: Vector3<f64> = (imu_from_pano.inverse() * calibration.t_i_c[k]).translation;
             let turn: So3<f64> = So3::exp(&Vector3::new(0.0, std::f64::consts::PI * k as f64, 0.0));
             imu_from_pano * Se3::new(turn, origin)
         })
@@ -186,7 +150,7 @@ pub(super) fn expand(
     let ingest: DualFisheyeIngest = DualFisheyeIngest {
         tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
         stitch,
-        readout_s: lenses.readout_s,
+        readout_s,
         rolling_shutter: config.panorama_rolling_shutter,
         gyro: VecDeque::new(),
         tile_camera: model,

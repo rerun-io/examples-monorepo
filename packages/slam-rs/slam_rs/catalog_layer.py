@@ -59,6 +59,7 @@ def write_layer(
         )
         rec.log(schema.trail_path(POSE_SOURCE), rr.LineStrips3D.from_fields(radii=0.006), static=True)
         rec.log(f"{root}", rr.AnyValues(source="slam-rs catalog VIO", profile=profile, backend=backend, decoder=decoder, config_sha256=run.config_sha256,
+                                      calibration_sha256=run.calibration_sha256,
                                       num_poses=len(positions), num_framesets=run.framesets, num_dropped=len(run.dropped),
                                       wall_s=run.wall_s, median_tracker_ms=run.median_tracker_ms,
                                       export_to_video_time_offset_ns=clock_offset_ns), static=True)

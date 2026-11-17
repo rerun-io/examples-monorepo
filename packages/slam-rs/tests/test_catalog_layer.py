@@ -23,7 +23,7 @@ def run() -> SegmentRun:
             position_m=np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]),
             quaternion_wxyz=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
         ),
-        framesets=2, lost=0, wall_s=0.1, ground_truth=empty_trajectory(), median_tracker_ms=10.0, config_sha256="test-config",
+        framesets=2, lost=0, wall_s=0.1, ground_truth=empty_trajectory(), median_tracker_ms=10.0, config_sha256="test-config", calibration_sha256="test-calibration",
     )
 
 

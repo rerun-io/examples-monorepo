@@ -409,6 +409,7 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
         transform_translation=_static_values(statics, f"{entity}:Transform3D:translation"),
         transform_relation=int(_static_values(statics, f"{entity}:Transform3D:relation")[0]),
         distortion_valid_radius=float(_static_values(statics, optional_radius)[0]) if optional_radius in statics.column_names else None,
+        rolling_shutter_readout_s=float(_static_values(statics, readout)[0]) if (readout := f"{entity}:rolling_shutter_readout_s") in statics.column_names else None,
     )
 
 
@@ -581,8 +582,6 @@ class SegmentFeed:
     """Muxed streams for an offline run; packet buffers are released after indexing and muxing."""
     decode_device: Literal["cpu", "cuda"] = "cpu"
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
-    gravity_ms2: float | None = None
-    """Gravity magnitude in m/s² the recording states on its IMU node (``gravity_ms2``), or None when it states none."""
     insta360: Insta360Factory | None = None
     """The factory lens calibration of an Insta360 recording (recognised by its ``insta360`` property), else None."""
 
@@ -1088,7 +1087,7 @@ def _build_feed(
     gravity_column: str = f"{IMU_ENTITY}:gravity_ms2"
     gravity_ms2: float | None = float(_static_values(rig_statics, gravity_column)[0]) if gravity_column in rig_statics.column_names else None
     try:
-        imu: ImuCalib = imu_calib(calibration, np.eye(4, dtype=np.float64), applied_shift_ns)
+        imu: ImuCalib = imu_calib(calibration, np.eye(4, dtype=np.float64), applied_shift_ns, gravity_ms2)
     except ValueError as error:
         raise ValueError(f"{segment_id}: {error}") from error
     camera_count: int = int(_static_values(rig_statics, f"{RIG_ENTITY}:num_cameras")[0])
@@ -1145,7 +1144,6 @@ def _build_feed(
         window_ns=int(window_s * 1e9),
         cached_payloads=cached_payloads,
         decode_device=decode_device,
-        gravity_ms2=gravity_ms2,
         insta360=read_insta360_factory(properties),
     )
 
