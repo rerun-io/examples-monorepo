@@ -2766,6 +2766,12 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Build the core, then convert an Insta360 .insv clip (two HEVC lens tracks, IMU, factory lenses) to an exoego:v2 .rrd"
 
+[feature.slam-rs.tasks.slam-rs-insv-panorama]
+cmd = "python tools/apps/insv_panorama.py"
+cwd = "packages/slam-rs"
+depends-on = ["slam-rs-build"]
+description = "Build the core, then write an Insta360 recording's stitched panorama as a derived, viewing-only AV1 layer (<stem>.pano.rrd)"
+
 [feature.slam-rs.tasks.slam-rs-robocap-probe]
 cmd = "python tools/apps/robocap_probe.py"
 cwd = "packages/slam-rs"
