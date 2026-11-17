@@ -1,28 +1,7 @@
 //! Explicit dense or retained byte inputs for one frontend frame.
 use crate::{ImageView, image};
 use kornia_image::{Image, ImageSize};
-use kornia_staging_imgproc::panorama::LensStitch;
-use std::sync::{Arc, Mutex};
-
-/// The dual-fisheye frameset check: two lens images of the stitch's lens size.
-fn check_lenses(stitch: &LensStitch, lenses: &[ImageView<'_>]) -> Result<(), image::IngestError> {
-    let lens = stitch.lens_size();
-    match lenses
-        .iter()
-        .find(|view| view.width != lens.width || view.height != lens.height)
-    {
-        Some(view) => Err(image::IngestError::LensSize {
-            width: view.width,
-            height: view.height,
-            expected_width: lens.width,
-            expected_height: lens.height,
-        }),
-        None if lenses.len() == 2 => Ok(()),
-        None => Err(image::IngestError::LensCount {
-            count: lenses.len(),
-        }),
-    }
-}
+use std::sync::Mutex;
 
 /// Retained byte frames share one upload allocation. CPU storage is touched only
 /// when a detector needs host pixels.
@@ -31,15 +10,12 @@ pub struct PackedImages {
     bytes: bytes::Bytes,
     frames: Vec<(ImageSize, usize)>,
     host: Vec<Mutex<Image<u16, 1>>>,
-    /// Set when the bytes are two lens images and the frames are their tiles.
-    stitch: Option<Arc<LensStitch>>,
 }
 impl std::fmt::Debug for PackedImages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PackedImages")
             .field("frames", &self.frames)
             .field("bytes", &self.bytes)
-            .field("stitch", &self.stitch.is_some())
             .finish()
     }
 }
@@ -68,39 +44,14 @@ impl PackedImages {
         }
         bytes.resize(bytes.len().next_multiple_of(4), 0);
         self.bytes = bytes.freeze();
-        self.stitch = None;
-    }
-    /// Retain two lens images whose frames are the two tiles `stitch` makes of them.
-    ///
-    /// # Errors
-    /// [`image::IngestError::LensSize`] when a view is not the tables' lens size, or
-    /// [`image::IngestError::LensCount`] when there are not two views.
-    pub fn fill_lenses(
-        &mut self,
-        lenses: &[ImageView<'_>],
-        stitch: &Arc<LensStitch>,
-    ) -> Result<(), image::IngestError> {
-        check_lenses(stitch, lenses)?;
-        self.fill(lenses);
-        self.stitch = Some(stitch.clone());
-        Ok(())
     }
     #[cfg(feature = "gpu-core")]
     pub(crate) fn bytes(&self) -> &bytes::Bytes {
         &self.bytes
     }
-    /// The stitch whose lens images these bytes are, if any.
-    #[cfg(feature = "gpu-core")]
-    pub(crate) fn stitch(&self) -> Option<&Arc<LensStitch>> {
-        self.stitch.as_ref()
-    }
     #[cfg(feature = "gpu-core")]
     pub(crate) fn same_pixels(&self, other: &Self) -> bool {
-        let same_stitch = match (&self.stitch, &other.stitch) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (a, b) => a.is_none() && b.is_none(),
-        };
-        same_stitch && self.frames == other.frames && self.bytes == other.bytes
+        self.frames == other.frames && self.bytes == other.bytes
     }
 }
 
@@ -125,17 +76,11 @@ impl<'a> FrameImages<'a> {
             Self::Dense(v) => FrameImage::dense(&v[camera]),
             Self::Packed(v) => {
                 let (size, offset) = v.frames[camera];
-                let bytes = &v.bytes[offset..offset + size.width * size.height];
-                let host = &v.host[camera];
                 FrameImage {
-                    source: match &v.stitch {
-                        Some(stitch) => FrameSource::Lens {
-                            stitch,
-                            tile: camera,
-                            bytes,
-                            host,
-                        },
-                        None => FrameSource::Packed { size, bytes, host },
+                    source: FrameSource::Packed {
+                        size,
+                        bytes: &v.bytes[offset..offset + size.width * size.height],
+                        host: &v.host[camera],
                     },
                 }
             }
@@ -158,13 +103,6 @@ enum FrameSource<'a> {
         bytes: &'a [u8],
         host: &'a Mutex<Image<u16, 1>>,
     },
-    /// Tile `tile`, made of lens `tile`'s bytes.
-    Lens {
-        stitch: &'a LensStitch,
-        tile: usize,
-        bytes: &'a [u8],
-        host: &'a Mutex<Image<u16, 1>>,
-    },
 }
 impl<'a> FrameImage<'a> {
     pub fn dense(image: &'a Image<u16, 1>) -> Self {
@@ -176,7 +114,6 @@ impl<'a> FrameImage<'a> {
         match self.source {
             FrameSource::Dense(v) => v.size(),
             FrameSource::Packed { size, .. } => size,
-            FrameSource::Lens { stitch, .. } => stitch.tile_size(),
         }
     }
     pub fn width(self) -> usize {
@@ -203,18 +140,6 @@ impl<'a> FrameImage<'a> {
                     size.height,
                     size.width,
                 )?;
-                Ok(body(&image))
-            }
-            FrameSource::Lens {
-                stitch,
-                tile,
-                bytes,
-                host,
-            } => {
-                let mut image = host
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                stitch.remap(tile, bytes, stitch.lens_size().width, &mut image)?;
                 Ok(body(&image))
             }
         }
@@ -262,28 +187,6 @@ impl FrameStorage {
             Self::Packed(images) => images.fill(views),
         }
         Ok(())
-    }
-    /// Retain two lens images as the two tile images `stitch` makes of them: the dual-fisheye replacement for
-    /// [`Self::fill`] with the tile views. The GPU lane stitches on the device; the CPU lane remaps here.
-    ///
-    /// # Errors
-    /// A lens view of the wrong size or count.
-    pub fn fill_lenses(
-        &mut self,
-        lenses: &[ImageView<'_>],
-        stitch: &Arc<LensStitch>,
-    ) -> Result<(), image::IngestError> {
-        match self {
-            Self::Dense(images) => {
-                check_lenses(stitch, lenses)?;
-                images.resize_with(2, image::empty);
-                for (tile, (image, view)) in images.iter_mut().zip(lenses).enumerate() {
-                    stitch.remap(tile, view.data, view.stride, image)?;
-                }
-                Ok(())
-            }
-            Self::Packed(images) => images.fill_lenses(lenses, stitch),
-        }
     }
     pub(crate) fn view(&self) -> FrameImages<'_> {
         match self {

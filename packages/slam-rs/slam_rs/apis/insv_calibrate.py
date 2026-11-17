@@ -2,8 +2,8 @@
 
 It reports, and changes nothing:
 
-1. ``R_P_imu``, the rotation from the IMU frame to the panorama frame P. The lane's own frontend tracks the two
-   hemisphere tiles over chosen spans; each consecutive frame pair gets a relative pose (rotation and translation
+1. ``R_P_imu``, the rotation from the IMU frame to the rig frame P, which has camera 0's axes. The native two-lens
+   rig's frontend tracks both lenses over chosen spans; each consecutive frame pair gets a relative pose (rotation and translation
    direction, robust epipolar fit on the sphere, seeded from the gyro under the recording's current calibration).
    Rotation-only fits are biased indoors. The visual rotation vectors are then aligned with
    the gyro-integrated ones in closed form, with the gyro bias as a free constant.
@@ -12,7 +12,7 @@ It reports, and changes nothing:
    handed to ``Vio`` shifted (no re-conversion). Both are the extra frame time offset to add to the device profile's
    per-frame model, relative to the frame times of the recording at hand.
 3. The rolling-shutter readout as a check: the bootstrap residual with the recording's readout, none, and its
-   sign flipped (the readout handed to ``Vio``; ``config.panorama_rolling_shutter`` stays as the dataset sets it).
+   sign flipped (the readout handed to ``Vio``, which corrects the keypoints of every camera with a non-zero readout).
 """
 
 from collections.abc import Iterable
@@ -29,10 +29,9 @@ from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
-from slam_rs.vio_log import PANORAMA_HEIGHT
 
-CAUCHY_RAD: float = 2.0 * np.pi / PANORAMA_HEIGHT
-"""Smallest Cauchy scale of the epipolar fit: 2 panorama pixels."""
+CAUCHY_RAD: float = 2.0 * np.pi / 960.0
+"""Smallest Cauchy scale of the epipolar fit, radians: 0.375 deg, about 3.5 px at the centre of a 1920 px X4 Air lens."""
 MIN_MATCHES: int = 30
 """A frame pair with fewer common tracks gives no relative pose."""
 
@@ -43,7 +42,7 @@ class Config:
 
     rrd: Path
     """Converted Insta360 recording."""
-    dataset: str = "insta360"
+    dataset: str = "insta360-native"
     """Dataset whose VIO config (``slam.toml``) the frontend and the bootstrap run with."""
     rotation_spans_s: tuple[float, ...] = (40.0, 190.0)
     """Start of each span the rotation is fitted on, seconds after the first frame; two disjoint spans give the agreement."""
@@ -64,14 +63,14 @@ class Config:
 
 @dataclass(frozen=True, slots=True)
 class TrackedFrame:
-    """The frontend's tracks on one frameset, as unit bearings in P."""
+    """The frontend's tracks on one frameset, both lenses, as unit bearings in P."""
 
     t_ns: int
     """The frameset's stamp, unshifted."""
     ids: Int64[ndarray, " n"]
     """Keypoint ids."""
     bearings: Float64[ndarray, "n 3"]
-    """Unit bearings in the panorama frame P."""
+    """Unit bearings in the rig frame P (camera 0's axes)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,12 +323,10 @@ def first_attempt(vio: _core.Vio) -> _core.BootstrapAttempt | None:
 
 
 def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_ns: int, stop_at_attempt: bool) -> list[TrackedFrame]:
-    """Track framesets with their times shifted by ``offset_ns``, pushing the IMU one sample ahead; the tracks in P.
+    """Track framesets with their times shifted by ``offset_ns``, pushing the IMU one sample ahead; every camera's tracks in P.
 
     Only the tracks are kept, so ``framesets`` may be a stream of any length.
     """
-    if vio.panorama_tile_origins is None:
-        raise ValueError("the dataset config does not stitch a panorama: run with an Insta360 dataset (config.panorama_dual_fisheye)")
     frames: list[TrackedFrame] = []
     pushed: int = 0
     for frameset in framesets:
@@ -345,8 +342,8 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
             frames.append(
                 TrackedFrame(
                     t_ns=frameset.t_ns,
-                    ids=np.concatenate([flow.ids(tile) for tile in range(2)]).astype(np.int64),
-                    bearings=np.concatenate([vio.bearings(tile, flow.positions(tile)) for tile in range(2)]),
+                    ids=np.concatenate([flow.ids(camera) for camera in range(vio.camera_count)]).astype(np.int64),
+                    bearings=np.concatenate([vio.bearings(camera, flow.positions(camera)) for camera in range(vio.camera_count)]),
                 )
             )
         if stop_at_attempt and first_attempt(vio) is not None:
@@ -394,7 +391,7 @@ def print_report(report: CalibrationReport, offsets_ms: tuple[float, ...]) -> No
     """The report as plain-text tables, then the device-profile values it implies."""
     np.set_printoptions(precision=5, suppress=True)
     rotation: RotationReport = report.rotation
-    print("\n1. R_P_imu (IMU -> panorama P), 5-DoF pair fits aligned with the gyro")
+    print("\n1. R_P_imu (IMU -> rig P, camera 0's axes), 5-DoF pair fits aligned with the gyro")
     print("| span start (s) | pairs | angle to current (deg) | bias (rad/s, imu) | rate residual (rad/s) | rate offset (a) (ms) |")
     print("|---|---|---|---|---|---|")
     for span in rotation.spans:

@@ -23,10 +23,9 @@ calibration = "configs/robocap_calib_downscale3.json"
 
 
 # TartanAir V2 (dataforge `tartanair`): one trajectory, three camera sets.
-# The three configs differ in more than the camera model, so a comparison across them includes these tuning
-# differences: `optical_flow_matching_default_depth` is 10.0 for pinhole and 2.0 for fisheye and equirect (the
-# pinhole value was raised because the 2 m default lost the stereo matches on the OldTown street scene), and
-# `optical_flow_detection_grid_size` is 64 for equirect and 50 for pinhole and fisheye.
+# The configs differ in more than the camera model, so a comparison across them includes these tuning
+# differences: `optical_flow_matching_default_depth` is 10.0 for pinhole and 2.0 for fisheye (the
+# pinhole value was raised because the 2 m default lost the stereo matches on the OldTown street scene).
 [[dataset]]
 name = "tartanair-pinhole"
 vio_config = "configs/tartanair_pinhole_config.json"
@@ -35,16 +34,7 @@ vio_config = "configs/tartanair_pinhole_config.json"
 name = "tartanair-fisheye"
 vio_config = "configs/tartanair_fisheye_config.json"
 
-[[dataset]]
-name = "tartanair-equirect"
-vio_config = "configs/tartanair_equirect_config.json"
-
-# Insta360 X4 Air (dataforge insta360, mei_v6 cameras): the same .rrd through the panorama lane (two lenses stitched into two
-# hemisphere tiles, two-centre extrinsics, rolling-shutter corrected keypoints) and as a plain two-lens KB4 rig.
-[[dataset]]
-name = "insta360"
-vio_config = "configs/insta360_config.json"
-
+# Insta360 X4 Air (dataforge insta360, mei_v6 cameras) as a plain two-lens rig.
 [[dataset]]
 name = "insta360-native"
 vio_config = "configs/insta360_native_config.json"

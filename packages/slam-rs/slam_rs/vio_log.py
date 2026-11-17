@@ -14,7 +14,7 @@ from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
-from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, log_panorama_keypoints, track_colors
+from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
@@ -34,12 +34,6 @@ JPEG_QUALITY: int = 85
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
-PANORAMA_ENTITY: str = f"{RUN_ENTITY}/panorama"
-"""The stitched 1920x960 panorama of a dual-fisheye rig, with the tracked keypoints of both tiles drawn on it."""
-PANORAMA_WIDTH: int = 1920
-"""Width of that panorama: two 960-column hemispheres (``kornia_staging_imgproc::panorama::TileGeometry`` default: 360 degrees)."""
-PANORAMA_HEIGHT: int = 960
-"""Rows of that panorama (180 degrees)."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 VIO_STATS_ENTITY: str = "/stats/vio"
@@ -186,10 +180,6 @@ class VioLogger:
     """Ground truth for the whole segment, on ``video_time``; may be empty."""
     frame_t_ns: Int64[ndarray, " n_frames"]
     """The segment's frameset times: the cadence used to draw ground truth."""
-    tile_origins: tuple[int, int] | None = None
-    """``Vio.panorama_tile_origins``: the frontend tracks two hemisphere tiles of camera 0's panorama; None otherwise."""
-    stitched: bool = False
-    """The tiles are stitched from two fisheye lenses: keypoints go on :data:`PANORAMA_ENTITY`, not on camera 0."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -245,12 +235,7 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
-        if self.tile_origins is None:
-            log_keypoints(frame)
-        elif self.stitched:
-            log_panorama_keypoints(frame, self.tile_origins, PANORAMA_WIDTH, PANORAMA_ENTITY)
-        else:
-            log_panorama_keypoints(frame, self.tile_origins, self.cameras[0].width, camera_entity(0))
+        log_keypoints(frame)
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
@@ -432,8 +417,7 @@ class VioStage:
     logger: VioLogger
     """Where the trajectories, the window, the landmarks and the counters go."""
     times: StageTimes = field(default_factory=StageTimes)
-    """Per-frameset wall time of each stage: ``track`` (the whole call), the host ``stitch`` of a stitched rig,
-    the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
+    """Per-frameset wall time of each stage: ``track`` (the whole call), the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
     rest of the call: bootstrap, estimator and glue) and the ``log`` work after it."""
     keypoints: list[int] = field(default_factory=list)
     """Keypoints the frontend holds after each frameset, summed over cameras."""
@@ -448,12 +432,11 @@ class VioStage:
         """Framesets still held for want of the inertial samples that cover them."""
         return self.lockstep.pending
 
-    def run(self, frameset: Frameset, *, log_panorama: bool = True) -> None:
+    def run(self, frameset: Frameset) -> None:
         """Track the frameset and everything its samples now cover, and log each one.
 
         Args:
             frameset: The frameset to track, with the samples since the previous one.
-            log_panorama: Draw a stitched rig's panorama for this frameset (the replay's image cadence).
         """
         started: float = time.monotonic()
         consumed: int = len(self.lockstep.consumed_ms)
@@ -464,43 +447,16 @@ class VioStage:
         if calls:
             # The breakdown belongs to the last call; a frameset released from the IMU hold adds a second one.
             frontend: dict[str, float] = vio.frontend_timings_ms
-            stitch_ns: int | None = vio.panorama_ingest_ns
-            stitch: float = 0.0 if stitch_ns is None else 1e-6 * stitch_ns
             flow: float = frontend["pyramid"] + frontend["detect"] + frontend["track"] + frontend["stereo"]
             self.times.add("track", sum(calls))
-            if stitch_ns is not None:
-                self.times.add("stitch", stitch)
             self.times.add("frontend", flow)
             self.times.add("imu", frontend["imu"])
-            self.times.add("estimator", calls[-1] - stitch - flow - frontend["imu"])
-        # One copy of the frontend's keypoints per frameset, for the count and the panorama.
-        frame: _core.FlowFrame | None = vio.flow_frame() if calls or log_panorama else None
+            self.times.add("estimator", calls[-1] - flow - frontend["imu"])
+        # One copy of the frontend's keypoints per frameset, for the count.
+        frame: _core.FlowFrame | None = vio.flow_frame() if calls else None
         if calls and frame is not None:
             self.keypoints.append(sum(frame.num_tracks(camera) for camera in range(vio.camera_count)))
-        if log_panorama:
-            self._log_panorama(frameset.t_ns, frame)
         self.times.add("log", 1e3 * (time.monotonic() - started) - sum(calls))
-
-    def _log_panorama(self, t_ns: int, frame: _core.FlowFrame | None) -> None:
-        """Draw a stitched rig's panorama and its tracked keypoints, tracked or not.
-
-        Before the estimator has a state it reports no pose, and :meth:`VioLogger.log`
-        draws nothing; the frontend still runs, and this is where it shows. A frameset
-        that the logger posed at ``t_ns`` already has its keypoints drawn: they are not drawn twice.
-
-        Args:
-            t_ns: The frameset's time.
-            frame: The frontend's keypoints after the frameset's ``track`` calls.
-        """
-        if not self.logger.stitched or self.logger.tile_origins is None:
-            return
-        pano: UInt8[ndarray, "h w"] | None = self.lockstep.vio.panorama_image()
-        if pano is None or frame is None or frame.t_ns != t_ns:
-            return
-        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
-        rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
-        if not self.logger.estimate_t_ns or self.logger.estimate_t_ns[-1] != t_ns:
-            log_panorama_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""

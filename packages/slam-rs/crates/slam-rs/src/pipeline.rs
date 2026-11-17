@@ -5,7 +5,7 @@ pub mod bootstrap;
 mod boundary;
 mod lag;
 mod lane;
-mod panorama;
+mod rolling_shutter;
 mod select;
 #[cfg(test)]
 mod tests;
@@ -13,7 +13,7 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
-pub use panorama::{PanoramaRig, RollingShutter};
+pub use rolling_shutter::RollingShutter;
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -64,9 +64,7 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
-    /// The tile cut when the rig is one full panorama; see [`PanoramaRig`].
-    panorama: Option<PanoramaRig>,
-    /// The rolling-shutter correction of a two-lens rig's keypoints; see [`RollingShutter`].
+    /// The rolling-shutter correction of the estimator's keypoints, when a camera states a readout.
     rolling_shutter: Option<RollingShutter>,
     /// The inertial bootstrap, when `config.vio_bootstrap` selects it.
     bootstrap: bootstrap::BootstrapPhase,
@@ -125,19 +123,11 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
-        let (panorama, calibration, rolling_shutter) = if config.panorama_dual_fisheye {
-            let (rig, tiles, rolling_shutter) = PanoramaRig::expand_dual_fisheye(&config, calibration)?;
-            (Some(rig), tiles, rolling_shutter)
-        } else {
-            let (rig, calibration) = PanoramaRig::expand(calibration)?;
-            (rig, calibration, None)
-        };
         let camera_count: usize = calibration.t_i_c.len();
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
-        let mut frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
-        if let Some(rig) = &panorama {
-            panorama::configure(rig, &config, &calibration, &mut frontend)?;
-        }
+        let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
+        let rolling_shutter: Option<RollingShutter> = RollingShutter::for_calibration(&calibration)
+            .map_err(frontend::flow::FrontendError::from)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
@@ -161,20 +151,14 @@ impl<S: Scalar> Vio<S> {
             last_deferred: None,
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
-            panorama,
             rolling_shutter,
             bootstrap,
         })
     }
 
-    /// The cameras the frontend tracks on: the two hemisphere tiles when the rig is one full panorama.
+    /// The rig's calibration, as the frontend and the estimator read it.
     pub fn calibration(&self) -> &calib::Calibration<f32> {
         &self.calib_f32
-    }
-
-    /// The tile cut, when the rig is one full panorama.
-    pub fn panorama(&self) -> Option<&PanoramaRig> {
-        self.panorama.as_ref()
     }
 
     /// The rolling-shutter correction, when the rig has one: its frame counts say how many frames were corrected
@@ -183,36 +167,9 @@ impl<S: Scalar> Vio<S> {
         self.rolling_shutter.as_ref()
     }
 
-    /// The stitched panorama of the last ingested dual-fisheye frameset, for
-    /// logging; `None` for any other rig. See [`PanoramaRig::panorama_image`].
-    ///
-    /// # Errors
-    ///
-    /// When the stored frameset is not this rig's.
-    pub fn panorama_image(&self) -> Result<Option<kornia_image::Image<u8, 1>>, VioError> {
-        match &self.panorama {
-            Some(rig) => rig.panorama_image(&self.frames),
-            None => Ok(None),
-        }
-    }
-
     /// Gravity in the world frame, `(0, 0, -calibration.gravity_ms2)`.
     fn gravity(&self) -> Vector3<f64> {
         crate::imu::gravity(self.calib_f32.gravity_ms2)
-    }
-
-    /// Every frameset rule, on the panorama when the rig is one.
-    fn check_input(&self, t_ns: i64, images: &[ImageView<'_>]) -> Result<(), VioError> {
-        let Some(rig) = &self.panorama else {
-            check_frameset(images, self.camera_count)?;
-            return Ok(self
-                .frontend
-                .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?);
-        };
-        rig.check(images)?;
-        Ok(self
-            .frontend
-            .check_frameset(t_ns, [rig.tile_size(); 2].into_iter())?)
     }
 
     /// The estimator, for callers that want the window or the snapshot.
@@ -366,7 +323,11 @@ impl<S: Scalar> Vio<S> {
         lookahead: Option<(i64, &[ImageView<'_>])>,
     ) -> Result<VioResult, VioError> {
         if let Some((next_t_ns, next_images)) = lookahead {
-            self.check_input(next_t_ns, next_images)?;
+            check_frameset(next_images, self.camera_count)?;
+            self.frontend.check_frameset(
+                next_t_ns,
+                next_images.iter().map(|image| (image.width, image.height)),
+            )?;
             if next_t_ns <= t_ns {
                 return Err(frontend::flow::FrontendError::NonMonotonicFrameset {
                     previous_t_ns: t_ns,
@@ -381,10 +342,7 @@ impl<S: Scalar> Vio<S> {
             && let Some((next_t_ns, next_images)) = lookahead
         {
             let vio = &mut *prepared.vio;
-            match &mut vio.panorama {
-                Some(rig) => rig.ingest_packed(next_images, &mut vio.next_frames)?,
-                None => vio.next_frames.fill(next_images),
-            }
+            vio.next_frames.fill(next_images);
             vio.frontend
                 .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
         }
@@ -429,7 +387,9 @@ impl<S: Scalar> Vio<S> {
         // `process_frame` still re-runs for callers that hold it directly; the
         // coverage predicate is the estimator's, and `process_frame` still runs
         // it as its second line.
-        self.check_input(t_ns, images)?;
+        check_frameset(images, self.camera_count)?;
+        self.frontend
+            .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
         if !self.bootstrap.imu_covers_frame(&self.estimator, t_ns) {
             return Ok(PreparedTrack {
                 vio: self,
@@ -469,10 +429,7 @@ impl<S: Scalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        match &mut self.panorama {
-            Some(rig) => rig.ingest(images, &mut self.frames)?,
-            None => self.frames.fill(images)?,
-        }
+        self.frames.fill(images)?;
         Ok(PreparedTrack {
             vio: self,
             t_ns,
