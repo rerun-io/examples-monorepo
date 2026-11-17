@@ -213,13 +213,13 @@ fn ingest_equals_the_kornia_staging_remap_and_the_gpu_bytes_narrow_it() {
     // Packed (GPU) storage gets the tiles narrowed to bytes.
     let mut packed = FrameStorage::new(true);
     rig.ingest(&views, &mut packed).unwrap();
-    for tile in 0..2 {
-        let narrowed: Vec<u8> = images[tile]
+    for (bytes, image) in rig.tiles.iter().zip(images) {
+        let narrowed: Vec<u8> = image
             .as_slice()
             .iter()
             .map(|&v| ((u32::from(v) + 128) >> 8).min(255) as u8)
             .collect();
-        assert_eq!(rig.tiles[tile], narrowed);
+        assert_eq!(bytes, &narrowed);
     }
     // A frameset that is not two lens images is refused before anything moves.
     assert!(rig.ingest(&views[..1], &mut dense).is_err());
@@ -232,7 +232,7 @@ fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
         panic!("equirectangular")
     };
     let masks = rig.detection_masks(&config(true), p.fy, p.cy).unwrap();
-    let (equirect_like, _) = (masks[0].masks.len(), ());
+    let masked_cells: usize = masks[0].masks.len();
     for (tile, cells) in masks.iter().enumerate() {
         let lut = rig.tile_lut(tile).unwrap();
         for rect in &cells.masks {
@@ -257,7 +257,10 @@ fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
         }
         assert!(invalid > 0, "margin 64 reaches past the lens coverage");
     }
-    assert!(equirect_like >= 2 * 15 + 2 * 15);
+    assert!(
+        masked_cells >= 2 * 15 + 2 * (17 - 2),
+        "margin columns and polar rows: {masked_cells}"
+    );
 }
 
 #[test]
