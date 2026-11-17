@@ -185,16 +185,16 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
         Wire::Bytes(s) => Some(String::from_utf8_lossy(s).into_owned()),
         _ => None,
     };
-    let submessage = |w: &Wire| -> Result<Vec<f64>, Insta360Error> {
+    // Fields 1 to 6 of a submessage, 0 when absent; every caller reads only these, so higher field numbers are
+    // ignored and no allocation depends on a field number from the file.
+    let submessage = |w: &Wire| -> Result<[f64; 6], Insta360Error> {
+        let mut values = [0.0; 6];
         let Wire::Bytes(s) = w else {
-            return Ok(Vec::new());
+            return Ok(values);
         };
-        let fields = protobuf_fields(s)?;
-        let max = fields.iter().map(|(n, _)| *n as usize).max().unwrap_or(0);
-        let mut values = vec![0.0; max];
-        for (n, v) in fields {
-            if n > 0 {
-                values[n as usize - 1] = v.number().unwrap_or(0.0);
+        for (n, v) in protobuf_fields(s)? {
+            if let Some(slot) = (n as usize).checked_sub(1).and_then(|i| values.get_mut(i)) {
+                *slot = v.number().unwrap_or(0.0);
             }
         }
         Ok(values)
@@ -209,7 +209,7 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
             111 => m.offset_v6 = text(&value),
             19 | 44 => {
                 let v = submessage(&value)?;
-                if v.len() >= 2 && v[0] > 0.0 && v[1] > 0.0 {
+                if v[0] > 0.0 && v[1] > 0.0 {
                     m.resolution = Some([v[0] as u32, v[1] as u32]);
                 }
             }
@@ -222,12 +222,11 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
             25 => m.rolling_shutter_ms = value.number(),
             27 => {
                 let v = submessage(&value)?;
-                if v.len() >= 4 && v[..4].iter().all(|&x| x > 0.0) {
-                    let at = |i: usize| v.get(i).copied().unwrap_or(0.0);
+                if v[..4].iter().all(|&x| x > 0.0) {
                     m.window_crop = Some(WindowCrop {
-                        src: [at(0) as u32, at(1) as u32],
-                        dst: [at(2) as u32, at(3) as u32],
-                        offset: [at(4) as i64, at(5) as i64],
+                        src: [v[0] as u32, v[1] as u32],
+                        dst: [v[2] as u32, v[3] as u32],
+                        offset: [v[4] as i64, v[5] as i64],
                     });
                 }
             }
@@ -235,8 +234,8 @@ fn parse_metadata(b: &[u8]) -> Result<Insta360Metadata, Insta360Error> {
             62 => m.is_raw_gyro = value.number().is_some_and(|v| v != 0.0),
             65 => {
                 let v = submessage(&value)?;
-                m.acc_range_g = v.first().copied().filter(|&x| x > 0.0);
-                m.gyro_range_dps = v.get(1).copied().filter(|&x| x > 0.0);
+                m.acc_range_g = Some(v[0]).filter(|&x| x > 0.0);
+                m.gyro_range_dps = Some(v[1]).filter(|&x| x > 0.0);
             }
             80 => m.multi_track_order = value.number().unwrap_or(0.0) as u64,
             131 => m.stream_type = value.number().unwrap_or(0.0) as u64,
@@ -989,6 +988,27 @@ mod tests {
         varint_field(80, 1, &mut m);
         varint_field(131, 4, &mut m);
         m
+    }
+
+    #[test]
+    fn a_huge_submessage_field_number_allocates_nothing_and_is_ignored() {
+        // Field numbers 2^40 and 2^28 inside the resolution, crop and range submessages: no allocation sized by
+        // them (a panic or a multi-gigabyte buffer before), and the fields 1 to 6 still read.
+        let mut m = metadata(true);
+        for field in [19, 27, 65] {
+            let mut sub = Vec::new();
+            varint_field(1, 1920, &mut sub);
+            varint_field(2, 1920, &mut sub);
+            varint_field(1 << 40, 7, &mut sub);
+            varint_field(1 << 28, 7, &mut sub);
+            bytes_field(field, &sub, &mut m);
+        }
+        let parsed = parse_metadata(&m).unwrap();
+        assert_eq!(parsed.resolution, Some([1920, 1920]));
+        assert_eq!(
+            (parsed.acc_range_g, parsed.gyro_range_dps),
+            (Some(1920.0), Some(1920.0))
+        );
     }
 
     /// A file of `prefix` junk bytes then a trailer holding the given records in 256-byte slots.
