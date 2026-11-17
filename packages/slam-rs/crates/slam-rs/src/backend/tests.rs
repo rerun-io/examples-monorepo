@@ -47,6 +47,7 @@ fn keyframe(t_ns: FrameId, window: &[FrameId], landmarks: Vec<StampLandmark>) ->
         keyframe_poses: window.iter().map(|&id| (id, pose(id as f64))).collect(),
         landmarks,
         keypoints: vec![vec![(KeypointId(t_ns as u64), Vector2::new(2.0, 3.0))]; 2],
+        images: None,
     }))
 }
 

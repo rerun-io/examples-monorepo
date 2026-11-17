@@ -210,6 +210,75 @@ impl KeyframeMap {
         Some(landmark)
     }
 
+    /// Add an observation of landmark `id` in `image` at `pixel`
+    /// (`addObservation`), replacing one already there. `false`, changing
+    /// nothing, for an unknown landmark or an image outside the map.
+    pub fn add_observation(
+        &mut self,
+        id: LandmarkId,
+        image: TimeCamId,
+        pixel: Vector2<f32>,
+    ) -> bool {
+        if !self.keyframes.contains_key(&image.frame_id) {
+            return false;
+        }
+        let Some(landmark) = self.landmarks.get_mut(&id) else {
+            return false;
+        };
+        landmark.obs.insert(image, pixel);
+        self.by_image.entry(image).or_default().insert(id);
+        true
+    }
+
+    /// Fold landmark `from` into `into` (`mergeLandmarks(from, into)`):
+    /// `into` keeps its host, direction and inverse distance (host-relative, as
+    /// the window wrote them) and gains every observation of `from` in an image
+    /// it does not observe yet; `from` is removed. `false`, changing nothing,
+    /// when either is missing or they are the same landmark.
+    pub fn merge_landmark(&mut self, from: LandmarkId, into: LandmarkId) -> bool {
+        if from == into || !self.landmarks.contains_key(&into) {
+            return false;
+        }
+        let Some(removed) = self.remove_landmark(from) else {
+            return false;
+        };
+        let Some(survivor) = self.landmarks.get_mut(&into) else {
+            return true;
+        };
+        for (image, pixel) in removed.obs {
+            if let std::collections::btree_map::Entry::Vacant(slot) = survivor.obs.entry(image) {
+                slot.insert(pixel);
+                self.by_image.entry(image).or_default().insert(into);
+            }
+        }
+        true
+    }
+
+    /// Landmark `id` in the world frame: `T_w_i(host) * t_i_c[cam] *
+    /// unproject(direction) / inv_dist`, as the window builds it. `None` for an
+    /// unknown landmark, host or camera, or a point at infinity (`inv_dist <= 0`)
+    /// or not finite.
+    pub fn landmark_world(
+        &self,
+        id: LandmarkId,
+        t_i_c: &[Se3<f64>],
+    ) -> Option<nalgebra::Vector3<f64>> {
+        let landmark = self.landmarks.get(&id)?;
+        let host = self.keyframes.get(&landmark.host.frame_id)?;
+        let extrinsic = t_i_c.get(landmark.host.cam_id)?;
+        if landmark.inv_dist.is_nan() || landmark.inv_dist <= 0.0 {
+            return None;
+        }
+        let bearing = crate::landmark::StereographicParam::unproject(&landmark.direction);
+        let point_c =
+            nalgebra::Vector3::new(bearing[0], bearing[1], bearing[2]) / landmark.inv_dist;
+        let point_w = (host.pose * *extrinsic) * point_c;
+        point_w
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(point_w)
+    }
+
     /// Delete keyframe `id` (`removeKeyframe`): the landmarks it hosts go, its
     /// observations go, and a landmark left with fewer than two observations
     /// goes. Returns the removed landmarks as they were before the removal,
@@ -472,6 +541,88 @@ mod tests {
         assert_eq!(map.landmark(LandmarkId(3)).unwrap().obs.len(), 2);
         assert!(map.landmarks_of_keyframe(2).is_empty());
         assert!(map.remove_keyframe(2).is_none());
+    }
+
+    #[test]
+    fn an_added_observation_is_indexed_and_needs_a_map_keyframe() {
+        let mut map = with_keyframes(&[1, 2, 3]);
+        map.merge_landmarks(&[landmark(5, (1, 0), &[(1, 0), (2, 0)])]);
+        assert!(map.add_observation(LandmarkId(5), TimeCamId::new(3, 1), Vector2::new(7.0, 8.0)));
+        assert_eq!(
+            map.landmarks_of_keyframe(3),
+            BTreeSet::from([LandmarkId(5)])
+        );
+        assert_eq!(
+            map.landmark(LandmarkId(5)).unwrap().obs[&TimeCamId::new(3, 1)],
+            Vector2::new(7.0, 8.0)
+        );
+        assert!(!map.add_observation(LandmarkId(5), TimeCamId::new(9, 0), Vector2::zeros()));
+        assert!(!map.add_observation(LandmarkId(6), TimeCamId::new(3, 0), Vector2::zeros()));
+    }
+
+    #[test]
+    fn merging_moves_new_observations_and_keeps_the_survivors_coordinates() {
+        let mut map = with_keyframes(&[1, 2, 3, 4]);
+        map.merge_landmarks(&[
+            landmark(1, (1, 0), &[(1, 0), (2, 0)]),
+            landmark(2, (3, 0), &[(3, 0), (2, 0), (4, 1)]),
+        ]);
+        let survivor = map.landmark(LandmarkId(2)).unwrap().clone();
+        let seen_in_2 = survivor.obs[&TimeCamId::new(2, 0)];
+        assert!(map.merge_landmark(LandmarkId(1), LandmarkId(2)));
+        assert!(map.landmark(LandmarkId(1)).is_none());
+        let merged = map.landmark(LandmarkId(2)).unwrap();
+        assert_eq!(
+            (merged.host, merged.direction, merged.inv_dist),
+            (survivor.host, survivor.direction, survivor.inv_dist)
+        );
+        assert_eq!(merged.obs.len(), 4);
+        assert_eq!(
+            merged.obs[&TimeCamId::new(2, 0)],
+            seen_in_2,
+            "an image it already saw keeps its pixel"
+        );
+        assert_eq!(
+            map.landmarks_of_keyframe(1),
+            BTreeSet::from([LandmarkId(2)])
+        );
+        assert!(!map.merge_landmark(LandmarkId(2), LandmarkId(2)));
+        assert!(!map.merge_landmark(LandmarkId(9), LandmarkId(2)));
+    }
+
+    #[test]
+    fn a_landmark_is_placed_through_its_hosts_pose_and_camera() {
+        let mut map = KeyframeMap::new();
+        map.upsert_keyframe(
+            1,
+            Se3::new(
+                crate::lie::So3::identity(),
+                nalgebra::Vector3::new(1.0, 0.0, 0.0),
+            ),
+            None,
+        );
+        map.upsert_keyframe(2, Se3::identity(), None);
+        let mut lm = landmark(3, (1, 1), &[(1, 1), (2, 0)]);
+        lm.direction = Vector2::zeros();
+        lm.inv_dist = 0.5;
+        map.merge_landmarks(&[lm]);
+        let t_i_c = [
+            Se3::identity(),
+            Se3::new(
+                crate::lie::So3::identity(),
+                nalgebra::Vector3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let point = map.landmark_world(LandmarkId(3), &t_i_c).unwrap();
+        let expected = (map.keyframe(1).unwrap().pose * t_i_c[1])
+            * (nalgebra::Vector3::from(
+                crate::landmark::StereographicParam::unproject(&Vector2::zeros()).xyz(),
+            ) * 2.0);
+        assert!((point - expected).norm() < 1e-12, "{point} vs {expected}");
+        assert!(
+            map.landmark_world(LandmarkId(3), &t_i_c[..1]).is_none(),
+            "unknown camera"
+        );
     }
 
     #[test]

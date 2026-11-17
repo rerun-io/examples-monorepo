@@ -48,6 +48,10 @@ pub trait BackendWork: Send + 'static {
     /// Look for a loop at `keyframe`, which a step added. Realtime may drop it.
     fn query(&mut self, keyframe: FrameId) -> Vec<MapEvent>;
 
+    /// The query of `keyframe` was dropped (Realtime, behind): release what it
+    /// held. Nothing by default.
+    fn drop_query(&mut self, _keyframe: FrameId) {}
+
     /// Copy the work for readers.
     fn view(&self) -> Self::View;
 }
@@ -111,7 +115,9 @@ impl<B: BackendWork> State<B> {
             }
         }
         while self.queries.len() > max_queries {
-            self.queries.pop_front();
+            if let Some(dropped) = self.queries.pop_front() {
+                self.work.drop_query(dropped);
+            }
             self.counters.queries_dropped += 1;
         }
     }
@@ -497,6 +503,7 @@ mod tests {
             keyframe_poses: BTreeMap::new(),
             landmarks: Vec::new(),
             keypoints: Vec::new(),
+            images: None,
         }))
     }
 

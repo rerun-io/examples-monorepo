@@ -12,6 +12,7 @@
 
 pub mod covisibility;
 pub mod cull;
+pub mod loop_closing;
 pub mod map;
 pub mod runner;
 pub mod snapshot;
@@ -23,9 +24,10 @@ use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
+pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
-pub use snapshot::MapSnapshot;
+pub use snapshot::{MapSnapshot, SnapshotLoop};
 
 /// The map's knobs, read from [`VioConfig`].
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +82,15 @@ pub enum MapEvent {
         /// Which rule culled it.
         reason: CullReason,
     },
+    /// A loop passed verification at a new keyframe (PR b2).
+    LoopVerified {
+        /// The new keyframe.
+        current: FrameId,
+        /// The keyframe it closes a loop with.
+        candidate: FrameId,
+        /// Fused, left for the pose-graph optimization, or stale.
+        outcome: LoopOutcome,
+    },
 }
 
 /// The map, its covisibility graph and what protects keyframes from culling.
@@ -100,6 +111,8 @@ pub struct MapBackend {
     culled_over_budget: usize,
     /// `T_i_c` per camera, which places the points of a [`BackendWork::view`].
     t_i_c: Vec<crate::lie::Se3<f64>>,
+    /// Loop closing (PR b2); `None` when it is off.
+    loops: Option<LoopClosing>,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -144,6 +157,7 @@ impl MapBackend {
             culled: BTreeSet::new(),
             culled_over_budget: 0,
             t_i_c: Vec::new(),
+            loops: None,
         }
     }
 
@@ -229,6 +243,13 @@ impl MapBackend {
                 events.push(MapEvent::KeyframeAdded(id));
             }
             self.map.upsert_keyframe(id, *pose, keypoints);
+        }
+        if let (Some(loops), Some(images), true) = (
+            self.loops.as_mut(),
+            &stamp.images,
+            added.contains(&stamp.t_ns),
+        ) {
+            loops.hold_images(stamp.t_ns, images.clone());
         }
         self.map.merge_landmarks(&stamp.landmarks);
         for id in added {
@@ -381,6 +402,9 @@ impl MapBackend {
             touched.insert(landmark.host.frame_id);
         }
         self.culled.insert(id);
+        if let Some(loops) = self.loops.as_mut() {
+            loops.forget(id);
+        }
         Some(touched)
     }
 }
@@ -397,9 +421,16 @@ impl BackendWork for MapBackend {
         MapBackend::step(self, stamp)
     }
 
-    /// Nothing yet: loop detection arrives in PR b2.
-    fn query(&mut self, _keyframe: FrameId) -> Vec<MapEvent> {
-        Vec::new()
+    /// Loop detection and, below the drift gate, fusion (PR b2).
+    fn query(&mut self, keyframe: FrameId) -> Vec<MapEvent> {
+        self.close_loops(keyframe)
+    }
+
+    /// Free the images a dropped query would have read.
+    fn drop_query(&mut self, keyframe: FrameId) {
+        if let Some(loops) = self.loops.as_mut() {
+            loops.drop_images(keyframe);
+        }
     }
 }
 

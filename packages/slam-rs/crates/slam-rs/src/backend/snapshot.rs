@@ -4,7 +4,7 @@
 
 use nalgebra::{Vector3, Vector4};
 
-use super::{CullCounts, MapBackend, MapStats};
+use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
 use crate::landmark::StereographicParam;
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
@@ -37,6 +37,23 @@ pub struct MapSnapshot {
     pub median_keyframe_landmarks: usize,
     /// The map's payload in bytes (a lower bound on its heap).
     pub retained_bytes: usize,
+    /// What loop closing has done (all zero when it is off).
+    pub loop_counts: LoopCounts,
+    /// Verified loops whose two keyframes are still in the map, oldest first.
+    pub loops: Vec<SnapshotLoop>,
+}
+
+/// One verified loop in a [`MapSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapshotLoop {
+    /// The keyframe that found the loop.
+    pub current: FrameId,
+    /// The keyframe it closes with.
+    pub candidate: FrameId,
+    /// Final PnP inliers.
+    pub inliers: usize,
+    /// Fused at once (`false`: left for the pose-graph optimization).
+    pub fused: bool,
 }
 
 impl MapBackend {
@@ -97,6 +114,31 @@ impl MapBackend {
             high_covisibility_weight: self.high_covisibility_weight(),
             median_keyframe_landmarks: self.map.median_keyframe_landmarks(),
             retained_bytes: self.map.retained_bytes(),
+            loop_counts: self
+                .loops
+                .as_ref()
+                .map(|loops| loops.counts())
+                .unwrap_or_default(),
+            loops: self
+                .loops
+                .iter()
+                .flat_map(|loops| loops.events())
+                .filter(|event| {
+                    event.outcome != LoopOutcome::Stale
+                        && keyframes.contains_key(&event.current)
+                        && keyframes.contains_key(&event.candidate)
+                })
+                .map(|event| SnapshotLoop {
+                    current: event.current,
+                    candidate: event.candidate,
+                    inliers: if event.stages.reprojection_matches > 0 {
+                        event.stages.reprojection_inliers
+                    } else {
+                        event.stages.inliers
+                    },
+                    fused: matches!(event.outcome, LoopOutcome::Fused { .. }),
+                })
+                .collect(),
         }
     }
 }

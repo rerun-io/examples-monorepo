@@ -671,6 +671,11 @@ pub struct MapSnapshot {
     median_keyframe_landmarks: usize,
     retained_bytes: usize,
     counters: slam_rs::backend::BackendCounters,
+    /// `[current, candidate]` per verified loop.
+    loop_edges: Vec<i64>,
+    loop_inliers: Vec<u32>,
+    loop_fused: Vec<bool>,
+    loop_counts: slam_rs::backend::LoopCounts,
 }
 
 impl MapSnapshot {
@@ -731,6 +736,18 @@ impl MapSnapshot {
             median_keyframe_landmarks: snapshot.median_keyframe_landmarks,
             retained_bytes: snapshot.retained_bytes,
             counters,
+            loop_edges: snapshot
+                .loops
+                .iter()
+                .flat_map(|edge| [edge.current, edge.candidate])
+                .collect(),
+            loop_inliers: snapshot
+                .loops
+                .iter()
+                .map(|edge| u32::try_from(edge.inliers).unwrap_or(u32::MAX))
+                .collect(),
+            loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
+            loop_counts: snapshot.loop_counts,
         })
     }
 }
@@ -915,6 +932,45 @@ impl MapSnapshot {
     #[getter]
     fn publish_total_us(&self) -> u64 {
         self.counters.publish.total_ns / 1_000
+    }
+
+    /// Verified loops whose keyframes are still in the map, oldest first, as
+    /// `[current, candidate]` keyframe timestamps: `int64[l, 2]`.
+    #[getter]
+    fn loop_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.loop_edges
+            .to_pyarray(py)
+            .reshape((self.loop_fused.len(), 2))
+    }
+
+    /// Final PnP inliers of each loop: `uint32[l]`.
+    #[getter]
+    fn loop_inliers<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
+        self.loop_inliers.to_pyarray(py)
+    }
+
+    /// Whether each loop was fused at once (else it waits for the pose-graph
+    /// optimization): `bool[l]`.
+    #[getter]
+    fn loop_fused<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.loop_fused.to_pyarray(py)
+    }
+
+    /// Loop-closing counters: keyframes indexed, queries without images, queries
+    /// with candidates, candidates validated, loops verified, fused, and left
+    /// for the pose-graph optimization.
+    #[getter]
+    fn loop_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        let counts = self.loop_counts;
+        std::collections::BTreeMap::from([
+            ("indexed", counts.indexed),
+            ("without_images", counts.without_images),
+            ("with_candidates", counts.with_candidates),
+            ("candidates", counts.candidates),
+            ("verified", counts.verified),
+            ("fused", counts.fused),
+            ("needs_pgo", counts.needs_pgo),
+        ])
     }
 
     fn __repr__(&self) -> String {

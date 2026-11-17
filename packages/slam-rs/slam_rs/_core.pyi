@@ -140,6 +140,22 @@ class MapSnapshot:
         """Shared landmarks per covisibility edge."""
 
     @property
+    def loop_edges(self) -> Int64[ndarray, "n_loops 2"]:
+        """Verified loops whose keyframes are still in the map, oldest first, as ``[current, candidate]`` timestamps."""
+
+    @property
+    def loop_inliers(self) -> UInt32[ndarray, " n_loops"]:
+        """Final PnP inliers of each loop."""
+
+    @property
+    def loop_fused(self) -> Bool[ndarray, " n_loops"]:
+        """Whether each loop was fused at once; otherwise it waits for the pose-graph optimization."""
+
+    @property
+    def loop_counts(self) -> dict[str, int]:
+        """Loop-closing counters: indexed, without_images, with_candidates, candidates, verified, fused, needs_pgo."""
+
+    @property
     def keyframes(self) -> int:
         """Map keyframes (RootSLAM's ``num_kfs``)."""
 

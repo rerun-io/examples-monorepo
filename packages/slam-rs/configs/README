@@ -9,7 +9,10 @@ adds a 70 px detection grid (about 40 % less frontend work; outside the 10 s
 clip's ATE band, inside the full session's). Both live profiles set
 backend.mode to realtime: when backend.enabled turns the persistent map on, it
 runs on its own thread and tracking never waits for it; reference and fast keep
-the offline default (inline, repeatable). tests/test_config_profiles.py checks overlays
+the offline default (inline, repeatable). profiles/rootslam-parity.json is the
+fast keys plus the backend.loop_closing knobs at RootSLAM's behaviour (camera-0
+query, raw BRIEF tests, 35 fixed PnP draws, inlier ratio 0), for parity checks
+against RootSLAM runs only. tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 

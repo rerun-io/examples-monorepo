@@ -65,6 +65,10 @@ pub struct Vio<S: Scalar = f32> {
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
+    /// Images of keyframes whose stamp has not gone to the back end yet, for
+    /// loop closing (DESIGN §2.2: the stamp carries its own keyframe's images).
+    #[cfg(feature = "backend")]
+    keyframe_images: std::collections::BTreeMap<i64, crate::estimator::KeyframeImages>,
 }
 
 pub use lag::OverlapTimings;
@@ -140,7 +144,8 @@ impl<S: Scalar> Vio<S> {
                             .iter()
                             .map(|t_i_c| t_i_c.cast::<f64>())
                             .collect(),
-                    ),
+                    )
+                    .with_loop_closing(&config, &calibration),
                     config.backend_mode,
                     config.backend_realtime_max_queued_queries.get(),
                 )
@@ -172,6 +177,8 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_runner,
+            #[cfg(feature = "backend")]
+            keyframe_images: std::collections::BTreeMap::new(),
         })
     }
 
@@ -239,10 +246,41 @@ impl<S: Scalar> Vio<S> {
     fn step_map(&mut self) {
         #[cfg(feature = "backend")]
         if let Some(runner) = self.map_runner.as_mut() {
-            for stamp in self.estimator.take_map_stamps() {
+            for mut stamp in self.estimator.take_map_stamps() {
+                if let crate::estimator::MapStamp::Keyframe(keyframe) = &mut stamp {
+                    keyframe.images = self.keyframe_images.remove(&keyframe.t_ns);
+                    self.keyframe_images.retain(|&t_ns, _| t_ns > keyframe.t_ns);
+                }
                 runner.submit(stamp);
             }
         }
+    }
+
+    /// Keep a copy of the frameset's images when the estimator made it a
+    /// keyframe and loop closing will describe it; its stamp (now, or after a
+    /// deferred solve) takes them. A lagged pipeline already holds the next
+    /// frameset's images, so its keyframes go without (counted by loop closing).
+    #[cfg(feature = "backend")]
+    fn hold_keyframe_images(&mut self, t_ns: i64, outcome: &estimator::FrameOutcome<S>) {
+        let keyframe =
+            matches!(outcome, estimator::FrameOutcome::Measured(stats) if stats.took_keyframe);
+        if !keyframe
+            || self.map_runner.is_none()
+            || !self.frontend.config().backend_loop_closing.enabled
+            || self.last_frame_t_ns != Some(t_ns)
+        {
+            return;
+        }
+        let images: Vec<kornia_image::Image<u16, 1>> = self
+            .frames
+            .view()
+            .iter()
+            .filter_map(|frame| frame.with_dense(Clone::clone).ok())
+            .collect();
+        self.keyframe_images.insert(
+            t_ns,
+            crate::estimator::KeyframeImages(std::sync::Arc::new(images)),
+        );
     }
 
     /// The estimator, for callers that want the window or the snapshot.
@@ -553,6 +591,8 @@ impl<S: Scalar> Vio<S> {
         t_ns: i64,
         outcome: estimator::FrameOutcome<S>,
     ) -> Result<VioResult, VioError> {
+        #[cfg(feature = "backend")]
+        self.hold_keyframe_images(t_ns, &outcome);
         self.step_map();
         // The estimator initialises inside the same `process_frame` that
         // measures, so a `Measured` outcome always has a state and

@@ -20,7 +20,10 @@
 //!
 //! The stamps are reads of the window: emitting them changes no number the
 //! window computes. Nothing is emitted unless [`SqrtKeypointVio::emit_map_stamps`]
-//! turned it on. No stamp holds an image (the retention rule, DESIGN §2.2).
+//! turned it on. The estimator never puts an image in a stamp; the pipeline
+//! attaches the new keyframe's own images ([`KeyframeImages`]) for loop
+//! closing, which drops them after that keyframe's query (the retention rule,
+//! DESIGN §2.2).
 
 use kornia_staging_algebra::Scalar;
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +78,25 @@ impl StampLandmark {
     }
 }
 
+/// One keyframe's images, one per camera (level 0, `u16`), shared without a
+/// copy. Two values are equal when they share the same buffers.
+#[derive(Clone)]
+pub struct KeyframeImages(pub std::sync::Arc<Vec<kornia_image::Image<u16, 1>>>);
+
+impl PartialEq for KeyframeImages {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for KeyframeImages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|image| [image.width(), image.height()]))
+            .finish()
+    }
+}
+
 /// The window after a keyframe's solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyframeStamp {
@@ -85,8 +107,11 @@ pub struct KeyframeStamp {
     /// Every window landmark, in id order.
     pub landmarks: Vec<StampLandmark>,
     /// The new keyframe's tracked keypoints per camera, in id order: what loop
-    /// detection describes later. Pixels only, never the image.
+    /// detection describes later. Pixels only.
     pub keypoints: Keypoints,
+    /// The new keyframe's images, which the pipeline attaches for loop closing
+    /// (`None` from the estimator, and when the pipeline no longer holds them).
+    pub images: Option<KeyframeImages>,
 }
 
 /// Keyframes leaving the window, with their final values.
@@ -190,6 +215,7 @@ impl<S: Scalar> super::SqrtKeypointVio<S> {
                 })
                 .collect(),
             keypoints,
+            images: None,
         };
         if let Some(stamps) = self.map_stamps.as_mut() {
             stamps.push(MapStamp::Keyframe(Box::new(stamp)));

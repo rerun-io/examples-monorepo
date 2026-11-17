@@ -39,7 +39,7 @@ mod stamp;
 mod triangulation;
 
 pub use snapshot::{SnapshotLandmark, VelBias, WindowSnapshot, WindowState};
-pub use stamp::{KeyframeStamp, Keypoints, MapStamp, MargStamp, StampLandmark};
+pub use stamp::{KeyframeImages, KeyframeStamp, Keypoints, MapStamp, MargStamp, StampLandmark};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;

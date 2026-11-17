@@ -1,12 +1,14 @@
-//! Seeded RANSAC around [`gp3p`](super::gp3p), on upstream `kornia_3d::ransac`.
+//! Seeded RANSAC around [`gp3p`](super::gp3p).
 //!
-//! The estimator implements upstream's [`Estimator`] trait and runs in its
-//! serial driver ([`run_with_rng`]) with [`ThresholdConsensus`] on the
-//! `1 - cos` bearing residual, so it inherits upstream's adaptive iteration cap
-//! (`m >= log(1 - p) / log(1 - w^k)`, tightened as better models land). The
-//! driver is serial and every random draw comes from one seeded
-//! [`ChaCha8Rng`]: the same input and seed give the same pose and inliers, on
-//! any thread count.
+//! [`draw_hypotheses`] is upstream `kornia_3d::ransac::run_with_rng`'s plain
+//! serial path (no SPRT, no LO-RANSAC) with an inlier-count consensus on the
+//! `1 - cos` bearing residual, so it keeps upstream's adaptive iteration cap
+//! (`m >= log(1 - p) / log(1 - w^k)`, tightened as better models land). It is a
+//! copy, checked draw for draw against upstream under the `kornia-3d-interop`
+//! feature (`tests/gp3p_ransac.rs`), because kornia-3d depends on faer, which
+//! slam-rs removed for an aarch64 LLVM crash; the `ransac` feature needs only
+//! `rand`. Every random draw comes from one seeded [`ChaCha8Rng`]: the same
+//! input and seed give the same pose and inliers, on any thread count.
 //!
 //! RootSLAM (`loop_closing.cpp:583-605`) runs OpenGV's `Ransac` with a sample of
 //! four (three for GP3P, the fourth picks among its solutions), confidence 0.99
@@ -29,9 +31,6 @@
 //! rejected candidate costs about 52 draws at 0.5 (17 at 0.7) instead of the cap.
 
 use super::{refine, solve, validate, GeneralizedCorrespondence, Gp3pError, Gp3pPose, Solutions};
-use kornia_3d::ransac::{
-    run_with_rng, Estimator, RansacConfig, ThresholdConsensus, UniformSampler,
-};
 use kornia_staging_algebra::lie::RigidTransform;
 use rand::rngs::ChaCha8Rng;
 use rand::SeedableRng;
@@ -135,9 +134,10 @@ pub struct Gp3pRansacResult {
     pub iterations: u32,
 }
 
-/// [`Estimator`] for generalized absolute pose. `SAMPLE == 3` scores every GP3P
-/// solution; `SAMPLE == 4` keeps the one that fits the fourth correspondence
-/// best (OpenGV `AbsolutePoseSacProblem`).
+/// The GP3P hypothesis generator. `SAMPLE == 3` returns every GP3P solution;
+/// `SAMPLE == 4` keeps the one that fits the fourth correspondence best
+/// (OpenGV `AbsolutePoseSacProblem`). Under the `kornia-3d-interop` feature it
+/// also implements upstream's `kornia_3d::ransac::Estimator`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Gp3pEstimator<const SAMPLE: usize>;
 
@@ -150,30 +150,17 @@ fn fit_triple(samples: &[GeneralizedCorrespondence]) -> Solutions {
     solutions
 }
 
-impl Estimator for Gp3pEstimator<3> {
-    type Model = Gp3pPose;
-    type Sample = GeneralizedCorrespondence;
-    const SAMPLE_SIZE: usize = 3;
-
-    fn fit(&self, samples: &[Self::Sample], out: &mut Vec<Self::Model>) {
+impl Gp3pEstimator<3> {
+    /// Every GP3P solution of the first three samples, appended to `out`.
+    pub fn fit(&self, samples: &[GeneralizedCorrespondence], out: &mut Vec<Gp3pPose>) {
         out.extend_from_slice(fit_triple(samples).as_slice());
     }
-
-    fn residual(&self, model: &Self::Model, sample: &Self::Sample) -> f64 {
-        sample.angular_residual(model)
-    }
-
-    /// No refit inside the driver: [`gp3p_ransac`] refines after it, on the
-    /// inliers, and keeps the refined pose unconditionally (as RootSLAM does).
-    fn refit(&self, _inliers: &[Self::Sample], _out: &mut Vec<Self::Model>) {}
 }
 
-impl Estimator for Gp3pEstimator<4> {
-    type Model = Gp3pPose;
-    type Sample = GeneralizedCorrespondence;
-    const SAMPLE_SIZE: usize = 4;
-
-    fn fit(&self, samples: &[Self::Sample], out: &mut Vec<Self::Model>) {
+impl Gp3pEstimator<4> {
+    /// The GP3P solution of the first three samples that fits the fourth best,
+    /// appended to `out` (none when the triple has no solution).
+    pub fn fit(&self, samples: &[GeneralizedCorrespondence], out: &mut Vec<Gp3pPose>) {
         let solutions = fit_triple(samples);
         let best = solutions.as_slice().iter().min_by(|a, b| {
             samples[3]
@@ -182,13 +169,146 @@ impl Estimator for Gp3pEstimator<4> {
         });
         out.extend(best.copied());
     }
+}
 
-    fn residual(&self, model: &Self::Model, sample: &Self::Sample) -> f64 {
-        sample.angular_residual(model)
+#[cfg(feature = "kornia-3d-interop")]
+mod interop {
+    use super::{GeneralizedCorrespondence, Gp3pEstimator, Gp3pPose};
+    use kornia_3d::ransac::Estimator;
+
+    impl Estimator for Gp3pEstimator<3> {
+        type Model = Gp3pPose;
+        type Sample = GeneralizedCorrespondence;
+        const SAMPLE_SIZE: usize = 3;
+
+        fn fit(&self, samples: &[Self::Sample], out: &mut Vec<Self::Model>) {
+            Gp3pEstimator::<3>::fit(self, samples, out);
+        }
+
+        fn residual(&self, model: &Self::Model, sample: &Self::Sample) -> f64 {
+            sample.angular_residual(model)
+        }
+
+        /// No refit inside the driver: [`super::gp3p_ransac`] refines after it.
+        fn refit(&self, _inliers: &[Self::Sample], _out: &mut Vec<Self::Model>) {}
     }
 
-    /// See [`Gp3pEstimator::<3>::refit`].
-    fn refit(&self, _inliers: &[Self::Sample], _out: &mut Vec<Self::Model>) {}
+    impl Estimator for Gp3pEstimator<4> {
+        type Model = Gp3pPose;
+        type Sample = GeneralizedCorrespondence;
+        const SAMPLE_SIZE: usize = 4;
+
+        fn fit(&self, samples: &[Self::Sample], out: &mut Vec<Self::Model>) {
+            Gp3pEstimator::<4>::fit(self, samples, out);
+        }
+
+        fn residual(&self, model: &Self::Model, sample: &Self::Sample) -> f64 {
+            sample.angular_residual(model)
+        }
+
+        /// See the sample-of-three estimator.
+        fn refit(&self, _inliers: &[Self::Sample], _out: &mut Vec<Self::Model>) {}
+    }
+}
+
+/// The best hypothesis of [`draw_hypotheses`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BestHypothesis {
+    /// The model with the most inliers (the first one drawn on a tie).
+    pub pose: Gp3pPose,
+    /// Its inlier mask over the input.
+    pub inliers: Vec<bool>,
+    /// Hypotheses drawn.
+    pub iterations: u32,
+}
+
+/// Serial RANSAC: draw `sample` distinct correspondences with a [`ChaCha8Rng`]
+/// seeded from `seed` (`rand::seq::index::sample`), fit GP3P
+/// ([`Gp3pEstimator`]), count the inliers (`1 - cos < threshold`) of every
+/// solution, keep the strictly better one, and tighten `max_iters` to
+/// `ceil(log(1 - p) / log(1 - w^sample))` after each better model. Upstream
+/// `kornia_3d::ransac::run_with_rng` with SPRT and LO off, draw for draw.
+/// `None` when fewer than `sample` correspondences or no draw gave a model.
+///
+/// # Panics
+///
+/// If `sample` is not 3 or 4.
+pub fn draw_hypotheses(
+    correspondences: &[GeneralizedCorrespondence],
+    sample: usize,
+    threshold: f64,
+    confidence: f64,
+    max_iters: u32,
+    seed: u64,
+) -> Option<BestHypothesis> {
+    assert!(sample == 3 || sample == 4, "GP3P samples 3 or 4 rays");
+    let n = correspondences.len();
+    if n < sample || max_iters == 0 {
+        return None;
+    }
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut drawn: Vec<GeneralizedCorrespondence> = Vec::with_capacity(sample);
+    let mut models: Vec<Gp3pPose> = Vec::with_capacity(super::MAX_SOLUTIONS);
+    let mut inliers: Vec<bool> = Vec::with_capacity(n);
+    let mut best: Option<(Gp3pPose, Vec<bool>)> = None;
+    let mut best_count: Option<usize> = None;
+    let mut cap = max_iters;
+    let mut iterations: u32 = 0;
+    while iterations < cap {
+        drawn.clear();
+        drawn.extend(
+            rand::seq::index::sample(&mut rng, n, sample)
+                .iter()
+                .map(|index| correspondences[index]),
+        );
+        models.clear();
+        if sample == 3 {
+            Gp3pEstimator::<3>.fit(&drawn, &mut models);
+        } else {
+            Gp3pEstimator::<4>.fit(&drawn, &mut models);
+        }
+        for model in &models {
+            inliers.clear();
+            inliers.extend(
+                correspondences
+                    .iter()
+                    .map(|c| c.angular_residual(model) < threshold),
+            );
+            let count = inliers.iter().filter(|&&is_in| is_in).count();
+            if best_count.is_none_or(|best| count > best) {
+                best_count = Some(count);
+                best = Some((*model, inliers.clone()));
+                if count > 0 {
+                    cap = adaptive_cap(count as f64 / n as f64, sample, confidence, cap);
+                }
+            }
+        }
+        iterations += 1;
+    }
+    best.map(|(pose, inliers)| BestHypothesis {
+        pose,
+        inliers,
+        iterations,
+    })
+}
+
+/// Upstream's `adaptive_max_iters`: the draws that contain an all-inlier sample
+/// with probability `confidence` at inlier ratio `w`, never above `current`.
+fn adaptive_cap(w: f64, sample: usize, confidence: f64, current: u32) -> u32 {
+    let all_inlier = w.powi(sample as i32);
+    if all_inlier >= 1.0 {
+        return 1;
+    }
+    let denominator = (1.0 - all_inlier).ln();
+    if denominator >= 0.0 || !denominator.is_finite() {
+        return current;
+    }
+    let raw = (1.0 - confidence.clamp(0.0, 1.0 - 1e-12)).ln() / denominator;
+    if !raw.is_finite() || raw <= 0.0 {
+        return current;
+    }
+    // Saturating float-to-int cast.
+    (raw.ceil() as u32).min(current).max(1)
 }
 
 /// Robust generalized absolute pose: seeded RANSAC over GP3P, then (optionally)
@@ -217,12 +337,6 @@ pub fn gp3p_ransac(
     {
         return Err(Gp3pError::InvalidMinInlierRatio);
     }
-    let consensus = ThresholdConsensus {
-        threshold: config.threshold,
-    };
-    let mut sampler = UniformSampler::new(ChaCha8Rng::seed_from_u64(config.seed));
-    // The driver's own RNG only feeds SPRT, which is off; seed it anyway.
-    let mut rng = ChaCha8Rng::seed_from_u64(config.seed.wrapping_add(0x9e37_79b9_7f4a_7c15));
     let (confidence, cap, sample) = match config.schedule {
         IterationSchedule::Adaptive {
             confidence,
@@ -232,35 +346,19 @@ pub fn gp3p_ransac(
     };
     let max_iters = config
         .min_inlier_ratio
-        .map_or(cap, |w| cap.min(draws_for(w, sample, confidence)));
-    let ransac = RansacConfig {
-        max_iters,
+        .map_or(cap, |w| cap.min(draws_for(w, sample as i32, confidence)));
+    let Some(best) = draw_hypotheses(
+        correspondences,
+        sample,
+        config.threshold,
         confidence,
-        inlier_threshold: config.threshold,
-        ..RansacConfig::default()
-    };
-    let result = match config.schedule {
-        IterationSchedule::Adaptive { .. } => run_with_rng(
-            &Gp3pEstimator::<3>,
-            &consensus,
-            &mut sampler,
-            correspondences,
-            &ransac,
-            &mut rng,
-        ),
-        IterationSchedule::RootSlamParity { .. } => run_with_rng(
-            &Gp3pEstimator::<4>,
-            &consensus,
-            &mut sampler,
-            correspondences,
-            &ransac,
-            &mut rng,
-        ),
-    };
-    let Some(mut pose) = result.model else {
+        max_iters,
+        config.seed,
+    ) else {
         return Ok(None);
     };
-    let mut inliers = result.inliers;
+    let mut pose = best.pose;
+    let mut inliers = best.inliers;
     if config.refine {
         let selected: Vec<GeneralizedCorrespondence> = correspondences
             .iter()
@@ -278,7 +376,7 @@ pub fn gp3p_ransac(
         pose: pose.to_rigid_transform(),
         num_inliers: inliers.iter().filter(|&&b| b).count(),
         inliers,
-        iterations: result.num_iters,
+        iterations: best.iterations,
     }))
 }
 
