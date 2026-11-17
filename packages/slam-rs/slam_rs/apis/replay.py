@@ -3,7 +3,7 @@
 import dataclasses
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -86,8 +86,7 @@ class Config:
 
     A stereo-off switch is not a valid proxy: stereo observations
     would still reach the estimator and give it metric scale. Black images give
-    the frontend nothing to detect or track, and the run fails if a blanked
-    camera ever reports a keypoint.
+    the frontend nothing to detect or track (``tests/test_vio_bootstrap.py::test_blanked_cameras_track_nothing``).
     """
     decode_threads: int = 1
     """PyAV decoder threads per camera stream (CPU decode); the Insta360 lenses decode at about 2.6x real time with 4."""
@@ -137,6 +136,24 @@ class FrontendStage:
         )
 
 
+def blank(framesets: Iterable[Frameset], cameras: tuple[int, ...]) -> Iterator[Frameset]:
+    """The framesets with black images in ``cameras`` (``--blank-cameras``); unchanged when ``cameras`` is empty.
+
+    Args:
+        framesets: The feed's framesets.
+        cameras: Camera indices whose images are replaced by zeros.
+
+    Yields:
+        Each frameset, its blanked cameras' images zeroed.
+    """
+    for frameset in framesets:
+        if cameras:
+            frameset = dataclasses.replace(
+                frameset, images=[np.zeros_like(image) if index in cameras else image for index, image in enumerate(frameset.images)]
+            )
+        yield frameset
+
+
 def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage | None) -> int:
     """Log every frameset's inputs and drive whichever stage was built over them.
 
@@ -157,7 +174,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     # The stage that tracks needs the pixels its keypoints were computed on.
     mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
     times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
-    framesets: Iterator[Frameset] = iter(feed.framesets(stop_ns))
+    framesets: Iterator[Frameset] = blank(feed.framesets(stop_ns), config.blank_cameras)
     while config.max_framesets is None or replayed < config.max_framesets:
         waited: float = time.monotonic()
         frameset: Frameset | None = next(framesets, None)
@@ -166,11 +183,6 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         times.add("decode", 1e3 * (time.monotonic() - waited))
         log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
         replayed += 1
-        if config.blank_cameras:
-            frameset = dataclasses.replace(
-                frameset,
-                images=[np.zeros_like(image) if index in config.blank_cameras else image for index, image in enumerate(frameset.images)],
-            )
         logged: float = time.monotonic()
         log_frameset_inputs(feed, frameset, mode if log_images else "off")
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
@@ -308,7 +320,7 @@ def main(config: Config) -> None:
             if unknown:
                 raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
             stage = VioStage(
-                lockstep=Lockstep(vio=vio, blank_cameras=tuple(config.blank_cameras)),
+                lockstep=Lockstep(vio=vio),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth,
@@ -333,10 +345,6 @@ def main(config: Config) -> None:
         stage.logger.log_complete_paths()
         stage.refuse_lost_framesets()
 
-        if stage.blank_cameras:
-            print(f"blanked cameras {list(stage.blank_cameras)}: {stage.blank_keypoints} keypoints over the run")
-            if stage.blank_keypoints:
-                raise SystemExit(f"blanked cameras {list(stage.blank_cameras)} reported {stage.blank_keypoints} keypoints: not a mono proxy")
         estimate: Trajectory = stage.logger.estimated()
         write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
         print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")
