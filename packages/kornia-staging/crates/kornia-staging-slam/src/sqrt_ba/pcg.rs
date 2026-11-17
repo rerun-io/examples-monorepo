@@ -95,6 +95,11 @@ impl<S: Scalar> BlockJacobi<S> {
         }
     }
 
+    /// The inverted blocks, one per pose.
+    pub fn inverses(&self) -> &[Matrix6<S>] {
+        &self.inverses
+    }
+
     /// Blocks that were not positive definite.
     pub fn fallbacks(&self) -> usize {
         self.fallbacks

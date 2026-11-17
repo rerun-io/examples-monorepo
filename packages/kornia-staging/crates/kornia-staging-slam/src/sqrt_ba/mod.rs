@@ -5,6 +5,7 @@ mod damping;
 mod dense;
 mod global;
 mod landmark_qr;
+mod lane;
 mod pcg;
 mod prior;
 mod rel_pose;
@@ -12,10 +13,12 @@ pub use assembly::{eliminate_blocks, linearize_blocks};
 pub use damping::LandmarkDamping;
 pub use dense::{DenseBlock, DenseHbWorkspace};
 pub use global::{
-    solve_global, GbaCamera, GbaCost, GbaError, GbaIteration, GbaLandmark, GbaObservation,
-    GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds, GbaTermination,
+    solve_global, solve_global_with, GbaCamera, GbaCost, GbaError, GbaIteration, GbaLandmark,
+    GbaObservation, GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds,
+    GbaTermination,
 };
 pub use landmark_qr::{BackSubstitution, LandmarkQr};
+pub use lane::{LaneSolve, PcgLane, PcgLaneError, ReducedBlock, ReducedSystem};
 pub use pcg::{pcg, BlockJacobi, PcgOptions, PcgSummary, PcgTermination, GBA_CG_CHECK_EVERY};
 pub use prior::PriorLinearization;
 pub use rel_pose::{apply_left_increment, relative_pose_error, RelPoseConstraint};

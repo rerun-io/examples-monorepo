@@ -34,7 +34,8 @@ use rayon::prelude::*;
 
 use super::{
     apply_left_increment, pcg, relative_pose_error, BlockJacobi, LandmarkDamping, LandmarkQr,
-    PcgOptions, PcgSummary, PcgTermination, RelPoseConstraint, SqrtBaError,
+    PcgLane, PcgLaneError, PcgOptions, PcgSummary, PcgTermination, ReducedBlock, ReducedSystem,
+    RelPoseConstraint, SqrtBaError,
 };
 
 /// A fixed camera model that projects camera-frame points.
@@ -237,8 +238,10 @@ pub struct GbaStageSeconds {
     pub stage1: f64,
     /// Landmark damping, preconditioner, right-hand side.
     pub stage2: f64,
-    /// PCG.
+    /// PCG, including [`Self::pcg_upload`].
     pub pcg: f64,
+    /// Moving the reduced system to the PCG lane (0 on the host).
+    pub pcg_upload: f64,
     /// Landmark back-substitution and model cost change.
     pub back_substitution: f64,
     /// Cost of the candidate.
@@ -258,6 +261,8 @@ pub struct GbaIteration {
     pub accepted: bool,
     /// PCG count and termination.
     pub pcg: PcgSummary,
+    /// Host waits on the PCG lane (0 on the host).
+    pub pcg_syncs: usize,
     /// Stage timings.
     pub seconds: GbaStageSeconds,
 }
@@ -321,6 +326,9 @@ pub enum GbaError {
     /// The landmark block layout is invalid.
     #[error(transparent)]
     Layout(#[from] SqrtBaError),
+    /// The PCG lane failed; the problem is left at its last accepted state.
+    #[error(transparent)]
+    Lane(#[from] PcgLaneError),
 }
 
 struct Camera<'a, S: Scalar, C> {
@@ -657,6 +665,12 @@ fn rel_cost<S: Scalar>(c: &RelPoseConstraint<S>, poses: &[RigidTransform<S>]) ->
     0.5 * r.iter().map(|v| v.to_f64() * v.to_f64()).sum::<f64>()
 }
 
+/// The pose-graph rows as `6 x 12` blocks over ascending keyframes.
+struct RelBlocks<S: Scalar> {
+    keyframes: Vec<[usize; 2]>,
+    values: Vec<S>,
+}
+
 struct Solver<'a, S: Scalar, C> {
     cameras: Vec<Camera<'a, S, C>>,
     blocks: Vec<Block<S>>,
@@ -670,7 +684,144 @@ struct Solver<'a, S: Scalar, C> {
     eps: S,
 }
 
-impl<S: Scalar, C: GbaCamera<S>> Solver<'_, S, C> {
+impl<'a, S: Scalar, C: GbaCamera<S>> Solver<'a, S, C> {
+    /// Validate the problem and lay out its blocks and the pose-major order.
+    fn new(
+        problem: &GbaProblem<S>,
+        rig: &'a [GbaRigCamera<S, C>],
+        options: &GbaOptions,
+    ) -> Result<Self, GbaError> {
+        let n_kf = problem.imu_from_world.len();
+        for (l, landmark) in problem.landmarks.iter().enumerate() {
+            for o in &landmark.observations {
+                if o.keyframe >= n_kf || o.camera >= rig.len() {
+                    return Err(GbaError::Index {
+                        landmark: l,
+                        keyframe: o.keyframe,
+                        camera: o.camera,
+                    });
+                }
+            }
+            let mut keys: Vec<_> = landmark
+                .observations
+                .iter()
+                .map(|o| (o.keyframe, o.camera))
+                .collect();
+            keys.sort_unstable();
+            keys.dedup();
+            if keys.len() < 2 || keys.len() != landmark.observations.len() {
+                return Err(GbaError::Observations(l));
+            }
+        }
+        for c in &problem.rel_poses {
+            for k in [c.frame_a, c.frame_b] {
+                if k >= n_kf {
+                    return Err(GbaError::Keyframe(k));
+                }
+            }
+        }
+        let mut fixed = vec![false; n_kf];
+        for &k in &options.fixed_keyframes {
+            *fixed.get_mut(k).ok_or(GbaError::Keyframe(k))? = true;
+        }
+        let blocks = problem
+            .landmarks
+            .iter()
+            .map(Block::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut counts = vec![0usize; n_kf + 1];
+        for block in &blocks {
+            for &kf in &block.keyframes {
+                counts[kf + 1] += 1;
+            }
+        }
+        let mut pose_ptr = counts.clone();
+        for k in 0..n_kf {
+            pose_ptr[k + 1] += pose_ptr[k];
+        }
+        let mut cursor = pose_ptr.clone();
+        let mut pose_entries = vec![(0, 0); pose_ptr[n_kf]];
+        for (b, block) in blocks.iter().enumerate() {
+            for (s, &kf) in block.keyframes.iter().enumerate() {
+                pose_entries[cursor[kf]] = (b, s);
+                cursor[kf] += 1;
+            }
+        }
+        let eps = options
+            .jacobi_epsilon
+            .map_or(S::default_epsilon(), S::from_literal);
+        Ok(Solver {
+            cameras: rig
+                .iter()
+                .map(|c| {
+                    let cam_from_imu = c.imu_from_camera.inverse();
+                    Camera {
+                        model: &c.model,
+                        adjoint: cam_from_imu.adjoint(),
+                        cam_from_imu,
+                    }
+                })
+                .collect(),
+            blocks,
+            pose_ptr,
+            pose_entries,
+            rel_rows: Vec::new(),
+            scale: vec![S::one(); 6 * n_kf],
+            fixed,
+            huber: S::from_literal(options.huber_px),
+            eps,
+        })
+    }
+
+    /// The linearized pose-graph rows as blocks (they do not depend on `lambda`).
+    fn rel_blocks(&self) -> RelBlocks<S> {
+        let mut rel = RelBlocks {
+            keyframes: Vec::with_capacity(self.rel_rows.len()),
+            values: Vec::with_capacity(72 * self.rel_rows.len()),
+        };
+        for row in &self.rel_rows {
+            let (lo, hi) = if row.a < row.b {
+                ((row.a, &row.ja), (row.b, &row.jb))
+            } else {
+                ((row.b, &row.jb), (row.a, &row.ja))
+            };
+            rel.keyframes.push([lo.0, hi.0]);
+            rel.values.extend_from_slice(lo.1.as_slice());
+            rel.values.extend_from_slice(hi.1.as_slice());
+        }
+        rel
+    }
+
+    /// The damped blocks and `rel` as one reduced system.
+    fn reduced<'s>(&'s self, lambda: S, rel: &'s RelBlocks<S>) -> ReducedSystem<'s, S> {
+        let landmarks = self.blocks.iter().map(|block| {
+            let rows = block.rows();
+            ReducedBlock {
+                keyframes: &block.keyframes,
+                values: &block.storage[..6 * block.keyframes.len() * rows],
+                stride: rows,
+                offset: 3,
+                rows: rows - 3,
+            }
+        });
+        let rows =
+            rel.keyframes
+                .iter()
+                .zip(rel.values.chunks_exact(72))
+                .map(|(keyframes, values)| ReducedBlock {
+                    keyframes,
+                    values,
+                    stride: 6,
+                    offset: 0,
+                    rows: 6,
+                });
+        ReducedSystem {
+            keyframes: self.scale.len() / 6,
+            lambda,
+            blocks: landmarks.chain(rows).collect(),
+        }
+    }
+
     fn evaluate(
         &self,
         problem_landmarks: &[GbaLandmark<S>],
@@ -914,86 +1065,24 @@ pub fn solve_global<S: Scalar, C: GbaCamera<S>>(
     options: &GbaOptions,
     pool: Option<&rayon::ThreadPool>,
 ) -> Result<GbaReport, GbaError> {
+    solve_global_with(problem, rig, options, pool, None)
+}
+
+/// [`solve_global`] with the PCG of every LM attempt on `lane` (`None`: on the
+/// host, as [`solve_global`]). Everything else stays on the host.
+///
+/// # Errors
+/// As [`solve_global`], and [`GbaError::Lane`] when the lane fails: the problem
+/// then holds the last accepted state.
+pub fn solve_global_with<S: Scalar, C: GbaCamera<S>>(
+    problem: &mut GbaProblem<S>,
+    rig: &[GbaRigCamera<S, C>],
+    options: &GbaOptions,
+    pool: Option<&rayon::ThreadPool>,
+    mut lane: Option<&mut dyn PcgLane<S>>,
+) -> Result<GbaReport, GbaError> {
     let n_kf = problem.imu_from_world.len();
-    for (l, landmark) in problem.landmarks.iter().enumerate() {
-        for o in &landmark.observations {
-            if o.keyframe >= n_kf || o.camera >= rig.len() {
-                return Err(GbaError::Index {
-                    landmark: l,
-                    keyframe: o.keyframe,
-                    camera: o.camera,
-                });
-            }
-        }
-        let mut keys: Vec<_> = landmark
-            .observations
-            .iter()
-            .map(|o| (o.keyframe, o.camera))
-            .collect();
-        keys.sort_unstable();
-        keys.dedup();
-        if keys.len() < 2 || keys.len() != landmark.observations.len() {
-            return Err(GbaError::Observations(l));
-        }
-    }
-    for c in &problem.rel_poses {
-        for k in [c.frame_a, c.frame_b] {
-            if k >= n_kf {
-                return Err(GbaError::Keyframe(k));
-            }
-        }
-    }
-    let mut fixed = vec![false; n_kf];
-    for &k in &options.fixed_keyframes {
-        *fixed.get_mut(k).ok_or(GbaError::Keyframe(k))? = true;
-    }
-    let blocks = problem
-        .landmarks
-        .iter()
-        .map(Block::new)
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut counts = vec![0usize; n_kf + 1];
-    for block in &blocks {
-        for &kf in &block.keyframes {
-            counts[kf + 1] += 1;
-        }
-    }
-    let mut pose_ptr = counts.clone();
-    for k in 0..n_kf {
-        pose_ptr[k + 1] += pose_ptr[k];
-    }
-    let mut cursor = pose_ptr.clone();
-    let mut pose_entries = vec![(0, 0); pose_ptr[n_kf]];
-    for (b, block) in blocks.iter().enumerate() {
-        for (s, &kf) in block.keyframes.iter().enumerate() {
-            pose_entries[cursor[kf]] = (b, s);
-            cursor[kf] += 1;
-        }
-    }
-    let eps = options
-        .jacobi_epsilon
-        .map_or(S::default_epsilon(), S::from_literal);
-    let mut solver = Solver {
-        cameras: rig
-            .iter()
-            .map(|c| {
-                let cam_from_imu = c.imu_from_camera.inverse();
-                Camera {
-                    model: &c.model,
-                    adjoint: cam_from_imu.adjoint(),
-                    cam_from_imu,
-                }
-            })
-            .collect(),
-        blocks,
-        pose_ptr,
-        pose_entries,
-        rel_rows: Vec::new(),
-        scale: vec![S::one(); 6 * n_kf],
-        fixed,
-        huber: S::from_literal(options.huber_px),
-        eps,
-    };
+    let mut solver = Solver::new(problem, rig, options)?;
 
     let initial_cost = solver.evaluate(
         &problem.landmarks,
@@ -1033,13 +1122,30 @@ pub fn solve_global<S: Scalar, C: GbaCamera<S>>(
             report.preconditioner_fallbacks += precond.fallbacks();
             seconds.stage2 = t.elapsed().as_secs_f64();
             let t = Instant::now();
-            let summary = pcg(
-                |v, out| solver.matvec(v, out, lambda_s, pool),
-                &precond,
-                &b,
-                &mut x,
-                &options.pcg,
-            );
+            let (summary, pcg_syncs) = match lane.as_deref_mut() {
+                None => (
+                    pcg(
+                        |v, out| solver.matvec(v, out, lambda_s, pool),
+                        &precond,
+                        &b,
+                        &mut x,
+                        &options.pcg,
+                    ),
+                    0,
+                ),
+                Some(lane) => {
+                    let rel = solver.rel_blocks();
+                    let solved = lane.solve(
+                        &solver.reduced(lambda_s, &rel),
+                        &precond,
+                        &b,
+                        &mut x,
+                        &options.pcg,
+                    )?;
+                    seconds.pcg_upload = solved.upload_s;
+                    (solved.summary, solved.syncs)
+                }
+            };
             seconds.pcg = t.elapsed().as_secs_f64();
             // We solved H x = J^T r; the step is -x (scaled).
             x.iter_mut().for_each(|v| *v = -*v);
@@ -1049,6 +1155,7 @@ pub fn solve_global<S: Scalar, C: GbaCamera<S>>(
                 model_decrease: f64::NAN,
                 accepted: false,
                 pcg: summary,
+                pcg_syncs,
                 seconds,
             };
             let step_finite = x.iter().all(|v| v.is_finite())

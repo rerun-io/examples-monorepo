@@ -24,6 +24,9 @@ cubecl-environment.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-algebra.workspace = true
 kornia-staging-3d.workspace = true
+# The global BA's reduced system and its PCG lane seam (linalg).
+kornia-staging-slam.workspace = true
+nalgebra.workspace = true
 thiserror.workspace = true
 log.workspace = true
 wgpu = { workspace = true, optional = true }
@@ -39,7 +42,6 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
 serde.workspace = true
 serde_json.workspace = true
-nalgebra.workspace = true
 approx.workspace = true
 criterion.workspace = true
 
