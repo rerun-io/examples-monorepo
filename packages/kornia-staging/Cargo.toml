@@ -27,6 +27,8 @@ tempfile = "3"
 kornia-image = { version = "0.2", default-features = false }
 kornia-imgproc = { version = "0.2", default-features = false }
 kornia-3d = { version = "0.2", default-features = false }
+# Must stay on kornia-3d's rand major: kornia_3d::ransac::UniformSampler<R: rand::Rng>.
+rand = { version = "0.10", default-features = false }
 kornia-algebra = { version = "0.2", default-features = false }
 kornia-tensor = { version = "0.2", default-features = false }
 kornia-bow = "0.2"
