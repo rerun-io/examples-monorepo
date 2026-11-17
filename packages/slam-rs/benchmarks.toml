@@ -373,6 +373,229 @@ gt_rmse_cm = 77.16547338163446
 median_tracker_ms = 8.876016363501549
 measured_on = "2026-09-10"
 
+# EuRoC MAV, RootSLAM's EMH/EV1/EV2: their own tier, with no baseline until one is measured on them.
+# The tier is separate so `--tier listed` still runs on a catalog without vslam-lab-euroc (only this host's has it).
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_01_easy"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_02_easy"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_03_medium"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_04_difficult"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__MH_05_difficult"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V1_01_easy"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V1_02_medium"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V1_03_difficult"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V2_01_easy"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V2_02_medium"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+# Known data issue of the VSLAM-LAB conversion: it keeps cam1 by frame count, not by stamp, so V2_03 loses its last
+# 295 stereo pairs (1626 of the raw 1921 are fed; completion 0.83). Not re-converted: the shared registration is additive-only.
+[[segment]]
+dataset_name = "vslam-lab-euroc"
+segment_id = "vslam-lab-euroc__V2_03_difficult"
+tier = "euroc"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+# TUM-VI, RootSLAM's TC (corridor), TM (magistrale), TR (room), TS (slides): their own tier, with no baseline in this file.
+# Outside the mocap room the ground truth covers only the start and the end of a run (corridor, magistrale, slides).
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor4"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor5"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale4"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale5"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale6"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room4"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room5"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room6"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__slides1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__slides2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__slides3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
 [robocap]
 has_ground_truth = false
 decode_path = "cpu_gray8_swscale_area_downscale3"
