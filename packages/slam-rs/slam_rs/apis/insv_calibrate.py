@@ -28,12 +28,9 @@ from slam_rs.apis.insv import nearest_permutation, orthonormal
 from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
+from slam_rs.vio_log import PANORAMA_HEIGHT, PANORAMA_WIDTH
 
-PANORAMA_WIDTH: int = 1920
-"""Columns of the stitched panorama (``kornia_staging_imgproc::panorama::TileGeometry`` default: 360 degrees)."""
-PANORAMA_HEIGHT: int = 960
-"""Rows of the stitched panorama (180 degrees)."""
-CAUCHY_RAD: float = 2.0 * np.pi / 960.0
+CAUCHY_RAD: float = 2.0 * np.pi / PANORAMA_HEIGHT
 """Smallest Cauchy scale of the epipolar fit: 2 panorama pixels."""
 MIN_MATCHES: int = 30
 """A frame pair with fewer common tracks gives no relative pose."""

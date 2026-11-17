@@ -36,7 +36,9 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 PANORAMA_ENTITY: str = f"{RUN_ENTITY}/panorama"
 """The stitched 1920x960 panorama of a dual-fisheye rig, with the tracked keypoints of both tiles drawn on it."""
 PANORAMA_WIDTH: int = 1920
-"""Width of that panorama: two 960-column hemispheres."""
+"""Width of that panorama: two 960-column hemispheres (``kornia_staging_imgproc::panorama::TileGeometry`` default: 360 degrees)."""
+PANORAMA_HEIGHT: int = 960
+"""Rows of that panorama (180 degrees)."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 VIO_STATS_ENTITY: str = "/stats/vio"

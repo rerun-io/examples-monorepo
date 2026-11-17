@@ -29,11 +29,10 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, LocalSegment, RigProfile, open_segment
+from slam_rs.vio_log import PANORAMA_HEIGHT, PANORAMA_WIDTH
 
 PANO_ENTITY: str = "/world/rig_00/pano"
 """Where the layer puts the panorama video."""
-PANO_WIDTH: int = 1920
-PANO_HEIGHT: int = 960
 
 
 @dataclass(slots=True)
@@ -126,7 +125,7 @@ def write_layer(config: Config) -> PanoLayer:
             clip: Path = work / "pano.mp4"
             # fps is the container's nominal rate only; log_video_stream puts every sample on its real frame time.
             encode_frames_to_mp4(
-                panoramas(), clip, source=FrameSource("gray8", width=PANO_WIDTH, height=PANO_HEIGHT), fps=30, gop=config.gop, cq=config.cq
+                panoramas(), clip, source=FrameSource("gray8", width=PANORAMA_WIDTH, height=PANORAMA_HEIGHT), fps=30, gop=config.gop, cq=config.cq
             )
             times_ns: Int64[ndarray, " n"] = np.asarray(times, dtype=np.int64)
             with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id) as rec:
