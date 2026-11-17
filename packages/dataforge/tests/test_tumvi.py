@@ -16,6 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
+from av.video.codeccontext import VideoCodecContext
 from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, UInt8, UInt16
 from numpy import ndarray
@@ -123,16 +124,13 @@ def rig_T_cam(camera: CalibratedCamera) -> Float64[ndarray, "4 4"]:
 def decode_gray8(samples: list[bytes]) -> list[UInt8[ndarray, "h w"]]:
     """A camera's VideoStream samples, in order, through dav1d and ``reformat(format="gray8")``: slam-rs's CPU decode."""
     decoder = av.CodecContext.create("libdav1d", "r")
+    assert isinstance(decoder, VideoCodecContext)
     frames: list[UInt8[ndarray, "h w"]] = []
-    for sample in samples:
-        for frame in decoder.decode(av.Packet(sample)):
+    for packet in [*(av.Packet(sample) for sample in samples), None]:
+        for frame in decoder.decode(packet):
             gray = frame.reformat(format="gray8")
             plane = gray.planes[0]
             frames.append(np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)[:, : gray.width].copy())
-    for frame in decoder.decode(None):
-        gray = frame.reformat(format="gray8")
-        plane = gray.planes[0]
-        frames.append(np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)[:, : gray.width].copy())
     return frames
 
 
@@ -384,7 +382,9 @@ def test_a_real_frame_reaches_the_video_as_the_upper_8_of_its_12_significant_bit
     identity = SequenceIdentity("tum-vi", (REAL_SEQUENCE,))
     base: Path = raw_asset("converted TUM-VI base", paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity))
     stamp: int = read_camera_index(index.read_bytes())[REAL_FRAME].timestamp_ns
-    raw: UInt16[ndarray, "512 512"] = cv2.imread(str(sequence / f"mav0/cam0/data/{stamp}.png"), cv2.IMREAD_UNCHANGED)
+    read = cv2.imread(str(sequence / f"mav0/cam0/data/{stamp}.png"), cv2.IMREAD_UNCHANGED)
+    assert isinstance(read, np.ndarray)
+    raw: UInt16[ndarray, "512 512"] = read
     assert raw.dtype == np.uint16 and np.all(raw % 4 == 0) and np.mean(raw % 16 == 0) > 0.9, "TUM-VI's 16-bit PNGs step by 16 (a few by 4)"
     store: rrc.ChunkStore = read_back(base)
     decoded: UInt8[ndarray, "512 512"] = decode_gray8(video_samples(store, 0, REAL_FRAME + 1))[REAL_FRAME]
