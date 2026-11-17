@@ -9,6 +9,11 @@ use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput};
 use nalgebra::{Matrix4, Vector2, Vector3, Vector4};
 
+/// The guess for a keypoint that cannot be tracked into a camera (its
+/// projection is invalid, or the pair has no epipolar geometry): far off every
+/// image, so the tracker never finds it.
+const UNTRACKABLE: [f32; 2] = [-1.0e6; 2];
+
 impl<
     P: crate::frontend::patterns::ConfiguredPattern,
     F: FrameStages<Tracker: PatchTracker<Pattern = P>>,
@@ -28,6 +33,7 @@ impl<
             masks,
             depth_guess,
             host_pool,
+            matched,
             ..
         } = self;
         let predict = |camera: usize,
@@ -48,7 +54,7 @@ impl<
                 if valid {
                     pixel
                 } else {
-                    Vector2::repeat(-1.0e6)
+                    Vector2::from(UNTRACKABLE)
                 }
             } else {
                 position
@@ -89,11 +95,17 @@ impl<
             }
         } else {
             // Mask camera zero once. Every destination borrows these same slots.
+            // With no camera matched nothing is offered for matching at all.
             let source = &mut passes[0];
             source.ids.clear();
             source.positions.clear();
             source.guesses.clear();
-            for (index, id) in new_cam0.ids.iter().enumerate() {
+            let offered: usize = if matched.iter().any(|&matched| matched) {
+                new_cam0.ids.len()
+            } else {
+                0
+            };
+            for (index, id) in new_cam0.ids.iter().enumerate().take(offered) {
                 let transform = new_cam0.transforms.get(index);
                 let position = Vector2::from(transform.translation);
                 if masks[0].in_bounds(position.x, position.y) {
@@ -111,6 +123,17 @@ impl<
                 let camera = lane + 1;
                 let pose = calib.t_i_c[0].inverse() * calib.t_i_c[camera];
                 guesses.clear();
+                // A camera that is not matched (a shared centre) gets the
+                // untrackable guess for every keypoint.
+                if !matched[camera] {
+                    for index in 0..source.ids.len() {
+                        guesses.push(&AffineCompact2f {
+                            linear: source.guesses.get(index).linear,
+                            translation: UNTRACKABLE,
+                        });
+                    }
+                    return;
+                }
                 for index in 0..source.ids.len() {
                     guesses.push(&predict(
                         camera,
@@ -141,7 +164,14 @@ impl<
     pub(super) fn finish_camera(&mut self, camera: usize) {
         self.finish_track_points(camera, camera);
         self.frame.cameras[camera].clear();
+        let kill: Option<&super::TrackKillMask> = self.track_kill_masks[camera].as_deref();
         for (slot, id) in self.tracked_ids.iter().enumerate() {
+            if let Some(kill) = kill {
+                let position: Vector2<f32> = self.tracked.get(slot).translation.into();
+                if kill.kills(position.x, position.y) {
+                    continue;
+                }
+            }
             // `keypoint_map_2.insert(result.begin(), result.end())`; the
             // cell counts are rebuilt afterwards by `updateCellCounts`.
             self.frame.cameras[camera].set(*id, &self.tracked.get(slot), NO_RESPONSE);
@@ -170,21 +200,29 @@ impl<
     }
 }
 
+/// Below this baseline, metres, two camera centres count as one.
+const MIN_EPIPOLAR_BASELINE_M: f64 = 1e-9;
+
 /// `computeEssential`.
 ///
 /// `E.topLeftCorner<3,3>() = hat(t.normalized()) * R`, computed in `double`
 /// because that is what casts to before calling it, and
-/// cast back to the estimator's scalar afterwards.
-pub(super) fn compute_essential(t_0_1: &Se3<f64>) -> Matrix4<f64> {
+/// cast back to the estimator's scalar afterwards. Coincident centres have no
+/// epipolar geometry, and normalizing their zero baseline would give a NaN
+/// matrix that every match passes (`NaN > threshold` is false): `None`.
+pub(super) fn compute_essential(t_0_1: &Se3<f64>) -> Option<Matrix4<f64>> {
     let translation: Vector3<f64> = t_0_1.translation;
+    let baseline: f64 = translation.norm();
+    if !baseline.is_finite() || baseline <= MIN_EPIPOLAR_BASELINE_M {
+        return None;
+    }
     let rotation = t_0_1.rotation.matrix();
     let mut essential: Matrix4<f64> = Matrix4::zeros();
-    // Normalizing a zero baseline yields NaNs: coincident cameras have no epipolar geometry.
-    let normalized: Vector3<f64> = translation / translation.norm();
+    let normalized: Vector3<f64> = translation / baseline;
     essential
         .fixed_view_mut::<3, 3>(0, 0)
         .copy_from(&(So3::hat(&normalized) * rotation));
-    essential
+    Some(essential)
 }
 
 /// `Ed.cast<Scalar>()`.
@@ -236,6 +274,17 @@ mod tests {
     use nalgebra::Matrix2;
 
     #[test]
+    fn a_shared_centre_has_no_essential_matrix_and_a_baseline_has_a_finite_one() {
+        assert!(compute_essential(&Se3::identity()).is_none());
+        let turned: Se3<f64> = Se3::new(So3::exp(&Vector3::new(0.0, 3.0, 0.0)), Vector3::zeros());
+        assert!(compute_essential(&turned).is_none());
+        let stereo: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
+        let essential: Matrix4<f64> = compute_essential(&stereo).unwrap();
+        assert!(essential.iter().all(|value| value.is_finite()));
+        assert_eq!(essential[(1, 2)], -1.0);
+    }
+
+    #[test]
     fn tracking_rejects_kb4_guesses_without_changing_source_slots() {
         let calibration =
             Calibration::from_json_str(include_str!("../../../tests/fixtures/msdmg_calib.json"))
@@ -263,7 +312,10 @@ mod tests {
         }
         flow.prepare_tracks(Some(&PosePrediction::default()));
         assert_eq!(flow.passes[0].ids, vec![1, 2]);
-        assert_eq!(flow.passes[0].guesses.get(1).translation, [-1.0e6; 2]);
+        assert_eq!(
+            flow.passes[0].guesses.get(1).translation,
+            super::UNTRACKABLE
+        );
         assert_eq!(flow.passes[0].guesses.get(0).translation, [480.0, 480.0]);
     }
 }

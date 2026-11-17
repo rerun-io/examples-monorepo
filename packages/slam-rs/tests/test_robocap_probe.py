@@ -118,6 +118,7 @@ def robocap_statics(
         transform_translation=cam_T_imu[:3, 3],
         transform_relation=CHILD_FROM_PARENT,
         distortion_valid_radius=None,
+        rolling_shutter_readout_s=None,
     )
 
 

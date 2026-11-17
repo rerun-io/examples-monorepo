@@ -329,6 +329,25 @@ impl Vio {
             .map_err(value_error)
     }
 
+    /// What the frontend lane cost on the last frameset that ran it, in ms:
+    /// `imu` (its motion preintegration), `pyramid`, `detect`, `track` and
+    /// `stereo`. Unlike a snapshot's timings it exists before the estimator has
+    /// a state.
+    #[getter]
+    fn frontend_timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
+        let timings = self.inner.frontend_timings();
+        [
+            ("imu", timings.imu_ns),
+            ("pyramid", timings.flow.pyramid_ns),
+            ("detect", timings.flow.detect_ns),
+            ("track", timings.flow.track_ns),
+            ("stereo", timings.flow.stereo_ns),
+        ]
+        .into_iter()
+        .map(|(name, ns)| (name, ns as f64 / 1e6))
+        .collect()
+    }
+
     /// The window, its landmarks and the last measured frame's statistics.
     ///
     /// `None` until a frameset has been measured: before that the window is
@@ -573,6 +592,20 @@ impl VioSnapshot {
         self.frame_update
     }
 
+    /// The GPU lane collected this frameset's temporal and stereo results in
+    /// one device wait (one-wait); always false on the CPU lane.
+    #[getter]
+    fn gpu_one_wait(&self) -> bool {
+        self.frontend_timings.flow.gpu_one_wait
+    }
+
+    /// The GPU lane reused this frameset's timestamp-bound lookahead image
+    /// upload; always false on the CPU lane.
+    #[getter]
+    fn gpu_lookahead(&self) -> bool {
+        self.frontend_timings.flow.gpu_lookahead
+    }
+
     /// Wall time each stage took on the last frame, milliseconds.
     ///
     /// The estimator's nine — `predict`, `keyframe`, `optimize`, `linearize`,
@@ -732,7 +765,9 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
     let readonly = array.readonly();
     let values: &[f64] = contiguous(&readonly, name, name)?;
     Ok(values
-        .as_chunks::<3>().0.iter()
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|row| [row[0], row[1], row[2]])
         .collect())
 }
@@ -884,6 +919,18 @@ impl Calibration {
             .collect()
     }
 
+    /// Gravity magnitude, m/s²: the recording's, or 9.81 when it states none.
+    #[getter]
+    fn gravity_ms2(&self) -> f64 {
+        self.inner.gravity_ms2
+    }
+
+    /// Rolling-shutter readout per camera, seconds, `None` where the camera states none.
+    #[getter]
+    fn readout_s(&self) -> Vec<Option<f64>> {
+        self.inner.readout_s.clone()
+    }
+
     /// IMU sample rate in Hz.
     #[getter]
     fn imu_update_rate(&self) -> f64 {
@@ -1008,7 +1055,9 @@ impl FlowFrame {
         let keypoints: &CameraKeypoints = self.camera(camera)?;
         let positions: Vec<f32> = keypoints
             .transforms
-            .as_chunks::<6>().0.iter()
+            .as_chunks::<6>()
+            .0
+            .iter()
             .flat_map(|warp| [warp[2], warp[5]])
             .collect();
         positions.to_pyarray(py).reshape((keypoints.ids.len(), 2))
@@ -1262,6 +1311,7 @@ fn camera_parts(object: &Bound<'_, PyAny>, index: usize) -> PyResult<CoreCameraP
             &what,
             "a float or None",
         )?,
+        readout_s: extract_attribute(object, "readout_s", &what, "a float or None")?,
         imu_t_cam_row_major,
     })
 }
@@ -1276,6 +1326,7 @@ fn imu_parts(object: &Bound<'_, PyAny>) -> PyResult<CoreImuParts<f64>> {
         gyro_bias_std: extract_attribute(object, "gyro_bias_std", what, "a float")?,
         accel_bias_std: extract_attribute(object, "accel_bias_std", what, "a float")?,
         cam_time_offset_ns: extract_attribute(object, "cam_time_offset_ns", what, "an integer")?,
+        gravity_ms2: extract_attribute(object, "gravity_ms2", what, "a float or None")?,
     })
 }
 

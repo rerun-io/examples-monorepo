@@ -46,7 +46,7 @@ def test_scoring_uses_ground_truth_and_rejects_wrong_clock(
         quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (30, 1)),
     )
     run: SegmentRun = SegmentRun(
-        estimate=shift_clock(truth, clock_offset), framesets=30, lost=0, wall_s=1.0, config_sha256="a" * 64, ground_truth=truth, median_tracker_ms=2.0
+        estimate=shift_clock(truth, clock_offset), framesets=30, lost=0, wall_s=1.0, config_sha256="a" * 64, calibration_sha256="b" * 64, ground_truth=truth, median_tracker_ms=2.0
     )
     monkeypatch.setattr(
         gate,
@@ -106,7 +106,7 @@ def test_nonfinite_scoring_keeps_costs_and_reports_refusal(
     finite: Trajectory = Trajectory(np.arange(20, dtype=np.int64), np.zeros((20, 3)), np.tile([1.0, 0.0, 0.0, 0.0], (20, 1)))
     bad: Trajectory = replace(finite, position_m=finite.position_m.copy())
     bad.position_m[3, 1] = np.nan
-    run: SegmentRun = SegmentRun(finite if bad_reference else bad, 20, 0, 2.0, bad if bad_reference else finite, 4.0, "a" * 64)
+    run: SegmentRun = SegmentRun(finite if bad_reference else bad, 20, 0, 2.0, bad if bad_reference else finite, 4.0, "a" * 64, "b" * 64)
     monkeypatch.setattr(
         gate,
         "resolve_catalog_segments",
@@ -130,7 +130,7 @@ def test_the_gate_forwards_auto_and_measures_the_lane_it_resolved(
         quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (30, 1)),
     )
     run: SegmentRun = SegmentRun(
-        estimate=truth, framesets=30, lost=0, wall_s=1.0, config_sha256="a" * 64, ground_truth=truth, median_tracker_ms=0.5
+        estimate=truth, framesets=30, lost=0, wall_s=1.0, config_sha256="a" * 64, calibration_sha256="b" * 64, ground_truth=truth, median_tracker_ms=0.5
     )
     requests: list[str] = []
     lanes: list[str] = []

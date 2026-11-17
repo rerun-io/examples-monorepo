@@ -479,6 +479,8 @@ pub fn flow_rig(count: usize) -> Calibration<f64> {
         accel_noise_std: Vector3::repeat(1e-3),
         gyro_bias_std: Vector3::repeat(1e-5),
         accel_bias_std: Vector3::repeat(1e-4),
+        gravity_ms2: 9.81,
+        readout_s: vec![None; count],
         unknown: BTreeMap::new(),
     }
 }

@@ -66,6 +66,9 @@ class Lockstep:
     elapsed_ms: list[float] = field(default_factory=list)
     """Wall time per yielded pose. Lag mode adds startup frontend time to the
     final drain; calls waiting for stereo do not yield a pose."""
+    consumed_ms: list[float] = field(default_factory=list)
+    """Wall time of every ``track`` call that consumed a frameset, posed or not (a stereo-waiting
+    frameset included); refusals for want of IMU are not in it."""
     _buffered: Frameset | None = None
     """The accepted frame still waiting for a lagged estimate."""
     _buffered_flow: _core.FlowFrame | None = None
@@ -126,6 +129,7 @@ class Lockstep:
             if result.status == _core.VioStatus.NeedMoreImu:
                 self.retries += 1
                 return
+            self.consumed_ms.append(elapsed_ms)
             self.pending.pop(0)
             if result.status == _core.VioStatus.Buffered:
                 self._buffered = held
@@ -196,6 +200,9 @@ class SegmentRun:
     Taken where the text is parsed, so a tool that exports it cannot name a
     config the estimator did not read.
     """
+    calibration_sha256: str
+    """SHA-256 of the calibration JSON the estimator was built from: the recording-derived settings (gravity, readouts,
+    lenses) that the config text does not hold."""
     dropped: tuple[DroppedFrameset, ...] = ()
     """Explicitly rejected input timestamps, on the exported device clock."""
 
@@ -213,7 +220,7 @@ class SegmentRun:
         return None
 
 
-def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
+def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str, calibration: _core.Calibration) -> SegmentRun:
     """Track framesets with IMU hold/retry; export estimates and truth on the device clock."""
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
@@ -258,6 +265,7 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         lost=replayed - len(t_ns),
         wall_s=wall_s,
         config_sha256=config_sha256,
+        calibration_sha256=config_text_sha256(calibration.to_json()),
         ground_truth=shift_clock(feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])), feed.export_offset_ns),
         median_tracker_ms=float(np.median(lockstep.elapsed_ms)) if lockstep.elapsed_ms else float("nan"),
         dropped=tuple(DroppedFrameset(drop.t_ns + feed.export_offset_ns, drop.reason) for drop in lockstep.dropped),
@@ -285,8 +293,11 @@ def run_segment(
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend=backend))
-        return drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
+        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
+        lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, flow, backend=backend))
+        return drive(
+            feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text), calibration=calibration
+        )
 
 
 def robocap_estimator_files(
@@ -380,4 +391,4 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text))
+        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text), calibration=calibration)

@@ -44,6 +44,8 @@ class CameraStatics:
     """``Transform3D:relation``; must be :data:`CHILD_FROM_PARENT`."""
     distortion_valid_radius: float | None
     """The valid radius ``rpmax``; present on msd-g2 only."""
+    rolling_shutter_readout_s: float | None
+    """The camera node's ``rolling_shutter_readout_s``, when the camera states one."""
 
 
 def scale_principal_point(value: float, downscale: int) -> float:
@@ -84,11 +86,12 @@ def camera_calib(index: int, statics: CameraStatics, downscale: int = 1) -> Came
     return _core.catalog_camera_calib(index, statics, downscale)
 
 
-def imu_calib(calibration: ImuCalibration, imu_T_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int) -> ImuCalib:
+def imu_calib(calibration: ImuCalibration, imu_T_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int, gravity_ms2: float | None) -> ImuCalib:
     """Convert catalog calibration into estimator units without re-aligning samples.
 
     The inverse ingestion shift moves *both* cameras and IMU to the historical
     estimator time origin. It must never be applied only to the camera stream.
     Factory per-camera offsets are provenance; ingestion already aligned samples.
+    ``gravity_ms2`` is the IMU node's own magnitude, None when the recording states none.
     """
-    return _core.catalog_imu_calib(calibration, imu_T_body, applied_time_shift_ns)
+    return _core.catalog_imu_calib(calibration, imu_T_body, applied_time_shift_ns, gravity_ms2)

@@ -1,6 +1,6 @@
 //! Consumer-owned nalgebra buffers over the staged deterministic reducer.
-use kornia_staging_algebra::Scalar;
 use super::{LinearizeError, landmark_block::LandmarkBlock};
+use kornia_staging_algebra::Scalar;
 use kornia_staging_slam::sqrt_ba::DenseHbWorkspace;
 use nalgebra::{DMatrix, DVector};
 /// Retains nalgebra buffers required by the estimator's solve and fixed-frame policy.
@@ -110,8 +110,7 @@ mod tests {
         .unwrap();
         config.vio_min_frames_after_kf = 5;
         config.vio_new_kf_keypoints_thresh = 2.0;
-        let mut candidate =
-            SqrtKeypointVio::<S>::with_default_gravity(calibration.cast(), config).unwrap();
+        let mut candidate = SqrtKeypointVio::<S>::new(calibration.cast(), config).unwrap();
         let mut observations = FlowObservations::new(0, calibration.t_i_c.len());
         for id in 0..36 {
             let point = calibration.t_i_c[0]

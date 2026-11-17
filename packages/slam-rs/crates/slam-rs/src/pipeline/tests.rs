@@ -357,3 +357,79 @@ fn gpu_lookahead_matches_tracking_with_changed_and_skipped_hints() {
     assert!(one_wait_resumed, "one-wait resumes after the mask clears");
     assert_eq!(lookahead.flush().unwrap(), reference.flush().unwrap());
 }
+
+/// Framesets of a RoboCap rig (4 x KB4 640x360) on the GPU lane that took the
+/// one-wait path, with `config.optical_flow_gpu_one_wait_any_model` as given.
+#[cfg(feature = "gpu-wgpu")]
+fn kb4_rig_one_wait_framesets(any_model: bool) -> usize {
+    let config = config::VioConfig {
+        optical_flow_gpu_one_wait_any_model: any_model,
+        ..config::VioConfig::from_json_str(include_str!("../../../../configs/msdmo_config.json"))
+            .unwrap()
+    };
+    let calibration = calib::Calibration::from_json_str(include_str!(
+        "../../../../configs/robocap_calib_downscale3.json"
+    ))
+    .unwrap();
+    let mut vio = Vio::<f32>::with_backend(
+        config,
+        calibration,
+        frontend::flow::FrontendOptions {
+            threads: 1,
+            ..Default::default()
+        },
+        Backend::Gpu,
+    )
+    .unwrap();
+    for tick in 0..400 {
+        vio.push_imu(tick * 5_000_000, [0.0; 3], [0.0, 0.0, 9.81])
+            .unwrap();
+    }
+    let mut one_wait = 0;
+    for frame in 0..12usize {
+        let images: Vec<Vec<u8>> = (0..4)
+            .map(|camera| {
+                (0..640 * 360)
+                    .map(|pixel| {
+                        let x = (pixel % 640 + frame + camera * 2) as u32;
+                        let y = (pixel / 640) as u32;
+                        let value = (x / 3).wrapping_mul(374_761_393)
+                            ^ (y / 3).wrapping_mul(668_265_263);
+                        (value.wrapping_mul(1_274_126_177) >> 24) as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        let views: Vec<ImageView<'_>> = images
+            .iter()
+            .map(|data| ImageView {
+                data,
+                width: 640,
+                height: 360,
+                stride: 640,
+            })
+            .collect();
+        vio.track((frame as i64 + 1) * 50_000_000, &views).unwrap();
+        let flow = vio.frontend_timings().flow;
+        assert!(frame > 0 || !flow.gpu_one_wait, "the first frameset has no temporal pass");
+        one_wait += usize::from(flow.gpu_one_wait);
+    }
+    one_wait
+}
+
+/// With the key on, a RoboCap rig takes the one-wait path once tracking starts.
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_kb4_rig_takes_one_wait() {
+    assert!(kb4_rig_one_wait_framesets(true) > 0, "KB4 one-wait never ran");
+}
+
+/// With the default config a RoboCap rig keeps the host stereo guesses: only
+/// Brown8 rigs take the one-wait path unless the config asks for it.
+#[cfg(feature = "gpu-wgpu")]
+#[test]
+#[ignore = "requires a GPU; run explicitly on the RTX validation host"]
+fn gpu_kb4_rig_skips_one_wait_by_default() {
+    assert_eq!(kb4_rig_one_wait_framesets(false), 0, "KB4 took one-wait by default");
+}

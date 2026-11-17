@@ -48,6 +48,34 @@ use kornia_staging_imgproc::features::{
 use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 use kornia_staging_slam::tracking::optical_flow::{CpuPatchTracker, PatchTracker, TrackInput};
 
+/// Pixels of one camera where a tracked keypoint is dropped: the rounded
+/// keypoint position indexes `killed`, row-major `width x height`. The
+/// panorama lane marks the rows above its latitude limit and, for stitched
+/// tiles, the pixels whose patch would read outside the lens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackKillMask {
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// One flag per pixel; true drops a keypoint whose rounded position lands there.
+    pub killed: Vec<bool>,
+}
+
+impl TrackKillMask {
+    /// Whether a keypoint at `(x, y)` is dropped; positions off the image are.
+    pub fn kills(&self, x: f32, y: f32) -> bool {
+        let (column, row) = (x.round(), y.round());
+        if !(column >= 0.0 && row >= 0.0)
+            || column as usize >= self.width
+            || row as usize >= self.height
+        {
+            return true;
+        }
+        self.killed[row as usize * self.width + column as usize]
+    }
+}
+
 /// Frame-to-frame optical flow in f32, generic over pyramid and tracker backends.
 /// [`FrameToFrameOpticalFlow::with_stages`] selects implementations without
 /// exposing a concrete pyramid in the driver's public signatures.
@@ -62,6 +90,10 @@ pub struct FrameToFrameOpticalFlow<
     cameras: Vec<RigCamera<f32>>,
     /// `E`, one 4x4 essential matrix per camera.
     essential: Vec<Matrix4<f32>>,
+    /// Whether new camera-0 keypoints are matched into this camera: stereo
+    /// matching is on and the pair has epipolar geometry. `false` for camera 0
+    /// itself and for a camera that shares camera 0's centre.
+    matched: Vec<bool>,
     /// One detection grid per camera, derived from that camera's image size.
     detection_grids: Vec<CellGrid>,
     /// The occupancy grid, shaped from camera 0 as `cells` is.
@@ -87,6 +119,15 @@ pub struct FrameToFrameOpticalFlow<
     depth_guess: f32,
     /// CellMasks for this frame, grown by `cam0OverlapCellsMasksForCam`.
     masks: Vec<CellMasks>,
+    /// Static per-camera cells where detection never runs; tracks may still
+    /// enter them. Empty unless [`FrameToFrameOpticalFlow::set_detection_masks`]
+    /// set them.
+    detection_masks: Vec<CellMasks>,
+    /// `masks` plus `detection_masks`, rebuilt before each detection.
+    detect_masks: Vec<CellMasks>,
+    /// Per camera, the pixels where a tracked keypoint is dropped; `None`
+    /// keeps every track.
+    track_kill_masks: Vec<Option<std::sync::Arc<TrackKillMask>>>,
 
     stages: F,
     /// The source keypoint ids of each lane of the batch in flight, in map order
@@ -333,16 +374,24 @@ impl<
             return Err(FrontendError::NoCameras);
         }
         // Each essential matrix uses that camera's pose relative to camera 0.
-        let essential: Vec<Matrix4<f32>> = (0..num_cams)
+        // `T_c0_c0`, and any camera at camera 0's centre, has no baseline and
+        // so no essential matrix: its entry is zero and it is never matched.
+        let essential_or_none: Vec<Option<Matrix4<f32>>> = (0..num_cams)
             .map(|index| {
                 if index == 0 {
-                    // `T_c0_c0` has no baseline, so `t.normalized()` would be
-                    // NaN; nothing reads index 0 either way.
-                    return Matrix4::zeros();
+                    return None;
                 }
                 let t_i_j: Se3<f32> = calib.t_i_c[0].inverse() * calib.t_i_c[index];
-                cast_matrix4(&compute_essential(&t_i_j.cast::<f64>()))
+                compute_essential(&t_i_j.cast::<f64>()).map(|essential| cast_matrix4(&essential))
             })
+            .collect();
+        let matched: Vec<bool> = essential_or_none
+            .iter()
+            .map(|essential| config.optical_flow_stereo_matching && essential.is_some())
+            .collect();
+        let essential: Vec<Matrix4<f32>> = essential_or_none
+            .into_iter()
+            .map(|essential| essential.unwrap_or_else(Matrix4::zeros))
             .collect();
 
         // `detectKeypointsWithCells` derives its grid from the image it is given
@@ -364,6 +413,9 @@ impl<
             stages,
             cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
             masks: vec![CellMasks::default(); num_cams],
+            detection_masks: vec![CellMasks::default(); num_cams],
+            detect_masks: vec![CellMasks::default(); num_cams],
+            track_kill_masks: vec![None; num_cams],
             snapshot: FrameState::default(),
             timings: FlowTimings::default(),
             passes: (0..num_cams).map(|_| TrackInput::default()).collect(),
@@ -393,6 +445,7 @@ impl<
             calib,
             cameras,
             essential,
+            matched,
             detection_grids,
             occupancy_grid,
             pattern: PhantomData,
@@ -465,6 +518,94 @@ impl<
     /// If `camera` is outside the rig.
     pub fn essential(&self, camera: usize) -> Matrix4<f32> {
         self.essential[camera]
+    }
+
+    /// Whether new camera-0 keypoints are matched into `camera`: stereo
+    /// matching is on and the pair has epipolar geometry (distinct centres).
+    ///
+    /// # Panics
+    /// If `camera` is outside the rig.
+    pub fn matches_into(&self, camera: usize) -> bool {
+        self.matched[camera]
+    }
+
+    /// Whether this frameset may take the stereo shortcut of the selected
+    /// backend: a previous frame exists, no camera has a mask (frame or static)
+    /// and every other camera is matched against camera 0.
+    fn stereo_eligible(&self) -> bool {
+        self.t_ns.is_some()
+            && self.masks.iter().all(|masks| masks.masks.is_empty())
+            && self
+                .detection_masks
+                .iter()
+                .all(|masks| masks.masks.is_empty())
+            && self.matched[1..].iter().all(|&matched| matched)
+    }
+
+    /// Set static per-camera cells where detection never runs, one list per
+    /// camera (an empty list masks nothing). Tracks are not dropped there.
+    ///
+    /// # Errors
+    /// [`FrontendError::DetectionMasks`] when the list count is not the camera
+    /// count or a rectangle is not exactly one cell of that camera's grid.
+    pub fn set_detection_masks(&mut self, masks: Vec<CellMasks>) -> Result<(), FrontendError> {
+        if masks.len() != self.cameras.len() {
+            return Err(FrontendError::DetectionMasks {
+                camera: masks.len(),
+                reason: "one mask list per camera",
+            });
+        }
+        for (camera, (list, grid)) in masks.iter().zip(&self.detection_grids).enumerate() {
+            let cell: f32 = grid.cell as f32;
+            let aligned = |edge: f32, start: usize| {
+                let offset: f32 = (edge - start as f32) / cell;
+                offset >= 0.0 && offset.fract() == 0.0
+            };
+            for rect in &list.masks {
+                if rect.w != cell
+                    || rect.h != cell
+                    || !aligned(rect.x, grid.x_start)
+                    || !aligned(rect.y, grid.y_start)
+                {
+                    return Err(FrontendError::DetectionMasks {
+                        camera,
+                        reason: "every rectangle must be one whole grid-aligned cell",
+                    });
+                }
+            }
+        }
+        self.detection_masks = masks;
+        Ok(())
+    }
+
+    /// Drop tracked keypoints that land on a marked pixel, one optional mask
+    /// per camera, each the camera's own size.
+    ///
+    /// # Errors
+    /// [`FrontendError::TrackKillMasks`] when the count is not the camera count
+    /// or a mask is not its camera's size.
+    pub fn set_track_kill_masks(
+        &mut self,
+        masks: Vec<Option<std::sync::Arc<TrackKillMask>>>,
+    ) -> Result<(), FrontendError> {
+        if masks.len() != self.cameras.len() {
+            return Err(FrontendError::TrackKillMasks {
+                camera: masks.len(),
+                reason: "one track kill mask per camera",
+            });
+        }
+        for (camera, mask) in masks.iter().enumerate() {
+            if let Some(mask) = mask
+                && [mask.width as u32, mask.height as u32] != self.cameras[camera].resolution
+            {
+                return Err(FrontendError::TrackKillMasks {
+                    camera,
+                    reason: "a track kill mask must be its camera's size",
+                });
+            }
+        }
+        self.track_kill_masks = masks;
+        Ok(())
     }
 
     /// The configuration this frontend runs.
@@ -701,8 +842,7 @@ impl<
                 config: &self.config,
                 depth: self.depth_guess,
                 last_detect_count: self.last_detect_count,
-                eligible: self.t_ns.is_some()
-                    && self.masks.iter().all(|masks| masks.masks.is_empty()),
+                eligible: self.stereo_eligible(),
             },
             &mut self.timings,
         )?;
@@ -740,7 +880,11 @@ impl<
         // reads them itself, which is the read the detector used to make on
         // every frameset.
         let mark: std::time::Instant = std::time::Instant::now();
-        self.stages.detector().scanner_mut().take_cells().map_err(Into::into)?;
+        self.stages
+            .detector()
+            .scanner_mut()
+            .take_cells()
+            .map_err(Into::into)?;
         self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {
@@ -751,5 +895,48 @@ impl<
         self.filter_points();
         self.timings.stereo_ns += duration_ns(mark);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use kornia_image::ImageSize;
+    use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
+
+    /// A rig with no static masks and every pair matched takes the branches it
+    /// took before detection masks and unmatched cameras existed: the stereo
+    /// shortcut stays eligible and detection reads the frame's masks unchanged.
+    #[test]
+    fn a_matched_rig_without_static_masks_takes_the_default_branches() {
+        let calibration =
+            Calibration::from_json_str(include_str!("../../tests/fixtures/msdmi_calib.json"))
+                .unwrap();
+        let mut flow = FrameToFrameOpticalFlow::<Pattern51>::new(
+            VioConfig::default(),
+            &calibration,
+            FrontendOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(flow.matched, vec![false, true]);
+        let [width, height] = calibration.resolution[0].map(|value| value as usize);
+        let texture: Vec<u16> = (0..width * height)
+            .map(|index| {
+                let (x, y) = (index % width / 4, index / width / 4);
+                ((x * 7919 + y * 104_729) % 251) as u16 * 256
+            })
+            .collect();
+        let image = Image::new(ImageSize { width, height }, texture).unwrap();
+        flow.process_frame(0, &[image.clone(), image], &PosePrediction::default(), &[])
+            .unwrap();
+        assert!(!flow.frame.cameras[0].is_empty());
+        assert_eq!(flow.detect_masks, flow.masks);
+        // The next frameset starts from the caller's (empty) masks.
+        for masks in &mut flow.masks {
+            masks.masks.clear();
+        }
+        assert!(flow.stereo_eligible());
     }
 }

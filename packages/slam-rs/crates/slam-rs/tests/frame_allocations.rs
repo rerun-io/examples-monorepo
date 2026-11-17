@@ -566,7 +566,7 @@ fn the_estimators_per_frame_cost_does_not_grow_with_the_lm_step_count() {
         },
     )
     .unwrap();
-    let mut estimator = slam_rs::estimator::SqrtKeypointVio::<f32>::with_default_gravity(
+    let mut estimator = slam_rs::estimator::SqrtKeypointVio::<f32>::new(
         common::calibration().cast(),
         common::config(),
     )

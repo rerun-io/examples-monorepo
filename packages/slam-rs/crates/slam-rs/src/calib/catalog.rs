@@ -16,6 +16,8 @@ pub struct CameraStatics {
     pub transform_translation: [f64; 3],
     pub transform_relation: i64,
     pub distortion_valid_radius: Option<f64>,
+    /// The camera node's `rolling_shutter_readout_s`, when the camera states one.
+    pub rolling_shutter_readout_s: Option<f64>,
 }
 
 /// Catalog noise densities, random walks, frequency, and the already-applied clock shift.
@@ -26,6 +28,8 @@ pub struct ImuStatics {
     pub gyro_bias_random_walk: Option<f64>,
     pub accel_bias_random_walk: Option<f64>,
     pub applied_time_shift_ns: i64,
+    /// The IMU node's `gravity_ms2`, when the recording states one.
+    pub gravity_ms2: Option<f64>,
 }
 
 impl CameraParts<f64> {
@@ -51,6 +55,13 @@ impl CameraParts<f64> {
         let (model, count) = match raw.distortion_model.as_str() {
             "kannala_brandt" => ("kb4", 4),
             "brown_conrady" => ("radtan8", 8),
+            // fx fy cx cy come from the pinhole matrix; the coefficients follow them.
+            "double_sphere" => ("ds", 2),
+            "eucm" => ("eucm", 2),
+            "equirectangular" => ("equirectangular", 1),
+            // xi, half_field_rad, then the factory distortion (CONTRACT.md order).
+            "mei_v3" => ("mei_v3", 7),
+            "mei_v6" => ("mei_v6", 15),
             other => return Err(invalid(format!("unsupported distortion model {other:?}"))),
         };
         if raw.distortion_coefficients.len() < count {
@@ -95,6 +106,7 @@ impl CameraParts<f64> {
             model: model.into(),
             distortion: raw.distortion_coefficients[..count].to_vec(),
             distortion_valid_radius: raw.distortion_valid_radius,
+            readout_s: raw.rolling_shutter_readout_s,
             imu_t_cam_row_major: pose,
         })
     }
@@ -129,6 +141,7 @@ impl ImuParts<f64> {
                 .applied_time_shift_ns
                 .checked_neg()
                 .ok_or_else(|| CatalogError("IMU time shift overflow".into()))?,
+            gravity_ms2: raw.gravity_ms2,
         })
     }
 }
@@ -149,6 +162,7 @@ mod tests {
             transform_translation: [2.0, 3.0, 4.0],
             transform_relation: 2,
             distortion_valid_radius: None,
+            rolling_shutter_readout_s: None,
         };
         let camera = CameraParts::from_catalog_statics(0, &raw, 3)?;
         assert_eq!(
@@ -171,6 +185,40 @@ mod tests {
         let mut bad = raw;
         bad.distortion_coefficients[4] = 1.0;
         assert!(CameraParts::from_catalog_statics(0, &bad, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_wide_angle_and_panorama_cameras_reach_the_staged_models() -> Result<(), CatalogError>
+    {
+        let pi = std::f64::consts::PI;
+        for (name, coefficients, model) in [
+            ("double_sphere", vec![-0.17, 0.59, 0.0, 0.0], "ds"),
+            ("eucm", vec![0.63, 1.04, 0.0], "eucm"),
+            ("equirectangular", vec![pi, 0.0], "equirectangular"),
+        ] {
+            let raw = CameraStatics {
+                distortion_model: name.into(),
+                distortion_coefficients: coefficients.clone(),
+                image_from_camera: [305.0, 0.0, 0.0, 0.0, 305.0, 0.0, 959.5, 479.5, 1.0],
+                resolution_wh: [1920.0, 960.0],
+                transform_mat3x3: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                transform_translation: [0.0; 3],
+                transform_relation: 2,
+                distortion_valid_radius: None,
+                rolling_shutter_readout_s: None,
+            };
+            let camera = CameraParts::from_catalog_statics(0, &raw, 2)?;
+            assert_eq!((camera.model.as_str(), camera.cx), (model, 479.5));
+            let failed = |e: &dyn std::error::Error| CatalogError(e.to_string());
+            let basalt =
+                super::super::camera_model_from_parts(&camera, 0).map_err(|e| failed(&e))?;
+            let slam = crate::camera::SlamCamera::from_model(&basalt).map_err(|e| failed(&e))?;
+            assert_eq!(slam.name(), model);
+            let mut live = raw;
+            live.distortion_coefficients[coefficients.len() - 1] = 0.5;
+            assert!(CameraParts::from_catalog_statics(0, &live, 2).is_err());
+        }
         Ok(())
     }
 }

@@ -19,7 +19,7 @@ use nalgebra::Vector3;
 
 use super::{EstimatorError, SqrtKeypointVio, WindowRole, duration_ns, fixed_keyframes};
 use crate::config::KeyframeMargCriteria;
-use crate::lie::{Se3};
+use crate::lie::Se3;
 use crate::marg::{
     MarginalizeInputs, MarginalizeOptions, MarginalizeSchedule, marginalize as marginalize_window,
 };
@@ -451,8 +451,7 @@ mod tests {
         let mut config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
         config.vio_kf_marg_criteria = criteria;
         let calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
-        let mut vio: SqrtKeypointVio<f64> =
-            SqrtKeypointVio::new(Vector3::new(0.0, 0.0, -9.81), calibration, config).unwrap();
+        let mut vio: SqrtKeypointVio<f64> = SqrtKeypointVio::new(calibration, config).unwrap();
         for (index, azimuth) in azimuths.into_iter().enumerate() {
             let t_ns: FrameId = i64::try_from(index).unwrap() * 1_000_000;
             #[expect(
