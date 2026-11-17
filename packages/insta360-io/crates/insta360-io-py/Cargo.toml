@@ -1,0 +1,28 @@
+[package]
+name = "insta360-io-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for kornia-staging's Insta360 .insv reader and dual-fisheye stitch, built by maturin as `insta360_io`."
+
+[lints]
+workspace = true
+
+[lib]
+name = "insta360_io"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+# The stitch plan is tested in Rust (`panorama.rs`); the bindings from Python (packages/dataforge/tests).
+doctest = false
+
+[dependencies]
+kornia-image.workspace = true
+kornia-staging-3d.workspace = true
+kornia-staging-imgproc.workspace = true
+kornia-staging-io.workspace = true
+nalgebra.workspace = true
+numpy.workspace = true
+# No `extension-module` feature (deprecated in PyO3 0.29): maturin sets PYO3_BUILD_EXTENSION_MODULE and passes the
+# macOS `-undefined dynamic_lookup` link arguments itself.
+pyo3 = { workspace = true, features = ["abi3-py312"] }

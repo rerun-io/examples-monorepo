@@ -1,0 +1,51 @@
+# rattler-build recipe for insta360-io: the Insta360 .insv clip reader and the CPU dual-fisheye stitch of
+# kornia-staging, as the pyo3 module insta360_io. maturin builds it from the crates/insta360-io-py workspace member
+# (pyproject.toml `manifest-path`). Same layout as packages/depth-png, plus kornia-staging as a second source: the
+# binding's path dependencies point at ../kornia-staging/crates.
+package:
+  name: insta360-io
+  version: "0.1.0"
+
+source:
+  - path: .
+    target_directory: insta360-io
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
+  - path: ../kornia-staging
+    target_directory: kornia-staging
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
+
+build:
+  number: 0
+  script:
+    - cd insta360-io
+    # pixi reuses the host prefix across source builds, and files left there are packaged: drop an earlier install.
+    - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+    - rm -rf "$SP_DIR/insta360_io" "$SP_DIR"/insta360_io-*.dist-info
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    # The C compiler links the extension; no stdlib('c'): it would pin a sysroot to the workspace's glibc 2.35.
+    - ${{ compiler('c') }}
+  host:
+    - python 3.12.*
+    - pip
+    - maturin >=1.9.4,<2
+  run:
+    - python 3.12.*
+    - numpy
+
+tests:
+  - python:
+      imports:
+        - insta360_io
+      pip_check: false
