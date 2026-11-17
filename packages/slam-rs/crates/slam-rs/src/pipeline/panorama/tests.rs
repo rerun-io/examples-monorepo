@@ -102,6 +102,29 @@ fn a_panorama_beside_other_cameras_is_refused() {
 }
 
 #[test]
+fn a_width_that_puts_an_outer_tile_pixel_on_lon_max_is_refused() {
+    // `W % 4 == 2`: the rounded tile origin puts one outer pixel centre exactly
+    // at `lon_max`.
+    for width in [1922, 2050] {
+        let error = PanoramaRig::expand(&VioConfig::default(), panorama_calibration(width, 960))
+            .unwrap_err();
+        assert!(matches!(error, VioError::Panorama(_)), "{error}");
+    }
+    // A multiple of 4 keeps both outer pixel centres half a pixel inside.
+    for width in [1920, 2048] {
+        let (_, tiles) = expanded(width, 960, &VioConfig::default());
+        let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {
+            panic!("equirectangular tiles");
+        };
+        let tile_width: f64 = f64::from(tiles.resolution[0][0]);
+        for x in [0.0, tile_width - 1.0] {
+            let slack: f64 = p.lon_max * p.fx - (x - p.cx).abs();
+            assert!((slack - 0.5).abs() < 1e-9, "{width}: {slack}");
+        }
+    }
+}
+
+#[test]
 fn the_crop_is_a_pure_copy_with_horizontal_wrap() {
     let (width, height): (usize, usize) = (1920, 960);
     let (mut rig, _) = expanded(width as u32, height as u32, &panorama_config(false));

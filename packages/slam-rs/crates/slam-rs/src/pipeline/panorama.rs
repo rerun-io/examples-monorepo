@@ -58,8 +58,10 @@ impl PanoramaRig {
     /// # Errors
     ///
     /// [`VioError::Panorama`] when a full panorama shares the rig with other
-    /// cameras, is not `fx = W / 2pi` with an even width, or when the margin
-    /// leaves a tile wider than the panorama.
+    /// cameras, is not `fx = W / 2pi` with an even width, when the margin
+    /// leaves a tile wider than the panorama, or when a tile's outer pixel
+    /// centre is not half a pixel inside its `lon_max` (a width that is not a
+    /// multiple of 4, for `cx = (W - 1) / 2`).
     pub fn expand(
         config: &VioConfig,
         calibration: Calibration<f64>,
@@ -105,10 +107,23 @@ impl PanoramaRig {
         // centred position, and the tile's principal point absorbs the rest, so
         // the crop stays a pure copy for any panorama `cx`.
         let origin: i64 = (pano.cx - (tile_width as f64 - 1.0) / 2.0).round() as i64;
+        // `lon_max` is `W / 4 + margin` columns from the tile's principal point.
+        // Each outer pixel centre must stay at least half a pixel inside it, or
+        // its rounding decides on which side of `lon_max` it lands. With
+        // `cx = (W - 1) / 2` that holds exactly when `W` is a multiple of 4.
+        let tile_cx: f64 = pano.cx - origin as f64;
+        let reach: f64 = tile_cx.max(tile_width as f64 - 1.0 - tile_cx) + 0.5;
+        if reach > width as f64 / 4.0 + margin as f64 + 1e-9 {
+            return Err(VioError::Panorama(format!(
+                "a {width}-wide panorama with cx = {} puts a tile's outer pixel on its lon_max; \
+                 use a width that is a multiple of 4 with cx = (W - 1) / 2",
+                pano.cx
+            )));
+        }
         let tile = EquirectangularParams {
             fx: pano.fx,
             fy: pano.fy,
-            cx: pano.cx - origin as f64,
+            cx: tile_cx,
             cy: pano.cy,
             lon_max: std::f64::consts::FRAC_PI_2 + margin as f64 / pano.fx,
         };
