@@ -541,6 +541,8 @@ class SegmentFeed:
     """Muxed streams for an offline run; packet buffers are released after indexing and muxing."""
     decode_device: Literal["cpu", "cuda"] = "cpu"
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
+    gravity_ms2: float | None = None
+    """Gravity magnitude in m/s² the recording states on its IMU node (``gravity_ms2``), or None when it states none."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -1035,6 +1037,8 @@ def _build_feed(
     # Validate calibration before fetching or decoding the large camera payloads.
     calibration: ImuCalibration = ImuCalibration.from_catalog(rig_statics, IMU_ENTITY)
     applied_shift_ns: int = _static_int(rig_statics, f"{IMU_ENTITY}:applied_time_shift_ns")
+    gravity_column: str = f"{IMU_ENTITY}:gravity_ms2"
+    gravity_ms2: float | None = float(_static_values(rig_statics, gravity_column)[0]) if gravity_column in rig_statics.column_names else None
     try:
         imu: ImuCalib = imu_calib(calibration, np.eye(4, dtype=np.float64), applied_shift_ns)
     except ValueError as error:
@@ -1093,6 +1097,7 @@ def _build_feed(
         window_ns=int(window_s * 1e9),
         cached_payloads=cached_payloads,
         decode_device=decode_device,
+        gravity_ms2=gravity_ms2,
     )
 
 

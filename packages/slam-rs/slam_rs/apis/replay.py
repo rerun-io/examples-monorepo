@@ -1,5 +1,7 @@
 """Replay catalog or local recordings through the Rust core and log ground-truth comparisons."""
 
+import dataclasses
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -77,6 +79,16 @@ class Config:
     """
     decode_device: DecodeRequest = "auto"
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
+    vio_bootstrap: Literal["stereo", "inertial", "auto"] | None = None
+    """Override ``config.vio_bootstrap``: how the estimator gets its first state. None keeps the dataset config's."""
+    blank_cameras: tuple[int, ...] = ()
+    """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording.
+
+    A stereo-off switch is not a valid proxy: stereo observations
+    would still reach the estimator and give it metric scale. Black images give
+    the frontend nothing to detect or track, and the run fails if a blanked
+    camera ever reports a keypoint.
+    """
     decode_threads: int = 1
     """PyAV decoder threads per camera stream (CPU decode); the Insta360 lenses decode at about 2.6x real time with 4."""
     image_log_every: int = 1
@@ -154,6 +166,11 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         times.add("decode", 1e3 * (time.monotonic() - waited))
         log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
         replayed += 1
+        if config.blank_cameras:
+            frameset = dataclasses.replace(
+                frameset,
+                images=[np.zeros_like(image) if index in config.blank_cameras else image for index, image in enumerate(frameset.images)],
+            )
         logged: float = time.monotonic()
         log_frameset_inputs(feed, frameset, mode if log_images else "off")
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
@@ -175,6 +192,50 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     return replayed
 
 
+def _write_bootstrap_report(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
+    """Write the inertial bootstrap's attempts beside the trajectory and print one line on them; nothing on the stereo start.
+
+    Args:
+        stage: The pipeline stage that ran.
+        output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
+        first_t_ns: The segment's first frameset time, the origin of the printed seconds.
+    """
+    vio: _core.Vio = stage.lockstep.vio
+    report_text: str | None = vio.bootstrap_report()
+    if report_text is None:
+        return
+    report_path: Path = output_csv.with_suffix(".bootstrap.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report_text)
+    verdicts: list[str] = [attempt.verdict.split(" ")[0] for attempt in vio.bootstrap_attempts]
+    start: int | None = vio.bootstrap_start_t_ns
+    accepted_at: int | None = vio.bootstrap_accepted_at_t_ns
+    print(
+        f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; "
+        + (
+            f"started at {(start - first_t_ns) * 1e-9:.2f} s, first pose at "
+            f"{(accepted_at - first_t_ns) * 1e-9:.2f} s, {vio.bootstrap_replayed} framesets replayed"
+            if start is not None and accepted_at is not None
+            else "no window accepted"
+        )
+        + f" -> {report_path}"
+    )
+
+
+def _write_bootstrap_report_after_failure(stage: VioStage, output_csv: Path, first_t_ns: int) -> None:
+    """Write the bootstrap report of a replay that raised; a writer error is printed, so the replay's own error propagates.
+
+    Args:
+        stage: The pipeline stage that ran.
+        output_csv: Trajectory path; the report goes to ``<csv>.bootstrap.json``.
+        first_t_ns: The segment's first frameset time, the origin of the printed seconds.
+    """
+    try:
+        _write_bootstrap_report(stage, output_csv, first_t_ns)
+    except (OSError, ValueError) as error:
+        print(f"inertial bootstrap report not written: {error!r}", file=sys.stderr)
+
+
 def main(config: Config) -> None:
     """Replay one segment, log it, write the trajectory and report the error.
 
@@ -192,6 +253,8 @@ def main(config: Config) -> None:
         vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
         vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+    if config.vio_bootstrap is not None:
+        vio_config.vio_bootstrap = config.vio_bootstrap
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -222,6 +285,8 @@ def main(config: Config) -> None:
         )
         if not feed.has_ground_truth:
             print("ground truth absent, not scored")
+        if feed.gravity_ms2 is not None:
+            vio_config.vio_gravity_ms2 = feed.gravity_ms2
         log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
@@ -239,8 +304,11 @@ def main(config: Config) -> None:
             # non-zero exit rather than a traceback through the feed.
             vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend)
             print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
+            unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
+            if unknown:
+                raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
             stage = VioStage(
-                lockstep=Lockstep(vio=vio),
+                lockstep=Lockstep(vio=vio, blank_cameras=tuple(config.blank_cameras)),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth,
@@ -248,14 +316,25 @@ def main(config: Config) -> None:
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
-        _replay(feed, config, stage)
+        try:
+            _replay(feed, config, stage)
+        except BaseException:
+            # Written even when the run stops: a bootstrap that never accepts raises, and its attempts are the diagnosis.
+            if isinstance(stage, VioStage):
+                _write_bootstrap_report_after_failure(stage, output_csv, int(feed.frame_t_ns[0]))
+            raise
         if not isinstance(stage, VioStage):
             return
+        _write_bootstrap_report(stage, output_csv, int(feed.frame_t_ns[0]))
         # The per-frameset segments show where the run had got to; these show
         # where it went, at every cursor and for one copy of each path.
         stage.logger.log_complete_paths()
         stage.refuse_lost_framesets()
 
+        if stage.blank_cameras:
+            print(f"blanked cameras {list(stage.blank_cameras)}: {stage.blank_keypoints} keypoints over the run")
+            if stage.blank_keypoints:
+                raise SystemExit(f"blanked cameras {list(stage.blank_cameras)} reported {stage.blank_keypoints} keypoints: not a mono proxy")
         estimate: Trajectory = stage.logger.estimated()
         write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
         print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")

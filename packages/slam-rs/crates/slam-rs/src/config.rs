@@ -46,6 +46,32 @@ pub enum KeyframeMargCriteria {
     ForwardVector,
 }
 
+/// How the estimator gets its first state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VioBootstrap {
+    /// First-frameset stereo landmarks, gravity from one accelerometer
+    /// sample, zero velocity. Today's behaviour, bit for bit.
+    #[default]
+    #[serde(rename = "stereo")]
+    Stereo,
+    /// Solve velocity, gravity and biases from a moving window of tracks and
+    /// IMU (`kornia_staging_slam::init::inertial`), then start a fresh
+    /// estimator at the window's first frameset and replay the window.
+    #[serde(rename = "inertial")]
+    Inertial,
+    /// `inertial` when no camera pair can triangulate in one frameset (see
+    /// [`crate::bootstrap::rig_has_stereo`]), else `stereo`.
+    #[serde(rename = "auto")]
+    Auto,
+}
+
+impl VioBootstrap {
+    /// The default; not written out, so existing configs keep their bytes.
+    pub fn is_stereo(&self) -> bool {
+        *self == Self::Stereo
+    }
+}
+
 /// Something that went wrong reading a config.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -232,6 +258,10 @@ pub struct VioConfig {
     /// Minimum baseline before a landmark is triangulated, in metres.
     #[serde(rename = "config.vio_min_triangulation_dist")]
     pub vio_min_triangulation_dist: f64,
+    /// Magnitude of gravity, m/s², along world -Z; the dataset's own value
+    /// (TartanAir synthesises its IMU with 9.8).
+    #[serde(rename = "config.vio_gravity_ms2")]
+    pub vio_gravity_ms2: f64,
     /// Levenberg-Marquardt iteration budget per frame.
     #[serde(rename = "config.vio_max_iterations")]
     pub vio_max_iterations: i32,
@@ -275,6 +305,12 @@ pub struct VioConfig {
     /// Which keyframe-removal rule applies.
     #[serde(rename = "config.vio_kf_marg_criteria")]
     pub vio_kf_marg_criteria: KeyframeMargCriteria,
+    /// How the first state is found; see [`VioBootstrap`].
+    #[serde(
+        rename = "config.vio_bootstrap",
+        skip_serializing_if = "VioBootstrap::is_stereo"
+    )]
+    pub vio_bootstrap: VioBootstrap,
 }
 
 impl Default for VioConfig {
@@ -323,6 +359,7 @@ impl Default for VioConfig {
             vio_obs_std_dev: 0.5,
             vio_obs_huber_thresh: 1.0,
             vio_min_triangulation_dist: 0.05,
+            vio_gravity_ms2: 9.81,
             vio_max_iterations: 7,
             vio_enforce_realtime: false,
             vio_use_lm: true,
@@ -337,6 +374,7 @@ impl Default for VioConfig {
             vio_fix_long_term_keyframes: false,
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
+            vio_bootstrap: VioBootstrap::Stereo,
         }
     }
 }

@@ -456,6 +456,19 @@ class VioStage:
         return self.lockstep.elapsed_ms
 
     @property
+    def blank_cameras(self) -> tuple[int, ...]:
+        """Cameras fed black images (the mono-inertial proxy); they must never hold a keypoint."""
+        return self.lockstep.blank_cameras
+
+    @property
+    def blank_keypoints(self) -> int:
+        """Keypoints the frontend reported in a blanked camera over the run; must stay 0.
+
+        A camera with no keypoint can connect no landmark: the proxy is mono only if this stays zero.
+        """
+        return self.lockstep.blank_keypoints
+
+    @property
     def pending(self) -> list[Frameset]:
         """Framesets still held for want of the inertial samples that cover them."""
         return self.lockstep.pending
