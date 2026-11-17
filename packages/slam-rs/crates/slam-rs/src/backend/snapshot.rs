@@ -116,8 +116,7 @@ impl MapBackend {
                 .iter()
                 .flat_map(|loops| loops.events())
                 .filter(|event| {
-                    event.outcome != LoopOutcome::Stale
-                        && keyframes.contains_key(&event.detection.current)
+                    keyframes.contains_key(&event.detection.current)
                         && keyframes.contains_key(&event.detection.candidate)
                 })
                 .map(|event| SnapshotLoop {

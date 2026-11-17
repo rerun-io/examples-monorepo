@@ -3,7 +3,7 @@
 //! §4 B11/B12/B29, PR c2). The solver is `kornia_staging_slam::pgo` (c1).
 //!
 //! When a verified loop would move the current keyframe by at least the drift
-//! gate, [`MapBackend::apply_loop`] runs one PGO before it fuses:
+//! gate, loop closing runs one PGO before it fuses:
 //!
 //! 1. **Graph** ([`PoseGraph::build`]): every map keyframe; the covisibility
 //!    graph's pose-graph edges (spanning tree, past loops, edges at or above
