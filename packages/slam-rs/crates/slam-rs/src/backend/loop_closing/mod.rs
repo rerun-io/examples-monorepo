@@ -47,7 +47,7 @@ use super::{MapBackend, MapEvent};
 use crate::calib::Calibration;
 use crate::camera::SlamCamera;
 use crate::config::{BriefTests, LoopClosingConfig, LoopQueryCameras, VioConfig};
-use crate::estimator::KeyframeImages;
+use crate::estimator::{ImageSlot, KeyframeImages};
 use crate::lie::Se3;
 use crate::types::{CamId, FrameId, KeypointId, LandmarkId, TimeCamId};
 
@@ -165,6 +165,9 @@ pub struct LoopCounts {
     /// Queries that found no images for their keyframe (dropped, culled, or a
     /// lagged pipeline that no longer held them).
     pub without_images: u64,
+    /// Keyframe stamps whose images the pipeline dropped before the back end
+    /// took them (Realtime, more stamps queued than the query cap).
+    pub images_stripped: u64,
     /// Queries that retrieved at least one candidate.
     pub with_candidates: u64,
     /// Candidates validated.
@@ -252,9 +255,13 @@ impl LoopClosing {
         self.images.len()
     }
 
-    /// Hold a new keyframe's images until its query.
-    pub(super) fn hold_images(&mut self, keyframe: FrameId, images: KeyframeImages) {
-        self.images.insert(keyframe, images);
+    /// Hold a new keyframe's images until its query; count a slot the
+    /// pipeline emptied first.
+    pub(super) fn hold_images(&mut self, keyframe: FrameId, slot: &ImageSlot) {
+        match slot.take() {
+            Some(images) => _ = self.images.insert(keyframe, images),
+            None => self.counts.images_stripped += 1,
+        }
     }
 
     /// A culled keyframe leaves the database; a dropped query frees its images.
@@ -343,8 +350,8 @@ pub(crate) fn retrieve(
         if config.query_cameras == LoopQueryCameras::Cam0 && *cam != 0 {
             continue;
         }
-        for hit in bow.query(bag, 0, Some(before)) {
-            let score = best.entry(hit.id.frame).or_insert(hit.score);
+        for hit in bow.query_frames(bag, 0, Some(before)) {
+            let score = best.entry(hit.frame).or_insert(hit.score);
             *score = score.max(hit.score);
         }
     }
@@ -443,7 +450,8 @@ pub(crate) fn fusion_plan(
             .filter(|&id| id != m.landmark && map.landmark(id).is_some());
         match into {
             Some(into) => {
-                if used.insert(m.landmark) && used.insert(into) {
+                if !used.contains(&m.landmark) && !used.contains(&into) {
+                    used.extend([m.landmark, into]);
                     plan.push(LoopFusion::Fuse {
                         from: m.landmark,
                         into,
