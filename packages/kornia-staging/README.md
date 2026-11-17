@@ -84,6 +84,7 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
+| Generalized (non-central) 3-point absolute pose (GP3P), tangent-plane LM refinement; seeded adaptive RANSAC estimator on upstream `kornia_3d::ransac` (feature `ransac`) | RootSLAM `loop_closing.cpp` `estimateAbsolutePose` (OpenGV GP3P) | kornia-rs / kornia-3d / pose::gp3p, ransac::estimators | staged | - |
 | Inverted-file bag-of-words database with DBoW2's L1 query (`queryL1`) | dpretrieval `crates/dbow` (DBoW2 `TemplatedDatabase`) | kornia-rs / kornia-bow / database | staged | - |
 | Integer area resize | slam-rs `area.rs`, `area/kernels.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
