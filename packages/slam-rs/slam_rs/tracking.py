@@ -218,6 +218,10 @@ class SegmentRun:
 def reanchored(estimate: Trajectory, map_snapshot: _core.MapSnapshot | None) -> Trajectory:
     """The final trajectory: every raw pose re-anchored on the map's keyframes on both sides (:func:`slam_rs._core.reanchor`).
 
+    Call it after :meth:`slam_rs._core.Vio.flush`, when every map keyframe is one of the poses. Mid-run it gives the
+    corrected history so far only when ``estimate`` reaches the snapshot's newest keyframe; one it does not reach
+    raises ``ValueError``.
+
     Args:
         estimate: The raw causal VIO poses, on the clock the estimator ran on (the map's keyframe ids are on it too).
         map_snapshot: The map after the flush; None (back end off) returns ``estimate`` itself.

@@ -117,6 +117,8 @@ fn view(rng: &mut Rng) -> View {
 struct Scene {
     views: Vec<View>,
     backend: MapBackend,
+    /// Every stamp the scene stepped, in order, to replay through a runner.
+    stamps: Vec<MapStamp>,
 }
 
 /// What a test changes in the revisit.
@@ -255,6 +257,19 @@ fn scene(
     })
 }
 
+/// A copy of `stamp` with its own image slot: a clone shares the slot, and the
+/// first step that reads it takes the images out.
+fn copy_stamp(stamp: &mut MapStamp) -> MapStamp {
+    let mut copy = stamp.clone();
+    if let (MapStamp::Keyframe(original), MapStamp::Keyframe(copied)) = (&mut *stamp, &mut copy)
+        && let Some(images) = original.images.as_ref().and_then(ImageSlot::take)
+    {
+        original.images = Some(ImageSlot::new(images.clone()));
+        copied.images = Some(ImageSlot::new(images));
+    }
+    copy
+}
+
 fn scene_with(setup: Setup) -> Scene {
     let Setup {
         cameras,
@@ -276,6 +291,11 @@ fn scene_with(setup: Setup) -> Scene {
     let mut backend = MapBackend::new(map_config(max_keyframes), calib.resolution.clone())
         .with_extrinsics(calib.t_i_c.clone())
         .with_loop_closing(&config, &calib);
+    let mut stamps: Vec<MapStamp> = Vec::new();
+    let mut record = |backend: &mut MapBackend, mut stamp: MapStamp| {
+        stamps.push(copy_stamp(&mut stamp));
+        backend.step(stamp);
+    };
     let tracked = |offset: u64, count: usize| -> crate::estimator::Keypoints {
         (0..cameras)
             .map(|cam| {
@@ -289,13 +309,16 @@ fn scene_with(setup: Setup) -> Scene {
     // A keyframe and its neighbour, out of the window, hosting one landmark per
     // point (`shifted` for those C does not track: 4 px off).
     let mut pair = |(first, second): (FrameId, FrameId), offset: u64, shifted: bool| {
-        backend.step(keyframe_stamp(
-            first,
-            &[(first, identity)],
-            vec![],
-            tracked(offset, POINTS),
-            Some(&images),
-        ));
+        record(
+            &mut backend,
+            keyframe_stamp(
+                first,
+                &[(first, identity)],
+                vec![],
+                tracked(offset, POINTS),
+                Some(&images),
+            ),
+        );
         assert!(backend.query(first).is_empty());
         let island: Vec<StampLandmark> = (0..cameras)
             .flat_map(|cam| (0..POINTS).map(move |k| (cam, k)))
@@ -309,23 +332,29 @@ fn scene_with(setup: Setup) -> Scene {
                 placed(&views, &calib, (cam, k), id, first, &[first, second], off)
             })
             .collect();
-        backend.step(keyframe_stamp(
-            second,
-            &[(first, identity), (second, identity)],
-            island,
-            tracked(offset, POINTS),
-            Some(&images),
-        ));
+        record(
+            &mut backend,
+            keyframe_stamp(
+                second,
+                &[(first, identity), (second, identity)],
+                island,
+                tracked(offset, POINTS),
+                Some(&images),
+            ),
+        );
         assert!(
             backend.query(second).is_empty(),
             "too recent to close a loop with {first}"
         );
-        backend.step(MapStamp::Marginalized(MargStamp {
-            keyframe_poses: [(first, identity), (second, identity)]
-                .into_iter()
-                .collect(),
-            landmarks: vec![],
-        }));
+        record(
+            &mut backend,
+            MapStamp::Marginalized(MargStamp {
+                keyframe_poses: [(first, identity), (second, identity)]
+                    .into_iter()
+                    .collect(),
+                landmarks: vec![],
+            }),
+        );
     };
     if setup.decoy {
         pair((E, E2), 50_000, true);
@@ -336,13 +365,10 @@ fn scene_with(setup: Setup) -> Scene {
     let mut current = Vec::new();
     if fuse_landmarks {
         window.insert(0, (D, drifted));
-        backend.step(keyframe_stamp(
-            D,
-            &[(D, drifted)],
-            vec![],
-            tracked(100_000, seen),
-            None,
-        ));
+        record(
+            &mut backend,
+            keyframe_stamp(D, &[(D, drifted)], vec![], tracked(100_000, seen), None),
+        );
         current = (0..cameras)
             .flat_map(|cam| (0..10).map(move |k| (cam, k)))
             .map(|(cam, k)| {
@@ -358,14 +384,15 @@ fn scene_with(setup: Setup) -> Scene {
             })
             .collect();
     }
-    backend.step(keyframe_stamp(
-        C,
-        &window,
-        current,
-        tracked(100_000, seen),
-        Some(&images),
-    ));
-    Scene { views, backend }
+    record(
+        &mut backend,
+        keyframe_stamp(C, &window, current, tracked(100_000, seen), Some(&images)),
+    );
+    Scene {
+        views,
+        backend,
+        stamps,
+    }
 }
 
 fn hand_bow(entries: &[(FrameId, u32, &[[u64; 4]])]) -> HashBow {
@@ -745,6 +772,66 @@ fn a_graph_the_solver_refuses_releases_the_loop_unapplied_and_records_it_once() 
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
     assert!(s.backend.pinned.is_empty());
     assert_eq!(s.backend.map_correction().epoch, 0);
+}
+
+#[test]
+fn realtime_and_offline_give_the_same_final_trajectory_through_a_pose_graph_optimization() {
+    // f1: the large-drift scene's stamps through the runner in both modes; the
+    // runner queries each new keyframe, and C's query runs the PGO.
+    let loops = LoopClosingConfig::default();
+    let mut scene = scene(1, 0.3, true, loops.clone(), 100);
+    let calib = calibration(1);
+    let config = VioConfig {
+        backend_loop_closing: loops,
+        ..VioConfig::default()
+    };
+    let mut run = |mode: crate::config::BackendMode| -> crate::backend::MapSnapshot {
+        let backend = MapBackend::new(map_config(100), calib.resolution.clone())
+            .with_extrinsics(calib.t_i_c.clone())
+            .with_loop_closing(&config, &calib);
+        let mut runner = crate::backend::BackendRunner::new(backend, mode, 16).unwrap();
+        for stamp in &mut scene.stamps {
+            runner.submit(copy_stamp(stamp));
+        }
+        runner.flush();
+        assert_eq!(runner.counters().queries_dropped, 0);
+        crate::backend::MapSnapshot::clone(&runner.view().view)
+    };
+    let offline = run(crate::config::BackendMode::Offline);
+    let realtime = run(crate::config::BackendMode::Realtime);
+    assert_eq!(
+        offline.correction.epoch, 1,
+        "one pose-graph optimization ran"
+    );
+    assert_eq!(realtime, offline);
+    // Each keyframe's raw pose, and a frame halfway to the next keyframe that
+    // keeps the raw pose before it.
+    let pose = |se3: &Se3<f64>| -> [f64; 7] {
+        let [x, y, z, w] = se3.rotation.quaternion_xyzw();
+        let t = se3.translation;
+        [t.x, t.y, t.z, x, y, z, w]
+    };
+    let mut frames: Vec<(i64, [f64; 7])> = Vec::new();
+    for (row, (&t_ns, raw)) in offline
+        .keyframe_t_ns
+        .iter()
+        .zip(&offline.keyframe_raw_poses)
+        .enumerate()
+    {
+        frames.push((t_ns, pose(raw)));
+        if let Some(&next) = offline.keyframe_t_ns.get(row + 1) {
+            frames.push(((t_ns + next) / 2, pose(raw)));
+        }
+    }
+    let final_offline = offline.reanchor(&frames).unwrap();
+    assert_eq!(realtime.reanchor(&frames).unwrap(), final_offline);
+    assert!(
+        final_offline
+            .iter()
+            .zip(&frames)
+            .any(|(corrected, (_, raw))| (corrected[0] - raw[0]).abs() > 0.1),
+        "the PGO moved the island's frames"
+    );
 }
 
 #[test]
