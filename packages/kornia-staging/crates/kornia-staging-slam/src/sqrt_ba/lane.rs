@@ -8,6 +8,7 @@
 //! the back-substitution stay on the host for every lane, so a lane changes
 //! only how `(J^T J + lambda I) x = b` is solved.
 use kornia_staging_algebra::Scalar;
+use nalgebra::Matrix6;
 
 use super::{BlockJacobi, PcgOptions, PcgSummary};
 
@@ -48,6 +49,26 @@ pub struct ReducedSystem<'a, S: Scalar> {
 }
 
 impl<S: Scalar> ReducedSystem<'_, S> {
+    /// The 6x6 diagonal blocks of `H`, in f64: the block-Jacobi input.
+    pub fn diagonal_blocks(&self) -> Vec<Matrix6<f64>> {
+        let mut diagonal = vec![Matrix6::<f64>::identity() * self.lambda.to_f64(); self.keyframes];
+        for block in &self.blocks {
+            for (s, &kf) in block.keyframes.iter().enumerate() {
+                for i in 0..6 {
+                    for j in 0..6 {
+                        diagonal[kf][(i, j)] += block
+                            .column(6 * s + i)
+                            .iter()
+                            .zip(block.column(6 * s + j))
+                            .map(|(a, b)| a.to_f64() * b.to_f64())
+                            .sum::<f64>();
+                    }
+                }
+            }
+        }
+        diagonal
+    }
+
     /// `y = H x`, accumulated in f64 block by block: a reference for lanes and
     /// tests, not the fast path.
     pub fn matvec(&self, x: &[S], y: &mut [S]) {

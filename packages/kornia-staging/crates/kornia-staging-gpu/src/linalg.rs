@@ -15,6 +15,7 @@
 //! portable devices have no f64). The PCG scalars are compensated f32 sums in
 //! one fixed order ([`fixed_order_dot`] states it), where the CPU lane sums in
 //! f64; the S4 band (DESIGN §7.4) measures what is left.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use cubecl::prelude::*;
@@ -290,6 +291,7 @@ fn read_f32<R: Runtime>(
     Ok(values[..owned.1].to_vec())
 }
 
+#[cfg(feature = "test-support")]
 /// `(J^T J + lambda I) x` on the device, the PCG's own matvec, with blocks
 /// paged at `max_binding_bytes` (`None`: the device's limit).
 ///
@@ -318,6 +320,7 @@ pub fn device_matvec<R: Runtime>(
     )
 }
 
+#[cfg(feature = "test-support")]
 /// `a . b` in the order of the device PCG's sums: unit `u` of [`PCG_UNITS`]
 /// adds the six entries of groups `u, u + 256, ...` in order into a Neumaier
 /// (compensated) sum, then a fixed pairwise tree of TwoSums adds the units and
@@ -364,6 +367,7 @@ pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
     hi[0] + lo[0]
 }
 
+#[cfg(feature = "test-support")]
 /// `a . b` on the device, by the kernel that sums the PCG's scalars.
 ///
 /// # Errors
@@ -410,6 +414,8 @@ pub struct GpuPcg<R: Runtime> {
     last: DeviceSolveStats,
     peak_device_bytes: usize,
     longest_section_s: f64,
+    #[cfg(feature = "test-support")]
+    residual: Vec<f32>,
 }
 
 impl<R: Runtime> GpuPcg<R> {
@@ -422,10 +428,13 @@ impl<R: Runtime> GpuPcg<R> {
             last: DeviceSolveStats::default(),
             peak_device_bytes: 0,
             longest_section_s: 0.0,
+            #[cfg(feature = "test-support")]
+            residual: Vec::new(),
         }
     }
 
-    /// Page the blocks at `bytes` instead (tests force small pages).
+    /// Page the blocks at `bytes` instead, at most the device's limit (tests
+    /// force small pages).
     #[must_use]
     pub fn with_max_binding_bytes(mut self, bytes: usize) -> Self {
         self.max_binding_bytes = bytes;
@@ -441,6 +450,12 @@ impl<R: Runtime> GpuPcg<R> {
     /// accounting, not the allocator's pool).
     pub fn peak_device_bytes(&self) -> usize {
         self.peak_device_bytes
+    }
+
+    /// The last solve's residual `r` as the device holds it (tests).
+    #[cfg(feature = "test-support")]
+    pub fn last_residual(&self) -> &[f32] {
+        &self.residual
     }
 
     /// The longest exclusive section of any solve, seconds.
@@ -471,11 +486,8 @@ impl<R: Runtime> GpuPcg<R> {
         }
         let client = &self.client;
         let started = Instant::now();
-        let layout = Layout::new(
-            system,
-            self.max_binding_bytes,
-            max_binding(client).max(self.max_binding_bytes),
-        )?;
+        let limit = max_binding(client);
+        let layout = Layout::new(system, self.max_binding_bytes.min(limit), limit)?;
         let pages = layout.pages.len();
         let minv: Vec<f32> = preconditioner
             .inverses()
@@ -490,6 +502,10 @@ impl<R: Runtime> GpuPcg<R> {
         let (z, p, q) = (empty(client, n), empty(client, n), empty(client, n));
         let fstate = upload(client, vec![1.0f32, 0.0, 0.0, 0.0]);
         let ustate = upload(client, vec![0u32; 4]);
+        // Wait for the copies here, outside any section: the upload is timed
+        // whole and the first iteration's section does not carry it.
+        cubecl::future::block_on(client.sync())
+            .map_err(|error| crate::transfer::read_failed("the PCG upload", &error))?;
         let upload_s = started.elapsed().as_secs_f64();
         let device_bytes = device.bytes + 4 * (minv.1 + 2 * n + 4 * n + 8);
         let buffers = PcgBuffers {
@@ -563,6 +579,10 @@ impl<R: Runtime> GpuPcg<R> {
         };
         x.copy_from_slice(&read_f32(client, &x_dev, "the PCG solution")?);
         syncs += 1;
+        #[cfg(feature = "test-support")]
+        {
+            self.residual = read_f32(client, &r, "the PCG residual")?;
+        }
         let termination = match state[kernels::TERMINATION] {
             kernels::CONVERGED => PcgTermination::Converged,
             kernels::INDEFINITE => PcgTermination::Indefinite,
@@ -647,15 +667,62 @@ fn probe_system() -> (Vec<Vec<f32>>, Vec<Vec<usize>>) {
     (values, keyframes)
 }
 
+/// GBA round trips ([`probe_pcg`]) run by this process so far, counted apart
+/// from the device's capability probes, which have one owner
+/// ([`crate::runtime::default_capabilities`]).
+static PCG_ROUND_TRIPS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many GBA round trips this process has run.
+pub fn pcg_round_trips_run() -> usize {
+    PCG_ROUND_TRIPS.load(Ordering::SeqCst)
+}
+
+/// Make every later round trip's device result zeros, as a runtime that runs
+/// no kernel would (tests of the fallback; one process each).
+#[cfg(feature = "test-support")]
+pub fn corrupt_round_trips() {
+    CORRUPT.store(true, Ordering::SeqCst);
+}
+
+#[cfg(feature = "test-support")]
+static CORRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The round trip's verdict: every device entry within [`PROBE_TOLERANCE`] of
+/// the host's largest entry, none NaN, and a host solution that is not zero.
+///
+/// # Errors
+/// [`GpuError::PcgRoundTrip`] with the entries that disagree.
+fn round_trip_agrees(host: &[f32], device: &[f32]) -> Result<(), GpuError> {
+    let scale = host.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let wrong = host
+        .iter()
+        .zip(device)
+        .filter(|(h, d)| {
+            let error = (*h - *d).abs();
+            error.is_nan() || error > PROBE_TOLERANCE * scale
+        })
+        .count()
+        + host.len().abs_diff(device.len());
+    if wrong == 0 && scale > 0.0 {
+        Ok(())
+    } else {
+        Err(GpuError::PcgRoundTrip {
+            wrong,
+            count: host.len(),
+        })
+    }
+}
+
 /// The back end's GBA round trip on `client` (DESIGN §7.3): a small reduced
 /// system (8 poses, 200 landmark blocks), three PCG iterations on the device
 /// and on the host, every entry of the solution within 1e-4 of the host's
 /// largest. Guards against a runtime that runs the kernels and returns zeros.
+/// The solve holds its own exclusive sections; callers add none.
 ///
 /// # Errors
 /// [`GpuError::PcgRoundTrip`] when the device disagrees; a device failure.
 pub fn probe_pcg<R: Runtime>(client: &ComputeClient<R>) -> Result<(), GpuError> {
-    crate::runtime::count_capability_probe();
+    PCG_ROUND_TRIPS.fetch_add(1, Ordering::SeqCst);
     let (values, keyframes) = probe_system();
     let system = ReducedSystem {
         keyframes: PROBE_POSES,
@@ -675,22 +742,7 @@ pub fn probe_pcg<R: Runtime>(client: &ComputeClient<R>) -> Result<(), GpuError> 
             })
             .collect(),
     };
-    let mut diagonal = vec![nalgebra::Matrix6::<f64>::identity() * 1e-2; PROBE_POSES];
-    for block in &system.blocks {
-        for (s, &kf) in block.keyframes.iter().enumerate() {
-            for i in 0..6 {
-                for j in 0..6 {
-                    diagonal[kf][(i, j)] += block
-                        .column(6 * s + i)
-                        .iter()
-                        .zip(block.column(6 * s + j))
-                        .map(|(a, b)| f64::from(*a) * f64::from(*b))
-                        .sum::<f64>();
-                }
-            }
-        }
-    }
-    let preconditioner = BlockJacobi::<f32>::from_blocks(&diagonal);
+    let preconditioner = BlockJacobi::<f32>::from_blocks(&system.diagonal_blocks());
     let b: Vec<f32> = (0..6 * PROBE_POSES).map(|i| wobble(i, 7)).collect();
     let options = PcgOptions {
         max_iterations: PROBE_ITERATIONS,
@@ -706,21 +758,33 @@ pub fn probe_pcg<R: Runtime>(client: &ComputeClient<R>) -> Result<(), GpuError> 
     );
     let mut device = vec![0.0f32; b.len()];
     GpuPcg::new(client.clone()).run(&system, &preconditioner, &b, &mut device, &options)?;
-    let scale = host.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-    let wrong = host
-        .iter()
-        .zip(&device)
-        .filter(|(h, d)| {
-            let error = (*h - *d).abs();
-            error.is_nan() || error > PROBE_TOLERANCE * scale
-        })
-        .count();
-    if wrong == 0 && scale > 0.0 {
-        Ok(())
-    } else {
-        Err(GpuError::PcgRoundTrip {
-            wrong,
-            count: host.len(),
-        })
+    #[cfg(feature = "test-support")]
+    if CORRUPT.load(Ordering::SeqCst) {
+        device.fill(0.0);
+    }
+    round_trip_agrees(&host, &device)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{round_trip_agrees, PROBE_TOLERANCE};
+
+    #[test]
+    fn the_round_trip_refuses_every_wrong_device_result() {
+        let host: Vec<f32> = (0..48).map(|i| (i as f32 * 0.37).sin()).collect();
+        let max = host.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(round_trip_agrees(&host, &host).is_ok());
+        let wrong = |device: Vec<f32>| round_trip_agrees(&host, &device).unwrap_err().to_string();
+        // Silent zeros: every entry but the host's own zero at i = 0.
+        assert!(wrong(vec![0.0; 48]).contains("on 47 of 48"));
+        let mut nan = host.clone();
+        nan[5] = f32::NAN;
+        assert!(wrong(nan).contains("on 1 of 48"));
+        let mut off = host.clone();
+        off[7] += 2.0 * PROBE_TOLERANCE * max;
+        assert!(wrong(off).contains("on 1 of 48"));
+        assert!(wrong(host[..40].to_vec()).contains("on 8 of 48"));
+        // A zero host solution proves nothing.
+        assert!(round_trip_agrees(&[0.0; 48], &[0.0; 48]).is_err());
     }
 }

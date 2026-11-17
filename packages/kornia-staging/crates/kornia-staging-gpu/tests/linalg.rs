@@ -72,25 +72,8 @@ fn system(b: &Blocks, lambda: f32) -> ReducedSystem<'_, f32> {
     }
 }
 
-/// The diagonal 6x6 blocks of `H`, in f64.
 fn preconditioner(system: &ReducedSystem<'_, f32>) -> BlockJacobi<f32> {
-    let mut diagonal =
-        vec![Matrix6::<f64>::identity() * f64::from(system.lambda); system.keyframes];
-    for block in &system.blocks {
-        for (s, &kf) in block.keyframes.iter().enumerate() {
-            for i in 0..6 {
-                for j in 0..6 {
-                    diagonal[kf][(i, j)] += block
-                        .column(6 * s + i)
-                        .iter()
-                        .zip(block.column(6 * s + j))
-                        .map(|(a, b)| f64::from(*a) * f64::from(*b))
-                        .sum::<f64>();
-                }
-            }
-        }
-    }
-    BlockJacobi::from_blocks(&diagonal)
+    BlockJacobi::from_blocks(&system.diagonal_blocks())
 }
 
 fn vector(n: usize, k: usize) -> Vec<f32> {
@@ -233,7 +216,8 @@ fn the_device_pcg_follows_the_cpu_lane_iteration_by_iteration() {
     let b = vector(6 * blocks.poses, 9);
     let mut lane = GpuPcg::new(client);
     // Across the first step, beta, and the residual replacement at 8 and 16.
-    for its in [1usize, 2, 7, 8, 9, 16, 17] {
+    // A cap of 0 runs one iteration on both lanes.
+    for its in [0usize, 1, 2, 7, 8, 9, 16, 17] {
         let options = PcgOptions {
             max_iterations: its,
             eta: f64::NEG_INFINITY,
@@ -243,9 +227,10 @@ fn the_device_pcg_follows_the_cpu_lane_iteration_by_iteration() {
         assert_eq!((gpu_its, gpu_term), (cpu_its, cpu_term), "{its}");
         assert_eq!(gpu_term, PcgTermination::MaxIterations);
         assert!(max_rel(&gpu, &cpu) < 1e-4, "{its}: {}", max_rel(&gpu, &cpu));
-        assert_eq!(lane.last_solve().syncs, its.div_ceil(8) + 1, "{its}");
+        let run = its.max(1);
+        assert_eq!(lane.last_solve().syncs, run.div_ceil(8) + 1, "{its}");
         // One exclusive section per iteration and one per state read.
-        assert_eq!(lane.last_solve().sections, its + its.div_ceil(8), "{its}");
+        assert_eq!(lane.last_solve().sections, run + run.div_ceil(8), "{its}");
     }
 }
 
@@ -324,6 +309,75 @@ fn the_device_pcg_reports_zero_rhs_and_indefinite_like_the_cpu_lane() {
         .unwrap()
         .summary;
     assert_eq!(cpu.termination, PcgTermination::Indefinite);
+    assert_eq!(gpu, cpu);
+}
+
+/// `b - H x` against the device's own `r`, relative to `b`.
+fn residual_gap(sys: &ReducedSystem<'_, f32>, b: &[f32], x: &[f32], r: &[f32]) -> f32 {
+    let mut hx = vec![0.0f32; x.len()];
+    sys.matvec(x, &mut hx);
+    let gap = r
+        .iter()
+        .zip(b.iter().zip(&hx))
+        .fold(0.0f32, |m, (ri, (bi, qi))| m.max((ri - (bi - qi)).abs()));
+    gap / b.iter().fold(0.0f32, |m, v| m.max(v.abs()))
+}
+
+#[test]
+fn the_device_replaces_the_residual_every_eighth_iteration() {
+    let client = gpu_client().unwrap();
+    // Ill-conditioned: a 1e4 spread of column scales and almost no damping,
+    // so the recursive residual drifts away from b - H x within a few steps.
+    let mut blocks = blocks(23, 500, 7);
+    for (values, rows) in blocks.values.iter_mut().zip(&blocks.rows) {
+        for (e, v) in values.iter_mut().enumerate() {
+            *v *= 10f32.powf(4.0 * ((e / (rows + 3)) % 6) as f32 / 5.0);
+        }
+    }
+    let sys = system(&blocks, 1e-8);
+    let b = vector(6 * blocks.poses, 9);
+    let mut lane = GpuPcg::new(client);
+    let mut gap = |its: usize| {
+        let options = PcgOptions {
+            max_iterations: its,
+            eta: f64::NEG_INFINITY,
+        };
+        let (x, ..) = gpu_pcg(&mut lane, &sys, &b, &options);
+        residual_gap(&sys, &b, &x, lane.last_residual())
+    };
+    let gaps: Vec<f32> = [7, 8, 15, 16].into_iter().map(&mut gap).collect();
+    eprintln!("residual gaps at 7, 8, 15, 16: {gaps:?}");
+    // Replaced at 8 and 16: r is b - H x up to the f32 matvec's rounding,
+    // which this conditioning lifts to a few percent of b (measured 0.02 and
+    // 0.03); one step before, the recursive r is away from it by about b
+    // (1.1 and 2.8). A missing or misplaced replacement shows as a large gap.
+    for (drifted, replaced) in [(gaps[0], gaps[1]), (gaps[2], gaps[3])] {
+        assert!(replaced < 0.1, "{gaps:?}");
+        assert!(drifted > 10.0 * replaced, "{gaps:?}");
+    }
+}
+
+#[test]
+fn the_device_reports_a_numerical_failure_like_the_cpu_lane() {
+    let client = gpu_client().unwrap();
+    let blocks = blocks(5, 40, 2);
+    let sys = system(&blocks, 1e-2);
+    let b = vector(30, 1);
+    // A preconditioner of zero blocks: z = 0, so rho = 0 with r != 0.
+    let pre = BlockJacobi::<f32>::from_blocks(&vec![Matrix6::zeros(); 5]);
+    let mut x = vec![0.0f32; 30];
+    let cpu = pcg(
+        |v, out| sys.matvec(v, out),
+        &pre,
+        &b,
+        &mut x,
+        &PcgOptions::default(),
+    );
+    let gpu = GpuPcg::new(client)
+        .solve(&sys, &pre, &b, &mut x, &PcgOptions::default())
+        .unwrap()
+        .summary;
+    assert_eq!(cpu.termination, PcgTermination::NumericalFailure);
     assert_eq!(gpu, cpu);
 }
 
