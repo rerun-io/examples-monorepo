@@ -9,6 +9,11 @@ use kornia_staging_imgproc::optical_flow::patch_se2::AffineCompact2f;
 use kornia_staging_slam::tracking::optical_flow::{PatchTracker, TrackInput};
 use nalgebra::{Matrix4, Vector2, Vector3, Vector4};
 
+/// The guess for a keypoint that cannot be tracked into a camera (its
+/// projection is invalid, or the pair has no epipolar geometry): far off every
+/// image, so the tracker never finds it.
+const UNTRACKABLE: [f32; 2] = [-1.0e6; 2];
+
 impl<
     P: crate::frontend::patterns::ConfiguredPattern,
     F: FrameStages<Tracker: PatchTracker<Pattern = P>>,
@@ -28,7 +33,7 @@ impl<
             masks,
             depth_guess,
             host_pool,
-            stereo_pairs,
+            matched,
             ..
         } = self;
         let predict = |camera: usize,
@@ -49,7 +54,7 @@ impl<
                 if valid {
                     pixel
                 } else {
-                    Vector2::repeat(-1.0e6)
+                    Vector2::from(UNTRACKABLE)
                 }
             } else {
                 position
@@ -90,12 +95,12 @@ impl<
             }
         } else {
             // Mask camera zero once. Every destination borrows these same slots.
-            // With stereo matching off nothing is offered for matching at all.
+            // With no camera matched nothing is offered for matching at all.
             let source = &mut passes[0];
             source.ids.clear();
             source.positions.clear();
             source.guesses.clear();
-            let offered: usize = if config.optical_flow_stereo_matching {
+            let offered: usize = if matched.iter().any(|&matched| matched) {
                 new_cam0.ids.len()
             } else {
                 0
@@ -118,13 +123,13 @@ impl<
                 let camera = lane + 1;
                 let pose = calib.t_i_c[0].inverse() * calib.t_i_c[camera];
                 guesses.clear();
-                // A pair without epipolar geometry (a shared centre) is never
-                // matched: every guess is the untrackable sentinel.
-                if !stereo_pairs[camera] {
+                // A camera that is not matched (a shared centre) gets the
+                // untrackable guess for every keypoint.
+                if !matched[camera] {
                     for index in 0..source.ids.len() {
                         guesses.push(&AffineCompact2f {
                             linear: source.guesses.get(index).linear,
-                            translation: [-1.0e6; 2],
+                            translation: UNTRACKABLE,
                         });
                     }
                     return;
@@ -319,7 +324,7 @@ mod tests {
         }
         flow.prepare_tracks(Some(&PosePrediction::default()));
         assert_eq!(flow.passes[0].ids, vec![1, 2]);
-        assert_eq!(flow.passes[0].guesses.get(1).translation, [-1.0e6; 2]);
+        assert_eq!(flow.passes[0].guesses.get(1).translation, super::UNTRACKABLE);
         assert_eq!(flow.passes[0].guesses.get(0).translation, [480.0, 480.0]);
     }
 }
