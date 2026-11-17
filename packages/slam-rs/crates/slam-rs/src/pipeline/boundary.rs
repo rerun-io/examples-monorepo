@@ -175,9 +175,6 @@ pub enum VioError {
     /// The estimator thread (D84 solve or lagged frameset) panicked.
     #[error("the lagged estimator thread panicked")]
     EstimatorPanicked,
-    /// A full panorama the tile cut cannot take, or a frameset that is not one.
-    #[error("panorama: {0}")]
-    Panorama(String),
 }
 
 /// Which frontend backend a [`Vio`] runs.

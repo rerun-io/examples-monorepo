@@ -211,18 +211,6 @@ pub struct VioConfig {
     #[serde(rename = "port.klt_exit_step_px")]
     pub port_klt_exit_step_px: Option<f32>,
 
-    // ── panorama lane (read only when the rig holds a full panorama) ───
-    /// Stitch two fisheye lens images into the two tiles (the Insta360 lane).
-    /// The caller then hands the factory lens calibration to
-    /// `Vio::with_panorama_lenses`; false keeps every rig as it is.
-    #[serde(rename = "config.panorama_dual_fisheye")]
-    pub panorama_dual_fisheye: bool,
-    /// Dual-fisheye tiles: hand the estimator rolling-shutter corrected
-    /// keypoints (each rotated to the middle row's time with the gyro); the
-    /// frontend keeps tracking the raw positions.
-    #[serde(rename = "config.panorama_rolling_shutter")]
-    pub panorama_rolling_shutter: bool,
-
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
     #[serde(rename = "config.vio_linearization_type")]
@@ -341,9 +329,6 @@ impl Default for VioConfig {
             port_keyframe_solve_deferred: false,
             port_frontend_lag: false,
             port_klt_exit_step_px: None,
-
-            panorama_dual_fisheye: false,
-            panorama_rolling_shutter: false,
 
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,

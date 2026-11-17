@@ -19,8 +19,6 @@ use kornia_staging_gpu::runtime::gpu_client;
 use kornia_staging_gpu::runtime::default_capabilities;
 mod frontend;
 pub use frontend::GpuStages;
-#[cfg(all(test, feature = "gpu-wgpu"))]
-mod stitch_tests;
 mod track;
 
 pub use detect::GpuCornerScan;

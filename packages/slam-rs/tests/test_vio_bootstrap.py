@@ -80,7 +80,7 @@ def test_blanked_cameras_track_nothing() -> None:
 
 @pytest.mark.parametrize(
     "dataset",
-    ["insta360_config", "insta360_native_config", "tartanair_equirect_config", "tartanair_fisheye_config", "tartanair_pinhole_config"],
+    ["insta360_native_config", "tartanair_fisheye_config", "tartanair_pinhole_config"],
 )
 def test_rigs_that_start_in_motion_bootstrap_inertially(dataset: str) -> None:
     """The Insta360 has no stereo pair and every TartanAir clip starts moving: the stereo start cannot work there."""
