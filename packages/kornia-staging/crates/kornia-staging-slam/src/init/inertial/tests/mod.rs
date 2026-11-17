@@ -550,3 +550,29 @@ fn refinement_gradient_matches_finite_differences() {
         );
     }
 }
+
+/// One refinement iteration per pass leaves a 0.02 rad/s gyro bias still moving after the five refine and re-score
+/// passes: the window ends without a stable inlier set and bias, so it is not accepted (it was before).
+#[test]
+fn an_unsettled_refine_loop_is_not_accepted() {
+    let mut scenario = Scenario::clean(Rig::TwoCentre, 2.0);
+    scenario.gyro_bias = Vector3::new(0.02, -0.02, 0.01);
+    let data = generate(&scenario);
+    let options = InertialInitOptions {
+        max_iterations: 1,
+        ..InertialInitOptions::default()
+    };
+    let outcome = solve(&data, &options);
+    assert!(
+        matches!(
+            outcome.verdict,
+            InitVerdict::Rejected(RejectReason::NotConverged)
+        ),
+        "{:?}",
+        outcome.verdict
+    );
+    // The same window with the default iterations settles and is accepted.
+    assert!(solve(&data, &InertialInitOptions::default())
+        .accepted()
+        .is_some());
+}
