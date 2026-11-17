@@ -167,5 +167,7 @@ def main(config: Config) -> None:
                     columns=rr.VideoStream.columns(sample=samples, is_keyframe=keyframes.tolist()),
                     recording=rec,
                 )
+                # Bound memory to one batch: without a flush the sink holds most of the clip.
+                rec.flush()
             print(f"cam_{cam:02d} = lens {cam} (track {track}): KB4 f {fit.focal_px:.3f} px, k {np.round(fit.k, 6)}, max residual {fit.max_residual_px:.4f} px")
     print(f"Wrote {frames} frames per lens and {imu_ns.size} IMU samples to {output}")
