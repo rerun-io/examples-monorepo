@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
 from slam_rs.apis.insv import nearest_permutation, orthonormal
@@ -195,25 +196,9 @@ class CalibrationReport:
     """Item 3 per window."""
 
 
-def rotation_exp(rotvec: Float64[ndarray, " 3"]) -> Float64[ndarray, "3 3"]:
-    """Rodrigues: the rotation of angle ``|rotvec|`` about ``rotvec``."""
-    angle: float = float(np.linalg.norm(rotvec))
-    cross: Float64[ndarray, "3 3"] = np.array([[0.0, -rotvec[2], rotvec[1]], [rotvec[2], 0.0, -rotvec[0]], [-rotvec[1], rotvec[0], 0.0]])
-    if angle < 1e-12:
-        return np.eye(3) + cross
-    return np.eye(3) + np.sin(angle) / angle * cross + (1.0 - np.cos(angle)) / angle**2 * cross @ cross
-
-
-def rotation_log(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, " 3"]:
-    """Rotation vector of ``rotation`` (angles below pi)."""
-    angle: float = float(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0)))
-    axis: Float64[ndarray, " 3"] = np.array([rotation[2, 1] - rotation[1, 2], rotation[0, 2] - rotation[2, 0], rotation[1, 0] - rotation[0, 1]])
-    return 0.5 * axis if angle < 1e-12 else angle / (2.0 * np.sin(angle)) * axis
-
-
 def rotation_angle_deg(rotation: Float64[ndarray, "3 3"]) -> float:
     """Angle of ``rotation`` in degrees."""
-    return float(np.degrees(np.linalg.norm(rotation_log(rotation))))
+    return float(np.degrees(Rotation.from_matrix(rotation).magnitude()))
 
 
 def tile_bearings(pixels_xy: Float64[ndarray, "n 2"], origin: int) -> Float64[ndarray, "n 3"]:
@@ -226,14 +211,6 @@ def tile_bearings(pixels_xy: Float64[ndarray, "n 2"], origin: int) -> Float64[nd
     lon: Float64[ndarray, " n"] = (pixels_xy[:, 0] + origin + 0.5) * step - np.pi / 2
     lat: Float64[ndarray, " n"] = (PANORAMA_HEIGHT / 2 - 0.5 - pixels_xy[:, 1]) * step
     return np.stack([np.cos(lat) * np.sin(lon), -np.sin(lat), np.cos(lat) * np.cos(lon)], axis=1)
-
-
-def epipolar_residuals(
-    rotation: Float64[ndarray, "3 3"], direction: Float64[ndarray, " 3"], rays0: Float64[ndarray, "n 3"], rays1: Float64[ndarray, "n 3"]
-) -> Float64[ndarray, " n"]:
-    """Sine of each frame-1 ray's angle off its epipolar plane, the plane through ``direction`` and ``rotation @ ray0``."""
-    normals: Float64[ndarray, "n 3"] = np.cross(direction, rays0 @ rotation.T)
-    return np.einsum("ij,ij->i", rays1, normals) / np.maximum(np.linalg.norm(normals, axis=1), 1e-12)
 
 
 def relative_pose(rays0: Float64[ndarray, "n 3"], rays1: Float64[ndarray, "n 3"], seed: Float64[ndarray, "3 3"], iterations: int = 30) -> PairPose:
@@ -259,7 +236,7 @@ def relative_pose(rays0: Float64[ndarray, "n 3"], rays1: Float64[ndarray, "n 3"]
         normal: Float64[ndarray, "5 5"] = jacobian.T @ (weights[:, None] * jacobian)
         normal += 1e-9 * np.trace(normal) * np.eye(5)
         delta: Float64[ndarray, " 5"] = -np.linalg.solve(normal, jacobian.T @ (weights * residual))
-        rotation = rotation_exp(delta[:3]) @ rotation
+        rotation = Rotation.from_rotvec(delta[:3]).as_matrix() @ rotation
         direction = direction + basis.T @ delta[3:]
         direction /= np.linalg.norm(direction)
         if np.linalg.norm(delta) < 1e-9:
@@ -289,9 +266,9 @@ def visual_pairs(frames: list[TrackedFrame], imu: ImuStream, current_pano_R_imu:
         if common[0].size < MIN_MATCHES:
             continue
         # rays1 = R rays0 with R = (rig_0 <- rig_1)^T, so the seed is exp(-gyro) and the visual rotation vector is -log(R).
-        pose: PairPose = relative_pose(first.bearings[common[1]], second.bearings[common[2]], rotation_exp(-seeds[index]))
+        pose: PairPose = relative_pose(first.bearings[common[1]], second.bearings[common[2]], Rotation.from_rotvec(-seeds[index]).as_matrix())
         kept.append(index)
-        rotvecs.append(-rotation_log(pose.rotation))
+        rotvecs.append(-Rotation.from_matrix(pose.rotation).as_rotvec())
     return VisualPairs(t0_ns=t0_ns[kept], t1_ns=t1_ns[kept], pano_rotvecs=np.array(rotvecs).reshape(-1, 3))
 
 

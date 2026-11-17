@@ -12,12 +12,12 @@ import numpy as np
 import pytest
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from scipy.spatial.transform import Rotation
 
 from slam_rs.apis.insv_calibrate import (
     Config,
     TrackedFrame,
     WindowScan,
-    epipolar_residuals,
     fit_hand_eye,
     main,
     offset_summary,
@@ -25,14 +25,13 @@ from slam_rs.apis.insv_calibrate import (
     rate_offset_curve,
     relative_pose,
     rotation_angle_deg,
-    rotation_exp,
     visual_pairs,
 )
 from slam_rs.catalog_timing import ImuStream
 
 PERMUTATION: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 """``R_P_imu`` of the X4 Air up to a fraction of a degree."""
-TRUE_PANO_R_IMU: Float64[ndarray, "3 3"] = rotation_exp(np.radians([0.6, -0.4, 0.8])) @ PERMUTATION
+TRUE_PANO_R_IMU: Float64[ndarray, "3 3"] = Rotation.from_rotvec(np.radians([0.6, -0.4, 0.8])).as_matrix() @ PERMUTATION
 BIAS: Float64[ndarray, " 3"] = np.array([0.004, -0.003, 0.002])
 EXTRA_OFFSET_MS: float = 3.0
 PIXEL_RAD: float = np.pi / 960.0
@@ -52,7 +51,7 @@ def synthetic_rig(seconds: float, seed: int) -> tuple[list[TrackedFrame], ImuStr
     # Midpoint rule on the analytic rate: the truth must not carry the half-step lag of a rectangle rule.
     world_R_imu: list[Float64[ndarray, "3 3"]] = [np.eye(3)]
     for rate in angular_rate(imu_t_s[:-1] + 0.5e-3):
-        world_R_imu.append(world_R_imu[-1] @ rotation_exp(rate * 1e-3))
+        world_R_imu.append(world_R_imu[-1] @ Rotation.from_rotvec(rate * 1e-3).as_matrix())
     points: Float64[ndarray, "n_points 3"] = rng.normal(size=(500, 3))
     points *= rng.uniform(2.0, 8.0, size=(500, 1)) / np.linalg.norm(points, axis=1, keepdims=True)
     frames: list[TrackedFrame] = []
@@ -60,7 +59,7 @@ def synthetic_rig(seconds: float, seed: int) -> tuple[list[TrackedFrame], ImuStr
         true_s: float = stamp_s + EXTRA_OFFSET_MS * 1e-3
         index: int = int(true_s * 1e3)
         rest_s: float = true_s - index * 1e-3
-        world_R_frame: Float64[ndarray, "3 3"] = world_R_imu[index] @ rotation_exp(angular_rate(np.array([index * 1e-3 + rest_s / 2]))[0] * rest_s)
+        world_R_frame: Float64[ndarray, "3 3"] = world_R_imu[index] @ Rotation.from_rotvec(angular_rate(np.array([index * 1e-3 + rest_s / 2]))[0] * rest_s).as_matrix()
         centre: Float64[ndarray, " 3"] = np.array([np.sin(0.5 * true_s), 0.5 * np.sin(0.3 * true_s), 0.2 * true_s])
         rays: Float64[ndarray, "n_points 3"] = (points - centre) @ world_R_frame @ TRUE_PANO_R_IMU.T
         rays = rays / np.linalg.norm(rays, axis=1, keepdims=True) + rng.normal(scale=0.5 * PIXEL_RAD, size=rays.shape)
@@ -68,15 +67,6 @@ def synthetic_rig(seconds: float, seed: int) -> tuple[list[TrackedFrame], ImuStr
     gyro: Float64[ndarray, "n_imu 3"] = rates + BIAS + rng.normal(scale=0.0028 * np.sqrt(1e3), size=rates.shape)
     imu_t_ns: Int64[ndarray, " n_imu"] = np.round(imu_t_s * 1e9).astype(np.int64)
     return frames, ImuStream(t_ns=imu_t_ns, gyro_rad_s=gyro, accel_m_s2=np.zeros_like(gyro))
-
-
-def test_the_epipolar_residual_is_the_sine_of_the_angle_off_the_epipolar_plane() -> None:
-    # Translation along x, b0 on the z axis: the epipolar plane is y = 0, and t x b0 = (0, -1, 0).
-    angle: float = 0.01
-    residual: Float64[ndarray, " 1"] = epipolar_residuals(
-        np.eye(3), np.array([1.0, 0.0, 0.0]), np.array([[0.0, 0.0, 1.0]]), np.array([[0.0, np.sin(angle), np.cos(angle)]])
-    )
-    assert residual[0] == pytest.approx(-np.sin(angle), abs=1e-15)
 
 
 def test_a_hand_placed_pose_is_recovered_from_a_wrong_seed() -> None:
@@ -89,7 +79,7 @@ def test_a_hand_placed_pose_is_recovered_from_a_wrong_seed() -> None:
     rays0: Float64[ndarray, "8 3"] = points / np.linalg.norm(points, axis=1, keepdims=True)
     rays1: Float64[ndarray, "8 3"] = (points - centre) @ rotation.T
     rays1 /= np.linalg.norm(rays1, axis=1, keepdims=True)
-    fit = relative_pose(rays0, rays1, rotation_exp(np.radians([2.0, -3.0, 4.0])) @ rotation)
+    fit = relative_pose(rays0, rays1, Rotation.from_rotvec(np.radians([2.0, -3.0, 4.0])).as_matrix() @ rotation)
     assert rotation_angle_deg(fit.rotation @ rotation.T) < 1e-6
     # t = -R c = (0, 1, 0) up to sign.
     assert abs(fit.direction @ np.array([0.0, 1.0, 0.0])) == pytest.approx(1.0, abs=1e-9)
@@ -97,7 +87,7 @@ def test_a_hand_placed_pose_is_recovered_from_a_wrong_seed() -> None:
 
 def test_the_rotation_and_the_rate_offset_are_recovered_on_a_synthetic_rig() -> None:
     frames, imu = synthetic_rig(seconds=10.0, seed=3)
-    current: Float64[ndarray, "3 3"] = rotation_exp(np.radians([1.0, 0.0, -1.0])) @ TRUE_PANO_R_IMU
+    current: Float64[ndarray, "3 3"] = Rotation.from_rotvec(np.radians([1.0, 0.0, -1.0])).as_matrix() @ TRUE_PANO_R_IMU
     pairs = visual_pairs(frames, imu, current)
     offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9))
     curve: Float64[ndarray, " n_offsets"] = rate_offset_curve(pairs, imu, fit_hand_eye(pairs, imu, 0.0), offsets_ms)
