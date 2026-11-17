@@ -13,7 +13,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
-from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
+from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, log_panorama_keypoints, track_colors
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
@@ -244,10 +244,12 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
-        if self.stitched:
-            log_keypoints(frame, self.tile_origins, PANORAMA_WIDTH, PANORAMA_ENTITY)
+        if self.tile_origins is None:
+            log_keypoints(frame)
+        elif self.stitched:
+            log_panorama_keypoints(frame, self.tile_origins, PANORAMA_WIDTH, PANORAMA_ENTITY)
         else:
-            log_keypoints(frame, self.tile_origins, self.cameras[0].width)
+            log_panorama_keypoints(frame, self.tile_origins, self.cameras[0].width, camera_entity(0))
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
@@ -525,7 +527,7 @@ class VioStage:
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
         rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
         if not self.logger.estimate_t_ns or self.logger.estimate_t_ns[-1] != t_ns:
-            log_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
+            log_panorama_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""
