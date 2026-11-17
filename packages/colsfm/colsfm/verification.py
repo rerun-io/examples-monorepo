@@ -6,9 +6,9 @@ loop stage, while the GPU sat idle. Here each chunk of pairs is verified on a fi
 the matcher hands it over (`pycolmap.estimate_two_view_geometry` releases the GIL: 7.7x on 8 threads, measured), and
 the matcher keeps working on the next chunk meanwhile.
 
-Memory stays bounded by construction: at most `chunks_in_flight` chunks are verifying at once. `submit` blocks on the
+Memory stays bounded by construction: at most `verify_chunks_in_flight` chunks are verifying at once. `submit` blocks on the
 oldest one before it takes another, so a CPU that falls behind holds the matcher back instead of letting chunks pile
-up. Peak memory is about `chunks_in_flight` chunks, whatever the length of the run, and the rule is the same on every
+up. Peak memory is about `verify_chunks_in_flight` chunks, whatever the length of the run, and the rule is the same on every
 machine.
 
 The result is what COLMAP's verifier writes (`WriteVerifiedTwoViewGeometry` in `feature_matching_utils.cc` at the
@@ -39,11 +39,11 @@ DEFAULT_VERIFY_THREADS: Final[int] = max(1, min(8, os.cpu_count() or 1))
 class VerifyChunking:
     """How verification is chunked and overlapped; the same rule on every machine, with no branch on its RAM."""
 
-    chunk_pairs: int = 256
+    verify_chunk_pairs: int = 256
     """Pairs verified, and written, per chunk; also FlexGlue's download chunk."""
-    threads: int = DEFAULT_VERIFY_THREADS
+    verify_threads: int = DEFAULT_VERIFY_THREADS
     """Worker threads that verify pairs (`pycolmap.estimate_two_view_geometry` releases the GIL)."""
-    chunks_in_flight: int = 2
+    verify_chunks_in_flight: int = 2
     """Chunks verifying at once; past that the matcher waits, so memory holds about this many chunks."""
 
     def __post_init__(self) -> None:
@@ -52,8 +52,8 @@ class VerifyChunking:
         Raises:
             ValueError: When a setting is below 1.
         """
-        if min(self.chunk_pairs, self.threads, self.chunks_in_flight) < 1:
-            raise ValueError(f"verification chunk_pairs, threads and chunks_in_flight must be at least 1, got {self}")
+        if min(self.verify_chunk_pairs, self.verify_threads, self.verify_chunks_in_flight) < 1:
+            raise ValueError(f"verify_chunk_pairs, verify_threads and verify_chunks_in_flight must be at least 1, got {self}")
 
 
 CapFunction = Callable[[ImagePair, KeypointsXY, MatchIndices], MatchIndices]
@@ -141,7 +141,7 @@ def verify_pair(
 
 
 class ChunkedVerifier:
-    """Verifies chunks of pairs on worker threads, at most `chunks_in_flight` at a time, results in submission order."""
+    """Verifies chunks of pairs on worker threads, at most `verify_chunks_in_flight` at a time, results in submission order."""
 
     def __init__(
         self,
@@ -161,12 +161,12 @@ class ChunkedVerifier:
         self._cameras: Mapping[int, pycolmap.Camera] = cameras
         self._options: pycolmap.TwoViewGeometryOptions = options
         self._cap: CapFunction | None = cap
-        self._chunks_in_flight: int = chunking.chunks_in_flight
-        self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=chunking.threads, thread_name_prefix="colsfm-verify")
+        self._chunks_in_flight: int = chunking.verify_chunks_in_flight
+        self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=chunking.verify_threads, thread_name_prefix="colsfm-verify")
         self._in_flight: deque[list[Future[VerifiedPair]]] = deque()
 
     def submit(self, chunk: Sequence[PairToVerify]) -> list[list[VerifiedPair]]:
-        """Queue one chunk; return the chunks that had to finish to keep at most `chunks_in_flight` in flight.
+        """Queue one chunk; return the chunks that had to finish to keep at most `verify_chunks_in_flight` in flight.
 
         Args:
             chunk: The pairs.

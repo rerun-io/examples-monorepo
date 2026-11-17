@@ -127,8 +127,9 @@ def test_min_num_inliers_empties_a_pair_instead_of_trimming_it(
 
     COLMAP goes one step further than the blob: `min_num_inliers` is applied to
     the *raw* match count as well, so a pair that cannot possibly reach the
-    threshold loses its `matches` row too, not just its geometry. The blob keeps
-    the raw matches and empties only the result.
+    threshold loses its `matches` row too, not just its geometry, and the pair is
+    stored as an empty DEGENERATE row. The blob keeps the raw matches and empties
+    only the result.
     """
     rig_frame = galileo_input.rig_frames()[0]
     keyframe_by_id = galileo_input.keyframe_by_id()
@@ -158,9 +159,10 @@ def test_min_num_inliers_empties_a_pair_instead_of_trimming_it(
     assert dropped.inlier_matches == 0
     assert dropped.raw_matches == 0
     assert strict.empty_pairs == 1
-    assert read_two_view_geometry(database_path, *pairs[0]).config == int(
-        pycolmap.TwoViewGeometryConfiguration.UNDEFINED
-    )
+    # COLMAP's `WriteVerifiedTwoViewGeometry` at the pin: a rejected pair is stored as an empty DEGENERATE row.
+    stored: pycolmap.TwoViewGeometry = read_two_view_geometry(database_path, *pairs[0])
+    assert stored.config == int(pycolmap.TwoViewGeometryConfiguration.DEGENERATE)
+    assert len(stored.inlier_matches) == 0
 
 
 def test_verification_options_carry_the_blob_thresholds() -> None:

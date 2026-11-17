@@ -175,7 +175,7 @@ class PipelineOptions:
     costs 4.4x on Galileo (33.9 s against 7.6 s, measured)."""
     verify: VerifyChunking = VerifyChunking()
     """Two-view verification's chunk size, worker threads and chunks in flight (`colsfm.verification`): memory holds
-    about `chunks_in_flight` chunks whatever the run's length, on every machine."""
+    about `verify_chunks_in_flight` chunks whatever the run's length, on every machine."""
     ba_backend: BaBackend = "caspar"
     """Which implementation solves the bundle adjustments — Ceres on the CPU, or COLMAP's
     CASPAR on the GPU. `caspar` by default (NOTES.md decision 17): with the closing Ceres

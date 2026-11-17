@@ -43,7 +43,7 @@ def test_chunked_verification_writes_what_colmaps_verify_matches_writes(matched_
     with pycolmap.Database.open(matched_database) as database:
         pair_ids, _ = database.read_all_matches()
     pairs: list[ImagePair] = [pycolmap.pair_id_to_image_pair(int(pair_id)) for pair_id in pair_ids]
-    options: MatchingOptions = MatchingOptions(verify=VerifyChunking(chunk_pairs=3, threads=2, chunks_in_flight=1))
+    options: MatchingOptions = MatchingOptions(verify=VerifyChunking(verify_chunk_pairs=3, verify_threads=2, verify_chunks_in_flight=1))
 
     pair_list: Path = tmp_path / "pairs.txt"
     with pycolmap.Database.open(colmap_path) as database:
@@ -96,14 +96,16 @@ def test_at_most_chunks_in_flight_chunks_are_verifying(monkeypatch: pytest.Monke
         return [PairToVerify(pair=(k, k + 100), matches=np.zeros((0, 2), dtype=np.int64), keypoints1=no_keypoints, keypoints2=no_keypoints)]
 
     cameras: dict[int, pycolmap.Camera] = {k: pycolmap.Camera() for k in (*range(5), *range(100, 105))}
-    with ChunkedVerifier(cameras, pycolmap.TwoViewGeometryOptions(), chunking=VerifyChunking(threads=2, chunks_in_flight=2)) as verifier:
+    with ChunkedVerifier(
+        cameras, pycolmap.TwoViewGeometryOptions(), chunking=VerifyChunking(verify_threads=2, verify_chunks_in_flight=2)
+    ) as verifier:
         handed_back: list[list[int]] = [[c[0].pair[0] for c in verifier.submit(chunk(k))] for k in range(5)]
         rest: list[int] = [c[0].pair[0] for c in verifier.finish()]
     assert handed_back == [[], [], [0], [1], [2]]
     assert rest == [3, 4]
 
 
-@pytest.mark.parametrize("field", ["chunk_pairs", "threads", "chunks_in_flight"])
+@pytest.mark.parametrize("field", ["verify_chunk_pairs", "verify_threads", "verify_chunks_in_flight"])
 def test_a_chunk_pool_or_window_of_zero_is_refused(field: str) -> None:
     with pytest.raises(ValueError, match="at least 1"):
         VerifyChunking(**{field: 0})

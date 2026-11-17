@@ -749,8 +749,8 @@ def verify_and_report(
     """Verify raw matches already in the database, in bounded chunks, and report: the tail of the backends that write
     their matches themselves (COLMAP's matcher, LightGlue+). FlexGlue streams its chunks to the verifier instead.
 
-    Each chunk's matches and keypoints are read, verified on `options.verify.threads` workers (`colsfm.verification`)
-    and its geometries written in one transaction, so memory holds `options.verify.chunks_in_flight` chunks at most.
+    Each chunk's matches and keypoints are read, verified on `options.verify.verify_threads` workers (`colsfm.verification`)
+    and its geometries written in one transaction, so memory holds `options.verify.verify_chunks_in_flight` chunks at most.
 
     Args:
         database_path: The database holding the raw matches.
@@ -775,8 +775,8 @@ def verify_and_report(
             spatial_cap(options, sizes) if cap else None,
             options.verify,
         ) as verifier:
-            for first in range(0, len(pairs), options.verify.chunk_pairs):
-                chunk_pairs: Sequence[ImagePair] = pairs[first : first + options.verify.chunk_pairs]
+            for first in range(0, len(pairs), options.verify.verify_chunk_pairs):
+                chunk_pairs: Sequence[ImagePair] = pairs[first : first + options.verify.verify_chunk_pairs]
                 keypoints: dict[int, Keypoints] = read_keypoints_batch(database_path, sorted({image_id for pair in chunk_pairs for image_id in pair}))
                 chunk: list[PairToVerify] = [
                     PairToVerify(

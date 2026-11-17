@@ -605,7 +605,7 @@ def _match_pairs_flexglue(
             )
 
         # Each downloaded chunk goes to the verifier's worker threads while the GPU matches the next one; `submit` hands
-        # back the chunks it had to finish to keep at most `options.verify.chunks_in_flight` in flight, and they are written
+        # back the chunks it had to finish to keep at most `options.verify.verify_chunks_in_flight` in flight, and they are written
         # (matches and geometries, one transaction) and dropped.
         with ChunkedVerifier(
             cameras,
@@ -617,7 +617,7 @@ def _match_pairs_flexglue(
                 ensure(image_id1)
                 ensure(image_id2)
                 flexglue.enqueue((image_id1, image_id2))
-                if (index + 1) % options.verify.chunk_pairs == 0 or index + 1 == len(pairs):
+                if (index + 1) % options.verify.verify_chunk_pairs == 0 or index + 1 == len(pairs):
                     for finished in verifier.submit(flexglue.flush()):
                         num_capped += write_and_count(database, finished, stats, write_matches=True)
             for finished in verifier.finish():
