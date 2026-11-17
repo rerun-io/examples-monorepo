@@ -11,9 +11,11 @@
 use super::super::{Mei, MeiDistortion};
 use nalgebra::{IsometryMatrix3, Matrix3, Rotation3, Translation3, Vector3};
 
-/// Half field of the lens type every supported string states, 131: a 200 degree field (telemetry-parser `rig.rs`).
-const LENS_TYPE: f64 = 131.0;
-const HALF_FIELD_RAD: f64 = 100.0 * std::f64::consts::PI / 180.0;
+/// Half field, degrees, of each lens type the reader supports: the largest angle off the axis whose pixels it uses.
+/// 131 (X4 Air): a 200 degree field (telemetry-parser `rig.rs`). 113 (X5): on the clip VID_20261113_145021_00_003
+/// the image circle keeps full brightness to 100 degrees through its V3 model and falls to half at 102.5-103.5
+/// degrees (the vignetted rim), so 100 degrees as well.
+const HALF_FIELD_DEG: [(f64, f64); 2] = [(131.0, 100.0), (113.0, 100.0)];
 
 /// `window_crop_info`: the sensor window a calibration string describes and the part of it the picture holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +55,7 @@ fn refuse(what: impl Into<String>) -> LensStringError {
 ///
 /// # Errors
 /// A token that is not a finite number, a version other than 3 and 6, a lens count that is not a whole number from
-/// 1 to 8 or does not match the token count, a lens type other than 131, or values that make no valid camera.
+/// 1 to 8 or does not match the token count, a lens type without a half field in `HALF_FIELD_DEG`, or values that make no valid camera.
 pub fn parse_lens_string(
     text: &str,
     crop: Option<WindowCrop>,
@@ -97,12 +99,13 @@ pub fn parse_lens_string(
     let mut rotations = Vec::with_capacity(count);
     let mut translations = Vec::with_capacity(count);
     for (i, t) in body.chunks_exact(per_lens).enumerate() {
-        if t[per_lens - 1] != LENS_TYPE {
+        let lens_type = t[per_lens - 1];
+        let Some(&(_, half_field_deg)) = HALF_FIELD_DEG.iter().find(|(ty, _)| *ty == lens_type)
+        else {
             return Err(refuse(format!(
-                "lens {i} has type {}; only type 131 (a 200 degree field) is supported",
-                t[per_lens - 1]
+                "lens {i} has type {lens_type}; only types 131 (X4 Air) and 113 (X5), with a measured field, are supported"
             )));
-        }
+        };
         let frame = [t[per_lens - 3] / count as f64, t[per_lens - 2]];
         let (mut cx, mut cy, mut fx, mut fy) = (t[3] - frame[0] * i as f64, t[4], t[1], t[2]);
         let mut window = frame;
@@ -139,7 +142,8 @@ pub fn parse_lens_string(
                 (cy + 0.5) * s[1] - 0.5,
                 t[0],
             ],
-            HALF_FIELD_RAD,
+            // As `100.0 * PI / 180.0`, the expression the X4 Air tables were built with, bit for bit.
+            half_field_deg * std::f64::consts::PI / 180.0,
             distortion,
         )
         .map_err(|_| refuse(format!("lens {i} makes no valid camera")))?;
