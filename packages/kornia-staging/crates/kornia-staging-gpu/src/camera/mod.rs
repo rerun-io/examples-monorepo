@@ -112,7 +112,7 @@ pub enum DeviceCamera {
 }
 impl DeviceCamera {
     /// Pack a validated CPU camera, or `None` when it needs the general CPU path
-    /// (pinhole, Fisheye624, Brown with prism or tilt terms).
+    /// (pinhole, Fisheye624, Brown with prism or tilt terms, Mei: no device kernel for those).
     pub fn from_model(model: &CameraModelKind<f32>) -> Option<Self> {
         Some(match model {
             CameraModelKind::BrownConrady(model) => {
@@ -138,7 +138,9 @@ impl DeviceCamera {
                 Self::Eucm(packed)
             }
             CameraModelKind::Equirectangular(model) => Self::Equirect(model.params()),
-            CameraModelKind::Pinhole(_) | CameraModelKind::Fisheye624(_) => return None,
+            CameraModelKind::Pinhole(_)
+            | CameraModelKind::Fisheye624(_)
+            | CameraModelKind::Mei(_) => return None,
         })
     }
     /// Model tag for comptime or in-kernel dispatch (`MODEL_*`).

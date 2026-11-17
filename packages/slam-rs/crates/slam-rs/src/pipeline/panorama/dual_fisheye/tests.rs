@@ -110,7 +110,10 @@ fn a_far_point_lands_where_the_tile_camera_and_the_table_agree() {
                     // 10 km along the tile pixel's ray, in the IMU frame, seen through the lens's factory model.
                     let point: Vector3<f64> = tiles.t_i_c[tile] * (bearing * 1.0e4);
                     let ray: Vector3<f64> = lens_from_imu * point;
-                    let [u, v] = lenses.lenses[tile].project([ray.x, ray.y, ray.z]).unwrap();
+                    let [u, v] = lenses.lenses[tile]
+                        .camera
+                        .project([ray.x, ray.y, ray.z])
+                        .unwrap();
                     let [qx, qy] = lut.sample[index];
                     let (tu_lens, tv_lens) = (f64::from(qx) / 128.0, f64::from(qy) / 128.0);
                     assert!(
@@ -137,7 +140,7 @@ fn a_near_point_shows_the_lens_offset_parallax_between_the_two_lanes() {
         model.project([local.x, local.y, local.z]).unwrap()
     };
     let (a, b) = (pixel(&two), pixel(&central));
-    let offset = lenses().lenses[0].pano_centre_m;
+    let offset = lenses().lenses[0].pano_from_lens.translation.vector;
     // Lens 0 sits +16.56 mm along Z, so the point is seen 0.0166 rad further from the lens axis.
     let expected = 960.0 / PI * (offset[2] / (1.0 - offset[0])).atan();
     assert!(

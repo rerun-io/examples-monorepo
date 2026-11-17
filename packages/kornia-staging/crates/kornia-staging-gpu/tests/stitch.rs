@@ -7,6 +7,8 @@
 #![allow(unsafe_code)]
 #![cfg(feature = "wgpu")]
 use kornia_image::{Image, ImageSize};
+use kornia_staging_3d::camera::formats::insta360::{parse_lens_string, FactoryLens, WindowCrop};
+use kornia_staging_3d::camera::CameraModel;
 use kornia_staging_gpu::{
     pyramid::{GpuPyramid, GpuPyramidBuilder},
     runtime::gpu_client,
@@ -17,11 +19,19 @@ use kornia_staging_imgproc::panorama::{
     build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
 };
 use kornia_staging_imgproc::pyramid::PyramidPlanU16;
-use kornia_staging_io::insta360::{parse_lens_string, WindowCrop};
 
 const LEVELS: usize = 3;
 include!("../../kornia-staging-io/tests/common/x4air_lens.rs");
 include!("../../kornia-staging-io/tests/common/x4air_clip.rs");
+
+/// The factory projection of a ray in the panorama frame.
+fn project(lens: &FactoryLens, d: [f64; 3]) -> Option<[f64; 2]> {
+    let local = lens
+        .pano_from_lens
+        .rotation
+        .inverse_transform_vector(&d.into());
+    lens.camera.project(local.into()).ok()
+}
 
 /// The CPU stitch of one lens: `lens_level1` then `remap_tile`.
 fn cpu_tile(lens: &Image<u8, 1>, lut: &TileLut) -> Image<u16, 1> {
@@ -191,11 +201,8 @@ fn synthetic_tables_cover_every_bilinear_phase_bit_exactly() {
 fn factory_tables_stitch_bit_exactly() {
     for (name, text) in [("V6", V6), ("V3", V3)] {
         let lenses = parse_lens_string(text, Some(CROP), [1920, 1920]).unwrap();
-        let luts = [0, 1].map(|k| {
-            build_tile_lut(TileGeometry::default(), k, LENS, |d| {
-                lenses[k].project_from_panorama(d)
-            })
-        });
+        let luts = [0, 1]
+            .map(|k| build_tile_lut(TileGeometry::default(), k, LENS, |d| project(&lenses[k], d)));
         assert!(luts.iter().all(|lut| lut.invalid_count() > 0));
         let images = [noise(LENS, 3), noise(LENS, 4)];
         assert_stitch_matches(&luts, &images, name);
@@ -276,7 +283,13 @@ fn clip_frame(frame: usize) -> Option<([TileLut; 2], [Image<u8, 1>; 2])> {
     let (path, clip) = clip()?;
     let luts = [0, 1].map(|k| {
         build_tile_lut(TileGeometry::default(), k, LENS, |d| {
-            clip.lenses_v6[k].project_from_panorama(d)
+            project(
+                &clip
+                    .lenses_v6
+                    .as_ref()
+                    .expect("the clip carries a V6 string")[k],
+                d,
+            )
         })
     });
     let lenses = [0, 1].map(|k| decode(&path, clip.lens_track[k], frame));

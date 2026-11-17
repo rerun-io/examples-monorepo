@@ -3,7 +3,7 @@
 //! factory lens calibration; and the rolling-shutter correction of the tiles'
 //! keypoints (the readout convention is [`DualFisheyeLenses::readout_s`]'s).
 //!
-//! Frames: `P` is the panorama frame of `kornia_staging_io::insta360` (`+Z` the
+//! Frames: `P` is the panorama frame of `kornia_staging_3d::camera::formats::insta360` (`+Z` the
 //! lens-0 axis, `+Y` toward the handle). Tile `k`'s camera frame is `P` turned
 //! by `k * pi` about `Y`; its origin is lens `k`'s centre (two-centre lane) or
 //! the lens midpoint (central lane).
@@ -16,9 +16,9 @@ use crate::frontend::flow::TrackKillMask;
 use crate::frontend::input::LensStitch;
 use crate::lie::{Se3, So3};
 use kornia_image::ImageSize;
+use kornia_staging_3d::camera::formats::insta360::{FactoryLens, WindowCrop, parse_lens_string};
 use kornia_staging_3d::camera::{CameraModel, Equirectangular};
 use kornia_staging_imgproc::panorama::{LUT_INVALID, TileGeometry, TileLut, build_tile_lut};
-use kornia_staging_io::insta360::{LensCalibration, WindowCrop, parse_lens_string};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ const GYRO_KEEP_NS: i64 = 200_000_000;
 #[derive(Debug, Clone)]
 pub struct DualFisheyeLenses {
     /// The two lenses, in lens order (not track order), at the lens image's pixels.
-    pub lenses: [LensCalibration; 2],
+    pub lenses: [FactoryLens; 2],
     /// Rolling-shutter readout time of one lens image, seconds: row `v` of an
     /// `H`-row image is read at `t + readout_s * (v - (H - 1) / 2) / H` relative
     /// to the frame time `t`. Positive reads top to bottom; negative bottom to top.
@@ -53,10 +53,9 @@ impl DualFisheyeLenses {
         lens_size: [u32; 2],
         readout_s: f64,
     ) -> Result<Self, VioError> {
-        let lenses: Vec<LensCalibration> =
-            parse_lens_string(lens_string, window_crop, lens_size)
-                .map_err(|error| VioError::Panorama(format!("factory lens string: {error}")))?;
-        let lenses: [LensCalibration; 2] = lenses.try_into().map_err(|all: Vec<_>| {
+        let lenses: Vec<FactoryLens> = parse_lens_string(lens_string, window_crop, lens_size)
+            .map_err(|error| VioError::Panorama(format!("factory lens string: {error}")))?;
+        let lenses: [FactoryLens; 2] = lenses.try_into().map_err(|all: Vec<_>| {
             VioError::Panorama(format!(
                 "a dual fisheye has two lenses; the string holds {}",
                 all.len()
@@ -72,10 +71,10 @@ impl DualFisheyeLenses {
 
     /// `T_P_lens`: lens `k`'s pose in the panorama frame (factory rotation and centre).
     pub fn pano_from_lens(&self, lens: usize) -> Se3<f64> {
-        let lens: &LensCalibration = &self.lenses[lens];
+        let lens: &FactoryLens = &self.lenses[lens];
         Se3::new(
-            rotation(&lens.pano_from_lens_rotation),
-            Vector3::from(lens.pano_centre_m),
+            rotation(lens.pano_from_lens.rotation.matrix()),
+            lens.pano_from_lens.translation.vector,
         )
     }
 
@@ -106,17 +105,21 @@ impl DualFisheyeLenses {
         }
         let luts: [TileLut; 2] = std::array::from_fn(|k| {
             build_tile_lut(geometry, k, lens, |ray| {
-                self.lenses[k].project_from_panorama(ray)
+                let lens: &FactoryLens = &self.lenses[k];
+                let local = lens
+                    .pano_from_lens
+                    .rotation
+                    .inverse_transform_vector(&Vector3::from(ray));
+                lens.camera.project(local.into()).ok()
             })
         });
         Ok(LensStitch::new(luts, lens)?)
     }
 }
 
-fn rotation(rows: &[[f64; 3]; 3]) -> So3<f64> {
-    let matrix: Matrix3<f64> = Matrix3::from_fn(|row, column| rows[row][column]);
+fn rotation(matrix: &Matrix3<f64>) -> So3<f64> {
     So3::from_unit_quaternion(UnitQuaternion::from_rotation_matrix(
-        &nalgebra::Rotation3::from_matrix(&matrix),
+        &nalgebra::Rotation3::from_matrix(matrix),
     ))
 }
 
@@ -185,7 +188,7 @@ pub(super) fn expand(
     let t_i_c: Vec<Se3<f64>> = (0..2)
         .map(|k| {
             let origin: Vector3<f64> = if config.panorama_two_centre {
-                Vector3::from(lenses.lenses[k].pano_centre_m)
+                lenses.lenses[k].pano_from_lens.translation.vector
             } else {
                 Vector3::zeros()
             };
