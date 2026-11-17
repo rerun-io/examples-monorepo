@@ -51,6 +51,7 @@
         "config.vio_marg_lost_landmarks": true,
         "config.vio_fix_long_term_keyframes": false,
         "config.vio_kf_marg_feature_ratio": 0.1,
-        "config.vio_kf_marg_criteria": "KF_MARG_DEFAULT"
+        "config.vio_kf_marg_criteria": "KF_MARG_DEFAULT",
+        "config.vio_bootstrap": "inertial"
     }
 }

@@ -56,3 +56,13 @@ def test_blanked_cameras_track_nothing() -> None:
         frame = flow.process(k * 33_333_333, [np.roll(textured, k, axis=1), black])
     assert len(frame.ids(0)) > 0
     assert len(frame.ids(1)) == 0
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ["insta360_config", "insta360_native_config", "tartanair_equirect_config", "tartanair_fisheye_config", "tartanair_pinhole_config"],
+)
+def test_rigs_that_start_in_motion_bootstrap_inertially(dataset: str) -> None:
+    """The Insta360 has no stereo pair and every TartanAir clip starts moving: the stereo start cannot work there."""
+    text: str = (SLAM_CONFIG_PATH.parent / f"configs/{dataset}.json").read_text()
+    assert _core.VioConfig.from_json(text).vio_bootstrap == "inertial"
