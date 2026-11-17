@@ -61,7 +61,7 @@
 //!    linear system and the relative speed (scale) uncertainty, bearing RMS,
 //!    and the unconstrained `|g|` of the closed form at the refined biases.
 //!
-//! # Departures from the design (§5, §13 M7)
+//! # Design choices
 //!
 //! - The gyro bias is not first estimated from visual relative rotations
 //!   (the VINS-Mono step): that needs overlapping views or an essential
