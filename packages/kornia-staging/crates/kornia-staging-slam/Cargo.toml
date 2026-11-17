@@ -15,6 +15,10 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+# The rootba-export golden test reads third-party JSON and Basalt calibrations.
+kornia-staging-3d = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
 kornia-image.workspace = true
 proptest.workspace = true
 approx.workspace = true
