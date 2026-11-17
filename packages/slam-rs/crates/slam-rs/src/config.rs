@@ -571,11 +571,24 @@ mod tests {
         assert_eq!(defaults.map_max_keyframes, 1500);
         assert_eq!(defaults.map_batch_cull_size, 30);
         assert_eq!(defaults.loop_closing_pgo_min_covisibility_weight, 96);
+        // Every map key of every fixture is the default; `backend.enabled` may differ.
+        let map_keys = |c: &VioConfig| {
+            (
+                c.map_enable_culling,
+                c.map_max_redundancy_score,
+                c.map_redundancy_exclude_hosted_lms,
+                c.map_max_keyframes,
+                c.map_batch_cull_size,
+                c.loop_closing_pgo_min_covisibility_weight,
+            )
+        };
         for (name, text) in every_fixture() {
             let config = VioConfig::from_json_str(text).unwrap();
-            let mut normalised = config.clone();
-            normalised.backend_enabled = defaults.backend_enabled;
-            assert_eq!(config, normalised, "{name} sets a map key");
+            assert_eq!(
+                map_keys(&config),
+                map_keys(&defaults),
+                "{name} sets a map key"
+            );
         }
 
         let parity = VioConfig::from_json_str(
