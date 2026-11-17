@@ -1,4 +1,5 @@
-//! Portable CubeCL image operations, shared across Vulkan and Metal devices.
+//! Portable CubeCL image operations and the global BA's PCG, shared across
+//! Vulkan and Metal devices.
 //!
 //! ```no_run
 //! # #[cfg(feature = "wgpu")] {
@@ -15,6 +16,7 @@
 #![deny(missing_docs)]
 
 pub mod kernels;
+pub mod linalg;
 pub mod runtime;
 pub mod transfer;
 /// Portable GPU runtime, with target-specific shader compiler selection.

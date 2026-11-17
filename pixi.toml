@@ -2888,6 +2888,14 @@ cmd = "cargo test --locked --offline -p robocap-recorder --features live-slam --
 cwd = "packages/slam-rs"
 description = "Run the recorder's live SLAM adapter tests without capture hardware"
 
+[feature.slam-rs.tasks.slam-rs-gba-golden]
+# Opt-in, not in the gate: needs RootSLAM's exported MGO07/MGO13 maps and rootba logs on the NAS
+# (GBA_EXPORT_RUNS, GBA_EXPORT_CALIB); a missing asset fails the run and names the asset.
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+cmd = "cargo test --locked --offline --release -p slam-rs --features backend --test gba_rootba_golden -- --ignored --nocapture"
+cwd = "packages/slam-rs"
+description = "Run the global-BA driver goldens against rootba bal (MGO07, MGO13)"
+
 [feature.slam-rs.tasks.slam-rs-catalog-test]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = """bash -c 'cargo test --locked --offline -p slam-rs-cli --features catalog && if [[ -n ${SLAM_RS_CATALOG_URL:-} && -f ${SLAM_RS_TEST_FIXTURE:-}/clip.json && ( -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8 || -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8.xz ) && -n ${SLAM_RS_TEST_OUTPUT:-} ]]; then cargo test --locked --offline -p slam-rs-cli --features catalog catalog_inputs_match_python_fixture -- --ignored --nocapture; else echo "SKIP catalog_inputs_match_python_fixture: set SLAM_RS_CATALOG_URL, SLAM_RS_TEST_FIXTURE (clip.json plus frames.u8 or frames.u8.xz), SLAM_RS_TEST_OUTPUT; dav1d required for G2"; fi'"""
@@ -3937,6 +3945,14 @@ description = "Run Rust workspace tests and doctests"
 cmd = """bash -c 'export CARGO_TARGET_DIR=../target/golden; golden=${KORNIA_STAGING_BASALT_BRIEF:-/mnt/nas/ssd-8tb/scratch/slam-rs-rootslam/fixtures/b1/basalt_brief.rrd}; cargo fmt --check && "$CONDA_PREFIX/bin/cargo-clippy" clippy --locked --all-targets -- -D warnings && if [[ -f $golden ]]; then KORNIA_STAGING_BASALT_BRIEF=$golden cargo test --locked --release -- --ignored --nocapture; else echo "SKIP kornia-staging-golden: Basalt BRIEF golden $golden is absent (set KORNIA_STAGING_BASALT_BRIEF)"; fi'"""
 cwd = "packages/kornia-staging/golden"
 description = "Run the golden parity tests (Basalt BRIEF, matcher, HashBoW) against the NAS .rrd fixtures"
+
+[feature.kornia-staging.tasks.kornia-staging-gba-golden]
+# Opt-in, not in the gate: needs RootSLAM's exported GBA problems and rootba logs on the NAS
+# (GBA_EXPORT_RUNS, GBA_EXPORT_CALIB); a missing asset fails the run and names the asset.
+depends-on = ["kornia-staging-patch-deps"]
+cmd = "cargo test --locked --release -p kornia-staging-slam --test gba_rootba_export -- --ignored golden --nocapture"
+cwd = "packages/kornia-staging"
+description = "Run the global-BA golden lanes against rootba bal (MGO07, TM1)"
 
 [feature.kornia-staging.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test", "kornia-staging-patch-test", "kornia-staging-patch-integration"]

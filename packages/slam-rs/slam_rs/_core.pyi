@@ -11,7 +11,7 @@ from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
-from slam_rs import BackendRequest, Lane
+from slam_rs import BackendRequest, GbaRequest, Lane
 from slam_rs.catalog_calibration import CameraStatics
 from slam_rs.catalog_feed import RigProfile
 from slam_rs.catalog_timing import ImuStream
@@ -160,6 +160,119 @@ class LoopCounts:
     @property
     def optimized(self) -> int:
         """Of those, closed by an applied pose-graph optimization."""
+
+class MapResult:
+    """The map's keyframes at the end of a sequence (:meth:`Vio.finish_map`).
+
+    Poses are ``T_w_i``, ``[tx, ty, tz, qx, qy, qz, qw]``, on the clock :meth:`Vio.track` was given.
+    """
+
+    @property
+    def keyframe_t_ns(self) -> Int64[ndarray, " n_keyframes"]:
+        """Map keyframe timestamps, oldest first."""
+
+    @property
+    def keyframe_poses_vio(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """``T_w_i`` as the window left them, before the global BA."""
+
+    @property
+    def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """``T_w_i`` after the global BA (equal to :attr:`keyframe_poses_vio` without it)."""
+
+    @property
+    def gba(self) -> GbaRun | None:
+        """The global BA, or None when :meth:`Vio.finish_map` ran without it."""
+
+    def __repr__(self) -> str: ...
+
+class GbaRun:
+    """One global BA over the map: what the problem held, each LM attempt, and the wall of each stage."""
+
+    @property
+    def lane(self) -> Lane:
+        """Where the PCG ran (always ``"cpu"`` with ``backend.gba_use_double``: the device lane is f32 only)."""
+
+    @property
+    def keyframes(self) -> int:
+        """Keyframe variables."""
+
+    @property
+    def keyframes_without_reprojection(self) -> int:
+        """Keyframes under ``backend.gba_min_obs_per_kf``: pose-graph rows only (B22)."""
+
+    @property
+    def landmarks(self) -> int:
+        """Landmarks in the problem."""
+
+    @property
+    def observations(self) -> int:
+        """Reprojection observations in the problem."""
+
+    @property
+    def pose_graph_rows(self) -> int:
+        """Pose-graph rows."""
+
+    @property
+    def nonfinite_landmarks(self) -> int:
+        """Landmarks left out for want of a finite position."""
+
+    @property
+    def initial_cost(self) -> float:
+        """``ERROR_VALID`` before the first step."""
+
+    @property
+    def final_cost(self) -> float:
+        """``ERROR_VALID`` of the returned state."""
+
+    @property
+    def termination(self) -> Literal["converged", "max_iterations", "lambda_overflow"]:
+        """Why the LM loop stopped."""
+
+    @property
+    def iteration_lambda(self) -> Float64[ndarray, " n_attempts"]:
+        """LM damping of each attempt."""
+
+    @property
+    def iteration_cost(self) -> Float64[ndarray, " n_attempts"]:
+        """Cost after each attempt's step; NaN where the step was not finite."""
+
+    @property
+    def iteration_accepted(self) -> Bool[ndarray, " n_attempts"]:
+        """Whether each attempt's step was kept."""
+
+    @property
+    def iteration_cg(self) -> Int64[ndarray, " n_attempts"]:
+        """PCG iterations of each attempt."""
+
+    @property
+    def iteration_stage_s(self) -> Float64[ndarray, "n_attempts 5"]:
+        """Wall seconds per attempt: stage 1 (linearize, QR), stage 2 (damping, preconditioner), PCG, back-substitution, evaluation."""
+
+    @property
+    def build_s(self) -> float:
+        """Wall seconds turning the map into the problem."""
+
+    @property
+    def solve_s(self) -> float:
+        """Wall seconds of the solve (centring, LM, uncentring, gauge)."""
+
+    @property
+    def apply_s(self) -> float:
+        """Wall seconds writing the result into the map."""
+
+    @property
+    def gauge_tilt_deg(self) -> float:
+        """How far the free gauge had tilted the solution's world z, degrees, before the driver brought it back onto the input poses."""
+
+    @property
+    def threads(self) -> int:
+        """Worker threads (``backend.gba_threads``)."""
+
+    @property
+    def use_double(self) -> bool:
+        """Whether it solved in f64 (``backend.gba_use_double``)."""
+
+    def __repr__(self) -> str: ...
 
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
@@ -439,8 +552,15 @@ class Vio:
         threads: int = 1,
         max_keypoints: int | None = None,
         backend: BackendRequest = "auto",
+        ba_backend: GbaRequest = "follow",
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
+
+        ``ba_backend`` is where :meth:`finish_map`'s global BA runs its PCG:
+        ``"follow"`` (the default) takes the frontend's lane, the GPU only when
+        the back-end probe (a small GBA round trip) also passes, otherwise the CPU
+        with one warning; ``"cpu"`` or ``"gpu"`` choose it outright, for benches
+        and tests, and ``"gpu"`` raises ``ValueError`` when it cannot run.
 
         ``backend`` chooses the frontend through :func:`select_backend`. The
         default ``"auto"`` runs the pyramid, patch build and KLT tracker through
@@ -517,6 +637,16 @@ class Vio:
 
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
+
+    def finish_map(self, run_gba: bool) -> MapResult | None:
+        """The map's keyframes at the end of a sequence, after a global BA on the map when ``run_gba`` (PR d2); None when ``backend.enabled`` is off.
+
+        Takes every stamp first. The window is untouched, so the poses :meth:`track` returned stay the raw VIO; the
+        map keeps the GBA's poses. Call it after :meth:`flush`.
+
+        Raises:
+            ValueError: The rig has a camera model the GBA cannot project, or the solver refused the problem.
+        """
 
     def map_snapshot(self) -> MapSnapshot | None:
         """A copy of the persistent keyframe map and the back end's counters at one moment; None when ``backend.enabled`` is off (the default).

@@ -73,6 +73,16 @@ pub enum ConfigError {
     /// The text is not the JSON the struct expects.
     #[error("could not parse the vio config: {0}")]
     Parse(#[from] serde_json::Error),
+    /// A value outside the range its key allows.
+    #[error("{key} = {value} is out of range: it must be {range}")]
+    OutOfRange {
+        /// The config key.
+        key: &'static str,
+        /// The value read.
+        value: f64,
+        /// The allowed range, in words.
+        range: &'static str,
+    },
 }
 
 /// The JSON wrapper: one object under `value0`.
@@ -336,6 +346,37 @@ pub struct VioConfig {
     /// Read only with the `backend` feature and `backend.enabled`.
     #[serde(rename = "backend.loop_closing")]
     pub backend_loop_closing: LoopClosingConfig,
+
+    // ── the global BA at the end of a sequence (`Vio::finish_map`, PR d2) ──
+    // rootba `bal` as RootSLAM's CI runs it (`run_sequence.sh`, DESIGN §3.1).
+    /// LM attempts, accepted or rejected (rootba `max_num_iterations`).
+    #[serde(rename = "backend.gba_max_iterations")]
+    pub gba_max_iterations: usize,
+    /// PCG iteration cap per LM attempt.
+    #[serde(rename = "backend.gba_cg_max_iterations")]
+    pub gba_cg_max_iterations: usize,
+    /// PCG forcing sequence `eta`.
+    #[serde(rename = "backend.gba_cg_eta")]
+    pub gba_cg_eta: f64,
+    /// Huber threshold of the reprojection rows, pixels.
+    #[serde(rename = "backend.gba_huber_px")]
+    pub gba_huber_px: f64,
+    /// A keyframe with fewer observations keeps its pose-graph rows and loses
+    /// its reprojection rows (B22: rootba `--min-obs-per-kf` drops the keyframe).
+    #[serde(rename = "backend.gba_min_obs_per_kf")]
+    pub gba_min_obs_per_kf: usize,
+    /// Translation sigma of the pose-graph rows, metres (B21).
+    #[serde(rename = "backend.gba_pose_graph_sigma_translation")]
+    pub gba_pose_graph_sigma_translation: f64,
+    /// Rotation sigma of the pose-graph rows, radians (B21).
+    #[serde(rename = "backend.gba_pose_graph_sigma_rotation")]
+    pub gba_pose_graph_sigma_rotation: f64,
+    /// Threads of the global BA (the two-core budget, DESIGN §2).
+    #[serde(rename = "backend.gba_threads")]
+    pub gba_threads: std::num::NonZeroUsize,
+    /// Solve in f64 instead of f32 (rootba `--use-double`; a debug lane).
+    #[serde(rename = "backend.gba_use_double")]
+    pub gba_use_double: bool,
 }
 
 impl Default for VioConfig {
@@ -407,6 +448,15 @@ impl Default for VioConfig {
             map_batch_cull_size: 30,
             loop_closing_pgo_min_covisibility_weight: 96,
             backend_loop_closing: LoopClosingConfig::default(),
+            gba_max_iterations: 20,
+            gba_cg_max_iterations: 500,
+            gba_cg_eta: 0.1,
+            gba_huber_px: 1.0,
+            gba_min_obs_per_kf: 10,
+            gba_pose_graph_sigma_translation: 0.05,
+            gba_pose_graph_sigma_rotation: 0.01,
+            gba_threads: std::num::NonZeroUsize::MIN.saturating_add(1),
+            gba_use_double: false,
         }
     }
 }
@@ -415,7 +465,34 @@ impl VioConfig {
     /// Read a wrapped config. Missing keys keep their defaults; unknown keys fail.
     pub fn from_json_str(text: &str) -> Result<Self, ConfigError> {
         let wrapper: Value0<Self> = serde_json::from_str(text)?;
-        Ok(wrapper.value0)
+        wrapper.value0.check_ranges()
+    }
+
+    /// Refuse values the global BA cannot run with (a sigma <= 0 gives an
+    /// infinite sqrt-info; a Huber threshold <= 0 or `eta` outside (0, 1)
+    /// breaks the LM loop without a word).
+    fn check_ranges(self) -> Result<Self, ConfigError> {
+        let out = |key, value, range| Err(ConfigError::OutOfRange { key, value, range });
+        let positive: [(&'static str, f64); 4] = [
+            ("backend.gba_max_iterations", self.gba_max_iterations as f64),
+            ("backend.gba_huber_px", self.gba_huber_px),
+            (
+                "backend.gba_pose_graph_sigma_translation",
+                self.gba_pose_graph_sigma_translation,
+            ),
+            (
+                "backend.gba_pose_graph_sigma_rotation",
+                self.gba_pose_graph_sigma_rotation,
+            ),
+        ];
+        if let Some(&(key, value)) = positive.iter().find(|(_, v)| v.is_nan() || *v <= 0.0) {
+            return out(key, value, "> 0");
+        }
+        let eta: f64 = self.gba_cg_eta;
+        if eta.is_nan() || eta <= 0.0 || eta >= 1.0 {
+            return out("backend.gba_cg_eta", eta, "in (0, 1)");
+        }
+        Ok(self)
     }
 
     /// Apply a flat profile overlay to a wrapped config, validating keys and values.
@@ -653,6 +730,46 @@ mod tests {
         ] {
             let text = format!(r#"{{"value0":{{"{dead}":3}}}}"#);
             assert!(VioConfig::from_json_str(&text).is_err(), "{dead} parsed");
+        }
+    }
+
+    /// The global BA keys (PR d2) default to rootba `bal` as RootSLAM's CI runs
+    /// it, two threads and f32, and a dataset config can override each.
+    #[test]
+    fn the_gba_keys_default_to_rootba_bal() {
+        let defaults = VioConfig::default();
+        assert_eq!(defaults.gba_max_iterations, 20);
+        assert_eq!(defaults.gba_cg_max_iterations, 500);
+        assert_eq!(defaults.gba_cg_eta, 0.1);
+        assert_eq!(defaults.gba_huber_px, 1.0);
+        assert_eq!(defaults.gba_min_obs_per_kf, 10);
+        assert_eq!(defaults.gba_pose_graph_sigma_translation, 0.05);
+        assert_eq!(defaults.gba_pose_graph_sigma_rotation, 0.01);
+        assert_eq!(defaults.gba_threads.get(), 2);
+        assert!(!defaults.gba_use_double);
+        let parsed = VioConfig::from_json_str(
+            r#"{"value0":{"backend.gba_max_iterations":5,"backend.gba_threads":8,
+            "backend.gba_use_double":true,"backend.gba_min_obs_per_kf":20}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.gba_max_iterations, 5);
+        assert_eq!(parsed.gba_threads.get(), 8);
+        assert!(parsed.gba_use_double);
+        assert_eq!(parsed.gba_min_obs_per_kf, 20);
+        assert!(VioConfig::from_json_str(r#"{"value0":{"backend.gba_threads":0}}"#).is_err());
+        // Out of range: refused at load, naming the key (rootba checks its
+        // Huber threshold too). A sigma <= 0 gives an infinite sqrt-info.
+        for (key, value) in [
+            ("backend.gba_max_iterations", "0"),
+            ("backend.gba_cg_eta", "0.0"),
+            ("backend.gba_cg_eta", "1.0"),
+            ("backend.gba_huber_px", "0.0"),
+            ("backend.gba_pose_graph_sigma_translation", "0.0"),
+            ("backend.gba_pose_graph_sigma_rotation", "-0.01"),
+        ] {
+            let text = format!(r#"{{"value0":{{"{key}":{value}}}}}"#);
+            let error = VioConfig::from_json_str(&text).unwrap_err();
+            assert!(error.to_string().contains(key), "{text}: {error}");
         }
     }
 

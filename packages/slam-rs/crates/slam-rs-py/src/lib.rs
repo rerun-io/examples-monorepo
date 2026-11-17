@@ -6,6 +6,7 @@
 //! `ValueError`, never a panic.
 
 mod catalog;
+mod gba;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
@@ -23,7 +24,7 @@ use slam_rs::frontend::flow::{
     FlowFrame as CoreFlowFrame, FrameToFrameOpticalFlow, FrontendError, FrontendOptions,
     PosePrediction,
 };
-use slam_rs::{Backend, BackendRequest, FrontendLane, ImageView, VioError};
+use slam_rs::{Backend, BackendRequest, Backends, FrontendLane, GbaRequest, ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
 fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
@@ -150,24 +151,28 @@ impl Vio {
     /// with one warning on stderr; `"gpu"` raises `ValueError` instead of falling
     /// back. Invalid input and runtime initialization panics also raise
     /// `ValueError` (D32). `threads` controls only the CPU pool and is accepted
-    /// but inert on the GPU lane.
+    /// but inert on the GPU lane. `ba_backend` is where `finish_map`'s global BA
+    /// runs its PCG: `"follow"` (the default, the frontend's lane), `"cpu"` or
+    /// `"gpu"`, for benches and tests.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto"))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto", ba_backend = "follow"))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
         backend: &str,
+        ba_backend: &str,
     ) -> PyResult<Self> {
         let request: BackendRequest = backend.parse().map_err(PyValueError::new_err)?;
-        let backend: Backend = slam_rs::select_backend(request).map_err(value_error)?;
+        let gba: GbaRequest = ba_backend.parse().map_err(PyValueError::new_err)?;
+        let backends: Backends = slam_rs::select_backend(request, gba).map_err(value_error)?;
         Ok(Self {
-            inner: slam_rs::Vio::with_backend(
+            inner: slam_rs::Vio::with_backends(
                 config.inner.clone(),
                 calibration.inner.clone(),
                 frontend_options(threads, max_keypoints),
-                backend,
+                backends,
             )
             .map_err(value_error)?,
         })
@@ -371,6 +376,22 @@ impl Vio {
             return Ok(None);
         };
         MapSnapshot::build(&view.view, view.counters, mode).map(Some)
+    }
+
+    /// The map's keyframes at the end of a sequence, after a global BA on the
+    /// map when ``run_gba``, or ``None`` when ``backend.enabled`` is off.
+    ///
+    /// Takes every stamp first. The window is untouched, so the poses ``track``
+    /// returned stay the raw VIO; the map keeps the GBA's. Call it after
+    /// ``flush``. Raises ``ValueError`` when the rig has a camera model the GBA
+    /// cannot project.
+    fn finish_map(&mut self, py: Python<'_>, run_gba: bool) -> PyResult<Option<gba::MapResult>> {
+        let result = py
+            .detach(|| self.inner.finish_map(run_gba))
+            .map_err(value_error)?;
+        result
+            .map(|result| gba::MapResult::build(py, &result))
+            .transpose()
     }
 
     fn __repr__(&self) -> String {
@@ -1826,8 +1847,10 @@ fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
 #[pyfunction]
 fn select_backend(request: &str) -> PyResult<&'static str> {
     let request: BackendRequest = request.parse().map_err(PyValueError::new_err)?;
-    Ok(slam_rs::select_backend(request)
+    // The frontend's lane only: a CPU GBA request never runs the back-end probe.
+    Ok(slam_rs::select_backend(request, GbaRequest::Cpu)
         .map_err(value_error)?
+        .frontend
         .name())
 }
 
@@ -1911,5 +1934,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<VioSnapshot>()?;
     module.add_class::<MapSnapshot>()?;
     module.add_class::<LoopCounts>()?;
+    module.add_class::<gba::MapResult>()?;
+    module.add_class::<gba::GbaRun>()?;
     Ok(())
 }

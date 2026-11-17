@@ -120,6 +120,9 @@ pub enum VioError {
     /// The operating system refused the Realtime back-end thread.
     #[error("could not start the back-end thread: {0}")]
     BackendThread(String),
+    /// The global BA at the end of a sequence did not run.
+    #[error("global BA: {0}")]
+    GlobalBa(String),
     /// The frameset does not hold one image per configured camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {

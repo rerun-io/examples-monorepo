@@ -14,6 +14,7 @@ pub mod anchor;
 pub mod covisibility;
 pub mod cull;
 pub mod loop_closing;
+pub mod gba;
 pub mod map;
 pub mod pgo;
 pub mod runner;
@@ -28,6 +29,7 @@ use crate::types::FrameId;
 pub use anchor::{AnchorError, CorrectionBoard, OnlineAnchor, reanchor};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
+pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use pgo::{MapCorrection, PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
@@ -123,6 +125,11 @@ pub struct MapBackend {
     /// Where each applied PGO posts its [`MapCorrection`] for the tracking
     /// thread's online re-anchoring (PR f1). A clone shares the board.
     corrections: std::sync::Arc<CorrectionBoard>,
+    /// The rig's camera models for the global BA ([`Self::finish`]); `None`
+    /// when the rig has a model the GBA cannot project.
+    gba_rig: Option<gba::GbaRig>,
+    /// Where the global BA's PCG runs (`select_backend`'s GBA lane).
+    gba_lane: crate::Backend,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -169,6 +176,8 @@ impl MapBackend {
             t_i_c: Vec::new(),
             loops: None,
             corrections: std::sync::Arc::default(),
+            gba_rig: None,
+            gba_lane: crate::Backend::Cpu,
         }
     }
 

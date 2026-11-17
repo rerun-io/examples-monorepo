@@ -11,6 +11,12 @@
 //! default device once per process, and the GPU frontend's construction reads
 //! the same cached result. Allocation and tracking failures happen after the
 //! choice and are never a reason to fall back.
+//!
+//! The same call picks the global BA's PCG lane (DESIGN §7.3, Q2): by default
+//! it follows the frontend. On a GPU frontend, [`probe_back_end`] adds a small
+//! GBA round trip on top of the cached validation; if only that fails, the GBA
+//! runs on the CPU with one warning. `--ba-backend cpu|gpu` (benches, tests)
+//! chooses it outright, and an explicit `gpu` fails instead of falling back.
 
 #[cfg(doc)]
 use crate::Vio;
@@ -43,6 +49,43 @@ impl std::str::FromStr for BackendRequest {
             )),
         }
     }
+}
+
+/// Where the global BA's PCG runs, as a caller asks (`--ba-backend`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GbaRequest {
+    /// The frontend's lane: the GPU when the frontend runs there and
+    /// [`probe_back_end`] passes, otherwise the CPU. The default.
+    #[default]
+    Follow,
+    /// The CPU.
+    Cpu,
+    /// The GPU; [`select_backend`] returns the probe's error if it cannot run here.
+    Gpu,
+}
+
+impl std::str::FromStr for GbaRequest {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "follow" => Ok(Self::Follow),
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            other => Err(format!(
+                "unknown GBA backend {other:?}: expected follow, cpu or gpu"
+            )),
+        }
+    }
+}
+
+/// The lanes of one pipeline: the frontend's and the global BA's PCG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backends {
+    /// The frontend.
+    pub frontend: Backend,
+    /// The global BA's PCG.
+    pub gba: Backend,
 }
 
 impl Backend {
@@ -132,6 +175,23 @@ fn device_probe() -> Result<(), ProbeError> {
     }
 }
 
+/// The back end's probe: the cached device validation, then the GBA round
+/// trip (`kornia_staging_gpu::linalg::probe_pcg`) in an exclusive section.
+fn back_end_probe() -> Result<(), ProbeError> {
+    #[cfg(feature = "gpu-wgpu")]
+    {
+        kornia_staging_gpu::runtime::default_capabilities()?;
+        let client = kornia_staging_gpu::runtime::gpu_client()?;
+        kornia_staging_gpu::transfer::execute_exclusive(&client, "the back-end probe", || {
+            kornia_staging_gpu::linalg::probe_pcg(&client)
+        })
+    }
+    #[cfg(not(feature = "gpu-wgpu"))]
+    {
+        Err(NoGpuFeature)
+    }
+}
+
 fn into_vio_error(error: ProbeError) -> VioError {
     #[cfg(feature = "gpu-wgpu")]
     {
@@ -152,11 +212,49 @@ fn write_fallback_notice(reason: &ProbeError) {
     );
 }
 
+fn write_gba_notice(reason: &ProbeError) {
+    eprintln!(
+        "slam-rs: WARNING: the global BA runs on the CPU because its GPU lane cannot run here: {}. \
+         Pass `--ba-backend cpu` to choose the CPU lane without this warning.",
+        into_vio_error(*reason)
+    );
+}
+
 /// The selector type over the real device probe and stderr notice.
 type ProcessSelector = Selector<ProbeError, fn() -> Result<(), ProbeError>, fn(&ProbeError)>;
 
 /// The process's selector over the real device probe.
 static SELECTOR: ProcessSelector = Selector::new(device_probe, write_fallback_notice);
+
+/// The process's selector for the GBA lane, over the back end's probe.
+static GBA_SELECTOR: ProcessSelector = Selector::new(back_end_probe, write_gba_notice);
+
+/// Both lanes over two selectors: the frontend's choice, then the GBA's,
+/// which follows the frontend unless asked outright.
+fn select_pair<E, P, N, Q, M>(
+    frontend: &Selector<E, P, N>,
+    gba: &Selector<E, Q, M>,
+    request: BackendRequest,
+    gba_request: GbaRequest,
+) -> Result<Backends, E>
+where
+    E: Clone,
+    P: Fn() -> Result<(), E>,
+    N: Fn(&E),
+    Q: Fn() -> Result<(), E>,
+    M: Fn(&E),
+{
+    let frontend: Backend = frontend.select(request)?;
+    let as_request: BackendRequest = match (gba_request, frontend) {
+        (GbaRequest::Follow, Backend::Gpu) => BackendRequest::Auto,
+        (GbaRequest::Follow, Backend::Cpu) | (GbaRequest::Cpu, _) => BackendRequest::Cpu,
+        (GbaRequest::Gpu, _) => BackendRequest::Gpu,
+    };
+    Ok(Backends {
+        frontend,
+        gba: gba.select(as_request)?,
+    })
+}
 
 /// Check that the GPU frontend can run on this host.
 ///
@@ -172,17 +270,32 @@ pub fn gpu_probe() -> Result<(), VioError> {
     SELECTOR.probed().map_err(into_vio_error)
 }
 
-/// Resolve a [`BackendRequest`] to the [`Backend`] that [`Vio::with_backend`]
-/// builds.
-///
-/// `Auto` never fails: when [`gpu_probe`] fails it returns [`Backend::Cpu`] and
-/// writes one warning to stderr, once per process. `Cpu` never probes.
+/// Check that the global BA's PCG can run on the GPU here: the cached device
+/// validation (it does not probe the device again), then a GBA round trip
+/// (8 poses, 200 landmark blocks, 3 CG iterations within 1e-4 of the CPU
+/// lane). Runs once per process.
 ///
 /// # Errors
 ///
-/// For `Gpu` only: the error of [`gpu_probe`].
-pub fn select_backend(request: BackendRequest) -> Result<Backend, VioError> {
-    SELECTOR.select(request).map_err(into_vio_error)
+/// As [`gpu_probe`], or the round trip's disagreement.
+pub fn probe_back_end() -> Result<(), VioError> {
+    GBA_SELECTOR.probed().map_err(into_vio_error)
+}
+
+/// Resolve a [`BackendRequest`] and a [`GbaRequest`] to the lanes that
+/// [`Vio::with_backends`] builds.
+///
+/// `Auto` never fails: when [`gpu_probe`] fails it returns [`Backend::Cpu`] and
+/// writes one warning to stderr, once per process. `Cpu` never probes. The GBA
+/// lane follows the frontend by default; on a GPU frontend whose
+/// [`probe_back_end`] fails, the GBA runs on the CPU with one warning.
+///
+/// # Errors
+///
+/// For `Gpu` only: the error of [`gpu_probe`]; for [`GbaRequest::Gpu`]: the
+/// error of [`probe_back_end`].
+pub fn select_backend(request: BackendRequest, gba: GbaRequest) -> Result<Backends, VioError> {
+    select_pair(&SELECTOR, &GBA_SELECTOR, request, gba).map_err(into_vio_error)
 }
 
 /// How many device capability probes this process has run (0 in a build
@@ -200,7 +313,7 @@ pub fn device_probes_run() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendRequest, Selector, select_backend};
+    use super::{BackendRequest, Backends, GbaRequest, Selector, select_backend, select_pair};
     use crate::Backend;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -295,16 +408,161 @@ mod tests {
         assert_eq!(notices.load(Ordering::SeqCst), 1);
     }
 
+    /// The GBA lane over two fake probes: the frontend's and the back end's.
+    fn lanes(
+        frontend: Result<(), &'static str>,
+        gba: Result<(), &'static str>,
+        request: BackendRequest,
+        gba_request: GbaRequest,
+        counts: &[AtomicUsize; 4],
+    ) -> Result<Backends, &'static str> {
+        let [front_probes, front_notices, gba_probes, gba_notices] = counts;
+        select_pair(
+            &counting(frontend, front_probes, front_notices),
+            &counting(gba, gba_probes, gba_notices),
+            request,
+            gba_request,
+        )
+    }
+
+    fn zero() -> [AtomicUsize; 4] {
+        std::array::from_fn(|_| AtomicUsize::new(0))
+    }
+
+    fn loads(counts: &[AtomicUsize; 4]) -> [usize; 4] {
+        std::array::from_fn(|i| counts[i].load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn gba_requests_parse_from_their_cli_names() {
+        assert_eq!("follow".parse(), Ok(GbaRequest::Follow));
+        assert_eq!("cpu".parse(), Ok(GbaRequest::Cpu));
+        assert_eq!("gpu".parse(), Ok(GbaRequest::Gpu));
+        assert!("auto".parse::<GbaRequest>().is_err());
+        assert_eq!(GbaRequest::default(), GbaRequest::Follow);
+    }
+
+    #[test]
+    fn the_gba_lane_follows_the_frontend() {
+        let gpu = Backends {
+            frontend: Backend::Gpu,
+            gba: Backend::Gpu,
+        };
+        let cpu = Backends {
+            frontend: Backend::Cpu,
+            gba: Backend::Cpu,
+        };
+        let counts = zero();
+        let auto = lanes(
+            Ok(()),
+            Ok(()),
+            BackendRequest::Auto,
+            GbaRequest::Follow,
+            &counts,
+        );
+        assert_eq!(auto, Ok(gpu));
+        assert_eq!(loads(&counts), [1, 0, 1, 0]);
+        // A CPU frontend, chosen or fallen back to, keeps the GBA on the CPU
+        // without running the back-end probe.
+        let counts = zero();
+        let chosen = lanes(
+            Ok(()),
+            Ok(()),
+            BackendRequest::Cpu,
+            GbaRequest::Follow,
+            &counts,
+        );
+        assert_eq!(chosen, Ok(cpu));
+        assert_eq!(loads(&counts), [0, 0, 0, 0]);
+        let counts = zero();
+        let fallen = lanes(
+            Err("no adapter"),
+            Ok(()),
+            BackendRequest::Auto,
+            GbaRequest::Follow,
+            &counts,
+        );
+        assert_eq!(fallen, Ok(cpu));
+        assert_eq!(loads(&counts), [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn a_failing_back_end_probe_moves_only_the_gba_and_warns_once() {
+        let counts = zero();
+        let selected = lanes(
+            Ok(()),
+            Err("the GBA's device PCG disagrees"),
+            BackendRequest::Auto,
+            GbaRequest::Follow,
+            &counts,
+        );
+        assert_eq!(
+            selected,
+            Ok(Backends {
+                frontend: Backend::Gpu,
+                gba: Backend::Cpu
+            })
+        );
+        assert_eq!(loads(&counts), [1, 0, 1, 1]);
+        // An explicit GPU lane fails with the probe's reason instead.
+        let counts = zero();
+        let explicit = lanes(
+            Ok(()),
+            Err("the GBA's device PCG disagrees"),
+            BackendRequest::Auto,
+            GbaRequest::Gpu,
+            &counts,
+        );
+        assert_eq!(explicit, Err("the GBA's device PCG disagrees"));
+        assert_eq!(loads(&counts), [1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn explicit_gba_lanes_ignore_the_frontend() {
+        let counts = zero();
+        let cpu = lanes(
+            Ok(()),
+            Ok(()),
+            BackendRequest::Gpu,
+            GbaRequest::Cpu,
+            &counts,
+        );
+        assert_eq!(cpu.map(|b| b.gba), Ok(Backend::Cpu));
+        assert_eq!(loads(&counts)[2], 0, "a CPU GBA never probes");
+        let counts = zero();
+        let gpu = lanes(
+            Ok(()),
+            Ok(()),
+            BackendRequest::Cpu,
+            GbaRequest::Gpu,
+            &counts,
+        );
+        assert_eq!(
+            gpu,
+            Ok(Backends {
+                frontend: Backend::Cpu,
+                gba: Backend::Gpu
+            })
+        );
+    }
+
     /// Without the GPU feature, auto falls back and an explicit GPU request fails.
     #[cfg(not(feature = "gpu-wgpu"))]
     #[test]
     fn a_cpu_only_build_falls_back_on_auto_and_refuses_gpu() {
         assert!(matches!(
-            select_backend(BackendRequest::Auto),
-            Ok(Backend::Cpu)
+            select_backend(BackendRequest::Auto, GbaRequest::Follow),
+            Ok(Backends {
+                frontend: Backend::Cpu,
+                gba: Backend::Cpu
+            })
         ));
         assert!(matches!(
-            select_backend(BackendRequest::Gpu),
+            select_backend(BackendRequest::Gpu, GbaRequest::Follow),
+            Err(crate::VioError::GpuUnavailable)
+        ));
+        assert!(matches!(
+            select_backend(BackendRequest::Cpu, GbaRequest::Gpu),
             Err(crate::VioError::GpuUnavailable)
         ));
         assert_eq!(super::device_probes_run(), 0);
@@ -314,9 +572,19 @@ mod tests {
     #[cfg(feature = "gpu-wgpu")]
     #[test]
     fn auto_never_fails_and_agrees_with_gpu() {
-        let auto: Result<Backend, _> = select_backend(BackendRequest::Auto);
+        let auto: Result<Backends, _> = select_backend(BackendRequest::Auto, GbaRequest::Follow);
         assert!(auto.is_ok(), "auto returned {auto:?}");
-        let gpu_ok: bool = select_backend(BackendRequest::Gpu).is_ok();
-        assert_eq!(auto.ok() == Some(Backend::Gpu), gpu_ok);
+        let gpu_ok: bool = select_backend(BackendRequest::Gpu, GbaRequest::Cpu).is_ok();
+        assert_eq!(
+            auto.as_ref().ok().map(|b| b.frontend) == Some(Backend::Gpu),
+            gpu_ok
+        );
+        // A GPU frontend that passed keeps the GBA there too when its probe passes.
+        if let Ok(backends) = auto {
+            assert_eq!(
+                backends.gba == Backend::Gpu,
+                backends.frontend == Backend::Gpu && super::probe_back_end().is_ok()
+            );
+        }
     }
 }
