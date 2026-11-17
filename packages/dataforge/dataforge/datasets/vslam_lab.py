@@ -48,12 +48,15 @@ from dataforge.datasets.vslam_lab_source import (
     CameraEntry,
     FrameIndex,
     ImuStream,
+    StereoPairs,
     StreamName,
+    pair_by_stamp,
     read_calibration,
     read_euroc_gt,
     read_frame_index,
     read_imu,
     read_poses,
+    read_stamped_frames,
 )
 from dataforge.euroc import nominal_fps
 from dataforge.identity import SequenceIdentity
@@ -77,6 +80,9 @@ RIG: int = 0
 REQUIRED_FILES: tuple[str, ...] = ("calibration.yaml", "rgb.csv")
 """What makes a sequence directory discoverable; the ground truth is checked by ``convert``, the frames read only while
 base is pending."""
+STEREO_PAIR_TOLERANCE_NS: int = 1_000_000
+"""Largest stamp gap of a stereo pair, 1 ms: the ASL cameras share stamps exactly, so this only bounds a pair to one
+capture (a frame period is 50 ms), and it is the gap slam-rs matches framesets within."""
 IMAGE_PLANE_DISTANCE: float = 0.1
 """Frustum length in metres."""
 DEPTH_FRAMES_PER_CHUNK: int = 4
@@ -180,6 +186,10 @@ class Benchmark:
     """Where the rig looks and which way is up, in the body frame; aims the Follow view."""
     gt: GroundTruth
     """The ground truth the gt layer reads."""
+    pair_by_stamp: bool = False
+    """Whether rgb_0 and rgb_1 come from the frames on disk paired by stamp (``frame_streams``), not from rgb.csv's
+    rows: VSLAM-LAB's EuRoC rgb.csv pairs the two cameras by row count, which is wrong where one camera dropped or
+    added frames."""
 
 
 BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
@@ -213,6 +223,9 @@ BENCHMARKS: dict[BenchmarkChoice, Benchmark] = {
             source="state_groundtruth_estimate0 (Vicon / Leica MS50, world_T_imu0)",
             zip_member=EUROC_GT_MEMBER,
         ),
+        # The ASL cameras are hardware-synced (cam0 and cam1 share stamps), but cam1 has 415 frames more than cam0 on
+        # V2_03_difficult, cam0 one more on MH_04_difficult and cam1 one more on V1_02_medium.
+        pair_by_stamp=True,
     ),
     "7scenes": Benchmark(
         directory="7SCENES",
@@ -395,7 +408,7 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
     def write_base(self, recording: rr.RecordingStream, identity: SequenceIdentity, source: Path, calibration: Calibration) -> None:
         """The sensor layer: every camera's video, its depth where registered, the IMU, the capture properties."""
         require_av1_nvenc(resolve_ffmpeg())
-        streams: dict[StreamName, FrameIndex] = read_frame_index(source / "rgb.csv")
+        streams: dict[StreamName, FrameIndex] = self.frame_streams(source)
         log_rig_node(recording, RIG, reference=rig_reference(calibration), num_cameras=len(calibration.cameras), name=self.benchmark.label, kind="ego")
         with work_dir(f"{identity.recording_id}-") as work:
             for index, camera in enumerate(calibration.cameras):
@@ -439,12 +452,32 @@ class VslamLabDataset(DataforgeDataset[VslamLabConfig, Path]):
             num_frames=max(frames.times_ns.size for frames in streams.values()),
             start_time_ns=first_ns,
             duration_s=self.timer.capture_s,
-            clock_source="the benchmark's own rgb.csv / imu_0.csv / groundtruth.csv nanosecond stamps, unshifted; frame_index: row of rgb.csv",
+            clock_source="the benchmark's own rgb.csv / imu_0.csv / groundtruth.csv nanosecond stamps, unshifted; frame_index: "
+            + ("row of the stereo pairs matched by stamp" if self.benchmark.pair_by_stamp else "row of rgb.csv"),
             benchmark=self.benchmark.directory,
             sequence=source.name,
             has_depth=bool(self.benchmark.depth_cameras),
             has_imu=self.benchmark.has_imu,
         )
+
+    def frame_streams(self, source: Path) -> dict[StreamName, FrameIndex]:
+        """rgb.csv's image streams; where the benchmark pairs by stamp, rgb_0 and rgb_1 are instead the stereo pairs.
+
+        The pairs come from every frame in ``rgb_0/`` and ``rgb_1/`` (VSLAM-LAB keeps them all there, also those its
+        rgb.csv leaves out), each rgb_0 frame with the rgb_1 frame within ``STEREO_PAIR_TOLERANCE_NS``; a frame without a
+        partner is dropped, and the counts are printed.
+        """
+        streams: dict[StreamName, FrameIndex] = read_frame_index(source / "rgb.csv")
+        if not self.benchmark.pair_by_stamp:
+            return streams
+        pairs: StereoPairs = pair_by_stamp(
+            read_stamped_frames(source, "rgb_0"), read_stamped_frames(source, "rgb_1"), tolerance_ns=STEREO_PAIR_TOLERANCE_NS
+        )
+        print(
+            f"{source.name}: {pairs.left.times_ns.size} stereo pairs within {STEREO_PAIR_TOLERANCE_NS} ns; "
+            f"dropped {pairs.unmatched_left} rgb_0 and {pairs.unmatched_right} rgb_1 frames without a partner"
+        )
+        return {**streams, "rgb_0": pairs.left, "rgb_1": pairs.right}
 
     def checked_calibration(self, source: Path) -> Calibration:
         """calibration.yaml, refused unless it states the sensor layout ``BENCHMARKS`` declares, the one source the

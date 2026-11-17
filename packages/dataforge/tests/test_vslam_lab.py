@@ -7,6 +7,7 @@ preview, which skips naming the sequence when it is not on this machine.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -30,13 +31,14 @@ from dataforge.datasets.vslam_lab import (
     BENCHMARKS,
     GT_PATH_COLOR,
     PREDICTION_PALETTE,
+    STEREO_PAIR_TOLERANCE_NS,
     Prediction,
     VslamLabConfig,
     VslamLabDataset,
     find_predictions,
     log_depth,
 )
-from dataforge.datasets.vslam_lab_source import read_frame_index
+from dataforge.datasets.vslam_lab_source import FrameIndex, StereoPairs, StreamName, pair_by_stamp, read_frame_index
 from dataforge.identity import SequenceIdentity
 
 TUM_STAMPS: tuple[int, ...] = (1305031102175303936, 1305031102211214080, 1305031102243211008)
@@ -59,6 +61,8 @@ VSLAM_LAB_EUROC_GROUNDTRUTH: str = (
     "ts (ns),tx (m),ty (m),tz (m),qx,qy,qz,qw\n1403636579763555584,4.66,-1.84,0.78,1,0,0,0\n1403636579863555584,4.66,-1.84,0.82,1,0,0,0\n"
 )
 """VSLAM-LAB's own EuRoC groundtruth.csv: cam0 positions with a constant placeholder in the quaternion columns."""
+EUROC_ASL_ROOT: Path = Path(os.environ.get("DATAFORGE_EUROC_ASL_ROOT", "/mnt/nas/ssd-8tb/datasets/euroc"))
+"""The raw ASL sequences, ``<seq>/mav0/cam<i>/data.csv``: the listings VSLAM-LAB's rgb.csv is written from."""
 
 
 def tum_sequence(root: Path, name: str = "rgbd_dataset_freiburg1_xyz") -> Path:
@@ -362,6 +366,7 @@ def test_an_euroc_sequence_converts_stereo_and_the_imu(tmp_path: Path, monkeypat
     for camera in (0, 1):
         assert column_rows(store, f"{schema.video_path(0, camera)}:VideoStream:sample").num_rows == 3
     assert column_rows(store, f"{schema.accel_path(0, 0)}:Scalars:scalars").num_rows == 21
+    assert str(recording_properties(store, "capture")["clock_source"]).endswith("frame_index: row of the stereo pairs matched by stamp")
     rig: dict[str, object] = store.reader(index=None, contents=schema.rig_path(0)).to_arrow_table().to_pylist()[0]
     assert rig[f"{schema.rig_path(0)}:reference"] == ["imu_00"]
     # simplecv stores a camera as cam_T_rig with relation ChildFromParent (2), so cam_01's stored translation is
@@ -371,6 +376,63 @@ def test_an_euroc_sequence_converts_stereo_and_the_imu(tmp_path: Path, monkeypat
     assert static[f"{schema.cam_path(0, 1)}:Transform3D:relation"] == [2]
     np.testing.assert_allclose(static[f"{schema.cam_path(0, 1)}:Transform3D:translation"], [cam1_T_body[:3, 3]], rtol=1e-6)
     np.testing.assert_allclose(static[f"{schema.imu_path(0, 0)}:Transform3D:translation"], [[0.0, 0.0, 0.0]])
+
+
+def test_euroc_stereo_streams_are_the_frames_on_disk_paired_by_stamp_not_rgb_csv_s_rows(tmp_path: Path) -> None:
+    """VSLAM-LAB writes EuRoC's rgb.csv by row count; here cam1 lacks one frame and has two cam0 lacks, as on V2_03."""
+    sequence: Path = euroc_sequence(tmp_path)
+    period: int = 50_000_000
+    cam0: list[int] = [EUROC_STAMPS[0] + period * step for step in range(6)]
+    cam1: list[int] = [cam0[0], cam0[1], cam0[1] + period // 2, cam0[3], cam0[4], cam0[5], cam0[5] + period]
+    for camera, stamps in (("rgb_0", cam0), ("rgb_1", cam1)):
+        shutil.rmtree(sequence / camera)
+        (sequence / camera).mkdir()
+        for stamp in stamps:
+            (sequence / f"{camera}/{stamp}.png").touch()
+    rows: list[str] = [f"{left},rgb_0/{left}.png,{right},rgb_1/{right}.png" for left, right in zip(cam0, cam1, strict=False)]
+    (sequence / "rgb.csv").write_text("ts_rgb_0 (ns),path_rgb_0,ts_rgb_1 (ns),path_rgb_1\n" + "\n".join(rows) + "\n")
+    streams: dict[StreamName, FrameIndex] = dataset(tmp_path, "euroc").frame_streams(sequence)
+    kept: list[int] = [cam0[0], cam0[1], cam0[3], cam0[4], cam0[5]]
+    assert streams["rgb_0"].times_ns.tolist() == kept
+    assert streams["rgb_1"].times_ns.tolist() == kept
+    assert streams["rgb_1"].paths == tuple(f"rgb_1/{stamp}.png" for stamp in kept)
+
+
+def test_a_benchmark_that_does_not_pair_by_stamp_keeps_rgb_csv_s_rows(tmp_path: Path) -> None:
+    sequence: Path = tum_sequence(tmp_path)
+    assert dataset(tmp_path, "rgbdtum").frame_streams(sequence)["rgb_0"].times_ns.tolist() == list(TUM_STAMPS)
+
+
+def asl_listing(sequence: str, camera: int) -> FrameIndex:
+    """One camera of a raw ASL sequence, ``mav0/cam<i>/data.csv``, as rgb.csv would list it."""
+    path: Path = raw_asset(f"EuRoC ASL {sequence} cam{camera} listing", EUROC_ASL_ROOT / sequence / f"mav0/cam{camera}/data.csv")
+    rows: list[list[str]] = [line.split(",") for line in path.read_text().splitlines() if line and not line.startswith("#")]
+    return FrameIndex(times_ns=np.array([int(row[0]) for row in rows], dtype=np.int64), paths=tuple(f"rgb_{camera}/{row[1].strip()}" for row in rows))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("sequence", "expected"), [("V2_03_difficult", 1921), ("MH_04_difficult", 2032)])
+def test_the_real_euroc_listings_pair_every_frame_cam0_and_cam1_took_together(sequence: str, expected: int) -> None:
+    cam0, cam1 = asl_listing(sequence, 0), asl_listing(sequence, 1)
+    pairs: StereoPairs = pair_by_stamp(cam0, cam1, tolerance_ns=STEREO_PAIR_TOLERANCE_NS)
+    assert pairs.left.times_ns.size == expected == np.intersect1d(cam0.times_ns, cam1.times_ns).size
+    assert int(np.abs(pairs.right.times_ns - pairs.left.times_ns).max()) <= STEREO_PAIR_TOLERANCE_NS
+    assert pairs.unmatched_left + pairs.left.times_ns.size == cam0.times_ns.size
+    assert pairs.unmatched_right + pairs.right.times_ns.size == cam1.times_ns.size
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "sequence",
+    ["MH_01_easy", "MH_02_easy", "MH_03_medium", "MH_05_difficult", "V1_01_easy", "V1_02_medium", "V1_03_difficult", "V2_01_easy", "V2_02_medium"],
+)
+def test_the_other_real_euroc_sequences_keep_the_frames_vslam_lab_s_row_pairing_gave(sequence: str) -> None:
+    """VSLAM-LAB keeps the first min(n_cam0, n_cam1) rows of each camera; on these nine that is the stamp pairing too."""
+    cam0, cam1 = asl_listing(sequence, 0), asl_listing(sequence, 1)
+    rows: int = min(cam0.times_ns.size, cam1.times_ns.size)
+    pairs: StereoPairs = pair_by_stamp(cam0, cam1, tolerance_ns=STEREO_PAIR_TOLERANCE_NS)
+    assert (pairs.left.times_ns.tolist(), pairs.left.paths) == (cam0.times_ns[:rows].tolist(), cam0.paths[:rows])
+    assert (pairs.right.times_ns.tolist(), pairs.right.paths) == (cam1.times_ns[:rows].tolist(), cam1.paths[:rows])
 
 
 @pytest.mark.integration

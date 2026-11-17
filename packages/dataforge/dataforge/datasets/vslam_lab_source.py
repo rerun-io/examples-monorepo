@@ -8,7 +8,7 @@
         rgb.csv            ts_<stream> (ns), path_<stream> per image stream (rgb_0, rgb_1, depth_0, depth_1)
         groundtruth.csv    ts (ns), tx (m), ty (m), tz (m), qx, qy, qz, qw: world_T_body, scalar last
         imu_0.csv          ts (ns), wx..wz (rad s^-1), ax..az (m s^-2)
-        rgb_0/ rgb_1/ depth_0/ depth_1/   the frames rgb.csv names
+        rgb_0/ rgb_1/ depth_0/ depth_1/   the frames rgb.csv names (on EuRoC, every frame of the camera)
         state_groundtruth_estimate0.csv   EuRoC only: EuRoC's own world_T_imu0, which dataforge's ``download``
                                           extracts from the sequence zip VSLAM-LAB keeps (``read_euroc_gt``)
 
@@ -30,7 +30,7 @@ from typing import Literal, TypeAlias, get_args
 import numpy as np
 import pyarrow as pa
 import pyarrow.csv as pacsv
-from jaxtyping import Float64, Int64
+from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from serde import SerdeError, coerce, field, serde
 from serde.yaml import from_yaml
@@ -144,6 +144,64 @@ class FrameIndex:
     """Capture stamps, nanoseconds, in file order."""
     paths: tuple[str, ...]
     """Frame files, relative to the sequence directory."""
+
+
+@dataclass(frozen=True, slots=True)
+class StereoPairs:
+    """Two image streams cut to the frames taken together, and how many frames of each had no partner."""
+
+    left: FrameIndex
+    """The reference camera's paired frames, in time order."""
+    right: FrameIndex
+    """The other camera's frame taken with each ``left`` frame, row for row."""
+    unmatched_left: int
+    """Reference frames dropped: no frame of the other camera within the tolerance."""
+    unmatched_right: int
+    """Other-camera frames dropped: no reference frame within the tolerance."""
+
+
+def read_stamped_frames(sequence: Path, stream: StreamName) -> FrameIndex:
+    """Every frame in ``<sequence>/<stream>/``, named ``<stamp ns>.png`` as EuRoC names them, in time order.
+
+    VSLAM-LAB moves all of a camera's frames into its stream directory, also those its rgb.csv leaves out, so this
+    listing, not rgb.csv, is the camera's whole stream. A name that is not a stamp is a ``ValueError`` naming it.
+    """
+    files: list[Path] = list((sequence / stream).glob("*.png"))
+    try:
+        stamps: Int64[ndarray, "n_frames"] = np.array([int(file.stem) for file in files], dtype=np.int64)
+    except ValueError as error:
+        raise ValueError(f"{sequence / stream}: a frame is not named by its nanosecond stamp: {error}") from error
+    order: Int64[ndarray, "n_frames"] = np.argsort(stamps)
+    return FrameIndex(times_ns=stamps[order], paths=tuple(f"{stream}/{files[index].name}" for index in order))
+
+
+def pair_by_stamp(left: FrameIndex, right: FrameIndex, *, tolerance_ns: int) -> StereoPairs:
+    """Keep each ``left`` frame whose nearest ``right`` frame is at most ``tolerance_ns`` away, with that frame.
+
+    The cameras of a hardware-synced rig share stamps, so a pair is one capture; a frame without a partner is
+    dropped and counted, never paired with a later frame of the other camera. Both streams must be strictly
+    increasing and the tolerance below half a frame period, so no frame pairs twice; either violation is a ``ValueError``.
+    """
+    for name, frames in (("left", left), ("right", right)):
+        if not bool((np.diff(frames.times_ns) > 0).all()):
+            raise ValueError(f"{name} stamps are not strictly increasing")
+    if right.times_ns.size == 0:
+        return StereoPairs(left=FrameIndex(times_ns=left.times_ns[:0], paths=()), right=right, unmatched_left=left.times_ns.size, unmatched_right=0)
+    after: Int64[ndarray, "n_left"] = np.searchsorted(right.times_ns, left.times_ns).astype(np.int64)
+    later: Int64[ndarray, "n_left"] = np.minimum(after, right.times_ns.size - 1)
+    earlier: Int64[ndarray, "n_left"] = np.maximum(after - 1, 0)
+    closer_earlier: Bool[ndarray, "n_left"] = np.abs(right.times_ns[earlier] - left.times_ns) <= np.abs(right.times_ns[later] - left.times_ns)
+    nearest: Int64[ndarray, "n_left"] = np.where(closer_earlier, earlier, later)
+    kept: Int64[ndarray, "n_pairs"] = np.flatnonzero(np.abs(right.times_ns[nearest] - left.times_ns) <= tolerance_ns)
+    partners: Int64[ndarray, "n_pairs"] = nearest[kept]
+    if not bool((np.diff(partners) > 0).all()):
+        raise ValueError(f"a right frame pairs with two left frames: tolerance {tolerance_ns} ns is not below half a frame period")
+    return StereoPairs(
+        left=FrameIndex(times_ns=left.times_ns[kept], paths=tuple(left.paths[index] for index in kept)),
+        right=FrameIndex(times_ns=right.times_ns[partners], paths=tuple(right.paths[index] for index in partners)),
+        unmatched_left=left.times_ns.size - kept.size,
+        unmatched_right=right.times_ns.size - partners.size,
+    )
 
 
 @dataclass(frozen=True, slots=True)
