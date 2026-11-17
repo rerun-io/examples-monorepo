@@ -55,11 +55,6 @@ def test_each_lens_fills_its_own_hemisphere() -> None:
     assert pano[480, 1440] == 40
     swapped: UInt8[ndarray, "960 1920"] = stitch.panorama(dark, bright)
     assert swapped[480, 480] == 40
-    # The margin only widens the tiles the lane tracks on; the panorama is their centres.
-    rng: np.random.Generator = np.random.default_rng(7)
-    lenses: list[UInt8[ndarray, "h w"]] = [rng.integers(0, 256, (1920, 1920), dtype=np.uint8) for _ in range(2)]
-    narrow = _core.PanoramaStitch(V6, CROP, (1920, 1920), margin_px=0)
-    np.testing.assert_array_equal(narrow.panorama(*lenses), stitch.panorama(*lenses))
 
 
 def test_a_lens_of_the_wrong_size_or_a_bad_string_is_refused() -> None:

@@ -36,7 +36,9 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 PANORAMA_ENTITY: str = f"{RUN_ENTITY}/panorama"
 """The stitched 1920x960 panorama of a dual-fisheye rig, with the tracked keypoints of both tiles drawn on it."""
 PANORAMA_WIDTH: int = 1920
-"""Width of that panorama: two 960-column hemispheres."""
+"""Width of that panorama: two 960-column hemispheres (``kornia_staging_imgproc::panorama::TileGeometry`` default: 360 degrees)."""
+PANORAMA_HEIGHT: int = 960
+"""Rows of that panorama (180 degrees)."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
 VIO_STATS_ENTITY: str = "/stats/vio"
@@ -509,28 +511,34 @@ class VioStage:
             self.times.add("frontend", flow)
             self.times.add("imu", frontend["imu"])
             self.times.add("estimator", calls[-1] - stitch - flow - frontend["imu"])
-            frame: _core.FlowFrame | None = vio.flow_frame()
-            if frame is not None:
-                self.keypoints.append(sum(len(frame.ids(camera)) for camera in range(vio.camera_count)))
+        # One copy of the frontend's keypoints per frameset, for the count and the panorama.
+        frame: _core.FlowFrame | None = vio.flow_frame() if calls or log_panorama else None
+        if calls and frame is not None:
+            self.keypoints.append(sum(frame.num_tracks(camera) for camera in range(vio.camera_count)))
         if log_panorama:
-            self._log_panorama(frameset.t_ns)
+            self._log_panorama(frameset.t_ns, frame)
         self.times.add("log", 1e3 * (time.monotonic() - started) - sum(calls))
 
-    def _log_panorama(self, t_ns: int) -> None:
+    def _log_panorama(self, t_ns: int, frame: _core.FlowFrame | None) -> None:
         """Draw a stitched rig's panorama and its tracked keypoints, tracked or not.
 
         Before the estimator has a state it reports no pose, and :meth:`VioLogger.log`
-        draws nothing; the frontend still runs, and this is where it shows.
+        draws nothing; the frontend still runs, and this is where it shows. A frameset
+        that the logger posed at ``t_ns`` already has its keypoints drawn: they are not drawn twice.
+
+        Args:
+            t_ns: The frameset's time.
+            frame: The frontend's keypoints after the frameset's ``track`` calls.
         """
         if not self.logger.stitched or self.logger.tile_origins is None:
             return
         pano: UInt8[ndarray, "h w"] | None = self.lockstep.vio.panorama_image()
-        frame: _core.FlowFrame | None = self.lockstep.vio.flow_frame()
         if pano is None or frame is None or frame.t_ns != t_ns:
             return
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
         rr.log(PANORAMA_ENTITY, rr.Image(pano, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
-        log_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
+        if not self.logger.estimate_t_ns or self.logger.estimate_t_ns[-1] != t_ns:
+            log_keypoints(frame, self.logger.tile_origins, pano.shape[1], PANORAMA_ENTITY)
 
     def flush(self) -> None:
         """Log the last lagged frame before completing paths or exporting poses."""

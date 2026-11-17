@@ -24,16 +24,16 @@ import rerun as rr
 import rerun.chunk as rrc
 from dataforge.logging_toolkit import log_video_stream
 from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
+from dataforge.writing import atomic_recording
 from jaxtyping import Int64
 from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import DEFAULT_WINDOW_S, LocalSegment, RigProfile, open_segment
+from slam_rs.vio_log import PANORAMA_HEIGHT, PANORAMA_WIDTH
 
 PANO_ENTITY: str = "/world/rig_00/pano"
 """Where the layer puts the panorama video."""
-PANO_WIDTH: int = 1920
-PANO_HEIGHT: int = 960
 
 
 @dataclass(slots=True)
@@ -44,8 +44,6 @@ class Config:
     """The Insta360 base recording (``slam-rs-insv`` output)."""
     output: Path | None = None
     """Destination layer; defaults to ``<recording stem>.pano.rrd`` beside the recording."""
-    margin_px: int = 64
-    """The lane's tile overlap (``config.panorama_tile_margin_px`` of the insta360 config); recorded, pixels do not depend on it."""
     cq: int = 34
     """NVENC constant-quality target: a viewing layer, not an analysis input."""
     gop: int = 30
@@ -112,7 +110,7 @@ def write_layer(config: Config) -> PanoLayer:
         if factory is None:
             raise ValueError(f"{config.rrd}: not an Insta360 recording (no insta360 property)")
         lens = feed.cameras[0]
-        stitch = _core.PanoramaStitch(factory.lens_string, factory.window_crop, (lens.width, lens.height), margin_px=config.margin_px)
+        stitch = _core.PanoramaStitch(factory.lens_string, factory.window_crop, (lens.width, lens.height))
         offset_ns: int = feed.imu.cam_time_offset_ns
 
         def panoramas() -> Iterator[bytes]:
@@ -126,11 +124,11 @@ def write_layer(config: Config) -> PanoLayer:
             clip: Path = work / "pano.mp4"
             # fps is the container's nominal rate only; log_video_stream puts every sample on its real frame time.
             encode_frames_to_mp4(
-                panoramas(), clip, source=FrameSource("gray8", width=PANO_WIDTH, height=PANO_HEIGHT), fps=30, gop=config.gop, cq=config.cq
+                panoramas(), clip, source=FrameSource("gray8", width=PANORAMA_WIDTH, height=PANORAMA_HEIGHT), fps=30, gop=config.gop, cq=config.cq
             )
             times_ns: Int64[ndarray, " n"] = np.asarray(times, dtype=np.int64)
-            with rr.RecordingStream(stores[0].application_id, recording_id=stores[0].recording_id) as rec:
-                rec.save(output)
+            # A derived layer of the base recording: it sends no RecordingInfo of its own (dataforge.writing.atomic_recording).
+            with atomic_recording(output, application_id=stores[0].application_id, recording_id=stores[0].recording_id, send_properties=False) as rec:
                 rec.send_property(
                     "pano_layer",
                     rr.AnyValues(
@@ -141,7 +139,6 @@ def write_layer(config: Config) -> PanoLayer:
                         source_segment=feed.segment_id,
                         stitch="slam_rs._core.PanoramaStitch (dual-fisheye lane tables + host remap)",
                         lens_string_version="v6",
-                        margin_px=config.margin_px,
                         codec="av1",
                         cq=config.cq,
                         gop=config.gop,
