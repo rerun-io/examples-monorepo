@@ -1,7 +1,7 @@
 //! Device cameras against the CPU f32 models: pixels, bearings, Jacobians and typed rejections.
 //!
-//! Inputs are real calibrations: RoboCap KB4 (`slam-rs/configs/robocap_calib_downscale3.json`
-//! cam 0), TUM-VI double sphere and EUCM (Basalt `tumvi_512_{ds,eucm}_calib.json` cam 0),
+//! Inputs are real calibrations: RoboCap KB4 (cam 0, copied into `ROBOCAP_KB4`),
+//! TUM-VI double sphere and EUCM (Basalt `tumvi_512_{ds,eucm}_calib.json` cam 0),
 //! an equirect hemisphere tile 1088x960 at 960/pi px/rad with `lon_max` 102 deg, and a
 //! 1920x960 panorama. The grids cover each model's whole valid domain and beyond.
 #![cfg(feature = "wgpu")]
@@ -298,15 +298,21 @@ fn assert_inverse(cpu: &CameraModelKind<f32>, pixels: &[[f32; 2]]) -> (f32, usiz
     (worst, valid)
 }
 
+/// RoboCap cam 0 KB4 `fx fy cx cy k1 k2 k3 k4`, copied from slam-rs `configs/robocap_calib_downscale3.json`.
+#[allow(clippy::excessive_precision)]
+const ROBOCAP_KB4: [f64; 8] = [
+    212.14536598347505,
+    211.57082242862452,
+    318.4011350411036,
+    174.8127089872141,
+    0.06166616664989166,
+    -0.02109092590818281,
+    0.037163389786906705,
+    -0.013518619346447233,
+];
+
 fn robocap_kb4() -> KannalaBrandt4<f32> {
-    let calibration: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../../slam-rs/configs/robocap_calib_downscale3.json"
-    ))
-    .unwrap();
-    let intrinsics = &calibration["value0"]["intrinsics"][0]["intrinsics"];
-    let params = ["fx", "fy", "cx", "cy", "k1", "k2", "k3", "k4"]
-        .map(|key| intrinsics[key].as_f64().unwrap() as f32);
-    KannalaBrandt4::new(params).unwrap()
+    KannalaBrandt4::new(ROBOCAP_KB4.map(|v| v as f32)).unwrap()
 }
 
 #[allow(clippy::excessive_precision)]
