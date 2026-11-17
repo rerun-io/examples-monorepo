@@ -7,7 +7,7 @@ exact: no ``Any``, and every array carries its dtype.
 from collections.abc import Sequence
 from typing import ClassVar, Literal
 
-from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32, UInt64
+from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
@@ -159,24 +159,12 @@ class MapSnapshot:
         """Applied pose-graph optimizations so far (the correction epoch)."""
 
     @property
-    def pgo_failures(self) -> int:
-        """Pose-graph optimizations the solver refused."""
+    def pgo_runs(self) -> Int64[ndarray, "n_pgo 5"]:
+        """Each applied PGO, oldest first: ``[current, candidate, moved, dropped_edges, iterations]``."""
 
     @property
-    def pgo_loops(self) -> Int64[ndarray, "n_pgo 2"]:
-        """``[current, candidate]`` keyframe timestamps of each applied PGO."""
-
-    @property
-    def pgo_cost(self) -> Float64[ndarray, "n_pgo 2"]:
-        """``[before, after]`` cost of each applied PGO."""
-
-    @property
-    def pgo_moved(self) -> UInt32[ndarray, " n_pgo"]:
-        """Keyframes each applied PGO moved."""
-
-    @property
-    def pgo_solve_us(self) -> UInt64[ndarray, " n_pgo"]:
-        """Wall time of each applied PGO's solve, microseconds."""
+    def pgo_us(self) -> tuple[int, int]:
+        """Wall time of the loops that ran a PGO (graph, solve, map write, fusion): total and slowest, microseconds."""
 
     @property
     def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
@@ -208,7 +196,7 @@ class MapSnapshot:
 
     @property
     def loop_fused(self) -> Bool[ndarray, " n_loops"]:
-        """Whether each loop was fused at once; otherwise it was at or above the drift gate, the PGO's."""
+        """Whether each loop's landmarks were fused, at once or after a PGO; otherwise it was left unapplied."""
 
     @property
     def loop_counts(self) -> LoopCounts:

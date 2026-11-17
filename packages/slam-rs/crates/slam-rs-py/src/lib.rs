@@ -677,13 +677,8 @@ pub struct MapSnapshot {
     loop_fused: Vec<bool>,
     loop_counts: slam_rs::backend::LoopCounts,
     pgo_epoch: u64,
-    pgo_failures: u64,
-    /// `[current, candidate]` per applied PGO.
-    pgo_loops: Vec<i64>,
-    /// `[before, after]` per applied PGO.
-    pgo_cost: Vec<f64>,
-    pgo_moved: Vec<u32>,
-    pgo_solve_us: Vec<u64>,
+    /// `[current, candidate, moved, dropped_edges, iterations]` per applied PGO.
+    pgo_runs: Vec<i64>,
 }
 
 /// `[tx, ty, tz, qx, qy, qz, qw]` per pose, flat.
@@ -780,27 +775,14 @@ impl MapSnapshot {
             loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
             loop_counts: snapshot.loop_counts,
             pgo_epoch: snapshot.correction.epoch,
-            pgo_failures: snapshot.pgo_failures,
-            pgo_loops: snapshot
+            pgo_runs: snapshot
                 .pgo_runs
                 .iter()
-                .flat_map(|run| [run.current, run.candidate])
-                .collect(),
-            pgo_cost: snapshot
-                .pgo_runs
-                .iter()
-                .flat_map(|run| [run.cost.0, run.cost.1])
-                .collect(),
-            pgo_moved: snapshot
-                .pgo_runs
-                .iter()
-                .map(|run| u32::try_from(run.moved).unwrap_or(u32::MAX))
-                .collect(),
-            pgo_solve_us: snapshot
-                .pgo_solve_ns
-                .0
-                .iter()
-                .map(|ns| ns / 1_000)
+                .flat_map(|run| {
+                    let counts = [run.moved, run.dropped_edges, run.iterations]
+                        .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+                    [run.current, run.candidate].into_iter().chain(counts)
+                })
                 .collect(),
         })
     }
@@ -843,38 +825,24 @@ impl MapSnapshot {
         self.pgo_epoch
     }
 
-    /// Pose-graph optimizations the solver refused.
+    /// Each applied PGO, oldest first: `[current, candidate, moved,
+    /// dropped_edges, iterations]` (the loop's keyframe timestamps, keyframes
+    /// moved, parallel edges dropped, LM steps): `int64[r, 5]`.
     #[getter]
-    fn pgo_failures(&self) -> u64 {
-        self.pgo_failures
-    }
-
-    /// `[current, candidate]` keyframe timestamps of each applied PGO: `int64[r, 2]`.
-    #[getter]
-    fn pgo_loops<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        self.pgo_loops
+    fn pgo_runs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.pgo_runs
             .to_pyarray(py)
-            .reshape((self.pgo_moved.len(), 2))
+            .reshape((self.pgo_runs.len() / 5, 5))
     }
 
-    /// `[before, after]` cost of each applied PGO: `float64[r, 2]`.
+    /// Wall time of the loops that ran a PGO (graph, solve, map write and
+    /// fusion), total and slowest, microseconds.
     #[getter]
-    fn pgo_cost<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        self.pgo_cost
-            .to_pyarray(py)
-            .reshape((self.pgo_moved.len(), 2))
-    }
-
-    /// Keyframes each applied PGO moved: `uint32[r]`.
-    #[getter]
-    fn pgo_moved<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
-        self.pgo_moved.to_pyarray(py)
-    }
-
-    /// Wall time of each applied PGO's solve, microseconds: `uint64[r]`.
-    #[getter]
-    fn pgo_solve_us<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u64>> {
-        self.pgo_solve_us.to_pyarray(py)
+    fn pgo_us(&self) -> (u64, u64) {
+        (
+            self.counters.pgo.total_ns / 1_000,
+            self.counters.pgo.max_ns / 1_000,
+        )
     }
 
     /// Whether each keyframe is still in the window: `bool[k]`.
@@ -1046,8 +1014,8 @@ impl MapSnapshot {
             .reshape((self.loop_fused.len(), 2))
     }
 
-    /// Whether each loop was fused at once (else it was at or above the drift
-    /// gate, the pose-graph optimization's): `bool[l]`.
+    /// Whether each loop's landmarks were fused, at once or after a pose-graph
+    /// optimization (else it was left unapplied): `bool[l]`.
     #[getter]
     fn loop_fused<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
         self.loop_fused.to_pyarray(py)

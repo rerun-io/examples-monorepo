@@ -748,7 +748,17 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
     let before = s.backend.map().clone();
     let kept = LandmarkId::from(keypoint_id(0, SEEN, 0));
     let kept_before = before.landmark_world(kept, &t_i_c).unwrap();
-    s.backend.query(C);
+    let events = s.backend.query(C);
+    assert!(
+        matches!(
+            events[..],
+            [MapEvent::LoopVerified {
+                pgo_ns: Some(_),
+                ..
+            }]
+        ),
+        "timed for the runner's counters: {events:?}"
+    );
     let loops = s.backend.loop_closing().unwrap();
     let event = &loops.events()[0];
     assert_eq!(
@@ -777,17 +787,7 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
         );
     }
     let run = loops.pgo().runs[0];
-    assert_eq!(
-        (
-            run.current,
-            run.candidate,
-            run.keyframes,
-            run.fixed,
-            run.loop_edges,
-            run.moved
-        ),
-        (C, A, 4, 2, 2, 2)
-    );
+    assert_eq!((run.current, run.candidate, run.moved), (C, A, 2));
     let host = map.keyframe(A).unwrap().pose * before.keyframe(A).unwrap().pose.inverse();
     let kept_after = map.landmark_world(kept, &t_i_c).unwrap();
     assert!(
@@ -820,15 +820,18 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
         snapshot.keyframe_poses[row_a],
         map.keyframe(A).unwrap().pose
     );
-    assert_eq!(snapshot.pgo_runs.len(), 1);
-    assert_eq!(snapshot.pgo_solve_ns.0.len(), 1);
-    assert!(!snapshot.loops[0].fused);
+    assert_eq!(snapshot.pgo_runs, loops.pgo().runs);
+    assert!(snapshot.loops[0].fused, "fused after the PGO");
 }
 
 #[test]
 fn a_small_drift_runs_no_pose_graph() {
     let mut s = scene(1, 0.05, true, LoopClosingConfig::default(), 100);
-    s.backend.query(C);
+    let events = s.backend.query(C);
+    assert!(matches!(
+        events[..],
+        [MapEvent::LoopVerified { pgo_ns: None, .. }]
+    ));
     let loops = s.backend.loop_closing().unwrap();
     assert!(matches!(
         loops.events()[0].outcome,

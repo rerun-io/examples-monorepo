@@ -65,7 +65,6 @@ fn the_graph_takes_the_loop_then_tree_past_loop_and_strong_edges_measured_from_t
         let graph = PoseGraph::build(&map, &graph, 50, &active, (6, &[1, 2], &corrected), &config);
         assert_eq!(graph.ids, vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(graph.copy, poses);
-        assert_eq!(graph.loop_edges, 2);
         let pairs: Vec<(usize, usize)> = graph.edges.iter().map(|e| (e.from, e.to)).collect();
         // The loop first (B29); then the tree (parent -> child), the past
         // loop 1-4, the strong 4-6.

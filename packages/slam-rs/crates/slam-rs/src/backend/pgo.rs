@@ -51,8 +51,6 @@ pub struct PoseGraph {
     pub fixed: Vec<bool>,
     /// Edges in priority order (the first of a pair is kept).
     pub edges: Vec<SolverEdge>,
-    /// How many of `edges` are the current loop's.
-    pub loop_edges: usize,
 }
 
 impl PoseGraph {
@@ -99,13 +97,11 @@ impl PoseGraph {
                 .collect(),
             None => Vec::new(),
         };
-        let n_loop: usize = loop_edges.len();
         Self {
             ids,
             copy,
             fixed,
             edges: loop_edges.into_iter().chain(map_edges).collect(),
-            loop_edges: n_loop,
         }
     }
 
@@ -143,40 +139,13 @@ pub struct PgoRun {
     pub current: FrameId,
     /// The keyframe it closed with.
     pub candidate: FrameId,
-    /// Keyframes in the graph.
-    pub keyframes: usize,
-    /// Of those, fixed (the gauge).
-    pub fixed: usize,
-    /// Edges given to the solver.
-    pub edges: usize,
-    /// Of those, the current loop's.
-    pub loop_edges: usize,
-    /// Parallel edges the solver dropped.
+    /// Keyframes the result moved.
+    pub moved: usize,
+    /// Parallel edges the solver dropped: a map edge between an island
+    /// keyframe and the current one (B29).
     pub dropped_edges: usize,
     /// LM steps.
     pub iterations: usize,
-    /// Cost before and after.
-    pub cost: (f64, f64),
-    /// Keyframes the result moved.
-    pub moved: usize,
-}
-
-/// Wall time of each PGO solve, in nanoseconds. It changes run to run, so it
-/// never takes part in equality or `Debug` (`Vio`'s fingerprint, and the
-/// Offline-against-Realtime snapshot comparison).
-#[derive(Clone, Default)]
-pub struct SolveTimes(pub Vec<u64>);
-
-impl PartialEq for SolveTimes {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl std::fmt::Debug for SolveTimes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SolveTimes(..)")
-    }
 }
 
 /// What the PGO has done: the runs, the corrections, the epoch.
@@ -189,8 +158,6 @@ pub struct PgoState {
     /// The pose each moved keyframe had before its first correction (the
     /// window's final pose); culled keyframes leave.
     pub raw: BTreeMap<FrameId, Se3<f64>>,
-    /// Wall time of each solve.
-    pub solve_ns: SolveTimes,
 }
 
 impl PgoState {
@@ -230,9 +197,7 @@ impl MapBackend {
             ),
             loops.config(),
         );
-        let started = std::time::Instant::now();
         let solved = graph.solve();
-        let solve_ns: u64 = crate::duration_ns(started);
         let Some(loops) = self.loops.as_mut() else {
             return false;
         };
@@ -257,16 +222,10 @@ impl MapBackend {
         loops.pgo.runs.push(PgoRun {
             current: detection.current,
             candidate: detection.candidate,
-            keyframes: graph.ids.len(),
-            fixed: graph.fixed.iter().filter(|&&fixed| fixed).count(),
-            edges: graph.edges.len(),
-            loop_edges: graph.loop_edges,
+            moved: moved.len(),
             dropped_edges: report.dropped_edges,
             iterations: report.iterations,
-            cost: (report.initial_cost, report.final_cost),
-            moved: moved.len(),
         });
-        loops.pgo.solve_ns.0.push(solve_ns);
         true
     }
 
