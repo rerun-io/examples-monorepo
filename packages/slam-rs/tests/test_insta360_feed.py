@@ -3,7 +3,7 @@
 import pyarrow as pa
 import pytest
 
-from slam_rs.catalog_feed import Insta360Factory, RigProfile, read_insta360_factory
+from slam_rs.catalog_feed import Insta360Factory, read_insta360_factory
 
 
 def properties(**columns: pa.Array) -> pa.Table:
@@ -46,9 +46,3 @@ def test_the_rotation_the_converter_posed_the_lenses_with_is_read_row_major() ->
 def test_an_old_conversion_without_the_readout_is_refused() -> None:
     with pytest.raises(ValueError, match="rolling_shutter_readout_s"):
         read_insta360_factory(properties(**{"property:insta360:offset_v6": ["2_2.31_x"]}))
-
-
-def test_decode_threads_must_be_positive() -> None:
-    assert RigProfile(decode_threads=4).decode_threads == 4
-    with pytest.raises(ValueError, match="decode_threads"):
-        RigProfile(decode_threads=0)

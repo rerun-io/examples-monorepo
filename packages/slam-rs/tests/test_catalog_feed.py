@@ -25,6 +25,7 @@ from slam_rs.catalog_feed import (
     CatalogSegment,
     Frameset,
     ImuStream,
+    RigProfile,
     SegmentFeed,
     _rig_trajectory,
     _shared_codec,
@@ -123,6 +124,12 @@ def test_wide_angle_and_panorama_models_keep_their_coefficients(distortion_model
 def test_an_unknown_distortion_model_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported distortion model"):
         camera_calib(0, _kb4_statics(distortion_model="unified"))
+
+
+def test_decode_threads_must_be_positive() -> None:
+    assert RigProfile(decode_threads=4).decode_threads == 4
+    with pytest.raises(ValueError, match="decode_threads"):
+        RigProfile(decode_threads=0)
 
 
 def test_the_extrinsic_is_inverted_only_for_child_from_parent() -> None:
