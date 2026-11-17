@@ -25,23 +25,9 @@ use dual_fisheye::DualFisheyeIngest;
 use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use nalgebra::Vector3;
 
-/// Where the two tiles' pixels come from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanoramaSource {
-    /// A central equirectangular panorama (TartanAir `lcam_equirect`): each tile
-    /// is a crop with horizontal wrap, a pure pixel copy; both tile cameras share
-    /// the panorama's centre.
-    Equirect,
-    /// Two fisheye lens images remapped through prebuilt fixed-point lookup
-    /// tables; the tile cameras sit at the two lens centres (or the midpoint).
-    /// Selected by [`PanoramaRig::expand_dual_fisheye`].
-    DualFisheye,
-}
-
 /// One panorama camera expanded into two hemisphere tiles.
 #[derive(Debug)]
 pub struct PanoramaRig {
-    source: PanoramaSource,
     /// Panorama size in pixels.
     width: usize,
     height: usize,
@@ -132,7 +118,6 @@ impl PanoramaRig {
             .collect();
         Ok((
             Some(Self {
-                source: PanoramaSource::Equirect,
                 width,
                 height,
                 tile_width,
@@ -171,7 +156,6 @@ impl PanoramaRig {
         let margin: i64 = geometry.margin as i64;
         Ok((
             Self {
-                source: PanoramaSource::DualFisheye,
                 width: 2 * geometry.hemisphere_width,
                 height,
                 tile_width,
@@ -181,16 +165,6 @@ impl PanoramaRig {
             },
             expanded.calibration,
         ))
-    }
-
-    /// Where the tiles come from.
-    pub fn source(&self) -> PanoramaSource {
-        self.source
-    }
-
-    /// Panorama `(width, height)` the input frameset must have.
-    pub fn panorama_size(&self) -> (usize, usize) {
-        (self.width, self.height)
     }
 
     /// Tile `(width, height)`, the same for both tiles.
