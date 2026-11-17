@@ -420,7 +420,7 @@ fn a_drifted_synthetic_map_recovers_in_f32_and_f64_far_from_the_origin() {
         assert!(gba.report.iterations.len() <= 20);
         assert!(gba.report.final_cost.error < 0.01 * gba.report.initial_cost.error);
         assert_eq!(gba.report.final_cost.invalid, 0);
-        assert_eq!(result.keyframe_poses_vio, before);
+        assert_eq!(result.keyframe_poses_before_gba, before);
         let after: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
         assert_eq!(result.keyframe_poses, after);
         let (rms_before, rms_after) = (aligned_rms(&before, &truth), aligned_rms(&after, &truth));
@@ -558,7 +558,7 @@ fn finish_without_the_gba_returns_the_map_unchanged() {
     let result = backend.finish(false, &VioConfig::default()).unwrap();
     assert!(result.gba.is_none());
     assert_eq!(backend.map(), &map_before);
-    assert_eq!(result.keyframe_poses, result.keyframe_poses_vio);
+    assert_eq!(result.keyframe_poses, result.keyframe_poses_before_gba);
     assert_eq!(result.keyframe_t_ns, (1..=6).collect::<Vec<i64>>());
 }
 

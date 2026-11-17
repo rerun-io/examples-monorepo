@@ -216,6 +216,19 @@ def test_the_scoring_csvs_round_trip_on_the_dataset_clock(tmp_path: Path) -> Non
         np.testing.assert_array_equal(read_back.quaternion_wxyz, written.quaternion_wxyz)
 
 
+def test_a_replay_writes_the_raw_vio_alone_before_the_final_run(tmp_path: Path) -> None:
+    """The raw VIO goes first (``final=None``), so a failure after tracking keeps it (k0 review); the final run follows alone."""
+    raw: Trajectory = Trajectory(t_ns=np.array([0, 50_000_000], dtype=np.int64), position_m=np.ones((2, 3)), quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)))
+    final_csv: Path = tmp_path / "slam_rs.csv"
+    raw_csv: Path = write_scoring_csvs(final_csv, final=None, raw=raw, offset_ns=0)
+    assert raw_csv.exists()
+    assert not final_csv.exists()
+    raw_text: str = raw_csv.read_text()
+    write_scoring_csvs(final_csv, final=raw, raw=None, offset_ns=0)
+    assert final_csv.read_text() == raw_text
+    assert raw_csv.read_text() == raw_text
+
+
 def test_a_row_with_the_wrong_field_count_is_rejected(tmp_path: Path) -> None:
     path: Path = tmp_path / "short.csv"
     path.write_text("#timestamp [ns], p_x, p_y, p_z, q_w, q_x, q_y, q_z\n1,0.0,0.0,0.0\n")
