@@ -220,4 +220,6 @@ fn calibration_validates_once_and_preserves_device_coefficients() {
 }
 
 #[cfg(feature = "wgpu")]
+mod models;
+#[cfg(feature = "wgpu")]
 mod parity;
