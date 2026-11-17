@@ -463,43 +463,27 @@ impl VioConfig {
     /// infinite sqrt-info; a Huber threshold <= 0 or `eta` outside (0, 1)
     /// breaks the LM loop without a word).
     fn check_ranges(self) -> Result<Self, ConfigError> {
-        let positive = "> 0";
-        let checks: [(&'static str, f64, bool, &'static str); 5] = [
-            (
-                "backend.gba_max_iterations",
-                self.gba_max_iterations as f64,
-                self.gba_max_iterations > 0,
-                positive,
-            ),
-            (
-                "backend.gba_cg_eta",
-                self.gba_cg_eta,
-                self.gba_cg_eta > 0.0 && self.gba_cg_eta < 1.0,
-                "in (0, 1)",
-            ),
-            (
-                "backend.gba_huber_px",
-                self.gba_huber_px,
-                self.gba_huber_px > 0.0,
-                positive,
-            ),
+        let out = |key, value, range| Err(ConfigError::OutOfRange { key, value, range });
+        let positive: [(&'static str, f64); 4] = [
+            ("backend.gba_max_iterations", self.gba_max_iterations as f64),
+            ("backend.gba_huber_px", self.gba_huber_px),
             (
                 "backend.gba_pose_graph_sigma_translation",
                 self.gba_pose_graph_sigma_translation,
-                self.gba_pose_graph_sigma_translation > 0.0,
-                positive,
             ),
             (
                 "backend.gba_pose_graph_sigma_rotation",
                 self.gba_pose_graph_sigma_rotation,
-                self.gba_pose_graph_sigma_rotation > 0.0,
-                positive,
             ),
         ];
-        match checks.into_iter().find(|(_, _, ok, _)| !ok) {
-            Some((key, value, _, range)) => Err(ConfigError::OutOfRange { key, value, range }),
-            None => Ok(self),
+        if let Some(&(key, value)) = positive.iter().find(|(_, v)| v.is_nan() || *v <= 0.0) {
+            return out(key, value, "> 0");
         }
+        let eta: f64 = self.gba_cg_eta;
+        if eta.is_nan() || eta <= 0.0 || eta >= 1.0 {
+            return out("backend.gba_cg_eta", eta, "in (0, 1)");
+        }
+        Ok(self)
     }
 
     /// Apply a flat profile overlay to a wrapped config, validating keys and values.
