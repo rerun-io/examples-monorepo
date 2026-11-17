@@ -1,6 +1,6 @@
-"""The persistent keyframe map through the Python boundary: on and Offline by default, either mode on request, off on request, and invisible to the poses."""
+"""The persistent keyframe map through the Python boundary: off (Offline when on) by default, either mode on request, off on request, and invisible to the poses."""
 
-import json
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -11,12 +11,9 @@ from numpy import ndarray
 from slam_rs import _core
 
 
-def _run(rig: RigFactory, texture: TextureFactory, mode: str | None) -> tuple[list[Float64[ndarray, "7"]], _core.Vio]:
+def _run(rig: RigFactory, texture: TextureFactory, mode: Literal["offline", "realtime"] | None) -> tuple[list[Float64[ndarray, "7"]], _core.Vio]:
     """Track a still stereo pair for twelve framesets with the back end off (``None``) or in ``mode``; return the poses and the flushed Vio."""
-    values: dict[str, object] = {"backend.enabled": mode is not None}
-    if mode is not None:
-        values["backend.mode"] = mode
-    config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": values}))
+    config: _core.VioConfig = _core.VioConfig().with_backend(mode or "off")
     vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
     if mode is None:
         assert vio.map_snapshot() is None
@@ -39,14 +36,17 @@ def _run(rig: RigFactory, texture: TextureFactory, mode: str | None) -> tuple[li
     return poses, vio
 
 
-def test_the_back_end_is_on_and_offline_by_default() -> None:
-    values: dict = json.loads(_core.VioConfig().to_json())["value0"]
-    assert values["backend.enabled"] is True
-    assert values["backend.mode"] == "offline"
+def test_the_back_end_is_off_and_offline_by_default() -> None:
+    """Opt in until loop closing (b2) gives the map a use: default runs are what they were before a2."""
+    config: _core.VioConfig = _core.VioConfig()
+    assert config.backend_enabled is False
+    assert config.backend_mode == "offline"
 
 
 @pytest.mark.parametrize("mode", ["offline", "realtime"])
-def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(rig: RigFactory, texture: TextureFactory, mode: str) -> None:
+def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(
+    rig: RigFactory, texture: TextureFactory, mode: Literal["offline", "realtime"]
+) -> None:
     on_poses, on = _run(rig, texture, mode)
     off_poses, _off = _run(rig, texture, None)
     for with_map, without in zip(on_poses, off_poses, strict=True):
@@ -88,3 +88,5 @@ def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(rig: Ri
     assert snapshot.step_count == snapshot.stamps
     assert snapshot.queries_dropped == 0
     assert snapshot.queries_run == k + snapshot.culled_redundant + snapshot.culled_over_budget
+    # Realtime readers get views the thread posted (the flush posts the last); Offline takes them on demand.
+    assert (snapshot.publish_count >= 1) if mode == "realtime" else (snapshot.publish_count == 0)

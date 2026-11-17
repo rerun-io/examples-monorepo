@@ -281,8 +281,9 @@ pub struct VioConfig {
     // keep its `config.` names; keys of this port are under `backend.`.
     /// Build the persistent keyframe map beside the window. Read only by builds
     /// with the `backend` feature; the raw VIO poses are the same either way.
-    /// On by default (PR a2): `backend.mode` says where it runs, and Realtime
-    /// never makes tracking wait. Builds without the feature ignore it.
+    /// Off by default: opt in until loop closing (PR b2) gives the map a use
+    /// (a2 review). `backend.mode` says where it runs; Realtime never makes
+    /// tracking wait. Builds without the feature ignore it.
     #[serde(rename = "backend.enabled")]
     pub backend_enabled: bool,
     /// Where the back end runs: inline (`offline`) or on its own thread
@@ -291,9 +292,11 @@ pub struct VioConfig {
     pub backend_mode: BackendMode,
     /// Realtime only: loop queries the back end keeps waiting while it is
     /// behind. One more drops the oldest (counted). 4 is about one second of
-    /// keyframes at MSD's keyframe rate. Map stamps are never dropped.
+    /// keyframes at MSD's keyframe rate. Map stamps are never dropped. Zero is
+    /// refused: it would drop every loop query and silently turn loop closing
+    /// off.
     #[serde(rename = "backend.realtime_max_queued_queries")]
-    pub backend_realtime_max_queued_queries: usize,
+    pub backend_realtime_max_queued_queries: std::num::NonZeroUsize,
     /// Cull keyframes: redundant ones as they leave the window, and the
     /// lowest-scored ones in batches when the map is over its budget.
     #[serde(rename = "config.map_enable_culling")]
@@ -386,9 +389,9 @@ impl Default for VioConfig {
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
 
-            backend_enabled: true,
+            backend_enabled: false,
             backend_mode: BackendMode::Offline,
-            backend_realtime_max_queued_queries: 4,
+            backend_realtime_max_queued_queries: std::num::NonZeroUsize::MIN.saturating_add(3),
             map_enable_culling: true,
             map_max_redundancy_score: 0.9,
             map_redundancy_exclude_hosted_lms: false,
@@ -413,6 +416,18 @@ impl VioConfig {
         let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_str(overlay)?;
         document.value0.extend(fields);
         Self::from_json_str(&serde_json::to_string(&document)?)
+    }
+
+    /// The same config with the back end off (`None`, `backend.mode` kept) or
+    /// on in `mode`.
+    #[must_use]
+    pub fn with_backend(&self, mode: Option<BackendMode>) -> Self {
+        let mut config: Self = self.clone();
+        config.backend_enabled = mode.is_some();
+        if let Some(mode) = mode {
+            config.backend_mode = mode;
+        }
+        config
     }
 
     /// Write configuration JSON with its `value0` wrapper.
@@ -592,7 +607,7 @@ mod tests {
     #[test]
     fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
         let defaults = VioConfig::default();
-        assert!(defaults.backend_enabled);
+        assert!(!defaults.backend_enabled);
         assert!(defaults.map_enable_culling);
         assert_eq!(defaults.map_max_redundancy_score, 0.9);
         assert!(!defaults.map_redundancy_exclude_hosted_lms);
@@ -607,12 +622,12 @@ mod tests {
         }
 
         let parity = VioConfig::from_json_str(
-            r#"{"value0":{"backend.enabled":false,"config.map_max_keyframes":3000,
+            r#"{"value0":{"backend.enabled":true,"config.map_max_keyframes":3000,
             "config.map_batch_cull_size":10,"config.map_enable_culling":false,
             "config.loop_closing_pgo_min_covisibility_weight":100}}"#,
         )
         .unwrap();
-        assert!(!parity.backend_enabled);
+        assert!(parity.backend_enabled);
         assert_eq!(parity.map_max_keyframes, 3000);
         assert_eq!(parity.map_batch_cull_size, 10);
         assert!(!parity.map_enable_culling);
@@ -638,18 +653,51 @@ mod tests {
     fn the_back_end_mode_defaults_to_offline_and_reads_lowercase_names() {
         let defaults = VioConfig::default();
         assert_eq!(defaults.backend_mode, BackendMode::Offline);
-        assert_eq!(defaults.backend_realtime_max_queued_queries, 4);
+        assert_eq!(defaults.backend_realtime_max_queued_queries.get(), 4);
         let realtime = VioConfig::from_json_str(
             r#"{"value0":{"backend.mode":"realtime","backend.realtime_max_queued_queries":2}}"#,
         )
         .unwrap();
         assert_eq!(realtime.backend_mode, BackendMode::Realtime);
-        assert_eq!(realtime.backend_realtime_max_queued_queries, 2);
+        assert_eq!(realtime.backend_realtime_max_queued_queries.get(), 2);
         let written: String = realtime.to_json_string().unwrap();
         assert!(written.contains(r#""realtime""#), "{written}");
         assert_eq!(VioConfig::from_json_str(&written).unwrap(), realtime);
         assert!(VioConfig::from_json_str(r#"{"value0":{"backend.mode":"Realtime"}}"#).is_err());
         assert!(VioConfig::from_json_str(r#"{"value0":{"backend.mode":"threaded"}}"#).is_err());
+        let zero =
+            VioConfig::from_json_str(r#"{"value0":{"backend.realtime_max_queued_queries":0}}"#)
+                .unwrap_err();
+        assert!(zero.to_string().contains("nonzero"), "{zero}");
+    }
+
+    /// `with_backend` sets the two back-end keys through the type, every
+    /// other key unchanged (the bindings use it instead of editing JSON).
+    #[test]
+    fn with_backend_sets_only_the_back_end_keys() {
+        let base = VioConfig {
+            vio_max_iterations: 3,
+            backend_mode: BackendMode::Realtime,
+            ..VioConfig::default()
+        };
+        let off = base.with_backend(None);
+        assert!(!off.backend_enabled);
+        assert_eq!(
+            off.backend_mode,
+            BackendMode::Realtime,
+            "off keeps the mode"
+        );
+        let offline = base.with_backend(Some(BackendMode::Offline));
+        assert!(offline.backend_enabled);
+        assert_eq!(offline.backend_mode, BackendMode::Offline);
+        assert_eq!(
+            VioConfig {
+                backend_enabled: false,
+                backend_mode: BackendMode::Realtime,
+                ..offline
+            },
+            base
+        );
     }
 
     #[test]

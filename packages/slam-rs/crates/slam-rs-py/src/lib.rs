@@ -348,22 +348,19 @@ impl Vio {
         .map(Some)
     }
 
-    /// A copy of the persistent keyframe map and the back end's counters, or
-    /// `None` when ``backend.enabled`` is off.
+    /// A copy of the persistent keyframe map and the back end's counters at the
+    /// moment it was taken, or `None` when ``backend.enabled`` is off.
     ///
-    /// Current up to the last solved keyframe the back end has taken; in
-    /// Realtime the back-end thread may still hold newer stamps (``flush``
-    /// waits for them). In Realtime this waits for the step in progress.
+    /// Never waits for the back end: in Realtime it is the newest copy the
+    /// back-end thread posted (``flush`` makes it current).
     fn map_snapshot(&self, py: Python<'_>) -> PyResult<Option<MapSnapshot>> {
-        let Some(counters) = self.inner.backend_counters() else {
+        let (Some(view), Some(mode)) = (
+            py.detach(|| self.inner.map_view()),
+            self.inner.backend_mode(),
+        ) else {
             return Ok(None);
         };
-        let mode = self.inner.backend_mode();
-        let snapshot = py.detach(|| self.inner.map_snapshot());
-        let (Some(snapshot), Some(mode)) = (snapshot, mode) else {
-            return Ok(None);
-        };
-        MapSnapshot::build(snapshot, counters, mode).map(Some)
+        MapSnapshot::build(&view.view, view.counters, mode).map(Some)
     }
 
     fn __repr__(&self) -> String {
@@ -640,6 +637,14 @@ impl VioSnapshot {
     }
 }
 
+/// The name `backend.mode` gives a mode.
+fn backend_mode_name(mode: slam_rs::config::BackendMode) -> &'static str {
+    match mode {
+        slam_rs::config::BackendMode::Offline => "offline",
+        slam_rs::config::BackendMode::Realtime => "realtime",
+    }
+}
+
 /// The persistent keyframe map and the back end's counters, copied out (D51).
 ///
 /// Arrays are flat copies in id order; scalars are counts. The map's poses are
@@ -676,7 +681,7 @@ impl MapSnapshot {
     /// `ValueError` when a landmark id has outgrown `int64`, the refusal
     /// [`VioSnapshot`] makes for the same ids.
     fn build(
-        snapshot: slam_rs::backend::MapSnapshot,
+        snapshot: &slam_rs::backend::MapSnapshot,
         counters: slam_rs::backend::BackendCounters,
         mode: slam_rs::config::BackendMode,
     ) -> PyResult<Self> {
@@ -703,16 +708,13 @@ impl MapSnapshot {
             })
             .collect::<PyResult<_>>()?;
         Ok(Self {
-            mode: match mode {
-                slam_rs::config::BackendMode::Offline => "offline",
-                slam_rs::config::BackendMode::Realtime => "realtime",
-            },
-            keyframe_t_ns: snapshot.keyframe_t_ns,
+            mode: backend_mode_name(mode),
+            keyframe_t_ns: snapshot.keyframe_t_ns.clone(),
             keyframe_poses,
-            keyframe_active: snapshot.keyframe_active,
+            keyframe_active: snapshot.keyframe_active.clone(),
             point_ids,
-            point_hosts: snapshot.point_hosts,
-            points_world: snapshot.points_world.into_iter().flatten().collect(),
+            point_hosts: snapshot.point_hosts.clone(),
+            points_world: snapshot.points_world.iter().flatten().copied().collect(),
             covisibility_edges: snapshot
                 .covisibility_edges
                 .iter()
@@ -897,6 +899,24 @@ impl MapSnapshot {
         self.counters.query.max_ns / 1_000
     }
 
+    /// Views the Realtime back-end thread posted for readers (0 Offline).
+    #[getter]
+    fn publish_count(&self) -> u64 {
+        self.counters.publish.steps
+    }
+
+    /// Wall time of the slowest posted view, microseconds.
+    #[getter]
+    fn publish_max_us(&self) -> u64 {
+        self.counters.publish.max_ns / 1_000
+    }
+
+    /// Wall time of all posted views, microseconds.
+    #[getter]
+    fn publish_total_us(&self) -> u64 {
+        self.counters.publish.total_ns / 1_000
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "MapSnapshot(mode={}, keyframes={}, points={}, edges={}, queries_dropped={})",
@@ -1070,6 +1090,36 @@ impl VioConfig {
     #[setter]
     fn set_optical_flow_image_safe_radius(&mut self, radius: f32) {
         self.inner.optical_flow_image_safe_radius = radius;
+    }
+
+    /// ``backend.enabled``: whether `Vio` builds the persistent keyframe map.
+    #[getter]
+    fn backend_enabled(&self) -> bool {
+        self.inner.backend_enabled
+    }
+
+    /// ``backend.mode``: ``"offline"`` (inline) or ``"realtime"`` (own thread).
+    #[getter]
+    fn backend_mode(&self) -> &'static str {
+        backend_mode_name(self.inner.backend_mode)
+    }
+
+    /// The same configuration with the back end ``"off"`` (``backend.mode``
+    /// kept) or on in ``"offline"`` or ``"realtime"``; every other key unchanged.
+    fn with_backend(&self, mode: &str) -> PyResult<Self> {
+        let mode: Option<slam_rs::config::BackendMode> = match mode {
+            "off" => None,
+            "offline" => Some(slam_rs::config::BackendMode::Offline),
+            "realtime" => Some(slam_rs::config::BackendMode::Realtime),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "back-end mode {other:?} is not \"off\", \"offline\" or \"realtime\""
+                )));
+            }
+        };
+        Ok(Self {
+            inner: self.inner.with_backend(mode),
+        })
     }
 
     fn __repr__(&self) -> String {

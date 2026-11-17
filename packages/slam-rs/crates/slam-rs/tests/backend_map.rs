@@ -136,8 +136,12 @@ fn the_map_never_moves_a_vio_pose_while_it_culls() {
             offline.max_pending_stamps = counters.max_pending_stamps;
             offline.step = counters.step;
             offline.query = counters.query;
+            offline.publish = counters.publish;
             offline
         });
+        // The flush posted the view Realtime readers get; Offline takes its views on demand.
+        assert!(counters.publish.steps >= 1, "{counters:?}");
+        assert_eq!(on.backend_counters().unwrap().publish.steps, 0);
         assert!(counters.max_pending_stamps >= 1, "{counters:?}");
         assert_eq!(on.estimator().missing_stamp_poses(), 0);
         on.read_map(|map_backend| check_map(&on, map_backend, deferred))

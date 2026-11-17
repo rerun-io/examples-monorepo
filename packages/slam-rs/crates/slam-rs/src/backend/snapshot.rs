@@ -41,8 +41,10 @@ pub struct MapSnapshot {
 
 impl MapBackend {
     /// Copy the map. A point is `T_w_i(host) * t_i_c[cam] * unproject(direction)
-    /// / inv_dist`, as the window builds it; a landmark whose host keyframe or
-    /// camera is unknown is left out of the points (it still counts in `stats`).
+    /// / inv_dist`, as the window builds it. A landmark whose host keyframe or
+    /// camera is unknown, or with no finite position (`inv_dist <= 0`, at
+    /// infinity), is left out of the points (it still counts in `stats`), as
+    /// RootSLAM's map export keeps only finite positions.
     pub fn snapshot(&self, t_i_c: &[Se3<f64>]) -> MapSnapshot {
         let keyframes = self.map.keyframes();
         let mut point_ids: Vec<LandmarkId> = Vec::with_capacity(self.map.landmarks().len());
@@ -55,13 +57,20 @@ impl MapBackend {
             ) else {
                 continue;
             };
+            if landmark.inv_dist.is_nan() || landmark.inv_dist <= 0.0 {
+                continue;
+            }
             let bearing: Vector4<f64> = StereographicParam::unproject(&landmark.direction);
             let point_c: Vector3<f64> =
                 Vector3::new(bearing[0], bearing[1], bearing[2]) / landmark.inv_dist;
             let point_w: Vector3<f64> = (host.pose * *extrinsic) * point_c;
+            let point: [f32; 3] = [point_w.x as f32, point_w.y as f32, point_w.z as f32];
+            if !point.iter().all(|value| value.is_finite()) {
+                continue;
+            }
             point_ids.push(id);
             point_hosts.push(landmark.host.frame_id);
-            points_world.push([point_w.x as f32, point_w.y as f32, point_w.z as f32]);
+            points_world.push(point);
         }
         let graph = self.graph();
         MapSnapshot {

@@ -65,9 +65,6 @@ pub struct Vio<S: Scalar = f32> {
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
-    /// `T_i_c` per camera, to place map points in the world for snapshots.
-    #[cfg(feature = "backend")]
-    map_t_i_c: Vec<crate::lie::Se3<f64>>,
 }
 
 pub use lag::OverlapTimings;
@@ -136,19 +133,20 @@ impl<S: Scalar> Vio<S> {
                     crate::backend::MapBackend::new(
                         crate::backend::MapConfig::from(&config),
                         calibration.resolution.clone(),
+                    )
+                    .with_extrinsics(
+                        calibration
+                            .t_i_c
+                            .iter()
+                            .map(|t_i_c| t_i_c.cast::<f64>())
+                            .collect(),
                     ),
                     config.backend_mode,
-                    config.backend_realtime_max_queued_queries,
+                    config.backend_realtime_max_queued_queries.get(),
                 )
             })
             .transpose()
             .map_err(|error| VioError::BackendThread(error.to_string()))?;
-        #[cfg(feature = "backend")]
-        let map_t_i_c: Vec<crate::lie::Se3<f64>> = calibration
-            .t_i_c
-            .iter()
-            .map(|t_i_c| t_i_c.cast::<f64>())
-            .collect();
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
@@ -174,19 +172,12 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_runner,
-            #[cfg(feature = "backend")]
-            map_t_i_c,
         })
     }
 
-    /// Read the persistent keyframe map; `None` when `backend.enabled` is off.
-    ///
-    /// Current up to the last solved keyframe the back end has taken: a
-    /// keyframe whose solve is still deferred (D84) joins once
-    /// [`Self::finish_deferred_keyframe`], the next `track` or [`Self::flush`]
-    /// solves it, and in Realtime once the back-end thread has stepped it
-    /// ([`Self::flush_backend`] waits for that). In Realtime a read waits for
-    /// the step in progress; `track` never does.
+    /// Read the persistent keyframe map itself; `None` when `backend.enabled`
+    /// is off. In Realtime this waits for the step in progress: tests and
+    /// diagnostics only. Tracking-side readers take [`Self::map_view`].
     #[cfg(feature = "backend")]
     pub fn read_map<R>(&self, read: impl FnOnce(&crate::backend::MapBackend) -> R) -> Option<R> {
         self.map_runner
@@ -194,19 +185,32 @@ impl<S: Scalar> Vio<S> {
             .map(|backend| backend.read(|map_backend, _| read(map_backend)))
     }
 
-    /// A copy of the map ([`Self::read_map`] says how current it is).
+    /// A copy of the map and the back end's counters at the moment it was
+    /// taken; `None` when `backend.enabled` is off. Never waits for the back
+    /// end ([`crate::backend::BackendRunner::view`]).
+    ///
+    /// Current up to the last solved keyframe the back end has taken: a
+    /// keyframe whose solve is still deferred (D84) joins once
+    /// [`Self::finish_deferred_keyframe`], the next `track` or [`Self::flush`]
+    /// solves it. In Realtime it is the newest copy the back-end thread
+    /// posted, which can trail the stamps it still holds;
+    /// [`Self::flush_backend`] makes it current.
     #[cfg(feature = "backend")]
-    pub fn map_snapshot(&self) -> Option<crate::backend::MapSnapshot> {
-        self.read_map(|map_backend| map_backend.snapshot(&self.map_t_i_c))
+    pub fn map_view(&self) -> Option<crate::backend::BackendView<crate::backend::MapSnapshot>> {
+        self.map_runner.as_ref().map(|runner| runner.view())
+    }
+
+    /// The map of [`Self::map_view`].
+    #[cfg(feature = "backend")]
+    pub fn map_snapshot(&self) -> Option<std::sync::Arc<crate::backend::MapSnapshot>> {
+        self.map_view().map(|view| view.view)
     }
 
     /// What the back end has done so far: stamps, queries run and dropped,
-    /// timings. `None` when `backend.enabled` is off.
+    /// timings. `None` when `backend.enabled` is off. Never waits.
     #[cfg(feature = "backend")]
     pub fn backend_counters(&self) -> Option<crate::backend::BackendCounters> {
-        self.map_runner
-            .as_ref()
-            .map(|backend| backend.read(|_, counters| *counters))
+        self.map_runner.as_ref().map(|runner| runner.counters())
     }
 
     /// Where the back end runs; `None` when `backend.enabled` is off.

@@ -21,7 +21,7 @@ from slam_rs.catalog_feed import (
     open_segment,
     select_decode_device,
 )
-from slam_rs.config import SlamConfig, load_slam_config, with_back_end
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep
@@ -78,8 +78,9 @@ class Config:
     map: Literal["off", "offline", "realtime"] | None = None
     """``--stage vio``: the back end's persistent keyframe map, drawn under ``/world/runs/slam_rs``; None keeps the profile's.
 
-    The profiles build it: ``reference`` and ``fast`` step it inline (tracking waits, results repeat). ``realtime``
-    runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the same in all three.
+    Off by default (opt in until loop closing gives the map a use). ``offline`` steps it inline (tracking waits, results
+    repeat); ``realtime`` runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the
+    same in all three.
     """
 
 
@@ -173,7 +174,7 @@ def main(config: Config) -> None:
     else:
         vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
     if config.map is not None:
-        vio_config = with_back_end(vio_config, config.map)
+        vio_config = vio_config.with_backend(config.map)
     source: SegmentSource
     origin: str
     if config.rrd is not None:

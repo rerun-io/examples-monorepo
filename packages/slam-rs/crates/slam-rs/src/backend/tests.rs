@@ -543,3 +543,30 @@ fn a_map_snapshot_skips_points_it_cannot_place() {
     assert!(snapshot.points_world.is_empty());
     assert_eq!(snapshot.stats.landmarks, 1);
 }
+
+/// A landmark at infinity (`inv_dist` 0, which the window allows) has no
+/// finite position: left out of the points, still counted (RootSLAM's map
+/// export keeps finite positions only).
+#[test]
+fn a_map_snapshot_skips_points_at_infinity() {
+    let mut backend =
+        backend(100, 10).with_extrinsics(vec![Se3::new(So3::identity(), Vector3::zeros()); 2]);
+    let mut far: StampLandmark = landmark(11, 1, &[(1, 0), (2, 0)]);
+    far.inv_dist = 0.0;
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![landmark(10, 1, &[(1, 0), (2, 0)]), far],
+    ));
+    let snapshot: MapSnapshot = backend.view();
+    assert_eq!(snapshot.point_ids, vec![LandmarkId(10)]);
+    assert!(
+        snapshot
+            .points_world
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    );
+    assert_eq!(snapshot.stats.landmarks, 2);
+}

@@ -38,6 +38,14 @@ MAP_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/keyframes"
 """The back end's map keyframes (DESIGN §8), one point per keyframe at its raw pose."""
 MAP_POINTS_ENTITY: str = f"{RUN_ENTITY}/map/points"
 """The back end's map points in the world frame (DESIGN §8)."""
+MAP_KEYFRAMES_EVERY_NS: int = 1_000_000_000
+"""Least video time between two draws of the map keyframes (at most ``map_max_keyframes`` points, ~24 kB a draw)."""
+MAP_POINTS_EVERY_NS: int = 5_000_000_000
+"""Least video time between two draws of the map points (tens of thousands of points, ~0.5 MB a draw on MIPB08).
+
+Each draw is the whole map, so drawing at every new keyframe would grow the recording with keyframes x map size;
+at a fixed video-time cadence it grows linearly with the clip. The final map is drawn once more after the flush.
+"""
 VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
@@ -205,7 +213,15 @@ class VioLogger:
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
     map_keyframe: int | None = None
-    """Newest window keyframe when the map was last drawn; None before the first."""
+    """Newest window keyframe when the map was last read; None before the first."""
+    map_keyframes_t_ns: int | None = None
+    """Video time of the last map-keyframes draw; None before the first."""
+    map_points_t_ns: int | None = None
+    """Video time of the last map-points draw; None before the first."""
+    map_keyframes_every_ns: int = MAP_KEYFRAMES_EVERY_NS
+    """Least video time between two map-keyframes draws (:data:`MAP_KEYFRAMES_EVERY_NS`)."""
+    map_points_every_ns: int = MAP_POINTS_EVERY_NS
+    """Least video time between two map-points draws (:data:`MAP_POINTS_EVERY_NS`)."""
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
@@ -239,7 +255,7 @@ class VioLogger:
             snapshot: The window and the frame's statistics behind that result.
             frame: The keypoints the estimator's own frontend tracked.
             elapsed_ms: Wall time the ``track`` call took.
-            map_snapshot: The back end's map, when the caller read it (see :meth:`map_is_stale`); drawn under the run.
+            map_snapshot: The back end's map, when the caller read it (see :meth:`map_is_due`); drawn under the run.
         """
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
@@ -256,7 +272,7 @@ class VioLogger:
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
         if map_snapshot is not None:
-            self._log_map(map_snapshot)
+            self._log_map(map_snapshot, snapshot.t_ns, final=False)
             self.map_keyframe = int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else None
         self._log_scalars(snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
@@ -366,21 +382,35 @@ class VioLogger:
             rr.Points3D(snapshot.landmark_positions, colors=track_colors(snapshot.landmark_hosts), radii=0.008),
         )
 
-    def map_is_stale(self, snapshot: _core.VioSnapshot) -> bool:
-        """Whether a keyframe joined the window since the map was last drawn: the moment to read the map again.
+    def map_is_due(self, snapshot: _core.VioSnapshot) -> bool:
+        """Whether to read the map now: a keyframe joined the window since the last read, and the keyframes are due.
 
-        The map changes only when a keyframe's stamp reaches the back end, and a snapshot of a long run's map holds
-        tens of thousands of points, so reading it every frameset would cost more than the frameset.
+        The map changes only when a keyframe's stamp reaches the back end, and a long run's map holds tens of
+        thousands of points, so it is read (and drawn) at most every :attr:`map_keyframes_every_ns` of video time.
         """
-        return len(snapshot.kf_ids) > 0 and int(snapshot.kf_ids[-1]) != self.map_keyframe
+        if len(snapshot.kf_ids) == 0 or int(snapshot.kf_ids[-1]) == self.map_keyframe:
+            return False
+        return self.map_keyframes_t_ns is None or snapshot.t_ns - self.map_keyframes_t_ns >= self.map_keyframes_every_ns
 
-    def _log_map(self, map_snapshot: _core.MapSnapshot) -> None:
-        """Draw the back end's keyframes (window ones in the window colour) and its points, whole, at the cursor."""
+    def log_final_map(self, map_snapshot: _core.MapSnapshot, t_ns: int) -> None:
+        """Draw the map once more after the run's flush, keyframes and points, so the recording ends on the final map.
+
+        Args:
+            map_snapshot: The map after :meth:`slam_rs._core.Vio.flush` (current in both modes).
+            t_ns: Video time of the cursor the caller set, usually the last frameset's.
+        """
+        self._log_map(map_snapshot, t_ns, final=True)
+
+    def _log_map(self, map_snapshot: _core.MapSnapshot, t_ns: int, *, final: bool) -> None:
+        """Draw the back end's keyframes (window ones in the window colour) at the cursor, and its points when due or final."""
         colors: UInt8[ndarray, "k 4"] = np.where(
             map_snapshot.keyframe_active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
         )
         rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(map_snapshot.keyframe_poses[:, 0:3], colors=colors, radii=0.012))
-        rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=MAP_POINT_COLOR, radii=0.004))
+        self.map_keyframes_t_ns = t_ns
+        if final or self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
+            rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=MAP_POINT_COLOR, radii=0.004))
+            self.map_points_t_ns = t_ns
 
     def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
         """Log the counters the time-series views plot.
@@ -472,9 +502,17 @@ class VioStage:
             self._log_result(held, result)
 
     def flush(self) -> None:
-        """Log the last lagged frame before completing paths or exporting poses."""
+        """Log the last lagged frame, then the final map (the flush made it current), before completing paths or exporting poses."""
+        last_t_ns: int | None = None
         for held, result in self.lockstep.flush():
             self._log_result(held, result)
+            last_t_ns = held.t_ns
+        final: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot()
+        if last_t_ns is None and self.logger.estimate_t_ns:
+            last_t_ns = self.logger.estimate_t_ns[-1]
+        if final is not None and last_t_ns is not None:
+            rr.set_time(TIMELINE, duration=np.timedelta64(last_t_ns, "ns"))
+            self.logger.log_final_map(final, last_t_ns)
 
     def _log_result(self, held: Frameset, result: _core.VioResult) -> None:
         """Log a result with the keypoints and timestamp of its own input frame."""
@@ -483,8 +521,8 @@ class VioStage:
         frame: _core.FlowFrame = self.lockstep.flow_frame()
         assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
         assert frame.t_ns == result.t_ns
-        # None with the back end off; read only when a keyframe joined.
-        map_snapshot: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot() if self.logger.map_is_stale(snapshot) else None
+        # None with the back end off; read only when a keyframe joined and the map is due (never waits for the back end).
+        map_snapshot: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot() if self.logger.map_is_due(snapshot) else None
         self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_snapshot)
 
     def refuse_lost_framesets(self) -> None:

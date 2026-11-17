@@ -16,11 +16,18 @@
 //! at most `max_queued_queries` queries. One more drops the oldest, which the
 //! next keyframe makes stale anyway, and counts it.
 //!
-//! The work sits behind a mutex so a caller can read it ([`BackendRunner::read`]).
-//! A read waits at most for the step or query in progress; `submit` never locks.
+//! Readers never wait for the work. [`BackendRunner::view`] hands out a copy
+//! ([`BackendWork::View`]) with the counters at the moment it was taken, one
+//! consistent read. In Realtime the back-end thread takes that copy itself,
+//! once a reader has asked for one, each time it has stepped every stamp
+//! waiting and after a query that changed the work; it posts it on a board
+//! whose lock only guards an `Arc` swap. The work's own lock stays the thread's
+//! for a whole step or query (in b2 a loop query and PGO), and only
+//! [`BackendRunner::read`] (tests, diagnostics) takes it from outside. Offline
+//! steps inside `submit`, so a view taken from the work there never waits.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -32,11 +39,17 @@ use crate::types::FrameId;
 
 /// What the back end does with the window's stamps.
 pub trait BackendWork: Send + 'static {
+    /// What readers get: a copy of the work that stays valid while it goes on.
+    type View: Send + Sync + 'static;
+
     /// Take one stamp. Every stamp reaches this, in order.
     fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent>;
 
     /// Look for a loop at `keyframe`, which a step added. Realtime may drop it.
     fn query(&mut self, keyframe: FrameId) -> Vec<MapEvent>;
+
+    /// Copy the work for readers.
+    fn view(&self) -> Self::View;
 }
 
 /// What the back end has done so far.
@@ -54,6 +67,26 @@ pub struct BackendCounters {
     pub step: StepTiming,
     /// Wall time of the queries.
     pub query: StepTiming,
+    /// Wall time of the views the Realtime thread posted for readers.
+    pub publish: StepTiming,
+}
+
+/// A copy of the work and the counters when it was taken: one moment.
+#[derive(Debug)]
+pub struct BackendView<V> {
+    /// The copy.
+    pub view: Arc<V>,
+    /// What the back end had done when it was taken.
+    pub counters: BackendCounters,
+}
+
+impl<V> Clone for BackendView<V> {
+    fn clone(&self) -> Self {
+        Self {
+            view: Arc::clone(&self.view),
+            counters: self.counters,
+        }
+    }
 }
 
 /// The work and what is waiting for it, behind the runner's mutex.
@@ -83,16 +116,66 @@ impl<B: BackendWork> State<B> {
         }
     }
 
-    /// Run the oldest queued query; `false` if none was queued.
-    fn query_one(&mut self) -> bool {
-        let Some(keyframe) = self.queries.pop_front() else {
-            return false;
-        };
+    /// Run the oldest queued query: `None` if none was queued, else whether
+    /// it changed the work.
+    fn query_one(&mut self) -> Option<bool> {
+        let keyframe: FrameId = self.queries.pop_front()?;
         let started = std::time::Instant::now();
-        self.work.query(keyframe);
+        let events: Vec<MapEvent> = self.work.query(keyframe);
         self.counters.query.record(crate::duration_ns(started));
         self.counters.queries_run += 1;
-        true
+        Some(!events.is_empty())
+    }
+
+    /// Take a view now, with the counters it goes with.
+    fn view(&self) -> BackendView<B::View> {
+        BackendView {
+            view: Arc::new(self.work.view()),
+            counters: self.counters,
+        }
+    }
+}
+
+/// What the Realtime thread posts for readers. Its lock guards copies and an
+/// `Arc` swap, never a step.
+struct Board<V> {
+    posted: Mutex<Posted<V>>,
+    /// A reader has asked for a view: from then on the thread posts them.
+    subscribed: AtomicBool,
+}
+
+struct Posted<V> {
+    /// The newest view.
+    latest: BackendView<V>,
+    /// The counters after the newest step or query (newer than `latest`'s).
+    counters: BackendCounters,
+}
+
+impl<V> Board<V> {
+    fn posted(&self) -> MutexGuard<'_, Posted<V>> {
+        match self.posted.lock() {
+            Ok(guard) => guard,
+            Err(_) => panic!("the back-end thread panicked"),
+        }
+    }
+
+    /// Post the counters and, when `take_view` (and on `force`), a new view.
+    fn post<B: BackendWork<View = V>>(&self, state: &mut State<B>, take_view: bool, force: bool) {
+        let mut latest: Option<BackendView<V>> = None;
+        if force || (take_view && self.subscribed.load(Ordering::Acquire)) {
+            let started = std::time::Instant::now();
+            let view: B::View = state.work.view();
+            state.counters.publish.record(crate::duration_ns(started));
+            latest = Some(BackendView {
+                view: Arc::new(view),
+                counters: state.counters,
+            });
+        }
+        let mut posted = self.posted();
+        posted.counters = state.counters;
+        if let Some(latest) = latest {
+            posted.latest = latest;
+        }
     }
 }
 
@@ -105,6 +188,10 @@ fn lock<B>(state: &Mutex<State<B>>) -> MutexGuard<'_, State<B>> {
     }
 }
 
+/// Stamps waiting past which a Realtime run warns, once: steps average about
+/// 0.6 ms (MIPB08), so 64 waiting means the thread has fallen well behind.
+const WARN_PENDING_STAMPS: u64 = 64;
+
 enum Message {
     Stamp(MapStamp),
     /// Answer once every earlier stamp is stepped and every queued query ran.
@@ -112,12 +199,13 @@ enum Message {
 }
 
 /// The Realtime thread and the tracking side of its channel.
-struct Thread {
+struct Thread<B: BackendWork> {
     sender: Option<Sender<Message>>,
     handle: Option<JoinHandle<()>>,
     /// Stamps sent and not yet taken.
     pending: Arc<AtomicU64>,
     max_pending: u64,
+    board: Arc<Board<B::View>>,
 }
 
 /// The back end in one of its two modes.
@@ -125,7 +213,7 @@ pub struct BackendRunner<B: BackendWork> {
     mode: BackendMode,
     state: Arc<Mutex<State<B>>>,
     /// `Some` in Realtime.
-    thread: Option<Thread>,
+    thread: Option<Thread<B>>,
 }
 
 impl<B: BackendWork> BackendRunner<B> {
@@ -141,22 +229,32 @@ impl<B: BackendWork> BackendRunner<B> {
             counters: BackendCounters::default(),
             queries: VecDeque::new(),
         }));
-        let mut thread: Option<Thread> = None;
+        let mut thread: Option<Thread<B>> = None;
         if mode == BackendMode::Realtime {
             let (sender, receiver) = mpsc::channel::<Message>();
             let pending = Arc::new(AtomicU64::new(0));
+            let first: BackendView<B::View> = lock(&state).view();
+            let board = Arc::new(Board {
+                posted: Mutex::new(Posted {
+                    counters: first.counters,
+                    latest: first,
+                }),
+                subscribed: AtomicBool::new(false),
+            });
             let handle = std::thread::Builder::new()
                 .name("slam-rs-backend".into())
                 .spawn({
                     let state = Arc::clone(&state);
                     let pending = Arc::clone(&pending);
-                    move || run_realtime(&state, &receiver, &pending, max_queued_queries)
+                    let board = Arc::clone(&board);
+                    move || run_realtime(&state, &board, &receiver, &pending, max_queued_queries)
                 })?;
             thread = Some(Thread {
                 sender: Some(sender),
                 handle: Some(handle),
                 pending,
                 max_pending: 0,
+                board,
             });
         }
         Ok(Self {
@@ -177,10 +275,15 @@ impl<B: BackendWork> BackendRunner<B> {
         let Some(thread) = self.thread.as_mut() else {
             let mut state = lock(&self.state);
             state.step(stamp, usize::MAX);
-            while state.query_one() {}
+            while state.query_one().is_some() {}
             return;
         };
         let pending: u64 = thread.pending.fetch_add(1, Ordering::Relaxed) + 1;
+        if pending > WARN_PENDING_STAMPS && thread.max_pending <= WARN_PENDING_STAMPS {
+            log::warn!(
+                "the back-end thread is {pending} map stamps behind tracking (a slow host?); stamps are never dropped, so the backlog grows until it catches up"
+            );
+        }
         thread.max_pending = thread.max_pending.max(pending);
         if let Some(sender) = thread.sender.as_ref()
             && sender.send(Message::Stamp(stamp)).is_err()
@@ -217,8 +320,34 @@ impl<B: BackendWork> BackendRunner<B> {
         }
     }
 
-    /// Read the work and the counters. Realtime waits for the step or query in
-    /// progress, never for the stamps still queued.
+    /// A copy of the work and the counters it goes with; never waits for a
+    /// step or query. Offline it is taken now (the steps run inside `submit`).
+    /// Realtime it is the newest one the thread posted: the first call returns
+    /// the one taken at start and asks the thread to post from then on; after
+    /// [`Self::flush`] it is current.
+    pub fn view(&self) -> BackendView<B::View> {
+        let Some(thread) = &self.thread else {
+            return lock(&self.state).view();
+        };
+        thread.board.subscribed.store(true, Ordering::Release);
+        let mut latest: BackendView<B::View> = thread.board.posted().latest.clone();
+        latest.counters.max_pending_stamps = thread.max_pending;
+        latest
+    }
+
+    /// What the back end has done so far; never waits for a step or query.
+    pub fn counters(&self) -> BackendCounters {
+        let Some(thread) = &self.thread else {
+            return lock(&self.state).counters;
+        };
+        let mut counters: BackendCounters = thread.board.posted().counters;
+        counters.max_pending_stamps = thread.max_pending;
+        counters
+    }
+
+    /// Read the work itself and the counters. Realtime waits for the step or
+    /// query in progress (never for the stamps still queued), so tracking
+    /// reads [`Self::view`] instead; this is for tests and diagnostics.
     pub fn read<R>(&self, read: impl FnOnce(&B, &BackendCounters) -> R) -> R {
         let state = lock(&self.state);
         let mut counters: BackendCounters = state.counters;
@@ -265,19 +394,30 @@ impl<B: BackendWork> Drop for BackendRunner<B> {
 }
 
 /// The Realtime loop: step every stamp waiting, then one query, until the
-/// channel closes. It blocks only when it has nothing to do.
+/// channel closes. It blocks only when it has nothing to do. It posts the
+/// counters after each step and query, and a view once no stamp is waiting
+/// (after a query only if it changed the work); a flush always posts one.
 fn run_realtime<B: BackendWork>(
     state: &Mutex<State<B>>,
+    board: &Board<B::View>,
     receiver: &Receiver<Message>,
     pending: &AtomicU64,
     max_queries: usize,
 ) {
+    let query = || {
+        let mut state = lock(state);
+        let changed: Option<bool> = state.query_one();
+        if let Some(changed) = changed {
+            board.post(&mut state, changed, false);
+        }
+        changed.is_some()
+    };
     loop {
         let message = match receiver.try_recv() {
             Ok(message) => message,
             Err(TryRecvError::Disconnected) => return,
             Err(TryRecvError::Empty) => {
-                if lock(state).query_one() {
+                if query() {
                     continue;
                 }
                 match receiver.recv() {
@@ -288,11 +428,14 @@ fn run_realtime<B: BackendWork>(
         };
         match message {
             Message::Stamp(stamp) => {
-                lock(state).step(stamp, max_queries);
-                pending.fetch_sub(1, Ordering::Relaxed);
+                let mut state = lock(state);
+                state.step(stamp, max_queries);
+                let waiting: u64 = pending.fetch_sub(1, Ordering::Relaxed) - 1;
+                board.post(&mut state, waiting == 0, false);
             }
             Message::Flush(ack) => {
-                while lock(state).query_one() {}
+                while query() {}
+                board.post(&mut lock(state), true, true);
                 // The flusher may have stopped waiting; nothing to do then.
                 let _ = ack.send(());
             }
@@ -305,7 +448,6 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::collections::BTreeMap;
-    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     use super::*;
@@ -322,6 +464,12 @@ mod tests {
     }
 
     impl BackendWork for Recorder {
+        type View = Vec<i64>;
+
+        fn view(&self) -> Vec<i64> {
+            self.steps.clone()
+        }
+
         fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {
             if let Some(gate) = &self.gate {
                 while !gate.load(Ordering::Acquire) {
@@ -420,6 +568,69 @@ mod tests {
         });
     }
 
+    /// A step held closed on the back-end thread (holding the work's lock):
+    /// a view and the counters come back at once, at the last posted moment,
+    /// and once the step ends and the runner is flushed the view is current.
+    #[test]
+    fn a_held_step_never_makes_a_view_or_the_counters_wait() {
+        let gate = Arc::new(AtomicBool::new(true));
+        let work = Recorder {
+            gate: Some(Arc::clone(&gate)),
+            ..Recorder::default()
+        };
+        let mut runner = BackendRunner::new(work, BackendMode::Realtime, 4).unwrap();
+        let first = runner.view();
+        assert!(first.view.is_empty());
+        runner.submit(stamp(0));
+        runner.flush();
+        gate.store(false, Ordering::Release);
+        runner.submit(stamp(1));
+        // Wait until the thread is inside the held step: it is idle after the
+        // flush, so the only one to take the work's lock now is step 1.
+        let started = std::time::Instant::now();
+        while runner.state.try_lock().is_ok() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the step never started"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let reading = std::time::Instant::now();
+        let held = runner.view();
+        let counters: BackendCounters = runner.counters();
+        assert!(reading.elapsed() < Duration::from_millis(50));
+        assert!(runner.state.try_lock().is_err(), "the step is still held");
+        assert_eq!(*held.view, vec![0]);
+        assert_eq!(held.counters.stamps, 1);
+        assert_eq!(counters.stamps, 1);
+        gate.store(true, Ordering::Release);
+        runner.flush();
+        let current = runner.view();
+        assert_eq!(*current.view, vec![0, 1]);
+        assert_eq!(current.counters.stamps, 2);
+        assert_eq!(current.counters.queries_run, 2);
+        assert!(
+            current.counters.publish.steps >= 2,
+            "{:?}",
+            current.counters
+        );
+    }
+
+    /// Offline takes a view on demand, never posts one, and the view's
+    /// counters are the ones of that moment.
+    #[test]
+    fn an_offline_view_is_taken_on_demand() {
+        let mut runner = BackendRunner::new(Recorder::default(), BackendMode::Offline, 1).unwrap();
+        for t_ns in 0..3 {
+            runner.submit(stamp(t_ns));
+        }
+        let view = runner.view();
+        assert_eq!(*view.view, vec![0, 1, 2]);
+        assert_eq!(view.counters, runner.counters());
+        assert_eq!(view.counters.stamps, 3);
+        assert_eq!(view.counters.publish.steps, 0);
+    }
+
     #[test]
     fn dropping_a_realtime_runner_joins_its_thread() {
         let work = Recorder {
@@ -441,6 +652,10 @@ mod tests {
     struct Panics;
 
     impl BackendWork for Panics {
+        type View = ();
+
+        fn view(&self) {}
+
         fn step(&mut self, _: MapStamp) -> Vec<MapEvent> {
             panic!("step failed");
         }

@@ -207,6 +207,18 @@ class MapSnapshot:
     def query_max_us(self) -> int:
         """Wall time of the slowest loop query, microseconds."""
 
+    @property
+    def publish_count(self) -> int:
+        """Views the Realtime back-end thread posted for readers (0 in Offline)."""
+
+    @property
+    def publish_max_us(self) -> int:
+        """Wall time of the slowest posted view, microseconds."""
+
+    @property
+    def publish_total_us(self) -> int:
+        """Wall time of all posted views, microseconds."""
+
     def __repr__(self) -> str: ...
 
 class VioSnapshot:
@@ -406,11 +418,11 @@ class Vio:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
     def map_snapshot(self) -> MapSnapshot | None:
-        """A copy of the persistent keyframe map and the back end's counters; None when ``backend.enabled`` is off (it is on by default).
+        """A copy of the persistent keyframe map and the back end's counters at one moment; None when ``backend.enabled`` is off (the default).
 
-        Current up to the last solved keyframe the back end has taken. In Realtime (``backend.mode``) the back-end
-        thread may still hold newer stamps; :meth:`flush` waits for them. In Realtime this waits for the step in
-        progress, never for the queued stamps; :meth:`track` never waits for the back end.
+        Never waits for the back end. Offline it is current up to the last solved keyframe. In Realtime
+        (``backend.mode``) it is the newest copy the back-end thread posted, which can trail the stamps it still
+        holds; :meth:`flush` makes it current. The first Realtime call asks the thread to post copies from then on.
         """
 
     def __repr__(self) -> str: ...
@@ -430,6 +442,20 @@ class VioConfig:
 
     optical_flow_image_safe_radius: float
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
+
+    @property
+    def backend_enabled(self) -> bool:
+        """``backend.enabled``: whether :class:`Vio` builds the persistent keyframe map (off by default)."""
+
+    @property
+    def backend_mode(self) -> Literal["offline", "realtime"]:
+        """``backend.mode``: ``offline`` steps the map inline (scoring, gates), ``realtime`` on its own thread (live)."""
+
+    def with_backend(self, mode: Literal["off", "offline", "realtime"]) -> VioConfig:
+        """The same configuration with the back end off (``backend.mode`` kept) or on in ``mode``; every other key unchanged.
+
+        Raises ``ValueError`` on any other mode.
+        """
 
     def __repr__(self) -> str: ...
 

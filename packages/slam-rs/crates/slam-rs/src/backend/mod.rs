@@ -24,7 +24,7 @@ use crate::types::FrameId;
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
-pub use runner::{BackendCounters, BackendRunner, BackendWork};
+pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::MapSnapshot;
 
 /// The map's knobs, read from [`VioConfig`].
@@ -98,6 +98,8 @@ pub struct MapBackend {
     culled: BTreeSet<FrameId>,
     /// How many of `culled` the over-budget batches took.
     culled_over_budget: usize,
+    /// `T_i_c` per camera, which places the points of a [`BackendWork::view`].
+    t_i_c: Vec<crate::lie::Se3<f64>>,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -141,7 +143,15 @@ impl MapBackend {
             pinned: BTreeSet::new(),
             culled: BTreeSet::new(),
             culled_over_budget: 0,
+            t_i_c: Vec::new(),
         }
+    }
+
+    /// The rig's `T_i_c` per camera, so a view can place the map's points.
+    #[must_use]
+    pub fn with_extrinsics(mut self, t_i_c: Vec<crate::lie::Se3<f64>>) -> Self {
+        self.t_i_c = t_i_c;
+        self
     }
 
     /// The map.
@@ -376,6 +386,13 @@ impl MapBackend {
 }
 
 impl BackendWork for MapBackend {
+    type View = MapSnapshot;
+
+    /// [`MapBackend::snapshot`] with the rig's extrinsics.
+    fn view(&self) -> MapSnapshot {
+        self.snapshot(&self.t_i_c)
+    }
+
     fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {
         MapBackend::step(self, stamp)
     }
