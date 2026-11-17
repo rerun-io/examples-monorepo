@@ -26,7 +26,7 @@ body being ``lcam_front``. Here:
 
 Clock: frame k is at k * 0.1 s and IMU sample j at j * 0.01 s on ``video_time``, from 0 (``capture:start_time_ns`` = 0).
 The IMU is synthesised from a pose spline whose ends swing (|accel| up to 94 m/s^2), so ``IMU_TRIM`` samples are dropped
-at each end and only frames inside the remaining IMU span are kept. Ground truth is the pose file at the kept frames.
+at each end and only frames with a remaining IMU sample at or before them and one strictly after them are kept. Ground truth is the pose file at the kept frames.
 """
 
 from __future__ import annotations
@@ -153,33 +153,36 @@ def imu_in_rig(values_ned: Float64[ndarray, "n 3"]) -> Float64[ndarray, "n 3"]:
 
 
 def aligned_window(num_frames: int, num_imu: int, frame_limit: int | None = None) -> tuple[Int64[ndarray, "k"], slice]:
-    """Frames and IMU samples to keep: the IMU without its spline ends, and the frames inside the IMU span.
+    """Frames and IMU samples to keep: the IMU without its spline ends, and the frames that IMU covers.
+
+    A frame is covered when a kept sample lies at or before it and another strictly after it: the estimator and the
+    bootstrap integrate up to a frame only once a later sample has arrived.
 
     Args:
         num_frames: Frames of the trajectory, frame k at k * 0.1 s.
         num_imu: IMU samples, sample j at j * 0.01 s.
-        frame_limit: Keep only this many frames, and the IMU up to the last of them.
+        frame_limit: Keep only this many frames, and the IMU up to the first sample after the last of them.
 
     Returns:
         Kept frame indices, and the slice of kept IMU samples.
 
     Raises:
-        ValueError: If ``frame_limit`` is below 1, or no frame lies inside the trimmed IMU span (an empty or too short
+        ValueError: If ``frame_limit`` is below 1, or the trimmed IMU covers no frame (an empty or too short
             ``pose_lcam_front.txt`` or ``imu_time.txt``).
     """
     if frame_limit is not None and frame_limit < 1:
         raise ValueError(f"--frame-limit {frame_limit} keeps no frame: give 1 or more")
     imu: slice = slice(IMU_TRIM, num_imu - IMU_TRIM)
     frames_ns: Int64[ndarray, "n"] = np.arange(num_frames, dtype=np.int64) * FRAME_PERIOD_NS
-    frames: Int64[ndarray, "k"] = np.flatnonzero((frames_ns >= imu.start * IMU_PERIOD_NS) & (frames_ns <= (imu.stop - 1) * IMU_PERIOD_NS))
+    frames: Int64[ndarray, "k"] = np.flatnonzero((frames_ns >= imu.start * IMU_PERIOD_NS) & (frames_ns < (imu.stop - 1) * IMU_PERIOD_NS))
     if not frames.size:
         raise ValueError(
             f"no frame of pose_lcam_front.txt ({num_frames} rows) lies inside the IMU span of imu_time.txt ({num_imu} rows, "
-            f"{IMU_TRIM} trimmed at each end)"
+            f"{IMU_TRIM} trimmed at each end, one sample needed after the frame)"
         )
     if frame_limit is not None:
         frames = frames[:frame_limit]
-        imu = slice(imu.start, int(frames[-1]) * FRAME_PERIOD_NS // IMU_PERIOD_NS + 1)
+        imu = slice(imu.start, int(frames[-1]) * FRAME_PERIOD_NS // IMU_PERIOD_NS + 2)
     return frames, imu
 
 
