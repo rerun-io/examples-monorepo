@@ -701,13 +701,8 @@ impl<S: Scalar> Vio<S> {
             BootstrapStep::Buffering => return Ok(self.result(VioStatus::NoVisualFeatures, t_ns)),
             BootstrapStep::Accepted(accepted) => accepted,
         };
-        let BootstrapPhase::Running(driver) =
-            std::mem::replace(&mut self.bootstrap, BootstrapPhase::Off)
-        else {
-            unreachable!("checked above");
-        };
-        let config: VioConfig = self.frontend.config().clone();
         let calibration: Calibration<S> = driver.calibration.cast();
+        let config: VioConfig = self.frontend.config().clone();
         let initial: InitialState<S> = InitialState {
             t_ns: accepted.initial.t_ns,
             t_w_i: accepted.initial.t_w_i.cast(),
@@ -727,20 +722,27 @@ impl<S: Scalar> Vio<S> {
         for sample in &accepted.imu {
             fresh.push_imu(*sample);
         }
-        self.estimator = fresh;
-        self.bootstrap = BootstrapPhase::Done(Box::new(driver.into_report()));
 
+        // Replay into the local estimator; `self` changes only once the replay
+        // has succeeded, so an error leaves the pipeline still bootstrapping.
         let pool = self.frontend.cpu_pool();
         let count: usize = accepted.frames.len();
         let mut last: Option<estimator::FrameOutcome<S>> = None;
         for (index, frame) in accepted.frames.into_iter().enumerate() {
-            let outcome = self.estimator.process_frame(frame, pool.as_ref())?;
+            let outcome = fresh.process_frame(frame, pool.as_ref())?;
             if index + 1 < count {
-                self.estimator.finish_deferred_keyframe(pool.as_ref())?;
+                fresh.finish_deferred_keyframe(pool.as_ref())?;
             } else {
                 last = Some(outcome);
             }
         }
+        self.estimator = fresh;
+        let BootstrapPhase::Running(driver) =
+            std::mem::replace(&mut self.bootstrap, BootstrapPhase::Off)
+        else {
+            unreachable!("checked above");
+        };
+        self.bootstrap = BootstrapPhase::Done(Box::new(driver.into_report()));
         let outcome = last.unwrap_or(estimator::FrameOutcome::NoVisualFeatures);
         self.accept_outcome(t_ns, outcome)
     }
