@@ -2,11 +2,13 @@
 
 use crate::ReplayOutputs;
 use crate::clip::ReplayInput;
+use slam_rs::backend::MapResult;
 use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::replay::{feed_imu_through, percentile};
 use slam_rs::{
-    Backend, BackendRequest, Backends, GbaRequest, ImageView, Vio, VioResult, select_backend,
+    Backend, BackendRequest, Backends, GbaRequest, ImageView, Vio, VioError, VioResult,
+    select_backend,
 };
 use std::fmt::Write as _;
 use std::path::Path;
@@ -34,7 +36,6 @@ pub(super) fn replay(
     load_s: f64,
     outputs: &ReplayOutputs,
 ) -> Result<(), String> {
-    let summary: &Path = &outputs.summary;
     let ReplayInput {
         clip,
         calibration,
@@ -150,30 +151,6 @@ pub(super) fn replay(
     }
     let flush_ms = flush_started.elapsed().as_secs_f64() * 1e3;
     let wall_s: f64 = started.elapsed().as_secs_f64();
-    // The final trajectory (DESIGN §1, §2): the global BA on the map after
-    // loops and PGO, then the raw VIO re-anchored on its keyframes; without the
-    // GBA, on the map as loops and PGO left it; the raw VIO itself with the
-    // back end off.
-    let finish_started = Instant::now();
-    let map = vio
-        .finish_map(run_gba)
-        .map_err(|error| format!("finish_map: {error}"))?;
-    let finish_map_s: f64 = finish_started.elapsed().as_secs_f64();
-    let final_poses: Vec<[f64; 7]> = match &map {
-        Some(map) => map
-            .reanchor(&raw)
-            .map_err(|error| format!("re-anchoring: {error}"))?,
-        None => raw.iter().map(|&(_, pose)| pose).collect(),
-    };
-    let gba = map.as_ref().and_then(|map| map.gba.as_ref());
-    let final_rows = raw.iter().map(|&(t_ns, _)| t_ns).zip(final_poses);
-    std::fs::write(&outputs.out, trajectory_csv(final_rows)?)
-        .map_err(|error| format!("{}: {error}", outputs.out.display()))?;
-    if let Some(path) = &outputs.out_vio {
-        std::fs::write(path, trajectory_csv(raw.iter().copied())?)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-    }
-
     let mean_ms: f64 = track_ms.iter().sum::<f64>() / track_ms.len().max(1) as f64;
     let mut sorted: Vec<f64> = track_ms.clone();
     sorted.sort_by(f64::total_cmp);
@@ -196,17 +173,11 @@ pub(super) fn replay(
         "gpu_path_frames": {"lookahead": counters.gpu_lookahead_frames, "one_wait": counters.gpu_one_wait_frames},
         "overlap_ms_mean": {"estimator": per_frame(counters.overlap_estimator_ns), "wait": per_frame(counters.overlap_wait_ns)},
         "flush_ms": flush_ms,
-        "finish_map_s": finish_map_s,
-        "gba": gba.map(|gba| serde_json::json!({"lane": gba.lane.name(), "keyframes": gba.counts.keyframes,
-                                                 "attempts": gba.report.iterations.len(), "build_s": gba.build_s,
-                                                 "solve_s": gba.solve_s, "apply_s": gba.apply_s})),
         "track_ms_per_frame": track_ms,
     });
-    std::fs::write(
-        summary,
-        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("{}: {error}", summary.display()))?;
+    write_outputs(outputs, &raw, report, run_gba, |run_gba| {
+        vio.finish_map(run_gba)
+    })?;
     println!(
         "{}: {tracked}/{framesets} tracked, wall {wall_s:.2} s = {:.2} ms/frameset (track mean {mean_ms:.2}, p50 {:.2}, p95 {:.2})",
         clip.segment_id,
@@ -215,6 +186,69 @@ pub(super) fn replay(
         percentile(&sorted, 0.95)
     );
     Ok(())
+}
+
+/// Write a replay's files. The raw VIO (`--out-vio`) and the summary go first,
+/// so nothing after them loses a tracked run. Then the final trajectory (DESIGN
+/// §1, §2): the raw VIO re-anchored on the map `finish_map` leaves, after the
+/// global BA when `run_gba`, or the raw VIO itself with the back end off; and
+/// the summary again, with the finish. A GBA that fails costs only the GBA: one
+/// warning, `--out` re-anchored on the map as loops and PGO left it, and
+/// `"gba": {"failed": <reason>}` in the summary.
+fn write_outputs(
+    outputs: &ReplayOutputs,
+    raw: &[(i64, [f64; 7])],
+    mut report: serde_json::Value,
+    run_gba: bool,
+    mut finish_map: impl FnMut(bool) -> Result<Option<MapResult>, VioError>,
+) -> Result<(), String> {
+    let write_summary = |report: &serde_json::Value| -> Result<(), String> {
+        let text: String =
+            serde_json::to_string_pretty(report).map_err(|error| error.to_string())?;
+        std::fs::write(&outputs.summary, text)
+            .map_err(|error| format!("{}: {error}", outputs.summary.display()))
+    };
+    if let Some(path) = &outputs.out_vio {
+        std::fs::write(path, trajectory_csv(raw.iter().copied())?)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+    write_summary(&report)?;
+
+    let finish_started = Instant::now();
+    let (map, gba_failure): (Option<MapResult>, Option<String>) = match finish_map(run_gba) {
+        Ok(map) => (map, None),
+        Err(error) => {
+            let reason: String = error.to_string();
+            eprintln!(
+                "slam-rs: warning: the global BA failed ({reason}); --out is re-anchored on the map as loops and PGO left it"
+            );
+            let map = finish_map(false).map_err(|error| format!("finish_map: {error}"))?;
+            (map, Some(reason))
+        }
+    };
+    let finish_map_s: f64 = finish_started.elapsed().as_secs_f64();
+    let final_poses: Vec<[f64; 7]> = match &map {
+        Some(map) => map
+            .reanchor(raw)
+            .map_err(|error| format!("re-anchoring: {error}"))?,
+        None => raw.iter().map(|&(_, pose)| pose).collect(),
+    };
+    let final_rows = raw.iter().map(|&(t_ns, _)| t_ns).zip(final_poses);
+    std::fs::write(&outputs.out, trajectory_csv(final_rows)?)
+        .map_err(|error| format!("{}: {error}", outputs.out.display()))?;
+
+    let gba = match (map.as_ref().and_then(|map| map.gba.as_ref()), gba_failure) {
+        (_, Some(reason)) => serde_json::json!({"failed": reason}),
+        (Some(gba), None) => {
+            serde_json::json!({"lane": gba.lane.name(), "keyframes": gba.counts.keyframes,
+                                                "attempts": gba.report.iterations.len(), "build_s": gba.build_s,
+                                                "solve_s": gba.solve_s, "apply_s": gba.apply_s})
+        }
+        (None, None) => serde_json::Value::Null,
+    };
+    report["finish_map_s"] = finish_map_s.into();
+    report["gba"] = gba;
+    write_summary(&report)
 }
 
 /// `t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z` rows from `(t_ns, [tx, ty, tz, qx, qy, qz, qw])`.
@@ -229,4 +263,126 @@ fn trajectory_csv(rows: impl Iterator<Item = (i64, [f64; 7])>) -> Result<String,
         .map_err(|error| error.to_string())?;
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplayOutputs, trajectory_csv, write_outputs};
+    use slam_rs::VioError;
+    use slam_rs::backend::MapResult;
+    use slam_rs::lie::Se3;
+    use std::path::{Path, PathBuf};
+
+    const RAW: [(i64, [f64; 7]); 2] = [
+        (10, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+        (20, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+    ];
+
+    fn outputs(name: &str) -> ReplayOutputs {
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("slam-rs-cli-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["slam_rs.csv", "slam_rs_vio.csv", "summary.json"] {
+            let _ = std::fs::remove_file(dir.join(file));
+        }
+        ReplayOutputs {
+            out: dir.join("slam_rs.csv"),
+            out_vio: Some(dir.join("slam_rs_vio.csv")),
+            summary: dir.join("summary.json"),
+        }
+    }
+
+    /// The map as loops and PGO left it: one keyframe, 2 m off the raw VIO.
+    fn lc_map() -> MapResult {
+        let mut moved: Se3<f64> = Se3::identity();
+        moved.translation.x = 2.0;
+        MapResult {
+            keyframe_t_ns: vec![10],
+            keyframe_poses_before_gba: vec![moved],
+            keyframe_poses: vec![moved],
+            gba: None,
+        }
+    }
+
+    fn summary(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_failed_gba_falls_back_to_the_map_after_loops_and_pgo() {
+        let outputs = outputs("gba-fails");
+        let mut asked: Vec<bool> = Vec::new();
+        write_outputs(
+            &outputs,
+            &RAW,
+            serde_json::json!({"tracked": 2}),
+            true,
+            |run_gba| {
+                asked.push(run_gba);
+                if run_gba {
+                    Err(VioError::GlobalBa("the solver refused".into()))
+                } else {
+                    Ok(Some(lc_map()))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(asked, [true, false]);
+        let raw_csv: String = trajectory_csv(RAW.iter().copied()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(outputs.out_vio.as_ref().unwrap()).unwrap(),
+            raw_csv
+        );
+        let lc_final = RAW
+            .iter()
+            .map(|&(t_ns, _)| t_ns)
+            .zip(lc_map().reanchor(&RAW).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&outputs.out).unwrap(),
+            trajectory_csv(lc_final).unwrap()
+        );
+        let report = summary(&outputs.summary);
+        assert_eq!(report["tracked"], 2);
+        assert!(
+            report["gba"]["failed"]
+                .as_str()
+                .unwrap()
+                .contains("the solver refused"),
+            "{report}"
+        );
+        assert!(report["finish_map_s"].as_f64().unwrap() >= 0.0);
+    }
+
+    #[test]
+    fn the_raw_vio_and_the_summary_are_written_before_the_map_is_finished() {
+        let outputs = outputs("finish-fails");
+        let error = write_outputs(
+            &outputs,
+            &RAW,
+            serde_json::json!({"tracked": 2}),
+            true,
+            |_| Err(VioError::GlobalBa("no map".into())),
+        )
+        .unwrap_err();
+        assert!(error.contains("no map"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(outputs.out_vio.as_ref().unwrap()).unwrap(),
+            trajectory_csv(RAW.iter().copied()).unwrap()
+        );
+        assert_eq!(summary(&outputs.summary)["tracked"], 2);
+        assert!(!outputs.out.exists());
+    }
+
+    #[test]
+    fn without_the_gba_finish_map_runs_once_and_the_summary_says_none() {
+        let outputs = outputs("no-gba");
+        let mut asked: Vec<bool> = Vec::new();
+        write_outputs(&outputs, &RAW, serde_json::json!({}), false, |run_gba| {
+            asked.push(run_gba);
+            Ok(Some(lc_map()))
+        })
+        .unwrap();
+        assert_eq!(asked, [false]);
+        assert!(summary(&outputs.summary)["gba"].is_null());
+    }
 }

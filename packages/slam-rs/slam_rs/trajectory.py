@@ -180,25 +180,29 @@ def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:
     )
 
 
-def write_scoring_csvs(final_csv: Path, *, final: Trajectory, raw: Trajectory, offset_ns: int) -> Path:
-    """Write the two trajectories a run is scored on, shifted onto the dataset's clock.
+def write_scoring_csvs(final_csv: Path, *, final: Trajectory | None, raw: Trajectory | None, offset_ns: int) -> Path:
+    """Write the trajectories a run is scored on, shifted onto the dataset's clock.
 
     ``final_csv`` (``slam_rs.csv``) holds the final run; the raw causal VIO goes
     beside it with ``_vio`` added to the stem (``slam_rs_vio.csv``), the names
-    the scorer's ``--est slam_rs=... --est slam_rs_vio=...`` reads.
+    the scorer's ``--est slam_rs=... --est slam_rs_vio=...`` reads. A replay
+    writes the raw VIO alone first (``final=None``), so that nothing after
+    tracking can lose it, and the final run once it exists (``raw=None``).
 
     Args:
         final_csv: Destination of the final trajectory.
-        final: The final run, on ``video_time``.
-        raw: The raw VIO run, on ``video_time``.
+        final: The final run, on ``video_time``; None writes no final file.
+        raw: The raw VIO run, on ``video_time``; None writes no raw file.
         offset_ns: ``video_time`` to dataset clock, as :func:`shift_clock` takes it.
 
     Returns:
-        Where the raw VIO trajectory went.
+        Where the raw VIO trajectory goes.
     """
     raw_csv: Path = final_csv.with_stem(f"{final_csv.stem}_vio")
-    write_trajectory(final_csv, shift_clock(final, offset_ns))
-    write_trajectory(raw_csv, shift_clock(raw, offset_ns))
+    if final is not None:
+        write_trajectory(final_csv, shift_clock(final, offset_ns))
+    if raw is not None:
+        write_trajectory(raw_csv, shift_clock(raw, offset_ns))
     return raw_csv
 
 

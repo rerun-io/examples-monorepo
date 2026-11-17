@@ -165,12 +165,15 @@ class MapResult:
         """Map keyframe timestamps, oldest first."""
 
     @property
-    def keyframe_poses_vio(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """``T_w_i`` as the window left them, before the global BA."""
+    def keyframe_poses_before_gba(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """``T_w_i`` in the map after loops and PGO, before the global BA (the +LC keyframes).
+
+        The window's own poses are :attr:`MapSnapshot.keyframe_raw_poses`.
+        """
 
     @property
     def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """``T_w_i`` after the global BA (equal to :attr:`keyframe_poses_vio` without it)."""
+        """``T_w_i`` after the global BA (equal to :attr:`keyframe_poses_before_gba` without it)."""
 
     @property
     def gba(self) -> GbaRun | None:

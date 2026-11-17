@@ -166,8 +166,10 @@ pub struct GbaRun {
 pub struct MapResult {
     /// Map keyframes, oldest first.
     pub keyframe_t_ns: Vec<FrameId>,
-    /// `T_w_i` as the window left them (before the GBA).
-    pub keyframe_poses_vio: Vec<Se3<f64>>,
+    /// `T_w_i` in the map before the GBA: after loop fusion and PGO (the +LC
+    /// keyframes). The window's own poses are
+    /// [`super::MapSnapshot::keyframe_raw_poses`].
+    pub keyframe_poses_before_gba: Vec<Se3<f64>>,
     /// `T_w_i` after the GBA (the same without it).
     pub keyframe_poses: Vec<Se3<f64>>,
     /// The GBA, when it ran.
@@ -545,13 +547,13 @@ impl MapBackend {
         config: &VioConfig,
     ) -> Result<MapResult, GbaDriverError> {
         let keyframe_t_ns: Vec<FrameId> = self.map.keyframes().keys().copied().collect();
-        let keyframe_poses_vio: Vec<Se3<f64>> =
+        let keyframe_poses_before_gba: Vec<Se3<f64>> =
             self.map.keyframes().values().map(|k| k.pose).collect();
         if !run_gba {
             return Ok(MapResult {
                 keyframe_t_ns,
-                keyframe_poses: keyframe_poses_vio.clone(),
-                keyframe_poses_vio,
+                keyframe_poses: keyframe_poses_before_gba.clone(),
+                keyframe_poses_before_gba,
                 gba: None,
             });
         }
@@ -570,7 +572,7 @@ impl MapBackend {
         let apply_s: f64 = started.elapsed().as_secs_f64();
         Ok(MapResult {
             keyframe_t_ns,
-            keyframe_poses_vio,
+            keyframe_poses_before_gba,
             keyframe_poses: self.map.keyframes().values().map(|k| k.pose).collect(),
             gba: Some(GbaRun {
                 counts: input.counts,

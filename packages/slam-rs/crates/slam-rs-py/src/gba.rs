@@ -28,13 +28,15 @@ fn flat_poses(poses: &[Se3<f64>]) -> Vec<f64> {
 /// The map's keyframes at the end of a sequence (`Vio.finish_map`).
 ///
 /// Poses are `T_w_i` (world from IMU), `[tx, ty, tz, qx, qy, qz, qw]`, on the
-/// clock `track` was given. `keyframe_poses_vio` is what the window left in the
-/// map; `keyframe_poses` is the same after the global BA (equal without it).
+/// clock `track` was given. `keyframe_poses_before_gba` is the map after loops
+/// and PGO, before the global BA (the +LC keyframes; the window's own poses are
+/// `MapSnapshot.keyframe_raw_poses`); `keyframe_poses` is the same after the
+/// global BA (equal without it).
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug)]
 pub struct MapResult {
     keyframe_t_ns: Vec<i64>,
-    keyframe_poses_vio: Vec<f64>,
+    keyframe_poses_before_gba: Vec<f64>,
     keyframe_poses: Vec<f64>,
     gba: Option<Py<GbaRun>>,
 }
@@ -44,7 +46,7 @@ impl MapResult {
     pub fn build(py: Python<'_>, result: &CoreMapResult) -> PyResult<Self> {
         Ok(Self {
             keyframe_t_ns: result.keyframe_t_ns.clone(),
-            keyframe_poses_vio: flat_poses(&result.keyframe_poses_vio),
+            keyframe_poses_before_gba: flat_poses(&result.keyframe_poses_before_gba),
             keyframe_poses: flat_poses(&result.keyframe_poses),
             gba: result
                 .gba
@@ -63,10 +65,13 @@ impl MapResult {
         self.keyframe_t_ns.to_pyarray(py)
     }
 
-    /// `T_w_i` as the window left them: `float64[k, 7]`.
+    /// `T_w_i` in the map after loops and PGO, before the global BA: `float64[k, 7]`.
     #[getter]
-    fn keyframe_poses_vio<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        self.keyframe_poses_vio
+    fn keyframe_poses_before_gba<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.keyframe_poses_before_gba
             .to_pyarray(py)
             .reshape((self.keyframe_t_ns.len(), 7))
     }

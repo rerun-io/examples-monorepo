@@ -112,7 +112,7 @@ fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
     assert!(plain.gba.is_none());
     assert_eq!(plain.keyframe_t_ns, snapshot.keyframe_t_ns);
     assert_eq!(plain.keyframe_poses, snapshot.keyframe_poses);
-    assert_eq!(plain.keyframe_poses_vio, snapshot.keyframe_poses);
+    assert_eq!(plain.keyframe_poses_before_gba, snapshot.keyframe_poses);
     assert_eq!(
         on.map_snapshot().unwrap(),
         snapshot,
@@ -130,9 +130,9 @@ fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
     assert!(gba.report.iterations.iter().any(|i| i.accepted));
     assert!(gba.counts.keyframes > 3 && gba.counts.landmarks > 0 && gba.counts.pose_graph_rows > 0);
     assert_eq!(gba.threads, 2);
-    assert_eq!(result.keyframe_poses_vio, snapshot.keyframe_poses);
+    assert_eq!(result.keyframe_poses_before_gba, snapshot.keyframe_poses);
     assert_ne!(
-        result.keyframe_poses, result.keyframe_poses_vio,
+        result.keyframe_poses, result.keyframe_poses_before_gba,
         "the GBA moved no keyframe"
     );
     // The map holds the GBA's poses; the window is untouched.

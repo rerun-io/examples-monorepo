@@ -37,7 +37,7 @@ def test_the_keyframe_trajectory_is_the_map_before_or_after_the_gba(rig: RigFact
     before: Trajectory = keyframe_trajectory(result, after_gba=False)
     np.testing.assert_array_equal(after.t_ns, result.keyframe_t_ns)
     np.testing.assert_array_equal(after.position_m, result.keyframe_poses[:, 0:3])
-    np.testing.assert_array_equal(before.position_m, result.keyframe_poses_vio[:, 0:3])
+    np.testing.assert_array_equal(before.position_m, result.keyframe_poses_before_gba[:, 0:3])
     # w-first, as :mod:`slam_rs.trajectory` stores rotations.
     np.testing.assert_array_equal(after.quaternion_wxyz[:, 0], result.keyframe_poses[:, 6])
     np.testing.assert_array_equal(after.quaternion_wxyz[:, 1:], result.keyframe_poses[:, 3:6])
