@@ -21,6 +21,7 @@ log = "0.4"
 kornia-staging-3d = { path = "crates/kornia-staging-3d", default-features = false }
 openh264 = { version = "=0.9.8", default-features = false, features = ["source"] }
 kornia-staging-imgproc = { path = "crates/kornia-staging-imgproc" }
+kornia-staging-io = { path = "crates/kornia-staging-io" }
 cc = "1"
 libc = "0.2"
 tempfile = "3"
