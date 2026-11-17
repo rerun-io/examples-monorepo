@@ -25,7 +25,6 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
-from slam_rs.apis.insv import nearest_permutation, orthonormal
 from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
@@ -36,6 +35,24 @@ CAUCHY_RAD: float = 2.0 * np.pi / PANORAMA_HEIGHT
 """Smallest Cauchy scale of the epipolar fit: 2 panorama pixels."""
 MIN_MATCHES: int = 30
 """A frame pair with fewer common tracks gives no relative pose."""
+
+
+def orthonormal(matrix: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
+    """The rotation nearest to ``matrix`` (SVD polar factor, determinant +1)."""
+    u, _, vt = np.linalg.svd(matrix)
+    rotation: Float64[ndarray, "3 3"] = u @ vt
+    if np.linalg.det(rotation) < 0:
+        rotation = u @ np.diag([1.0, 1.0, -1.0]) @ vt
+    return rotation
+
+
+def nearest_permutation(rotation: Float64[ndarray, "3 3"]) -> Float64[ndarray, "3 3"]:
+    """The signed axis permutation nearest to ``rotation``, row by row."""
+    permutation: Float64[ndarray, "3 3"] = np.zeros((3, 3))
+    for row in range(3):
+        column: int = int(np.argmax(np.abs(rotation[row])))
+        permutation[row, column] = np.sign(rotation[row, column])
+    return permutation
 
 
 @dataclass

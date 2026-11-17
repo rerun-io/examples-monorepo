@@ -2759,19 +2759,6 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Build the core, then replay a segment in the viewer (GPU frontend when available)"
 
-# e.g. `pixi run -e slam-rs slam-rs-insv --insv clip.insv [--output clip.rrd] [--max-frames 90]`
-[feature.slam-rs.tasks.slam-rs-insv]
-cmd = "python tools/apps/insv.py"
-cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
-description = "Build the core, then convert an Insta360 .insv clip (two HEVC lens tracks, IMU, factory lenses) to an exoego:v2 .rrd"
-
-[feature.slam-rs.tasks.slam-rs-insv-panorama]
-cmd = "python tools/apps/insv_panorama.py"
-cwd = "packages/slam-rs"
-depends-on = ["slam-rs-build"]
-description = "Build the core, then write an Insta360 recording's stitched panorama as a derived, viewing-only AV1 layer (<stem>.pano.rrd)"
-
 # e.g. `pixi run -e slam-rs slam-rs-insv-calibrate --rrd clip.rrd [--rotation-spans-s 40 190] [--scan-windows-s 20 60 100]`
 [feature.slam-rs.tasks.slam-rs-insv-calibrate]
 cmd = "python tools/apps/insv_calibrate.py"

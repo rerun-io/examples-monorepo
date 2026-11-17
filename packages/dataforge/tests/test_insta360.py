@@ -26,6 +26,16 @@ MIN_PSNR_DB: float = 38.0
 """Floor for the first decoded panorama frame against the stitch at the default cq 34 (measured 41.7 dB on 2026-11-17)."""
 
 
+def angle_to_nearest_permutation_deg(rotation: Float64[ndarray, "3 3"]) -> float:
+    """Angle in degrees between ``rotation`` and the signed axis permutation nearest to it (row by row)."""
+    permutation: Float64[ndarray, "3 3"] = np.zeros((3, 3))
+    for row in range(3):
+        column: int = int(np.argmax(np.abs(rotation[row])))
+        permutation[row, column] = np.sign(rotation[row, column])
+    cosine: float = (float(np.trace(permutation.T @ rotation)) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+
 def x4_air() -> DeviceProfile:
     from dataforge.datasets.insta360 import load_profiles
 
@@ -35,7 +45,7 @@ def x4_air() -> DeviceProfile:
 
 def test_the_measured_imu_rotation_orthonormalises_to_0_13_deg_from_its_permutation() -> None:
     """The X4 Air profile's R_P_imu is 0.13 deg from x_P = -z_imu, y_P = +x_imu, z_P = -y_imu."""
-    from dataforge.datasets.insta360 import angle_to_nearest_permutation_deg, orthonormal
+    from dataforge.datasets.insta360 import orthonormal
 
     profile: DeviceProfile = x4_air()
     assert (profile.name, profile.version, profile.camera_type) == ("x4-air-1920", 1, "Insta360 X4 Air")
