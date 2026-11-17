@@ -8,7 +8,10 @@ mod select;
 #[cfg(test)]
 mod tests;
 
-pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
+pub use boundary::{
+    Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus, pose_from_xyzw,
+    pose_to_xyzw,
+};
 pub use lane::FrontendLane;
 use lane::build_frontend;
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};

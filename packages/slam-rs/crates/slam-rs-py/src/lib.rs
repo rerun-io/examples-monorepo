@@ -666,20 +666,7 @@ fn backend_mode_name(mode: slam_rs::config::BackendMode) -> &'static str {
 
 /// `[tx, ty, tz, qx, qy, qz, qw]` per pose, flat.
 fn flat_poses(poses: &[slam_rs::lie::Se3<f64>]) -> Vec<f64> {
-    let mut flat: Vec<f64> = Vec::with_capacity(7 * poses.len());
-    for pose in poses {
-        let quaternion: [f64; 4] = pose.rotation.quaternion_xyzw();
-        flat.extend_from_slice(&[
-            pose.translation.x,
-            pose.translation.y,
-            pose.translation.z,
-            quaternion[0],
-            quaternion[1],
-            quaternion[2],
-            quaternion[3],
-        ]);
-    }
-    flat
+    poses.iter().flat_map(slam_rs::pose_to_xyzw).collect()
 }
 
 /// The frontend options both entry points build, from the two knobs they expose.
@@ -1428,12 +1415,12 @@ fn device_probes_run() -> usize {
     slam_rs::device_probes_run()
 }
 
-/// `(t_ns, T_w_i)` rows from parallel timestamp and `[tx, ty, tz, qx, qy, qz, qw]` arrays.
-fn stamped_poses(
+/// `(t_ns, [tx, ty, tz, qx, qy, qz, qw])` rows from parallel timestamp and pose arrays.
+fn stamped_rows(
     t_ns: &[i64],
     poses: &PyReadonlyArray2<'_, f64>,
     what: &str,
-) -> PyResult<Vec<(i64, slam_rs::lie::Se3<f64>)>> {
+) -> PyResult<Vec<(i64, [f64; 7])>> {
     let poses = poses.as_array();
     if poses.ncols() != 7 || poses.nrows() != t_ns.len() {
         return Err(PyValueError::new_err(format!(
@@ -1443,23 +1430,15 @@ fn stamped_poses(
             poses.shape()
         )));
     }
-    t_ns.iter()
+    Ok(t_ns
+        .iter()
         .zip(poses.rows())
-        .map(|(&t_ns, row)| {
-            let rotation = slam_rs::lie::So3::from_quaternion_xyzw(row[3], row[4], row[5], row[6])
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!("{what}: no unit quaternion at {t_ns} ns"))
-                })?;
-            Ok((
-                t_ns,
-                slam_rs::lie::Se3::new(rotation, nalgebra::Vector3::new(row[0], row[1], row[2])),
-            ))
-        })
-        .collect()
+        .map(|(&t_ns, row)| (t_ns, std::array::from_fn(|i| row[i])))
+        .collect())
 }
 
 /// The final trajectory: every raw frame pose re-anchored on the optimized
-/// keyframes on both sides (`slam_rs::backend::reanchor`, PR f1).
+/// keyframes on both sides (`slam_rs::backend::reanchor_arrays`, PR f1).
 #[pyfunction]
 fn reanchor<'py>(
     py: Python<'py>,
@@ -1468,12 +1447,20 @@ fn reanchor<'py>(
     keyframe_t_ns: numpy::PyReadonlyArray1<'_, i64>,
     keyframe_poses: PyReadonlyArray2<'_, f64>,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-    let frames = stamped_poses(frame_t_ns.as_slice()?, &frame_poses, "frames")?;
-    let keyframes = stamped_poses(keyframe_t_ns.as_slice()?, &keyframe_poses, "keyframes")?;
-    let anchored = slam_rs::backend::reanchor(&frames, &keyframes)
+    let frames = stamped_rows(frame_t_ns.as_slice()?, &frame_poses, "frames")?;
+    let keyframes = stamped_rows(keyframe_t_ns.as_slice()?, &keyframe_poses, "keyframes")?;
+    let keyframe_poses: Vec<slam_rs::lie::Se3<f64>> = keyframes
+        .iter()
+        .map(|(t_ns, pose)| {
+            slam_rs::pose_from_xyzw(pose).ok_or_else(|| {
+                PyValueError::new_err(format!("keyframes: no unit quaternion at {t_ns} ns"))
+            })
+        })
+        .collect::<PyResult<_>>()?;
+    let keyframe_t_ns: Vec<i64> = keyframes.iter().map(|&(t_ns, _)| t_ns).collect();
+    let anchored = slam_rs::backend::reanchor_arrays(&frames, &keyframe_t_ns, &keyframe_poses)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let flat: Vec<f64> = flat_poses(&anchored);
-    numpy::ndarray::Array2::from_shape_vec((anchored.len(), 7), flat)
+    numpy::ndarray::Array2::from_shape_vec((anchored.len(), 7), anchored.concat())
         .map(|array| array.to_pyarray(py))
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }

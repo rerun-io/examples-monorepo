@@ -12,25 +12,27 @@ from numpy import ndarray
 
 from slam_rs import _core
 
-LOOPS_ENTITY: str = "/world/runs/slam_rs/loops"
+RUN_ENTITY: str = "/world/runs/slam_rs"
+"""The final run and the back end's map, beside the dataset's own ``/world/runs/gt`` (the catalog layer's ``slam_rs``)."""
+LOOPS_ENTITY: str = f"{RUN_ENTITY}/loops"
 """Where the loop edges go, beside the map's keyframes and points."""
 FUSED_LOOP_COLOR: tuple[int, int, int, int] = (255, 70, 200, 255)
 """A loop whose landmarks were fused (at once or after a pose-graph optimization): magenta."""
 PGO_LOOP_COLOR: tuple[int, int, int, int] = (255, 225, 40, 255)
 """A verified loop left unapplied (at or above the drift gate, the pose-graph optimization off or refused): yellow."""
-PGO_CORRECTIONS_ENTITY: str = "/world/runs/slam_rs/pgo/corrections"
+PGO_CORRECTIONS_ENTITY: str = f"{RUN_ENTITY}/pgo/corrections"
 """Where the pose-graph corrections go."""
 PGO_CORRECTION_COLOR: tuple[int, int, int, int] = (120, 160, 255, 255)
 """A keyframe's raw-to-corrected move: blue."""
-PGO_BEFORE_ENTITY: str = "/world/runs/slam_rs/pgo/before"
+PGO_BEFORE_ENTITY: str = f"{RUN_ENTITY}/pgo/before"
 """The map keyframes' path before any pose-graph correction (the window's poses)."""
-PGO_AFTER_ENTITY: str = "/world/runs/slam_rs/pgo/after"
+PGO_AFTER_ENTITY: str = f"{RUN_ENTITY}/pgo/after"
 """The map keyframes' path as the pose-graph optimizations left it."""
 PGO_BEFORE_COLOR: tuple[int, int, int, int] = (150, 150, 165, 255)
 """Before: grey, as the raw VIO run."""
 PGO_AFTER_COLOR: tuple[int, int, int, int] = (60, 200, 120, 255)
 """After: green."""
-POSE_GRAPH_ENTITY: str = "/world/runs/slam_rs/pose_graph"
+POSE_GRAPH_ENTITY: str = f"{RUN_ENTITY}/pose_graph"
 """The edges a pose-graph optimization takes: spanning tree, loop closures, high covisibility."""
 POSE_GRAPH_COLORS: tuple[tuple[int, int, int, int], ...] = ((90, 90, 110, 160), (255, 225, 40, 255), (80, 170, 255, 110))
 """Per edge kind (``MapSnapshot.pose_graph_edge_kinds``): tree dark grey, loop closure yellow, high covisibility faint blue."""

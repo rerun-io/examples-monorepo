@@ -793,11 +793,7 @@ fn realtime_and_offline_give_the_same_final_trajectory_through_a_pose_graph_opti
     assert_eq!(realtime, offline);
     // Each keyframe's raw pose, and a frame halfway to the next keyframe that
     // keeps the raw pose before it.
-    let pose = |se3: &Se3<f64>| -> [f64; 7] {
-        let [x, y, z, w] = se3.rotation.quaternion_xyzw();
-        let t = se3.translation;
-        [t.x, t.y, t.z, x, y, z, w]
-    };
+    let pose = crate::pose_to_xyzw;
     let mut frames: Vec<(i64, [f64; 7])> = Vec::new();
     for (row, (&t_ns, raw)) in offline
         .keyframe_t_ns

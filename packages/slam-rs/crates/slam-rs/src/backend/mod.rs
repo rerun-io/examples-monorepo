@@ -26,7 +26,7 @@ use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::{FrameId, LandmarkId};
 
-pub use anchor::{AnchorError, reanchor};
+pub use anchor::{AnchorError, reanchor, reanchor_arrays};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};

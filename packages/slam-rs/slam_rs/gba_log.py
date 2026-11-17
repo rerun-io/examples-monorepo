@@ -37,7 +37,7 @@ def keyframe_trajectory(result: _core.MapResult, *, after_gba: bool) -> Trajecto
         One pose per map keyframe, oldest first, quaternions w-first.
     """
     poses: Float64[ndarray, "k 7"] = result.keyframe_poses if after_gba else result.keyframe_poses_vio
-    return Trajectory(t_ns=result.keyframe_t_ns.copy(), position_m=poses[:, 0:3].copy(), quaternion_wxyz=np.roll(poses[:, 3:7], 1, axis=1))
+    return Trajectory.from_xyzw(result.keyframe_t_ns, poses)
 
 
 def log_map_result(result: _core.MapResult) -> None:

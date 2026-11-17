@@ -57,9 +57,9 @@ def write_layer(
     if not np.array_equal(final.t_ns, run.estimate.t_ns):
         raise ValueError("the final trajectory must have the raw VIO's timestamps")
     positions: Float64[ndarray, "n 3"] = final.position_m
-    rotations: Float64[ndarray, "n 4"] = np.roll(final.quaternion_wxyz, -1, axis=1)
+    rotations: Float64[ndarray, "n 4"] = final.xyzw()[:, 3:7]
     raw_positions: Float64[ndarray, "n 3"] = run.estimate.position_m
-    raw_rotations: Float64[ndarray, "n 4"] = np.roll(run.estimate.quaternion_wxyz, -1, axis=1)
+    raw_rotations: Float64[ndarray, "n 4"] = run.estimate.xyzw()[:, 3:7]
     times: Int64[ndarray, " n"] = shift_clock(run.estimate, -clock_offset_ns).t_ns
     finite: bool = all(np.isfinite(array).all() for array in (positions, rotations, raw_positions, raw_rotations))
     if not finite or not np.all(np.diff(times) > 0):
