@@ -276,37 +276,6 @@ impl Vio {
             .and_then(|rig| rig.dual_fisheye_ingest_ns())
     }
 
-    /// Rolling-shutter correction of tile pixels (`float64[n, 2]`) for a gyro
-    /// rate `omega_imu` (rad/s, IMU frame), exactly as the estimator's copy is
-    /// corrected; rows that cannot be corrected come back unchanged. Raises on
-    /// a rig that is not a dual fisheye.
-    fn rolling_shutter_corrected<'py>(
-        &self,
-        py: Python<'py>,
-        tile: usize,
-        pixels: &Bound<'py, PyAny>,
-        omega_imu: [f64; 3],
-    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let rig = self
-            .inner
-            .panorama()
-            .filter(|rig| rig.tile_lut(0).is_some())
-            .ok_or_else(|| PyValueError::new_err("not a dual-fisheye rig"))?;
-        if tile > 1 {
-            return Err(PyIndexError::new_err(format!("tile {tile}")));
-        }
-        let rows: Vec<[f64; 2]> = float64_pairs(pixels, "pixels")?;
-        let corrected: Vec<Vec<f64>> = rig
-            .rolling_shutter_corrected(tile, &rows, omega_imu)
-            .into_iter()
-            .map(|pixel| pixel.to_vec())
-            .collect();
-        if corrected.is_empty() {
-            return Ok(PyArray2::zeros(py, [0, 2], false));
-        }
-        Ok(PyArray2::from_vec2(py, &corrected)?)
-    }
-
     /// Whether the frontend runs on the GPU.
     #[getter]
     fn gpu(&self) -> bool {
@@ -978,21 +947,6 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
         .as_chunks::<3>().0.iter()
         .map(|row| [row[0], row[1], row[2]])
         .collect())
-}
-
-fn float64_pairs(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 2]>> {
-    let array: &Bound<'_, PyArray2<f64>> = object
-        .cast::<PyArray2<f64>>()
-        .map_err(|_| PyValueError::new_err(format!("{name} must be a 2-D float64 numpy array")))?;
-    if array.shape()[1] != 2 {
-        return Err(PyValueError::new_err(format!(
-            "{name} must have shape (n, 2), got {:?}",
-            array.shape()
-        )));
-    }
-    let readonly = array.readonly();
-    let values: &[f64] = contiguous(&readonly, name, name)?;
-    Ok(values.as_chunks::<2>().0.to_vec())
 }
 
 fn u32_arg(value: i64) -> PyResult<u32> {

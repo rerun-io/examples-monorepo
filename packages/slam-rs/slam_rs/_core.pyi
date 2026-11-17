@@ -300,8 +300,6 @@ class Vio:
 
         On the GPU lane it is remapped on the host from the lens bytes, only when asked: no device read-back.
         """
-    def rolling_shutter_corrected(self, tile: int, pixels: Float64[ndarray, "n 2"], omega_imu: tuple[float, float, float]) -> Float64[ndarray, "n 2"]:
-        """Tile pixels with the rolling shutter removed for a gyro rate in the IMU frame, as the estimator's copy gets them."""
     @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""
