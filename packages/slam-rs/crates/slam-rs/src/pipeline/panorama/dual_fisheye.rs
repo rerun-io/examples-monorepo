@@ -8,19 +8,16 @@
 //! by `k * pi` about `Y`; its origin is lens `k`'s centre (two-centre lane) or
 //! the lens midpoint (central lane).
 
-use super::super::{ImageView, VioError};
+use super::super::VioError;
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
 use crate::estimator::FlowObservations;
 use crate::frontend::flow::TrackKillMask;
+use crate::frontend::input::LensStitch;
 use crate::lie::{Se3, So3};
-use kornia_image::{Image, ImageError, ImageSize};
+use kornia_image::ImageSize;
 use kornia_staging_3d::camera::{CameraModel, Equirectangular};
-use kornia_staging_imgproc::color::widen_u8_shift8_strided_unchecked;
-use kornia_staging_imgproc::panorama::{
-    LUT_INVALID, TileGeometry, TileLut, build_tile_lut, remap_tile,
-};
-use kornia_staging_imgproc::pyramid::pyrdown_floor_u16;
+use kornia_staging_imgproc::panorama::{LUT_INVALID, TileGeometry, TileLut, build_tile_lut};
 use kornia_staging_io::insta360::{LensCalibration, WindowCrop, parse_lens_string};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 use std::collections::VecDeque;
@@ -171,25 +168,18 @@ pub(super) fn expand(
     let model: Equirectangular<f64> =
         Equirectangular::new([tile.fx, tile.fy, tile.cx, tile.cy, tile.lon_max])
             .map_err(|error| VioError::Panorama(format!("tile camera: {error:?}")))?;
-    let tile_size: ImageSize = ImageSize {
-        width: geometry.width(),
-        height: geometry.height,
-    };
-    let image = |size: ImageSize| {
-        Image::from_size_val(size, 0u16).map_err(|error| VioError::Panorama(error.to_string()))
-    };
+    // Built once per rig: the GPU lane uploads these tables once and the lookahead
+    // recognises the stitch by identity (F5).
+    let stitch: Arc<LensStitch> = Arc::new(LensStitch::new(luts, lens_size)?);
     let ingest: DualFisheyeIngest = DualFisheyeIngest {
-        level0: image(lens_size)?,
-        level1: image(luts[0].source_size)?,
-        tiles: [image(tile_size)?, image(tile_size)?],
         tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
-        luts,
+        stitch,
         lens_size,
         readout_s: lenses.readout_s,
         rolling_shutter: config.panorama_rolling_shutter,
         gyro: VecDeque::new(),
         tile_camera: model,
-        last_ns: [0; 2],
+        last_ns: 0,
     };
     let mut tiles: Calibration<f64> = calibration;
     tiles.intrinsics = vec![BasaltCamera::Equirectangular(tile); 2];
@@ -205,12 +195,8 @@ pub(super) fn expand(
 /// Per-rig state of the dual-fisheye ingest; every buffer is reused.
 pub(super) struct DualFisheyeIngest {
     lens_size: ImageSize,
-    luts: [TileLut; 2],
-    /// One lens widened to `u16`, then its level 1; reused for both lenses.
-    level0: Image<u16, 1>,
-    level1: Image<u16, 1>,
-    /// The two tiles at the pyramid's `u16` level-0 format.
-    tiles: [Image<u16, 1>; 2],
+    /// The two tables, shared with the frame storage that stitches through them.
+    stitch: Arc<LensStitch>,
     readout_s: f64,
     rolling_shutter: bool,
     /// Recent raw gyro samples (rig = IMU frame), oldest first.
@@ -219,8 +205,8 @@ pub(super) struct DualFisheyeIngest {
     tile_camera: Equirectangular<f64>,
     /// `R_tile_imu` per tile.
     tile_from_imu: [So3<f64>; 2],
-    /// Wall time of the last [`Self::remap`]: lens level 1 (both lenses), then the gather, ns.
-    last_ns: [u64; 2],
+    /// Wall time of the last host-side ingest ([`super::PanoramaRig::ingest`]), ns.
+    last_ns: u64,
 }
 
 impl std::fmt::Debug for DualFisheyeIngest {
@@ -241,53 +227,28 @@ impl DualFisheyeIngest {
 
     /// The lookup table of tile `k`.
     pub fn lut(&self, tile: usize) -> &TileLut {
-        &self.luts[tile]
+        &self.stitch.luts()[tile]
     }
 
-    /// The `u16` tiles [`Self::remap`] last wrote.
-    pub fn tiles(&self) -> &[Image<u16, 1>; 2] {
-        &self.tiles
+    /// The stitch the frame storage takes the lens images through.
+    pub fn stitch(&self) -> &Arc<LensStitch> {
+        &self.stitch
     }
 
-    /// Lens luma (lens order) -> level 1 -> table gather, into the `u16` tiles.
-    pub fn remap(&mut self, images: &[ImageView<'_>]) -> Result<(), VioError> {
-        let to_vio = |error: ImageError| VioError::Panorama(error.to_string());
-        self.last_ns = [0; 2];
-        for (lens, image) in images.iter().enumerate() {
-            let mark: std::time::Instant = std::time::Instant::now();
-            widen_u8_shift8_strided_unchecked(image.data, image.stride, &mut self.level0);
-            pyrdown_floor_u16(&self.level0, &mut self.level1).map_err(to_vio)?;
-            let reduced: std::time::Instant = std::time::Instant::now();
-            remap_tile(&self.level1, &self.luts[lens], &mut self.tiles[lens]).map_err(to_vio)?;
-            self.last_ns[0] += (reduced - mark).as_nanos() as u64;
-            self.last_ns[1] += reduced.elapsed().as_nanos() as u64;
-        }
-        Ok(())
+    /// Record the wall time of the last host-side ingest.
+    pub fn set_last_ns(&mut self, ns: u64) {
+        self.last_ns = ns;
     }
 
-    /// Wall time of the last remap: `[lens level 1, gather]` over both lenses, ns.
-    pub fn last_ns(&self) -> [u64; 2] {
+    /// Wall time of the last host-side ingest, ns: the CPU remap on the CPU lane, the lens byte copy on the GPU
+    /// lane (whose stitch runs on the device inside the frontend's pyramid build).
+    pub fn last_ns(&self) -> u64 {
         self.last_ns
-    }
-
-    /// Swap point for the GPU lane: the CPU-remapped tiles narrowed to bytes
-    /// (`(v + 128) >> 8`) for the normal device upload, which widens them again.
-    /// The device stitch kernel (F5) replaces this function and [`Self::remap`]
-    /// on the GPU lane.
-    pub fn narrow_tiles_for_device_upload(&self, out: &mut [Vec<u8>; 2]) {
-        for (bytes, tile) in out.iter_mut().zip(&self.tiles) {
-            bytes.clear();
-            bytes.extend(
-                tile.as_slice()
-                    .iter()
-                    .map(|&value| ((u32::from(value) + 128) >> 8).min(255) as u8),
-            );
-        }
     }
 
     /// Per tile, whether each pixel's table entry is invalid (outside the lens).
     pub fn invalid(&self, tile: usize) -> Vec<bool> {
-        self.luts[tile]
+        self.lut(tile)
             .sample
             .iter()
             .map(|&sample| sample == LUT_INVALID)
@@ -296,7 +257,7 @@ impl DualFisheyeIngest {
 
     /// Per tile, the invalid pixels grown by [`KILL_RADIUS_PX`] (Chebyshev).
     pub fn kill_mask(&self, tile: usize) -> Arc<TrackKillMask> {
-        let geometry: &TileGeometry = &self.luts[tile].geometry;
+        let geometry: &TileGeometry = &self.lut(tile).geometry;
         let (width, height) = (geometry.width(), geometry.height);
         let invalid: Vec<bool> = self.invalid(tile);
         let mut killed: Vec<bool> = vec![false; width * height];
@@ -334,7 +295,7 @@ impl DualFisheyeIngest {
                 rolling_shutter_correct(
                     pixel,
                     &self.tile_camera,
-                    &self.luts[tile],
+                    self.lut(tile),
                     self.lens_size.height,
                     self.readout_s,
                     &omega,
@@ -399,7 +360,7 @@ impl DualFisheyeIngest {
                 if let Some([u, v]) = rolling_shutter_correct(
                     [f64::from(pixel.x), f64::from(pixel.y)],
                     &self.tile_camera,
-                    &self.luts[tile],
+                    self.lut(tile),
                     self.lens_size.height,
                     self.readout_s,
                     &omega,

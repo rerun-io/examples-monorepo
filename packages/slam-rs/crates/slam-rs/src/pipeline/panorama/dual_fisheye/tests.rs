@@ -3,7 +3,8 @@
 use super::*;
 use crate::frontend::input::FrameStorage;
 use crate::pipeline::panorama::{PanoramaRig, PanoramaSource};
-use kornia_staging_imgproc::panorama::lens_level1;
+use kornia_image::Image;
+use kornia_staging_imgproc::panorama::{assemble_panorama, lens_level1, remap_tile};
 use std::f64::consts::PI;
 
 /// The X4 Air clip's V6 factory string (recon/09), as `kornia-staging-io`'s tests hold it.
@@ -164,64 +165,87 @@ fn textured_lens(seed: u32) -> Vec<u8> {
 }
 
 #[test]
-fn ingest_equals_the_kornia_staging_remap_and_the_gpu_bytes_narrow_it() {
+fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_remap() {
     let (mut rig, _) = rig(true);
-    let lenses_px = [textured_lens(1), textured_lens(2)];
-    let views: Vec<ImageView<'_>> = lenses_px
+    // A padded stride: the CPU lane reads the rows in place, no dense copy first.
+    let stride: usize = 1924;
+    let lenses_px: [Vec<u8>; 2] = [textured_lens(1), textured_lens(2)];
+    let padded: Vec<Vec<u8>> = lenses_px
+        .iter()
+        .map(|dense| {
+            dense
+                .chunks_exact(1920)
+                .flat_map(|row| row.iter().copied().chain([7u8; 4]))
+                .collect()
+        })
+        .collect();
+    let views: Vec<ImageView<'_>> = padded
         .iter()
         .map(|data| ImageView {
             width: 1920,
             height: 1920,
-            stride: 1920,
+            stride,
             data,
         })
         .collect();
-    let mut dense = FrameStorage::new(false);
-    rig.ingest(&views, &mut dense).unwrap();
-    let FrameStorage::Dense(images) = &dense else {
-        panic!("dense")
-    };
-    for tile in 0..2 {
-        let lens = Image::<u8, 1>::new(
-            ImageSize {
-                width: 1920,
-                height: 1920,
-            },
-            lenses_px[tile].clone(),
-        )
-        .unwrap();
-        let level1 = lens_level1(&lens).unwrap();
-        let mut reference = Image::from_size_val(
-            ImageSize {
-                width: 1088,
-                height: 960,
-            },
-            0u16,
-        )
-        .unwrap();
-        remap_tile(&level1, rig.tile_lut(tile).unwrap(), &mut reference).unwrap();
-        assert_eq!(
-            images[tile].as_slice(),
-            reference.as_slice(),
-            "tile {tile}: CPU lane takes the remap as is"
-        );
-        assert_eq!(
-            rig.dual_fisheye_tiles().unwrap()[tile].as_slice(),
-            reference.as_slice()
-        );
-    }
-    // Packed (GPU) storage gets the tiles narrowed to bytes.
-    let mut packed = FrameStorage::new(true);
-    rig.ingest(&views, &mut packed).unwrap();
-    for (bytes, image) in rig.tiles.iter().zip(images) {
-        let narrowed: Vec<u8> = image
-            .as_slice()
-            .iter()
-            .map(|&v| ((u32::from(v) + 128) >> 8).min(255) as u8)
-            .collect();
-        assert_eq!(bytes, &narrowed);
+    let references: Vec<Image<u16, 1>> = (0..2)
+        .map(|tile| {
+            let lens = Image::<u8, 1>::new(
+                ImageSize {
+                    width: 1920,
+                    height: 1920,
+                },
+                lenses_px[tile].clone(),
+            )
+            .unwrap();
+            let mut reference = Image::from_size_val(
+                ImageSize {
+                    width: 1088,
+                    height: 960,
+                },
+                0u16,
+            )
+            .unwrap();
+            remap_tile(
+                &lens_level1(&lens).unwrap(),
+                rig.tile_lut(tile).unwrap(),
+                &mut reference,
+            )
+            .unwrap();
+            reference
+        })
+        .collect();
+    let geometry: TileGeometry = rig.tile_lut(0).unwrap().geometry;
+    let panorama: Image<u8, 1> =
+        assemble_panorama([&references[0], &references[1]], geometry).unwrap();
+    // The CPU lane (dense) remaps on the host; the GPU lane (packed) keeps the lens bytes for the device
+    // stitch, and its host view (detector fallback, panorama logging) is the same remap, never a u8 round trip.
+    for gpu in [false, true] {
+        let mut storage = FrameStorage::new(gpu);
+        for _ in 0..2 {
+            // Twice: the reused scratch must not leak the previous frameset.
+            rig.ingest(&views, &mut storage).unwrap();
+        }
+        let frames = storage.view();
+        assert_eq!(frames.len(), 2);
+        for (tile, reference) in references.iter().enumerate() {
+            assert_eq!(frames.get(tile).size(), reference.size());
+            frames
+                .get(tile)
+                .with_dense(|image| {
+                    assert_eq!(
+                        image.as_slice(),
+                        reference.as_slice(),
+                        "gpu {gpu}, tile {tile}"
+                    );
+                })
+                .unwrap();
+        }
+        let logged = rig.panorama_image(&storage).unwrap().unwrap();
+        assert_eq!(logged.as_slice(), panorama.as_slice(), "gpu {gpu}");
     }
     // A frameset that is not two lens images is refused before anything moves.
+    let mut dense = FrameStorage::new(false);
     assert!(rig.ingest(&views[..1], &mut dense).is_err());
 }
 

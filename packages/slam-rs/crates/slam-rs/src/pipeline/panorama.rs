@@ -49,8 +49,8 @@ pub struct PanoramaRig {
     tile_width: usize,
     /// Panorama column of each tile's column 0 (may be negative: it wraps).
     origins: [i64; 2],
-    /// The two tiles of the last frameset as bytes: the crop (equirect), or
-    /// the narrowed remap the GPU lane uploads (dual fisheye).
+    /// The two tiles of the last frameset as bytes (equirect crop; unused by
+    /// the dual fisheye, whose storage takes the lens images).
     tiles: [Vec<u8>; 2],
     /// Tables, buffers and rolling-shutter state of the dual-fisheye source.
     dual: Option<Box<DualFisheyeIngest>>,
@@ -176,7 +176,7 @@ impl PanoramaRig {
                 height,
                 tile_width,
                 origins: [-margin, geometry.hemisphere_width as i64 - margin],
-                tiles: [vec![0; tile_width * height], vec![0; tile_width * height]],
+                tiles: [Vec::new(), Vec::new()],
                 dual: Some(Box::new(expanded.ingest)),
             },
             expanded.calibration,
@@ -344,9 +344,10 @@ impl PanoramaRig {
 impl PanoramaRig {
     /// Turn a checked frameset into the frontend's two tile images in `frames`.
     ///
-    /// Equirect: the crop, widened by the normal fill. Dual fisheye: the remap
-    /// writes `u16` level 0 directly into dense (CPU) storage; packed (GPU)
-    /// storage gets the narrowed bytes ([`DualFisheyeIngest::narrow_tiles_for_device_upload`]).
+    /// Equirect: the crop, widened by the normal fill. Dual fisheye: the two lens
+    /// images go to the storage with the rig's one [`crate::frontend::input::LensStitch`]
+    /// (`fill_lenses`): dense (CPU) storage remaps on the host, packed (GPU)
+    /// storage keeps the lens bytes and the pyramid builder stitches on the device.
     ///
     /// # Errors
     ///
@@ -362,15 +363,13 @@ impl PanoramaRig {
             frames.fill(&self.tile_views())?;
             return Ok(());
         };
-        dual.remap(images)?;
-        if !frames.fill_dense_u16(dual.tiles()) {
-            dual.narrow_tiles_for_device_upload(&mut self.tiles);
-            frames.fill(&self.tile_views())?;
-        }
+        let mark: std::time::Instant = std::time::Instant::now();
+        frames.fill_lenses(images, dual.stitch())?;
+        dual.set_last_ns(mark.elapsed().as_nanos() as u64);
         Ok(())
     }
 
-    /// The same for the GPU lane's lookahead upload, which takes bytes.
+    /// The same for the GPU lane's lookahead upload.
     ///
     /// # Errors
     ///
@@ -381,15 +380,44 @@ impl PanoramaRig {
         packed: &mut PackedImages,
     ) -> Result<(), VioError> {
         self.check(images)?;
-        match &mut self.dual {
-            Some(dual) => {
-                dual.remap(images)?;
-                dual.narrow_tiles_for_device_upload(&mut self.tiles);
+        match &self.dual {
+            Some(dual) => packed.fill_lenses(images, dual.stitch())?,
+            None => {
+                self.crop(images)?;
+                packed.fill(&self.tile_views());
             }
-            None => self.crop(images)?,
         }
-        packed.fill(&self.tile_views());
         Ok(())
+    }
+
+    /// The stitched panorama (tile centres side by side, `u8`) of the frameset
+    /// `frames` holds, for logging; `None` for an equirect rig. Only a caller
+    /// that asks pays for it: on the GPU lane the tiles are remapped on the host
+    /// from the retained lens bytes (the same integer rule as the device), never
+    /// read back from the device.
+    ///
+    /// # Errors
+    ///
+    /// When the storage does not hold this rig's two tiles.
+    pub fn panorama_image(
+        &self,
+        frames: &FrameStorage,
+    ) -> Result<Option<kornia_image::Image<u8, 1>>, VioError> {
+        let Some(dual) = &self.dual else {
+            return Ok(None);
+        };
+        let view = frames.view();
+        if view.len() != 2 {
+            return Ok(None);
+        }
+        let geometry = dual.lut(0).geometry;
+        let to_vio = |error: kornia_image::ImageError| VioError::Panorama(error.to_string());
+        let panorama = view.get(0).with_dense(|tile0| {
+            view.get(1).with_dense(|tile1| {
+                kornia_staging_imgproc::panorama::assemble_panorama([tile0, tile1], geometry)
+            })
+        })??;
+        Ok(Some(panorama.map_err(to_vio)?))
     }
 
     /// Keep a raw gyro sample (IMU frame) for the rolling-shutter correction.
@@ -411,11 +439,6 @@ impl PanoramaRig {
         }
     }
 
-    /// The `u16` tiles of the last dual-fisheye frameset, `None` for equirect.
-    pub fn dual_fisheye_tiles(&self) -> Option<&[kornia_image::Image<u16, 1>; 2]> {
-        self.dual.as_deref().map(DualFisheyeIngest::tiles)
-    }
-
     /// [`DualFisheyeLenses`]' rolling-shutter correction of tile `tile`'s pixels
     /// for a gyro rate `omega_imu` (IMU frame), as the estimator's copy gets it;
     /// a pixel that cannot be corrected comes back unchanged, and every pixel
@@ -432,9 +455,10 @@ impl PanoramaRig {
         }
     }
 
-    /// Wall time of the last dual-fisheye ingest, `[lens level 1, gather]` ns
-    /// over both lenses; `None` for equirect.
-    pub fn dual_fisheye_ingest_ns(&self) -> Option<[u64; 2]> {
+    /// Wall time of the last dual-fisheye host ingest, ns: the CPU remap of
+    /// both lenses (CPU lane) or the lens byte copy (GPU lane, which stitches on
+    /// the device inside the frontend); `None` for equirect.
+    pub fn dual_fisheye_ingest_ns(&self) -> Option<u64> {
         self.dual.as_deref().map(DualFisheyeIngest::last_ns)
     }
 

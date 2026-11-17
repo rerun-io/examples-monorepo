@@ -194,6 +194,19 @@ impl<S: Scalar> Vio<S> {
         self.panorama.as_ref()
     }
 
+    /// The stitched panorama of the last ingested dual-fisheye frameset, for
+    /// logging; `None` for any other rig. See [`PanoramaRig::panorama_image`].
+    ///
+    /// # Errors
+    ///
+    /// When the stored frameset is not this rig's.
+    pub fn panorama_image(&self) -> Result<Option<kornia_image::Image<u8, 1>>, VioError> {
+        match &self.panorama {
+            Some(rig) => rig.panorama_image(&self.frames),
+            None => Ok(None),
+        }
+    }
+
     /// Gravity in the world frame, `(0, 0, -config.vio_gravity_ms2)`.
     fn gravity(&self) -> Vector3<f64> {
         Vector3::new(0.0, 0.0, -self.frontend.config().vio_gravity_ms2)

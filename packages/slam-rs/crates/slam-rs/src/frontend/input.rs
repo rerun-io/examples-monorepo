@@ -1,17 +1,28 @@
 //! Explicit dense or retained byte inputs for one frontend frame.
 use crate::{ImageView, image};
 use kornia_image::{Image, ImageSize};
-use kornia_staging_imgproc::panorama::{TileLut, lens_level1, remap_tile};
+use kornia_staging_imgproc::color::widen_u8_shift8_strided_unchecked;
+use kornia_staging_imgproc::panorama::{TileLut, remap_tile};
+use kornia_staging_imgproc::pyramid::pyrdown_floor_u16;
 use std::sync::{Arc, Mutex};
 
 /// The dual-fisheye ingest: two lens images become the two hemisphere tiles through tables built once on the CPU
 /// (`kornia_staging_imgproc::panorama::build_tile_lut`). Tile `k` reads lens `k`. The GPU lane uploads the tables
 /// once and stitches on the device; the CPU lane and the GPU fallback run `lens_level1` + `remap_tile`. Both give the
 /// same tile pixels bit for bit.
-#[derive(Debug)]
 pub struct LensStitch {
     luts: [TileLut; 2],
     lens: ImageSize,
+    /// Host remap scratch, reused every frameset: one lens widened to `u16`, then its level 1.
+    scratch: Mutex<[Image<u16, 1>; 2]>,
+}
+impl std::fmt::Debug for LensStitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LensStitch")
+            .field("luts", &self.luts)
+            .field("lens", &self.lens)
+            .finish_non_exhaustive()
+    }
 }
 impl LensStitch {
     /// # Errors
@@ -39,7 +50,15 @@ impl LensStitch {
         if !consistent {
             return Err(image::IngestError::StitchTables);
         }
-        Ok(Self { luts, lens })
+        let scratch = Mutex::new([
+            image::zeros(lens.width, lens.height)?,
+            image::zeros(source.width, source.height)?,
+        ]);
+        Ok(Self {
+            luts,
+            lens,
+            scratch,
+        })
     }
     /// The two tables, tile 0 then tile 1.
     pub fn luts(&self) -> &[TileLut; 2] {
@@ -56,19 +75,31 @@ impl LensStitch {
             height: self.luts[0].geometry.height,
         }
     }
-    /// Tile `tile` from lens `tile`'s dense bytes, on the host.
+    /// Tile `tile` from lens `tile`'s bytes (`stride` bytes per row), on the host: `lens_level1` + `remap_tile`, the
+    /// device stitch's integer rule, through reused scratch and without copying the lens first.
     fn remap(
         &self,
         tile: usize,
-        lens: Vec<u8>,
+        lens: &[u8],
+        stride: usize,
         out: &mut Image<u16, 1>,
     ) -> Result<(), image::IngestError> {
         let layout = |_| image::IngestError::StitchTables;
-        let lens = Image::new(self.lens, lens).map_err(layout)?;
+        let needed = stride * (self.lens.height - 1) + self.lens.width;
+        if stride < self.lens.width || lens.len() < needed {
+            return Err(image::IngestError::StitchTables);
+        }
         if out.size() != self.tile_size() {
             *out = image::zeros(self.tile_size().width, self.tile_size().height)?;
         }
-        remap_tile(&lens_level1(&lens).map_err(layout)?, &self.luts[tile], out).map_err(layout)
+        let mut scratch = self
+            .scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let [level0, level1] = &mut *scratch;
+        widen_u8_shift8_strided_unchecked(lens, stride, level0);
+        pyrdown_floor_u16(level0, level1).map_err(layout)?;
+        remap_tile(level1, &self.luts[tile], out).map_err(layout)
     }
     fn check(&self, lenses: &[ImageView<'_>]) -> Result<(), image::IngestError> {
         match lenses
@@ -277,7 +308,7 @@ impl<'a> FrameImage<'a> {
                 let mut image = host
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                stitch.remap(tile, bytes.to_vec(), &mut image)?;
+                stitch.remap(tile, bytes, stitch.lens.width, &mut image)?;
                 Ok(body(&image))
             }
         }
@@ -326,23 +357,6 @@ impl FrameStorage {
         }
         Ok(())
     }
-    /// Take level-0 images the caller already built at the pyramid's `u16`
-    /// format (the dual-fisheye remap), with no byte round trip. Returns false,
-    /// touching nothing, on packed storage: the device upload takes bytes.
-    pub(crate) fn fill_dense_u16(&mut self, sources: &[Image<u16, 1>]) -> bool {
-        let Self::Dense(images) = self else {
-            return false;
-        };
-        images.resize_with(sources.len(), image::empty);
-        for (image, source) in images.iter_mut().zip(sources) {
-            if image.size() == source.size() {
-                image.as_slice_mut().copy_from_slice(source.as_slice());
-            } else {
-                image.clone_from(source);
-            }
-        }
-        true
-    }
     /// Retain two lens images as the two tile images `stitch` makes of them: the dual-fisheye replacement for
     /// [`Self::fill`] with the tile views. The GPU lane stitches on the device; the CPU lane remaps here.
     ///
@@ -358,9 +372,7 @@ impl FrameStorage {
                 stitch.check(lenses)?;
                 images.resize_with(2, image::empty);
                 for (tile, (image, view)) in images.iter_mut().zip(lenses).enumerate() {
-                    let rows = (0..view.height)
-                        .flat_map(|row| &view.data[row * view.stride..][..view.width]);
-                    stitch.remap(tile, rows.copied().collect(), image)?;
+                    stitch.remap(tile, view.data, view.stride, image)?;
                 }
                 Ok(())
             }

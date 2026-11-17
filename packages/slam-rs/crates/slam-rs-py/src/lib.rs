@@ -191,17 +191,11 @@ impl Vio {
 
     /// The stitched 1920x960 panorama of the last dual-fisheye frameset
     /// (`uint8[h, w]`, tile centres side by side), `None` for any other rig.
+    /// On the GPU lane it is remapped on the host from the lens bytes, only when asked.
     fn panorama_image<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyArray2<u8>>>> {
-        let Some(tiles) = self.inner.panorama().and_then(|rig| rig.dual_fisheye_tiles()) else {
+        let Some(pano) = self.inner.panorama_image().map_err(value_error)? else {
             return Ok(None);
         };
-        let geometry = kornia_staging_imgproc::panorama::TileGeometry {
-            hemisphere_width: 960,
-            height: 960,
-            margin: (tiles[0].width() - 960) / 2,
-        };
-        let pano = kornia_staging_imgproc::panorama::assemble_panorama([&tiles[0], &tiles[1]], geometry)
-            .map_err(value_error)?;
         let (width, height) = (pano.width(), pano.height());
         Ok(Some(
             numpy::ndarray::Array2::from_shape_vec((height, width), pano.as_slice().to_vec())
@@ -210,14 +204,14 @@ impl Vio {
         ))
     }
 
-    /// Wall time of the last dual-fisheye ingest as `(lens_level1_ns, remap_ns)`
-    /// over both lenses, `None` for any other rig.
+    /// Wall time of the last dual-fisheye host ingest in ns (the CPU remap of
+    /// both lenses; on the GPU lane the lens byte copy, the stitch itself runs on
+    /// the device), `None` for any other rig.
     #[getter]
-    fn panorama_ingest_ns(&self) -> Option<(u64, u64)> {
+    fn panorama_ingest_ns(&self) -> Option<u64> {
         self.inner
             .panorama()
             .and_then(|rig| rig.dual_fisheye_ingest_ns())
-            .map(|[level1, remap]| (level1, remap))
     }
 
     /// Rolling-shutter correction of tile pixels (`float64[n, 2]`) for a gyro
@@ -428,6 +422,25 @@ impl Vio {
         py.detach(|| self.inner.flush())
             .map(|result| result.map(|inner| VioResult { inner }))
             .map_err(value_error)
+    }
+
+    /// What the frontend lane cost on the last frameset that ran it, in ms:
+    /// `imu` (its motion preintegration), `pyramid`, `detect`, `track` and
+    /// `stereo`. Unlike a snapshot's timings it exists before the estimator has
+    /// a state, so a bootstrapping run can be timed too.
+    #[getter]
+    fn frontend_timings_ms(&self) -> std::collections::BTreeMap<&'static str, f64> {
+        let timings = self.inner.frontend_timings();
+        [
+            ("imu", timings.imu_ns),
+            ("pyramid", timings.flow.pyramid_ns),
+            ("detect", timings.flow.detect_ns),
+            ("track", timings.flow.track_ns),
+            ("stereo", timings.flow.stereo_ns),
+        ]
+        .into_iter()
+        .map(|(name, ns)| (name, ns as f64 / 1e6))
+        .collect()
     }
 
     /// The inertial bootstrap's attempts as JSON (`config.vio_bootstrap`),

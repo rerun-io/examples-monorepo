@@ -255,10 +255,14 @@ class Vio:
         Tile ``k``'s pixel ``(x, y)`` is the panorama's ``((x + origins[k]) mod W, y)``.
         """
     @property
-    def panorama_ingest_ns(self) -> tuple[int, int] | None:
-        """Wall time of the last dual-fisheye ingest, ``(lens_level1_ns, remap_ns)`` over both lenses; None otherwise."""
+    def panorama_ingest_ns(self) -> int | None:
+        """Wall time of the last dual-fisheye host ingest in ns: the CPU remap of both lenses, or on the GPU lane the
+        lens byte copy (the stitch runs on the device); None for any other rig."""
     def panorama_image(self) -> UInt8[ndarray, "h w"] | None:
-        """The stitched 1920x960 panorama of the last dual-fisheye frameset (``dual_fisheye`` given), else None."""
+        """The stitched 1920x960 panorama of the last dual-fisheye frameset (``dual_fisheye`` given), else None.
+
+        On the GPU lane it is remapped on the host from the lens bytes, only when asked: no device read-back.
+        """
     def rolling_shutter_corrected(self, tile: int, pixels: Float64[ndarray, "n 2"], omega_imu: tuple[float, float, float]) -> Float64[ndarray, "n 2"]:
         """Tile pixels with the rolling shutter removed for a gyro rate in the IMU frame, as the estimator's copy gets them."""
     @property
@@ -316,6 +320,11 @@ class Vio:
 
     def bootstrap_report(self) -> str | None:
         """The inertial bootstrap's attempts as JSON (``config.vio_bootstrap``), or None on the stereo start."""
+
+    @property
+    def frontend_timings_ms(self) -> dict[str, float]:
+        """What the frontend lane cost on the last frameset that ran it, in ms: ``imu``, ``pyramid``, ``detect``,
+        ``track`` and ``stereo``. Exists before the estimator has a state, unlike a snapshot's timings."""
 
     def __repr__(self) -> str: ...
 
