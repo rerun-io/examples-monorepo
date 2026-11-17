@@ -85,13 +85,26 @@ impl DualFisheyeLenses {
     ///
     /// # Errors
     ///
-    /// [`VioError`] for a lens image below 4x4.
+    /// [`VioError::Panorama`] for a margin wider than half a hemisphere (480 px)
+    /// or a lens image below 4x4, before any table is built.
     pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
         let geometry: TileGeometry = TileGeometry {
             hemisphere_width: 960,
             height: 960,
             margin: margin_px,
         };
+        if margin_px > geometry.hemisphere_width / 2 {
+            return Err(VioError::Panorama(format!(
+                "a {margin_px} px margin is wider than half the {} px hemisphere",
+                geometry.hemisphere_width
+            )));
+        }
+        if lens.width < 4 || lens.height < 4 {
+            return Err(VioError::Panorama(format!(
+                "a {}x{} lens image is below 4x4",
+                lens.width, lens.height
+            )));
+        }
         let luts: [TileLut; 2] = std::array::from_fn(|k| {
             build_tile_lut(geometry, k, lens, |ray| {
                 self.lenses[k].project_from_panorama(ray)

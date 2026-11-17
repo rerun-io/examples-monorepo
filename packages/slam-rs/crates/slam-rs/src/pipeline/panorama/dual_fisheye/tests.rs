@@ -279,6 +279,36 @@ fn the_standalone_stitch_gives_the_lanes_panorama() {
     );
 }
 
+/// A margin past half a hemisphere or a lens below 4x4 is refused before the
+/// tables are built (a typo in the margin would otherwise allocate GBs).
+#[test]
+fn a_wide_margin_or_a_tiny_lens_is_refused_before_the_tables() {
+    let lens = ImageSize {
+        width: 1920,
+        height: 1920,
+    };
+    for margin in [481, 2000] {
+        let refused = lenses().stitch(lens, margin);
+        assert!(
+            matches!(&refused, Err(VioError::Panorama(message)) if message.contains("margin")),
+            "margin {margin}: {refused:?}"
+        );
+    }
+    for tiny in [[3, 1920], [1920, 3]] {
+        let refused = lenses().stitch(
+            ImageSize {
+                width: tiny[0],
+                height: tiny[1],
+            },
+            64,
+        );
+        assert!(
+            matches!(&refused, Err(VioError::Panorama(message)) if message.contains("4x4")),
+            "lens {tiny:?}: {refused:?}"
+        );
+    }
+}
+
 #[test]
 fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
     let (rig, tiles) = rig(true);
