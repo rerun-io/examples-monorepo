@@ -5,7 +5,7 @@ mod gp3p_common;
 
 use gp3p_common::{observe, pose_error, random_pose, rig, scene, Rng};
 use kornia_staging_3d::pose::gp3p::ransac::{
-    gp3p_ransac, Gp3pEstimator, Gp3pRansacConfig, Gp3pRansacResult, IterationSchedule,
+    gp3p_ransac, Gp3pRansacConfig, Gp3pRansacResult, IterationSchedule,
 };
 use kornia_staging_3d::pose::gp3p::{gp3p, GeneralizedCorrespondence, Gp3pError, Gp3pPose};
 use kornia_staging_algebra::lie::RigidTransform;
@@ -409,8 +409,11 @@ fn invalid_min_inlier_ratio_is_refused() {
 
 /// The parity knob: of several GP3P solutions, the sample's fourth
 /// correspondence keeps the true one (OpenGV `AbsolutePoseSacProblem`).
+#[cfg(feature = "kornia-3d-interop")]
 #[test]
 fn parity_estimator_keeps_the_solution_that_fits_the_fourth_point() {
+    use kornia_3d::ransac::Estimator;
+    use kornia_staging_3d::pose::gp3p::ransac::interop::{FourRays, ThreeRays};
     let mut multi = 0;
     for seed in 0..500 {
         let mut rng = Rng::new(40_000 + seed);
@@ -425,13 +428,13 @@ fn parity_estimator_keeps_the_solution_that_fits_the_fourth_point() {
         }
         multi += 1;
         let mut models = Vec::new();
-        Gp3pEstimator::<4>.fit(&sample, &mut models);
+        FourRays.fit(&sample, &mut models);
         assert_eq!(models.len(), 1, "seed {seed}");
         let (r, t) = pose_error(&models[0], &truth);
         assert!(r < 1e-7 && t < 1e-7, "seed {seed}: {r} {t}");
         // The sample-of-three estimator returns every solution instead.
         let mut all = Vec::new();
-        Gp3pEstimator::<3>.fit(&sample[..3], &mut all);
+        ThreeRays.fit(&sample[..3], &mut all);
         assert!(all.len() >= 2, "seed {seed}");
     }
     assert!(
@@ -465,12 +468,12 @@ fn parity_ransac_recovers_a_clean_central_scene() {
 /// `kornia_3d::ransac::run_with_rng` does on its plain path (no SPRT, no
 /// LO-RANSAC): same draw count, same model, same inliers, for both schedules
 /// and with the acceptance-ratio bound. It replaces upstream so the `ransac`
-/// feature carries no kornia-3d (and so no faer) into slam-rs.
+/// feature carries no kornia-3d (and so no faer) into its consumers.
 #[cfg(feature = "kornia-3d-interop")]
 #[test]
 fn the_local_driver_equals_upstreams_serial_driver() {
     use kornia_3d::ransac::{run_with_rng, RansacConfig, ThresholdConsensus, UniformSampler};
-    use kornia_staging_3d::pose::gp3p::ransac::draw_hypotheses;
+    use kornia_staging_3d::pose::gp3p::ransac::interop::{FourRays, ThreeRays};
     use rand::rngs::ChaCha8Rng;
     use rand::SeedableRng;
     for seed in 0..60u64 {
@@ -487,7 +490,15 @@ fn the_local_driver_equals_upstreams_serial_driver() {
             inlier_ratio,
             NOISE,
         );
-        for (sample, max_iters, confidence) in [(3, 500, 0.999), (4, 36, 0.99), (3, 52, 0.999)] {
+        // The default schedule, the parity one, and the default one bounded to
+        // 52 draws by a 0.5 acceptance ratio.
+        let parity = IterationSchedule::OpenGv { iterations: 35 };
+        let cases = [
+            (3, 500, 0.999, IterationSchedule::default(), None),
+            (4, 36, 0.99, parity, None),
+            (3, 52, 0.999, IterationSchedule::default(), Some(0.5)),
+        ];
+        for (sample, max_iters, confidence, schedule, min_inlier_ratio) in cases {
             let ransac = RansacConfig {
                 max_iters,
                 confidence,
@@ -499,7 +510,7 @@ fn the_local_driver_equals_upstreams_serial_driver() {
             let mut spare = ChaCha8Rng::seed_from_u64(seed + 1);
             let upstream = if sample == 3 {
                 run_with_rng(
-                    &Gp3pEstimator::<3>,
+                    &ThreeRays,
                     &consensus,
                     &mut sampler,
                     &c,
@@ -507,16 +518,16 @@ fn the_local_driver_equals_upstreams_serial_driver() {
                     &mut spare,
                 )
             } else {
-                run_with_rng(
-                    &Gp3pEstimator::<4>,
-                    &consensus,
-                    &mut sampler,
-                    &c,
-                    &ransac,
-                    &mut spare,
-                )
+                run_with_rng(&FourRays, &consensus, &mut sampler, &c, &ransac, &mut spare)
             };
-            let local = draw_hypotheses(&c, sample, 5e-5, confidence, max_iters, seed);
+            let config = Gp3pRansacConfig {
+                threshold: 5e-5,
+                schedule,
+                seed,
+                refine: false,
+                min_inlier_ratio,
+            };
+            let local = gp3p_ransac(&c, &config).unwrap();
             let label = format!("seed {seed}, sample {sample}, cap {max_iters}");
             assert_eq!(
                 local.as_ref().map(|l| l.iterations),
@@ -524,7 +535,8 @@ fn the_local_driver_equals_upstreams_serial_driver() {
                 "{label}"
             );
             if let Some(local) = local {
-                assert_eq!(Some(local.pose), upstream.model, "{label}");
+                let upstream_pose = upstream.model.map(|m| m.to_rigid_transform());
+                assert_eq!(Some(local.pose), upstream_pose, "{label}");
                 assert_eq!(local.inliers, upstream.inliers, "{label}");
             }
         }
