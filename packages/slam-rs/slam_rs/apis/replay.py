@@ -238,7 +238,7 @@ def main(config: Config) -> None:
         estimate: Trajectory = stage.logger.estimated()
         # The final run: the raw VIO re-anchored on the flushed map's keyframes (the raw VIO itself with the back end off).
         final: Trajectory = reanchored(estimate, stage.lockstep.vio.map_snapshot())
-        stage.logger.log_final_path(final)
+        stage.logger.log_final_run(final)
         vio_csv: Path = write_scoring_csvs(output_csv, final=final, raw=estimate, offset_ns=feed.export_offset_ns)
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
         if len(estimate) == 0:
