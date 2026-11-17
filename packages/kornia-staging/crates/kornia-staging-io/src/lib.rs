@@ -7,3 +7,9 @@ pub mod v4l;
 
 /// Annex-B parsing and optional subprocess encoding.
 pub mod video;
+
+/// MP4 demuxing and HEVC sample framing.
+pub mod container;
+
+/// Insta360 `.insv` dual-fisheye clips: trailer, factory lens calibration, IMU and frame times.
+pub mod insta360;
