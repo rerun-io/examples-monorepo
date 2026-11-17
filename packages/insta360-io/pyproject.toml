@@ -1,0 +1,16 @@
+[build-system]
+# >= 1.9.4: sets PYO3_BUILD_EXTENSION_MODULE, which replaces PyO3's extension-module feature.
+requires = ["maturin>=1.9.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "insta360-io"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["numpy"]
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "crates/insta360-io-py/Cargo.toml"
+module-name = "insta360_io"
+# insta360_io.pyi (next to this file) ships as insta360_io/__init__.pyi with py.typed.
