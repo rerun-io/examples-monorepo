@@ -438,57 +438,29 @@ fn a_drifted_synthetic_map_recovers_in_f32_and_f64_far_from_the_origin() {
     assert!(gap < 1e-3, "f32 vs f64 keyframe RMS {gap} m");
 }
 
-/// B11: the solution is applied as a delta on the pose the map holds now, and
-/// a solved landmark moves with its host the same way.
+/// The solution goes into the map as it is: solved keyframes take their solved
+/// poses and solved landmarks sit at their solved world positions.
 #[test]
-fn the_result_is_applied_as_a_delta_on_the_current_pose() {
+fn the_solution_is_written_into_the_map() {
     let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01, 0.3);
     let config = VioConfig::default();
-    let edges = chain_edges(6);
-    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &config);
+    let input = map_problem(backend.map(), &chain_edges(6), &backend.t_i_c, &config);
     let (solved, _) = solve(&input, backend.gba_rig.as_ref().unwrap(), &config).unwrap();
-    // The map moved keyframe 1 (a host) after the problem was built.
-    let moved = Se3::new(
-        So3::exp(&Vector3::new(0.0, 0.01, 0.0)),
-        Vector3::new(0.1, 0.0, 0.0),
-    );
-    let now = moved * backend.map().keyframe(1).unwrap().pose;
-    backend.map.upsert_keyframe(1, now, None);
     apply(&mut backend.map, &input, &solved, &backend.t_i_c);
-    let k = input.keyframes.iter().position(|&id| id == 1).unwrap();
-    let t_gba = solved.imu_from_world[k].inverse();
-    let t_input = input.problem.imu_from_world[k].inverse();
-    let expected = t_gba * t_input.inverse() * now;
-    let got = backend.map().keyframe(1).unwrap().pose;
-    assert!((got.translation - expected.translation).norm() < 1e-9);
-    assert!((got.rotation.inverse() * expected.rotation).log().norm() < 1e-9);
-    let stored_world = |id: LandmarkId| {
-        let stored = backend.map().landmark(id).unwrap();
-        let host = backend.map().keyframe(stored.host.frame_id).unwrap().pose
-            * backend.t_i_c[stored.host.cam_id];
-        let bearing = StereographicParam::<f64>::unproject(&stored.direction);
-        (
-            stored.host.frame_id,
-            host * (Vector3::new(bearing[0], bearing[1], bearing[2]) / stored.inv_dist),
-        )
-    };
-    let mut on_moved_host = 0;
-    for (&id, solved_lm) in input.landmarks.iter().zip(&solved.landmarks) {
-        let (host, p_w) = stored_world(id);
-        // A landmark of an unmoved host sits at its solved world position; one
-        // of keyframe 1 moved with it, by the same delta as the pose.
-        let expected = if host == 1 {
-            on_moved_host += 1;
-            got * t_gba.inverse() * solved_lm.position
-        } else {
-            solved_lm.position
-        };
+    for (&id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
+        let pose = backend.map().keyframe(id).unwrap().pose;
         assert!(
-            (p_w - expected).norm() < 1e-9,
-            "landmark {id:?} of host {host}"
+            (pose * *imu_from_world).log().norm() < 1e-12,
+            "keyframe {id}"
         );
     }
-    assert!(on_moved_host > 0);
+    for (&id, landmark) in input.landmarks.iter().zip(&solved.landmarks) {
+        let stored = backend.map().landmark_world(id, &backend.t_i_c).unwrap();
+        assert!(
+            (stored - landmark.position).norm() < 1e-9,
+            "landmark {id:?}"
+        );
+    }
 }
 
 /// The gauge: a solution the free gauge turned and shifted (a 2 deg tilt) is

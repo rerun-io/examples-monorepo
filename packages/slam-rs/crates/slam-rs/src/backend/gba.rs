@@ -4,7 +4,7 @@
 //! [`kornia_staging_slam::sqrt_ba`] global problem ([`map_problem`]), solves it
 //! ([`solve`]: f64 centring, then the f32 or f64 square-root BA), takes the
 //! free gauge out ([`remove_gauge`]) and writes the result back into the map
-//! ([`apply`]). RootSLAM runs the same BA as a separate process on an exported
+//! (`apply`). RootSLAM runs the same BA as a separate process on an exported
 //! `map.json` (rootba `bal`, B25); here it runs in process, on the map the
 //! window built.
 //!
@@ -356,29 +356,14 @@ pub fn remove_gauge(input: &GbaProblem<f64>, solved: &mut GbaProblem<f64>) -> Se
     gauge
 }
 
-/// Write a solution into the map. Each keyframe moves by the GBA's delta,
-/// `T_new = T_gba T_input^-1 T_now` (B11), so a pose the map changed since the
-/// problem was built keeps that change. Each solved landmark is stored relative
-/// to its host's solved pose, so it moves with its host the same way; a host
-/// outside the problem keeps its current pose. Unsolved landmarks ride on their
-/// host.
-pub fn apply(
-    map: &mut KeyframeMap,
-    input: &GbaInput,
-    solved: &GbaProblem<f64>,
-    t_i_c: &[Se3<f64>],
-) {
-    for ((&id, input_pose), solved_pose) in input
-        .keyframes
-        .iter()
-        .zip(&input.problem.imu_from_world)
-        .zip(&solved.imu_from_world)
-    {
-        let Some(now) = map.keyframe(id).map(|k| k.pose) else {
-            continue;
-        };
-        let delta: Se3<f64> = solved_pose.inverse() * *input_pose;
-        map.upsert_keyframe(id, delta * now, None);
+/// Write a solution into the map: each solved keyframe takes its solved pose,
+/// each solved landmark is stored relative to its host's pose after that (a
+/// host outside the problem keeps its pose). Unsolved landmarks ride on their
+/// host. `finish` holds the map for the whole solve, so nothing moved since
+/// [`map_problem`].
+fn apply(map: &mut KeyframeMap, input: &GbaInput, solved: &GbaProblem<f64>, t_i_c: &[Se3<f64>]) {
+    for (&id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
+        map.upsert_keyframe(id, imu_from_world.inverse(), None);
     }
     for (&id, landmark) in input.landmarks.iter().zip(&solved.landmarks) {
         let Some(host) = map.landmark(id).map(|l| l.host) else {
@@ -389,12 +374,8 @@ pub fn apply(
         else {
             continue;
         };
-        let host_pose: Se3<f64> = input
-            .keyframes
-            .binary_search(&host.frame_id)
-            .map_or(keyframe.pose, |k| solved.imu_from_world[k].inverse());
         if let Some((direction, inv_dist)) =
-            host_relative(&(host_pose * *extrinsic), &landmark.position)
+            host_relative(&(keyframe.pose * *extrinsic), &landmark.position)
         {
             map.set_landmark_position(id, direction, inv_dist);
         }

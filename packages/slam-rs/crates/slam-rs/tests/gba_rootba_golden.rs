@@ -1,9 +1,9 @@
 //! The global BA driver on RootSLAM's exported MGO07 and MGO13 maps, against
 //! rootba `bal` (DESIGN §7.4, PR d2). The map goes through the same path as
 //! `Vio::finish_map`: a [`KeyframeMap`] with host-relative landmarks, then
-//! `map_problem`, `solve` (f64 centring, f32) and `apply`, without
-//! `remove_gauge`: rootba holds no pose and moves no gauge either, so the
-//! keyframes are compared with the solver's output before the re-alignment.
+//! `map_problem` and `solve` (f64 centring, f32), without `remove_gauge`:
+//! rootba holds no pose and moves no gauge either, so the keyframes are
+//! compared with the solver's output before the re-alignment.
 //!
 //! Assets, read at test time as third-party formats: `<runs>/<seq>/map/{map,
 //! pose_graph}.json` and `map/optimized_tracking_pg_float.csv`, and the
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
 use serde::Deserialize;
-use slam_rs::backend::gba::{GbaRig, apply, map_problem, solve};
+use slam_rs::backend::gba::{GbaRig, map_problem, solve};
 use slam_rs::backend::map::host_relative;
 use slam_rs::backend::{KeyframeMap, PoseGraphEdge, PoseGraphEdgeKind};
 use slam_rs::calib::Calibration;
@@ -228,7 +228,6 @@ fn golden(seq: &str) {
     let config = VioConfig::default();
     let input = map_problem(&map, &edges, t_i_c, &config);
     let (solved, report) = solve(&input, &rig, &config).unwrap();
-    apply(&mut map, &input, &solved, t_i_c);
     let ours = report.final_cost.error;
     let (bal_f32, bal_f64) = (
         final_cost(&run.join(format!("output.{seq}.balpgf.log"))),
@@ -259,9 +258,9 @@ fn golden(seq: &str) {
     // `min_obs_per_kf` observations in map.json (its filter_kf); we keep all.
     let bal_poses = positions(&run.join("map/optimized_tracking_pg_float.csv"));
     let (mut a, mut b) = (Vec::new(), Vec::new());
-    for (id, keyframe) in map.keyframes() {
+    for (id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
         if let Some(p) = bal_poses.get(id) {
-            a.push(keyframe.pose.translation);
+            a.push(imu_from_world.inverse().translation);
             b.push(*p);
         }
     }
