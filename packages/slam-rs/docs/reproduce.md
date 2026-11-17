@@ -19,17 +19,16 @@ to a tier.
 ## EuRoC
 
 EuRoC MAV (RootSLAM's EMH/EV1/EV2 groups, 11 sequences) is the catalog dataset
-`vslam-lab-euroc`: dataforge's VSLAM-LAB conversion (`dataforge-vslam-lab-rrd` on
-the NAS). Its `video_time` is the benchmark's own nanosecond clock, which
+`vslam-lab-euroc`: dataforge's VSLAM-LAB conversion (`dataforge-vslam-lab-rrd`). Its `video_time` is the benchmark's own nanosecond clock, which
 `slam.toml` states (`video_time_is_absolute`), and its cameras are radtan with no
 valid radius (Basalt's `rpmax` 0, no bound). The IMU model slam-rs reads is
 Basalt's, the one RootSLAM ran EuRoC with, imported as the `sensor_metadata`
-layer rather than VSLAM-LAB's OKVIS sigmas. On pablo-dl-server the registration
-root is `/mnt/nas/ssd-8tb/datasets/vslam-lab-euroc-catalog` (`base` and `gt`
-link to the conversion), registered once, skipping duplicates:
+layer rather than VSLAM-LAB's OKVIS sigmas. The registration root holds `base`
+and `gt` as links to the conversion's files and that `sensor_metadata`; it is
+registered once, skipping duplicates:
 
 ```bash
-export DATAFORGE_OUTPUT_ROOT=/mnt/nas/ssd-8tb/datasets/vslam-lab-euroc-catalog
+export DATAFORGE_OUTPUT_ROOT=<registration root>
 python ../dataforge/tools/apps/register.py vslam-lab --benchmark euroc        # dataforge env: base + gt
 pixi run -e slam-rs slam-rs-import-imu-calibration --dataset vslam-lab-euroc \
   --catalog rerun+http://127.0.0.1:51235 --applied-time-shift-ns 0 --no-register \
