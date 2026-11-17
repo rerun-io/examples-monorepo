@@ -40,7 +40,8 @@ fn expanded(width: u32, height: u32, config: &VioConfig) -> (PanoramaRig, Calibr
     (rig.expect("a full panorama expands"), tiles)
 }
 
-fn tile_model(tiles: &Calibration<f64>, tile: usize) -> Equirectangular<f64> {
+/// Tile `tile`'s camera model; the dual-fisheye tests share it.
+pub(super) fn tile_model(tiles: &Calibration<f64>, tile: usize) -> Equirectangular<f64> {
     let BasaltCamera::Equirectangular(p) = tiles.intrinsics[tile] else {
         panic!("tile cameras are equirectangular");
     };

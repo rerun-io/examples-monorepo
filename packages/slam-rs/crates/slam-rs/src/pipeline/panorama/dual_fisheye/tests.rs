@@ -4,6 +4,7 @@ use super::*;
 use crate::ImageView;
 use crate::frontend::input::FrameStorage;
 use crate::pipeline::panorama::PanoramaRig;
+use crate::pipeline::panorama::tests::tile_model;
 use kornia_image::Image;
 use kornia_staging_imgproc::panorama::{assemble_panorama, lens_level1, remap_tile};
 use std::f64::consts::PI;
@@ -59,13 +60,6 @@ fn rig(two_centre: bool) -> (PanoramaRig, Calibration<f64>) {
     let lenses = lenses();
     PanoramaRig::expand_dual_fisheye(&config(two_centre), lens_calibration(&lenses), lenses)
         .unwrap()
-}
-
-fn tile_model(tiles: &Calibration<f64>, tile: usize) -> Equirectangular<f64> {
-    let BasaltCamera::Equirectangular(p) = tiles.intrinsics[tile] else {
-        panic!("tile cameras are equirectangular");
-    };
-    Equirectangular::new([p.fx, p.fy, p.cx, p.cy, p.lon_max]).unwrap()
 }
 
 #[test]
