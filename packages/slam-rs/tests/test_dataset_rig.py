@@ -18,6 +18,8 @@ EUROC_SEGMENT: str = "vslam-lab-euroc__MH_01_easy"
 """RootSLAM's EMH01, the EuRoC sequence of the smoke set."""
 EUROC_FIRST_CAM0_NS: int = 1403636579763555584
 """The first row of MH_01_easy's ``mav0/cam0/data.csv``."""
+EUROC_RIG: RigProfile = RigProfile(video_time_is_absolute=True, frameset_tolerance_ns=1_000_000)
+"""EuRoC as slam.toml states it: the benchmark clock on ``video_time``, framesets matched within 1 ms."""
 
 
 class _Opened(Exception):
@@ -38,7 +40,7 @@ def _capture_profile(monkeypatch: pytest.MonkeyPatch, module: object) -> list[Ri
 def test_msd_datasets_read_as_msd_and_euroc_reads_the_device_clock(settings: SlamConfig) -> None:
     for name in ("msd-index", "msd-g2", "msd-odyssey"):
         assert dataset_rig(settings.dataset(name)) == MSD_RIG
-    assert dataset_rig(settings.dataset("vslam-lab-euroc")) == RigProfile(video_time_is_absolute=True)
+    assert dataset_rig(settings.dataset("vslam-lab-euroc")) == EUROC_RIG
 
 
 @pytest.mark.parametrize(("segment", "absolute"), [(EUROC_SEGMENT, True), ("msd-g2__MGO_others__MGO07_mapping_easy", False)])
@@ -55,7 +57,7 @@ def test_the_gate_runs_a_euroc_segment_on_the_device_clock(
     seen: list[RigProfile] = _capture_profile(monkeypatch, tracking)
     with pytest.raises(_Opened):
         tracking.run_segment(settings, benchmarks.by_id(EUROC_SEGMENT), backend="cpu")
-    assert seen == [RigProfile(video_time_is_absolute=True)]
+    assert seen == [EUROC_RIG]
 
 
 @pytest.mark.integration
@@ -84,3 +86,26 @@ def test_euroc_opens_from_the_catalog_on_its_own_clock(settings: SlamConfig) -> 
         truth = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         # state_groundtruth_estimate0 starts 1.075 s after the first frame and runs at 200 Hz.
         assert int(truth.t_ns[0]) == 1403636580838555648
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
+@pytest.mark.parametrize(("sequence", "framesets"), [("MH_04_difficult", 2031), ("V2_03_difficult", 1626)])
+def test_only_frames_both_euroc_cameras_took_together_are_fed(settings: SlamConfig, sequence: str, framesets: int) -> None:
+    """Each camera's frames keep their own stamps, but the conversion holds equal frame counts, not equal stamps.
+
+    The raw ASL has 2032 (MH_04) and 1921 (V2_03) stamps in both cameras. VSLAM-LAB keeps
+    as many cam1 frames as cam0 has, so the converted cam1 lists 1 and 296 frames cam0 never took
+    (up to 20.6 s away): matching within 1 ms feeds 2031 and 1626 stereo framesets, never a pair taken apart.
+    """
+    from rerun.catalog import CatalogClient
+
+    if "vslam-lab-euroc" not in {entry.name for entry in CatalogClient(settings.catalog_url).datasets()}:
+        pytest.skip(f"vslam-lab-euroc is not registered on {settings.catalog_url}; register it as packages/slam-rs/docs/reproduce.md describes")
+    with open_segment(
+        CatalogSegment(settings.catalog_url, "vslam-lab-euroc", f"vslam-lab-euroc__{sequence}"),
+        profile=dataset_rig(settings.dataset("vslam-lab-euroc")),
+        include_ground_truth=False,
+    ) as feed:
+        assert len(feed.frame_t_ns) == framesets
+        assert bool((feed.index.frame_index >= 0).all())

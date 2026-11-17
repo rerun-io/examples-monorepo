@@ -314,8 +314,8 @@ ROBOCAP_RIG: RigProfile = _core.catalog_rig_profile("robocap")
 
 
 def dataset_rig(dataset: DatasetProperties) -> RigProfile:
-    """How a ``[[dataset]]`` of ``slam.toml`` is read: MSD's profile, on the clock its settings state."""
-    return replace(MSD_RIG, video_time_is_absolute=dataset.video_time_is_absolute)
+    """How a ``[[dataset]]`` of ``slam.toml`` is read: MSD's profile, with the clock and frameset matching its settings state."""
+    return replace(MSD_RIG, video_time_is_absolute=dataset.video_time_is_absolute, frameset_tolerance_ns=dataset.frameset_tolerance_ns)
 
 
 def _flat_float(column: pa.Array) -> Float64[ndarray, " n_values"]:
