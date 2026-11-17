@@ -116,7 +116,7 @@ impl<S: Scalar> MeiDistortion<S> {
 /// `v = fy y_d + cy`. A ray more than `half_field_rad` off the optical axis does not project (the image circle
 /// ends there), rear rays inside that cone do. The inverse solves the distortion by damped Newton and lifts
 /// through the sphere in closed form. Intrinsic derivatives cover `fx fy cx cy xi`, not the distortion
-/// coefficients. There is no device (GPU) kernel for this model.
+/// coefficients. The device kernel (`kornia_staging_gpu::camera::mei`) evaluates the same rules in f32.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
@@ -172,6 +172,10 @@ impl<S: Scalar> Mei<S> {
     /// The distortion of the normalized sphere point.
     pub fn distortion(&self) -> MeiDistortion<S> {
         self.distortion
+    }
+    /// `cos(half_field_rad)`: a ray whose `z` is below `|P|` times this lies outside the field.
+    pub fn cos_half_field(&self) -> S {
+        self.cos_half_field
     }
 }
 

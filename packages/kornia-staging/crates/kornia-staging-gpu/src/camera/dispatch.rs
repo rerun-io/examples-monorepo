@@ -2,8 +2,8 @@
 //! shader with only that model's code, so a Brown8 caller's source is unchanged.
 #![allow(missing_docs)]
 use super::{
-    brown8, double_sphere, equirect, eucm, kb4, MODEL_BROWN8, MODEL_DOUBLE_SPHERE, MODEL_EUCM,
-    MODEL_KB4,
+    brown8, double_sphere, equirect, eucm, kb4, mei, MODEL_BROWN8, MODEL_DOUBLE_SPHERE, MODEL_EUCM,
+    MODEL_KB4, MODEL_MEI,
 };
 use cubecl::prelude::*;
 
@@ -26,6 +26,8 @@ pub fn project(
         double_sphere::project(params, offset, x, y, z, out, false)
     } else if comptime!(model == MODEL_EUCM) {
         eucm::project(params, offset, x, y, z, out, false)
+    } else if comptime!(model == MODEL_MEI) {
+        mei::project(params, offset, x, y, z, out, false)
     } else {
         // MODEL_EQUIRECT. A kernel cannot panic, so this arm does not check the tag: the host takes tags from
         // `DeviceCamera::model_id` and sizes every layout with `parameter_count`, which panics on any other tag.
@@ -51,6 +53,8 @@ pub fn unproject(
         double_sphere::unproject(params, offset, px, py, out)
     } else if comptime!(model == MODEL_EUCM) {
         eucm::unproject(params, offset, px, py, out)
+    } else if comptime!(model == MODEL_MEI) {
+        mei::unproject(params, offset, px, py, out)
     } else {
         // MODEL_EQUIRECT. A kernel cannot panic, so this arm does not check the tag: the host takes tags from
         // `DeviceCamera::model_id` and sizes every layout with `parameter_count`, which panics on any other tag.
@@ -77,6 +81,8 @@ pub fn project_with_point_jacobian(
         double_sphere::project(params, offset, x, y, z, out, true)
     } else if comptime!(model == MODEL_EUCM) {
         eucm::project(params, offset, x, y, z, out, true)
+    } else if comptime!(model == MODEL_MEI) {
+        mei::project(params, offset, x, y, z, out, true)
     } else {
         // MODEL_EQUIRECT. A kernel cannot panic, so this arm does not check the tag: the host takes tags from
         // `DeviceCamera::model_id` and sizes every layout with `parameter_count`, which panics on any other tag.

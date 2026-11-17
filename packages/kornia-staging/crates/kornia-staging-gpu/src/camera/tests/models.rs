@@ -3,7 +3,8 @@
 //! Inputs are real calibrations: RoboCap KB4 (cam 0, copied into `ROBOCAP_KB4`),
 //! TUM-VI double sphere and EUCM (Basalt `tumvi_512_{ds,eucm}_calib.json` cam 0),
 //! an equirect hemisphere tile 1088x960 at 960/pi px/rad with `lon_max` 102 deg, and a
-//! 1920x960 panorama. The grids cover each model's whole valid domain and beyond.
+//! 1920x960 panorama, and the Insta360 X4 Air lens 0 Mei camera (V3 and V6 factory strings at 1920 px,
+//! kornia-staging-3d `camera/tests/mei.rs`). The grids cover each model's whole valid domain and beyond.
 #![cfg(feature = "wgpu")]
 use crate::{
     camera::{brown8, dispatch, DeviceCamera},
@@ -13,7 +14,7 @@ use crate::{
 use cubecl::prelude::*;
 use kornia_staging_3d::camera::{
     BrownConrady, CameraModel, CameraModelKind, DoubleSphere, Equirectangular, Eucm,
-    KannalaBrandt4, ProjectionReject, UnprojectError,
+    KannalaBrandt4, Mei, MeiDistortion, ProjectionReject, UnprojectError,
 };
 
 /// Values per output record: pixel or bearing, the 2x3 Jacobian, then the status.
@@ -194,6 +195,7 @@ fn assert_projection(cpu: &CameraModelKind<f32>, points: &[[f32; 3]]) -> (f32, f
             CameraModelKind::BrownConrady(m) => {
                 m.project_with_jacobians(*point, Some(&mut jp), None)
             }
+            CameraModelKind::Mei(m) => m.project_with_jacobians(*point, Some(&mut jp), None),
             other => panic!("no device camera for {other:?}"),
         };
         let status = projection_status(got[8]);
@@ -241,13 +243,20 @@ fn assert_projection(cpu: &CameraModelKind<f32>, points: &[[f32; 3]]) -> (f32, f
 
 /// Device bearings agree with the CPU inverse to `PIXEL_TOLERANCE` times the focal length.
 ///
+/// For Mei the scale is its on-axis angular focal length `f / (1 + xi)`: the sphere shrinks the
+/// image by that factor, so `f` alone would count each radian of bearing as 3.3x the pixels it moves on
+/// the X4 Air lens.
+///
 /// Where `1 - b r^2` of the DS/EUCM closed form is below 1e-2 (the rim of the inverse's
 /// disc, outside the TUM-VI image) f32 cancellation dominates, and beyond 98 % of KB4's
 /// `r_max` the radial slope tends to zero: on these rims the bearing bound is 5e-3 px and
 /// the round trip through the CPU projection must still land within 1e-3 px.
 fn assert_inverse(cpu: &CameraModelKind<f32>, pixels: &[[f32; 2]]) -> (f32, usize) {
     let device = DeviceCamera::from_model(cpu).unwrap();
-    let focal = device.device_parameters()[0].max(device.device_parameters()[1]);
+    let mut focal = device.device_parameters()[0].max(device.device_parameters()[1]);
+    if let CameraModelKind::Mei(mei) = cpu {
+        focal /= 1.0 + mei.params()[4];
+    }
     let bearings = run(&device, UNPROJECT, pixels.as_flattened());
     let (mut worst, mut valid) = (0f32, 0);
     for (pixel, got) in pixels.iter().zip(&bearings) {
@@ -459,4 +468,142 @@ fn device_camera_packs_cpu_constants_and_refuses_general_models() {
     assert_eq!(device.device_parameters()[6], ds.domain_bound());
     let pinhole = kornia_staging_3d::camera::Pinhole::new([400.0, 400.0, 320.0, 240.0]).unwrap();
     assert!(DeviceCamera::from_model(&CameraModelKind::Pinhole(pinhole)).is_none());
+}
+
+/// X4 Air lens 0 at 1920 px, V3 string: `fx fy cx cy xi`, then `k1 k2 k3 p1 p2`.
+#[allow(clippy::excessive_precision)]
+const X4AIR_V3: ([f32; 5], [f32; 5]) = (
+    [1834.6, 1834.2, 960.242, 965.681, 2.31494],
+    [0.96273077, -2.06431413, 4.31214333, 0.00172895, -0.00121632],
+);
+/// X4 Air lens 0 at 1920 px, V6 string: `fx fy cx cy xi`, then `d0..d12`.
+#[allow(clippy::excessive_precision)]
+const X4AIR_V6: ([f32; 5], [f32; 13]) = (
+    [1834.9, 1834.5, 958.292, 965.869, 2.31494],
+    [
+        0.93861496,
+        -1.68402135,
+        2.19166017,
+        3.85762072,
+        0.0,
+        -0.00495962,
+        0.00156076,
+        -0.00330722,
+        0.00397486,
+        0.00827898,
+        -0.00125315,
+        0.02416405,
+        -0.00143547,
+    ],
+);
+
+fn x4air_mei() -> [Mei<f32>; 2] {
+    let half_field = 100f32.to_radians();
+    let (param, d) = X4AIR_V3;
+    let v3 = MeiDistortion::V3 {
+        k: [d[0], d[1], d[2]],
+        p: [d[3], d[4]],
+    };
+    let v6 = MeiDistortion::V6 { d: X4AIR_V6.1 };
+    [
+        Mei::new(param, half_field, v3).unwrap(),
+        Mei::new(X4AIR_V6.0, half_field, v6).unwrap(),
+    ]
+}
+
+#[test]
+fn mei_v3_and_v6_match_cpu_to_the_field_edge() {
+    for camera in x4air_mei() {
+        let cpu = CameraModelKind::Mei(camera);
+        let mut points = sphere_points();
+        // Either side of the 100 degree field edge.
+        for degrees in [99.0f32, 99.9, 100.1, 101.0] {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            points.extend([
+                [sin, 0.0, cos],
+                [0.0, -2.0 * sin, 2.0 * cos],
+                [0.6 * sin, 0.8 * sin, cos],
+            ]);
+        }
+        let (pixel, jacobian, valid) = assert_projection(&cpu, &points);
+        let rear = points
+            .iter()
+            .filter(|p| p[2] < 0.0 && camera.project(**p).is_ok())
+            .count();
+        let outside = points
+            .iter()
+            .filter(|p| camera.project(**p) == Err(ProjectionReject::OutsideDomain))
+            .count();
+        assert!(
+            rear >= 100 && outside >= 100,
+            "{rear} rear, {outside} outside"
+        );
+        let pixels = image_pixels(1920.0, 1920.0);
+        let (bearing, inverse_valid) = assert_inverse(&cpu, &pixels);
+        // Far beyond the image circle the distortion folds and the Newton path is chaotic: there a
+        // refusal's kind (no convergence, or a converged point outside the field) depends on the
+        // rounding (on the CPU, V3 and its V6 packing already swap 11 of 78641 kinds), so the
+        // validity must agree and at most 1 % of those two kinds may swap.
+        let far: Vec<[f32; 2]> = pixels
+            .iter()
+            .map(|p| [p[0] * 4.0 - 2880.0, p[1] * 4.0 - 2880.0])
+            .collect();
+        let far_results = run(
+            &DeviceCamera::from_model(&cpu).unwrap(),
+            UNPROJECT,
+            far.as_flattened(),
+        );
+        let swapped = far
+            .iter()
+            .zip(far_results)
+            .filter(
+                |(pixel, got)| match (camera.unproject(**pixel), unprojection_status(got[8])) {
+                    (Ok(_), Ok(())) => false,
+                    (Err(a), Err(b)) if a == b => false,
+                    (
+                        Err(UnprojectError::NoConvergence | UnprojectError::OutsideDomain),
+                        Err(UnprojectError::NoConvergence | UnprojectError::OutsideDomain),
+                    ) => true,
+                    pair => panic!("far pixel {pixel:?}: {pair:?}"),
+                },
+            )
+            .count();
+        assert!(swapped * 100 < far.len(), "{swapped} refusal kinds swapped");
+        // The device bearings project back onto their pixels through the CPU model.
+        let device = DeviceCamera::from_model(&cpu).unwrap();
+        let mut round_trip = 0f32;
+        for (pixel, got) in pixels
+            .iter()
+            .zip(run(&device, UNPROJECT, pixels.as_flattened()))
+        {
+            if unprojection_status(got[8]).is_ok() {
+                let back = camera.project([got[0], got[1], got[2]]).unwrap();
+                round_trip =
+                    round_trip.max((back[0] - pixel[0]).abs().max((back[1] - pixel[1]).abs()));
+            }
+        }
+        assert!(round_trip <= PIXEL_TOLERANCE, "round trip {round_trip} px");
+        // assert_inverse matched every refusal's kind; count them to show which ones the grid reaches.
+        let refusals = [
+            UnprojectError::OutsideDomain,
+            UnprojectError::NoConvergence,
+            UnprojectError::NonFinite,
+        ]
+        .map(|kind| {
+            pixels
+                .iter()
+                .filter(|p| camera.unproject(**p) == Err(kind))
+                .count()
+        });
+        let rejected = pixels.len() - inverse_valid;
+        assert!(
+            rejected > 1000,
+            "pixels beyond the image circle: {rejected}"
+        );
+        println!(
+            "Mei {:?}: pixel {pixel:e} px, Jacobian {jacobian:e} rel ({valid} points, {rear} rear, {outside} beyond), bearing {bearing:e} px, round trip {round_trip:e} px ({inverse_valid} pixels; outside, no convergence, non-finite: {refusals:?}; {swapped} of {} far refusal kinds swapped)",
+            camera.distortion(),
+            far.len()
+        );
+    }
 }
