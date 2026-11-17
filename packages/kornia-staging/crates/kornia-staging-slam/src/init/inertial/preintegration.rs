@@ -18,6 +18,10 @@
 //! samples are reached by linear interpolation of the two neighbouring
 //! samples. The bias Jacobians are the first-order recursions of Forster et
 //! al. (Appendix B), evaluated at the start of each sub-interval.
+//!
+//! This is not `kornia-staging-sensors`' `IntegratedImuMeasurement`: that one folds one keyframe interval with its
+//! noise covariance, while the initialisation needs the terms from `t_0` to every frame of the window in one pass, in
+//! `f64`, without covariance. Merging the two changes the discretisation and so the bootstrap's numbers.
 use super::{ImuSample, InertialInitError};
 use kornia_staging_algebra::lie::{right_jacobian_so3, Rotation3};
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
