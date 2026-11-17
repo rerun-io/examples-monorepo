@@ -312,7 +312,10 @@ mod tests {
         }
         flow.prepare_tracks(Some(&PosePrediction::default()));
         assert_eq!(flow.passes[0].ids, vec![1, 2]);
-        assert_eq!(flow.passes[0].guesses.get(1).translation, super::UNTRACKABLE);
+        assert_eq!(
+            flow.passes[0].guesses.get(1).translation,
+            super::UNTRACKABLE
+        );
         assert_eq!(flow.passes[0].guesses.get(0).translation, [480.0, 480.0]);
     }
 }

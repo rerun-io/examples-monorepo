@@ -170,8 +170,7 @@ pub(super) fn expand(
     };
     // Built once per rig: the GPU lane uploads these tables once and the lookahead
     // recognises the stitch by identity.
-    let stitch: Arc<LensStitch> =
-        Arc::new(lenses.stitch(lens_size, super::TILE_MARGIN_PX)?);
+    let stitch: Arc<LensStitch> = Arc::new(lenses.stitch(lens_size, super::TILE_MARGIN_PX)?);
     let geometry: TileGeometry = stitch.luts()[0].geometry;
     let focal: f64 = geometry.focal();
     let [cx, cy] = geometry.principal();

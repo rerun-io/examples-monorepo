@@ -105,8 +105,7 @@ fn a_width_that_puts_an_outer_tile_pixel_on_lon_max_is_refused() {
     // `W % 4 == 2`: the rounded tile origin puts one outer pixel centre exactly
     // at `lon_max`.
     for width in [1922, 2050] {
-        let error = PanoramaRig::expand(panorama_calibration(width, 960))
-            .unwrap_err();
+        let error = PanoramaRig::expand(panorama_calibration(width, 960)).unwrap_err();
         assert!(matches!(error, VioError::Panorama(_)), "{error}");
     }
     // A multiple of 4 keeps both outer pixel centres half a pixel inside.

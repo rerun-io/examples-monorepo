@@ -59,8 +59,7 @@ fn config() -> VioConfig {
 
 fn rig() -> (PanoramaRig, Calibration<f64>) {
     let lenses = lenses();
-    PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses), lenses)
-        .unwrap()
+    PanoramaRig::expand_dual_fisheye(&config(), lens_calibration(&lenses), lenses).unwrap()
 }
 
 #[test]
