@@ -32,6 +32,14 @@ pub enum FrontendError {
     /// The calibration carries no cameras.
     #[error("the calibration carries no cameras")]
     NoCameras,
+    /// Per-camera detection masks or latitude limits that do not fit the rig.
+    #[error("detection masks for camera {camera}: {reason}")]
+    DetectionMasks {
+        /// The camera at fault, or the list count when the count is wrong.
+        camera: usize,
+        /// What the masks must be.
+        reason: &'static str,
+    },
     /// The calibration has fewer extrinsics than cameras.
     #[error("the calibration has {intrinsics} cameras but {extrinsics} extrinsics")]
     RaggedExtrinsics {

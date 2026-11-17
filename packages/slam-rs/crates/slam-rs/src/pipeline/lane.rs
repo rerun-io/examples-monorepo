@@ -69,6 +69,21 @@ impl FrontendLane {
         }
     }
 
+    /// Static detection-only cells per camera; see
+    /// [`frontend::flow::FrameToFrameOpticalFlow::set_detection_masks`].
+    pub fn set_detection_masks(
+        &mut self,
+        masks: Vec<kornia_staging_imgproc::features::CellMasks>,
+    ) -> Result<(), VioError> {
+        Ok(on_lane!(self, |flow| flow.set_detection_masks(masks))?)
+    }
+
+    /// Per-camera track latitude limits; see
+    /// [`frontend::flow::FrameToFrameOpticalFlow::set_track_latitude_limits`].
+    pub fn set_track_latitude_limits(&mut self, limits: Vec<Option<f32>>) -> Result<(), VioError> {
+        Ok(on_lane!(self, |flow| flow.set_track_latitude_limits(limits))?)
+    }
+
     /// Share the CPU frontend's workers with the synchronous estimator.
     pub(super) fn cpu_pool(&self) -> Option<crate::frontend::parallel::WorkPool> {
         match self {

@@ -1,9 +1,8 @@
 //! One-frame-lag frontend/estimator scheduling (M7).
 
-use kornia_staging_algebra::Scalar;
 use super::{Vio, VioError, VioResult};
-use crate::imu;
 use crate::{duration_ns, estimator, frontend, types};
+use kornia_staging_algebra::Scalar;
 
 /// Wall times for the estimator running beside the frontend, in nanoseconds.
 /// These overlap the frontend timers and must not be added to them.
@@ -135,7 +134,7 @@ impl<S: Scalar> Vio<S> {
                 &self.frontend_noise,
             )?;
             Ok(pim
-                .predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>())
+                .predict_state(&latest.pose_vel_state(), &self.gravity())
                 .t_w_i)
         };
         let previous_t_ns = self.last_frame_t_ns.unwrap_or(latest.t_ns);

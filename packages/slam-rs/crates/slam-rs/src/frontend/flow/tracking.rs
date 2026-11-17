@@ -28,6 +28,7 @@ impl<
             masks,
             depth_guess,
             host_pool,
+            stereo_pairs,
             ..
         } = self;
         let predict = |camera: usize,
@@ -89,11 +90,17 @@ impl<
             }
         } else {
             // Mask camera zero once. Every destination borrows these same slots.
+            // With stereo matching off nothing is offered for matching at all.
             let source = &mut passes[0];
             source.ids.clear();
             source.positions.clear();
             source.guesses.clear();
-            for (index, id) in new_cam0.ids.iter().enumerate() {
+            let offered: usize = if config.optical_flow_stereo_matching {
+                new_cam0.ids.len()
+            } else {
+                0
+            };
+            for (index, id) in new_cam0.ids.iter().enumerate().take(offered) {
                 let transform = new_cam0.transforms.get(index);
                 let position = Vector2::from(transform.translation);
                 if masks[0].in_bounds(position.x, position.y) {
@@ -111,6 +118,17 @@ impl<
                 let camera = lane + 1;
                 let pose = calib.t_i_c[0].inverse() * calib.t_i_c[camera];
                 guesses.clear();
+                // A pair without epipolar geometry (a shared centre) is never
+                // matched: every guess is the untrackable sentinel.
+                if !stereo_pairs[camera] {
+                    for index in 0..source.ids.len() {
+                        guesses.push(&AffineCompact2f {
+                            linear: source.guesses.get(index).linear,
+                            translation: [-1.0e6; 2],
+                        });
+                    }
+                    return;
+                }
                 for index in 0..source.ids.len() {
                     guesses.push(&predict(
                         camera,
@@ -141,7 +159,19 @@ impl<
     pub(super) fn finish_camera(&mut self, camera: usize) {
         self.finish_track_points(camera, camera);
         self.frame.cameras[camera].clear();
+        let limit: Option<f32> = self.track_latitude_limits[camera];
         for (slot, id) in self.tracked_ids.iter().enumerate() {
+            if let Some(limit) = limit {
+                // Latitude about the camera's own y axis: `atan2(y, hypot(x, z))`.
+                let mut bearing: Vector4<f32> = Vector4::zeros();
+                let position: Vector2<f32> = self.tracked.get(slot).translation.into();
+                let valid: bool = self.cameras[camera]
+                    .model
+                    .unproject(&position, &mut bearing);
+                if !valid || bearing.y.atan2(bearing.x.hypot(bearing.z)).abs() > limit {
+                    continue;
+                }
+            }
             // `keypoint_map_2.insert(result.begin(), result.end())`; the
             // cell counts are rebuilt afterwards by `updateCellCounts`.
             self.frame.cameras[camera].set(*id, &self.tracked.get(slot), NO_RESPONSE);
@@ -170,21 +200,29 @@ impl<
     }
 }
 
+/// Below this baseline, metres, two camera centres count as one.
+const MIN_EPIPOLAR_BASELINE_M: f64 = 1e-9;
+
 /// `computeEssential`.
 ///
 /// `E.topLeftCorner<3,3>() = hat(t.normalized()) * R`, computed in `double`
 /// because that is what casts to before calling it, and
-/// cast back to the estimator's scalar afterwards.
-pub(super) fn compute_essential(t_0_1: &Se3<f64>) -> Matrix4<f64> {
+/// cast back to the estimator's scalar afterwards. Coincident centres have no
+/// epipolar geometry, and normalizing their zero baseline would give a NaN
+/// matrix that every match passes (`NaN > threshold` is false): `None`.
+pub(super) fn compute_essential(t_0_1: &Se3<f64>) -> Option<Matrix4<f64>> {
     let translation: Vector3<f64> = t_0_1.translation;
+    let baseline: f64 = translation.norm();
+    if !baseline.is_finite() || baseline <= MIN_EPIPOLAR_BASELINE_M {
+        return None;
+    }
     let rotation = t_0_1.rotation.matrix();
     let mut essential: Matrix4<f64> = Matrix4::zeros();
-    // Normalizing a zero baseline yields NaNs: coincident cameras have no epipolar geometry.
-    let normalized: Vector3<f64> = translation / translation.norm();
+    let normalized: Vector3<f64> = translation / baseline;
     essential
         .fixed_view_mut::<3, 3>(0, 0)
         .copy_from(&(So3::hat(&normalized) * rotation));
-    essential
+    Some(essential)
 }
 
 /// `Ed.cast<Scalar>()`.
@@ -234,6 +272,17 @@ mod tests {
     use kornia_staging_3d::camera::{CameraModelKind, KannalaBrandt4};
     use kornia_staging_imgproc::optical_flow::patch_se2::Pattern51;
     use nalgebra::Matrix2;
+
+    #[test]
+    fn a_shared_centre_has_no_essential_matrix_and_a_baseline_has_a_finite_one() {
+        assert!(compute_essential(&Se3::identity()).is_none());
+        let turned: Se3<f64> = Se3::new(So3::exp(&Vector3::new(0.0, 3.0, 0.0)), Vector3::zeros());
+        assert!(compute_essential(&turned).is_none());
+        let stereo: Se3<f64> = Se3::new(So3::identity(), Vector3::new(0.1, 0.0, 0.0));
+        let essential: Matrix4<f64> = compute_essential(&stereo).unwrap();
+        assert!(essential.iter().all(|value| value.is_finite()));
+        assert_eq!(essential[(1, 2)], -1.0);
+    }
 
     #[test]
     fn tracking_rejects_kb4_guesses_without_changing_source_slots() {

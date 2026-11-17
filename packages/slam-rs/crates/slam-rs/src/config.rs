@@ -84,6 +84,14 @@ pub struct VioConfig {
     /// Also detect in the part of each camera outside camera 0's frustum.
     #[serde(rename = "config.optical_flow_detection_nonoverlap")]
     pub optical_flow_detection_nonoverlap: bool,
+    /// Match camera 0's new keypoints into the other cameras and filter them
+    /// epipolarly. `false` turns every cross-camera match off: each camera then
+    /// detects on its whole image (its own masks aside), whatever
+    /// `optical_flow_detection_nonoverlap` says, and no keypoint id is shared
+    /// between cameras. A pair of cameras with a common centre has no epipolar
+    /// geometry and is never matched, whatever this says.
+    #[serde(rename = "config.optical_flow_stereo_matching")]
+    pub optical_flow_stereo_matching: bool,
     /// Forward-backward consistency gate, in squared pixels.
     #[serde(rename = "config.optical_flow_max_recovered_dist2")]
     pub optical_flow_max_recovered_dist2: f32,
@@ -179,6 +187,17 @@ pub struct VioConfig {
     #[serde(rename = "port.klt_exit_step_px")]
     pub port_klt_exit_step_px: Option<f32>,
 
+    // ── panorama lane (read only when the rig holds a full panorama) ───
+    /// Columns each hemisphere tile reaches past its 180-degree half of the
+    /// panorama, on each side, in panorama pixels. A multiple of the cell size
+    /// keeps the margin whole cells.
+    #[serde(rename = "config.panorama_tile_margin_px")]
+    pub panorama_tile_margin_px: u32,
+    /// Tracked keypoints above this absolute latitude, degrees, are dropped;
+    /// detection skips every cell row whose centre lies above it.
+    #[serde(rename = "config.panorama_track_max_latitude_deg")]
+    pub panorama_track_max_latitude_deg: f32,
+
     // ── estimator ───────────────────────────────────────────────────────
     /// Which linearization runs.
     #[serde(rename = "config.vio_linearization_type")]
@@ -215,6 +234,10 @@ pub struct VioConfig {
     /// Minimum baseline before a landmark is triangulated, in metres.
     #[serde(rename = "config.vio_min_triangulation_dist")]
     pub vio_min_triangulation_dist: f64,
+    /// Magnitude of gravity, m/s², along world -Z; the dataset's own value
+    /// (TartanAir synthesises its IMU with 9.8).
+    #[serde(rename = "config.vio_gravity_ms2")]
+    pub vio_gravity_ms2: f64,
     /// Levenberg-Marquardt iteration budget per frame.
     #[serde(rename = "config.vio_max_iterations")]
     pub vio_max_iterations: i32,
@@ -270,6 +293,7 @@ impl Default for VioConfig {
             optical_flow_detection_min_threshold: 5,
             optical_flow_detection_max_threshold: 40,
             optical_flow_detection_nonoverlap: true,
+            optical_flow_stereo_matching: true,
             optical_flow_max_recovered_dist2: 0.04,
             optical_flow_pattern: 51,
             optical_flow_max_iterations: 5,
@@ -293,6 +317,9 @@ impl Default for VioConfig {
             port_frontend_lag: false,
             port_klt_exit_step_px: None,
 
+            panorama_tile_margin_px: 64,
+            panorama_track_max_latitude_deg: 75.0,
+
             vio_linearization_type: LinearizationType::AbsQr,
             vio_sqrt_marg: true,
             vio_max_states: 3,
@@ -304,6 +331,7 @@ impl Default for VioConfig {
             vio_obs_std_dev: 0.5,
             vio_obs_huber_thresh: 1.0,
             vio_min_triangulation_dist: 0.05,
+            vio_gravity_ms2: 9.81,
             vio_max_iterations: 7,
             vio_enforce_realtime: false,
             vio_use_lm: true,

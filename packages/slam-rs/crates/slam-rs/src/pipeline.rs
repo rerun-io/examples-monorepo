@@ -4,6 +4,7 @@ use kornia_staging_algebra::Scalar;
 mod boundary;
 mod lag;
 mod lane;
+mod panorama;
 mod select;
 #[cfg(test)]
 mod tests;
@@ -11,6 +12,7 @@ mod tests;
 pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
 pub use lane::FrontendLane;
 use lane::build_frontend;
+pub use panorama::{PanoramaRig, PanoramaSource};
 pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -61,6 +63,8 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
+    /// The tile cut when the rig is one full panorama; see [`PanoramaRig`].
+    panorama: Option<PanoramaRig>,
 }
 
 pub use lag::OverlapTimings;
@@ -116,13 +120,19 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
+        let (panorama, calibration) = PanoramaRig::expand(&config, calibration)?;
         let camera_count: usize = calibration.t_i_c.len();
-        let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
+        let mut frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
+        if let Some(rig) = &panorama {
+            panorama::configure(rig, &config, &calibration, &mut frontend)?;
+        }
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
+        let gravity: Vector3<S> =
+            Vector3::new(S::zero(), S::zero(), crate::lie::c(-config.vio_gravity_ms2));
         let estimator: estimator::SqrtKeypointVio<S> =
-            estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
+            estimator::SqrtKeypointVio::new(gravity, calibration.cast(), config)?;
         Ok(Self {
             frontend,
             estimator,
@@ -141,7 +151,32 @@ impl<S: Scalar> Vio<S> {
             last_deferred: None,
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
+            panorama,
         })
+    }
+
+    /// The tile cut, when the rig is one full panorama.
+    pub fn panorama(&self) -> Option<&PanoramaRig> {
+        self.panorama.as_ref()
+    }
+
+    /// Gravity in the world frame, `(0, 0, -config.vio_gravity_ms2)`.
+    fn gravity(&self) -> Vector3<f64> {
+        Vector3::new(0.0, 0.0, -self.frontend.config().vio_gravity_ms2)
+    }
+
+    /// Every frameset rule, on the panorama when the rig is one.
+    fn check_input(&self, t_ns: i64, images: &[ImageView<'_>]) -> Result<(), VioError> {
+        let Some(rig) = &self.panorama else {
+            check_frameset(images, self.camera_count)?;
+            return Ok(self
+                .frontend
+                .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?);
+        };
+        rig.check(images)?;
+        Ok(self
+            .frontend
+            .check_frameset(t_ns, [rig.tile_size(); 2].into_iter())?)
     }
 
     /// The estimator, for callers that want the window or the snapshot.
@@ -291,11 +326,7 @@ impl<S: Scalar> Vio<S> {
         lookahead: Option<(i64, &[ImageView<'_>])>,
     ) -> Result<VioResult, VioError> {
         if let Some((next_t_ns, next_images)) = lookahead {
-            check_frameset(next_images, self.camera_count)?;
-            self.frontend.check_frameset(
-                next_t_ns,
-                next_images.iter().map(|image| (image.width, image.height)),
-            )?;
+            self.check_input(next_t_ns, next_images)?;
             if next_t_ns <= t_ns {
                 return Err(frontend::flow::FrontendError::NonMonotonicFrameset {
                     previous_t_ns: t_ns,
@@ -310,7 +341,13 @@ impl<S: Scalar> Vio<S> {
             && let Some((next_t_ns, next_images)) = lookahead
         {
             let vio = &mut *prepared.vio;
-            vio.next_frames.fill(next_images);
+            match &mut vio.panorama {
+                Some(rig) => {
+                    rig.crop(next_images)?;
+                    vio.next_frames.fill(&rig.tile_views());
+                }
+                None => vio.next_frames.fill(next_images),
+            }
             vio.frontend
                 .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
         }
@@ -355,9 +392,7 @@ impl<S: Scalar> Vio<S> {
         // `process_frame` still re-runs for callers that hold it directly; the
         // coverage predicate is the estimator's, and `process_frame` still runs
         // it as its second line.
-        check_frameset(images, self.camera_count)?;
-        self.frontend
-            .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
+        self.check_input(t_ns, images)?;
         if !self.estimator.imu_covers_frame(t_ns) {
             return Ok(PreparedTrack {
                 vio: self,
@@ -376,7 +411,7 @@ impl<S: Scalar> Vio<S> {
                 let pim: kornia_staging_sensors::imu::IntegratedImuMeasurement<f64> =
                     self.frontend_preintegrate(t_ns, &latest)?;
                 let predicted: kornia_staging_sensors::imu::NavState<f64> =
-                    pim.predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>());
+                    pim.predict_state(&latest.pose_vel_state(), &self.gravity());
                 frontend::flow::PosePrediction {
                     t_w_i_previous: latest.t_w_i.cast(),
                     t_w_i_current: predicted.t_w_i.cast(),
@@ -392,7 +427,13 @@ impl<S: Scalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
-        self.frames.fill(images)?;
+        match &mut self.panorama {
+            Some(rig) => {
+                rig.crop(images)?;
+                self.frames.fill(&rig.tile_views())?;
+            }
+            None => self.frames.fill(images)?,
+        }
         Ok(PreparedTrack {
             vio: self,
             t_ns,
