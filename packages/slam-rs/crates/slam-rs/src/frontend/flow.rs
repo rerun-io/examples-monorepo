@@ -62,6 +62,10 @@ pub struct FrameToFrameOpticalFlow<
     cameras: Vec<RigCamera<f32>>,
     /// `E`, one 4x4 essential matrix per camera.
     essential: Vec<Matrix4<f32>>,
+    /// Whether camera 0 and this camera have epipolar geometry, so that new
+    /// camera-0 keypoints may be matched into it: `false` for camera 0 itself
+    /// and for a camera that shares camera 0's centre.
+    stereo_pairs: Vec<bool>,
     /// One detection grid per camera, derived from that camera's image size.
     detection_grids: Vec<CellGrid>,
     /// The occupancy grid, shaped from camera 0 as `cells` is.
@@ -87,6 +91,15 @@ pub struct FrameToFrameOpticalFlow<
     depth_guess: f32,
     /// CellMasks for this frame, grown by `cam0OverlapCellsMasksForCam`.
     masks: Vec<CellMasks>,
+    /// Static per-camera cells where detection never runs; tracks may still
+    /// enter them. Empty unless [`FrameToFrameOpticalFlow::set_detection_masks`]
+    /// set them.
+    detection_masks: Vec<CellMasks>,
+    /// `masks` plus `detection_masks`, rebuilt before each detection.
+    detect_masks: Vec<CellMasks>,
+    /// Per camera, the largest absolute latitude (radians, about the camera's
+    /// own y axis) a tracked keypoint may reach; `None` keeps every track.
+    track_latitude_limits: Vec<Option<f32>>,
 
     stages: F,
     /// The source keypoint ids of each lane of the batch in flight, in map order
@@ -333,16 +346,21 @@ impl<
             return Err(FrontendError::NoCameras);
         }
         // Each essential matrix uses that camera's pose relative to camera 0.
-        let essential: Vec<Matrix4<f32>> = (0..num_cams)
+        // `T_c0_c0`, and any camera at camera 0's centre, has no baseline and
+        // so no essential matrix: its entry is zero and it is never matched.
+        let essential_or_none: Vec<Option<Matrix4<f32>>> = (0..num_cams)
             .map(|index| {
                 if index == 0 {
-                    // `T_c0_c0` has no baseline, so `t.normalized()` would be
-                    // NaN; nothing reads index 0 either way.
-                    return Matrix4::zeros();
+                    return None;
                 }
                 let t_i_j: Se3<f32> = calib.t_i_c[0].inverse() * calib.t_i_c[index];
-                cast_matrix4(&compute_essential(&t_i_j.cast::<f64>()))
+                compute_essential(&t_i_j.cast::<f64>()).map(|essential| cast_matrix4(&essential))
             })
+            .collect();
+        let stereo_pairs: Vec<bool> = essential_or_none.iter().map(Option::is_some).collect();
+        let essential: Vec<Matrix4<f32>> = essential_or_none
+            .into_iter()
+            .map(|essential| essential.unwrap_or_else(Matrix4::zeros))
             .collect();
 
         // `detectKeypointsWithCells` derives its grid from the image it is given
@@ -364,6 +382,9 @@ impl<
             stages,
             cells: vec![vec![0; occupancy_grid.rows * occupancy_grid.columns]; num_cams],
             masks: vec![CellMasks::default(); num_cams],
+            detection_masks: vec![CellMasks::default(); num_cams],
+            detect_masks: vec![CellMasks::default(); num_cams],
+            track_latitude_limits: vec![None; num_cams],
             snapshot: FrameState::default(),
             timings: FlowTimings::default(),
             passes: (0..num_cams).map(|_| TrackInput::default()).collect(),
@@ -393,6 +414,7 @@ impl<
             calib,
             cameras,
             essential,
+            stereo_pairs,
             detection_grids,
             occupancy_grid,
             pattern: PhantomData,
@@ -465,6 +487,70 @@ impl<
     /// If `camera` is outside the rig.
     pub fn essential(&self, camera: usize) -> Matrix4<f32> {
         self.essential[camera]
+    }
+
+    /// Whether new camera-0 keypoints are matched into `camera`: stereo
+    /// matching is on and the pair has epipolar geometry (distinct centres).
+    ///
+    /// # Panics
+    /// If `camera` is outside the rig.
+    pub fn matches_into(&self, camera: usize) -> bool {
+        self.config.optical_flow_stereo_matching && self.stereo_pairs[camera]
+    }
+
+    /// Set static per-camera cells where detection never runs, one list per
+    /// camera (an empty list masks nothing). Tracks are not dropped there.
+    ///
+    /// # Errors
+    /// [`FrontendError::DetectionMasks`] when the list count is not the camera
+    /// count or a rectangle is not exactly one cell of that camera's grid.
+    pub fn set_detection_masks(&mut self, masks: Vec<CellMasks>) -> Result<(), FrontendError> {
+        if masks.len() != self.cameras.len() {
+            return Err(FrontendError::DetectionMasks {
+                camera: masks.len(),
+                reason: "one mask list per camera",
+            });
+        }
+        for (camera, (list, grid)) in masks.iter().zip(&self.detection_grids).enumerate() {
+            let cell: f32 = grid.cell as f32;
+            let aligned = |edge: f32, start: usize| {
+                let offset: f32 = (edge - start as f32) / cell;
+                offset >= 0.0 && offset.fract() == 0.0
+            };
+            for rect in &list.masks {
+                if rect.w != cell
+                    || rect.h != cell
+                    || !aligned(rect.x, grid.x_start)
+                    || !aligned(rect.y, grid.y_start)
+                {
+                    return Err(FrontendError::DetectionMasks {
+                        camera,
+                        reason: "every rectangle must be one whole grid-aligned cell",
+                    });
+                }
+            }
+        }
+        self.detection_masks = masks;
+        Ok(())
+    }
+
+    /// Drop tracked keypoints whose bearing lies above an absolute latitude
+    /// (radians, about the camera's own y axis), one optional limit per camera.
+    ///
+    /// # Errors
+    /// [`FrontendError::DetectionMasks`] when the count is not the camera count.
+    pub fn set_track_latitude_limits(
+        &mut self,
+        limits: Vec<Option<f32>>,
+    ) -> Result<(), FrontendError> {
+        if limits.len() != self.cameras.len() {
+            return Err(FrontendError::DetectionMasks {
+                camera: limits.len(),
+                reason: "one latitude limit per camera",
+            });
+        }
+        self.track_latitude_limits = limits;
+        Ok(())
     }
 
     /// The configuration this frontend runs.
@@ -702,7 +788,12 @@ impl<
                 depth: self.depth_guess,
                 last_detect_count: self.last_detect_count,
                 eligible: self.t_ns.is_some()
-                    && self.masks.iter().all(|masks| masks.masks.is_empty()),
+                    && self.masks.iter().all(|masks| masks.masks.is_empty())
+                    && self
+                        .detection_masks
+                        .iter()
+                        .all(|masks| masks.masks.is_empty())
+                    && (1..num_cams).all(|camera| self.matches_into(camera)),
             },
             &mut self.timings,
         )?;
@@ -740,7 +831,11 @@ impl<
         // reads them itself, which is the read the detector used to make on
         // every frameset.
         let mark: std::time::Instant = std::time::Instant::now();
-        self.stages.detector().scanner_mut().take_cells().map_err(Into::into)?;
+        self.stages
+            .detector()
+            .scanner_mut()
+            .take_cells()
+            .map_err(Into::into)?;
         self.timings.detect_ns += duration_ns(mark);
 
         if self.should_detect() {

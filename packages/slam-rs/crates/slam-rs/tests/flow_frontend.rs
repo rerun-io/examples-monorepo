@@ -522,7 +522,9 @@ struct EmptyScan {
 }
 
 impl slam_rs::frontend::detect::FrameCornerScan for EmptyScan {
-    fn fork_frame(&self) -> Option<Box<Self>> { self.independent.then(|| Box::new(self.clone())) }
+    fn fork_frame(&self) -> Option<Box<Self>> {
+        self.independent.then(|| Box::new(self.clone()))
+    }
 }
 
 impl CornerScan for EmptyScan {
@@ -608,6 +610,79 @@ fn four_cameras_use_the_selected_scanner_at_one_and_four_threads() {
         match &expected {
             None => expected = Some(actual),
             Some(expected) => assert_eq!(&actual, expected),
+        }
+    }
+}
+
+/// The new keys at their defaults reproduce today's frontend output exactly:
+/// stereo matching on (spelled out in the JSON), no detection-only cells and
+/// no latitude limits set, against a frontend built with none of them named.
+#[test]
+fn the_panorama_keys_at_their_defaults_change_no_observation() {
+    let frames = [
+        [dotted_image(0), dotted_image(0), dotted_image(0)],
+        [dotted_image(1), dotted_image(1), dotted_image(1)],
+        [dotted_image(3), dotted_image(3), dotted_image(3)],
+    ];
+    let mut explicit: VioConfig = VioConfig::from_json_str(
+        r#"{"value0": {"config.optical_flow_stereo_matching": true, "config.panorama_tile_margin_px": 64}}"#,
+    )
+    .unwrap();
+    explicit.optical_flow_matching_guess_type = config().optical_flow_matching_guess_type;
+    assert_eq!(explicit, config());
+    let mut plain: FrameToFrameOpticalFlow<Pattern51> =
+        FrameToFrameOpticalFlow::new(config(), &rig(3), FrontendOptions::default()).unwrap();
+    let mut named: FrameToFrameOpticalFlow<Pattern51> =
+        FrameToFrameOpticalFlow::new(explicit, &rig(3), FrontendOptions::default()).unwrap();
+    named
+        .set_detection_masks(vec![CellMasks::default(); 3])
+        .unwrap();
+    named.set_track_latitude_limits(vec![None; 3]).unwrap();
+    for (t_ns, images) in frames.iter().enumerate() {
+        plain
+            .process_frame(t_ns as i64, images, &PosePrediction::default(), &[])
+            .unwrap();
+        named
+            .process_frame(t_ns as i64, images, &PosePrediction::default(), &[])
+            .unwrap();
+        assert_eq!(plain.frame(), named.frame());
+    }
+    // A real stereo rig still matches into its side cameras by default.
+    assert!(
+        plain.frame().cameras[0]
+            .ids
+            .iter()
+            .any(|id| plain.frame().cameras[1].get(*id).is_some())
+    );
+}
+
+/// With stereo matching off a stereo rig shares no keypoint id between
+/// cameras, and every camera detects on its own, even with
+/// `optical_flow_detection_nonoverlap` off.
+#[test]
+fn stereo_matching_off_shares_no_id_and_every_camera_detects() {
+    for nonoverlap in [true, false] {
+        let off: VioConfig = VioConfig {
+            optical_flow_stereo_matching: false,
+            optical_flow_detection_nonoverlap: nonoverlap,
+            ..config()
+        };
+        let mut flow: FrameToFrameOpticalFlow<Pattern51> =
+            FrameToFrameOpticalFlow::new(off, &rig(2), FrontendOptions::default()).unwrap();
+        assert!(!flow.matches_into(1));
+        for shift in [0, 1] {
+            let images = [dotted_image(shift), dotted_image(shift)];
+            flow.process_frame(i64::from(shift), &images, &PosePrediction::default(), &[])
+                .unwrap();
+            let [zero, one] = [&flow.frame().cameras[0], &flow.frame().cameras[1]];
+            assert!(
+                zero.ids.iter().all(|id| one.get(*id).is_none()),
+                "nonoverlap {nonoverlap}"
+            );
+            assert!(
+                !zero.ids.is_empty() && !one.ids.is_empty(),
+                "nonoverlap {nonoverlap}"
+            );
         }
     }
 }

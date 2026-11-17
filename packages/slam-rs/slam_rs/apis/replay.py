@@ -192,6 +192,8 @@ def main(config: Config) -> None:
         )
         if not feed.has_ground_truth:
             print("ground truth absent, not scored")
+        if feed.gravity_ms2 is not None:
+            vio_config.vio_gravity_ms2 = feed.gravity_ms2
         log_calibration(feed.cameras)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
@@ -215,6 +217,7 @@ def main(config: Config) -> None:
                     cameras=feed.cameras,
                     ground_truth=truth,
                     frame_t_ns=feed.frame_t_ns,
+                    tile_origins=vio.panorama_tile_origins,
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))

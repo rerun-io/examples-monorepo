@@ -79,6 +79,14 @@ impl<
     ) -> Result<(), FrontendError> {
         let config = self.detector_config();
         let mark = std::time::Instant::now();
+        // The frame's masks, then the static detection-only cells, in that
+        // order; with no static cells this is the frame's list unchanged.
+        for camera in cameras.clone() {
+            let combined: &mut CellMasks = &mut self.detect_masks[camera];
+            combined.masks.clear();
+            combined.extend(&self.masks[camera]);
+            combined.extend(&self.detection_masks[camera]);
+        }
         let Self {
             stages,
             side_detectors,
@@ -88,7 +96,7 @@ impl<
             detection_grids,
             cells,
             occupancy_grid,
-            masks,
+            detect_masks: masks,
             ..
         } = self;
         let detector = stages.detector();
@@ -299,6 +307,10 @@ impl<
         if self.cameras.len() > 1 {
             self.prepare_tracks(None);
         }
+        // With stereo matching off every camera detects on its own, whatever
+        // `optical_flow_detection_nonoverlap` says.
+        let side_detect: bool = self.config.optical_flow_detection_nonoverlap
+            || !self.config.optical_flow_stereo_matching;
         self.stages.stereo(
             kornia_staging_slam::tracking::optical_flow::TrackPhase::Matching {
                 ids: &self.passes[0].ids,
@@ -308,7 +320,7 @@ impl<
             &mut self.result_slots[1..],
             images,
             &self.cell_selects,
-            self.config.optical_flow_detection_nonoverlap,
+            side_detect,
             &mut self.timings,
         )?;
         let mark = std::time::Instant::now();
@@ -319,9 +331,13 @@ impl<
         self.timings.stereo_ns += duration_ns(mark);
 
         // `if (!config.optical_flow_detection_nonoverlap) continue;`.
-        if self.config.optical_flow_detection_nonoverlap {
+        if side_detect {
+            // A camera nothing is matched into keeps its whole image: masking
+            // its cam-0 overlap would leave that region with no keypoints.
             for camera in 1..self.cameras.len() {
-                self.append_cam0_overlap_masks(camera);
+                if self.matches_into(camera) {
+                    self.append_cam0_overlap_masks(camera);
+                }
             }
             self.add_points_for_cameras(
                 1..self.cameras.len(),
@@ -336,6 +352,8 @@ impl<
     /// shares with camera 0 whose epipolar error is too large.
     fn filter_points_for_cam(&mut self, camera: usize) {
         self.to_remove.clear();
+        // No epipolar geometry, nothing to check a shared id against: drop it.
+        let checkable: bool = self.stereo_pairs[camera];
         let essential: Matrix4<f32> = self.essential[camera];
         let threshold: f32 = self.config.optical_flow_epipolar_error;
 
@@ -356,7 +374,7 @@ impl<
                 .unproject(&in_cam0.translation.into(), &mut p3d0);
             let ok1: bool = self.cameras[camera].model.unproject(&proj1, &mut p3d1);
 
-            if ok0 && ok1 {
+            if ok0 && ok1 && checkable {
                 // `std::abs(p3d0.transpose() * E[cam] * p3d1)`, in the
                 // estimator's scalar and only then widened for the comparison.
                 let error: f32 = (p3d0.transpose() * essential * p3d1)[(0, 0)].abs();
