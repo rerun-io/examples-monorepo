@@ -332,9 +332,11 @@ fn sample_table(stbl: &[u8], media_time: i64, file_len: u64) -> Result<Vec<Sampl
         .collect::<Result<_, Mp4Error>>()?;
     let mut offsets = Vec::with_capacity(count);
     for (r, &(first, per_chunk)) in runs.iter().enumerate() {
-        let last = runs
-            .get(r + 1)
-            .map_or(chunk_offsets.len(), |next| next.0 - 1);
+        let last = runs.get(r + 1).map_or(Ok(chunk_offsets.len()), |next| {
+            next.0
+                .checked_sub(1)
+                .ok_or_else(|| malformed("stsc run starts at chunk 0"))
+        })?;
         for chunk in first..=last {
             let mut offset = *chunk_offsets
                 .get(chunk.wrapping_sub(1))
@@ -344,7 +346,9 @@ fn sample_table(stbl: &[u8], media_time: i64, file_len: u64) -> Result<Vec<Sampl
                     .get(offsets.len())
                     .ok_or_else(|| malformed("stsc describes more samples than stsz"))?;
                 offsets.push(offset);
-                offset += u64::from(size);
+                offset = offset
+                    .checked_add(u64::from(size))
+                    .ok_or_else(|| malformed("sample offset overflows 64 bits"))?;
             }
         }
     }
@@ -364,7 +368,9 @@ fn sample_table(stbl: &[u8], media_time: i64, file_len: u64) -> Result<Vec<Sampl
         );
         for _ in 0..n {
             dts.push(t);
-            t += delta;
+            t = t
+                .checked_add(delta)
+                .ok_or_else(|| malformed("stts decode time overflows 64 bits"))?;
         }
     }
     let mut composition = vec![0i64; count];
@@ -394,17 +400,22 @@ fn sample_table(stbl: &[u8], media_time: i64, file_len: u64) -> Result<Vec<Sampl
             dts.len()
         )));
     }
-    Ok((0..count)
-        .map(|i| Sample {
-            offset: offsets[i],
-            size: sizes[i],
-            dts: dts[i],
-            pts: dts[i] + composition[i] - media_time,
-            is_sync: sync
-                .as_ref()
-                .is_none_or(|s| s.binary_search(&(i as u32 + 1)).is_ok()),
+    (0..count)
+        .map(|i| {
+            Ok(Sample {
+                offset: offsets[i],
+                size: sizes[i],
+                dts: dts[i],
+                pts: dts[i]
+                    .checked_add(composition[i])
+                    .and_then(|t| t.checked_sub(media_time))
+                    .ok_or_else(|| malformed("presentation time overflows 64 bits"))?,
+                is_sync: sync
+                    .as_ref()
+                    .is_none_or(|s| s.binary_search(&(i as u32 + 1)).is_ok()),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Builders for synthetic MP4 files, shared by this crate's tests.
@@ -653,17 +664,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_table_that_disagrees_with_stsz_is_an_error() {
-        let file = bx(
-            b"moov",
-            &trak(&spec(
-                &[10, 20, 30, 40, 50],
-                &[100, 200],
-                &[[1, 2, 1]],
-                false,
-            )),
-        );
     /// An `stbl` payload: `stsz` (fixed size, count, per-sample sizes), `stts` rows, `stsc` rows and `co64` offsets.
     fn stbl(
         fixed: u32,
@@ -730,6 +730,46 @@ mod tests {
         assert_eq!(sample_table(&fixed, 0, 1 << 20).unwrap()[1].offset, 107);
     }
 
+    #[test]
+    fn overflowing_table_values_are_errors_not_panics() {
+        // A second stsc run that starts at chunk 0.
+        let chunk0 = stbl(
+            0,
+            2,
+            &[10, 20],
+            &[[2, 1]],
+            &[[1, 1, 1], [0, 1, 1]],
+            &[100, 200],
+        );
+        assert!(matches!(
+            sample_table(&chunk0, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // A chunk offset 5 bytes below 2^64 followed by a 10-byte sample.
+        let offset = stbl(0, 2, &[10, 20], &[[2, 1]], &[[1, 2, 1]], &[u64::MAX - 5]);
+        assert!(matches!(
+            sample_table(&offset, 0, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+        // A 64-bit edit-list media time that puts the presentation time past i64.
+        let ok = stbl(0, 2, &[10, 20], &[[2, 1]], &[[1, 2, 1]], &[100]);
+        assert!(matches!(
+            sample_table(&ok, i64::MIN, 1 << 20),
+            Err(Mp4Error::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn a_table_that_disagrees_with_stsz_is_an_error() {
+        let file = bx(
+            b"moov",
+            &trak(&spec(
+                &[10, 20, 30, 40, 50],
+                &[100, 200],
+                &[[1, 2, 1]],
+                false,
+            )),
+        );
         assert!(matches!(
             read_hevc_tracks(&mut Cursor::new(file)),
             Err(Mp4Error::Malformed(_))

@@ -326,21 +326,23 @@ fn parse_imu(record: &[u8], m: &Insta360Metadata) -> Result<Vec<ImuSample>, Inst
     } else {
         // u64 t_ms, then six f64: accel in g, gyro in rad/s.
         let count = items(record, 56, "float IMU")?;
-        Ok((0..count)
+        (0..count)
             .map(|i| {
                 let b = &record[i * 56..];
                 let v = |k: usize| f64::from_bits(le(b, 8 + 8 * k, 8));
-                ImuSample {
-                    t_us: le(b, 0, 8) as i64 * 1000,
+                Ok(ImuSample {
+                    t_us: (le(b, 0, 8) as i64)
+                        .checked_mul(1000)
+                        .ok_or_else(|| malformed("float IMU time overflows microseconds"))?,
                     accel_m_s2: [
                         v(0) * STANDARD_GRAVITY,
                         v(1) * STANDARD_GRAVITY,
                         v(2) * STANDARD_GRAVITY,
                     ],
                     gyro_rad_s: [v(3), v(4), v(5)],
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -630,8 +632,13 @@ pub fn parse_lens_string(
         }
     };
     let per_lens = 11 + n_coeffs + 3;
+    if count.fract() != 0.0 || !(1.0..=8.0).contains(&count) {
+        return Err(malformed(format!(
+            "V{version} lens string states {count} lenses, not a whole number from 1 to 8"
+        )));
+    }
     let count = count as usize;
-    if count == 0 || body.len() != count * per_lens {
+    if body.len() != count * per_lens {
         return Err(malformed(format!(
             "V{version} lens string: {} tokens for {count} lenses of {per_lens}",
             body.len()
@@ -752,10 +759,12 @@ impl Insta360Clip {
         }
         let first = m.first_frame_timestamp_us;
         let exposures = &trailer.exposures_vin0;
-        let nearest = (0..exposures.len()).min_by_key(|&i| (exposures[i].t_us - first).abs());
+        // In i128, so times anywhere in i64 cannot overflow the difference.
+        let distance = |i: usize| (i128::from(exposures[i].t_us) - i128::from(first)).abs();
+        let nearest = (0..exposures.len()).min_by_key(|&i| distance(i));
         let period_us = 1e6 / m.frame_rate.unwrap_or(30.0);
         let first_frame_entry = nearest
-            .filter(|&i| ((exposures[i].t_us - first).abs() as f64) < 0.5 * period_us)
+            .filter(|&i| (distance(i) as f64) < 0.5 * period_us)
             .ok_or_else(|| {
                 malformed(format!(
                     "no exposure entry within half a frame of first_frame_timestamp {first}"
@@ -927,7 +936,17 @@ mod tests {
 
     #[test]
     fn malformed_lens_strings_are_errors_not_panics() {
-        for text in ["", "2_1_2", "2_x_197632", "1_2.3_197632", "2_1_2_3_132096"] {
+        // The last three state 1e30, 2.5 and -1 lenses: the count must be a whole number from 1 to 8.
+        for text in [
+            "",
+            "2_1_2",
+            "2_x_197632",
+            "1_2.3_197632",
+            "2_1_2_3_132096",
+            "1e30_1_197632",
+            "2.5_1_197632",
+            "-1_1_197632",
+        ] {
             assert!(
                 parse_lens_string(text, None, [1920, 1920]).is_err(),
                 "{text}"
@@ -1125,6 +1144,14 @@ mod tests {
             (4, exposures(&[1])),
         ]);
         assert!(read_trailer(&mut Cursor::new(file)).is_err());
+        // A time of 2^62 ms overflows i64 microseconds: an error, not a panic or a wrapped time.
+        let mut imu = (1u64 << 62).to_le_bytes().to_vec();
+        imu.extend_from_slice(&[0u8; 48]);
+        let file = trailer_file(&[(1, metadata(false)), (3, imu), (4, exposures(&[1]))]);
+        assert!(matches!(
+            read_trailer(&mut Cursor::new(file)),
+            Err(Insta360Error::Malformed(_))
+        ));
     }
 
     #[test]
@@ -1167,6 +1194,7 @@ mod tests {
                 exposures(&[1_000_100, 1_000_150, 1_000_200, 1_033_567, 1_066_934]),
             ),
         ]);
+        let video = file.clone();
         file.extend(bx(b"inst", &trailer[1000..]));
         let dir = std::env::temp_dir().join(format!("insta360-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1186,6 +1214,22 @@ mod tests {
         let mut out = Vec::new();
         assert!(reader.read_annex_b(&clip.tracks[0], 0, &mut out).unwrap());
         assert_eq!(out, [0, 0, 0, 1, 0x40, 0x01, 0, 0, 0, 1, 0x26, 0x01]);
+        // A first-frame time of i64::MIN and an exposure at i64::MAX: the distance between them does not overflow,
+        // and the clip is refused because no exposure is near the first frame.
+        let mut far_metadata = metadata(true);
+        varint_field(24, 1 << 63, &mut far_metadata);
+        let far = trailer_file(&[
+            (1, far_metadata),
+            (3, Vec::new()),
+            (4, exposures(&[i64::MAX as u64])),
+        ]);
+        let mut far_file = video;
+        far_file.extend(bx(b"inst", &far[1000..]));
+        std::fs::write(&path, &far_file).unwrap();
+        assert!(matches!(
+            Insta360Clip::open(&path),
+            Err(Insta360Error::Malformed(_))
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
