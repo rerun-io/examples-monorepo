@@ -339,13 +339,11 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
             raise ValueError(f"frameset {frameset.t_ns} + {offset_ns} ns runs past the IMU read for it")
         flow: _core.FlowFrame | None = vio.flow_frame()
         if flow is not None:
-            frames.append(
-                TrackedFrame(
-                    t_ns=frameset.t_ns,
-                    ids=np.concatenate([flow.ids(camera) for camera in range(vio.camera_count)]).astype(np.int64),
-                    bearings=np.concatenate([vio.bearings(camera, flow.positions(camera)) for camera in range(vio.camera_count)]),
-                )
-            )
+            ids: Int64[ndarray, " n"] = np.concatenate([flow.ids(camera) for camera in range(vio.camera_count)]).astype(np.int64)
+            bearings: Float64[ndarray, "n 3"] = np.concatenate([vio.bearings(camera, flow.positions(camera)) for camera in range(vio.camera_count)])
+            # A track can drift past a lens's field, where the model has no bearing: drop it, one NaN breaks the fits.
+            valid: np.ndarray = np.isfinite(bearings).all(axis=1)
+            frames.append(TrackedFrame(t_ns=frameset.t_ns, ids=ids[valid], bearings=bearings[valid]))
         if stop_at_attempt and first_attempt(vio) is not None:
             break
     return frames
