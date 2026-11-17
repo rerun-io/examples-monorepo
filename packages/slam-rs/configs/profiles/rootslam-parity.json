@@ -1,0 +1,1 @@
+{"config.vio_max_iterations": 7, "port.redetect_survivor_ratio": 0.85, "port.frame_update_max_iterations": 5, "port.klt_exit_step_px": 0.05, "backend.loop_closing": {"query_cameras": "cam0", "brief_tests": "raw", "pnp_ransac_fixed_iterations": 35, "pnp_inliers_ratio": 0.0, "pgo_edge_sigmas": [1.0, 1.0]}}

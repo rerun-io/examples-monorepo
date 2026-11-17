@@ -10,10 +10,13 @@
 //! leave it out. The window never reads the map, so the raw VIO poses are the
 //! same with the back end on or off.
 
+pub mod anchor;
 pub mod covisibility;
 pub mod cull;
 pub mod gba;
+pub mod loop_closing;
 pub mod map;
+pub mod pgo;
 pub mod runner;
 pub mod snapshot;
 
@@ -23,11 +26,14 @@ use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
+pub use anchor::{AnchorError, reanchor};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
+pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
+pub use pgo::{MapCorrection, PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
-pub use snapshot::MapSnapshot;
+pub use snapshot::{MapSnapshot, SnapshotLoop};
 
 /// The map's knobs, read from [`VioConfig`].
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +88,18 @@ pub enum MapEvent {
         /// Which rule culled it.
         reason: CullReason,
     },
+    /// A loop passed verification at a new keyframe (PR b2).
+    LoopVerified {
+        /// The new keyframe.
+        current: FrameId,
+        /// The keyframe it closes a loop with.
+        candidate: FrameId,
+        /// Fused, optimized then fused, left unapplied, or stale.
+        outcome: LoopOutcome,
+        /// Wall time of the apply, when it ran a pose-graph optimization
+        /// (graph, solve, map write and fusion; PR c2). It differs run to run.
+        pgo_ns: Option<u64>,
+    },
 }
 
 /// The map, its covisibility graph and what protects keyframes from culling.
@@ -105,6 +123,8 @@ pub struct MapBackend {
     /// The rig's camera models for the global BA ([`Self::finish`]); `None`
     /// when the rig has a model the GBA cannot project.
     gba_rig: Option<gba::GbaRig>,
+    /// Loop closing (PR b2); `None` when it is off.
+    loops: Option<LoopClosing>,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -150,6 +170,7 @@ impl MapBackend {
             culled_over_budget: 0,
             t_i_c: Vec::new(),
             gba_rig: None,
+            loops: None,
         }
     }
 
@@ -235,6 +256,13 @@ impl MapBackend {
                 events.push(MapEvent::KeyframeAdded(id));
             }
             self.map.upsert_keyframe(id, *pose, keypoints);
+        }
+        if let (Some(loops), Some(slot), true) = (
+            self.loops.as_mut(),
+            &stamp.images,
+            added.contains(&stamp.t_ns),
+        ) {
+            loops.hold_images(stamp.t_ns, slot);
         }
         self.map.merge_landmarks(&stamp.landmarks);
         for id in added {
@@ -387,6 +415,9 @@ impl MapBackend {
             touched.insert(landmark.host.frame_id);
         }
         self.culled.insert(id);
+        if let Some(loops) = self.loops.as_mut() {
+            loops.forget(id);
+        }
         Some(touched)
     }
 }
@@ -403,9 +434,16 @@ impl BackendWork for MapBackend {
         MapBackend::step(self, stamp)
     }
 
-    /// Nothing yet: loop detection arrives in PR b2.
-    fn query(&mut self, _keyframe: FrameId) -> Vec<MapEvent> {
-        Vec::new()
+    /// Loop detection and, below the drift gate, fusion (PR b2).
+    fn query(&mut self, keyframe: FrameId) -> Vec<MapEvent> {
+        self.close_loops(keyframe)
+    }
+
+    /// Free the images a dropped query would have read.
+    fn drop_query(&mut self, keyframe: FrameId) {
+        if let Some(loops) = self.loops.as_mut() {
+            loops.drop_images(keyframe);
+        }
     }
 }
 

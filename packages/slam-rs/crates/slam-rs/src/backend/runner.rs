@@ -48,6 +48,10 @@ pub trait BackendWork: Send + 'static {
     /// Look for a loop at `keyframe`, which a step added. Realtime may drop it.
     fn query(&mut self, keyframe: FrameId) -> Vec<MapEvent>;
 
+    /// The query of `keyframe` was dropped (Realtime, behind): release what it
+    /// held. Nothing by default.
+    fn drop_query(&mut self, _keyframe: FrameId) {}
+
     /// Copy the work for readers.
     fn view(&self) -> Self::View;
 }
@@ -69,6 +73,8 @@ pub struct BackendCounters {
     pub query: StepTiming,
     /// Wall time of the views the Realtime thread posted for readers.
     pub publish: StepTiming,
+    /// Wall time of the loops that ran a pose-graph optimization (PR c2).
+    pub pgo: StepTiming,
 }
 
 /// A copy of the work and the counters when it was taken: one moment.
@@ -111,7 +117,9 @@ impl<B: BackendWork> State<B> {
             }
         }
         while self.queries.len() > max_queries {
-            self.queries.pop_front();
+            if let Some(dropped) = self.queries.pop_front() {
+                self.work.drop_query(dropped);
+            }
             self.counters.queries_dropped += 1;
         }
     }
@@ -124,6 +132,14 @@ impl<B: BackendWork> State<B> {
         let events: Vec<MapEvent> = self.work.query(keyframe);
         self.counters.query.record(crate::duration_ns(started));
         self.counters.queries_run += 1;
+        for event in &events {
+            if let MapEvent::LoopVerified {
+                pgo_ns: Some(ns), ..
+            } = event
+            {
+                self.counters.pgo.record(*ns);
+            }
+        }
         Some(!events.is_empty())
     }
 
@@ -514,6 +530,7 @@ mod tests {
             keyframe_poses: BTreeMap::new(),
             landmarks: Vec::new(),
             keypoints: Vec::new(),
+            images: None,
         }))
     }
 

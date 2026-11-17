@@ -4,7 +4,8 @@
 
 use nalgebra::{Vector3, Vector4};
 
-use super::{CullCounts, MapBackend, MapStats};
+use super::pgo::{MapCorrection, PgoRun};
+use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats, PoseGraphEdge};
 use crate::landmark::StereographicParam;
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
@@ -15,8 +16,10 @@ pub struct MapSnapshot {
     /// Map keyframes, oldest first.
     pub keyframe_t_ns: Vec<FrameId>,
     /// `T_w_i` of each keyframe as the map holds it: the window's solved (or,
-    /// once evicted, final) pose. Loop closing has not moved any yet.
+    /// once evicted, final) pose, as the pose-graph optimization corrected it.
     pub keyframe_poses: Vec<Se3<f64>>,
+    /// The window's pose of each keyframe, before any correction.
+    pub keyframe_raw_poses: Vec<Se3<f64>>,
     /// Whether each keyframe is still in the window.
     pub keyframe_active: Vec<bool>,
     /// Map landmarks the snapshot could place, in id order.
@@ -33,10 +36,33 @@ pub struct MapSnapshot {
     pub culls: CullCounts,
     /// The shared-landmark weight at which an edge is "high".
     pub high_covisibility_weight: u32,
+    /// The edges a pose-graph optimization would take now (the spanning tree,
+    /// the loop closures, the high-covisibility edges; PR f1 draws them).
+    pub pose_graph_edges: Vec<PoseGraphEdge>,
     /// Median number of landmarks a map keyframe sees.
     pub median_keyframe_landmarks: usize,
     /// The map's payload in bytes (a lower bound on its heap).
     pub retained_bytes: usize,
+    /// What loop closing has done (all zero when it is off).
+    pub loop_counts: LoopCounts,
+    /// Verified loops whose two keyframes are still in the map, oldest first.
+    pub loops: Vec<SnapshotLoop>,
+    /// The PGO's corrections and epoch, for re-anchoring (PR f1).
+    pub correction: MapCorrection,
+    /// Applied PGOs, oldest first.
+    pub pgo_runs: Vec<PgoRun>,
+}
+
+/// One verified loop in a [`MapSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapshotLoop {
+    /// The keyframe that found the loop.
+    pub current: FrameId,
+    /// The keyframe it closes with.
+    pub candidate: FrameId,
+    /// Its landmarks were fused, at once or after a pose-graph optimization
+    /// (`false`: left unapplied, the optimization off or refused).
+    pub fused: bool,
 }
 
 impl MapBackend {
@@ -73,9 +99,17 @@ impl MapBackend {
             points_world.push(point);
         }
         let graph = self.graph();
+        let pgo = self.loops.as_ref().map(|loops| loops.pgo());
         MapSnapshot {
             keyframe_t_ns: keyframes.keys().copied().collect(),
             keyframe_poses: keyframes.values().map(|keyframe| keyframe.pose).collect(),
+            keyframe_raw_poses: keyframes
+                .iter()
+                .map(|(id, keyframe)| {
+                    pgo.and_then(|pgo| pgo.raw.get(id).copied())
+                        .unwrap_or(keyframe.pose)
+                })
+                .collect(),
             keyframe_active: keyframes
                 .keys()
                 .map(|id| self.active.contains(id))
@@ -95,8 +129,34 @@ impl MapBackend {
             stats: self.stats(),
             culls: self.cull_counts(),
             high_covisibility_weight: self.high_covisibility_weight(),
+            pose_graph_edges: graph.pose_graph_edges(self.high_covisibility_weight()),
             median_keyframe_landmarks: self.map.median_keyframe_landmarks(),
             retained_bytes: self.map.retained_bytes(),
+            loop_counts: self
+                .loops
+                .as_ref()
+                .map(|loops| loops.counts())
+                .unwrap_or_default(),
+            loops: self
+                .loops
+                .iter()
+                .flat_map(|loops| loops.events())
+                .filter(|event| {
+                    event.outcome != LoopOutcome::Stale
+                        && keyframes.contains_key(&event.detection.current)
+                        && keyframes.contains_key(&event.detection.candidate)
+                })
+                .map(|event| SnapshotLoop {
+                    current: event.detection.current,
+                    candidate: event.detection.candidate,
+                    fused: matches!(
+                        event.outcome,
+                        LoopOutcome::Fused { .. } | LoopOutcome::Optimized { .. }
+                    ),
+                })
+                .collect(),
+            correction: self.map_correction(),
+            pgo_runs: pgo.map(|pgo| pgo.runs.clone()).unwrap_or_default(),
         }
     }
 }

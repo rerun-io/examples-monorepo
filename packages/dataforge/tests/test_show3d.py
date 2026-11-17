@@ -193,6 +193,7 @@ def tiny_scene(tmp_path: Path) -> Path:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("nvenc_ffmpeg")
 def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
     target: Path = tmp_path / "synthetic.rrd"
     write_base_layer(
@@ -249,6 +250,7 @@ def test_synthetic_base_roundtrip(tmp_path: Path, tiny_scene: Path) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("nvenc_ffmpeg")
 def test_table_fields_name_columns_the_layer_writers_produce(tmp_path: Path, tiny_scene: Path) -> None:
     """``table_fields()`` names its columns by string, so a writer that renames a property would strand one silently.
 

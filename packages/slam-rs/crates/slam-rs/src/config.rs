@@ -4,6 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "backend/loop_closing/config.rs"]
+mod loop_closing;
+pub use loop_closing::{BriefTests, LoopClosingConfig, LoopQueryCameras};
+
 /// Which linearization the estimator runs.
 ///
 /// Only [`LinearizationType::AbsQr`] is ported (decision D13); the other two
@@ -369,6 +373,10 @@ pub struct VioConfig {
     /// Solve in f64 instead of f32 (rootba `--use-double`; a debug lane).
     #[serde(rename = "backend.gba_use_double")]
     pub gba_use_double: bool,
+    /// Loop detection, verification and fusion (PR b2, DESIGN §3 rows 7-11).
+    /// Read only with the `backend` feature and `backend.enabled`.
+    #[serde(rename = "backend.loop_closing")]
+    pub backend_loop_closing: LoopClosingConfig,
 }
 
 impl Default for VioConfig {
@@ -448,6 +456,7 @@ impl Default for VioConfig {
             gba_pose_graph_sigma_rotation: 0.01,
             gba_threads: std::num::NonZeroUsize::MIN.saturating_add(1),
             gba_use_double: false,
+            backend_loop_closing: LoopClosingConfig::default(),
         }
     }
 }

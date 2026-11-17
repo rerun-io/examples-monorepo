@@ -1,6 +1,10 @@
 slam-rs JSON inputs: dataset VIO configurations and RoboCap calibration.
 
-Each dataset in ../slam.toml selects one configuration. The
+Each dataset in ../slam.toml selects one configuration. euroc_config.json is
+msdmg_config.json with EuRoC's sensor facts only: no fisheye mask (safe radius
+0 on a pinhole rig) and RootSLAM's EuRoC recall patch norms. tumvi_config.json
+is msdmg_config.json with TUM-VI's 40 px detection grid and 320 px fisheye mask
+(docs/reproduce.md lists what is carried from RootSLAM's config). The
 reference profile leaves it unchanged. The default fast profile applies the
 three keys in profiles/fast.json. profiles/live.json is the RoboCap live
 profile (robocap-live's default): the fast keys plus a deferred keyframe solve
@@ -9,7 +13,13 @@ adds a 70 px detection grid (about 40 % less frontend work; outside the 10 s
 clip's ATE band, inside the full session's). Both live profiles set
 backend.mode to realtime: when backend.enabled turns the persistent map on, it
 runs on its own thread and tracking never waits for it; reference and fast keep
-the offline default (inline, repeatable). tests/test_config_profiles.py checks overlays
+the offline default (inline, repeatable). profiles/rootslam-parity.json is the
+fast keys plus RootSLAM's values of the backend.loop_closing knobs (camera-0
+query, raw BRIEF tests, OpenGV's RANSAC schedule capped at 35 draws, inlier
+ratio 0, I6 pose-graph edges), for parity checks against RootSLAM runs only.
+It keeps the bug fixes (B3, B4, B8 and the others), so it reproduces
+RootSLAM's verification gates, not its candidate supply: compare loop counts
+per revisit window, not totals. tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 

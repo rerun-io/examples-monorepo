@@ -21,9 +21,9 @@ gpu-core = ["dep:kornia-staging-gpu", "dep:cubecl"]
 # `slam-rs-wgpu-test` checks the kernels on the device.
 # Compiler selection and storage alignment belong to kornia-staging-gpu.
 gpu-wgpu = ["gpu-core", "kornia-staging-gpu/wgpu"]
-# The back end beside the window (the persistent keyframe map, DESIGN a1), off by
-# default so wasm, iOS and embedded builds stay as they are. No dependency.
-backend = []
+# The back end beside the window (the persistent keyframe map, DESIGN a1; loop
+# closing, b2), off by default so wasm, iOS and embedded builds stay as they are.
+backend = ["dep:kornia-staging-bow", "dep:kornia-bow", "kornia-staging-3d/ransac"]
 
 [dependencies]
 kornia-staging-gpu = { workspace = true, optional = true }
@@ -33,6 +33,8 @@ kornia-staging-3d.workspace = true
 kornia-staging-algebra.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-sensors.workspace = true
+kornia-staging-bow = { workspace = true, optional = true }
+kornia-bow = { workspace = true, optional = true }
 cubecl = { workspace = true, optional = true }
 kornia-image = { workspace = true }
 kornia-imgproc = { workspace = true }

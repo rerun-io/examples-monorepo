@@ -575,6 +575,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+dependencies = [
+ "bincode_derive",
+ "serde",
+ "unty",
+]
+
+[[package]]
+name = "bincode_derive"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
+dependencies = [
+ "virtue",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3140,6 +3160,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-bow"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f56365c5b88412594d0164be70c4ab639d9e674bdea0756d48c3515394713d2c"
+dependencies = [
+ "bincode",
+ "rand 0.10.2",
+ "rayon",
+ "serde",
+ "serde-big-array",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-image"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3173,6 +3207,7 @@ dependencies = [
  "kornia-algebra",
  "kornia-staging-algebra",
  "nalgebra",
+ "rand 0.10.2",
  "serde",
  "thiserror",
 ]
@@ -3184,6 +3219,13 @@ dependencies = [
  "kornia-algebra",
  "nalgebra",
  "thiserror",
+]
+
+[[package]]
+name = "kornia-staging-bow"
+version = "0.1.0"
+dependencies = [
+ "kornia-bow",
 ]
 
 [[package]]
@@ -6559,6 +6601,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-big-array"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde-value"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6732,10 +6783,12 @@ dependencies = [
  "bytes",
  "cubecl",
  "kornia-algebra",
+ "kornia-bow",
  "kornia-image",
  "kornia-imgproc",
  "kornia-staging-3d",
  "kornia-staging-algebra",
+ "kornia-staging-bow",
  "kornia-staging-gpu",
  "kornia-staging-imgproc",
  "kornia-staging-sensors",
@@ -6775,6 +6828,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-staging-imgproc",
+ "nalgebra",
  "numpy",
  "pyo3",
  "slam-rs",
@@ -7537,6 +7591,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
 name = "ureq"
 version = "3.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7660,6 +7720,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtue"
+version = "0.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "void"

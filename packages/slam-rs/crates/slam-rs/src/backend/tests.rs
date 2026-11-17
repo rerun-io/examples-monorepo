@@ -47,6 +47,7 @@ fn keyframe(t_ns: FrameId, window: &[FrameId], landmarks: Vec<StampLandmark>) ->
         keyframe_poses: window.iter().map(|&id| (id, pose(id as f64))).collect(),
         landmarks,
         keypoints: vec![vec![(KeypointId(t_ns as u64), Vector2::new(2.0, 3.0))]; 2],
+        images: None,
     }))
 }
 
@@ -569,4 +570,18 @@ fn a_map_snapshot_skips_points_at_infinity() {
             .all(|value| value.is_finite())
     );
     assert_eq!(snapshot.stats.landmarks, 2);
+}
+
+#[test]
+fn reanchoring_refuses_a_frame_without_a_rotation() {
+    // A zero quaternion is no rotation: refused, as the Python binding refuses it,
+    // never read as the identity.
+    let snapshot: MapSnapshot = backend(100, 10).snapshot(&[]);
+    let mut frames = vec![(10, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]), (20, [0.0; 7])];
+    assert_eq!(
+        snapshot.reanchor(&frames),
+        Err(AnchorError::NoRotation { t_ns: 20 })
+    );
+    frames[1].1[6] = 1.0;
+    assert_eq!(snapshot.reanchor(&frames).unwrap()[1], frames[1].1);
 }
