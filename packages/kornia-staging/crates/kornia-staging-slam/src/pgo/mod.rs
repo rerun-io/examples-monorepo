@@ -1,24 +1,26 @@
 //! SE(3) pose-graph optimization over keyframe poses, in f64.
 //!
 //! The solver behind RootSLAM's loop closure (Ceres `SPARSE_NORMAL_CHOLESKY`, LM, 20 iterations): relative-pose
-//! residuals with analytic Jacobians ([`relative_pose_residual`]), a block-sparse Cholesky over 6x6 blocks with a
-//! minimum-degree ordering ([`SymbolicCholesky`]), and the staged Levenberg–Marquardt driver. The gauge is the
+//! residuals with analytic Jacobians ([`relative_pose_residual`], RootSLAM's Ceres term), a block-sparse Cholesky
+//! over 6x6 blocks with an exact minimum-degree ordering, and the staged Levenberg–Marquardt driver. The gauge is the
 //! caller's set of fixed poses (RootSLAM fixes the sliding window and the newest keyframe). Each edge carries
 //! its own square-root information; [`EdgeSigmas`] builds the diagonal ones.
 //!
-//! Single-threaded and allocation-bounded by the graph: a 1500-keyframe map solves in a few milliseconds.
+//! Single-threaded and allocation-bounded by the graph: a 1500-keyframe map (~2,400 edges) solves in ~8 ms on one
+//! thread (`benches/pgo.rs`).
 
 mod residual;
 mod sparse;
 
 pub use residual::{relative_pose_residual, RelPoseLinearization};
-pub use sparse::{BlockSymmetric, NotPositiveDefinite, SymbolicCholesky};
 
 use kornia_staging_algebra::lie::RigidTransform;
 use kornia_staging_algebra::optim::solvers::{
     levenberg_marquardt, DampingRule, LmConfig, LmProblem, LmTermination, ScalingFloor,
 };
 use nalgebra::{Matrix6, Vector6};
+use sparse::{BlockSymmetric, SymbolicCholesky};
+use std::collections::HashSet;
 
 /// Standard deviations of a relative-pose measurement, the same on every axis of each part.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,8 +47,9 @@ impl EdgeSigmas {
 }
 
 impl Default for EdgeSigmas {
-    /// 0.05 m / 0.01 rad: rootba's pose-graph rows in RootSLAM's global BA, used for the PGO too so both
-    /// weigh the pose graph alike.
+    /// 0.05 m / 0.01 rad: the sigmas of the pose-graph rows in RootSLAM's global BA (rootba), the design's
+    /// default for the PGO too. The two residuals differ (see [`relative_pose_residual`]), so equal sigmas
+    /// do not make the two costs equal on long edges.
     fn default() -> Self {
         Self {
             translation_m: 0.05,
@@ -91,7 +94,19 @@ impl PoseGraphEdge {
     }
 }
 
-/// Levenberg–Marquardt limits for [`optimize_pose_graph`].
+/// What [`optimize_pose_graph`] does with several edges between the same two poses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParallelEdges {
+    /// Keep the first edge of each unordered pose pair and drop the rest: RootSLAM's `buildPoseGraph`, which
+    /// lists the covisibility-graph edges (spanning tree, past loops, high covisibility) before the current
+    /// loop edges, so an island keyframe that already has an edge to the current keyframe loses its new loop edge.
+    #[default]
+    KeepFirst,
+    /// Keep every edge; parallel edges add up.
+    Sum,
+}
+
+/// Levenberg–Marquardt limits and edge handling for [`optimize_pose_graph`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PgoConfig {
     /// Attempted steps, accepted or not (RootSLAM: 20).
@@ -102,6 +117,8 @@ pub struct PgoConfig {
     pub initial_damping: f64,
     /// Stop when the damping exceeds this.
     pub max_damping: f64,
+    /// Several edges between one pose pair (RootSLAM: keep the first).
+    pub parallel_edges: ParallelEdges,
 }
 
 impl Default for PgoConfig {
@@ -111,6 +128,7 @@ impl Default for PgoConfig {
             relative_tolerance: 1e-6,
             initial_damping: 1e-4,
             max_damping: 1e16,
+            parallel_edges: ParallelEdges::KeepFirst,
         }
     }
 }
@@ -139,6 +157,8 @@ pub struct PgoReport {
     pub final_cost: f64,
     /// Why the LM loop stopped.
     pub termination: LmTermination,
+    /// Edges dropped by [`ParallelEdges::KeepFirst`].
+    pub dropped_edges: usize,
 }
 
 /// An invalid pose graph.
@@ -195,7 +215,7 @@ pub enum PgoError {
 /// # Arguments
 /// * `world_from_poses` - Keyframe poses `T_w_i`, updated in place.
 /// * `fixed` - One flag per pose: `true` holds that pose constant.
-/// * `edges` - Relative-pose measurements; parallel edges add up.
+/// * `edges` - Relative-pose measurements, in priority order for [`ParallelEdges::KeepFirst`].
 /// * `config` - LM limits.
 ///
 /// # Errors
@@ -207,6 +227,7 @@ pub fn optimize_pose_graph(
     config: &PgoConfig,
 ) -> Result<PgoReport, PgoError> {
     let n = world_from_poses.len();
+    let n_edges_in = edges.len();
     if fixed.len() != n {
         return Err(PgoError::FixedLength {
             poses: n,
@@ -243,8 +264,19 @@ pub fn optimize_pose_graph(
     }
     check_anchored(n, fixed, edges)?;
 
+    let mut seen = HashSet::new();
+    let edges: Vec<PoseGraphEdge> = match config.parallel_edges {
+        ParallelEdges::Sum => edges.to_vec(),
+        ParallelEdges::KeepFirst => edges
+            .iter()
+            .filter(|e| seen.insert((e.from.min(e.to), e.from.max(e.to))))
+            .copied()
+            .collect(),
+    };
+    let dropped_edges = n_edges_in - edges.len();
+
     let mut touched = vec![false; n];
-    for edge in edges {
+    for edge in &edges {
         touched[edge.from] = true;
         touched[edge.to] = true;
     }
@@ -263,6 +295,7 @@ pub fn optimize_pose_graph(
             initial_cost,
             final_cost: initial_cost,
             termination: LmTermination::Tolerance,
+            dropped_edges,
         });
     }
 
@@ -282,7 +315,7 @@ pub fn optimize_pose_graph(
         })
         .collect();
     let mut problem = PgoProblem {
-        edges,
+        edges: &edges,
         layout,
         poses: world_from_poses.to_vec(),
         trial: world_from_poses.to_vec(),
@@ -308,6 +341,7 @@ pub fn optimize_pose_graph(
         initial_cost,
         final_cost: lm.final_energy,
         termination: lm.termination,
+        dropped_edges,
     })
 }
 

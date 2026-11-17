@@ -14,15 +14,15 @@ use nalgebra::{Matrix6, Vector6};
 /// A diagonal block lost positive definiteness during the factorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("block {block} of the factor is not positive definite")]
-pub struct NotPositiveDefinite {
+pub(crate) struct NotPositiveDefinite {
     /// The block, in the caller's (unpermuted) numbering.
-    pub block: usize,
+    pub(crate) block: usize,
 }
 
 /// Values of a symmetric block matrix on a [`SymbolicCholesky`] pattern; after
 /// [`SymbolicCholesky::factor`], the values of its lower Cholesky factor.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BlockSymmetric {
+pub(crate) struct BlockSymmetric {
     /// Diagonal blocks by elimination position: full symmetric blocks, or lower-triangular factor blocks.
     diagonal: Vec<Matrix6<f64>>,
     /// Strictly lower blocks, by slot of the pattern.
@@ -31,7 +31,7 @@ pub struct BlockSymmetric {
 
 /// The ordering and fill pattern of a block Cholesky factor.
 #[derive(Debug, Clone)]
-pub struct SymbolicCholesky {
+pub(crate) struct SymbolicCholesky {
     /// Elimination position -> caller's block index.
     order: Vec<usize>,
     /// Caller's block index -> elimination position.
@@ -53,7 +53,7 @@ impl SymbolicCholesky {
     /// * `blocks` - Number of 6x6 diagonal blocks.
     /// * `edges` - Pairs of blocks with a nonzero off-diagonal block; repeats and either order are fine.
     ///   Self pairs and indices `>= blocks` are ignored.
-    pub fn new(blocks: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> Self {
+    pub(crate) fn new(blocks: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> Self {
         let mut adjacency: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); blocks];
         for (a, b) in edges {
             if a != b && a < blocks && b < blocks {
@@ -127,22 +127,25 @@ impl SymbolicCholesky {
     }
 
     /// Number of diagonal blocks.
-    pub fn blocks(&self) -> usize {
+    pub(crate) fn blocks(&self) -> usize {
         self.order.len()
     }
 
+    #[cfg(test)]
     /// The elimination order: caller's block indices, first eliminated first.
-    pub fn ordering(&self) -> &[usize] {
+    pub(crate) fn ordering(&self) -> &[usize] {
         &self.order
     }
 
+    #[cfg(test)]
     /// Number of strictly lower blocks of the factor, fill included.
-    pub fn off_diagonal_blocks(&self) -> usize {
+    pub(crate) fn off_diagonal_blocks(&self) -> usize {
         self.row.len()
     }
 
+    #[cfg(test)]
     /// Whether the factor pattern has a block for this pair.
-    pub fn has_block(&self, a: usize, b: usize) -> bool {
+    pub(crate) fn has_block(&self, a: usize, b: usize) -> bool {
         self.slot(a, b).is_some()
     }
 
@@ -161,7 +164,7 @@ impl SymbolicCholesky {
     }
 
     /// An all-zero matrix on this pattern.
-    pub fn zeros(&self) -> BlockSymmetric {
+    pub(crate) fn zeros(&self) -> BlockSymmetric {
         BlockSymmetric {
             diagonal: vec![Matrix6::zeros(); self.blocks()],
             lower: vec![Matrix6::zeros(); self.row.len()],
@@ -169,20 +172,21 @@ impl SymbolicCholesky {
     }
 
     /// `H_aa += block`.
-    pub fn add_diagonal(&self, h: &mut BlockSymmetric, a: usize, block: &Matrix6<f64>) {
+    pub(crate) fn add_diagonal(&self, h: &mut BlockSymmetric, a: usize, block: &Matrix6<f64>) {
         h.diagonal[self.position[a]] += block;
     }
 
     /// The diagonal block `H_aa`.
-    pub fn diagonal(&self, h: &BlockSymmetric, a: usize) -> Matrix6<f64> {
+    pub(crate) fn diagonal(&self, h: &BlockSymmetric, a: usize) -> Matrix6<f64> {
         h.diagonal[self.position[a]]
     }
 
+    #[cfg(test)]
     /// `H_ab += block` (and `H_ba += block^T`).
     ///
     /// # Panics
     /// If `a == b` or the pair was not an edge given to [`SymbolicCholesky::new`].
-    pub fn add_off_diagonal(
+    pub(crate) fn add_off_diagonal(
         &self,
         h: &mut BlockSymmetric,
         a: usize,
@@ -211,7 +215,7 @@ impl SymbolicCholesky {
     }
 
     /// `y = H x` with `x` and `y` in the caller's numbering, six entries per block.
-    pub fn multiply(&self, h: &BlockSymmetric, x: &[f64], y: &mut [f64]) {
+    pub(crate) fn multiply(&self, h: &BlockSymmetric, x: &[f64], y: &mut [f64]) {
         let xs: Vec<Vector6<f64>> = self.gather(x);
         let mut ys = vec![Vector6::zeros(); self.blocks()];
         for j in 0..self.blocks() {
@@ -229,7 +233,7 @@ impl SymbolicCholesky {
     ///
     /// # Errors
     /// [`NotPositiveDefinite`] names the first block whose Schur complement is not positive definite.
-    pub fn factor(&self, h: &mut BlockSymmetric) -> Result<(), NotPositiveDefinite> {
+    pub(crate) fn factor(&self, h: &mut BlockSymmetric) -> Result<(), NotPositiveDefinite> {
         let mut slot_of_row = vec![usize::MAX; self.blocks()];
         for j in 0..self.blocks() {
             let column = self.column_start[j]..self.column_start[j + 1];
@@ -271,7 +275,7 @@ impl SymbolicCholesky {
     }
 
     /// Solve `L L^T x = rhs` in place, with a factor from [`Self::factor`] and `rhs` in the caller's numbering.
-    pub fn solve(&self, factor: &BlockSymmetric, rhs: &mut [f64]) {
+    pub(crate) fn solve(&self, factor: &BlockSymmetric, rhs: &mut [f64]) {
         let mut y = self.gather(rhs);
         for j in 0..self.blocks() {
             forward_substitute(&factor.diagonal[j], &mut y[j]);
@@ -333,7 +337,12 @@ impl BlockSymmetric {
     /// Marquardt damping: `H_ii += lambda * scale_i` on every diagonal entry.
     ///
     /// `scale` is in the caller's numbering, six entries per block.
-    pub fn add_scaled_identity(&mut self, symbolic: &SymbolicCholesky, lambda: f64, scale: &[f64]) {
+    pub(crate) fn add_scaled_identity(
+        &mut self,
+        symbolic: &SymbolicCholesky,
+        lambda: f64,
+        scale: &[f64],
+    ) {
         for (p, &v) in symbolic.order.iter().enumerate() {
             for k in 0..6 {
                 self.diagonal[p][(k, k)] += lambda * scale[6 * v + k];
@@ -342,7 +351,7 @@ impl BlockSymmetric {
     }
 
     /// Zero every block, keeping the pattern.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.diagonal.fill(Matrix6::zeros());
         self.lower.fill(Matrix6::zeros());
     }

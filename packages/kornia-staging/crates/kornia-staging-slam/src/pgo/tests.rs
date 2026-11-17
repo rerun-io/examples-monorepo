@@ -106,23 +106,67 @@ fn residual_jacobians_match_central_differences() {
     }
 }
 
+/// RootSLAM's Ceres `PoseGraph3dErrorTerm` (`loop_closing.h`), written out from its quaternions.
+fn ceres_pose_graph_term(
+    measured: &RigidTransform<f64>,
+    a: &RigidTransform<f64>,
+    b: &RigidTransform<f64>,
+) -> Vector6<f64> {
+    let q_a_inverse = a.rotation.quaternion().inverse();
+    let q_ab_estimated = q_a_inverse * *b.rotation.quaternion();
+    let p_ab_estimated = q_a_inverse * (b.translation - a.translation);
+    let delta_q = *measured.rotation.quaternion() * q_ab_estimated.conjugate();
+    let t = p_ab_estimated - measured.translation;
+    let w = 2.0 * delta_q.imag();
+    Vector6::new(t.x, t.y, t.z, w.x, w.y, w.z)
+}
+
 #[test]
-fn residual_cost_matches_the_ceres_pose_graph_term() {
-    // RootSLAM's Ceres `PoseGraph3dErrorTerm`: [R_a^T (p_b - p_a) - p_ab; 2 vec(q_ab q_est^-1)].
-    // Ours is the decoupled SE(3) log in the measurement frame: the same squared norm to second order.
+fn residual_is_the_ceres_pose_graph_term() {
     let mut rng = Lcg(3);
-    for _ in 0..32 {
+    for _ in 0..64 {
         let a = rng.pose(10.0, 3.0);
         let b = rng.pose(10.0, 3.0);
-        let measured = a.inverse() * b * rng.pose(0.01, 0.01);
+        let measured = a.inverse() * b * rng.pose(0.5, 0.3);
         let ours = relative_pose_residual(&measured, &a, &b).residual;
-        let est = a.inverse() * b;
-        let t = est.translation - measured.translation;
-        let dq = (*measured.rotation.quaternion()) * est.rotation.quaternion().inverse();
-        let ceres_rot = 2.0 * dq.imag() * dq.w.signum();
-        let ceres = Vector6::new(t.x, t.y, t.z, ceres_rot.x, ceres_rot.y, ceres_rot.z);
-        assert!((ours.norm_squared() - ceres.norm_squared()).abs() <= 1e-4 * ceres.norm_squared());
+        let ceres = ceres_pose_graph_term(&measured, &a, &b);
+        assert!((ours - ceres).amax() < 1e-12, "{ours} vs {ceres}");
     }
+}
+
+#[test]
+fn residual_matches_a_hand_computed_edge() {
+    // a: yaw 90 deg at (1, 2, 3); b: 5 m along world y from a, yaw 90 deg + 0.25 rad.
+    // Measured: 4.9 m along a's x, 0.1 m to its right, yaw 0.2 rad.
+    let yaw = |angle: f64| Rotation3::exp(&Vector3::new(0.0, 0.0, angle));
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    let a = RigidTransform::new(yaw(half_pi), Vector3::new(1.0, 2.0, 3.0));
+    let b = RigidTransform::new(yaw(half_pi + 0.25), Vector3::new(1.0, 7.0, 3.0));
+    let measured = RigidTransform::new(yaw(0.2), Vector3::new(4.9, 0.1, 0.0));
+    let r = relative_pose_residual(&measured, &a, &b).residual;
+    // Translation in a's frame: R_a^T (0, 5, 0) - (4.9, 0.1, 0) = (5, 0, 0) - (4.9, 0.1, 0); no R_ab^T on it.
+    // Rotation: q_ab q_est^-1 = yaw(0.2 - 0.25), so 2 vec = (0, 0, 2 sin(-0.025)) = (0, 0, -0.04999479...).
+    let expected = Vector6::new(0.1, -0.1, 0.0, 0.0, 0.0, -0.049_994_791_829_424_665);
+    assert!((r - expected).amax() < 1e-12, "{r}");
+}
+
+#[test]
+fn residual_is_not_rootbas_gba_row_on_a_long_edge() {
+    // A 5 m edge with 0.01 rad of yaw error. rootba's `logd(T_meas T_est^-1)` puts the rotation error times the
+    // edge length into its translation row (t_m - R_m R_est^T t_est); this residual's translation row is zero.
+    let measured = RigidTransform::new(Rotation3::identity(), Vector3::new(5.0, 0.0, 0.0));
+    let a = RigidTransform::<f64>::identity();
+    let b = RigidTransform::new(
+        Rotation3::exp(&Vector3::new(0.0, 0.0, 0.01)),
+        Vector3::new(5.0, 0.0, 0.0),
+    );
+    let ours = relative_pose_residual(&measured, &a, &b).residual;
+    assert!(ours.fixed_rows::<3>(0).norm() < 1e-15);
+    let rootba = (measured * (a.inverse() * b).inverse()).log_decoupled();
+    assert!(
+        (rootba.fixed_rows::<3>(0).norm() - 5.0 * 0.01).abs() < 1e-3,
+        "{rootba}"
+    );
 }
 
 // ───── sigmas ───────────────────────────────────────────────────────────────
@@ -359,7 +403,7 @@ fn fixed_poses_are_bit_unchanged_and_loop_drift_moves_the_old_map() {
 }
 
 #[test]
-fn edges_between_fixed_poses_and_isolated_poses_are_inert() {
+fn an_isolated_pose_stays_put() {
     let mut rng = Lcg(8);
     let n = 20;
     let mut graph = drifting_graph(&mut rng, n, 0.002, &EdgeSigmas::UNIT);
@@ -419,6 +463,12 @@ fn invalid_inputs_are_rejected() {
         optimize_pose_graph(&mut poses, &fixed, &[bad], &config).unwrap_err(),
         PgoError::NonFinite { edge: 0 }
     );
+    let mut bad_poses = poses.clone();
+    bad_poses[2].translation.y = f64::INFINITY;
+    assert_eq!(
+        optimize_pose_graph(&mut bad_poses, &fixed, &[edge(0, 1)], &config).unwrap_err(),
+        PgoError::NonFinitePose { pose: 2 }
+    );
 }
 
 #[test]
@@ -439,13 +489,61 @@ fn a_stiffer_edge_is_satisfied_more_closely() {
         PoseGraphEdge::new(0, 1, measured_b, &loose),
     ];
     let mut poses = vec![RigidTransform::<f64>::identity(); 2];
-    optimize_pose_graph(&mut poses, &[true, false], &edges, &PgoConfig::default()).unwrap();
+    let sum = PgoConfig {
+        parallel_edges: ParallelEdges::Sum,
+        ..PgoConfig::default()
+    };
+    optimize_pose_graph(&mut poses, &[true, false], &edges, &sum).unwrap();
     // Weighted mean: (1.0 * 100^2 + 1.2 * 10^2) / (100^2 + 10^2).
     let expected = (1.0 * 1e4 + 1.2 * 1e2) / (1e4 + 1e2);
     assert!(
         (poses[1].translation.x - expected).abs() < 1e-9,
         "{}",
         poses[1].translation.x
+    );
+}
+
+#[test]
+fn parallel_edges_keep_the_first_by_default() {
+    // RootSLAM's buildPoseGraph: one edge per unordered pair, the first listed wins (covisibility before loops).
+    let first = RigidTransform::new(Rotation3::identity(), Vector3::new(1.0, 0.0, 0.0));
+    let later = RigidTransform::new(Rotation3::identity(), Vector3::new(1.2, 0.0, 0.0));
+    let edges = [
+        PoseGraphEdge::new(0, 1, first, &EdgeSigmas::UNIT),
+        PoseGraphEdge::new(1, 0, later.inverse(), &EdgeSigmas::UNIT),
+        PoseGraphEdge::new(0, 1, later, &EdgeSigmas::UNIT),
+    ];
+    let mut poses = vec![RigidTransform::<f64>::identity(); 2];
+    let report =
+        optimize_pose_graph(&mut poses, &[true, false], &edges, &PgoConfig::default()).unwrap();
+    assert_eq!(report.dropped_edges, 2);
+    assert!(
+        (poses[1].translation.x - 1.0).abs() < 1e-9,
+        "{}",
+        poses[1].translation.x
+    );
+    // Same poses, bit for bit, as solving the first edge alone.
+    let mut alone = vec![RigidTransform::<f64>::identity(); 2];
+    optimize_pose_graph(
+        &mut alone,
+        &[true, false],
+        &edges[..1],
+        &PgoConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(poses, alone);
+    // `Sum` keeps all three: the mean of 1.0, 1.2 and 1.2.
+    let sum = PgoConfig {
+        parallel_edges: ParallelEdges::Sum,
+        ..PgoConfig::default()
+    };
+    let mut summed = vec![RigidTransform::<f64>::identity(); 2];
+    let report = optimize_pose_graph(&mut summed, &[true, false], &edges, &sum).unwrap();
+    assert_eq!(report.dropped_edges, 0);
+    assert!(
+        (summed[1].translation.x - 3.4 / 3.0).abs() < 1e-9,
+        "{}",
+        summed[1].translation.x
     );
 }
 
@@ -705,7 +803,15 @@ fn pgo_agrees_with_upstream_kornia_3d() {
 /// The shape of a RootSLAM map at its 1500-keyframe cap: a spanning-tree chain, covisibility edges to
 /// the next few keyframes, past loop edges, and the current loop from the newest keyframe to an island
 /// near the start (`benches/pgo.rs` builds the same shape).
-fn rootslam_loop_graph(n: usize) -> (Vec<RigidTransform<f64>>, Vec<bool>, Vec<PoseGraphEdge>) {
+#[allow(clippy::type_complexity)]
+fn rootslam_loop_graph(
+    n: usize,
+) -> (
+    Vec<RigidTransform<f64>>,
+    Vec<RigidTransform<f64>>,
+    Vec<bool>,
+    Vec<PoseGraphEdge>,
+) {
     let mut rng = Lcg(12);
     let sigmas = EdgeSigmas::default();
     let mut graph = drifting_graph(&mut rng, n, 0.001, &sigmas);
@@ -726,15 +832,29 @@ fn rootslam_loop_graph(n: usize) -> (Vec<RigidTransform<f64>>, Vec<bool>, Vec<Po
             .edges
             .push(PoseGraphEdge::new(k, n - 1, measured, &sigmas));
     }
-    (graph.initial, window_fixed(n, 8), graph.edges)
+    (graph.truth, graph.initial, window_fixed(n, 8), graph.edges)
 }
 
 #[test]
 fn a_1500_keyframe_loop_closes() {
-    let (initial, fixed, edges) = rootslam_loop_graph(1500);
+    let (truth, initial, fixed, edges) = rootslam_loop_graph(1500);
+    let n = initial.len();
     let mut poses = initial.clone();
     let report = optimize_pose_graph(&mut poses, &fixed, &edges, &PgoConfig::default()).unwrap();
     assert!(report.iterations <= 20);
+    // The loop closes geometrically: the newest keyframe sits where the truth puts it relative to the island.
+    let loop_error = |p: &[RigidTransform<f64>]| {
+        (0..5)
+            .map(|k| {
+                let d = (truth[k].inverse() * truth[n - 1]).inverse() * (p[k].inverse() * p[n - 1]);
+                d.translation.norm().max(d.rotation.log().norm())
+            })
+            .fold(0.0, f64::max)
+    };
+    let (before, after) = (loop_error(&initial), loop_error(&poses));
+    // Measured: 0.96 before (VIO-like drift), 0.0045 after (the 0.001 edge noise accumulated around the loop).
+    assert!(before > 0.5, "{before}");
+    assert!(after < 1e-2, "{after}");
     // 0.001 noise on ~2,700 edges whitened by 0.05 m / 0.01 rad leaves a cost floor of ~15.
     assert!(report.final_cost < 1e-2 * report.initial_cost, "{report:?}");
     assert_eq!(report.termination, LmTermination::Tolerance);
