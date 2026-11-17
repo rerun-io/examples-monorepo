@@ -28,6 +28,7 @@ pub mod formats;
 pub use brown::BrownConrady;
 mod fisheye624;
 pub use fisheye624::Fisheye624;
+pub mod insta360;
 mod kb4;
 mod pinhole;
 pub use kb4::KannalaBrandt4;
