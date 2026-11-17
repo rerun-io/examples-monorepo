@@ -1,7 +1,8 @@
 //! The dual-fisheye lane's stitch without a pipeline, for the derived viewing panorama.
 use crate::{gray_array, gray_pixels, value_error, window_crop};
 use kornia_image::ImageSize;
-use numpy::{PyArray2, ToPyArray};
+use kornia_staging_imgproc::panorama::TileGeometry;
+use numpy::{IntoPyArray, PyArray2};
 use pyo3::prelude::*;
 use slam_rs::ImageView;
 use slam_rs::frontend::input::LensStitch;
@@ -18,16 +19,13 @@ pub struct PanoramaStitch {
 impl PanoramaStitch {
     /// `lens_string` is the raw V3/V6 factory string, `window_crop` the
     /// `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` it is stated through or
-    /// `None`, `lens_size` each lens image's `(width, height)`, `margin_px` the
-    /// lane's tile overlap (`config.panorama_tile_margin_px`; the panorama's
-    /// pixels do not depend on it).
+    /// `None`, `lens_size` each lens image's `(width, height)`. The tiles take the
+    /// default margin; the panorama's pixels do not depend on it.
     #[new]
-    #[pyo3(signature = (lens_string, window_crop_px, lens_size, *, margin_px = 64))]
     fn new(
         lens_string: &str,
         window_crop_px: Option<[i64; 6]>,
         lens_size: (u32, u32),
-        margin_px: usize,
     ) -> PyResult<Self> {
         let (width, height) = lens_size;
         let lenses = slam_rs::DualFisheyeLenses::parse(
@@ -42,7 +40,9 @@ impl PanoramaStitch {
             height: height as usize,
         };
         Ok(Self {
-            stitch: lenses.stitch(lens, margin_px).map_err(value_error)?,
+            stitch: lenses
+                .stitch(lens, TileGeometry::default().margin)
+                .map_err(value_error)?,
         })
     }
 
@@ -71,7 +71,7 @@ impl PanoramaStitch {
         Ok(
             numpy::ndarray::Array2::from_shape_vec((pano.height(), pano.width()), pano.into_vec())
                 .map_err(value_error)?
-                .to_pyarray(py),
+                .into_pyarray(py),
         )
     }
 }

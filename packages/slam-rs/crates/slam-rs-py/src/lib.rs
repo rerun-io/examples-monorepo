@@ -12,8 +12,8 @@ mod panorama;
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
 use numpy::{
-    PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
-    ToPyArray,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2,
+    PyUntypedArrayMethods, ToPyArray,
 };
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -260,9 +260,9 @@ impl Vio {
         };
         let (width, height) = (pano.width(), pano.height());
         Ok(Some(
-            numpy::ndarray::Array2::from_shape_vec((height, width), pano.as_slice().to_vec())
+            numpy::ndarray::Array2::from_shape_vec((height, width), pano.into_vec())
                 .map_err(value_error)?
-                .to_pyarray(py),
+                .into_pyarray(py),
         ))
     }
 
@@ -274,37 +274,6 @@ impl Vio {
         self.inner
             .panorama()
             .and_then(|rig| rig.dual_fisheye_ingest_ns())
-    }
-
-    /// Rolling-shutter correction of tile pixels (`float64[n, 2]`) for a gyro
-    /// rate `omega_imu` (rad/s, IMU frame), exactly as the estimator's copy is
-    /// corrected; rows that cannot be corrected come back unchanged. Raises on
-    /// a rig that is not a dual fisheye.
-    fn rolling_shutter_corrected<'py>(
-        &self,
-        py: Python<'py>,
-        tile: usize,
-        pixels: &Bound<'py, PyAny>,
-        omega_imu: [f64; 3],
-    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        let rig = self
-            .inner
-            .panorama()
-            .filter(|rig| rig.tile_lut(0).is_some())
-            .ok_or_else(|| PyValueError::new_err("not a dual-fisheye rig"))?;
-        if tile > 1 {
-            return Err(PyIndexError::new_err(format!("tile {tile}")));
-        }
-        let rows: Vec<[f64; 2]> = float64_pairs(pixels, "pixels")?;
-        let corrected: Vec<Vec<f64>> = rig
-            .rolling_shutter_corrected(tile, &rows, omega_imu)
-            .into_iter()
-            .map(|pixel| pixel.to_vec())
-            .collect();
-        if corrected.is_empty() {
-            return Ok(PyArray2::zeros(py, [0, 2], false));
-        }
-        Ok(PyArray2::from_vec2(py, &corrected)?)
     }
 
     /// Whether the frontend runs on the GPU.
@@ -980,21 +949,6 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
         .collect())
 }
 
-fn float64_pairs(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 2]>> {
-    let array: &Bound<'_, PyArray2<f64>> = object
-        .cast::<PyArray2<f64>>()
-        .map_err(|_| PyValueError::new_err(format!("{name} must be a 2-D float64 numpy array")))?;
-    if array.shape()[1] != 2 {
-        return Err(PyValueError::new_err(format!(
-            "{name} must have shape (n, 2), got {:?}",
-            array.shape()
-        )));
-    }
-    let readonly = array.readonly();
-    let values: &[f64] = contiguous(&readonly, name, name)?;
-    Ok(values.as_chunks::<2>().0.to_vec())
-}
-
 fn u32_arg(value: i64) -> PyResult<u32> {
     u32::try_from(value).map_err(|_| PyValueError::new_err(format!("{value} is not a size")))
 }
@@ -1078,13 +1032,12 @@ impl VioConfig {
         self.inner.vio_gravity_ms2 = gravity;
     }
 
-    /// `config.vio_bootstrap`: `"stereo"` (the default), `"inertial"` or `"auto"`.
+    /// `config.vio_bootstrap`: `"stereo"` (the default) or `"inertial"`.
     #[getter]
     fn vio_bootstrap(&self) -> &'static str {
         match self.inner.vio_bootstrap {
             slam_rs::config::VioBootstrap::Stereo => "stereo",
             slam_rs::config::VioBootstrap::Inertial => "inertial",
-            slam_rs::config::VioBootstrap::Auto => "auto",
         }
     }
 
@@ -1093,10 +1046,9 @@ impl VioConfig {
         self.inner.vio_bootstrap = match value {
             "stereo" => slam_rs::config::VioBootstrap::Stereo,
             "inertial" => slam_rs::config::VioBootstrap::Inertial,
-            "auto" => slam_rs::config::VioBootstrap::Auto,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "vio_bootstrap must be stereo, inertial or auto, not {other:?}"
+                    "vio_bootstrap must be stereo or inertial, not {other:?}"
                 )));
             }
         };

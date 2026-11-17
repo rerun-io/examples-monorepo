@@ -19,10 +19,10 @@ pub(crate) fn noise_from_calibration<S: Scalar>(
         calib.discrete_time_gyro_noise_std().map(|x| x * x),
     )
 }
-/// Gravity in the world frame, `(0, 0, -9.81)`. The pipeline takes the
-/// magnitude from `config.vio_gravity_ms2` instead.
-pub fn gravity<S: Scalar>() -> Vector3<S> {
-    Vector3::new(S::zero(), S::zero(), c(-9.81))
+/// Gravity in the world frame, `(0, 0, -magnitude)`; the pipeline passes
+/// `config.vio_gravity_ms2`.
+pub fn gravity<S: Scalar>(magnitude: f64) -> Vector3<S> {
+    Vector3::new(S::zero(), S::zero(), c(-magnitude))
 }
 /// One calibrated sample as the two producer loops pop them: `(t_ns, gyro,
 /// accel)`, the shape `accumulate_to` carries its pending sample in.

@@ -59,10 +59,6 @@ pub enum VioBootstrap {
     /// estimator at the window's first frameset and replay the window.
     #[serde(rename = "inertial")]
     Inertial,
-    /// `inertial` when no camera pair can triangulate in one frameset (see
-    /// [`crate::bootstrap::rig_has_stereo`]), else `stereo`.
-    #[serde(rename = "auto")]
-    Auto,
 }
 
 impl VioBootstrap {

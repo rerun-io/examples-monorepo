@@ -89,9 +89,8 @@ impl DualFisheyeLenses {
     /// or a lens image below 4x4, before any table is built.
     pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
         let geometry: TileGeometry = TileGeometry {
-            hemisphere_width: 960,
-            height: 960,
             margin: margin_px,
+            ..TileGeometry::default()
         };
         if margin_px > geometry.hemisphere_width / 2 {
             return Err(VioError::Panorama(format!(
@@ -303,30 +302,6 @@ impl DualFisheyeIngest {
             height,
             killed,
         })
-    }
-
-    /// [`rolling_shutter_correct`] of tile pixels for a gyro rate in the IMU frame.
-    pub fn corrected_pixels(
-        &self,
-        tile: usize,
-        pixels: &[[f64; 2]],
-        omega_imu: Vector3<f64>,
-    ) -> Vec<[f64; 2]> {
-        let omega: Vector3<f64> = self.tile_from_imu[tile] * omega_imu;
-        pixels
-            .iter()
-            .map(|&pixel| {
-                rolling_shutter_correct(
-                    pixel,
-                    &self.tile_camera,
-                    self.lut(tile),
-                    self.lens_size().height,
-                    self.readout_s,
-                    &omega,
-                )
-                .unwrap_or(pixel)
-            })
-            .collect()
     }
 
     /// Keep a raw gyro sample for the rolling-shutter rate.

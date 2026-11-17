@@ -413,22 +413,6 @@ impl PanoramaRig {
         }
     }
 
-    /// [`DualFisheyeLenses`]' rolling-shutter correction of tile `tile`'s pixels
-    /// for a gyro rate `omega_imu` (IMU frame), as the estimator's copy gets it;
-    /// a pixel that cannot be corrected comes back unchanged, and every pixel
-    /// does on an equirect rig.
-    pub fn rolling_shutter_corrected(
-        &self,
-        tile: usize,
-        pixels: &[[f64; 2]],
-        omega_imu: [f64; 3],
-    ) -> Vec<[f64; 2]> {
-        match &self.dual {
-            Some(dual) => dual.corrected_pixels(tile, pixels, Vector3::from(omega_imu)),
-            None => pixels.to_vec(),
-        }
-    }
-
     /// Wall time of the last dual-fisheye host ingest, ns: the CPU remap of
     /// both lenses (CPU lane) or the lens byte copy (GPU lane, which stitches on
     /// the device inside the frontend); `None` for equirect.

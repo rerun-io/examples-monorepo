@@ -152,7 +152,7 @@ fn integrate_noisy(
 /// both weights are `1e3`.
 fn lin_data() -> ImuLinData<f64> {
     ImuLinData {
-        g: gravity::<f64>(),
+        g: gravity::<f64>(9.81),
         gyro_bias_weight_sqrt: Vector3::repeat(1e3),
         accel_bias_weight_sqrt: Vector3::repeat(1e3),
     }

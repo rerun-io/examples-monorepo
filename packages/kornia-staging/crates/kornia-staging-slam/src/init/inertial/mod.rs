@@ -140,6 +140,7 @@ mod tests;
 use kornia_staging_algebra::lie::{RigidTransform, Rotation3};
 use linear::{Camera, ConsensusParams, TrackBlock};
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3, Vector6};
+pub use preintegration::sample_at;
 use preintegration::{preintegrate, Preintegrated};
 
 /// One IMU sample.

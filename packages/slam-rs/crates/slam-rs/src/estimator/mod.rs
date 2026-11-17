@@ -417,7 +417,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         calibration: Calibration<S>,
         config: VioConfig,
     ) -> Result<Self, EstimatorError> {
-        Self::new(gravity::<S>(), calibration, config)
+        Self::new(gravity::<S>(9.81), calibration, config)
     }
 
     /// `takeLongTermKeyframe()` : the next `measure` moves the

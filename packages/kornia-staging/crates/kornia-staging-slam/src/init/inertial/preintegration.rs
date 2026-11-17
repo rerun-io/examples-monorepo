@@ -86,7 +86,7 @@ fn interpolate(a: &ImuSample, b: &ImuSample, t_ns: i64) -> (Vector3<f64>, Vector
 
 /// The value of the IMU signal at `t_ns`, interpolated between the
 /// neighbouring samples. The caller guarantees coverage.
-fn sample_at(imu: &[ImuSample], t_ns: i64) -> (Vector3<f64>, Vector3<f64>) {
+pub fn sample_at(imu: &[ImuSample], t_ns: i64) -> (Vector3<f64>, Vector3<f64>) {
     // First sample strictly after t_ns.
     let upper: usize = imu.partition_point(|s| s.t_ns <= t_ns);
     if upper == 0 {

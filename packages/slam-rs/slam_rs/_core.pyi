@@ -300,8 +300,6 @@ class Vio:
 
         On the GPU lane it is remapped on the host from the lens bytes, only when asked: no device read-back.
         """
-    def rolling_shutter_corrected(self, tile: int, pixels: Float64[ndarray, "n 2"], omega_imu: tuple[float, float, float]) -> Float64[ndarray, "n 2"]:
-        """Tile pixels with the rolling shutter removed for a gyro rate in the IMU frame, as the estimator's copy gets them."""
     @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""
@@ -399,7 +397,7 @@ class VioConfig:
     vio_gravity_ms2: float
     """Magnitude of gravity in m/s²; the feed sets the recording's own value when it carries one."""
     vio_bootstrap: str
-    """``config.vio_bootstrap``: ``"stereo"`` (default), ``"inertial"`` or ``"auto"``; anything else raises ``ValueError``."""
+    """``config.vio_bootstrap``: ``"stereo"`` (default) or ``"inertial"``; anything else raises ``ValueError``."""
     @property
     def panorama_dual_fisheye(self) -> bool:
         """``config.panorama_dual_fisheye``: the caller hands ``Vio`` the factory lenses (``dual_fisheye``)."""
@@ -569,41 +567,15 @@ class InsvLens:
     """One lens of an Insta360 factory calibration at the track resolution, window crop applied (Mei sphere model)."""
 
     @property
-    def version(self) -> int: ...
-    @property
-    def xi(self) -> float: ...
-    @property
-    def fx(self) -> float: ...
-    @property
-    def fy(self) -> float: ...
-    @property
     def cx(self) -> float: ...
     @property
     def cy(self) -> float: ...
-    @property
-    def px_per_rad(self) -> float: ...
-    @property
-    def radial(self) -> list[float]: ...
-    @property
-    def tangential(self) -> list[float]: ...
-    @property
-    def prism(self) -> list[float]: ...
-    @property
-    def ypr_deg(self) -> list[float]: ...
-    @property
-    def translation_m(self) -> list[float]: ...
-    @property
-    def lens_from_rig_rotation(self) -> list[list[float]]:
-        """Rig -> lens rotation, row-major. The rig frame has lens 0's axes."""
     @property
     def pano_from_lens_rotation(self) -> list[list[float]]:
         """``R_P_lens``, row-major: lens vectors into the panorama frame P."""
     @property
     def pano_centre_m(self) -> list[float]:
         """Lens centre in P, metres, origin at the midpoint of the lens centres."""
-    @property
-    def lens_from_rig_translation_m(self) -> list[float]:
-        """Rig -> lens translation in metres; the rig origin is the midpoint of the two lens centres."""
     def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
         """Image radius in track pixels of rays ``theta`` radians off the axis (radial part of the model only)."""
 
@@ -655,12 +627,10 @@ class PanoramaStitch:
     Built from the factory inputs ``Vio(dual_fisheye=...)`` takes; the same tables and host remap as the lane.
     """
 
-    def __init__(
-        self, lens_string: str, window_crop_px: tuple[int, int, int, int, int, int] | None, lens_size: tuple[int, int], *, margin_px: int = 64
-    ) -> None:
+    def __init__(self, lens_string: str, window_crop_px: tuple[int, int, int, int, int, int] | None, lens_size: tuple[int, int]) -> None:
         """``lens_string``: raw V3/V6 factory string; ``window_crop_px``: its window crop or None; ``lens_size``: ``(width, height)``.
 
-        ``margin_px`` is the lane's tile overlap; the panorama's pixels do not depend on it. Raises ``ValueError`` on a bad string.
+        Raises ``ValueError`` on a bad string.
         """
     def panorama(self, lens0: UInt8[ndarray, "h w"], lens1: UInt8[ndarray, "h w"]) -> UInt8[ndarray, "960 1920"]:
         """The panorama of lens 0's and lens 1's C-contiguous images (lens 0's hemisphere on the left); ``ValueError`` on a wrong size."""

@@ -10,59 +10,35 @@ use pyo3::types::PyBytes;
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct InsvLens {
-    /// Lens-string version, 3 or 6.
-    #[pyo3(get)]
-    version: u8,
-    /// Mei sphere offset.
-    #[pyo3(get)]
-    xi: f64,
-    /// Mei focal along x, track pixels.
-    #[pyo3(get)]
-    fx: f64,
-    /// Mei focal along y, track pixels.
-    #[pyo3(get)]
-    fy: f64,
-    /// Principal point x, track pixels.
-    #[pyo3(get)]
-    cx: f64,
-    /// Principal point y, track pixels.
-    #[pyo3(get)]
-    cy: f64,
-    /// Pixels per radian at the optical axis.
-    #[pyo3(get)]
-    px_per_rad: f64,
-    /// Radial coefficients (V3 `k1 k2 k3`, V6 `d0..d4`).
-    #[pyo3(get)]
-    radial: Vec<f64>,
-    /// Tangential coefficients (V3 `p1 p2`, V6 `d5..d8`).
-    #[pyo3(get)]
-    tangential: Vec<f64>,
-    /// Thin-prism coefficients (V6 `d9..d12`).
-    #[pyo3(get)]
-    prism: Vec<f64>,
-    /// Factory yaw, pitch, roll, degrees.
-    #[pyo3(get)]
-    ypr_deg: [f64; 3],
-    /// Factory translation, metres.
-    #[pyo3(get)]
-    translation_m: [f64; 3],
-    /// Rotation rig -> lens, row-major 3x3.
-    #[pyo3(get)]
-    lens_from_rig_rotation: [[f64; 3]; 3],
-    /// Translation of rig -> lens, metres; the rig origin is the midpoint of the lens centres.
-    #[pyo3(get)]
-    lens_from_rig_translation_m: [f64; 3],
-    /// `R_P_lens`, row-major: lens vectors into the panorama frame `P` (+Z lens-0 axis, +Y toward the handle).
-    #[pyo3(get)]
-    pano_from_lens_rotation: [[f64; 3]; 3],
-    /// Lens centre in `P`, metres; the origin is the midpoint of the lens centres.
-    #[pyo3(get)]
-    pano_centre_m: [f64; 3],
     core: LensCalibration,
 }
 
 #[pymethods]
 impl InsvLens {
+    /// Principal point x, track pixels.
+    #[getter]
+    fn cx(&self) -> f64 {
+        self.core.cx
+    }
+
+    /// Principal point y, track pixels.
+    #[getter]
+    fn cy(&self) -> f64 {
+        self.core.cy
+    }
+
+    /// `R_P_lens`, row-major: lens vectors into the panorama frame `P` (+Z lens-0 axis, +Y toward the handle).
+    #[getter]
+    fn pano_from_lens_rotation(&self) -> [[f64; 3]; 3] {
+        self.core.pano_from_lens_rotation
+    }
+
+    /// Lens centre in `P`, metres; the origin is the midpoint of the lens centres.
+    #[getter]
+    fn pano_centre_m(&self) -> [f64; 3] {
+        self.core.pano_centre_m
+    }
+
     /// Image radius in track pixels of rays `theta` radians off the axis, through the radial part of the model.
     fn radius_px<'py>(&self, py: Python<'py>, theta: Vec<f64>) -> Bound<'py, PyArray1<f64>> {
         theta
@@ -75,25 +51,7 @@ impl InsvLens {
 
 impl From<&LensCalibration> for InsvLens {
     fn from(l: &LensCalibration) -> Self {
-        Self {
-            version: l.version,
-            xi: l.xi,
-            fx: l.fx,
-            fy: l.fy,
-            cx: l.cx,
-            cy: l.cy,
-            px_per_rad: l.px_per_rad(),
-            radial: l.radial.clone(),
-            tangential: l.tangential.clone(),
-            prism: l.prism.clone(),
-            ypr_deg: l.ypr_deg,
-            translation_m: l.translation_m,
-            lens_from_rig_rotation: l.lens_from_rig_rotation,
-            lens_from_rig_translation_m: l.lens_from_rig_translation_m,
-            pano_from_lens_rotation: l.pano_from_lens_rotation,
-            pano_centre_m: l.pano_centre_m,
-            core: l.clone(),
-        }
+        Self { core: l.clone() }
     }
 }
 
