@@ -99,8 +99,7 @@ pub struct LoopDetection {
     /// The keyframe it closes a loop with.
     pub candidate: FrameId,
     /// The candidate and its covisibility neighbours, pinned with the current
-    /// and candidate keyframes until applied (until the pose-graph
-    /// optimization takes it, for [`LoopOutcome::NeedsPgo`]).
+    /// and candidate keyframes until applied.
     pub island: Vec<FrameId>,
     /// `T_w_i` of the current keyframe from PnP against the island.
     pub corrected_pose: Se3<f64>,
@@ -200,9 +199,6 @@ pub struct LoopClosing {
     descriptors: BTreeMap<FrameId, KeyframeDescriptors>,
     images: BTreeMap<FrameId, KeyframeImages>,
     events: Vec<LoopEvent>,
-    /// Current keyframes of the [`LoopOutcome::NeedsPgo`] events the
-    /// pose-graph optimization has not taken yet.
-    awaiting_pgo: BTreeSet<FrameId>,
     counts: LoopCounts,
     /// What the pose-graph optimization has done (PR c2).
     pub(super) pgo: PgoState,
@@ -246,7 +242,6 @@ impl LoopClosing {
             descriptors: BTreeMap::new(),
             images: BTreeMap::new(),
             events: Vec::new(),
-            awaiting_pgo: BTreeSet::new(),
             counts: LoopCounts::default(),
             pgo: PgoState::default(),
         }))
@@ -860,7 +855,7 @@ impl MapBackend {
                 LoopOutcome::Stale => {}
             }
         }
-        self.release(&detection);
+        self.unpin(detection.keyframes());
         let event = LoopEvent {
             detection,
             drift_m,
@@ -871,47 +866,6 @@ impl MapBackend {
             loops.events.push(event.clone());
         }
         event
-    }
-
-    /// Verified loops waiting for the pose-graph optimization, oldest first.
-    pub fn loops_awaiting_pgo(&self) -> impl Iterator<Item = &LoopEvent> {
-        self.loops.iter().flat_map(|loops| {
-            loops
-                .events
-                .iter()
-                .filter(|event| loops.awaiting_pgo.contains(&event.detection.current))
-        })
-    }
-
-    /// The pose-graph optimization (c2) has taken the loop found at
-    /// `current`: unpin its keyframes (those another waiting loop holds stay
-    /// pinned) and hand it back, with the matches the fusion after the
-    /// optimization reads. `None` when no loop waits there.
-    pub fn finish_pgo_loop(&mut self, current: FrameId) -> Option<LoopDetection> {
-        let loops = self.loops.as_mut()?;
-        if !loops.awaiting_pgo.remove(&current) {
-            return None;
-        }
-        let event = loops
-            .events
-            .iter()
-            .rfind(|event| event.detection.current == current)?;
-        let detection: LoopDetection = event.detection.clone();
-        self.release(&detection);
-        Some(detection)
-    }
-
-    /// Unpin a loop's keyframes but those a waiting loop still holds.
-    fn release(&mut self, detection: &LoopDetection) {
-        let held: BTreeSet<FrameId> = self
-            .loops_awaiting_pgo()
-            .flat_map(|event| event.detection.keyframes())
-            .collect();
-        let free: Vec<FrameId> = detection
-            .keyframes()
-            .filter(|id| !held.contains(id))
-            .collect();
-        self.unpin(free);
     }
 
     /// Carry out [`fusion_plan`] and raise the covisibility edges it creates
