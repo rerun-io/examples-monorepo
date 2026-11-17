@@ -39,6 +39,7 @@ use kornia_staging_slam::sqrt_ba::{
 };
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector2, Vector3, Vector4};
 
+use super::map::host_relative;
 use super::{KeyframeMap, MapBackend, PoseGraphEdge};
 
 use crate::config::VioConfig;
@@ -187,23 +188,9 @@ pub enum GbaDriverError {
     Threads(String),
 }
 
-/// A world point as the window stores it: stereographic direction and
-/// inverse distance in the camera `world_from_camera` places. `None` for a
-/// point at the camera centre or a non-finite result.
-pub fn host_relative(
-    world_from_camera: &Se3<f64>,
-    point: &Vector3<f64>,
-) -> Option<(Vector2<f64>, f64)> {
-    let p_c: Vector3<f64> = world_from_camera.inverse() * *point;
-    let distance: f64 = p_c.norm();
-    let direction: Vector2<f64> =
-        StereographicParam::project(&Vector4::new(p_c.x, p_c.y, p_c.z, 0.0));
-    let inv_dist: f64 = 1.0 / distance;
-    (distance > 0.0 && inv_dist.is_finite() && direction.iter().all(|v| v.is_finite()))
-        .then_some((direction, inv_dist))
-}
-
-/// The world position of a host-relative landmark.
+/// The world position of a host-relative landmark: the GBA's own rule, which
+/// keeps a finite point with a negative `inv_dist` (see
+/// [`KeyframeMap::landmark_world`]).
 fn world_point(
     world_from_camera: &Se3<f64>,
     direction: &Vector2<f64>,

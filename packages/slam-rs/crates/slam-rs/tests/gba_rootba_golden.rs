@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
 use serde::Deserialize;
-use slam_rs::backend::gba::{GbaRig, apply, host_relative, map_problem, solve};
+use slam_rs::backend::gba::{GbaRig, apply, map_problem, solve};
+use slam_rs::backend::map::host_relative;
 use slam_rs::backend::{KeyframeMap, PoseGraphEdge, PoseGraphEdgeKind};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
