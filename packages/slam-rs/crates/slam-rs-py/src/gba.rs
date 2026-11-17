@@ -4,26 +4,8 @@
 use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pyo3::prelude::*;
 use slam_rs::backend::{GbaRun as CoreGbaRun, MapResult as CoreMapResult};
-use slam_rs::lie::Se3;
 
-/// `[tx, ty, tz, qx, qy, qz, qw]` per pose, flat.
-fn flat_poses(poses: &[Se3<f64>]) -> Vec<f64> {
-    poses
-        .iter()
-        .flat_map(|pose| {
-            let q: [f64; 4] = pose.rotation.quaternion_xyzw();
-            [
-                pose.translation.x,
-                pose.translation.y,
-                pose.translation.z,
-                q[0],
-                q[1],
-                q[2],
-                q[3],
-            ]
-        })
-        .collect()
-}
+use crate::flat_poses;
 
 /// The map's keyframes at the end of a sequence (`Vio.finish_map`).
 ///
