@@ -467,18 +467,19 @@ fn retrieval_ranks_keyframes_by_their_best_camera_before_the_top_n() {
 }
 
 #[test]
-fn every_camera_queries_by_default_and_camera_0_only_under_parity() {
-    // B5: the revisit is seen by camera 1 only.
+fn camera_0_queries_by_default_and_every_camera_under_all() {
+    // B5 (camera 0 by default since k1's A/B): the revisit is seen by camera 1 only.
     let (w1, w2) = (with_word(1), with_word(2));
     let bow = hand_bow(&[(SECOND, 1, &[w2])]);
     let bags = [(0, bow.bag(&[w1])), (1, bow.bag(&[w2]))];
-    let all = LoopClosingConfig::default();
-    assert_eq!(retrieve(&bow, &bags, 40 * SECOND, &all), vec![SECOND]);
-    let cam0 = LoopClosingConfig {
-        query_cameras: LoopQueryCameras::Cam0,
-        ..all
-    };
+    let cam0 = LoopClosingConfig::default();
+    assert_eq!(cam0.query_cameras, LoopQueryCameras::Cam0);
     assert!(retrieve(&bow, &bags, 40 * SECOND, &cam0).is_empty());
+    let all = LoopClosingConfig {
+        query_cameras: LoopQueryCameras::All,
+        ..cam0
+    };
+    assert_eq!(retrieve(&bow, &bags, 40 * SECOND, &all), vec![SECOND]);
 }
 
 #[test]
