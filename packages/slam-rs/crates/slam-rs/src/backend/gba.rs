@@ -184,10 +184,14 @@ pub struct MapResult {
     /// keyframes). The window's own poses are
     /// [`super::MapSnapshot::keyframe_raw_poses`].
     pub keyframe_poses_before_gba: Vec<Se3<f64>>,
-    /// `T_w_i` after the GBA (the same without it).
+    /// `T_w_i` after the GBA (the same without it, or when it failed).
     pub keyframe_poses: Vec<Se3<f64>>,
     /// The GBA, when it ran.
     pub gba: Option<GbaRun>,
+    /// Why the GBA, asked for, did not run or did not solve. A failed GBA never
+    /// loses the run: it writes nothing into the map until it has solved, so
+    /// `keyframe_poses` are then the map's after loops and PGO.
+    pub gba_failure: Option<GbaDriverError>,
 }
 
 /// Why the global BA did not run.
@@ -455,27 +459,33 @@ impl MapBackend {
     /// The map's keyframes at the end of a sequence, after a global BA when
     /// `run_gba`. The pose-graph rows are the graph's
     /// [`super::CovisibilityGraph::pose_graph_edges`] at the high-covisibility
-    /// weight.
-    ///
-    /// # Errors
-    /// [`GbaDriverError::NoRig`] when `run_gba` and the map has no camera
-    /// models; the solver's refusal.
-    pub fn finish(
-        &mut self,
-        run_gba: bool,
-        config: &VioConfig,
-    ) -> Result<MapResult, GbaDriverError> {
+    /// weight. A GBA that fails ([`GbaDriverError::NoRig`] when the map has no
+    /// camera models, or the solver's refusal) leaves the map as it was and is
+    /// reported in [`MapResult::gba_failure`].
+    pub fn finish(&mut self, run_gba: bool, config: &VioConfig) -> MapResult {
         let keyframe_t_ns: Vec<FrameId> = self.map.keyframes().keys().copied().collect();
         let keyframe_poses_before_gba: Vec<Se3<f64>> =
             self.map.keyframes().values().map(|k| k.pose).collect();
-        if !run_gba {
-            return Ok(MapResult {
-                keyframe_t_ns,
-                keyframe_poses: keyframe_poses_before_gba.clone(),
-                keyframe_poses_before_gba,
-                gba: None,
-            });
+        let gba: Result<Option<GbaRun>, GbaDriverError> = if run_gba {
+            self.global_ba(config).map(Some)
+        } else {
+            Ok(None)
+        };
+        let (gba, gba_failure) = match gba {
+            Ok(gba) => (gba, None),
+            Err(error) => (None, Some(error)),
+        };
+        MapResult {
+            keyframe_t_ns,
+            keyframe_poses_before_gba,
+            keyframe_poses: self.map.keyframes().values().map(|k| k.pose).collect(),
+            gba,
+            gba_failure,
         }
+    }
+
+    /// Build, solve and apply the global BA on the map.
+    fn global_ba(&mut self, config: &VioConfig) -> Result<GbaRun, GbaDriverError> {
         let rig: &GbaRig = self.gba_rig.as_ref().ok_or(GbaDriverError::NoRig)?;
         let started = Instant::now();
         let edges: Vec<PoseGraphEdge> =
@@ -489,25 +499,20 @@ impl MapBackend {
         let started = Instant::now();
         apply(&mut self.map, &input, &solved, &self.rig.t_i_c);
         let apply_s: f64 = started.elapsed().as_secs_f64();
-        Ok(MapResult {
-            keyframe_t_ns,
-            keyframe_poses_before_gba,
-            keyframe_poses: self.map.keyframes().values().map(|k| k.pose).collect(),
-            gba: Some(GbaRun {
-                counts: input.counts,
-                report,
-                gauge,
-                build_s,
-                solve_s,
-                apply_s,
-                threads: config.gba_threads.get(),
-                use_double: config.gba_use_double,
-                lane: if config.gba_use_double {
-                    crate::Backend::Cpu
-                } else {
-                    self.gba_lane
-                },
-            }),
+        Ok(GbaRun {
+            counts: input.counts,
+            report,
+            gauge,
+            build_s,
+            solve_s,
+            apply_s,
+            threads: config.gba_threads.get(),
+            use_double: config.gba_use_double,
+            lane: if config.gba_use_double {
+                crate::Backend::Cpu
+            } else {
+                self.gba_lane
+            },
         })
     }
 }

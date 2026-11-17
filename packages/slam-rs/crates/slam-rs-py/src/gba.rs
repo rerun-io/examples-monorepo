@@ -53,10 +53,20 @@ impl MapResult {
             .reshape((self.inner.keyframe_poses.len(), 7))
     }
 
-    /// The global BA, or `None` when `finish_map` ran without it.
+    /// The global BA, or `None` when `finish_map` ran without it or it failed.
     #[getter]
     fn gba(&self) -> Option<GbaRun> {
         self.inner.gba.clone().map(|run| GbaRun { run })
+    }
+
+    /// Why the global BA, asked for, failed (`"global BA: <reason>"`), or
+    /// `None`; the keyframes are then the map's after loops and PGO.
+    #[getter]
+    fn gba_failure(&self) -> Option<String> {
+        self.inner
+            .gba_failure
+            .as_ref()
+            .map(|error| format!("global BA: {error}"))
     }
 
     fn __repr__(&self) -> String {

@@ -181,7 +181,11 @@ class MapResult:
 
     @property
     def gba(self) -> GbaRun | None:
-        """The global BA, or None when :meth:`Vio.finish_map` ran without it."""
+        """The global BA, or None when :meth:`Vio.finish_map` ran without it or it failed."""
+
+    @property
+    def gba_failure(self) -> str | None:
+        """Why the global BA, asked for, failed (``"global BA: <reason>"``), or None; the keyframes are then the map's after loops and PGO."""
 
     def __repr__(self) -> str: ...
 
@@ -645,10 +649,9 @@ class Vio:
         """The map's keyframes at the end of a sequence, after a global BA on the map when ``run_gba`` (PR d2); None when ``backend.enabled`` is off.
 
         Takes every stamp first. The window is untouched, so the poses :meth:`track` returned stay the raw VIO; the
-        map keeps the GBA's poses. Call it after :meth:`flush`.
-
-        Raises:
-            ValueError: The rig has a camera model the GBA cannot project, or the solver refused the problem.
+        map keeps the GBA's poses. Call it after :meth:`flush`. A GBA that fails (a camera model it cannot project,
+        the solver's refusal) is reported in :attr:`MapResult.gba_failure`, and the keyframes are then the map's after
+        loops and PGO.
         """
 
     def map_snapshot(self) -> MapSnapshot | None:

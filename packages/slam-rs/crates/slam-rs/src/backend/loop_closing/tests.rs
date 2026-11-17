@@ -857,9 +857,7 @@ fn the_global_ba_starts_from_the_map_after_loops_and_pgo() {
         crate::config::BackendMode::Realtime,
     ] {
         let mut runner = runner_in(mode);
-        let result = runner
-            .update(|backend| backend.finish(true, &config))
-            .unwrap();
+        let result = runner.update(|backend| backend.finish(true, &config));
         assert!(result.gba.is_some(), "{mode:?}: the GBA ran");
         assert_eq!(result.keyframe_t_ns, after_pgo.keyframe_t_ns, "{mode:?}");
         assert_eq!(
