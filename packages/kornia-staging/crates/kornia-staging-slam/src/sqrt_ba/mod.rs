@@ -1,12 +1,24 @@
-//! Square-root landmark elimination and deterministic absolute-system assembly.
+//! Square-root landmark elimination, deterministic absolute-system assembly,
+//! and the global square-root bundle adjustment (rootba `bal`).
 mod assembly;
+mod damping;
 mod dense;
+mod global;
 mod landmark_qr;
+mod pcg;
 mod prior;
+mod rel_pose;
 pub use assembly::{eliminate_blocks, linearize_blocks};
+pub use damping::LandmarkDamping;
 pub use dense::{DenseBlock, DenseHbWorkspace};
+pub use global::{
+    solve_global, GbaCamera, GbaCost, GbaError, GbaIteration, GbaLandmark, GbaObservation,
+    GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds, GbaTermination,
+};
 pub use landmark_qr::{BackSubstitution, LandmarkQr};
+pub use pcg::{dot, pcg, BlockJacobi, PcgOptions, PcgSummary, PcgTermination, GBA_CG_CHECK_EVERY};
 pub use prior::PriorLinearization;
+pub use rel_pose::{apply_left_increment, relative_pose_error, RelPoseConstraint};
 
 /// An invalid packed buffer or landmark layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
