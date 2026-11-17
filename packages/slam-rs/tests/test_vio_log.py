@@ -522,7 +522,7 @@ def test_the_map_is_drawn_under_the_run_as_keyframes_join_and_ends_on_the_final_
     vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu")
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     points_every_ns: int = 1_000_000_000
-    assert FRAMESETS * FRAME_PERIOD_NS < points_every_ns
+    assert points_every_ns > FRAMESETS * FRAME_PERIOD_NS
     logged: Logged = drive(
         vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "map.rrd", read_rows, map_every_ns=(0, points_every_ns)
     )
@@ -561,7 +561,7 @@ def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
     rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
     """At the default cadences a 0.4 s run draws the map at its first keyframe and after the flush, never per keyframe."""
-    assert FRAMESETS * FRAME_PERIOD_NS < min(MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS)
+    assert min(MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS) > FRAMESETS * FRAME_PERIOD_NS
     vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("realtime"), backend="cpu")
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "rt.rrd", read_rows)
