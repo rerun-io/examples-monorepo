@@ -8,16 +8,18 @@ synthetic rig, so the whole file stays inside the default, seconds-long suite;
 the reference segments are the V2 gate's business.
 """
 
+from dataclasses import replace
 from typing import cast
 
 import numpy as np
 import pytest
-from fixture_types import FRAME, FRAME_PERIOD_NS, IMU_PERIOD_NS, PipelineFactory, RigFactory, TextureFactory, gravity_batch
+from fixture_types import FRAME, FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, RigFactory, TextureFactory, gravity_batch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from numpy.typing import NDArray
 
 from slam_rs import _core
+from slam_rs.catalog_feed import ImuCalib
 
 
 def test_core_reports_a_version() -> None:
@@ -54,6 +56,14 @@ def test_a_config_the_port_does_not_implement_is_refused(rig: RigFactory) -> Non
     raw: str = _core.VioConfig().to_json().replace('"config.vio_enforce_realtime": false', '"config.vio_enforce_realtime": true')
     with pytest.raises(ValueError, match="vio_enforce_realtime"):
         _core.Vio(rig(2), _core.VioConfig.from_json(raw), backend="cpu")
+
+
+def test_a_rig_wider_than_2048_px_is_tracked_at_half_resolution(rig: RigFactory, camera: CameraFactory, imu: ImuCalib) -> None:
+    """Keypoints of a 3840 px lens rig are in pixels of its frames reduced by two; ``tracked_resolution`` says so."""
+    assert _core.Vio(rig(2), _core.VioConfig(), backend="cpu").tracked_resolution == [(FRAME, FRAME)] * 2
+    wide = [replace(camera(index, 0.1 * index), width=4096, height=4096, cx=2048.0, cy=2048.0) for index in range(2)]
+    vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(wide, imu), _core.VioConfig(), backend="cpu")
+    assert vio.tracked_resolution == [(2048, 2048)] * 2
 
 
 def test_push_imu_rejects_a_non_monotonic_timestamp(pipeline: PipelineFactory) -> None:
