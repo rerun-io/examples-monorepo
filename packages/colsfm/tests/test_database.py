@@ -196,3 +196,18 @@ def test_selected_subset_only_writes_kept_frames(galileo: FramesMeta, tmp_path: 
     # `kpmap_to_colmap` does (export.md §3.3).
     assert database.num_cameras() == len(galileo.cameras)
     database.close()
+
+
+def test_verification_refuses_pairs_that_already_have_a_geometry_row(galileo: FramesMeta, tmp_path: Path) -> None:
+    """`verify_matches` would silently skip such a pair; `verify_and_report` names the count instead (no row is deleted)."""
+    from colsfm.matching import MatchingOptions, verify_and_report
+
+    database_path: Path = tmp_path / "existing.db"
+    create_database(database_path, galileo)
+    first, second, third = (keyframe.keyframe_id for keyframe in galileo.keyframes[:3])
+    geometry: pycolmap.TwoViewGeometry = pycolmap.TwoViewGeometry()
+    geometry.config = int(pycolmap.TwoViewGeometryConfiguration.UNDEFINED)
+    with pycolmap.Database.open(database_path) as database:
+        database.write_two_view_geometry(first, second, geometry)
+    with pytest.raises(ValueError, match="1 of 2 pairs already have a two-view geometry row"):
+        verify_and_report(database_path, [(first, second), (first, third)], MatchingOptions(), device="cpu", started=0.0, cap=False)

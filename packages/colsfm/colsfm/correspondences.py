@@ -9,8 +9,10 @@ Separate from `colsfm.mapping` because it is the mapper's *input*, and it is rea
 by the extrinsic refinement and by the audit tools on their own terms -- none of
 which want the round loop that follows it.
 """
+
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +44,8 @@ def load_correspondences(
     reconstruction: pycolmap.Reconstruction,
     database_path: Path,
     min_num_matches: int = 0,
+    *,
+    excluded_pairs: Collection[tuple[int, int]] = (),
 ) -> Correspondences:
     """Load keypoints and verified two-view geometries into the reconstruction.
 
@@ -60,6 +64,8 @@ def load_correspondences(
         database_path: COLMAP database written by the feature and matching stages.
         min_num_matches: Drop image pairs with fewer inlier matches; cuSFM's
             `min_num_matches_per_pair`.
+        excluded_pairs: Pairs `(min id, max id)` left out of the graph although the database holds their geometry
+            (`MappingOptions.excluded_pairs`).
 
     Returns:
         The graph, the observation manager and the cache that owns them.
@@ -77,6 +83,7 @@ def load_correspondences(
     cache_options.image_names = {image.name for image in reconstruction.images.values()}
     with pycolmap.Database.open(database_path) as database:
         database_cache: pycolmap.DatabaseCache = pycolmap.DatabaseCache.create(database, cache_options)
+        pair_order: list[int] = [int(pair_id) for pair_id in database.read_two_view_geometry_num_inliers()[0]]
 
     image_id_by_name: dict[str, int] = {image.name: image_id for image_id, image in reconstruction.images.items()}
     mismatched: list[str] = []
@@ -95,7 +102,7 @@ def load_correspondences(
     if num_loaded == 0:
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 
-    graph: pycolmap.CorrespondenceGraph = database_cache.correspondence_graph
+    graph: pycolmap.CorrespondenceGraph = graph_without_pairs(database_cache, pair_order, excluded_pairs)
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
     return Correspondences(
         database_cache=database_cache,
@@ -104,6 +111,43 @@ def load_correspondences(
         num_images=num_loaded,
         num_image_pairs=graph.num_image_pairs(),
     )
+
+
+def graph_without_pairs(
+    database_cache: pycolmap.DatabaseCache, pair_order: Sequence[int], excluded_pairs: Collection[tuple[int, int]]
+) -> pycolmap.CorrespondenceGraph:
+    """The cache's correspondence graph without the given image pairs, rebuilt pair by pair.
+
+    `DatabaseCache` has no pair filter, and leaving a pair out here is what lets a stage take back pairs it matched only
+    for its own use without deleting database rows (COLMAP runs a full `VACUUM` when it closes a connection that
+    deleted anything). The rebuild runs for every load, an empty set included, so there is one path; it copies the
+    cache's own pairs with their inlier matches, so `min_num_matches` and the watermark rule stay COLMAP's.
+
+    Args:
+        database_cache: The loaded cache.
+        pair_order: Pair ids in the database's own row order, the order `DatabaseCache` added them in; the graph's
+            correspondence lists, and so triangulation, depend on it.
+        excluded_pairs: Pairs `(min id, max id)` to leave out.
+
+    Returns:
+        A finalized graph over the cache's images.
+    """
+    cached: pycolmap.CorrespondenceGraph = database_cache.correspondence_graph
+    excluded: set[tuple[int, int]] = {(min(pair), max(pair)) for pair in excluded_pairs}
+    graph: pycolmap.CorrespondenceGraph = pycolmap.CorrespondenceGraph()
+    for image_id, image in database_cache.images.items():
+        if cached.exists_image(image_id):
+            graph.add_image(image_id, len(image.points2D))
+    in_cache: set[int] = set(cached.image_pairs())
+    for pair_id in pair_order:
+        if pair_id not in in_cache:
+            continue
+        image_id1, image_id2 = pycolmap.pair_id_to_image_pair(pair_id)
+        if (min(image_id1, image_id2), max(image_id1, image_id2)) in excluded:
+            continue
+        graph.add_two_view_geometry(image_id1, image_id2, cached.extract_two_view_geometry(image_id1, image_id2, True))
+    graph.finalize()
+    return graph
 
 
 def registered_image_ids(reconstruction: pycolmap.Reconstruction) -> list[int]:
@@ -121,5 +165,3 @@ def registered_image_ids(reconstruction: pycolmap.Reconstruction) -> list[int]:
             if data_id.sensor_id.type == pycolmap.SensorType.CAMERA:
                 image_ids.append(data_id.id)
     return sorted(image_ids)
-
-

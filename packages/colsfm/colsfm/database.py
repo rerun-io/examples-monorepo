@@ -365,39 +365,18 @@ def pair_inlier_counts(database_path: Path, pairs: Sequence[ImagePair]) -> dict[
     return {pair: counts.get(pair, 0) for pair in pairs}
 
 
-def delete_two_view_geometries(database_path: Path, pairs: Sequence[ImagePair]) -> None:
-    """Drop the two-view geometry rows of the given pairs.
-
-    `pycolmap.verify_matches` skips any pair that already has a row, and COLMAP's
-    matcher writes an `UNDEFINED` placeholder row whenever
-    `skip_geometric_verification` is set — so the placeholders have to go before
-    verification will do anything.
+def count_two_view_geometries(database_path: Path, pairs: Sequence[ImagePair]) -> int:
+    """How many of the pairs already have a two-view geometry row. Read-only.
 
     Args:
         database_path: An existing database.
-        pairs: Image pairs whose geometries should be removed.
+        pairs: Image pairs to look up.
+
+    Returns:
+        The number of pairs with a row.
     """
-    # One transaction, as `create_database` and the feature writers use: SQLite wraps
-    # each unbatched delete in its own otherwise, which is one commit per pair.
-    with pycolmap.Database.open(database_path) as database, database_transaction(database):
-        for image_id1, image_id2 in pairs:
-            database.delete_two_view_geometry(image_id1, image_id2)
-
-
-def delete_image_pairs(database_path: Path, pairs: Sequence[ImagePair]) -> None:
-    """Drop the matches and the two-view geometry of the given pairs, in one transaction.
-
-    The mapper reads every verified geometry in the database (`colsfm.mapping.load_correspondences`), so this is how a
-    stage takes back pairs it matched only for its own use.
-
-    Args:
-        database_path: An existing database.
-        pairs: Image pairs to remove.
-    """
-    with pycolmap.Database.open(database_path) as database, database_transaction(database):
-        for image_id1, image_id2 in pairs:
-            database.delete_matches(image_id1, image_id2)
-            database.delete_two_view_geometry(image_id1, image_id2)
+    with pycolmap.Database.open(database_path) as database:
+        return sum(1 for image_id1, image_id2 in pairs if database.exists_two_view_geometry(image_id1, image_id2))
 
 
 def raw_match_counts(database_path: Path, pairs: Sequence[ImagePair]) -> dict[ImagePair, int]:

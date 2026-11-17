@@ -49,10 +49,9 @@ empty `matches` row. Reporting "raw matches and inliers per pair", which is what
 tells a stale threshold apart from a genuinely textureless pair, therefore needs
 matching and verification split: `match_image_pairs` with
 `skip_geometric_verification`, then COLMAP's own batch `verify_matches` over the
-same pair file. That is also the blob's order. One wrinkle in between: the
-skipped-verification pass still writes an `UNDEFINED` two-view geometry row per
-pair, and `verify_matches` silently skips any pair that already has one, so the
-placeholders are deleted first.
+same pair file. That is also the blob's order. `verify_matches` silently skips any pair that already has a geometry row; at the
+pinned COLMAP the skipped-verification pass writes none (older COLMAP wrote an
+`UNDEFINED` placeholder per pair), and `verify_and_report` checks that none exists.
 
 **The score threshold.** The blob's 0.3 is calibrated for its own LightGlue
 engine. COLMAP's graph scores differently, and at 0.3 the low-texture
@@ -99,8 +98,8 @@ from colsfm.database import (
     Keypoints,
     KeypointsXY,
     MatchIndices,
+    count_two_view_geometries,
     database_transaction,
-    delete_two_view_geometries,
     pair_inlier_counts,
     raw_match_counts,
     read_keypoints_batch,
@@ -749,7 +748,15 @@ def verify_and_report(
         The report, and the inlier matches the cap removed (0 without it).
     """
     raw: dict[ImagePair, int] = raw_match_counts(database_path, pairs)
-    delete_two_view_geometries(database_path, pairs)
+    # `verify_matches` silently skips a pair that already has a geometry row. None can exist: every run starts from a
+    # fresh database, the loop stage verifies only pairs it matched itself, and at the pinned COLMAP neither its matcher
+    # (with `skip_geometric_verification`) nor ours writes placeholder rows. The rows used to be deleted here, and COLMAP
+    # rewrites the whole database (`VACUUM`) when it closes a connection that deleted anything: 3 s per call on MSD
+    # MGO05's 1.8 GB database, for deletes that found nothing. Checked instead, read-only, so a change that brings
+    # placeholders back fails here rather than silently skipping verification.
+    existing: int = count_two_view_geometries(database_path, pairs)
+    if existing:
+        raise ValueError(f"{existing} of {len(pairs)} pairs already have a two-view geometry row; verify_matches would skip them")
     with tempfile.TemporaryDirectory(prefix="colsfm-pairs-") as scratch:
         pair_list_path: Path = Path(scratch) / "pairs.txt"
         write_pair_list(pair_list_path, pairs, database_path)
