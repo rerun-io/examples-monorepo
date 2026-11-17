@@ -44,6 +44,12 @@ pub enum AnchorError {
         /// The keyframe.
         t_ns: i64,
     },
+    /// A frame's quaternion is zero or not finite, so it holds no rotation.
+    #[error("no unit quaternion at {t_ns} ns")]
+    NoRotation {
+        /// The frame.
+        t_ns: i64,
+    },
 }
 
 fn strictly_increasing(what: &'static str, poses: &[(i64, Se3<f64>)]) -> Result<(), AnchorError> {
@@ -116,9 +122,15 @@ impl super::MapSnapshot {
     /// [`crate::VioPose::world_from_rig`] holds them: `(t_ns, [tx, ty, tz, qx,
     /// qy, qz, qw])`.
     ///
+    /// Call it after `Vio::flush`, when every map keyframe is one of the
+    /// frames. Mid-run, take the snapshot first and pass the frames up to the
+    /// newest frame `track` has returned: a keyframe the frames do not reach
+    /// fails the whole call.
+    ///
     /// # Errors
     ///
-    /// As [`reanchor`].
+    /// As [`reanchor`], and [`AnchorError::NoRotation`] for a zero or
+    /// non-finite quaternion.
     pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
         reanchor_arrays(frames, &self.keyframe_t_ns, &self.keyframe_poses)
     }
@@ -131,7 +143,7 @@ impl super::MapResult {
     ///
     /// # Errors
     ///
-    /// As [`reanchor`].
+    /// As [`super::MapSnapshot::reanchor`].
     pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
         reanchor_arrays(frames, &self.keyframe_t_ns, &self.keyframe_poses)
     }
@@ -145,8 +157,15 @@ fn reanchor_arrays(
 ) -> Result<Vec<[f64; 7]>, AnchorError> {
     let frames: Vec<(i64, Se3<f64>)> = frames
         .iter()
-        .map(|&(t_ns, pose)| (t_ns, pose_from_array(&pose)))
-        .collect();
+        .map(|&(t_ns, pose)| {
+            let rotation = So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6])
+                .ok_or(AnchorError::NoRotation { t_ns })?;
+            Ok((
+                t_ns,
+                Se3::new(rotation, nalgebra::Vector3::new(pose[0], pose[1], pose[2])),
+            ))
+        })
+        .collect::<Result<_, AnchorError>>()?;
     let keyframes: Vec<(i64, Se3<f64>)> = keyframe_t_ns
         .iter()
         .copied()
@@ -156,15 +175,6 @@ fn reanchor_arrays(
         .iter()
         .map(pose_to_array)
         .collect())
-}
-
-/// `[tx, ty, tz, qx, qy, qz, qw]` as a transform; a zero quaternion (never
-/// one the pipeline returns) is the identity rotation.
-fn pose_from_array(pose: &[f64; 7]) -> Se3<f64> {
-    Se3::new(
-        So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6]).unwrap_or_else(So3::identity),
-        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
-    )
 }
 
 fn pose_to_array(pose: &Se3<f64>) -> [f64; 7] {

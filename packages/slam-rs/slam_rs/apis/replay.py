@@ -254,7 +254,7 @@ def main(config: Config) -> None:
         # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
         # VIO itself with the back end off).
         final, map_result = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
-        stage.logger.log_final_path(final)
+        stage.logger.log_final_run(final)
         vio_csv: Path = write_scoring_csvs(output_csv, final=final, raw=estimate, offset_ns=feed.export_offset_ns)
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
         if map_result is not None and map_result.gba is not None:
