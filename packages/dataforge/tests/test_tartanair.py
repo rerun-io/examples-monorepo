@@ -158,10 +158,10 @@ def test_two_seconds_of_a_real_trajectory_agree_across_gt_gyro_and_frames(
     gyro_ns: list[int] = [stamp.value for stamp in gyro[schema.TIMELINE]]
     rates: Float64[ndarray, "n 3"] = np.array(gyro[1].to_pylist()).reshape(-1, 3)
     assert gyro_ns[0] == frame_ns[0] and gyro_ns[-1] == frame_ns[-1]
-    # Body rates in the rig frame integrate (right-multiplied, 0.01 s steps) to the GT relative rotation.
+    # Body rates in the rig frame integrate (right-multiplied, trapezoid over 0.01 s steps) to the GT relative rotation.
     for first, last in ((0, 10), (10, 19), (0, 19)):
         integrated: Rotation = Rotation.identity()
-        for rate in rates[gyro_ns.index(frame_ns[first]) : gyro_ns.index(frame_ns[last])]:
-            integrated = integrated * Rotation.from_rotvec(rate * 0.01)
+        for j in range(gyro_ns.index(frame_ns[first]), gyro_ns.index(frame_ns[last])):
+            integrated = integrated * Rotation.from_rotvec(0.5 * (rates[j] + rates[j + 1]) * 0.01)
         relative: Rotation = world_R_rig[first].inv() * world_R_rig[last]
         assert np.degrees((integrated.inv() * relative).magnitude()) < 0.5
