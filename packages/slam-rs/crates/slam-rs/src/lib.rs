@@ -8,9 +8,9 @@
 mod pipeline;
 pub use pipeline::bootstrap;
 pub use pipeline::{
-    Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView,
-    OverlapTimings, PanoramaRig, PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus,
-    check_imu_sample, device_probes_run, gpu_probe, select_backend,
+    Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView, OverlapTimings, PanoramaRig,
+    PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
+    device_probes_run, gpu_probe, select_backend,
 };
 
 pub mod ba_base;
@@ -68,4 +68,3 @@ pub const GPU_BACKEND: Option<&str> = None;
 pub(crate) fn duration_ns(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
-

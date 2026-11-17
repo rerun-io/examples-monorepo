@@ -72,7 +72,6 @@ def built_by(run: object) -> Built:
 
 def test_replay_gate_and_catalog_layer_build_the_same_estimator(feed: FakeFeed, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from rerun.catalog import DatasetEntry
-
     from simplecv.rerun_log_utils import RerunTyroConfig
 
     import slam_rs.apis.catalog_layer as catalog_layer

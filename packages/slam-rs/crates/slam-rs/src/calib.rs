@@ -414,12 +414,14 @@ impl<S: kornia_staging_algebra::Scalar> BasaltCamera<S> {
             }
             Self::MeiV3(p) => {
                 let distortion = MeiDistortion::V3 { k: p.k, p: p.p };
-                let camera = Mei::new([p.fx, p.fy, p.cx, p.cy, p.xi], p.half_field_rad, distortion)?;
+                let camera =
+                    Mei::new([p.fx, p.fy, p.cx, p.cy, p.xi], p.half_field_rad, distortion)?;
                 return Ok(CameraModelKind::Mei(camera));
             }
             Self::MeiV6(p) => {
                 let distortion = MeiDistortion::V6 { d: p.d };
-                let camera = Mei::new([p.fx, p.fy, p.cx, p.cy, p.xi], p.half_field_rad, distortion)?;
+                let camera =
+                    Mei::new([p.fx, p.fy, p.cx, p.cy, p.xi], p.half_field_rad, distortion)?;
                 return Ok(CameraModelKind::Mei(camera));
             }
             Self::Unified(_) => return Err(ConversionError::Unsupported(self.name().into())),
@@ -1403,10 +1405,18 @@ mod tests {
         use kornia_staging_3d::camera::{CameraModel, Mei, MeiDistortion};
         use nalgebra::{Matrix2x4, Vector2, Vector4};
         let d: [f64; 13] = [
-            -0.005, 0.0016, -0.0033, 0.004, 0.0083, -0.0013, 0.024, -0.0014, 0.001, 0.0002, -0.0003,
-            0.0001, 0.00005,
+            -0.005, 0.0016, -0.0033, 0.004, 0.0083, -0.0013, 0.024, -0.0014, 0.001, 0.0002,
+            -0.0003, 0.0001, 0.00005,
         ];
-        let v3: [f64; 7] = [2.3149, 100f64.to_radians(), 0.12, -0.05, 0.01, 0.001, -0.002];
+        let v3: [f64; 7] = [
+            2.3149,
+            100f64.to_radians(),
+            0.12,
+            -0.05,
+            0.01,
+            0.001,
+            -0.002,
+        ];
         let v6: Vec<f64> = [2.3149, 100f64.to_radians()].into_iter().chain(d).collect();
         let direct: [Mei<f64>; 2] = [
             Mei::new(
@@ -1418,11 +1428,17 @@ mod tests {
                 },
             )
             .unwrap(),
-            Mei::new([420.5, 421.0, 480.0, 270.0, v6[0]], v6[1], MeiDistortion::V6 { d })
-                .unwrap(),
+            Mei::new(
+                [420.5, 421.0, 480.0, 270.0, v6[0]],
+                v6[1],
+                MeiDistortion::V6 { d },
+            )
+            .unwrap(),
         ];
-        let cameras: Vec<CameraParts<f64>> =
-            vec![a_camera("mei_v3", v3.to_vec()), a_camera("mei_v6", v6.clone())];
+        let cameras: Vec<CameraParts<f64>> = vec![
+            a_camera("mei_v3", v3.to_vec()),
+            a_camera("mei_v6", v6.clone()),
+        ];
         let calib: Calibration<f64> = Calibration::from_catalog_parts(&cameras, &an_imu()).unwrap();
         assert_eq!(calib.intrinsics[0].params()[4..], v3);
         assert_eq!(calib.intrinsics[1].params()[4..], v6[..]);
@@ -1466,7 +1482,10 @@ mod tests {
         assert_eq!(calib.readout_s, vec![None, Some(0.0159)]);
         let reread: Calibration<f64> =
             Calibration::from_json_str(&calib.to_json_string().unwrap()).unwrap();
-        assert_eq!((reread.gravity_ms2, reread.readout_s), (9.8, vec![None, Some(0.0159)]));
+        assert_eq!(
+            (reread.gravity_ms2, reread.readout_s),
+            (9.8, vec![None, Some(0.0159)])
+        );
         assert_eq!(calib.cast::<f32>().gravity_ms2, 9.8);
 
         let stated_none: Calibration<f64> =

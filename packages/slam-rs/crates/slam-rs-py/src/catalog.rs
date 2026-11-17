@@ -63,7 +63,9 @@ fn catalog_camera_calib<'py>(
     kwargs.set_item("readout_s", camera.readout_s)?;
     let pose: Vec<Vec<f64>> = camera
         .imu_t_cam_row_major
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|r| r.to_vec())
         .collect();
     kwargs.set_item("imu_T_cam", PyArray2::from_vec2(py, &pose)?)?;

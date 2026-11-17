@@ -4,7 +4,6 @@ Replay and fleet measurements share this driver so they use the same frame,
 inertial, and timestamp handling. Returned trajectories use the device clock.
 """
 
-import dataclasses
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field

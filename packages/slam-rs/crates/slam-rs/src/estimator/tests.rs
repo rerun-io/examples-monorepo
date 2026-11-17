@@ -159,8 +159,7 @@ fn a_rig_whose_intrinsics_and_extrinsics_disagree_is_refused() {
     let config: VioConfig = VioConfig::from_json_str(CONFIG).unwrap();
     let mut calibration: Calibration<f64> = Calibration::from_json_str(CALIB).unwrap();
     calibration.intrinsics.pop();
-    let refused: EstimatorError =
-        SqrtKeypointVio::new(calibration, config).unwrap_err();
+    let refused: EstimatorError = SqrtKeypointVio::new(calibration, config).unwrap_err();
     assert!(
         matches!(
             refused,

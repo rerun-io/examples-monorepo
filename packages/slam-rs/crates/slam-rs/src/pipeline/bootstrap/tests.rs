@@ -430,12 +430,8 @@ fn estimator_starts_from_the_solved_window_and_tracks_monocular() {
     let (k_accepted, accepted) = run.until_accepted(120).unwrap();
     let config: VioConfig = VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
     let initial = accepted.initial;
-    let mut estimator: SqrtKeypointVio<f64> = SqrtKeypointVio::with_initial_state(
-        run.calibration.clone(),
-        config,
-        initial,
-    )
-    .unwrap();
+    let mut estimator: SqrtKeypointVio<f64> =
+        SqrtKeypointVio::with_initial_state(run.calibration.clone(), config, initial).unwrap();
     for sample in &accepted.imu {
         estimator.push_imu(*sample);
     }

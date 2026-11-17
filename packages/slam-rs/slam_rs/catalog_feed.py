@@ -46,7 +46,7 @@ import hashlib
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import cache
 from importlib.util import find_spec
 from io import BytesIO

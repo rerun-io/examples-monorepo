@@ -6,12 +6,12 @@ use crate::frontend::input::FrameStorage;
 use crate::pipeline::panorama::PanoramaRig;
 use crate::pipeline::panorama::tests::tile_model;
 use kornia_image::Image;
+use kornia_staging_3d::camera::MeiDistortion;
+use kornia_staging_3d::camera::formats::insta360::{FactoryLens, WindowCrop, parse_lens_string};
 use kornia_staging_imgproc::panorama::{
     assemble_panorama, hemisphere_tile_table, lens_level1, remap,
 };
-use kornia_staging_3d::camera::MeiDistortion;
 use nalgebra::{Matrix3, UnitQuaternion};
-use kornia_staging_3d::camera::formats::insta360::{FactoryLens, WindowCrop, parse_lens_string};
 use std::f64::consts::PI;
 
 /// The Insta360 X4 Air clip's V6 factory string, the one `kornia-staging-io`'s tests hold

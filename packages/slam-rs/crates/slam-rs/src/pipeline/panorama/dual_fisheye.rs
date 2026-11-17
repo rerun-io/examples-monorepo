@@ -79,7 +79,10 @@ pub(super) struct Expanded {
 /// into the two tile cameras and build the lookup tables.
 ///
 /// `P`: camera 0's axes, origin at the midpoint of the two camera centres.
-pub(super) fn expand(config: &VioConfig, calibration: Calibration<f64>) -> Result<Expanded, VioError> {
+pub(super) fn expand(
+    config: &VioConfig,
+    calibration: Calibration<f64>,
+) -> Result<Expanded, VioError> {
     if calibration.intrinsics.len() != 2 || calibration.resolution.len() != 2 {
         return Err(VioError::Panorama(format!(
             "a dual fisheye rig has two lens cameras; this rig has {}",

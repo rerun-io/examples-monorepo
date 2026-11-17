@@ -857,7 +857,9 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
     let readonly = array.readonly();
     let values: &[f64] = contiguous(&readonly, name, name)?;
     Ok(values
-        .as_chunks::<3>().0.iter()
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|row| [row[0], row[1], row[2]])
         .collect())
 }
@@ -1174,7 +1176,9 @@ impl FlowFrame {
         let keypoints: &CameraKeypoints = self.camera(camera)?;
         let positions: Vec<f32> = keypoints
             .transforms
-            .as_chunks::<6>().0.iter()
+            .as_chunks::<6>()
+            .0
+            .iter()
             .flat_map(|warp| [warp[2], warp[5]])
             .collect();
         positions.to_pyarray(py).reshape((keypoints.ids.len(), 2))

@@ -13,7 +13,6 @@
 
 mod dual_fisheye;
 
-
 use super::{ImageView, VioError};
 use crate::calib::{BasaltCamera, Calibration, EquirectangularParams};
 use crate::config::VioConfig;
