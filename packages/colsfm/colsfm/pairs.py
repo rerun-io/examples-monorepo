@@ -160,7 +160,7 @@ def normalise_pair(image_id1: int, image_id2: int) -> ImagePair:
 def write_pair_list(pair_list_path: Path, pairs: Sequence[ImagePair], database_path: Path) -> None:
     """Write the `image_name1 image_name2` file pycolmap's pair matchers read.
 
-    `match_image_pairs` and `verify_matches` both address images by name, so the
+    `match_image_pairs` addresses images by name, so the
     names are looked up in the database rather than trusted from the caller.
 
     Args:

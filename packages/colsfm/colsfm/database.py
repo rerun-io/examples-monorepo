@@ -29,6 +29,7 @@ Keypoints written by COLMAP are Nx6 (xy plus a 2x2 affine block), so
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Final, TypeAlias
@@ -70,18 +71,16 @@ MatchIndices: TypeAlias = Int64[ndarray, "num_matches 2"]
 
 @contextlib.contextmanager
 def database_transaction(database: pycolmap.Database) -> Iterator[None]:
-    """Commit everything the block writes as one transaction.
+    """Run the block as one transaction: committed when it ends, rolled back when it raises.
 
-    SQLite wraps each unbatched statement in its own transaction, so a batch of
-    keypoint and descriptor writes used to reach the file one column at a time: an
-    interrupted extraction could leave an image with keypoints and no descriptors,
-    which every reader downstream takes as a contradiction rather than as damage.
-    Inside this block they land together.
+    SQLite gives every statement outside a transaction a commit of its own, so a batch of writes reaches the file one
+    row at a time, and an interrupted batch leaves its prefix behind (keypoints without their descriptors, a chunk's
+    matches without its verified geometries). Inside this block the batch lands whole or not at all.
 
-    `pycolmap.DatabaseTransaction` is an RAII object with no `close()`: COLMAP
-    commits it in its destructor, so the block ends by dropping the last reference
-    to it. That means it commits on the way out of an exception too -- it makes the
-    write coherent, it is not a rollback.
+    `pycolmap.DatabaseTransaction` begins in `__enter__`, so it has to be entered; constructing one opens nothing. Its
+    `__exit__` rolls back on an exception through the hook the colmap-src recipe adds
+    (`patches/add-database-transaction-rollback.patch`); upstream at the pin commits either way. Rolling back costs
+    nothing on disk, where a delete-based repair would make COLMAP `VACUUM` the whole file when it closes.
 
     Args:
         database: An open COLMAP database.
@@ -89,11 +88,8 @@ def database_transaction(database: pycolmap.Database) -> Iterator[None]:
     Yields:
         Nothing; the block runs inside the transaction.
     """
-    transaction: pycolmap.DatabaseTransaction = pycolmap.DatabaseTransaction(database)
-    try:
+    with pycolmap.DatabaseTransaction(database):
         yield
-    finally:
-        del transaction
 
 
 def create_database(database_path: Path, frames_meta: FramesMeta, *, overwrite: bool = False) -> None:
@@ -170,7 +166,7 @@ def _colmap_image(keyframe: KeyframeMeta) -> pycolmap.Image:
 def image_ids_by_name(database_path: Path) -> dict[str, int]:
     """Index the database's images by name.
 
-    COLMAP's pair lists and `verify_matches` address images by name, so this is
+    COLMAP's pair lists address images by name, so this is
     what turns keyframe-id pairs into something pycolmap will accept.
 
     Args:
@@ -365,39 +361,28 @@ def pair_inlier_counts(database_path: Path, pairs: Sequence[ImagePair]) -> dict[
     return {pair: counts.get(pair, 0) for pair in pairs}
 
 
-def delete_two_view_geometries(database_path: Path, pairs: Sequence[ImagePair]) -> None:
-    """Drop the two-view geometry rows of the given pairs.
+def count_two_view_geometries(database_path: Path, pairs: Sequence[ImagePair]) -> int:
+    """How many of the pairs already have a two-view geometry row, on a read-only connection.
 
-    `pycolmap.verify_matches` skips any pair that already has a row, and COLMAP's
-    matcher writes an `UNDEFINED` placeholder row whenever
-    `skip_geometric_verification` is set — so the placeholders have to go before
-    verification will do anything.
+    `pycolmap.Database.open` creates a missing file, sets pragmas and migrates the schema, so this reads the table
+    through SQLite with `mode=ro` instead: nothing is written, and a missing path is an error rather than a new file.
 
     Args:
         database_path: An existing database.
-        pairs: Image pairs whose geometries should be removed.
+        pairs: Image pairs to look up.
+
+    Returns:
+        The number of pairs with a row, whatever its configuration.
+
+    Raises:
+        FileNotFoundError: When there is no file at `database_path`.
     """
-    # One transaction, as `create_database` and the feature writers use: SQLite wraps
-    # each unbatched delete in its own otherwise, which is one commit per pair.
-    with pycolmap.Database.open(database_path) as database, database_transaction(database):
-        for image_id1, image_id2 in pairs:
-            database.delete_two_view_geometry(image_id1, image_id2)
-
-
-def delete_image_pairs(database_path: Path, pairs: Sequence[ImagePair]) -> None:
-    """Drop the matches and the two-view geometry of the given pairs, in one transaction.
-
-    The mapper reads every verified geometry in the database (`colsfm.mapping.load_correspondences`), so this is how a
-    stage takes back pairs it matched only for its own use.
-
-    Args:
-        database_path: An existing database.
-        pairs: Image pairs to remove.
-    """
-    with pycolmap.Database.open(database_path) as database, database_transaction(database):
-        for image_id1, image_id2 in pairs:
-            database.delete_matches(image_id1, image_id2)
-            database.delete_two_view_geometry(image_id1, image_id2)
+    if not database_path.is_file():
+        raise FileNotFoundError(f"No COLMAP database at {database_path}")
+    pair_ids: list[int] = [pycolmap.image_pair_to_pair_id(image_id1, image_id2) for image_id1, image_id2 in pairs]
+    with contextlib.closing(sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+        stored: set[int] = {int(row[0]) for row in connection.execute("SELECT pair_id FROM two_view_geometries")}
+    return sum(1 for pair_id in pair_ids if pair_id in stored)
 
 
 def raw_match_counts(database_path: Path, pairs: Sequence[ImagePair]) -> dict[ImagePair, int]:
