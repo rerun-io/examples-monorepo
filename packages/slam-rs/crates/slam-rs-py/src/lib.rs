@@ -709,6 +709,7 @@ pub struct MapSnapshot {
     /// `[current, candidate]` per verified loop.
     loop_edges: Vec<i64>,
     loop_fused: Vec<bool>,
+    loop_drift: Vec<f64>,
     loop_counts: slam_rs::backend::LoopCounts,
     pgo_epoch: u64,
     /// `[current, candidate, moved, dropped_edges, iterations]` per applied PGO.
@@ -824,6 +825,11 @@ impl MapSnapshot {
                 .flat_map(|edge| [edge.current, edge.candidate])
                 .collect(),
             loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
+            loop_drift: snapshot
+                .loops
+                .iter()
+                .flat_map(|edge| [edge.drift_m, edge.drift_deg])
+                .collect(),
             loop_counts: snapshot.loop_counts,
             pgo_epoch: snapshot.correction.epoch,
             pgo_runs: snapshot
@@ -1084,6 +1090,16 @@ impl MapSnapshot {
     #[getter]
     fn loop_fused<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
         self.loop_fused.to_pyarray(py)
+    }
+
+    /// Drift of each loop when it was verified (translation and rotation of
+    /// `T_map^-1 T_pnp`), in the order of `loop_edges`: `float64[l, 2]`
+    /// (metres, degrees).
+    #[getter]
+    fn loop_drift<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.loop_drift
+            .to_pyarray(py)
+            .reshape((self.loop_fused.len(), 2))
     }
 
     /// What loop closing has done so far.

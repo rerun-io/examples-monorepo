@@ -63,6 +63,11 @@ pub struct SnapshotLoop {
     /// Its landmarks were fused, at once or after a pose-graph optimization
     /// (`false`: left unapplied, the optimization off or refused).
     pub fused: bool,
+    /// Translation of `T_map^-1 T_pnp` when it was verified, metres
+    /// ([`LoopEvent::drift_m`](super::loop_closing::LoopEvent::drift_m)).
+    pub drift_m: f64,
+    /// Its rotation angle, degrees.
+    pub drift_deg: f64,
 }
 
 impl MapBackend {
@@ -153,6 +158,8 @@ impl MapBackend {
                         event.outcome,
                         LoopOutcome::Fused { .. } | LoopOutcome::Optimized { .. }
                     ),
+                    drift_m: event.drift_m,
+                    drift_deg: event.drift_deg,
                 })
                 .collect(),
             correction: self.map_correction(),

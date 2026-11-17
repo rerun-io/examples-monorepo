@@ -700,6 +700,11 @@ fn a_revisit_is_verified_fused_and_linked_to_its_island() {
         assert_eq!(snapshot.loop_counts.verified, 1);
         assert_eq!(snapshot.loops.len(), 1);
         assert!(snapshot.loops[0].fused);
+        // The snapshot carries each loop's drift, so a run can report its largest (k1).
+        assert_eq!(
+            (snapshot.loops[0].drift_m, snapshot.loops[0].drift_deg),
+            (event.drift_m, event.drift_deg)
+        );
     }
 }
 
