@@ -25,6 +25,14 @@ use dual_fisheye::DualFisheyeIngest;
 use kornia_staging_imgproc::features::{CellGrid, CellMasks, MaskRect};
 use nalgebra::Vector3;
 
+/// Columns each hemisphere tile reaches past its 180-degree half of the
+/// panorama, on each side, in panorama pixels: one 64 px detection cell.
+pub(super) const TILE_MARGIN_PX: usize = 64;
+
+/// Tracked keypoints above this absolute latitude, degrees, are dropped, and
+/// detection skips every cell row whose centre lies above it.
+const TRACK_MAX_LATITUDE_DEG: f64 = 75.0;
+
 /// One panorama camera expanded into two hemisphere tiles.
 #[derive(Debug)]
 pub struct PanoramaRig {
@@ -86,7 +94,7 @@ impl PanoramaRig {
                 pano.fx
             )));
         }
-        let margin: usize = config.panorama_tile_margin_px as usize;
+        let margin: usize = TILE_MARGIN_PX;
         let tile_width: usize = width / 2 + 2 * margin;
         if tile_width > width {
             return Err(VioError::Panorama(format!(
@@ -135,8 +143,7 @@ impl PanoramaRig {
     ///
     /// Tile `k`: `fx = fy = 960 / pi`, principal point at the tile centre,
     /// `lon_max` to the tile's outer pixel edge; `T_imu_tile_k = T_imu_P *
-    /// (Ry(k pi), c_k)` with `c_k` lens `k`'s centre in `P`
-    /// (`config.panorama_two_centre`) or zero (central lane). The panorama they
+    /// (Ry(k pi), c_k)` with `c_k` lens `k`'s centre in `P`. The panorama they
     /// form is 1920x960: tile columns `[margin, margin + 960)` of tile 0, then
     /// of tile 1.
     ///
@@ -184,7 +191,7 @@ impl PanoramaRig {
 
     /// Detection cells for both tiles: the margin columns (the other
     /// hemisphere's half of the seam) and every cell row whose centre lies above
-    /// `config.panorama_track_max_latitude_deg`. Whole grid-aligned cells.
+    /// [`TRACK_MAX_LATITUDE_DEG`]. Whole grid-aligned cells.
     ///
     /// # Errors
     ///
@@ -198,8 +205,8 @@ impl PanoramaRig {
         let cell: usize = config.optical_flow_detection_grid_size as usize;
         let grid: CellGrid = CellGrid::new(self.tile_width, self.height, cell)
             .map_err(|error| VioError::Panorama(error.to_string()))?;
-        let margin: usize = config.panorama_tile_margin_px as usize;
-        let limit: f64 = f64::from(config.panorama_track_max_latitude_deg).to_radians();
+        let margin: usize = TILE_MARGIN_PX;
+        let limit: f64 = TRACK_MAX_LATITUDE_DEG.to_radians();
         let mut masks: CellMasks = CellMasks::default();
         for (column, row) in grid.cells() {
             let x: usize = grid.x_start + column * cell;
@@ -442,7 +449,7 @@ pub(super) fn configure(
             "tile cameras must be equirectangular".to_owned(),
         ));
     };
-    let limit: f32 = config.panorama_track_max_latitude_deg.to_radians();
+    let limit: f32 = (TRACK_MAX_LATITUDE_DEG as f32).to_radians();
     frontend.set_detection_masks(panorama.detection_masks(config, tile.fy, tile.cy)?)?;
     frontend.set_track_latitude_limits(vec![Some(limit); 2])?;
     if let Some(dual) = &panorama.dual {

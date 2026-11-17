@@ -625,7 +625,7 @@ fn the_panorama_keys_at_their_defaults_change_no_observation() {
         [dotted_image(3), dotted_image(3), dotted_image(3)],
     ];
     let mut explicit: VioConfig = VioConfig::from_json_str(
-        r#"{"value0": {"config.optical_flow_stereo_matching": true, "config.panorama_tile_margin_px": 64}}"#,
+        r#"{"value0": {"config.optical_flow_stereo_matching": true}}"#,
     )
     .unwrap();
     explicit.optical_flow_matching_guess_type = config().optical_flow_matching_guess_type;
