@@ -804,17 +804,17 @@ impl<'a, S: Scalar, C: GbaCamera<S>> Solver<'a, S, C> {
                 rows: rows - 3,
             }
         });
-        let rows =
-            rel.keyframes
-                .iter()
-                .zip(rel.values.as_chunks::<72>().0)
-                .map(|(keyframes, values)| ReducedBlock {
-                    keyframes,
-                    values: values.as_slice(),
-                    stride: 6,
-                    offset: 0,
-                    rows: 6,
-                });
+        let rows = rel
+            .keyframes
+            .iter()
+            .zip(rel.values.as_chunks::<72>().0)
+            .map(|(keyframes, values)| ReducedBlock {
+                keyframes,
+                values: values.as_slice(),
+                stride: 6,
+                offset: 0,
+                rows: 6,
+            });
         ReducedSystem {
             keyframes: self.scale.len() / 6,
             lambda,
