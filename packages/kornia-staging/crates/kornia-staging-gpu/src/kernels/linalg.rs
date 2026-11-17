@@ -8,12 +8,14 @@
 //!   lanes then a pairwise sum, the CPU lane's `dot_lanes` order;
 //! - [`pose_reduce_kernel`]: one unit per unknown, `lambda x` then every block
 //!   that holds the pose in block order (the pose-major CSR reduction);
-//! - the three PCG kernels run on one cube of [`PCG_UNITS`] units: unit `u`
-//!   owns poses `u, u + 256, ...` (six entries each, in order), and the cube
-//!   sums its partials in a fixed tree. The scalar logic of
-//!   `kornia_staging_slam::sqrt_ba::pcg` runs on unit 0; once it stops, a flag
-//!   turns every later kernel into a no-op, so the host reads the state only
-//!   every `GBA_CG_CHECK_EVERY` iterations.
+//! - the PCG kernels run on one cube of [`PCG_UNITS`] units: unit `u` owns
+//!   poses `u, u + 256, ...` (six entries each, in order). Every PCG scalar
+//!   (`r . z`, `r . r`, `p . q`, `x . b`, `x . r`) is a compensated f32 sum
+//!   (DESIGN §7.3): a Neumaier accumulator per unit, then a fixed tree of
+//!   TwoSums that carries the rounding errors beside the partials. The scalar
+//!   logic of `kornia_staging_slam::sqrt_ba::pcg` runs on unit 0; once it
+//!   stops, a flag turns every later kernel into a no-op, so the host reads
+//!   the state only every `GBA_CG_CHECK_EVERY` iterations.
 use cubecl::prelude::*;
 
 use super::finite::is_finite;
@@ -44,19 +46,76 @@ fn is_infinite(value: f32) -> bool {
     (u32::reinterpret(value) & 0x7fffffffu32) == 0x7f800000u32
 }
 
-/// Sum a power-of-two shared array into slot 0 in a fixed tree, with a
-/// cube-uniform barrier per step.
+/// `value`, hidden from the shader compiler: `hide` is a runtime zero, so
+/// the compiler cannot prove an identity between `value` and the operands it
+/// came from. GPU compilers (SPIR-V drivers, Metal by default) reassociate
+/// float algebra and would fold the error terms below to zero.
 #[cube]
-fn sum_tree(shared: &mut Shared<[f32]>, unit: usize, #[comptime] slots: usize) {
+fn opaque(value: f32, hide: u32) -> f32 {
+    f32::reinterpret(u32::reinterpret(value) ^ hide)
+}
+
+/// Add `value` to unit `unit`'s compensated sum: Neumaier's variant of
+/// Kahan summation, `hi` the running sum and `lo` the rounding it dropped.
+#[cube]
+fn neumaier_add(
+    hi: &mut Shared<[f32]>,
+    lo: &mut Shared<[f32]>,
+    unit: usize,
+    value: f32,
+    hide: u32,
+) {
+    let sum = hi[unit];
+    let t = opaque(sum + value, hide);
+    if f32::abs(sum) >= f32::abs(value) {
+        lo[unit] += opaque(sum - t, hide) + value;
+    } else {
+        lo[unit] += opaque(value - t, hide) + sum;
+    }
+    hi[unit] = t;
+}
+
+/// Unit `unit`'s share of `a . b`, compensated: the six entries of groups
+/// `unit, unit + 256, ...` in order.
+#[cube]
+fn unit_dot(
+    a: &[f32],
+    b: &[f32],
+    hi: &mut Shared<[f32]>,
+    lo: &mut Shared<[f32]>,
+    unit: usize,
+    poses: usize,
+    hide: u32,
+) {
+    for k in range_stepped(unit, poses, PCG_UNITS) {
+        #[unroll]
+        for i in 0..6usize {
+            let n = 6usize * k + i;
+            neumaier_add(hi, lo, unit, a[n] * b[n], hide);
+        }
+    }
+}
+
+/// Add the units' compensated sums in a fixed tree of error-free TwoSums
+/// (Knuth), the errors carried in `lo`, with a cube-uniform barrier per step.
+/// Every unit gets the total `hi[0] + lo[0]`.
+#[cube]
+fn compensated_tree(hi: &mut Shared<[f32]>, lo: &mut Shared<[f32]>, unit: usize, hide: u32) -> f32 {
     sync_cube();
     #[unroll]
-    for step in 0..comptime!(slots.ilog2() as usize) {
-        let stride = slots >> (step + 1usize);
+    for step in 0..comptime!(PCG_UNITS.ilog2() as usize) {
+        let stride = PCG_UNITS >> (step + 1usize);
         if unit < stride {
-            shared[unit] += shared[unit + stride];
+            let a = hi[unit];
+            let b = hi[unit + stride];
+            let s = opaque(a + b, hide);
+            let bb = opaque(s - a, hide);
+            hi[unit] = s;
+            lo[unit] += lo[unit + stride] + ((a - opaque(s - bb, hide)) + (b - bb));
         }
         sync_cube();
     }
+    hi[0] + lo[0]
 }
 
 /// Unit 0 records why the PCG stopped.
@@ -193,17 +252,22 @@ fn pcg_precondition_kernel(
     ustate: &mut [u32],
     poses: usize,
     iteration: u32,
+    hide: u32,
 ) {
     if ustate[STOPPED] != 0u32 {
         terminate!();
     }
     let unit = usize::cast_from(UNIT_POS);
-    let mut rz = Shared::<[f32]>::new_slice(PCG_UNITS);
-    let mut rr = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut rz_hi = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut rz_lo = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut rr_hi = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut rr_lo = Shared::<[f32]>::new_slice(PCG_UNITS);
     let mut beta_shared = Shared::<[f32]>::new_slice(1usize);
     let mut stopped = Shared::<[u32]>::new_slice(1usize);
-    let mut acc_rz = 0.0f32;
-    let mut acc_rr = 0.0f32;
+    rz_hi[unit] = 0.0f32;
+    rz_lo[unit] = 0.0f32;
+    rr_hi[unit] = 0.0f32;
+    rr_lo[unit] = 0.0f32;
     for k in range_stepped(unit, poses, PCG_UNITS) {
         #[unroll]
         for i in 0..6usize {
@@ -214,21 +278,18 @@ fn pcg_precondition_kernel(
             }
             z[6usize * k + i] = zi;
             let ri = r[6usize * k + i];
-            acc_rz += ri * zi;
-            acc_rr += ri * ri;
+            neumaier_add(&mut rz_hi, &mut rz_lo, unit, ri * zi, hide);
+            neumaier_add(&mut rr_hi, &mut rr_lo, unit, ri * ri, hide);
         }
     }
-    rz[unit] = acc_rz;
-    rr[unit] = acc_rr;
-    sum_tree(&mut rz, unit, PCG_UNITS);
-    sum_tree(&mut rr, unit, PCG_UNITS);
+    let rho = compensated_tree(&mut rz_hi, &mut rz_lo, unit, hide);
+    let rr = compensated_tree(&mut rr_hi, &mut rr_lo, unit, hide);
     if unit == 0usize {
-        let rho = rz[0];
         let last_rho = fstate[RHO];
         fstate[RHO] = rho;
         let mut termination = RUNNING.runtime();
         let mut beta = 0.0f32;
-        if rho == 0.0f32 && rr[0] == 0.0f32 {
+        if rho == 0.0f32 && rr == 0.0f32 {
             termination = CONVERGED;
         } else if rho == 0.0f32 || !is_finite(rho) {
             termination = NUMERICAL_FAILURE;
@@ -262,38 +323,19 @@ fn pcg_precondition_kernel(
     }
 }
 
-/// The `Q` test on unit 0 after `x . b` and `x . r` are in slot 0.
-#[cube]
-#[allow(clippy::too_many_arguments)]
-fn model_test(
-    xb: &Shared<[f32]>,
-    xr: &Shared<[f32]>,
-    fstate: &mut [f32],
-    ustate: &mut [u32],
-    unit: usize,
-    iteration: u32,
-    max_iterations: u32,
-    eta: f32,
-) {
-    if unit == 0usize {
-        let q1 = -(xb[0] + xr[0]);
-        let zeta = f32::cast_from(iteration) * (q1 - fstate[Q0]) / q1;
-        if zeta < eta {
-            stop(ustate, CONVERGED, iteration);
-        } else {
-            fstate[Q0] = q1;
-            if iteration >= max_iterations {
-                stop(ustate, MAX_ITERATIONS, iteration);
-            }
-        }
-    }
-}
+/// [`pcg_update_kernel`] after `q = A p`: `x += alpha p`, `r -= alpha q`, the `Q` test.
+pub(crate) const STEP: u32 = 0;
+/// After `q = A p` on an iteration that replaces the residual: `x += alpha p` only.
+pub(crate) const ADVANCE: u32 = 1;
+/// After `q = A x`: `r = b - q`, the `Q` test.
+pub(crate) const REPLACE: u32 = 2;
 
-/// PCG steps 4-6 after `q = A p`: `alpha = rho / p . q`, `x += alpha p`, and
-/// unless this iteration replaces the residual, `r -= alpha q` and the `Q` test.
+/// PCG steps 4-6 in one of three modes ([`STEP`], [`ADVANCE`], [`REPLACE`]).
+/// `alpha = rho / p . q` and its checks precede the `x` update; the `Q` test
+/// `i (Q_i - Q_{i-1}) / Q_i < eta` with `Q_i = -(x . b + x . r)` follows `r`.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments)]
-fn pcg_step_kernel(
+fn pcg_update_kernel(
     p: &[f32],
     q: &[f32],
     x: &mut [f32],
@@ -303,150 +345,104 @@ fn pcg_step_kernel(
     ustate: &mut [u32],
     poses: usize,
     iteration: u32,
-    replace: u32,
+    mode: u32,
     max_iterations: u32,
     eta: f32,
+    hide: u32,
 ) {
     if ustate[STOPPED] != 0u32 {
         terminate!();
     }
     let unit = usize::cast_from(UNIT_POS);
-    let mut pq = Shared::<[f32]>::new_slice(PCG_UNITS);
-    let mut xb = Shared::<[f32]>::new_slice(PCG_UNITS);
-    let mut xr = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut xb_hi = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut xb_lo = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut xr_hi = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut xr_lo = Shared::<[f32]>::new_slice(PCG_UNITS);
     let mut alpha_shared = Shared::<[f32]>::new_slice(1usize);
     let mut stopped = Shared::<[u32]>::new_slice(1usize);
-    let mut acc = 0.0f32;
-    for k in range_stepped(unit, poses, PCG_UNITS) {
-        #[unroll]
-        for i in 0..6usize {
-            acc += p[6usize * k + i] * q[6usize * k + i];
-        }
-    }
-    pq[unit] = acc;
-    sum_tree(&mut pq, unit, PCG_UNITS);
-    if unit == 0usize {
-        let value = pq[0];
-        let mut termination = RUNNING.runtime();
-        let mut alpha = 0.0f32;
-        if value <= 0.0f32 || is_infinite(value) {
-            termination = INDEFINITE;
-        } else {
-            alpha = fstate[RHO] / value;
-            if !is_finite(alpha) {
-                termination = NUMERICAL_FAILURE;
+    let mut alpha = 0.0f32;
+    if mode != REPLACE {
+        xb_hi[unit] = 0.0f32;
+        xb_lo[unit] = 0.0f32;
+        unit_dot(p, q, &mut xb_hi, &mut xb_lo, unit, poses, hide);
+        let pq = compensated_tree(&mut xb_hi, &mut xb_lo, unit, hide);
+        if unit == 0usize {
+            let mut termination = RUNNING.runtime();
+            let mut value = 0.0f32;
+            if pq <= 0.0f32 || is_infinite(pq) {
+                termination = INDEFINITE;
+            } else {
+                value = fstate[RHO] / pq;
+                if !is_finite(value) {
+                    termination = NUMERICAL_FAILURE;
+                }
             }
+            if termination != RUNNING {
+                stop(ustate, termination, iteration);
+            }
+            stopped[0] = termination;
+            alpha_shared[0] = value;
         }
-        if termination != RUNNING {
-            stop(ustate, termination, iteration);
+        sync_cube();
+        if stopped[0] != RUNNING {
+            terminate!();
         }
-        stopped[0] = termination;
-        alpha_shared[0] = alpha;
+        alpha = alpha_shared[0];
     }
-    sync_cube();
-    if stopped[0] != RUNNING {
-        terminate!();
-    }
-    let alpha = alpha_shared[0];
-    let mut acc_xb = 0.0f32;
-    let mut acc_xr = 0.0f32;
+    xb_hi[unit] = 0.0f32;
+    xb_lo[unit] = 0.0f32;
+    xr_hi[unit] = 0.0f32;
+    xr_lo[unit] = 0.0f32;
     for k in range_stepped(unit, poses, PCG_UNITS) {
         #[unroll]
         for i in 0..6usize {
             let n = 6usize * k + i;
-            let xn = x[n] + alpha * p[n];
-            x[n] = xn;
-            if replace == 0u32 {
-                let rn = r[n] - alpha * q[n];
+            let mut xn = x[n];
+            let mut rn = r[n];
+            if mode == REPLACE {
+                rn = b[n] - q[n];
+            } else {
+                xn += alpha * p[n];
+                x[n] = xn;
+                rn -= alpha * q[n];
+            }
+            if mode != ADVANCE {
                 r[n] = rn;
-                acc_xb += xn * b[n];
-                acc_xr += xn * rn;
+                neumaier_add(&mut xb_hi, &mut xb_lo, unit, xn * b[n], hide);
+                neumaier_add(&mut xr_hi, &mut xr_lo, unit, xn * rn, hide);
             }
         }
     }
-    if replace == 0u32 {
-        xb[unit] = acc_xb;
-        xr[unit] = acc_xr;
-        sum_tree(&mut xb, unit, PCG_UNITS);
-        sum_tree(&mut xr, unit, PCG_UNITS);
-        model_test(
-            &xb,
-            &xr,
-            fstate,
-            ustate,
-            unit,
-            iteration,
-            max_iterations,
-            eta,
-        );
-    }
-}
-
-/// Residual replacement after `q = A x`: `r = b - q`, then the `Q` test.
-#[cube(launch_unchecked)]
-#[allow(clippy::too_many_arguments)]
-fn pcg_replace_kernel(
-    q: &[f32],
-    x: &[f32],
-    r: &mut [f32],
-    b: &[f32],
-    fstate: &mut [f32],
-    ustate: &mut [u32],
-    poses: usize,
-    iteration: u32,
-    max_iterations: u32,
-    eta: f32,
-) {
-    if ustate[STOPPED] != 0u32 {
-        terminate!();
-    }
-    let unit = usize::cast_from(UNIT_POS);
-    let mut xb = Shared::<[f32]>::new_slice(PCG_UNITS);
-    let mut xr = Shared::<[f32]>::new_slice(PCG_UNITS);
-    let mut acc_xb = 0.0f32;
-    let mut acc_xr = 0.0f32;
-    for k in range_stepped(unit, poses, PCG_UNITS) {
-        #[unroll]
-        for i in 0..6usize {
-            let n = 6usize * k + i;
-            let rn = b[n] - q[n];
-            r[n] = rn;
-            acc_xb += x[n] * b[n];
-            acc_xr += x[n] * rn;
+    if mode != ADVANCE {
+        let xb = compensated_tree(&mut xb_hi, &mut xb_lo, unit, hide);
+        let xr = compensated_tree(&mut xr_hi, &mut xr_lo, unit, hide);
+        if unit == 0usize {
+            let q1 = -(xb + xr);
+            let zeta = f32::cast_from(iteration) * (q1 - fstate[Q0]) / q1;
+            if zeta < eta {
+                stop(ustate, CONVERGED, iteration);
+            } else {
+                fstate[Q0] = q1;
+                if iteration >= max_iterations {
+                    stop(ustate, MAX_ITERATIONS, iteration);
+                }
+            }
         }
     }
-    xb[unit] = acc_xb;
-    xr[unit] = acc_xr;
-    sum_tree(&mut xb, unit, PCG_UNITS);
-    sum_tree(&mut xr, unit, PCG_UNITS);
-    model_test(
-        &xb,
-        &xr,
-        fstate,
-        ustate,
-        unit,
-        iteration,
-        max_iterations,
-        eta,
-    );
 }
 
 /// `out[0] = a . b` over `poses` six-entry groups, in the PCG kernels' order.
 #[cube(launch_unchecked)]
-fn dot_kernel(a: &[f32], b: &[f32], out: &mut [f32], poses: usize) {
+fn dot_kernel(a: &[f32], b: &[f32], out: &mut [f32], poses: usize, hide: u32) {
     let unit = usize::cast_from(UNIT_POS);
-    let mut partial = Shared::<[f32]>::new_slice(PCG_UNITS);
-    let mut acc = 0.0f32;
-    for k in range_stepped(unit, poses, PCG_UNITS) {
-        #[unroll]
-        for i in 0..6usize {
-            acc += a[6usize * k + i] * b[6usize * k + i];
-        }
-    }
-    partial[unit] = acc;
-    sum_tree(&mut partial, unit, PCG_UNITS);
+    let mut hi = Shared::<[f32]>::new_slice(PCG_UNITS);
+    let mut lo = Shared::<[f32]>::new_slice(PCG_UNITS);
+    hi[unit] = 0.0f32;
+    lo[unit] = 0.0f32;
+    unit_dot(a, b, &mut hi, &mut lo, unit, poses, hide);
+    let total = compensated_tree(&mut hi, &mut lo, unit, hide);
     if unit == 0usize {
-        out[0] = partial[0];
+        out[0] = total;
     }
 }
 
@@ -581,22 +577,23 @@ pub(crate) fn launch_pcg_precondition<R: Runtime>(
             arg(v.ustate),
             v.x.1 / 6,
             iteration,
+            0u32,
         );
     }
 }
 
-pub(crate) fn launch_pcg_step<R: Runtime>(
+pub(crate) fn launch_pcg_update<R: Runtime>(
     client: &ComputeClient<R>,
     v: &PcgBuffers<'_>,
     iteration: u32,
-    replace: bool,
+    mode: u32,
     max_iterations: u32,
     eta: f32,
 ) {
     let (cubes, units) = single_cube();
     // SAFETY: as `launch_pcg_precondition`.
     unsafe {
-        pcg_step_kernel::launch_unchecked::<R>(
+        pcg_update_kernel::launch_unchecked::<R>(
             client,
             cubes,
             units,
@@ -609,37 +606,10 @@ pub(crate) fn launch_pcg_step<R: Runtime>(
             arg(v.ustate),
             v.x.1 / 6,
             iteration,
-            u32::from(replace),
+            mode,
             max_iterations,
             eta,
-        );
-    }
-}
-
-pub(crate) fn launch_pcg_replace<R: Runtime>(
-    client: &ComputeClient<R>,
-    v: &PcgBuffers<'_>,
-    iteration: u32,
-    max_iterations: u32,
-    eta: f32,
-) {
-    let (cubes, units) = single_cube();
-    // SAFETY: as `launch_pcg_precondition`.
-    unsafe {
-        pcg_replace_kernel::launch_unchecked::<R>(
-            client,
-            cubes,
-            units,
-            arg(v.q),
-            arg(v.x),
-            arg(v.r),
-            arg(v.b),
-            arg(v.fstate),
-            arg(v.ustate),
-            v.x.1 / 6,
-            iteration,
-            max_iterations,
-            eta,
+            0u32,
         );
     }
 }
@@ -654,6 +624,15 @@ pub(crate) fn launch_dot<R: Runtime>(
     let (cubes, units) = single_cube();
     // SAFETY: `a` and `b` hold the same multiple of six entries; `out` one.
     unsafe {
-        dot_kernel::launch_unchecked::<R>(client, cubes, units, arg(a), arg(b), arg(out), a.1 / 6);
+        dot_kernel::launch_unchecked::<R>(
+            client,
+            cubes,
+            units,
+            arg(a),
+            arg(b),
+            arg(out),
+            a.1 / 6,
+            0u32,
+        );
     }
 }

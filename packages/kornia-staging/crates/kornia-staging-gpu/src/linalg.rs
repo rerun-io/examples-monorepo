@@ -6,14 +6,15 @@
 //! below the maximum binding size), and the whole PCG runs there. The host
 //! waits on the device once every [`GBA_CG_CHECK_EVERY`] iterations, the same
 //! constant the CPU lane uses for its residual replacement; the device stops
-//! at exactly the iteration the CPU rules stop at. Each of those
-//! eight-iteration sections runs through [`execute_exclusive`], so it never
-//! interleaves with frontend work on the same device.
+//! at exactly the iteration the CPU rules stop at. Each iteration is one
+//! [`execute_exclusive`] section and each state read another, so frontend
+//! work on the same device never waits behind more than one of them
+//! (DESIGN §7.3).
 //!
 //! The block-Jacobi inverses come from the host, factored in f64 (DESIGN §7.3:
-//! portable devices have no f64). The PCG scalars are f32 sums in one fixed
-//! order ([`fixed_order_dot`] states it), where the CPU lane sums in f64; the
-//! S4 band (DESIGN §7.4) measures what that costs.
+//! portable devices have no f64). The PCG scalars are compensated f32 sums in
+//! one fixed order ([`fixed_order_dot`] states it), where the CPU lane sums in
+//! f64; the S4 band (DESIGN §7.4) measures what is left.
 use std::time::Instant;
 
 use cubecl::prelude::*;
@@ -317,10 +318,10 @@ pub fn device_matvec<R: Runtime>(
     )
 }
 
-/// `a . b` in the order of the device PCG's sums: unit `u` of
-/// [`PCG_UNITS`] adds the six entries of groups `u, u + 256, ...` in order,
-/// then a fixed pairwise tree adds the units. The host mirror of the device
-/// sum, for tests.
+/// `a . b` in the order of the device PCG's sums: unit `u` of [`PCG_UNITS`]
+/// adds the six entries of groups `u, u + 256, ...` in order into a Neumaier
+/// (compensated) sum, then a fixed pairwise tree of TwoSums adds the units and
+/// carries their errors. The host mirror of the device sum, for tests.
 ///
 /// # Panics
 /// If the lengths differ or are not a multiple of six.
@@ -329,7 +330,7 @@ pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
         a.len() == b.len() && a.len().is_multiple_of(6),
         "six-entry groups"
     );
-    let mut partial = [0.0f32; PCG_UNITS];
+    let (mut hi, mut lo) = ([0.0f32; PCG_UNITS], [0.0f32; PCG_UNITS]);
     for (k, (ga, gb)) in a
         .as_chunks::<6>()
         .0
@@ -337,18 +338,30 @@ pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
         .zip(b.as_chunks::<6>().0)
         .enumerate()
     {
+        let u = k % PCG_UNITS;
         for (x, y) in ga.iter().zip(gb) {
-            partial[k % PCG_UNITS] += x * y;
+            let (sum, value) = (hi[u], x * y);
+            let t = sum + value;
+            lo[u] += if sum.abs() >= value.abs() {
+                (sum - t) + value
+            } else {
+                (value - t) + sum
+            };
+            hi[u] = t;
         }
     }
     let mut stride = PCG_UNITS / 2;
     while stride > 0 {
         for u in 0..stride {
-            partial[u] += partial[u + stride];
+            let (a, b) = (hi[u], hi[u + stride]);
+            let s = a + b;
+            let bb = s - a;
+            hi[u] = s;
+            lo[u] += lo[u + stride] + ((a - (s - bb)) + (b - bb));
         }
         stride /= 2;
     }
-    partial[0]
+    hi[0] + lo[0]
 }
 
 /// `a . b` on the device, by the kernel that sums the PCG's scalars.
@@ -384,6 +397,8 @@ pub struct DeviceSolveStats {
     pub pages: usize,
     /// Host waits on the device.
     pub syncs: usize,
+    /// Exclusive sections: one per iteration, one per state read.
+    pub sections: usize,
     /// The longest exclusive section, seconds.
     pub longest_section_s: f64,
 }
@@ -394,6 +409,7 @@ pub struct GpuPcg<R: Runtime> {
     max_binding_bytes: usize,
     last: DeviceSolveStats,
     peak_device_bytes: usize,
+    longest_section_s: f64,
 }
 
 impl<R: Runtime> GpuPcg<R> {
@@ -405,6 +421,7 @@ impl<R: Runtime> GpuPcg<R> {
             max_binding_bytes,
             last: DeviceSolveStats::default(),
             peak_device_bytes: 0,
+            longest_section_s: 0.0,
         }
     }
 
@@ -420,9 +437,15 @@ impl<R: Runtime> GpuPcg<R> {
         self.last
     }
 
-    /// The most bytes any solve held on the device.
+    /// The most bytes any solve bound on the device (the lane's own
+    /// accounting, not the allocator's pool).
     pub fn peak_device_bytes(&self) -> usize {
         self.peak_device_bytes
+    }
+
+    /// The longest exclusive section of any solve, seconds.
+    pub fn longest_section_s(&self) -> f64 {
+        self.longest_section_s
     }
 
     fn run(
@@ -480,31 +503,52 @@ impl<R: Runtime> GpuPcg<R> {
             fstate: view(&fstate),
             ustate: view(&ustate),
         };
-        let max = u32::try_from(options.max_iterations)
+        // A cap of 0 runs one iteration, as the CPU lane does.
+        let max = u32::try_from(options.max_iterations.max(1))
             .map_err(|_| GpuError::PcgLayout { what: "iterations" })?;
         let eta = options.eta as f32;
         let mut syncs = 0usize;
         let mut longest = 0.0f64;
-        let mut first = 1u32;
+        let mut sections = 0usize;
+        let mut it = 1u32;
         let state: Vec<u32> = loop {
-            let last = (first + GBA_CG_CHECK_EVERY as u32 - 1).min(max);
+            // One iteration per exclusive section (DESIGN 7.3): frontend work
+            // waits behind one iteration at most.
             let section = Instant::now();
-            let state = execute_exclusive(client, "the PCG", || {
-                for it in first..=last {
-                    kernels::launch_pcg_precondition(client, &buffers, it);
-                    device.matvec(client, buffers.p, buffers.q, buffers.ustate);
-                    let replace = (it as usize).is_multiple_of(GBA_CG_CHECK_EVERY);
-                    kernels::launch_pcg_step(client, &buffers, it, replace, max, eta);
-                    if replace {
-                        device.matvec(client, buffers.x, buffers.q, buffers.ustate);
-                        kernels::launch_pcg_replace(client, &buffers, it, max, eta);
-                    }
+            execute_exclusive(client, "a PCG iteration", || {
+                kernels::launch_pcg_precondition(client, &buffers, it);
+                device.matvec(client, buffers.p, buffers.q, buffers.ustate);
+                let replace = (it as usize).is_multiple_of(GBA_CG_CHECK_EVERY);
+                let mode = if replace {
+                    kernels::ADVANCE
+                } else {
+                    kernels::STEP
+                };
+                kernels::launch_pcg_update(client, &buffers, it, mode, max, eta);
+                if replace {
+                    device.matvec(client, buffers.x, buffers.q, buffers.ustate);
+                    kernels::launch_pcg_update(client, &buffers, it, kernels::REPLACE, max, eta);
                 }
+                Ok::<_, GpuError>(())
+            })?;
+            longest = longest.max(section.elapsed().as_secs_f64());
+            sections += 1;
+            if !(it as usize).is_multiple_of(GBA_CG_CHECK_EVERY) && it < max {
+                it += 1;
+                continue;
+            }
+            // Wait for the device outside any section, then read the state in
+            // a short section of its own.
+            cubecl::future::block_on(client.sync())
+                .map_err(|error| crate::transfer::read_failed("the PCG state", &error))?;
+            let section = Instant::now();
+            let state = execute_exclusive(client, "the PCG state", || {
                 let bytes = read_buffers(client, vec![ustate.0.clone()], "the PCG state")?;
                 Ok::<_, GpuError>(u32::from_bytes(&bytes[0]).to_vec())
             })?;
-            syncs += 1;
             longest = longest.max(section.elapsed().as_secs_f64());
+            sections += 1;
+            syncs += 1;
             if state.len() < 3 {
                 return Err(GpuError::ShortRead {
                     what: "the PCG state",
@@ -512,10 +556,10 @@ impl<R: Runtime> GpuPcg<R> {
                     expected: 12,
                 });
             }
-            if state[kernels::STOPPED] != 0 || last >= max {
+            if state[kernels::STOPPED] != 0 || it >= max {
                 break state;
             }
-            first = last + 1;
+            it += 1;
         };
         x.copy_from_slice(&read_f32(client, &x_dev, "the PCG solution")?);
         syncs += 1;
@@ -527,7 +571,7 @@ impl<R: Runtime> GpuPcg<R> {
             _ => {
                 return Err(GpuError::PcgLayout {
                     what: "termination",
-                })
+                });
             }
         };
         self.last = DeviceSolveStats {
@@ -535,9 +579,11 @@ impl<R: Runtime> GpuPcg<R> {
             device_bytes,
             pages,
             syncs,
+            sections,
             longest_section_s: longest,
         };
         self.peak_device_bytes = self.peak_device_bytes.max(device_bytes);
+        self.longest_section_s = self.longest_section_s.max(longest);
         Ok(LaneSolve {
             summary: PcgSummary {
                 iterations: state[kernels::ITERATIONS] as usize,
