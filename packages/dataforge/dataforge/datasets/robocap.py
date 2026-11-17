@@ -91,9 +91,10 @@ so the rig's reference sensor is the IMU node, not a camera."""
 IMU_DEVICE: int = 0
 """v1 logs the middle IMU (``dev0``) only. TODO(dataforge): also emit dev1/dev2."""
 RUN_SOURCE: str = "basalt"
-EXTRA_RUN_SOURCES: tuple[str, ...] = ("slam_rs",)
-"""Further pose layers RoboCap sessions carry: the slam-rs catalog result layer."""
 """Processing source of the pose layer the blueprints already lay out; nothing writes it yet."""
+EXTRA_RUN_SOURCES: tuple[str, ...] = ("slam_rs", "slam_rs_vio")
+"""Further pose runs RoboCap sessions carry: the slam-rs catalog result layer writes its final
+run and its raw causal VIO run, and both get the same dim path and trail window."""
 SESSION_DIR_RE: re.Pattern[str] = re.compile(r"^(?P<device>[0-9a-f]+)_session_(?P<session>\d+)$")
 """Session directory names; the ``-old`` duplicates deliberately do not match."""
 MESH_RELATIVE_PATH: str = "robocap-mesh/3DModel.glb"

@@ -12,6 +12,7 @@ from numpy import ndarray
 
 from colsfm.database import (
     ImagePair,
+    count_two_view_geometries,
     create_database,
     image_ids_by_name,
     keypoint_counts,
@@ -196,3 +197,39 @@ def test_selected_subset_only_writes_kept_frames(galileo: FramesMeta, tmp_path: 
     # `kpmap_to_colmap` does (export.md §3.3).
     assert database.num_cameras() == len(galileo.cameras)
     database.close()
+
+
+def test_verification_refuses_pairs_that_already_have_a_geometry_row(galileo: FramesMeta, tmp_path: Path) -> None:
+    """A second geometry row for a pair cannot be written; `verify_and_report` names the count instead (no row is deleted)."""
+    from colsfm.matching import MatchingOptions, verify_and_report
+
+    database_path: Path = tmp_path / "existing.db"
+    create_database(database_path, galileo)
+    first, second, third = (keyframe.keyframe_id for keyframe in galileo.keyframes[:3])
+    geometry: pycolmap.TwoViewGeometry = pycolmap.TwoViewGeometry()
+    geometry.config = int(pycolmap.TwoViewGeometryConfiguration.UNDEFINED)
+    with pycolmap.Database.open(database_path) as database:
+        database.write_two_view_geometry(first, second, geometry)
+    with pytest.raises(ValueError, match="1 of 2 pairs already have a two-view geometry row"):
+        verify_and_report(database_path, [(first, second), (first, third)], MatchingOptions(), device="cpu", started=0.0, cap=False)
+
+
+def test_the_existing_geometry_check_writes_nothing(galileo: FramesMeta, tmp_path: Path) -> None:
+    """It counts any row (an empty UNDEFINED one too) through a read-only connection: the file stays byte for byte."""
+    database_path: Path = tmp_path / "readonly.db"
+    create_database(database_path, galileo)
+    first, second, third = (keyframe.keyframe_id for keyframe in galileo.keyframes[:3])
+    geometry: pycolmap.TwoViewGeometry = pycolmap.TwoViewGeometry()
+    geometry.config = int(pycolmap.TwoViewGeometryConfiguration.UNDEFINED)
+    with pycolmap.Database.open(database_path) as database:
+        database.write_two_view_geometry(second, first, geometry)
+    before: bytes = database_path.read_bytes()
+    assert count_two_view_geometries(database_path, [(first, second), (first, third)]) == 1
+    assert database_path.read_bytes() == before
+
+
+def test_the_existing_geometry_check_does_not_create_a_missing_database(tmp_path: Path) -> None:
+    missing: Path = tmp_path / "missing.db"
+    with pytest.raises(FileNotFoundError, match="No COLMAP database"):
+        count_two_view_geometries(missing, [(1, 2)])
+    assert list(tmp_path.iterdir()) == []

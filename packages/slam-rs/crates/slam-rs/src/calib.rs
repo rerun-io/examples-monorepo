@@ -1254,6 +1254,49 @@ mod tests {
         assert_eq!(basalt_name.intrinsics, calib.intrinsics);
     }
 
+    /// EuRoC's radtan4 cameras carry no valid radius: Basalt's `rpmax` 0, which
+    /// must mean "no bound" all the way to the projection, not "nothing is valid".
+    /// `camera.rs` `radtan8_without_a_valid_radius_is_unbounded` pins that at the
+    /// camera; this test adds the catalog path: statics -> `Calibration` -> `SlamCamera`.
+    #[test]
+    fn a_catalog_radtan_camera_without_a_valid_radius_projects_unbounded() {
+        use super::catalog::CameraStatics;
+        use crate::camera::SlamCamera;
+        use kornia_staging_3d::camera::CameraModelKind;
+        use nalgebra::{Vector2, Vector4};
+
+        // vslam-lab-euroc MH_01_easy cam_00 as the catalog stores it: brown_conrady,
+        // k1 k2 p1 p2 and a zero tail, column-major K, ChildFromParent pose.
+        let mut coefficients: Vec<f64> = vec![-0.2834081, 0.07395907, 0.00019359, 1.76187114e-05];
+        coefficients.resize(14, 0.0);
+        let raw = CameraStatics {
+            distortion_model: "brown_conrady".into(),
+            distortion_coefficients: coefficients,
+            image_from_camera: [458.654, 0.0, 0.0, 0.0, 457.296, 0.0, 367.215, 248.375, 1.0],
+            resolution_wh: [752.0, 480.0],
+            transform_mat3x3: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            transform_translation: [0.0; 3],
+            transform_relation: 2,
+            distortion_valid_radius: None,
+        };
+        let part: CameraParts<f64> = CameraParts::from_catalog_statics(0, &raw, 1).unwrap();
+        assert_eq!(part.model, "radtan8");
+        let calib: Calibration<f64> = Calibration::from_catalog_parts(&[part], &an_imu()).unwrap();
+        // Basalt spells "no bound" as rpmax 0 ...
+        assert_eq!(calib.intrinsics[0].valid_radius(), Some(0.0));
+        // ... and the staged camera the estimator runs has no bound at all.
+        let camera: SlamCamera<f64> = SlamCamera::from_model(&calib.intrinsics[0]).unwrap();
+        let CameraModelKind::BrownConrady(inner) = camera.inner else {
+            panic!("EuRoC cam0 is pinhole-radtan8");
+        };
+        assert_eq!(inner.valid_radius(), None);
+        // A ray 60 degrees off axis (normalized radius 1.73, outside the
+        // 752x480 image) still projects to a finite pixel.
+        let mut uv: Vector2<f64> = Vector2::zeros();
+        assert!(camera.project_point(&Vector4::new(3.0_f64.sqrt(), 0.0, 1.0, 1.0), &mut uv, None));
+        assert!(uv.iter().all(|value| value.is_finite()));
+    }
+
     #[test]
     fn catalog_parts_reject_the_wrong_coefficient_count() {
         let camera: CameraParts<f64> = a_camera("kb4", vec![0.1, 0.2, 0.3]);

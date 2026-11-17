@@ -44,6 +44,7 @@ from colsfm.model_assets import check_raco_graphs
 from colsfm.run_lifecycle import (
     DATABASE_NAME,
 )
+from colsfm.verification import VerifyChunking
 
 DEFAULT_CONFIG_DIR: Final[Path] = RESOURCES_DIR / "configs" / "loop-closure-fixed"
 """`isaac` with loop closure repaired; what the blob reference runs used."""
@@ -172,6 +173,9 @@ class PipelineOptions:
     worker processes, not the threads inside one: the runner launches one process per
     camera. COLMAP has a single process, so 1 serialises JPEG decode against the GPU and
     costs 4.4x on Galileo (33.9 s against 7.6 s, measured)."""
+    verify: VerifyChunking = VerifyChunking()
+    """Two-view verification's chunk size, worker threads and chunks in flight (`colsfm.verification`): memory holds
+    about `verify_chunks_in_flight` chunks whatever the run's length, on every machine."""
     ba_backend: BaBackend = "caspar"
     """Which implementation solves the bundle adjustments — Ceres on the CPU, or COLMAP's
     CASPAR on the GPU. `caspar` by default (NOTES.md decision 17): with the closing Ceres
@@ -313,6 +317,8 @@ class ResolvedRun:
     """Device request the two ONNX stages share; `--use-gpu` resolved exactly once."""
     num_threads: int
     """Threads for extraction and matching; -1 lets COLMAP use every core."""
+    verify: VerifyChunking
+    """Stages 4 and 5: how two-view verification is chunked and overlapped."""
 
     def matching_options(self, config: CusfmConfig) -> MatchingOptions:
         """The matcher's settings, once the config profile's verification block is known.
@@ -332,6 +338,7 @@ class ResolvedRun:
             device=self.device,
             match_limit=self.match_limit,
             image_dir=self.selection.input_dir,
+            verify=self.verify,
         )
 
 
@@ -396,4 +403,5 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
         ba_plan=ba_plan,
         device=options.device,
         num_threads=options.num_threads,
+        verify=options.verify,
     )

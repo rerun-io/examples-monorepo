@@ -59,6 +59,8 @@ impl From<BackendArg> for slam_rs::BackendRequest {
     }
 }
 
+// Parsed once per process: boxing the replay arguments would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Print the version of the core.
@@ -90,13 +92,24 @@ enum Command {
         /// width x height gray8 raster (`-` reads stdin, e.g. `xz -dc frames.u8.xz | slam-rs replay --frames - ...`).
         #[arg(long, requires = "clip", conflicts_with = "catalog")]
         frames: Option<PathBuf>,
-        /// Trajectory CSV: `t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z` on the clip's frameset clock, tracked framesets only.
-        #[arg(long)]
-        out: PathBuf,
-        /// Summary JSON: wall time, per-frameset track times, frontend stage means.
-        #[arg(long)]
-        summary: PathBuf,
+        #[command(flatten)]
+        outputs: ReplayOutputs,
     },
+}
+
+/// The files one replay writes.
+#[derive(Debug, clap::Args)]
+pub(crate) struct ReplayOutputs {
+    /// Trajectory CSV: `t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z` on the clip's frameset clock, tracked framesets only.
+    #[arg(long)]
+    pub(crate) out: PathBuf,
+    /// Raw VIO trajectory CSV, same format as `--out`. Until re-anchoring on the optimised keyframes lands, the final
+    /// trajectory in `--out` is the raw VIO, so the two files are equal.
+    #[arg(long)]
+    pub(crate) out_vio: Option<PathBuf>,
+    /// Summary JSON: wall time, per-frameset track times, frontend stage means.
+    #[arg(long)]
+    pub(crate) summary: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -114,8 +127,7 @@ fn main() -> ExitCode {
             threads,
             max_framesets,
             frames,
-            out,
-            summary,
+            outputs,
         } => {
             let started = Instant::now();
             let input = match (clip.as_deref(), catalog.as_deref(), segment.as_deref()) {
@@ -141,8 +153,7 @@ fn main() -> ExitCode {
                     backend.into(),
                     threads,
                     started.elapsed().as_secs_f64(),
-                    &out,
-                    &summary,
+                    &outputs,
                 )
             }) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -157,8 +168,9 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Command};
     use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn catalog_replay_accepts_a_segment_without_fixture_files() {
@@ -179,6 +191,33 @@ mod tests {
             "summary.json",
         ]);
         assert!(parsed.is_ok(), "{parsed:?}");
+    }
+
+    #[test]
+    fn replay_writes_the_raw_vio_csv_only_when_asked() {
+        let base = [
+            "slam-rs",
+            "replay",
+            "--clip",
+            "fixture",
+            "--config",
+            "config.json",
+            "--out",
+            "slam_rs.csv",
+            "--summary",
+            "summary.json",
+        ];
+        let out_vio = |args: &[&str]| match Cli::try_parse_from(args).map(|cli| cli.command) {
+            Ok(Command::Replay { outputs, .. }) => outputs.out_vio,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(out_vio(&base), None);
+        let with_vio: Vec<&str> = base
+            .iter()
+            .copied()
+            .chain(["--out-vio", "slam_rs_vio.csv"])
+            .collect();
+        assert_eq!(out_vio(&with_vio), Some(PathBuf::from("slam_rs_vio.csv")));
     }
 
     #[test]
