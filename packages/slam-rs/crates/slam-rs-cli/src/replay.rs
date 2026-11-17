@@ -36,7 +36,6 @@ pub(super) fn replay(
     load_s: f64,
     outputs: &ReplayOutputs,
 ) -> Result<(), String> {
-    let summary: &Path = &outputs.summary;
     let ReplayInput {
         clip,
         calibration,
