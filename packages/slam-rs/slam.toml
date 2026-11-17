@@ -21,3 +21,16 @@ device_id = "f408193e6447b3b0"
 vio_config = "configs/msdmo_config.json"
 calibration = "configs/robocap_calib_downscale3.json"
 
+
+# TartanAir V2 (dataforge `tartanair`): one trajectory, three camera sets.
+[[dataset]]
+name = "tartanair-pinhole"
+vio_config = "configs/tartanair_pinhole_config.json"
+
+[[dataset]]
+name = "tartanair-fisheye"
+vio_config = "configs/tartanair_fisheye_config.json"
+
+[[dataset]]
+name = "tartanair-equirect"
+vio_config = "configs/tartanair_equirect_config.json"

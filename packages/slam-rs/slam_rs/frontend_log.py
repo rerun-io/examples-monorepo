@@ -59,7 +59,30 @@ def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3
     return HUE_RAMP[hashed % np.uint64(len(HUE_RAMP))]
 
 
-def log_keypoints(frame: _core.FlowFrame) -> None:
+def panorama_positions(
+    frame: _core.FlowFrame, tile_origins: tuple[int, int], panorama_width: int
+) -> tuple[Int64[ndarray, " n_tracks"], Float32[ndarray, "n_tracks 2"]]:
+    """Both hemisphere tiles' keypoints in the panorama's pixels: ``x`` shifted by the tile origin and wrapped.
+
+    Args:
+        frame: What the frontend produced for one frameset of the two tiles.
+        tile_origins: ``Vio.panorama_tile_origins``.
+        panorama_width: Panorama width in pixels.
+
+    Returns:
+        The keypoint ids of both tiles and their panorama positions, tile 0 first.
+    """
+    ids: list[Int64[ndarray, " n"]] = []
+    positions: list[Float32[ndarray, "n 2"]] = []
+    for tile, origin in enumerate(tile_origins):
+        tile_positions: Float32[ndarray, "n 2"] = frame.positions(tile).copy()
+        tile_positions[:, 0] = np.mod(tile_positions[:, 0] + np.float32(origin), np.float32(panorama_width))
+        ids.append(frame.ids(tile))
+        positions.append(tile_positions)
+    return np.concatenate(ids), np.concatenate(positions)
+
+
+def log_keypoints(frame: _core.FlowFrame, tile_origins: tuple[int, int] | None = None, panorama_width: int = 0) -> None:
     """Draw one frameset's tracked keypoints on the camera images.
 
     Two rungs draw this layer — the frontend's own and the estimator's, whose
@@ -70,7 +93,13 @@ def log_keypoints(frame: _core.FlowFrame) -> None:
 
     Args:
         frame: What a frontend produced for one frameset.
+        tile_origins: For a panorama rig, ``Vio.panorama_tile_origins``: both tiles are drawn on camera 0's panorama.
+        panorama_width: Panorama width in pixels; read only with ``tile_origins``.
     """
+    if tile_origins is not None:
+        ids, positions = panorama_positions(frame, tile_origins, panorama_width)
+        rr.log(f"{camera_entity(0)}/keypoints", rr.Points2D(positions, colors=track_colors(ids), radii=KEYPOINT_RADIUS_PX))
+        return
     for index in range(frame.camera_count):
         ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
         rr.log(

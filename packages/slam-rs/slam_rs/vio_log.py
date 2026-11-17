@@ -178,6 +178,8 @@ class VioLogger:
     """Ground truth for the whole segment, on ``video_time``; may be empty."""
     frame_t_ns: Int64[ndarray, " n_frames"]
     """The segment's frameset times: the cadence used to draw ground truth."""
+    tile_origins: tuple[int, int] | None = None
+    """``Vio.panorama_tile_origins``: the frontend tracks two hemisphere tiles of camera 0's panorama; None otherwise."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -233,7 +235,7 @@ class VioLogger:
         rr.log(f"{RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
-        log_keypoints(frame)
+        log_keypoints(frame, self.tile_origins, self.cameras[0].width)
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)

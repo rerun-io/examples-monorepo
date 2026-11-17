@@ -185,6 +185,19 @@ impl Vio {
         self.inner.frontend().camera_count()
     }
 
+    /// Panorama column of each hemisphere tile's column 0, before wrapping,
+    /// when the rig is one full panorama; `None` otherwise.
+    ///
+    /// The frontend then tracks two tiles: tile `k`'s pixel `(x, y)` is the
+    /// panorama's `((x + origins[k]) mod W, y)`.
+    #[getter]
+    fn panorama_tile_origins(&self) -> Option<(i64, i64)> {
+        self.inner.panorama().map(|rig| {
+            let [first, second] = rig.tile_origins();
+            (first, second)
+        })
+    }
+
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
     /// frame and uncalibrated — the static bias calibration is applied inside.
     fn push_imu(&mut self, t_ns: i64, gyro: [f64; 3], accel: [f64; 3]) -> PyResult<()> {
@@ -782,6 +795,19 @@ impl VioConfig {
     #[setter]
     fn set_optical_flow_image_safe_radius(&mut self, radius: f32) {
         self.inner.optical_flow_image_safe_radius = radius;
+    }
+
+    /// `config.vio_gravity_ms2`: the magnitude of gravity, m/s². A dataset fact
+    /// (TartanAir synthesises its IMU with 9.8), so the feed sets it from the
+    /// recording when the recording carries one.
+    #[getter]
+    fn vio_gravity_ms2(&self) -> f64 {
+        self.inner.vio_gravity_ms2
+    }
+
+    #[setter]
+    fn set_vio_gravity_ms2(&mut self, gravity: f64) {
+        self.inner.vio_gravity_ms2 = gravity;
     }
 
     fn __repr__(&self) -> String {

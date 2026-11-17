@@ -240,6 +240,12 @@ class Vio:
     @property
     def camera_count(self) -> int: ...
     @property
+    def panorama_tile_origins(self) -> tuple[int, int] | None:
+        """Panorama column of each hemisphere tile's column 0 when the rig is one full panorama, else None.
+
+        Tile ``k``'s pixel ``(x, y)`` is the panorama's ``((x + origins[k]) mod W, y)``.
+        """
+    @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""
     @property
@@ -309,6 +315,8 @@ class VioConfig:
 
     optical_flow_image_safe_radius: float
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
+    vio_gravity_ms2: float
+    """Magnitude of gravity in m/s²; the feed sets the recording's own value when it carries one."""
 
     def __repr__(self) -> str: ...
 
