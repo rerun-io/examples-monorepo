@@ -13,7 +13,7 @@
 //!
 //! The block-Jacobi inverses come from the host, factored in f64 (DESIGN §7.3:
 //! portable devices have no f64). The PCG scalars are compensated f32 sums in
-//! one fixed order ([`fixed_order_dot`] states it), where the CPU lane sums in
+//! one fixed order (`tests/support/sums.rs` mirrors it), where the CPU lane sums in
 //! f64; the S4 band (DESIGN §7.4) measures what is left.
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -24,7 +24,7 @@ use kornia_staging_slam::sqrt_ba::{
     ReducedSystem, GBA_CG_CHECK_EVERY,
 };
 
-use crate::kernels::linalg::{self as kernels, PcgBuffers, PCG_UNITS};
+use crate::kernels::linalg::{self as kernels, PcgBuffers};
 use crate::kernels::Buffer;
 use crate::runtime::{guarded, GpuError};
 use crate::transfer::{binding_limits, execute_exclusive, read_buffers};
@@ -193,8 +193,6 @@ struct DeviceSystem {
     t: Owned,
     contrib: Owned,
     lambda: f32,
-    /// Bytes this system holds on the device.
-    bytes: usize,
 }
 
 impl DeviceSystem {
@@ -210,7 +208,7 @@ impl DeviceSystem {
                 block_meta: upload(client, p.block_meta),
             })
             .collect();
-        let system = Self {
+        Self {
             pages,
             slot_kf: upload(client, layout.slot_kf),
             pose_ptr: upload(client, layout.pose_ptr),
@@ -218,20 +216,7 @@ impl DeviceSystem {
             t: empty(client, layout.rows),
             contrib: empty(client, 6 * slots),
             lambda,
-            bytes: 0,
-        };
-        let bytes = 4
-            * (system
-                .pages
-                .iter()
-                .map(|p| p.data.1 + p.row_meta.1 + p.col_meta.1 + p.block_meta.1)
-                .sum::<usize>()
-                + system.slot_kf.1
-                + system.pose_ptr.1
-                + system.pose_slots.1
-                + system.t.1
-                + system.contrib.1);
-        Self { bytes, ..system }
+        }
     }
 
     /// `y = (J^T J + lambda I) x`; a no-op once `ustate` says stopped.
@@ -321,53 +306,6 @@ pub fn device_matvec<R: Runtime>(
 }
 
 #[cfg(feature = "test-support")]
-/// `a . b` in the order of the device PCG's sums: unit `u` of [`PCG_UNITS`]
-/// adds the six entries of groups `u, u + 256, ...` in order into a Neumaier
-/// (compensated) sum, then a fixed pairwise tree of TwoSums adds the units and
-/// carries their errors. The host mirror of the device sum, for tests.
-///
-/// # Panics
-/// If the lengths differ or are not a multiple of six.
-pub fn fixed_order_dot(a: &[f32], b: &[f32]) -> f32 {
-    assert!(
-        a.len() == b.len() && a.len().is_multiple_of(6),
-        "six-entry groups"
-    );
-    let (mut hi, mut lo) = ([0.0f32; PCG_UNITS], [0.0f32; PCG_UNITS]);
-    for (k, (ga, gb)) in a
-        .as_chunks::<6>()
-        .0
-        .iter()
-        .zip(b.as_chunks::<6>().0)
-        .enumerate()
-    {
-        let u = k % PCG_UNITS;
-        for (x, y) in ga.iter().zip(gb) {
-            let (sum, value) = (hi[u], x * y);
-            let t = sum + value;
-            lo[u] += if sum.abs() >= value.abs() {
-                (sum - t) + value
-            } else {
-                (value - t) + sum
-            };
-            hi[u] = t;
-        }
-    }
-    let mut stride = PCG_UNITS / 2;
-    while stride > 0 {
-        for u in 0..stride {
-            let (a, b) = (hi[u], hi[u + stride]);
-            let s = a + b;
-            let bb = s - a;
-            hi[u] = s;
-            lo[u] += lo[u + stride] + ((a - (s - bb)) + (b - bb));
-        }
-        stride /= 2;
-    }
-    hi[0] + lo[0]
-}
-
-#[cfg(feature = "test-support")]
 /// `a . b` on the device, by the kernel that sums the PCG's scalars.
 ///
 /// # Errors
@@ -395,8 +333,6 @@ pub fn device_dot<R: Runtime>(
 pub struct DeviceSolveStats {
     /// Seconds to lay the system out and upload it.
     pub upload_s: f64,
-    /// Bytes the solve held on the device.
-    pub device_bytes: usize,
     /// Pages the blocks took.
     pub pages: usize,
     /// Host waits on the device.
@@ -412,7 +348,6 @@ pub struct GpuPcg<R: Runtime> {
     client: ComputeClient<R>,
     max_binding_bytes: usize,
     last: DeviceSolveStats,
-    peak_device_bytes: usize,
     longest_section_s: f64,
     #[cfg(feature = "test-support")]
     residual: Vec<f32>,
@@ -426,7 +361,6 @@ impl<R: Runtime> GpuPcg<R> {
             client,
             max_binding_bytes,
             last: DeviceSolveStats::default(),
-            peak_device_bytes: 0,
             longest_section_s: 0.0,
             #[cfg(feature = "test-support")]
             residual: Vec::new(),
@@ -444,12 +378,6 @@ impl<R: Runtime> GpuPcg<R> {
     /// The last solve's costs.
     pub fn last_solve(&self) -> DeviceSolveStats {
         self.last
-    }
-
-    /// The most bytes any solve bound on the device (the lane's own
-    /// accounting, not the allocator's pool).
-    pub fn peak_device_bytes(&self) -> usize {
-        self.peak_device_bytes
     }
 
     /// The last solve's residual `r` as the device holds it (tests).
@@ -507,7 +435,6 @@ impl<R: Runtime> GpuPcg<R> {
         cubecl::future::block_on(client.sync())
             .map_err(|error| crate::transfer::read_failed("the PCG upload", &error))?;
         let upload_s = started.elapsed().as_secs_f64();
-        let device_bytes = device.bytes + 4 * (minv.1 + 2 * n + 4 * n + 8);
         let buffers = PcgBuffers {
             minv: view(&minv),
             b: view(&b_dev),
@@ -596,13 +523,11 @@ impl<R: Runtime> GpuPcg<R> {
         };
         self.last = DeviceSolveStats {
             upload_s,
-            device_bytes,
             pages,
             syncs,
             sections,
             longest_section_s: longest,
         };
-        self.peak_device_bytes = self.peak_device_bytes.max(device_bytes);
         self.longest_section_s = self.longest_section_s.max(longest);
         Ok(LaneSolve {
             summary: PcgSummary {

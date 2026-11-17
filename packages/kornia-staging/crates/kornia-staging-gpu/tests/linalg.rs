@@ -4,7 +4,7 @@
 
 use kornia_staging_3d::camera::{CameraModelKind, Pinhole};
 use kornia_staging_algebra::lie::{RigidTransform, Rotation3};
-use kornia_staging_gpu::linalg::{device_dot, device_matvec, fixed_order_dot, probe_pcg, GpuPcg};
+use kornia_staging_gpu::linalg::{device_dot, device_matvec, probe_pcg, GpuPcg};
 use kornia_staging_gpu::runtime::gpu_client;
 use kornia_staging_slam::sqrt_ba::{
     apply_left_increment, pcg, solve_global_with, BlockJacobi, GbaCamera, GbaLandmark,
@@ -12,6 +12,10 @@ use kornia_staging_slam::sqrt_ba::{
     ReducedBlock, ReducedSystem, RelPoseConstraint,
 };
 use nalgebra::{Matrix3, Matrix6, UnitQuaternion, Vector3, Vector6};
+
+#[path = "support/sums.rs"]
+mod sums;
+use sums::fixed_order_dot;
 
 fn wobble(i: usize, k: usize) -> f64 {
     (((i * 7919 + k * 104_729) % 9973) as f64 * 0.618_033_988_7).sin()

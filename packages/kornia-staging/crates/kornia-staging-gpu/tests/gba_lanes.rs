@@ -21,7 +21,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::time::Instant;
 
-use kornia_staging_gpu::linalg::{fixed_order_dot, probe_pcg, GpuPcg};
+use kornia_staging_gpu::linalg::{probe_pcg, GpuPcg};
 use kornia_staging_gpu::runtime::gpu_client;
 use kornia_staging_slam::sqrt_ba::{
     pcg_with_dot, solve_global_with, BlockJacobi, GbaOptions, GbaProblem, GbaReport,
@@ -32,6 +32,9 @@ use nalgebra::{Matrix3, Vector3};
 #[path = "../../kornia-staging-slam/tests/support/rootba_export.rs"]
 mod rootba_export;
 use rootba_export::{load, Export};
+#[path = "support/sums.rs"]
+mod sums;
+use sums::{fixed_order_dot, plain_fixed_order_dot};
 
 fn loadavg() -> String {
     std::fs::read_to_string("/proc/loadavg")
@@ -42,28 +45,13 @@ fn loadavg() -> String {
         .join(" ")
 }
 
-/// `a . b` in f32 in the device's unit order without compensation.
-fn plain_fixed_order_dot(a: &[f32], b: &[f32]) -> f64 {
-    let mut partial = [0.0f32; 256];
-    for (k, (ga, gb)) in a.chunks(6).zip(b.chunks(6)).enumerate() {
-        for (x, y) in ga.iter().zip(gb) {
-            partial[k % 256] += x * y;
-        }
-    }
-    let mut stride = 128;
-    while stride > 0 {
-        for u in 0..stride {
-            partial[u] += partial[u + stride];
-        }
-        stride /= 2;
-    }
-    f64::from(partial[0])
-}
+/// A PCG scalar sum.
+type Dot = fn(&[f32], &[f32]) -> f64;
 
 /// The host PCG on the reduced system, with the scalar sums of `dot`.
 struct HostLane {
     name: &'static str,
-    dot: fn(&[f32], &[f32]) -> f64,
+    dot: Dot,
 }
 
 impl PcgLane<f32> for HostLane {
@@ -96,21 +84,16 @@ impl PcgLane<f32> for HostLane {
 }
 
 fn host_lane(lane: &str) -> Option<HostLane> {
-    let dot: fn(&[f32], &[f32]) -> f64 = match lane {
-        "host64" => |a, b| {
+    let (name, dot): (&'static str, Dot) = match lane {
+        "host64" => ("host64", |a, b| {
             a.iter()
                 .zip(b)
                 .map(|(x, y)| f64::from(*x) * f64::from(*y))
                 .sum()
-        },
-        "host32" => plain_fixed_order_dot,
-        "hostcomp" => |a, b| f64::from(fixed_order_dot(a, b)),
+        }),
+        "host32" => ("host32", |a, b| f64::from(plain_fixed_order_dot(a, b))),
+        "hostcomp" => ("hostcomp", |a, b| f64::from(fixed_order_dot(a, b))),
         _ => return None,
-    };
-    let name = match lane {
-        "host64" => "host64",
-        "host32" => "host32",
-        _ => "hostcomp",
     };
     Some(HostLane { name, dot })
 }
@@ -121,7 +104,6 @@ struct Run {
     report: GbaReport,
     wall: f64,
     solved: GbaProblem<f64>,
-    device_bytes: usize,
     longest_section_s: f64,
     pool: Option<(u64, u64)>,
     load_before: String,
@@ -135,7 +117,7 @@ fn run(export: &Export, lane: &str, threads: usize, options: &GbaOptions) -> Run
     let load_before = loadavg();
     let mut solved = export.problem.clone();
     let start = Instant::now();
-    let (mut device_bytes, mut longest_section_s, mut memory) = (0, 0.0, None);
+    let (mut longest_section_s, mut memory) = (0.0, None);
     let report = if lane == "cpu64" {
         let (mut centred, centroid) = export.problem.centred::<f64>();
         let report =
@@ -155,7 +137,6 @@ fn run(export: &Export, lane: &str, threads: usize, options: &GbaOptions) -> Run
             solve_global_with(&mut centred, &export.rig, options, Some(&pool), lane).unwrap();
         solved.uncentre_from(&centred, &centroid);
         if let Some(d) = &device {
-            device_bytes = d.peak_device_bytes();
             longest_section_s = d.longest_section_s();
             let usage = gpu_client().unwrap().memory_usage().unwrap();
             memory = Some((usage.bytes_reserved, usage.bytes_in_use));
@@ -167,7 +148,6 @@ fn run(export: &Export, lane: &str, threads: usize, options: &GbaOptions) -> Run
         report,
         wall: start.elapsed().as_secs_f64(),
         solved,
-        device_bytes,
         longest_section_s,
         pool: memory,
         load_before,
@@ -188,7 +168,7 @@ fn line(seq: &str, threads: usize, r: &Run) -> String {
     format!(
         "LANE seq={seq} lane={} threads={threads} wall_s={:.3} stage1_s={:.3} stage2_s={:.3} upload_s={upload:.3} \
          cg_s={:.3} cg_its={its} cg_ms_per_it={:.3} backsub_s={:.3} eval_s={:.3} syncs={} longest_section_ms={:.3} \
-         lm={} accepted={} cost={:.6e} termination={:?} dropped_rows={} bound_mb={:.1} pool_reserved_mb={:.1} \
+         lm={} accepted={} cost={:.6e} termination={:?} dropped_rows={} pool_reserved_mb={:.1} \
          pool_in_use_mb={:.1} load_before=[{}] load_after=[{}]",
         r.lane,
         r.wall,
@@ -209,7 +189,6 @@ fn line(seq: &str, threads: usize, r: &Run) -> String {
         r.report.final_cost.error,
         r.report.termination,
         r.report.dropped_rows,
-        r.device_bytes as f64 / 1e6,
         reserved as f64 / 1e6,
         in_use as f64 / 1e6,
         r.load_before,
