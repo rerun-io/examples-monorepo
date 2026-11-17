@@ -56,7 +56,10 @@
 //!    chordal bearing error. Then the IMU is re-integrated at the new biases,
 //!    every candidate track is re-triangulated and scored, tracks above the
 //!    outlier threshold are dropped (or re-admitted), and the refinement runs
-//!    again until the inlier set and the biases are stable.
+//!    again until the inlier set and the biases are stable. A refinement that
+//!    stalls or runs out of iterations, a point that the observations do not
+//!    determine, or an information matrix that is not positive definite
+//!    rejects the window; nothing is clamped into a confident number.
 //! 5. **Gates after solving**: inlier count, conditioning of the reduced
 //!    linear system and the relative speed (scale) uncertainty, bearing RMS,
 //!    and the unconstrained `|g|` of the closed form at the refined biases.
@@ -139,7 +142,7 @@ mod tests;
 
 use kornia_staging_algebra::lie::{RigidTransform, Rotation3};
 use linear::{Camera, ConsensusParams, TrackBlock};
-use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3, Vector6};
+use nalgebra::{DMatrix, DVector, Quaternion, UnitQuaternion, Vector3, Vector6};
 pub use preintegration::sample_at;
 use preintegration::{preintegrate, Preintegrated};
 
@@ -350,8 +353,22 @@ pub enum RejectReason {
         /// Unconstrained `|g|`, m/s^2.
         gravity_norm: f64,
     },
-    /// The solve failed numerically, or the refine and re-score passes ended without a stable inlier set.
+    /// The solve failed numerically, the last refinement did not converge
+    /// ([`InitQuality::refinement`]), or the refine and re-score passes ended
+    /// without a stable inlier set.
     NotConverged,
+}
+
+/// How the last Levenberg-Marquardt refinement ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefineOutcome {
+    /// The cost stopped decreasing beyond rounding: the state is a minimum.
+    Converged,
+    /// No damping decreased the cost although the model predicted a decrease:
+    /// the search failed short of a minimum.
+    Stalled,
+    /// The iteration limit came first.
+    IterationLimit,
 }
 
 /// The verdict on a window.
@@ -408,8 +425,8 @@ pub struct InitQuality {
     pub gravity_norm_unconstrained: Option<f64>,
     /// Relative 1-sigma of `|v0|` from the refinement's information matrix.
     pub scale_sigma: Option<f64>,
-    /// Refinement converged.
-    pub converged: bool,
+    /// How the last refinement ended; `None` when none ran.
+    pub refinement: Option<RefineOutcome>,
 }
 
 /// The verdict, the solution when the solve got that far, and its quality.
@@ -541,6 +558,33 @@ fn parallax(
     min_cos.clamp(-1.0, 1.0).acos()
 }
 
+/// Relative 1-sigma of the speed `|v0|`: `sqrt(sigma2 d^T C_vv d) / |v0|`,
+/// with `d` the velocity direction and `C_vv` the velocity block of the
+/// inverse of `information` (velocity first), by a Cholesky solve.
+///
+/// `None` when `information` is not positive definite (rank-deficient or
+/// indefinite), or when a number on the way is not finite, so a NaN variance
+/// is never read as a confident scale. A zero speed has no relative sigma:
+/// infinity.
+fn scale_sigma(information: &DMatrix<f64>, velocity: &Vector3<f64>, sigma2: f64) -> Option<f64> {
+    if !information.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let factor = information.clone().cholesky()?;
+    let speed: f64 = velocity.norm();
+    if speed == 0.0 {
+        return Some(f64::INFINITY);
+    }
+    let mut direction: DVector<f64> = DVector::zeros(information.nrows());
+    direction
+        .fixed_rows_mut::<3>(0)
+        .copy_from(&(velocity / speed));
+    // d^T (L L^T)^-1 d = |L^-1 d|^2: never negative.
+    let whitened: DVector<f64> = factor.l().solve_lower_triangular(&direction)?;
+    let sigma: f64 = (whitened.norm_squared() * sigma2).sqrt() / speed;
+    sigma.is_finite().then_some(sigma)
+}
+
 /// A candidate track: owned, normalised, sorted observations.
 struct Candidate {
     id: u64,
@@ -582,7 +626,7 @@ pub fn solve_inertial_init(
         condition: None,
         gravity_norm_unconstrained: None,
         scale_sigma: None,
-        converged: false,
+        refinement: None,
     };
     let reject = |reason: RejectReason, quality: InitQuality, solution: Option<InertialInit>| {
         Ok(InertialInitOutcome {
@@ -760,7 +804,7 @@ pub fn solve_inertial_init(
     // Quality at the final state.
     let used: Vec<usize> = (0..candidates.len()).filter(|&i| inlier[i]).collect();
     quality.tracks_used = used.len();
-    quality.converged = refined.converged;
+    quality.refinement = Some(refined.outcome);
     let poses = linear::poses(&preint, &velocity, &gravity, &bias_gyro, &bias_accel);
     let mut all_angles: Vec<f64> = Vec::new();
     for &i in &used {
@@ -781,24 +825,17 @@ pub fn solve_inertial_init(
     }
     // Scale sigma: velocity block of the inverse reduced information, with
     // the residual variance estimated from the robust cost.
-    let dof: f64 = (2 * refined.observations) as f64
-        - 3.0 * used.len() as f64
-        - refined.information.nrows() as f64;
+    let dof: f64 =
+        (2 * refined.observations) as f64 - 3.0 * used.len() as f64 - refine::MAX_Y as f64;
     let sigma2: f64 = if dof > 0.0 {
         refined.data_cost / dof
     } else {
         f64::INFINITY
     };
-    let speed: f64 = velocity.norm();
-    quality.scale_sigma = refined.information.clone().try_inverse().map(|cov| {
-        let c_vv: Matrix3<f64> = cov.fixed_view::<3, 3>(0, 0).into_owned() * sigma2;
-        if speed > 0.0 {
-            let dir: Vector3<f64> = velocity / speed;
-            (dir.dot(&(c_vv * dir))).max(0.0).sqrt() / speed
-        } else {
-            f64::INFINITY
-        }
-    });
+    quality.scale_sigma = refined
+        .information
+        .as_ref()
+        .and_then(|information| scale_sigma(information, &velocity, sigma2));
 
     let world_from_body0: Rotation3<f64> = world_from_gravity(&gravity);
     let solution = InertialInit {
@@ -832,7 +869,8 @@ pub fn solve_inertial_init(
         .chain(gravity.iter())
         .chain(bias_gyro.iter())
         .all(|v| v.is_finite());
-    let verdict: InitVerdict = if !finite || !settled {
+    let verdict: InitVerdict = if !finite || !settled || refined.outcome != RefineOutcome::Converged
+    {
         InitVerdict::Rejected(RejectReason::NotConverged)
     } else if used.len() < options.min_tracks {
         InitVerdict::Rejected(RejectReason::TooFewTracks {
