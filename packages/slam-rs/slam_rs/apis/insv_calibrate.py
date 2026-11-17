@@ -449,10 +449,10 @@ def print_report(report: CalibrationReport, offsets_ms: tuple[float, ...]) -> No
         print("| offset (ms) | " + " | ".join(f"{scan.start_s:.0f} s" for scan in report.scans) + " |")
         print("|---|" + "---|" * len(report.scans))
         for index, offset in enumerate(offsets_ms):
-            cells: list[str] = [
-                "-" if scan.residual_rad[index] is None else f"{1e3 * scan.residual_rad[index]:.3f}{'' if scan.verdicts[index] == 'Accepted' else '*'}"
-                for scan in report.scans
-            ]
+            cells: list[str] = []
+            for scan in report.scans:
+                value: float | None = scan.residual_rad[index]
+                cells.append("-" if value is None else f"{1e3 * value:.3f}{'' if scan.verdicts[index] == 'Accepted' else '*'}")
             print(f"| {offset:+.1f} | " + " | ".join(cells) + " |")
         minima: list[str] = ["-" if value is None else f"{value:+.2f}" for value in (scan.minimum_ms() for scan in report.scans)]
         mean_ms, spread_ms = offset_summary(report.scans)
