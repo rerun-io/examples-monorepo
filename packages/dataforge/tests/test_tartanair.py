@@ -125,7 +125,7 @@ def test_every_kept_frame_has_an_imu_sample_strictly_after_it(
     frames, imu = aligned_window(num_frames=num_frames, num_imu=num_imu, frame_limit=frame_limit)
     np.testing.assert_array_equal(frames, expected_frames)
     assert (imu.start, imu.stop) == expected_imu
-    assert IMU_TRIM <= imu.start and imu.stop <= num_imu - IMU_TRIM  # inside the trimmed source
+    assert imu.start >= IMU_TRIM and imu.stop <= num_imu - IMU_TRIM  # inside the trimmed source
     assert imu.start * IMU_PERIOD_NS <= frames[0] * FRAME_PERIOD_NS  # a sample at or before the first frame
     assert (imu.stop - 1) * IMU_PERIOD_NS > frames[-1] * FRAME_PERIOD_NS  # and one strictly after the last
 
