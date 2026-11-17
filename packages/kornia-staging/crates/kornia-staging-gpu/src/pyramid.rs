@@ -539,6 +539,11 @@ enum Ingest {
     Packed,
     /// The bytes are two lens images; level 0 of each tile is gathered from its lens's level 1.
     Lenses(Box<LensIngest>),
+    /// The bytes are full-size camera images; level 0 of each pyramid is their fused-ingest level 1.
+    Half {
+        full: ImageSize,
+        unused_level0: cubecl::server::Handle,
+    },
 }
 
 /// The bindings of the lens reduction and the gather.
@@ -601,6 +606,23 @@ impl PyramidLaunch {
                     cameras,
                 );
             }
+        }
+        if let Ingest::Half {
+            full,
+            unused_level0,
+        } = &ingest
+        {
+            kernels::launch_ingest(
+                client,
+                (handle, *len),
+                (unused_level0, 2),
+                buffers[0],
+                full.width,
+                full.height,
+                false,
+                strides[0],
+                cameras,
+            );
         }
         for pair in levels.windows(2) {
             let [source, target] = [pair[0], pair[1]];
@@ -688,6 +710,42 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
         let expected =
             (first.levels[0].width * first.levels[0].height * out.len()).next_multiple_of(4);
         self.prepare_batch(packed, sizes, expected, out, Ingest::Packed)
+    }
+
+    /// Upload full-size u8 camera images and prepare pyramids whose level 0 is each image reduced
+    /// by two: the 5x5 reduction the packed ingest gives level 1, so these pyramids equal levels 1
+    /// and up of the full-size ones. Lets a rig with large lenses track at half resolution.
+    /// Returns `None` when the geometry or binding limits require individual builds.
+    ///
+    /// # Arguments
+    /// * `packed` - Contiguous full-size camera pixels, padded to a four-byte length.
+    /// * `full` - The size of every camera image; each pyramid's level 0 is its floor-halved size.
+    /// * `out` - Matching persistent pyramids on this device.
+    ///
+    /// # Errors
+    /// Returns geometry or packed-length mismatches and typed device failures.
+    pub fn prepare_half(
+        &mut self,
+        packed: &bytes::Bytes,
+        full: ImageSize,
+        out: &mut [GpuPyramid<R>],
+    ) -> Result<Option<PyramidLaunch>, PyramidError> {
+        let half = ImageSize {
+            width: full.width / 2,
+            height: full.height / 2,
+        };
+        let expected = (full.width * full.height * out.len()).next_multiple_of(4);
+        let ingest = Ingest::Half {
+            full,
+            unused_level0: self.client.empty(2 * size_of::<u16>()),
+        };
+        self.prepare_batch(
+            packed,
+            std::iter::repeat_n(half, out.len()),
+            expected,
+            out,
+            ingest,
+        )
     }
 
     /// Upload two lens images and prepare the two tile pyramids the stitch fills from them.

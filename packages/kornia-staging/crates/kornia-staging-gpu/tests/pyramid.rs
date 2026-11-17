@@ -306,3 +306,58 @@ fn dense_batches_reject_mismatched_camera_counts() {
 }
 
 use kornia_staging_imgproc::test_fixtures::packed_texture;
+
+#[test]
+fn half_ingest_pyramids_are_the_full_pyramid_from_level_one() {
+    let client = gpu_client().unwrap();
+    let mut builder = GpuPyramidBuilder::new(client.clone());
+    for (width, height) in [(640, 480), (130, 98)] {
+        let full = ImageSize { width, height };
+        let mut pyramids: Vec<_> = (0..2)
+            .map(|_| builder.allocate(width / 2, height / 2, LEVELS).unwrap())
+            .collect();
+        let images: Vec<_> = (0..2)
+            .map(|camera| packed_texture(width, height, (camera * 7) as f32, camera as f32))
+            .collect();
+        let mut bytes: Vec<u8> = images
+            .iter()
+            .flat_map(|image| image.as_slice().iter().map(|&v| (v >> 8) as u8))
+            .collect();
+        bytes.resize(bytes.len().next_multiple_of(4), 0);
+        let work = builder
+            .prepare_half(&bytes::Bytes::from(bytes), full, &mut pyramids)
+            .unwrap()
+            .unwrap();
+        // SAFETY: This is the same client used to prepare the batch.
+        unsafe {
+            work.run(&client);
+        }
+        let mut actual: Image<u16, 1> = Image::from_size_val(
+            ImageSize {
+                width: 0,
+                height: 0,
+            },
+            0u16,
+        )
+        .unwrap();
+        for (camera, image) in images.iter().enumerate() {
+            let mut expected = PyramidPlanU16::new(full, LEVELS + 1).unwrap();
+            expected.run(image).unwrap();
+            for level in 0..LEVELS {
+                let want = &expected.levels()[level + 1];
+                assert_eq!(
+                    pyramids[camera].level_size(level),
+                    Some(want.size()),
+                    "{width}x{height} camera {camera} level {level}"
+                );
+                pyramids[camera]
+                    .read_level_into(level, &mut actual)
+                    .unwrap();
+                assert!(
+                    actual.as_slice() == want.as_slice(),
+                    "{width}x{height} camera {camera} level {level} differs"
+                );
+            }
+        }
+    }
+}
