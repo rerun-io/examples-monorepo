@@ -88,15 +88,15 @@ def test_an_unknown_overlay_key_is_rejected(tmp_path: Path, overlay: str, reject
         replace(settings, package_root=tmp_path).vio_config_text(dataset.name, profile="fast")
 
 
-@pytest.mark.parametrize("mode", ["offline", "realtime"])
-def test_the_back_end_overlay_turns_the_map_on_and_keeps_every_other_key(mode: Literal["offline", "realtime"]) -> None:
+@pytest.mark.parametrize("mode", ["off", "offline", "realtime"])
+def test_the_back_end_overlay_sets_the_map_and_keeps_every_other_key(mode: Literal["off", "offline", "realtime"]) -> None:
     from slam_rs import _core
     from slam_rs.config import with_back_end
 
-    base: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"config.vio_max_iterations": 3}}')
+    base: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"config.vio_max_iterations": 3, "backend.mode": "realtime"}}')
     values: dict = json.loads(with_back_end(base, mode).to_json())["value0"]
-    assert values.pop("backend.enabled") is True
-    assert values.pop("backend.mode") == mode
+    assert values.pop("backend.enabled") is (mode != "off")
+    assert values.pop("backend.mode") == ("realtime" if mode == "off" else mode)
     original: dict = json.loads(base.to_json())["value0"]
     original.pop("backend.enabled")
     original.pop("backend.mode")
@@ -104,7 +104,7 @@ def test_the_back_end_overlay_turns_the_map_on_and_keeps_every_other_key(mode: L
 
 
 def test_the_live_profiles_run_the_back_end_realtime_and_the_scoring_profiles_offline() -> None:
-    """DESIGN §8: gates and scoring step the map inline; live use gives it its own thread (when ``backend.enabled``)."""
+    """DESIGN §8: gates and scoring step the map inline; live use gives it its own thread."""
     from slam_rs import _core
 
     settings: SlamConfig = load_slam_config()

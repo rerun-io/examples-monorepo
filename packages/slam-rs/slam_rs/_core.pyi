@@ -406,7 +406,7 @@ class Vio:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
     def map_snapshot(self) -> MapSnapshot | None:
-        """A copy of the persistent keyframe map and the back end's counters; None when ``backend.enabled`` is off (the default).
+        """A copy of the persistent keyframe map and the back end's counters; None when ``backend.enabled`` is off (it is on by default).
 
         Current up to the last solved keyframe the back end has taken. In Realtime (``backend.mode``) the back-end
         thread may still hold newer stamps; :meth:`flush` waits for them. In Realtime this waits for the step in

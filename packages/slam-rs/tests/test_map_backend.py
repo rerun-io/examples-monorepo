@@ -1,4 +1,4 @@
-"""The persistent keyframe map through the Python boundary: off by default, on in either mode, and invisible to the poses."""
+"""The persistent keyframe map through the Python boundary: on and Offline by default, either mode on request, off on request, and invisible to the poses."""
 
 import json
 
@@ -39,9 +39,9 @@ def _run(rig: RigFactory, texture: TextureFactory, mode: str | None) -> tuple[li
     return poses, vio
 
 
-def test_the_back_end_is_off_and_offline_by_default() -> None:
+def test_the_back_end_is_on_and_offline_by_default() -> None:
     values: dict = json.loads(_core.VioConfig().to_json())["value0"]
-    assert values["backend.enabled"] is False
+    assert values["backend.enabled"] is True
     assert values["backend.mode"] == "offline"
 
 

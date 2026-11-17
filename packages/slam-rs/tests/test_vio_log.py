@@ -492,11 +492,10 @@ def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logge
 def test_the_map_is_drawn_under_the_run_when_a_keyframe_joins(
     rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """With the back end on, the map's keyframes and points land under the run (DESIGN §8), once per new keyframe."""
+    """With the back end on (the default), the map's keyframes and points land under the run (DESIGN §8), once per new keyframe."""
     assert MAP_KEYFRAMES_ENTITY == "/world/runs/slam_rs/keyframes"
     assert MAP_POINTS_ENTITY == "/world/runs/slam_rs/map/points"
-    config: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"backend.enabled": true}}')
-    vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig(), backend="cpu")
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "map.rrd", read_rows)
     keyframe_rows: list[Row] = logged.rows[MAP_KEYFRAMES_ENTITY]
@@ -513,6 +512,13 @@ def test_the_map_is_drawn_under_the_run_when_a_keyframe_joins(
     assert np.isfinite(np.asarray(last_points["Points3D:positions"], dtype=np.float64)).all()
 
 
-def test_no_map_is_drawn_with_the_back_end_off(logged: Logged) -> None:
+def test_no_map_is_drawn_with_the_back_end_off(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    config: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"backend.enabled": false}}')
+    vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "off.rrd", read_rows)
+    assert len(logged.tracked) >= FRAMESETS - 2
     assert MAP_KEYFRAMES_ENTITY not in logged.rows
     assert MAP_POINTS_ENTITY not in logged.rows
