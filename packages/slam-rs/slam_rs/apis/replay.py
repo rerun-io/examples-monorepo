@@ -1,5 +1,7 @@
 """Replay catalog or local recordings through the Rust core and log ground-truth comparisons."""
 
+import dataclasses
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +77,16 @@ class Config:
     """
     decode_device: DecodeRequest = "auto"
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
+    vio_bootstrap: Literal["stereo", "inertial", "auto"] | None = None
+    """Override ``config.vio_bootstrap``: how the estimator gets its first state. None keeps the dataset config's."""
+    blank_cameras: tuple[int, ...] = ()
+    """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording.
+
+    A stereo-off switch is not a valid proxy (DESIGN H3): stereo observations
+    would still reach the estimator and give it metric scale. Black images give
+    the frontend nothing to detect or track, and the run fails if a blanked
+    camera ever reports a keypoint.
+    """
 
 
 @dataclass(slots=True)
@@ -138,6 +150,11 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         if config.max_framesets is not None and replayed >= config.max_framesets:
             break
         replayed += 1
+        if config.blank_cameras:
+            frameset = dataclasses.replace(
+                frameset,
+                images=[np.zeros_like(image) if index in config.blank_cameras else image for index, image in enumerate(frameset.images)],
+            )
         log_frameset_inputs(feed, frameset, mode)
         if stage is not None:
             stage.run(frameset)
@@ -166,6 +183,8 @@ def main(config: Config) -> None:
         vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
         vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+    if config.vio_bootstrap is not None:
+        vio_config.vio_bootstrap = config.vio_bootstrap
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -209,7 +228,11 @@ def main(config: Config) -> None:
             # non-zero exit rather than a traceback through the feed.
             vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend)
             print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
+            unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
+            if unknown:
+                raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
             stage = VioStage(
+                blank_cameras=tuple(config.blank_cameras),
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(
                     cameras=feed.cameras,
@@ -225,6 +248,29 @@ def main(config: Config) -> None:
         # where it went, at every cursor and for one copy of each path.
         stage.logger.log_complete_paths()
         stage.refuse_lost_framesets()
+
+        if stage.blank_cameras:
+            print(f"blanked cameras {list(stage.blank_cameras)}: {stage.blank_keypoints} keypoints over the run")
+            if stage.blank_keypoints:
+                raise SystemExit(f"blanked cameras {list(stage.blank_cameras)} reported {stage.blank_keypoints} keypoints: not a mono proxy")
+        report_text: str | None = stage.lockstep.vio.bootstrap_report()
+        if report_text is not None:
+            report_path: Path = output_csv.with_suffix(".bootstrap.json")
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(report_text)
+            report: dict = json.loads(report_text)
+            verdicts: list[str] = [attempt["verdict"].split(" ")[0] for attempt in report["attempts"]]
+            start: int | None = report["start_t_ns"]
+            print(
+                f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; "
+                + (
+                    f"started at {(start - int(feed.frame_t_ns[0])) * 1e-9:.2f} s, first pose at "
+                    f"{(report['accepted_at_t_ns'] - int(feed.frame_t_ns[0])) * 1e-9:.2f} s, {report['replayed']} framesets replayed"
+                    if start is not None
+                    else "no window accepted"
+                )
+                + f" -> {report_path}"
+            )
 
         estimate: Trajectory = stage.logger.estimated()
         write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))

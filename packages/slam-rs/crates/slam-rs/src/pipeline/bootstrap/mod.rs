@@ -551,6 +551,16 @@ impl InertialBootstrap {
         let t_ns: i64 = frame.t_ns;
         let first_ever: i64 = *self.first_t_ns.get_or_insert(t_ns);
         self.frames.push_back(frame);
+        // A window starts where the IMU does: the solver integrates from its
+        // first frameset.
+        let imu_start: Option<i64> = self.imu.front().map(|s| s.timestamp_ns);
+        while self
+            .frames
+            .front()
+            .is_some_and(|f| imu_start.is_none_or(|start| f.t_ns < start))
+        {
+            self.frames.pop_front();
+        }
         self.trim_imu();
         let first: i64 = self.frames.front().map_or(t_ns, |f| f.t_ns);
         if t_ns - first < self.window_ns {
