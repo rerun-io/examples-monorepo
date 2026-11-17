@@ -176,15 +176,13 @@ fn device_probe() -> Result<(), ProbeError> {
 }
 
 /// The back end's probe: the cached device validation, then the GBA round
-/// trip (`kornia_staging_gpu::linalg::probe_pcg`) in an exclusive section.
+/// trip (`kornia_staging_gpu::linalg::probe_pcg`, which holds its own
+/// exclusive sections).
 fn back_end_probe() -> Result<(), ProbeError> {
     #[cfg(feature = "gpu-wgpu")]
     {
         kornia_staging_gpu::runtime::default_capabilities()?;
-        let client = kornia_staging_gpu::runtime::gpu_client()?;
-        kornia_staging_gpu::transfer::execute_exclusive(&client, "the back-end probe", || {
-            kornia_staging_gpu::linalg::probe_pcg(&client)
-        })
+        kornia_staging_gpu::linalg::probe_pcg(&kornia_staging_gpu::runtime::gpu_client()?)
     }
     #[cfg(not(feature = "gpu-wgpu"))]
     {
@@ -245,15 +243,35 @@ where
     M: Fn(&E),
 {
     let frontend: Backend = frontend.select(request)?;
-    let as_request: BackendRequest = match (gba_request, frontend) {
+    Ok(Backends {
+        frontend,
+        gba: gba_lane(gba, frontend, gba_request)?,
+    })
+}
+
+/// The GBA lane for a chosen frontend.
+fn gba_lane<E, Q, M>(
+    gba: &Selector<E, Q, M>,
+    frontend: Backend,
+    request: GbaRequest,
+) -> Result<Backend, E>
+where
+    E: Clone,
+    Q: Fn() -> Result<(), E>,
+    M: Fn(&E),
+{
+    gba.select(match (request, frontend) {
         (GbaRequest::Follow, Backend::Gpu) => BackendRequest::Auto,
         (GbaRequest::Follow, Backend::Cpu) | (GbaRequest::Cpu, _) => BackendRequest::Cpu,
         (GbaRequest::Gpu, _) => BackendRequest::Gpu,
-    };
-    Ok(Backends {
-        frontend,
-        gba: gba.select(as_request)?,
     })
+}
+
+/// The GBA lane that follows a frontend chosen without [`select_backend`]
+/// ([`Vio::with_backend`], the RoboCap paths): the GPU when the frontend runs
+/// there and [`probe_back_end`] passes, otherwise the CPU (one warning).
+pub fn follow_frontend(frontend: Backend) -> Backend {
+    gba_lane(&GBA_SELECTOR, frontend, GbaRequest::Follow).unwrap_or(Backend::Cpu)
 }
 
 /// Check that the GPU frontend can run on this host.
@@ -304,6 +322,19 @@ pub fn device_probes_run() -> usize {
     #[cfg(feature = "gpu-core")]
     {
         kornia_staging_gpu::runtime::capability_probes_run()
+    }
+    #[cfg(not(feature = "gpu-core"))]
+    {
+        0
+    }
+}
+
+/// How many GBA round trips ([`probe_back_end`]) this process has run, counted
+/// apart from [`device_probes_run`] (0 in a build without the GPU feature).
+pub fn gba_probes_run() -> usize {
+    #[cfg(feature = "gpu-core")]
+    {
+        kornia_staging_gpu::linalg::pcg_round_trips_run()
     }
     #[cfg(not(feature = "gpu-core"))]
     {

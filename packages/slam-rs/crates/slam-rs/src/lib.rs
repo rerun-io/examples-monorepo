@@ -10,7 +10,7 @@ mod pipeline;
 pub use pipeline::{
     Backend, BackendRequest, Backends, FrontendLane, FrontendTimings, GbaRequest, ImageView,
     OverlapTimings, PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
-    device_probes_run, gpu_probe, probe_back_end, select_backend,
+    device_probes_run, follow_frontend, gba_probes_run, gpu_probe, probe_back_end, select_backend,
 };
 
 pub mod ba_base;

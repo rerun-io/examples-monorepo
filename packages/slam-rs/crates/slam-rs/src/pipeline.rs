@@ -12,8 +12,8 @@ pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioRe
 pub use lane::FrontendLane;
 use lane::build_frontend;
 pub use select::{
-    BackendRequest, Backends, GbaRequest, device_probes_run, gpu_probe, probe_back_end,
-    select_backend,
+    BackendRequest, Backends, GbaRequest, device_probes_run, follow_frontend, gba_probes_run,
+    gpu_probe, probe_back_end, select_backend,
 };
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
@@ -81,6 +81,8 @@ pub struct Vio<S: Scalar = f32> {
     /// by the Realtime query cap.
     #[cfg(feature = "backend")]
     image_slots: crate::estimator::ImageSlots,
+    /// Where the global BA's PCG runs.
+    gba_lane: Backend,
 }
 
 pub use lag::OverlapTimings;
@@ -123,7 +125,9 @@ impl<S: Scalar> Vio<S> {
         Self::with_backend(config, calibration, options, Backend::Cpu)
     }
 
-    /// The same pipeline on a named frontend backend (decision D21).
+    /// The same pipeline on a named frontend backend (decision D21). With
+    /// `backend.enabled`, the global BA's PCG follows the frontend
+    /// ([`follow_frontend`], DESIGN Q2/Q7).
     ///
     /// # Errors
     ///
@@ -136,20 +140,24 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
+        let gba: Backend = if config.backend_enabled {
+            follow_frontend(backend)
+        } else {
+            Backend::Cpu
+        };
         Self::with_backends(
             config,
             calibration,
             options,
             Backends {
                 frontend: backend,
-                gba: Backend::Cpu,
+                gba,
             },
         )
     }
 
-    /// [`Self::with_backend`] with the global BA's PCG lane as well
-    /// ([`select_backend`] resolves both; [`Self::with_backend`] keeps the GBA on
-    /// the CPU).
+    /// [`Self::with_backend`] with the global BA's PCG lane named as well
+    /// ([`select_backend`] resolves both).
     ///
     /// # Errors
     /// As [`Self::with_backend`].
@@ -224,6 +232,7 @@ impl<S: Scalar> Vio<S> {
             lagged_frames: None,
             #[cfg(feature = "backend")]
             image_slots: crate::estimator::ImageSlots::new(query_cap),
+            gba_lane: backends.gba,
         })
     }
 
@@ -389,6 +398,11 @@ impl<S: Scalar> Vio<S> {
     /// Which frontend backend this pipeline runs.
     pub fn backend(&self) -> Backend {
         self.frontend.backend()
+    }
+
+    /// Where the global BA's PCG runs.
+    pub fn gba_lane(&self) -> Backend {
+        self.gba_lane
     }
 
     /// What the frontend lane cost on the last frameset that ran it.

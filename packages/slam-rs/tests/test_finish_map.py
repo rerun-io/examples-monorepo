@@ -107,9 +107,10 @@ def test_a_rig_the_gba_cannot_project_is_refused_before_any_frame(rig: RigFactor
 def test_ba_backend_is_parsed_and_a_cpu_frontend_never_probes_for_it(rig: RigFactory) -> None:
     """``ba_backend`` takes ``follow``, ``cpu`` or ``gpu``; on a CPU frontend ``follow`` keeps the GBA on the CPU without the back-end probe."""
     probes: int = _core.device_probes_run()
-    _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu", ba_backend="follow")
+    follow: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu", ba_backend="follow")
     _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu", ba_backend="cpu")
     assert _core.device_probes_run() == probes
+    assert (follow.backend, follow.gba_lane) == ("cpu", "cpu")
     with pytest.raises(ValueError, match="expected follow, cpu or gpu"):
         _core.Vio(rig(2), _core.VioConfig(), backend="cpu", ba_backend="auto")  # type: ignore[arg-type]
 

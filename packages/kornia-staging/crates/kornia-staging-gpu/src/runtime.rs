@@ -193,13 +193,7 @@ pub fn guarded<T, E: From<GpuError>>(
 /// Capability probes (storage or subgroup) run by this process so far.
 static CAPABILITY_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Count one capability probe (the back end's PCG round trip counts too).
-pub(crate) fn count_capability_probe() {
-    CAPABILITY_PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// How many capability probes ([`probe_storage`], [`probe_subgroups`],
-/// [`crate::linalg::probe_pcg`]) this
+/// How many capability probes ([`probe_storage`], [`probe_subgroups`]) this
 /// process has run. Lets a caller prove that repeated construction on a
 /// validated device runs no new probes.
 pub fn capability_probes_run() -> usize {

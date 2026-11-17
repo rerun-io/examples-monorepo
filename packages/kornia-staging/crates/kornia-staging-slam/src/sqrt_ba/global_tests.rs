@@ -776,4 +776,17 @@ fn a_failing_lane_is_an_error_not_a_fallback() {
         })
     );
     assert_eq!(error.to_string(), "the view PCG lane failed: device lost");
+    // The problem holds the state of the one attempt before the failure.
+    let mut one = problem.clone();
+    let first = GbaOptions {
+        max_iterations: 1,
+        ..GbaOptions::default()
+    };
+    let mut healthy = ViewLane {
+        solves: 0,
+        fail_on: None,
+    };
+    solve_global_with(&mut one, &rig, &first, None, Some(&mut healthy)).unwrap();
+    assert_eq!(p, one);
+    assert_ne!(p, problem, "the first attempt moved nothing");
 }
