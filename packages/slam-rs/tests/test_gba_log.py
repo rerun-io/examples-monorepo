@@ -3,10 +3,10 @@
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
 from fixture_types import RigFactory, Rows, RowsReader, TextureFactory
-import pyarrow as pa
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
