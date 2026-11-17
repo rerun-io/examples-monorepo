@@ -6,7 +6,8 @@ for single LFS archives checked against the Hub's sha256 (hocap), and the resumi
 Every dataset download shares the integrity toolkit: ``FileIntegrity`` (size plus sha256, sha1
 or git blob sha1) with ``content_digest`` / ``matches_file`` / ``verify_file``, one
 ``publish_verified`` (stage, verify, atomic replace), the ``hf_file_info`` adapter and one
-``FetchReport`` for the summary line. Listing, skip rules, what happens to a rejected file and
+``FetchReport`` for the summary line. ``hf_zip`` and ``extract_zip_members`` read chosen members out of a
+pinned zip on the Hub without fetching the whole archive (assembly101, tartanair). Listing, skip rules, what happens to a rejected file and
 whether a partial resumes stay with each dataset.
 """
 
@@ -15,17 +16,20 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import sys
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Literal, NamedTuple
+from pathlib import Path, PurePosixPath
+from typing import IO, Literal, NamedTuple, cast
+from zipfile import ZipFile, ZipInfo
 
 import httpx
 import requests
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+from huggingface_hub import HfApi, HfFileSystem, hf_hub_download, snapshot_download
+from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import RepoFile
 
 HfRepoType = Literal["dataset", "model"]
@@ -243,6 +247,59 @@ def publish_verified(staged: Path, dest: Path, expected: FileIntegrity, *, set_a
         if kept is not None:
             kept.rename(dest)
         raise
+
+
+HF_ZIP_BLOCK_BYTES: int = 16 * 1024 * 1024
+"""Range-read block of ``hf_zip``. Every block is one Hub ``resolve`` call (rate-limited, 3,000 per 5 min per IP) that
+redirects to the CDN, so blocks this size keep a read near one call per 10 MB: measured on TartanAir, 4 calls for
+one trajectory's 1.3 MB of IMU (22 members) and 10 for its 95 MB of one camera (153 members, 5.6 s)."""
+
+
+def hf_zip(filesystem: HfFileSystem, repo_id: str, revision: str, path: str) -> ZipFile:
+    """Range-read a zip of a dataset repo at a pinned revision; only the central directory and the members read move.
+
+    ``HfFileSystem`` retries a failed or rate-limited (429) block a bounded number of times.
+    """
+    handle: object = filesystem.open(f"datasets/{repo_id}@{revision}/{path}", "rb", block_size=HF_ZIP_BLOCK_BYTES)
+    return ZipFile(cast(IO[bytes], handle))
+
+
+def extract_zip_members(archive: ZipFile, members: Iterable[ZipInfo], root: Path, report: FetchReport) -> None:
+    """Write each member to ``root/<member name>`` in archive order through a ``.part`` file.
+
+    A member already on disk at its uncompressed size is skipped, so an interrupted run restarts where it stopped; a
+    partial member restarts from zero. ``zipfile`` checks each member's CRC-32 on the full read.
+
+    Raises:
+        ValueError: A member name leaves ``root``, or a written file's size is not the member's (the file is deleted).
+        zipfile.BadZipFile: A member's CRC does not match.
+    """
+    for info in sorted(members, key=lambda info: info.header_offset):
+        name: PurePosixPath = PurePosixPath(info.filename)
+        if ".." in name.parts or name.is_absolute():
+            raise ValueError(f"zip member {info.filename!r} would land outside {root}")
+        target: Path = root / info.filename
+        integrity: FileIntegrity = FileIntegrity(info.file_size, None, None)
+        if matches_file(target, integrity):
+            report.count(False, info.file_size)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path = target.with_name(f"{target.name}.part")
+        with archive.open(info) as source, temporary.open("wb") as output:
+            shutil.copyfileobj(source, output, length=8 * 1024 * 1024)
+        try:
+            publish_verified(temporary, target, integrity)
+        except IntegrityError as error:
+            temporary.unlink()
+            raise ValueError(f"{error}; deleted") from None
+        report.count(True, info.file_size)
+
+
+def transfer_error(where: str, error: HfHubHTTPError | httpx.HTTPError) -> RuntimeError:
+    """Name the file and the status only: the Hub's own message carries the signed CDN URL of the redirect."""
+    response: httpx.Response | None = error.response if isinstance(error, HfHubHTTPError | httpx.HTTPStatusError) else None
+    status: str = f"HTTP {response.status_code}" if response is not None else "no response"
+    return RuntimeError(f"{where}: {type(error).__name__} ({status})")
 
 
 @dataclass(frozen=True, slots=True)
