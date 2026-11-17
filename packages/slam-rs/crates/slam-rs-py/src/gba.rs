@@ -228,19 +228,29 @@ impl GbaRun {
     /// Wall seconds turning the map into the problem.
     #[getter]
     fn build_s(&self) -> f64 {
-        self.run.seconds.build
+        self.run.build_s
     }
 
-    /// Wall seconds of the solve (centring, LM, uncentring).
+    /// Wall seconds of the solve (centring, LM, uncentring, gauge).
     #[getter]
     fn solve_s(&self) -> f64 {
-        self.run.seconds.solve
+        self.run.solve_s
     }
 
     /// Wall seconds writing the result into the map.
     #[getter]
     fn apply_s(&self) -> f64 {
-        self.run.seconds.apply
+        self.run.apply_s
+    }
+
+    /// How far the free gauge had tilted the solution's world z, degrees,
+    /// before the driver brought it back onto the input poses.
+    #[getter]
+    fn gauge_tilt_deg(&self) -> f64 {
+        self.run.gauge.rotation.matrix()[(2, 2)]
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
     }
 
     /// Worker threads.
@@ -263,7 +273,7 @@ impl GbaRun {
             self.run.report.iterations.len(),
             self.run.report.initial_cost.error,
             self.run.report.final_cost.error,
-            self.run.seconds.solve
+            self.run.solve_s
         )
     }
 }

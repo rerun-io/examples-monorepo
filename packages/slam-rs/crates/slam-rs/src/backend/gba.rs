@@ -2,10 +2,11 @@
 //!
 //! [`MapBackend::finish`] turns the persistent keyframe map into a
 //! [`kornia_staging_slam::sqrt_ba`] global problem ([`map_problem`]), solves it
-//! ([`solve`]: f64 centring, then the f32 or f64 square-root BA), and writes the
-//! result back into the map ([`apply`]). RootSLAM runs the same BA as a separate
-//! process on an exported `map.json` (rootba `bal`, B25); here it runs in
-//! process, on the map the window built.
+//! ([`solve`]: f64 centring, then the f32 or f64 square-root BA), takes the
+//! free gauge out ([`remove_gauge`]) and writes the result back into the map
+//! ([`apply`]). RootSLAM runs the same BA as a separate process on an exported
+//! `map.json` (rootba `bal`, B25); here it runs in process, on the map the
+//! window built.
 //!
 //! The problem, as `bal` runs it:
 //! - one `T_i_w` per map keyframe that has a row; cameras are fixed;
@@ -19,6 +20,11 @@
 //!   the map's own poses, sigmas 0.05 m / 0.01 rad (B21);
 //! - Huber 1 px, `ERROR_VALID`, 20 LM attempts, no pose held constant.
 //!
+//! Neither row kind sees roll, pitch or the origin, so the free gauge lets the
+//! solution turn out of the VIO's gravity frame (up to 0.9 deg on MG). After the
+//! solve, one rigid transform brings it back onto the input poses (DESIGN §3.1,
+//! d2 decision); the cost does not change.
+//!
 //! The window never reads the map, so the raw VIO poses do not change.
 
 use std::collections::BTreeMap;
@@ -27,60 +33,43 @@ use std::time::Instant;
 use kornia_staging_3d::camera::{
     BrownConrady, CameraModelKind, Fisheye624, KannalaBrandt4, Pinhole,
 };
-use kornia_staging_algebra::Scalar;
 use kornia_staging_slam::sqrt_ba::{
     GbaError, GbaLandmark, GbaObservation, GbaOptions, GbaProblem, GbaReport, GbaRigCamera,
     PcgOptions, RelPoseConstraint, solve_global,
 };
-use nalgebra::{Vector2, Vector3, Vector4};
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector2, Vector3, Vector4};
 
 use super::{KeyframeMap, MapBackend, PoseGraphEdge};
 
 use crate::config::VioConfig;
 use crate::landmark::StereographicParam;
-use crate::lie::Se3;
+use crate::lie::{Se3, So3};
 use crate::types::{FrameId, LandmarkId};
 /// The solver's report types, for callers that read a [`GbaRun`].
 pub use kornia_staging_slam::sqrt_ba::{GbaCost, GbaIteration, GbaStageSeconds, GbaTermination};
 
-/// The rig as the global BA sees it: the camera models in both scalars and
-/// `T_i_c`, all fixed.
+/// The rig as the global BA sees it: each camera's model and `T_i_c`, fixed.
+/// The f32 lane casts them in [`solve`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct GbaRig {
-    /// Camera models and extrinsics, f64 lane.
-    pub f64: Vec<GbaRigCamera<f64, CameraModelKind<f64>>>,
-    /// The same in f32 (the default lane).
-    pub f32: Vec<GbaRigCamera<f32, CameraModelKind<f32>>>,
-    /// `T_i_c` per camera.
-    pub t_i_c: Vec<Se3<f64>>,
+    /// Camera models and extrinsics.
+    pub cameras: Vec<GbaRigCamera<f64, CameraModelKind<f64>>>,
 }
 
 impl GbaRig {
     /// A rig from its staged camera models and extrinsics; `None` when the
     /// lists differ in length or a model does not survive the cast to f32.
-    pub fn new(models: Vec<CameraModelKind<f64>>, t_i_c: Vec<Se3<f64>>) -> Option<Self> {
-        if models.len() != t_i_c.len() {
-            return None;
-        }
-        let f32: Vec<GbaRigCamera<f32, CameraModelKind<f32>>> = models
-            .iter()
-            .zip(&t_i_c)
-            .map(|(model, t)| {
-                Some(GbaRigCamera {
-                    model: cast_model(model)?,
-                    imu_from_camera: t.cast(),
-                })
-            })
-            .collect::<Option<_>>()?;
-        let f64 = models
+    pub fn new(models: Vec<CameraModelKind<f64>>, t_i_c: &[Se3<f64>]) -> Option<Self> {
+        let cameras: Vec<GbaRigCamera<f64, CameraModelKind<f64>>> = models
             .into_iter()
-            .zip(&t_i_c)
+            .zip(t_i_c)
             .map(|(model, t)| GbaRigCamera {
                 model,
                 imu_from_camera: *t,
             })
             .collect();
-        Some(Self { f64, f32, t_i_c })
+        (cameras.len() == t_i_c.len() && cameras.iter().all(|c| cast_model(&c.model).is_some()))
+            .then_some(Self { cameras })
     }
 }
 
@@ -103,63 +92,16 @@ fn cast_model(model: &CameraModelKind<f64>) -> Option<CameraModelKind<f32>> {
     })
 }
 
-/// The global BA's knobs (`backend.gba_*`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct GbaSettings {
-    /// LM attempts, accepted or rejected.
-    pub max_iterations: usize,
-    /// PCG iteration cap per attempt.
-    pub cg_max_iterations: usize,
-    /// PCG forcing sequence.
-    pub cg_eta: f64,
-    /// Huber threshold, pixels.
-    pub huber_px: f64,
-    /// Fewest observations for a keyframe's reprojection rows (B22).
-    pub min_obs_per_kf: usize,
-    /// Pose-graph translation sigma, metres.
-    pub sigma_translation: f64,
-    /// Pose-graph rotation sigma, radians.
-    pub sigma_rotation: f64,
-    /// Worker threads.
-    pub threads: usize,
-    /// Solve in f64 instead of f32.
-    pub use_double: bool,
-}
-
-impl Default for GbaSettings {
-    fn default() -> Self {
-        Self::from(&VioConfig::default())
-    }
-}
-
-impl From<&VioConfig> for GbaSettings {
-    fn from(config: &VioConfig) -> Self {
-        Self {
-            max_iterations: config.gba_max_iterations,
-            cg_max_iterations: config.gba_cg_max_iterations,
-            cg_eta: config.gba_cg_eta,
-            huber_px: config.gba_huber_px,
-            min_obs_per_kf: config.gba_min_obs_per_kf,
-            sigma_translation: config.gba_pose_graph_sigma_translation,
-            sigma_rotation: config.gba_pose_graph_sigma_rotation,
-            threads: config.gba_threads.get(),
-            use_double: config.gba_use_double,
-        }
-    }
-}
-
-impl GbaSettings {
-    /// The LM options: rootba `bal`'s, with no pose held constant.
-    pub fn options(&self) -> GbaOptions {
-        GbaOptions {
-            max_iterations: self.max_iterations,
-            pcg: PcgOptions {
-                max_iterations: self.cg_max_iterations,
-                eta: self.cg_eta,
-            },
-            huber_px: self.huber_px,
-            ..GbaOptions::default()
-        }
+/// The LM options from `backend.gba_*`: rootba `bal`'s, no pose held constant.
+pub fn gba_options(config: &VioConfig) -> GbaOptions {
+    GbaOptions {
+        max_iterations: config.gba_max_iterations,
+        pcg: PcgOptions {
+            max_iterations: config.gba_cg_max_iterations,
+            eta: config.gba_cg_eta,
+        },
+        huber_px: config.gba_huber_px,
+        ..GbaOptions::default()
     }
 }
 
@@ -195,17 +137,6 @@ pub struct GbaInput {
     pub counts: GbaCounts,
 }
 
-/// Wall time of the three driver stages, seconds.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct GbaSeconds {
-    /// Map to problem.
-    pub build: f64,
-    /// Centring, cast, LM, uncentring.
-    pub solve: f64,
-    /// Problem back into the map.
-    pub apply: f64,
-}
-
 /// One global BA over the map.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GbaRun {
@@ -213,8 +144,14 @@ pub struct GbaRun {
     pub counts: GbaCounts,
     /// The LM and PCG report (cost per attempt, CG iterations, stage times).
     pub report: GbaReport,
-    /// Driver stage walls.
-    pub seconds: GbaSeconds,
+    /// The rigid transform [`remove_gauge`] applied to the solution.
+    pub gauge: Se3<f64>,
+    /// Wall seconds: map to problem.
+    pub build_s: f64,
+    /// Wall seconds: centring, cast, LM, uncentring and gauge.
+    pub solve_s: f64,
+    /// Wall seconds: problem back into the map.
+    pub apply_s: f64,
     /// Worker threads used.
     pub threads: usize,
     /// Whether it ran in f64.
@@ -248,15 +185,6 @@ pub enum GbaDriverError {
     /// The worker pool could not start.
     #[error("could not start the global BA's threads: {0}")]
     Threads(String),
-}
-
-/// A solved problem in world coordinates.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GbaSolution {
-    /// The problem after the LM loop, uncentred.
-    pub problem: GbaProblem<f64>,
-    /// The LM and PCG report.
-    pub report: GbaReport,
 }
 
 /// A world point as the window stores it: stereographic direction and
@@ -294,7 +222,7 @@ pub fn map_problem(
     map: &KeyframeMap,
     edges: &[PoseGraphEdge],
     t_i_c: &[Se3<f64>],
-    settings: &GbaSettings,
+    config: &VioConfig,
 ) -> GbaInput {
     let keyframes = map.keyframes();
     let mut counts = GbaCounts::default();
@@ -344,7 +272,7 @@ pub fn map_problem(
     let sparse = |frame: &FrameId| {
         per_keyframe
             .get(frame)
-            .is_some_and(|&n| n < settings.min_obs_per_kf)
+            .is_some_and(|&n| n < config.gba_min_obs_per_kf)
     };
     counts.keyframes_without_reprojection =
         per_keyframe.keys().filter(|frame| sparse(frame)).count();
@@ -377,8 +305,8 @@ pub fn map_problem(
                 index[&e.from],
                 index[&e.to],
                 pose(e.from).inverse() * pose(e.to),
-                settings.sigma_translation,
-                settings.sigma_rotation,
+                config.gba_pose_graph_sigma_translation,
+                config.gba_pose_graph_sigma_rotation,
             )
         })
         .collect();
@@ -412,46 +340,99 @@ pub fn map_problem(
     }
 }
 
-/// Centre in f64 on the landmark centroid, solve in the settings' scalar,
-/// uncentre (the `norm` fix: RootSLAM's CI runs `--no-normalize`).
+/// Centre in f64 on the landmark centroid, solve in f32 (or f64 with
+/// `backend.gba_use_double`), uncentre (the `norm` fix: RootSLAM's CI runs
+/// `--no-normalize`). The result is in the solver's free gauge, as rootba
+/// `bal` returns it; [`remove_gauge`] takes that out.
 ///
 /// # Errors
-/// The worker pool cannot start, or the solver refuses the problem.
+/// The worker pool cannot start, a camera model does not cast to f32, or the
+/// solver refuses the problem.
 pub fn solve(
     input: &GbaInput,
     rig: &GbaRig,
-    settings: &GbaSettings,
-) -> Result<GbaSolution, GbaDriverError> {
+    config: &VioConfig,
+) -> Result<(GbaProblem<f64>, GbaReport), GbaDriverError> {
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(settings.threads)
+        .num_threads(config.gba_threads.get())
         .thread_name(|i| format!("slam-rs-gba-{i}"))
         .build()
         .map_err(|e| GbaDriverError::Threads(e.to_string()))?;
-    fn run<S: Scalar>(
-        input: &GbaInput,
-        rig: &[GbaRigCamera<S, CameraModelKind<S>>],
-        options: &GbaOptions,
-        pool: &rayon::ThreadPool,
-    ) -> Result<GbaSolution, GbaDriverError> {
-        let (mut centred, centroid) = input.problem.centred::<S>();
-        let report: GbaReport = solve_global(&mut centred, rig, options, Some(pool))?;
-        let mut problem: GbaProblem<f64> = input.problem.clone();
+    let options: GbaOptions = gba_options(config);
+    let mut problem: GbaProblem<f64> = input.problem.clone();
+    let report: GbaReport = if config.gba_use_double {
+        let (mut centred, centroid) = input.problem.centred::<f64>();
+        let report = solve_global(&mut centred, &rig.cameras, &options, Some(&pool))?;
         problem.uncentre_from(&centred, &centroid);
-        Ok(GbaSolution { problem, report })
-    }
-    let options: GbaOptions = settings.options();
-    if settings.use_double {
-        run(input, &rig.f64, &options, &pool)
+        report
     } else {
-        run(input, &rig.f32, &options, &pool)
+        let cameras: Vec<GbaRigCamera<f32, CameraModelKind<f32>>> = rig
+            .cameras
+            .iter()
+            .map(|c| {
+                Some(GbaRigCamera {
+                    model: cast_model(&c.model)?,
+                    imu_from_camera: c.imu_from_camera.cast(),
+                })
+            })
+            .collect::<Option<_>>()
+            .ok_or(GbaDriverError::NoRig)?;
+        let (mut centred, centroid) = input.problem.centred::<f32>();
+        let report = solve_global(&mut centred, &cameras, &options, Some(&pool))?;
+        problem.uncentre_from(&centred, &centroid);
+        report
+    };
+    Ok((problem, report))
+}
+
+/// Take the free gauge out of a solution: the rigid transform `G` that best
+/// maps the solved `T_w_i` onto the input ones (least squares over the
+/// positions, metres, and the rotation columns, unit vectors; Kabsch), applied
+/// to every solved pose and landmark. Rigid, so no residual and no cost
+/// changes. Returns `G`.
+pub fn remove_gauge(input: &GbaProblem<f64>, solved: &mut GbaProblem<f64>) -> Se3<f64> {
+    let poses = |p: &GbaProblem<f64>| -> Vec<Se3<f64>> {
+        p.imu_from_world.iter().map(Se3::inverse).collect()
+    };
+    let (from, to) = (poses(solved), poses(input));
+    if from.is_empty() {
+        return Se3::identity();
     }
+    let n = from.len() as f64;
+    let mean_from: Vector3<f64> = from.iter().map(|p| p.translation).sum::<Vector3<f64>>() / n;
+    let mean_to: Vector3<f64> = to.iter().map(|p| p.translation).sum::<Vector3<f64>>() / n;
+    let mut h: Matrix3<f64> = Matrix3::zeros();
+    for (a, b) in from.iter().zip(&to) {
+        h += (a.translation - mean_from) * (b.translation - mean_to).transpose()
+            + a.rotation.matrix() * b.rotation.matrix().transpose();
+    }
+    let svd = h.svd(true, true);
+    let (Some(u), Some(v_t)) = (svd.u, svd.v_t) else {
+        return Se3::identity();
+    };
+    let mut d: Matrix3<f64> = Matrix3::identity();
+    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
+    let r: Matrix3<f64> = v_t.transpose() * d * u.transpose();
+    let rotation = So3::from_unit_quaternion(UnitQuaternion::from_rotation_matrix(
+        &Rotation3::from_matrix_unchecked(r),
+    ));
+    let gauge = Se3::new(rotation, mean_to - rotation * mean_from);
+    let inverse: Se3<f64> = gauge.inverse();
+    for pose in &mut solved.imu_from_world {
+        *pose = *pose * inverse;
+    }
+    for landmark in &mut solved.landmarks {
+        landmark.position = gauge * landmark.position;
+    }
+    gauge
 }
 
 /// Write a solution into the map. Each keyframe moves by the GBA's delta,
 /// `T_new = T_gba T_input^-1 T_now` (B11), so a pose the map changed since the
-/// problem was built keeps that change. Each solved landmark is stored at its
-/// solved world point, relative to its host's new pose; the others ride on
-/// their host.
+/// problem was built keeps that change. Each solved landmark is stored relative
+/// to its host's solved pose, so it moves with its host the same way; a host
+/// outside the problem keeps its current pose. Unsolved landmarks ride on their
+/// host.
 pub fn apply(
     map: &mut KeyframeMap,
     input: &GbaInput,
@@ -479,8 +460,12 @@ pub fn apply(
         else {
             continue;
         };
+        let host_pose: Se3<f64> = input
+            .keyframes
+            .binary_search(&host.frame_id)
+            .map_or(keyframe.pose, |k| solved.imu_from_world[k].inverse());
         if let Some((direction, inv_dist)) =
-            host_relative(&(keyframe.pose * *extrinsic), &landmark.position)
+            host_relative(&(host_pose * *extrinsic), &landmark.position)
         {
             map.set_landmark_position(id, direction, inv_dist);
         }
@@ -506,7 +491,7 @@ impl MapBackend {
     pub fn finish(
         &mut self,
         run_gba: bool,
-        settings: &GbaSettings,
+        config: &VioConfig,
     ) -> Result<MapResult, GbaDriverError> {
         let keyframe_t_ns: Vec<FrameId> = self.map.keyframes().keys().copied().collect();
         let keyframe_poses_vio: Vec<Se3<f64>> =
@@ -523,14 +508,14 @@ impl MapBackend {
         let started = Instant::now();
         let edges: Vec<PoseGraphEdge> =
             self.graph.pose_graph_edges(self.high_covisibility_weight());
-        let input: GbaInput = map_problem(&self.map, &edges, &rig.t_i_c, settings);
-        let build: f64 = started.elapsed().as_secs_f64();
+        let input: GbaInput = map_problem(&self.map, &edges, &self.t_i_c, config);
+        let build_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let solution: GbaSolution = solve(&input, rig, settings)?;
+        let (mut solved, report) = solve(&input, rig, config)?;
+        let gauge: Se3<f64> = remove_gauge(&input.problem, &mut solved);
         let solve_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let t_i_c: Vec<Se3<f64>> = rig.t_i_c.clone();
-        apply(&mut self.map, &input, &solution.problem, &t_i_c);
+        apply(&mut self.map, &input, &solved, &self.t_i_c);
         let apply_s: f64 = started.elapsed().as_secs_f64();
         Ok(MapResult {
             keyframe_t_ns,
@@ -538,14 +523,13 @@ impl MapBackend {
             keyframe_poses: self.map.keyframes().values().map(|k| k.pose).collect(),
             gba: Some(GbaRun {
                 counts: input.counts,
-                report: solution.report,
-                seconds: GbaSeconds {
-                    build,
-                    solve: solve_s,
-                    apply: apply_s,
-                },
-                threads: settings.threads,
-                use_double: settings.use_double,
+                report,
+                gauge,
+                build_s,
+                solve_s,
+                apply_s,
+                threads: config.gba_threads.get(),
+                use_double: config.gba_use_double,
             }),
         })
     }

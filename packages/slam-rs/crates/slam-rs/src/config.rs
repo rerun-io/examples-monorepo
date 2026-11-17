@@ -69,6 +69,16 @@ pub enum ConfigError {
     /// The text is not the JSON the struct expects.
     #[error("could not parse the vio config: {0}")]
     Parse(#[from] serde_json::Error),
+    /// A value outside the range its key allows.
+    #[error("{key} = {value} is out of range: it must be {range}")]
+    OutOfRange {
+        /// The config key.
+        key: &'static str,
+        /// The value read.
+        value: f64,
+        /// The allowed range, in words.
+        range: &'static str,
+    },
 }
 
 /// The JSON wrapper: one object under `value0`.
@@ -446,7 +456,50 @@ impl VioConfig {
     /// Read a wrapped config. Missing keys keep their defaults; unknown keys fail.
     pub fn from_json_str(text: &str) -> Result<Self, ConfigError> {
         let wrapper: Value0<Self> = serde_json::from_str(text)?;
-        Ok(wrapper.value0)
+        wrapper.value0.check_ranges()
+    }
+
+    /// Refuse values the global BA cannot run with (a sigma <= 0 gives an
+    /// infinite sqrt-info; a Huber threshold <= 0 or `eta` outside (0, 1)
+    /// breaks the LM loop without a word).
+    fn check_ranges(self) -> Result<Self, ConfigError> {
+        let positive = "> 0";
+        let checks: [(&'static str, f64, bool, &'static str); 5] = [
+            (
+                "backend.gba_max_iterations",
+                self.gba_max_iterations as f64,
+                self.gba_max_iterations > 0,
+                positive,
+            ),
+            (
+                "backend.gba_cg_eta",
+                self.gba_cg_eta,
+                self.gba_cg_eta > 0.0 && self.gba_cg_eta < 1.0,
+                "in (0, 1)",
+            ),
+            (
+                "backend.gba_huber_px",
+                self.gba_huber_px,
+                self.gba_huber_px > 0.0,
+                positive,
+            ),
+            (
+                "backend.gba_pose_graph_sigma_translation",
+                self.gba_pose_graph_sigma_translation,
+                self.gba_pose_graph_sigma_translation > 0.0,
+                positive,
+            ),
+            (
+                "backend.gba_pose_graph_sigma_rotation",
+                self.gba_pose_graph_sigma_rotation,
+                self.gba_pose_graph_sigma_rotation > 0.0,
+                positive,
+            ),
+        ];
+        match checks.into_iter().find(|(_, _, ok, _)| !ok) {
+            Some((key, value, _, range)) => Err(ConfigError::OutOfRange { key, value, range }),
+            None => Ok(self),
+        }
     }
 
     /// Apply a flat profile overlay to a wrapped config, validating keys and values.
@@ -711,6 +764,20 @@ mod tests {
         assert!(parsed.gba_use_double);
         assert_eq!(parsed.gba_min_obs_per_kf, 20);
         assert!(VioConfig::from_json_str(r#"{"value0":{"backend.gba_threads":0}}"#).is_err());
+        // Out of range: refused at load, naming the key (rootba checks its
+        // Huber threshold too). A sigma <= 0 gives an infinite sqrt-info.
+        for (key, value) in [
+            ("backend.gba_max_iterations", "0"),
+            ("backend.gba_cg_eta", "0.0"),
+            ("backend.gba_cg_eta", "1.0"),
+            ("backend.gba_huber_px", "0.0"),
+            ("backend.gba_pose_graph_sigma_translation", "0.0"),
+            ("backend.gba_pose_graph_sigma_rotation", "-0.01"),
+        ] {
+            let text = format!(r#"{{"value0":{{"{key}":{value}}}}}"#);
+            let error = VioConfig::from_json_str(&text).unwrap_err();
+            assert!(error.to_string().contains(key), "{text}: {error}");
+        }
     }
 
     /// `backend.mode` (DESIGN §2, §8): Offline by default, lowercase names, and

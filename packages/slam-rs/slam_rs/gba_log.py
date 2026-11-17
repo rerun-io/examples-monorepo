@@ -7,6 +7,8 @@ entities under the same run, so its alignment transform places both in the datas
 
 import numpy as np
 import rerun as rr
+from jaxtyping import Float64
+from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.trajectory import Trajectory
@@ -34,7 +36,7 @@ def keyframe_trajectory(result: _core.MapResult, *, after_gba: bool) -> Trajecto
     Returns:
         One pose per map keyframe, oldest first, quaternions w-first.
     """
-    poses = result.keyframe_poses if after_gba else result.keyframe_poses_vio
+    poses: Float64[ndarray, "k 7"] = result.keyframe_poses if after_gba else result.keyframe_poses_vio
     return Trajectory(t_ns=result.keyframe_t_ns.copy(), position_m=poses[:, 0:3].copy(), quaternion_wxyz=np.roll(poses[:, 3:7], 1, axis=1))
 
 
@@ -49,10 +51,10 @@ def log_map_result(result: _core.MapResult) -> None:
     gba: _core.GbaRun | None = result.gba
     if gba is None or result.keyframe_t_ns.shape[0] == 0:
         return
-    positions = result.keyframe_poses[:, 0:3]
+    positions: Float64[ndarray, "k 3"] = result.keyframe_poses[:, 0:3]
     rr.log(GBA_KEYFRAMES_ENTITY, rr.Points3D(positions, colors=GBA_COLOR, radii=0.012))
     rr.log(GBA_PATH_ENTITY, rr.LineStrips3D([positions], colors=GBA_COLOR, radii=0.004))
-    attempts = rr.TimeColumn(GBA_TIMELINE, sequence=np.arange(gba.iteration_lambda.shape[0], dtype=np.int64))
+    attempts: rr.TimeColumn = rr.TimeColumn(GBA_TIMELINE, sequence=np.arange(gba.iteration_lambda.shape[0], dtype=np.int64))
     for name, values in (
         ("cost", gba.iteration_cost),
         ("lambda", gba.iteration_lambda),
@@ -75,6 +77,7 @@ def log_map_result(result: _core.MapResult) -> None:
             build_s=gba.build_s,
             solve_s=gba.solve_s,
             apply_s=gba.apply_s,
+            gauge_tilt_deg=gba.gauge_tilt_deg,
             threads=gba.threads,
         ),
         static=True,

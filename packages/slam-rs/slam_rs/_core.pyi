@@ -185,11 +185,15 @@ class GbaRun:
 
     @property
     def solve_s(self) -> float:
-        """Wall seconds of the solve (centring, LM, uncentring)."""
+        """Wall seconds of the solve (centring, LM, uncentring, gauge)."""
 
     @property
     def apply_s(self) -> float:
         """Wall seconds writing the result into the map."""
+
+    @property
+    def gauge_tilt_deg(self) -> float:
+        """How far the free gauge had tilted the solution's world z, degrees, before the driver brought it back onto the input poses."""
 
     @property
     def threads(self) -> int:

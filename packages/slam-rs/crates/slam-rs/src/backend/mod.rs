@@ -24,7 +24,7 @@ use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::FrameId;
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
-pub use gba::{GbaDriverError, GbaRig, GbaRun, GbaSettings, MapResult};
+pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::MapSnapshot;

@@ -1,5 +1,6 @@
 """``Vio.finish_map`` through the Python boundary (PR d2): the map's keyframes before and after the global BA, typed copies, and the GBA's scalars."""
 
+import json
 from typing import Literal
 
 import numpy as np
@@ -79,6 +80,7 @@ def test_finish_map_returns_typed_keyframes_and_the_gba_scalars(
     assert gba.threads == 2
     assert gba.use_double is False
     assert min(gba.build_s, gba.solve_s, gba.apply_s) >= 0.0
+    assert 0.0 <= gba.gauge_tilt_deg < 1.0
 
     # The map now holds the GBA's poses; the poses track returned are untouched.
     after: _core.MapSnapshot | None = vio.map_snapshot()
@@ -87,3 +89,15 @@ def test_finish_map_returns_typed_keyframes_and_the_gba_scalars(
     _off_poses, _off = _tracked(rig, texture, None)
     for with_map, without in zip(poses, _off_poses, strict=True):
         np.testing.assert_array_equal(with_map, without)
+
+
+@pytest.mark.parametrize(("model", "extra"), [("ds", {"xi": 0.0, "alpha": 0.5}), ("eucm", {"alpha": 0.5, "beta": 1.0})])
+def test_a_rig_the_gba_cannot_project_is_refused_before_any_frame(rig: RigFactory, model: str, extra: dict[str, float]) -> None:
+    """The GBA projects every model the frontend does, so a replay that tracked never meets ``finish_map``'s ValueError: ds and eucm stop at ``Vio(...)``."""
+    document: dict[str, dict[str, list[dict[str, object]]]] = json.loads(rig(2).to_json())
+    for camera in document["value0"]["intrinsics"]:
+        camera["camera_type"] = model
+        camera["intrinsics"] = {"fx": 100.0, "fy": 100.0, "cx": 100.0, "cy": 100.0, **extra}
+    calibration: _core.Calibration = _core.Calibration.from_json(json.dumps(document))
+    with pytest.raises(ValueError, match=f"camera model {model} is parsed but its projection is not implemented"):
+        _core.Vio(calibration, _core.VioConfig().with_backend("offline"), backend="cpu")

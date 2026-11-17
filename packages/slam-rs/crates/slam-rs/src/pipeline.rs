@@ -65,9 +65,6 @@ pub struct Vio<S: Scalar = f32> {
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
-    /// The global BA's knobs, for [`Self::finish_map`].
-    #[cfg(feature = "backend")]
-    gba_settings: crate::backend::GbaSettings,
 }
 
 pub use lag::OverlapTimings;
@@ -151,8 +148,6 @@ impl<S: Scalar> Vio<S> {
             })
             .transpose()
             .map_err(|error| VioError::BackendThread(error.to_string()))?;
-        #[cfg(feature = "backend")]
-        let gba_settings = crate::backend::GbaSettings::from(&config);
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
@@ -178,8 +173,6 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_runner,
-            #[cfg(feature = "backend")]
-            gba_settings,
         })
     }
 
@@ -205,12 +198,12 @@ impl<S: Scalar> Vio<S> {
         run_gba: bool,
     ) -> Result<Option<crate::backend::MapResult>, VioError> {
         self.step_map();
-        let settings: crate::backend::GbaSettings = self.gba_settings.clone();
+        let config: &config::VioConfig = self.frontend.config();
         let Some(runner) = self.map_runner.as_mut() else {
             return Ok(None);
         };
         runner
-            .update(|backend| backend.finish(run_gba, &settings))
+            .update(|backend| backend.finish(run_gba, config))
             .map(Some)
             .map_err(|error| VioError::GlobalBa(error.to_string()))
     }
@@ -851,7 +844,6 @@ fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), V
     Ok(())
 }
 
-/// Flatten an isometry into `[tx, ty, tz, qx, qy, qz, qw]`.
 /// The rig's staged camera models for the global BA; `None` (one warning) when
 /// a model has no staged projection, which leaves the GBA off for this rig.
 #[cfg(feature = "backend")]
@@ -862,7 +854,7 @@ fn gba_rig(calibration: &calib::Calibration<f64>) -> Option<crate::backend::GbaR
         .map(calib::BasaltCamera::to_staged)
         .collect();
     match models {
-        Ok(models) => crate::backend::GbaRig::new(models, calibration.t_i_c.clone()),
+        Ok(models) => crate::backend::GbaRig::new(models, &calibration.t_i_c),
         Err(error) => {
             log::warn!("the global BA is off for this rig: {error}");
             None
@@ -870,6 +862,7 @@ fn gba_rig(calibration: &calib::Calibration<f64>) -> Option<crate::backend::GbaR
     }
 }
 
+/// Flatten an isometry into `[tx, ty, tz, qx, qy, qz, qw]`.
 fn pose_to_array(pose: &Isometry3<f64>) -> [f64; 7] {
     let rotation: UnitQuaternion<f64> = pose.rotation;
     [

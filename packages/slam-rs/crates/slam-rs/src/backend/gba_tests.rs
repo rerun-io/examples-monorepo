@@ -33,7 +33,7 @@ fn t_i_c() -> Vec<Se3<f64>> {
 fn rig() -> GbaRig {
     let model: CameraModelKind<f64> =
         CameraModelKind::Pinhole(Pinhole::new([300.0, 300.0, 320.0, 240.0]).unwrap());
-    GbaRig::new(vec![model; CAMERAS], t_i_c()).unwrap()
+    GbaRig::new(vec![model; CAMERAS], &t_i_c()).unwrap()
 }
 
 /// `T_w_i` of keyframe `k` on a circle of radius 5 m around `centre`, looking in.
@@ -68,7 +68,7 @@ fn config() -> MapConfig {
 
 /// A map of `n_kf` keyframes (ids 1..) and `n_lm` landmarks around `centre`.
 /// Poses drift by `pose_noise` metres (and `pose_noise / 10` radians of yaw)
-/// per keyframe, landmarks carry `point_noise` metres; pixels carry 0.3 px. The keyframes form a
+/// per keyframe, landmarks carry `point_noise` metres, pixels `pixel_noise`. The keyframes form a
 /// chain in the covisibility graph. Returns the backend and the true `T_w_i`.
 fn synthetic_map(
     n_kf: usize,
@@ -76,6 +76,7 @@ fn synthetic_map(
     centre: Vector3<f64>,
     pose_noise: f64,
     point_noise: f64,
+    pixel_noise: f64,
 ) -> (MapBackend, Vec<Se3<f64>>) {
     let rig = rig();
     let truth: Vec<Se3<f64>> = (0..n_kf).map(|k| truth_pose(k, centre)).collect();
@@ -94,7 +95,7 @@ fn synthetic_map(
         })
         .collect();
     let mut backend = MapBackend::new(config(), vec![[640, 480]; CAMERAS])
-        .with_extrinsics(rig.t_i_c.clone())
+        .with_extrinsics(t_i_c())
         .with_gba_rig(Some(rig.clone()));
     for (k, pose) in noisy.iter().enumerate() {
         backend.map.upsert_keyframe(k as i64 + 1, *pose, None);
@@ -104,7 +105,7 @@ fn synthetic_map(
         let p = truth_point(l, centre);
         let mut obs = BTreeMap::new();
         for (k, pose) in truth.iter().enumerate() {
-            for (c, cam) in rig.f64.iter().enumerate() {
+            for (c, cam) in rig.cameras.iter().enumerate() {
                 if (k + c + l) % 3 == 0 {
                     continue;
                 }
@@ -114,8 +115,8 @@ fn synthetic_map(
                     && (0.0..480.0).contains(&px[1])
                 {
                     let pixel = Vector2::new(
-                        (px[0] + 0.3 * wobble(l, 10 * k + c)) as f32,
-                        (px[1] + 0.3 * wobble(l, 10 * k + c + 5)) as f32,
+                        (px[0] + pixel_noise * wobble(l, 10 * k + c)) as f32,
+                        (px[1] + pixel_noise * wobble(l, 10 * k + c + 5)) as f32,
                     );
                     obs.insert(TimeCamId::new(k as i64 + 1, c), pixel);
                 }
@@ -125,7 +126,7 @@ fn synthetic_map(
             continue;
         };
         let noisy_p = p + Vector3::new(wobble(l, 31), wobble(l, 32), wobble(l, 33)) * point_noise;
-        let host_pose = noisy[(host.frame_id - 1) as usize] * rig.t_i_c[host.cam_id];
+        let host_pose = noisy[(host.frame_id - 1) as usize] * t_i_c()[host.cam_id];
         let (direction, inv_dist) = host_relative(&host_pose, &noisy_p).unwrap();
         landmarks.push(StampLandmark {
             id: LandmarkId(l as u64),
@@ -176,10 +177,62 @@ fn chain_edges(n_kf: usize) -> Vec<PoseGraphEdge> {
         .collect()
 }
 
+/// World-z tilt, degrees, of the rigid fit (Kabsch on positions) of `est`
+/// onto `reference`: how far a solve turned the map out of the input's gravity
+/// frame.
+fn tilt_deg(est: &[Se3<f64>], reference: &[Se3<f64>]) -> f64 {
+    let n = est.len() as f64;
+    let mean_e: Vector3<f64> = est.iter().map(|p| p.translation).sum::<Vector3<f64>>() / n;
+    let mean_r: Vector3<f64> = reference
+        .iter()
+        .map(|p| p.translation)
+        .sum::<Vector3<f64>>()
+        / n;
+    let mut h = Matrix3::zeros();
+    for (e, r) in est.iter().zip(reference) {
+        h += (e.translation - mean_e) * (r.translation - mean_r).transpose();
+    }
+    let svd = h.svd(true, true);
+    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
+    let mut d = Matrix3::identity();
+    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
+    let r = v_t.transpose() * d * u.transpose();
+    (r * Vector3::z()).angle(&Vector3::z()).to_degrees()
+}
+
+/// The gauge (DESIGN §3.1, d2 decision): no pose is held constant in the
+/// solve, so the result is brought back onto the input poses by one rigid
+/// transform. A drifted map keeps the input's world z.
+#[test]
+fn a_drifted_map_keeps_the_input_world_z() {
+    let (mut backend, _) = synthetic_map(16, 300, Vector3::new(30.0, -20.0, 1.0), 0.01, 0.03, 0.3);
+    let before: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
+    let result = backend.finish(true, &VioConfig::default()).unwrap();
+    let tilt = tilt_deg(&result.keyframe_poses, &before);
+    assert!(tilt < 0.01, "the GBA tilted the map by {tilt} deg");
+}
+
+/// A map with no error anywhere: the GBA moves no pose (beyond f32 rounding)
+/// and keeps world z.
+#[test]
+fn a_zero_error_map_keeps_every_pose_and_world_z() {
+    let (mut backend, _) = synthetic_map(12, 200, Vector3::new(30.0, -20.0, 1.0), 0.0, 0.0, 0.0);
+    let before: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
+    let result = backend.finish(true, &VioConfig::default()).unwrap();
+    assert!(tilt_deg(&result.keyframe_poses, &before) < 0.01);
+    for (a, b) in result.keyframe_poses.iter().zip(&before) {
+        assert!(
+            (a.translation - b.translation).norm() < 1e-5,
+            "{a:?} vs {b:?}"
+        );
+        assert!((a.rotation.inverse() * b.rotation).log().norm() < 1e-5);
+    }
+}
+
 #[test]
 fn host_relative_landmarks_become_world_points_once_and_round_trip() {
-    let (backend, _) = synthetic_map(6, 40, Vector3::zeros(), 0.0, 0.0);
-    let input = map_problem(backend.map(), &[], &backend.t_i_c, &GbaSettings::default());
+    let (backend, _) = synthetic_map(6, 40, Vector3::zeros(), 0.0, 0.0, 0.3);
+    let input = map_problem(backend.map(), &[], &backend.t_i_c, &VioConfig::default());
     assert!(!input.landmarks.is_empty());
     for (id, landmark) in input.landmarks.iter().zip(&input.problem.landmarks) {
         let stored = backend.map().landmark(*id).unwrap();
@@ -204,7 +257,7 @@ fn host_relative_landmarks_become_world_points_once_and_round_trip() {
 /// landmark needs two observations and a finite position.
 #[test]
 fn sparse_keyframes_keep_their_pose_graph_rows_and_landmarks_need_two_finite_observations() {
-    let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.0, 0.0);
+    let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.0, 0.0, 0.3);
     // Keyframe 7 sees three landmarks only; landmark 1000 is at infinity.
     backend
         .map
@@ -242,12 +295,7 @@ fn sparse_keyframes_keep_their_pose_graph_rows_and_landmarks_need_two_finite_obs
         to: 7,
         kind: PoseGraphEdgeKind::SpanningTree,
     });
-    let input = map_problem(
-        backend.map(),
-        &edges,
-        &backend.t_i_c,
-        &GbaSettings::default(),
-    );
+    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &VioConfig::default());
     assert_eq!(input.keyframes, (1..=7).collect::<Vec<i64>>());
     let k7 = input.keyframes.iter().position(|&id| id == 7).unwrap();
     assert!(
@@ -290,7 +338,7 @@ fn sparse_keyframes_keep_their_pose_graph_rows_and_landmarks_need_two_finite_obs
 /// map's own poses (zero residual at the start), sigmas 0.05 m / 0.01 rad.
 #[test]
 fn pose_graph_rows_are_the_graph_edges_measured_from_the_input_poses() {
-    let (backend, _) = synthetic_map(5, 30, Vector3::zeros(), 0.02, 0.0);
+    let (backend, _) = synthetic_map(5, 30, Vector3::zeros(), 0.02, 0.0, 0.3);
     let mut edges = chain_edges(5);
     edges.push(PoseGraphEdge {
         from: 1,
@@ -303,12 +351,7 @@ fn pose_graph_rows_are_the_graph_edges_measured_from_the_input_poses() {
         to: 99,
         kind: PoseGraphEdgeKind::HighCovisibility,
     });
-    let input = map_problem(
-        backend.map(),
-        &edges,
-        &backend.t_i_c,
-        &GbaSettings::default(),
-    );
+    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &VioConfig::default());
     assert_eq!(input.problem.rel_poses.len(), 5);
     for c in &input.problem.rel_poses {
         let a = backend
@@ -348,7 +391,7 @@ fn pose_graph_rows_are_the_graph_edges_measured_from_the_input_poses() {
 /// constant (DESIGN §3.1), and the PCG limits from the config.
 #[test]
 fn the_options_are_rootba_bal_with_no_fixed_pose() {
-    let options = GbaSettings::default().options();
+    let options = gba_options(&VioConfig::default());
     assert_eq!(options.huber_px, 1.0);
     assert_eq!(options.max_iterations, 20);
     assert!(options.fixed_keyframes.is_empty());
@@ -366,13 +409,13 @@ fn a_drifted_synthetic_map_recovers_in_f32_and_f64_far_from_the_origin() {
     let centre = Vector3::new(1e4, -2e3, 5.0);
     let mut solved: Vec<Vec<Se3<f64>>> = Vec::new();
     for use_double in [false, true] {
-        let (mut backend, truth) = synthetic_map(16, 300, centre, 0.01, 0.03);
+        let (mut backend, truth) = synthetic_map(16, 300, centre, 0.01, 0.03, 0.3);
         let before: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
-        let settings = GbaSettings {
-            use_double,
-            ..GbaSettings::default()
+        let config = VioConfig {
+            gba_use_double: use_double,
+            ..VioConfig::default()
         };
-        let result = backend.finish(true, &settings).unwrap();
+        let result = backend.finish(true, &config).unwrap();
         let gba = result.gba.as_ref().unwrap();
         assert!(gba.report.iterations.len() <= 20);
         assert!(gba.report.final_cost.error < 0.01 * gba.report.initial_cost.error);
@@ -398,48 +441,115 @@ fn a_drifted_synthetic_map_recovers_in_f32_and_f64_far_from_the_origin() {
     assert!(gap < 1e-3, "f32 vs f64 keyframe RMS {gap} m");
 }
 
-/// B11: the solution is applied as a delta on the pose the map holds now.
+/// B11: the solution is applied as a delta on the pose the map holds now, and
+/// a solved landmark moves with its host the same way.
 #[test]
 fn the_result_is_applied_as_a_delta_on_the_current_pose() {
-    let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01);
-    let settings = GbaSettings::default();
+    let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01, 0.3);
+    let config = VioConfig::default();
     let edges = chain_edges(6);
-    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &settings);
-    let solved = solve(&input, backend.gba_rig.as_ref().unwrap(), &settings).unwrap();
-    // The map moved keyframe 3 after the problem was built.
+    let input = map_problem(backend.map(), &edges, &backend.t_i_c, &config);
+    let (solved, _) = solve(&input, backend.gba_rig.as_ref().unwrap(), &config).unwrap();
+    // The map moved keyframe 1 (a host) after the problem was built.
     let moved = Se3::new(
         So3::exp(&Vector3::new(0.0, 0.01, 0.0)),
         Vector3::new(0.1, 0.0, 0.0),
     );
-    let now = moved * backend.map().keyframe(3).unwrap().pose;
-    backend.map.upsert_keyframe(3, now, None);
-    apply(&mut backend.map, &input, &solved.problem, &backend.t_i_c);
-    let k = input.keyframes.iter().position(|&id| id == 3).unwrap();
-    let t_gba = solved.problem.imu_from_world[k].inverse();
+    let now = moved * backend.map().keyframe(1).unwrap().pose;
+    backend.map.upsert_keyframe(1, now, None);
+    apply(&mut backend.map, &input, &solved, &backend.t_i_c);
+    let k = input.keyframes.iter().position(|&id| id == 1).unwrap();
+    let t_gba = solved.imu_from_world[k].inverse();
     let t_input = input.problem.imu_from_world[k].inverse();
     let expected = t_gba * t_input.inverse() * now;
-    let got = backend.map().keyframe(3).unwrap().pose;
+    let got = backend.map().keyframe(1).unwrap().pose;
     assert!((got.translation - expected.translation).norm() < 1e-9);
     assert!((got.rotation.inverse() * expected.rotation).log().norm() < 1e-9);
-    // A landmark it optimized sits at its solved world position.
-    let (id, solved_lm) = (
-        input.landmarks.last().unwrap(),
-        solved.problem.landmarks.last().unwrap(),
+    let stored_world = |id: LandmarkId| {
+        let stored = backend.map().landmark(id).unwrap();
+        let host = backend.map().keyframe(stored.host.frame_id).unwrap().pose
+            * backend.t_i_c[stored.host.cam_id];
+        let bearing = StereographicParam::<f64>::unproject(&stored.direction);
+        (
+            stored.host.frame_id,
+            host * (Vector3::new(bearing[0], bearing[1], bearing[2]) / stored.inv_dist),
+        )
+    };
+    let mut on_moved_host = 0;
+    for (&id, solved_lm) in input.landmarks.iter().zip(&solved.landmarks) {
+        let (host, p_w) = stored_world(id);
+        // A landmark of an unmoved host sits at its solved world position; one
+        // of keyframe 1 moved with it, by the same delta as the pose.
+        let expected = if host == 1 {
+            on_moved_host += 1;
+            got * t_gba.inverse() * solved_lm.position
+        } else {
+            solved_lm.position
+        };
+        assert!(
+            (p_w - expected).norm() < 1e-9,
+            "landmark {id:?} of host {host}"
+        );
+    }
+    assert!(on_moved_host > 0);
+}
+
+/// The gauge: a solution the free gauge turned and shifted (a 2 deg tilt) is
+/// brought back onto the input poses, landmarks with it, and the cost does
+/// not change.
+#[test]
+fn a_tilted_solution_is_rotated_back_and_keeps_its_cost() {
+    let (backend, _) = synthetic_map(8, 120, Vector3::new(30.0, -20.0, 1.0), 0.0, 0.0, 0.3);
+    let config = VioConfig::default();
+    let input = map_problem(backend.map(), &chain_edges(8), &backend.t_i_c, &config);
+    let tilt = Se3::new(
+        So3::exp(&Vector3::new(2f64.to_radians(), -1f64.to_radians(), 0.3)),
+        Vector3::new(0.5, -0.2, 0.1),
     );
-    let stored = backend.map().landmark(*id).unwrap();
-    let host = backend.map().keyframe(stored.host.frame_id).unwrap().pose
-        * backend.t_i_c[stored.host.cam_id];
-    let bearing = StereographicParam::<f64>::unproject(&stored.direction);
-    let p_w = host * (Vector3::new(bearing[0], bearing[1], bearing[2]) / stored.inv_dist);
-    assert!((p_w - solved_lm.position).norm() < 1e-9);
+    let mut tilted = input.problem.clone();
+    for pose in &mut tilted.imu_from_world {
+        *pose = *pose * tilt.inverse();
+    }
+    for landmark in &mut tilted.landmarks {
+        landmark.position = tilt * landmark.position;
+    }
+    let cost = |problem: &GbaProblem<f64>| {
+        let options = GbaOptions {
+            max_iterations: 0,
+            ..gba_options(&config)
+        };
+        solve_global(&mut problem.clone(), &rig().cameras, &options, None)
+            .unwrap()
+            .initial_cost
+            .error
+    };
+    let before = cost(&tilted);
+    let gauge = remove_gauge(&input.problem, &mut tilted);
+    assert!((gauge * tilt).log().norm() < 1e-9, "{gauge:?}");
+    for (a, b) in tilted
+        .imu_from_world
+        .iter()
+        .zip(&input.problem.imu_from_world)
+    {
+        assert!((a.inverse() * *b).log().norm() < 1e-9);
+    }
+    for (a, b) in tilted.landmarks.iter().zip(&input.problem.landmarks) {
+        assert!((a.position - b.position).norm() < 1e-9);
+    }
+    let after = cost(&tilted);
+    assert!(
+        (after - before).abs() <= 1e-9 * before,
+        "{before} -> {after}"
+    );
+    assert!((after - cost(&input.problem)).abs() <= 1e-9 * before);
 }
 
 /// `finish(false)` copies the map and changes nothing.
 #[test]
 fn finish_without_the_gba_returns_the_map_unchanged() {
-    let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01);
+    let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01, 0.3);
     let map_before = backend.map().clone();
-    let result = backend.finish(false, &GbaSettings::default()).unwrap();
+    let result = backend.finish(false, &VioConfig::default()).unwrap();
     assert!(result.gba.is_none());
     assert_eq!(backend.map(), &map_before);
     assert_eq!(result.keyframe_poses, result.keyframe_poses_vio);
@@ -450,8 +560,8 @@ fn finish_without_the_gba_returns_the_map_unchanged() {
 /// iterations and stage times, and the wall of each driver stage.
 #[test]
 fn the_report_carries_the_iteration_scalars_and_stage_walls() {
-    let (mut backend, _) = synthetic_map(8, 120, Vector3::zeros(), 0.02, 0.01);
-    let result = backend.finish(true, &GbaSettings::default()).unwrap();
+    let (mut backend, _) = synthetic_map(8, 120, Vector3::zeros(), 0.02, 0.01, 0.3);
+    let result = backend.finish(true, &VioConfig::default()).unwrap();
     let gba = result.gba.unwrap();
     assert!(!gba.report.iterations.is_empty() && gba.report.iterations.len() <= 20);
     assert!(
@@ -461,7 +571,7 @@ fn the_report_carries_the_iteration_scalars_and_stage_walls() {
             .all(|i| i.pcg.iterations > 0 && i.lambda > 0.0)
     );
     assert!(gba.report.iterations.iter().any(|i| i.accepted));
-    assert!(gba.seconds.build > 0.0 && gba.seconds.solve > 0.0 && gba.seconds.apply > 0.0);
+    assert!(gba.build_s > 0.0 && gba.solve_s > 0.0 && gba.apply_s > 0.0);
     assert_eq!(gba.threads, 2);
     assert_eq!(gba.counts.keyframes, 8);
     assert_eq!(gba.counts.pose_graph_rows, 7);
@@ -470,11 +580,11 @@ fn the_report_carries_the_iteration_scalars_and_stage_walls() {
 /// A map without the rig's camera models cannot run the GBA, and says so.
 #[test]
 fn the_gba_needs_the_rig() {
-    let (backend, _) = synthetic_map(4, 30, Vector3::zeros(), 0.0, 0.0);
+    let (backend, _) = synthetic_map(4, 30, Vector3::zeros(), 0.0, 0.0, 0.3);
     let mut backend = backend.with_gba_rig(None);
-    assert!(backend.finish(false, &GbaSettings::default()).is_ok());
+    assert!(backend.finish(false, &VioConfig::default()).is_ok());
     assert!(matches!(
-        backend.finish(true, &GbaSettings::default()),
+        backend.finish(true, &VioConfig::default()),
         Err(GbaDriverError::NoRig)
     ));
 }

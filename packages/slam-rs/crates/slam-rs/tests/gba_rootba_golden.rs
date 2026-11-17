@@ -1,15 +1,18 @@
-//! The global BA driver on RootSLAM's exported MGO07 map, against rootba `bal`
-//! (DESIGN §7.4, PR d2). The map goes through the same path as
+//! The global BA driver on RootSLAM's exported MGO07 and MGO13 maps, against
+//! rootba `bal` (DESIGN §7.4, PR d2). The map goes through the same path as
 //! `Vio::finish_map`: a [`KeyframeMap`] with host-relative landmarks, then
-//! `map_problem`, `solve` (f64 centring, f32) and `apply`.
+//! `map_problem`, `solve` (f64 centring, f32) and `apply`, without
+//! `remove_gauge`: rootba holds no pose and moves no gauge either, so the
+//! keyframes are compared with the solver's output before the re-alignment.
 //!
-//! Assets, read at test time as third-party formats: `<runs>/MGO07/map/{map,
+//! Assets, read at test time as third-party formats: `<runs>/<seq>/map/{map,
 //! pose_graph}.json` and `map/optimized_tracking_pg_float.csv`, and the
-//! `output.MGO07.{balpgf,balpgd}.log` of the reproduction (default runs root
+//! `output.<seq>.{balpgf,balpgd}.log` of the reproduction (default runs root
 //! `/mnt/nas/ssd-8tb/scratch/rootslam/runs`, override `GBA_EXPORT_RUNS`), and
 //! RootSLAM's Basalt calibration `msd/msdmg_calib.json` (default
 //! `~/0Dev/forks/rootslam/data`, override `GBA_EXPORT_CALIB`). `#[ignore]`: run
-//! it with `--ignored`; a missing asset then fails and names the asset.
+//! them with `pixi run -e slam-rs-dev slam-rs-gba-golden`; a missing asset then
+//! fails and names the asset.
 
 #![cfg(feature = "backend")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -19,9 +22,10 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
 use serde::Deserialize;
-use slam_rs::backend::gba::{GbaRig, GbaSettings, apply, host_relative, map_problem, solve};
+use slam_rs::backend::gba::{GbaRig, apply, host_relative, map_problem, solve};
 use slam_rs::backend::{KeyframeMap, PoseGraphEdge, PoseGraphEdgeKind};
 use slam_rs::calib::Calibration;
+use slam_rs::config::VioConfig;
 use slam_rs::estimator::StampLandmark;
 use slam_rs::lie::{Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
@@ -149,7 +153,20 @@ fn rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
 #[test]
 #[ignore = "reads RootSLAM's exported MGO07 map and rootba's runs from the NAS"]
 fn golden_mgo07_driver_matches_rootba_bal_cost_and_keyframe_poses() {
-    let run = runs_root().join("MGO07");
+    golden("MGO07");
+}
+
+/// MGO13 has 34 keyframes under `min_obs_per_kf`: rootba drops them and their
+/// pose-graph rows, we keep those rows (B22). Our cost ends at or below `bal`'s,
+/// and we keep every keyframe rootba keeps; the poses are not compared.
+#[test]
+#[ignore = "reads RootSLAM's exported MGO13 map and rootba's runs from the NAS"]
+fn golden_mgo13_driver_keeps_sparse_keyframes_and_ends_at_or_below_rootba_bal() {
+    golden("MGO13");
+}
+
+fn golden(seq: &str) {
+    let run = runs_root().join(seq);
     let export: MapJson = serde_json::from_str(&read_asset(&run.join("map/map.json"))).unwrap();
     let graph: PoseGraphJson =
         serde_json::from_str(&read_asset(&run.join("map/pose_graph.json"))).unwrap();
@@ -160,7 +177,8 @@ fn golden_mgo07_driver_matches_rootba_bal_cost_and_keyframe_poses() {
         .iter()
         .map(|m| m.to_staged().unwrap())
         .collect();
-    let rig = GbaRig::new(models, calibration.t_i_c.clone()).unwrap();
+    let rig = GbaRig::new(models, &calibration.t_i_c).unwrap();
+    let t_i_c = &calibration.t_i_c;
 
     // The export as our map: host-relative landmarks, hosted by their first
     // observation (converted once), keyframe observations.
@@ -181,7 +199,7 @@ fn golden_mgo07_driver_matches_rootba_bal_cost_and_keyframe_poses() {
         .filter_map(|lm| {
             let obs = obs.remove(&lm.id)?;
             let host = *obs.keys().next()?;
-            let pose = map.keyframe(host.frame_id)?.pose * rig.t_i_c[host.cam_id];
+            let pose = map.keyframe(host.frame_id)?.pose * t_i_c[host.cam_id];
             let (direction, inv_dist) = host_relative(&pose, &Vector3::from(lm.p_w))?;
             Some(StampLandmark {
                 id: LandmarkId(lm.id),
@@ -203,34 +221,38 @@ fn golden_mgo07_driver_matches_rootba_bal_cost_and_keyframe_poses() {
         })
         .collect();
 
-    let settings = GbaSettings::default();
-    let input = map_problem(&map, &edges, &rig.t_i_c, &settings);
-    let solved = solve(&input, &rig, &settings).unwrap();
-    apply(&mut map, &input, &solved.problem, &rig.t_i_c);
-    let ours = solved.report.final_cost.error;
+    let config = VioConfig::default();
+    let input = map_problem(&map, &edges, t_i_c, &config);
+    let (solved, report) = solve(&input, &rig, &config).unwrap();
+    apply(&mut map, &input, &solved, t_i_c);
+    let ours = report.final_cost.error;
     let (bal_f32, bal_f64) = (
-        final_cost(&run.join("output.MGO07.balpgf.log")),
-        final_cost(&run.join("output.MGO07.balpgd.log")),
+        final_cost(&run.join(format!("output.{seq}.balpgf.log"))),
+        final_cost(&run.join(format!("output.{seq}.balpgd.log"))),
     );
     eprintln!(
-        "MGO07 driver: {:?}; cost {:.4e} -> {ours:.4e} in {} attempts, {} CG; rootba bal f32 {bal_f32:.4e}, f64 {bal_f64:.4e}",
+        "{seq} driver: {:?}; cost {:.4e} -> {ours:.4e} in {} attempts, {} CG; rootba bal f32 {bal_f32:.4e}, f64 {bal_f64:.4e}",
         input.counts,
-        solved.report.initial_cost.error,
-        solved.report.iterations.len(),
-        solved.report.pcg_iterations()
+        report.initial_cost.error,
+        report.iterations.len(),
+        report.pcg_iterations()
     );
-    // d1's band: rootba's final cost (f32 and f64) within 0.5 %, not suspiciously lower.
+    // d1's band: rootba's final cost (f32 and f64) within 0.5 %, not suspiciously
+    // lower. With sparse keyframes, B22 keeps rows rootba drops: at or below bal.
+    let sparse = input.counts.keyframes_without_reprojection;
     for bal in [bal_f32, bal_f64] {
+        let upper = if sparse > 0 { 1.0 } else { 1.005 };
         assert!(
-            ours <= bal * 1.005 && ours >= bal * 0.95,
-            "ours {ours} vs bal {bal}"
+            ours <= bal * upper && ours >= bal * 0.95,
+            "ours {ours} vs bal {bal} ({sparse} sparse keyframes)"
         );
     }
 
     // Keyframe poses against rootba f32's optimized keyframes (DESIGN §7.4: RMS
     // within 1 mm on MG). Neither run holds a pose constant and both start from
     // the same poses, so the gauge barely floats: the raw RMS is within 1 mm of
-    // the aligned one.
+    // the aligned one. rootba keeps the keyframes with at least
+    // `min_obs_per_kf` observations in map.json (its filter_kf); we keep all.
     let bal_poses = positions(&run.join("map/optimized_tracking_pg_float.csv"));
     let (mut a, mut b) = (Vec::new(), Vec::new());
     for (id, keyframe) in map.keyframes() {
@@ -239,22 +261,37 @@ fn golden_mgo07_driver_matches_rootba_bal_cost_and_keyframe_poses() {
             b.push(*p);
         }
     }
-    assert!(
-        a.len() + 5 >= export.keyframes.len(),
-        "{} of {} keyframes in rootba's output",
+    let mut per_keyframe: HashMap<i64, usize> = HashMap::new();
+    for o in &export.observations {
+        *per_keyframe.entry(o.kf_id).or_default() += 1;
+    }
+    let kept = export
+        .keyframes
+        .iter()
+        .filter(|kf| per_keyframe.get(&kf.id).copied().unwrap_or(0) >= config.gba_min_obs_per_kf)
+        .count();
+    assert_eq!(
         a.len(),
-        export.keyframes.len()
+        kept,
+        "{} of {} keyframes in rootba's output, {kept} with >= {} observations",
+        a.len(),
+        export.keyframes.len(),
+        config.gba_min_obs_per_kf
     );
     let (raw, aligned) = (rms(&a, &b), aligned_rms(&a, &b));
     eprintln!(
-        "MGO07 keyframes vs rootba bal f32: {} compared, RMS raw {:.3} mm, SE3-aligned {:.3} mm",
+        "{seq} keyframes vs rootba bal f32: {} compared, RMS raw {:.3} mm, SE3-aligned {:.3} mm",
         a.len(),
         1e3 * raw,
         1e3 * aligned
     );
-    assert!(aligned < 1e-3, "aligned keyframe RMS {aligned} m");
-    assert!(
-        raw - aligned < 1e-3,
-        "the gauge floated: raw {raw} m vs aligned {aligned} m"
-    );
+    // With sparse keyframes rootba also drops their pose-graph rows, so it
+    // solves another problem (MGO13: 38 mm apart): the band needs equal problems.
+    if sparse == 0 {
+        assert!(aligned < 1e-3, "aligned keyframe RMS {aligned} m");
+        assert!(
+            raw - aligned < 1e-3,
+            "the gauge floated: raw {raw} m vs aligned {aligned} m"
+        );
+    }
 }

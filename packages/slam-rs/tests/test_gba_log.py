@@ -6,7 +6,8 @@ import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
 from fixture_types import RigFactory, Rows, RowsReader, TextureFactory
-from jaxtyping import UInt8
+import pyarrow as pa
+from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
@@ -57,13 +58,13 @@ def test_the_gba_keyframes_go_under_the_run_and_its_attempts_on_their_timeline(
     rr.disconnect()
     rows: Rows = read_rows(output)
     assert [row.t_ns for row in rows[GBA_KEYFRAMES_ENTITY]] == [220_000_000]
-    drawn = np.asarray(rows[GBA_KEYFRAMES_ENTITY][0].values["Points3D:positions"], dtype=np.float64).reshape(-1, 3)
+    drawn: Float64[ndarray, "k 3"] = np.asarray(rows[GBA_KEYFRAMES_ENTITY][0].values["Points3D:positions"], dtype=np.float64).reshape(-1, 3)
     np.testing.assert_allclose(drawn, result.keyframe_poses[:, 0:3], rtol=1e-6, atol=1e-6)
     assert [row.t_ns for row in rows[GBA_PATH_ENTITY]] == [220_000_000]
     costs: list[float] = []
     for chunk in rrc.RrdReader(output).stream().collect().stream():
         if chunk.entity_path == f"{GBA_STATS_ENTITY}/cost":
-            batch = chunk.to_record_batch()
+            batch: pa.RecordBatch = chunk.to_record_batch()
             assert GBA_TIMELINE in batch.schema.names
             costs += [value for row in batch.column("Scalars:scalars").to_pylist() for value in row]
     np.testing.assert_allclose(costs, gba.iteration_cost)
