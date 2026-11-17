@@ -1,13 +1,14 @@
-//! The reader on the real X4 Air clip. Asset-gated: `KORNIA_STAGING_INSV` names the file (default below); run with
+//! The reader on the real X4 Air clip. Asset-gated: `KORNIA_STAGING_INSV` names the file; run with
 //! `cargo test -p kornia-staging-io --test insta360_clip -- --ignored`.
 use kornia_staging_io::insta360::Insta360Clip;
-
-const DEFAULT: &str = "/home/pablo/data/insta360/VID_20261116_125200_00_003.insv";
 
 #[test]
 #[ignore = "needs the X4 Air clip VID_20261116_125200_00_003.insv (KORNIA_STAGING_INSV)"]
 fn the_x4_air_clip_reads_whole() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::var("KORNIA_STAGING_INSV").unwrap_or_else(|_| DEFAULT.into());
+    let Ok(path) = std::env::var("KORNIA_STAGING_INSV") else {
+        eprintln!("SKIP: KORNIA_STAGING_INSV is unset (it names the X4 Air clip VID_20261116_125200_00_003.insv)");
+        return Ok(());
+    };
     if !std::path::Path::new(&path).is_file() {
         eprintln!("SKIP: asset {path} (VID_20261116_125200_00_003.insv) is absent");
         return Ok(());

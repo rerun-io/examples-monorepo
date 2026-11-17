@@ -3,7 +3,8 @@
 //!
 //! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
 //! `cargo test -p kornia-staging-io --test insta360_pano -- --ignored` (`KORNIA_STAGING_INSV` names the clip). With
-//! `--release`, `evidence_pngs_and_timing` also writes tiles and panoramas to `KORNIA_STAGING_PANO_OUT`.
+//! `--release`, `evidence_pngs_and_timing` also writes tiles and panoramas to `KORNIA_STAGING_PANO_OUT` (default: a
+//! `kornia-staging-pano` directory in the system temporary directory).
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::panorama::{
     assemble_panorama, build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
@@ -316,8 +317,12 @@ fn a_real_frame_pair_matches_the_oracle_remap() {
 #[ignore = "writes evidence PNGs; needs the X4 Air clip VID_20261116_125200_00_003.insv and ffmpeg"]
 fn evidence_pngs_and_timing() {
     let Some((path, clip)) = clip() else { return };
-    let out = std::env::var("KORNIA_STAGING_PANO_OUT")
-        .unwrap_or_else(|_| "/tmp/slam-rs-fisheye-360/f4a-pano-lut/out".into());
+    let out = std::env::var("KORNIA_STAGING_PANO_OUT").unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join("kornia-staging-pano")
+            .to_string_lossy()
+            .into_owned()
+    });
     std::fs::create_dir_all(&out).unwrap();
     let g = TileGeometry::default();
     let started = Instant::now();
