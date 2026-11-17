@@ -2,9 +2,9 @@
 //!
 //! [`MapBackend::step`] takes the window's [`MapStamp`]s in order and keeps the
 //! [`KeyframeMap`], its [`CovisibilityGraph`] and the culling rules
-//! ([`cull`]) up to date. It is a synchronous state machine with no thread:
-//! [`crate::Vio`] steps it inline after each frameset (Offline); a later PR
-//! wraps the same `step` in a thread for Realtime.
+//! ([`cull`]) up to date. It is a synchronous state machine with no thread.
+//! [`BackendRunner`] runs it inline (Offline) or on its own thread (Realtime,
+//! PR a2); [`MapSnapshot`] copies it out.
 //!
 //! Host only, behind the `backend` cargo feature; wasm, iOS and embedded builds
 //! leave it out. The window never reads the map, so the raw VIO poses are the
@@ -13,6 +13,8 @@
 pub mod covisibility;
 pub mod cull;
 pub mod map;
+pub mod runner;
+pub mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +24,8 @@ use crate::types::FrameId;
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
+pub use runner::{BackendCounters, BackendRunner, BackendWork};
+pub use snapshot::MapSnapshot;
 
 /// The map's knobs, read from [`VioConfig`].
 #[derive(Debug, Clone, PartialEq)]
@@ -96,7 +100,7 @@ pub struct MapBackend {
     culled_over_budget: usize,
 }
 
-/// Wall time of [`MapBackend::step`] calls, as the caller measured them.
+/// Wall time of back-end calls, as [`BackendRunner`] measured them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StepTiming {
     /// Steps timed.
@@ -368,6 +372,17 @@ impl MapBackend {
         }
         self.culled.insert(id);
         Some(touched)
+    }
+}
+
+impl BackendWork for MapBackend {
+    fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {
+        MapBackend::step(self, stamp)
+    }
+
+    /// Nothing yet: loop detection arrives in PR b2.
+    fn query(&mut self, _keyframe: FrameId) -> Vec<MapEvent> {
+        Vec::new()
     }
 }
 

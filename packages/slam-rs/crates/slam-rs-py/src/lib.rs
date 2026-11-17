@@ -348,58 +348,22 @@ impl Vio {
         .map(Some)
     }
 
-    /// The persistent map's counts, or `None` when ``backend.enabled`` is off.
-    /// Current up to the last solved keyframe. ``keyframes``, ``landmarks`` and
-    /// ``observations`` are RootSLAM's ``stats_map.json`` counts; ``culled_redundant``
-    /// and ``culled_over_budget`` count each culling rule; ``covisibility_edges``,
-    /// ``high_covisibility_weight`` (shared landmarks) and ``high_covisibility_edges``
-    /// describe the graph; ``median_keyframe_landmarks`` is the median number of
-    /// landmarks a map keyframe sees; ``retained_bytes`` is the map's payload (a lower bound on its heap);
-    /// ``step_count``, ``step_total_us`` and ``step_max_us`` time the inline steps.
-    #[getter]
-    fn map_stats(&self) -> Option<std::collections::BTreeMap<&'static str, u64>> {
-        self.inner.map_backend().map(|map_backend| {
-            let stats = map_backend.stats();
-            let culls = map_backend.cull_counts();
-            let high_weight: u32 = map_backend.high_covisibility_weight();
-            let timing = self.inner.map_step_timing();
-            std::collections::BTreeMap::from([
-                ("keyframes", stats.keyframes as u64),
-                ("landmarks", stats.landmarks as u64),
-                ("observations", stats.observations as u64),
-                ("culled_redundant", culls.redundant as u64),
-                ("culled_over_budget", culls.over_budget as u64),
-                (
-                    "covisibility_edges",
-                    map_backend.graph().edge_weights().len() as u64,
-                ),
-                ("high_covisibility_weight", u64::from(high_weight)),
-                (
-                    "high_covisibility_edges",
-                    map_backend
-                        .graph()
-                        .high_covisibility_edges(high_weight)
-                        .len() as u64,
-                ),
-                (
-                    "median_keyframe_landmarks",
-                    map_backend.map().median_keyframe_landmarks() as u64,
-                ),
-                ("retained_bytes", map_backend.map().retained_bytes() as u64),
-                ("step_count", timing.steps),
-                ("step_total_us", timing.total_ns / 1_000),
-                ("step_max_us", timing.max_ns / 1_000),
-            ])
-        })
-    }
-
-    /// Every covisibility edge weight of the persistent map (shared landmarks),
-    /// each edge once; `None` when ``backend.enabled`` is off.
-    #[getter]
-    fn map_covisibility_weights(&self) -> Option<Vec<u32>> {
-        self.inner
-            .map_backend()
-            .map(|map_backend| map_backend.graph().edge_weights())
+    /// A copy of the persistent keyframe map and the back end's counters, or
+    /// `None` when ``backend.enabled`` is off.
+    ///
+    /// Current up to the last solved keyframe the back end has taken; in
+    /// Realtime the back-end thread may still hold newer stamps (``flush``
+    /// waits for them). In Realtime this waits for the step in progress.
+    fn map_snapshot(&self, py: Python<'_>) -> PyResult<Option<MapSnapshot>> {
+        let Some(counters) = self.inner.backend_counters() else {
+            return Ok(None);
+        };
+        let mode = self.inner.backend_mode();
+        let snapshot = py.detach(|| self.inner.map_snapshot());
+        let (Some(snapshot), Some(mode)) = (snapshot, mode) else {
+            return Ok(None);
+        };
+        MapSnapshot::build(snapshot, counters, mode).map(Some)
     }
 
     fn __repr__(&self) -> String {
@@ -672,6 +636,275 @@ impl VioSnapshot {
             self.window_t_ns.len(),
             self.kf_ids.len(),
             self.landmark_ids.len()
+        )
+    }
+}
+
+/// The persistent keyframe map and the back end's counters, copied out (D51).
+///
+/// Arrays are flat copies in id order; scalars are counts. The map's poses are
+/// the window's solved (or, once evicted, final) poses: what the back end
+/// starts from, before any loop closure moves them.
+#[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
+#[derive(Debug)]
+pub struct MapSnapshot {
+    mode: &'static str,
+    keyframe_t_ns: Vec<i64>,
+    /// `[tx, ty, tz, qx, qy, qz, qw]` per keyframe.
+    keyframe_poses: Vec<f64>,
+    keyframe_active: Vec<bool>,
+    point_ids: Vec<i64>,
+    point_hosts: Vec<i64>,
+    /// `[x, y, z]` per point, world frame.
+    points_world: Vec<f32>,
+    /// `[a, b]` per edge.
+    covisibility_edges: Vec<i64>,
+    covisibility_weights: Vec<u32>,
+    snapshot_stats: slam_rs::backend::MapStats,
+    culls: slam_rs::backend::CullCounts,
+    high_covisibility_weight: u32,
+    median_keyframe_landmarks: usize,
+    retained_bytes: usize,
+    counters: slam_rs::backend::BackendCounters,
+}
+
+impl MapSnapshot {
+    /// Flatten one map snapshot.
+    ///
+    /// # Errors
+    ///
+    /// `ValueError` when a landmark id has outgrown `int64`, the refusal
+    /// [`VioSnapshot`] makes for the same ids.
+    fn build(
+        snapshot: slam_rs::backend::MapSnapshot,
+        counters: slam_rs::backend::BackendCounters,
+        mode: slam_rs::config::BackendMode,
+    ) -> PyResult<Self> {
+        let mut keyframe_poses: Vec<f64> = Vec::with_capacity(7 * snapshot.keyframe_poses.len());
+        for pose in &snapshot.keyframe_poses {
+            let quaternion: [f64; 4] = pose.rotation.quaternion_xyzw();
+            keyframe_poses.extend_from_slice(&[
+                pose.translation.x,
+                pose.translation.y,
+                pose.translation.z,
+                quaternion[0],
+                quaternion[1],
+                quaternion[2],
+                quaternion[3],
+            ]);
+        }
+        let point_ids: Vec<i64> = snapshot
+            .point_ids
+            .iter()
+            .map(|id| {
+                i64::try_from(id.0).map_err(|_| {
+                    PyValueError::new_err(format!("landmark id {} does not fit in an int64", id.0))
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(Self {
+            mode: match mode {
+                slam_rs::config::BackendMode::Offline => "offline",
+                slam_rs::config::BackendMode::Realtime => "realtime",
+            },
+            keyframe_t_ns: snapshot.keyframe_t_ns,
+            keyframe_poses,
+            keyframe_active: snapshot.keyframe_active,
+            point_ids,
+            point_hosts: snapshot.point_hosts,
+            points_world: snapshot.points_world.into_iter().flatten().collect(),
+            covisibility_edges: snapshot
+                .covisibility_edges
+                .iter()
+                .flat_map(|&(a, b, _)| [a, b])
+                .collect(),
+            covisibility_weights: snapshot
+                .covisibility_edges
+                .iter()
+                .map(|&(_, _, weight)| weight)
+                .collect(),
+            snapshot_stats: snapshot.stats,
+            culls: snapshot.culls,
+            high_covisibility_weight: snapshot.high_covisibility_weight,
+            median_keyframe_landmarks: snapshot.median_keyframe_landmarks,
+            retained_bytes: snapshot.retained_bytes,
+            counters,
+        })
+    }
+}
+
+#[pymethods]
+impl MapSnapshot {
+    /// Where the back end runs: ``"offline"`` or ``"realtime"``.
+    #[getter]
+    fn mode(&self) -> &'static str {
+        self.mode
+    }
+
+    /// Map keyframe timestamps, oldest first: `int64[k]`.
+    #[getter]
+    fn keyframe_t_ns<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.keyframe_t_ns.to_pyarray(py)
+    }
+
+    /// Raw keyframe poses `T_w_i`, `[tx, ty, tz, qx, qy, qz, qw]`: `float64[k, 7]`.
+    #[getter]
+    fn keyframe_poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        self.keyframe_poses
+            .to_pyarray(py)
+            .reshape((self.keyframe_t_ns.len(), 7))
+    }
+
+    /// Whether each keyframe is still in the window: `bool[k]`.
+    #[getter]
+    fn keyframe_active<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.keyframe_active.to_pyarray(py)
+    }
+
+    /// Map point (landmark) ids: `int64[p]`.
+    #[getter]
+    fn point_ids<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.point_ids.to_pyarray(py)
+    }
+
+    /// Timestamp of the keyframe hosting each point: `int64[p]`.
+    #[getter]
+    fn point_hosts<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.point_hosts.to_pyarray(py)
+    }
+
+    /// Map points in the world frame, metres: `float32[p, 3]`.
+    #[getter]
+    fn points_world<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        self.points_world
+            .to_pyarray(py)
+            .reshape((self.point_ids.len(), 3))
+    }
+
+    /// Covisibility edges as keyframe timestamp pairs, smaller first: `int64[e, 2]`.
+    #[getter]
+    fn covisibility_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.covisibility_edges
+            .to_pyarray(py)
+            .reshape((self.covisibility_weights.len(), 2))
+    }
+
+    /// Shared landmarks per covisibility edge: `uint32[e]`.
+    #[getter]
+    fn covisibility_weights<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
+        self.covisibility_weights.to_pyarray(py)
+    }
+
+    /// Map keyframes (RootSLAM's ``num_kfs``).
+    #[getter]
+    fn keyframes(&self) -> usize {
+        self.snapshot_stats.keyframes
+    }
+
+    /// Map landmarks (``num_lms``), placed in ``points_world`` or not.
+    #[getter]
+    fn landmarks(&self) -> usize {
+        self.snapshot_stats.landmarks
+    }
+
+    /// (landmark, image) observations (``num_obs``).
+    #[getter]
+    fn observations(&self) -> usize {
+        self.snapshot_stats.observations
+    }
+
+    /// Keyframes culled as redundant when they left the window.
+    #[getter]
+    fn culled_redundant(&self) -> usize {
+        self.culls.redundant
+    }
+
+    /// Keyframes culled while the map was over its keyframe budget.
+    #[getter]
+    fn culled_over_budget(&self) -> usize {
+        self.culls.over_budget
+    }
+
+    /// Shared landmarks at which a covisibility edge is "high".
+    #[getter]
+    fn high_covisibility_weight(&self) -> u32 {
+        self.high_covisibility_weight
+    }
+
+    /// Median number of landmarks a map keyframe sees.
+    #[getter]
+    fn median_keyframe_landmarks(&self) -> usize {
+        self.median_keyframe_landmarks
+    }
+
+    /// The map's payload in bytes (a lower bound on its heap).
+    #[getter]
+    fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Stamps the back end has taken.
+    #[getter]
+    fn stamps(&self) -> u64 {
+        self.counters.stamps
+    }
+
+    /// Loop queries run.
+    #[getter]
+    fn queries_run(&self) -> u64 {
+        self.counters.queries_run
+    }
+
+    /// Loop queries dropped because the back end was behind (Realtime only).
+    #[getter]
+    fn queries_dropped(&self) -> u64 {
+        self.counters.queries_dropped
+    }
+
+    /// Most stamps ever waiting for the back-end thread (0 Offline).
+    #[getter]
+    fn max_pending_stamps(&self) -> u64 {
+        self.counters.max_pending_stamps
+    }
+
+    /// Steps timed.
+    #[getter]
+    fn step_count(&self) -> u64 {
+        self.counters.step.steps
+    }
+
+    /// Wall time of all steps, microseconds.
+    #[getter]
+    fn step_total_us(&self) -> u64 {
+        self.counters.step.total_ns / 1_000
+    }
+
+    /// Wall time of the slowest step, microseconds.
+    #[getter]
+    fn step_max_us(&self) -> u64 {
+        self.counters.step.max_ns / 1_000
+    }
+
+    /// Wall time of all loop queries, microseconds.
+    #[getter]
+    fn query_total_us(&self) -> u64 {
+        self.counters.query.total_ns / 1_000
+    }
+
+    /// Wall time of the slowest loop query, microseconds.
+    #[getter]
+    fn query_max_us(&self) -> u64 {
+        self.counters.query.max_ns / 1_000
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MapSnapshot(mode={}, keyframes={}, points={}, edges={}, queries_dropped={})",
+            self.mode,
+            self.keyframe_t_ns.len(),
+            self.point_ids.len(),
+            self.covisibility_weights.len(),
+            self.counters.queries_dropped
         )
     }
 }
@@ -1409,5 +1642,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<OpticalFlow>()?;
     module.add_class::<FlowFrame>()?;
     module.add_class::<VioSnapshot>()?;
+    module.add_class::<MapSnapshot>()?;
     Ok(())
 }

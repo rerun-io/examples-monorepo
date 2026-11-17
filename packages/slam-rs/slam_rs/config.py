@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tomllib import TOMLDecodeError
+from typing import Literal
 
 from serde import SerdeError, coerce, field, serde
 from serde.toml import from_toml
@@ -149,3 +150,18 @@ def profiled_config_text(path: Path, profile: str = "reference", profiles: Path 
     resolved: str = json.dumps(document)
     _core.VioConfig.from_json(resolved)
     return resolved
+
+
+def with_back_end(config: _core.VioConfig, mode: Literal["offline", "realtime"]) -> _core.VioConfig:
+    """Turn the back end (the persistent keyframe map) on in ``mode``, every other key unchanged.
+
+    Args:
+        config: A resolved VIO configuration.
+        mode: ``offline`` steps the map inline (scoring, gates); ``realtime`` on its own thread (live).
+
+    Returns:
+        The same configuration with ``backend.enabled`` and ``backend.mode`` set.
+    """
+    document: dict = json.loads(config.to_json())
+    document["value0"].update({"backend.enabled": True, "backend.mode": mode})
+    return _core.VioConfig.from_json(json.dumps(document))

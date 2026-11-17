@@ -3,6 +3,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -85,3 +86,29 @@ def test_an_unknown_overlay_key_is_rejected(tmp_path: Path, overlay: str, reject
     (profiles / "fast.json").write_text(overlay)
     with pytest.raises(ValueError, match=rejected):
         replace(settings, package_root=tmp_path).vio_config_text(dataset.name, profile="fast")
+
+
+@pytest.mark.parametrize("mode", ["offline", "realtime"])
+def test_the_back_end_overlay_turns_the_map_on_and_keeps_every_other_key(mode: Literal["offline", "realtime"]) -> None:
+    from slam_rs import _core
+    from slam_rs.config import with_back_end
+
+    base: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"config.vio_max_iterations": 3}}')
+    values: dict = json.loads(with_back_end(base, mode).to_json())["value0"]
+    assert values.pop("backend.enabled") is True
+    assert values.pop("backend.mode") == mode
+    original: dict = json.loads(base.to_json())["value0"]
+    original.pop("backend.enabled")
+    original.pop("backend.mode")
+    assert values == original
+
+
+def test_the_live_profiles_run_the_back_end_realtime_and_the_scoring_profiles_offline() -> None:
+    """DESIGN §8: gates and scoring step the map inline; live use gives it its own thread (when ``backend.enabled``)."""
+    from slam_rs import _core
+
+    settings: SlamConfig = load_slam_config()
+    dataset: DatasetProperties = settings.datasets[0]
+    for profile, mode in (("reference", "offline"), ("fast", "offline"), ("live", "realtime"), ("live30", "realtime")):
+        config: _core.VioConfig = _core.VioConfig.from_json(settings.vio_config_text(dataset.name, profile=profile))
+        assert json.loads(config.to_json())["value0"]["backend.mode"] == mode, profile

@@ -34,6 +34,10 @@ RUN_ENTITY: str = "/world/runs/slam_rs"
 """Where this run's estimate goes, beside the dataset's own ``/world/runs/gt``."""
 GT_ENTITY: str = "/world/runs/gt"
 """The dataset's own ground-truth run, which the base recording already names."""
+MAP_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/keyframes"
+"""The back end's map keyframes (DESIGN §8), one point per keyframe at its raw pose."""
+MAP_POINTS_ENTITY: str = f"{RUN_ENTITY}/map/points"
+"""The back end's map points in the world frame (DESIGN §8)."""
 VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
@@ -50,6 +54,10 @@ POSE_COLOR: tuple[int, int, int, int] = (150, 150, 165, 200)
 """A window frame that is not a keyframe: a state awaiting its vote, or a demoted pose block."""
 MARGINALIZED_COLOR: tuple[int, int, int, int] = (255, 90, 90, 70)
 """A frame the last marginalization removed: the same Pinhole frustum, faded out."""
+MAP_KEYFRAME_COLOR: tuple[int, int, int, int] = (255, 160, 60, 255)
+"""A map keyframe that has left the window; window keyframes keep :data:`KEYFRAME_COLOR`."""
+MAP_POINT_COLOR: tuple[int, int, int, int] = (200, 200, 210, 120)
+"""A map point: faint, so the window's landmarks stay readable on top."""
 
 FRUSTUM_DEPTH_M: float = 0.08
 """Window frusta's ``image_plane_distance``, metres: an orientation marker, not a claim about range.
@@ -196,6 +204,8 @@ class VioLogger:
     """Number of slots drawn in each family on the previous frameset."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
+    map_keyframe: int | None = None
+    """Newest window keyframe when the map was last drawn; None before the first."""
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
@@ -214,7 +224,14 @@ class VioLogger:
             for color in (KEYFRAME_COLOR, LTKF_COLOR, POSE_COLOR, MARGINALIZED_COLOR)
         }
 
-    def log(self, result: _core.VioResult, snapshot: _core.VioSnapshot, frame: _core.FlowFrame, elapsed_ms: float) -> None:
+    def log(
+        self,
+        result: _core.VioResult,
+        snapshot: _core.VioSnapshot,
+        frame: _core.FlowFrame,
+        elapsed_ms: float,
+        map_snapshot: _core.MapSnapshot | None = None,
+    ) -> None:
         """Log one tracked frameset: the keypoints, the estimated and ground-truth paths, the rig, the window, the landmarks and the counters.
 
         Args:
@@ -222,6 +239,7 @@ class VioLogger:
             snapshot: The window and the frame's statistics behind that result.
             frame: The keypoints the estimator's own frontend tracked.
             elapsed_ms: Wall time the ``track`` call took.
+            map_snapshot: The back end's map, when the caller read it (see :meth:`map_is_stale`); drawn under the run.
         """
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
@@ -237,6 +255,9 @@ class VioLogger:
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
+        if map_snapshot is not None:
+            self._log_map(map_snapshot)
+            self.map_keyframe = int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else None
         self._log_scalars(snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
             # The only two readers of the whole estimate, and the reason it is
@@ -345,6 +366,22 @@ class VioLogger:
             rr.Points3D(snapshot.landmark_positions, colors=track_colors(snapshot.landmark_hosts), radii=0.008),
         )
 
+    def map_is_stale(self, snapshot: _core.VioSnapshot) -> bool:
+        """Whether a keyframe joined the window since the map was last drawn: the moment to read the map again.
+
+        The map changes only when a keyframe's stamp reaches the back end, and a snapshot of a long run's map holds
+        tens of thousands of points, so reading it every frameset would cost more than the frameset.
+        """
+        return len(snapshot.kf_ids) > 0 and int(snapshot.kf_ids[-1]) != self.map_keyframe
+
+    def _log_map(self, map_snapshot: _core.MapSnapshot) -> None:
+        """Draw the back end's keyframes (window ones in the window colour) and its points, whole, at the cursor."""
+        colors: UInt8[ndarray, "k 4"] = np.where(
+            map_snapshot.keyframe_active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
+        )
+        rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(map_snapshot.keyframe_poses[:, 0:3], colors=colors, radii=0.012))
+        rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=MAP_POINT_COLOR, radii=0.004))
+
     def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
         """Log the counters the time-series views plot.
 
@@ -446,7 +483,9 @@ class VioStage:
         frame: _core.FlowFrame = self.lockstep.flow_frame()
         assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
         assert frame.t_ns == result.t_ns
-        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1])
+        # None with the back end off; read only when a keyframe joined.
+        map_snapshot: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot() if self.logger.map_is_stale(snapshot) else None
+        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_snapshot)
 
     def refuse_lost_framesets(self) -> None:
         """Stop the run when a frameset never got the inertial samples that cover it.

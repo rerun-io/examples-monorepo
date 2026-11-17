@@ -110,6 +110,9 @@ pub enum VioError {
     /// backend that is not compiled in is a refusal, not a missing argument.
     #[error("this build has no GPU backend; rebuild with the `gpu-wgpu` cargo feature")]
     GpuUnavailable,
+    /// The operating system refused the Realtime back-end thread.
+    #[error("could not start the back-end thread: {0}")]
+    BackendThread(String),
     /// The frameset does not hold one image per configured camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {

@@ -46,6 +46,23 @@ pub enum KeyframeMargCriteria {
     ForwardVector,
 }
 
+/// How the back end runs beside tracking (`backend.mode`, DESIGN §2).
+///
+/// Both modes run the same [`crate::backend::MapBackend`] steps in the same
+/// order, and neither changes a VIO pose: the window never reads the map.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendMode {
+    /// Inline: tracking waits for each step, every loop query runs, and runs
+    /// repeat (RootSLAM `--deterministic 1`). For scoring and gates.
+    #[default]
+    Offline,
+    /// On its own thread: tracking hands stamps over and never waits; when the
+    /// back end falls behind it drops the oldest queued loop queries and counts
+    /// them. For live use.
+    Realtime,
+}
+
 /// Something that went wrong reading a config.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -264,10 +281,18 @@ pub struct VioConfig {
     // keep its `config.` names; keys of this port are under `backend.`.
     /// Build the persistent keyframe map beside the window. Read only by builds
     /// with the `backend` feature; the raw VIO poses are the same either way.
-    /// Off by default until the back end has its own thread (PR a2): until then
-    /// its `step` runs inline on the tracking thread.
+    /// Off by default; `backend.mode` says where it runs when on.
     #[serde(rename = "backend.enabled")]
     pub backend_enabled: bool,
+    /// Where the back end runs: inline (`offline`) or on its own thread
+    /// (`realtime`).
+    #[serde(rename = "backend.mode")]
+    pub backend_mode: BackendMode,
+    /// Realtime only: loop queries the back end keeps waiting while it is
+    /// behind. One more drops the oldest (counted). 4 is about one second of
+    /// keyframes at MSD's keyframe rate. Map stamps are never dropped.
+    #[serde(rename = "backend.realtime_max_queued_queries")]
+    pub backend_realtime_max_queued_queries: usize,
     /// Cull keyframes: redundant ones as they leave the window, and the
     /// lowest-scored ones in batches when the map is over its budget.
     #[serde(rename = "config.map_enable_culling")]
@@ -361,6 +386,8 @@ impl Default for VioConfig {
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
 
             backend_enabled: false,
+            backend_mode: BackendMode::Offline,
+            backend_realtime_max_queued_queries: 4,
             map_enable_culling: true,
             map_max_redundancy_score: 0.9,
             map_redundancy_exclude_hosted_lms: false,
@@ -602,6 +629,26 @@ mod tests {
             let text = format!(r#"{{"value0":{{"{dead}":3}}}}"#);
             assert!(VioConfig::from_json_str(&text).is_err(), "{dead} parsed");
         }
+    }
+
+    /// `backend.mode` (DESIGN §2, §8): Offline by default, lowercase names, and
+    /// an unknown mode refused.
+    #[test]
+    fn the_back_end_mode_defaults_to_offline_and_reads_lowercase_names() {
+        let defaults = VioConfig::default();
+        assert_eq!(defaults.backend_mode, BackendMode::Offline);
+        assert_eq!(defaults.backend_realtime_max_queued_queries, 4);
+        let realtime = VioConfig::from_json_str(
+            r#"{"value0":{"backend.mode":"realtime","backend.realtime_max_queued_queries":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(realtime.backend_mode, BackendMode::Realtime);
+        assert_eq!(realtime.backend_realtime_max_queued_queries, 2);
+        let written: String = realtime.to_json_string().unwrap();
+        assert!(written.contains(r#""realtime""#), "{written}");
+        assert_eq!(VioConfig::from_json_str(&written).unwrap(), realtime);
+        assert!(VioConfig::from_json_str(r#"{"value0":{"backend.mode":"Realtime"}}"#).is_err());
+        assert!(VioConfig::from_json_str(r#"{"value0":{"backend.mode":"threaded"}}"#).is_err());
     }
 
     #[test]

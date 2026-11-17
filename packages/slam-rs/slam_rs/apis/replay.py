@@ -21,7 +21,7 @@ from slam_rs.catalog_feed import (
     open_segment,
     select_decode_device,
 )
-from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.config import SlamConfig, load_slam_config, with_back_end
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep
@@ -75,6 +75,12 @@ class Config:
     """
     decode_device: DecodeRequest = "auto"
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
+    map: Literal["off", "offline", "realtime"] = "off"
+    """``--stage vio``: build the back end's persistent keyframe map and draw it under ``/world/runs/slam_rs``.
+
+    ``offline`` steps it inline (tracking waits, results repeat); ``realtime`` on its own thread (tracking never
+    waits). Either way the VIO poses are the same as with ``off``.
+    """
 
 
 @dataclass(slots=True)
@@ -166,6 +172,8 @@ def main(config: Config) -> None:
         vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
         vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+    if config.map != "off":
+        vio_config = with_back_end(vio_config, config.map)
     source: SegmentSource
     origin: str
     if config.rrd is not None:

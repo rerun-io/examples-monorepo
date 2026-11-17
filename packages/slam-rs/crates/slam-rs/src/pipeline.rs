@@ -61,13 +61,13 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
-    /// The persistent keyframe map, stepped inline with the window's stamps
-    /// (Offline); `None` when `backend.enabled` is off.
+    /// The back end over the persistent keyframe map, inline (Offline) or on
+    /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
-    map_backend: Option<crate::backend::MapBackend>,
-    /// Wall time of the inline map steps (they run on the tracking thread).
+    map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
+    /// `T_i_c` per camera, to place map points in the world for snapshots.
     #[cfg(feature = "backend")]
-    map_step_timing: crate::backend::StepTiming,
+    map_t_i_c: Vec<crate::lie::Se3<f64>>,
 }
 
 pub use lag::OverlapTimings;
@@ -129,17 +129,31 @@ impl<S: Scalar> Vio<S> {
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
         #[cfg(feature = "backend")]
-        let map_backend = config.backend_enabled.then(|| {
-            crate::backend::MapBackend::new(
-                crate::backend::MapConfig::from(&config),
-                calibration.resolution.clone(),
-            )
-        });
+        let map_runner = config
+            .backend_enabled
+            .then(|| {
+                crate::backend::BackendRunner::new(
+                    crate::backend::MapBackend::new(
+                        crate::backend::MapConfig::from(&config),
+                        calibration.resolution.clone(),
+                    ),
+                    config.backend_mode,
+                    config.backend_realtime_max_queued_queries,
+                )
+            })
+            .transpose()
+            .map_err(|error| VioError::BackendThread(error.to_string()))?;
+        #[cfg(feature = "backend")]
+        let map_t_i_c: Vec<crate::lie::Se3<f64>> = calibration
+            .t_i_c
+            .iter()
+            .map(|t_i_c| t_i_c.cast::<f64>())
+            .collect();
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
         #[cfg(feature = "backend")]
-        estimator.emit_map_stamps(map_backend.is_some());
+        estimator.emit_map_stamps(map_runner.is_some());
         Ok(Self {
             frontend,
             estimator,
@@ -159,39 +173,72 @@ impl<S: Scalar> Vio<S> {
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
-            map_backend,
+            map_runner,
             #[cfg(feature = "backend")]
-            map_step_timing: crate::backend::StepTiming::default(),
+            map_t_i_c,
         })
     }
 
-    /// The persistent keyframe map, or `None` when `backend.enabled` is off.
+    /// Read the persistent keyframe map; `None` when `backend.enabled` is off.
     ///
-    /// Current up to the last solved keyframe: a keyframe whose solve is still
-    /// deferred (D84) joins once [`Self::finish_deferred_keyframe`], the next
-    /// `track` or [`Self::flush`] solves it.
+    /// Current up to the last solved keyframe the back end has taken: a
+    /// keyframe whose solve is still deferred (D84) joins once
+    /// [`Self::finish_deferred_keyframe`], the next `track` or [`Self::flush`]
+    /// solves it, and in Realtime once the back-end thread has stepped it
+    /// ([`Self::flush_backend`] waits for that). In Realtime a read waits for
+    /// the step in progress; `track` never does.
     #[cfg(feature = "backend")]
-    pub fn map_backend(&self) -> Option<&crate::backend::MapBackend> {
-        self.map_backend.as_ref()
+    pub fn read_map<R>(&self, read: impl FnOnce(&crate::backend::MapBackend) -> R) -> Option<R> {
+        self.map_runner
+            .as_ref()
+            .map(|backend| backend.read(|map_backend, _| read(map_backend)))
     }
 
-    /// Hand the window's new stamps to the map, oldest first. The window never
-    /// reads the map back, so this cannot move a VIO pose.
-    fn step_map(&mut self) {
+    /// A copy of the map ([`Self::read_map`] says how current it is).
+    #[cfg(feature = "backend")]
+    pub fn map_snapshot(&self) -> Option<crate::backend::MapSnapshot> {
+        self.read_map(|map_backend| map_backend.snapshot(&self.map_t_i_c))
+    }
+
+    /// What the back end has done so far: stamps, queries run and dropped,
+    /// timings. `None` when `backend.enabled` is off.
+    #[cfg(feature = "backend")]
+    pub fn backend_counters(&self) -> Option<crate::backend::BackendCounters> {
+        self.map_runner
+            .as_ref()
+            .map(|backend| backend.read(|_, counters| *counters))
+    }
+
+    /// Where the back end runs; `None` when `backend.enabled` is off.
+    #[cfg(feature = "backend")]
+    pub fn backend_mode(&self) -> Option<config::BackendMode> {
+        self.map_runner.as_ref().map(|runner| runner.mode())
+    }
+
+    /// Wait until the back end has taken every stamp the window has handed it.
+    /// Immediate in Offline or with the back end off. [`Self::flush`] calls it.
+    ///
+    /// # Panics
+    ///
+    /// Re-raises a panic of the back-end thread.
+    pub fn flush_backend(&mut self) {
+        self.step_map();
         #[cfg(feature = "backend")]
-        if let Some(map_backend) = self.map_backend.as_mut() {
-            for stamp in self.estimator.take_map_stamps() {
-                let started = std::time::Instant::now();
-                map_backend.step(stamp);
-                self.map_step_timing.record(crate::duration_ns(started));
-            }
+        if let Some(runner) = self.map_runner.as_mut() {
+            runner.flush();
         }
     }
 
-    /// Wall time of the inline map steps so far (zero with the back end off).
-    #[cfg(feature = "backend")]
-    pub fn map_step_timing(&self) -> crate::backend::StepTiming {
-        self.map_step_timing
+    /// Hand the window's new stamps to the back end, oldest first. The window
+    /// never reads the map back, so this cannot move a VIO pose. Realtime only
+    /// sends them: tracking never waits for the back end.
+    fn step_map(&mut self) {
+        #[cfg(feature = "backend")]
+        if let Some(runner) = self.map_runner.as_mut() {
+            for stamp in self.estimator.take_map_stamps() {
+                runner.submit(stamp);
+            }
+        }
     }
 
     /// The estimator, for callers that want the window or the snapshot.

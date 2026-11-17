@@ -49,6 +49,7 @@ impl<S: Scalar> Vio<S> {
             None
         };
         self.finish_deferred_keyframe()?;
+        self.flush_backend();
         Ok(result)
     }
 

@@ -26,7 +26,18 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, Row, Rows, RowsReader, TextureFactory, gravity_batch
+from fixture_types import (
+    FRAME_PERIOD_NS,
+    IMU_PERIOD_NS,
+    CameraFactory,
+    PipelineFactory,
+    RigFactory,
+    Row,
+    Rows,
+    RowsReader,
+    TextureFactory,
+    gravity_batch,
+)
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
@@ -40,6 +51,8 @@ from slam_rs.vio_log import (
     IMAGE_PLANE_M,
     KEYFRAME_COLOR,
     LTKF_COLOR,
+    MAP_KEYFRAMES_ENTITY,
+    MAP_POINTS_ENTITY,
     MARGINALIZED_COLOR,
     POSE_COLOR,
     RUN_ENTITY,
@@ -118,7 +131,9 @@ def drive(
         frame: _core.FlowFrame | None = vio.flow_frame()
         assert snapshot is not None
         assert frame is not None
-        logger.log(result, snapshot, frame, elapsed_ms=1.5)
+        # What `VioStage` does: read the map only when a keyframe joined (None with the back end off).
+        map_snapshot: _core.MapSnapshot | None = vio.map_snapshot() if logger.map_is_stale(snapshot) else None
+        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_snapshot=map_snapshot)
         tracked.append(t_ns)
     # What a replay ends with, and the other half of the segment form: the rows
     # above are one segment each, these are the whole paths, static.
@@ -472,3 +487,32 @@ def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logge
         plotted += [str(entity) for entity in contents]
     assert sorted(plotted) == sorted(set(plotted)), "a counter is plotted in two views, so it is drawn against two axes"
     assert set(plotted) == counters, "every logged counter is plotted exactly once, and nothing else is"
+
+
+def test_the_map_is_drawn_under_the_run_when_a_keyframe_joins(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """With the back end on, the map's keyframes and points land under the run (DESIGN §8), once per new keyframe."""
+    assert MAP_KEYFRAMES_ENTITY == "/world/runs/slam_rs/keyframes"
+    assert MAP_POINTS_ENTITY == "/world/runs/slam_rs/map/points"
+    config: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"backend.enabled": true}}')
+    vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "map.rrd", read_rows)
+    keyframe_rows: list[Row] = logged.rows[MAP_KEYFRAMES_ENTITY]
+    point_rows: list[Row] = logged.rows[MAP_POINTS_ENTITY]
+    assert 1 <= len(keyframe_rows) < len(logged.tracked)
+    assert [t for t, _ in point_rows] == [t for t, _ in keyframe_rows]
+    final: _core.MapSnapshot | None = vio.map_snapshot()
+    assert final is not None
+    _, last_keyframes = keyframe_rows[-1]
+    positions: Float64[ndarray, "k 3"] = np.asarray(last_keyframes["Points3D:positions"], dtype=np.float64).reshape(-1, 3)
+    assert positions.shape[0] >= 1
+    assert np.isfinite(positions).all()
+    _, last_points = point_rows[-1]
+    assert np.isfinite(np.asarray(last_points["Points3D:positions"], dtype=np.float64)).all()
+
+
+def test_no_map_is_drawn_with_the_back_end_off(logged: Logged) -> None:
+    assert MAP_KEYFRAMES_ENTITY not in logged.rows
+    assert MAP_POINTS_ENTITY not in logged.rows
