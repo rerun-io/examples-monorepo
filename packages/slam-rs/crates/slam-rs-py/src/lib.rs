@@ -6,6 +6,7 @@
 //! `ValueError`, never a panic.
 
 mod catalog;
+mod insv;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
@@ -1338,6 +1339,7 @@ fn device_probes_run() -> usize {
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     catalog::register(module)?;
+    insv::register(module)?;
     module.add("__version__", slam_rs::VERSION)?;
     // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
