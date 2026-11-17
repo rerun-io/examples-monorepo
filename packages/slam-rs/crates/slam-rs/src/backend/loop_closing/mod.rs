@@ -16,19 +16,19 @@
 //!    match keyframe to keyframe (mutual, Hamming < 70, strict ratio 1.2: B6,
 //!    B17; ids without a descriptor are skipped: B7); read the island (the
 //!    candidate and its strongest covisibility neighbours) and match against
-//!    its landmarks; GP3P RANSAC on the rig (#614) with the inlier ratio gate
-//!    `inliers >= 0.5 x matches` (B1, passed to RANSAC as its acceptance bound);
-//!    then the reprojection pass: unmatched landmarks of the candidate are
-//!    projected with the PnP pose and searched for in a 16 px window of the
-//!    current images, on a local copy of the matches (B8), and PnP runs again,
-//!    its ratio gate over the matches it was fed (B2).
+//!    its landmarks; GP3P RANSAC on the rig (#614) with its minimum inlier
+//!    count; then the reprojection pass: unmatched landmarks of the candidate
+//!    are projected with the PnP pose and searched for in a 16 px window of
+//!    the current images, on a local copy of the matches (B8), and PnP runs
+//!    again. The final PnP alone has the ratio gate `inliers >= 0.5 x` the
+//!    matches it was fed (B1, DESIGN §4; B2), also RANSAC's acceptance bound.
 //!
 //! The island stays pinned against culling from detection to
 //! [`MapBackend::apply_loop`] (B10). Apply measures the drift the loop would
 //! correct; a small one fuses at once (landmark fusion, [`LoopFusion`], B9, and
-//! a loop edge in the covisibility graph); a large one is kept as a verified
-//! loop for the pose-graph optimization (PR c2), which RootSLAM runs before it
-//! fuses.
+//! a loop edge in the covisibility graph); a large one stays pinned, with its
+//! matches, for the pose-graph optimization (PR c2), which RootSLAM runs
+//! before it fuses ([`MapBackend::finish_pgo_loop`]).
 
 mod window;
 
@@ -91,18 +91,21 @@ pub enum LoopFusion {
     },
 }
 
-/// A loop that passed verification, before it is applied.
+/// A loop that passed verification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopDetection {
     /// The new keyframe.
     pub current: FrameId,
     /// The keyframe it closes a loop with.
     pub candidate: FrameId,
-    /// The candidate and its covisibility neighbours, pinned until applied.
+    /// The candidate and its covisibility neighbours, pinned with the current
+    /// and candidate keyframes until applied (until the pose-graph
+    /// optimization takes it, for [`LoopOutcome::NeedsPgo`]).
     pub island: Vec<FrameId>,
     /// `T_w_i` of the current keyframe from PnP against the island.
     pub corrected_pose: Se3<f64>,
-    /// The final inlier matches.
+    /// The final inlier matches: fused at once, or after the pose-graph
+    /// optimization.
     pub matches: Vec<LoopMatch>,
     /// How many matches survived each stage.
     pub stages: LoopStages,
@@ -133,7 +136,9 @@ pub enum LoopOutcome {
         /// Observations of island landmarks added to the current keyframe.
         observations_added: usize,
     },
-    /// Drift at or above the gate: left for the pose-graph optimization (c2).
+    /// Drift at or above the gate: left for the pose-graph optimization (c2),
+    /// which takes it with [`MapBackend::finish_pgo_loop`]; until then its
+    /// keyframes stay pinned and its matches kept for the fusion after it.
     NeedsPgo,
     /// The current or candidate keyframe left the map first (not pinned).
     Stale,
@@ -142,16 +147,8 @@ pub enum LoopOutcome {
 /// One verified loop and what became of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopEvent {
-    /// The new keyframe.
-    pub current: FrameId,
-    /// The keyframe it closes a loop with.
-    pub candidate: FrameId,
-    /// The candidate and its covisibility neighbours.
-    pub island: Vec<FrameId>,
-    /// Match counts per stage.
-    pub stages: LoopStages,
-    /// `T_w_i` of the current keyframe from PnP.
-    pub corrected_pose: Se3<f64>,
+    /// The loop as verified.
+    pub detection: LoopDetection,
     /// Translation of `T_map^-1 T_pnp`, metres.
     pub drift_m: f64,
     /// Rotation angle of `T_map^-1 T_pnp`, degrees.
@@ -191,7 +188,20 @@ pub struct LoopClosing {
     descriptors: BTreeMap<FrameId, KeyframeDescriptors>,
     images: BTreeMap<FrameId, KeyframeImages>,
     events: Vec<LoopEvent>,
+    /// Current keyframes of the [`LoopOutcome::NeedsPgo`] events the
+    /// pose-graph optimization has not taken yet.
+    awaiting_pgo: BTreeSet<FrameId>,
     counts: LoopCounts,
+}
+
+impl LoopDetection {
+    /// The keyframes the loop pins: the island, the current and the candidate.
+    fn keyframes(&self) -> impl Iterator<Item = FrameId> + '_ {
+        self.island
+            .iter()
+            .copied()
+            .chain([self.current, self.candidate])
+    }
 }
 
 impl LoopClosing {
@@ -222,6 +232,7 @@ impl LoopClosing {
             descriptors: BTreeMap::new(),
             images: BTreeMap::new(),
             events: Vec::new(),
+            awaiting_pgo: BTreeSet::new(),
             counts: LoopCounts::default(),
         }))
     }
@@ -487,8 +498,8 @@ impl MapBackend {
         };
         let event: LoopEvent = self.apply_loop(detection);
         vec![MapEvent::LoopVerified {
-            current: event.current,
-            candidate: event.candidate,
+            current: event.detection.current,
+            candidate: event.detection.candidate,
             outcome: event.outcome,
         }]
     }
@@ -512,12 +523,7 @@ impl MapBackend {
         let detection = candidates
             .into_iter()
             .find_map(|candidate| self.validate(keyframe, candidate, &keypoints, &images))?;
-        let pinned = detection
-            .island
-            .iter()
-            .copied()
-            .chain([detection.current, detection.candidate]);
-        self.pinned.extend(pinned);
+        self.pinned.extend(detection.keyframes());
         Some(detection)
     }
 
@@ -584,7 +590,7 @@ impl MapBackend {
             let index = list.binary_search_by_key(&id, |(k, _)| *k).ok()?;
             Some(list[index].1)
         };
-        let mut matches: Vec<LoopMatch> = island_matches
+        let matches: Vec<LoopMatch> = island_matches
             .iter()
             .filter_map(|&(cam, id, lm)| {
                 Some(LoopMatch {
@@ -596,34 +602,31 @@ impl MapBackend {
             })
             .collect();
 
-        let (pose, inliers) = self.solve_pnp(&matches, &config, seed(current, candidate, 0))?;
-        stages.inliers = inliers.len();
-        if !passes_pnp_gate(
-            inliers.len(),
-            island_matches.len(),
+        // B1 (DESIGN §4): the ratio gate reads the final PnP only; the first
+        // keeps its minimum inlier count.
+        let ratio: f64 = config.pnp_inliers_ratio;
+        let first_ratio: f64 = if config.reproject_landmarks {
+            0.0
+        } else {
+            ratio
+        };
+        let (mut pose, mut matches) = self.solve_pnp(
+            &matches,
+            seed(current, candidate, 0),
             config.pnp_min_inliers,
-            config.pnp_inliers_ratio,
-        ) {
-            return None;
-        }
-        let mut pose: Se3<f64> = pose;
-        matches = inliers;
+            first_ratio,
+        )?;
+        stages.inliers = matches.len();
         if config.reproject_landmarks {
             matches.extend(self.reproject(candidate, &matches, &pose, images));
             stages.reprojection_matches = matches.len();
-            let (refined, inliers) =
-                self.solve_pnp(&matches, &config, seed(current, candidate, 1))?;
-            stages.reprojection_inliers = inliers.len();
-            if !passes_pnp_gate(
-                inliers.len(),
-                stages.reprojection_matches,
+            (pose, matches) = self.solve_pnp(
+                &matches,
+                seed(current, candidate, 1),
                 config.reprojected_pnp_min_inliers,
-                config.pnp_inliers_ratio,
-            ) {
-                return None;
-            }
-            pose = refined;
-            matches = inliers;
+                ratio,
+            )?;
+            stages.reprojection_inliers = matches.len();
         }
         Some(LoopDetection {
             current,
@@ -636,14 +639,17 @@ impl MapBackend {
     }
 
     /// GP3P RANSAC of the rig body pose from the matches; the pose and the
-    /// inlier matches, or `None` with fewer than four usable matches or no model.
+    /// inlier matches when they pass [`passes_pnp_gate`] over the matches fed
+    /// to RANSAC (those with a landmark and a bearing, B2), else `None`.
     fn solve_pnp(
         &self,
         matches: &[LoopMatch],
-        config: &LoopClosingConfig,
         seed: u64,
+        min_inliers: usize,
+        ratio: f64,
     ) -> Option<(Se3<f64>, Vec<LoopMatch>)> {
         let loops = self.loops.as_ref()?;
+        let config: &LoopClosingConfig = &loops.config;
         let mut used: Vec<LoopMatch> = Vec::with_capacity(matches.len());
         let mut correspondences: Vec<GeneralizedCorrespondence> = Vec::with_capacity(matches.len());
         for m in matches {
@@ -677,17 +683,17 @@ impl MapBackend {
                 }),
             seed,
             refine: true,
-            min_inlier_ratio: (config.pnp_inliers_ratio > 0.0)
-                .then_some(config.pnp_inliers_ratio.min(1.0)),
+            min_inlier_ratio: (ratio > 0.0).then_some(ratio.min(1.0)),
         };
         let result = gp3p_ransac(&correspondences, &ransac).ok()??;
+        let fed: usize = used.len();
         let inliers: Vec<LoopMatch> = used
             .into_iter()
             .zip(&result.inliers)
             .filter(|(_, is_in)| **is_in)
             .map(|(m, _)| m)
             .collect();
-        Some((result.pose, inliers))
+        passes_pnp_gate(inliers.len(), fed, min_inliers, ratio).then_some((result.pose, inliers))
     }
 
     /// The reprojection pass (`reprojectLandmarks` + `searchInWindow`): every
@@ -762,16 +768,10 @@ impl MapBackend {
     }
 
     /// Apply a verified loop (`handle_loop_detection`): measure the drift it
-    /// would correct; below the gate, fuse its landmarks and add the loop edge;
-    /// at or above it, keep it for the pose-graph optimization. Unpins the
-    /// island either way and records the event.
+    /// would correct; below the gate, fuse its landmarks, add the loop edge
+    /// and unpin its keyframes; at or above it, keep it, pinned, for the
+    /// pose-graph optimization ([`Self::finish_pgo_loop`]). Records the event.
     pub fn apply_loop(&mut self, detection: LoopDetection) -> LoopEvent {
-        let pins = detection
-            .island
-            .iter()
-            .copied()
-            .chain([detection.current, detection.candidate]);
-        self.unpin(pins);
         let gates: Option<(f64, f64)> = self.loops.as_ref().map(|loops| {
             (
                 loops.config.min_drift_reduction_m,
@@ -797,26 +797,71 @@ impl MapBackend {
         } else {
             LoopOutcome::Stale
         };
+        if let Some(loops) = self.loops.as_mut() {
+            loops.counts.verified += 1;
+            match outcome {
+                LoopOutcome::Fused { .. } => loops.counts.fused += 1,
+                LoopOutcome::NeedsPgo => {
+                    loops.counts.needs_pgo += 1;
+                    loops.awaiting_pgo.insert(detection.current);
+                }
+                LoopOutcome::Stale => {}
+            }
+        }
+        if outcome != LoopOutcome::NeedsPgo {
+            self.release(&detection);
+        }
         let event = LoopEvent {
-            current: detection.current,
-            candidate: detection.candidate,
-            island: detection.island,
-            stages: detection.stages,
-            corrected_pose: detection.corrected_pose,
+            detection,
             drift_m,
             drift_deg,
             outcome,
         };
         if let Some(loops) = self.loops.as_mut() {
-            loops.counts.verified += 1;
-            match outcome {
-                LoopOutcome::Fused { .. } => loops.counts.fused += 1,
-                LoopOutcome::NeedsPgo => loops.counts.needs_pgo += 1,
-                LoopOutcome::Stale => {}
-            }
             loops.events.push(event.clone());
         }
         event
+    }
+
+    /// Verified loops waiting for the pose-graph optimization, oldest first.
+    pub fn loops_awaiting_pgo(&self) -> impl Iterator<Item = &LoopEvent> {
+        self.loops.iter().flat_map(|loops| {
+            loops
+                .events
+                .iter()
+                .filter(|event| loops.awaiting_pgo.contains(&event.detection.current))
+        })
+    }
+
+    /// The pose-graph optimization (c2) has taken the loop found at
+    /// `current`: unpin its keyframes (those another waiting loop holds stay
+    /// pinned) and hand it back, with the matches the fusion after the
+    /// optimization reads. `None` when no loop waits there.
+    pub fn finish_pgo_loop(&mut self, current: FrameId) -> Option<LoopDetection> {
+        let loops = self.loops.as_mut()?;
+        if !loops.awaiting_pgo.remove(&current) {
+            return None;
+        }
+        let event = loops
+            .events
+            .iter()
+            .rfind(|event| event.detection.current == current)?;
+        let detection: LoopDetection = event.detection.clone();
+        self.release(&detection);
+        Some(detection)
+    }
+
+    /// Unpin a loop's keyframes but those a waiting loop still holds.
+    fn release(&mut self, detection: &LoopDetection) {
+        let held: BTreeSet<FrameId> = self
+            .loops_awaiting_pgo()
+            .flat_map(|event| event.detection.keyframes())
+            .collect();
+        let free: Vec<FrameId> = detection
+            .keyframes()
+            .filter(|id| !held.contains(id))
+            .collect();
+        self.unpin(free);
     }
 
     /// Carry out [`fusion_plan`] and raise the covisibility edges it creates

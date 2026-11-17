@@ -69,6 +69,11 @@ pub struct Vio<S: Scalar = f32> {
     /// loop closing (DESIGN §2.2: the stamp carries its own keyframe's images).
     #[cfg(feature = "backend")]
     keyframe_images: std::collections::BTreeMap<i64, crate::estimator::KeyframeImages>,
+    /// With `port.frontend_lag` and loop closing on: the previous frameset's
+    /// input and its timestamp, which the estimator finishes beside the
+    /// frontend of the next. Swapped with `frames`, never copied.
+    #[cfg(feature = "backend")]
+    lagged_frames: Option<(i64, frontend::input::FrameStorage)>,
 }
 
 pub use lag::OverlapTimings;
@@ -179,6 +184,8 @@ impl<S: Scalar> Vio<S> {
             map_runner,
             #[cfg(feature = "backend")]
             keyframe_images: std::collections::BTreeMap::new(),
+            #[cfg(feature = "backend")]
+            lagged_frames: None,
         })
     }
 
@@ -256,27 +263,40 @@ impl<S: Scalar> Vio<S> {
         }
     }
 
+    /// Whether keyframe images go to the back end: loop closing is on.
+    #[cfg(feature = "backend")]
+    fn loop_closing_on(&self) -> bool {
+        self.map_runner.is_some() && self.frontend.config().backend_loop_closing.enabled
+    }
+
     /// Keep a copy of the frameset's images when the estimator made it a
     /// keyframe and loop closing will describe it; its stamp (now, or after a
-    /// deferred solve) takes them. A lagged pipeline already holds the next
-    /// frameset's images, so its keyframes go without (counted by loop closing).
+    /// deferred solve) takes them. A lagged pipeline finishes the previous
+    /// frameset, whose input `lagged_frames` holds. A camera image that fails
+    /// to fill holds none, so no image shifts to another camera.
     #[cfg(feature = "backend")]
     fn hold_keyframe_images(&mut self, t_ns: i64, outcome: &estimator::FrameOutcome<S>) {
         let keyframe =
             matches!(outcome, estimator::FrameOutcome::Measured(stats) if stats.took_keyframe);
-        if !keyframe
-            || self.map_runner.is_none()
-            || !self.frontend.config().backend_loop_closing.enabled
-            || self.last_frame_t_ns != Some(t_ns)
-        {
+        if !keyframe || !self.loop_closing_on() {
             return;
         }
-        let images: Vec<kornia_image::Image<u16, 1>> = self
-            .frames
+        let frames = if self.last_frame_t_ns == Some(t_ns) {
+            &self.frames
+        } else {
+            match &self.lagged_frames {
+                Some((lagged_t_ns, frames)) if *lagged_t_ns == t_ns => frames,
+                _ => return,
+            }
+        };
+        let Ok(images) = frames
             .view()
             .iter()
-            .filter_map(|frame| frame.with_dense(Clone::clone).ok())
-            .collect();
+            .map(|frame| frame.with_dense(Clone::clone))
+            .collect::<Result<Vec<kornia_image::Image<u16, 1>>, _>>()
+        else {
+            return;
+        };
         self.keyframe_images.insert(
             t_ns,
             crate::estimator::KeyframeImages(std::sync::Arc::new(images)),
@@ -532,6 +552,22 @@ impl<S: Scalar> Vio<S> {
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
+        // A lagged estimator finishes the frameset `frames` holds now: keep it.
+        #[cfg(feature = "backend")]
+        if self.frontend.config().port_frontend_lag
+            && self.loop_closing_on()
+            && let Some(previous_t_ns) = self.last_frame_t_ns
+        {
+            let mut spare = match self.lagged_frames.take() {
+                Some((_, spare)) => spare,
+                None => frontend::input::FrameStorage::new(matches!(
+                    self.frames,
+                    frontend::input::FrameStorage::Packed(_)
+                )),
+            };
+            std::mem::swap(&mut self.frames, &mut spare);
+            self.lagged_frames = Some((previous_t_ns, spare));
+        }
         self.frames.fill(images)?;
         Ok(PreparedTrack {
             vio: self,

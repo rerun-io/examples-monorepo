@@ -119,6 +119,57 @@ struct Scene {
     backend: MapBackend,
 }
 
+/// What a test changes in the revisit.
+#[derive(Clone)]
+struct Setup {
+    cameras: usize,
+    drift: f64,
+    fuse_landmarks: bool,
+    loops: LoopClosingConfig,
+    max_keyframes: usize,
+    /// C tracks the first `seen` points of each camera.
+    seen: usize,
+    /// Island landmarks `k < wrong` sit 30 px off their dot: outliers of the
+    /// first PnP.
+    wrong: usize,
+    /// Island landmarks `k >= seen` sit 4 px off: the reprojection pass finds
+    /// their dots and PnP rejects them (at [`tight`]'s threshold).
+    shifted_unseen: bool,
+    /// A decoy keyframe E (and its neighbour E2) before A: the same images,
+    /// its own track ids, its landmarks `k >= seen` 4 px off. Its score ties
+    /// A's, so it is validated first, and it fails after its reprojection pass.
+    decoy: bool,
+}
+
+impl Setup {
+    fn new(cameras: usize, drift: f64, loops: LoopClosingConfig) -> Self {
+        Self {
+            cameras,
+            drift,
+            fuse_landmarks: false,
+            loops,
+            max_keyframes: 100,
+            seen: SEEN,
+            wrong: 0,
+            shifted_unseen: false,
+            decoy: false,
+        }
+    }
+}
+
+/// A PnP threshold under which a landmark 4 px off its dot is an outlier
+/// anywhere in the image (about 0.6 px).
+fn tight(loops: LoopClosingConfig) -> LoopClosingConfig {
+    LoopClosingConfig {
+        pnp_ransac_threshold: 2e-6,
+        ..loops
+    }
+}
+
+/// The decoy keyframe and its neighbour ([`Setup::decoy`]).
+const E: FrameId = SECOND / 2;
+const E2: FrameId = 3 * SECOND / 4;
+
 fn keypoint_id(cam: usize, k: usize, offset: u64) -> KeypointId {
     KeypointId(offset + 1 + 1000 * cam as u64 + k as u64)
 }
@@ -132,9 +183,25 @@ fn landmark(
     host: FrameId,
     obs: &[FrameId],
 ) -> StampLandmark {
+    placed(views, calib, (cam, k), id, host, obs, 0.0)
+}
+
+/// [`landmark`] placed `off` pixels from its dot, in a direction drawn from
+/// `(cam, k)`: observed at the dot, it is a PnP outlier.
+fn placed(
+    views: &[View],
+    calib: &Calibration<f64>,
+    (cam, k): (usize, usize),
+    id: KeypointId,
+    host: FrameId,
+    obs: &[FrameId],
+    off: f32,
+) -> StampLandmark {
     let camera = SlamCamera::from_model(&calib.intrinsics[cam]).unwrap();
     let mut bearing = Vector4::zeros();
-    assert!(camera.unproject(&views[cam].pixels[k].cast::<f64>(), &mut bearing));
+    let angle = Rng::new(1000 * cam as u64 + k as u64).below(360) as f32;
+    let shift = off * Vector2::new(angle.to_radians().cos(), angle.to_radians().sin());
+    assert!(camera.unproject(&(views[cam].pixels[k] + shift).cast::<f64>(), &mut bearing));
     StampLandmark {
         id: LandmarkId::from(id),
         host: TimeCamId::new(host, cam),
@@ -181,6 +248,23 @@ fn scene(
     loops: LoopClosingConfig,
     max_keyframes: usize,
 ) -> Scene {
+    scene_with(Setup {
+        fuse_landmarks,
+        max_keyframes,
+        ..Setup::new(cameras, drift, loops)
+    })
+}
+
+fn scene_with(setup: Setup) -> Scene {
+    let Setup {
+        cameras,
+        drift,
+        fuse_landmarks,
+        loops,
+        max_keyframes,
+        seen,
+        ..
+    } = setup.clone();
     let calib = calibration(cameras);
     let mut rng = Rng::new(7 + cameras as u64);
     let views: Vec<View> = (0..cameras).map(|_| view(&mut rng)).collect();
@@ -202,33 +286,51 @@ fn scene(
             .collect()
     };
     let identity = Se3::identity();
-    backend.step(keyframe_stamp(
-        A,
-        &[(A, identity)],
-        vec![],
-        tracked(0, POINTS),
-        Some(&images),
-    ));
-    assert!(backend.query(A).is_empty());
-    let island: Vec<StampLandmark> = (0..cameras)
-        .flat_map(|cam| (0..POINTS).map(move |k| (cam, k)))
-        .map(|(cam, k)| landmark(&views, &calib, cam, k, keypoint_id(cam, k, 0), A, &[A, A2]))
-        .collect();
-    backend.step(keyframe_stamp(
-        A2,
-        &[(A, identity), (A2, identity)],
-        island,
-        tracked(0, POINTS),
-        Some(&images),
-    ));
-    assert!(
-        backend.query(A2).is_empty(),
-        "too recent to close a loop with A"
-    );
-    backend.step(MapStamp::Marginalized(MargStamp {
-        keyframe_poses: [(A, identity), (A2, identity)].into_iter().collect(),
-        landmarks: vec![],
-    }));
+    // A keyframe and its neighbour, out of the window, hosting one landmark per
+    // point (`shifted` for those C does not track: 4 px off).
+    let mut pair = |(first, second): (FrameId, FrameId), offset: u64, shifted: bool| {
+        backend.step(keyframe_stamp(
+            first,
+            &[(first, identity)],
+            vec![],
+            tracked(offset, POINTS),
+            Some(&images),
+        ));
+        assert!(backend.query(first).is_empty());
+        let island: Vec<StampLandmark> = (0..cameras)
+            .flat_map(|cam| (0..POINTS).map(move |k| (cam, k)))
+            .map(|(cam, k)| {
+                let off: f32 = match k {
+                    k if k < setup.wrong => 30.0,
+                    k if k >= seen && shifted => 4.0,
+                    _ => 0.0,
+                };
+                let id = keypoint_id(cam, k, offset);
+                placed(&views, &calib, (cam, k), id, first, &[first, second], off)
+            })
+            .collect();
+        backend.step(keyframe_stamp(
+            second,
+            &[(first, identity), (second, identity)],
+            island,
+            tracked(offset, POINTS),
+            Some(&images),
+        ));
+        assert!(
+            backend.query(second).is_empty(),
+            "too recent to close a loop with {first}"
+        );
+        backend.step(MapStamp::Marginalized(MargStamp {
+            keyframe_poses: [(first, identity), (second, identity)]
+                .into_iter()
+                .collect(),
+            landmarks: vec![],
+        }));
+    };
+    if setup.decoy {
+        pair((E, E2), 50_000, true);
+    }
+    pair((A, A2), 0, setup.shifted_unseen);
     let drifted = Se3::new(So3::identity(), Vector3::new(drift, 0.0, 0.0));
     let mut window = vec![(C, drifted)];
     let mut current = Vec::new();
@@ -238,7 +340,7 @@ fn scene(
             D,
             &[(D, drifted)],
             vec![],
-            tracked(100_000, SEEN),
+            tracked(100_000, seen),
             None,
         ));
         current = (0..cameras)
@@ -260,7 +362,7 @@ fn scene(
         C,
         &window,
         current,
-        tracked(100_000, SEEN),
+        tracked(100_000, seen),
         Some(&images),
     ));
     Scene { views, backend }
@@ -504,21 +606,24 @@ fn a_revisit_is_verified_fused_and_linked_to_its_island() {
         assert_eq!(events.len(), 1, "{cameras} cameras");
         let loops = s.backend.loop_closing().unwrap();
         let event = loops.events()[0].clone();
+        let detection = &event.detection;
         assert_eq!(
-            (event.current, event.candidate),
+            (detection.current, detection.candidate),
             (C, A),
             "equal scores: the older id first"
         );
-        assert_eq!(event.island, vec![A, A2]);
-        assert_eq!(event.stages.initial_matches, SEEN * cameras);
-        assert_eq!(event.stages.island_matches, SEEN * cameras);
-        assert_eq!(event.stages.inliers, SEEN * cameras);
+        assert_eq!(detection.island, vec![A, A2]);
         assert_eq!(
-            event.stages.reprojection_matches,
-            POINTS * cameras,
-            "every unmatched landmark redetected"
+            detection.stages,
+            LoopStages {
+                initial_matches: SEEN * cameras,
+                island_matches: SEEN * cameras,
+                inliers: SEEN * cameras,
+                // Every unmatched landmark redetected.
+                reprojection_matches: POINTS * cameras,
+                reprojection_inliers: POINTS * cameras,
+            }
         );
-        assert_eq!(event.stages.reprojection_inliers, POINTS * cameras);
         assert!(
             (event.drift_m - 0.05).abs() < 1e-6 && event.drift_deg < 1e-4,
             "{event:?}"
@@ -561,7 +666,7 @@ fn a_revisit_is_verified_fused_and_linked_to_its_island() {
         let snapshot = s.backend.snapshot(&calibration(cameras).t_i_c);
         assert_eq!(snapshot.loop_counts.verified, 1);
         assert_eq!(snapshot.loops.len(), 1);
-        assert!(snapshot.loops[0].fused && snapshot.loops[0].inliers == POINTS * cameras);
+        assert!(snapshot.loops[0].fused);
     }
 }
 
@@ -617,6 +722,7 @@ fn the_parity_knobs_close_the_same_revisit() {
     assert_eq!(s.backend.query(C).len(), 1);
     assert_eq!(
         s.backend.loop_closing().unwrap().events()[0]
+            .detection
             .stages
             .reprojection_inliers,
         2 * POINTS
@@ -692,4 +798,198 @@ proptest! {
         prop_assert!(fused, "{:?}", event.outcome);
         prop_assert!(s.backend.pinned.is_empty());
     }
+}
+
+#[test]
+fn a_loop_left_for_the_pose_graph_keeps_its_matches_and_its_island_until_the_pgo_takes_it() {
+    // RootSLAM fuses after the PGO (`handle_loop_closure`), from the matches,
+    // and keeps the island protected until then (B10).
+    let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
+    s.backend.query(C);
+    let event = s.backend.loop_closing().unwrap().events()[0].clone();
+    assert_eq!(event.outcome, LoopOutcome::NeedsPgo);
+    assert_eq!(event.detection.matches.len(), POINTS);
+    assert_eq!(
+        s.backend.loops_awaiting_pgo().collect::<Vec<_>>(),
+        vec![&event]
+    );
+    s.backend.config.max_keyframes = 1;
+    crowd(&mut s.backend, 4);
+    for id in [A, A2, C] {
+        assert!(s.backend.map().contains_keyframe(id), "{id} culled");
+    }
+    assert_eq!(s.backend.finish_pgo_loop(C), Some(event.detection));
+    assert!(s.backend.pinned.is_empty());
+    assert_eq!(s.backend.loops_awaiting_pgo().count(), 0);
+    assert_eq!(s.backend.finish_pgo_loop(C), None);
+}
+
+#[test]
+fn finishing_one_waiting_loop_keeps_the_pins_another_still_needs() {
+    let mut s = scene(1, 0.3, false, LoopClosingConfig::default(), 100);
+    s.backend.query(C);
+    // A second revisit 2 s later, with its own track ids, closes with A too.
+    let c3: FrameId = C + 2 * SECOND;
+    let drifted = Se3::new(So3::identity(), Vector3::new(0.3, 0.0, 0.0));
+    let keypoints = vec![
+        (0..SEEN)
+            .map(|k| (keypoint_id(0, k, 200_000), s.views[0].pixels[k]))
+            .collect(),
+    ];
+    let images = KeyframeImages(Arc::new(vec![s.views[0].image.clone()]));
+    s.backend.step(keyframe_stamp(
+        c3,
+        &[(C, drifted), (c3, drifted)],
+        vec![],
+        keypoints,
+        Some(&images),
+    ));
+    s.backend.query(c3);
+    let candidates: Vec<FrameId> = s
+        .backend
+        .loops_awaiting_pgo()
+        .map(|event| event.detection.candidate)
+        .collect();
+    assert_eq!(candidates, vec![A, A]);
+    s.backend.finish_pgo_loop(C).unwrap();
+    assert_eq!(s.backend.pinned, [A, A2, c3].into_iter().collect());
+    s.backend.finish_pgo_loop(c3).unwrap();
+    assert!(s.backend.pinned.is_empty());
+}
+
+#[test]
+fn the_ratio_gate_reads_the_final_pnp_only() {
+    // B1, lead decision (DESIGN §4): 20 of the 42 island matches are inliers
+    // (0.48, as RootSLAM's MGO13 loops: median 0.42), and after the
+    // reprojection pass the final PnP keeps all its matches.
+    let setup = Setup {
+        wrong: 22,
+        ..Setup::new(1, 0.05, LoopClosingConfig::default())
+    };
+    let detection = scene_with(setup.clone()).backend.detect_loop(C).unwrap();
+    assert_eq!(
+        (detection.stages.island_matches, detection.stages.inliers),
+        (SEEN, SEEN - 22)
+    );
+    assert_eq!(detection.stages.reprojection_inliers, POINTS - 22);
+    // Without the reprojection pass the first PnP is the final one.
+    let no_pass = LoopClosingConfig {
+        reproject_landmarks: false,
+        ..LoopClosingConfig::default()
+    };
+    let mut without = scene_with(Setup {
+        loops: no_pass.clone(),
+        ..setup.clone()
+    });
+    assert!(without.backend.detect_loop(C).is_none());
+    let parity = LoopClosingConfig {
+        pnp_inliers_ratio: 0.0,
+        ..no_pass
+    };
+    assert!(
+        scene_with(Setup {
+            loops: parity,
+            ..setup
+        })
+        .backend
+        .detect_loop(C)
+        .is_some()
+    );
+}
+
+#[test]
+fn the_final_ratio_divides_by_the_matches_fed_to_that_pnp() {
+    // B2: all 20 island matches are inliers; the reprojection pass adds 40
+    // dots whose landmarks sit 4 px off, so the final PnP keeps 20 of 60.
+    // RootSLAM divides by the 20 island matches and would pass it.
+    let setup = Setup {
+        seen: 20,
+        shifted_unseen: true,
+        ..Setup::new(1, 0.05, tight(LoopClosingConfig::default()))
+    };
+    assert!(scene_with(setup.clone()).backend.detect_loop(C).is_none());
+    let parity = tight(LoopClosingConfig {
+        pnp_inliers_ratio: 0.0,
+        ..LoopClosingConfig::default()
+    });
+    let detection = scene_with(Setup {
+        loops: parity,
+        ..setup
+    })
+    .backend
+    .detect_loop(C)
+    .unwrap();
+    assert_eq!(
+        detection.stages,
+        LoopStages {
+            initial_matches: 20,
+            island_matches: 20,
+            inliers: 20,
+            reprojection_matches: POINTS,
+            reprojection_inliers: 20,
+        }
+    );
+}
+
+#[test]
+fn an_island_landmark_its_keyframe_never_described_matches_nothing() {
+    // B7: A2 observes a landmark of D (an added observation, no descriptor in
+    // A2), and C gets a keypoint whose descriptor is all zero. RootSLAM
+    // default-inserts a zero descriptor for the landmark, and the two match.
+    let mut s = scene(1, 0.05, true, LoopClosingConfig::default(), 100);
+    let keypoints = s.backend.map().keyframe(C).unwrap().keypoints.clone();
+    let loops = s.backend.loops.as_mut().unwrap();
+    let images = loops.images.remove(&C).unwrap();
+    loops.index(C, &keypoints, &images);
+    let before = s.backend.validate(C, A, &keypoints, &images).unwrap();
+    let loops = s.backend.loops.as_mut().unwrap();
+    loops.descriptors.get_mut(&C).unwrap()[0].insert(KeypointId(9_999_999), Descriptor256([0; 4]));
+    let hosted = LandmarkId::from(keypoint_id(0, 0, 100_000));
+    assert!(
+        s.backend
+            .map
+            .add_observation(hosted, TimeCamId::new(A2, 0), Vector2::new(5.0, 5.0))
+    );
+    let after = s.backend.validate(C, A, &keypoints, &images).unwrap();
+    assert_eq!(after.stages, before.stages);
+}
+
+#[test]
+fn a_candidate_that_failed_after_its_reprojection_pass_leaves_the_next_one_as_it_is() {
+    // B8: RootSLAM writes a candidate's redetected corners into the current
+    // keyframe, and the next candidate of the same query sees them.
+    let setup = Setup {
+        seen: 20,
+        ..Setup::new(1, 0.05, tight(LoopClosingConfig::default()))
+    };
+    // Its island may differ (the spanning tree links A to E2); what it found must not.
+    let found = |d: LoopDetection| (d.candidate, d.corrected_pose, d.matches, d.stages);
+    let alone = scene_with(setup.clone()).backend.detect_loop(C).unwrap();
+    let mut s = scene_with(Setup {
+        decoy: true,
+        ..setup.clone()
+    });
+    assert_eq!(s.backend.detect_loop(C).map(found), Some(found(alone)));
+    assert_eq!(
+        s.backend.loop_closing().unwrap().counts().candidates,
+        3,
+        "E and E2 failed first"
+    );
+    // The decoy reaches its reprojection pass: without the ratio gate it closes.
+    let parity = tight(LoopClosingConfig {
+        pnp_inliers_ratio: 0.0,
+        ..LoopClosingConfig::default()
+    });
+    let decoy = scene_with(Setup {
+        decoy: true,
+        loops: parity,
+        ..setup
+    })
+    .backend
+    .detect_loop(C)
+    .unwrap();
+    assert_eq!(
+        (decoy.candidate, decoy.stages.reprojection_matches),
+        (E, POINTS)
+    );
 }

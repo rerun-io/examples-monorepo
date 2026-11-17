@@ -50,8 +50,6 @@ pub struct SnapshotLoop {
     pub current: FrameId,
     /// The keyframe it closes with.
     pub candidate: FrameId,
-    /// Final PnP inliers.
-    pub inliers: usize,
     /// Fused at once (`false`: left for the pose-graph optimization).
     pub fused: bool,
 }
@@ -125,17 +123,12 @@ impl MapBackend {
                 .flat_map(|loops| loops.events())
                 .filter(|event| {
                     event.outcome != LoopOutcome::Stale
-                        && keyframes.contains_key(&event.current)
-                        && keyframes.contains_key(&event.candidate)
+                        && keyframes.contains_key(&event.detection.current)
+                        && keyframes.contains_key(&event.detection.candidate)
                 })
                 .map(|event| SnapshotLoop {
-                    current: event.current,
-                    candidate: event.candidate,
-                    inliers: if event.stages.reprojection_matches > 0 {
-                        event.stages.reprojection_inliers
-                    } else {
-                        event.stages.inliers
-                    },
+                    current: event.detection.current,
+                    candidate: event.detection.candidate,
                     fused: matches!(event.outcome, LoopOutcome::Fused { .. }),
                 })
                 .collect(),
