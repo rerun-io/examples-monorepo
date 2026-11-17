@@ -47,6 +47,14 @@ pub struct MapLandmark {
     pub obs: BTreeMap<TimeCamId, Vector2<f32>>,
 }
 
+impl MapLandmark {
+    /// The keyframes that observe it, each once: whom culling and loop fusion
+    /// link or unlink through it.
+    pub fn observers(&self) -> BTreeSet<FrameId> {
+        self.obs.keys().map(|image| image.frame_id).collect()
+    }
+}
+
 /// The counts RootSLAM writes to `stats_map.json`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MapStats {

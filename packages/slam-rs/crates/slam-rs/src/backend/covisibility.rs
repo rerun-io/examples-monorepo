@@ -2,8 +2,9 @@
 //! `covisibility_graph.cpp`).
 //!
 //! A node per map keyframe. An edge's weight is the number of landmarks the two
-//! keyframes share, counted when the newer one joins the map and lowered as
-//! culling removes landmarks. Each keyframe's spanning-tree parent is its
+//! keyframes share, counted when the newer one joins the map, then moved by
+//! the map's landmark edits (culling, loop fusion), all in
+//! [`super::MapBackend`]. Each keyframe's spanning-tree parent is its
 //! strongest neighbour when it joins; loop-closure edges come from loop closing.
 //!
 //! Differences from RootSLAM, all deliberate:
