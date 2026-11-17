@@ -14,6 +14,10 @@
 #       pattern of upstream PR #4657).
 #   add-caspar-adapters-generated-f32.patch  Symforce 0.12.0 output: 266 new fp32 kernels (224 fisheye, 42
 #       FULL_OPENCV) plus the 4 regenerated aggregates (solver.{h,cc}, caspar_mappings.{h,cu}). Not hand-editable.
+#   add-database-transaction-rollback.patch  hand-written hook, 4 files: `DatabaseTransaction::Rollback` (SQLite
+#       ROLLBACK TRANSACTION) and pycolmap's `with DatabaseTransaction(db):` rolling back when the block raises.
+#       Upstream commits on an exception, so colsfm's chunk writes (matches + verified geometries) could not be
+#       all-or-nothing, and a delete-based repair would bring back COLMAP's VACUUM.
 # How the patches were made, with the generator command and versions: patches/PROVENANCE.md.
 # This is the one recipe whose patch is larger than "a hook": the adapter is C++ inside COLMAP's Caspar backend,
 # so it cannot live in a Python package (recipes/README.md "Patch or package" names the exception). The generated
@@ -43,10 +47,11 @@ source:
   patches:
     - patches/add-caspar-adapters.patch
     - patches/add-caspar-adapters-generated-f32.patch
+    - patches/add-database-transaction-rollback.patch
 
 build:
   # Bump with every patch or build-script edit: the build string hash does not follow them (recipes/README.md).
-  number: 1
+  number: 2
   string: main137f216_caspar_fisheye_fullopencv_cuda130_sm${{ cuda_arch }}_py312_${{ build_number }}
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
@@ -56,6 +61,7 @@ build:
     - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -ci fisheye)" -eq 224
     - grep -q "class FullOpenCVAdapter" src/colmap/estimators/caspar/caspar_model_adapter.h
     - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -ci full_\\?opencv)" -eq 42
+    - grep -q "void RollbackTransaction() const override" src/colmap/scene/database_sqlite.cc
     # conda's onnxruntime-cpp nests its headers under include/onnxruntime/core/session/; COLMAP includes them flat.
     - export CPATH="$PREFIX/include/onnxruntime/core/session${CPATH:+:$CPATH}"
     # Step 1: libcolmap with CASPAR. FETCH_ONNX=OFF: the fetched prebuilt onnxruntime is CUDA 12. FETCH_FAISS and
