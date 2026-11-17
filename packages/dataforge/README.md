@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`, `vslam-lab`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`, `vslam-lab`, `tum-vi`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -470,6 +470,33 @@ TUM's is `groundtruth.csv`; EuRoC's is EuRoC's own
 (`<EUROC>/<room>/<seq>/<seq>.zip`, unless its retention is MINIMAL) to
 `<seq>/state_groundtruth_estimate0.csv`, read by the same EuRoC reader as
 msd's gt. After that the zip may go.
+
+### TUM-VI (tum-vi)
+
+`datasets/tumvi.py` converts the raw ASL tree of TUM-VI's 512x512 16-bit
+release (`dataset-<name>_512_16/`, extracted by hand under `--root`), with the
+readers in `tumvi_source.py`. One sequence is three layers under
+`tum-vi__<name>` (`room1`, `magistrale4`, ...):
+
+- `base`: cam0 and cam1 as AV1 videos at their KB4 pinholes (Kalibr's
+  equidistant model; `rig_T_cam` = `T_cam_imu` inverted, the rig frame is
+  the IMU's), only the frames both cameras share by stamp (the capture
+  properties count the rest), the 200 Hz IMU;
+- `gt`: mocap0, world_T_imu0, every sample. Outside the motion-capture room
+  there is none, so corridor, magistrale and slides runs have ground truth at
+  their start and end only; `property:gt:span_*` lists the spans;
+- `sensor_metadata`: `dso/imu_config.yaml` as `ImuCalibration` on the IMU node,
+  with `applied_time_shift_ns` 0.
+
+Every stream keeps the dataset's own nanosecond stamps, unshifted. Like
+vslam-lab, it keeps no sidecars: the derived layers read the sequence's small
+files in place.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=<rrd tree>
+pixi run -e dataforge --frozen dataforge-convert --jobs 2 tum-vi --root <dir>
+pixi run -e dataforge --frozen dataforge-register tum-vi --root <dir>
+```
 
 ### Environment variables
 
