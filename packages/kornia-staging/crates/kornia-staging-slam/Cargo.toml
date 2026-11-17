@@ -18,6 +18,9 @@ criterion.workspace = true
 kornia-image.workspace = true
 proptest.workspace = true
 approx.workspace = true
+# Test-only oracle: upstream's dense, numeric-Jacobian PGO.
+kornia-3d.workspace = true
+kornia-algebra.workspace = true
 
 [lints]
 workspace = true
@@ -36,4 +39,8 @@ harness = false
 
 [[bench]]
 name = "assembly"
+harness = false
+
+[[bench]]
+name = "pgo"
 harness = false
