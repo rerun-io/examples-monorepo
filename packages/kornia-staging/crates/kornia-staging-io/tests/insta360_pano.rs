@@ -2,15 +2,12 @@
 //! implementation of the factory projection, and on the real X4 Air clip.
 //!
 //! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
-//! `cargo test -p kornia-staging-io --test insta360_pano -- --ignored` (`KORNIA_STAGING_INSV` names the clip). With
-//! `--release`, `evidence_pngs_and_timing` also writes tiles and panoramas to `KORNIA_STAGING_PANO_OUT` (default: a
-//! `kornia-staging-pano` directory in the system temporary directory).
+//! `cargo test -p kornia-staging-io --test insta360_pano -- --ignored` (`KORNIA_STAGING_INSV` names the clip).
 use kornia_image::{Image, ImageSize};
 use kornia_staging_imgproc::panorama::{
-    assemble_panorama, build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
+    build_tile_lut, lens_level1, remap_tile, TileGeometry, TileLut, LUT_INVALID,
 };
 use kornia_staging_io::insta360::{parse_lens_string, Insta360Clip, LensCalibration, WindowCrop};
-use std::time::Instant;
 
 include!("common/x4air_lens.rs");
 include!("common/x4air_clip.rs");
@@ -311,129 +308,4 @@ fn a_real_frame_pair_matches_the_oracle_remap() {
         // Against the same level 1 in f64, the integer rule loses at most its 1/512 px position and rounding.
         assert!(exact < 1.0, "tile {k}: {exact}");
     }
-}
-
-#[test]
-#[ignore = "writes evidence PNGs; needs the X4 Air clip VID_20261116_125200_00_003.insv and ffmpeg"]
-fn evidence_pngs_and_timing() {
-    let Some((path, clip)) = clip() else { return };
-    let out = std::env::var("KORNIA_STAGING_PANO_OUT").unwrap_or_else(|_| {
-        std::env::temp_dir()
-            .join("kornia-staging-pano")
-            .to_string_lossy()
-            .into_owned()
-    });
-    std::fs::create_dir_all(&out).unwrap();
-    let g = TileGeometry::default();
-    let started = Instant::now();
-    let luts = [0, 1].map(|k| lut(&clip.lenses_v6[k], g, k));
-    eprintln!(
-        "tables: {:.1} ms for both tiles",
-        started.elapsed().as_secs_f64() * 1e3
-    );
-    for frame in [12, 3862, 7700] {
-        let t = tiles(&path, &clip, &luts, frame);
-        for (k, tile) in t.iter().enumerate() {
-            let bytes: Vec<u8> = tile
-                .as_slice()
-                .iter()
-                .map(|&v| ((u32::from(v) + 128) >> 8).min(255) as u8)
-                .collect();
-            write_png(
-                &format!("{out}/tile{k}_{frame:05}.png"),
-                g.width(),
-                960,
-                &bytes,
-            );
-        }
-        let pano = assemble_panorama([&t[0], &t[1]], g).unwrap();
-        write_png(
-            &format!("{out}/pano_{frame:05}.png"),
-            1920,
-            960,
-            pano.as_slice(),
-        );
-    }
-    // One frame pair: reduce both lenses and gather both tiles, single thread.
-    let lens = [0, 1].map(|k| decode(&path, clip.lens_track[k], 3862));
-    let mut dst = [0, 1].map(|_| {
-        Image::from_size_val(
-            ImageSize {
-                width: g.width(),
-                height: 960,
-            },
-            0u16,
-        )
-        .unwrap()
-    });
-    let (mut reduce, mut gather) = (Vec::new(), Vec::new());
-    for _ in 0..20 {
-        let t0 = Instant::now();
-        let level1 = [0, 1].map(|k| lens_level1(&lens[k]).unwrap());
-        let t1 = Instant::now();
-        for k in 0..2 {
-            remap_tile(&level1[k], &luts[k], &mut dst[k]).unwrap();
-        }
-        reduce.push((t1 - t0).as_secs_f64() * 1e3);
-        gather.push(t1.elapsed().as_secs_f64() * 1e3);
-    }
-    reduce.sort_by(f64::total_cmp);
-    gather.sort_by(f64::total_cmp);
-    eprintln!(
-        "frame pair, median of 20: widen + reduce {:.2} ms, gather {:.2} ms",
-        reduce[10], gather[10]
-    );
-}
-
-/// 8-bit greyscale PNG with stored (uncompressed) deflate blocks (RFC 2083, RFC 1950/1951).
-fn write_png(path: &str, width: usize, height: usize, pixels: &[u8]) {
-    let crc_table: Vec<u32> = (0..256u32)
-        .map(|n| {
-            (0..8).fold(n, |c, _| {
-                if c & 1 == 1 {
-                    0xEDB8_8320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                }
-            })
-        })
-        .collect();
-    let crc = |bytes: &[u8]| {
-        !bytes.iter().fold(!0u32, |c, &b| {
-            crc_table[((c ^ u32::from(b)) & 255) as usize] ^ (c >> 8)
-        })
-    };
-    let raw: Vec<u8> = pixels
-        .chunks_exact(width)
-        .flat_map(|row| std::iter::once(0).chain(row.iter().copied()))
-        .collect();
-    let mut z = vec![0x78, 0x01];
-    let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
-    for (i, b) in blocks.iter().enumerate() {
-        z.push(u8::from(i + 1 == blocks.len()));
-        z.extend((b.len() as u16).to_le_bytes());
-        z.extend((!(b.len() as u16)).to_le_bytes());
-        z.extend_from_slice(b);
-    }
-    let (a, b) = raw.iter().fold((1u32, 0u32), |(a, b), &x| {
-        (
-            (a + u32::from(x)) % 65521,
-            (b + (a + u32::from(x)) % 65521) % 65521,
-        )
-    });
-    z.extend(((b << 16) | a).to_be_bytes());
-    let mut ihdr = Vec::new();
-    ihdr.extend((width as u32).to_be_bytes());
-    ihdr.extend((height as u32).to_be_bytes());
-    ihdr.extend([8, 0, 0, 0, 0]);
-    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-    for (kind, data) in [(&b"IHDR"[..], &ihdr[..]), (b"IDAT", &z), (b"IEND", &[])] {
-        png.extend((data.len() as u32).to_be_bytes());
-        let start = png.len();
-        png.extend_from_slice(kind);
-        png.extend_from_slice(data);
-        let c = crc(&png[start..]);
-        png.extend(c.to_be_bytes());
-    }
-    std::fs::write(path, png).unwrap();
 }

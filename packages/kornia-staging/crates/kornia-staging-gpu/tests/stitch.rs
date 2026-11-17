@@ -3,11 +3,9 @@
 //!
 //! The clip tests are asset-gated and decode with an `ffmpeg` on `PATH`: run
 //! `cargo test -p kornia-staging-gpu --features wgpu --test stitch -- --ignored` (`KORNIA_STAGING_INSV` names the
-//! clip). `device_stitch_timing` prints the per-frameset time; run it with `--release`.
+//! clip).
 #![allow(unsafe_code)]
 #![cfg(feature = "wgpu")]
-use std::time::Instant;
-
 use kornia_image::{Image, ImageSize};
 use kornia_staging_gpu::{
     pyramid::{GpuPyramid, GpuPyramidBuilder},
@@ -292,56 +290,4 @@ fn a_real_frame_pair_stitches_bit_exactly() {
         return;
     };
     assert_stitch_matches(&luts, &lenses, "frame 3862");
-}
-
-#[test]
-#[ignore = "timing; needs the X4 Air clip VID_20261116_125200_00_003.insv and ffmpeg; run with --release"]
-fn device_stitch_timing() {
-    let Some((luts, lenses)) = clip_frame(3862) else {
-        return;
-    };
-    let client = gpu_client().unwrap();
-    let tables = TileTables::upload(&client, [&luts[0], &luts[1]]).unwrap();
-    let mut builder = GpuPyramidBuilder::new(client);
-    let tile = tables.tile_size();
-    let mut pyramids: Vec<_> = (0..2)
-        .map(|_| builder.allocate(tile.width, tile.height, LEVELS).unwrap())
-        .collect();
-    let bytes = packed(&lenses);
-    let mut coarse = Image::from_size_val(tile, 0u16).unwrap();
-    let median = |mut samples: Vec<f64>| {
-        samples.sort_by(f64::total_cmp);
-        samples[samples.len() / 2]
-    };
-    let device = (0..60)
-        .map(|_| {
-            let start = Instant::now();
-            let client = gpu_client().unwrap();
-            let launch = builder
-                .prepare_lenses(&bytes, LENS, &tables, &mut pyramids)
-                .unwrap()
-                .unwrap();
-            // SAFETY: prepared on this process's shared client.
-            unsafe { launch.run(&client) };
-            // The wait: one small read of the last level of the last tile, after every launch.
-            pyramids[1].read_level_into(LEVELS, &mut coarse).unwrap();
-            start.elapsed().as_secs_f64() * 1e3
-        })
-        .skip(10)
-        .collect();
-    let cpu = (0..20)
-        .map(|_| {
-            let start = Instant::now();
-            for k in 0..2 {
-                std::hint::black_box(cpu_tile(&lenses[k], &luts[k]));
-            }
-            start.elapsed().as_secs_f64() * 1e3
-        })
-        .collect();
-    eprintln!(
-        "device stitch (upload 2 x 1920x1920 u8, lens reduce, gather, 3-level tile pyramids, one small read): median {:.3} ms over 50; \
-         CPU lens_level1 + remap_tile, both lenses, one thread: median {:.3} ms over 20",
-        median(device),
-        median(cpu)
-    );
 }
