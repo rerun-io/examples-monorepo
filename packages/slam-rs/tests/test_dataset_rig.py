@@ -23,6 +23,12 @@ EUROC_FIRST_CAM0_NS: int = 1403636579763555584
 """The first row of MH_01_easy's ``mav0/cam0/data.csv``."""
 EUROC_RIG: RigProfile = RigProfile(video_time_is_absolute=True, frameset_tolerance_ns=1_000_000)
 """EuRoC as slam.toml states it: the benchmark clock on ``video_time``, framesets matched within 1 ms."""
+TUMVI_SEGMENT: str = "tum-vi__room1"
+"""RootSLAM's TR1."""
+TUMVI_FIRST_PAIR_NS: int = 1520530308199447626
+"""The first row of room1's ``mav0/cam0/data.csv`` (cam1's first row has the same stamp)."""
+TUMVI_RIG: RigProfile = RigProfile(video_time_is_absolute=True)
+"""TUM-VI as slam.toml states it: the dataset clock on ``video_time``; the conversion keeps only shared stamps, so no tolerance."""
 
 
 class _Opened(Exception):
@@ -44,6 +50,7 @@ def test_msd_datasets_read_as_msd_and_euroc_reads_the_device_clock(settings: Sla
     for name in ("msd-index", "msd-g2", "msd-odyssey"):
         assert dataset_rig(settings.dataset(name)) == MSD_RIG
     assert dataset_rig(settings.dataset("vslam-lab-euroc")) == EUROC_RIG
+    assert dataset_rig(settings.dataset("tum-vi")) == TUMVI_RIG
 
 
 @pytest.mark.parametrize(("segment", "absolute"), [(EUROC_SEGMENT, True), ("msd-g2__MGO_others__MGO07_mapping_easy", False)])
@@ -139,3 +146,26 @@ def test_only_frames_both_euroc_cameras_took_together_are_fed(settings: SlamConf
         stamps = feed.index.camera_t_ns
         pairs = feed.index.frame_index
         assert (stamps[0][pairs[:, 0]] == stamps[1][pairs[:, 1]]).all()
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("live_catalog")
+def test_tum_vi_opens_from_the_catalog_as_kb4_stereo_on_its_own_clock(settings: SlamConfig) -> None:
+    """room1 as registered: two 512x512 KB4 cameras, imu_config.yaml's noise model, no clock shift, every stereo pair, mocap GT."""
+    from rerun.catalog import CatalogClient
+
+    if "tum-vi" not in {entry.name for entry in CatalogClient(settings.catalog_url).datasets()}:
+        pytest.skip(f"tum-vi is not registered on {settings.catalog_url}; register it as packages/slam-rs/docs/reproduce.md describes")
+    with open_segment(CatalogSegment(settings.catalog_url, "tum-vi", TUMVI_SEGMENT), profile=dataset_rig(settings.dataset("tum-vi"))) as feed:
+        assert feed.export_offset_ns == 0
+        assert feed.imu.cam_time_offset_ns == 0
+        assert int(feed.frame_t_ns[0]) == TUMVI_FIRST_PAIR_NS
+        assert len(feed.frame_t_ns) == 2821
+        assert [(camera.model, camera.width, camera.height) for camera in feed.cameras] == [("kb4", 512, 512)] * 2
+        # TUM-VI's own Kalibr model (the inflated values), not Basalt's tumvi_512_ds_calib.json that RootSLAM ran.
+        assert (feed.imu.accel_noise_std, feed.imu.gyro_noise_std, feed.imu.accel_bias_std, feed.imu.gyro_bias_std) == (
+            0.0028, 0.00016, 0.00086, 0.000022
+        )
+        truth = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
+        # mocap0 runs at ~120 Hz from 9.8 ms before the first frame: the first pose inside the frame span is its third row.
+        assert int(truth.t_ns[0]) == 1520530308206345351

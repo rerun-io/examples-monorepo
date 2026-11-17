@@ -2,7 +2,9 @@ slam-rs JSON inputs: dataset VIO configurations and RoboCap calibration.
 
 Each dataset in ../slam.toml selects one configuration. euroc_config.json is
 msdmg_config.json with EuRoC's sensor facts only: no fisheye mask (safe radius
-0 on a pinhole rig) and RootSLAM's EuRoC recall patch norms. The
+0 on a pinhole rig) and RootSLAM's EuRoC recall patch norms. tumvi_config.json
+is msdmg_config.json with TUM-VI's 40 px detection grid and 320 px fisheye mask
+(docs/reproduce.md lists what is carried from RootSLAM's config). The
 reference profile leaves it unchanged. The default fast profile applies the
 three keys in profiles/fast.json. profiles/live.json is the RoboCap live
 profile (robocap-live's default): the fast keys plus a deferred keyframe solve
