@@ -348,19 +348,58 @@ impl Vio {
         .map(Some)
     }
 
-    /// The persistent map's size: ``keyframes``, ``landmarks`` and
-    /// ``observations`` (RootSLAM's ``stats_map.json`` counts), or `None` when
-    /// ``backend.enabled`` is off. Current up to the last solved keyframe.
+    /// The persistent map's counts, or `None` when ``backend.enabled`` is off.
+    /// Current up to the last solved keyframe. ``keyframes``, ``landmarks`` and
+    /// ``observations`` are RootSLAM's ``stats_map.json`` counts; ``culled_redundant``
+    /// and ``culled_over_budget`` count each culling rule; ``covisibility_edges``,
+    /// ``high_covisibility_weight`` (shared landmarks) and ``high_covisibility_edges``
+    /// describe the graph; ``median_keyframe_landmarks`` is what the per-map weight
+    /// scales; ``retained_bytes`` is the map's payload (a lower bound on its heap);
+    /// ``step_count``, ``step_total_us`` and ``step_max_us`` time the inline steps.
     #[getter]
-    fn map_stats(&self) -> Option<std::collections::BTreeMap<&'static str, usize>> {
+    fn map_stats(&self) -> Option<std::collections::BTreeMap<&'static str, u64>> {
         self.inner.map_backend().map(|map_backend| {
             let stats = map_backend.stats();
+            let culls = map_backend.cull_counts();
+            let high_weight: u32 = map_backend.high_covisibility_weight();
+            let timing = self.inner.map_step_timing();
             std::collections::BTreeMap::from([
-                ("keyframes", stats.keyframes),
-                ("landmarks", stats.landmarks),
-                ("observations", stats.observations),
+                ("keyframes", stats.keyframes as u64),
+                ("landmarks", stats.landmarks as u64),
+                ("observations", stats.observations as u64),
+                ("culled_redundant", culls.redundant as u64),
+                ("culled_over_budget", culls.over_budget as u64),
+                (
+                    "covisibility_edges",
+                    map_backend.graph().edge_weights().len() as u64,
+                ),
+                ("high_covisibility_weight", u64::from(high_weight)),
+                (
+                    "high_covisibility_edges",
+                    map_backend
+                        .graph()
+                        .high_covisibility_edges(high_weight)
+                        .len() as u64,
+                ),
+                (
+                    "median_keyframe_landmarks",
+                    map_backend.map().median_keyframe_landmarks() as u64,
+                ),
+                ("retained_bytes", map_backend.map().retained_bytes() as u64),
+                ("step_count", timing.steps),
+                ("step_total_us", timing.total_ns / 1_000),
+                ("step_max_us", timing.max_ns / 1_000),
             ])
         })
+    }
+
+    /// Every covisibility edge weight of the persistent map (shared landmarks),
+    /// each edge once; `None` when ``backend.enabled`` is off.
+    #[getter]
+    fn map_covisibility_weights(&self) -> Option<Vec<u32>> {
+        self.inner
+            .map_backend()
+            .map(|map_backend| map_backend.graph().edge_weights())
     }
 
     fn __repr__(&self) -> String {
@@ -747,7 +786,9 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
     let readonly = array.readonly();
     let values: &[f64] = contiguous(&readonly, name, name)?;
     Ok(values
-        .as_chunks::<3>().0.iter()
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|row| [row[0], row[1], row[2]])
         .collect())
 }
@@ -1023,7 +1064,9 @@ impl FlowFrame {
         let keypoints: &CameraKeypoints = self.camera(camera)?;
         let positions: Vec<f32> = keypoints
             .transforms
-            .as_chunks::<6>().0.iter()
+            .as_chunks::<6>()
+            .0
+            .iter()
             .flat_map(|warp| [warp[2], warp[5]])
             .collect();
         positions.to_pyarray(py).reshape((keypoints.ids.len(), 2))

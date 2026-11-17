@@ -9,9 +9,11 @@
 //! closing has pinned (B10: RootSLAM leaves an island unprotected between
 //! its request and the response, then reads it with `.at()`).
 //!
-//! The score is RootSLAM's weighted sum, computed when the batch is chosen
-//! from the map as it is then, where RootSLAM freezes the coverage and
-//! landmark terms when the keyframe leaves the window.
+//! The score is RootSLAM's weighted sum, computed from the map as it is when
+//! the batch runs, where RootSLAM freezes the coverage and landmark terms when
+//! the keyframe leaves the window. The batch itself
+//! ([`super::MapBackend`]'s over-budget cull) re-ranks after each cull, as
+//! RootSLAM's `handleGraphScoreChange` does.
 
 use crate::types::FrameId;
 
@@ -33,14 +35,7 @@ impl CovisibilityThreshold {
         match *self {
             Self::Fixed(weight) => weight.max(1),
             Self::PerMedianLandmarks(ratio) => {
-                let mut seen: Vec<usize> = map
-                    .keyframes()
-                    .keys()
-                    .map(|&id| map.landmarks_of_keyframe(id).len())
-                    .collect();
-                seen.sort_unstable();
-                let median: usize = seen.get(seen.len() / 2).copied().unwrap_or(0);
-                ((ratio * median as f64).round() as u32).max(1)
+                ((ratio * map.median_keyframe_landmarks() as f64).round() as u32).max(1)
             }
         }
     }
@@ -73,27 +68,6 @@ pub fn keyframe_score(
         + 0.2 * map.observed_landmarks_score(id)
 }
 
-/// Up to `count` unprotected map keyframes, lowest score first; equal scores
-/// go by id.
-pub fn batch_to_cull(
-    map: &KeyframeMap,
-    graph: &CovisibilityGraph,
-    protected: impl Fn(FrameId) -> bool,
-    high_weight: u32,
-    resolutions: &[[u32; 2]],
-    count: usize,
-) -> Vec<FrameId> {
-    let mut scored: Vec<(f32, FrameId)> = map
-        .keyframes()
-        .keys()
-        .copied()
-        .filter(|&id| !protected(id))
-        .map(|id| (keyframe_score(map, graph, id, high_weight, resolutions), id))
-        .collect();
-    scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().take(count).map(|(_, id)| id).collect()
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -124,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn the_batch_takes_the_lowest_scores_and_skips_the_protected() {
+    fn the_score_weighs_graph_loops_time_coverage_and_landmarks() {
         let map = map_with(&[10, 20, 30, 40, 50]);
         let mut graph = CovisibilityGraph::new();
         graph.insert_keyframe(10, &BTreeMap::new());
@@ -139,14 +113,6 @@ mod tests {
         assert!((score(30) - 0.4).abs() < 1e-6);
         assert!((score(40) - 0.45).abs() < 1e-6);
         assert!((score(20) - 0.55).abs() < 1e-6);
-        assert_eq!(
-            batch_to_cull(&map, &graph, |_| false, 100, &[], 3),
-            vec![30, 40, 10]
-        );
-        assert_eq!(
-            batch_to_cull(&map, &graph, |id| id == 30 || id == 10, 100, &[], 3),
-            vec![40, 20, 50]
-        );
-        assert!(batch_to_cull(&map, &graph, |_| true, 100, &[], 3).is_empty());
+        assert!((score(10) - 0.5).abs() < 1e-6);
     }
 }

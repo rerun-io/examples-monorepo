@@ -128,15 +128,36 @@ impl<S: Scalar> super::SqrtKeypointVio<S> {
     }
 
     /// `T_w_i` of the given window frames, in `f64`. A frame the window does not
-    /// hold is skipped.
-    fn window_poses(&self, frames: &BTreeSet<FrameId>) -> BTreeMap<FrameId, Se3<f64>> {
-        frames
-            .iter()
-            .filter_map(|&frame_id| {
-                let pose = self.ba.get_pose_state_with_lin(frame_id).ok()?;
-                Some((frame_id, pose.pose().cast::<f64>()))
-            })
-            .collect()
+    /// hold is a bug (a keyframe the map would never release): it fails debug
+    /// builds, and release builds log it, count it in
+    /// [`Self::missing_stamp_poses`] and leave it out.
+    fn window_poses(&mut self, frames: &BTreeSet<FrameId>) -> BTreeMap<FrameId, Se3<f64>> {
+        let mut poses: BTreeMap<FrameId, Se3<f64>> = BTreeMap::new();
+        for &frame_id in frames {
+            match self.ba.get_pose_state_with_lin(frame_id) {
+                Ok(pose) => {
+                    poses.insert(frame_id, pose.pose().cast::<f64>());
+                }
+                Err(error) => {
+                    self.missing_stamp_poses += 1;
+                    log::warn!(
+                        "map stamp: {error} ({} missing so far)",
+                        self.missing_stamp_poses
+                    );
+                }
+            }
+        }
+        debug_assert_eq!(
+            poses.len(),
+            frames.len(),
+            "a map stamp asked for a frame the window does not hold"
+        );
+        poses
+    }
+
+    /// Keyframe poses the map stamps asked for and the window did not hold.
+    pub fn missing_stamp_poses(&self) -> usize {
+        self.missing_stamp_poses
     }
 
     /// Record the window after `t_ns`'s keyframe solve, when stamps are on.

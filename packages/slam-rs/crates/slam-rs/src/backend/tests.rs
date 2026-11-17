@@ -238,6 +238,49 @@ fn an_over_budget_map_culls_its_lowest_scored_inactive_keyframes() {
     );
 }
 
+/// RootSLAM re-ranks after each cull (`handleGraphScoreChange`), and so does
+/// the batch: a cull that takes a neighbour's landmarks lowers its score before
+/// the next pick. Ranked once, the batch would take 3 then 4.
+#[test]
+fn the_batch_re_ranks_after_each_cull() {
+    let mut backend = MapBackend::new(
+        MapConfig {
+            high_covisibility: CovisibilityThreshold::Fixed(100),
+            ..config(5, 2)
+        },
+        vec![[640, 480]; 2],
+    );
+    backend.step(keyframe(1, &[1], vec![]));
+    // 2 sees only ten landmarks hosted by 3; 4 sees fifteen of its own with 5.
+    // No edge is high and every pixel is the same, so graph = 1 and coverage =
+    // 0 everywhere: score = 0.4 + 0.1 time + 0.2 n / (n + 10).
+    let landmarks: Vec<StampLandmark> = (0..10)
+        .map(|k| landmark(100 + k, 3, &[(2, 0), (3, 0)]))
+        .chain((0..15).map(|k| landmark(200 + k, 4, &[(4, 0), (5, 0)])))
+        .collect();
+    backend.step(keyframe(5, &[2, 3, 4, 5], landmarks));
+    backend.step(marg(&[2, 3, 4], 0.0, vec![]));
+    let score = |backend: &MapBackend, id| {
+        cull::keyframe_score(backend.map(), backend.graph(), id, 100, &[[640, 480]; 2])
+    };
+    let events = backend.step(keyframe(6, &[5, 6], vec![]));
+    let culled: Vec<FrameId> = events
+        .iter()
+        .filter_map(|event| match event {
+            MapEvent::KeyframeCulled {
+                id,
+                reason: CullReason::OverBudget,
+            } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    // Before: 3 = 0.4 + 0.02 + 0.1 = 0.52, 4 = 0.4 + 0.02 + 0.12 = 0.54,
+    // 2 = 0.4 + 0.06 + 0.1 = 0.56. Culling 3 takes its ten landmarks, so
+    // 2 drops to 0.46 and goes before 4.
+    assert_eq!(culled, vec![3, 2]);
+    assert!((score(&backend, 4) - 0.54).abs() < 1e-6);
+}
+
 // ── property: culling never touches a protected keyframe ────────────────
 
 /// One step of a random session.
@@ -287,18 +330,61 @@ fn protected(
     protected
 }
 
-/// Step `backend` and fail if a culled keyframe was in `protected`.
+/// Step `backend` and fail if a culled keyframe was in `protected`. Returns
+/// the over-budget culls, in order.
 fn checked_step(
     backend: &mut MapBackend,
     stamp: MapStamp,
     protected: &BTreeSet<FrameId>,
-) -> Result<(), TestCaseError> {
+) -> Result<Vec<FrameId>, TestCaseError> {
+    let mut over_budget: Vec<FrameId> = Vec::new();
     for event in backend.step(stamp) {
-        if let MapEvent::KeyframeCulled { id, .. } = event {
+        if let MapEvent::KeyframeCulled { id, reason } = event {
             prop_assert!(!protected.contains(&id), "culled protected keyframe {}", id);
+            if reason == CullReason::OverBudget {
+                over_budget.push(id);
+            }
         }
     }
-    Ok(())
+    Ok(over_budget)
+}
+
+/// The over-budget batch the slow way: merge `stamp` without culling, then
+/// score every unprotected keyframe afresh before each pick.
+fn rescored_batch(backend: &MapBackend, stamp: MapStamp) -> Vec<FrameId> {
+    let mut reference: MapBackend = backend.clone();
+    reference.config.enable_culling = false;
+    reference.step(stamp);
+    if reference.map.keyframes().len() <= reference.config.max_keyframes {
+        return Vec::new();
+    }
+    let high_weight: u32 = reference.high_covisibility_weight();
+    let mut culled: Vec<FrameId> = Vec::new();
+    while culled.len() < reference.config.batch_cull_size {
+        let lowest: Option<(f32, FrameId)> = reference
+            .map
+            .keyframes()
+            .keys()
+            .copied()
+            .filter(|&id| !reference.is_protected(id))
+            .map(|id| {
+                let score = cull::keyframe_score(
+                    &reference.map,
+                    &reference.graph,
+                    id,
+                    high_weight,
+                    &reference.resolutions,
+                );
+                (score, id)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let Some((_, id)) = lowest else {
+            break;
+        };
+        reference.cull_keyframe(id);
+        culled.push(id);
+    }
+    culled
 }
 
 proptest! {
@@ -334,7 +420,10 @@ proptest! {
                         .collect();
                     let mut guard = protected(&backend, &pinned, None);
                     guard.extend(window.iter().copied());
-                    checked_step(&mut backend, keyframe(t, &window, landmarks), &guard)?;
+                    let stamp = keyframe(t, &window, landmarks);
+                    let expected = rescored_batch(&backend, stamp.clone());
+                    // The incremental re-rank picks what a full re-score would.
+                    prop_assert_eq!(checked_step(&mut backend, stamp, &guard)?, expected);
                     while window.len() > size {
                         let oldest = window.remove(0);
                         let guard = protected(&backend, &pinned, Some(oldest));

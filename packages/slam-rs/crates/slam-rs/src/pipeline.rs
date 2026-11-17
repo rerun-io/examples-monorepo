@@ -65,6 +65,9 @@ pub struct Vio<S: Scalar = f32> {
     /// (Offline); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_backend: Option<crate::backend::MapBackend>,
+    /// Wall time of the inline map steps (they run on the tracking thread).
+    #[cfg(feature = "backend")]
+    map_step_timing: crate::backend::StepTiming,
 }
 
 pub use lag::OverlapTimings;
@@ -157,6 +160,8 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_backend,
+            #[cfg(feature = "backend")]
+            map_step_timing: crate::backend::StepTiming::default(),
         })
     }
 
@@ -176,9 +181,17 @@ impl<S: Scalar> Vio<S> {
         #[cfg(feature = "backend")]
         if let Some(map_backend) = self.map_backend.as_mut() {
             for stamp in self.estimator.take_map_stamps() {
+                let started = std::time::Instant::now();
                 map_backend.step(stamp);
+                self.map_step_timing.record(crate::duration_ns(started));
             }
         }
+    }
+
+    /// Wall time of the inline map steps so far (zero with the back end off).
+    #[cfg(feature = "backend")]
+    pub fn map_step_timing(&self) -> crate::backend::StepTiming {
+        self.map_step_timing
     }
 
     /// The estimator, for callers that want the window or the snapshot.

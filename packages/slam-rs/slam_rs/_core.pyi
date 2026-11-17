@@ -294,10 +294,19 @@ class Vio:
 
     @property
     def map_stats(self) -> dict[str, int] | None:
-        """The persistent map's ``keyframes``, ``landmarks`` and ``observations`` counts.
+        """The persistent map's counts; None when ``backend.enabled`` is off (the default).
 
-        None when ``backend.enabled`` is off. Current up to the last solved keyframe.
+        Current up to the last solved keyframe. ``keyframes``, ``landmarks`` and ``observations`` are
+        RootSLAM's ``stats_map.json`` counts; ``culled_redundant`` and ``culled_over_budget`` count each culling
+        rule; ``covisibility_edges``, ``high_covisibility_weight`` (shared landmarks) and
+        ``high_covisibility_edges`` describe the graph; ``median_keyframe_landmarks`` is what the per-map weight
+        scales; ``retained_bytes`` is the map's payload (a lower bound on its heap); ``step_count``,
+        ``step_total_us`` and ``step_max_us`` time the inline map steps.
         """
+
+    @property
+    def map_covisibility_weights(self) -> list[int] | None:
+        """Every covisibility edge weight (shared landmarks), each edge once; None when the back end is off."""
 
     def __repr__(self) -> str: ...
 

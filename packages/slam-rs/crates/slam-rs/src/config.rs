@@ -264,6 +264,8 @@ pub struct VioConfig {
     // keep its `config.` names; keys of this port are under `backend.`.
     /// Build the persistent keyframe map beside the window. Read only by builds
     /// with the `backend` feature; the raw VIO poses are the same either way.
+    /// Off by default until the back end has its own thread (PR a2): until then
+    /// its `step` runs inline on the tracking thread.
     #[serde(rename = "backend.enabled")]
     pub backend_enabled: bool,
     /// Cull keyframes: redundant ones as they leave the window, and the
@@ -356,7 +358,7 @@ impl Default for VioConfig {
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
 
-            backend_enabled: true,
+            backend_enabled: false,
             map_enable_culling: true,
             map_max_redundancy_score: 0.9,
             map_redundancy_exclude_hosted_lms: false,
@@ -561,7 +563,7 @@ mod tests {
     #[test]
     fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
         let defaults = VioConfig::default();
-        assert!(defaults.backend_enabled);
+        assert!(!defaults.backend_enabled);
         assert!(defaults.map_enable_culling);
         assert_eq!(defaults.map_max_redundancy_score, 0.9);
         assert!(!defaults.map_redundancy_exclude_hosted_lms);
@@ -577,12 +579,12 @@ mod tests {
         }
 
         let parity = VioConfig::from_json_str(
-            r#"{"value0":{"backend.enabled":false,"config.map_max_keyframes":3000,
+            r#"{"value0":{"backend.enabled":true,"config.map_max_keyframes":3000,
             "config.map_batch_cull_size":10,"config.map_enable_culling":false,
             "config.loop_closing_pgo_min_covisibility_weight":100}}"#,
         )
         .unwrap();
-        assert!(!parity.backend_enabled);
+        assert!(parity.backend_enabled);
         assert_eq!(parity.map_max_keyframes, 3000);
         assert_eq!(parity.map_batch_cull_size, 10);
         assert!(!parity.map_enable_culling);

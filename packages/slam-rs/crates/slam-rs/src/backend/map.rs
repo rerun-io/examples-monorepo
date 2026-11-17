@@ -107,6 +107,18 @@ impl KeyframeMap {
         }
     }
 
+    /// The median number of landmarks a map keyframe sees (the upper median);
+    /// 0 for an empty map.
+    pub fn median_keyframe_landmarks(&self) -> usize {
+        let mut seen: Vec<usize> = self
+            .keyframes
+            .keys()
+            .map(|&id| self.landmarks_of_keyframe(id).len())
+            .collect();
+        seen.sort_unstable();
+        seen.get(seen.len() / 2).copied().unwrap_or(0)
+    }
+
     /// Landmarks one image observes or hosts.
     pub fn landmarks_in_image(&self, image: TimeCamId) -> impl Iterator<Item = LandmarkId> + '_ {
         self.by_image.get(&image).into_iter().flatten().copied()
@@ -283,9 +295,9 @@ impl KeyframeMap {
         seen / (seen + 10.0)
     }
 
-    /// Bytes the map's own buffers hold: what grows with the map. A lower bound
-    /// on allocator use (tree nodes are counted by payload). No image buffer
-    /// exists to count.
+    /// Bytes the map's own buffers hold, counted by payload: a lower bound on
+    /// what the allocator holds for it (tree nodes carry slack).
+    /// `tests/backend_map.rs` checks it against a counting allocator.
     pub fn retained_bytes(&self) -> usize {
         use std::mem::size_of;
         let keyframes: usize = self
@@ -493,31 +505,5 @@ mod tests {
         assert!((coverage - 0.05).abs() < 1e-6, "{coverage}");
         assert_eq!(map.image_coverage(9, &[[100, 100]]), 0.0);
         assert!((map.observed_landmarks_score(1) - 3.0 / 13.0).abs() < 1e-6);
-    }
-
-    /// The retention rule: what a keyframe costs grows with its keypoints and
-    /// landmarks, and nothing in the map depends on the image size.
-    #[test]
-    fn the_map_retains_keypoints_not_images() {
-        let keypoints = |count: u64| {
-            vec![
-                (0..count)
-                    .map(|id| (KeypointId(id), Vector2::new(1.0, 2.0)))
-                    .collect::<Vec<_>>();
-                4
-            ]
-        };
-        let mut small = KeyframeMap::new();
-        let mut large = KeyframeMap::new();
-        small.upsert_keyframe(1, Se3::identity(), Some(keypoints(1000)));
-        large.upsert_keyframe(1, Se3::identity(), Some(keypoints(1000)));
-        // Same keypoints and landmarks from a VGA rig and a 4K rig: same bytes.
-        assert_eq!(small.retained_bytes(), large.retained_bytes());
-        let per_keyframe = small.retained_bytes();
-        // 4 cameras x 1000 keypoints x 16 B, plus bookkeeping; a 640x480 u16
-        // image alone would be 600 KiB.
-        assert!(per_keyframe < 80 * 1024, "{per_keyframe} B per keyframe");
-        small.upsert_keyframe(2, Se3::identity(), Some(keypoints(10)));
-        assert!(small.retained_bytes() - per_keyframe < 2 * 1024);
     }
 }

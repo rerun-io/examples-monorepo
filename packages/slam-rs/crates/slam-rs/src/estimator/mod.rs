@@ -226,6 +226,9 @@ pub struct SqrtKeypointVio<S: Scalar> {
     /// taken; `None` (the default) emits nothing. Read-only copies of the
     /// window: no number the window computes depends on it.
     map_stamps: Option<Vec<MapStamp>>,
+    /// Keyframe poses a stamp asked for and the window did not hold; always 0
+    /// unless the window and the stamps disagree (logged at each miss).
+    missing_stamp_poses: usize,
 }
 
 /// Validate numerical domains before estimator arithmetic runs (D32).
@@ -406,6 +409,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             scratch: OptimizeScratch::default(),
             deferred: None,
             map_stamps: None,
+            missing_stamp_poses: 0,
         })
     }
 

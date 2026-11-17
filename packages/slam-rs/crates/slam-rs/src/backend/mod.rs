@@ -99,6 +99,37 @@ pub struct MapBackend {
     pinned: BTreeSet<FrameId>,
     /// Keyframes the map culled; a stamp never brings one back.
     culled: BTreeSet<FrameId>,
+    /// How many of `culled` the over-budget batches took.
+    culled_over_budget: usize,
+}
+
+/// Wall time of [`MapBackend::step`] calls, as the caller measured them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StepTiming {
+    /// Steps timed.
+    pub steps: u64,
+    /// Their total, in nanoseconds.
+    pub total_ns: u64,
+    /// The slowest one, in nanoseconds.
+    pub max_ns: u64,
+}
+
+impl StepTiming {
+    /// Add one step that took `ns`.
+    pub fn record(&mut self, ns: u64) {
+        self.steps += 1;
+        self.total_ns += ns;
+        self.max_ns = self.max_ns.max(ns);
+    }
+}
+
+/// How many keyframes each culling rule has taken so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CullCounts {
+    /// Redundant as they left the window.
+    pub redundant: usize,
+    /// Lowest-scored in an over-budget batch.
+    pub over_budget: usize,
 }
 
 impl MapBackend {
@@ -112,6 +143,7 @@ impl MapBackend {
             active: BTreeSet::new(),
             pinned: BTreeSet::new(),
             culled: BTreeSet::new(),
+            culled_over_budget: 0,
         }
     }
 
@@ -128,6 +160,14 @@ impl MapBackend {
     /// The `stats_map.json` counts.
     pub fn stats(&self) -> MapStats {
         self.map.stats()
+    }
+
+    /// How many keyframes each culling rule has taken.
+    pub fn cull_counts(&self) -> CullCounts {
+        CullCounts {
+            redundant: self.culled.len() - self.culled_over_budget,
+            over_budget: self.culled_over_budget,
+        }
     }
 
     /// Keyframes still in the window.
@@ -189,25 +229,63 @@ impl MapBackend {
             self.graph.insert_keyframe(id, &shared);
         }
         if self.config.enable_culling && self.map.keyframes().len() > self.config.max_keyframes {
-            let high_weight: u32 = self.high_covisibility_weight();
-            let batch: Vec<FrameId> = cull::batch_to_cull(
-                &self.map,
-                &self.graph,
-                |id| self.is_protected(id),
-                high_weight,
-                &self.resolutions,
-                self.config.batch_cull_size,
-            );
-            for id in batch {
-                if self.cull_keyframe(id) {
-                    events.push(MapEvent::KeyframeCulled {
-                        id,
-                        reason: CullReason::OverBudget,
-                    });
-                }
+            for id in self.cull_over_budget() {
+                events.push(MapEvent::KeyframeCulled {
+                    id,
+                    reason: CullReason::OverBudget,
+                });
             }
         }
         events
+    }
+
+    /// `cullKeyframes`: cull up to `batch_cull_size` unprotected keyframes, the
+    /// lowest score first (equal scores by id). As in RootSLAM
+    /// (`handleGraphScoreChange`), every cull re-ranks the keyframes it touched
+    /// before the next pick: graph neighbours, loop partners and the observers of
+    /// the landmarks it took. The high-covisibility weight is fixed for the batch,
+    /// from the map as the batch starts.
+    fn cull_over_budget(&mut self) -> Vec<FrameId> {
+        let high_weight: u32 = self.high_covisibility_weight();
+        let score = |backend: &Self, id: FrameId| {
+            cull::keyframe_score(
+                &backend.map,
+                &backend.graph,
+                id,
+                high_weight,
+                &backend.resolutions,
+            )
+        };
+        let mut scores: BTreeMap<FrameId, f32> = self
+            .map
+            .keyframes()
+            .keys()
+            .copied()
+            .filter(|&id| !self.is_protected(id))
+            .map(|id| (id, score(self, id)))
+            .collect();
+        let mut culled: Vec<FrameId> = Vec::new();
+        while culled.len() < self.config.batch_cull_size {
+            let Some(id) = scores
+                .iter()
+                .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.cmp(b.0)))
+                .map(|(&id, _)| id)
+            else {
+                break;
+            };
+            scores.remove(&id);
+            let Some(touched) = self.cull_keyframe(id) else {
+                continue;
+            };
+            culled.push(id);
+            self.culled_over_budget += 1;
+            for other in touched {
+                if let Some(entry) = scores.get_mut(&other) {
+                    *entry = score(self, other);
+                }
+            }
+        }
+        culled
     }
 
     /// `write_map_marg`, with final values: the evicted keyframes' poses and
@@ -230,7 +308,7 @@ impl MapBackend {
                     .map
                     .redundancy_score(id, self.config.redundancy_exclude_hosted)
                     >= self.config.max_redundancy_score
-                && self.cull_keyframe(id)
+                && self.cull_keyframe(id).is_some()
             {
                 events.push(MapEvent::KeyframeCulled {
                     id,
@@ -264,14 +342,20 @@ impl MapBackend {
 
     /// `cullKeyframe`: remove `id` from the map and the graph, and lower the
     /// edges between the keyframes that shared a landmark the removal took.
-    /// `false`, changing nothing, for a protected or unknown keyframe.
-    fn cull_keyframe(&mut self, id: FrameId) -> bool {
+    /// Returns the keyframes whose score inputs changed: `id`'s graph neighbours
+    /// and loop partners, and the observers of the landmarks it took. `None`,
+    /// changing nothing, for a protected or unknown keyframe.
+    fn cull_keyframe(&mut self, id: FrameId) -> Option<BTreeSet<FrameId>> {
         if self.is_protected(id) {
-            return false;
+            return None;
         }
-        let Some(removed) = self.map.remove_keyframe(id) else {
-            return false;
-        };
+        let removed = self.map.remove_keyframe(id)?;
+        let mut touched: BTreeSet<FrameId> = self
+            .graph
+            .neighbours(id)
+            .map(|(other, _)| other)
+            .chain(self.graph.loop_closures(id))
+            .collect();
         self.graph.remove_keyframe(id);
         for (_, landmark) in &removed {
             let observers: Vec<FrameId> = landmark
@@ -287,9 +371,11 @@ impl MapBackend {
                     self.graph.decrement_edge(a, b, 1);
                 }
             }
+            touched.extend(observers);
+            touched.insert(landmark.host.frame_id);
         }
         self.culled.insert(id);
-        true
+        Some(touched)
     }
 }
 
