@@ -1,12 +1,19 @@
 //! Global BA on RootSLAM's exported GBA problems (rootba `bal` input), read at
 //! test time. Assets: `<runs>/<SEQ>/map/{map,pose_graph}.json` and the
-//! `output.<SEQ>.balpgf.log` of the reproduction (default runs root
-//! `/mnt/nas/ssd-8tb/scratch/rootslam/runs`, override `GBA_EXPORT_RUNS`), and the
-//! RootSLAM Basalt calibrations (default `~/0Dev/forks/rootslam/data`, override
-//! `GBA_EXPORT_CALIB`). Both lanes are `#[ignore]`:
-//! `cargo test --release -p kornia-staging-slam --test gba_rootba_export -- --ignored --nocapture`.
+//! `output.<SEQ>.{balpgf,balpgd}.log` of the reproduction (rootba `bal` in f32 and
+//! f64; default runs root `/mnt/nas/ssd-8tb/scratch/rootslam/runs`, override
+//! `GBA_EXPORT_RUNS`), and the RootSLAM Basalt calibrations (default
+//! `~/0Dev/forks/rootslam/data`, override `GBA_EXPORT_CALIB`). The golden and
+//! bench lanes are `#[ignore]`; run explicitly, a missing asset fails the test
+//! and names the asset. `pixi run -e kornia-staging --frozen kornia-staging-gba-golden`
+//! runs the goldens (`cargo test --release -p kornia-staging-slam --test
+//! gba_rootba_export -- --ignored golden`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use std::{collections::HashMap, path::PathBuf, time::Instant};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use kornia_staging_3d::camera::{formats::BasaltCamera, CameraModelKind};
 use kornia_staging_algebra::lie::{RigidTransform, Rotation3};
@@ -15,7 +22,95 @@ use kornia_staging_slam::sqrt_ba::{
     GbaRigCamera, RelPoseConstraint,
 };
 use nalgebra::{UnitQuaternion, Vector3};
-use serde_json::Value;
+use serde::Deserialize;
+
+// RootSLAM's map export and Basalt's calibration: third-party formats, read
+// partially (unknown fields allowed).
+
+/// `map/map.json`.
+#[derive(Deserialize)]
+struct MapJson {
+    keyframes: Vec<KeyframeJson>,
+    landmarks: Vec<LandmarkJson>,
+    observations: Vec<ObservationJson>,
+}
+
+#[derive(Deserialize)]
+struct KeyframeJson {
+    id: u64,
+    /// `[qw, qx, qy, qz, tx, ty, tz]`.
+    #[serde(rename = "T_w_i")]
+    world_from_imu: [f64; 7],
+}
+
+#[derive(Deserialize)]
+struct LandmarkJson {
+    id: u64,
+    p_w: [f64; 3],
+}
+
+#[derive(Deserialize)]
+struct ObservationJson {
+    lm_id: u64,
+    kf_id: u64,
+    cam_id: usize,
+    pos: [f64; 2],
+}
+
+/// `map/pose_graph.json`.
+#[derive(Deserialize)]
+struct PoseGraphJson {
+    edges: Vec<EdgeJson>,
+}
+
+#[derive(Deserialize)]
+struct EdgeJson {
+    kf_id_a: u64,
+    kf_id_b: u64,
+    /// `[qw, qx, qy, qz, tx, ty, tz]`.
+    #[serde(rename = "T_a_b")]
+    a_from_b: [f64; 7],
+}
+
+/// Basalt calibration file: `{"value0": {...}}`.
+#[derive(Deserialize)]
+struct CalibrationFile {
+    value0: CalibrationJson,
+}
+
+#[derive(Deserialize)]
+struct CalibrationJson {
+    #[serde(rename = "T_imu_cam")]
+    imu_from_camera: Vec<ImuFromCameraJson>,
+    /// Basalt camera records; `ds` is read here, the rest by [`BasaltCamera`].
+    intrinsics: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ImuFromCameraJson {
+    px: f64,
+    py: f64,
+    pz: f64,
+    qx: f64,
+    qy: f64,
+    qz: f64,
+    qw: f64,
+}
+
+#[derive(Deserialize)]
+struct DoubleSphereJson {
+    intrinsics: DoubleSphereIntrinsicsJson,
+}
+
+#[derive(Deserialize)]
+struct DoubleSphereIntrinsicsJson {
+    fx: f64,
+    fy: f64,
+    cx: f64,
+    cy: f64,
+    xi: f64,
+    alpha: f64,
+}
 
 /// Basalt `ds` (double sphere), absent from the staged camera set.
 #[derive(Debug, Clone, Copy)]
@@ -24,7 +119,6 @@ struct DoubleSphere {
     xi: f32,
     alpha: f32,
 }
-
 impl GbaCamera<f32> for DoubleSphere {
     fn project(&self, p: [f32; 3], jacobian: Option<&mut [[f32; 3]; 2]>) -> ([f32; 2], bool) {
         let [fx, fy, cx, cy] = self.f;
@@ -96,13 +190,8 @@ fn calib_path(seq: &str) -> PathBuf {
     }
 }
 
-fn f(v: &Value) -> f64 {
-    v.as_f64().unwrap()
-}
-
 /// `[qw, qx, qy, qz, tx, ty, tz]`, as rootba reads it.
-fn pose7(v: &Value) -> RigidTransform<f64> {
-    let a: Vec<f64> = v.as_array().unwrap().iter().map(f).collect();
+fn pose7(a: &[f64; 7]) -> RigidTransform<f64> {
     let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(a[0], a[1], a[2], a[3]));
     RigidTransform::new(
         Rotation3::from_unit_quaternion(q),
@@ -110,105 +199,137 @@ fn pose7(v: &Value) -> RigidTransform<f64> {
     )
 }
 
+/// The asset's text; panics naming the asset when it is absent (the lanes that
+/// read assets are `#[ignore]`, so running them is an explicit request).
+fn read_asset(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("asset {} is absent or unreadable: {e}", path.display()))
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(path: &Path) -> T {
+    serde_json::from_str(&read_asset(path))
+        .unwrap_or_else(|e| panic!("asset {} does not parse: {e}", path.display()))
+}
+
+/// What rootba `bal` reports in `output.<SEQ>.<variant>.log`.
+#[derive(Debug, Clone, Copy)]
+struct RootbaRun {
+    final_cost: f64,
+    accepted: usize,
+    rejected: usize,
+    cg_iterations: usize,
+}
+
+fn rootba_run(seq: &str, variant: &str) -> RootbaRun {
+    let path = runs_root()
+        .join(seq)
+        .join(format!("output.{seq}.{variant}.log"));
+    let log = read_asset(&path);
+    let final_cost = log
+        .lines()
+        .find(|l| l.starts_with("Final Cost: error valid:"))
+        .and_then(|l| l.split_whitespace().nth(4)?.parse().ok())
+        .unwrap_or_else(|| panic!("{} has no 'Final Cost' line", path.display()));
+    let attempts = log
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with("[Success]") || l.starts_with("[Reject]"));
+    let (mut accepted, mut rejected, mut cg_iterations) = (0, 0, 0);
+    for line in attempts {
+        if line.starts_with("[Success]") {
+            accepted += 1;
+        } else {
+            rejected += 1;
+        }
+        cg_iterations += line
+            .split("cg_iter: ")
+            .nth(1)
+            .and_then(|t| t.split(',').next()?.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("{}: no cg_iter in {line}", path.display()));
+    }
+    RootbaRun {
+        final_cost,
+        accepted,
+        rejected,
+        cg_iterations,
+    }
+}
+
 struct Export {
     problem: GbaProblem<f64>,
     rig: Vec<GbaRigCamera<f32, ExportCamera>>,
-    rootba_final_cost: Option<f64>,
 }
 
-/// `None` (with a message naming the asset) when an input is missing.
-fn load(seq: &str) -> Option<Export> {
-    let dir = runs_root().join(seq);
-    let calib = calib_path(seq);
-    for path in [
-        dir.join("map/map.json"),
-        dir.join("map/pose_graph.json"),
-        calib.clone(),
-    ] {
-        if !path.exists() {
-            eprintln!("SKIP {seq}: asset {} is absent", path.display());
-            return None;
-        }
-    }
-    let read = |p: PathBuf| -> Value {
-        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
-    };
-    let map = read(dir.join("map/map.json"));
-    let graph = read(dir.join("map/pose_graph.json"));
-    let calib = read(calib)["value0"].clone();
+fn load(seq: &str) -> Export {
+    let dir = runs_root().join(seq).join("map");
+    let map: MapJson = parse(&dir.join("map.json"));
+    let graph: PoseGraphJson = parse(&dir.join("pose_graph.json"));
+    let calib = parse::<CalibrationFile>(&calib_path(seq)).value0;
 
-    let mut kf_index = HashMap::new();
-    let imu_from_world = map["keyframes"]
-        .as_array()
-        .unwrap()
+    let kf_index: HashMap<u64, usize> = map
+        .keyframes
         .iter()
         .enumerate()
-        .map(|(i, kf)| {
-            kf_index.insert(kf["id"].as_u64().unwrap(), i);
-            pose7(&kf["T_w_i"]).inverse()
-        })
-        .collect::<Vec<_>>();
-    let mut lm_index = HashMap::new();
-    let mut landmarks: Vec<GbaLandmark<f64>> = map["landmarks"]
-        .as_array()
-        .unwrap()
+        .map(|(i, kf)| (kf.id, i))
+        .collect();
+    let imu_from_world = map
+        .keyframes
+        .iter()
+        .map(|kf| pose7(&kf.world_from_imu).inverse())
+        .collect();
+    let lm_index: HashMap<u64, usize> = map
+        .landmarks
         .iter()
         .enumerate()
-        .map(|(i, lm)| {
-            lm_index.insert(lm["id"].as_u64().unwrap(), i);
-            let p: Vec<f64> = lm["p_w"].as_array().unwrap().iter().map(f).collect();
-            GbaLandmark {
-                position: Vector3::new(p[0], p[1], p[2]),
-                observations: Vec::new(),
-            }
+        .map(|(i, lm)| (lm.id, i))
+        .collect();
+    let mut landmarks: Vec<GbaLandmark<f64>> = map
+        .landmarks
+        .iter()
+        .map(|lm| GbaLandmark {
+            position: Vector3::from(lm.p_w),
+            observations: Vec::new(),
         })
         .collect();
-    for obs in map["observations"].as_array().unwrap() {
-        let pos = obs["pos"].as_array().unwrap();
-        landmarks[lm_index[&obs["lm_id"].as_u64().unwrap()]]
+    for obs in &map.observations {
+        landmarks[lm_index[&obs.lm_id]]
             .observations
             .push(GbaObservation {
-                keyframe: kf_index[&obs["kf_id"].as_u64().unwrap()],
-                camera: obs["cam_id"].as_u64().unwrap() as usize,
-                pixel: [f(&pos[0]), f(&pos[1])],
+                keyframe: kf_index[&obs.kf_id],
+                camera: obs.cam_id,
+                pixel: obs.pos,
             });
     }
-    let rel_poses = graph["edges"]
-        .as_array()
-        .unwrap()
+    let rel_poses = graph
+        .edges
         .iter()
         .filter_map(|e| {
-            let a = *kf_index.get(&e["kf_id_a"].as_u64()?)?;
-            let b = *kf_index.get(&e["kf_id_b"].as_u64()?)?;
-            (a != b).then(|| RelPoseConstraint::with_sigmas(a, b, pose7(&e["T_a_b"]), 0.05, 0.01))
+            let a = *kf_index.get(&e.kf_id_a)?;
+            let b = *kf_index.get(&e.kf_id_b)?;
+            (a != b).then(|| RelPoseConstraint::with_sigmas(a, b, pose7(&e.a_from_b), 0.05, 0.01))
         })
         .collect();
-    let rig = calib["intrinsics"]
-        .as_array()
-        .unwrap()
+    let rig = calib
+        .intrinsics
         .iter()
-        .zip(calib["T_imu_cam"].as_array().unwrap())
+        .zip(&calib.imu_from_camera)
         .map(|(intr, t)| {
             let model = if intr["camera_type"] == "ds" {
-                let p = &intr["intrinsics"];
+                let p = DoubleSphereJson::deserialize(intr).unwrap().intrinsics;
                 ExportCamera::Ds(DoubleSphere {
-                    f: ["fx", "fy", "cx", "cy"].map(|k| f(&p[k]) as f32),
-                    xi: f(&p["xi"]) as f32,
-                    alpha: f(&p["alpha"]) as f32,
+                    f: [p.fx, p.fy, p.cx, p.cy].map(|v| v as f32),
+                    xi: p.xi as f32,
+                    alpha: p.alpha as f32,
                 })
             } else {
-                let basalt: BasaltCamera<f32> = serde_json::from_value(intr.clone()).unwrap();
+                let basalt = BasaltCamera::<f32>::deserialize(intr).unwrap();
                 ExportCamera::Staged(CameraModelKind::try_from(&basalt).unwrap())
             };
-            let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
-                f(&t["qw"]),
-                f(&t["qx"]),
-                f(&t["qy"]),
-                f(&t["qz"]),
-            ));
+            let q =
+                UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(t.qw, t.qx, t.qy, t.qz));
             let imu_from_camera = RigidTransform::new(
                 Rotation3::from_unit_quaternion(q),
-                Vector3::new(f(&t["px"]), f(&t["py"]), f(&t["pz"])),
+                Vector3::new(t.px, t.py, t.pz),
             );
             GbaRigCamera {
                 model,
@@ -216,14 +337,6 @@ fn load(seq: &str) -> Option<Export> {
             }
         })
         .collect();
-    let rootba_final_cost = std::fs::read_to_string(dir.join(format!("output.{seq}.balpgf.log")))
-        .ok()
-        .and_then(|log| {
-            let line = log
-                .lines()
-                .find(|l| l.starts_with("Final Cost: error valid:"))?;
-            line.split_whitespace().nth(4)?.parse().ok()
-        });
     let mut problem = GbaProblem {
         imu_from_world,
         landmarks,
@@ -237,11 +350,7 @@ fn load(seq: &str) -> Option<Export> {
         problem.landmarks.iter().map(|l| l.observations.len()).sum::<usize>(),
         problem.rel_poses.len()
     );
-    Some(Export {
-        problem,
-        rig,
-        rootba_final_cost,
-    })
+    Export { problem, rig }
 }
 
 fn run(export: &Export, threads: usize) -> (GbaReport, f64) {
@@ -289,32 +398,83 @@ fn summary(seq: &str, threads: usize, report: &GbaReport, wall: f64) -> String {
     )
 }
 
-/// DESIGN §7.4 / §10 d1: our f32 GBA on RootSLAM's exported MGO07 problem reaches
-/// rootba `bal`'s final cost (balpgf, same options) within 0.5 %.
-#[test]
-#[ignore = "reads RootSLAM's exported MGO07 GBA problem from the NAS"]
-fn mgo07_reaches_rootba_final_cost() {
-    let Some(export) = load("MGO07") else { return };
-    let Some(rootba) = export.rootba_final_cost else {
-        eprintln!("SKIP: output.MGO07.balpgf.log (rootba's final cost) is absent");
-        return;
-    };
+/// Our run, rootba's f32 (`balpgf`) and f64 (`balpgd`) runs of one sequence.
+fn golden(seq: &str) -> (GbaReport, RootbaRun, RootbaRun) {
+    let export = load(seq);
+    let (f32_run, f64_run) = (rootba_run(seq, "balpgf"), rootba_run(seq, "balpgd"));
     let (report, wall) = run(&export, 4);
     eprintln!(
-        "{}\nrootba bal final cost {rootba:.4e}",
-        summary("MGO07", 4, &report, wall)
+        "{}\nrootba bal f32 {f32_run:?}\nrootba bal f64 {f64_run:?}",
+        summary(seq, 4, &report, wall)
     );
-    assert!(
-        report.final_cost.error <= rootba * 1.005,
-        "{} vs rootba {rootba}",
-        report.final_cost.error
-    );
-    assert!(
-        report.final_cost.error >= rootba * 0.95,
-        "suspiciously low: {} vs {rootba}",
-        report.final_cost.error
-    );
+    // DESIGN §7.4: the final cost reaches rootba's (f32 and f64) within 0.5 %,
+    // and is not suspiciously lower.
+    let ours = report.final_cost.error;
+    for rootba in [f32_run.final_cost, f64_run.final_cost] {
+        assert!(ours <= rootba * 1.005, "{seq}: {ours} vs rootba {rootba}");
+        assert!(
+            ours >= rootba * 0.95,
+            "{seq}: suspiciously low: {ours} vs {rootba}"
+        );
+    }
+    assert!(ours < report.initial_cost.error);
     assert_eq!(report.nonfinite_landmark_steps, 0);
+    assert_eq!(report.dropped_rows, 0);
+    (report, f32_run, f64_run)
+}
+
+/// DESIGN §7.4 / §10 d1 on MGO07 (pinhole-radtan rig, every LM step accepted):
+/// cost band, LM attempts and the CG iteration total within 15 % of rootba f32's.
+#[test]
+#[ignore = "reads RootSLAM's exported MGO07 GBA problem from the NAS"]
+fn golden_mgo07_matches_rootba() {
+    let (report, rootba, _) = golden("MGO07");
+    let accepted = report.iterations.iter().filter(|i| i.accepted).count();
+    assert_eq!(report.iterations.len(), rootba.accepted + rootba.rejected);
+    assert!(
+        accepted.abs_diff(rootba.accepted) <= 1,
+        "accepted {accepted} vs rootba {rootba:?}"
+    );
+    let cg = report.pcg_iterations() as f64;
+    let band = cg / rootba.cg_iterations as f64;
+    assert!(
+        (0.85..=1.15).contains(&band),
+        "CG iterations {cg} vs rootba {rootba:?}"
+    );
+}
+
+/// DESIGN §7.4 on TM1 (double-sphere rig, test-only camera): the cost band, and
+/// rejected LM steps that occur and are handled. A rejected attempt leaves the
+/// state, so the cost of the next attempt is measured from the same start;
+/// lambda grows after it; the accepted costs fall.
+#[test]
+#[ignore = "reads RootSLAM's exported TM1 GBA problem from the NAS"]
+fn golden_tm1_matches_rootba_with_rejected_steps() {
+    let (report, rootba, _) = golden("TM1");
+    assert!(
+        rootba.rejected > 0,
+        "rootba's TM1 run rejects steps: {rootba:?}"
+    );
+    let rejected = report.iterations.iter().filter(|i| !i.accepted).count();
+    assert!(rejected > 0, "no rejected LM step on TM1");
+    let mut cost = report.initial_cost.error;
+    for (i, it) in report.iterations.iter().enumerate() {
+        let after = it.cost_after.expect("every TM1 step is finite").error;
+        if it.accepted {
+            assert!(after < cost, "attempt {i}: accepted {after} >= {cost}");
+            cost = after;
+        } else {
+            // Rejected: the cost rose, or the model predicted no decrease.
+            assert!(
+                after >= cost || it.model_decrease <= 0.0,
+                "attempt {i}: rejected a predicted decrease {after} < {cost}"
+            );
+            if let Some(next) = report.iterations.get(i + 1) {
+                assert!(next.lambda > it.lambda, "attempt {i}: lambda did not grow");
+            }
+        }
+    }
+    assert_eq!(cost, report.final_cost.error);
 }
 
 /// CG ms per iteration and totals. `GBA_BENCH_SEQS` (default `MGO07,TM1`) and
@@ -325,14 +485,56 @@ fn bench_exported_problems() {
     let seqs = std::env::var("GBA_BENCH_SEQS").unwrap_or_else(|_| "MGO07,TM1".into());
     let threads = std::env::var("GBA_BENCH_THREADS").unwrap_or_else(|_| "2,8".into());
     for seq in seqs.split(',') {
-        let Some(export) = load(seq) else { continue };
+        let export = load(seq);
         for t in threads.split(',').map(|t| t.parse::<usize>().unwrap()) {
             let (report, wall) = run(&export, t);
             println!(
-                "BENCH {} rootba_final={:?}",
+                "BENCH {} load {}",
                 summary(seq, t, &report, wall),
-                export.rootba_final_cost
+                std::fs::read_to_string("/proc/loadavg")
+                    .unwrap_or_default()
+                    .trim()
             );
         }
     }
+}
+
+/// The test-only double-sphere Jacobian against central differences (TM1's
+/// camera 0 intrinsics), in f64 arithmetic on the f32 model's output.
+#[test]
+fn double_sphere_jacobian_matches_central_differences() {
+    let cam = DoubleSphere {
+        f: [158.286, 158.274, 254.961, 256.889],
+        xi: -0.172,
+        alpha: 0.593,
+    };
+    let mut checked = 0;
+    for p in [
+        [0.1f32, -0.2, 1.0],
+        [0.8, 0.3, 0.5],
+        [-1.2, 0.4, 0.3],
+        [0.3, -0.9, -0.1],
+    ] {
+        let mut j = [[0.0f32; 3]; 2];
+        let (_, valid) = cam.project(p, Some(&mut j));
+        assert!(valid, "{p:?}");
+        let h = 1e-3f32;
+        for k in 0..3 {
+            let (mut plus, mut minus) = (p, p);
+            plus[k] += h;
+            minus[k] -= h;
+            let (a, _) = cam.project(plus, None);
+            let (b, _) = cam.project(minus, None);
+            for r in 0..2 {
+                let numeric = (f64::from(a[r]) - f64::from(b[r])) / (2.0 * f64::from(h));
+                let analytic = f64::from(j[r][k]);
+                assert!(
+                    (numeric - analytic).abs() < 1e-2 * (1.0 + analytic.abs()),
+                    "{p:?} row {r} col {k}: {numeric} vs {analytic}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 12);
 }

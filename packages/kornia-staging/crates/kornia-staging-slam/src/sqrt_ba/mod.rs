@@ -16,7 +16,7 @@ pub use global::{
     GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds, GbaTermination,
 };
 pub use landmark_qr::{BackSubstitution, LandmarkQr};
-pub use pcg::{dot, pcg, BlockJacobi, PcgOptions, PcgSummary, PcgTermination, GBA_CG_CHECK_EVERY};
+pub use pcg::{pcg, BlockJacobi, PcgOptions, PcgSummary, PcgTermination, GBA_CG_CHECK_EVERY};
 pub use prior::PriorLinearization;
 pub use rel_pose::{apply_left_increment, relative_pose_error, RelPoseConstraint};
 

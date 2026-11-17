@@ -286,6 +286,34 @@ fn one_lm_step_matches_a_dense_damped_solve() {
     }
 }
 
+/// The synthetic rig in f32 (the product lane).
+fn rig32(rig: &Rig) -> Vec<GbaRigCamera<f32, CameraModelKind<f32>>> {
+    rig.iter()
+        .map(|c| GbaRigCamera {
+            model: match c.model {
+                CameraModelKind::Pinhole(_) => {
+                    CameraModelKind::Pinhole(Pinhole::new([300.0f32, 300.0, 320.0, 240.0]).unwrap())
+                }
+                _ => unreachable!(),
+            },
+            imu_from_camera: c.imu_from_camera.cast(),
+        })
+        .collect()
+}
+
+/// The same scene with the world origin moved by `-offset` (every world point
+/// gains `offset`).
+fn shifted(problem: &GbaProblem<f64>, offset: Vector3<f64>) -> GbaProblem<f64> {
+    let mut out = problem.clone();
+    for pose in &mut out.imu_from_world {
+        *pose = *pose * RigidTransform::new(Rotation3::identity(), -offset);
+    }
+    for l in &mut out.landmarks {
+        l.position += offset;
+    }
+    out
+}
+
 fn pose_rms(a: &GbaProblem<f64>, b: &GbaProblem<f64>) -> f64 {
     let sum: f64 = a
         .imu_from_world
@@ -302,19 +330,7 @@ fn f32_reaches_the_f64_result_within_the_band() {
     let mut solved64 = problem.clone();
     let r64 = solve_global(&mut solved64, &rig, &GbaOptions::default(), None).unwrap();
     let (mut centred32, centroid) = problem.centred::<f32>();
-    let rig32: Vec<GbaRigCamera<f32, CameraModelKind<f32>>> = rig
-        .iter()
-        .map(|c| GbaRigCamera {
-            model: match c.model {
-                CameraModelKind::Pinhole(_) => {
-                    CameraModelKind::Pinhole(Pinhole::new([300.0f32, 300.0, 320.0, 240.0]).unwrap())
-                }
-                _ => unreachable!(),
-            },
-            imu_from_camera: c.imu_from_camera.cast(),
-        })
-        .collect();
-    let r32 = solve_global(&mut centred32, &rig32, &GbaOptions::default(), None).unwrap();
+    let r32 = solve_global(&mut centred32, &rig32(&rig), &GbaOptions::default(), None).unwrap();
     let mut solved32 = problem.clone();
     solved32.uncentre_from(&centred32, &centroid);
     assert!(
@@ -343,10 +359,11 @@ fn f32_reaches_the_f64_result_within_the_band() {
     );
 }
 
-#[test]
-fn results_do_not_depend_on_the_thread_count() {
-    let (_, problem, rig) = synthetic(10, 80, 2);
-    let mut first: Option<GbaProblem<f64>> = None;
+fn assert_thread_count_independent<S: Scalar>(
+    problem: &GbaProblem<S>,
+    rig: &[GbaRigCamera<S, CameraModelKind<S>>],
+) {
+    let mut first: Option<GbaProblem<S>> = None;
     for threads in [0, 1, 3, 8] {
         let pool = (threads > 0).then(|| {
             rayon::ThreadPoolBuilder::new()
@@ -355,12 +372,124 @@ fn results_do_not_depend_on_the_thread_count() {
                 .unwrap()
         });
         let mut solved = problem.clone();
-        solve_global(&mut solved, &rig, &GbaOptions::default(), pool.as_ref()).unwrap();
+        solve_global(&mut solved, rig, &GbaOptions::default(), pool.as_ref()).unwrap();
         match &first {
             None => first = Some(solved),
             Some(f) => assert_eq!(f, &solved, "threads {threads}"),
         }
     }
+}
+
+#[test]
+fn results_do_not_depend_on_the_thread_count() {
+    let (_, problem, rig) = synthetic(10, 80, 2);
+    assert_thread_count_independent(&problem, &rig);
+    // The product lane: f32 after centring.
+    assert_thread_count_independent(&problem.centred::<f32>().0, &rig32(&rig));
+}
+
+/// DESIGN B24: 10 km from the origin an f32 world point resolves to about 1 mm,
+/// which costs ~0.1 px at these depths. Centring in f64 before the cast keeps
+/// the f32 solve within the §7.4 band of f64; the uncentred cast leaves it.
+#[test]
+fn f32_far_from_the_origin_needs_centring() {
+    let (_, near, rig) = synthetic(12, 120, 2);
+    let problem = shifted(&near, Vector3::new(1e4, -2e3, 5.0));
+    let mut solved64 = problem.clone();
+    let r64 = solve_global(&mut solved64, &rig, &GbaOptions::default(), None).unwrap();
+    let rig32 = rig32(&rig);
+    let band = |r32: &GbaReport, solved32: &GbaProblem<f64>| {
+        (
+            (r32.final_cost.error - r64.final_cost.error).abs() / r64.final_cost.error,
+            pose_rms(solved32, &solved64),
+        )
+    };
+
+    let (mut centred32, centroid) = problem.centred::<f32>();
+    let r32 = solve_global(&mut centred32, &rig32, &GbaOptions::default(), None).unwrap();
+    let mut solved32 = problem.clone();
+    solved32.uncentre_from(&centred32, &centroid);
+    let (rel, rms) = band(&r32, &solved32);
+    assert!(
+        rel < 1e-3 && rms < 1e-3,
+        "centred f32: cost rel {rel}, KF RMS {rms} m"
+    );
+
+    let mut uncentred32 = problem.cast::<f32>();
+    let r32 = solve_global(&mut uncentred32, &rig32, &GbaOptions::default(), None).unwrap();
+    let (rel, rms) = band(&r32, &uncentred32.cast());
+    assert!(
+        rel >= 1e-3 || rms >= 1e-3,
+        "uncentred f32 stayed in the band (cost rel {rel}, KF RMS {rms} m): the test no longer shows the fix"
+    );
+}
+
+/// Landmarks moved by up to 3 m, a tiny `lambda` and PCG run to tolerance: the
+/// first Gauss-Newton-like attempts overshoot and are rejected. A
+/// rejected attempt leaves the state bit-identical, multiplies `lambda` by
+/// `vee` (x2, then x4) and damps the same linearization again: the attempt that
+/// is finally accepted equals a fresh solve started at its `lambda`, bit for bit.
+#[test]
+fn a_rejected_step_redamps_the_same_linearization() {
+    let (_, mut start, rig) = synthetic(8, 60, 2);
+    for (k, pose) in start.imu_from_world.iter_mut().enumerate().skip(1) {
+        let xi = Vector6::from_fn(|i, _| wobble(k, 90 + i) * if i < 3 { 0.05 } else { 0.02 });
+        *pose = apply_left_increment(pose, &xi);
+    }
+    for (l, landmark) in start.landmarks.iter_mut().enumerate() {
+        landmark.position += Vector3::from_fn(|i, _| 3.0 * wobble(l, 120 + i));
+    }
+    let options = |max_iterations: usize, initial_lambda: f64| GbaOptions {
+        max_iterations,
+        initial_lambda,
+        lambda_min: 1e-14,
+        pcg: PcgOptions {
+            max_iterations: 500,
+            eta: 1e-10,
+        },
+        ..Default::default()
+    };
+    let lambda0 = 1e-12;
+
+    let mut once = start.clone();
+    let first = solve_global(&mut once, &rig, &options(1, lambda0), None).unwrap();
+    let it = first.iterations[0];
+    let cost_after = it.cost_after.expect("a finite step whose cost rose");
+    assert!(!it.accepted, "{it:?}");
+    assert!(cost_after.error > first.initial_cost.error, "{it:?}");
+    assert_eq!(once, start, "a rejected attempt changed the state");
+    assert_eq!(first.final_cost, first.initial_cost);
+
+    let mut solved = start.clone();
+    let report = solve_global(&mut solved, &rig, &options(20, lambda0), None).unwrap();
+    let its = &report.iterations;
+    let k = its
+        .iter()
+        .position(|i| i.accepted)
+        .expect("an accepted step");
+    assert!(
+        k >= 2,
+        "need two rejections before the first accepted step: {its:?}"
+    );
+    assert_eq!(its[0].lambda, lambda0);
+    assert_eq!(its[1].lambda, 2.0 * lambda0);
+    assert_eq!(its[2].lambda, 4.0 * its[1].lambda);
+    // Up to and including step k, one linearization was damped k + 1 times.
+    let mut upto = start.clone();
+    solve_global(&mut upto, &rig, &options(k + 1, lambda0), None).unwrap();
+    let mut fresh = start.clone();
+    let fresh_report = solve_global(&mut fresh, &rig, &options(1, its[k].lambda), None).unwrap();
+    assert_eq!(fresh_report.iterations[0].pcg, its[k].pcg);
+    assert_eq!(
+        fresh_report.iterations[0].model_decrease.to_bits(),
+        its[k].model_decrease.to_bits()
+    );
+    assert_eq!(fresh_report.iterations[0].cost_after, its[k].cost_after);
+    assert_eq!(
+        fresh, upto,
+        "the re-damped step differs from a fresh solve at its lambda"
+    );
+    assert!(report.final_cost.error < report.initial_cost.error);
 }
 
 #[test]

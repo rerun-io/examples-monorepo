@@ -1,10 +1,11 @@
 //! Implicit preconditioned conjugate gradients for the reduced camera system.
 //!
 //! Termination follows rootba / Ceres: the quadratic model value `Q` must stop
-//! improving, `i (Q_i - Q_{i-1}) / Q_i < eta`. f32 safety (DESIGN B24): every dot
-//! product and norm accumulates in f64 in index order, the residual is recomputed
-//! from `b - A x` every [`GBA_CG_CHECK_EVERY`] iterations, and the block-Jacobi
-//! inverses are factored in f64.
+//! improving, `i (Q_i - Q_{i-1}) / Q_i < eta`. rootba's CG (from Ceres) also
+//! recomputes the residual from `b - A x`, every 10 iterations; we do it every
+//! [`GBA_CG_CHECK_EVERY`] = 8. Ours for f32 (DESIGN B24): every PCG dot product
+//! accumulates in f64 in index order and the block-Jacobi inverses are factored
+//! in f64. The matvec itself (in `global`) stays in `S`.
 use kornia_staging_algebra::Scalar;
 use nalgebra::{Matrix6, Vector6};
 
@@ -41,7 +42,8 @@ pub enum PcgTermination {
     MaxIterations,
     /// `p' A p <= 0`: no more progress (rootba keeps the iterate).
     Indefinite,
-    /// `rho`, `beta` or `alpha` became zero or non-finite.
+    /// `rho`, `beta` or `alpha` became zero (with a nonzero residual) or
+    /// non-finite.
     NumericalFailure,
 }
 
@@ -108,7 +110,7 @@ impl<S: Scalar> BlockJacobi<S> {
 }
 
 /// Fixed-order dot product accumulated in f64.
-pub fn dot<S: Scalar>(a: &[S], b: &[S]) -> f64 {
+pub(crate) fn dot<S: Scalar>(a: &[S], b: &[S]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x.to_f64() * y.to_f64()).sum()
 }
 
@@ -141,6 +143,10 @@ pub fn pcg<S: Scalar>(
         preconditioner.apply(&r, &mut z);
         let last_rho = rho;
         rho = dot(&r, &z);
+        if rho == 0.0 && dot(&r, &r) == 0.0 {
+            // The residual is exactly zero: `x` solves the system.
+            break PcgTermination::Converged;
+        }
         if rho == 0.0 || !rho.is_finite() {
             break PcgTermination::NumericalFailure;
         }
@@ -258,6 +264,28 @@ mod tests {
         // Ceres' Q test needs a second iteration to see the model stop moving.
         assert!(summary.iterations <= 2, "{summary:?}");
         assert!((&a * DVector::from_vec(x) - b).amax() < 1e-9);
+    }
+
+    #[test]
+    fn an_exactly_zero_residual_converges() {
+        // A = 2 I, b = 1: one step gives x = 1/2 and r = 0 exactly, so the
+        // second iteration sees rho = 0. That is convergence, not a failure.
+        let a = DMatrix::<f64>::identity(6, 6) * 2.0;
+        let mut x = vec![0.0f32; 6];
+        let summary = pcg(
+            |v, out| out.iter_mut().zip(v).for_each(|(o, vi)| *o = 2.0 * vi),
+            &BlockJacobi::from_blocks(&blocks(&a)),
+            &[1.0f32; 6],
+            &mut x,
+            &PcgOptions::default(),
+        );
+        assert_eq!(
+            summary.termination,
+            PcgTermination::Converged,
+            "{summary:?}"
+        );
+        assert_eq!(summary.iterations, 2);
+        assert_eq!(x, vec![0.5f32; 6]);
     }
 
     #[test]

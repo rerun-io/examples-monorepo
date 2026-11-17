@@ -15,10 +15,12 @@
 //! thread count. rootba's default reduction zeroes a full pose vector per split
 //! (O(landmarks x keyframes) per iteration; phase-1 profile).
 //!
-//! f32 safety (DESIGN B24): Jacobi scaling, block-Jacobi preconditioner
-//! factored in f64, a `lambda` floor, PCG residual replacement, every cost and
-//! model decrease summed in f64, non-finite rows dropped and counted, and the
-//! LM/PCG counts logged in [`GbaReport`]. [`GbaProblem::centred`] moves the
+//! f32 safety (DESIGN B24). As in rootba: Jacobi scaling, and PCG residual
+//! replacement (rootba every 10 iterations, ours every 8). Ours: the
+//! block-Jacobi preconditioner factored in f64, a `lambda` floor, the PCG dots,
+//! every cost and the model decrease summed in f64 (the per-block matvec stays
+//! in `S`, with a fixed 8-lane order), non-finite rows dropped and counted, and
+//! the LM/PCG counts logged in [`GbaReport`]. [`GbaProblem::centred`] moves the
 //! world origin to the landmark centroid in f64 before the cast.
 use std::time::Instant;
 
