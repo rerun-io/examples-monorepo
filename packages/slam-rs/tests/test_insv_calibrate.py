@@ -6,28 +6,35 @@ tool must find. The bearings are expressed in the panorama frame P, the gyro in 
 """
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
-from jaxtyping import Float64, Int64
+from fixture_types import FRAME, RigFactory
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
+from slam_rs import _core
 from slam_rs.apis.insv_calibrate import (
     Config,
     TrackedFrame,
     WindowScan,
     fit_hand_eye,
     main,
+    nearest_axis_permutation,
     offset_summary,
     parabola_minimum,
     rate_offset_curve,
     relative_pose,
     rotation_angle_deg,
+    scan_window,
     visual_pairs,
 )
+from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, open_segment
 from slam_rs.catalog_timing import ImuStream
+from slam_rs.config import load_slam_config
 
 PERMUTATION: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 """``R_P_imu`` of the X4 Air up to a fraction of a degree."""
@@ -96,6 +103,18 @@ def test_the_rotation_and_the_rate_offset_are_recovered_on_a_synthetic_rig() -> 
     fit = fit_hand_eye(pairs, imu, offset_ms)
     assert rotation_angle_deg(fit.pano_R_imu @ TRUE_PANO_R_IMU.T) < 0.1
     np.testing.assert_allclose(fit.bias_rad_s, BIAS, atol=3e-3)
+    np.testing.assert_array_equal(nearest_axis_permutation(fit.pano_R_imu), PERMUTATION)
+
+
+def test_bearings_come_from_the_frontend_cameras(rig: RigFactory) -> None:
+    # kb4 with zero coefficients, f = 100 px: 100 px right of the centre is 1 rad off the axis.
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig(), backend="cpu")
+    pixels: Float32[ndarray, "3 2"] = np.array([[FRAME / 2, FRAME / 2], [FRAME / 2 + 100.0, FRAME / 2], [FRAME / 2, FRAME / 2 - 100.0]], dtype=np.float32)
+    expected: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, 1.0], [np.sin(1.0), 0.0, np.cos(1.0)], [0.0, -np.sin(1.0), np.cos(1.0)]])
+    for camera in range(2):
+        np.testing.assert_allclose(vio.bearings(camera, pixels), expected, atol=1e-6)
+    with pytest.raises(IndexError):
+        vio.bearings(2, pixels)
 
 
 def test_the_parabola_finds_a_minimum_between_grid_points_and_stops_at_an_edge() -> None:
@@ -104,7 +123,7 @@ def test_the_parabola_finds_a_minimum_between_grid_points_and_stops_at_an_edge()
     assert parabola_minimum(offsets, offsets) == -2.0
 
 
-def test_the_bootstrap_scan_recovers_the_offset_over_noisy_windows() -> None:
+def test_the_offset_summary_averages_the_window_minima_and_skips_missing_residuals() -> None:
     rng: np.random.Generator = np.random.default_rng(7)
     offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9))
     grid: Float64[ndarray, " n_offsets"] = np.asarray(offsets_ms)
@@ -129,3 +148,34 @@ def test_the_real_clip_gives_the_converters_rotation() -> None:
         pytest.skip(f"the converted Insta360 clip VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
     report = main(Config(rrd=CLIP_RRD, rotation_spans_s=(40.0,), span_s=20.0, scan_windows_s=()))
     assert report.rotation.spans[0].angle_to_current_deg < 0.5
+
+
+@pytest.mark.golden
+def test_the_bootstrap_scan_finds_a_known_shift_of_the_frame_times_on_the_real_clip() -> None:
+    """Estimator (b) through ``Vio`` on one 2.3 s window of the clip: frame times shifted by a known offset move the
+    scan's minimum by minus that offset, with the recording's readout, none and the sign flipped. There is no synthetic
+    version: the scan runs the dual-fisheye lane, whose inertial bootstrap needs two lens images of a moving 3D scene
+    with matching IMU, and the unit fixtures give only a still rig with flat textures, on which no offset is observable.
+    """
+    if CLIP_RRD is None or not CLIP_RRD.is_file():
+        pytest.skip(f"the converted Insta360 clip VID_20261116_125200_00_003.rrd is absent: set SLAM_RS_INSTA360_RRD (now {CLIP_RRD})")
+    shift_ns: int = 3_000_000
+    offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9, 2))
+    vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text("insta360", profile="fast"))
+    with open_segment(LocalSegment(CLIP_RRD), profile=RigProfile(decode_threads=4), window_s=1.0, include_ground_truth=False) as feed:
+        assert feed.insta360 is not None
+        start_ns: int = int(feed.frame_t_ns[0]) + 60_000_000_000
+        stop_ns: int = start_ns + 2_300_000_000
+        framesets: list[Frameset] = [frameset for frameset in feed.framesets(stop_ns, start_ns) if frameset.t_ns <= stop_ns]
+        imu: ImuStream = feed.imu_between(start_ns - 500_000_000, stop_ns + 500_000_000)
+        shifted: list[Frameset] = [replace(frameset, t_ns=frameset.t_ns + shift_ns) for frameset in framesets]
+        readout_s: float = feed.insta360.readout_s
+        minima: dict[float, tuple[float | None, float | None]] = {}
+        for readout in (readout_s, 0.0, -readout_s):
+            base, _ = scan_window(feed, vio_config, "cpu", framesets, imu, 60.0, offsets_ms, readout)
+            moved, _ = scan_window(feed, vio_config, "cpu", shifted, imu, 60.0, offsets_ms, readout)
+            minima[readout] = (base.minimum_ms(), moved.minimum_ms())
+    print(f"readout -> (minimum, minimum with the frames {shift_ns * 1e-6:+.1f} ms later), ms: {minima}")
+    for readout, (base_ms, moved_ms) in minima.items():
+        assert base_ms is not None and moved_ms is not None, f"readout {readout}: the scan found no minimum"
+        assert moved_ms - base_ms == pytest.approx(-shift_ns * 1e-6, abs=1.0), f"readout {readout}"

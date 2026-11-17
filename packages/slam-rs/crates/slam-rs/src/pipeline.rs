@@ -188,6 +188,11 @@ impl<S: Scalar> Vio<S> {
         })
     }
 
+    /// The cameras the frontend tracks on: the two hemisphere tiles when the rig is one full panorama.
+    pub fn calibration(&self) -> &calib::Calibration<f32> {
+        &self.calib_f32
+    }
+
     /// The tile cut, when the rig is one full panorama.
     pub fn panorama(&self) -> Option<&PanoramaRig> {
         self.panorama.as_ref()

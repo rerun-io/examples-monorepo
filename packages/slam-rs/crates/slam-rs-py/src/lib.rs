@@ -229,6 +229,52 @@ impl Vio {
         self.inner.frontend().camera_count()
     }
 
+    /// Unit bearings of frontend camera `camera`'s pixels (`float32[n, 2]`, as
+    /// `FlowFrame.positions` gives them) in frontend camera 0's frame:
+    /// `float64[n, 3]`, NaN where the pixel does not unproject. On a panorama
+    /// rig the frontend cameras are the hemisphere tiles and camera 0's frame is
+    /// the panorama frame `P`.
+    fn bearings<'py>(
+        &self,
+        py: Python<'py>,
+        camera: usize,
+        pixels: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let array: &Bound<'_, PyArray2<f32>> = pixels
+            .cast::<PyArray2<f32>>()
+            .map_err(|_| PyValueError::new_err("pixels must be a 2-D float32 numpy array"))?;
+        if array.shape()[1] != 2 {
+            return Err(PyValueError::new_err(format!(
+                "pixels must have shape (n, 2), got {:?}",
+                array.shape()
+            )));
+        }
+        let readonly = array.readonly();
+        let values: &[f32] = contiguous(&readonly, "pixels", "pixels")?;
+        let calibration: CoreCalibration<f64> = self.inner.calibration().cast();
+        if camera >= calibration.intrinsics.len() {
+            return Err(PyIndexError::new_err(format!(
+                "camera {camera} out of range for {} cameras",
+                calibration.intrinsics.len()
+            )));
+        }
+        let model = slam_rs::camera::SlamCamera::from_model(&calibration.intrinsics[camera])
+            .map_err(value_error)?;
+        let to_first = calibration.t_i_c[0].rotation.inverse() * calibration.t_i_c[camera].rotation;
+        let bearings: Vec<f64> = values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[x, y]| {
+                let mut point = Default::default();
+                model.unproject(&[f64::from(x), f64::from(y)].into(), &mut point);
+                let bearing = to_first * point.xyz();
+                [bearing.x, bearing.y, bearing.z]
+            })
+            .collect();
+        bearings.into_pyarray(py).reshape((values.len() / 2, 3))
+    }
+
     /// Panorama column of each hemisphere tile's column 0, before wrapping,
     /// when the rig is one full panorama; `None` otherwise.
     ///
