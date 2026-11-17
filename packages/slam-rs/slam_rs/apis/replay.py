@@ -11,6 +11,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.stage_times import StageTimes
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
@@ -30,7 +31,7 @@ from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep, vio_for_feed
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import FrameMode, StageTimes, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -195,7 +196,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         stage.flush()
     elapsed: float = time.monotonic() - started
     print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
-    print(times.summary())
+    print(times.line("frameset"))
     if stage is not None:
         print(stage.summary())
     if isinstance(stage, VioStage) and stage.keypoints:
