@@ -29,7 +29,7 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.rig import TIMELINE
-from slam_rs.tracking import Lockstep, vio_for_feed
+from slam_rs.tracking import Lockstep
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import RUN_ENTITY, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
@@ -363,7 +363,7 @@ def main(config: Config) -> None:
             # host with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = vio_for_feed(feed, vio_config, config.backend)
+            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend)
             print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
             unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
             if unknown:

@@ -16,7 +16,7 @@ It reports, and changes nothing:
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import takewhile
 from pathlib import Path
 
@@ -26,10 +26,9 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
-from slam_rs.catalog_feed import Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment
+from slam_rs.catalog_feed import CameraCalib, Frameset, LocalSegment, RigProfile, SegmentFeed, open_segment
 from slam_rs.catalog_timing import ImuStream
 from slam_rs.config import load_slam_config
-from slam_rs.tracking import vio_for_feed
 from slam_rs.vio_log import PANORAMA_HEIGHT
 
 CAUCHY_RAD: float = 2.0 * np.pi / PANORAMA_HEIGHT
@@ -355,6 +354,12 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
     return frames
 
 
+def vio_with_readout(feed: SegmentFeed, vio_config: _core.VioConfig, backend: BackendRequest, readout_s: float) -> _core.Vio:
+    """The feed's ``Vio`` with every camera's rolling-shutter readout replaced by ``readout_s`` (the shutter check)."""
+    cameras: tuple[CameraCalib, ...] = tuple(replace(camera, readout_s=readout_s) for camera in feed.cameras)
+    return _core.Vio(_core.Calibration.from_catalog(cameras, feed.imu), vio_config, backend=backend)
+
+
 def scan_window(
     feed: SegmentFeed,
     vio_config: _core.VioConfig,
@@ -369,7 +374,7 @@ def scan_window(
     until the bootstrap's first attempt."""
 
     def attempt(offset_ms: float, readout_s: float) -> _core.BootstrapAttempt | None:
-        vio: _core.Vio = vio_for_feed(feed, vio_config, backend, readout_s)
+        vio: _core.Vio = vio_with_readout(feed, vio_config, backend, readout_s)
         drive(vio, framesets, imu, int(round(offset_ms * 1e6)), True)
         return first_attempt(vio)
 
@@ -436,9 +441,11 @@ def main(config: Config) -> CalibrationReport:
     """Run the three measurements on the recording, print them and return them."""
     vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text(config.dataset, profile="fast"))
     with open_segment(LocalSegment(config.rrd), profile=RigProfile(decode_threads=config.decode_threads), window_s=1.0, include_ground_truth=False) as feed:
-        if feed.insta360 is None or feed.insta360.pano_from_imu is None:
-            raise ValueError(f"{config.rrd}: no insta360 pano_from_imu property; convert the recording again")
-        current: Float64[ndarray, "3 3"] = feed.insta360.pano_from_imu
+        readout_s: float | None = feed.cameras[0].readout_s
+        if readout_s is None:
+            raise ValueError(f"{config.rrd}: camera 0 states no rolling_shutter_readout_s; convert the recording again")
+        # P has camera 0's axes, so R_P_imu is camera 0's rotation from the IMU.
+        current: Float64[ndarray, "3 3"] = feed.cameras[0].imu_T_cam[:3, :3].T.copy()
         first_ns: int = int(feed.frame_t_ns[0])
 
         def read(start_s: float, length_s: float) -> tuple[Iterable[Frameset], ImuStream]:
@@ -452,7 +459,7 @@ def main(config: Config) -> CalibrationReport:
         all_pairs: list[VisualPairs] = []
         for start_s in config.rotation_spans_s:
             framesets, imu = read(start_s, config.span_s)
-            tracked: list[TrackedFrame] = drive(vio_for_feed(feed, vio_config, config.backend, feed.insta360.readout_s), framesets, imu, 0, False)
+            tracked: list[TrackedFrame] = drive(vio_with_readout(feed, vio_config, config.backend, readout_s), framesets, imu, 0, False)
             pairs: VisualPairs = visual_pairs(tracked, imu, current)
             curve: Float64[ndarray, " n_offsets"] = rate_offset_curve(pairs, imu, fit_hand_eye(pairs, imu, 0.0), config.offsets_ms)
             rate_offset_ms: float = parabola_minimum(np.asarray(config.offsets_ms), curve)
@@ -476,10 +483,10 @@ def main(config: Config) -> CalibrationReport:
             nearest_permutation=permutation,
             angle_to_permutation_deg=rotation_angle_deg(joint.pano_R_imu @ permutation.T),
         )
-        report: CalibrationReport = CalibrationReport(current_pano_R_imu=current, readout_s=feed.insta360.readout_s, rotation=rotation)
+        report: CalibrationReport = CalibrationReport(current_pano_R_imu=current, readout_s=readout_s, rotation=rotation)
         for start_s in config.scan_windows_s:
             stream, imu = read(start_s, config.window_s)
-            scan, check = scan_window(feed, vio_config, config.backend, list(stream), imu, start_s, config.offsets_ms, feed.insta360.readout_s)
+            scan, check = scan_window(feed, vio_config, config.backend, list(stream), imu, start_s, config.offsets_ms, readout_s)
             report.scans.append(scan)
             report.shutter.append(check)
             print(f"window {start_s:.0f} s: minimum {scan.minimum_ms()} ms; shutter on/off/flipped {[check.on, check.off, check.flipped]}", flush=True)

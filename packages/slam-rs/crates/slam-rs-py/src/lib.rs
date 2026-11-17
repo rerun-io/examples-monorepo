@@ -862,24 +862,6 @@ fn float64_triples(object: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<[f64; 
         .collect())
 }
 
-fn u32_arg(value: i64) -> PyResult<u32> {
-    u32::try_from(value).map_err(|_| PyValueError::new_err(format!("{value} is not a size")))
-}
-
-/// A factory window crop `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` from Python.
-fn window_crop(
-    crop: Option<[i64; 6]>,
-) -> PyResult<Option<kornia_staging_3d::camera::formats::insta360::WindowCrop>> {
-    crop.map(|[sw, sh, dw, dh, ox, oy]| {
-        Ok(kornia_staging_3d::camera::formats::insta360::WindowCrop {
-            src: [u32_arg(sw)?, u32_arg(sh)?],
-            dst: [u32_arg(dw)?, u32_arg(dh)?],
-            offset: [ox, oy],
-        })
-    })
-    .transpose()
-}
-
 /// VIO configuration read from JSON. Omitted keys retain constructor defaults.
 #[pyclass(module = "slam_rs._core", skip_from_py_object)]
 #[derive(Debug, Clone)]
@@ -926,7 +908,7 @@ impl VioConfig {
         self.inner.optical_flow_image_safe_radius = radius;
     }
 
-    /// `config.panorama_dual_fisheye`: the caller hands `Vio` the factory lenses.
+    /// `config.panorama_dual_fisheye`: stitch the rig's two back-to-back cameras into two hemisphere tiles.
     #[getter]
     fn panorama_dual_fisheye(&self) -> bool {
         self.inner.panorama_dual_fisheye

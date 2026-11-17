@@ -295,7 +295,6 @@ class Vio:
         threads: int = 1,
         max_keypoints: int | None = None,
         backend: BackendRequest = "auto",
-        dual_fisheye: tuple[str, tuple[int, int, int, int, int, int] | None, float] | None = None,
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
 
@@ -335,7 +334,7 @@ class Vio:
         """Wall time of the last dual-fisheye host ingest in ns: the CPU remap of both lenses, or on the GPU lane the
         lens byte copy (the stitch runs on the device); None for any other rig."""
     def panorama_image(self) -> UInt8[ndarray, "h w"] | None:
-        """The stitched 1920x960 panorama of the last dual-fisheye frameset (``dual_fisheye`` given), else None.
+        """The stitched 1920x960 panorama of the last dual-fisheye frameset (``config.panorama_dual_fisheye``), else None.
 
         On the GPU lane it is remapped on the host from the lens bytes, only when asked: no device read-back.
         """
@@ -421,7 +420,7 @@ class VioConfig:
     """``config.vio_bootstrap``: ``"stereo"`` (default) or ``"inertial"``; anything else raises ``ValueError``."""
     @property
     def panorama_dual_fisheye(self) -> bool:
-        """``config.panorama_dual_fisheye``: the caller hands ``Vio`` the factory lenses (``dual_fisheye``)."""
+        """``config.panorama_dual_fisheye``: stitch the rig's two back-to-back cameras into two hemisphere tiles."""
 
     def __repr__(self) -> str: ...
 

@@ -163,13 +163,13 @@ def test_the_bootstrap_scan_finds_a_known_shift_of_the_frame_times_on_the_real_c
     offsets_ms: tuple[float, ...] = tuple(float(value) for value in range(-8, 9, 2))
     vio_config: _core.VioConfig = _core.VioConfig.from_json(load_slam_config().vio_config_text("insta360", profile="fast"))
     with open_segment(LocalSegment(CLIP_RRD), profile=RigProfile(decode_threads=4), window_s=1.0, include_ground_truth=False) as feed:
-        assert feed.insta360 is not None
         start_ns: int = int(feed.frame_t_ns[0]) + 60_000_000_000
         stop_ns: int = start_ns + 2_300_000_000
         framesets: list[Frameset] = [frameset for frameset in feed.framesets(stop_ns, start_ns) if frameset.t_ns <= stop_ns]
         imu: ImuStream = feed.imu_between(start_ns - 500_000_000, stop_ns + 500_000_000)
         shifted: list[Frameset] = [replace(frameset, t_ns=frameset.t_ns + shift_ns) for frameset in framesets]
-        readout_s: float = feed.insta360.readout_s
+        readout_s: float | None = feed.cameras[0].readout_s
+        assert readout_s is not None
         minima: dict[float, tuple[float | None, float | None]] = {}
         for readout in (readout_s, 0.0, -readout_s):
             base, _ = scan_window(feed, vio_config, "cpu", framesets, imu, 60.0, offsets_ms, readout)

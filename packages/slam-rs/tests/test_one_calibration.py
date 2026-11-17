@@ -32,7 +32,7 @@ class Built(Exception):
         self.readout_s: list[float | None] = calibration.readout_s
 
 
-def standin_vio(calibration: _core.Calibration, config: _core.VioConfig, backend: str = "auto", dual_fisheye: object = None) -> _core.Vio:
+def standin_vio(calibration: _core.Calibration, config: _core.VioConfig, backend: str = "auto") -> _core.Vio:
     """Record what the tool built the estimator from, then stop the tool."""
     raise Built(calibration, config)
 

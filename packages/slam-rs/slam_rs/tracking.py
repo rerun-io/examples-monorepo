@@ -18,7 +18,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_calibration import ImuCalib
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, Insta360Factory, SegmentFeed, open_segment
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -177,29 +177,6 @@ class Lockstep:
             return
         self.elapsed_ms.append(elapsed_ms)
         yield held, result
-
-
-def vio_for_feed(feed: SegmentFeed, vio_config: _core.VioConfig, backend: BackendRequest, readout_s: float | None = None) -> _core.Vio:
-    """A ``Vio`` over the feed's rig with the Insta360 factory lenses the recording states (gravity is in the calibration).
-
-    The factory lenses go to ``Vio`` when the config asks for the dual-fisheye lane.
-
-    Args:
-        feed: The open segment.
-        vio_config: The dataset's VIO config.
-        backend: Frontend lane request.
-        readout_s: Rolling-shutter readout handed to ``Vio`` instead of the recording's; None keeps the recording's.
-
-    Raises:
-        ValueError: If the config asks for the stitch but the recording carries no Insta360 factory calibration.
-    """
-    dual_fisheye: tuple[str, tuple[int, int, int, int, int, int] | None, float] | None = None
-    if vio_config.panorama_dual_fisheye:
-        if feed.insta360 is None:
-            raise ValueError(f"{feed.segment_id}: config.panorama_dual_fisheye needs an Insta360 recording (no insta360 property)")
-        factory: Insta360Factory = feed.insta360 if readout_s is None else dataclasses.replace(feed.insta360, readout_s=readout_s)
-        dual_fisheye = factory.vio_argument()
-    return _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=backend, dual_fisheye=dual_fisheye)
 
 
 @dataclass(slots=True, frozen=True)
