@@ -15,9 +15,6 @@ pub use brief::{
 mod hamming;
 pub use hamming::{match_mutual, Descriptor256, MatchConfig};
 
-#[cfg(test)]
-mod brief_golden;
-
 mod cells;
 pub use cells::{
     cell_select, detect_keypoints_with_cells, detect_prepared_keypoints_with_cells,

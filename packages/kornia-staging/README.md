@@ -50,6 +50,10 @@ and doctests for every workspace member except GPU, in both feature modes,
 plus Python patch-preparation tests.
 Run `pixi run -e kornia-staging-dev --frozen kornia-staging-gpu-test`
 for the opt-in GPU tests and Clippy on the host device.
+Run `pixi run -e kornia-staging-dev --frozen kornia-staging-golden` for the golden
+parity tests (Basalt BRIEF, matcher, HashBoW) in `golden/`, a
+test-only Cargo workspace without a destination: it reads third-party reference outputs stored as `.rrd`
+on the NAS, skips when they are absent, and stays out of the gate's build.
 CPU-only bare Cargo commands also require these workspace patches.
 Prepare the pinned CubeCL trees with `kornia-staging-patch-deps` before bare Cargo;
 consumer workspace roots must repeat the three `[patch.crates-io]` overrides. Run each affected consumer's gate

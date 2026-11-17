@@ -3,8 +3,13 @@
 //!
 //! The angle is the intensity centroid over a radius-15 disc; the descriptor compares 256 point pairs of ORB's
 //! learned `bit_pattern_31_`, rotated by that angle and rounded to the nearest pixel. With
-//! [`BriefConfig::basalt`] the output is bit-identical to Basalt; the default adds a box mean around each sampled
-//! point, as ORB smooths before its tests (Basalt compares raw pixels, so its bits are noise-sensitive).
+//! [`BriefConfig::basalt`] the output is bit-identical to Basalt.
+//!
+//! Smoothing (RootSLAM port bug B16, a behaviour knob): Basalt compares raw pixels; ORB smooths before its tests.
+//! The default compares the sums of the 5x5 boxes around the two points instead, following the port's rule that the
+//! fixed behaviour is the default. The tests here show only that the bits then differ from Basalt's; they do not
+//! show that smoothing makes retrieval or matching more robust. That is measured end to end by the knob A/B (PR k
+//! of the port), which keeps or flips this default. The `rootslam-parity` profile selects [`BriefConfig::basalt`].
 
 use kornia_image::Image;
 
@@ -305,12 +310,14 @@ impl BriefSmoothing {
 /// Descriptor options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BriefConfig {
-    /// Smoothing of the tests. The default smooths; [`BriefConfig::basalt`] does not.
+    /// Smoothing of the tests (B16). The default smooths; [`BriefConfig::basalt`] (the `rootslam-parity` setting)
+    /// does not.
     pub smoothing: BriefSmoothing,
 }
 
 impl Default for BriefConfig {
-    /// 5x5 boxes: ORB's smoothing scale (ORB blurs with a 7x7 Gaussian of sigma 2 before its tests).
+    /// 5x5 boxes, about ORB's smoothing scale (ORB blurs with a 7x7 Gaussian of sigma 2 before its tests). The
+    /// bits differ from Basalt's; the knob A/B of the RootSLAM port decides whether this stays the default.
     fn default() -> Self {
         Self {
             smoothing: BriefSmoothing::Box { radius: 2 },
@@ -319,7 +326,7 @@ impl Default for BriefConfig {
 }
 
 impl BriefConfig {
-    /// Basalt's descriptor, bit for bit: raw pixel tests.
+    /// Basalt's descriptor, bit for bit: raw pixel tests. The `rootslam-parity` profile uses this.
     pub const fn basalt() -> Self {
         Self {
             smoothing: BriefSmoothing::None,

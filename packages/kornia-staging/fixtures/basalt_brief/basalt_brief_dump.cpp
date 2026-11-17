@@ -2,7 +2,8 @@
 //
 // The output is Basalt's own: this file only feeds inputs to Basalt's computeAngles, computeDescriptors,
 // matchDescriptors (src/utils/keypoints.cpp) and HashBowST (include/basalt/hash_bow/hash_bow.h) and prints what
-// they return. The Rust golden tests read it from the NAS and skip when it is absent.
+// they return. basalt_brief_to_rrd.py turns that text into the golden .rrd on the NAS, which the tests in
+// packages/kornia-staging/golden read (pixi task kornia-staging-golden); the text itself is not kept.
 //
 // Build and run against a RootSLAM checkout (branch pixi, built with `pixi run build`), with RS = that checkout:
 //   RS/.pixi/envs/default/bin/c++ -std=c++17 -O3 -march=native -DBASALT_BUILD_SHARED_LIBRARY_ONLY \
@@ -13,6 +14,8 @@
 //     -L RS/.pixi/envs/default/lib -Wl,-rpath,RS/.pixi/envs/default/lib -lopencv_core -lopencv_imgproc \
 //     -lopencv_features2d -ltbb -o basalt_brief_dump
 //   ./basalt_brief_dump packages/kornia-staging/fixtures/frames/frame_00{0,1,2}_cam{0,1}.pgm > basalt_brief.txt
+//   pixi run -e slam-rs-dev python packages/kornia-staging/fixtures/basalt_brief/basalt_brief_to_rrd.py \
+//     --dump basalt_brief.txt --out /mnt/nas/ssd-8tb/scratch/slam-rs-rootslam/fixtures/b1/basalt_brief.rrd
 //
 // Inputs (all reproduced by the Rust test): each PGM widened to u16 with `v << 8`, then one synthetic u16 image
 // (xorshift32 seeded 12345, `state >> 16`, then an integer 3x3 box mean). Keypoints on an 11-pixel grid with

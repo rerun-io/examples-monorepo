@@ -1,111 +1,25 @@
 //! BRIEF and matcher parity with Basalt's own `computeAngles`, `computeDescriptors` and `matchDescriptors`.
 //!
 //! The reference is the output of `fixtures/basalt_brief/basalt_brief_dump.cpp`, built against RootSLAM's
-//! `keypoints.cpp` (branch pixi @ 839629d) and run on `fixtures/frames/*.pgm` plus a synthetic u16 image. It lives on
-//! the NAS; the tests skip, naming it, when it is absent.
+//! `keypoints.cpp` (branch pixi @ 839629d) and run on `fixtures/frames/*.pgm` plus a synthetic u16 image, stored as
+//! an `.rrd` on the NAS. Run with the `kornia-staging-golden` Pixi task (release, `--ignored`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use kornia_image::{Image, ImageSize};
+use kornia_staging_golden::BasaltBrief;
+use kornia_staging_imgproc::features::{
+    describe_keypoints_u16, match_mutual, BriefConfig, Descriptor256, MatchConfig,
+};
+use kornia_staging_imgproc::test_fixtures::read_pgm;
 
-use super::{describe_keypoints_u16, match_mutual, BriefConfig, Descriptor256, MatchConfig};
-use crate::test_fixtures::read_pgm;
-
-/// The golden file: `KORNIA_STAGING_BASALT_BRIEF`, else the RootSLAM port's scratch folder on the NAS.
-pub(crate) fn golden_path() -> Option<PathBuf> {
-    let path = std::env::var_os("KORNIA_STAGING_BASALT_BRIEF")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from("/mnt/nas/ssd-8tb/scratch/slam-rs-rootslam/fixtures/b1/basalt_brief.txt")
-        });
-    if path.is_file() {
-        Some(path)
-    } else {
-        eprintln!("skipped: Basalt BRIEF golden {} is absent", path.display());
-        None
-    }
-}
-
-/// One keypoint line: position, and Basalt's angle and descriptor when it was inside the 19-pixel border.
-struct GoldenKeypoint {
-    position: [f32; 2],
-    described: Option<(f64, Descriptor256)>,
-}
-
-struct GoldenImage {
-    keypoints: Vec<GoldenKeypoint>,
-}
-
-/// Matched index pairs `(a, b)`.
-type Pairs = Vec<(usize, usize)>;
 /// One image's angle and descriptor per keypoint, `None` outside the border.
 type Described = Vec<Option<(f64, Descriptor256)>>;
 
-struct Golden {
-    images: Vec<GoldenImage>,
-    /// `(image a, image b, matches)` as Basalt's `matchDescriptors` returned them, sorted by the `a` index.
-    matches: Vec<(usize, usize, Pairs)>,
-}
-
-fn parse(path: &Path) -> Golden {
-    let text = std::fs::read_to_string(path).unwrap();
-    let mut golden = Golden {
-        images: Vec::new(),
-        matches: Vec::new(),
-    };
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split(' ').collect();
-        match fields[0] {
-            "image" => golden.images.push(GoldenImage {
-                keypoints: Vec::new(),
-            }),
-            "kp" => {
-                let position = [fields[1].parse().unwrap(), fields[2].parse().unwrap()];
-                let described = (fields[3] != "out").then(|| {
-                    let words: Vec<u64> = fields[4..8]
-                        .iter()
-                        .map(|w| u64::from_str_radix(w, 16).unwrap())
-                        .collect();
-                    (
-                        fields[3].parse().unwrap(),
-                        Descriptor256(words.try_into().unwrap()),
-                    )
-                });
-                golden
-                    .images
-                    .last_mut()
-                    .unwrap()
-                    .keypoints
-                    .push(GoldenKeypoint {
-                        position,
-                        described,
-                    });
-            }
-            "match" => {
-                let pairs = fields[4..]
-                    .iter()
-                    .map(|p| {
-                        let (a, b) = p.split_once(':').unwrap();
-                        (a.parse().unwrap(), b.parse().unwrap())
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(pairs.len(), fields[3].parse::<usize>().unwrap());
-                golden.matches.push((
-                    fields[1].parse().unwrap(),
-                    fields[2].parse().unwrap(),
-                    pairs,
-                ));
-            }
-            _ => {}
-        }
-    }
-    golden
-}
-
 /// The dump's inputs: each frame fixture widened with `v << 8`, then the synthetic image.
 fn images() -> Vec<Image<u16, 1>> {
-    let frames = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/frames");
+    let frames = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/frames");
     let mut images: Vec<Image<u16, 1>> = [
         "000_cam0", "000_cam1", "001_cam0", "001_cam1", "002_cam0", "002_cam1",
     ]
@@ -155,12 +69,13 @@ fn synthetic(width: usize, height: usize) -> Image<u16, 1> {
 }
 
 /// Our descriptors of every image, in keypoint order, with the Basalt configuration.
-fn described(golden: &Golden, images: &[Image<u16, 1>]) -> Vec<Described> {
+fn described(golden: &BasaltBrief, images: &[Image<u16, 1>]) -> Vec<Described> {
     golden
         .images
         .iter()
         .zip(images)
         .map(|(g, image)| {
+            assert_eq!((g.width, g.height), (image.width(), image.height()));
             let positions: Vec<[f32; 2]> = g.keypoints.iter().map(|k| k.position).collect();
             describe_keypoints_u16(image, &positions, BriefConfig::basalt())
                 .into_iter()
@@ -171,9 +86,9 @@ fn described(golden: &Golden, images: &[Image<u16, 1>]) -> Vec<Described> {
 }
 
 #[test]
+#[ignore = "needs the Basalt BRIEF golden .rrd on the NAS (kornia-staging-golden task)"]
 fn angles_and_descriptors_are_bit_identical_to_basalt() {
-    let Some(path) = golden_path() else { return };
-    let golden = parse(&path);
+    let golden = BasaltBrief::load_default();
     let images = images();
     assert_eq!(golden.images.len(), images.len());
     let ours = described(&golden, &images);
@@ -196,15 +111,17 @@ fn angles_and_descriptors_are_bit_identical_to_basalt() {
                     k.position
                 );
                 assert_eq!(
-                    descriptor, *our_descriptor,
+                    Descriptor256(descriptor),
+                    *our_descriptor,
                     "descriptor at {:?}",
                     k.position
                 );
                 inside += 1;
-                textured += usize::from(descriptor != Descriptor256::default());
+                textured += usize::from(descriptor != [0; 4]);
             }
         }
     }
+    eprintln!("{inside} described keypoints, {textured} with a non-zero descriptor");
     assert!(
         inside > 30_000 && textured > 20_000,
         "{inside} described, {textured} non-zero"
@@ -212,9 +129,9 @@ fn angles_and_descriptors_are_bit_identical_to_basalt() {
 }
 
 #[test]
+#[ignore = "needs the Basalt BRIEF golden .rrd on the NAS (kornia-staging-golden task)"]
 fn matches_are_basalts_minus_ties_and_unverified_mutual_checks() {
-    let Some(path) = golden_path() else { return };
-    let golden = parse(&path);
+    let golden = BasaltBrief::load_default();
     let images = images();
     let descriptors: Vec<Vec<Descriptor256>> = described(&golden, &images)
         .into_iter()
@@ -222,9 +139,10 @@ fn matches_are_basalts_minus_ties_and_unverified_mutual_checks() {
         .collect();
     let config = MatchConfig::default();
     let (mut total, mut basalt_only) = (0, 0);
-    // The first two image pairs: brute force over ~6,700 descriptors each is slow in a debug build.
-    for (a, b, basalt) in golden.matches.iter().take(2) {
-        let (da, db) = (&descriptors[*a], &descriptors[*b]);
+    assert_eq!(golden.matches.len(), 5);
+    for m in &golden.matches {
+        let (a, b, basalt) = (m.image_a, m.image_b, &m.pairs);
+        let (da, db) = (&descriptors[a], &descriptors[b]);
         let ours = match_mutual(da, db, config);
         // Ours is a subset of Basalt's; each pair only Basalt keeps is a tie for the best (B17), or a
         // pair whose reverse search found nothing and passed by reading index 0 (B6).
@@ -249,6 +167,6 @@ fn matches_are_basalts_minus_ties_and_unverified_mutual_checks() {
         total += ours.len();
         basalt_only += basalt.len() - ours.len();
     }
-    eprintln!("{total} matches, {basalt_only} more in Basalt");
+    eprintln!("{total} matches over 5 image pairs, {basalt_only} more in Basalt");
     assert!(total > 250, "{total} matches");
 }

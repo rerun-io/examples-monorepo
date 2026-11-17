@@ -6,13 +6,9 @@
 pub struct Descriptor256(pub [u64; 4]);
 
 impl Descriptor256 {
-    /// The result of binary test `index`.
-    ///
-    /// # Panics
-    ///
-    /// If `index >= 256`.
-    #[inline]
-    pub fn bit(&self, index: usize) -> bool {
+    /// The result of binary test `index` (tests only: the bit order is checked against `std::bitset`).
+    #[cfg(test)]
+    fn bit(&self, index: usize) -> bool {
         self.0[index / 64] >> (index % 64) & 1 == 1
     }
 

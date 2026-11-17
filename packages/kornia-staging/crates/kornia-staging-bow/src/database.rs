@@ -60,11 +60,6 @@ impl Database {
         self.direct.is_empty()
     }
 
-    /// `true` when `entry` was added and not removed.
-    pub fn contains(&self, entry: EntryId) -> bool {
-        self.direct.contains_key(&entry)
-    }
-
     /// Add an L1-normalized bag of words (as [`kornia_bow::Vocabulary::transform`] returns it).
     ///
     /// # Returns
@@ -135,23 +130,23 @@ impl Database {
         max_results: usize,
         keep: impl Fn(EntryId) -> bool,
     ) -> Vec<QueryResult> {
-        let mut sums = vec![0.0f64; self.next as usize];
-        let mut scored = vec![false; self.next as usize];
+        // Keyed by the scored entries only: with keyframe culling, ids ever issued far outnumber live entries.
+        let mut sums: HashMap<EntryId, f64> = HashMap::new();
         for &(word, q) in bow.0.iter().filter(|&&(_, w)| w != 0.0) {
             for &(entry, d) in self.inverted.get(&word).into_iter().flatten() {
                 let (q, d) = (f64::from(q), f64::from(d));
-                sums[entry as usize] += (q - d).abs() - q.abs() - d.abs();
-                scored[entry as usize] = true;
+                *sums.entry(entry).or_default() += (q - d).abs() - q.abs() - d.abs();
             }
         }
-        let mut results: Vec<QueryResult> = (0..self.next)
-            .filter(|&entry| scored[entry as usize] && keep(entry))
-            .map(|entry| QueryResult {
+        let mut results: Vec<QueryResult> = sums
+            .into_iter()
+            .filter(|&(entry, _)| keep(entry))
+            .map(|(entry, sum)| QueryResult {
                 entry,
-                score: (-sums[entry as usize] / 2.0) as f32,
+                score: (-sum / 2.0) as f32,
             })
             .collect();
-        results.sort_by(|a, b| b.score.total_cmp(&a.score));
+        results.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.entry.cmp(&b.entry)));
         if max_results > 0 {
             results.truncate(max_results);
         }
@@ -215,7 +210,6 @@ mod tests {
         let b = db.add(&bow(&[(1, 1.0)]));
         assert!(db.remove(a));
         assert!(!db.remove(a));
-        assert!(!db.contains(a) && db.contains(b));
         assert_eq!(db.len(), 1);
         let entries: Vec<_> = db
             .query(&bow(&[(1, 1.0), (2, 1.0)]), 0)
