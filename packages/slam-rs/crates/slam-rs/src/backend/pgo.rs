@@ -1,6 +1,6 @@
 //! The pose-graph optimization a large-drift loop runs (RootSLAM §III-B;
 //! `loop_closing.cpp:725-902`, `map_database.cpp:164-243`; DESIGN §3 row 12,
-//! §4 B11/B12, PR c2). The solver is `kornia_staging_slam::pgo` (c1).
+//! §4 B11/B12/B29, PR c2). The solver is `kornia_staging_slam::pgo` (c1).
 //!
 //! When a verified loop would move the current keyframe by at least the drift
 //! gate, [`MapBackend::apply_loop`] runs one PGO before it fuses:
@@ -11,16 +11,17 @@
 //!    are now; and one edge from each island keyframe to the current one,
 //!    measured with the PnP pose. Each edge weighs `pgo_edge_sigmas` (B12;
 //!    RootSLAM's I6 under `rootslam-parity`). Of several edges between one pair
-//!    the first is kept: the loop's edges come first, so an island keyframe that
-//!    already shares an edge with the current one keeps the loop's measurement
-//!    (RootSLAM lists them last and drops them; parity keeps that order).
+//!    the first is kept. The loop's edges come first, so an island keyframe
+//!    that already shares an edge with the current one keeps the loop's
+//!    measurement (B29, also under parity: RootSLAM lists them last and drops
+//!    them).
 //! 2. **Gauge** (DESIGN §11 Q3): the window keyframes and the newest keyframe
 //!    are fixed and stay bit-identical. The window never reads the map, so the
 //!    raw VIO poses do not change; the old map moves onto the current drift.
-//! 3. **Apply** ([`apply_delta`], B11): each moved keyframe takes the PGO's
-//!    change, `T_new = T_pgo · T_copy⁻¹ · T_now`, so a pose the window wrote
-//!    after the copy keeps that write. Landmarks are host-relative and move
-//!    with their host keyframe.
+//! 3. **Apply** ([`apply`]): each moved keyframe takes its optimized pose.
+//!    The PGO runs inside the back-end step (Offline and Realtime), so no
+//!    keyframe changes between the copy and the apply and B11 cannot occur.
+//!    Landmarks are host-relative and move with their host keyframe.
 //!
 //! Every applied PGO raises the epoch of the [`MapCorrection`] that the
 //! snapshot publishes for re-anchoring (PR f1).
@@ -99,16 +100,11 @@ impl PoseGraph {
             None => Vec::new(),
         };
         let n_loop: usize = loop_edges.len();
-        let edges: Vec<SolverEdge> = if config.pgo_loop_edges_first {
-            loop_edges.into_iter().chain(map_edges).collect()
-        } else {
-            map_edges.into_iter().chain(loop_edges).collect()
-        };
         Self {
             ids,
             copy,
             fixed,
-            edges,
+            edges: loop_edges.into_iter().chain(map_edges).collect(),
             loop_edges: n_loop,
         }
     }
@@ -127,31 +123,15 @@ impl PoseGraph {
     }
 }
 
-/// Write a PGO result into the map as a change (B11): keyframe `i` takes
-/// `T_pgo · T_copy⁻¹ · T_now`. RootSLAM writes `T_pgo` itself, which undoes any
-/// window update made since the copy. A pose the PGO left bit-identical, or a
-/// keyframe culled since the copy, is not touched; one added since the copy is
-/// not in the graph and keeps its pose. Returns the moved keyframes.
-pub fn apply_delta(
-    map: &mut KeyframeMap,
-    graph: &PoseGraph,
-    optimized: &[Se3<f64>],
-) -> Vec<FrameId> {
+/// Write a PGO result into the map: each keyframe the PGO moved takes its
+/// optimized pose. Returns the moved keyframes.
+pub fn apply(map: &mut KeyframeMap, graph: &PoseGraph, optimized: &[Se3<f64>]) -> Vec<FrameId> {
     let mut moved: Vec<FrameId> = Vec::new();
     for ((&id, copy), pgo) in graph.ids.iter().zip(&graph.copy).zip(optimized) {
-        if pgo == copy {
-            continue;
+        if pgo != copy {
+            map.upsert_keyframe(id, *pgo, None);
+            moved.push(id);
         }
-        let Some(now) = map.keyframe(id).map(|kf| kf.pose) else {
-            continue;
-        };
-        let new = if now == *copy {
-            *pgo
-        } else {
-            *pgo * copy.inverse() * now
-        };
-        map.upsert_keyframe(id, new, None);
-        moved.push(id);
     }
     moved
 }
@@ -273,7 +253,7 @@ impl MapBackend {
                 loops.pgo.raw.entry(id).or_insert(*copy);
             }
         }
-        let moved: Vec<FrameId> = apply_delta(&mut self.map, &graph, &poses);
+        let moved: Vec<FrameId> = apply(&mut self.map, &graph, &poses);
         loops.pgo.runs.push(PgoRun {
             current: detection.current,
             candidate: detection.candidate,
