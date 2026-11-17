@@ -454,10 +454,6 @@ class VioStage:
     """The estimator and the D17 hold, which the V2 gate drives the same way."""
     logger: VioLogger
     """Where the trajectories, the window, the landmarks and the counters go."""
-    blank_cameras: tuple[int, ...] = ()
-    """Cameras fed black images (the mono-inertial proxy); they must never hold a keypoint."""
-    blank_keypoints: int = 0
-    """Keypoints the frontend reported in a blanked camera, summed over framesets; must stay 0."""
     times: StageTimes = field(default_factory=StageTimes)
     """Per-frameset wall time of each stage: ``track`` (the whole call), the host ``stitch`` of a stitched rig,
     the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
@@ -469,6 +465,19 @@ class VioStage:
     def elapsed_ms(self) -> list[float]:
         """Wall time each ``track`` call that tracked took, in frameset order."""
         return self.lockstep.elapsed_ms
+
+    @property
+    def blank_cameras(self) -> tuple[int, ...]:
+        """Cameras fed black images (the mono-inertial proxy); they must never hold a keypoint."""
+        return self.lockstep.blank_cameras
+
+    @property
+    def blank_keypoints(self) -> int:
+        """Keypoints the frontend reported in a blanked camera over the run; must stay 0.
+
+        A camera with no keypoint can connect no landmark: the proxy is mono only if this stays zero.
+        """
+        return self.lockstep.blank_keypoints
 
     @property
     def pending(self) -> list[Frameset]:
@@ -503,12 +512,6 @@ class VioStage:
             frame: _core.FlowFrame | None = vio.flow_frame()
             if frame is not None:
                 self.keypoints.append(sum(len(frame.ids(camera)) for camera in range(vio.camera_count)))
-        if self.blank_cameras:
-            # A camera with no keypoint can connect no landmark: the proxy is
-            # mono only if this stays zero (DESIGN H3).
-            blanked: _core.FlowFrame | None = vio.flow_frame()
-            if blanked is not None:
-                self.blank_keypoints += sum(len(blanked.ids(camera)) for camera in self.blank_cameras)
         if log_panorama:
             self._log_panorama(frameset.t_ns)
         self.times.add("log", 1e3 * (time.monotonic() - started) - sum(calls))

@@ -310,8 +310,7 @@ def main(config: Config) -> None:
             if unknown:
                 raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
             stage = VioStage(
-                blank_cameras=tuple(config.blank_cameras),
-                lockstep=Lockstep(vio=vio),
+                lockstep=Lockstep(vio=vio, blank_cameras=tuple(config.blank_cameras)),
                 logger=VioLogger(
                     cameras=feed.cameras,
                     ground_truth=truth,
