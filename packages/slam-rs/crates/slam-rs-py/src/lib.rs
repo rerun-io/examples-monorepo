@@ -597,6 +597,20 @@ impl VioSnapshot {
         self.frame_update
     }
 
+    /// The GPU lane collected this frameset's temporal and stereo results in
+    /// one device wait (one-wait); always false on the CPU lane.
+    #[getter]
+    fn gpu_one_wait(&self) -> bool {
+        self.frontend_timings.flow.gpu_one_wait
+    }
+
+    /// The GPU lane reused this frameset's timestamp-bound lookahead image
+    /// upload; always false on the CPU lane.
+    #[getter]
+    fn gpu_lookahead(&self) -> bool {
+        self.frontend_timings.flow.gpu_lookahead
+    }
+
     /// Wall time each stage took on the last frame, milliseconds.
     ///
     /// The estimator's nine — `predict`, `keyframe`, `optimize`, `linearize`,
