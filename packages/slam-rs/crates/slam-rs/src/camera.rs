@@ -58,6 +58,9 @@ impl<S: Scalar> SlamCamera<S> {
             staged::CameraModelKind::Kb4(_) => "kb4",
             staged::CameraModelKind::BrownConrady(_) => "pinhole-radtan8",
             staged::CameraModelKind::Fisheye624(_) => "fisheye624",
+            staged::CameraModelKind::DoubleSphere(_) => "ds",
+            staged::CameraModelKind::Eucm(_) => "eucm",
+            staged::CameraModelKind::Equirectangular(_) => "equirectangular",
         }
     }
 
@@ -75,6 +78,18 @@ impl<S: Scalar> SlamCamera<S> {
             }
             staged::CameraModelKind::Fisheye624(v) => {
                 let [fx, fy, cx, cy, ..] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::DoubleSphere(v) => {
+                let [fx, fy, cx, cy, ..] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::Eucm(v) => {
+                let [fx, fy, cx, cy, ..] = v.params();
+                [fx, fy, cx, cy]
+            }
+            staged::CameraModelKind::Equirectangular(v) => {
+                let [fx, fy, cx, cy, _] = v.params();
                 [fx, fy, cx, cy]
             }
         }

@@ -71,7 +71,41 @@ pub struct Radtan8Params<S> {
     pub rpmax: S,
 }
 
-/// Basalt schemas for the three supported camera families.
+/// Double sphere, `fx fy cx cy xi alpha`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DoubleSphereParams<S> {
+    /// Focal length along image x, pixels.
+    pub fx: S,
+    /// Focal length along image y, pixels.
+    pub fy: S,
+    /// Principal point x, pixels.
+    pub cx: S,
+    /// Principal point y, pixels.
+    pub cy: S,
+    /// Offset between the two projection spheres.
+    pub xi: S,
+    /// Blend between the second sphere and the image plane.
+    pub alpha: S,
+}
+
+/// Enhanced unified camera model, `fx fy cx cy alpha beta`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EucmParams<S> {
+    /// Focal length along image x, pixels.
+    pub fx: S,
+    /// Focal length along image y, pixels.
+    pub fy: S,
+    /// Principal point x, pixels.
+    pub cx: S,
+    /// Principal point y, pixels.
+    pub cy: S,
+    /// Blend parameter.
+    pub alpha: S,
+    /// Ellipsoid shape parameter.
+    pub beta: S,
+}
+
+/// Basalt schemas for the five supported camera families.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "camera_type", content = "intrinsics")]
 pub enum BasaltCamera<S> {
@@ -84,6 +118,12 @@ pub enum BasaltCamera<S> {
     /// `pinhole-radtan8`.
     #[serde(rename = "pinhole-radtan8")]
     PinholeRadtan8(Radtan8Params<S>),
+    /// `ds`.
+    #[serde(rename = "ds")]
+    DoubleSphere(DoubleSphereParams<S>),
+    /// `eucm`.
+    #[serde(rename = "eucm")]
+    Eucm(EucmParams<S>),
 }
 
 /// A format conversion would change or cannot evaluate the camera model.
@@ -113,7 +153,7 @@ pub struct ColmapCamera {
     pub params: Vec<f64>,
 }
 
-const COLMAP_MODELS: [(u32, usize, bool); 10] = [
+const COLMAP_MODELS: [(u32, usize, bool); 12] = [
     (0, 3, true),
     (1, 4, false),
     (2, 4, true),
@@ -124,6 +164,8 @@ const COLMAP_MODELS: [(u32, usize, bool); 10] = [
     (8, 4, true),
     (9, 5, true),
     (11, 16, false),
+    (16, 6, false),
+    (17, 2, false),
 ];
 fn colmap_layout(id: u32) -> Result<(usize, bool), ConversionError> {
     COLMAP_MODELS
@@ -143,6 +185,22 @@ impl TryFrom<&ColmapCamera> for CameraModelKind<f64> {
             return Err(ConversionError::Invalid(
                 "parameter count or non-finite coefficient",
             ));
+        }
+        if id == 17 {
+            // EQUIRECTANGULAR stores only the panorama size.
+            let [w, h] = [p[0], p[1]];
+            if !(w >= 1.0
+                && h >= 1.0
+                && w.fract() == 0.0
+                && h.fract() == 0.0
+                && w <= f64::from(u32::MAX)
+                && h <= f64::from(u32::MAX))
+            {
+                return Err(ConversionError::Invalid("equirectangular size"));
+            }
+            return Ok(Self::Equirectangular(Equirectangular::panorama(
+                w as u32, h as u32,
+            )?));
         }
         let head = if tied {
             [p[0], p[0], p[1] - 0.5, p[2] - 0.5]
@@ -171,6 +229,9 @@ impl TryFrom<&ColmapCamera> for CameraModelKind<f64> {
                 full[..4].copy_from_slice(&head);
                 Ok(Self::Fisheye624(Fisheye624::new(full)?))
             }
+            16 => Ok(Self::Eucm(Eucm::new([
+                head[0], head[1], head[2], head[3], p[4], p[5],
+            ])?)),
             _ => unreachable!(),
         }
     }
@@ -183,6 +244,26 @@ impl CameraModelKind<f64> {
     /// Returns `Unsupported` for unavailable models and `Invalid` for a lossy restriction.
     pub fn to_colmap(&self, model_id: u32) -> Result<ColmapCamera, ConversionError> {
         let (count, tied) = colmap_layout(model_id)?;
+        if let (Self::Equirectangular(v), 17) = (self, model_id) {
+            let [fx, fy, ..] = v.params();
+            let [w, h] = [
+                (fx * std::f64::consts::TAU).round(),
+                (fy * std::f64::consts::PI).round(),
+            ];
+            let full =
+                (w >= 1.0 && h >= 1.0 && w <= f64::from(u32::MAX) && h <= f64::from(u32::MAX))
+                    .then(|| Equirectangular::panorama(w as u32, h as u32).ok())
+                    .flatten();
+            if full != Some(*v) {
+                return Err(ConversionError::Invalid(
+                    "COLMAP equirectangular is a full panorama",
+                ));
+            }
+            return Ok(ColmapCamera {
+                model_id,
+                params: vec![w, h],
+            });
+        }
         let mut full = match (self, model_id) {
             (Self::Pinhole(v), 0 | 1) => v.params().to_vec(),
             (Self::BrownConrady(v), 2 | 3 | 4 | 6) if v.valid_radius().is_none() => {
@@ -190,6 +271,7 @@ impl CameraModelKind<f64> {
             }
             (Self::Kb4(v), 5 | 8 | 9) => v.params().to_vec(),
             (Self::Fisheye624(v), 11) => v.params().to_vec(),
+            (Self::Eucm(v), 16) => v.params().to_vec(),
             _ => {
                 return Err(ConversionError::Invalid(
                     "family or valid radius cannot be represented",
@@ -247,6 +329,12 @@ impl<S: Scalar> TryFrom<&BasaltCamera<S>> for CameraModelKind<S> {
                     },
                 )?))
             }
+            BasaltCamera::DoubleSphere(v) => Ok(Self::DoubleSphere(DoubleSphere::new([
+                v.fx, v.fy, v.cx, v.cy, v.xi, v.alpha,
+            ])?)),
+            BasaltCamera::Eucm(v) => Ok(Self::Eucm(Eucm::new([
+                v.fx, v.fy, v.cx, v.cy, v.alpha, v.beta,
+            ])?)),
         }
     }
 }
@@ -295,9 +383,34 @@ impl<S: Scalar> TryFrom<CameraModelKind<S>> for BasaltCamera<S> {
                     rpmax: v.valid_radius().unwrap_or(S::zero()),
                 }))
             }
+            CameraModelKind::DoubleSphere(v) => {
+                let [fx, fy, cx, cy, xi, alpha] = v.params();
+                Ok(Self::DoubleSphere(DoubleSphereParams {
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    xi,
+                    alpha,
+                }))
+            }
+            CameraModelKind::Eucm(v) => {
+                let [fx, fy, cx, cy, alpha, beta] = v.params();
+                Ok(Self::Eucm(EucmParams {
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    alpha,
+                    beta,
+                }))
+            }
             CameraModelKind::Fisheye624(_) => {
                 Err(ConversionError::Unsupported("fisheye624 in Basalt".into()))
             }
+            CameraModelKind::Equirectangular(_) => Err(ConversionError::Unsupported(
+                "equirectangular in Basalt".into(),
+            )),
         }
     }
 }
