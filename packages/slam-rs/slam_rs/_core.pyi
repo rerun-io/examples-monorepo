@@ -469,3 +469,75 @@ def catalog_pair_imu(gyro_t_ns: Int64[ndarray, " n_gyro"], gyro_rad_s: Float64[n
 def catalog_rig_profile(dataset: str) -> "RigProfile":
     """Return the camera selection and clock rules owned by Rust."""
     ...
+
+
+class InsvLens:
+    """One lens of an Insta360 factory calibration at the track resolution, window crop applied (Mei sphere model)."""
+
+    @property
+    def version(self) -> int: ...
+    @property
+    def xi(self) -> float: ...
+    @property
+    def fx(self) -> float: ...
+    @property
+    def fy(self) -> float: ...
+    @property
+    def cx(self) -> float: ...
+    @property
+    def cy(self) -> float: ...
+    @property
+    def px_per_rad(self) -> float: ...
+    @property
+    def radial(self) -> list[float]: ...
+    @property
+    def tangential(self) -> list[float]: ...
+    @property
+    def prism(self) -> list[float]: ...
+    @property
+    def ypr_deg(self) -> list[float]: ...
+    @property
+    def translation_m(self) -> list[float]: ...
+    @property
+    def lens_from_rig_rotation(self) -> list[list[float]]:
+        """Rig -> lens rotation, row-major. The rig frame has lens 0's axes."""
+    @property
+    def lens_from_rig_translation_m(self) -> list[float]:
+        """Rig -> lens translation in metres; the rig origin is the midpoint of the two lens centres."""
+    def radius_px(self, theta: Sequence[float]) -> Float64[ndarray, " n"]:
+        """Image radius in track pixels of rays ``theta`` radians off the axis (radial part of the model only)."""
+
+
+class InsvClip:
+    """An Insta360 ``.insv`` clip: trailer metadata, factory lenses, IMU, frame times and the two HEVC lens tracks."""
+
+    def __init__(self, path: str) -> None:
+        """Read the container index and the trailer; raises ``ValueError`` on a malformed file."""
+    @property
+    def camera_type(self) -> str: ...
+    @property
+    def firmware(self) -> str: ...
+    @property
+    def first_frame_timestamp_us(self) -> int: ...
+    @property
+    def rolling_shutter_ms(self) -> float | None: ...
+    @property
+    def gyro_timestamp_ms(self) -> float | None: ...
+    @property
+    def factory_strings(self) -> list[tuple[str, str]]:
+        """Raw lens strings present in the metadata, as ``(version name, string)``: ``v1``, ``v2``, ``v3``, ``v6``."""
+    @property
+    def lens_track(self) -> tuple[int, int]:
+        """Video track index of lens 0 and lens 1."""
+    @property
+    def lenses(self) -> list[InsvLens]: ...
+    @property
+    def resolution(self) -> tuple[int, int]: ...
+    @property
+    def num_frames(self) -> int: ...
+    def imu(self) -> tuple[Int64[ndarray, " n"], Float64[ndarray, "n 3"], Float64[ndarray, "n 3"]]:
+        """Times on the trailer clock (us), accel (m/s^2) and gyro (rad/s) in the IMU's axes."""
+    def frame_exposures(self, vin1: bool) -> tuple[Int64[ndarray, " n_frames"], Float64[ndarray, " n_frames"]]:
+        """Per-frame exposure entries of record 4 (``vin1=False``) or 12: times (us) and exposure times (s)."""
+    def read_samples(self, track: int, start: int, stop: int) -> tuple[list[bytes], Bool[ndarray, " n"]]:
+        """Samples ``start..stop`` of one track as Annex B access units with parameter sets on IRAPs, and IRAP flags."""
