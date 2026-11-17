@@ -82,13 +82,17 @@ pub const MODEL_EUCM: u32 = 3;
 pub const MODEL_EQUIRECT: u32 = 4;
 
 /// Packed parameter count of the model tagged `model` (`MODEL_*`).
+///
+/// # Panics
+/// On a tag that names no model, so a host layout never sizes an unknown camera as another model.
 pub const fn parameter_count(model: u32) -> usize {
     match model {
         MODEL_BROWN8 => BROWN8_PARAMETERS,
         MODEL_KB4 => kb4::PARAMETERS,
         MODEL_DOUBLE_SPHERE => double_sphere::PARAMETERS,
         MODEL_EUCM => eucm::PARAMETERS,
-        _ => equirect::PARAMETERS,
+        MODEL_EQUIRECT => equirect::PARAMETERS,
+        _ => panic!("unknown device camera model tag"),
     }
 }
 
@@ -164,6 +168,27 @@ mod tests;
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
+    #[test]
+    fn parameter_count_names_every_model_and_refuses_other_tags() {
+        assert_eq!(
+            [
+                MODEL_BROWN8,
+                MODEL_KB4,
+                MODEL_DOUBLE_SPHERE,
+                MODEL_EUCM,
+                MODEL_EQUIRECT
+            ]
+            .map(parameter_count),
+            [
+                BROWN8_PARAMETERS,
+                kb4::PARAMETERS,
+                double_sphere::PARAMETERS,
+                eucm::PARAMETERS,
+                equirect::PARAMETERS
+            ]
+        );
+        assert!(std::panic::catch_unwind(|| parameter_count(MODEL_EQUIRECT + 1)).is_err());
+    }
     #[test]
     fn prism_and_tilt_require_the_general_camera() {
         let mut parameters = [0.0; 18];
