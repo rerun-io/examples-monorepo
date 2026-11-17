@@ -24,7 +24,7 @@ fn clip() -> Option<(String, kornia_staging_io::insta360::Insta360Clip)> {
         return None;
     }
     let clip = kornia_staging_io::insta360::Insta360Clip::open(&path).unwrap();
-    assert_eq!(clip.lens_track, [1, 0], "lens 0 is track 1 (recon/09)");
+    assert_eq!(clip.lens_track, [1, 0], "lens 0 is track 1: the clip states the reversed track order");
     Some((path, clip))
 }
 

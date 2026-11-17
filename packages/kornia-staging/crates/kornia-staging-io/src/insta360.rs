@@ -464,7 +464,7 @@ pub struct LensCalibration {
     /// frame (telemetry-parser `rig.rs::rotation`): `+Z` the nominal lens-0 axis, `+Y` image-down of lens 0 (the body
     /// axis toward the handle), `+X` right. `R_P_lens = Rv(0, 0, 90; lens 0) Rv(ypr_i; i)^T` with the vendor rotation
     /// `Rv` of [`parse_lens_string`]. Unlike `lens_from_rig_rotation`, lens 0 is not the identity here: the factory
-    /// relative rotation, not the nominal 180 deg, puts the two seams within 0.25 px (recon/09 section 1).
+    /// relative rotation, not the nominal 180 deg, puts the two seams within 0.25 px on the X4 Air clip.
     pub pano_from_lens_rotation: [[f64; 3]; 3],
     /// This lens's centre in the panorama frame `P`, metres, with the origin at the mean of the lens centres:
     /// `R_P_lens0 (translation_m - mean)`. The factory translations are in lens 0's frame, which `R_P_lens0` turns
@@ -503,8 +503,8 @@ impl LensCalibration {
     /// V3: `x_d = m_x R + 2 p1 m_x m_y + p2 (r2 + 2 m_x^2)`, `y_d = m_y R + p1 (r2 + 2 m_y^2) + 2 p2 m_x m_y`;
     /// V6: `x_d = m_x R + (r2 + 2 m_x^2) a + 2 m_x m_y b + d9 r2 + d11 r2^2`,
     /// `y_d = m_y R + (r2 + 2 m_y^2) b + 2 m_x m_y a + d10 r2 + d12 r2^2` with `a = d5 + d7 r2`, `b = d6 + d8 r2`;
-    /// `R = 1 + sum_i radial_i r2^(i+1)`; `u = fx x_d + cx`, `v = fy y_d + cy` (video-types `MeiDistortion`,
-    /// recon/03 section 5.1). The ray need not be unit length.
+    /// `R = 1 + sum_i radial_i r2^(i+1)`; `u = fx x_d + cx`, `v = fy y_d + cy` (video-types `MeiDistortion`).
+    /// The ray need not be unit length.
     ///
     /// # Returns
     /// `None` for a zero ray or one more than [`LENS_HALF_FIELD_RAD`] off the optical axis.
@@ -852,7 +852,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    // The real X4 Air strings (recon/03 section 5).
+    // The real X4 Air strings, from the clip VID_20261116_125200_00_003.insv.
     include!("../tests/common/x4air_lens.rs");
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
@@ -880,7 +880,7 @@ mod tests {
             (l0.radial.len(), l0.tangential.len(), l0.prism.len()),
             (3, 2, 0)
         );
-        // Image radius at 100 deg: 972.2 and 980.1 px (recon/03 section 5.3).
+        // Image radius at 100 deg: 972.2 and 980.1 px.
         assert!(
             close(l0.radius_px(100f64.to_radians()), 972.2, 0.1)
                 && close(l1.radius_px(100f64.to_radians()), 980.1, 0.1)
