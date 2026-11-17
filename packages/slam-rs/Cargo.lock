@@ -6779,7 +6779,6 @@ dependencies = [
  "kornia-image",
  "kornia-staging-3d",
  "kornia-staging-imgproc",
- "kornia-staging-io",
  "numpy",
  "pyo3",
  "slam-rs",
