@@ -2637,6 +2637,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "kornia-image",
+ "kornia-staging-imgproc",
  "kornia-tensor",
  "libc",
  "openh264",
