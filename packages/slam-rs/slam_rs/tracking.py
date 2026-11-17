@@ -199,7 +199,7 @@ class SegmentRun:
     dropped: tuple[DroppedFrameset, ...] = ()
     """Explicitly rejected input timestamps, on the exported device clock."""
     final: Trajectory | None = None
-    """The final trajectory (:func:`reanchored` on the flushed map), at the estimate's timestamps; None with the back end off, where it is the estimate."""
+    """The final trajectory (:func:`final_trajectory`: the global BA, then re-anchoring), at the estimate's timestamps; None with the back end off, where it is the estimate."""
 
 
     def unexplained_loss(self) -> str | None:
@@ -215,25 +215,45 @@ class SegmentRun:
         return None
 
 
-def reanchored(estimate: Trajectory, map_snapshot: _core.MapSnapshot | None) -> Trajectory:
-    """The final trajectory: every raw pose re-anchored on the map's keyframes on both sides (:func:`slam_rs._core.reanchor`).
+def reanchored(estimate: Trajectory, map_keyframes: _core.MapSnapshot | _core.MapResult | None) -> Trajectory:
+    """Every raw pose re-anchored on the map's keyframes on both sides (:func:`slam_rs._core.reanchor`).
 
     Args:
         estimate: The raw causal VIO poses, on the clock the estimator ran on (the map's keyframe ids are on it too).
-        map_snapshot: The map after the flush; None (back end off) returns ``estimate`` itself.
+        map_keyframes: The map after the flush, or what :meth:`slam_rs._core.Vio.finish_map` returned; None (back end
+            off) returns ``estimate`` itself.
 
     Returns:
         One pose per raw pose, at the same timestamps.
     """
-    if map_snapshot is None:
+    if map_keyframes is None:
         return estimate
     raw_xyzw: Float64[ndarray, "n 7"] = np.concatenate([estimate.position_m, np.roll(estimate.quaternion_wxyz, -1, axis=1)], axis=1)
-    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, raw_xyzw, map_snapshot.keyframe_t_ns, map_snapshot.keyframe_poses)
+    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, raw_xyzw, map_keyframes.keyframe_t_ns, map_keyframes.keyframe_poses)
     return Trajectory(t_ns=estimate.t_ns.copy(), position_m=final[:, 0:3].copy(), quaternion_wxyz=np.roll(final[:, 3:7], 1, axis=1))
 
 
-def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
-    """Track framesets with IMU hold/retry; export estimates and truth on the device clock."""
+def final_trajectory(vio: _core.Vio, estimate: Trajectory, *, run_gba: bool) -> tuple[Trajectory, _core.MapResult | None]:
+    """The run's final trajectory (DESIGN §1, §2): the global BA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes.
+
+    Call it once, after the flush: the GBA writes its poses into the map.
+
+    Args:
+        vio: The flushed estimator.
+        estimate: Its raw causal VIO poses, on the estimator's clock.
+        run_gba: Run the global BA; without it the final run is re-anchored on the map as loops and PGO left it.
+
+    Returns:
+        The final trajectory (``estimate`` itself with the back end off) and :meth:`slam_rs._core.Vio.finish_map`'s result.
+    """
+    map_result: _core.MapResult | None = vio.finish_map(run_gba=run_gba)
+    return reanchored(estimate, map_result), map_result
+
+
+def drive(
+    feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str, run_gba: bool = True
+) -> SegmentRun:
+    """Track framesets with IMU hold/retry; export estimates, the final trajectory (:func:`final_trajectory`) and truth on the device clock."""
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
@@ -270,12 +290,11 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
         quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
     )
-    map_snapshot: _core.MapSnapshot | None = lockstep.vio.map_snapshot()
-    final: Trajectory | None = None if map_snapshot is None else shift_clock(reanchored(estimate, map_snapshot), feed.export_offset_ns)
+    final, map_result = final_trajectory(lockstep.vio, estimate, run_gba=run_gba)
     # Both an uncovered input and a consumed pre-initialization input lack a pose.
     return SegmentRun(
         estimate=shift_clock(estimate, feed.export_offset_ns),
-        final=final,
+        final=None if map_result is None else shift_clock(final, feed.export_offset_ns),
         framesets=replayed,
         lost=replayed - len(t_ns),
         wall_s=wall_s,

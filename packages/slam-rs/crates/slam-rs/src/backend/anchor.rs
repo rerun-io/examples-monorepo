@@ -125,21 +125,42 @@ impl super::MapSnapshot {
     ///
     /// As [`reanchor`].
     pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
-        let frames: Vec<(i64, Se3<f64>)> = frames
-            .iter()
-            .map(|&(t_ns, pose)| (t_ns, pose_from_array(&pose)))
-            .collect();
-        let keyframes: Vec<(i64, Se3<f64>)> = self
-            .keyframe_t_ns
-            .iter()
-            .copied()
-            .zip(self.keyframe_poses.iter().copied())
-            .collect();
-        Ok(reanchor(&frames, &keyframes)?
-            .iter()
-            .map(pose_to_array)
-            .collect())
+        reanchor_arrays(frames, &self.keyframe_t_ns, &self.keyframe_poses)
     }
+}
+
+impl super::MapResult {
+    /// The final trajectory (DESIGN §1, §2): [`reanchor`] on the keyframes
+    /// [`crate::Vio::finish_map`] left, the global BA's when it ran. Frames as
+    /// [`super::MapSnapshot::reanchor`] takes them.
+    ///
+    /// # Errors
+    ///
+    /// As [`reanchor`].
+    pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
+        reanchor_arrays(frames, &self.keyframe_t_ns, &self.keyframe_poses)
+    }
+}
+
+/// [`reanchor`] for `[tx, ty, tz, qx, qy, qz, qw]` frames on these keyframes.
+fn reanchor_arrays(
+    frames: &[(i64, [f64; 7])],
+    keyframe_t_ns: &[FrameId],
+    keyframe_poses: &[Se3<f64>],
+) -> Result<Vec<[f64; 7]>, AnchorError> {
+    let frames: Vec<(i64, Se3<f64>)> = frames
+        .iter()
+        .map(|&(t_ns, pose)| (t_ns, pose_from_array(&pose)))
+        .collect();
+    let keyframes: Vec<(i64, Se3<f64>)> = keyframe_t_ns
+        .iter()
+        .copied()
+        .zip(keyframe_poses.iter().copied())
+        .collect();
+    Ok(reanchor(&frames, &keyframes)?
+        .iter()
+        .map(pose_to_array)
+        .collect())
 }
 
 /// `[tx, ty, tz, qx, qy, qz, qw]` as a transform; a zero quaternion (never

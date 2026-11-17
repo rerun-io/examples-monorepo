@@ -106,6 +106,10 @@ enum Command {
         /// Where the global BA's PCG runs (benches and tests; the default follows the frontend).
         #[arg(long, value_enum, default_value = "follow")]
         ba_backend: GbaArg,
+        /// Skip the global BA at the end: `--out` then holds the raw VIO re-anchored on the map after loops and PGO
+        /// only. By default the GBA runs on that map and `--out` is re-anchored on its keyframes.
+        #[arg(long)]
+        no_gba: bool,
         /// Frontend worker threads (any count gives the same trajectory, D31).
         #[arg(long, default_value_t = 1)]
         threads: usize,
@@ -128,7 +132,7 @@ pub(crate) struct ReplayOutputs {
     #[arg(long)]
     pub(crate) out: PathBuf,
     /// Raw VIO trajectory CSV, same format as `--out`. `--out` holds the final trajectory: the raw VIO re-anchored on
-    /// the map's keyframes, or the raw VIO itself with the back end off.
+    /// the map's keyframes after loops, PGO and the global BA, or the raw VIO itself with the back end off.
     #[arg(long)]
     pub(crate) out_vio: Option<PathBuf>,
     /// Summary JSON: wall time, per-frameset track times, frontend stage means.
@@ -149,6 +153,7 @@ fn main() -> ExitCode {
             config,
             backend,
             ba_backend,
+            no_gba,
             threads,
             max_framesets,
             frames,
@@ -176,6 +181,7 @@ fn main() -> ExitCode {
                     input,
                     &config,
                     (backend.into(), ba_backend.into()),
+                    !no_gba,
                     threads,
                     started.elapsed().as_secs_f64(),
                     &outputs,
@@ -243,6 +249,29 @@ mod tests {
             .chain(["--out-vio", "slam_rs_vio.csv"])
             .collect();
         assert_eq!(out_vio(&with_vio), Some(PathBuf::from("slam_rs_vio.csv")));
+    }
+
+    #[test]
+    fn replay_runs_the_global_ba_unless_told_not_to() {
+        let base = [
+            "slam-rs",
+            "replay",
+            "--clip",
+            "fixture",
+            "--config",
+            "config.json",
+            "--out",
+            "slam_rs.csv",
+            "--summary",
+            "summary.json",
+        ];
+        let no_gba = |args: &[&str]| match Cli::try_parse_from(args).map(|cli| cli.command) {
+            Ok(Command::Replay { no_gba, .. }) => no_gba,
+            other => panic!("{other:?}"),
+        };
+        assert!(!no_gba(&base));
+        let skipped: Vec<&str> = base.iter().copied().chain(["--no-gba"]).collect();
+        assert!(no_gba(&skipped));
     }
 
     #[test]

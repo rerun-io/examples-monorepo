@@ -156,3 +156,82 @@ fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
         result.keyframe_poses
     );
 }
+
+/// The final trajectory (DESIGN §1, §2; PR k0): the global BA on the map after
+/// loops and PGO, then the raw VIO re-anchored on the GBA's keyframes. Without
+/// the GBA it is f1's +LC final exactly, and the raw VIO never moves.
+#[test]
+fn the_final_trajectory_is_the_raw_vio_reanchored_on_the_gba_keyframes() {
+    let frames = frames();
+    let mut off = pipeline_with_map(None);
+    let mut on = pipeline_with_map(Some(BackendMode::Offline));
+    let without = run(&frames, &mut off);
+    let with = run(&frames, &mut on);
+    assert_eq!(with.results, without.results, "the raw VIO moved");
+    let raw: Vec<(i64, [f64; 7])> = with
+        .results
+        .iter()
+        .filter_map(|result| Some((result.t_ns, result.pose?.world_from_rig)))
+        .collect();
+    assert!(raw.len() > 10);
+
+    let lc_final = on.map_snapshot().unwrap().reanchor(&raw).unwrap();
+    let plain = on.finish_map(false).unwrap().unwrap();
+    assert_eq!(
+        plain.reanchor(&raw).unwrap(),
+        lc_final,
+        "run_gba=false is not f1's +LC final"
+    );
+
+    let result = on.finish_map(true).unwrap().unwrap();
+    assert!(result.gba.is_some());
+    let keyframes: Vec<(i64, api::lie::Se3<f64>)> = result
+        .keyframe_t_ns
+        .iter()
+        .copied()
+        .zip(result.keyframe_poses.iter().copied())
+        .collect();
+    let expected = api::backend::reanchor(
+        &raw.iter()
+            .map(|&(t_ns, pose)| (t_ns, se3(&pose)))
+            .collect::<Vec<_>>(),
+        &keyframes,
+    )
+    .unwrap();
+    let gba_final = result.reanchor(&raw).unwrap();
+    assert_eq!(gba_final.len(), raw.len());
+    for (ours, theirs) in gba_final.iter().zip(&expected) {
+        assert_eq!(*ours, pose_array(theirs));
+    }
+    assert_ne!(gba_final, lc_final, "the GBA moved no frame");
+    // Each keyframe lands on its GBA pose.
+    for (t_ns, pose) in &keyframes {
+        let row = raw.binary_search_by_key(t_ns, |&(t, _)| t).unwrap();
+        assert_eq!(gba_final[row], pose_array(pose));
+    }
+    assert_eq!(
+        on.map_snapshot().unwrap().reanchor(&raw).unwrap(),
+        gba_final,
+        "the map after finish_map gives the same final"
+    );
+}
+
+fn se3(pose: &[f64; 7]) -> api::lie::Se3<f64> {
+    api::lie::Se3::new(
+        api::lie::So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6]).unwrap(),
+        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
+    )
+}
+
+fn pose_array(pose: &api::lie::Se3<f64>) -> [f64; 7] {
+    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
+    [
+        pose.translation.x,
+        pose.translation.y,
+        pose.translation.z,
+        x,
+        y,
+        z,
+        w,
+    ]
+}

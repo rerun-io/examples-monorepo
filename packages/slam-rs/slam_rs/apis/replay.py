@@ -25,7 +25,7 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.tracking import Lockstep, reanchored
+from slam_rs.tracking import Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_scoring_csvs, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
@@ -84,8 +84,9 @@ class Config:
     same in all three.
     """
     gba: bool = True
-    """With the map on: run the global BA on the map at the end (``Vio.finish_map``), draw its keyframes under
-    ``/world/runs/slam_rs/gba`` and write them to ``<output-csv stem>_gba_keyframes.csv``. The raw VIO is unchanged."""
+    """With the map on: run the global BA on the map after loops and PGO (``Vio.finish_map``) and re-anchor the final
+    trajectory on its keyframes; draw them under ``/world/runs/slam_rs/gba`` and write them to ``<output-csv
+    stem>_gba_keyframes.csv``. ``--no-gba`` re-anchors on the map as loops and PGO left it. The raw VIO is unchanged."""
     ba_backend: GbaRequest = "follow"
     """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
     ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
@@ -245,12 +246,12 @@ def main(config: Config) -> None:
         stage.refuse_lost_framesets()
 
         estimate: Trajectory = stage.logger.estimated()
-        # The final run: the raw VIO re-anchored on the flushed map's keyframes (the raw VIO itself with the back end off).
-        final: Trajectory = reanchored(estimate, stage.lockstep.vio.map_snapshot())
+        # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
+        # VIO itself with the back end off).
+        final, map_result = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
         stage.logger.log_final_path(final)
         vio_csv: Path = write_scoring_csvs(output_csv, final=final, raw=estimate, offset_ns=feed.export_offset_ns)
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
-        map_result: _core.MapResult | None = stage.lockstep.vio.finish_map(run_gba=config.gba)
         if map_result is not None and map_result.gba is not None:
             # At the cursor the flush left on the last frameset, beside the final map.
             log_map_result(map_result)

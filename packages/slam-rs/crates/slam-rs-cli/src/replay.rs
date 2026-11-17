@@ -29,6 +29,7 @@ pub(super) fn replay(
     input: ReplayInput,
     config_path: &Path,
     (request, gba_request): (BackendRequest, GbaRequest),
+    run_gba: bool,
     threads: usize,
     load_s: f64,
     outputs: &ReplayOutputs,
@@ -149,14 +150,22 @@ pub(super) fn replay(
     }
     let flush_ms = flush_started.elapsed().as_secs_f64() * 1e3;
     let wall_s: f64 = started.elapsed().as_secs_f64();
-    // The final trajectory: the raw VIO re-anchored on the flushed map's
-    // keyframes; the raw VIO itself with the back end off.
-    let final_poses: Vec<[f64; 7]> = match vio.map_snapshot() {
+    // The final trajectory (DESIGN §1, §2): the global BA on the map after
+    // loops and PGO, then the raw VIO re-anchored on its keyframes; without the
+    // GBA, on the map as loops and PGO left it; the raw VIO itself with the
+    // back end off.
+    let finish_started = Instant::now();
+    let map = vio
+        .finish_map(run_gba)
+        .map_err(|error| format!("finish_map: {error}"))?;
+    let finish_map_s: f64 = finish_started.elapsed().as_secs_f64();
+    let final_poses: Vec<[f64; 7]> = match &map {
         Some(map) => map
             .reanchor(&raw)
             .map_err(|error| format!("re-anchoring: {error}"))?,
         None => raw.iter().map(|&(_, pose)| pose).collect(),
     };
+    let gba = map.as_ref().and_then(|map| map.gba.as_ref());
     let final_rows = raw.iter().map(|&(t_ns, _)| t_ns).zip(final_poses);
     std::fs::write(&outputs.out, trajectory_csv(final_rows)?)
         .map_err(|error| format!("{}: {error}", outputs.out.display()))?;
@@ -187,6 +196,10 @@ pub(super) fn replay(
         "gpu_path_frames": {"lookahead": counters.gpu_lookahead_frames, "one_wait": counters.gpu_one_wait_frames},
         "overlap_ms_mean": {"estimator": per_frame(counters.overlap_estimator_ns), "wait": per_frame(counters.overlap_wait_ns)},
         "flush_ms": flush_ms,
+        "finish_map_s": finish_map_s,
+        "gba": gba.map(|gba| serde_json::json!({"lane": gba.lane.name(), "keyframes": gba.counts.keyframes,
+                                                 "attempts": gba.report.iterations.len(), "build_s": gba.build_s,
+                                                 "solve_s": gba.solve_s, "apply_s": gba.apply_s})),
         "track_ms_per_frame": track_ms,
     });
     std::fs::write(
