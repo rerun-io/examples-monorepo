@@ -244,6 +244,42 @@ fn both_lanes_hand_the_lens_images_to_the_storage_and_see_the_kornia_staging_rem
 }
 
 #[test]
+fn the_standalone_stitch_gives_the_lanes_panorama() {
+    let (mut rig, _) = rig(true);
+    let lenses_px: [Vec<u8>; 2] = [textured_lens(3), textured_lens(4)];
+    let views: Vec<ImageView<'_>> = lenses_px
+        .iter()
+        .map(|data| ImageView {
+            width: 1920,
+            height: 1920,
+            stride: 1920,
+            data,
+        })
+        .collect();
+    let mut storage = FrameStorage::new(false);
+    rig.ingest(&views, &mut storage).unwrap();
+    let lane = rig.panorama_image(&storage).unwrap().unwrap();
+    let lens = ImageSize {
+        width: 1920,
+        height: 1920,
+    };
+    // The panorama is the tile centres, so any margin gives the same pixels.
+    for margin in [64, 0] {
+        let stitch = lenses().stitch(lens, margin).unwrap();
+        let standalone = stitch.panorama(&views).unwrap();
+        assert_eq!((standalone.width(), standalone.height()), (1920, 960));
+        assert_eq!(standalone.as_slice(), lane.as_slice(), "margin {margin}");
+    }
+    assert!(
+        lenses()
+            .stitch(lens, 64)
+            .unwrap()
+            .panorama(&views[..1])
+            .is_err()
+    );
+}
+
+#[test]
 fn masks_are_whole_cells_over_margins_poles_and_every_invalid_pixel() {
     let (rig, tiles) = rig(true);
     let BasaltCamera::Equirectangular(p) = tiles.intrinsics[0] else {

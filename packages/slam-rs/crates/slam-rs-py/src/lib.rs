@@ -7,6 +7,7 @@
 
 mod catalog;
 mod insv;
+mod panorama;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
@@ -165,16 +166,8 @@ impl Vio {
                 let size: [u32; 2] = *calibration.inner.resolution.first().ok_or_else(|| {
                     PyValueError::new_err("a dual-fisheye rig needs its lens cameras")
                 })?;
-                let crop = crop
-                    .map(|[sw, sh, dw, dh, ox, oy]| {
-                        Ok::<_, PyErr>(kornia_staging_io::insta360::WindowCrop {
-                            src: [u32_arg(sw)?, u32_arg(sh)?],
-                            dst: [u32_arg(dw)?, u32_arg(dh)?],
-                            offset: [ox, oy],
-                        })
-                    })
-                    .transpose()?;
-                slam_rs::DualFisheyeLenses::parse(&text, crop, size, readout_s).map_err(value_error)
+                slam_rs::DualFisheyeLenses::parse(&text, window_crop(crop)?, size, readout_s)
+                    .map_err(value_error)
             })
             .transpose()?;
         Ok(Self {
@@ -894,6 +887,20 @@ fn u32_arg(value: i64) -> PyResult<u32> {
     u32::try_from(value).map_err(|_| PyValueError::new_err(format!("{value} is not a size")))
 }
 
+/// A factory window crop `(src_w, src_h, dst_w, dst_h, offset_x, offset_y)` from Python.
+fn window_crop(
+    crop: Option<[i64; 6]>,
+) -> PyResult<Option<kornia_staging_io::insta360::WindowCrop>> {
+    crop.map(|[sw, sh, dw, dh, ox, oy]| {
+        Ok(kornia_staging_io::insta360::WindowCrop {
+            src: [u32_arg(sw)?, u32_arg(sh)?],
+            dst: [u32_arg(dw)?, u32_arg(dh)?],
+            offset: [ox, oy],
+        })
+    })
+    .transpose()
+}
+
 /// VIO configuration read from JSON. Omitted keys retain constructor defaults.
 #[pyclass(module = "slam_rs._core", skip_from_py_object)]
 #[derive(Debug, Clone)]
@@ -1540,6 +1547,7 @@ fn device_probes_run() -> usize {
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     catalog::register(module)?;
     insv::register(module)?;
+    panorama::register(module)?;
     module.add("__version__", slam_rs::VERSION)?;
     // Report the wgpu runtime, or None for a CPU-only build.
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;

@@ -78,6 +78,27 @@ impl DualFisheyeLenses {
             Vector3::from(lens.pano_centre_m),
         )
     }
+
+    /// The tables that stitch `lens` images into the two 960-row hemisphere tiles
+    /// with `margin_px` overlap columns: the one stitch the lane and the viewing
+    /// panorama ([`LensStitch::panorama`]) share. Tile `k` reads lens `k`.
+    ///
+    /// # Errors
+    ///
+    /// [`VioError`] for a lens image below 4x4.
+    pub fn stitch(&self, lens: ImageSize, margin_px: usize) -> Result<LensStitch, VioError> {
+        let geometry: TileGeometry = TileGeometry {
+            hemisphere_width: 960,
+            height: 960,
+            margin: margin_px,
+        };
+        let luts: [TileLut; 2] = std::array::from_fn(|k| {
+            build_tile_lut(geometry, k, lens, |ray| {
+                self.lenses[k].project_from_panorama(ray)
+            })
+        });
+        Ok(LensStitch::new(luts, lens)?)
+    }
 }
 
 fn rotation(rows: &[[f64; 3]; 3]) -> So3<f64> {
@@ -131,11 +152,15 @@ pub(super) fn expand(
             check.translation.norm()
         )));
     }
-    let geometry: TileGeometry = TileGeometry {
-        hemisphere_width: 960,
-        height: 960,
-        margin: config.panorama_tile_margin_px as usize,
+    let lens_size: ImageSize = ImageSize {
+        width: lens_w as usize,
+        height: lens_h as usize,
     };
+    // Built once per rig: the GPU lane uploads these tables once and the lookahead
+    // recognises the stitch by identity (F5).
+    let stitch: Arc<LensStitch> =
+        Arc::new(lenses.stitch(lens_size, config.panorama_tile_margin_px as usize)?);
+    let geometry: TileGeometry = stitch.luts()[0].geometry;
     let focal: f64 = geometry.focal();
     let [cx, cy] = geometry.principal();
     let tile: EquirectangularParams<f64> = EquirectangularParams {
@@ -156,21 +181,9 @@ pub(super) fn expand(
             imu_from_pano * Se3::new(turn, origin)
         })
         .collect();
-    let lens_size: ImageSize = ImageSize {
-        width: lens_w as usize,
-        height: lens_h as usize,
-    };
-    let luts: [TileLut; 2] = std::array::from_fn(|k| {
-        build_tile_lut(geometry, k, lens_size, |ray| {
-            lenses.lenses[k].project_from_panorama(ray)
-        })
-    });
     let model: Equirectangular<f64> =
         Equirectangular::new([tile.fx, tile.fy, tile.cx, tile.cy, tile.lon_max])
             .map_err(|error| VioError::Panorama(format!("tile camera: {error:?}")))?;
-    // Built once per rig: the GPU lane uploads these tables once and the lookahead
-    // recognises the stitch by identity (F5).
-    let stitch: Arc<LensStitch> = Arc::new(LensStitch::new(luts, lens_size)?);
     let ingest: DualFisheyeIngest = DualFisheyeIngest {
         tile_from_imu: [t_i_c[0].rotation.inverse(), t_i_c[1].rotation.inverse()],
         stitch,
