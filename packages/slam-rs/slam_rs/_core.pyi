@@ -675,6 +675,12 @@ class Vio:
 
     @property
     def camera_count(self) -> int: ...
+    def bearings(self, camera: int, pixels: Float32[ndarray, "n 2"]) -> Float64[ndarray, "n 3"]:
+        """Unit bearings of camera ``camera``'s pixels in camera 0's frame (rotation only); NaN where a pixel does not unproject."""
+    @property
+    def rolling_shutter_frames(self) -> tuple[int, int] | None:
+        """``(corrected, no_coverage)``: frames the rolling-shutter correction moved, and frames left raw because the gyro
+        did not cover their time; None when no camera states a readout."""
     @property
     def gpu(self) -> bool:
         """Whether the frontend runs on the GPU."""

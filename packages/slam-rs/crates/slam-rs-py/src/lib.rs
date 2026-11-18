@@ -13,8 +13,8 @@ mod map;
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
 use numpy::{
-    PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods,
-    ToPyArray,
+    IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray2,
+    PyUntypedArrayMethods, ToPyArray,
 };
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
@@ -173,6 +173,14 @@ impl Vio {
         })
     }
 
+    /// `(corrected, no_coverage)`: frames whose keypoints the rolling-shutter
+    /// correction moved, and frames left raw because the gyro did not cover their
+    /// time; `None` when no camera states a readout.
+    #[getter]
+    fn rolling_shutter_frames(&self) -> Option<(usize, usize)> {
+        self.inner.rolling_shutter().map(slam_rs::RollingShutter::counts)
+    }
+
     /// Whether the frontend runs on the GPU.
     #[getter]
     fn gpu(&self) -> bool {
@@ -198,6 +206,50 @@ impl Vio {
     #[getter]
     fn camera_count(&self) -> usize {
         self.inner.frontend().camera_count()
+    }
+
+    /// Unit bearings of camera `camera`'s pixels (`float32[n, 2]`, as
+    /// `FlowFrame.positions` gives them) in camera 0's frame (rotation only):
+    /// `float64[n, 3]`, NaN where the pixel does not unproject.
+    fn bearings<'py>(
+        &self,
+        py: Python<'py>,
+        camera: usize,
+        pixels: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let array: &Bound<'_, PyArray2<f32>> = pixels
+            .cast::<PyArray2<f32>>()
+            .map_err(|_| PyValueError::new_err("pixels must be a 2-D float32 numpy array"))?;
+        if array.shape()[1] != 2 {
+            return Err(PyValueError::new_err(format!(
+                "pixels must have shape (n, 2), got {:?}",
+                array.shape()
+            )));
+        }
+        let readonly = array.readonly();
+        let values: &[f32] = contiguous(&readonly, "pixels", "pixels")?;
+        let calibration: CoreCalibration<f64> = self.inner.calibration().cast();
+        if camera >= calibration.intrinsics.len() {
+            return Err(PyIndexError::new_err(format!(
+                "camera {camera} out of range for {} cameras",
+                calibration.intrinsics.len()
+            )));
+        }
+        let model = slam_rs::camera::SlamCamera::from_model(&calibration.intrinsics[camera])
+            .map_err(value_error)?;
+        let to_first = calibration.t_i_c[0].rotation.inverse() * calibration.t_i_c[camera].rotation;
+        let bearings: Vec<f64> = values
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[x, y]| {
+                let mut point = Default::default();
+                model.unproject(&[f64::from(x), f64::from(y)].into(), &mut point);
+                let bearing = to_first * point.xyz();
+                [bearing.x, bearing.y, bearing.z]
+            })
+            .collect();
+        bearings.into_pyarray(py).reshape((values.len() / 2, 3))
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig

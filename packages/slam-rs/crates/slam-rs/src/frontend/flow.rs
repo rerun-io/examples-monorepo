@@ -49,9 +49,7 @@ use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 use kornia_staging_slam::tracking::optical_flow::{CpuPatchTracker, PatchTracker, TrackInput};
 
 /// Pixels of one camera where a tracked keypoint is dropped: the rounded
-/// keypoint position indexes `killed`, row-major `width x height`. The
-/// panorama lane marks the rows above its latitude limit and, for stitched
-/// tiles, the pixels whose patch would read outside the lens.
+/// keypoint position indexes `killed`, row-major `width x height`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackKillMask {
     /// Image width in pixels.
