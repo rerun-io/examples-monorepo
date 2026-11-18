@@ -7,8 +7,9 @@ A positive slot's circle is mapped back to stored pixels and logged as the squar
 no box outlives its frame. The blueprint shows each camera's ``VideoStream`` with every model's boxes as their own entity.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -27,6 +28,11 @@ from handtrack.train.checkpoint import load_weights
 COLOURS: tuple[tuple[int, int, int], ...] = ((255, 80, 80), (80, 160, 255), (255, 200, 0), (200, 120, 255), (0, 220, 220))
 """Box colour by the model's position in ``names`` (red, blue, yellow, ...)."""
 SIDES: str = "LR"
+InputConvention: TypeAlias = Literal["legacy", "upright", "cap"]
+"""How a model sees the frames: ``legacy`` letterbox (frames as stored), ``upright`` (``catalog.UPRIGHT_TURNS``), or ``cap``
+(``CAP_TURNS``, what robocap-live's ``mix1-upright`` feeds the detector on the cap)."""
+CAP_TURNS: tuple[int, ...] = (0, 0, 2, 2, 0, 0)
+"""robocap-live's mix1-upright input: RoboCap cameras 2-3 turned 180 degrees (their stored frames are already upright)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,8 +45,8 @@ class DetNetCompareConfig:
     """One label per model; it names the entity (``detnet/<name>``) and fixes the colour by position."""
     weights: tuple[Path, ...]
     """Model-only state_dicts (``*.weights.pt`` with ``.sha256`` sidecars), one per name."""
-    upright: tuple[bool, ...]
-    """Per model: True feeds upright frames (``catalog.UPRIGHT_TURNS``), False the legacy letterbox (frames as stored)."""
+    inputs: tuple[InputConvention, ...]
+    """Per model, the input convention it is scored in (each model in the one it was trained or deployed with)."""
     out_dir: Path
     """Receives ``<segment>__<names>.rrd``; a new model set writes a new file (a registered file is never overwritten)."""
     dataset: str = "robocap-hands"
@@ -55,8 +61,8 @@ class DetNetCompareConfig:
     """Frames decoded per NVDEC call (64 x 1080p RGB = 400 MB before the luma reduces it)."""
 
     def __post_init__(self) -> None:
-        if not self.names or not (len(self.names) == len(self.weights) == len(self.upright)) or len(set(self.names)) != len(self.names):
-            raise ValueError("need one unique name, weights file and upright flag per model")
+        if not self.names or not (len(self.names) == len(self.weights) == len(self.inputs)) or len(set(self.names)) != len(self.names):
+            raise ValueError("need one unique name, weights file and input convention per model")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +124,8 @@ def write_segment(config: DetNetCompareConfig, dataset, segment: str, models: li
     from simplecv.rerun_dataloader import open_segment_decoder
 
     device: torch.device = torch.device(config.device)
-    specs: list[SourceSpec] = [source_spec(config.dataset, 0, upright) for upright in config.upright]
+    specs: list[SourceSpec] = [source_spec(config.dataset, 0, convention != "legacy") for convention in config.inputs]
+    specs = [replace(spec, quarter_turns=CAP_TURNS) if convention == "cap" else spec for spec, convention in zip(specs, config.inputs, strict=True)]
     partial: Path = path.with_suffix(".partial.rrd")
     rec = rr.RecordingStream(config.dataset, recording_id=segment)
     rec.save(partial)

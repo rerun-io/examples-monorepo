@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, get_args
 
+import pyarrow as pa
 import torch
 from serde import serde
 from serde.json import from_json, to_json
@@ -253,7 +254,12 @@ def training_segments(name: str, holdout: DetectorHoldout, catalog_url: str) -> 
     held: set[str] = set(holdout.segments.get(name, []))
     if not held:
         raise ValueError(f"{name} has no held-out episodes in the holdout file; freeze them before training")
-    return sorted(set(dataset.segment_ids()) - held)
+    segments: set[str] = set(dataset.segment_ids())
+    if DATASET_SPECS[name][2] == "teacher":  # pseudo-labels arrive per segment: train only on segments that have them
+        table: pa.Table = dataset.segment_table().to_arrow_table()
+        layers: dict[str, list[str] | None] = dict(zip(table["rerun_segment_id"].to_pylist(), table["rerun_layer_names"].to_pylist(), strict=True))
+        segments = {segment for segment in segments if "hand_teacher" in (layers.get(segment) or [])}
+    return sorted(segments - held)
 
 
 def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device, nets: Nets = "detnet") -> EchoStream:

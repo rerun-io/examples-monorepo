@@ -38,4 +38,4 @@ def test_config_needs_one_convention_per_model() -> None:
     from handtrack.apis.detnet_compare import DetNetCompareConfig
 
     with pytest.raises(ValueError):
-        DetNetCompareConfig(segments=("s",), names=("a", "b"), weights=(Path("a"), Path("b")), upright=(True,), out_dir=Path("/tmp"))
+        DetNetCompareConfig(segments=("s",), names=("a", "b"), weights=(Path("a"), Path("b")), inputs=("upright",), out_dir=Path("/tmp"))
