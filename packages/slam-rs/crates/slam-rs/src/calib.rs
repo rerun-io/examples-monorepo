@@ -250,6 +250,21 @@ pub enum BasaltCamera<S> {
 }
 
 impl<S: Copy> BasaltCamera<S> {
+    /// `fx fy cx cy`, the pixel terms every model leads with.
+    fn pixel_terms_mut(&mut self) -> [&mut S; 4] {
+        match self {
+            Self::Pinhole(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::Kb4(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::PinholeRadtan8(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::DoubleSphere(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::ExtendedUnified(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::Unified(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::Equirectangular(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::MeiV3(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+            Self::MeiV6(p) => [&mut p.fx, &mut p.fy, &mut p.cx, &mut p.cy],
+        }
+    }
+
     /// The model name stored in `camera_type`.
     pub fn name(&self) -> &'static str {
         match self {
@@ -582,6 +597,24 @@ pub struct Calibration<S: Scalar> {
     pub readout_s: Vec<Option<f64>>,
     /// Keys the struct does not model, such as EuRoC's mocap block.
     pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl Calibration<f64> {
+    /// The same rig on images reduced by two, the CPU and device pyramids' reduction, which puts full pixel `2u`
+    /// on pixel `u`: every camera's `fx fy cx cy` halved and its resolution floor-halved. Every other term is
+    /// unitless, an angle or in seconds, and stays.
+    #[must_use]
+    pub fn half_resolution(mut self) -> Self {
+        for camera in &mut self.intrinsics {
+            for term in camera.pixel_terms_mut() {
+                *term *= 0.5;
+            }
+        }
+        for resolution in &mut self.resolution {
+            *resolution = resolution.map(|pixels| pixels / 2);
+        }
+        self
+    }
 }
 
 /// Gravity magnitude, m/s², of a calibration that states none.
@@ -1070,6 +1103,24 @@ mod tests {
     const MSDMG: &str = include_str!("../tests/fixtures/msdmg_calib.json");
     const EUROC: &str = include_str!("../tests/fixtures/euroc_ds_calib.json");
     const ROBOCAP: &str = include_str!("../tests/fixtures/robocap_calib.json");
+
+    #[test]
+    fn half_resolution_halves_the_pixel_terms_and_nothing_else() {
+        let full = Calibration::<f64>::from_json_str(ROBOCAP).unwrap();
+        let half = full.clone().half_resolution();
+        for (a, b) in full.intrinsics.iter().zip(&half.intrinsics) {
+            let (a, b) = (a.params(), b.params());
+            for term in 0..4 {
+                assert_eq!(b[term], 0.5 * a[term]);
+            }
+            assert_eq!(a[4..], b[4..]);
+        }
+        for (a, b) in full.resolution.iter().zip(&half.resolution) {
+            assert_eq!(*b, [a[0] / 2, a[1] / 2]);
+        }
+        assert_eq!(full.t_i_c, half.t_i_c);
+        assert_eq!(full.readout_s, half.readout_s);
+    }
 
     fn every_fixture() -> [(&'static str, &'static str); 4] {
         [

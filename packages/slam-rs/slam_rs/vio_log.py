@@ -524,6 +524,12 @@ class VioStage:
     keypoints: list[int] = field(default_factory=list)
     """Keypoints the frontend holds after each frameset, summed over cameras."""
 
+    def __post_init__(self) -> None:
+        """Draw the keypoints in each camera's own pixels: a rig wider than 2048 px is tracked on frames reduced by two."""
+        for camera, (width, _) in zip(self.logger.cameras, self.lockstep.vio.tracked_resolution, strict=True):
+            if width != camera.width:
+                rr.log(f"{camera_entity(camera.index)}/keypoints", rr.Transform3D(scale=2.0), static=True)
+
     @property
     def elapsed_ms(self) -> list[float]:
         """Wall time each ``track`` call that tracked took, in frameset order."""

@@ -678,6 +678,10 @@ class Vio:
     def bearings(self, camera: int, pixels: Float32[ndarray, "n 2"]) -> Float64[ndarray, "n 3"]:
         """Unit bearings of camera ``camera``'s pixels in camera 0's frame (rotation only); NaN where a pixel does not unproject."""
     @property
+    def tracked_resolution(self) -> list[tuple[int, int]]:
+        """``(width, height)`` of the frames each camera is tracked on: the calibration's, or half of it when every camera
+        is wider than 2048 px (keypoints are then in the reduced pixels)."""
+    @property
     def rolling_shutter_frames(self) -> tuple[int, int] | None:
         """``(corrected, no_coverage)``: frames the rolling-shutter correction moved, and frames left raw because the gyro
         did not cover their time; None when no camera states a readout."""

@@ -181,6 +181,18 @@ impl Vio {
         self.inner.rolling_shutter().map(slam_rs::RollingShutter::counts)
     }
 
+    /// `(width, height)` of the frames each camera is tracked on: the calibration's, or half of it when every
+    /// camera is wider than 2048 px (keypoints are then in the reduced pixels).
+    #[getter]
+    fn tracked_resolution(&self) -> Vec<(u32, u32)> {
+        self.inner
+            .calibration()
+            .resolution
+            .iter()
+            .map(|&[width, height]| (width, height))
+            .collect()
+    }
+
     /// Whether the frontend runs on the GPU.
     #[getter]
     fn gpu(&self) -> bool {

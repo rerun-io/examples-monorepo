@@ -44,6 +44,9 @@ pub enum IngestError {
         /// Elements actually supplied.
         len: usize,
     },
+    /// The half-resolution reduction could not be planned or run.
+    #[error(transparent)]
+    Reduce(#[from] kornia_staging_imgproc::pyramid::PyramidPlanError),
 }
 
 /// Allocate a dense zero-filled frame after checking its allocation bounds.
@@ -128,6 +131,25 @@ pub(crate) fn fill_from_u8_strided_unchecked(
     }
     widen_u8_shift8_strided_unchecked(bytes, stride, image);
     Ok(())
+}
+
+/// Fill `image` with a validated u8 view reduced by two: level 1 of its CPU pyramid, so full pixel `2u` lands on
+/// pixel `u`, the same pixels the device's half ingest gives level 0.
+///
+/// # Errors
+/// Returns an allocation-layout or reduction error.
+pub fn fill_half_from_u8_strided_unchecked(
+    image: &mut Image<u16, 1>,
+    bytes: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+) -> Result<(), IngestError> {
+    let mut full = empty();
+    fill_from_u8_strided_unchecked(&mut full, bytes, width, height, stride)?;
+    let mut plan = kornia_staging_imgproc::pyramid::PyramidPlanU16::new(full.size(), 2)?;
+    plan.run(&full)?;
+    copy_image(&plan.levels()[1], image)
 }
 
 /// Copy a dense image, reusing storage when its geometry matches.

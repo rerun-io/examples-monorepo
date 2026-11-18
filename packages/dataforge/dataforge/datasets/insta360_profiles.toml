@@ -1,17 +1,17 @@
 # Insta360 device profiles: the calibration a clip does not carry, measured per body and video mode.
 #
 # Read by dataforge.datasets.insta360 (DeviceProfiles, load_profiles). A clip takes the profile whose camera type,
-# lens size, frame rate and rolling-shutter readout match its own; a clip outside every profile's measured mode is
-# refused with the property that differs. Bump `version` whenever a measured number changes: converted recordings
+# lens type, frame rate and rolling-shutter readout match its own (not its lens size: the reader states the factory
+# lenses at the track resolution, so one profile serves every resolution of a body); a clip outside every profile's
+# measured mode is refused with the property that differs. Bump `version` whenever a measured number changes: converted recordings
 # name the profile and its version.
 
 [[profile]]
-name = "x4-air-1920"
+name = "x4-air"
 version = 1
 provenance = "gyro-visual epipolar fit on the clip VID_20261116_125200_00_003 (2026-11-16, no board)"
 camera_type = "Insta360 X4 Air"
-lens_width = 1920
-lens_height = 1920
+lens_type = 131
 # Measured from the exposure-record stamps: 29.9697 Hz on the clip.
 frame_rate_hz = 29.97
 frame_rate_tolerance_hz = 0.05
@@ -34,6 +34,46 @@ frame_time_shutter_slope = -0.44
 frame_time_constant_s = -0.0001
 
 # Placeholder until the unit's IMU is measured; the slam-rs feed refuses an IMU without all five numbers.
+[profile.imu_noise]
+gyro_noise_density = 0.0028
+accel_noise_density = 0.016
+gyro_bias_random_walk = 0.0001
+accel_bias_random_walk = 0.001
+rate_hz = 1000.0
+source = "placeholder: consumer MEMS (TDK ICM-40609 class, values not measured on this unit)"
+
+[[profile]]
+name = "x5"
+version = 2
+provenance = "insv_calibrate on the clip VID_20261113_145021_00_003 (2026-11-17, no board), over a first conversion with R_P_imu of the X4 Air and frame times at the record-4 stamps"
+camera_type = "Insta360 X5"
+lens_type = 113
+# Measured from the exposure-record stamps: 29.9688 Hz on the clip.
+frame_rate_hz = 29.97
+frame_rate_tolerance_hz = 0.05
+# Metadata rolling_shutter 21.244 ms; insv_calibrate's bootstrap residual is lowest with it in all five windows (against
+# none and the sign flipped).
+readout_s = 0.021244
+readout_tolerance_s = 0.00001
+# R_P_imu: insv_calibrate's joint fit of spans 10-30 s and 45-65 s (spans agree within 0.49 deg), which it states in
+# camera 0's axes, turned into the vendor frame P by the factory R_P_lens0: R_P_imu = R_P_lens0 R_cam0_imu. It lies
+# 0.067 deg from the first conversion's value and 0.09 deg from the permutation x_P = -z_imu, y_P = +x_imu,
+# z_P = -y_imu. The conversion is checked on two clips: on A, insv_calibrate's 'current' rotation equals
+# R_lens0_P R_P_imu(x4-air) within 0.0001 deg, so its output is in camera 0's axes; on B, R_P_lens0 times the base
+# recording's R_cam0_imu gives the x4-air value within 0.006 deg, and B's camera-0 span fits (0.16, 0.21 deg from
+# R_cam0_imu) convert to within 0.21 deg of it. The converter orthonormalises it.
+pano_from_imu_measured = [
+    [0.00008, 0.00127, -1.00000],
+    [1.00000, -0.00083, 0.00008],
+    [-0.00083, -1.00000, -0.00127],
+]
+# Not measured, as on the X4 Air.
+lever_arm_m = [0.0, 0.0, 0.0]
+# The clip holds one shutter (2 ms on every frame), so no shutter slope can be fitted: slope 0, and the constant is
+# insv_calibrate's extra frame time offset on the record-4 stamps (bootstrap scan -0.66 ms, rate fit +0.34 ms).
+frame_time_shutter_slope = 0.0
+frame_time_constant_s = -0.0007
+
 [profile.imu_noise]
 gyro_noise_density = 0.0028
 accel_noise_density = 0.016

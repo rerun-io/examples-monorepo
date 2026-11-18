@@ -25,6 +25,13 @@ pub use select::{
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
 
+/// Widest camera image the frontend tracks at full resolution. A rig whose every camera is wider (the Insta360
+/// X5 and the X4 Air's high-resolution mode, 3840 px lenses) is tracked on its images reduced by two, on the device
+/// on the GPU lane: the calibration is halved once here ([`calib::Calibration::half_resolution`]), so the tracker,
+/// the estimator and every pose see a 1920 px rig, and the tracker's cost stays that of the 1920 px mode.
+/// Keypoints and `Vio::calibration` are in the reduced pixels.
+pub const MAX_FULL_RESOLUTION_WIDTH: u32 = 2048;
+
 /// Frameset pipeline with optional one-frame estimator lag (D17, D24, M7).
 /// First preintegrate for the frontend prediction, run optical flow, then run
 /// the estimator's independent preintegrator, measurement, optimization and
@@ -53,6 +60,8 @@ pub struct Vio<S: Scalar = f32> {
     frames: frontend::input::FrameStorage,
     /// Reusable lookahead input, filled by the same lane as the current frame.
     next_frames: frontend::input::PackedImages,
+    /// Every camera is tracked on its images reduced by two; see [`MAX_FULL_RESOLUTION_WIDTH`].
+    half: bool,
     /// `img->masks`, always empty here: masks come from Monado.
     masks: Vec<kornia_staging_imgproc::features::CellMasks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
@@ -180,6 +189,16 @@ impl<S: Scalar> Vio<S> {
     ) -> Result<Self, VioError> {
         let backend: Backend = backends.frontend;
         let camera_count: usize = calibration.t_i_c.len();
+        let half: bool = !calibration.resolution.is_empty()
+            && calibration
+                .resolution
+                .iter()
+                .all(|[width, _]| *width > MAX_FULL_RESOLUTION_WIDTH);
+        let calibration = if half {
+            calibration.half_resolution()
+        } else {
+            calibration
+        };
         let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let rolling_shutter: Option<RollingShutter> = RollingShutter::for_calibration(&calibration)
@@ -218,6 +237,7 @@ impl<S: Scalar> Vio<S> {
             calib_f32,
             frames: frontend::input::FrameStorage::new(backend == Backend::Gpu),
             next_frames: frontend::input::PackedImages::default(),
+            half,
             masks: vec![kornia_staging_imgproc::features::CellMasks::default(); camera_count],
             camera_count,
             last_frame_t_ns: None,
@@ -554,9 +574,10 @@ impl<S: Scalar> Vio<S> {
     ) -> Result<VioResult, VioError> {
         if let Some((next_t_ns, next_images)) = lookahead {
             check_frameset(next_images, self.camera_count)?;
+            let shift = usize::from(self.half);
             self.frontend.check_frameset(
                 next_t_ns,
-                next_images.iter().map(|image| (image.width, image.height)),
+                next_images.iter().map(|image| (image.width >> shift, image.height >> shift)),
             )?;
             if next_t_ns <= t_ns {
                 return Err(frontend::flow::FrontendError::NonMonotonicFrameset {
@@ -572,7 +593,7 @@ impl<S: Scalar> Vio<S> {
             && let Some((next_t_ns, next_images)) = lookahead
         {
             let vio = &mut *prepared.vio;
-            vio.next_frames.fill(next_images);
+            vio.next_frames.fill(next_images, vio.half);
             vio.frontend
                 .queue_lookahead(next_t_ns, &mut vio.next_frames)?;
         }
@@ -618,8 +639,12 @@ impl<S: Scalar> Vio<S> {
         // coverage predicate is the estimator's, and `process_frame` still runs
         // it as its second line.
         check_frameset(images, self.camera_count)?;
-        self.frontend
-            .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
+        // A half-resolution rig takes full-size frames and tracks them reduced by two.
+        let shift = usize::from(self.half);
+        self.frontend.check_frameset(
+            t_ns,
+            images.iter().map(|image| (image.width >> shift, image.height >> shift)),
+        )?;
         if !self.bootstrap.imu_covers_frame(&self.estimator, t_ns) {
             return Ok(PreparedTrack {
                 vio: self,
@@ -675,7 +700,7 @@ impl<S: Scalar> Vio<S> {
             std::mem::swap(&mut self.frames, &mut spare);
             self.lagged_frames = Some((previous_t_ns, spare));
         }
-        self.frames.fill(images)?;
+        self.frames.fill(images, self.half)?;
         Ok(PreparedTrack {
             vio: self,
             t_ns,

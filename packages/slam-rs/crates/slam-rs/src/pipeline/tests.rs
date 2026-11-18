@@ -55,6 +55,32 @@ fn a_frameset_ahead_of_the_imu_needs_more_imu() {
     );
 }
 
+/// A rig whose every camera is wider than [`MAX_FULL_RESOLUTION_WIDTH`] is tracked at half resolution: its
+/// calibration is halved and it takes full-size frames, not half-size ones.
+#[test]
+fn a_rig_wider_than_the_full_resolution_limit_tracks_at_half_resolution() {
+    let config: config::VioConfig = config::VioConfig::from_json_str(MSDMI_CONFIG).unwrap();
+    let mut calibration: calib::Calibration<f64> =
+        calib::Calibration::from_json_str(MSDMI_CALIB).unwrap();
+    calibration.resolution = vec![[3840, 3840]; 2];
+    let options = frontend::flow::FrontendOptions {
+        threads: 1,
+        ..frontend::flow::FrontendOptions::default()
+    };
+    let mut vio: Vio<f32> = Vio::new(config, calibration.clone(), options).unwrap();
+    assert_eq!(vio.calibration().resolution, vec![[1920, 1920]; 2]);
+    assert_eq!(
+        vio.calibration().intrinsics[0].params()[0],
+        (0.5 * calibration.intrinsics[0].params()[0]) as f32
+    );
+    let full: Vec<u8> = vec![0; 3840 * 3840];
+    let views = [image(&full, 3840, 3840), image(&full, 3840, 3840)];
+    assert_eq!(vio.track(1_000, &views).unwrap().status, VioStatus::NeedMoreImu);
+    let half: Vec<u8> = vec![0; 1920 * 1920];
+    let views = [image(&half, 1920, 1920), image(&half, 1920, 1920)];
+    assert!(vio.track(2_000, &views).is_err());
+}
+
 /// `vio_enforce_realtime` drops framesets, which Offline mode cannot do
 /// without letting arrival order reach a decision, so it is refused at
 /// construction rather than silently ignored.
