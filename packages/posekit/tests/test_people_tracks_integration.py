@@ -38,7 +38,7 @@ def test_people_tracker_keeps_the_operator_between_redetects() -> None:
     tracker = PeopleTracker(TrackOptions(redetect_every=3), MaskOptions(), "cuda")
 
     unions = [tracker.step(frames[:, i]) for i in range(len(indices))]
-    reference = tracker.masker(frames[:, 2])  # SAM 3 on the last tracker-only step
+    reference = torch.from_numpy(tracker.masker(frames[:, 2])).cuda()  # SAM 3 on the last tracker-only step
 
     assert tracker.redetects == 2  # steps 0 and 3
     assert all(u.shape == (2, 1920, 1920) for u in unions)
