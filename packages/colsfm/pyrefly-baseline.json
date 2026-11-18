@@ -1465,6 +1465,13 @@
     },
     {
       "column": 1,
+      "path": "tests/test_loop_camera_pairing.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `loop_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
       "path": "tests/test_loop_closure.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `loop_helpers`",

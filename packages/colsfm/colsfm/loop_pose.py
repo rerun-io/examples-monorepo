@@ -58,7 +58,8 @@ baseline on depth, where a redundant, refined least-squares problem averages the
 instead of amplifying it. The generalized essential matrix is still used, but only for its
 rotation: `RigPoseConfig.max_direction_disagreement_deg` cross-checks the PnP translation
 direction against it and drops a pair the two disagree about. It costs no extra matching —
-it is solved from the same-camera correspondences the observation pass already read.
+it is solved from the primary-camera correspondences the observation pass already read (each source camera
+against the primary target camera the plan paired it with, `colsfm.loop_pairs.loop_camera_pairing`).
 
 Depth, and why the neighbours matter
 ------------------------------------
@@ -119,7 +120,7 @@ import pycolmap
 from jaxtyping import Bool, Float64, Int
 from numpy import ndarray
 
-from colsfm.loop_pairs import local_map_partners
+from colsfm.loop_pairs import CameraPairing, local_map_partners
 from colsfm.rig_geometry import RigFrameIndex, RigGeometry
 
 Matches: TypeAlias = Int[ndarray, "n_matches 2"]
@@ -429,7 +430,9 @@ class _EpipolarCorrespondences:
     target_pixels: list[Keypoints]
     """The matching target-image pixels, block for block."""
     camera_indices: list[int]
-    """`camera_idx` per correspondence, flat across the blocks."""
+    """Source `camera_idx` per correspondence, flat across the blocks."""
+    target_camera_indices: list[int]
+    """Target `camera_idx` per correspondence: the primary target camera the plan paired the source camera with."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,7 +448,7 @@ class _Observations:
     cameras: set[int]
     """Which cameras of the target rig frame contributed."""
     epipolar: _EpipolarCorrespondences
-    """The same-camera matches, for the translation-direction cross-check."""
+    """The primary-camera matches, for the translation-direction cross-check."""
 
 
 @dataclass(slots=True)
@@ -466,6 +469,9 @@ class RigPoseEstimator:
     """Keypoint pixels per image id."""
     match_fn: MatchFunction
     """The injected matcher."""
+    pairing: CameraPairing
+    """Target cameras per `(source rig, target rig, source camera)`, primary first: the plan's table
+    (`colsfm.loop_pairs.loop_camera_pairing`), so the estimator matches exactly the pairs the plan scheduled."""
     config: RigPoseConfig = DEFAULT_RIG_POSE_CONFIG
     """Gates and thresholds."""
     cache_images: int = BEARING_CACHE_IMAGES
@@ -763,14 +769,12 @@ class RigPoseEstimator:
         epipolar_source: list[Keypoints] = []
         epipolar_target: list[Keypoints] = []
         epipolar_positions: list[int] = []
+        epipolar_target_positions: list[int] = []
         for camera_id in self.geometry.camera_ids:
             anchor: int | None = self.index.keyframe(source_rig_id, camera_id)
             if anchor is None:
                 continue
-            target_cameras: list[int] = [camera_id]
-            partner_camera: int | None = self.geometry.stereo_partner.get(camera_id)
-            if partner_camera is not None:
-                target_cameras.append(partner_camera)
+            target_cameras: tuple[int, ...] = self.pairing[(source_rig_id, target_rig_id, camera_id)]
             anchor_landmarks: AnchorLandmarks | None = landmarks.get(anchor)
             for target_camera in target_cameras:
                 observed: int | None = self.index.keyframe(target_rig_id, target_camera)
@@ -780,10 +784,11 @@ class RigPoseEstimator:
                 if len(pair_matches) == 0:
                     continue
                 position: int = self.geometry.position_of(target_camera)
-                if target_camera == camera_id and anchor in self.keypoints:
+                if target_camera == target_cameras[0] and anchor in self.keypoints:
                     epipolar_source.append(self.keypoints[anchor][pair_matches[:, 0]])
                     epipolar_target.append(self.keypoints[observed][pair_matches[:, 1]])
-                    epipolar_positions.extend([position] * len(pair_matches))
+                    epipolar_positions.extend([self.geometry.position_of(camera_id)] * len(pair_matches))
+                    epipolar_target_positions.extend([position] * len(pair_matches))
                 if anchor_landmarks is None or len(anchor_landmarks) == 0:
                     continue
                 insertion: Int[ndarray, "n_matches"] = np.searchsorted(anchor_landmarks.keypoint_indices, pair_matches[:, 0])
@@ -797,7 +802,10 @@ class RigPoseEstimator:
                 camera_indices.extend([position] * hits)
                 contributing.add(target_camera)
         epipolar: _EpipolarCorrespondences = _EpipolarCorrespondences(
-            source_pixels=epipolar_source, target_pixels=epipolar_target, camera_indices=epipolar_positions
+            source_pixels=epipolar_source,
+            target_pixels=epipolar_target,
+            camera_indices=epipolar_positions,
+            target_camera_indices=epipolar_target_positions,
         )
         if not point_blocks:
             return _Observations(np.zeros((0, 2), dtype=np.float64), np.zeros((0, 3), dtype=np.float64), [], set(), epipolar)
@@ -810,13 +818,13 @@ class RigPoseEstimator:
         )
 
     def _epipolar_pose(self, correspondences: _EpipolarCorrespondences) -> pycolmap.Rigid3d | None:
-        """Solve the generalized essential matrix over the same-camera matches of a rig pair.
+        """Solve the generalized essential matrix over the primary-camera matches of a rig pair.
 
         Its rotation and translation *direction* are trustworthy; its magnitude is not, which
         is why the caller only cross-checks a direction against it (module docstring).
 
         Args:
-            correspondences: The same-camera matches `_observations` collected.
+            correspondences: The primary-camera matches `_observations` collected.
 
         Returns:
             `source_T_target` with an unreliable magnitude, or None when there are too few
@@ -828,7 +836,7 @@ class RigPoseEstimator:
             np.ascontiguousarray(np.vstack(correspondences.source_pixels), dtype=np.float64),
             np.ascontiguousarray(np.vstack(correspondences.target_pixels), dtype=np.float64),
             correspondences.camera_indices,
-            correspondences.camera_indices,
+            correspondences.target_camera_indices,
             list(self.geometry.cams_from_rig),
             list(self.geometry.cameras),
             _ransac_options(self.config),

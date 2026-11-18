@@ -285,7 +285,7 @@ from colsfm.config import PoseGraphConfig
 from colsfm.database import ImagePair, read_keypoints_batch
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.geometry import MICROSECONDS_PER_SECOND
-from colsfm.loop_pairs import required_image_pairs
+from colsfm.loop_pairs import CameraPairing, loop_camera_pairing, required_image_pairs
 from colsfm.loop_pose import (
     BEARING_CACHE_IMAGES,
     DEFAULT_RIG_POSE_CONFIG,
@@ -400,6 +400,13 @@ class LoopClosureConfig:
     against its archived Galileo result the identity is 8x closer."""
     loop_residual_weight: float = 0.25
     """`pose_graph_config.loop_residual_weight`; only read when `use_stored_weights`."""
+    pair_cameras_by_prior: bool = False
+    """Which target camera each source anchor is matched against (`colsfm.loop_pairs.loop_camera_pairing`).
+
+    False: the camera whose image scores best against the anchor's in retrieval; no prior is read. True: the camera
+    whose optical axis is nearest the anchor's under the prior relative rotation of the two rig frames, for a profile
+    whose metric prior is trusted. Either way the source's own camera stays unless another camera (not its stereo
+    partner) scores higher, so mono and stereo rigs pair exactly as before."""
     num_threads: int = DEFAULT_MEASUREMENT_THREADS
     """Worker threads the measurement pass runs source-rig groups on.
 
@@ -576,6 +583,9 @@ class LoopSearchPlan:
     """Rig frames in capture order with their prior poses."""
     keypoints: Mapping[int, Keypoints]
     """Keypoint pixels per image id, read once — 148 MB on RoboCap."""
+    pairing: CameraPairing
+    """Target cameras per `(source rig, target rig, source camera)`, primary first (`loop_camera_pairing`), decided
+    once here. The pair list, the measurement and `pairs_outside_accepted_edges` all read this one table."""
     counters: FunnelCounters
     """The funnel so far: retrieval's own counters, which `verify_loop_plan` finishes."""
     duration_seconds: float
@@ -669,14 +679,16 @@ def plan_loop_search(
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)
     rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
     rig_index: RigFrameIndex = rig_frame_index(frames_meta)
+    pairing: CameraPairing = loop_camera_pairing(rig_index, empty_geometry, index, pixels, rig_pairs, config.pair_cameras_by_prior)
     return LoopSearchPlan(
         config=config,
-        image_pairs=required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs),
+        image_pairs=required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs, pairing),
         groups=tuple(groups),
         queried_by=shortlist.queried_by,
         geometry=empty_geometry,
         rig_index=rig_index,
         keypoints=pixels,
+        pairing=pairing,
         counters=counters,
         duration_seconds=duration_seconds,
         gap_seconds=gap_seconds,
@@ -698,7 +710,13 @@ def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosu
     """
     config: LoopClosureConfig = plan.config
     make_estimator: Callable[..., RigPoseEstimator] = partial(
-        RigPoseEstimator, index=plan.rig_index, geometry=plan.geometry, keypoints=plan.keypoints, match_fn=match_fn, config=config.rig_pose
+        RigPoseEstimator,
+        index=plan.rig_index,
+        geometry=plan.geometry,
+        keypoints=plan.keypoints,
+        match_fn=match_fn,
+        pairing=plan.pairing,
+        config=config.rig_pose,
     )
     candidates: list[LoopCandidate] = _measure_groups(list(plan.groups), make_estimator, config, plan.counters)
 
@@ -771,7 +789,14 @@ def pairs_outside_accepted_edges(plan: LoopSearchPlan, edges: Sequence[PoseGraph
         The pairs of `matched` outside every accepted edge's local maps and observations, in `matched`'s order.
     """
     kept: set[ImagePair] = set(
-        required_image_pairs(plan.rig_index, plan.geometry, plan.keypoints, plan.config.rig_pose.neighbour_span, [(edge.source, edge.target) for edge in edges])
+        required_image_pairs(
+            plan.rig_index,
+            plan.geometry,
+            plan.keypoints,
+            plan.config.rig_pose.neighbour_span,
+            [(edge.source, edge.target) for edge in edges],
+            plan.pairing,
+        )
     )
     return [pair for pair in matched if pair not in kept]
 

@@ -11,6 +11,7 @@ stays in `conftest.py`; this module only adds what a loop scene needs on top of 
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,7 +20,11 @@ from conftest import project_and_mask as conftest_project_and_mask
 from jaxtyping import Bool, Float64, Int
 from numpy import ndarray
 
+from colsfm.database import Keypoints
+from colsfm.loop_pairs import local_map_partners
 from colsfm.loop_pose import Matches, MatchFunction
+from colsfm.pairs import normalise_pair
+from colsfm.rig_geometry import RigFrameIndex, RigGeometry
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,3 +109,46 @@ def matcher_from_point_indices(
         return np.array(true_matches + outliers, dtype=np.int64).reshape(-1, 2)
 
     return match_fn
+
+
+def same_camera_image_pairs(
+    index: RigFrameIndex,
+    geometry: RigGeometry,
+    keypoints: Mapping[int, Keypoints],
+    neighbour_span: int,
+    rig_pairs: Iterable[tuple[int, int]],
+) -> tuple[tuple[int, int], ...]:
+    """Main's loop pair list before the camera pairing table: each anchor against the same target camera and its partner.
+
+    A test-local reference, kept verbatim from `colsfm.loop_pairs.required_image_pairs` at main 524eb57ca, so a mono or
+    stereo plan can be compared against the list main scheduled.
+
+    Args:
+        index: The rig-frame index.
+        geometry: The rig.
+        keypoints: Keypoint pixels per image id.
+        neighbour_span: Temporal neighbours in a local map.
+        rig_pairs: The shortlisted `(source rig id, target rig id)` pairs.
+
+    Returns:
+        The image pairs, normalised, deduplicated and sorted.
+    """
+    pairs: set[tuple[int, int]] = set()
+    for source_rig_id, target_rig_id in rig_pairs:
+        for camera_id in geometry.camera_ids:
+            anchor: int | None = index.keyframe(source_rig_id, camera_id)
+            if anchor is None:
+                continue
+            if anchor in keypoints:
+                for partner in local_map_partners(index, geometry, neighbour_span, source_rig_id, camera_id):
+                    pairs.add(normalise_pair(anchor, partner))
+            target_cameras: list[int] = [camera_id]
+            partner_camera: int | None = geometry.stereo_partner.get(camera_id)
+            if partner_camera is not None:
+                target_cameras.append(partner_camera)
+            for target_camera in target_cameras:
+                observed: int | None = index.keyframe(target_rig_id, target_camera)
+                if observed is None or observed not in keypoints:
+                    continue
+                pairs.add(normalise_pair(anchor, observed))
+    return tuple(sorted(pairs))

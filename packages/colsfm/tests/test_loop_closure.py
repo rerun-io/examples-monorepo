@@ -25,7 +25,7 @@ import pycolmap
 import pytest
 from google.protobuf.message import Message
 from jaxtyping import Float32, Float64, Int
-from loop_helpers import ProjectedPoints, matcher_from_point_indices, project_and_mask
+from loop_helpers import ProjectedPoints, matcher_from_point_indices, project_and_mask, same_camera_image_pairs
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
@@ -52,6 +52,7 @@ from colsfm.loop_closure import (
     session_duration_seconds,
     verify_loop_plan,
 )
+from colsfm.loop_pairs import required_image_pairs
 from colsfm.loop_pose import DEFAULT_RIG_POSE_CONFIG, Keypoints, RigPoseConfig, RigPoseEstimate
 from colsfm.matching import MatchingOptions
 from colsfm.pose_graph import PoseGraphEdge, RigNode, gate_loop_edges, sequential_edges, solve_pose_graph
@@ -499,6 +500,38 @@ def test_only_accepted_edges_pairs_stay_for_the_mapper(scene: SquareRigScene, ma
     assert dropped and kept
     assert pairs_outside_accepted_edges(plan, result.edges, sorted(kept)) == []
     assert pairs_outside_accepted_edges(plan, [], list(plan.image_pairs)) == list(plan.image_pairs)
+
+
+def test_a_stereo_plan_names_exactly_mains_same_camera_pairs(scene: SquareRigScene) -> None:
+    """On the stereo square rig the best-score camera pairing changes nothing: the pair list is main's."""
+    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    expected: tuple[tuple[int, int], ...] = same_camera_image_pairs(
+        plan.rig_index, plan.geometry, plan.keypoints, plan.config.rig_pose.neighbour_span, plan.rig_pairs
+    )
+    assert plan.image_pairs == expected
+    by_prior: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(pair_cameras_by_prior=True))
+    assert by_prior.image_pairs == expected
+
+
+def test_the_pair_list_the_measurement_and_the_mapper_filter_read_the_one_pairing_table(scene: SquareRigScene) -> None:
+    """Swap the plan's table for one that pairs each camera with the other camera only: all three callers follow it."""
+    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    swapped: LoopSearchPlan = replace(plan, pairing={key: (cameras[-1],) for key, cameras in plan.pairing.items()})
+    scheduled: set[tuple[int, int]] = set(
+        required_image_pairs(
+            swapped.rig_index, swapped.geometry, swapped.keypoints, swapped.config.rig_pose.neighbour_span, swapped.rig_pairs, swapped.pairing
+        )
+    )
+    assert scheduled != set(plan.image_pairs), "the swapped table must schedule other pairs"
+    requested: set[tuple[int, int]] = set()
+    verify_loop_plan(swapped, recording_matcher(requested))
+    assert requested == scheduled
+    edges: list[PoseGraphEdge] = [
+        PoseGraphEdge(source=source, target=target, source_T_target=pycolmap.Rigid3d(), information=np.eye(6), kind="loop")
+        for source, target in swapped.rig_pairs
+    ]
+    assert pairs_outside_accepted_edges(swapped, edges, sorted(scheduled)) == []
+    assert pairs_outside_accepted_edges(swapped, edges, list(plan.image_pairs)) == sorted(set(plan.image_pairs) - scheduled)
 
 
 def test_the_score_gate_is_one_constant_and_can_be_overridden(scene: SquareRigScene, match_fn: MatchFunction, loop_result: LoopClosureResult) -> None:

@@ -228,6 +228,27 @@ def make_match_function(scene: FourCameraScene, outlier_ratio: float = 0.2, seed
     return matcher_from_point_indices(scene.point_index_by_image, outlier_ratio, seed)
 
 
+def same_camera_pairing(index: RigFrameIndex, geometry: RigGeometry) -> dict[tuple[int, int, int], tuple[int, ...]]:
+    """Each source camera against the same target camera and its stereo partner, for every rig pair of the scene.
+
+    The scene's revisit keeps its heading, so this is what `colsfm.loop_pairs.loop_camera_pairing` chooses for it; the
+    estimator's own tests do not need a retrieval index to say so.
+
+    Args:
+        index: The scene's rig-frame index.
+        geometry: The scene's rig.
+
+    Returns:
+        The camera pairing table.
+    """
+    return {
+        (source, target, camera_id): (camera_id,) if camera_id not in geometry.stereo_partner else (camera_id, geometry.stereo_partner[camera_id])
+        for source in index.sequence
+        for target in index.sequence
+        for camera_id in geometry.camera_ids
+    }
+
+
 def make_estimator(scene: FourCameraScene, config: RigPoseConfig | None = None, match_fn: MatchFunction | None = None) -> RigPoseEstimator:
     """Build an estimator over the scene, with the default matcher unless one is given.
 
@@ -244,6 +265,7 @@ def make_estimator(scene: FourCameraScene, config: RigPoseConfig | None = None, 
         geometry=scene.geometry,
         keypoints=scene.keypoints,
         match_fn=make_match_function(scene) if match_fn is None else match_fn,
+        pairing=same_camera_pairing(scene.index, scene.geometry),
         config=RigPoseConfig() if config is None else config,
     )
 
