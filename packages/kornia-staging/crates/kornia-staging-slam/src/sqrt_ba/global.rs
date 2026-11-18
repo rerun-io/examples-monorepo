@@ -119,13 +119,25 @@ impl<S: Scalar> GbaProblem<S> {
 
     /// The problem in another scalar.
     pub fn cast<T: Scalar>(&self) -> GbaProblem<T> {
+        self.cast_with(RigidTransform::cast, |position| {
+            position.map(|v| T::from_literal(v.to_f64()))
+        })
+    }
+
+    /// The problem in another scalar, each pose and landmark position mapped
+    /// by `pose` and `position`, in one pass.
+    fn cast_with<T: Scalar>(
+        &self,
+        pose: impl Fn(&RigidTransform<S>) -> RigidTransform<T>,
+        position: impl Fn(&Vector3<S>) -> Vector3<T>,
+    ) -> GbaProblem<T> {
         GbaProblem {
-            imu_from_world: self.imu_from_world.iter().map(|p| p.cast()).collect(),
+            imu_from_world: self.imu_from_world.iter().map(pose).collect(),
             landmarks: self
                 .landmarks
                 .iter()
                 .map(|l| GbaLandmark {
-                    position: l.position.map(|v| T::from_literal(v.to_f64())),
+                    position: position(&l.position),
                     observations: l
                         .observations
                         .iter()
@@ -143,9 +155,9 @@ impl<S: Scalar> GbaProblem<S> {
 }
 
 impl GbaProblem<f64> {
-    /// Move the world origin to the landmark centroid (in f64), then cast.
-    /// Relative-pose measurements do not change. Returns the centroid for
-    /// [`Self::uncentre_from`].
+    /// Move the world origin to the landmark centroid (in f64), then cast, in
+    /// one pass. Relative-pose measurements do not change. Returns the
+    /// centroid for [`Self::uncentre_from`].
     pub fn centred<T: Scalar>(&self) -> (GbaProblem<T>, Vector3<f64>) {
         let n = self.landmarks.len().max(1) as f64;
         let centroid: Vector3<f64> = self
@@ -154,15 +166,16 @@ impl GbaProblem<f64> {
             .map(|l| l.position)
             .sum::<Vector3<f64>>()
             / n;
-        let mut centred = self.clone();
-        for pose in &mut centred.imu_from_world {
-            // p_i = R (p_w' + c) + t: the new translation is t + R c.
-            pose.translation += pose.rotation * centroid;
-        }
-        for landmark in &mut centred.landmarks {
-            landmark.position -= centroid;
-        }
-        (centred.cast(), centroid)
+        let centred = self.cast_with(
+            |pose| {
+                // p_i = R (p_w' + c) + t: the new translation is t + R c.
+                let mut pose: RigidTransform<f64> = *pose;
+                pose.translation += pose.rotation * centroid;
+                pose.cast()
+            },
+            |position| (position - centroid).map(|v| T::from_literal(v.to_f64())),
+        );
+        (centred, centroid)
     }
 
     /// Write a solved centred problem back into world coordinates.
