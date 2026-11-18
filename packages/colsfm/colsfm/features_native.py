@@ -12,11 +12,12 @@ that selects points for LightGlue+ happens later, on its scores (`colsfm.matchin
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import gc
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, TypeAlias
+from typing import Final, Literal, Protocol, TypeAlias, runtime_checkable
 
 import numpy as np
 import pycolmap
@@ -56,6 +57,17 @@ COLMAP's nearest first-class descriptor type is `ALIKED_N16ROT`. The label only
 travels with the blob; nothing in this pipeline dispatches on it, and the
 descriptors are recovered bit-exactly either way
 (`docs/spec/pycolmap-capabilities.md` §4)."""
+
+
+@runtime_checkable
+class EngineRuntime(Protocol):
+    """What extraction uses of an engine runtime (trtkit's direct-binding `TensorRtDynamicRuntime`)."""
+
+    max_input_shapes: dict[str, tuple[int, ...]]
+
+    def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Execute once and return output views valid until the next call."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,8 +304,13 @@ def run_native_extraction(
     max_num_features: int,
     batch_size: int,
     masks: MaskSource | None = None,
+    open_runtime: Callable[[Path], EngineRuntime] | None = None,
 ) -> None:
-    """Execute every group on GPU frames and store what came back, one direct-binding runtime per engine.
+    """Execute every group on GPU frames and store what came back, one direct-binding runtime at a time.
+
+    A group's runtime is released, and torch's cached blocks returned to the driver, before the next group's is
+    created: an execution context reserves activation memory for its profile maximum (3.8 GB for eight 480x800 cube
+    faces), and a rig with three image sizes that kept all three alive needed their sum.
 
     Args:
         database_path: An existing COLMAP database whose image rows are written.
@@ -304,19 +321,19 @@ def run_native_extraction(
         max_num_features: Keypoint ceiling per image.
         batch_size: Images executed together. The caller validates it against its own engines' profiles.
         masks: Per-image keypoint masks; see `store_feature_batch`.
+        open_runtime: Opens an engine file; a direct-binding `TensorRtDynamicRuntime` when None (tests pass a fake).
 
     Raises:
         RuntimeError: When an engine cannot be deserialised or fails to execute.
     """
     with ExitStack() as stack:
         database: pycolmap.Database = stack.enter_context(pycolmap.Database.open(database_path))
-        runtimes: dict[Path, TensorRtDynamicRuntime] = {}
         for group in groups:
             if not group.tasks:
                 continue
-            if group.engine_path not in runtimes:
-                runtimes[group.engine_path] = TensorRtDynamicRuntime(group.engine_path, direct_binding=True)
-            runtime: TensorRtDynamicRuntime = runtimes[group.engine_path]
+            runtime: EngineRuntime = (
+                open_runtime(group.engine_path) if open_runtime is not None else TensorRtDynamicRuntime(group.engine_path, direct_binding=True)
+            )
             group_batch: int = min(batch_size, group.maximum_batch_size or batch_size)
             declared_shape: tuple[int, ...] = runtime.max_input_shapes[model.image_binding]
             network_height: int = group.network_height if group.network_height is not None else int(declared_shape[2])
@@ -335,6 +352,12 @@ def run_native_extraction(
                     descriptor_type=model.descriptor_type,
                     masks=masks,
                 )
+            # Release this group's context, engine and buffers before the next group opens its own.
+            del runtime, network_tensor, outputs
+            gc.collect()
+            if torch.cuda.is_initialized():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
 
 
 def _device_batch(frames: FrameSource, tasks: Sequence[ImageTask], network_height: int, network_width: int) -> Tensor:
