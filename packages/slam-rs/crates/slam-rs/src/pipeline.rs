@@ -61,6 +61,13 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
+    /// The persistent keyframe map, stepped inline with the window's stamps
+    /// (Offline); `None` when `backend.enabled` is off.
+    #[cfg(feature = "backend")]
+    map_backend: Option<crate::backend::MapBackend>,
+    /// Wall time of the inline map steps (they run on the tracking thread).
+    #[cfg(feature = "backend")]
+    map_step_timing: crate::backend::StepTiming,
 }
 
 pub use lag::OverlapTimings;
@@ -121,8 +128,18 @@ impl<S: Scalar> Vio<S> {
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
             crate::imu::noise_from_calibration(&calibration)?;
-        let estimator: estimator::SqrtKeypointVio<S> =
+        #[cfg(feature = "backend")]
+        let map_backend = config.backend_enabled.then(|| {
+            crate::backend::MapBackend::new(
+                crate::backend::MapConfig::from(&config),
+                calibration.resolution.clone(),
+            )
+        });
+        #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
+        let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
+        #[cfg(feature = "backend")]
+        estimator.emit_map_stamps(map_backend.is_some());
         Ok(Self {
             frontend,
             estimator,
@@ -141,7 +158,40 @@ impl<S: Scalar> Vio<S> {
             last_deferred: None,
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
+            #[cfg(feature = "backend")]
+            map_backend,
+            #[cfg(feature = "backend")]
+            map_step_timing: crate::backend::StepTiming::default(),
         })
+    }
+
+    /// The persistent keyframe map, or `None` when `backend.enabled` is off.
+    ///
+    /// Current up to the last solved keyframe: a keyframe whose solve is still
+    /// deferred (D84) joins once [`Self::finish_deferred_keyframe`], the next
+    /// `track` or [`Self::flush`] solves it.
+    #[cfg(feature = "backend")]
+    pub fn map_backend(&self) -> Option<&crate::backend::MapBackend> {
+        self.map_backend.as_ref()
+    }
+
+    /// Hand the window's new stamps to the map, oldest first. The window never
+    /// reads the map back, so this cannot move a VIO pose.
+    fn step_map(&mut self) {
+        #[cfg(feature = "backend")]
+        if let Some(map_backend) = self.map_backend.as_mut() {
+            for stamp in self.estimator.take_map_stamps() {
+                let started = std::time::Instant::now();
+                map_backend.step(stamp);
+                self.map_step_timing.record(crate::duration_ns(started));
+            }
+        }
+    }
+
+    /// Wall time of the inline map steps so far (zero with the back end off).
+    #[cfg(feature = "backend")]
+    pub fn map_step_timing(&self) -> crate::backend::StepTiming {
+        self.map_step_timing
     }
 
     /// The estimator, for callers that want the window or the snapshot.
@@ -209,6 +259,7 @@ impl<S: Scalar> Vio<S> {
         {
             self.last_deferred = Some(Box::new(stats));
         }
+        self.step_map();
         Ok(())
     }
 
@@ -451,6 +502,7 @@ impl<S: Scalar> Vio<S> {
         t_ns: i64,
         outcome: estimator::FrameOutcome<S>,
     ) -> Result<VioResult, VioError> {
+        self.step_map();
         // The estimator initialises inside the same `process_frame` that
         // measures, so a `Measured` outcome always has a state and
         // the outcome alone decides the status.
