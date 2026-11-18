@@ -236,6 +236,7 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
             keynet_crop=settings.keynet_crop,
             keynet=KeyNetAugment(negative_margin=settings.keynet_negative_margin),
             upright=settings.upright,
+            catalog_url=settings.rerun.catalog_url if settings.rerun is not None else CATALOG_URL,
         )
     )
 

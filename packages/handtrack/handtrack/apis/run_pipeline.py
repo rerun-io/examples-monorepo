@@ -50,11 +50,12 @@ from handtrack.keynet_perspective import PerspectiveKeyNetEstimator
 from handtrack.models.detnet import DetNetF
 from handtrack.models.keynet import KeyNetF, keynet_for_state
 from handtrack.oracle import GroundTruthViews, KeyNetOnTruthBoxes, OracleDetector, OracleKeypoints
-from handtrack.pipeline import SegmentData, TrackerRun, detnet_alone_track, load_weights, read_segment, read_state, run_tracker, segment_track
+from handtrack.pipeline import SegmentData, TrackerRun, detnet_alone_track, read_segment, run_tracker, segment_track
 from handtrack.reference.results import Calibration
 from handtrack.reference.upstream import PoseStage, load_umetrack
 from handtrack.results import DetectorSource, HandMode, KeypointSource, SegmentTrack, TrackMetadata, save_track
 from handtrack.tracker import Detector, DetNetDetector, KeyNetEstimator, KeypointEstimator, Tracker, TrackerConfig
+from handtrack.train.checkpoint import load_weights, read_state
 from handtrack.umetrack import RigPoseNetwork, UmeTrackEstimator
 
 # Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.

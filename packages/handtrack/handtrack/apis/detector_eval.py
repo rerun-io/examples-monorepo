@@ -22,7 +22,7 @@ from handtrack.data.rerun_source import nvdec_producer, source_spec
 from handtrack.data.stream import DetNetSamples
 from handtrack.eval.boxes import MIN_IOU, NET_SCALE, PRESENCE_THRESHOLD, BoxCounts, box_counts, square_iou
 from handtrack.models.detnet import DetNetF
-from handtrack.pipeline import load_weights
+from handtrack.train.checkpoint import load_weights
 
 BASE_SPLITS: dict[str, SplitName] = {"dataforge-umetrack": "test", "dataforge-show3d": "val", "dataforge-hot3d-quest3": "test"}
 """Base datasets: the catalog split each one is scored on (none of them is trained on)."""

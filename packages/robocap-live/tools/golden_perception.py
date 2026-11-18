@@ -39,7 +39,7 @@ from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.labels.perspective import CropCameras, crop_rays, unproject
 from handtrack.models.detnet import DetNetF, decode_detections
 from handtrack.models.keynet import KeyNetF, KeyNetOutput, keynet_for_state
-from handtrack.pipeline import load_weights, read_state
+from handtrack.train.checkpoint import load_weights, read_state
 from handtrack.tracker import CropRequest
 from jaxtyping import Float32, UInt8
 from numpy import ndarray

@@ -199,12 +199,12 @@ class Trainer:
         if nets in ('detnet', 'both'):
             self.models['detnet'] = DetNetF().to(self.device)
             if detnet_init is not None:  # warm start (fine-tune); a resumed run's checkpoint replaces these weights later
-                from handtrack.pipeline import load_weights
+                from handtrack.train.checkpoint import load_weights
 
                 load_weights(self.models['detnet'], detnet_init)
         if nets in ('keynet', 'both') and keynet_init is not None:
             # Warm start: the weights' own heads (pinch, visibility) and BatchNorm epsilon; a pinch head rides along untrained.
-            from handtrack.pipeline import read_state
+            from handtrack.train.checkpoint import read_state
 
             self.models['keynet'] = keynet_from_state(read_state(keynet_init)[0]).to(self.device)
         elif nets in ('keynet', 'both'):

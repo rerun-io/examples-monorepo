@@ -25,8 +25,7 @@ from handtrack.data.keynet_rerun import stream_cuts
 from handtrack.data.stream import KeyNetAugment, evaluation_augment
 from handtrack.labels.pinch import CONTACT_CLOSED_MM, CONTACT_OPEN_MM
 from handtrack.models.keynet import KeyNetF, keynet_from_state
-from handtrack.pipeline import read_state
-from handtrack.train.checkpoint import export_weights
+from handtrack.train.checkpoint import export_weights, read_state
 
 
 @serde(deny_unknown_fields=True)
