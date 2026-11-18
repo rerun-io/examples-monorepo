@@ -107,7 +107,7 @@ class FaceFrameset:
 def _decode_rgb(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w 3"]]:
     """Decode a face stream frame by frame, in sample order."""
     data: bytes = wrap_mp4(video.samples, video.keyframes, 30, codec=video.codec)
-    with av.open(BytesIO(data)) as container:
+    with av.open(BytesIO(data), mode="r") as container:
         for frame in container.decode(video=0):
             yield frame.to_ndarray(format="rgb24")
 
@@ -118,7 +118,9 @@ def iter_framesets(layer: LayerSegment, faces: tuple[CubeFace, ...], timeline: s
     Raises:
         ValueError: If the faces do not share the same stamps, or a stream decodes to another frame count.
     """
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(layer.dataset, layer.segment_id, [f"{face.entity}/pinhole/video" for face in faces], timeline)
+    videos: tuple[CatalogVideo, ...] = read_catalog_videos(
+        layer.dataset, layer.segment_id, [f"{face.entity}/pinhole/video" for face in faces], timeline
+    )
     stamps: Int64[ndarray, " n_frames"] = videos[0].t_ns.copy()
     for face, video in zip(faces, videos, strict=True):
         if not np.array_equal(video.t_ns, stamps):
@@ -146,7 +148,11 @@ def read_people_masks(layer: LayerSegment, face: CubeFace, timeline: str, wanted
     entity: str = f"{face.entity}/pinhole/people_mask"
     buffer_column: str = f"{entity}:SegmentationImage:buffer"
     table: pa.Table = (
-        layer.dataset.filter_segments(layer.segment_id).filter_contents([entity]).reader(index=timeline).select(timeline, buffer_column).to_arrow_table()
+        layer.dataset.filter_segments(layer.segment_id)
+        .filter_contents([entity])
+        .reader(index=timeline)
+        .select(timeline, buffer_column)
+        .to_arrow_table()
     )
     table = table.filter(table[buffer_column].is_valid())
     stamps: Int64[ndarray, " n"] = table[timeline].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64)

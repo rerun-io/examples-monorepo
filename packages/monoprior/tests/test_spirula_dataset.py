@@ -29,7 +29,11 @@ def test_rewrite_points_names_at_jpegs_and_keeps_records() -> None:
         "7 1 0 0 0 0 0 0 2 cube_0_front/2295639162.jpg",
         "1 2 -1",
     ]
-    assert keys == {0: ColmapImageKey("cube_0_front", 2262305829), 5: ColmapImageKey("cube_0_left", 2262305829), 7: ColmapImageKey("cube_0_front", 2295639162)}
+    assert keys == {
+        0: ColmapImageKey("cube_0_front", 2262305829),
+        5: ColmapImageKey("cube_0_left", 2262305829),
+        7: ColmapImageKey("cube_0_front", 2295639162),
+    }
     assert camera_ids == {0: 2, 5: 3, 7: 2}
 
 

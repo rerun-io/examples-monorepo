@@ -62,7 +62,9 @@ def _rig(lens1_error_deg: float = 1.0, pixel_centre_px: float = 0.0) -> tuple[Cu
     lens1_R_rig: Float64[ndarray, "3 3"] = Rotation.from_euler("xyz", [lens1_error_deg, -lens1_error_deg, 0.5], degrees=True).as_matrix() @ np.diag(
         [-1.0, 1.0, -1.0]
     )
-    return tuple(_face(lens, direction, rotation, pixel_centre_px) for lens, rotation in ((0, np.eye(3)), (1, lens1_R_rig)) for direction in FACE_R_LENS)
+    return tuple(
+        _face(lens, direction, rotation, pixel_centre_px) for lens, rotation in ((0, np.eye(3)), (1, lens1_R_rig)) for direction in FACE_R_LENS
+    )
 
 
 def _render(
@@ -72,7 +74,9 @@ def _render(
     u: Float64[ndarray, "h w"]
     v: Float64[ndarray, "h w"]
     u, v = np.meshgrid(np.arange(width) + pixel_centre_px, np.arange(height) + pixel_centre_px)
-    rays_cam: Float64[ndarray, "h w 3"] = np.stack([(u - k_matrix[0, 2]) / k_matrix[0, 0], (v - k_matrix[1, 2]) / k_matrix[1, 1], np.ones_like(u)], -1)
+    rays_cam: Float64[ndarray, "h w 3"] = np.stack(
+        [(u - k_matrix[0, 2]) / k_matrix[0, 0], (v - k_matrix[1, 2]) / k_matrix[1, 1], np.ones_like(u)], -1
+    )
     rays_rig: Float64[ndarray, "h w 3"] = rays_cam @ face_R_rig  # row vectors: R^T applied
     rays_rig /= np.linalg.norm(rays_rig, axis=-1, keepdims=True)
     rgb: Float64[ndarray, "h w 3"] = 127.5 + 100.0 * np.stack(
@@ -99,7 +103,16 @@ def test_full_face_window_rejects_bad_intrinsics() -> None:
         full_face_window(front, pixel_centre_px=0.5)  # the wrong pixel-centre convention
     face: CubeFace = _rig()[1]
     with pytest.raises(ValueError, match="not an integer"):
-        full_face_window(CubeFace(face.entity, face.name, face.k_matrix + np.diag([0.0, 0.0, 0.0]) + np.array([[0, 0, 0.3], [0, 0, 0], [0, 0, 0]]), face.width, face.height, face.face_R_rig))
+        full_face_window(
+            CubeFace(
+                face.entity,
+                face.name,
+                face.k_matrix + np.diag([0.0, 0.0, 0.0]) + np.array([[0, 0, 0.3], [0, 0, 0], [0, 0, 0]]),
+                face.width,
+                face.height,
+                face.face_R_rig,
+            )
+        )
     with pytest.raises(ValueError, match="does not fit"):
         full_face_window(CubeFace(face.entity, face.name, face.k_matrix, face.width + 50, face.height, face.face_R_rig))
 

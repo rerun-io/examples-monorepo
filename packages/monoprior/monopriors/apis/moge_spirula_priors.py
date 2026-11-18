@@ -21,7 +21,16 @@ import torch
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 
-from monopriors.cube_faces import PIXEL_CENTRE_PX, CubeFace, FullFaceWindow, depth_png_mm, full_face_window, join_half_faces, normal_png_rgb, opposite_half_face
+from monopriors.cube_faces import (
+    PIXEL_CENTRE_PX,
+    CubeFace,
+    FullFaceWindow,
+    depth_png_mm,
+    full_face_window,
+    join_half_faces,
+    normal_png_rgb,
+    opposite_half_face,
+)
 from monopriors.cube_layer import FaceFrameset, iter_framesets, open_rrd, read_cube_faces
 from monopriors.models.moge_v2.export import resolve_num_tokens, token_grid_hw
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TrtPredictor
@@ -86,11 +95,16 @@ def _exported_stamps(dataset_dir: Path, faces: tuple[CubeFace, ...]) -> dict[str
     return {face.name: {int(path.stem) for path in (images_dir / face.name).glob("*.jpg")} for face in faces}
 
 
-def _write_prior(dataset_dir: Path, job: _Job, depth_m: Float32[ndarray, "n n"], normals: Float32[ndarray, "n n 3"], valid: Bool[ndarray, "n n"]) -> None:
+def _write_prior(
+    dataset_dir: Path, job: _Job, depth_m: Float32[ndarray, "n n"], normals: Float32[ndarray, "n n 3"], valid: Bool[ndarray, "n n"]
+) -> None:
     depth_crop: Float32[ndarray, "h w"] = job.window.crop(depth_m)
     normal_crop: Float32[ndarray, "h w 3"] = job.window.crop(normals)
     valid_crop: Bool[ndarray, "h w"] = job.window.crop(valid)
-    for kind, image in (("depths", depth_png_mm(depth_crop, valid_crop)), ("normals", cv2.cvtColor(normal_png_rgb(normal_crop, valid_crop), cv2.COLOR_RGB2BGR))):
+    for kind, image in (
+        ("depths", depth_png_mm(depth_crop, valid_crop)),
+        ("normals", cv2.cvtColor(normal_png_rgb(normal_crop, valid_crop), cv2.COLOR_RGB2BGR)),
+    ):
         path: Path = dataset_dir / kind / job.face.name / f"{job.t_ns}.png"
         if not cv2.imwrite(str(path), image):
             raise OSError(f"could not write {path}")
@@ -111,9 +125,15 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
         for face in faces:
             for kind in ("depths", "normals"):
                 (config.dataset_dir / kind / face.name).mkdir(parents=True, exist_ok=True)
-        print(f"{len(faces)} faces, full side {sides.pop()} px, MoGe-2 {config.encoder} engine {side_tokens_hw[0]}x{side_tokens_hw[1]}, batch {config.batch_size}")
+        print(
+            f"{len(faces)} faces, full side {sides.pop()} px, MoGe-2 {config.encoder} engine {side_tokens_hw[0]}x{side_tokens_hw[1]}, batch {config.batch_size}"
+        )
         predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
-            encoder=config.encoder, heads="geometry", network_hw_options=(side_tokens_hw,), resolution_level=config.resolution_level, batch_size=config.batch_size
+            encoder=config.encoder,
+            heads="geometry",
+            network_hw_options=(side_tokens_hw,),
+            resolution_level=config.resolution_level,
+            batch_size=config.batch_size,
         )
         pending: list[_Job] = []
         writes: list[Future[None]] = []
@@ -151,4 +171,6 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
             for write in writes:
                 write.result()
         seconds: float = time.perf_counter() - start
-        print(f"wrote priors for {n_images} images ({n_framesets} framesets) in {seconds:.1f} s = {n_images / max(seconds, 1e-9):.1f} images/s -> {config.dataset_dir}")
+        print(
+            f"wrote priors for {n_images} images ({n_framesets} framesets) in {seconds:.1f} s = {n_images / max(seconds, 1e-9):.1f} images/s -> {config.dataset_dir}"
+        )

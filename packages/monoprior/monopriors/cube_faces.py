@@ -128,7 +128,9 @@ def opposite_half_face(face: CubeFace, faces: tuple[CubeFace, ...]) -> CubeFace:
     alignments: list[float] = [float(axis_rig @ other.face_R_rig[2]) for other in candidates]
     best: int = int(np.argmax(alignments))
     if alignments[best] < np.cos(np.deg2rad(10.0)):
-        raise ValueError(f"{face.name}: the best other-lens half-face {candidates[best].name} is {np.rad2deg(np.arccos(min(alignments[best], 1.0))):.1f} deg off")
+        raise ValueError(
+            f"{face.name}: the best other-lens half-face {candidates[best].name} is {np.rad2deg(np.arccos(min(alignments[best], 1.0))):.1f} deg off"
+        )
     return candidates[best]
 
 

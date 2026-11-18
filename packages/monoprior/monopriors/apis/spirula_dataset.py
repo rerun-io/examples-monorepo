@@ -95,7 +95,11 @@ def rewrite_image_names(text: str) -> tuple[str, dict[int, ColmapImageKey], dict
     Returns:
         The rewritten text, the key per image id and the camera id per image id.
     """
-    out: list[str] = ["# Image list with two lines of data per image:", "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME", "#   POINTS2D[] as (X, Y, POINT3D_ID)"]
+    out: list[str] = [
+        "# Image list with two lines of data per image:",
+        "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME",
+        "#   POINTS2D[] as (X, Y, POINT3D_ID)",
+    ]
     keys: dict[int, ColmapImageKey] = {}
     camera_ids: dict[int, int] = {}
     for header, points in _image_records(text):
@@ -142,7 +146,9 @@ def _check_cameras(cameras: dict[int, ColmapCamera], keys: dict[int, ColmapImage
         camera: ColmapCamera = cameras[camera_ids[image_id]]
         face: CubeFace = faces[key.face]
         if camera.model != "PINHOLE" or (camera.width, camera.height) != (face.width, face.height):
-            raise ValueError(f"camera {camera.camera_id} is {camera.model} {camera.width}x{camera.height}; face {face.name} is PINHOLE {face.width}x{face.height}")
+            raise ValueError(
+                f"camera {camera.camera_id} is {camera.model} {camera.width}x{camera.height}; face {face.name} is PINHOLE {face.width}x{face.height}"
+            )
         layer_params: Float64[ndarray, "4"] = np.array([face.k_matrix[0, 0], face.k_matrix[1, 1], face.k_matrix[0, 2], face.k_matrix[1, 2]])
         if np.max(np.abs(camera.params - layer_params)) > 1.0:
             print(f"warning: camera {camera.camera_id} ({face.name}) params {camera.params} differ from the layer's {layer_params} by more than 1 px")
