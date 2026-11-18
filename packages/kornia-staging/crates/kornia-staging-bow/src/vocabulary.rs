@@ -12,7 +12,8 @@
 //!   sums fixed chunks in a fixed order);
 //! * greedy descent to a leaf word, as DBoW2's `transform` and kornia-bow's `traverse` do;
 //! * [`tf_idf`]: term counts weighted by `ln(n_images / document frequency)`, L1-normalized, ready for
-//!   [`crate::Database`] and [`BoW::l1_similarity`].
+//!   [`crate::Database`] and [`BoW::l1_similarity`];
+//! * [`similarity_matrix`]: every pair's DBoW2 L1 score at once, the per-run retrieval index.
 //!
 //! Descriptors are `[f32; D]` rows, the layout [`kornia_bow::metric::Feature<f32, D>`] dereferences to, so a
 //! C-contiguous `n x D` float32 buffer is borrowed with `<[f32]>::as_chunks::<D>()` instead of copied.
@@ -70,8 +71,6 @@ pub enum VocabularyError {
     TooManyWords,
     /// Training needs at least one descriptor.
     NoTrainingData,
-    /// Image offsets must start at 0, never decrease and end at the number of words.
-    Offsets,
 }
 
 impl fmt::Display for VocabularyError {
@@ -81,10 +80,6 @@ impl fmt::Display for VocabularyError {
             Self::Depth(d) => write!(f, "depth must be at least 1, got {d}"),
             Self::TooManyWords => write!(f, "branching^depth does not fit a u32 word id"),
             Self::NoTrainingData => write!(f, "no training descriptors"),
-            Self::Offsets => write!(
-                f,
-                "offsets must start at 0, be non-decreasing and end at the word count"
-            ),
         }
     }
 }
@@ -307,10 +302,6 @@ impl<const D: usize> Vocabulary<D> {
                 order[cursor[node as usize]] = i;
                 cursor[node as usize] += 1;
             }
-            let parent_live: Vec<bool> = live.last().cloned().unwrap_or_else(|| vec![true]);
-            let parent_centroid = |node: usize| -> Option<[f32; D]> {
-                centroids.last().map(|level: &Vec<[f32; D]>| level[node])
-            };
 
             let fitted: Vec<FittedNode<D>> = (0..n_nodes)
                 .into_par_iter()
@@ -319,9 +310,13 @@ impl<const D: usize> Vocabulary<D> {
                     let mut slots = vec![[0.0f32; D]; branching];
                     let mut alive = vec![false; branching];
                     if members.is_empty() {
-                        if parent_live[node] {
-                            if let Some(c) = parent_centroid(node) {
-                                slots[0] = c;
+                        // Only below the root: level 0 is the root, which holds every descriptor, so an empty node
+                        // always has a parent level. A live parent passes its centroid down; a dead one stays dead.
+                        if let (Some(parent_centroids), Some(parent_live)) =
+                            (centroids.last(), live.last())
+                        {
+                            if parent_live[node] {
+                                slots[0] = parent_centroids[node];
                                 alive[0] = true;
                             }
                         }
@@ -413,36 +408,25 @@ impl<const D: usize> Vocabulary<D> {
     }
 }
 
-/// TF-IDF bags of words of a set of images, from their descriptors' words.
+/// TF-IDF bags of words of a set of images, from the words of each image's descriptors.
 ///
-/// Image `i` owns `words[offsets[i]..offsets[i + 1]]`. Word `w` of image `i` weighs
-/// `count_i(w) * ln(n_images / df(w))`, where `df(w)` is the number of images containing `w`; words of weight 0
-/// (in every image) are dropped and each bag is L1-normalized. An image whose every word is dropped gets an empty
-/// bag.
+/// Word `w` of image `i` weighs `count_i(w) * ln(n_images / df(w))`, where `df(w)` is the number of images
+/// containing `w`; words of weight 0 (in every image) are dropped and each bag is L1-normalized. An image whose every
+/// word is dropped gets an empty bag.
 ///
 /// ```
 /// use kornia_staging_bow::vocabulary::tf_idf;
 ///
 /// // Word 7 is in both images (idf 0, dropped); words 1 and 2 each in one.
-/// let bows = tf_idf(&[1, 1, 7, 2, 7], &[0, 3, 5]).unwrap();
+/// let bows = tf_idf(&[vec![1, 1, 7], vec![2, 7]]);
 /// assert_eq!(bows[0].0, vec![(1, 1.0)]);
 /// assert_eq!(bows[1].0, vec![(2, 1.0)]);
 /// ```
-///
-/// # Errors
-///
-/// [`VocabularyError::Offsets`] when `offsets` does not partition `words`.
-pub fn tf_idf(words: &[u32], offsets: &[usize]) -> Result<Vec<BoW>, VocabularyError> {
-    if offsets.first() != Some(&0)
-        || offsets.last() != Some(&words.len())
-        || offsets.windows(2).any(|w| w[0] > w[1])
-    {
-        return Err(VocabularyError::Offsets);
-    }
-    let counts: Vec<Vec<(u32, u32)>> = offsets
-        .par_windows(2)
-        .map(|w| {
-            let mut image = words[w[0]..w[1]].to_vec();
+pub fn tf_idf<W: AsRef<[u32]> + Sync>(images: &[W]) -> Vec<BoW> {
+    let counts: Vec<Vec<(u32, u32)>> = images
+        .par_iter()
+        .map(|image| {
+            let mut image = image.as_ref().to_vec();
             image.sort_unstable();
             let mut runs: Vec<(u32, u32)> = Vec::new();
             for word in image {
@@ -461,7 +445,7 @@ pub fn tf_idf(words: &[u32], offsets: &[usize]) -> Result<Vec<BoW>, VocabularyEr
         }
     }
     let n_images = counts.len() as f64;
-    Ok(counts
+    counts
         .into_par_iter()
         .map(|image| {
             let mut bow = BoW(image
@@ -475,7 +459,57 @@ pub fn tf_idf(words: &[u32], offsets: &[usize]) -> Result<Vec<BoW>, VocabularyEr
             bow.normalize_l1();
             bow
         })
-        .collect())
+        .collect()
+}
+
+/// The dense `n x n` DBoW2 L1 score matrix (row-major) of a set of images, from the words of each image's
+/// descriptors: [`tf_idf`] bags, then `s(q, d) = -0.5 * sum over shared words of (|q_w - d_w| - |q_w| - |d_w|)`,
+/// clamped to `[0, 1]`. The diagonal is 1.0; an empty bag scores 0 against every other image.
+///
+/// The scores equal [`crate::Database::query`]'s on the same bags, bit for bit: the same terms are summed in f64 in
+/// the same order (query words in word order, entries in image order). Each row is one pass over the inverted lists
+/// of its words into a dense per-thread accumulator, so a row costs the postings it touches plus `n`, with no
+/// hashing and no sort; rows run in parallel.
+///
+/// ```
+/// use kornia_staging_bow::vocabulary::similarity_matrix;
+///
+/// let scores = similarity_matrix(&[vec![1, 2], vec![1, 3], vec![9]]);
+/// assert_eq!(scores[0], 1.0); // diagonal
+/// assert_eq!(scores[1], scores[3]); // symmetric
+/// assert_eq!(scores[2], 0.0); // no shared word
+/// ```
+pub fn similarity_matrix<W: AsRef<[u32]> + Sync>(images: &[W]) -> Vec<f32> {
+    let bows = tf_idf(images);
+    let n = bows.len();
+    // Inverted lists in image order, without weight-0 words (as the Database indexes them).
+    let mut inverted: HashMap<u32, Vec<(usize, f32)>> = HashMap::new();
+    for (entry, bow) in bows.iter().enumerate() {
+        for &(word, weight) in bow.0.iter().filter(|&&(_, w)| w != 0.0) {
+            inverted.entry(word).or_default().push((entry, weight));
+        }
+    }
+    let mut scores = vec![0.0f32; n * n];
+    if n == 0 {
+        return scores;
+    }
+    scores.par_chunks_mut(n).enumerate().for_each_init(
+        || vec![0.0f64; n],
+        |sums, (query, row)| {
+            sums.fill(0.0);
+            for &(word, q) in bows[query].0.iter().filter(|&&(_, w)| w != 0.0) {
+                for &(entry, d) in inverted.get(&word).into_iter().flatten() {
+                    let (q, d) = (f64::from(q), f64::from(d));
+                    sums[entry] += (q - d).abs() - q.abs() - d.abs();
+                }
+            }
+            for (score, &sum) in row.iter_mut().zip(sums.iter()) {
+                *score = ((-sum / 2.0) as f32).clamp(0.0, 1.0);
+            }
+            row[query] = 1.0;
+        },
+    );
+    scores
 }
 
 #[cfg(test)]

@@ -57,40 +57,21 @@ fn rejects_invalid_settings() {
 }
 
 #[test]
-fn same_seed_same_tree_for_any_thread_count() {
+fn a_different_seed_gives_a_different_tree() {
+    // Same seed across thread counts is the proptest `same_seed_same_vocabulary_across_thread_counts`.
     let data = random_points::<8>(5000, 1);
-    let cfg = config(4, 3, 5, 42);
-    let train_with = |threads: usize| {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap();
-        pool.install(|| Vocabulary::train(&data, &cfg).unwrap())
-    };
-    let one = train_with(1);
-    let many = train_with(8);
-    assert_eq!(one.centroids, many.centroids);
-    assert_eq!(one.live, many.live);
-    assert_eq!(one.words(&data), many.words(&data));
-    let other_seed = Vocabulary::train(&data, &config(4, 3, 5, 43)).unwrap();
-    assert_ne!(one.centroids, other_seed.centroids);
+    let a = Vocabulary::train(&data, &config(4, 3, 5, 42)).unwrap();
+    let b = Vocabulary::train(&data, &config(4, 3, 5, 43)).unwrap();
+    assert_ne!(a.centroids, b.centroids);
 }
 
 #[test]
-fn separates_well_separated_clusters() {
-    // 4 clusters at the corners of a square, 2 x 2 tree: each top-level child must hold exactly one cluster.
+fn lloyd_iterations_put_centroids_on_cluster_means() {
+    // Recovery of well-separated clusters is the proptest `well_separated_clusters_are_recovered`; this checks that
+    // the centroids are the cluster means (k-means++ alone would leave them on training points).
     let centers = [[0.0f32, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]];
     let data = clustered(&centers, 50, 3);
     let vocabulary = Vocabulary::train(&data, &config(4, 1, 10, 0)).unwrap();
-    let words: Vec<u32> = centers.iter().map(|c| vocabulary.word(c)).collect();
-    let mut distinct = words.clone();
-    distinct.sort_unstable();
-    distinct.dedup();
-    assert_eq!(distinct.len(), 4, "{words:?}");
-    for (point, center) in data.iter().zip(centers.iter().cycle()) {
-        assert_eq!(vocabulary.word(point), vocabulary.word(center));
-    }
-    // Lloyd iterations move the centroids onto the cluster means, not onto one training point.
     for center in &centers {
         let closest = vocabulary.centroids[0]
             .iter()
@@ -148,8 +129,7 @@ fn duplicates_do_not_break_training() {
 #[test]
 fn tf_idf_matches_a_hand_computed_case() {
     // 3 images. Word 1 in images 0 and 1 (idf ln 1.5), word 2 only in image 0 (idf ln 3), word 3 everywhere (0).
-    let words = [1, 1, 2, 3, /**/ 1, 3, /**/ 3];
-    let bows = tf_idf(&words, &[0, 4, 6, 7]).unwrap();
+    let bows = tf_idf(&[vec![1, 1, 2, 3], vec![1, 3], vec![3]]);
     let (a, b) = (2.0 * 1.5f64.ln(), 3.0f64.ln());
     let expected0 = [(1u32, a / (a + b)), (2, b / (a + b))];
     assert_eq!(bows[0].0.len(), 2);
@@ -171,22 +151,6 @@ fn tf_idf_matches_a_hand_computed_case() {
     assert_eq!(results[0].entry, 1);
     assert_eq!(results[1].entry, 0);
     assert!((f64::from(results[1].score) - score).abs() < 1e-6);
-}
-
-#[test]
-fn tf_idf_rejects_bad_offsets() {
-    assert_eq!(
-        tf_idf(&[1, 2], &[0, 1]).unwrap_err(),
-        VocabularyError::Offsets
-    );
-    assert_eq!(
-        tf_idf(&[1, 2], &[1, 2]).unwrap_err(),
-        VocabularyError::Offsets
-    );
-    assert_eq!(
-        tf_idf(&[1, 2], &[0, 2, 1, 2]).unwrap_err(),
-        VocabularyError::Offsets
-    );
 }
 
 mod properties {
@@ -214,14 +178,6 @@ mod properties {
         proptest::collection::vec(proptest::collection::vec(0u32..12, 0..20), 1..8)
     }
 
-    fn flatten(images: &[Vec<u32>]) -> (Vec<u32>, Vec<usize>) {
-        let mut offsets = vec![0];
-        for image in images {
-            offsets.push(offsets.last().unwrap() + image.len());
-        }
-        (images.concat(), offsets)
-    }
-
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -236,7 +192,6 @@ mod properties {
             prop_assert_eq!(&one.centroids, &eight.centroids);
             prop_assert_eq!(&one.live, &eight.live);
             prop_assert_eq!(one.words(&data), eight.words(&data));
-            prop_assert_eq!(train_in(8, &data, &cfg).centroids, one.centroids.clone());
         }
 
         /// Every descriptor, seen or not, lands on exactly one live leaf inside the word range.
@@ -256,8 +211,7 @@ mod properties {
         /// TF-IDF bags are non-negative, sorted by word, and sum to 1 unless every word was dropped.
         #[test]
         fn tf_idf_rows_are_l1_normalised_and_non_negative(images in images()) {
-            let (words, offsets) = flatten(&images);
-            for bow in tf_idf(&words, &offsets).unwrap() {
+            for bow in tf_idf(&images) {
                 prop_assert!(bow.0.iter().all(|&(_, w)| w > 0.0));
                 prop_assert!(bow.0.windows(2).all(|p| p[0].0 < p[1].0));
                 if !bow.0.is_empty() {
@@ -269,12 +223,11 @@ mod properties {
 
         /// The L1 score is symmetric and in [0, 1], and a bag scores 1 against itself. An image whose every word was
         /// dropped has an empty bag: the Database never returns it (it has no word to share), while kornia-bow's
-        /// `l1_similarity` reads it as `1 - |q - d|_1 / 2` (1 against another empty bag, 0.5 against any other), so
-        /// callers that score pairs directly must treat empty bags as 0 (the `bow_vocab` binding does).
+        /// `l1_similarity` reads it as `1 - |q - d|_1 / 2` (1 against another empty bag, 0.5 against any other);
+        /// [`similarity_matrix`] scores it 0, as the Database does.
         #[test]
         fn score_is_symmetric_bounded_and_one_on_itself(images in images()) {
-            let (words, offsets) = flatten(&images);
-            let bows = tf_idf(&words, &offsets).unwrap();
+            let bows = tf_idf(&images);
             let mut database = Database::new();
             for bow in &bows {
                 database.add(bow);
@@ -299,8 +252,7 @@ mod properties {
         /// The inverted-file top-k equals a brute-force ranking by pairwise L1 similarity (ties by entry order).
         #[test]
         fn database_top_k_equals_brute_force_ranking(images in images(), k in 1usize..6) {
-            let (words, offsets) = flatten(&images);
-            let bows = tf_idf(&words, &offsets).unwrap();
+            let bows = tf_idf(&images);
             let mut database = Database::new();
             for bow in &bows {
                 database.add(bow);
@@ -320,6 +272,37 @@ mod properties {
                     prop_assert!((q.l1_similarity(&bows[hit.entry as usize]) - hit.score).abs() < 1e-5);
                 }
                 prop_assert_eq!(hits.len(), brute.len().min(k));
+            }
+        }
+
+        /// The dense matrix equals the Database's scores on the same bags: symmetric, diagonal 1, in [0, 1], and an
+        /// empty bag scores 0 against every other image.
+        #[test]
+        fn similarity_matrix_equals_database_scores(images in images()) {
+            let scores = similarity_matrix(&images);
+            let bows = tf_idf(&images);
+            let n = bows.len();
+            prop_assert_eq!(scores.len(), n * n);
+            let mut database = Database::new();
+            for bow in &bows {
+                database.add(bow);
+            }
+            for q in 0..n {
+                let mut expected = vec![0.0f32; n];
+                for hit in database.query(&bows[q], 0) {
+                    expected[hit.entry as usize] = hit.score.clamp(0.0, 1.0);
+                }
+                expected[q] = 1.0;
+                prop_assert_eq!(&scores[q * n..(q + 1) * n], &expected[..]);
+                for d in 0..n {
+                    let s = scores[q * n + d];
+                    prop_assert!((0.0..=1.0).contains(&s));
+                    // f64 sums of `|q-d| - |q| - |d|` and `|d-q| - |d| - |q|` can differ in the last bit.
+                    prop_assert!((s - scores[d * n + q]).abs() < 1e-6);
+                    if q != d && (bows[q].0.is_empty() || bows[d].0.is_empty()) {
+                        prop_assert_eq!(s, 0.0);
+                    }
+                }
             }
         }
 
