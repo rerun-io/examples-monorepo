@@ -139,6 +139,34 @@ fn the_map_never_moves_a_vio_pose_while_it_culls() {
         realtime.finish_deferred_keyframe().unwrap();
         realtime.flush_backend();
         assert_eq!(realtime.map_snapshot(), on.map_snapshot());
+        // f1: without a loop, Realtime and Offline give the same final
+        // trajectory.
+        let raw = |results: &[api::VioResult]| -> Vec<(i64, [f64; 7])> {
+            results
+                .iter()
+                .filter_map(|result| result.pose.map(|pose| (result.t_ns, pose.world_from_rig)))
+                .collect()
+        };
+        let offline_map = on.map_snapshot().unwrap();
+        let offline_final = offline_map.reanchor(&raw(&with.results)).unwrap();
+        let realtime_final = realtime
+            .map_snapshot()
+            .unwrap()
+            .reanchor(&raw(&threaded.results))
+            .unwrap();
+        assert_eq!(realtime_final, offline_final);
+        assert_eq!(offline_final.len(), raw(&with.results).len());
+        // Each map keyframe lands on its map pose.
+        let raw_t_ns: Vec<i64> = raw(&with.results).iter().map(|&(t_ns, _)| t_ns).collect();
+        for (t_ns, pose) in offline_map
+            .keyframe_t_ns
+            .iter()
+            .zip(&offline_map.keyframe_poses)
+        {
+            let row = raw_t_ns.binary_search(t_ns).unwrap();
+            let [x, y, z, ..] = offline_final[row];
+            assert!((nalgebra::Vector3::new(x, y, z) - pose.translation).norm() < 1e-12);
+        }
         let counters = realtime.backend_counters().unwrap();
         assert_eq!(counters, {
             let mut offline = on.backend_counters().unwrap();

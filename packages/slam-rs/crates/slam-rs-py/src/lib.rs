@@ -76,7 +76,10 @@ impl VioResult {
         self.inner.t_ns
     }
 
-    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`.
+    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`: the raw,
+    /// causal VIO, which is also this frame's corrected pose (the pose-graph
+    /// gauge fixes the window). The corrected history is
+    /// `slam_rs.tracking.reanchored(poses, vio.map_snapshot())`.
     #[getter]
     fn world_from_rig<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.inner
@@ -666,6 +669,10 @@ pub struct MapSnapshot {
     /// `[a, b]` per edge.
     covisibility_edges: Vec<i64>,
     covisibility_weights: Vec<u32>,
+    /// `[from, to]` per pose-graph edge.
+    pose_graph_edges: Vec<i64>,
+    /// 0 spanning tree, 1 loop closure, 2 high covisibility, per pose-graph edge.
+    pose_graph_edge_kinds: Vec<u8>,
     snapshot_stats: slam_rs::backend::MapStats,
     culls: slam_rs::backend::CullCounts,
     high_covisibility_weight: u32,
@@ -765,6 +772,20 @@ impl MapSnapshot {
                 .covisibility_edges
                 .iter()
                 .map(|&(_, _, weight)| weight)
+                .collect(),
+            pose_graph_edges: snapshot
+                .pose_graph_edges
+                .iter()
+                .flat_map(|edge| [edge.from, edge.to])
+                .collect(),
+            pose_graph_edge_kinds: snapshot
+                .pose_graph_edges
+                .iter()
+                .map(|edge| match edge.kind {
+                    slam_rs::backend::PoseGraphEdgeKind::SpanningTree => 0,
+                    slam_rs::backend::PoseGraphEdgeKind::LoopClosure => 1,
+                    slam_rs::backend::PoseGraphEdgeKind::HighCovisibility => 2,
+                })
                 .collect(),
             snapshot_stats: snapshot.stats,
             culls: snapshot.culls,
@@ -888,6 +909,20 @@ impl MapSnapshot {
     #[getter]
     fn covisibility_weights<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
         self.covisibility_weights.to_pyarray(py)
+    }
+
+    /// The edges a pose-graph optimization would take now, `[from, to]` keyframe timestamps: `int64[g, 2]`.
+    #[getter]
+    fn pose_graph_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.pose_graph_edges
+            .to_pyarray(py)
+            .reshape((self.pose_graph_edge_kinds.len(), 2))
+    }
+
+    /// Kind of each pose-graph edge: 0 spanning tree, 1 loop closure, 2 high covisibility: `uint8[g]`.
+    #[getter]
+    fn pose_graph_edge_kinds<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<u8>> {
+        self.pose_graph_edge_kinds.to_pyarray(py)
     }
 
     /// Map keyframes (RootSLAM's ``num_kfs``).
@@ -1802,6 +1837,56 @@ fn device_probes_run() -> usize {
     slam_rs::device_probes_run()
 }
 
+/// `(t_ns, T_w_i)` rows from parallel timestamp and `[tx, ty, tz, qx, qy, qz, qw]` arrays.
+fn stamped_poses(
+    t_ns: &[i64],
+    poses: &PyReadonlyArray2<'_, f64>,
+    what: &str,
+) -> PyResult<Vec<(i64, slam_rs::lie::Se3<f64>)>> {
+    let poses = poses.as_array();
+    if poses.ncols() != 7 || poses.nrows() != t_ns.len() {
+        return Err(PyValueError::new_err(format!(
+            "{what}: {} timestamps need {} x 7 poses, got {:?}",
+            t_ns.len(),
+            t_ns.len(),
+            poses.shape()
+        )));
+    }
+    t_ns.iter()
+        .zip(poses.rows())
+        .map(|(&t_ns, row)| {
+            let rotation = slam_rs::lie::So3::from_quaternion_xyzw(row[3], row[4], row[5], row[6])
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!("{what}: no unit quaternion at {t_ns} ns"))
+                })?;
+            Ok((
+                t_ns,
+                slam_rs::lie::Se3::new(rotation, nalgebra::Vector3::new(row[0], row[1], row[2])),
+            ))
+        })
+        .collect()
+}
+
+/// The final trajectory: every raw frame pose re-anchored on the optimized
+/// keyframes on both sides (`slam_rs::backend::reanchor`, PR f1).
+#[pyfunction]
+fn reanchor<'py>(
+    py: Python<'py>,
+    frame_t_ns: numpy::PyReadonlyArray1<'_, i64>,
+    frame_poses: PyReadonlyArray2<'_, f64>,
+    keyframe_t_ns: numpy::PyReadonlyArray1<'_, i64>,
+    keyframe_poses: PyReadonlyArray2<'_, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let frames = stamped_poses(frame_t_ns.as_slice()?, &frame_poses, "frames")?;
+    let keyframes = stamped_poses(keyframe_t_ns.as_slice()?, &keyframe_poses, "keyframes")?;
+    let anchored = slam_rs::backend::reanchor(&frames, &keyframes)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let flat: Vec<f64> = flat_poses(&anchored);
+    numpy::ndarray::Array2::from_shape_vec((anchored.len(), 7), flat)
+        .map(|array| array.to_pyarray(py))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// The compiled core of the `slam_rs` package.
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1811,6 +1896,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
     module.add_function(wrap_pyfunction!(select_backend, module)?)?;
     module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
+    module.add_function(wrap_pyfunction!(reanchor, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
     module.add_class::<VioStatus>()?;

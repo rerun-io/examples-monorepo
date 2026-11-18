@@ -6828,6 +6828,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-staging-imgproc",
+ "nalgebra",
  "numpy",
  "pyo3",
  "slam-rs",

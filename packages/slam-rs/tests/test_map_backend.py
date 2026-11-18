@@ -31,6 +31,8 @@ def _run(rig: RigFactory, texture: TextureFactory, mode: Literal["offline", "rea
         result: _core.VioResult = vio.track(index * 20_000_000, images)
         assert result.status == _core.VioStatus.Tracking
         assert result.world_from_rig is not None
+        # The live pose is the raw causal VIO; the corrected history comes from the map (``tracking.reanchored``), not from ``track``.
+        assert not hasattr(result, "world_from_rig_corrected")
         poses.append(result.world_from_rig)
     vio.flush()
     return poses, vio

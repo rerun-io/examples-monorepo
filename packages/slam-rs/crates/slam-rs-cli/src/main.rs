@@ -103,8 +103,8 @@ pub(crate) struct ReplayOutputs {
     /// Trajectory CSV: `t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z` on the clip's frameset clock, tracked framesets only.
     #[arg(long)]
     pub(crate) out: PathBuf,
-    /// Raw VIO trajectory CSV, same format as `--out`. Until re-anchoring on the optimised keyframes lands, the final
-    /// trajectory in `--out` is the raw VIO, so the two files are equal.
+    /// Raw VIO trajectory CSV, same format as `--out`. `--out` holds the final trajectory: the raw VIO re-anchored on
+    /// the map's keyframes, or the raw VIO itself with the back end off.
     #[arg(long)]
     pub(crate) out_vio: Option<PathBuf>,
     /// Summary JSON: wall time, per-frameset track times, frontend stage means.

@@ -19,6 +19,7 @@ module in this directory therefore stands alone.
 
 import itertools
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -59,6 +60,7 @@ from slam_rs.vio_log import (
     MARGINALIZED_COLOR,
     POSE_COLOR,
     RUN_ENTITY,
+    VIO_RUN_ENTITY,
     VIO_STATS_ENTITY,
     VioLogger,
     inverted,
@@ -103,6 +105,7 @@ def drive(
     output: Path,
     read_rows: RowsReader,
     map_every_ns: tuple[int, int] = (MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS),
+    finish: Callable[[VioLogger], None] | None = None,
 ) -> Logged:
     """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
 
@@ -114,6 +117,7 @@ def drive(
         output: Where the ``.rrd`` is written.
         read_rows: Reads the recording back, from :mod:`conftest`.
         map_every_ns: The logger's map-keyframes and map-points cadences.
+        finish: Called with the logger at the last cursor, after the complete paths (what a replay ends with).
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
@@ -158,6 +162,8 @@ def drive(
     # What a replay ends with, and the other half of the segment form: the rows
     # above are one segment each, these are the whole paths, static.
     logger.log_complete_paths()
+    if finish is not None:
+        finish(logger)
     rr.disconnect()
     return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output, newest_keyframes=newest_keyframes)
 
@@ -211,14 +217,14 @@ def test_every_rig_camera_pins_its_frustum_to_one_size(camera: CameraFactory, tm
     output: Path = tmp_path / "rig.rrd"
     rr.init("slam-rs-vio-log-test", recording_id=f"rig-{tmp_path.name}")
     rr.save(output)
-    log_rig((camera(0, 0.0), camera(1, 0.1)), f"{RUN_ENTITY}/rig")
+    log_rig((camera(0, 0.0), camera(1, 0.1)), f"{VIO_RUN_ENTITY}/rig")
     log_rig((camera(0, 0.0), camera(1, 0.1)), RIG_ENTITY, pinhole_child="/pinhole")
     rr.disconnect()
     # Float32 in the file, so approximately 0.1 is the most the component can say.
     assert image_planes(output) == pytest.approx(
         {
             f"{prefix}/cam_{index:02d}{child}": IMAGE_PLANE_M
-            for prefix, child in ((f"{RUN_ENTITY}/rig", ""), (RIG_ENTITY, "/pinhole"))
+            for prefix, child in ((f"{VIO_RUN_ENTITY}/rig", ""), (RIG_ENTITY, "/pinhole"))
             for index in range(2)
         }
     )
@@ -233,9 +239,9 @@ def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
     """
     assert len(logged.tracked) >= FRAMESETS - 2, "only the framesets before the first covered one may fail to track"
     for entity in (
-        f"{RUN_ENTITY}/rig",
-        f"{RUN_ENTITY}/window/00",
-        f"{RUN_ENTITY}/landmarks",
+        f"{VIO_RUN_ENTITY}/rig",
+        f"{VIO_RUN_ENTITY}/window/00",
+        f"{VIO_RUN_ENTITY}/landmarks",
         f"{VIO_STATS_ENTITY}/num_landmarks",
         f"{VIO_STATS_ENTITY}/lm_iterations",
         f"{VIO_STATS_ENTITY}/lm_error_before",
@@ -254,7 +260,7 @@ def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None
     themselves are two points each, which is what makes the rung linear. The
     first tracked frameset has one pose and no pair, so it writes no row.
     """
-    rows: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory"]
+    rows: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trajectory"]
     assert [t_ns for t_ns, _ in rows] == logged.tracked[1:]
     assert [len(values["LineStrips3D:strips"][0]) for _, values in rows] == [2] * len(rows)
     assert len(logged.logger.estimated()) == len(logged.tracked)
@@ -279,8 +285,8 @@ def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -
 def test_the_whole_paths_are_logged_once_at_the_end(logged: Logged) -> None:
     """One static row per path, so a viewer opened at any cursor sees where each run went."""
     strips: dict[str, int] = static_path_lengths(logged.recording)
-    assert sorted(strips) == sorted([f"{RUN_ENTITY}/path", f"{GT_ENTITY}/path"])
-    assert strips[f"{RUN_ENTITY}/path"] == len(logged.tracked)
+    assert sorted(strips) == sorted([f"{VIO_RUN_ENTITY}/path", f"{GT_ENTITY}/path"])
+    assert strips[f"{VIO_RUN_ENTITY}/path"] == len(logged.tracked)
     assert strips[f"{GT_ENTITY}/path"] == FRAMESETS
 
 
@@ -368,23 +374,23 @@ def test_window_frames_are_pinhole_cameras_on_numbered_slots(logged: Logged) -> 
     (keyframe, long-term keyframe, plain frame) is the frustum's colour. No
     hand-drawn wireframes anywhere under the window.
     """
-    slots: list[str] = slot_entities(logged.rows, f"{RUN_ENTITY}/window")
-    assert slots and slots[0] == f"{RUN_ENTITY}/window/00"
+    slots: list[str] = slot_entities(logged.rows, f"{VIO_RUN_ENTITY}/window")
+    assert slots and slots[0] == f"{VIO_RUN_ENTITY}/window/00"
     for entity, rows in logged.rows.items():
-        if entity.startswith((f"{RUN_ENTITY}/window", f"{RUN_ENTITY}/marginalized")):
+        if entity.startswith((f"{VIO_RUN_ENTITY}/window", f"{VIO_RUN_ENTITY}/marginalized")):
             assert not any("LineStrips3D:strips" in values for _, values in rows), entity
     for slot in slots:
         assert all("Transform3D:translation" in values for _, values in logged.rows[slot] if "Clear:is_recursive" not in values), slot
         colours: set[int] = {values["Pinhole:color"][0] for _, values in logged.rows[f"{slot}/cam_00"] if "Pinhole:color" in values}
         assert colours and colours <= {packed(KEYFRAME_COLOR), packed(LTKF_COLOR), packed(POSE_COLOR)}, slot
     planes: dict[str, float] = image_planes(logged.recording)
-    assert planes[f"{RUN_ENTITY}/window/00/cam_00"] == pytest.approx(FRUSTUM_DEPTH_M)
-    assert planes[f"{RUN_ENTITY}/rig/cam_00"] == pytest.approx(IMAGE_PLANE_M)
+    assert planes[f"{VIO_RUN_ENTITY}/window/00/cam_00"] == pytest.approx(FRUSTUM_DEPTH_M)
+    assert planes[f"{VIO_RUN_ENTITY}/rig/cam_00"] == pytest.approx(IMAGE_PLANE_M)
 
 
 def test_the_frames_a_marginalization_removed_are_faded_pinholes_at_the_poses_they_held(logged: Logged) -> None:
     """A frame the last marginalization removed is drawn once more, as the same camera, in the marginalized colour."""
-    slots: list[str] = slot_entities(logged.rows, f"{RUN_ENTITY}/marginalized")
+    slots: list[str] = slot_entities(logged.rows, f"{VIO_RUN_ENTITY}/marginalized")
     assert slots, "no frameset drew a frame the last marginalization removed"
     drawn: list[int] = [t_ns for t_ns, values in logged.rows[slots[0]] if "Transform3D:translation" in values]
     assert drawn
@@ -394,7 +400,7 @@ def test_the_frames_a_marginalization_removed_are_faded_pinholes_at_the_poses_th
 
 def test_a_slot_is_cleared_once_when_it_empties_and_not_again_until_it_is_reused(logged: Logged) -> None:
     """Rerun keeps the latest state, so one clear at the frameset a slot empties is exactly enough; repeating it is waste."""
-    for prefix in (f"{RUN_ENTITY}/window", f"{RUN_ENTITY}/marginalized"):
+    for prefix in (f"{VIO_RUN_ENTITY}/window", f"{VIO_RUN_ENTITY}/marginalized"):
         for slot in slot_entities(logged.rows, prefix):
             drawn: set[int] = {t_ns for t_ns, values in logged.rows[slot] if "Transform3D:translation" in values}
             cleared: list[int] = [t_ns for t_ns, values in logged.rows[slot] if "Clear:is_recursive" in values]
@@ -413,12 +419,12 @@ def translations(rows: Rows, entity: str) -> dict[int, tuple[float, ...]]:
 
 def test_window_slots_hold_real_poses_and_marginalized_slots_hold_the_poses_they_held(logged: Logged) -> None:
     """The newest window pose is where the rig is; a marginalized frame is drawn where the previous window had it."""
-    rig: dict[int, tuple[float, ...]] = translations(logged.rows, f"{RUN_ENTITY}/rig")
-    window: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{RUN_ENTITY}/window")]
+    rig: dict[int, tuple[float, ...]] = translations(logged.rows, f"{VIO_RUN_ENTITY}/rig")
+    window: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{VIO_RUN_ENTITY}/window")]
     for t_ns in logged.tracked:
         drawn_now: set[tuple[float, ...]] = {slot[t_ns] for slot in window if t_ns in slot}
         assert rig[t_ns] in drawn_now, (t_ns, "the current rig pose is not among the window frames")
-    marginalized: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{RUN_ENTITY}/marginalized")]
+    marginalized: list[dict[int, tuple[float, ...]]] = [translations(logged.rows, slot) for slot in slot_entities(logged.rows, f"{VIO_RUN_ENTITY}/marginalized")]
     checked: int = 0
     for previous, t_ns in zip(logged.tracked, logged.tracked[1:], strict=False):
         drawn_before: set[tuple[float, ...]] = {slot[previous] for slot in window if previous in slot}
@@ -470,6 +476,7 @@ def test_only_the_three_paths_reach_back_to_the_start_of_the_recording(camera: C
     assert sorted(str(entity) for entity in world.visualizer_overrides) == [
         f"{GT_ENTITY}/trajectory",
         f"{RUN_ENTITY}/trajectory",
+        f"{VIO_RUN_ENTITY}/trajectory",
     ]
     reaching_back: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
         rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
@@ -557,6 +564,47 @@ def test_the_map_is_drawn_under_the_run_as_keyframes_join_and_ends_on_the_final_
     assert np.isfinite(final.points_world).all()
 
 
+def test_the_final_map_draws_the_pose_graph_and_the_keyframes_before_and_after_pgo(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """After the flush the run carries ``pgo/{before,after}`` (DESIGN §8, PR f1) and the pose graph; the final trajectory lands on the map keyframes."""
+    from slam_rs.map_loops import PGO_AFTER_ENTITY, PGO_BEFORE_ENTITY, POSE_GRAPH_ENTITY
+    from slam_rs.tracking import reanchored
+
+    assert (PGO_BEFORE_ENTITY, PGO_AFTER_ENTITY, POSE_GRAPH_ENTITY) == (
+        "/world/runs/slam_rs/pgo/before", "/world/runs/slam_rs/pgo/after", "/world/runs/slam_rs/pose_graph"
+    )
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "pgo.rrd", read_rows)
+    final_map: _core.MapSnapshot | None = vio.map_snapshot()
+    assert final_map is not None
+    k: int = final_map.keyframe_t_ns.shape[0]
+    assert k >= 2
+    g: int = final_map.pose_graph_edges.shape[0]
+    assert final_map.pose_graph_edges.dtype == np.int64
+    assert final_map.pose_graph_edge_kinds.dtype == np.uint8
+    assert final_map.pose_graph_edge_kinds.shape == (g,)
+    assert g >= k - 1, "the spanning tree alone links every keyframe"
+    assert np.isin(final_map.pose_graph_edges, final_map.keyframe_t_ns).all()
+    last: int = logged.tracked[-1]
+    before = [values["LineStrips3D:strips"] for t, values in logged.rows[PGO_BEFORE_ENTITY] if t == last]
+    after = [values["LineStrips3D:strips"] for t, values in logged.rows[PGO_AFTER_ENTITY] if t == last]
+    graph = [values["LineStrips3D:strips"] for t, values in logged.rows[POSE_GRAPH_ENTITY] if t == last]
+    np.testing.assert_allclose(np.asarray(after[-1][0], dtype=np.float64), final_map.keyframe_poses[:, 0:3], atol=1e-6)
+    # No loop closes on this run: before and after are the same path.
+    np.testing.assert_allclose(np.asarray(before[-1][0], dtype=np.float64), final_map.keyframe_raw_poses[:, 0:3], atol=1e-6)
+    assert len(graph[-1]) == g
+
+    estimate: Trajectory = logged.logger.estimated()
+    final: Trajectory = reanchored(estimate, final_map)
+    np.testing.assert_array_equal(final.t_ns, estimate.t_ns)
+    rows: Int64[ndarray, " k"] = np.searchsorted(estimate.t_ns, final_map.keyframe_t_ns)
+    np.testing.assert_array_equal(estimate.t_ns[rows], final_map.keyframe_t_ns)
+    np.testing.assert_allclose(final.position_m[rows], final_map.keyframe_poses[:, 0:3], atol=1e-12)
+    assert reanchored(estimate, None) is estimate
+
+
 def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
     rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
@@ -579,3 +627,63 @@ def test_no_map_is_drawn_with_the_back_end_off(
     assert len(logged.tracked) >= FRAMESETS - 2
     assert MAP_KEYFRAMES_ENTITY not in logged.rows
     assert MAP_POINTS_ENTITY not in logged.rows
+
+
+def test_the_live_run_is_the_raw_vio_and_the_final_run_has_its_own_alignment(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """The replay uses the layer's names (f0): the live raw VIO under ``slam_rs_vio``, the final run under ``slam_rs``.
+
+    The final run is placed by an alignment fitted to the final run itself, so a loop the back end closed lands on
+    the ground truth instead of on the raw run's drift.
+    """
+    assert (RUN_ENTITY, VIO_RUN_ENTITY) == ("/world/runs/slam_rs", "/world/runs/slam_rs_vio")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    truth: Trajectory = straight_line(t_ns)
+    finals: list[Trajectory] = []
+
+    def finish(logger: VioLogger) -> None:
+        estimate: Trajectory = logger.estimated()
+        # Half a metre off the raw run and bent: its alignment cannot be the raw run's.
+        bend: Float64[ndarray, "n 3"] = np.column_stack([np.zeros(len(estimate)), 0.5 + 0.1 * np.arange(len(estimate)) ** 2, np.zeros(len(estimate))])
+        final: Trajectory = Trajectory(t_ns=estimate.t_ns, position_m=estimate.position_m + bend, quaternion_wxyz=estimate.quaternion_wxyz)
+        logger.log_final_run(final)
+        finals.append(final)
+
+    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "final.rrd", read_rows, finish=finish)
+    for part in ("rig", "window/00", "landmarks", "trajectory"):
+        assert f"{VIO_RUN_ENTITY}/{part}" in logged.rows, part
+    assert f"{RUN_ENTITY}/rig" not in logged.rows
+    assert sorted(static_path_lengths(logged.recording)) == sorted([f"{VIO_RUN_ENTITY}/path", f"{GT_ENTITY}/path"])
+
+    # The final run: its whole path once, at the last cursor, under its own alignment.
+    (final,) = finals
+    drawn: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory"]
+    assert [row.t_ns for row in drawn] == [logged.tracked[-1]]
+    np.testing.assert_allclose(np.asarray(drawn[0].values["LineStrips3D:strips"][0], dtype=np.float64), final.position_m, atol=1e-6)
+    placed: list[Row] = [row for row in logged.rows[RUN_ENTITY] if "Transform3D:translation" in row.values]
+    assert [row.t_ns for row in placed] == [logged.tracked[-1]]
+    expected: SimilarityTransform = inverted(ate(final, truth).alignment)
+    raw: SimilarityTransform = inverted(ate(logged.logger.estimated(), truth).alignment)
+    np.testing.assert_allclose(placed[0].values["Transform3D:translation"][0], expected.dst_t_src, atol=1e-5)
+    assert not np.allclose(expected.dst_t_src, raw.dst_t_src, atol=1e-2)
+
+
+def test_until_the_final_run_the_map_sits_on_the_raw_runs_alignment(
+    pipeline: PipelineFactory,
+    texture: TextureFactory,
+    camera: CameraFactory,
+    tmp_path: Path,
+    read_rows: RowsReader,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The map is drawn under ``slam_rs`` while the run goes, so that entity carries the raw run's alignment until the final run replaces it."""
+    monkeypatch.setattr(vio_log, "ATE_EVERY", 1)
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "mirror.rrd", read_rows)
+
+    def placements(entity: str) -> list[tuple[int, list[float]]]:
+        return [(row.t_ns, row.values["Transform3D:translation"][0]) for row in logged.rows[entity] if "Transform3D:translation" in row.values]
+
+    assert placements(VIO_RUN_ENTITY)
+    assert placements(RUN_ENTITY) == placements(VIO_RUN_ENTITY)

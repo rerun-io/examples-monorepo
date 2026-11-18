@@ -36,6 +36,23 @@ def device_probes_run() -> int:
     unit test tier asserts it stays at 0.
     """
 
+def reanchor(
+    frame_t_ns: Int64[ndarray, " n"],
+    frame_poses: Float64[ndarray, "n 7"],
+    keyframe_t_ns: Int64[ndarray, " k"],
+    keyframe_poses: Float64[ndarray, "k 7"],
+) -> Float64[ndarray, "n 7"]:
+    """The final trajectory: each raw frame pose re-anchored on the optimized keyframes on both sides.
+
+    A frame between keyframes ``i`` and ``i+1`` blends ``T_i_opt T_i_raw^-1 T_f_raw`` and the same from ``i+1``
+    (translation lerp, rotation slerp, by time); a keyframe takes its optimized pose; frames outside the keyframes
+    take the nearest keyframe's correction. ``T_i_raw`` is the keyframe's own row in the frames. Poses are
+    ``[tx, ty, tz, qx, qy, qz, qw]``; timestamps increase strictly.
+
+    Raises:
+        ValueError: Timestamps that do not increase, a keyframe that is not a frame, or mismatched shapes.
+    """
+
 def select_backend(request: BackendRequest) -> Lane:
     """Resolve a backend request to the lane :class:`Vio` would run (``slam_rs::select_backend``).
 
@@ -79,7 +96,9 @@ class VioResult:
     def world_from_rig(self) -> Float64[ndarray, " 7"] | None:
         """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw).
 
-        Only ``Tracking`` supplies a pose; every other status returns ``None``.
+        Only ``Tracking`` supplies a pose; every other status returns ``None``. This is the raw, causal VIO; the
+        back end never moves it, and the pose-graph gauge (window fixed) makes it this frame's corrected pose too.
+        The corrected history of earlier frames is ``slam_rs.tracking.reanchored(poses, vio.map_snapshot())``.
         """
 
     @property
@@ -197,6 +216,14 @@ class MapSnapshot:
     @property
     def covisibility_weights(self) -> UInt32[ndarray, " n_edges"]:
         """Shared landmarks per covisibility edge."""
+
+    @property
+    def pose_graph_edges(self) -> Int64[ndarray, "n_pose_graph_edges 2"]:
+        """The edges a pose-graph optimization would take now, ``[from, to]`` keyframe timestamps."""
+
+    @property
+    def pose_graph_edge_kinds(self) -> UInt8[ndarray, " n_pose_graph_edges"]:
+        """Kind of each pose-graph edge: 0 spanning tree, 1 loop closure, 2 high covisibility."""
 
     @property
     def loop_edges(self) -> Int64[ndarray, "n_loops 2"]:

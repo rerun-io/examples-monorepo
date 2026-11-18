@@ -10,6 +10,7 @@
 //! leave it out. The window never reads the map, so the raw VIO poses are the
 //! same with the back end on or off.
 
+pub mod anchor;
 pub mod covisibility;
 pub mod cull;
 pub mod loop_closing;
@@ -24,6 +25,7 @@ use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::{FrameId, LandmarkId};
 
+pub use anchor::{AnchorError, reanchor};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};

@@ -66,21 +66,14 @@ pub(super) fn replay(
         .map_err(|error| format!("Vio: {error}"))?;
     let setup_s: f64 = setup_started.elapsed().as_secs_f64();
 
-    let mut poses: String = String::from("#t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z\n");
+    let mut raw: Vec<(i64, [f64; 7])> = Vec::with_capacity(framesets);
     let mut track_ms: Vec<f64> = Vec::with_capacity(framesets);
     let mut counters = ReplayCounters::default();
     let mut tracked: usize = 0;
     let mut record = |result: &VioResult| -> Result<(), String> {
         if let Some(estimate) = &result.pose {
             tracked += 1;
-            let pose = estimate.world_from_rig;
-            let t_ns = result.t_ns;
-            writeln!(
-                poses,
-                "{t_ns},{:?},{:?},{:?},{:?},{:?},{:?},{:?}",
-                pose[0], pose[1], pose[2], pose[6], pose[3], pose[4], pose[5]
-            )
-            .map_err(|error| error.to_string())?;
+            raw.push((result.t_ns, estimate.world_from_rig));
         }
         Ok(())
     };
@@ -149,9 +142,20 @@ pub(super) fn replay(
     }
     let flush_ms = flush_started.elapsed().as_secs_f64() * 1e3;
     let wall_s: f64 = started.elapsed().as_secs_f64();
-    // Until re-anchoring on the optimised keyframes lands, the final trajectory is the raw VIO.
-    for path in std::iter::once(&outputs.out).chain(&outputs.out_vio) {
-        std::fs::write(path, &poses).map_err(|error| format!("{}: {error}", path.display()))?;
+    // The final trajectory: the raw VIO re-anchored on the flushed map's
+    // keyframes; the raw VIO itself with the back end off.
+    let final_poses: Vec<[f64; 7]> = match vio.map_snapshot() {
+        Some(map) => map
+            .reanchor(&raw)
+            .map_err(|error| format!("re-anchoring: {error}"))?,
+        None => raw.iter().map(|&(_, pose)| pose).collect(),
+    };
+    let final_rows = raw.iter().map(|&(t_ns, _)| t_ns).zip(final_poses);
+    std::fs::write(&outputs.out, trajectory_csv(final_rows)?)
+        .map_err(|error| format!("{}: {error}", outputs.out.display()))?;
+    if let Some(path) = &outputs.out_vio {
+        std::fs::write(path, trajectory_csv(raw.iter().copied())?)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
     }
 
     let mean_ms: f64 = track_ms.iter().sum::<f64>() / track_ms.len().max(1) as f64;
@@ -190,4 +194,18 @@ pub(super) fn replay(
         percentile(&sorted, 0.95)
     );
     Ok(())
+}
+
+/// `t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z` rows from `(t_ns, [tx, ty, tz, qx, qy, qz, qw])`.
+fn trajectory_csv(rows: impl Iterator<Item = (i64, [f64; 7])>) -> Result<String, String> {
+    let mut text: String = String::from("#t_ns,p_x,p_y,p_z,q_w,q_x,q_y,q_z\n");
+    for (t_ns, pose) in rows {
+        writeln!(
+            text,
+            "{t_ns},{:?},{:?},{:?},{:?},{:?},{:?},{:?}",
+            pose[0], pose[1], pose[2], pose[6], pose[3], pose[4], pose[5]
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(text)
 }

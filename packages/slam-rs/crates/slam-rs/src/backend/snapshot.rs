@@ -3,7 +3,7 @@
 //! snapshot stays valid while the back end goes on (D51).
 
 use super::pgo::PgoRun;
-use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
+use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats, PoseGraphEdge};
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
 
@@ -33,6 +33,9 @@ pub struct MapSnapshot {
     pub culls: CullCounts,
     /// The shared-landmark weight at which an edge is "high".
     pub high_covisibility_weight: u32,
+    /// The edges a pose-graph optimization would take now (the spanning tree,
+    /// the loop closures, the high-covisibility edges; PR f1 draws them).
+    pub pose_graph_edges: Vec<PoseGraphEdge>,
     /// Median number of landmarks a map keyframe sees.
     pub median_keyframe_landmarks: usize,
     /// The map's payload in bytes (a lower bound on its heap).
@@ -105,6 +108,7 @@ impl MapBackend {
             stats: self.stats(),
             culls: self.cull_counts(),
             high_covisibility_weight: self.high_covisibility_weight(),
+            pose_graph_edges: graph.pose_graph_edges(self.high_covisibility_weight()),
             median_keyframe_landmarks: self.map.median_keyframe_landmarks(),
             retained_bytes: self.map.retained_bytes(),
             loop_counts: self
