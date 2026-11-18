@@ -195,7 +195,13 @@ class Sam2VideoSegmenter(VideoSegmenter):
             if prompts.points_xy is not None:
                 points_xy = prompts.points_xy[row : row + 1].float()
                 points_labels = torch.ones((1,), dtype=torch.long, device=points_xy.device)
-            sam2_prompts.append(SAM2Prompt(obj_id=track_id, points_coords=points_xy, points_labels=points_labels, boxes=boxes))
+            masks_logits: Float[Tensor, "1 h w"] | None = None
+            if prompts.masks is not None:
+                # binary mask -> saturated logits; SAM2 resizes the dense prompt to its 256 px mask grid
+                masks_logits = torch.where(prompts.masks[row : row + 1], 10.0, -10.0)
+            sam2_prompts.append(
+                SAM2Prompt(obj_id=track_id, points_coords=points_xy, points_labels=points_labels, boxes=boxes, masks_logits=masks_logits)
+            )
         return sam2_prompts
 
 

@@ -56,6 +56,8 @@ class TrackOptions:
     """The tracker sees frames shrunk by this factor (it segments at 512 px internally); masks are upsampled back."""
     max_tracks: int = 24
     """Tracks per stream at most (new instances are ignored above it)."""
+    mask_prompts: bool = True
+    """Prompt the tracker with the SAM 3 mask as well as its box (keeps small people and the operator on shape)."""
 
 
 @dataclass
@@ -150,6 +152,7 @@ class PeopleTracker:
             assert detections.masks is not None
             rows: list[int] = []
             boxes: list[Tensor] = []
+            prompt_masks: list[Tensor] = []
             ids: list[int] = []
             for slot in range(n_slots):
                 in_slot: Tensor = torch.where(detections.frame_indices == slot)[0]
@@ -176,14 +179,20 @@ class PeopleTracker:
                 for track_id, col in (*plan.reanchor, *plan.start):
                     rows.append(slot)
                     boxes.append(detections.xyxy[in_slot[col]] / scale)
+                    prompt_masks.append(det_masks[col])
                     ids.append(track_id)
                 self.live[slot] += [track_id for track_id, _ in plan.start]
             if ids:
                 device: torch.device = frames_rgb.device
+                small_masks: Bool[Tensor, "m hs ws"] | None = None
+                if self.options.mask_prompts:
+                    full: Tensor = torch.stack(prompt_masks)[:, None].float()
+                    small_masks = (F.interpolate(full, scale_factor=1.0 / scale, mode="area")[:, 0] >= 0.5) if scale > 1 else full[:, 0] > 0
                 prompts = SegmentationPrompts(
                     frame_indices=torch.tensor(rows, dtype=torch.long, device=device),
                     boxes_xyxy=torch.stack(boxes).float(),
                     track_ids=torch.tensor(ids, dtype=torch.long, device=device),
+                    masks=small_masks,
                 )
         small: UInt8[Tensor, "s hs ws 3"] = frames_rgb
         if scale > 1:
@@ -218,6 +227,7 @@ def main(config: PeopleTracksConfig) -> None:
     """Write the tracked people-mask layer and print speed and GPU memory."""
     if config.output_every % config.track.stride or config.start % config.output_every:
         raise ValueError("track.stride must divide output_every, and start must be a multiple of output_every")
+    process_start: float = time.perf_counter()
     torch.cuda.reset_peak_memory_stats()
     with rr.server.Server(datasets={"in": [str(config.rrd)]}) as server:
         dataset = server.client().get_dataset("in")
@@ -234,6 +244,7 @@ def main(config: PeopleTracksConfig) -> None:
     end: int = n_packets if config.end is None else min(config.end, n_packets)
     tracked: list[int] = list(range(config.start, end, config.track.stride))
     print(f"segment {segment_id}: streams {entities}, {len(tracked)} tracker steps over frames {config.start}..{end - 1}")
+    print(f"rrd read {time.perf_counter() - process_start:.1f} s")
 
     load_start: float = time.perf_counter()
     tracker = PeopleTracker(config.track, config.mask, config.device)
@@ -292,3 +303,4 @@ def main(config: PeopleTracksConfig) -> None:
         f"(model load excluded; SAM 3 {tracker.detect_seconds:.1f} s): {n_images / wall:.1f} images/s, {wall / max(n_masks, 1):.3f} s/mask; "
         f"peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB, reserved {torch.cuda.max_memory_reserved() / 1e9:.1f} GB"
     )
+    print(f"total incl. rrd read and model load {time.perf_counter() - process_start:.1f} s")
