@@ -10,7 +10,7 @@ use kornia_staging_algebra::{
     lie::{right_jacobian_inv_so3, RigidTransform, Rotation3},
     Scalar,
 };
-use nalgebra::{Matrix3, Matrix6, Vector6};
+use nalgebra::{Matrix6, Vector6};
 
 /// A relative pose measurement between two keyframes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,13 +93,7 @@ pub fn relative_pose_error<S: Scalar>(
     }
     if let Some(out) = d_res_d_xi_b {
         // Decoupled adjoint of T_a_b_est: T_b_a expd(xi) T_a_b = expd(adj xi).
-        let r: Matrix3<S> = a_from_b_est.rotation.matrix();
-        let mut adj: Matrix6<S> = Matrix6::zeros();
-        adj.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
-        adj.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
-        adj.fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(Rotation3::hat(&a_from_b_est.translation) * r));
-        *out = j * adj;
+        *out = j * a_from_b_est.adjoint();
     }
     res
 }
