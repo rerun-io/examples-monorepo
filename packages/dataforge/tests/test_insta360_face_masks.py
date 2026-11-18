@@ -43,38 +43,45 @@ def write_base(path: Path) -> None:
             recording.log(f"/world/rig_00/cam_0{lens}/pinhole", PinholeWithDistortion(pinhole, distortion), static=True)
 
 
-def write_faces(path: Path, base: Path) -> None:
+def write_faces(path: Path) -> None:
     """A cube layer as ``write_cube`` lays it out, with placeholder video samples."""
     from dataforge.datasets import insta360_cube as cube
 
+    lenses = [lens_from_rig(0), lens_from_rig(1)]
     with rr.RecordingStream("test", recording_id="insta360__clip") as recording:
         recording.save(path)
-        for lens in range(2):
-            for k, face in enumerate(cube.lens_faces(lens, FACE)):
-                node: str = f"/world/rig_00/cam_{2 + 5 * lens + k:02d}"
-                pose = cube.face_from_rig(face, lens_from_rig(lens))
-                recording.log(node, rr.AnyValues(name=face.name, source_lens=lens), static=True)
-                recording.log(
-                    node, rr.Transform3D(translation=pose[:3, 3], mat3x3=pose[:3, :3], relation=rr.TransformRelation.ChildFromParent), static=True
-                )
-                recording.log(f"{node}/pinhole", rr.Pinhole(image_from_camera=face.intrinsics, width=face.width, height=face.height), static=True)
-                recording.log(f"{node}/pinhole/video", rr.VideoStream(codec=rr.VideoCodec.AV1), static=True)
-                for stamp in STAMPS:
-                    recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
-                    recording.log(f"{node}/pinhole/video", rr.VideoStream.from_fields(sample=b"\x00"))
+        for k, face in enumerate(cube.cube_faces(FACE)):
+            node: str = f"/world/rig_00/cam_{2 + k:02d}"
+            pose = cube.face_from_rig(face, lenses)
+            recording.log(node, rr.AnyValues(name=face.name), static=True)
+            recording.log(
+                node, rr.Transform3D(translation=pose[:3, 3], mat3x3=pose[:3, :3], relation=rr.TransformRelation.ChildFromParent), static=True
+            )
+            recording.log(f"{node}/pinhole", rr.Pinhole(image_from_camera=face.intrinsics, width=FACE, height=FACE), static=True)
+            recording.log(f"{node}/pinhole/video", rr.VideoStream(codec=rr.VideoCodec.AV1), static=True)
+            for stamp in STAMPS:
+                recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
+                recording.log(f"{node}/pinhole/video", rr.VideoStream.from_fields(sample=b"\x00"))
 
 
 def write_masks(path: Path, stamps: list[int]) -> None:
-    """A disc at each lens's centre (on its optical axis)."""
-    u, v = np.meshgrid(np.arange(LENS), np.arange(LENS))
+    """Lens 0: a disc on its optical axis. Lens 1: a disc 80 deg toward its +X (the cube's -X: ``cube6_left``)."""
+    import insta360_io
+
     centre: float = (LENS - 1) / 2
-    disc: UInt8[ndarray, "h w"] = (np.hypot(u - centre, v - centre) <= 20).astype(np.uint8)
+    camera = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [2.315, np.deg2rad(100.0)] + [0.0] * 13)
+    side, _ = camera.project(np.array([[np.sin(np.deg2rad(80.0)), 0.0, np.cos(np.deg2rad(80.0))]]))
+    u, v = np.meshgrid(np.arange(LENS), np.arange(LENS))
+    discs: list[UInt8[ndarray, "h w"]] = [
+        (np.hypot(u - centre, v - centre) <= 20).astype(np.uint8),
+        (np.hypot(u - side[0, 0], v - side[0, 1]) <= 8).astype(np.uint8),
+    ]
     with rr.RecordingStream("test", recording_id="insta360__clip") as recording:
         recording.save(path)
         for stamp in stamps:
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
             for lens in range(2):
-                recording.log(f"/world/rig_00/cam_0{lens}/pinhole/people_mask", rr.SegmentationImage(disc))
+                recording.log(f"/world/rig_00/cam_0{lens}/pinhole/people_mask", rr.SegmentationImage(discs[lens]))
 
 
 def read_masks(path: Path) -> dict[str, list[tuple[int, UInt8[ndarray, "h w"]]]]:
@@ -95,51 +102,33 @@ def read_masks(path: Path) -> dict[str, list[tuple[int, UInt8[ndarray, "h w"]]]]
     return found
 
 
-def test_lens_discs_land_on_the_front_faces_at_every_face_stamp(tmp_path: Path) -> None:
+def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) -> None:
     from dataforge.apis.insta360_face_masks import Config, main
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
     write_base(base)
-    write_faces(faces, base)
+    write_faces(faces)
     write_masks(masks, [*STAMPS, 999_000_000])
-    main(Config(base=base, masks=masks, faces=faces, output=output, mask_invalid=False))
+    main(Config(base=base, masks=masks, faces=faces, output=output))
     found = read_masks(output)
-    assert sorted(found) == [f"/world/rig_00/cam_{cam:02d}/pinhole/people_mask" for cam in range(2, 12)]
+    assert sorted(found) == [f"/world/rig_00/cam_{cam:02d}/pinhole/people_mask" for cam in range(2, 8)]
+    hit: dict[str, bool] = {"cam_02": True, "cam_03": False, "cam_04": True, "cam_05": False, "cam_06": False, "cam_07": False}
     for entity, rows in found.items():
         assert sorted(stamp for stamp, _ in rows) == STAMPS, entity
-        front: bool = entity.endswith(("cam_02/pinhole/people_mask", "cam_07/pinhole/people_mask"))
-        assert all((mask.sum() > 0) == front for _, mask in rows), entity
+        assert all((mask.sum() > 0) == hit[entity.split("/")[3]] for _, mask in rows), entity
+        assert all(mask.shape == (FACE, FACE) and set(np.unique(mask)) <= {0, 1} for _, mask in rows)
+    # Lens 1's disc sits on the lens-1 half of cube6_left: the image's left half (image right points to +Z0).
+    left: UInt8[ndarray, "n n"] = found["/world/rig_00/cam_04/pinhole/people_mask"][0][1]
+    assert left[:, : FACE // 2].sum() > 0 and left[:, FACE // 2 :].sum() == 0
 
 
-def test_by_default_the_mask_also_covers_the_wedge_outside_the_lens_field_grown_by_the_margin(tmp_path: Path) -> None:
-    from dataforge.apis.insta360_face_masks import Config, main
-
-    base, faces, masks = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks"))
-    write_base(base)
-    write_faces(faces, base)
-    write_masks(masks, STAMPS)
-    plain, default, wide = (tmp_path / f"{name}.rrd" for name in ("plain", "default", "wide"))
-    main(Config(base=base, masks=masks, faces=faces, output=plain, mask_invalid=False))
-    main(Config(base=base, masks=masks, faces=faces, output=default))
-    main(Config(base=base, masks=masks, faces=faces, output=wide, invalid_margin_px=8))
-    people, masked, wider = read_masks(plain), read_masks(default), read_masks(wide)
-    for entity, rows in masked.items():
-        for (_, person), (_, mask), (_, grown) in zip(people[entity], rows, wider[entity], strict=True):
-            assert (mask >= person).all() and (grown >= mask).all()
-            if entity.endswith(("cam_02/pinhole/people_mask", "cam_07/pinhole/people_mask")):
-                np.testing.assert_array_equal(mask, person)  # a front face has no wedge
-            else:
-                # The wedge is a few pixels at the middle of the far edge; the margin grows it, more with 8 px than 4.
-                assert 0 < mask.sum() < grown.sum() < mask.size // 10, entity
-
-
-def test_a_face_stamp_without_a_lens_mask_is_an_error(tmp_path: Path) -> None:
+def test_a_face_stamp_without_a_mask_on_both_lenses_is_an_error(tmp_path: Path) -> None:
     from dataforge.apis.insta360_face_masks import Config, main
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
     write_base(base)
-    write_faces(faces, base)
+    write_faces(faces)
     write_masks(masks, STAMPS[:1])
-    with pytest.raises(ValueError, match="face stamps have no mask"):
+    with pytest.raises(ValueError, match="no mask on both lenses"):
         main(Config(base=base, masks=masks, faces=faces, output=output))
     assert not output.exists()
