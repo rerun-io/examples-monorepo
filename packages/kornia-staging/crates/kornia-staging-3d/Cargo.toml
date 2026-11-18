@@ -38,8 +38,9 @@ required-features = ["ransac"]
 default = []
 virtual-camera = ["dep:kornia-image"]
 kornia-3d-interop = ["dep:kornia-3d"]
-# GP3P RANSAC on upstream kornia_3d::ransac.
-ransac = ["dep:kornia-3d", "dep:rand"]
+# Seeded GP3P RANSAC (a copy of upstream kornia_3d::ransac's serial driver, so no
+# kornia-3d and no faer; checked against upstream under kornia-3d-interop).
+ransac = ["dep:rand"]
 serde = ["dep:serde"]
 
 [dependencies.serde]

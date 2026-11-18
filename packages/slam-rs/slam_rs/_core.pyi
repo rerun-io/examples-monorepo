@@ -96,6 +96,41 @@ class VioResult:
 
     def __repr__(self) -> str: ...
 
+class LoopCounts:
+    """What loop closing has done so far (all zero when it is off)."""
+
+    @property
+    def indexed(self) -> int:
+        """Keyframes described and added to the database."""
+
+    @property
+    def without_images(self) -> int:
+        """Queries that found no images for their keyframe."""
+
+    @property
+    def images_stripped(self) -> int:
+        """Keyframe stamps whose images were dropped before the back end took them (Realtime, behind)."""
+
+    @property
+    def with_candidates(self) -> int:
+        """Queries that retrieved at least one candidate."""
+
+    @property
+    def candidates(self) -> int:
+        """Candidates validated."""
+
+    @property
+    def verified(self) -> int:
+        """Loops that passed verification."""
+
+    @property
+    def fused(self) -> int:
+        """Loops fused at once."""
+
+    @property
+    def needs_pgo(self) -> int:
+        """Loops left for the pose-graph optimization."""
+
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
 
@@ -138,6 +173,18 @@ class MapSnapshot:
     @property
     def covisibility_weights(self) -> UInt32[ndarray, " n_edges"]:
         """Shared landmarks per covisibility edge."""
+
+    @property
+    def loop_edges(self) -> Int64[ndarray, "n_loops 2"]:
+        """Verified loops whose keyframes are still in the map, oldest first, as ``[current, candidate]`` timestamps."""
+
+    @property
+    def loop_fused(self) -> Bool[ndarray, " n_loops"]:
+        """Whether each loop was fused at once; otherwise it waits for the pose-graph optimization."""
+
+    @property
+    def loop_counts(self) -> LoopCounts:
+        """What loop closing has done so far."""
 
     @property
     def keyframes(self) -> int:

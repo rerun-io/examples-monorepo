@@ -4,6 +4,10 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "backend/loop_closing/config.rs"]
+mod loop_closing;
+pub use loop_closing::{BriefTests, LoopClosingConfig, LoopQueryCameras};
+
 /// Which linearization the estimator runs.
 ///
 /// Only [`LinearizationType::AbsQr`] is ported (decision D13); the other two
@@ -328,6 +332,10 @@ pub struct VioConfig {
     /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17).
     #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
     pub loop_closing_pgo_min_covisibility_weight: u32,
+    /// Loop detection, verification and fusion (PR b2, DESIGN §3 rows 7-11).
+    /// Read only with the `backend` feature and `backend.enabled`.
+    #[serde(rename = "backend.loop_closing")]
+    pub backend_loop_closing: LoopClosingConfig,
 }
 
 impl Default for VioConfig {
@@ -398,6 +406,7 @@ impl Default for VioConfig {
             map_max_keyframes: 1500,
             map_batch_cull_size: 30,
             loop_closing_pgo_min_covisibility_weight: 96,
+            backend_loop_closing: LoopClosingConfig::default(),
         }
     }
 }

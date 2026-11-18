@@ -671,6 +671,33 @@ pub struct MapSnapshot {
     median_keyframe_landmarks: usize,
     retained_bytes: usize,
     counters: slam_rs::backend::BackendCounters,
+    /// `[current, candidate]` per verified loop.
+    loop_edges: Vec<i64>,
+    loop_fused: Vec<bool>,
+    loop_counts: slam_rs::backend::LoopCounts,
+}
+
+/// What loop closing has done so far (all zero when it is off).
+#[pyclass(module = "slam_rs._core", frozen, get_all, skip_from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct LoopCounts {
+    /// Keyframes described and added to the database.
+    indexed: u64,
+    /// Queries that found no images for their keyframe.
+    without_images: u64,
+    /// Keyframe stamps whose images were dropped before the back end took
+    /// them (Realtime, more stamps queued than the query cap).
+    images_stripped: u64,
+    /// Queries that retrieved at least one candidate.
+    with_candidates: u64,
+    /// Candidates validated.
+    candidates: u64,
+    /// Loops that passed verification.
+    verified: u64,
+    /// Loops fused at once.
+    fused: u64,
+    /// Loops left for the pose-graph optimization.
+    needs_pgo: u64,
 }
 
 impl MapSnapshot {
@@ -731,6 +758,13 @@ impl MapSnapshot {
             median_keyframe_landmarks: snapshot.median_keyframe_landmarks,
             retained_bytes: snapshot.retained_bytes,
             counters,
+            loop_edges: snapshot
+                .loops
+                .iter()
+                .flat_map(|edge| [edge.current, edge.candidate])
+                .collect(),
+            loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
+            loop_counts: snapshot.loop_counts,
         })
     }
 }
@@ -915,6 +949,38 @@ impl MapSnapshot {
     #[getter]
     fn publish_total_us(&self) -> u64 {
         self.counters.publish.total_ns / 1_000
+    }
+
+    /// Verified loops whose keyframes are still in the map, oldest first, as
+    /// `[current, candidate]` keyframe timestamps: `int64[l, 2]`.
+    #[getter]
+    fn loop_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        self.loop_edges
+            .to_pyarray(py)
+            .reshape((self.loop_fused.len(), 2))
+    }
+
+    /// Whether each loop was fused at once (else it waits for the pose-graph
+    /// optimization): `bool[l]`.
+    #[getter]
+    fn loop_fused<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.loop_fused.to_pyarray(py)
+    }
+
+    /// What loop closing has done so far.
+    #[getter]
+    fn loop_counts(&self) -> LoopCounts {
+        let counts = self.loop_counts;
+        LoopCounts {
+            indexed: counts.indexed,
+            without_images: counts.without_images,
+            images_stripped: counts.images_stripped,
+            with_candidates: counts.with_candidates,
+            candidates: counts.candidates,
+            verified: counts.verified,
+            fused: counts.fused,
+            needs_pgo: counts.needs_pgo,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -1693,5 +1759,6 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FlowFrame>()?;
     module.add_class::<VioSnapshot>()?;
     module.add_class::<MapSnapshot>()?;
+    module.add_class::<LoopCounts>()?;
     Ok(())
 }

@@ -2,10 +2,7 @@
 //! bindings and the Rerun layer. Everything is copied, in id order, so a
 //! snapshot stays valid while the back end goes on (D51).
 
-use nalgebra::{Vector3, Vector4};
-
-use super::{CullCounts, MapBackend, MapStats};
-use crate::landmark::StereographicParam;
+use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
 
@@ -37,33 +34,37 @@ pub struct MapSnapshot {
     pub median_keyframe_landmarks: usize,
     /// The map's payload in bytes (a lower bound on its heap).
     pub retained_bytes: usize,
+    /// What loop closing has done (all zero when it is off).
+    pub loop_counts: LoopCounts,
+    /// Verified loops whose two keyframes are still in the map, oldest first.
+    pub loops: Vec<SnapshotLoop>,
+}
+
+/// One verified loop in a [`MapSnapshot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapshotLoop {
+    /// The keyframe that found the loop.
+    pub current: FrameId,
+    /// The keyframe it closes with.
+    pub candidate: FrameId,
+    /// Fused at once (`false`: left for the pose-graph optimization).
+    pub fused: bool,
 }
 
 impl MapBackend {
-    /// Copy the map. A point is `T_w_i(host) * t_i_c[cam] * unproject(direction)
-    /// / inv_dist`, as the window builds it. A landmark whose host keyframe or
-    /// camera is unknown, or with no finite position (`inv_dist <= 0`, at
-    /// infinity), is left out of the points (it still counts in `stats`), as
-    /// RootSLAM's map export keeps only finite positions.
+    /// Copy the map. A point is [`super::KeyframeMap::landmark_world`]; a
+    /// landmark it cannot place, or whose position overflows `f32`, is left out
+    /// of the points (it still counts in `stats`), as RootSLAM's map export
+    /// keeps only finite positions.
     pub fn snapshot(&self, t_i_c: &[Se3<f64>]) -> MapSnapshot {
         let keyframes = self.map.keyframes();
         let mut point_ids: Vec<LandmarkId> = Vec::with_capacity(self.map.landmarks().len());
         let mut point_hosts: Vec<FrameId> = Vec::with_capacity(self.map.landmarks().len());
         let mut points_world: Vec<[f32; 3]> = Vec::with_capacity(self.map.landmarks().len());
         for (&id, landmark) in self.map.landmarks() {
-            let (Some(host), Some(extrinsic)) = (
-                keyframes.get(&landmark.host.frame_id),
-                t_i_c.get(landmark.host.cam_id),
-            ) else {
+            let Some(point_w) = self.map.landmark_world(id, t_i_c) else {
                 continue;
             };
-            if landmark.inv_dist.is_nan() || landmark.inv_dist <= 0.0 {
-                continue;
-            }
-            let bearing: Vector4<f64> = StereographicParam::unproject(&landmark.direction);
-            let point_c: Vector3<f64> =
-                Vector3::new(bearing[0], bearing[1], bearing[2]) / landmark.inv_dist;
-            let point_w: Vector3<f64> = (host.pose * *extrinsic) * point_c;
             let point: [f32; 3] = [point_w.x as f32, point_w.y as f32, point_w.z as f32];
             if !point.iter().all(|value| value.is_finite()) {
                 continue;
@@ -89,6 +90,26 @@ impl MapBackend {
             high_covisibility_weight: self.high_covisibility_weight(),
             median_keyframe_landmarks: self.map.median_keyframe_landmarks(),
             retained_bytes: self.map.retained_bytes(),
+            loop_counts: self
+                .loops
+                .as_ref()
+                .map(|loops| loops.counts())
+                .unwrap_or_default(),
+            loops: self
+                .loops
+                .iter()
+                .flat_map(|loops| loops.events())
+                .filter(|event| {
+                    event.outcome != LoopOutcome::Stale
+                        && keyframes.contains_key(&event.detection.current)
+                        && keyframes.contains_key(&event.detection.candidate)
+                })
+                .map(|event| SnapshotLoop {
+                    current: event.detection.current,
+                    candidate: event.detection.candidate,
+                    fused: matches!(event.outcome, LoopOutcome::Fused { .. }),
+                })
+                .collect(),
         }
     }
 }
