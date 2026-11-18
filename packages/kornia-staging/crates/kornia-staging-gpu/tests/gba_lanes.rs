@@ -220,26 +220,29 @@ fn pose_rms_mm(a: &GbaProblem<f64>, b: &GbaProblem<f64>) -> f64 {
 /// also fits rotations).
 fn kabsch_rms_mm(a: &GbaProblem<f64>, b: &GbaProblem<f64>) -> f64 {
     let (pa, pb) = (positions(a), positions(b));
-    let n = pa.len() as f64;
-    let (ca, cb) = (
-        pa.iter().sum::<Vector3<f64>>() / n,
-        pb.iter().sum::<Vector3<f64>>() / n,
-    );
-    let mut h = Matrix3::zeros();
-    for (x, y) in pa.iter().zip(&pb) {
-        h += (x - ca) * (y - cb).transpose();
-    }
-    let svd = h.svd(true, true);
-    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
-    let mut d = Matrix3::identity();
-    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
-    let r = v_t.transpose() * d * u.transpose();
+    let (r, t) = rigid_fit(&pa, &pb);
     let sum: f64 = pa
         .iter()
         .zip(&pb)
-        .map(|(x, y)| (r * (x - ca) + cb - y).norm_squared())
+        .map(|(x, y)| (r * x + t - y).norm_squared())
         .sum();
-    1e3 * (sum / n).sqrt()
+    1e3 * (sum / pa.len() as f64).sqrt()
+}
+
+/// The rigid transform (`R`, `t`) that best maps `a` onto `b` (Kabsch:
+/// upstream `umeyama_f64` without scale).
+fn rigid_fit(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> (Matrix3<f64>, Vector3<f64>) {
+    let points = |p: &[Vector3<f64>]| -> Vec<kornia_algebra::Vec3F64> {
+        p.iter()
+            .map(|v| kornia_algebra::Vec3F64::new(v.x, v.y, v.z))
+            .collect()
+    };
+    let (r, t, _) =
+        kornia_algebra::linalg::rigid::umeyama_f64(&points(a), &points(b), false).unwrap();
+    (
+        Matrix3::from_column_slice(&<[f64; 9]>::from(r)),
+        Vector3::new(t.x, t.y, t.z),
+    )
 }
 
 /// One LM step's pose increment per keyframe, stacked: rotation (log of
