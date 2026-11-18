@@ -118,28 +118,31 @@ fn positions(path: &Path) -> BTreeMap<i64, Vector3<f64>> {
         .collect()
 }
 
+/// The rigid transform (`R`, `t`) that best maps `a` onto `b` (Kabsch:
+/// upstream `umeyama_f64` without scale).
+fn rigid_fit(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> (Matrix3<f64>, Vector3<f64>) {
+    let points = |p: &[Vector3<f64>]| -> Vec<kornia_algebra::Vec3F64> {
+        p.iter()
+            .map(|v| kornia_algebra::Vec3F64::new(v.x, v.y, v.z))
+            .collect()
+    };
+    let (r, t, _) =
+        kornia_algebra::linalg::rigid::umeyama_f64(&points(a), &points(b), false).unwrap();
+    (
+        Matrix3::from_column_slice(&<[f64; 9]>::from(r)),
+        Vector3::new(t.x, t.y, t.z),
+    )
+}
+
 /// RMS of `a - b` after the rigid alignment (Kabsch) of `a` onto `b`.
 fn aligned_rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
-    let n = a.len() as f64;
-    let (ma, mb) = (
-        a.iter().sum::<Vector3<f64>>() / n,
-        b.iter().sum::<Vector3<f64>>() / n,
-    );
-    let mut h = Matrix3::zeros();
-    for (x, y) in a.iter().zip(b) {
-        h += (x - ma) * (y - mb).transpose();
-    }
-    let svd = h.svd(true, true);
-    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
-    let mut d = Matrix3::identity();
-    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
-    let r = v_t.transpose() * d * u.transpose();
-    (a.iter()
+    let (r, t) = rigid_fit(a, b);
+    let sq: f64 = a
+        .iter()
         .zip(b)
-        .map(|(x, y)| (r * (x - ma) + mb - y).norm_squared())
-        .sum::<f64>()
-        / n)
-        .sqrt()
+        .map(|(x, y)| (r * x + t - y).norm_squared())
+        .sum();
+    (sq / a.len() as f64).sqrt()
 }
 
 fn rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {

@@ -147,25 +147,34 @@ fn synthetic_map(
 
 /// RMS of the keyframe positions after the rigid alignment (Kabsch) of `est`
 /// onto `truth`: the GBA fixes no pose, so its gauge floats.
+/// The rigid transform (`R`, `t`) that best maps `a` onto `b` (Kabsch:
+/// upstream `umeyama_f64` without scale).
+fn rigid_fit(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> (Matrix3<f64>, Vector3<f64>) {
+    let points = |p: &[Vector3<f64>]| -> Vec<kornia_algebra::Vec3F64> {
+        p.iter()
+            .map(|v| kornia_algebra::Vec3F64::new(v.x, v.y, v.z))
+            .collect()
+    };
+    let (r, t, _) =
+        kornia_algebra::linalg::rigid::umeyama_f64(&points(a), &points(b), false).unwrap();
+    (
+        Matrix3::from_column_slice(&<[f64; 9]>::from(r)),
+        Vector3::new(t.x, t.y, t.z),
+    )
+}
+
 fn aligned_rms(est: &[Se3<f64>], truth: &[Se3<f64>]) -> f64 {
-    let n = est.len() as f64;
-    let mean_e: Vector3<f64> = est.iter().map(|p| p.translation).sum::<Vector3<f64>>() / n;
-    let mean_t: Vector3<f64> = truth.iter().map(|p| p.translation).sum::<Vector3<f64>>() / n;
-    let mut h = Matrix3::zeros();
-    for (e, t) in est.iter().zip(truth) {
-        h += (e.translation - mean_e) * (t.translation - mean_t).transpose();
-    }
-    let svd = h.svd(true, true);
-    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
-    let mut d = Matrix3::identity();
-    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
-    let r = v_t.transpose() * d * u.transpose();
-    let sq: f64 = est
+    let (e, t): (Vec<Vector3<f64>>, Vec<Vector3<f64>>) = (
+        est.iter().map(|p| p.translation).collect(),
+        truth.iter().map(|p| p.translation).collect(),
+    );
+    let (r, shift) = rigid_fit(&e, &t);
+    let sq: f64 = e
         .iter()
-        .zip(truth)
-        .map(|(e, t)| (r * (e.translation - mean_e) + mean_t - t.translation).norm_squared())
+        .zip(&t)
+        .map(|(e, t)| (r * e + shift - t).norm_squared())
         .sum();
-    (sq / n).sqrt()
+    (sq / e.len() as f64).sqrt()
 }
 
 fn chain_edges(n_kf: usize) -> Vec<PoseGraphEdge> {
@@ -182,22 +191,9 @@ fn chain_edges(n_kf: usize) -> Vec<PoseGraphEdge> {
 /// onto `reference`: how far a solve turned the map out of the input's gravity
 /// frame.
 fn tilt_deg(est: &[Se3<f64>], reference: &[Se3<f64>]) -> f64 {
-    let n = est.len() as f64;
-    let mean_e: Vector3<f64> = est.iter().map(|p| p.translation).sum::<Vector3<f64>>() / n;
-    let mean_r: Vector3<f64> = reference
-        .iter()
-        .map(|p| p.translation)
-        .sum::<Vector3<f64>>()
-        / n;
-    let mut h = Matrix3::zeros();
-    for (e, r) in est.iter().zip(reference) {
-        h += (e.translation - mean_e) * (r.translation - mean_r).transpose();
-    }
-    let svd = h.svd(true, true);
-    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
-    let mut d = Matrix3::identity();
-    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
-    let r = v_t.transpose() * d * u.transpose();
+    let positions =
+        |poses: &[Se3<f64>]| -> Vec<Vector3<f64>> { poses.iter().map(|p| p.translation).collect() };
+    let (r, _) = rigid_fit(&positions(est), &positions(reference));
     (r * Vector3::z()).angle(&Vector3::z()).to_degrees()
 }
 
