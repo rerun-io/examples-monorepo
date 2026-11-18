@@ -15,7 +15,7 @@
 //! thread count. rootba's default reduction zeroes a full pose vector per split
 //! (O(landmarks x keyframes) per iteration; phase-1 profile).
 //!
-//! f32 safety (DESIGN B24). As in rootba: Jacobi scaling, and PCG residual
+//! f32 safety. As in rootba: Jacobi scaling, and PCG residual
 //! replacement (rootba every 10 iterations, ours every 8). Ours: the
 //! block-Jacobi preconditioner factored in f64, a `lambda` floor, the PCG dots,
 //! every cost and the model decrease summed in f64 (the per-block matvec stays
@@ -92,9 +92,9 @@ pub struct GbaProblem<S: Scalar> {
 }
 
 impl<S: Scalar> GbaProblem<S> {
-    /// DESIGN §3.1 filters. A keyframe with fewer than `min_obs_per_kf`
+    /// The export filters. A keyframe with fewer than `min_obs_per_kf`
     /// observations loses its reprojection rows but keeps its pose-graph rows
-    /// (B22: rootba drops the keyframe and its edges). Then every landmark with
+    /// (rootba drops the keyframe and its edges). Then every landmark with
     /// fewer than two observations goes. Returns (observations, landmarks) removed.
     pub fn drop_sparse_observations(&mut self, min_obs_per_kf: usize) -> (usize, usize) {
         let mut per_kf = vec![0usize; self.imu_from_world.len()];
