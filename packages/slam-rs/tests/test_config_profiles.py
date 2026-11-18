@@ -103,7 +103,7 @@ def test_with_backend_sets_the_map_and_keeps_every_other_key(mode: Literal["off"
     config: _core.VioConfig = base.with_backend(mode)
     assert config.backend_enabled is (mode != "off")
     assert config.backend_mode == ("realtime" if mode == "off" else mode)
-    assert base.backend_enabled is False
+    assert base.backend_enabled is True
     assert base.backend_mode == "realtime"
     # Every other key unchanged: the same as writing the two keys into the base's JSON.
     keys: str = f'"backend.enabled": {"false" if mode == "off" else "true"}, "backend.mode": "{"realtime" if mode == "off" else mode}"'
@@ -122,4 +122,4 @@ def test_the_live_profiles_run_the_back_end_realtime_and_the_scoring_profiles_of
     for profile, mode in (("reference", "offline"), ("fast", "offline"), ("live", "realtime"), ("live30", "realtime")):
         config: _core.VioConfig = _core.VioConfig.from_json(settings.vio_config_text(dataset.name, profile=profile))
         assert config.backend_mode == mode, profile
-        assert config.backend_enabled is False, profile
+        assert config.backend_enabled is True, profile

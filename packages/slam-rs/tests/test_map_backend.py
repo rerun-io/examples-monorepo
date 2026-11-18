@@ -38,10 +38,10 @@ def _run(rig: RigFactory, texture: TextureFactory, mode: Literal["offline", "rea
     return poses, vio
 
 
-def test_the_back_end_is_off_and_offline_by_default() -> None:
-    """Opt in until loop closing (b2) gives the map a use: default runs are what they were before a2."""
+def test_the_back_end_is_on_and_offline_by_default() -> None:
+    """Loops, PGO and the global BA give the final trajectory, so the back end runs by default, inline."""
     config: _core.VioConfig = _core.VioConfig()
-    assert config.backend_enabled is False
+    assert config.backend_enabled is True
     assert config.backend_mode == "offline"
 
 
