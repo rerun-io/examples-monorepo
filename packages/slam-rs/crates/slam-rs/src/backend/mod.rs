@@ -399,12 +399,18 @@ impl MapBackend {
         Some(touched)
     }
 
-    /// Carry out loop fusion's landmark edits (`merge_loop_landmarks`,
-    /// `map_database.cpp:259-336`) and raise the covisibility edges they
-    /// create, in RootSLAM's two passes: first every added observation, which
-    /// links `current` to every observer of the landmark (once per landmark),
-    /// then every fusion, which links every observer of one landmark to every
-    /// observer of the other. Returns (landmarks fused, observations added).
+    /// Carry out loop fusion's landmark edits (`merge_loop_landmarks`) and
+    /// raise the covisibility edges they create: an added observation links
+    /// `current` to every observer of the landmark (once per landmark); a
+    /// fusion links every observer of one landmark to every observer of the
+    /// other. Returns (landmarks fused, observations added).
+    ///
+    /// Deliberate difference from RootSLAM: `merge_loop_landmarks`
+    /// (`map_database.cpp:259-336`) does every added observation before any
+    /// fusion; this does the plan's steps in match order. Both orders were
+    /// measured (2026-11-17): RootSLAM's made MGO13's final trajectory worse
+    /// (5.51 cm against 4.76) and left EMH01 and TC3 the same, so the
+    /// interleaved order stays. Do not "fix" it without a new measurement.
     fn fuse_landmarks(
         &mut self,
         current: FrameId,
@@ -418,10 +424,7 @@ impl MapBackend {
         let mut change = EdgeChange::default();
         let (mut landmarks_fused, mut observations_added) = (0, 0);
         let mut linked: BTreeSet<LandmarkId> = BTreeSet::new();
-        let (adds, fusions): (Vec<_>, Vec<_>) = plan
-            .into_iter()
-            .partition(|step| matches!(step, loop_closing::LoopFusion::AddObs { .. }));
-        for step in adds.into_iter().chain(fusions) {
+        for step in plan {
             match step {
                 loop_closing::LoopFusion::AddObs {
                     landmark,
