@@ -22,7 +22,7 @@ def test_full_centred_faces_are_accepted(name: str) -> None:
 
 def test_seam_split_names_are_rejected() -> None:
     with pytest.raises(ValueError, match="cube6_"):
-        _face("cube6_left")
+        _face("cube_0_left")
 
 
 @pytest.mark.parametrize(("width", "height", "cx"), [(N, 480, (N - 1) / 2), (N, N, 79.5), (N, N, N / 2)])
