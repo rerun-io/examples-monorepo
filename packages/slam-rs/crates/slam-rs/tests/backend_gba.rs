@@ -193,7 +193,7 @@ fn the_final_trajectory_is_the_raw_vio_reanchored_on_the_gba_keyframes() {
         .collect();
     let expected = api::backend::reanchor(
         &raw.iter()
-            .map(|&(t_ns, pose)| (t_ns, se3(&pose)))
+            .map(|&(t_ns, pose)| (t_ns, api::pose_from_xyzw(&pose).unwrap()))
             .collect::<Vec<_>>(),
         &keyframes,
     )
@@ -201,37 +201,17 @@ fn the_final_trajectory_is_the_raw_vio_reanchored_on_the_gba_keyframes() {
     let gba_final = result.reanchor(&raw).unwrap();
     assert_eq!(gba_final.len(), raw.len());
     for (ours, theirs) in gba_final.iter().zip(&expected) {
-        assert_eq!(*ours, pose_array(theirs));
+        assert_eq!(*ours, api::pose_to_xyzw(theirs));
     }
     assert_ne!(gba_final, lc_final, "the GBA moved no frame");
     // Each keyframe lands on its GBA pose.
     for (t_ns, pose) in &keyframes {
         let row = raw.binary_search_by_key(t_ns, |&(t, _)| t).unwrap();
-        assert_eq!(gba_final[row], pose_array(pose));
+        assert_eq!(gba_final[row], api::pose_to_xyzw(pose));
     }
     assert_eq!(
         on.map_snapshot().unwrap().reanchor(&raw).unwrap(),
         gba_final,
         "the map after finish_map gives the same final"
     );
-}
-
-fn se3(pose: &[f64; 7]) -> api::lie::Se3<f64> {
-    api::lie::Se3::new(
-        api::lie::So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6]).unwrap(),
-        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
-    )
-}
-
-fn pose_array(pose: &api::lie::Se3<f64>) -> [f64; 7] {
-    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
-    [
-        pose.translation.x,
-        pose.translation.y,
-        pose.translation.z,
-        x,
-        y,
-        z,
-        w,
-    ]
 }
