@@ -15,7 +15,7 @@
 //! thread count. rootba's default reduction zeroes a full pose vector per split
 //! (O(landmarks x keyframes) per iteration; phase-1 profile).
 //!
-//! f32 safety (DESIGN B24). As in rootba: Jacobi scaling, and PCG residual
+//! f32 safety. As in rootba: Jacobi scaling, and PCG residual
 //! replacement (rootba every 10 iterations, ours every 8). Ours: the
 //! block-Jacobi preconditioner factored in f64, a `lambda` floor, the PCG dots,
 //! every cost and the model decrease summed in f64 (the per-block matvec stays
@@ -92,41 +92,75 @@ pub struct GbaProblem<S: Scalar> {
     pub rel_poses: Vec<RelPoseConstraint<S>>,
 }
 
+/// What [`GbaProblem::drop_sparse_observations`] removed and kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparseDrop {
+    /// Keyframes with observations, but fewer than `min_obs_per_kf`.
+    pub keyframes: usize,
+    /// Observations of those keyframes.
+    pub observations: usize,
+    /// The index each kept landmark had before the call, in order.
+    pub kept_landmarks: Vec<usize>,
+}
+
 impl<S: Scalar> GbaProblem<S> {
-    /// DESIGN §3.1 filters. A keyframe with fewer than `min_obs_per_kf`
+    /// The export filters. A keyframe with fewer than `min_obs_per_kf`
     /// observations loses its reprojection rows but keeps its pose-graph rows
-    /// (B22: rootba drops the keyframe and its edges). Then every landmark with
-    /// fewer than two observations goes. Returns (observations, landmarks) removed.
-    pub fn drop_sparse_observations(&mut self, min_obs_per_kf: usize) -> (usize, usize) {
+    /// (rootba drops the keyframe and its edges). Then every landmark with
+    /// fewer than two observations or no finite position goes.
+    pub fn drop_sparse_observations(&mut self, min_obs_per_kf: usize) -> SparseDrop {
         let mut per_kf = vec![0usize; self.imu_from_world.len()];
         for obs in self.landmarks.iter().flat_map(|l| &l.observations) {
             if let Some(n) = per_kf.get_mut(obs.keyframe) {
                 *n += 1;
             }
         }
-        let mut dropped_obs = 0;
+        let mut observations = 0;
         for landmark in &mut self.landmarks {
             let before = landmark.observations.len();
             landmark
                 .observations
                 .retain(|o| per_kf.get(o.keyframe).is_some_and(|&n| n >= min_obs_per_kf));
-            dropped_obs += before - landmark.observations.len();
+            observations += before - landmark.observations.len();
         }
-        let before = self.landmarks.len();
-        self.landmarks
-            .retain(|l| l.observations.len() >= 2 && l.position.iter().all(|v| v.is_finite()));
-        (dropped_obs, before - self.landmarks.len())
+        let mut kept_landmarks = Vec::new();
+        for (i, l) in std::mem::take(&mut self.landmarks).into_iter().enumerate() {
+            if l.observations.len() >= 2 && l.position.iter().all(|v| v.is_finite()) {
+                kept_landmarks.push(i);
+                self.landmarks.push(l);
+            }
+        }
+        SparseDrop {
+            keyframes: per_kf
+                .iter()
+                .filter(|&&n| n > 0 && n < min_obs_per_kf)
+                .count(),
+            observations,
+            kept_landmarks,
+        }
     }
 
     /// The problem in another scalar.
     pub fn cast<T: Scalar>(&self) -> GbaProblem<T> {
+        self.cast_with(RigidTransform::cast, |position| {
+            position.map(|v| T::from_literal(v.to_f64()))
+        })
+    }
+
+    /// The problem in another scalar, each pose and landmark position mapped
+    /// by `pose` and `position`, in one pass.
+    fn cast_with<T: Scalar>(
+        &self,
+        pose: impl Fn(&RigidTransform<S>) -> RigidTransform<T>,
+        position: impl Fn(&Vector3<S>) -> Vector3<T>,
+    ) -> GbaProblem<T> {
         GbaProblem {
-            imu_from_world: self.imu_from_world.iter().map(|p| p.cast()).collect(),
+            imu_from_world: self.imu_from_world.iter().map(pose).collect(),
             landmarks: self
                 .landmarks
                 .iter()
                 .map(|l| GbaLandmark {
-                    position: l.position.map(|v| T::from_literal(v.to_f64())),
+                    position: position(&l.position),
                     observations: l
                         .observations
                         .iter()
@@ -144,9 +178,9 @@ impl<S: Scalar> GbaProblem<S> {
 }
 
 impl GbaProblem<f64> {
-    /// Move the world origin to the landmark centroid (in f64), then cast.
-    /// Relative-pose measurements do not change. Returns the centroid for
-    /// [`Self::uncentre_from`].
+    /// Move the world origin to the landmark centroid (in f64), then cast, in
+    /// one pass. Relative-pose measurements do not change. Returns the
+    /// centroid for [`Self::uncentre_from`].
     pub fn centred<T: Scalar>(&self) -> (GbaProblem<T>, Vector3<f64>) {
         let n = self.landmarks.len().max(1) as f64;
         let centroid: Vector3<f64> = self
@@ -155,15 +189,16 @@ impl GbaProblem<f64> {
             .map(|l| l.position)
             .sum::<Vector3<f64>>()
             / n;
-        let mut centred = self.clone();
-        for pose in &mut centred.imu_from_world {
-            // p_i = R (p_w' + c) + t: the new translation is t + R c.
-            pose.translation += pose.rotation * centroid;
-        }
-        for landmark in &mut centred.landmarks {
-            landmark.position -= centroid;
-        }
-        (centred.cast(), centroid)
+        let centred = self.cast_with(
+            |pose| {
+                // p_i = R (p_w' + c) + t: the new translation is t + R c.
+                let mut pose: RigidTransform<f64> = *pose;
+                pose.translation += pose.rotation * centroid;
+                pose.cast()
+            },
+            |position| (position - centroid).map(|v| T::from_literal(v.to_f64())),
+        );
+        (centred, centroid)
     }
 
     /// Write a solved centred problem back into world coordinates.

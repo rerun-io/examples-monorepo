@@ -46,6 +46,8 @@ kornia-staging-gpu = { path = ".", features = ["test-support"] }
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
 # tests/gba_lanes.rs reads RootSLAM's exported GBA problems (Basalt calibrations).
 kornia-staging-3d = { workspace = true, features = ["serde"] }
+# Upstream umeyama_f64, the rigid fit the band checks compare positions with.
+kornia-algebra.workspace = true
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

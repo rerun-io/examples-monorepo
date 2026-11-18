@@ -1,4 +1,4 @@
-//! The global BA's implicit PCG on the device (DESIGN §7, PR e1).
+//! The global BA's implicit PCG on the device.
 //!
 //! [`GpuPcg`] is a [`PcgLane`] for `kornia_staging_slam::sqrt_ba::solve_global_with`:
 //! each LM attempt's reduced camera system goes to the device in one upload
@@ -8,13 +8,12 @@
 //! constant the CPU lane uses for its residual replacement; the device stops
 //! at exactly the iteration the CPU rules stop at. Each iteration is one
 //! [`execute_exclusive`] section and each state read another, so frontend
-//! work on the same device never waits behind more than one of them
-//! (DESIGN §7.3).
+//! work on the same device never waits behind more than one of them.
 //!
-//! The block-Jacobi inverses come from the host, factored in f64 (DESIGN §7.3:
-//! portable devices have no f64). The PCG scalars are compensated f32 sums in
+//! The block-Jacobi inverses come from the host, factored in f64 (portable
+//! devices have no f64). The PCG scalars are compensated f32 sums in
 //! one fixed order (`tests/support/sums.rs` mirrors it), where the CPU lane sums in
-//! f64; the S4 band (DESIGN §7.4) measures what is left.
+//! f64; the lane band (`tests/gba_lanes.rs`) measures what is left.
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -455,7 +454,7 @@ impl<R: Runtime> GpuPcg<R> {
         let mut sections = 0usize;
         let mut it = 1u32;
         let state: Vec<u32> = loop {
-            // One iteration per exclusive section (DESIGN 7.3): frontend work
+            // One iteration per exclusive section: frontend work
             // waits behind one iteration at most.
             let section = Instant::now();
             execute_exclusive(client, "a PCG iteration", || {
@@ -638,7 +637,7 @@ fn round_trip_agrees(host: &[f32], device: &[f32]) -> Result<(), GpuError> {
     }
 }
 
-/// The back end's GBA round trip on `client` (DESIGN §7.3): a small reduced
+/// The back end's GBA round trip on `client`: a small reduced
 /// system (8 poses, 200 landmark blocks), three PCG iterations on the device
 /// and on the host, every entry of the solution within 1e-4 of the host's
 /// largest. Guards against a runtime that runs the kernels and returns zeros.

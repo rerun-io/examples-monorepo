@@ -85,6 +85,7 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Camera trait, pinhole, robust KB4; ProjectionReject extends upstream with OutsideDomain/NonFinite | slam-rs camera.rs; robocap-live kornia_ext/fisheye.rs | kornia-rs / kornia-3d / camera | staged | [#822](https://github.com/kornia/kornia-rs/issues/822), [#481](https://github.com/kornia/kornia-rs/issues/481) |
 | Brown4/5/8/12/14, analytic derivatives and robust inverse | slam-rs radtan8; simplecv Brown–Conrady | kornia-rs / kornia-3d / camera | staged | - |
 | Fisheye624 / Fisheye62, analytic derivatives and robust inverse | simplecv fisheye624.py; handfit SymForce test oracles | kornia-rs / kornia-3d / camera | staged | - |
+| `CameraModelKind::<f64>::to_f32`: every parameter narrowed with `as f32`, `None` when the narrowed camera is invalid | slam-rs `backend::gba` (`cast_model`) | kornia-rs / kornia-3d / camera | staged | - |
 | Canonical serde tags; COLMAP and Basalt converters | camera crosswalk research; slam-rs calibration schemas | kornia-rs / kornia-3d / camera::formats | staged | - |
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |

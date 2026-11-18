@@ -3,7 +3,7 @@
 //! Termination follows rootba / Ceres: the quadratic model value `Q` must stop
 //! improving, `i (Q_i - Q_{i-1}) / Q_i < eta`. rootba's CG (from Ceres) also
 //! recomputes the residual from `b - A x`, every 10 iterations; we do it every
-//! [`GBA_CG_CHECK_EVERY`] = 8. Ours for f32 (DESIGN B24): every PCG dot product
+//! [`GBA_CG_CHECK_EVERY`] = 8. Ours for f32: every PCG dot product
 //! accumulates in f64 in index order and the block-Jacobi inverses are factored
 //! in f64. The matvec itself (in `global`) stays in `S`.
 use kornia_staging_algebra::Scalar;
@@ -131,7 +131,7 @@ pub fn pcg<S: Scalar>(
 }
 
 /// [`pcg`] with every scalar sum taken by `dot`: an ablation seam, so a test
-/// can run the host PCG with another lane's sums (DESIGN §7.4).
+/// can run the host PCG with another lane's sums.
 pub fn pcg_with_dot<S: Scalar>(
     mut matvec: impl FnMut(&[S], &mut [S]),
     preconditioner: &BlockJacobi<S>,

@@ -1,4 +1,4 @@
-//! The global BA's PCG kernels (DESIGN §7.3, PR e1) and their launchers.
+//! The global BA's PCG kernels and their launchers.
 //!
 //! Every sum has one fixed order, so two runs on one device are bit-equal and
 //! no kernel uses a float atomic:
@@ -10,8 +10,8 @@
 //!   that holds the pose in block order (the pose-major CSR reduction);
 //! - the PCG kernels run on one cube of [`PCG_UNITS`] units: unit `u` owns
 //!   poses `u, u + 256, ...` (six entries each, in order). Every PCG scalar
-//!   (`r . z`, `r . r`, `p . q`, `x . b`, `x . r`) is a compensated f32 sum
-//!   (DESIGN §7.3): a Neumaier accumulator per unit, then a fixed tree of
+//!   (`r . z`, `r . r`, `p . q`, `x . b`, `x . r`) is a compensated f32 sum:
+//!   a Neumaier accumulator per unit, then a fixed tree of
 //!   TwoSums that carries the rounding errors beside the partials. The scalar
 //!   logic of `kornia_staging_slam::sqrt_ba::pcg` runs on unit 0; once it
 //!   stops, a flag turns every later kernel into a no-op, so the host reads

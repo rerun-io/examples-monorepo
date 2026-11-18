@@ -1,4 +1,4 @@
-//! The global BA's device PCG against the CPU lane (DESIGN §7.4, PR e1).
+//! The global BA's device PCG against the CPU lane.
 #![cfg(feature = "wgpu")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

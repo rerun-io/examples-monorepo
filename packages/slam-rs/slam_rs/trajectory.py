@@ -39,6 +39,15 @@ class Trajectory:
     def __len__(self) -> int:
         return int(self.t_ns.shape[0])
 
+    @classmethod
+    def from_xyzw(cls, t_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 7"]) -> "Trajectory":
+        """A trajectory from ``[tx, ty, tz, qx, qy, qz, qw]`` rows, the layout the core's poses use."""
+        return cls(t_ns=t_ns.copy(), position_m=poses[:, 0:3].copy(), quaternion_wxyz=np.roll(poses[:, 3:7], 1, axis=1))
+
+    def xyzw(self) -> Float64[ndarray, "n 7"]:
+        """The poses as ``[tx, ty, tz, qx, qy, qz, qw]`` rows, the layout the core takes."""
+        return np.concatenate([self.position_m, np.roll(self.quaternion_wxyz, -1, axis=1)], axis=1)
+
 
 @dataclass(slots=True, frozen=True)
 class Association:
@@ -178,32 +187,6 @@ def shift_clock(trajectory: Trajectory, offset_ns: int) -> Trajectory:
         position_m=trajectory.position_m,
         quaternion_wxyz=trajectory.quaternion_wxyz,
     )
-
-
-def write_scoring_csvs(final_csv: Path, *, final: Trajectory | None, raw: Trajectory | None, offset_ns: int) -> Path:
-    """Write the trajectories a run is scored on, shifted onto the dataset's clock.
-
-    ``final_csv`` (``slam_rs.csv``) holds the final run; the raw causal VIO goes
-    beside it with ``_vio`` added to the stem (``slam_rs_vio.csv``), the names
-    the scorer's ``--est slam_rs=... --est slam_rs_vio=...`` reads. A replay
-    writes the raw VIO alone first (``final=None``), so that nothing after
-    tracking can lose it, and the final run once it exists (``raw=None``).
-
-    Args:
-        final_csv: Destination of the final trajectory.
-        final: The final run, on ``video_time``; None writes no final file.
-        raw: The raw VIO run, on ``video_time``; None writes no raw file.
-        offset_ns: ``video_time`` to dataset clock, as :func:`shift_clock` takes it.
-
-    Returns:
-        Where the raw VIO trajectory goes.
-    """
-    raw_csv: Path = final_csv.with_stem(f"{final_csv.stem}_vio")
-    if final is not None:
-        write_trajectory(final_csv, shift_clock(final, offset_ns))
-    if raw is not None:
-        write_trajectory(raw_csv, shift_clock(raw, offset_ns))
-    return raw_csv
 
 
 def associate(reference: Trajectory, candidate: Trajectory, tolerance_ns: int = ASSOCIATION_TOLERANCE_NS) -> Association:

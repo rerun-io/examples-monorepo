@@ -1,109 +1,36 @@
 //! The global BA driver on RootSLAM's exported MGO07 and MGO13 maps, against
 //! rootba `bal` (DESIGN §7.4, PR d2). The map goes through the same path as
 //! `Vio::finish_map`: a [`KeyframeMap`] with host-relative landmarks, then
-//! `map_problem`, `solve` (f64 centring, f32) and `apply`, without
-//! `remove_gauge`: rootba holds no pose and moves no gauge either, so the
-//! keyframes are compared with the solver's output before the re-alignment.
+//! `map_problem` and `solve` (f64 centring, f32), without `remove_gauge`:
+//! rootba holds no pose and moves no gauge either, so the keyframes are
+//! compared with the solver's output before the re-alignment.
 //!
-//! Assets, read at test time as third-party formats: `<runs>/<seq>/map/{map,
-//! pose_graph}.json` and `map/optimized_tracking_pg_float.csv`, and the
-//! `output.<seq>.{balpgf,balpgd}.log` of the reproduction (default runs root
-//! `/mnt/nas/ssd-8tb/scratch/rootslam/runs`, override `GBA_EXPORT_RUNS`), and
-//! RootSLAM's Basalt calibration `msd/msdmg_calib.json` (default
-//! `~/0Dev/forks/rootslam/data`, override `GBA_EXPORT_CALIB`). `#[ignore]`: run
-//! them with `pixi run -e slam-rs-dev slam-rs-gba-golden`; a missing asset then
-//! fails and names the asset.
+//! The export, its assets and rootba's logs are read by kornia-staging-slam's
+//! `tests/support/rootba_export.rs`, shared with the solver golden; this file
+//! adds `map/optimized_tracking_pg_float.csv` (rootba's optimized keyframes).
+//! `#[ignore]`: run them with `pixi run -e slam-rs-dev slam-rs-gba-golden`; a
+//! missing asset then fails and names the asset.
 
 #![cfg(feature = "backend")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
-use serde::Deserialize;
-use slam_rs::backend::gba::{GbaRig, apply, host_relative, map_problem, solve};
+use nalgebra::{Matrix3, Vector2, Vector3};
+use slam_rs::backend::gba::{GbaRig, map_problem, solve};
+use slam_rs::backend::map::host_relative;
 use slam_rs::backend::{KeyframeMap, PoseGraphEdge, PoseGraphEdgeKind};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
 use slam_rs::estimator::StampLandmark;
-use slam_rs::lie::{Se3, So3};
 use slam_rs::types::{LandmarkId, TimeCamId};
 
-#[derive(Deserialize)]
-struct MapJson {
-    keyframes: Vec<KeyframeJson>,
-    landmarks: Vec<LandmarkJson>,
-    observations: Vec<ObservationJson>,
-}
-
-#[derive(Deserialize)]
-struct KeyframeJson {
-    id: i64,
-    /// `[qw, qx, qy, qz, tx, ty, tz]`.
-    #[serde(rename = "T_w_i")]
-    world_from_imu: [f64; 7],
-}
-
-#[derive(Deserialize)]
-struct LandmarkJson {
-    id: u64,
-    p_w: [f64; 3],
-}
-
-#[derive(Deserialize)]
-struct ObservationJson {
-    lm_id: u64,
-    kf_id: i64,
-    cam_id: usize,
-    pos: [f64; 2],
-}
-
-#[derive(Deserialize)]
-struct PoseGraphJson {
-    edges: Vec<EdgeJson>,
-}
-
-#[derive(Deserialize)]
-struct EdgeJson {
-    kf_id_a: i64,
-    kf_id_b: i64,
-}
-
-fn runs_root() -> PathBuf {
-    std::env::var_os("GBA_EXPORT_RUNS").map_or_else(
-        || PathBuf::from("/mnt/nas/ssd-8tb/scratch/rootslam/runs"),
-        PathBuf::from,
-    )
-}
-
-fn calib_path() -> PathBuf {
-    std::env::var_os("GBA_EXPORT_CALIB")
-        .map_or_else(
-            || PathBuf::from(std::env::var("HOME").unwrap()).join("0Dev/forks/rootslam/data"),
-            PathBuf::from,
-        )
-        .join("msd/msdmg_calib.json")
-}
-
-fn read_asset(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("asset {} is absent or unreadable: {e}", path.display()))
-}
-
-fn pose7(a: &[f64; 7]) -> Se3<f64> {
-    let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(a[0], a[1], a[2], a[3]));
-    Se3::new(So3::from_unit_quaternion(q), Vector3::new(a[4], a[5], a[6]))
-}
-
-/// `Final Cost: error valid: <v>` of a rootba log.
-fn final_cost(path: &Path) -> f64 {
-    read_asset(path)
-        .lines()
-        .find(|l| l.starts_with("Final Cost: error valid:"))
-        .and_then(|l| l.split_whitespace().nth(4)?.parse().ok())
-        .unwrap_or_else(|| panic!("{} has no 'Final Cost' line", path.display()))
-}
+#[path = "../../../../kornia-staging/crates/kornia-staging-slam/tests/support/rootba_export.rs"]
+mod rootba_export;
+use rootba_export::{
+    MapJson, PoseGraphJson, calib_path, parse, pose7, read_asset, rootba_run, runs_root,
+};
 
 /// Keyframe positions of a EuRoC trajectory CSV (rootba's optimized output).
 fn positions(path: &Path) -> BTreeMap<i64, Vector3<f64>> {
@@ -117,28 +44,31 @@ fn positions(path: &Path) -> BTreeMap<i64, Vector3<f64>> {
         .collect()
 }
 
+/// The rigid transform (`R`, `t`) that best maps `a` onto `b` (Kabsch:
+/// upstream `umeyama_f64` without scale).
+fn rigid_fit(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> (Matrix3<f64>, Vector3<f64>) {
+    let points = |p: &[Vector3<f64>]| -> Vec<kornia_algebra::Vec3F64> {
+        p.iter()
+            .map(|v| kornia_algebra::Vec3F64::new(v.x, v.y, v.z))
+            .collect()
+    };
+    let (r, t, _) =
+        kornia_algebra::linalg::rigid::umeyama_f64(&points(a), &points(b), false).unwrap();
+    (
+        Matrix3::from_column_slice(&<[f64; 9]>::from(r)),
+        Vector3::new(t.x, t.y, t.z),
+    )
+}
+
 /// RMS of `a - b` after the rigid alignment (Kabsch) of `a` onto `b`.
 fn aligned_rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
-    let n = a.len() as f64;
-    let (ma, mb) = (
-        a.iter().sum::<Vector3<f64>>() / n,
-        b.iter().sum::<Vector3<f64>>() / n,
-    );
-    let mut h = Matrix3::zeros();
-    for (x, y) in a.iter().zip(b) {
-        h += (x - ma) * (y - mb).transpose();
-    }
-    let svd = h.svd(true, true);
-    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
-    let mut d = Matrix3::identity();
-    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
-    let r = v_t.transpose() * d * u.transpose();
-    (a.iter()
+    let (r, t) = rigid_fit(a, b);
+    let sq: f64 = a
+        .iter()
         .zip(b)
-        .map(|(x, y)| (r * (x - ma) + mb - y).norm_squared())
-        .sum::<f64>()
-        / n)
-        .sqrt()
+        .map(|(x, y)| (r * x + t - y).norm_squared())
+        .sum();
+    (sq / a.len() as f64).sqrt()
 }
 
 fn rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
@@ -167,11 +97,10 @@ fn golden_mgo13_driver_keeps_sparse_keyframes_and_ends_at_or_below_rootba_bal() 
 
 fn golden(seq: &str) {
     let run = runs_root().join(seq);
-    let export: MapJson = serde_json::from_str(&read_asset(&run.join("map/map.json"))).unwrap();
-    let graph: PoseGraphJson =
-        serde_json::from_str(&read_asset(&run.join("map/pose_graph.json"))).unwrap();
+    let export: MapJson = parse(&run.join("map/map.json"));
+    let graph: PoseGraphJson = parse(&run.join("map/pose_graph.json"));
     let calibration: Calibration<f64> =
-        Calibration::from_json_str(&read_asset(&calib_path())).unwrap();
+        Calibration::from_json_str(&read_asset(&calib_path(seq))).unwrap();
     let models = calibration
         .intrinsics
         .iter()
@@ -184,12 +113,12 @@ fn golden(seq: &str) {
     // observation (converted once), keyframe observations.
     let mut map = KeyframeMap::new();
     for kf in &export.keyframes {
-        map.upsert_keyframe(kf.id, pose7(&kf.world_from_imu), None);
+        map.upsert_keyframe(kf.id as i64, pose7(&kf.world_from_imu), None);
     }
     let mut obs: HashMap<u64, BTreeMap<TimeCamId, Vector2<f32>>> = HashMap::new();
     for o in &export.observations {
         obs.entry(o.lm_id).or_default().insert(
-            TimeCamId::new(o.kf_id, o.cam_id),
+            TimeCamId::new(o.kf_id as i64, o.cam_id),
             Vector2::new(o.pos[0] as f32, o.pos[1] as f32),
         );
     }
@@ -215,8 +144,8 @@ fn golden(seq: &str) {
         .edges
         .iter()
         .map(|e| PoseGraphEdge {
-            from: e.kf_id_a,
-            to: e.kf_id_b,
+            from: e.kf_id_a as i64,
+            to: e.kf_id_b as i64,
             kind: PoseGraphEdgeKind::SpanningTree,
         })
         .collect();
@@ -224,11 +153,10 @@ fn golden(seq: &str) {
     let config = VioConfig::default();
     let input = map_problem(&map, &edges, t_i_c, &config);
     let (solved, report) = solve(&input, &rig, &config, slam_rs::Backend::Cpu).unwrap();
-    apply(&mut map, &input, &solved, t_i_c);
     let ours = report.final_cost.error;
     let (bal_f32, bal_f64) = (
-        final_cost(&run.join(format!("output.{seq}.balpgf.log"))),
-        final_cost(&run.join(format!("output.{seq}.balpgd.log"))),
+        rootba_run(seq, "balpgf").final_cost,
+        rootba_run(seq, "balpgd").final_cost,
     );
     eprintln!(
         "{seq} driver: {:?}; cost {:.4e} -> {ours:.4e} in {} attempts, {} CG; rootba bal f32 {bal_f32:.4e}, f64 {bal_f64:.4e}",
@@ -255,13 +183,13 @@ fn golden(seq: &str) {
     // `min_obs_per_kf` observations in map.json (its filter_kf); we keep all.
     let bal_poses = positions(&run.join("map/optimized_tracking_pg_float.csv"));
     let (mut a, mut b) = (Vec::new(), Vec::new());
-    for (id, keyframe) in map.keyframes() {
+    for (id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
         if let Some(p) = bal_poses.get(id) {
-            a.push(keyframe.pose.translation);
+            a.push(imu_from_world.inverse().translation);
             b.push(*p);
         }
     }
-    let mut per_keyframe: HashMap<i64, usize> = HashMap::new();
+    let mut per_keyframe: HashMap<u64, usize> = HashMap::new();
     for o in &export.observations {
         *per_keyframe.entry(o.kf_id).or_default() += 1;
     }

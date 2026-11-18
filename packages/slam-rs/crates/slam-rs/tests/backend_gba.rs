@@ -60,14 +60,17 @@ fn the_gba_records_its_lane() {
     let frames = frames();
     let mut cpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Cpu);
     run(&frames, &mut cpu);
-    let result = cpu.finish_map(true).unwrap().unwrap();
+    let result = cpu.finish_map(true).unwrap();
     assert_eq!(result.gba.unwrap().lane, api::Backend::Cpu);
     #[cfg(not(feature = "gpu-wgpu"))]
     {
         let mut gpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Gpu);
         run(&frames, &mut gpu);
-        let error = gpu.finish_map(true).unwrap_err().to_string();
+        let failed = gpu.finish_map(true).unwrap();
+        let error = failed.gba_failure.unwrap().to_string();
         assert!(error.contains("GPU lane cannot start"), "{error}");
+        assert!(failed.gba.is_none());
+        assert_eq!(failed.keyframe_poses, failed.keyframe_poses_before_gba);
     }
 }
 
@@ -80,10 +83,7 @@ fn the_gpu_lane_lands_in_the_cpu_band() {
     let mut gpu = pipeline_on(Some(BackendMode::Offline), api::Backend::Gpu);
     run(&frames, &mut cpu);
     run(&frames, &mut gpu);
-    let (cpu, gpu) = (
-        cpu.finish_map(true).unwrap().unwrap(),
-        gpu.finish_map(true).unwrap().unwrap(),
-    );
+    let (cpu, gpu) = (cpu.finish_map(true).unwrap(), gpu.finish_map(true).unwrap());
     let (c, g) = (cpu.gba.unwrap(), gpu.gba.unwrap());
     assert_eq!(g.lane, api::Backend::Gpu);
     let (cc, gc) = (c.report.final_cost.error, g.report.final_cost.error);
@@ -104,11 +104,11 @@ fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
     let threaded = run(&frames, &mut realtime);
     assert_eq!(with.results, without.results);
     assert_eq!(threaded.results, without.results);
-    assert!(off.finish_map(true).unwrap().is_none(), "no map, no result");
+    assert!(off.finish_map(true).is_none(), "no map, no result");
 
     let window = format!("{:?}", on.estimator());
     let snapshot = on.map_snapshot().unwrap();
-    let plain = on.finish_map(false).unwrap().unwrap();
+    let plain = on.finish_map(false).unwrap();
     assert!(plain.gba.is_none());
     assert_eq!(plain.keyframe_t_ns, snapshot.keyframe_t_ns);
     assert_eq!(plain.keyframe_poses, snapshot.keyframe_poses);
@@ -119,7 +119,7 @@ fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
         "finish_map(false) changed the map"
     );
 
-    let result = on.finish_map(true).unwrap().unwrap();
+    let result = on.finish_map(true).unwrap();
     let gba = result.gba.as_ref().unwrap();
     assert!(
         (1..=20).contains(&gba.report.iterations.len()),
@@ -149,7 +149,7 @@ fn finish_map_runs_the_gba_on_the_map_and_never_on_the_window() {
     // Realtime builds the same map, so its GBA gives the same result, and its
     // posted view shows it.
     realtime.finish_deferred_keyframe().unwrap();
-    let threaded_result = realtime.finish_map(true).unwrap().unwrap();
+    let threaded_result = realtime.finish_map(true).unwrap();
     assert_eq!(threaded_result.keyframe_poses, result.keyframe_poses);
     assert_eq!(
         realtime.map_snapshot().unwrap().keyframe_poses,
@@ -176,14 +176,14 @@ fn the_final_trajectory_is_the_raw_vio_reanchored_on_the_gba_keyframes() {
     assert!(raw.len() > 10);
 
     let lc_final = on.map_snapshot().unwrap().reanchor(&raw).unwrap();
-    let plain = on.finish_map(false).unwrap().unwrap();
+    let plain = on.finish_map(false).unwrap();
     assert_eq!(
         plain.reanchor(&raw).unwrap(),
         lc_final,
         "run_gba=false is not f1's +LC final"
     );
 
-    let result = on.finish_map(true).unwrap().unwrap();
+    let result = on.finish_map(true).unwrap();
     assert!(result.gba.is_some());
     let keyframes: Vec<(i64, api::lie::Se3<f64>)> = result
         .keyframe_t_ns
@@ -193,7 +193,7 @@ fn the_final_trajectory_is_the_raw_vio_reanchored_on_the_gba_keyframes() {
         .collect();
     let expected = api::backend::reanchor(
         &raw.iter()
-            .map(|&(t_ns, pose)| (t_ns, se3(&pose)))
+            .map(|&(t_ns, pose)| (t_ns, api::pose_from_xyzw(&pose).unwrap()))
             .collect::<Vec<_>>(),
         &keyframes,
     )
@@ -201,37 +201,17 @@ fn the_final_trajectory_is_the_raw_vio_reanchored_on_the_gba_keyframes() {
     let gba_final = result.reanchor(&raw).unwrap();
     assert_eq!(gba_final.len(), raw.len());
     for (ours, theirs) in gba_final.iter().zip(&expected) {
-        assert_eq!(*ours, pose_array(theirs));
+        assert_eq!(*ours, api::pose_to_xyzw(theirs));
     }
     assert_ne!(gba_final, lc_final, "the GBA moved no frame");
     // Each keyframe lands on its GBA pose.
     for (t_ns, pose) in &keyframes {
         let row = raw.binary_search_by_key(t_ns, |&(t, _)| t).unwrap();
-        assert_eq!(gba_final[row], pose_array(pose));
+        assert_eq!(gba_final[row], api::pose_to_xyzw(pose));
     }
     assert_eq!(
         on.map_snapshot().unwrap().reanchor(&raw).unwrap(),
         gba_final,
         "the map after finish_map gives the same final"
     );
-}
-
-fn se3(pose: &[f64; 7]) -> api::lie::Se3<f64> {
-    api::lie::Se3::new(
-        api::lie::So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6]).unwrap(),
-        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
-    )
-}
-
-fn pose_array(pose: &api::lie::Se3<f64>) -> [f64; 7] {
-    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
-    [
-        pose.translation.x,
-        pose.translation.y,
-        pose.translation.z,
-        x,
-        y,
-        z,
-        w,
-    ]
 }

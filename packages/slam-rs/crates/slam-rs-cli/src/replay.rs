@@ -7,8 +7,7 @@ use slam_rs::config::VioConfig;
 use slam_rs::frontend::flow::FrontendOptions;
 use slam_rs::replay::{feed_imu_through, percentile};
 use slam_rs::{
-    Backend, BackendRequest, Backends, GbaRequest, ImageView, Vio, VioError, VioResult,
-    select_backend,
+    Backend, BackendRequest, Backends, GbaRequest, ImageView, Vio, VioResult, select_backend,
 };
 use std::fmt::Write as _;
 use std::path::Path;
@@ -175,9 +174,7 @@ pub(super) fn replay(
         "flush_ms": flush_ms,
         "track_ms_per_frame": track_ms,
     });
-    write_outputs(outputs, &raw, report, run_gba, |run_gba| {
-        vio.finish_map(run_gba)
-    })?;
+    write_outputs(outputs, &raw, report, || vio.finish_map(run_gba))?;
     println!(
         "{}: {tracked}/{framesets} tracked, wall {wall_s:.2} s = {:.2} ms/frameset (track mean {mean_ms:.2}, p50 {:.2}, p95 {:.2})",
         clip.segment_id,
@@ -191,16 +188,15 @@ pub(super) fn replay(
 /// Write a replay's files. The raw VIO (`--out-vio`) and the summary go first,
 /// so nothing after them loses a tracked run. Then the final trajectory (DESIGN
 /// §1, §2): the raw VIO re-anchored on the map `finish_map` leaves, after the
-/// global BA when `run_gba`, or the raw VIO itself with the back end off; and
-/// the summary again, with the finish. A GBA that fails costs only the GBA: one
+/// global BA when it ran, or the raw VIO itself with the back end off; and the
+/// summary again, with the finish. A GBA that failed costs only the GBA: one
 /// warning, `--out` re-anchored on the map as loops and PGO left it, and
 /// `"gba": {"failed": <reason>}` in the summary.
 fn write_outputs(
     outputs: &ReplayOutputs,
     raw: &[(i64, [f64; 7])],
     mut report: serde_json::Value,
-    run_gba: bool,
-    mut finish_map: impl FnMut(bool) -> Result<Option<MapResult>, VioError>,
+    finish_map: impl FnOnce() -> Option<MapResult>,
 ) -> Result<(), String> {
     let write_summary = |report: &serde_json::Value| -> Result<(), String> {
         let text: String =
@@ -215,18 +211,17 @@ fn write_outputs(
     write_summary(&report)?;
 
     let finish_started = Instant::now();
-    let (map, gba_failure): (Option<MapResult>, Option<String>) = match finish_map(run_gba) {
-        Ok(map) => (map, None),
-        Err(error) => {
-            let reason: String = error.to_string();
-            eprintln!(
-                "slam-rs: warning: the global BA failed ({reason}); --out is re-anchored on the map as loops and PGO left it"
-            );
-            let map = finish_map(false).map_err(|error| format!("finish_map: {error}"))?;
-            (map, Some(reason))
-        }
-    };
+    let map: Option<MapResult> = finish_map();
     let finish_map_s: f64 = finish_started.elapsed().as_secs_f64();
+    let gba_failure: Option<String> = map
+        .as_ref()
+        .and_then(|map| map.gba_failure.as_ref())
+        .map(|error| format!("global BA: {error}"));
+    if let Some(reason) = &gba_failure {
+        eprintln!(
+            "slam-rs: warning: the global BA failed ({reason}); --out is re-anchored on the map as loops and PGO left it"
+        );
+    }
     let final_poses: Vec<[f64; 7]> = match &map {
         Some(map) => map
             .reanchor(raw)
@@ -268,8 +263,7 @@ fn trajectory_csv(rows: impl Iterator<Item = (i64, [f64; 7])>) -> Result<String,
 #[cfg(test)]
 mod tests {
     use super::{ReplayOutputs, trajectory_csv, write_outputs};
-    use slam_rs::VioError;
-    use slam_rs::backend::MapResult;
+    use slam_rs::backend::{GbaDriverError, MapResult};
     use slam_rs::lie::Se3;
     use std::path::{Path, PathBuf};
 
@@ -301,6 +295,7 @@ mod tests {
             keyframe_poses_before_gba: vec![moved],
             keyframe_poses: vec![moved],
             gba: None,
+            gba_failure: None,
         }
     }
 
@@ -311,23 +306,14 @@ mod tests {
     #[test]
     fn a_failed_gba_falls_back_to_the_map_after_loops_and_pgo() {
         let outputs = outputs("gba-fails");
-        let mut asked: Vec<bool> = Vec::new();
-        write_outputs(
-            &outputs,
-            &RAW,
-            serde_json::json!({"tracked": 2}),
-            true,
-            |run_gba| {
-                asked.push(run_gba);
-                if run_gba {
-                    Err(VioError::GlobalBa("the solver refused".into()))
-                } else {
-                    Ok(Some(lc_map()))
-                }
-            },
-        )
+        let failed = MapResult {
+            gba_failure: Some(GbaDriverError::NoRig),
+            ..lc_map()
+        };
+        write_outputs(&outputs, &RAW, serde_json::json!({"tracked": 2}), || {
+            Some(failed)
+        })
         .unwrap();
-        assert_eq!(asked, [true, false]);
         let raw_csv: String = trajectory_csv(RAW.iter().copied()).unwrap();
         assert_eq!(
             std::fs::read_to_string(outputs.out_vio.as_ref().unwrap()).unwrap(),
@@ -343,11 +329,9 @@ mod tests {
         );
         let report = summary(&outputs.summary);
         assert_eq!(report["tracked"], 2);
-        assert!(
-            report["gba"]["failed"]
-                .as_str()
-                .unwrap()
-                .contains("the solver refused"),
+        assert_eq!(
+            report["gba"]["failed"],
+            format!("global BA: {}", GbaDriverError::NoRig),
             "{report}"
         );
         assert!(report["finish_map_s"].as_f64().unwrap() >= 0.0);
@@ -356,15 +340,16 @@ mod tests {
     #[test]
     fn the_raw_vio_and_the_summary_are_written_before_the_map_is_finished() {
         let outputs = outputs("finish-fails");
-        let error = write_outputs(
-            &outputs,
-            &RAW,
-            serde_json::json!({"tracked": 2}),
-            true,
-            |_| Err(VioError::GlobalBa("no map".into())),
-        )
+        // A keyframe that is not one of the frames: re-anchoring refuses it.
+        let stray = MapResult {
+            keyframe_t_ns: vec![15],
+            ..lc_map()
+        };
+        let error = write_outputs(&outputs, &RAW, serde_json::json!({"tracked": 2}), || {
+            Some(stray)
+        })
         .unwrap_err();
-        assert!(error.contains("no map"), "{error}");
+        assert!(error.contains("re-anchoring"), "{error}");
         assert_eq!(
             std::fs::read_to_string(outputs.out_vio.as_ref().unwrap()).unwrap(),
             trajectory_csv(RAW.iter().copied()).unwrap()
@@ -374,15 +359,9 @@ mod tests {
     }
 
     #[test]
-    fn without_the_gba_finish_map_runs_once_and_the_summary_says_none() {
+    fn without_the_gba_the_summary_says_none() {
         let outputs = outputs("no-gba");
-        let mut asked: Vec<bool> = Vec::new();
-        write_outputs(&outputs, &RAW, serde_json::json!({}), false, |run_gba| {
-            asked.push(run_gba);
-            Ok(Some(lc_map()))
-        })
-        .unwrap();
-        assert_eq!(asked, [false]);
+        write_outputs(&outputs, &RAW, serde_json::json!({}), || Some(lc_map())).unwrap();
         assert!(summary(&outputs.summary)["gba"].is_null());
     }
 }

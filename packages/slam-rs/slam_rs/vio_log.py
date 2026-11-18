@@ -20,7 +20,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
-from slam_rs.map_loops import log_loops, log_pose_graph
+from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
 
@@ -38,8 +38,6 @@ IMAGE_DOWNSCALE: int = 2
 JPEG_QUALITY: int = 85
 """Quality of the full-resolution frames the tracking stages log; 960x960 grayscale lands around 38 kB."""
 
-RUN_ENTITY: str = "/world/runs/slam_rs"
-"""The final run and the back end's map, beside the dataset's own ``/world/runs/gt`` (the catalog layer's ``slam_rs``)."""
 VIO_RUN_ENTITY: str = "/world/runs/slam_rs_vio"
 """The raw causal VIO, drawn live: rig, trajectory, window, landmarks (the catalog layer's ``slam_rs_vio``)."""
 GT_ENTITY: str = "/world/runs/gt"

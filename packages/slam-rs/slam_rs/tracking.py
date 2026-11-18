@@ -9,7 +9,7 @@ import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal
 
 import numpy as np
 from jaxtyping import Float64
@@ -235,16 +235,8 @@ def reanchored(estimate: Trajectory, map_keyframes: _core.MapSnapshot | _core.Ma
     """
     if map_keyframes is None:
         return estimate
-    raw_xyzw: Float64[ndarray, "n 7"] = np.concatenate([estimate.position_m, np.roll(estimate.quaternion_wxyz, -1, axis=1)], axis=1)
-    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, raw_xyzw, map_keyframes.keyframe_t_ns, map_keyframes.keyframe_poses)
-    return Trajectory(t_ns=estimate.t_ns.copy(), position_m=final[:, 0:3].copy(), quaternion_wxyz=np.roll(final[:, 3:7], 1, axis=1))
-
-
-@runtime_checkable
-class FinishesMap(Protocol):
-    """What :func:`final_trajectory` asks of the estimator: :meth:`slam_rs._core.Vio.finish_map`."""
-
-    def finish_map(self, run_gba: bool) -> _core.MapResult | None: ...
+    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, estimate.xyzw(), map_keyframes.keyframe_t_ns, map_keyframes.keyframe_poses)
+    return Trajectory.from_xyzw(estimate.t_ns, final)
 
 
 @dataclass(slots=True, frozen=True)
@@ -259,12 +251,11 @@ class FinalRun:
     """Why the global BA failed, when it was asked for and did; ``final`` is then re-anchored on the map after loops and PGO."""
 
 
-def final_trajectory(vio: FinishesMap, estimate: Trajectory, *, run_gba: bool) -> FinalRun:
+def final_trajectory(vio: _core.Vio, estimate: Trajectory, *, run_gba: bool) -> FinalRun:
     """The run's final trajectory (DESIGN §1, §2): the global BA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes.
 
-    Call it once, after the flush: the GBA writes its poses into the map. A GBA that fails costs only the GBA: one
-    warning naming the error, and the final run is re-anchored on the map as loops and PGO left it (the GBA writes
-    nothing into the map until it has solved).
+    Call it once, after the flush: the GBA writes its poses into the map. A GBA that fails costs only the GBA: the
+    core returns the map as loops and PGO left it with the reason (``MapResult.gba_failure``), and this warns once.
 
     Args:
         vio: The flushed estimator.
@@ -274,15 +265,10 @@ def final_trajectory(vio: FinishesMap, estimate: Trajectory, *, run_gba: bool) -
     Returns:
         The final trajectory, the map it stands on and the GBA's failure, if any.
     """
-    gba_failure: str | None = None
-    try:
-        map_result: _core.MapResult | None = vio.finish_map(run_gba=run_gba)
-    except ValueError as error:
-        if not run_gba:
-            raise
-        gba_failure = str(error)
+    map_result: _core.MapResult | None = vio.finish_map(run_gba=run_gba)
+    gba_failure: str | None = None if map_result is None else map_result.gba_failure
+    if gba_failure is not None:
         warnings.warn(f"the global BA failed ({gba_failure}); the final run is re-anchored on the map after loops and PGO", RuntimeWarning, stacklevel=2)
-        map_result = vio.finish_map(run_gba=False)
     return FinalRun(final=reanchored(estimate, map_result), map_result=map_result, gba_failure=gba_failure)
 
 

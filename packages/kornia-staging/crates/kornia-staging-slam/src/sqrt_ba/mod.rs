@@ -15,7 +15,7 @@ pub use dense::{DenseBlock, DenseHbWorkspace};
 pub use global::{
     solve_global, solve_global_with, GbaCamera, GbaCost, GbaError, GbaIteration, GbaLandmark,
     GbaObservation, GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds,
-    GbaTermination,
+    GbaTermination, SparseDrop,
 };
 pub use landmark_qr::{BackSubstitution, LandmarkQr};
 pub use lane::{LaneSolve, PcgLane, PcgLaneError, ReducedBlock, ReducedSystem};

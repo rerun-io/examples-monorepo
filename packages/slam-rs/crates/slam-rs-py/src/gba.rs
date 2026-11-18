@@ -4,26 +4,8 @@
 use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pyo3::prelude::*;
 use slam_rs::backend::{GbaRun as CoreGbaRun, MapResult as CoreMapResult};
-use slam_rs::lie::Se3;
 
-/// `[tx, ty, tz, qx, qy, qz, qw]` per pose, flat.
-fn flat_poses(poses: &[Se3<f64>]) -> Vec<f64> {
-    poses
-        .iter()
-        .flat_map(|pose| {
-            let q: [f64; 4] = pose.rotation.quaternion_xyzw();
-            [
-                pose.translation.x,
-                pose.translation.y,
-                pose.translation.z,
-                q[0],
-                q[1],
-                q[2],
-                q[3],
-            ]
-        })
-        .collect()
-}
+use crate::flat_poses;
 
 /// The map's keyframes at the end of a sequence (`Vio.finish_map`).
 ///
@@ -35,25 +17,12 @@ fn flat_poses(poses: &[Se3<f64>]) -> Vec<f64> {
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug)]
 pub struct MapResult {
-    keyframe_t_ns: Vec<i64>,
-    keyframe_poses_before_gba: Vec<f64>,
-    keyframe_poses: Vec<f64>,
-    gba: Option<Py<GbaRun>>,
+    inner: CoreMapResult,
 }
 
 impl MapResult {
-    /// Flatten one result.
-    pub fn build(py: Python<'_>, result: &CoreMapResult) -> PyResult<Self> {
-        Ok(Self {
-            keyframe_t_ns: result.keyframe_t_ns.clone(),
-            keyframe_poses_before_gba: flat_poses(&result.keyframe_poses_before_gba),
-            keyframe_poses: flat_poses(&result.keyframe_poses),
-            gba: result
-                .gba
-                .as_ref()
-                .map(|run| Py::new(py, GbaRun::build(run)))
-                .transpose()?,
-        })
+    pub fn new(inner: CoreMapResult) -> Self {
+        Self { inner }
     }
 }
 
@@ -62,7 +31,7 @@ impl MapResult {
     /// Map keyframe timestamps, oldest first: `int64[k]`.
     #[getter]
     fn keyframe_t_ns<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
-        self.keyframe_t_ns.to_pyarray(py)
+        self.inner.keyframe_t_ns.to_pyarray(py)
     }
 
     /// `T_w_i` in the map after loops and PGO, before the global BA: `float64[k, 7]`.
@@ -71,30 +40,40 @@ impl MapResult {
         &self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        self.keyframe_poses_before_gba
+        flat_poses(&self.inner.keyframe_poses_before_gba)
             .to_pyarray(py)
-            .reshape((self.keyframe_t_ns.len(), 7))
+            .reshape((self.inner.keyframe_poses_before_gba.len(), 7))
     }
 
     /// `T_w_i` after the global BA: `float64[k, 7]`.
     #[getter]
     fn keyframe_poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        self.keyframe_poses
+        flat_poses(&self.inner.keyframe_poses)
             .to_pyarray(py)
-            .reshape((self.keyframe_t_ns.len(), 7))
+            .reshape((self.inner.keyframe_poses.len(), 7))
     }
 
-    /// The global BA, or `None` when `finish_map` ran without it.
+    /// The global BA, or `None` when `finish_map` ran without it or it failed.
     #[getter]
-    fn gba(&self, py: Python<'_>) -> Option<Py<GbaRun>> {
-        self.gba.as_ref().map(|run| run.clone_ref(py))
+    fn gba(&self) -> Option<GbaRun> {
+        self.inner.gba.clone().map(|run| GbaRun { run })
+    }
+
+    /// Why the global BA, asked for, failed (`"global BA: <reason>"`), or
+    /// `None`; the keyframes are then the map's after loops and PGO.
+    #[getter]
+    fn gba_failure(&self) -> Option<String> {
+        self.inner
+            .gba_failure
+            .as_ref()
+            .map(|error| format!("global BA: {error}"))
     }
 
     fn __repr__(&self) -> String {
         format!(
             "MapResult(keyframes={}, gba={})",
-            self.keyframe_t_ns.len(),
-            self.gba.is_some()
+            self.inner.keyframe_t_ns.len(),
+            self.inner.gba.is_some()
         )
     }
 }
@@ -108,10 +87,6 @@ pub struct GbaRun {
 }
 
 impl GbaRun {
-    fn build(run: &CoreGbaRun) -> Self {
-        Self { run: run.clone() }
-    }
-
     fn per_iteration<T: numpy::Element + Copy>(
         &self,
         value: impl Fn(&slam_rs::backend::gba::GbaIteration) -> T,
