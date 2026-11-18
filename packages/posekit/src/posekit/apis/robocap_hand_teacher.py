@@ -418,15 +418,13 @@ def cut_session(config: Config, path: Path) -> list[ClipPlan]:
         if match is None:
             continue
         cam: int = int(match[1])
-        batch: pa.RecordBatch | None = None
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        if "VideoStream:sample" not in batch.schema.names:
+            continue  # an is_keyframe-only chunk: the flags come from read_times
+        bounds: Int64[ndarray, "n"] = batch.column("video_time").cast(pa.int64()).to_numpy()
         for plan in todo:
             first: int = plan.first_ns[cam]
             last: int = plan.last_ns[cam]
-            if batch is None:
-                batch = chunk.to_record_batch()
-                if "VideoStream:sample" not in batch.schema.names:
-                    break  # an is_keyframe-only chunk: the flags come from read_times
-                bounds: Int64[ndarray, "n"] = batch.column("video_time").cast(pa.int64()).to_numpy()
             if bounds[-1] < first or bounds[0] > last:
                 continue
             kept: pa.RecordBatch | None = video_slice(batch, plan, cam, cams[cam])
