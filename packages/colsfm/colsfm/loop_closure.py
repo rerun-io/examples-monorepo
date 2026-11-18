@@ -453,6 +453,7 @@ class LoopClosureConfig:
             max_translation_m=config.loop_edge_translation_threshold_meters,
             max_rotation_deg=config.loop_edge_rotation_threshold_degrees,
             loop_residual_weight=config.loop_residual_weight,
+            pair_cameras_by_prior=config.loop_pair_cameras_by_prior,
         )
 
 

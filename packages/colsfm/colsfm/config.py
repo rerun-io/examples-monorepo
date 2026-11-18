@@ -53,6 +53,9 @@ class ColsfmProfileConfig:
 
     loop_candidates_per_frame: int = 3
     """`colsfm.loop_closure.LoopClosureConfig.loop_candidates_per_frame`."""
+    loop_pair_cameras_by_prior: bool = False
+    """`colsfm.loop_closure.LoopClosureConfig.pair_cameras_by_prior`: the prior rotation, not retrieval, chooses the
+    target camera of each loop image pair. Only for a profile whose metric prior is trusted."""
 
 
 def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
@@ -307,6 +310,8 @@ class PoseGraphConfig:
     """Translation gate a loop edge must pass; 0.0 disables the gate."""
     loop_edge_rotation_threshold_degrees: float
     """Rotation gate a loop edge must pass; 0.0 disables the gate."""
+    loop_pair_cameras_by_prior: bool = False
+    """From the profile's `colsfm.toml` (`LoopClosureConfig.pair_cameras_by_prior`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,6 +536,7 @@ def read_config_directory(
     worker_message: Message = read("matching_task_worker_config")
     pose_graph_message: Message = read("pose_graph_config")
     mapping_message: Message = read("vision_mapping_config")
+    profile: ColsfmProfileConfig = read_colsfm_profile(directory)
 
     return CusfmConfig(
         profile=directory.name,
@@ -571,9 +577,10 @@ def read_config_directory(
             loop_closure_interval_ratio=float(pose_graph_message.loop_closure_interval_ratio),
             loop_residual_weight=float(pose_graph_message.loop_residual_weight),
             good_loop_threshold=float(pose_graph_message.good_loop_threshold),
-            loop_candidates_per_frame=read_colsfm_profile(directory).loop_candidates_per_frame,
+            loop_candidates_per_frame=profile.loop_candidates_per_frame,
             loop_edge_translation_threshold_meters=float(pose_graph_message.loop_edge_translation_threshold_meters),
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
+            loop_pair_cameras_by_prior=profile.loop_pair_cameras_by_prior,
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),

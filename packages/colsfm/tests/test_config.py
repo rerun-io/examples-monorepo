@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from colsfm.config import (
     read_config_directory,
     read_config_message,
 )
+from colsfm.loop_closure import LoopClosureConfig
 
 
 @pytest.fixture(scope="module")
@@ -179,3 +181,12 @@ def test_a_colsfm_profile_file_with_an_unknown_field_is_refused_naming_the_file(
     (tmp_path / "colsfm.toml").write_text("num_votes = 3\n")
     with pytest.raises(ValueError, match="colsfm.toml"):
         read_colsfm_profile(tmp_path)
+
+
+def test_the_profile_lets_the_prior_choose_the_loop_camera_pairing(tmp_path: Path) -> None:
+    """`loop_pair_cameras_by_prior` in `colsfm.toml` reaches `LoopClosureConfig.pair_cameras_by_prior`; off by default."""
+    assert not LoopClosureConfig.from_pose_graph(read_config_directory(RESOURCES_DIR / "configs" / "isaac").pose_graph).pair_cameras_by_prior
+    profile: Path = tmp_path / "profile"
+    shutil.copytree(RESOURCES_DIR / "configs" / "isaac", profile)
+    (profile / "colsfm.toml").write_text("loop_pair_cameras_by_prior = true\n")
+    assert LoopClosureConfig.from_pose_graph(read_config_directory(profile).pose_graph).pair_cameras_by_prior
