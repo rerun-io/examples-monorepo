@@ -13,79 +13,52 @@ use kornia_staging_imgproc::features::{
 use kornia_staging_imgproc::interpolation::in_bounds_u16;
 use nalgebra::Vector2;
 
-/// OpenCV's 16-pixel Bresenham ring of radius 3, `(dx, dy)`, in circular order.
-const RING: [(i32, i32); 16] = [
-    (0, -3),
-    (1, -3),
-    (2, -2),
-    (3, -1),
-    (3, 0),
-    (3, 1),
-    (2, 2),
-    (1, 3),
-    (0, 3),
-    (-1, 3),
-    (-2, 2),
-    (-3, 1),
-    (-3, 0),
-    (-3, -1),
-    (-2, -2),
-    (-1, -3),
-];
-
 /// Contiguous ring pixels a FAST-9 corner needs.
 const ARC: usize = 9;
 
-/// The OpenCV FAST score of the pixel at `(x, y)` of an 8-bit `side`-wide
-/// patch, or `None` when it is no corner at `threshold`. A corner has nine
-/// contiguous ring pixels all brighter than `centre + threshold` or all darker
-/// than `centre - threshold`; its score is the largest threshold it would still
-/// pass (`cv::FAST`'s `cornerScore<16>`).
-fn corner_score(patch: &[u8], side: usize, x: usize, y: usize, threshold: u8) -> Option<u32> {
-    let centre = i32::from(patch[y * side + x]);
-    let diff: [i32; 16] = RING.map(|(dx, dy)| {
-        centre - i32::from(patch[(y as i32 + dy) as usize * side + (x as i32 + dx) as usize])
-    });
-    // Largest min over any arc of nine, darker ring (diff > 0) or brighter (diff < 0).
-    let mut best: i32 = 0;
-    for start in 0..16 {
-        let arc = (0..ARC).map(|k| diff[(start + k) % 16]);
-        let darker = arc.clone().min().unwrap_or(0);
-        let brighter = arc.map(|d| -d).min().unwrap_or(0);
-        best = best.max(darker).max(brighter);
-    }
-    (best > i32::from(threshold)).then_some((best - 1) as u32)
-}
-
 /// FAST-9 corners of an 8-bit `side` x `side` patch, at least 3 pixels from
-/// its edge, row-major, with OpenCV's non-maximum suppression: a corner stays
-/// when its score beats all eight neighbours' (a non-corner scores 0).
+/// its edge, row-major, with OpenCV's scores and non-maximum suppression:
+/// upstream `fast_detect_rect_u8`'s candidates, the staged
+/// `opencv_corner_score`, and a corner stays when its score beats all eight
+/// neighbours' (a non-corner scores 0).
 pub(crate) fn fast_corners(patch: &[u8], side: usize, threshold: u8) -> Vec<[usize; 2]> {
     if side < 7 {
         return Vec::new();
     }
-    let mut scores: Vec<Option<u32>> = vec![None; side * side];
-    for y in 3..side - 3 {
-        for x in 3..side - 3 {
-            scores[y * side + x] = corner_score(patch, side, x, y, threshold);
-        }
+    let Ok(image) = Image::<u8, 1>::new(
+        kornia_image::ImageSize {
+            width: side,
+            height: side,
+        },
+        patch.to_vec(),
+    ) else {
+        return Vec::new();
+    };
+    let rect = kornia_imgproc::features::Rect {
+        x: 0,
+        y: 0,
+        w: side,
+        h: side,
+    };
+    let mut scores: Vec<f32> = vec![0.0; side * side];
+    let mut candidates: Vec<[usize; 2]> = Vec::new();
+    for corner in
+        kornia_imgproc::features::fast_detect_rect_u8(&image, rect, f32::from(threshold), ARC, 3)
+    {
+        let [x, y] = corner.xy.map(|v| v as usize);
+        scores[y * side + x] =
+            kornia_staging_imgproc::features::opencv_corner_score(corner.response);
+        candidates.push([x, y]);
     }
-    let mut corners: Vec<[usize; 2]> = Vec::new();
-    for y in 3..side - 3 {
-        for x in 3..side - 3 {
-            let Some(score) = scores[y * side + x] else {
-                continue;
-            };
-            let peak = (y - 1..=y + 1)
-                .flat_map(|ny| (x - 1..=x + 1).map(move |nx| (nx, ny)))
-                .filter(|&(nx, ny)| (nx, ny) != (x, y))
-                .all(|(nx, ny)| score > scores[ny * side + nx].unwrap_or(0));
-            if peak {
-                corners.push([x, y]);
-            }
-        }
-    }
-    corners
+    candidates.sort_by_key(|&[x, y]| (y, x));
+    candidates.retain(|&[x, y]| {
+        let score = scores[y * side + x];
+        (y - 1..=y + 1)
+            .flat_map(|ny| (x - 1..=x + 1).map(move |nx| (nx, ny)))
+            .filter(|&(nx, ny)| (nx, ny) != (x, y))
+            .all(|(nx, ny)| score > scores[ny * side + nx])
+    });
+    candidates
 }
 
 /// What the window search needs.
@@ -149,6 +122,77 @@ mod tests {
 
     use super::*;
 
+    /// OpenCV's 16-pixel Bresenham ring of radius 3, `(dx, dy)`, in circular order.
+    const RING: [(i32, i32); 16] = [
+        (0, -3),
+        (1, -3),
+        (2, -2),
+        (3, -1),
+        (3, 0),
+        (3, 1),
+        (2, 2),
+        (1, 3),
+        (0, 3),
+        (-1, 3),
+        (-2, 2),
+        (-3, 1),
+        (-3, 0),
+        (-3, -1),
+        (-2, -2),
+        (-1, -3),
+    ];
+
+    /// The OpenCV FAST score of the pixel at `(x, y)` of an 8-bit `side`-wide
+    /// patch, or `None` when it is no corner at `threshold`. A corner has nine
+    /// contiguous ring pixels all brighter than `centre + threshold` or all darker
+    /// than `centre - threshold`; its score is the largest threshold it would still
+    /// pass (`cv::FAST`'s `cornerScore<16>`).
+    fn corner_score(patch: &[u8], side: usize, x: usize, y: usize, threshold: u8) -> Option<u32> {
+        let centre = i32::from(patch[y * side + x]);
+        let diff: [i32; 16] = RING.map(|(dx, dy)| {
+            centre - i32::from(patch[(y as i32 + dy) as usize * side + (x as i32 + dx) as usize])
+        });
+        // Largest min over any arc of nine, darker ring (diff > 0) or brighter (diff < 0).
+        let mut best: i32 = 0;
+        for start in 0..16 {
+            let arc = (0..ARC).map(|k| diff[(start + k) % 16]);
+            let darker = arc.clone().min().unwrap_or(0);
+            let brighter = arc.map(|d| -d).min().unwrap_or(0);
+            best = best.max(darker).max(brighter);
+        }
+        (best > i32::from(threshold)).then_some((best - 1) as u32)
+    }
+
+    /// The oracle: `cv::FAST` on the patch, written out (ring, arc of nine,
+    /// `cornerScore<16>`, strict 3x3 suppression).
+    fn opencv_fast_corners(patch: &[u8], side: usize, threshold: u8) -> Vec<[usize; 2]> {
+        if side < 7 {
+            return Vec::new();
+        }
+        let mut scores: Vec<Option<u32>> = vec![None; side * side];
+        for y in 3..side - 3 {
+            for x in 3..side - 3 {
+                scores[y * side + x] = corner_score(patch, side, x, y, threshold);
+            }
+        }
+        let mut corners: Vec<[usize; 2]> = Vec::new();
+        for y in 3..side - 3 {
+            for x in 3..side - 3 {
+                let Some(score) = scores[y * side + x] else {
+                    continue;
+                };
+                let peak = (y - 1..=y + 1)
+                    .flat_map(|ny| (x - 1..=x + 1).map(move |nx| (nx, ny)))
+                    .filter(|&(nx, ny)| (nx, ny) != (x, y))
+                    .all(|(nx, ny)| score > scores[ny * side + nx].unwrap_or(0));
+                if peak {
+                    corners.push([x, y]);
+                }
+            }
+        }
+        corners
+    }
+
     /// A flat patch of `background` with one pixel of `dot` at (8, 8).
     fn dot_patch(background: u8, dot: u8) -> Vec<u8> {
         let mut patch = vec![background; 256];
@@ -189,5 +233,53 @@ mod tests {
             !corners.contains(&[8, 8]) && !corners.contains(&[9, 8]),
             "{corners:?}"
         );
+    }
+
+    /// The staged FAST path gives `cv::FAST`'s corners, on random patches
+    /// (noise, blocks and dots) at thresholds 5..=40.
+    #[test]
+    fn the_staged_fast_path_finds_opencvs_corners() {
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut corners_seen = 0;
+        for case in 0..3000 {
+            let side: usize = [16, 16, 16, 20, 32][case % 5];
+            let patch: Vec<u8> = match case % 3 {
+                0 => (0..side * side).map(|_| next() as u8).collect(),
+                1 => {
+                    let (a, b) = (next() as u8, next() as u8);
+                    (0..side * side)
+                        .map(|i| {
+                            if (i / side / 4 + i % side / 3).is_multiple_of(2) {
+                                a
+                            } else {
+                                b
+                            }
+                        })
+                        .collect()
+                }
+                _ => {
+                    let mut patch = vec![next() as u8; side * side];
+                    for _ in 0..4 {
+                        patch[(next() as usize) % (side * side)] = next() as u8;
+                    }
+                    patch
+                }
+            };
+            let threshold: u8 = 5 + (next() % 36) as u8;
+            let expected = opencv_fast_corners(&patch, side, threshold);
+            corners_seen += expected.len();
+            assert_eq!(
+                fast_corners(&patch, side, threshold),
+                expected,
+                "case {case}, side {side}, threshold {threshold}"
+            );
+        }
+        assert!(corners_seen > 1000, "{corners_seen}");
     }
 }

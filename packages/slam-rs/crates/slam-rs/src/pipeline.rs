@@ -8,7 +8,10 @@ mod select;
 #[cfg(test)]
 mod tests;
 
-pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
+pub use boundary::{
+    Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus, pose_from_xyzw,
+    pose_to_xyzw,
+};
 pub use lane::FrontendLane;
 use lane::build_frontend;
 pub use select::{
@@ -377,6 +380,8 @@ impl<S: Scalar> Vio<S> {
             .map(|frame| frame.with_dense(Clone::clone))
             .collect::<Result<Vec<kornia_image::Image<u16, 1>>, _>>()
         else {
+            // Counted later as the query's `without_images`.
+            log::warn!("loop closing: keyframe {t_ns}'s images could not be copied");
             return;
         };
         self.keyframe_images.insert(

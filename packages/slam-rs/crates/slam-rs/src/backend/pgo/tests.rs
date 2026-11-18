@@ -165,7 +165,7 @@ fn landmarks_move_with_their_host_keyframe() {
         &loop_config(),
     );
     let (optimized, _) = pose_graph.solve().unwrap();
-    apply(&mut map, &pose_graph, &optimized);
+    apply(&mut map, &pose_graph, &optimized, &mut BTreeMap::new());
     let after = map.landmark_world(LandmarkId(7), &t_i_c).unwrap();
     let expected = optimized[0] * pose_graph.copy[0].inverse() * before;
     assert!((after - expected).norm() < 1e-12, "{after} vs {expected}");
@@ -226,7 +226,7 @@ fn a_loop_recovers_a_synthetic_drift() {
         &loop_config(),
     );
     let (optimized, report) = pose_graph.solve().unwrap();
-    apply(&mut map, &pose_graph, &optimized);
+    apply(&mut map, &pose_graph, &optimized, &mut BTreeMap::new());
     let after = worst(&map);
     assert!(before > 1.0, "{before}");
     assert!(after < 0.15 * before, "{before} -> {after}, {report:?}");

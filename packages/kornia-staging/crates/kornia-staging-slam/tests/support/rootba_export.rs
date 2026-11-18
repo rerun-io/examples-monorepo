@@ -349,13 +349,16 @@ pub fn load(seq: &str) -> Export {
         landmarks,
         rel_poses,
     };
-    let (obs, lms) = problem.drop_sparse_observations(10);
+    let landmarks = problem.landmarks.len();
+    let dropped = problem.drop_sparse_observations(10);
     eprintln!(
-        "{seq}: {} keyframes, {} landmarks, {} observations, {} pose-graph rows (dropped {obs} obs, {lms} landmarks)",
+        "{seq}: {} keyframes, {} landmarks, {} observations, {} pose-graph rows (dropped {} obs, {} landmarks)",
         problem.imu_from_world.len(),
         problem.landmarks.len(),
         problem.landmarks.iter().map(|l| l.observations.len()).sum::<usize>(),
-        problem.rel_poses.len()
+        problem.rel_poses.len(),
+        dropped.observations,
+        landmarks - dropped.kept_landmarks.len()
     );
     Export {
         problem,

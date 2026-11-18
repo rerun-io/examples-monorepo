@@ -1,7 +1,7 @@
 //! Loop closing (RootSLAM §III-B; `loop_closing.cpp:120-694`,
 //! `map_database.cpp:164-336`; DESIGN §3 rows 7-11, PR b2).
 //!
-//! At each new keyframe ([`MapBackend::detect_loop`]):
+//! At each new keyframe:
 //!
 //! 1. **Index.** Describe the keyframe's tracked keypoints (rotated BRIEF on its
 //!    own images, the only images loop closing reads, dropped after its query:
@@ -23,8 +23,8 @@
 //!    again. The final PnP alone has the ratio gate `inliers >= 0.5 x` the
 //!    matches it was fed (B1, DESIGN §4; B2), also RANSAC's acceptance bound.
 //!
-//! The island stays pinned against culling from detection to
-//! [`MapBackend::apply_loop`] (B10). Apply measures the drift the loop would
+//! Then, in the same query (no stamp or cull runs in between, so the island
+//! needs no protection: B10), apply measures the drift the loop would
 //! correct; a small one fuses at once (landmark fusion, [`LoopFusion`], B9, and
 //! a loop edge in the covisibility graph); a large one first runs the
 //! pose-graph optimization ([`super::pgo`], PR c2), then fuses the same way.
@@ -98,13 +98,11 @@ pub struct LoopDetection {
     pub current: FrameId,
     /// The keyframe it closes a loop with.
     pub candidate: FrameId,
-    /// The candidate and its covisibility neighbours, pinned with the current
-    /// and candidate keyframes until applied.
+    /// The candidate and its covisibility neighbours.
     pub island: Vec<FrameId>,
     /// `T_w_i` of the current keyframe from PnP against the island.
     pub corrected_pose: Se3<f64>,
-    /// The final inlier matches: fused at once, or after the pose-graph
-    /// optimization.
+    /// The final inlier matches, which the fusion reads.
     pub matches: Vec<LoopMatch>,
     /// How many matches survived each stage.
     pub stages: LoopStages,
@@ -136,7 +134,7 @@ pub enum LoopOutcome {
         observations_added: usize,
     },
     /// Drift at or above the gate, but the pose-graph optimization is off or
-    /// refused the graph: nothing changed, and the keyframes are unpinned.
+    /// refused the graph: nothing changed.
     NeedsPgo,
     /// Drift at or above the gate: the pose-graph optimization moved the map,
     /// then landmarks were fused and a loop edge added (c2).
@@ -146,14 +144,12 @@ pub enum LoopOutcome {
         /// Observations of island landmarks added to the current keyframe.
         observations_added: usize,
     },
-    /// The current or candidate keyframe left the map first (not pinned).
-    Stale,
 }
 
 /// One verified loop and what became of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopEvent {
-    /// The loop as verified.
+    /// The loop as verified; its matches are not kept once applied (empty).
     pub detection: LoopDetection,
     /// Translation of `T_map^-1 T_pnp`, metres.
     pub drift_m: f64,
@@ -178,6 +174,10 @@ pub struct LoopCounts {
     pub with_candidates: u64,
     /// Candidates validated.
     pub candidates: u64,
+    /// GP3P RANSAC calls that refused their input (non-finite or non-unit
+    /// rays, a bad ratio): a bug upstream of it, logged and counted, never a
+    /// silent "no loop".
+    pub pnp_errors: u64,
     /// Loops that passed verification.
     pub verified: u64,
     /// Loops fused at once.
@@ -202,16 +202,6 @@ pub struct LoopClosing {
     counts: LoopCounts,
     /// What the pose-graph optimization has done (PR c2).
     pub(super) pgo: PgoState,
-}
-
-impl LoopDetection {
-    /// The keyframes the loop pins: the island, the current and the candidate.
-    fn keyframes(&self) -> impl Iterator<Item = FrameId> + '_ {
-        self.island
-            .iter()
-            .copied()
-            .chain([self.current, self.candidate])
-    }
 }
 
 impl LoopClosing {
@@ -252,9 +242,21 @@ impl LoopClosing {
         &self.events
     }
 
-    /// The counters.
+    /// The counters; the verified-loop ones are counted from the events.
     pub fn counts(&self) -> LoopCounts {
-        self.counts
+        let mut counts: LoopCounts = self.counts;
+        for event in &self.events {
+            counts.verified += 1;
+            match event.outcome {
+                LoopOutcome::Fused { .. } => counts.fused += 1,
+                LoopOutcome::NeedsPgo => counts.needs_pgo += 1,
+                LoopOutcome::Optimized { .. } => {
+                    counts.needs_pgo += 1;
+                    counts.optimized += 1;
+                }
+            }
+        }
+        counts
     }
 
     /// What the pose-graph optimization has done.
@@ -515,28 +517,34 @@ impl MapBackend {
         self.loops.as_ref()
     }
 
-    /// The query of one new keyframe: detect, then apply at once (the island
-    /// stays pinned in between). The keyframe's images are dropped here, with
+    /// The query of one new keyframe: detect, then apply at once. The
+    /// keyframe's images are dropped here, with
     /// those of any older keyframe whose query never ran.
     pub(super) fn close_loops(&mut self, keyframe: FrameId) -> Vec<MapEvent> {
         let Some(detection) = self.detect_loop(keyframe) else {
             return Vec::new();
         };
         let started = std::time::Instant::now();
-        let event: LoopEvent = self.apply_loop(detection);
-        let pgo_ns = matches!(event.outcome, LoopOutcome::Optimized { .. })
-            .then(|| crate::duration_ns(started));
+        let Some(&LoopEvent {
+            ref detection,
+            outcome,
+            ..
+        }) = self.apply_loop(detection)
+        else {
+            return Vec::new();
+        };
+        let pgo_ns =
+            matches!(outcome, LoopOutcome::Optimized { .. }).then(|| crate::duration_ns(started));
         vec![MapEvent::LoopVerified {
-            current: event.detection.current,
-            candidate: event.detection.candidate,
-            outcome: event.outcome,
+            current: detection.current,
+            candidate: detection.candidate,
+            outcome,
             pgo_ns,
         }]
     }
 
-    /// Index `keyframe` and look for a loop at it. A verified loop pins its
-    /// island, current and candidate keyframes until [`Self::apply_loop`].
-    pub fn detect_loop(&mut self, keyframe: FrameId) -> Option<LoopDetection> {
+    /// Index `keyframe` and look for a loop at it.
+    fn detect_loop(&mut self, keyframe: FrameId) -> Option<LoopDetection> {
         let loops = self.loops.as_mut()?;
         let images: Option<KeyframeImages> = loops.images.remove(&keyframe);
         loops.images.retain(|&id, _| id > keyframe);
@@ -553,7 +561,6 @@ impl MapBackend {
         let detection = candidates
             .into_iter()
             .find_map(|candidate| self.validate(keyframe, candidate, &keypoints, &images))?;
-        self.pinned.extend(detection.keyframes());
         Some(detection)
     }
 
@@ -672,7 +679,7 @@ impl MapBackend {
     /// inlier matches when they pass [`passes_pnp_gate`] over the matches fed
     /// to RANSAC (those with a landmark and a bearing, B2), else `None`.
     fn solve_pnp(
-        &self,
+        &mut self,
         matches: &[LoopMatch],
         seed: u64,
         min_inliers: usize,
@@ -709,13 +716,23 @@ impl MapBackend {
             schedule: config
                 .pnp_ransac_fixed_iterations
                 .map_or_else(IterationSchedule::default, |iterations| {
-                    IterationSchedule::RootSlamParity { iterations }
+                    IterationSchedule::OpenGv { iterations }
                 }),
             seed,
             refine: true,
             min_inlier_ratio: (ratio > 0.0).then_some(ratio.min(1.0)),
         };
-        let result = gp3p_ransac(&correspondences, &ransac).ok()??;
+        let result = match gp3p_ransac(&correspondences, &ransac) {
+            Ok(result) => result?,
+            Err(error) => {
+                log::warn!(
+                    "loop closing: GP3P RANSAC refused {} correspondences: {error}",
+                    correspondences.len()
+                );
+                self.loops.as_mut()?.counts.pnp_errors += 1;
+                return None;
+            }
+        };
         let fed: usize = used.len();
         let inliers: Vec<LoopMatch> = used
             .into_iter()
@@ -800,123 +817,50 @@ impl MapBackend {
     /// Apply a verified loop (`handle_loop_detection`): measure the drift it
     /// would correct; below the gate, fuse its landmarks and add the loop edge;
     /// at or above it, run the pose-graph optimization first
-    /// (`handle_loop_closure`), then do the same. Unpins its keyframes either
-    /// way and records the event.
-    pub fn apply_loop(&mut self, detection: LoopDetection) -> LoopEvent {
-        let gates: Option<(f64, f64)> = self.loops.as_ref().map(|loops| {
-            (
-                loops.config.min_drift_reduction_m,
-                loops.config.min_rot_reduction_deg,
-            )
-        });
-        let map_pose: Option<Se3<f64>> = self.map.keyframe(detection.current).map(|kf| kf.pose);
-        let (drift_m, drift_deg) = map_pose.map_or((f64::NAN, f64::NAN), |pose| {
-            drift(&pose, &detection.corrected_pose)
-        });
-        let outcome: LoopOutcome = if let (Some((min_m, min_deg)), Some(_), true) = (
-            gates,
-            map_pose,
-            self.map.contains_keyframe(detection.candidate),
-        ) {
-            if drift_m >= min_m || drift_deg >= min_deg {
-                if self.optimize_loop(&detection) {
-                    self.graph
-                        .add_loop_closure(detection.candidate, detection.current);
-                    match self.fuse(detection.current, &detection.matches) {
-                        LoopOutcome::Fused {
-                            landmarks_fused,
-                            observations_added,
-                        } => LoopOutcome::Optimized {
-                            landmarks_fused,
-                            observations_added,
-                        },
-                        other => other,
-                    }
-                } else {
-                    LoopOutcome::NeedsPgo
-                }
-            } else {
+    /// (`handle_loop_closure`), then do the same. Records the event, without
+    /// its matches, and returns it.
+    fn apply_loop(&mut self, mut detection: LoopDetection) -> Option<&LoopEvent> {
+        let config: &LoopClosingConfig = &self.loops.as_ref()?.config;
+        let (min_m, min_deg) = (config.min_drift_reduction_m, config.min_rot_reduction_deg);
+        let map_pose: Se3<f64> = self.map.keyframe(detection.current)?.pose;
+        let (drift_m, drift_deg) = drift(&map_pose, &detection.corrected_pose);
+        let outcome: LoopOutcome = if drift_m >= min_m || drift_deg >= min_deg {
+            if self.optimize_loop(&detection) {
                 self.graph
                     .add_loop_closure(detection.candidate, detection.current);
-                self.fuse(detection.current, &detection.matches)
+                match self.fuse(detection.current, &detection.matches) {
+                    LoopOutcome::Fused {
+                        landmarks_fused,
+                        observations_added,
+                    } => LoopOutcome::Optimized {
+                        landmarks_fused,
+                        observations_added,
+                    },
+                    other => other,
+                }
+            } else {
+                LoopOutcome::NeedsPgo
             }
         } else {
-            LoopOutcome::Stale
+            self.graph
+                .add_loop_closure(detection.candidate, detection.current);
+            self.fuse(detection.current, &detection.matches)
         };
-        if let Some(loops) = self.loops.as_mut() {
-            loops.counts.verified += 1;
-            match outcome {
-                LoopOutcome::Fused { .. } => loops.counts.fused += 1,
-                LoopOutcome::NeedsPgo => loops.counts.needs_pgo += 1,
-                LoopOutcome::Optimized { .. } => {
-                    loops.counts.needs_pgo += 1;
-                    loops.counts.optimized += 1;
-                }
-                LoopOutcome::Stale => {}
-            }
-        }
-        self.unpin(detection.keyframes());
-        let event = LoopEvent {
+        detection.matches = Vec::new();
+        let loops = self.loops.as_mut()?;
+        loops.events.push(LoopEvent {
             detection,
             drift_m,
             drift_deg,
             outcome,
-        };
-        if let Some(loops) = self.loops.as_mut() {
-            loops.events.push(event.clone());
-        }
-        event
+        });
+        loops.events.last()
     }
 
-    /// Carry out [`fusion_plan`] and raise the covisibility edges it creates
-    /// (`merge_loop_landmarks`): an added observation links the current
-    /// keyframe to every keyframe that sees the landmark (once per landmark);
-    /// a fusion links every observer of one to every observer of the other.
+    /// Carry out [`fusion_plan`] ([`MapBackend::fuse_landmarks`]).
     fn fuse(&mut self, current: FrameId, matches: &[LoopMatch]) -> LoopOutcome {
-        let mut increments: BTreeMap<(FrameId, FrameId), u32> = BTreeMap::new();
-        let mut bump = |a: FrameId, b: FrameId| {
-            if a != b {
-                *increments.entry((a.min(b), a.max(b))).or_insert(0) += 1;
-            }
-        };
-        let observers = |map: &super::KeyframeMap, id: LandmarkId| -> BTreeSet<FrameId> {
-            map.landmark(id)
-                .map(|lm| lm.obs.keys().map(|image| image.frame_id).collect())
-                .unwrap_or_default()
-        };
-        let (mut landmarks_fused, mut observations_added) = (0, 0);
-        let mut linked: BTreeSet<LandmarkId> = BTreeSet::new();
-        for step in fusion_plan(&self.map, current, matches) {
-            match step {
-                LoopFusion::AddObs {
-                    landmark,
-                    image,
-                    pixel,
-                } => {
-                    if linked.insert(landmark) {
-                        for other in observers(&self.map, landmark) {
-                            bump(current, other);
-                        }
-                    }
-                    observations_added +=
-                        usize::from(self.map.add_observation(landmark, image, pixel));
-                }
-                LoopFusion::Fuse { from, into } => {
-                    let (old, new) = (observers(&self.map, from), observers(&self.map, into));
-                    if self.map.merge_landmark(from, into) {
-                        for &a in &old {
-                            for &b in &new {
-                                bump(a, b);
-                            }
-                        }
-                        landmarks_fused += 1;
-                    }
-                }
-            }
-        }
-        for ((a, b), by) in increments {
-            self.graph.increment_edge(a, b, by);
-        }
+        let plan: Vec<LoopFusion> = fusion_plan(&self.map, current, matches);
+        let (landmarks_fused, observations_added) = self.fuse_landmarks(current, plan);
         LoopOutcome::Fused {
             landmarks_fused,
             observations_added,

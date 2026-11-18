@@ -27,7 +27,7 @@ from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep, reanchored
-from slam_rs.trajectory import Trajectory, ate, coverage, write_scoring_csvs
+from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_scoring_csvs, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]

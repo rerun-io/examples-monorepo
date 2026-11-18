@@ -3,7 +3,7 @@
 //! §4 B11/B12/B29, PR c2). The solver is `kornia_staging_slam::pgo` (c1).
 //!
 //! When a verified loop would move the current keyframe by at least the drift
-//! gate, [`MapBackend::apply_loop`] runs one PGO before it fuses:
+//! gate, loop closing runs one PGO before it fuses:
 //!
 //! 1. **Graph** ([`PoseGraph::build`]): every map keyframe; the covisibility
 //!    graph's pose-graph edges (spanning tree, past loops, edges at or above
@@ -23,8 +23,8 @@
 //!    keyframe changes between the copy and the apply and B11 cannot occur.
 //!    Landmarks are host-relative and move with their host keyframe.
 //!
-//! Every applied PGO raises the epoch of the [`MapCorrection`] that the
-//! snapshot publishes for re-anchoring (PR f1).
+//! Every applied PGO raises the PGO epoch that the snapshot publishes for
+//! re-anchoring (PR f1).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -120,11 +120,18 @@ impl PoseGraph {
 }
 
 /// Write a PGO result into the map: each keyframe the PGO moved takes its
-/// optimized pose. Returns the moved keyframes.
-pub fn apply(map: &mut KeyframeMap, graph: &PoseGraph, optimized: &[Se3<f64>]) -> Vec<FrameId> {
+/// optimized pose, and `raw` keeps the pose it had before its first
+/// correction. Returns the moved keyframes.
+pub fn apply(
+    map: &mut KeyframeMap,
+    graph: &PoseGraph,
+    optimized: &[Se3<f64>],
+    raw: &mut BTreeMap<FrameId, Se3<f64>>,
+) -> Vec<FrameId> {
     let mut moved: Vec<FrameId> = Vec::new();
     for ((&id, copy), pgo) in graph.ids.iter().zip(&graph.copy).zip(optimized) {
         if pgo != copy {
+            raw.entry(id).or_insert(*copy);
             map.upsert_keyframe(id, *pgo, None);
             moved.push(id);
         }
@@ -161,20 +168,10 @@ pub struct PgoState {
 }
 
 impl PgoState {
-    /// Applied PGOs so far; the [`MapCorrection`] epoch.
+    /// Applied PGOs so far; a reader re-anchors when it changes.
     pub fn epoch(&self) -> u64 {
         self.runs.len() as u64
     }
-}
-
-/// The corrections every applied PGO left on the map, for re-anchoring (PR f1).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct MapCorrection {
-    /// Applied PGOs so far; a reader re-anchors when it changes.
-    pub epoch: u64,
-    /// Corrected `T_w_i` of each map keyframe a PGO moved. Every other map
-    /// keyframe keeps its raw pose.
-    pub poses: BTreeMap<FrameId, Se3<f64>>,
 }
 
 impl MapBackend {
@@ -213,12 +210,7 @@ impl MapBackend {
                 return false;
             }
         };
-        for ((&id, copy), pose) in graph.ids.iter().zip(&graph.copy).zip(&poses) {
-            if pose != copy {
-                loops.pgo.raw.entry(id).or_insert(*copy);
-            }
-        }
-        let moved: Vec<FrameId> = apply(&mut self.map, &graph, &poses);
+        let moved: Vec<FrameId> = apply(&mut self.map, &graph, &poses, &mut loops.pgo.raw);
         loops.pgo.runs.push(PgoRun {
             current: detection.current,
             candidate: detection.candidate,
@@ -227,22 +219,6 @@ impl MapBackend {
             iterations: report.iterations,
         });
         true
-    }
-
-    /// The corrections the PGO left on the map, with its epoch.
-    pub fn map_correction(&self) -> MapCorrection {
-        let Some(loops) = self.loops.as_ref() else {
-            return MapCorrection::default();
-        };
-        MapCorrection {
-            epoch: loops.pgo.epoch(),
-            poses: loops
-                .pgo
-                .raw
-                .keys()
-                .filter_map(|&id| Some((id, self.map.keyframe(id)?.pose)))
-                .collect(),
-        }
     }
 }
 

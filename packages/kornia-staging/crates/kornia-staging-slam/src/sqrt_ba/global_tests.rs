@@ -338,7 +338,7 @@ fn f32_reaches_the_f64_result_within_the_band() {
         r64.final_cost.error < 0.5 * r64.initial_cost.error,
         "{r64:?}"
     );
-    // DESIGN §7.4: final cost f32 vs f64 within 1e-3 relative, KF poses within 1 mm.
+    // The band: final cost f32 vs f64 within 1e-3 relative, KF poses within 1 mm.
     let rel = (r32.final_cost.error - r64.final_cost.error).abs() / r64.final_cost.error;
     assert!(
         rel < 1e-3,
@@ -389,9 +389,9 @@ fn results_do_not_depend_on_the_thread_count() {
     assert_thread_count_independent(&problem.centred::<f32>().0, &rig32(&rig));
 }
 
-/// DESIGN B24: 10 km from the origin an f32 world point resolves to about 1 mm,
-/// which costs ~0.1 px at these depths. Centring in f64 before the cast keeps
-/// the f32 solve within the §7.4 band of f64; the uncentred cast leaves it.
+/// 10 km from the origin an f32 world point resolves to about 1 mm, which
+/// costs ~0.1 px at these depths. Centring in f64 before the cast keeps the
+/// f32 solve within the f32-vs-f64 band; the uncentred cast leaves it.
 #[test]
 fn f32_far_from_the_origin_needs_centring() {
     let (_, near, rig) = synthetic(12, 120, 2);
@@ -567,9 +567,13 @@ fn sparse_keyframes_keep_their_pose_graph_rows() {
             pixel: [1.0, 1.0],
         }],
     });
-    let (obs, lms) = problem.drop_sparse_observations(10);
-    assert_eq!(obs, single);
-    assert!(lms >= 1);
+    let landmarks = problem.landmarks.len();
+    let dropped = problem.drop_sparse_observations(10);
+    assert_eq!(dropped.observations, single);
+    assert_eq!(dropped.keyframes, 1);
+    // The one-observation landmark (the last) goes.
+    assert!(!dropped.kept_landmarks.contains(&(landmarks - 1)));
+    assert_eq!(dropped.kept_landmarks.len(), problem.landmarks.len());
     assert!(problem.landmarks.iter().all(|l| l.observations.len() >= 2));
     assert!(problem
         .landmarks

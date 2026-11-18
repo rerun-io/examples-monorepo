@@ -39,6 +39,15 @@ class Trajectory:
     def __len__(self) -> int:
         return int(self.t_ns.shape[0])
 
+    @classmethod
+    def from_xyzw(cls, t_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 7"]) -> "Trajectory":
+        """A trajectory from ``[tx, ty, tz, qx, qy, qz, qw]`` rows, the layout the core's poses use."""
+        return cls(t_ns=t_ns.copy(), position_m=poses[:, 0:3].copy(), quaternion_wxyz=np.roll(poses[:, 3:7], 1, axis=1))
+
+    def xyzw(self) -> Float64[ndarray, "n 7"]:
+        """The poses as ``[tx, ty, tz, qx, qy, qz, qw]`` rows, the layout the core takes."""
+        return np.concatenate([self.position_m, np.roll(self.quaternion_wxyz, -1, axis=1)], axis=1)
+
 
 @dataclass(slots=True, frozen=True)
 class Association:

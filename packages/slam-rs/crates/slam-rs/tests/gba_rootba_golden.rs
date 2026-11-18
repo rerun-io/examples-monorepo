@@ -1,9 +1,9 @@
 //! The global BA driver on RootSLAM's exported MGO07 and MGO13 maps, against
 //! rootba `bal` (DESIGN §7.4, PR d2). The map goes through the same path as
 //! `Vio::finish_map`: a [`KeyframeMap`] with host-relative landmarks, then
-//! `map_problem`, `solve` (f64 centring, f32) and `apply`, without
-//! `remove_gauge`: rootba holds no pose and moves no gauge either, so the
-//! keyframes are compared with the solver's output before the re-alignment.
+//! `map_problem` and `solve` (f64 centring, f32), without `remove_gauge`:
+//! rootba holds no pose and moves no gauge either, so the keyframes are
+//! compared with the solver's output before the re-alignment.
 //!
 //! Assets, read at test time as third-party formats: `<runs>/<seq>/map/{map,
 //! pose_graph}.json` and `map/optimized_tracking_pg_float.csv`, and the
@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 
 use nalgebra::{Matrix3, UnitQuaternion, Vector2, Vector3};
 use serde::Deserialize;
-use slam_rs::backend::gba::{GbaRig, apply, host_relative, map_problem, solve};
+use slam_rs::backend::gba::{GbaRig, map_problem, solve};
+use slam_rs::backend::map::host_relative;
 use slam_rs::backend::{KeyframeMap, PoseGraphEdge, PoseGraphEdgeKind};
 use slam_rs::calib::Calibration;
 use slam_rs::config::VioConfig;
@@ -117,28 +118,31 @@ fn positions(path: &Path) -> BTreeMap<i64, Vector3<f64>> {
         .collect()
 }
 
+/// The rigid transform (`R`, `t`) that best maps `a` onto `b` (Kabsch:
+/// upstream `umeyama_f64` without scale).
+fn rigid_fit(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> (Matrix3<f64>, Vector3<f64>) {
+    let points = |p: &[Vector3<f64>]| -> Vec<kornia_algebra::Vec3F64> {
+        p.iter()
+            .map(|v| kornia_algebra::Vec3F64::new(v.x, v.y, v.z))
+            .collect()
+    };
+    let (r, t, _) =
+        kornia_algebra::linalg::rigid::umeyama_f64(&points(a), &points(b), false).unwrap();
+    (
+        Matrix3::from_column_slice(&<[f64; 9]>::from(r)),
+        Vector3::new(t.x, t.y, t.z),
+    )
+}
+
 /// RMS of `a - b` after the rigid alignment (Kabsch) of `a` onto `b`.
 fn aligned_rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
-    let n = a.len() as f64;
-    let (ma, mb) = (
-        a.iter().sum::<Vector3<f64>>() / n,
-        b.iter().sum::<Vector3<f64>>() / n,
-    );
-    let mut h = Matrix3::zeros();
-    for (x, y) in a.iter().zip(b) {
-        h += (x - ma) * (y - mb).transpose();
-    }
-    let svd = h.svd(true, true);
-    let (u, v_t) = (svd.u.unwrap(), svd.v_t.unwrap());
-    let mut d = Matrix3::identity();
-    d[(2, 2)] = (v_t.transpose() * u.transpose()).determinant().signum();
-    let r = v_t.transpose() * d * u.transpose();
-    (a.iter()
+    let (r, t) = rigid_fit(a, b);
+    let sq: f64 = a
+        .iter()
         .zip(b)
-        .map(|(x, y)| (r * (x - ma) + mb - y).norm_squared())
-        .sum::<f64>()
-        / n)
-        .sqrt()
+        .map(|(x, y)| (r * x + t - y).norm_squared())
+        .sum();
+    (sq / a.len() as f64).sqrt()
 }
 
 fn rms(a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
@@ -224,7 +228,6 @@ fn golden(seq: &str) {
     let config = VioConfig::default();
     let input = map_problem(&map, &edges, t_i_c, &config);
     let (solved, report) = solve(&input, &rig, &config, slam_rs::Backend::Cpu).unwrap();
-    apply(&mut map, &input, &solved, t_i_c);
     let ours = report.final_cost.error;
     let (bal_f32, bal_f64) = (
         final_cost(&run.join(format!("output.{seq}.balpgf.log"))),
@@ -255,9 +258,9 @@ fn golden(seq: &str) {
     // `min_obs_per_kf` observations in map.json (its filter_kf); we keep all.
     let bal_poses = positions(&run.join("map/optimized_tracking_pg_float.csv"));
     let (mut a, mut b) = (Vec::new(), Vec::new());
-    for (id, keyframe) in map.keyframes() {
+    for (id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
         if let Some(p) = bal_poses.get(id) {
-            a.push(keyframe.pose.translation);
+            a.push(imu_from_world.inverse().translation);
             b.push(*p);
         }
     }
