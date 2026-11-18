@@ -22,6 +22,9 @@ kornia-staging-sensor-iio = { path = "../kornia-staging/crates/kornia-staging-se
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d", features = ["serde"] }
 kornia-staging-algebra = { path = "../kornia-staging/crates/kornia-staging-algebra" }
 kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }
+kornia-staging-bow = { path = "../kornia-staging/crates/kornia-staging-bow" }
+# The bag-of-words type of kornia-staging-bow's HashBoW (loop closing).
+kornia-bow = "0.2"
 anyhow = "1"
 libc = "0.2"
 cc = "1"
