@@ -1,6 +1,6 @@
 """Read the casa-loma cube-faces layer (and its people-mask layer) from a local ``.rrd``.
 
-Faces are the camera nodes ``/world/rig_NN/cam_NN`` whose static ``name`` is ``cube_<lens>_<direction>``
+Faces are the camera nodes ``/world/rig_NN/cam_NN`` whose static ``name`` is ``cube6_<direction>``
 (CONTRACT "Cube faces"); the raw lenses (other names) are skipped. Geometry comes from the layer's static
 ``Pinhole`` and ``Transform3D`` (face-from-rig), never from constants.
 """
@@ -77,7 +77,7 @@ def read_cube_faces(layer: LayerSegment) -> tuple[CubeFace, ...]:
         if FACE_NAME_PATTERN.match(name):
             names[entity] = name
     if not names:
-        raise ValueError(f"segment {layer.segment_id}: no camera node is named cube_<lens>_<direction>")
+        raise ValueError(f"segment {layer.segment_id}: no camera node is named cube6_<front0|front1|left|right|up|down>")
     if len(set(names.values())) != len(names):
         raise ValueError(f"segment {layer.segment_id}: repeated face names {sorted(names.values())}")
     calibration: dict[str, PinholeParameters] = read_camera_calibration(layer.dataset, layer.segment_id, list(names))
@@ -171,16 +171,23 @@ def read_people_masks(layer: LayerSegment, face: CubeFace, timeline: str, wanted
 def read_valid_masks(layer: LayerSegment, faces: tuple[CubeFace, ...]) -> dict[str, Bool[ndarray, "h w"]]:
     """Each face's static ``pinhole/valid_mask`` (1 = inside the lens field) as a bool image, by face name.
 
+    A face without a ``valid_mask`` (the 6-face cubemap has no invalid pixels) is valid everywhere.
+
     Raises:
-        ValueError: If a face has no valid mask or it has another size than the face.
+        ValueError: If a valid mask has another size than its face.
     """
     entities: list[str] = [f"{face.entity}/pinhole/valid_mask" for face in faces]
-    table: pa.Table = layer.dataset.filter_segments(layer.segment_id).filter_contents(entities).reader(index=None).to_arrow_table()
+    present: set[str] = {f"/{str(column.entity_path).lstrip('/')}" for column in layer.dataset.schema().component_columns()}
+    with_mask: list[str] = [entity for entity in entities if entity in present]
+    table: pa.Table | None = (
+        layer.dataset.filter_segments(layer.segment_id).filter_contents(with_mask).reader(index=None).to_arrow_table() if with_mask else None
+    )
     valid: dict[str, Bool[ndarray, "h w"]] = {}
     for face, entity in zip(faces, entities, strict=True):
         column_name: str = f"{entity}:SegmentationImage:buffer"
-        if column_name not in table.column_names:
-            raise ValueError(f"segment {layer.segment_id}: {entity} has no SegmentationImage")
+        if table is None or column_name not in table.column_names:
+            valid[face.name] = np.ones((face.height, face.width), dtype=bool)
+            continue
         flat: UInt8[ndarray, " n_pixels"] = np.asarray(table.column(column_name).drop_null().combine_chunks()[0].values.flatten(), dtype=np.uint8)
         if flat.size != face.width * face.height:
             raise ValueError(f"{entity}: {flat.size} pixels, the face is {face.width}x{face.height}")
