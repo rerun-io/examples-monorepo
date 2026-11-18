@@ -131,7 +131,7 @@ pub fn pcg<S: Scalar>(
 }
 
 /// [`pcg`] with every scalar sum taken by `dot`: an ablation seam, so a test
-/// can run the host PCG with another lane's sums (DESIGN §7.4).
+/// can run the host PCG with another lane's sums.
 pub fn pcg_with_dot<S: Scalar>(
     mut matvec: impl FnMut(&[S], &mut [S]),
     preconditioner: &BlockJacobi<S>,
