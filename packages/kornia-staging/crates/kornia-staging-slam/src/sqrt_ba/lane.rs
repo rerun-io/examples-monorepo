@@ -1,4 +1,4 @@
-//! Where the PCG of the global BA runs (DESIGN §7.3).
+//! Where the PCG of the global BA runs.
 //!
 //! [`super::solve_global`] runs the PCG on the host, on the landmark blocks it
 //! owns. [`super::solve_global_with`] hands each LM attempt's reduced camera

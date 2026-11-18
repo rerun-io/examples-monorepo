@@ -1,4 +1,4 @@
-//! The S4 band and S5 speed table of DESIGN §7.4 (PR e1): the global BA on
+//! The lane band and speed table: the global BA on
 //! RootSLAM's exported problems, CPU lane against the device lane.
 //!
 //! `#[ignore]`: it reads the NAS assets that `kornia-staging-slam`'s
@@ -267,7 +267,7 @@ fn rel_err(a: &[f64], reference: &[f64]) -> f64 {
     (diff / norm).sqrt()
 }
 
-/// DESIGN §7.4 bands for the device lane against the cpu-f64 oracle.
+/// The bands for the device lane against the cpu-f64 oracle.
 /// Final cost against cpu-f64: 1e-3, except MGO13 at 4e-3. On MGO13 cpu-f32
 /// also sits 3.6e-3 from f64, and gpu vs cpu-f32 is 1.8e-5. The cause is the
 /// same f32 floor as the KF band Pablo accepted (LM stops at 20 attempts in a
@@ -283,8 +283,8 @@ fn cost_band(seq: &str) -> f64 {
 const STEP_REL_BAND: f64 = 1e-3;
 /// Keyframe position RMS: 5 mm on TUM-VI, 1 mm on MSD, except MGO13: its
 /// device lane sits 1.1 mm from both CPU lanes, the f32 floor of that map
-/// (the f64-summed host ablation lands as far away), and Pablo accepted that
-/// tolerance (2026-11-17, DESIGN §7.3). Only MGO13 gets 1.2 mm.
+/// (the f64-summed host ablation lands as far away), an accepted tolerance
+/// (2026-11-17). Only MGO13 gets 1.2 mm.
 fn kf_band_mm(seq: &str) -> f64 {
     match seq {
         "MGO13" => 1.2,
