@@ -129,10 +129,16 @@ fn right_front() -> KannalaBrandt4<f64> {
 }
 
 mod brown;
+mod double_sphere;
+mod equirectangular;
+mod eucm;
 mod fisheye624;
 #[cfg(feature = "serde")]
 mod formats;
+#[cfg(feature = "serde")]
+mod insta360;
 mod kb4;
+mod mei;
 mod pinhole;
 mod regressions;
 
@@ -165,6 +171,32 @@ fn to_f32_narrows_every_parameter_and_refuses_an_invalid_narrowed_model() {
         CameraModelKind::Kb4(KannalaBrandt4::new(kb4).unwrap()),
         CameraModelKind::BrownConrady(BrownConrady::new([1.0; 18], Some(0.7)).unwrap()),
         CameraModelKind::Fisheye624(Fisheye624::new(fisheye).unwrap()),
+        CameraModelKind::DoubleSphere(
+            DoubleSphere::new([400.1, 410.2, 320.3, 240.4, -0.2, 0.6]).unwrap(),
+        ),
+        CameraModelKind::Eucm(Eucm::new([400.1, 410.2, 320.3, 240.4, 0.6, 1.1]).unwrap()),
+        CameraModelKind::Equirectangular(
+            Equirectangular::new([305.6, 305.6, 959.5, 479.5, 3.0]).unwrap(),
+        ),
+        CameraModelKind::Mei(
+            Mei::new(
+                [400.1, 410.2, 320.3, 240.4, 2.3],
+                1.75,
+                MeiDistortion::V3 {
+                    k: [0.1, 0.0, 0.0],
+                    p: [1e-4, 0.0],
+                },
+            )
+            .unwrap(),
+        ),
+        CameraModelKind::Mei(
+            Mei::new(
+                [400.1, 410.2, 320.3, 240.4, 2.3],
+                1.75,
+                MeiDistortion::V6 { d: [1e-3; 13] },
+            )
+            .unwrap(),
+        ),
     ];
     for model in models {
         let narrowed = model.to_f32().unwrap();
@@ -184,6 +216,34 @@ fn to_f32_narrows_every_parameter_and_refuses_an_invalid_narrowed_model() {
             ),
             CameraModelKind::Fisheye624(m) => {
                 CameraModelKind::Fisheye624(Fisheye624::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::DoubleSphere(m) => CameraModelKind::DoubleSphere(
+                DoubleSphere::new(m.params().map(|v| v as f32)).unwrap(),
+            ),
+            CameraModelKind::Eucm(m) => {
+                CameraModelKind::Eucm(Eucm::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::Equirectangular(m) => CameraModelKind::Equirectangular(
+                Equirectangular::new(m.params().map(|v| v as f32)).unwrap(),
+            ),
+            CameraModelKind::Mei(m) => {
+                let distortion = match m.distortion() {
+                    MeiDistortion::V3 { k, p } => MeiDistortion::V3 {
+                        k: k.map(|v| v as f32),
+                        p: p.map(|v| v as f32),
+                    },
+                    MeiDistortion::V6 { d } => MeiDistortion::V6 {
+                        d: d.map(|v| v as f32),
+                    },
+                };
+                CameraModelKind::Mei(
+                    Mei::new(
+                        m.params().map(|v| v as f32),
+                        m.half_field_rad() as f32,
+                        distortion,
+                    )
+                    .unwrap(),
+                )
             }
         };
         assert_eq!(narrowed, expected);
