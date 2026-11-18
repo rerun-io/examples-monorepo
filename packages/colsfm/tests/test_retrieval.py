@@ -6,8 +6,7 @@ Seams under test (all public):
 * `RetrievalIndex.query` / `.score` — ranked candidates, self and temporal exclusion.
 * `RetrievalIndex.search` — the same, plus what the temporal gate dropped.
 * `read_descriptors_from_database` — the pycolmap read path.
-* `colsfm.vocab_tree.bow_matrix` / `all_pairs_l1_score` — the Python tree's scoring, kept for the parity check.
-* `bow_vocab` — the Rust vocabulary's TF-IDF and L1 score, against the spec's formulas and the Python tree.
+* `bow_vocab` — the Rust vocabulary's TF-IDF and L1 score, against the spec's formulas.
 
 The Galileo test reads the shipped blob keyframe protos directly rather than running the
 feature extractor, so it is offline and needs no GPU. Its reader lives in this file
@@ -42,8 +41,6 @@ from colsfm.retrieval import (
     VocabConfig,
     build_retrieval_index,
 )
-from colsfm.vocab_tree import VocabConfig as PythonVocabConfig
-from colsfm.vocab_tree import all_pairs_l1_score, bow_matrix, l1_score, vocab_similarity
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 """Repo root, so data paths resolve regardless of the working directory."""
@@ -426,31 +423,13 @@ def test_the_vocabulary_backend_is_reproducible_and_the_seed_is_what_moves_it(
     assert reseeded.query(10, top_k=1)[0].score > 0.0
 
 
-def test_the_vectorised_l1_score_agrees_with_the_spec_reference() -> None:
-    """`all_pairs_l1_score` must equal `docs/spec/bow.md` §9.5's `l1_score`, pair by pair.
+def l1_score(query: dict[int, float], document: dict[int, float]) -> float:
+    """The DBoW2 L1 score of two L1-normalised BoW vectors, literally `docs/spec/bow.md` §9.5.
 
-    The vectorised path replaces `-0.5 * (|q - d| - |q| - |d|)` with `min(q, d)`, which is
-    the same thing for non-negative weights and is what lets the inverted index score every
-    pair in one pass. The identity is the load-bearing step, so it is checked against the
-    literal expression from the spec.
+    `s = -0.5 * sum_{w in q & d} (|q_w - d_w| - |q_w| - |d_w|)`.
     """
-    generator: np.random.Generator = np.random.default_rng(0)
-    n_images: int = 6
-    n_words: int = 40
-    words: Int32[ndarray, "n_descriptors"] = generator.integers(0, n_words, 600).astype(np.int32)
-    images: Int32[ndarray, "n_descriptors"] = np.repeat(np.arange(n_images, dtype=np.int32), 100)
-    bow = bow_matrix(words, images, n_images, n_words)
-    scores: Float32[ndarray, "n_images n_images"] = all_pairs_l1_score(bow)
-    dense: Float32[ndarray, "n_images n_words"] = bow.toarray()
-    np.testing.assert_allclose(dense.sum(axis=1), 1.0, atol=1e-6)
-
-    for first in range(n_images):
-        for second in range(n_images):
-            if first == second:
-                continue
-            query: dict[int, float] = {word: float(value) for word, value in enumerate(dense[first]) if value > 0.0}
-            document: dict[int, float] = {word: float(value) for word, value in enumerate(dense[second]) if value > 0.0}
-            assert l1_score(query, document) == pytest.approx(float(scores[first, second]), abs=1e-6)
+    shared: set[int] = set(query) & set(document)
+    return -0.5 * sum(abs(query[word] - document[word]) - abs(query[word]) - abs(document[word]) for word in shared)
 
 
 def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
@@ -487,30 +466,6 @@ def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
         for second in range(len(images)):
             if first != second:
                 assert l1_score(bows[first], bows[second]) == pytest.approx(float(scores[first, second]), abs=1e-5)
-
-
-def test_the_rust_vocabulary_ranks_like_the_python_tree(synthetic_corpus: SyntheticCorpus, synthetic_vocab_index: RetrievalIndex) -> None:
-    """Parity before the Python tree is deleted: on the same corpus, the same gated top-1 for every query.
-
-    `synthetic_vocab_index` is the Rust backend (`bow_vocab`); `vocab_similarity` is the Python
-    tree it replaces, with the same branching, depth, sample and seed. The trees differ in their
-    random draws, so the scores are not bit-equal; the ranking that loop closure reads must agree.
-    """
-    config: RetrievalConfig = RetrievalConfig(backend="vocab")
-    image_ids: tuple[int, ...] = synthetic_vocab_index.image_ids
-    counts: list[int] = [len(synthetic_corpus.descriptors[image_id]) for image_id in image_ids]
-    python_scores, python_words = vocab_similarity(synthetic_corpus.descriptors, image_ids, counts, PythonVocabConfig(), config.seed)
-    python_index: RetrievalIndex = RetrievalIndex(
-        image_ids=image_ids, similarity=python_scores, descriptors_per_image=0, config=config, build_seconds=0.0, n_words=python_words
-    )
-    assert python_words == synthetic_vocab_index.n_words
-    gate_us: int = 5 * FRAME_PERIOD_US
-    for query_id in image_ids:
-        rust_best: list[Candidate] = synthetic_vocab_index.query(
-            query_id, top_k=1, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us
-        )
-        python_best: list[Candidate] = python_index.query(query_id, top_k=1, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us)
-        assert [c.image_id for c in rust_best] == [c.image_id for c in python_best]
 
 
 VOCAB_PROBE_IMAGES: int = 100
@@ -564,12 +519,13 @@ def test_the_vocabulary_backend_builds_the_whole_tree(vocab_build: VocabBuild) -
 
 @pytest.mark.perf
 def test_the_vocabulary_backend_builds_and_queries_inside_the_budget(vocab_build: VocabBuild) -> None:
-    """100 x 2048 descriptors: build and every query, both well under the pipeline budget (the fork measured 11.1 s and 0.07 s at 1000 images).
+    """100 x 2048 descriptors: build and every query, both well under the pipeline budget.
 
-    Measured here: 11.1 s to build and 0.07 s for all 1000 queries, because the inverted
-    index scores every pair during the build. The bounds are generous multiples so the test
-    fails on an algorithmic regression rather than on a busy machine. RoboCap's real 4528
-    images take 42 s to build and 1.4 s to query.
+    Measured with the Rust vocabulary (`bow_vocab`, all cores): 0.3 s to build and 0.02 s for
+    the 100 queries, because the build scores every pair. The bounds are generous multiples so
+    the test fails on an algorithmic regression rather than on a busy machine. Clip B's real
+    4542 images (8.6 M descriptors) build in 4.0-4.5 s on 8 threads, against 43-52 s for the
+    single-threaded Python tree this replaced.
     """
     assert vocab_build.build_seconds < 90.0
     assert vocab_build.query_seconds < 30.0
