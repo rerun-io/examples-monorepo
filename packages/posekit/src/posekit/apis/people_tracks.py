@@ -42,8 +42,12 @@ class TrackOptions:
     """EfficientTAM variant and memory options."""
     stride: int = 10
     """Frames between two tracker steps; must divide ``output_every``."""
-    redetect_every: int = 3
-    """Tracker steps between two SAM 3 re-detects (step 0 initialises)."""
+    redetect_every: int = 2
+    """Tracker steps between two SAM 3 re-detects (step 0 initialises).
+
+    2 at stride 10 keeps every output frame within 10 frames of a SAM 3 detection: at 3 the tracker drifted off the
+    operator on lens 1 near frame 7040 (clip B) between re-detects.
+    """
     max_misses: int = 3
     """A track whose mask is empty for this many steps in a row is dropped."""
     max_unconfirmed: int = 2
