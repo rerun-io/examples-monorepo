@@ -57,6 +57,8 @@ class ColsfmProfileConfig:
     """`colsfm.loop_closure.LoopClosureConfig.max_prior_translation_m`; None = no prior-consistency gate."""
     loop_max_prior_rotation_deg: float | None = None
     """`colsfm.loop_closure.LoopClosureConfig.max_prior_rotation_deg`; None = no prior-consistency gate."""
+    loop_query_all_cameras: bool = False
+    """`colsfm.loop_closure.LoopClosureConfig.query_all_cameras`."""
 
 
 def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
@@ -315,6 +317,8 @@ class PoseGraphConfig:
     """From `colsfm.toml` (`LoopClosureConfig.max_prior_translation_m`)."""
     loop_max_prior_rotation_deg: float | None = None
     """From `colsfm.toml` (`LoopClosureConfig.max_prior_rotation_deg`)."""
+    loop_query_all_cameras: bool = False
+    """From `colsfm.toml` (`LoopClosureConfig.query_all_cameras`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +589,7 @@ def read_config_directory(
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
             loop_max_prior_translation_m=profile.loop_max_prior_translation_m,
             loop_max_prior_rotation_deg=profile.loop_max_prior_rotation_deg,
+            loop_query_all_cameras=profile.loop_query_all_cameras,
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),
