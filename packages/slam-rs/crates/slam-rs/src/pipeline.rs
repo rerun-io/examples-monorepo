@@ -8,7 +8,10 @@ mod select;
 #[cfg(test)]
 mod tests;
 
-pub use boundary::{Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus};
+pub use boundary::{
+    Backend, FrontendTimings, ImageView, VioError, VioPose, VioResult, VioStatus, pose_from_xyzw,
+    pose_to_xyzw,
+};
 pub use lane::FrontendLane;
 use lane::build_frontend;
 pub use select::{
@@ -180,27 +183,16 @@ impl<S: Scalar> Vio<S> {
         let map_runner = config
             .backend_enabled
             .then(|| {
+                let rig = crate::backend::BackendRig::new(&calibration)
+                    .map_err(|error| VioError::BackendRig(error.to_string()))?;
                 crate::backend::BackendRunner::new(
-                    crate::backend::MapBackend::new(
-                        crate::backend::MapConfig::from(&config),
-                        calibration.resolution.clone(),
-                    )
-                    .with_extrinsics(
-                        calibration
-                            .t_i_c
-                            .iter()
-                            .map(|t_i_c| t_i_c.cast::<f64>())
-                            .collect(),
-                    )
-                    .with_loop_closing(&config, &calibration)
-                    .with_gba_rig(gba_rig(&calibration))
-                    .with_gba_lane(backends.gba),
+                    crate::backend::MapBackend::new(&config, rig, backends.gba),
                     config.backend_mode,
-                    config.backend_realtime_max_queued_queries.get(),
+                    query_cap,
                 )
+                .map_err(|error| VioError::BackendThread(error.to_string()))
             })
-            .transpose()
-            .map_err(|error| VioError::BackendThread(error.to_string()))?;
+            .transpose()?;
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
@@ -377,6 +369,8 @@ impl<S: Scalar> Vio<S> {
             .map(|frame| frame.with_dense(Clone::clone))
             .collect::<Result<Vec<kornia_image::Image<u16, 1>>, _>>()
         else {
+            // Counted later as the query's `without_images`.
+            log::warn!("loop closing: keyframe {t_ns}'s images could not be copied");
             return;
         };
         self.keyframe_images.insert(
@@ -972,24 +966,6 @@ fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), V
         }
     }
     Ok(())
-}
-
-/// The rig's staged camera models for the global BA; `None` (one warning) when
-/// a model has no staged projection, which leaves the GBA off for this rig.
-#[cfg(feature = "backend")]
-fn gba_rig(calibration: &calib::Calibration<f64>) -> Option<crate::backend::GbaRig> {
-    let models: Result<Vec<_>, _> = calibration
-        .intrinsics
-        .iter()
-        .map(calib::BasaltCamera::to_staged)
-        .collect();
-    match models {
-        Ok(models) => crate::backend::GbaRig::new(models, &calibration.t_i_c),
-        Err(error) => {
-            log::warn!("the global BA is off for this rig: {error}");
-            None
-        }
-    }
 }
 
 /// Flatten an isometry into `[tx, ty, tz, qx, qy, qz, qw]`.

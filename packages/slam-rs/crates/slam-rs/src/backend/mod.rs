@@ -22,16 +22,18 @@ pub mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::calib::{BasaltCamera, CalibError, Calibration};
 use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
-use crate::types::FrameId;
+use crate::lie::Se3;
+use crate::types::{FrameId, LandmarkId};
 
-pub use anchor::{AnchorError, reanchor};
+pub use anchor::{AnchorError, reanchor, reanchor_arrays};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
-pub use pgo::{MapCorrection, PgoRun, PgoState};
+pub use pgo::{PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::{MapSnapshot, SnapshotLoop};
 
@@ -65,6 +67,53 @@ impl From<&VioConfig> for MapConfig {
     }
 }
 
+/// The rig the back end works in, one entry per camera, built once from the
+/// calibration with its lists checked to the same length. Culling scores
+/// coverage with its image sizes, the snapshot, loop closing and the global
+/// BA place landmarks with its extrinsics, and loop closing and the global BA
+/// derive their camera models from its models.
+#[derive(Debug, Clone)]
+pub struct BackendRig {
+    /// Projection model per camera.
+    pub(crate) intrinsics: Vec<BasaltCamera<f64>>,
+    /// `T_i_c` per camera, its rotation renormalized (`Se3::cast`): the map has
+    /// always used the normalized extrinsics; the GBA's cameras are cast to f32 anyway.
+    pub(crate) t_i_c: Vec<Se3<f64>>,
+    /// `[width, height]` per camera, in pixels.
+    pub(crate) resolutions: Vec<[u32; 2]>,
+}
+
+impl BackendRig {
+    /// The rig of `calibration`.
+    ///
+    /// # Errors
+    ///
+    /// [`CalibError::RaggedCameraLists`] when the camera lists differ in length.
+    pub fn new(calibration: &Calibration<f64>) -> Result<Self, CalibError> {
+        let (extrinsics, intrinsics, resolutions) = (
+            calibration.t_i_c.len(),
+            calibration.intrinsics.len(),
+            calibration.resolution.len(),
+        );
+        if intrinsics != extrinsics || resolutions != extrinsics {
+            return Err(CalibError::RaggedCameraLists {
+                extrinsics,
+                intrinsics,
+                resolutions,
+            });
+        }
+        Ok(Self {
+            intrinsics: calibration.intrinsics.clone(),
+            t_i_c: calibration
+                .t_i_c
+                .iter()
+                .map(|t_i_c| t_i_c.cast::<f64>())
+                .collect(),
+            resolutions: calibration.resolution.clone(),
+        })
+    }
+}
+
 /// Why a keyframe left the map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CullReason {
@@ -94,7 +143,7 @@ pub enum MapEvent {
         current: FrameId,
         /// The keyframe it closes a loop with.
         candidate: FrameId,
-        /// Fused, optimized then fused, left unapplied, or stale.
+        /// Fused, optimized then fused, or left unapplied.
         outcome: LoopOutcome,
         /// Wall time of the apply, when it ran a pose-graph optimization
         /// (graph, solve, map write and fusion; PR c2). It differs run to run.
@@ -106,20 +155,15 @@ pub enum MapEvent {
 #[derive(Debug, Clone)]
 pub struct MapBackend {
     config: MapConfig,
-    /// Image size per camera, for the coverage score.
-    resolutions: Vec<[u32; 2]>,
+    rig: BackendRig,
     map: KeyframeMap,
     graph: CovisibilityGraph,
     /// Keyframes still in the window.
     active: BTreeSet<FrameId>,
-    /// Keyframes loop closing holds (an island from request to apply).
-    pinned: BTreeSet<FrameId>,
     /// Keyframes the map culled; a stamp never brings one back.
     culled: BTreeSet<FrameId>,
     /// How many of `culled` the over-budget batches took.
     culled_over_budget: usize,
-    /// `T_i_c` per camera, which places the points of a [`BackendWork::view`].
-    t_i_c: Vec<crate::lie::Se3<f64>>,
     /// Loop closing (PR b2); `None` when it is off.
     loops: Option<LoopClosing>,
     /// The rig's camera models for the global BA ([`Self::finish`]); `None`
@@ -159,29 +203,31 @@ pub struct CullCounts {
 }
 
 impl MapBackend {
-    /// An empty map for a rig with these image sizes.
-    pub fn new(config: MapConfig, resolutions: Vec<[u32; 2]>) -> Self {
+    /// An empty map for `rig` with the map knobs of `config`, loop closing as
+    /// `config` says and the global BA's PCG on `gba_lane`. A camera model loop
+    /// closing or the global BA cannot use leaves that part off, with one
+    /// warning: the map still runs.
+    pub fn new(config: &VioConfig, rig: BackendRig, gba_lane: crate::Backend) -> Self {
+        let loops: Option<LoopClosing> =
+            LoopClosing::new(&config.backend_loop_closing, &rig.intrinsics).unwrap_or_else(
+                |error| {
+                    log::warn!("loop closing off: {error}");
+                    None
+                },
+            );
+        let gba_rig: Option<gba::GbaRig> = gba::GbaRig::of(&rig);
         Self {
-            config,
-            resolutions,
+            config: MapConfig::from(config),
+            rig,
             map: KeyframeMap::new(),
             graph: CovisibilityGraph::new(),
             active: BTreeSet::new(),
-            pinned: BTreeSet::new(),
             culled: BTreeSet::new(),
             culled_over_budget: 0,
-            t_i_c: Vec::new(),
-            loops: None,
-            gba_rig: None,
-            gba_lane: crate::Backend::Cpu,
+            loops,
+            gba_rig,
+            gba_lane,
         }
-    }
-
-    /// The rig's `T_i_c` per camera, so a view can place the map's points.
-    #[must_use]
-    pub fn with_extrinsics(mut self, t_i_c: Vec<crate::lie::Se3<f64>>) -> Self {
-        self.t_i_c = t_i_c;
-        self
     }
 
     /// The map.
@@ -217,22 +263,9 @@ impl MapBackend {
         self.config.high_covisibility.max(1)
     }
 
-    /// Whether culling must leave `id` alone: the root, a window keyframe, or a
-    /// pinned one.
+    /// Whether culling must leave `id` alone: the root or a window keyframe.
     pub fn is_protected(&self, id: FrameId) -> bool {
-        self.graph.root() == Some(id) || self.active.contains(&id) || self.pinned.contains(&id)
-    }
-
-    /// Protect keyframes from culling until [`Self::unpin`] (B10).
-    pub fn pin(&mut self, ids: impl IntoIterator<Item = FrameId>) {
-        self.pinned.extend(ids);
-    }
-
-    /// Release keyframes [`Self::pin`] protected.
-    pub fn unpin(&mut self, ids: impl IntoIterator<Item = FrameId>) {
-        for id in ids {
-            self.pinned.remove(&id);
-        }
+        self.graph.root() == Some(id) || self.active.contains(&id)
     }
 
     /// Take one stamp from the window.
@@ -296,7 +329,7 @@ impl MapBackend {
                 &backend.graph,
                 id,
                 high_weight,
-                &backend.resolutions,
+                &backend.rig.resolutions,
             )
         };
         let mut scores: BTreeMap<FrameId, f32> = self
@@ -369,25 +402,25 @@ impl MapBackend {
             let Some(landmark) = self.map.landmark(landmark_id) else {
                 continue;
             };
-            let others: BTreeSet<FrameId> = landmark
-                .obs
-                .keys()
-                .chain([&landmark.host])
-                .map(|image| image.frame_id)
-                .filter(|&other| other != id && self.graph.contains(other))
-                .collect();
-            for other in others {
-                *shared.entry(other).or_insert(0) += 1;
+            // Each observing keyframe once, and the host if it observes none.
+            let host: FrameId = landmark.host.frame_id;
+            let host_alone: Option<FrameId> =
+                (!landmark.frames().any(|f| f == host)).then_some(host);
+            for other in landmark.frames().chain(host_alone) {
+                if other != id && self.graph.contains(other) {
+                    *shared.entry(other).or_insert(0) += 1;
+                }
             }
         }
         shared
     }
 
-    /// `cullKeyframe`: remove `id` from the map and the graph, and lower the
-    /// edges between the keyframes that shared a landmark the removal took.
-    /// Returns the keyframes whose score inputs changed: `id`'s graph neighbours
-    /// and loop partners, and the observers of the landmarks it took. `None`,
-    /// changing nothing, for a protected or unknown keyframe.
+    /// `cullKeyframe`: remove `id` from the map and the graph; each landmark
+    /// the removal took lowers the edge between every two of its other
+    /// observers by one. Returns the keyframes whose score inputs changed:
+    /// `id`'s graph neighbours and loop partners, and the observers and hosts
+    /// of the landmarks it took. `None`, changing nothing, for a protected or
+    /// unknown keyframe.
     fn cull_keyframe(&mut self, id: FrameId) -> Option<BTreeSet<FrameId>> {
         if self.is_protected(id) {
             return None;
@@ -400,28 +433,103 @@ impl MapBackend {
             .chain(self.graph.loop_closures(id))
             .collect();
         self.graph.remove_keyframe(id);
+        let mut change = EdgeChange::default();
         for (_, landmark) in &removed {
-            let observers: Vec<FrameId> = landmark
-                .obs
-                .keys()
-                .map(|image| image.frame_id)
-                .filter(|&other| other != id)
-                .collect::<BTreeSet<FrameId>>()
-                .into_iter()
-                .collect();
-            for (k, &a) in observers.iter().enumerate() {
-                for &b in &observers[k + 1..] {
-                    self.graph.decrement_edge(a, b, 1);
-                }
-            }
+            let observers: BTreeSet<FrameId> = landmark.frames().filter(|&f| f != id).collect();
+            change.pairs(&observers, -1);
             touched.extend(observers);
             touched.insert(landmark.host.frame_id);
         }
+        change.apply(&mut self.graph);
         self.culled.insert(id);
         if let Some(loops) = self.loops.as_mut() {
             loops.forget(id);
         }
         Some(touched)
+    }
+
+    /// Carry out loop fusion's landmark edits (`merge_loop_landmarks`,
+    /// `map_database.cpp:259-336`) and raise the covisibility edges they
+    /// create, in RootSLAM's two passes: first every added observation, which
+    /// links `current` to every observer of the landmark (once per landmark),
+    /// then every fusion, which links every observer of one landmark to every
+    /// observer of the other. Returns (landmarks fused, observations added).
+    fn fuse_landmarks(
+        &mut self,
+        current: FrameId,
+        plan: Vec<loop_closing::LoopFusion>,
+    ) -> (usize, usize) {
+        let observers = |map: &KeyframeMap, id: LandmarkId| -> BTreeSet<FrameId> {
+            map.landmark(id)
+                .map(|landmark| landmark.frames().collect())
+                .unwrap_or_default()
+        };
+        let mut change = EdgeChange::default();
+        let (mut landmarks_fused, mut observations_added) = (0, 0);
+        let mut linked: BTreeSet<LandmarkId> = BTreeSet::new();
+        let (adds, fusions): (Vec<_>, Vec<_>) = plan
+            .into_iter()
+            .partition(|step| matches!(step, loop_closing::LoopFusion::AddObs { .. }));
+        for step in adds.into_iter().chain(fusions) {
+            match step {
+                loop_closing::LoopFusion::AddObs {
+                    landmark,
+                    image,
+                    pixel,
+                } => {
+                    if linked.insert(landmark) {
+                        change.across(&[current].into(), &observers(&self.map, landmark), 1);
+                    }
+                    observations_added +=
+                        usize::from(self.map.add_observation(landmark, image, pixel));
+                }
+                loop_closing::LoopFusion::Fuse { from, into } => {
+                    let (old, new) = (observers(&self.map, from), observers(&self.map, into));
+                    if self.map.merge_landmark(from, into) {
+                        change.across(&old, &new, 1);
+                        landmarks_fused += 1;
+                    }
+                }
+            }
+        }
+        change.apply(&mut self.graph);
+        (landmarks_fused, observations_added)
+    }
+}
+
+/// Covisibility edge changes, summed per keyframe pair and applied once.
+#[derive(Default)]
+struct EdgeChange(BTreeMap<(FrameId, FrameId), i64>);
+
+impl EdgeChange {
+    /// Add `by` to the edge between every two of `keyframes`.
+    fn pairs(&mut self, keyframes: &BTreeSet<FrameId>, by: i64) {
+        for &a in keyframes {
+            for &b in keyframes.range(a + 1..) {
+                *self.0.entry((a, b)).or_insert(0) += by;
+            }
+        }
+    }
+
+    /// Add `by` to the edge of `(a, b)` for every `a` in `left` and `b` in
+    /// `right`, `a != b`.
+    fn across(&mut self, left: &BTreeSet<FrameId>, right: &BTreeSet<FrameId>, by: i64) {
+        for &a in left {
+            for &b in right.iter().filter(|&&b| b != a) {
+                *self.0.entry((a.min(b), a.max(b))).or_insert(0) += by;
+            }
+        }
+    }
+
+    fn apply(self, graph: &mut CovisibilityGraph) {
+        for ((a, b), by) in self.0 {
+            let size: u32 = u32::try_from(by.unsigned_abs()).unwrap_or(u32::MAX);
+            if by > 0 {
+                graph.increment_edge(a, b, size);
+            } else if by < 0 {
+                graph.decrement_edge(a, b, size);
+            }
+        }
     }
 }
 
@@ -430,7 +538,7 @@ impl BackendWork for MapBackend {
 
     /// [`MapBackend::snapshot`] with the rig's extrinsics.
     fn view(&self) -> MapSnapshot {
-        self.snapshot(&self.t_i_c)
+        self.snapshot()
     }
 
     fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {

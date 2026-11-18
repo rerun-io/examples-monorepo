@@ -2,8 +2,9 @@
 //! `covisibility_graph.cpp`).
 //!
 //! A node per map keyframe. An edge's weight is the number of landmarks the two
-//! keyframes share, counted when the newer one joins the map and lowered as
-//! culling removes landmarks. Each keyframe's spanning-tree parent is its
+//! keyframes share, counted when the newer one joins the map, then moved by
+//! the map's landmark edits (culling, loop fusion), all in
+//! [`super::MapBackend`]. Each keyframe's spanning-tree parent is its
 //! strongest neighbour when it joins; loop-closure edges come from loop closing.
 //!
 //! Differences from RootSLAM, all deliberate:
@@ -14,7 +15,11 @@
 //!   existing nodes (B19: `decrementEdge` creates both nodes through
 //!   `operator[]`);
 //! - an edge counts shared *landmarks*; RootSLAM counts every observation of
-//!   the other keyframe, so a landmark seen by two of its cameras counts twice;
+//!   the other keyframe, so a landmark seen by two of its cameras counts twice
+//!   (at insertion and at a loop fusion's added observations alike;
+//!   `map_database.cpp:281-284`); a fusion's observer cross product, which
+//!   counts a pair that sees both landmarks twice, is RootSLAM's own rule
+//!   (`map_database.cpp:311-321`);
 //! - "high covisibility" is a threshold passed in at query time, not a set kept
 //!   in step with one fixed value (the default, 96 shared landmarks, matches
 //!   RootSLAM's high edges per keyframe: see `VioConfig`);
@@ -269,24 +274,20 @@ impl CovisibilityGraph {
         true
     }
 
-    /// Every edge weight, each edge once, in `(smaller, larger)` id order.
-    pub fn edge_weights(&self) -> Vec<u32> {
-        self.nodes
-            .iter()
-            .flat_map(|(&a, node)| node.edges.range(a + 1..).map(|(_, &weight)| weight))
-            .collect()
+    /// Every edge once as `(smaller, larger, weight)`, in id order.
+    pub fn edges(&self) -> impl Iterator<Item = (FrameId, FrameId, u32)> + '_ {
+        self.nodes.iter().flat_map(|(&a, node)| {
+            node.edges
+                .range(a + 1..)
+                .map(move |(&b, &weight)| (a, b, weight))
+        })
     }
 
     /// Edges at or above `threshold`, each once as `(smaller, larger)`, in order.
     pub fn high_covisibility_edges(&self, threshold: u32) -> Vec<(FrameId, FrameId)> {
-        self.nodes
-            .iter()
-            .flat_map(|(&a, node)| {
-                node.edges
-                    .range(a + 1..)
-                    .filter(move |(_, weight)| **weight >= threshold)
-                    .map(move |(&b, _)| (a, b))
-            })
+        self.edges()
+            .filter(|&(_, _, weight)| weight >= threshold)
+            .map(|(a, b, _)| (a, b))
             .collect()
     }
 

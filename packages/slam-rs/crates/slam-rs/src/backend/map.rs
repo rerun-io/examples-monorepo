@@ -11,9 +11,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector3, Vector4};
 
 use crate::estimator::{Keypoints, StampLandmark};
+use crate::landmark::StereographicParam;
 use crate::lie::Se3;
 use crate::types::{CamId, FrameId, KeypointId, LandmarkId, TimeCamId};
 
@@ -45,6 +46,19 @@ pub struct MapLandmark {
     pub inv_dist: f64,
     /// Where map keyframes saw it; at least two entries.
     pub obs: BTreeMap<TimeCamId, Vector2<f32>>,
+}
+
+impl MapLandmark {
+    /// The keyframes that observe it, each once, in id order (`obs` is
+    /// ordered by frame, then camera): whom insertion, culling and loop fusion
+    /// link or unlink through it, and the redundancy score's count.
+    pub fn frames(&self) -> impl Iterator<Item = FrameId> + '_ {
+        let mut previous: Option<FrameId> = None;
+        self.obs
+            .keys()
+            .map(|image| image.frame_id)
+            .filter(move |&frame| previous.replace(frame) != Some(frame))
+    }
 }
 
 /// The counts RootSLAM writes to `stats_map.json`.
@@ -165,11 +179,6 @@ impl KeyframeMap {
             if !self.keyframes.contains_key(&stamped.host.frame_id) {
                 continue;
             }
-            let obs = stamped
-                .obs
-                .iter()
-                .filter(|(image, _)| self.keyframes.contains_key(&image.frame_id))
-                .map(|(image, pixel)| (*image, *pixel));
             let landmark: &mut MapLandmark =
                 self.landmarks
                     .entry(stamped.id)
@@ -183,19 +192,22 @@ impl KeyframeMap {
             landmark.host = stamped.host;
             landmark.direction = stamped.direction;
             landmark.inv_dist = stamped.inv_dist;
-            landmark.obs.extend(obs);
-            let images: Vec<TimeCamId> = landmark.obs.keys().copied().collect();
-            if old_host != stamped.host && !images.contains(&old_host) {
+            // Every image already in `obs` is indexed: index the new ones only.
+            for (image, pixel) in &stamped.obs {
+                if self.keyframes.contains_key(&image.frame_id)
+                    && landmark.obs.insert(*image, *pixel).is_none()
+                {
+                    self.by_image.entry(*image).or_default().insert(stamped.id);
+                }
+            }
+            if old_host != stamped.host && !landmark.obs.contains_key(&old_host) {
                 detach(&mut self.by_image, old_host, stamped.id);
             }
-            for image in images.into_iter().chain([stamped.host]) {
-                self.by_image.entry(image).or_default().insert(stamped.id);
-            }
-            if self
-                .landmarks
-                .get(&stamped.id)
-                .is_some_and(|lm| lm.obs.len() < MIN_OBSERVATIONS)
-            {
+            self.by_image
+                .entry(stamped.host)
+                .or_default()
+                .insert(stamped.id);
+            if landmark.obs.len() < MIN_OBSERVATIONS {
                 self.remove_landmark(stamped.id);
             }
         }
@@ -272,7 +284,8 @@ impl KeyframeMap {
     /// Landmark `id` in the world frame: `T_w_i(host) * t_i_c[cam] *
     /// unproject(direction) / inv_dist`, as the window builds it. `None` for an
     /// unknown landmark, host or camera, or a point at infinity (`inv_dist <= 0`)
-    /// or not finite.
+    /// or not finite. The snapshot, loop closing and the global BA all place
+    /// landmarks with it.
     pub fn landmark_world(
         &self,
         id: LandmarkId,
@@ -305,18 +318,16 @@ impl KeyframeMap {
             let Some(landmark) = self.landmarks.get_mut(&landmark_id) else {
                 continue;
             };
-            if landmark.host.frame_id == id {
+            let remaining: usize = landmark.obs.keys().filter(|i| i.frame_id != id).count();
+            if landmark.host.frame_id == id || remaining < MIN_OBSERVATIONS {
+                // Removed whole, as it was: its index entries in `id`'s images
+                // go with the `by_image` sweep below anyway.
                 if let Some(landmark) = self.remove_landmark(landmark_id) {
                     removed.push((landmark_id, landmark));
                 }
                 continue;
             }
-            let before: MapLandmark = landmark.clone();
             landmark.obs.retain(|image, _| image.frame_id != id);
-            if landmark.obs.len() < MIN_OBSERVATIONS {
-                self.remove_landmark(landmark_id);
-                removed.push((landmark_id, before));
-            }
         }
         self.by_image.retain(|image, _| image.frame_id != id);
         Some(removed)
@@ -330,11 +341,7 @@ impl KeyframeMap {
             .iter()
             .filter_map(|landmark_id| self.landmarks.get(landmark_id))
             .filter(|landmark| !(exclude_hosted && landmark.host.frame_id == id))
-            .filter(|landmark| {
-                let keyframes: BTreeSet<FrameId> =
-                    landmark.obs.keys().map(|image| image.frame_id).collect();
-                keyframes.len() > REDUNDANT_ABOVE_KEYFRAMES
-            })
+            .filter(|landmark| landmark.frames().count() > REDUNDANT_ABOVE_KEYFRAMES)
             .count();
         if seen.is_empty() {
             0.0
@@ -414,6 +421,23 @@ impl KeyframeMap {
             .sum();
         keyframes + landmarks + index
     }
+}
+
+/// The inverse of [`KeyframeMap::landmark_world`]: a world point as the window
+/// stores it, stereographic direction and inverse distance in the camera
+/// `world_from_camera` places. `None` for a
+/// point at the camera centre or a non-finite result.
+pub fn host_relative(
+    world_from_camera: &Se3<f64>,
+    point: &Vector3<f64>,
+) -> Option<(Vector2<f64>, f64)> {
+    let p_c: Vector3<f64> = world_from_camera.inverse() * *point;
+    let distance: f64 = p_c.norm();
+    let direction: Vector2<f64> =
+        StereographicParam::project(&Vector4::new(p_c.x, p_c.y, p_c.z, 0.0));
+    let inv_dist: f64 = 1.0 / distance;
+    (distance > 0.0 && inv_dist.is_finite() && direction.iter().all(|v| v.is_finite()))
+        .then_some((direction, inv_dist))
 }
 
 /// Drop `id` from `by_image[image]`, then the entry if it empties.

@@ -87,6 +87,31 @@ pub struct VioPose {
     pub accel_bias: [f64; 3],
 }
 
+/// `pose` as `[tx, ty, tz, qx, qy, qz, qw]`, the layout of
+/// [`VioPose::world_from_rig`].
+pub fn pose_to_xyzw(pose: &crate::lie::Se3<f64>) -> [f64; 7] {
+    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
+    [
+        pose.translation.x,
+        pose.translation.y,
+        pose.translation.z,
+        x,
+        y,
+        z,
+        w,
+    ]
+}
+
+/// The pose a `[tx, ty, tz, qx, qy, qz, qw]` row holds; `None` for a zero or
+/// non-finite quaternion, which holds no rotation.
+pub fn pose_from_xyzw(pose: &[f64; 7]) -> Option<crate::lie::Se3<f64>> {
+    let rotation = crate::lie::So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6])?;
+    Some(crate::lie::Se3::new(
+        rotation,
+        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
+    ))
+}
+
 /// Everything that can go wrong at the API boundary.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum VioError {
@@ -114,6 +139,9 @@ pub enum VioError {
     /// backend that is not compiled in is a refusal, not a missing argument.
     #[error("this build has no GPU backend; rebuild with the `gpu-wgpu` cargo feature")]
     GpuUnavailable,
+    /// The back end refused the calibration's rig (ragged camera lists).
+    #[error("the back end's rig: {0}")]
+    BackendRig(String),
     /// The operating system refused the Realtime back-end thread.
     #[error("could not start the back-end thread: {0}")]
     BackendThread(String),

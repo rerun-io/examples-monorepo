@@ -235,9 +235,8 @@ def reanchored(estimate: Trajectory, map_keyframes: _core.MapSnapshot | _core.Ma
     """
     if map_keyframes is None:
         return estimate
-    raw_xyzw: Float64[ndarray, "n 7"] = np.concatenate([estimate.position_m, np.roll(estimate.quaternion_wxyz, -1, axis=1)], axis=1)
-    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, raw_xyzw, map_keyframes.keyframe_t_ns, map_keyframes.keyframe_poses)
-    return Trajectory(t_ns=estimate.t_ns.copy(), position_m=final[:, 0:3].copy(), quaternion_wxyz=np.roll(final[:, 3:7], 1, axis=1))
+    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, estimate.xyzw(), map_keyframes.keyframe_t_ns, map_keyframes.keyframe_poses)
+    return Trajectory.from_xyzw(estimate.t_ns, final)
 
 
 @runtime_checkable

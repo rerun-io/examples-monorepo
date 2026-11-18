@@ -58,8 +58,23 @@ fn marg(ids: &[FrameId], x: f64, landmarks: Vec<StampLandmark>) -> MapStamp {
     })
 }
 
+/// A back end on two 640 x 480 cameras with these extrinsics and no camera
+/// models (loop closing and the global BA off), with these map knobs.
+fn backend_with(config: MapConfig, t_i_c: Vec<Se3<f64>>) -> MapBackend {
+    let rig = BackendRig {
+        intrinsics: Vec::new(),
+        t_i_c,
+        resolutions: vec![[640, 480]; 2],
+    };
+    let mut backend = MapBackend::new(&VioConfig::default(), rig, crate::Backend::Cpu);
+    backend.config = config;
+    backend.loops = None;
+    backend.gba_rig = None;
+    backend
+}
+
 fn backend(max_keyframes: usize, batch: usize) -> MapBackend {
-    MapBackend::new(config(max_keyframes, batch), vec![[640, 480]; 2])
+    backend_with(config(max_keyframes, batch), Vec::new())
 }
 
 #[test]
@@ -181,20 +196,12 @@ fn a_redundant_keyframe_is_culled_as_it_leaves_and_never_comes_back() {
 }
 
 #[test]
-fn the_root_and_pinned_keyframes_are_never_culled() {
+fn the_root_is_never_culled() {
     let mut backend = redundant_map();
     // Keyframe 1 is the root: redundant or not, it stays.
     let events = backend.step(marg(&[1], 1.0, vec![]));
     assert_eq!(events, vec![MapEvent::KeyframeMarginalized(1)]);
     assert!(backend.map().contains_keyframe(1));
-    // B10: a pinned keyframe survives its redundancy cull.
-    backend.pin([2]);
-    assert!(backend.is_protected(2));
-    let events = backend.step(marg(&[2], 2.0, vec![]));
-    assert_eq!(events, vec![MapEvent::KeyframeMarginalized(2)]);
-    assert!(backend.map().contains_keyframe(2));
-    backend.unpin([2]);
-    assert!(!backend.is_protected(2));
 }
 
 #[test]
@@ -244,12 +251,12 @@ fn an_over_budget_map_culls_its_lowest_scored_inactive_keyframes() {
 /// the next pick. Ranked once, the batch would take 3 then 4.
 #[test]
 fn the_batch_re_ranks_after_each_cull() {
-    let mut backend = MapBackend::new(
+    let mut backend = backend_with(
         MapConfig {
             high_covisibility: 100,
             ..config(5, 2)
         },
-        vec![[640, 480]; 2],
+        Vec::new(),
     );
     backend.step(keyframe(1, &[1], vec![]));
     // 2 sees only ten landmarks hosted by 3; 4 sees fifteen of its own with 5.
@@ -295,10 +302,6 @@ enum Step {
     },
     /// Evict the oldest window keyframe.
     Marginalize,
-    /// Pin the keyframe this far back from the newest.
-    Pin(usize),
-    /// Release every pin.
-    UnpinAll,
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -310,23 +313,16 @@ fn step() -> impl Strategy<Value = Step> {
         4 => (2usize..5, prop::collection::vec(landmark, 0..8))
             .prop_map(|(window, landmarks)| Step::Keyframe { window, landmarks }),
         3 => Just(Step::Marginalize),
-        1 => (0usize..10).prop_map(Step::Pin),
-        1 => Just(Step::UnpinAll),
     ]
 }
 
 /// What must survive a step that marginalizes `releasing` (if any): the root,
-/// every pinned keyframe, and every window keyframe but the one leaving.
-fn protected(
-    backend: &MapBackend,
-    pinned: &BTreeSet<FrameId>,
-    releasing: Option<FrameId>,
-) -> BTreeSet<FrameId> {
+/// and every window keyframe but the one leaving.
+fn protected(backend: &MapBackend, releasing: Option<FrameId>) -> BTreeSet<FrameId> {
     let mut protected: BTreeSet<FrameId> = backend.active_keyframes().clone();
     if let Some(releasing) = releasing {
         protected.remove(&releasing);
     }
-    protected.extend(pinned.iter().copied());
     protected.extend(backend.graph().root());
     protected
 }
@@ -374,7 +370,7 @@ fn rescored_batch(backend: &MapBackend, stamp: MapStamp) -> Vec<FrameId> {
                     &reference.graph,
                     id,
                     high_weight,
-                    &reference.resolutions,
+                    &reference.rig.resolutions,
                 );
                 (score, id)
             })
@@ -394,13 +390,12 @@ proptest! {
         steps in prop::collection::vec(step(), 1..60),
         max_keyframes in 3usize..8,
     ) {
-        let mut backend = MapBackend::new(
+        let mut backend = backend_with(
             MapConfig { max_redundancy_score: 0.5, ..config(max_keyframes, 2) },
-            vec![[640, 480]; 2],
+            Vec::new(),
         );
         let mut made: Vec<FrameId> = Vec::new();
         let mut window: Vec<FrameId> = Vec::new();
-        let mut pinned: BTreeSet<FrameId> = BTreeSet::new();
         let mut next_landmark: u64 = 0;
         for step in steps {
             match step {
@@ -419,7 +414,7 @@ proptest! {
                             landmark(next_landmark, host, &obs)
                         })
                         .collect();
-                    let mut guard = protected(&backend, &pinned, None);
+                    let mut guard = protected(&backend, None);
                     guard.extend(window.iter().copied());
                     let stamp = keyframe(t, &window, landmarks);
                     let expected = rescored_batch(&backend, stamp.clone());
@@ -427,26 +422,16 @@ proptest! {
                     prop_assert_eq!(checked_step(&mut backend, stamp, &guard)?, expected);
                     while window.len() > size {
                         let oldest = window.remove(0);
-                        let guard = protected(&backend, &pinned, Some(oldest));
+                        let guard = protected(&backend, Some(oldest));
                         checked_step(&mut backend, marg(&[oldest], 0.0, vec![]), &guard)?;
                     }
                 }
                 Step::Marginalize => {
                     if window.len() > 1 {
                         let oldest = window.remove(0);
-                        let guard = protected(&backend, &pinned, Some(oldest));
+                        let guard = protected(&backend, Some(oldest));
                         checked_step(&mut backend, marg(&[oldest], 0.0, vec![]), &guard)?;
                     }
-                }
-                Step::Pin(back) => {
-                    if let Some(&id) = made.iter().rev().nth(back) {
-                        backend.pin([id]);
-                        pinned.insert(id);
-                    }
-                }
-                Step::UnpinAll => {
-                    backend.unpin(made.clone());
-                    pinned.clear();
                 }
             }
             let map = backend.map();
@@ -485,7 +470,12 @@ proptest! {
 /// direction / inverse distance, and each covisibility edge once.
 #[test]
 fn a_map_snapshot_copies_keyframes_world_points_and_edges() {
-    let mut backend = backend(100, 10);
+    // Camera 0 sits 0.1 m along y of the IMU, camera 1 0.2 m along z.
+    let t_i_c: Vec<Se3<f64>> = vec![
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.1, 0.0)),
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.0, 0.2)),
+    ];
+    let mut backend = backend_with(config(100, 10), t_i_c);
     backend.step(keyframe(1, &[1], vec![]));
     backend.step(keyframe(
         2,
@@ -496,13 +486,8 @@ fn a_map_snapshot_copies_keyframes_world_points_and_edges() {
         ],
     ));
     backend.step(marg(&[1], 1.5, vec![]));
-    // Camera 0 sits 0.1 m along y of the IMU, camera 1 0.2 m along z.
-    let t_i_c: Vec<Se3<f64>> = vec![
-        Se3::new(So3::identity(), Vector3::new(0.0, 0.1, 0.0)),
-        Se3::new(So3::identity(), Vector3::new(0.0, 0.0, 0.2)),
-    ];
 
-    let snapshot: MapSnapshot = backend.snapshot(&t_i_c);
+    let snapshot: MapSnapshot = backend.snapshot();
 
     assert_eq!(snapshot.keyframe_t_ns, vec![1, 2]);
     assert_eq!(snapshot.keyframe_poses, vec![pose(1.5), pose(2.0)]);
@@ -539,7 +524,7 @@ fn a_map_snapshot_skips_points_it_cannot_place() {
         &[1, 2],
         vec![landmark(10, 1, &[(1, 0), (2, 0)])],
     ));
-    let snapshot: MapSnapshot = backend.snapshot(&[]);
+    let snapshot: MapSnapshot = backend.snapshot();
     assert!(snapshot.point_ids.is_empty());
     assert!(snapshot.points_world.is_empty());
     assert_eq!(snapshot.stats.landmarks, 1);
@@ -550,8 +535,10 @@ fn a_map_snapshot_skips_points_it_cannot_place() {
 /// export keeps finite positions only).
 #[test]
 fn a_map_snapshot_skips_points_at_infinity() {
-    let mut backend =
-        backend(100, 10).with_extrinsics(vec![Se3::new(So3::identity(), Vector3::zeros()); 2]);
+    let mut backend = backend_with(
+        config(100, 10),
+        vec![Se3::new(So3::identity(), Vector3::zeros()); 2],
+    );
     let mut far: StampLandmark = landmark(11, 1, &[(1, 0), (2, 0)]);
     far.inv_dist = 0.0;
     backend.step(keyframe(1, &[1], vec![]));
@@ -576,7 +563,7 @@ fn a_map_snapshot_skips_points_at_infinity() {
 fn reanchoring_refuses_a_frame_without_a_rotation() {
     // A zero quaternion is no rotation: refused, as the Python binding refuses it,
     // never read as the identity.
-    let snapshot: MapSnapshot = backend(100, 10).snapshot(&[]);
+    let snapshot: MapSnapshot = backend(100, 10).snapshot();
     let mut frames = vec![(10, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]), (20, [0.0; 7])];
     assert_eq!(
         snapshot.reanchor(&frames),
@@ -584,4 +571,18 @@ fn reanchoring_refuses_a_frame_without_a_rotation() {
     );
     frames[1].1[6] = 1.0;
     assert_eq!(snapshot.reanchor(&frames).unwrap()[1], frames[1].1);
+}
+
+#[test]
+fn a_rig_with_ragged_camera_lists_is_refused() {
+    let mut calibration = crate::calib::Calibration::<f64>::default();
+    calibration.resolution.push([640, 480]);
+    assert!(matches!(
+        BackendRig::new(&calibration),
+        Err(crate::calib::CalibError::RaggedCameraLists {
+            extrinsics: 0,
+            intrinsics: 0,
+            resolutions: 1
+        })
+    ));
 }

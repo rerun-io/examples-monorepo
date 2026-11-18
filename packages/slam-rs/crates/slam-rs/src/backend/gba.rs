@@ -4,7 +4,7 @@
 //! [`kornia_staging_slam::sqrt_ba`] global problem ([`map_problem`]), solves it
 //! ([`solve`]: f64 centring, then the f32 or f64 square-root BA), takes the
 //! free gauge out ([`remove_gauge`]) and writes the result back into the map
-//! ([`apply`]). RootSLAM runs the same BA as a separate process on an exported
+//! (`apply`). RootSLAM runs the same BA as a separate process on an exported
 //! `map.json` (rootba `bal`, B25); here it runs in process, on the map the
 //! window built.
 //!
@@ -12,7 +12,7 @@
 //! - one `T_i_w` per map keyframe that has a row; cameras are fixed;
 //! - one world point per landmark with at least two observations and a finite
 //!   position (RootSLAM's export rule, `map_database.cpp:934-944`), computed once
-//!   from its host-relative form;
+//!   by [`KeyframeMap::landmark_world`], the map's one conversion and validity rule;
 //! - a keyframe with fewer than `min_obs_per_kf` observations loses its
 //!   reprojection rows and keeps its pose-graph rows (B22: rootba drops it);
 //! - one rel-pose row per pose-graph edge (spanning tree, loop closures,
@@ -27,39 +27,42 @@
 //!
 //! The window never reads the map, so the raw VIO poses do not change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use kornia_staging_3d::camera::{
-    BrownConrady, CameraModelKind, Fisheye624, KannalaBrandt4, Pinhole,
-};
+use kornia_staging_3d::camera::CameraModelKind;
 use kornia_staging_slam::sqrt_ba::{
     GbaError, GbaLandmark, GbaObservation, GbaOptions, GbaProblem, GbaReport, GbaRigCamera,
     PcgOptions, RelPoseConstraint, solve_global,
 };
-use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector2, Vector3, Vector4};
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
+use super::map::host_relative;
 use super::{KeyframeMap, MapBackend, PoseGraphEdge};
 
 use crate::config::VioConfig;
-use crate::landmark::StereographicParam;
 use crate::lie::{Se3, So3};
 use crate::types::{FrameId, LandmarkId};
 /// The solver's report types, for callers that read a [`GbaRun`].
 pub use kornia_staging_slam::sqrt_ba::{GbaCost, GbaIteration, GbaStageSeconds, GbaTermination};
 
-/// The rig as the global BA sees it: each camera's model and `T_i_c`, fixed.
-/// The f32 lane casts them in [`solve`].
+/// The rig as the global BA sees it: each camera's model and `T_i_c`, fixed,
+/// in f64 and as the f32 lane solves with them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GbaRig {
     /// Camera models and extrinsics.
     pub cameras: Vec<GbaRigCamera<f64, CameraModelKind<f64>>>,
+    /// The same, cast to f32.
+    pub cameras_f32: Vec<GbaRigCamera<f32, CameraModelKind<f32>>>,
 }
 
 impl GbaRig {
     /// A rig from its staged camera models and extrinsics; `None` when the
     /// lists differ in length or a model does not survive the cast to f32.
     pub fn new(models: Vec<CameraModelKind<f64>>, t_i_c: &[Se3<f64>]) -> Option<Self> {
+        if models.len() != t_i_c.len() {
+            return None;
+        }
         let cameras: Vec<GbaRigCamera<f64, CameraModelKind<f64>>> = models
             .into_iter()
             .zip(t_i_c)
@@ -68,28 +71,38 @@ impl GbaRig {
                 imu_from_camera: *t,
             })
             .collect();
-        (cameras.len() == t_i_c.len() && cameras.iter().all(|c| cast_model(&c.model).is_some()))
-            .then_some(Self { cameras })
+        let cameras_f32 = cameras
+            .iter()
+            .map(|c| {
+                Some(GbaRigCamera {
+                    model: c.model.to_f32()?,
+                    imu_from_camera: c.imu_from_camera.cast(),
+                })
+            })
+            .collect::<Option<_>>()?;
+        Some(Self {
+            cameras,
+            cameras_f32,
+        })
     }
-}
 
-/// A staged camera model in f32.
-fn cast_model(model: &CameraModelKind<f64>) -> Option<CameraModelKind<f32>> {
-    let narrow = |v: f64| v as f32;
-    Some(match model {
-        CameraModelKind::Pinhole(m) => {
-            CameraModelKind::Pinhole(Pinhole::new(m.params().map(narrow)).ok()?)
+    /// The back end's rig through the staged camera models; `None` (one
+    /// warning) when a model has no staged projection, which leaves the GBA
+    /// off for this rig.
+    pub(crate) fn of(rig: &super::BackendRig) -> Option<Self> {
+        let models: Result<Vec<_>, _> = rig
+            .intrinsics
+            .iter()
+            .map(crate::calib::BasaltCamera::to_staged)
+            .collect();
+        match models {
+            Ok(models) => Self::new(models, &rig.t_i_c),
+            Err(error) => {
+                log::warn!("the global BA is off for this rig: {error}");
+                None
+            }
         }
-        CameraModelKind::Kb4(m) => {
-            CameraModelKind::Kb4(KannalaBrandt4::new(m.params().map(narrow)).ok()?)
-        }
-        CameraModelKind::BrownConrady(m) => CameraModelKind::BrownConrady(
-            BrownConrady::new(m.params().map(narrow), m.valid_radius().map(narrow)).ok()?,
-        ),
-        CameraModelKind::Fisheye624(m) => {
-            CameraModelKind::Fisheye624(Fisheye624::new(m.params().map(narrow)).ok()?)
-        }
-    })
+    }
 }
 
 /// The LM options from `backend.gba_*`: rootba `bal`'s, no pose held constant.
@@ -120,7 +133,8 @@ pub struct GbaCounts {
     pub pose_graph_rows: usize,
     /// Observations of keyframes under `min_obs_per_kf`.
     pub dropped_observations: usize,
-    /// Landmarks without a finite world position (at infinity).
+    /// Landmarks without a world position ([`KeyframeMap::landmark_world`]: at
+    /// infinity, or an unknown host or camera).
     pub nonfinite_landmarks: usize,
 }
 
@@ -196,35 +210,6 @@ pub enum GbaDriverError {
     GpuLane(String),
 }
 
-/// A world point as the window stores it: stereographic direction and
-/// inverse distance in the camera `world_from_camera` places. `None` for a
-/// point at the camera centre or a non-finite result.
-pub fn host_relative(
-    world_from_camera: &Se3<f64>,
-    point: &Vector3<f64>,
-) -> Option<(Vector2<f64>, f64)> {
-    let p_c: Vector3<f64> = world_from_camera.inverse() * *point;
-    let distance: f64 = p_c.norm();
-    let direction: Vector2<f64> =
-        StereographicParam::project(&Vector4::new(p_c.x, p_c.y, p_c.z, 0.0));
-    let inv_dist: f64 = 1.0 / distance;
-    (distance > 0.0 && inv_dist.is_finite() && direction.iter().all(|v| v.is_finite()))
-        .then_some((direction, inv_dist))
-}
-
-/// The world position of a host-relative landmark.
-fn world_point(
-    world_from_camera: &Se3<f64>,
-    direction: &Vector2<f64>,
-    inv_dist: f64,
-) -> Vector3<f64> {
-    let bearing: Vector4<f64> = StereographicParam::unproject(direction);
-    *world_from_camera * (Vector3::new(bearing[0], bearing[1], bearing[2]) / inv_dist)
-}
-
-/// A landmark in world coordinates with its (keyframe, camera, pixel) observations.
-type WorldLandmark = (LandmarkId, Vector3<f64>, Vec<(FrameId, usize, [f64; 2])>);
-
 /// The map as a global BA problem (DESIGN §3.1). `edges` are the pose-graph
 /// edges; an edge to a keyframe the map does not hold is skipped.
 pub fn map_problem(
@@ -234,63 +219,46 @@ pub fn map_problem(
     config: &VioConfig,
 ) -> GbaInput {
     let keyframes = map.keyframes();
+    let ids: Vec<FrameId> = keyframes.keys().copied().collect();
     let mut counts = GbaCounts::default();
-    // Landmarks in world coordinates, once, with their keyframe observations.
-    let mut world: Vec<WorldLandmark> = Vec::new();
+    // Landmarks in world coordinates, once, with their observations; a
+    // keyframe index is into `ids` until the compaction below.
+    let mut landmark_ids: Vec<LandmarkId> = Vec::new();
+    let mut landmarks: Vec<GbaLandmark<f64>> = Vec::new();
     for (&id, landmark) in map.landmarks() {
-        let (Some(host), Some(extrinsic)) = (
-            keyframes.get(&landmark.host.frame_id),
-            t_i_c.get(landmark.host.cam_id),
-        ) else {
-            continue;
-        };
-        let position: Vector3<f64> = world_point(
-            &(host.pose * *extrinsic),
-            &landmark.direction,
-            landmark.inv_dist,
-        );
-        if !position.iter().all(|v| v.is_finite()) {
+        let Some(position) = map.landmark_world(id, t_i_c) else {
             counts.nonfinite_landmarks += 1;
             continue;
-        }
-        let observations: Vec<(FrameId, usize, [f64; 2])> = landmark
+        };
+        let observations: Vec<GbaObservation<f64>> = landmark
             .obs
             .iter()
-            .filter(|(image, _)| {
-                keyframes.contains_key(&image.frame_id) && image.cam_id < t_i_c.len()
-            })
-            .map(|(image, pixel)| {
-                (
-                    image.frame_id,
-                    image.cam_id,
-                    [f64::from(pixel.x), f64::from(pixel.y)],
-                )
+            .filter(|(image, _)| image.cam_id < t_i_c.len())
+            .filter_map(|(image, pixel)| {
+                Some(GbaObservation {
+                    keyframe: ids.binary_search(&image.frame_id).ok()?,
+                    camera: image.cam_id,
+                    pixel: [f64::from(pixel.x), f64::from(pixel.y)],
+                })
             })
             .collect();
         if observations.len() >= 2 {
-            world.push((id, position, observations));
+            landmark_ids.push(id);
+            landmarks.push(GbaLandmark {
+                position,
+                observations,
+            });
         }
     }
-    // B22: a keyframe under `min_obs_per_kf` loses its reprojection rows.
-    let mut per_keyframe: BTreeMap<FrameId, usize> = BTreeMap::new();
-    for (_, _, observations) in &world {
-        for (frame, _, _) in observations {
-            *per_keyframe.entry(*frame).or_insert(0) += 1;
-        }
-    }
-    let sparse = |frame: &FrameId| {
-        per_keyframe
-            .get(frame)
-            .is_some_and(|&n| n < config.gba_min_obs_per_kf)
+    let mut problem = GbaProblem {
+        imu_from_world: keyframes.values().map(|k| k.pose.inverse()).collect(),
+        landmarks,
+        rel_poses: Vec::new(),
     };
-    counts.keyframes_without_reprojection =
-        per_keyframe.keys().filter(|frame| sparse(frame)).count();
-    for (_, _, observations) in &mut world {
-        let before: usize = observations.len();
-        observations.retain(|(frame, _, _)| !sparse(frame));
-        counts.dropped_observations += before - observations.len();
-    }
-    world.retain(|(_, _, observations)| observations.len() >= 2);
+    // B22: a keyframe under `min_obs_per_kf` loses its reprojection rows.
+    let sparse = problem.drop_sparse_observations(config.gba_min_obs_per_kf);
+    counts.keyframes_without_reprojection = sparse.keyframes;
+    counts.dropped_observations = sparse.observations;
     let edges: Vec<&PoseGraphEdge> = edges
         .iter()
         .filter(|e| {
@@ -298,16 +266,25 @@ pub fn map_problem(
         })
         .collect();
     // A keyframe is a variable when a row touches it.
-    let mut used: std::collections::BTreeSet<FrameId> =
-        edges.iter().flat_map(|e| [e.from, e.to]).collect();
+    let mut used: BTreeSet<FrameId> = edges.iter().flat_map(|e| [e.from, e.to]).collect();
     used.extend(
-        world
+        problem
+            .landmarks
             .iter()
-            .flat_map(|(_, _, obs)| obs.iter().map(|(frame, _, _)| *frame)),
+            .flat_map(|l| &l.observations)
+            .map(|o| ids[o.keyframe]),
     );
     let index: BTreeMap<FrameId, usize> = used.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    for observation in problem
+        .landmarks
+        .iter_mut()
+        .flat_map(|l| &mut l.observations)
+    {
+        observation.keyframe = index[&ids[observation.keyframe]];
+    }
     let pose = |id: FrameId| keyframes[&id].pose;
-    let rel_poses: Vec<RelPoseConstraint<f64>> = edges
+    problem.imu_from_world = used.iter().map(|&id| pose(id).inverse()).collect();
+    problem.rel_poses = edges
         .iter()
         .map(|e| {
             RelPoseConstraint::with_sigmas(
@@ -319,32 +296,18 @@ pub fn map_problem(
             )
         })
         .collect();
-    let landmarks: Vec<GbaLandmark<f64>> = world
-        .iter()
-        .map(|(_, position, observations)| GbaLandmark {
-            position: *position,
-            observations: observations
-                .iter()
-                .map(|&(frame, camera, pixel)| GbaObservation {
-                    keyframe: index[&frame],
-                    camera,
-                    pixel,
-                })
-                .collect(),
-        })
-        .collect();
     counts.keyframes = used.len();
-    counts.landmarks = landmarks.len();
-    counts.observations = landmarks.iter().map(|l| l.observations.len()).sum();
-    counts.pose_graph_rows = rel_poses.len();
+    counts.landmarks = problem.landmarks.len();
+    counts.observations = problem.landmarks.iter().map(|l| l.observations.len()).sum();
+    counts.pose_graph_rows = problem.rel_poses.len();
     GbaInput {
-        problem: GbaProblem {
-            imu_from_world: used.iter().map(|&id| pose(id).inverse()).collect(),
-            landmarks,
-            rel_poses,
-        },
         keyframes: used.into_iter().collect(),
-        landmarks: world.into_iter().map(|(id, _, _)| id).collect(),
+        landmarks: sparse
+            .kept_landmarks
+            .iter()
+            .map(|&i| landmark_ids[i])
+            .collect(),
+        problem,
         counts,
     }
 }
@@ -355,8 +318,7 @@ pub fn map_problem(
 /// `bal` returns it; [`remove_gauge`] takes that out.
 ///
 /// # Errors
-/// The worker pool cannot start, a camera model does not cast to f32, or the
-/// solver refuses the problem.
+/// The worker pool cannot start, or the solver refuses the problem.
 pub fn solve(
     input: &GbaInput,
     rig: &GbaRig,
@@ -376,21 +338,11 @@ pub fn solve(
         problem.uncentre_from(&centred, &centroid);
         report
     } else {
-        let cameras: Vec<GbaRigCamera<f32, CameraModelKind<f32>>> = rig
-            .cameras
-            .iter()
-            .map(|c| {
-                Some(GbaRigCamera {
-                    model: cast_model(&c.model)?,
-                    imu_from_camera: c.imu_from_camera.cast(),
-                })
-            })
-            .collect::<Option<_>>()
-            .ok_or(GbaDriverError::NoRig)?;
+        let cameras: &[GbaRigCamera<f32, CameraModelKind<f32>>] = &rig.cameras_f32;
         let (mut centred, centroid) = input.problem.centred::<f32>();
         let report = match lane {
-            crate::Backend::Cpu => solve_global(&mut centred, &cameras, &options, Some(&pool))?,
-            crate::Backend::Gpu => solve_on_device(&mut centred, &cameras, &options, &pool)?,
+            crate::Backend::Cpu => solve_global(&mut centred, cameras, &options, Some(&pool))?,
+            crate::Backend::Gpu => solve_on_device(&mut centred, cameras, &options, &pool)?,
         };
         problem.uncentre_from(&centred, &centroid);
         report
@@ -473,29 +425,14 @@ pub fn remove_gauge(input: &GbaProblem<f64>, solved: &mut GbaProblem<f64>) -> Se
     gauge
 }
 
-/// Write a solution into the map. Each keyframe moves by the GBA's delta,
-/// `T_new = T_gba T_input^-1 T_now` (B11), so a pose the map changed since the
-/// problem was built keeps that change. Each solved landmark is stored relative
-/// to its host's solved pose, so it moves with its host the same way; a host
-/// outside the problem keeps its current pose. Unsolved landmarks ride on their
-/// host.
-pub fn apply(
-    map: &mut KeyframeMap,
-    input: &GbaInput,
-    solved: &GbaProblem<f64>,
-    t_i_c: &[Se3<f64>],
-) {
-    for ((&id, input_pose), solved_pose) in input
-        .keyframes
-        .iter()
-        .zip(&input.problem.imu_from_world)
-        .zip(&solved.imu_from_world)
-    {
-        let Some(now) = map.keyframe(id).map(|k| k.pose) else {
-            continue;
-        };
-        let delta: Se3<f64> = solved_pose.inverse() * *input_pose;
-        map.upsert_keyframe(id, delta * now, None);
+/// Write a solution into the map: each solved keyframe takes its solved pose,
+/// each solved landmark is stored relative to its host's pose after that (a
+/// host outside the problem keeps its pose). Unsolved landmarks ride on their
+/// host. `finish` holds the map for the whole solve, so nothing moved since
+/// [`map_problem`].
+fn apply(map: &mut KeyframeMap, input: &GbaInput, solved: &GbaProblem<f64>, t_i_c: &[Se3<f64>]) {
+    for (&id, imu_from_world) in input.keyframes.iter().zip(&solved.imu_from_world) {
+        map.upsert_keyframe(id, imu_from_world.inverse(), None);
     }
     for (&id, landmark) in input.landmarks.iter().zip(&solved.landmarks) {
         let Some(host) = map.landmark(id).map(|l| l.host) else {
@@ -506,12 +443,8 @@ pub fn apply(
         else {
             continue;
         };
-        let host_pose: Se3<f64> = input
-            .keyframes
-            .binary_search(&host.frame_id)
-            .map_or(keyframe.pose, |k| solved.imu_from_world[k].inverse());
         if let Some((direction, inv_dist)) =
-            host_relative(&(host_pose * *extrinsic), &landmark.position)
+            host_relative(&(keyframe.pose * *extrinsic), &landmark.position)
         {
             map.set_landmark_position(id, direction, inv_dist);
         }
@@ -519,20 +452,6 @@ pub fn apply(
 }
 
 impl MapBackend {
-    /// Where the global BA's PCG runs (CPU by default).
-    #[must_use]
-    pub fn with_gba_lane(mut self, lane: crate::Backend) -> Self {
-        self.gba_lane = lane;
-        self
-    }
-
-    /// The rig the global BA projects through.
-    #[must_use]
-    pub fn with_gba_rig(mut self, rig: Option<GbaRig>) -> Self {
-        self.gba_rig = rig;
-        self
-    }
-
     /// The map's keyframes at the end of a sequence, after a global BA when
     /// `run_gba`. The pose-graph rows are the graph's
     /// [`super::CovisibilityGraph::pose_graph_edges`] at the high-covisibility
@@ -561,14 +480,14 @@ impl MapBackend {
         let started = Instant::now();
         let edges: Vec<PoseGraphEdge> =
             self.graph.pose_graph_edges(self.high_covisibility_weight());
-        let input: GbaInput = map_problem(&self.map, &edges, &self.t_i_c, config);
+        let input: GbaInput = map_problem(&self.map, &edges, &self.rig.t_i_c, config);
         let build_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
         let (mut solved, report) = solve(&input, rig, config, self.gba_lane)?;
         let gauge: Se3<f64> = remove_gauge(&input.problem, &mut solved);
         let solve_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        apply(&mut self.map, &input, &solved, &self.t_i_c);
+        apply(&mut self.map, &input, &solved, &self.rig.t_i_c);
         let apply_s: f64 = started.elapsed().as_secs_f64();
         Ok(MapResult {
             keyframe_t_ns,
