@@ -50,6 +50,10 @@ and doctests for every workspace member except GPU, in both feature modes,
 plus Python patch-preparation tests.
 Run `pixi run -e kornia-staging-dev --frozen kornia-staging-gpu-test`
 for the opt-in GPU tests and Clippy on the host device.
+Run `pixi run -e kornia-staging-dev --frozen kornia-staging-golden` for the golden
+parity tests (Basalt BRIEF, matcher, HashBoW) in `golden/`, a
+test-only Cargo workspace without a destination: it reads third-party reference outputs stored as `.rrd`
+on the NAS, skips when they are absent, and stays out of the gate's build.
 CPU-only bare Cargo commands also require these workspace patches.
 Prepare the pinned CubeCL trees with `kornia-staging-patch-deps` before bare Cargo;
 consumer workspace roots must repeat the three `[patch.crates-io]` overrides. Run each affected consumer's gate
@@ -85,10 +89,13 @@ nalgebra types directly. Conversions at camera boundaries change storage only.
 | Virtual pinhole maps and opt-in approximate KB4 f32/NEON kernel | robocap-live kornia_ext/virtual_camera | kornia-rs / kornia-3d / camera::virtual_camera | staged | - |
 | Bearing triangulation and stereographic chart | slam-rs `landmark.rs`, `ba_base.rs` | kornia-rs / kornia-3d / pose | staged | - |
 | Inverted-file bag-of-words database with DBoW2's L1 query (`queryL1`) | dpretrieval `crates/dbow` (DBoW2 `TemplatedDatabase`) | kornia-rs / kornia-bow / database | staged | - |
+| Database entry removal and filtered query (f64 score sums) | RootSLAM `hash_bow.h` (`HashBowST::remove_from_database`, time filter) | kornia-rs / kornia-bow / database | staged | - |
+| HashBoW: vocabulary-free 16-bit words of permuted descriptor bits, L1 term frequencies, frame/camera keys, minimum-age filter, frame removal; always sorted, per-frame top N | RootSLAM `hash_bow.h` | kornia-rs / kornia-bow / hash_bow | staged | - |
 | Integer area resize | slam-rs `area.rs`, `area/kernels.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | 4x4 pooling | robocap-live `kornia_ext/pool.rs` | kornia-rs / kornia-imgproc / resize | staged | - |
 | Scaled zero-border bilinear remap | robocap-live `kornia_ext/remap.rs` | kornia-rs / kornia-imgproc / interpolation::remap | staged | - |
 | Heatmap peaks | robocap-live `kornia_ext/heatmap.rs` | kornia-rs / kornia-imgproc / features | staged | - |
+| Basalt oriented BRIEF at given u16 keypoints (intensity-centroid angle, `pattern_31` as `i8`, optional box smoothing), bit-identical to Basalt; 256-bit Hamming and mutual matcher with strict ties | RootSLAM `keypoints.cpp` (`computeAngles`, `computeDescriptors`, `matchDescriptors`) | kornia-rs / kornia-imgproc / features | staged | - |
 | Minimum enclosing circle | robocap-live `hands/circles.rs` | kornia-rs / kornia-imgproc / contours::min_enclosing_circle | staged | - |
 | Strided u8-shift8 ingestion and sparse u16 bilinear values/gradients (dense conversion uses upstream cast_and_scale) | slam-rs `image.rs` | kornia-rs / kornia-imgproc / color, interpolation | staged | - |
 | Floor-halved integer u16 Gaussian downsampling and reusable PyramidPlanU16 | slam-rs `pyramid.rs` | kornia-rs / kornia-imgproc / `pyramid` | staged | - |

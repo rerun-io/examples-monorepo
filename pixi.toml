@@ -3930,6 +3930,14 @@ cmd = "cargo test --locked --workspace --exclude kornia-staging-gpu --all-featur
 cwd = "packages/kornia-staging"
 description = "Run Rust workspace tests and doctests"
 
+# Golden parity against third-party reference outputs stored as .rrd on the NAS. `golden/` is a Cargo workspace of its
+# own: the Rerun 0.42 decoder it needs stays out of the staging lock and the gate's build. The env's cargo-clippy is
+# called directly, as `cargo clippy` would pick a rustup one from CARGO_HOME. Skips, naming the asset, when absent.
+[feature.kornia-staging.tasks.kornia-staging-golden]
+cmd = """bash -c 'export CARGO_TARGET_DIR=../target/golden; golden=${KORNIA_STAGING_BASALT_BRIEF:-/mnt/nas/ssd-8tb/scratch/slam-rs-rootslam/fixtures/b1/basalt_brief.rrd}; cargo fmt --check && "$CONDA_PREFIX/bin/cargo-clippy" clippy --locked --all-targets -- -D warnings && if [[ -f $golden ]]; then KORNIA_STAGING_BASALT_BRIEF=$golden cargo test --locked --release -- --ignored --nocapture; else echo "SKIP kornia-staging-golden: Basalt BRIEF golden $golden is absent (set KORNIA_STAGING_BASALT_BRIEF)"; fi'"""
+cwd = "packages/kornia-staging/golden"
+description = "Run the golden parity tests (Basalt BRIEF, matcher, HashBoW) against the NAS .rrd fixtures"
+
 [feature.kornia-staging.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test", "kornia-staging-patch-test", "kornia-staging-patch-integration"]
 description = "Run the Rust author checks for staged Kornia code"
