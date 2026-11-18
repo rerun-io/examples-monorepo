@@ -36,6 +36,7 @@ from handtrack.data.stream import DetNetSamples, ImageHands, detnet_samples
 from handtrack.geometry.letterbox import Letterbox, letterbox_for
 from handtrack.labels.coco2d import coco133_hands
 from handtrack.labels.crops import scale_intensity
+from handtrack.labels.validity import HandLabel
 
 LabelKind = Literal["hand_model", "coco133", "teacher"]
 SHARING_STRATEGY: str = "file_system"
@@ -204,7 +205,19 @@ def coco133_labels(dataset, spec: SourceSpec, segment: str) -> FrameLabels:
         out.circles[at, c] = hands.circles
         out.net_xy[at, c] = hands.net_xy
         out.in_front[at, c] = hands.in_front
+    if teacher:
+        out.hand_label[teacher_unsure_sides(out.hand_label, out.image_valid)] = int(HandLabel.PARTIAL)
     return out
+
+
+def teacher_unsure_sides(hand_label: Int64[Tensor, "f c 2"], image_valid: Bool[Tensor, "f c"]) -> Bool[Tensor, "f c 2"]:
+    """Hands a teacher calls absent in a labelled image while it finds the same side in another camera of that frame.
+
+    The teacher misses about a third of the hands a reviewer sees on RoboCap (2026-11-17, against Astra-reviewed boxes), and an
+    absent label teaches the detector to miss them too. When the side is in the scene, its absence here is unknown, so it gets
+    no presence loss (``PARTIAL``); frames where no camera finds the side keep their absent labels."""
+    seen: Bool[Tensor, "f 1 2"] = (hand_label == int(HandLabel.PRESENT)).any(dim=1, keepdim=True)
+    return (hand_label == int(HandLabel.ABSENT)) & seen & image_valid[..., None]
 
 
 def segment_frame_labels(dataset, spec: SourceSpec, segment: str, infos: dict) -> FrameLabels:
