@@ -2889,6 +2889,14 @@ cmd = "cargo test --locked --offline -p robocap-recorder --features live-slam --
 cwd = "packages/slam-rs"
 description = "Run the recorder's live SLAM adapter tests without capture hardware"
 
+[feature.slam-rs.tasks.slam-rs-gba-golden]
+# Opt-in, not in the gate: needs RootSLAM's exported MGO07/MGO13 maps and rootba logs on the NAS
+# (GBA_EXPORT_RUNS, GBA_EXPORT_CALIB); a missing asset fails the run and names the asset.
+depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
+cmd = "cargo test --locked --offline --release -p slam-rs --features backend --test gba_rootba_golden -- --ignored --nocapture"
+cwd = "packages/slam-rs"
+description = "Run the global-BA driver goldens against rootba bal (MGO07, MGO13)"
+
 [feature.slam-rs.tasks.slam-rs-catalog-test]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
 cmd = """bash -c 'cargo test --locked --offline -p slam-rs-cli --features catalog && if [[ -n ${SLAM_RS_CATALOG_URL:-} && -f ${SLAM_RS_TEST_FIXTURE:-}/clip.json && ( -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8 || -f ${SLAM_RS_TEST_FIXTURE:-}/frames.u8.xz ) && -n ${SLAM_RS_TEST_OUTPUT:-} ]]; then cargo test --locked --offline -p slam-rs-cli --features catalog catalog_inputs_match_python_fixture -- --ignored --nocapture; else echo "SKIP catalog_inputs_match_python_fixture: set SLAM_RS_CATALOG_URL, SLAM_RS_TEST_FIXTURE (clip.json plus frames.u8 or frames.u8.xz), SLAM_RS_TEST_OUTPUT; dav1d required for G2"; fi'"""

@@ -13,6 +13,7 @@
 pub mod anchor;
 pub mod covisibility;
 pub mod cull;
+pub mod gba;
 pub mod loop_closing;
 pub mod map;
 pub mod pgo;
@@ -25,8 +26,9 @@ use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
 use crate::types::{FrameId, LandmarkId};
 
-pub use anchor::{AnchorError, reanchor};
+pub use anchor::{AnchorError, reanchor, reanchor_arrays};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
+pub use gba::{GbaDriverError, GbaRig, GbaRun, MapResult};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use pgo::{PgoRun, PgoState};
@@ -116,6 +118,9 @@ pub struct MapBackend {
     culled_over_budget: usize,
     /// `T_i_c` per camera, which places the points of a [`BackendWork::view`].
     t_i_c: Vec<crate::lie::Se3<f64>>,
+    /// The rig's camera models for the global BA ([`Self::finish`]); `None`
+    /// when the rig has a model the GBA cannot project.
+    gba_rig: Option<gba::GbaRig>,
     /// Loop closing (PR b2); `None` when it is off.
     loops: Option<LoopClosing>,
 }
@@ -161,6 +166,7 @@ impl MapBackend {
             culled: BTreeSet::new(),
             culled_over_budget: 0,
             t_i_c: Vec::new(),
+            gba_rig: None,
             loops: None,
         }
     }

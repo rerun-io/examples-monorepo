@@ -366,6 +366,23 @@ impl<B: BackendWork> BackendRunner<B> {
         counters
     }
 
+    /// Change the work once every stamp submitted so far is taken (the global
+    /// BA at the end of a sequence). Realtime then posts a fresh view, so
+    /// readers see the change.
+    ///
+    /// # Panics
+    ///
+    /// Re-raises a panic of the back-end thread.
+    pub fn update<R>(&mut self, change: impl FnOnce(&mut B) -> R) -> R {
+        self.flush();
+        let mut state = lock(&self.state);
+        let out: R = change(&mut state.work);
+        if let Some(thread) = &self.thread {
+            thread.board.post(&mut state, true, true);
+        }
+        out
+    }
+
     /// Read the work itself and the counters. Realtime waits for the step or
     /// query in progress (never for the stamps still queued), so tracking
     /// reads [`Self::view`] instead; this is for tests and diagnostics.

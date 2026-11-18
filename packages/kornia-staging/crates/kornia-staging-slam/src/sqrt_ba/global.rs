@@ -91,30 +91,52 @@ pub struct GbaProblem<S: Scalar> {
     pub rel_poses: Vec<RelPoseConstraint<S>>,
 }
 
+/// What [`GbaProblem::drop_sparse_observations`] removed and kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparseDrop {
+    /// Keyframes with observations, but fewer than `min_obs_per_kf`.
+    pub keyframes: usize,
+    /// Observations of those keyframes.
+    pub observations: usize,
+    /// The index each kept landmark had before the call, in order.
+    pub kept_landmarks: Vec<usize>,
+}
+
 impl<S: Scalar> GbaProblem<S> {
     /// The export filters. A keyframe with fewer than `min_obs_per_kf`
     /// observations loses its reprojection rows but keeps its pose-graph rows
     /// (rootba drops the keyframe and its edges). Then every landmark with
-    /// fewer than two observations goes. Returns (observations, landmarks) removed.
-    pub fn drop_sparse_observations(&mut self, min_obs_per_kf: usize) -> (usize, usize) {
+    /// fewer than two observations or no finite position goes.
+    pub fn drop_sparse_observations(&mut self, min_obs_per_kf: usize) -> SparseDrop {
         let mut per_kf = vec![0usize; self.imu_from_world.len()];
         for obs in self.landmarks.iter().flat_map(|l| &l.observations) {
             if let Some(n) = per_kf.get_mut(obs.keyframe) {
                 *n += 1;
             }
         }
-        let mut dropped_obs = 0;
+        let mut observations = 0;
         for landmark in &mut self.landmarks {
             let before = landmark.observations.len();
             landmark
                 .observations
                 .retain(|o| per_kf.get(o.keyframe).is_some_and(|&n| n >= min_obs_per_kf));
-            dropped_obs += before - landmark.observations.len();
+            observations += before - landmark.observations.len();
         }
-        let before = self.landmarks.len();
-        self.landmarks
-            .retain(|l| l.observations.len() >= 2 && l.position.iter().all(|v| v.is_finite()));
-        (dropped_obs, before - self.landmarks.len())
+        let mut kept_landmarks = Vec::new();
+        for (i, l) in std::mem::take(&mut self.landmarks).into_iter().enumerate() {
+            if l.observations.len() >= 2 && l.position.iter().all(|v| v.is_finite()) {
+                kept_landmarks.push(i);
+                self.landmarks.push(l);
+            }
+        }
+        SparseDrop {
+            keyframes: per_kf
+                .iter()
+                .filter(|&&n| n > 0 && n < min_obs_per_kf)
+                .count(),
+            observations,
+            kept_landmarks,
+        }
     }
 
     /// The problem in another scalar.

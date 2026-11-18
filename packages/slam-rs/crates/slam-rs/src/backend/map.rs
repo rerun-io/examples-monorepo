@@ -11,9 +11,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector3, Vector4};
 
 use crate::estimator::{Keypoints, StampLandmark};
+use crate::landmark::StereographicParam;
 use crate::lie::Se3;
 use crate::types::{CamId, FrameId, KeypointId, LandmarkId, TimeCamId};
 
@@ -212,6 +213,21 @@ impl KeyframeMap {
         }
     }
 
+    /// Move a landmark to a new direction and inverse distance in its host
+    /// camera (the global BA's write-back); host and observations stay. A
+    /// missing id is a no-op.
+    pub fn set_landmark_position(
+        &mut self,
+        id: LandmarkId,
+        direction: Vector2<f64>,
+        inv_dist: f64,
+    ) {
+        if let Some(landmark) = self.landmarks.get_mut(&id) {
+            landmark.direction = direction;
+            landmark.inv_dist = inv_dist;
+        }
+    }
+
     /// Delete a landmark and its index entries; a missing id is a no-op.
     pub fn remove_landmark(&mut self, id: LandmarkId) -> Option<MapLandmark> {
         let landmark: MapLandmark = self.landmarks.remove(&id)?;
@@ -268,7 +284,8 @@ impl KeyframeMap {
     /// Landmark `id` in the world frame: `T_w_i(host) * t_i_c[cam] *
     /// unproject(direction) / inv_dist`, as the window builds it. `None` for an
     /// unknown landmark, host or camera, or a point at infinity (`inv_dist <= 0`)
-    /// or not finite.
+    /// or not finite. The snapshot, loop closing and the global BA all place
+    /// landmarks with it.
     pub fn landmark_world(
         &self,
         id: LandmarkId,
@@ -404,6 +421,23 @@ impl KeyframeMap {
             .sum();
         keyframes + landmarks + index
     }
+}
+
+/// The inverse of [`KeyframeMap::landmark_world`]: a world point as the window
+/// stores it, stereographic direction and inverse distance in the camera
+/// `world_from_camera` places. `None` for a
+/// point at the camera centre or a non-finite result.
+pub fn host_relative(
+    world_from_camera: &Se3<f64>,
+    point: &Vector3<f64>,
+) -> Option<(Vector2<f64>, f64)> {
+    let p_c: Vector3<f64> = world_from_camera.inverse() * *point;
+    let distance: f64 = p_c.norm();
+    let direction: Vector2<f64> =
+        StereographicParam::project(&Vector4::new(p_c.x, p_c.y, p_c.z, 0.0));
+    let inv_dist: f64 = 1.0 / distance;
+    (distance > 0.0 && inv_dist.is_finite() && direction.iter().all(|v| v.is_finite()))
+        .then_some((direction, inv_dist))
 }
 
 /// Drop `id` from `by_image[image]`, then the entry if it empties.

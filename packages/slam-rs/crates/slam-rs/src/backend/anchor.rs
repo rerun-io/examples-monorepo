@@ -23,6 +23,7 @@
 //! frame by the relative correction instead.
 
 use crate::lie::{Se3, So3};
+use crate::types::FrameId;
 
 /// Why [`reanchor`] refused its inputs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -131,41 +132,38 @@ impl super::MapSnapshot {
     /// As [`reanchor`], and [`AnchorError::NoRotation`] for a zero or
     /// non-finite quaternion.
     pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
-        let frames: Vec<(i64, Se3<f64>)> = frames
-            .iter()
-            .map(|&(t_ns, pose)| {
-                let rotation = So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6])
-                    .ok_or(AnchorError::NoRotation { t_ns })?;
-                Ok((
-                    t_ns,
-                    Se3::new(rotation, nalgebra::Vector3::new(pose[0], pose[1], pose[2])),
-                ))
-            })
-            .collect::<Result<_, AnchorError>>()?;
-        let keyframes: Vec<(i64, Se3<f64>)> = self
-            .keyframe_t_ns
-            .iter()
-            .copied()
-            .zip(self.keyframe_poses.iter().copied())
-            .collect();
-        Ok(reanchor(&frames, &keyframes)?
-            .iter()
-            .map(pose_to_array)
-            .collect())
+        reanchor_arrays(frames, &self.keyframe_t_ns, &self.keyframe_poses)
     }
 }
 
-fn pose_to_array(pose: &Se3<f64>) -> [f64; 7] {
-    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
-    [
-        pose.translation.x,
-        pose.translation.y,
-        pose.translation.z,
-        x,
-        y,
-        z,
-        w,
-    ]
+/// [`reanchor`] for `[tx, ty, tz, qx, qy, qz, qw]` frames on these keyframes.
+///
+/// # Errors
+///
+/// As [`reanchor`], and [`AnchorError::NoRotation`] for a zero or non-finite
+/// quaternion.
+pub fn reanchor_arrays(
+    frames: &[(i64, [f64; 7])],
+    keyframe_t_ns: &[FrameId],
+    keyframe_poses: &[Se3<f64>],
+) -> Result<Vec<[f64; 7]>, AnchorError> {
+    let frames: Vec<(i64, Se3<f64>)> = frames
+        .iter()
+        .map(|(t_ns, pose)| {
+            let pose =
+                crate::pose_from_xyzw(pose).ok_or(AnchorError::NoRotation { t_ns: *t_ns })?;
+            Ok((*t_ns, pose))
+        })
+        .collect::<Result<_, AnchorError>>()?;
+    let keyframes: Vec<(i64, Se3<f64>)> = keyframe_t_ns
+        .iter()
+        .copied()
+        .zip(keyframe_poses.iter().copied())
+        .collect();
+    Ok(reanchor(&frames, &keyframes)?
+        .iter()
+        .map(crate::pose_to_xyzw)
+        .collect())
 }
 
 /// Translation lerped, rotation slerped on the shortest arc: `scipy`'s

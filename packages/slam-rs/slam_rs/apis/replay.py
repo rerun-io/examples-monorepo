@@ -24,9 +24,10 @@ from slam_rs.catalog_feed import (
 )
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
+from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import Lockstep, reanchored
-from slam_rs.trajectory import Trajectory, ate, coverage, write_scoring_csvs
+from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_scoring_csvs, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
@@ -83,6 +84,9 @@ class Config:
     repeat); ``realtime`` runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the
     same in all three.
     """
+    gba: bool = True
+    """With the map on: run the global BA on the map at the end (``Vio.finish_map``), draw its keyframes under
+    ``/world/runs/slam_rs/gba`` and write them to ``<output-csv stem>_gba_keyframes.csv``. The raw VIO is unchanged."""
 
 
 @dataclass(slots=True)
@@ -246,6 +250,13 @@ def main(config: Config) -> None:
         stage.logger.log_final_run(final)
         vio_csv: Path = write_scoring_csvs(output_csv, final=final, raw=estimate, offset_ns=feed.export_offset_ns)
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
+        map_result: _core.MapResult | None = stage.lockstep.vio.finish_map(run_gba=config.gba)
+        if map_result is not None and map_result.gba is not None:
+            # At the cursor the flush left on the last frameset, beside the final map.
+            log_map_result(map_result)
+            gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
+            write_trajectory(gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns))
+            print(f"global BA: {map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")
             return

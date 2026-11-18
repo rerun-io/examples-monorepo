@@ -13,7 +13,7 @@ pub use damping::LandmarkDamping;
 pub use dense::{DenseBlock, DenseHbWorkspace};
 pub use global::{
     solve_global, GbaCamera, GbaCost, GbaError, GbaIteration, GbaLandmark, GbaObservation,
-    GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds, GbaTermination,
+    GbaOptions, GbaProblem, GbaReport, GbaRigCamera, GbaStageSeconds, GbaTermination, SparseDrop,
 };
 pub use landmark_qr::{BackSubstitution, LandmarkQr};
 pub use pcg::{pcg, BlockJacobi, PcgOptions, PcgSummary, PcgTermination, GBA_CG_CHECK_EVERY};

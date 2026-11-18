@@ -87,6 +87,31 @@ pub struct VioPose {
     pub accel_bias: [f64; 3],
 }
 
+/// `pose` as `[tx, ty, tz, qx, qy, qz, qw]`, the layout of
+/// [`VioPose::world_from_rig`].
+pub fn pose_to_xyzw(pose: &crate::lie::Se3<f64>) -> [f64; 7] {
+    let [x, y, z, w] = pose.rotation.quaternion_xyzw();
+    [
+        pose.translation.x,
+        pose.translation.y,
+        pose.translation.z,
+        x,
+        y,
+        z,
+        w,
+    ]
+}
+
+/// The pose a `[tx, ty, tz, qx, qy, qz, qw]` row holds; `None` for a zero or
+/// non-finite quaternion, which holds no rotation.
+pub fn pose_from_xyzw(pose: &[f64; 7]) -> Option<crate::lie::Se3<f64>> {
+    let rotation = crate::lie::So3::from_quaternion_xyzw(pose[3], pose[4], pose[5], pose[6])?;
+    Some(crate::lie::Se3::new(
+        rotation,
+        nalgebra::Vector3::new(pose[0], pose[1], pose[2]),
+    ))
+}
+
 /// Everything that can go wrong at the API boundary.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum VioError {
@@ -117,6 +142,9 @@ pub enum VioError {
     /// The operating system refused the Realtime back-end thread.
     #[error("could not start the back-end thread: {0}")]
     BackendThread(String),
+    /// The global BA at the end of a sequence did not run.
+    #[error("global BA: {0}")]
+    GlobalBa(String),
     /// The frameset does not hold one image per configured camera.
     #[error("expected {expected} images, got {actual}")]
     CameraCountMismatch {
