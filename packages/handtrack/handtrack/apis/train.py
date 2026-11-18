@@ -35,7 +35,9 @@ class DetectorHoldout:
 class RerunStreamSettings:
     """Train DetNet from the Rerun 0.42 dataloader: one streaming producer per dataset into per-dataset echo pools."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d", "gsi-six-view", "dataforge-gen-humanego-subset")
-    """Training datasets; each gets an equal share of every batch."""
+    """Training datasets; each gets an equal share of every batch unless ``shares`` says otherwise."""
+    shares: tuple[int, ...] = ()
+    """DetNet images per batch from each dataset (same order as ``datasets``, summing to ``stream.detnet_batch``); empty: equal."""
     decode: Literal["nvdec", "cpu"] = "nvdec"
     """nvdec: decode on the GPU in the training process (simplecv's segment-wide decoder); cpu: the 0.42 CPU decoder in spawn workers."""
     workers: tuple[int, ...] = (4, 6, 8, 8)
@@ -69,6 +71,8 @@ class RerunStreamSettings:
     catalog_url: str = CATALOG_URL
 
     def __post_init__(self) -> None:
+        if self.shares and len(self.shares) != len(self.datasets):
+            raise ValueError("rerun.shares needs one count per dataset")
         if len(self.workers) != len(self.datasets) or min(self.workers) < 1:
             raise ValueError("rerun.workers needs one positive count per dataset")
         unknown: list[str] = [name for name in self.datasets if name not in DATASET_SPECS]
@@ -158,6 +162,8 @@ class Config:
     """Shared stream factory settings."""
     keynet_init: Path | None = None
     """Start KeyNet from these weights (a ``*.weights.pt`` with its ``.sha256`` sidecar) instead of from scratch."""
+    detnet_init: Path | None = None
+    """Start DetNet from these weights (a ``*.weights.pt`` with its ``.sha256`` sidecar) instead of from scratch (a fine-tune)."""
 
 
 SPLITS: dict[str, SplitName] = {"training": "train", "train": "train", "validation": "val", "val": "val", "testing": "test", "test": "test"}
@@ -272,7 +278,7 @@ def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: t
                                         device=device, endless=True))
     return EchoStream(producers, batch_size=settings.detnet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
                       device=device, seed=settings.seed, finish=training_finish(settings.detnet_augment), epoch_steps=rerun.epoch_steps,
-                      min_echo=rerun.min_echo, prefetch=rerun.prefetch)
+                      min_echo=rerun.min_echo, prefetch=rerun.prefetch, shares=rerun.shares)
 
 
 GPU_OVERHEAD_GB: float = 0.75
@@ -296,7 +302,7 @@ def main(config: Config) -> None:
     cap_gpu_memory(config.stream.gpu_memory_gb, config.device)
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
                                resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config),
-                               keynet_init=config.keynet_init)
+                               keynet_init=config.keynet_init, detnet_init=config.detnet_init)
     source: BatchSource = build_source(config.stream, config.stream.train_split, config.nets, device=config.device)
     try:
         validation: BatchSource = build_source(config.stream, config.stream.val_split, config.nets, device=config.device)

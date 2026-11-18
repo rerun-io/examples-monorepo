@@ -3,7 +3,8 @@
 One ``RerunIterableDataset`` per training dataset replays a frozen ``Manifest`` (index ``frame_index``, one field per camera
 video), so each epoch's order is reproducible. Samples carry only their fields; ``Manifest.worker_plan`` names the
 (segment, frame) of each, and the worker labels it from a per-segment table it builds once: the existing hand-model path
-(``segment_labels``) for UmeTrack and SHOW3D, ``coco133_hands`` for datasets that ship 2D keypoints (GSI, Gen-HumanEgo).
+(``segment_labels``) for UmeTrack and SHOW3D, ``coco133_hands`` for datasets that ship 2D keypoints (GSI, Gen-HumanEgo) and for
+RoboCap clips pseudo-labelled by an offline teacher (``hand_teacher``, the same COCO-133 layout).
 Workers letterbox and pool too, so only 160x120 samples reach the training process.
 """
 
@@ -36,7 +37,7 @@ from handtrack.geometry.letterbox import Letterbox, letterbox_for
 from handtrack.labels.coco2d import coco133_hands
 from handtrack.labels.crops import scale_intensity
 
-LabelKind = Literal["hand_model", "coco133"]
+LabelKind = Literal["hand_model", "coco133", "teacher"]
 SHARING_STRATEGY: str = "file_system"
 """Tensors from workers travel as named shared-memory files: the default file-descriptor strategy opens an authenticated socket
 per tensor in the training process, and those handshakes starved the training loop."""
@@ -74,8 +75,10 @@ DATASET_SPECS: dict[str, tuple[tuple[str, ...], Literal["h264", "h265", "av1"], 
     "gsi-six-view": (tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h265", "coco133", 8, None),
     "dataforge-gen-humanego-subset": (tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h264", "coco133", 14, 0.8),
     "dataforge-hot3d-quest3": (("/world/rig_00/cam_00", "/world/rig_00/cam_01"), "av1", "hand_model", 6, None),
+    "robocap-hands": (tuple(f"/world/rig_00/cam_0{i}" for i in range(6)), "h264", "teacher", 20, None),
 }
 """Datasets the producers read: cameras, codec, label path, first unique camera id, and the coco133 trust score.
+``robocap-hands`` holds 60 s RoboCap clips with a ``frame_index`` timeline and EgoHand pseudo-labels (``hand_teacher``).
 HOT3D is evaluation only (its catalog split has no training segments)."""
 
 
@@ -169,15 +172,20 @@ def dense_rows(column: pa.ChunkedArray, length: int, inner: int = 1) -> tuple[Fl
 
 
 def coco133_labels(dataset, spec: SourceSpec, segment: str) -> FrameLabels:
-    """GSI / Gen-HumanEgo: labels from the stored lens-aware ``coco133_uv_projected`` keypoints and the per-hand trust columns."""
+    """GSI / Gen-HumanEgo: labels from the stored lens-aware ``coco133_uv_projected`` keypoints and the per-hand trust columns.
+
+    ``teacher`` (RoboCap): the teacher's per-camera ``hand_teacher`` keypoints in the same layout. A row labels its image (no hand
+    is an absent label); an image without a row (not sampled, or ambiguous to the teacher) gives no supervision."""
+    teacher: bool = spec.labels == "teacher"
+    points: str = "hand_teacher" if teacher else "coco133_uv_projected"
     statics: pa.Table = dataset.filter_segments([segment]).filter_contents([f"{c}/pinhole" for c in spec.cameras]).reader(index=None).to_arrow_table()
-    entities: list[str] = [f"{c}/pinhole/coco133_uv_projected" for c in spec.cameras] + [f"{HANDS}/{s}/{p}" for s in SIDES for p in ("confidence", "scores")]
+    entities: list[str] = [f"{c}/pinhole/{points}" for c in spec.cameras] + ([] if teacher else [f"{HANDS}/{s}/{p}" for s in SIDES for p in ("confidence", "scores")])
     table: pa.Table = dataset.filter_segments([segment]).filter_contents(entities).reader(index="frame_index").to_arrow_table()
     frames: Int64[ndarray, "f"] = np.asarray(table["frame_index"].to_numpy(zero_copy_only=False), dtype=np.int64)
     count: int = int(frames.max()) + 1 if len(frames) else 0
     out = _empty_labels(count, len(spec.cameras))
     trusted: Bool[ndarray, "f 2"] = np.ones((len(frames), 2), dtype=bool)
-    for side, name in enumerate(SIDES):
+    for side, name in enumerate(SIDES if not teacher else ()):
         confidence: Float32[ndarray, "f"] = _scalar(table[f"{HANDS}/{name}/confidence:Scalars:scalars"])
         trusted[:, side] &= np.nan_to_num(confidence) > 0
         if spec.min_score is not None:
@@ -185,18 +193,25 @@ def coco133_labels(dataset, spec: SourceSpec, segment: str) -> FrameLabels:
     at: Tensor = torch.from_numpy(frames)
     for c, camera in enumerate(spec.cameras):
         width, height = (int(v) for v in statics[f"{camera}/pinhole:Pinhole:resolution"][0].as_py()[0])
-        uv, has_points = dense_rows(table[f"{camera}/pinhole/coco133_uv_projected:Points2D:positions"], 133, inner=2)
-        weight, has_weight = dense_rows(table[f"{camera}/pinhole/coco133_uv_projected:simplecv.KeypointConfidence2D:confidences"], 133)
+        uv, has_points = dense_rows(table[f"{camera}/pinhole/{points}:Points2D:positions"], 133, inner=2)
+        weight, has_weight = dense_rows(table[f"{camera}/pinhole/{points}:simplecv.KeypointConfidence2D:confidences"], 133)
         usable: Bool[ndarray, "f"] = has_points & has_weight
         uv[~usable] = np.nan
         weight = np.where(usable[:, None], weight, np.float32(0.0))
         hands = coco133_hands(torch.from_numpy(uv), torch.from_numpy(weight), torch.from_numpy(trusted), camera_letterbox(spec, c, width, height))
-        out.image_valid[at, c] = hands.image_valid
+        out.image_valid[at, c] = hands.image_valid & torch.from_numpy(usable) if teacher else hands.image_valid
         out.hand_label[at, c] = hands.hand_label
         out.circles[at, c] = hands.circles
         out.net_xy[at, c] = hands.net_xy
         out.in_front[at, c] = hands.in_front
     return out
+
+
+def segment_frame_labels(dataset, spec: SourceSpec, segment: str, infos: dict) -> FrameLabels:
+    """One segment's labels by the dataset's label kind (``infos``: ``list_segments`` by id, needed by ``hand_model`` only)."""
+    if spec.labels == "hand_model":
+        return hand_model_labels(dataset, spec.dataset, segment, infos, spec.quarter_turns)
+    return coco133_labels(dataset, spec, segment)
 
 
 class LabelledFrames(IterableDataset):
@@ -245,7 +260,7 @@ class LabelledFrames(IterableDataset):
             labels = cache.get(segment)
             if labels is None:
                 cache.clear()  # BlockShuffle keeps a worker on one segment for a block; one segment's labels at a time bounds memory
-                labels = hand_model_labels(dataset, self.spec.dataset, segment, infos, self.spec.quarter_turns) if self.spec.labels == "hand_model" else coco133_labels(dataset, self.spec, segment)
+                labels = segment_frame_labels(dataset, self.spec, segment, infos)
                 cache[segment] = labels
             if frame >= labels.image_valid.shape[0]:
                 continue
@@ -360,8 +375,7 @@ def nvdec_producer(spec: SourceSpec, segments: Sequence[str], *, catalog_url: st
                     labels = cache.get(keyed.segment_id)
                     if labels is None:
                         cache.clear()  # a fetch block stays inside one segment; one segment's labels at a time bounds memory
-                        labels = (hand_model_labels(dataset, spec.dataset, keyed.segment_id, infos, spec.quarter_turns) if spec.labels == "hand_model"
-                                  else coco133_labels(dataset, spec, keyed.segment_id))
+                        labels = segment_frame_labels(dataset, spec, keyed.segment_id, infos)
                         cache[keyed.segment_id] = labels
                     if keyed.index >= labels.image_valid.shape[0] or not bool(labels.image_valid[keyed.index, c]):
                         continue
