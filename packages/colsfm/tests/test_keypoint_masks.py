@@ -62,7 +62,7 @@ def test_an_input_without_mask_entities_opens_no_mask_source() -> None:
 
 
 def _two_camera_database(tmp_path: Path) -> Path:
-    """A database with one image per camera: a 64x48 and a 48x64 camera (the cube's two half-face shapes)."""
+    """A database with one image per camera: a 64x48 and a 48x64 camera (two image sizes)."""
     k_matrix = np.asarray([[32.0, 0.0, 31.5], [0.0, 32.0, 23.5], [0.0, 0.0, 1.0]])
     cameras: list[CatalogCameraModel] = [
         CatalogCameraModel(
