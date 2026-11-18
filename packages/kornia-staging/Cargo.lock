@@ -2594,7 +2594,6 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rayon",
- "rusqlite",
 ]
 
 [[package]]

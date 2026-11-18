@@ -14,8 +14,6 @@ rayon.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
-# Reads real descriptors from a COLMAP database in the vocabulary bench (benches/vocabulary.rs).
-rusqlite = { version = "0.40", features = ["bundled"] }
 
 [lints]
 workspace = true
