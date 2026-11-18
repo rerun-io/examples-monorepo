@@ -2,6 +2,9 @@
 # k-means vocabulary for float descriptors, TF-IDF bags of words and inverted-file L1 scores. The core lives in
 # kornia-staging; this workspace is only the binding, as packages/insta360-io's is for its core. maturin builds the
 # module from crates/bow-vocab-py (pyproject.toml, recipe.yaml). No GPU and no CubeCL, so no patched dependencies.
+# Its own package rather than a class in dpretrieval._core: dpretrieval is DPVO's ORB loop closure (ORBvoc.txt,
+# OpenCV at import, the dpvo environments), and sharing one binding would make colsfm and DPVO rebuild and re-test
+# each other's module on every change.
 [workspace]
 resolver = "2"
 members = ["crates/bow-vocab-py"]
@@ -13,7 +16,6 @@ rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
-kornia-bow = "0.2"
 kornia-staging-bow = { path = "../kornia-staging/crates/kornia-staging-bow" }
 numpy = "0.29"
 pyo3 = "0.29"

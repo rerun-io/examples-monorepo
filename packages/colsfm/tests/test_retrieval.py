@@ -444,7 +444,7 @@ def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
     corpus: dict[int, Descriptors] = _random_corpus(6, 300, seed=3)
     images: list[Descriptors] = [corpus[image_id] for image_id in sorted(corpus)]
     vocabulary: Vocabulary = Vocabulary(np.concatenate(images), branching=4, depth=3, iterations=5, seed=0)
-    scores: Float32[ndarray, "n_images n_images"] = vocabulary.index(images).similarity()
+    scores: Float32[ndarray, "n_images n_images"] = vocabulary.similarity(images)
 
     counts: list[dict[int, int]] = []
     for image in images:
@@ -521,11 +521,9 @@ def test_the_vocabulary_backend_builds_the_whole_tree(vocab_build: VocabBuild) -
 def test_the_vocabulary_backend_builds_and_queries_inside_the_budget(vocab_build: VocabBuild) -> None:
     """100 x 2048 descriptors: build and every query, both well under the pipeline budget.
 
-    Measured with the Rust vocabulary (`bow_vocab`, all cores): 0.3 s to build and 0.02 s for
-    the 100 queries, because the build scores every pair. The bounds are generous multiples so
-    the test fails on an algorithmic regression rather than on a busy machine. Clip B's real
-    4542 images (8.6 M descriptors) build in 4.0-4.5 s on 8 threads, against 43-52 s for the
-    single-threaded Python tree this replaced.
+    The build trains the vocabulary and scores every pair (0.3 s on all cores when measured),
+    so the queries only read the matrix (0.02 s for 100). The bounds are generous multiples so
+    the test fails on an algorithmic regression rather than on a busy machine.
     """
     assert vocab_build.build_seconds < 90.0
     assert vocab_build.query_seconds < 30.0

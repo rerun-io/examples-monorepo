@@ -32,7 +32,6 @@ dependencies = [
 name = "bow-vocab-py"
 version = "0.1.0"
 dependencies = [
- "kornia-bow",
  "kornia-staging-bow",
  "numpy",
  "pyo3",

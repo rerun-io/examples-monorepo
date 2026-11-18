@@ -21,6 +21,7 @@ source:
       exclude:
         - target/**
         - .pixi/**
+        - fixtures/**
         - '**/__pycache__/**'
 
 build:

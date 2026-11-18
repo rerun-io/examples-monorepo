@@ -95,20 +95,17 @@ at 0.014 and 0.091 against the blob's own 0.7 maturity bar, and §9.4 concludes 
 by measurement instead. On the 4528 RoboCap images (9 253 392 ALIKED descriptors,
 everything the extractor produced, no subsampling):
 
-| tree | words | build | doc freq (median/max) | median IDF | top-1 within 2 rig frames |
-|---|---|---|---|---|---|
-| k=10, depth 4 | 10 000 | 67.3 s | 650 / 2094 | 1.94 | 4518/4528 |
-| k=10, depth 5 | 100 000 | 42.2 s | 36 / 1996 | 4.83 | 4517/4528 |
+| tree | words | doc freq (median/max) | median IDF | top-1 within 2 rig frames |
+|---|---|---|---|---|
+| k=10, depth 4 | 10 000 | 650 / 2094 | 1.94 | 4518/4528 |
+| k=10, depth 5 | 100 000 | 36 / 1996 | 4.83 | 4517/4528 |
 
-Depth 5 is both faster and healthier: the all-pairs scoring cost is `sum_w df_w^2`, so ten
+Depth 5 is both cheaper and healthier: the all-pairs scoring cost is `sum_w df_w^2`, so ten
 times more words makes the words ten times rarer and the scoring nearly ten times cheaper,
-while the IDF stops collapsing towards zero. (Those builds were the single-threaded Python
-tree this module used before `bow_vocab`; for comparison the blob spends 162.4 s on the
-vocabulary, 81.0 s on the index and 75.7 s on the association stage,
-`docs/open-pipeline-plan.md`.)
+while the IDF stops collapsing towards zero.
 
 **Descriptors are not subsampled on the vocab path**, and that is a measured decision, not
-an oversight. Keeping 512 per image cuts the build to 20.3 s but moves the median gated
+an oversight. Keeping 512 per image cuts the build time but moves the median gated
 best score from 0.153 to 0.069 — the L1 score counts *shared* words, so thinning the
 descriptors thins the overlap and silently rescales the score out from under
 `GOOD_SCORE_THRESHOLD`. Using every descriptor is also what the blob does (§6.3: "no
@@ -120,8 +117,8 @@ What is deliberately not copied from `docs/spec/bow.md`
 * The integer-division IDF of §6.7 (`logf(N // df)`), reproduced only for bit-comparison
   (§9.3). The plain `log(n_images / df)` is used instead. Its one visible consequence —
   every word with `df > N/2` collapsing to weight 0 — happens naturally here, since
-  `log(N/df)` goes to 0 as `df` goes to `N`, and the zero rows are dropped by
-  `eliminate_zeros`.
+  `log(N/df)` goes to 0 as `df` goes to `N`, and Rust's `tf_idf` drops every weight-0
+  word from the bags.
 * `min_shared_word_number = 50` (§9.1, and `docs/spec/generate_association_main.md` §7.1
   item 4, which lists it as a "must keep"). The score already subsumes it: since every
   term of `s = sum_w min(q_w, d_w)` is bounded by `q_w`, a pair that shares few words can
@@ -677,8 +674,8 @@ def _vocab_similarity(
     `bow_vocab` (kornia-staging-bow's `vocabulary` module): k-means++ then Lloyd iterations
     per node, rayon-parallel and the same tree for a given seed at any thread count; every
     descriptor descends to its word, each image becomes an L1-normalised TF-IDF bag of words
-    (`ln(n_images / df)`), and every row of the score matrix is one inverted-file DBoW2 L1
-    query. The image arrays are borrowed by Rust, not copied.
+    (`ln(n_images / df)`), and every pair gets its DBoW2 L1 score from one pass over the
+    inverted lists per row. The image arrays are borrowed by Rust, not copied.
 
     Args:
         descriptors_by_image: Descriptors per image id.
@@ -693,7 +690,7 @@ def _vocab_similarity(
     vocabulary: Vocabulary = Vocabulary(sample, branching=config.branching, depth=config.depth, iterations=config.kmeans_iterations, seed=seed)
     del sample
     images: list[Descriptors] = [np.ascontiguousarray(descriptors_by_image[image_id], dtype=np.float32) for image_id in image_ids]
-    return vocabulary.index(images).similarity(), vocabulary.n_words
+    return vocabulary.similarity(images), vocabulary.n_words
 
 
 # ======================================================================================
