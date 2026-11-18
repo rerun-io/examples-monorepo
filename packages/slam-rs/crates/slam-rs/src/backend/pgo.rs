@@ -120,11 +120,18 @@ impl PoseGraph {
 }
 
 /// Write a PGO result into the map: each keyframe the PGO moved takes its
-/// optimized pose. Returns the moved keyframes.
-pub fn apply(map: &mut KeyframeMap, graph: &PoseGraph, optimized: &[Se3<f64>]) -> Vec<FrameId> {
+/// optimized pose, and `raw` keeps the pose it had before its first
+/// correction. Returns the moved keyframes.
+pub fn apply(
+    map: &mut KeyframeMap,
+    graph: &PoseGraph,
+    optimized: &[Se3<f64>],
+    raw: &mut BTreeMap<FrameId, Se3<f64>>,
+) -> Vec<FrameId> {
     let mut moved: Vec<FrameId> = Vec::new();
     for ((&id, copy), pgo) in graph.ids.iter().zip(&graph.copy).zip(optimized) {
         if pgo != copy {
+            raw.entry(id).or_insert(*copy);
             map.upsert_keyframe(id, *pgo, None);
             moved.push(id);
         }
@@ -203,12 +210,7 @@ impl MapBackend {
                 return false;
             }
         };
-        for ((&id, copy), pose) in graph.ids.iter().zip(&graph.copy).zip(&poses) {
-            if pose != copy {
-                loops.pgo.raw.entry(id).or_insert(*copy);
-            }
-        }
-        let moved: Vec<FrameId> = apply(&mut self.map, &graph, &poses);
+        let moved: Vec<FrameId> = apply(&mut self.map, &graph, &poses, &mut loops.pgo.raw);
         loops.pgo.runs.push(PgoRun {
             current: detection.current,
             candidate: detection.candidate,

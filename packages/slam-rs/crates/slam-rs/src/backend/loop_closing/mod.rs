@@ -149,7 +149,7 @@ pub enum LoopOutcome {
 /// One verified loop and what became of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopEvent {
-    /// The loop as verified.
+    /// The loop as verified; its matches are not kept once applied (empty).
     pub detection: LoopDetection,
     /// Translation of `T_map^-1 T_pnp`, metres.
     pub drift_m: f64,
@@ -174,6 +174,10 @@ pub struct LoopCounts {
     pub with_candidates: u64,
     /// Candidates validated.
     pub candidates: u64,
+    /// GP3P RANSAC calls that refused their input (non-finite or non-unit
+    /// rays, a bad ratio): a bug upstream of it, logged and counted, never a
+    /// silent "no loop".
+    pub pnp_errors: u64,
     /// Loops that passed verification.
     pub verified: u64,
     /// Loops fused at once.
@@ -238,9 +242,21 @@ impl LoopClosing {
         &self.events
     }
 
-    /// The counters.
+    /// The counters; the verified-loop ones are counted from the events.
     pub fn counts(&self) -> LoopCounts {
-        self.counts
+        let mut counts: LoopCounts = self.counts;
+        for event in &self.events {
+            counts.verified += 1;
+            match event.outcome {
+                LoopOutcome::Fused { .. } => counts.fused += 1,
+                LoopOutcome::NeedsPgo => counts.needs_pgo += 1,
+                LoopOutcome::Optimized { .. } => {
+                    counts.needs_pgo += 1;
+                    counts.optimized += 1;
+                }
+            }
+        }
+        counts
     }
 
     /// What the pose-graph optimization has done.
@@ -509,15 +525,20 @@ impl MapBackend {
             return Vec::new();
         };
         let started = std::time::Instant::now();
-        let Some(event) = self.apply_loop(detection) else {
+        let Some(&LoopEvent {
+            ref detection,
+            outcome,
+            ..
+        }) = self.apply_loop(detection)
+        else {
             return Vec::new();
         };
-        let pgo_ns = matches!(event.outcome, LoopOutcome::Optimized { .. })
-            .then(|| crate::duration_ns(started));
+        let pgo_ns =
+            matches!(outcome, LoopOutcome::Optimized { .. }).then(|| crate::duration_ns(started));
         vec![MapEvent::LoopVerified {
-            current: event.detection.current,
-            candidate: event.detection.candidate,
-            outcome: event.outcome,
+            current: detection.current,
+            candidate: detection.candidate,
+            outcome,
             pgo_ns,
         }]
     }
@@ -658,7 +679,7 @@ impl MapBackend {
     /// inlier matches when they pass [`passes_pnp_gate`] over the matches fed
     /// to RANSAC (those with a landmark and a bearing, B2), else `None`.
     fn solve_pnp(
-        &self,
+        &mut self,
         matches: &[LoopMatch],
         seed: u64,
         min_inliers: usize,
@@ -701,7 +722,17 @@ impl MapBackend {
             refine: true,
             min_inlier_ratio: (ratio > 0.0).then_some(ratio.min(1.0)),
         };
-        let result = gp3p_ransac(&correspondences, &ransac).ok()??;
+        let result = match gp3p_ransac(&correspondences, &ransac) {
+            Ok(result) => result?,
+            Err(error) => {
+                log::warn!(
+                    "loop closing: GP3P RANSAC refused {} correspondences: {error}",
+                    correspondences.len()
+                );
+                self.loops.as_mut()?.counts.pnp_errors += 1;
+                return None;
+            }
+        };
         let fed: usize = used.len();
         let inliers: Vec<LoopMatch> = used
             .into_iter()
@@ -786,8 +817,9 @@ impl MapBackend {
     /// Apply a verified loop (`handle_loop_detection`): measure the drift it
     /// would correct; below the gate, fuse its landmarks and add the loop edge;
     /// at or above it, run the pose-graph optimization first
-    /// (`handle_loop_closure`), then do the same. Records the event.
-    fn apply_loop(&mut self, detection: LoopDetection) -> Option<LoopEvent> {
+    /// (`handle_loop_closure`), then do the same. Records the event, without
+    /// its matches, and returns it.
+    fn apply_loop(&mut self, mut detection: LoopDetection) -> Option<&LoopEvent> {
         let config: &LoopClosingConfig = &self.loops.as_ref()?.config;
         let (min_m, min_deg) = (config.min_drift_reduction_m, config.min_rot_reduction_deg);
         let map_pose: Se3<f64> = self.map.keyframe(detection.current)?.pose;
@@ -814,24 +846,15 @@ impl MapBackend {
                 .add_loop_closure(detection.candidate, detection.current);
             self.fuse(detection.current, &detection.matches)
         };
+        detection.matches = Vec::new();
         let loops = self.loops.as_mut()?;
-        loops.counts.verified += 1;
-        match outcome {
-            LoopOutcome::Fused { .. } => loops.counts.fused += 1,
-            LoopOutcome::NeedsPgo => loops.counts.needs_pgo += 1,
-            LoopOutcome::Optimized { .. } => {
-                loops.counts.needs_pgo += 1;
-                loops.counts.optimized += 1;
-            }
-        }
-        let event = LoopEvent {
+        loops.events.push(LoopEvent {
             detection,
             drift_m,
             drift_deg,
             outcome,
-        };
-        loops.events.push(event.clone());
-        Some(event)
+        });
+        loops.events.last()
     }
 
     /// Carry out [`fusion_plan`] ([`MapBackend::fuse_landmarks`]).
