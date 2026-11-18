@@ -44,9 +44,9 @@ class RerunStreamSettings:
     nvdec_frames_per_call: int = 64
     """Frames per NVDEC call; each call peaks at about 25 MB of GPU memory per 1080p frame (RGB float), so a 12 GB card wants 16."""
     nvdec_chunk: int = 256
-    nvdec_fetch_block: int = 1024
-    """Samples the dataloader fetches and decodes at once per camera (each held as a 640x480 frame, ~0.3 MB); 256 suits a 12 GB card."""
     """Decoded images an NVDEC producer labels and pools at once (each costs ~1.2 MB of float scratch); 64 suits a 12 GB card."""
+    nvdec_fetch_block: int = 1024
+    """Samples the dataloader fetches and decodes at once per camera (each held as a 640x480 frame, ~0.3 MB); 512 suits a 12 GB card."""
     workers: tuple[int, ...] = (4, 6, 8, 8)
     """Spawn decode workers per dataset for ``decode=cpu`` (same order as ``datasets``)."""
     pool_capacity: int = 32_768
