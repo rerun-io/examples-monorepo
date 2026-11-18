@@ -15,6 +15,7 @@ kornia-algebra.workspace = true
 kornia-image = { workspace = true, optional = true }
 thiserror.workspace = true
 nalgebra.workspace = true
+rand = { workspace = true, optional = true, features = ["chacha"] }
 
 [dev-dependencies]
 kornia-tensor.workspace = true
@@ -28,10 +29,18 @@ criterion.workspace = true
 name = "cameras"
 harness = false
 
+[[bench]]
+name = "gp3p"
+harness = false
+required-features = ["ransac"]
+
 [features]
 default = []
 virtual-camera = ["dep:kornia-image"]
 kornia-3d-interop = ["dep:kornia-3d"]
+# Seeded GP3P RANSAC (a copy of upstream kornia_3d::ransac's serial driver, so no
+# kornia-3d and no faer; checked against upstream under kornia-3d-interop).
+ransac = ["dep:rand"]
 serde = ["dep:serde"]
 
 [dependencies.serde]
