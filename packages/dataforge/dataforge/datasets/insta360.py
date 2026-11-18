@@ -529,7 +529,7 @@ class Insta360Config(FrameLimitedConfig):
     """Keep only the first this-many sampled framesets (a sample pack); None keeps all."""
     cube_face_size: int | None = None
     """Front face side ``N`` (a multiple of 32); None = ``lens_size * 800 / 1920``."""
-    cube_cq: int = 18
+    cube_cq: int = 14
     """NVENC constant-quality target of the faces: they feed SfM and splat training, so near visually lossless."""
     cube_gop: int = 10
     """Face keyframe interval in sampled framesets."""
