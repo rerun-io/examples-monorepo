@@ -469,9 +469,39 @@ impl Default for VioConfig {
 
 impl VioConfig {
     /// Read a wrapped config. Missing keys keep their defaults; unknown keys fail.
+    ///
+    /// Loop-closing knobs are flat keys like every other one,
+    /// `backend.loop_closing.<knob>`, so a profile overlay sets one knob and
+    /// keeps the dataset's others; they are folded into the
+    /// `backend.loop_closing` section here (a flat key wins over the same knob
+    /// in a written-out section).
     pub fn from_json_str(text: &str) -> Result<Self, ConfigError> {
-        let wrapper: Value0<Self> = serde_json::from_str(text)?;
-        wrapper.value0.check_ranges()
+        const SECTION: &str = "backend.loop_closing";
+        let mut document: Value0<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(text)?;
+        let values = &mut document.value0;
+        let flat: Vec<String> = values
+            .keys()
+            .filter(|key| key.starts_with("backend.loop_closing."))
+            .cloned()
+            .collect();
+        let section_is_object: bool = values.get(SECTION).is_none_or(serde_json::Value::is_object);
+        // A section that is not an object stays, and its flat keys fail as unknown.
+        if !flat.is_empty() && section_is_object {
+            let mut knobs: serde_json::Map<String, serde_json::Value> = match values.remove(SECTION)
+            {
+                Some(serde_json::Value::Object(knobs)) => knobs,
+                _ => serde_json::Map::new(),
+            };
+            for key in flat {
+                if let Some(value) = values.remove(&key) {
+                    knobs.insert(key[SECTION.len() + 1..].to_string(), value);
+                }
+            }
+            values.insert(SECTION.to_string(), serde_json::Value::Object(knobs));
+        }
+        let config: Self = serde_json::from_value(serde_json::Value::Object(document.value0))?;
+        config.check_ranges()
     }
 
     /// Refuse values the global BA cannot run with (a sigma <= 0 gives an
@@ -806,6 +836,24 @@ mod tests {
     #[test]
     fn tumvi_loop_gates_are_rootslams_tumvi_512_values() {
         assert_loop_gates(TUMVI_JSON, (20, 30, 0.6), 144);
+    }
+
+    /// The parity profile overlays its loop knobs one by one: a dataset keeps
+    /// the gates the profile does not set (RootSLAM's euroc 10 / 30, tumvi_512
+    /// 20 / 30), where a whole-section overlay ran MSD's gates everywhere.
+    #[test]
+    fn the_parity_profile_keeps_each_datasets_loop_gates() {
+        let parity = include_str!("../../../configs/profiles/rootslam-parity.json");
+        for (text, gates) in [(EUROC_JSON, (10, 30)), (TUMVI_JSON, (20, 30))] {
+            let loops = VioConfig::with_overlay(text, parity)
+                .unwrap()
+                .backend_loop_closing;
+            assert_eq!(
+                (loops.pnp_min_inliers, loops.reprojected_pnp_min_inliers),
+                gates
+            );
+            assert_eq!(loops.pnp_inliers_ratio, 0.0, "the profile's own knob");
+        }
     }
 
     /// The global BA keys (PR d2) default to rootba `bal` as RootSLAM's CI runs

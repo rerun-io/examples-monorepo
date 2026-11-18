@@ -314,7 +314,12 @@ def test_tum_vi_config_differs_from_msd_only_where_rootslams_tumvi_config_does(s
     """
     msd: dict = json.loads(settings.vio_config_text("msd-g2"))["value0"]
     tumvi: dict = json.loads(settings.vio_config_text("tum-vi"))["value0"]
-    assert tumvi.keys() - msd.keys() == {"backend.loop_closing", "config.loop_closing_pgo_min_covisibility_weight"}
+    assert tumvi.keys() - msd.keys() == {
+        "backend.loop_closing.pnp_min_inliers",
+        "backend.loop_closing.reprojected_pnp_min_inliers",
+        "backend.loop_closing.pnp_inliers_ratio",
+        "config.loop_closing_pgo_min_covisibility_weight",
+    }
     assert msd.keys() <= tumvi.keys()
     assert {key: tumvi[key] for key in msd if msd[key] != tumvi[key]} == {
         "config.optical_flow_detection_grid_size": 40,
@@ -333,7 +338,11 @@ def test_euroc_config_differs_from_msd_only_in_sensor_facts(settings: SlamConfig
         "config.optical_flow_image_safe_radius",
         "config.optical_flow_recall_max_patch_norms",
     }
-    assert euroc.keys() - msd.keys() == {"backend.loop_closing", "config.loop_closing_pgo_min_covisibility_weight"}
+    assert euroc.keys() - msd.keys() == {
+        "backend.loop_closing.reprojected_pnp_min_inliers",
+        "backend.loop_closing.pnp_inliers_ratio",
+        "config.loop_closing_pgo_min_covisibility_weight",
+    }
     assert msd.keys() <= euroc.keys()
     assert euroc["config.optical_flow_image_safe_radius"] == 0.0
 
