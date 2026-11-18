@@ -49,7 +49,8 @@ from typing import Final, Literal, TypeAlias
 import pycolmap
 
 from colsfm.database import image_ids_by_name, keypoint_counts
-from colsfm.frame_manifest import FrameSource
+from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSource, is_catalog_input, read_manifest
+from colsfm.keypoint_masks import MaskSource, open_mask_source
 
 AlikedVariant: TypeAlias = Literal["ALIKED_N16ROT", "ALIKED_N32"]
 """The two ALIKED graphs COLMAP 4.2 can download and run."""
@@ -136,6 +137,9 @@ class FeatureOptions:
     whichever engine `raco_engine` picks for that size. False is the legacy
     stretch on the fixed-shape graph, which is what `docs/kitti-06-results.md`
     §9 measured. `pycolmap` ignores it: it is already native."""
+    raco_batch_pixels: int | None = None
+    """On `raco` only: the shape-dynamic engines' pixel budget per execution (`PipelineOptions.raco_batch_pixels`);
+    None keeps `colsfm.features_raco.DYNAMIC_BATCH_PIXEL_BUDGET`."""
     raco_engine: RacoEngineChoice = "auto"
     """On `raco` with `native_resolution` only: which engine runs each size.
 
@@ -273,11 +277,17 @@ def extract_features(
         RuntimeError: When `options.device` is `cuda` and CUDA is unusable.
         ImportError: When `options.backend` is `raco` and TensorRT or
             `cuda-python` is not importable.
+        ValueError: When the catalog input names keypoint masks and the backend is not `raco`.
     """
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     if not image_root.is_dir():
         raise FileNotFoundError(f"No image directory at {image_root}")
+
+    # A catalog input may name keypoint masks per camera stream; only the raco backend applies them.
+    masks: MaskSource | None = open_mask_source(read_manifest(image_root / FRAME_SOURCE_FILE) if is_catalog_input(image_root) else None)
+    if masks is not None and options.backend != "raco":
+        raise ValueError(f"keypoint masks are applied by the raco backend only, not {options.backend}")
 
     if options.backend == "raco":
         # Imported here, not at module scope: TensorRT and `cuda-python` are only needed by this branch, and a machine
@@ -297,7 +307,9 @@ def extract_features(
                 max_num_features=options.max_num_features,
                 native_resolution=options.native_resolution,
                 raco_engine=options.raco_engine,
+                batch_pixels=options.raco_batch_pixels,
                 frames=source,
+                masks=masks,
             )
         finally:
             if frames is None:
