@@ -40,6 +40,8 @@ class RerunStreamSettings:
     """DetNet images per batch from each dataset (same order as ``datasets``, summing to ``stream.detnet_batch``); empty: equal."""
     decode: Literal["nvdec", "cpu"] = "nvdec"
     """nvdec: decode on the GPU in the training process (simplecv's segment-wide decoder); cpu: the 0.42 CPU decoder in spawn workers."""
+    nvdec_frames_per_call: int = 64
+    """Frames per NVDEC call; each call peaks at about 25 MB of GPU memory per 1080p frame (RGB float), so a 12 GB card wants 16."""
     workers: tuple[int, ...] = (4, 6, 8, 8)
     """Spawn decode workers per dataset for ``decode=cpu`` (same order as ``datasets``)."""
     pool_capacity: int = 32_768
@@ -271,7 +273,8 @@ def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: t
     for index, (name, workers) in enumerate(zip(rerun.datasets, rerun.workers, strict=True)):
         segments: list[str] = training_segments(name, holdout, rerun.catalog_url)
         if rerun.decode == "nvdec":
-            producers.append(nvdec_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, device=device, endless=True))
+            producers.append(nvdec_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, device=device, endless=True,
+                                            frames_per_call=rerun.nvdec_frames_per_call))
             continue
         digest: str = hashlib.sha256("\n".join(segments).encode()).hexdigest()[:10]
         manifest: Path = build_manifest(source_spec(name, index), segments, rerun.catalog_url, rerun.manifest_dir / f"{name}-train-{digest}-w{workers}.parquet", workers)
