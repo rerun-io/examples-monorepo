@@ -46,7 +46,7 @@ class ColmapImageKey:
     """The face and stamp a colsfm image name ``<face>/<t_ns>`` stands for."""
 
     face: str
-    """Face name, e.g. ``cube_0_front``."""
+    """Face name, e.g. ``cube6_front0``."""
     t_ns: int
     """Frameset stamp on the layer's timeline."""
 
