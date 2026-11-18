@@ -19,7 +19,7 @@ from torch import Tensor
 
 from handtrack.apis.train import DetectorHoldout
 from handtrack.data.catalog import CATALOG_URL, SplitName, list_segments, select_split
-from handtrack.data.rerun_source import SourceSpec, nvdec_producer, source_spec
+from handtrack.data.rerun_source import NVDEC_SLICE, SourceSpec, nvdec_producer, source_spec
 from handtrack.data.stream import DetNetSamples
 from handtrack.eval.boxes import MIN_IOU, NET_SCALE, PRESENCE_THRESHOLD, BoxCounts, box_counts, square_iou
 from handtrack.models.detnet import DetNetF
@@ -53,6 +53,8 @@ class DetectorEvalConfig:
     quarter_turns: tuple[int, ...] | None = None
     """Override every scored dataset's upright turns with these (one per camera), e.g. ``0 0 2 2 0 0`` for robocap-hands as
     robocap-live's mix1-upright feeds the cap; needs ``upright`` and datasets with that many cameras."""
+    nvdec_frames_per_call: int = NVDEC_SLICE
+    """Frames per NVDEC call; lower it to fit beside other jobs on a shared GPU (8 keeps a robocap-hands run near 5 GB)."""
     catalog_url: str = CATALOG_URL
     device: str = "cuda:0"
 
@@ -190,7 +192,7 @@ def main(config: DetectorEvalConfig) -> DetectorEvalReport:
         spec: SourceSpec = source_spec(dataset, index, config.upright)
         if config.quarter_turns is not None:
             spec = dataclasses.replace(spec, quarter_turns=config.quarter_turns)
-        for samples in nvdec_producer(spec, segments, catalog_url=config.catalog_url, device=device)(0):
+        for samples in nvdec_producer(spec, segments, catalog_url=config.catalog_url, device=device, frames_per_call=config.nvdec_frames_per_call)(0):
             images += int(samples.pooled.shape[0])
             frames: Float32[Tensor, "n 1 120 160"] = samples.pooled[:, None].float() / 255.0
             predicted: list[Tensor] = []

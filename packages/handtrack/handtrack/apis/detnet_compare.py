@@ -114,7 +114,7 @@ def compare_blueprint(cameras: tuple[str, ...]):
                                  contents=["+ $origin/video", "+ $origin/detnet/**", "+ $origin/hand_teacher"])
 
     columns = [rrb.Vertical(view(cameras[c]), view(cameras[c + 1])) for c in range(0, len(cameras), 2)]
-    return rrb.Blueprint(rrb.Horizontal(*columns), rrb.TimePanel(timeline="frame_index"), collapse_panels=True)
+    return rrb.Blueprint(rrb.Horizontal(*columns), rrb.TimePanel(timeline="frame_index", state="collapsed"), collapse_panels=True)
 
 
 @torch.no_grad()
