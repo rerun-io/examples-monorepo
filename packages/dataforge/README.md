@@ -471,6 +471,31 @@ TUM's is `groundtruth.csv`; EuRoC's is EuRoC's own
 `<seq>/state_groundtruth_estimate0.csv`, read by the same EuRoC reader as
 msd's gt. After that the zip may go.
 
+### TartanAir V2 (tartanair)
+
+[`theairlabcmu/tartanair2`](https://huggingface.co/datasets/theairlabcmu/tartanair2)
+(revision `0d2d145e`, the one COLMAP's benchmark pins) ships each environment
+as one zip per camera that holds every trajectory. `download` reads each zip's
+central directory through HTTP `Range` requests and fetches only the chosen
+trajectories' members (`--trajectories <Env>/<easy|hard>/P0NN ...`), so the
+default subset is about 13 GB instead of 35 GB of whole zips. It can restart:
+a member already on disk at its size is skipped, and every member's CRC is checked.
+The range reads go through `dataforge.transports.hf_zip` (`HfFileSystem`, 16 MiB
+blocks), the same opener Assembly101 uses.
+
+One trajectory converts three ways, one catalog dataset per `--camera-set`, so
+the same motion runs through each camera model: `pinhole` (`lcam_front` +
+`rcam_front`), `fisheye` (`lcam_fish` + `rcam_fish`, 195 deg equidistant as
+`kannala_brandt` with zero coefficients) and `equirect` (`lcam_equirect`, as
+`equirectangular`). The IMU (100 Hz, noise-free, from the pose spline) is the
+rig reference; its synthetic noise model says so. The module docstring states
+the NED-to-RDF axes, the Z-up world, the clock and the pixel-centre convention.
+
+```bash
+pixi run -e dataforge --frozen dataforge-download tartanair --root <raw>
+DATAFORGE_OUTPUT_ROOT=<rrd> pixi run -e dataforge --frozen dataforge-convert tartanair --camera-set fisheye --root <raw>
+```
+
 ### TUM-VI (tum-vi)
 
 `datasets/tumvi.py` converts the raw ASL tree of TUM-VI's 512x512 16-bit
