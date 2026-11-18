@@ -24,6 +24,9 @@ pub(crate) use fast_cell::{cell_shared_bytes, launch_fast_cell, launch_fast_cell
 /// Low-level fused KLT kernel for callers that supply validated device bindings.
 pub(crate) mod klt_fused;
 
+/// The global BA's PCG kernels.
+pub(crate) mod linalg;
+
 /// IEEE float classification for device code.
 pub mod finite;
 pub(crate) mod trig;

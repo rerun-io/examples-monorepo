@@ -7,6 +7,8 @@
 
 mod bootstrap;
 mod catalog;
+mod gba;
+mod map;
 
 use kornia_image::Image;
 use kornia_staging_imgproc::features::CellGrid;
@@ -24,7 +26,7 @@ use slam_rs::frontend::flow::{
     FlowFrame as CoreFlowFrame, FrameToFrameOpticalFlow, FrontendError, FrontendOptions,
     PosePrediction,
 };
-use slam_rs::{Backend, BackendRequest, FrontendLane, ImageView, VioError};
+use slam_rs::{Backend, BackendRequest, Backends, FrontendLane, GbaRequest, ImageView, VioError};
 
 /// Map any core error onto `ValueError`, which is what every refusal here is.
 fn value_error<E: std::fmt::Display>(error: E) -> PyErr {
@@ -77,7 +79,10 @@ impl VioResult {
         self.inner.t_ns
     }
 
-    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`.
+    /// Rig pose in the world frame as `[tx, ty, tz, qx, qy, qz, qw]`: the raw,
+    /// causal VIO, which is also this frame's corrected pose (the pose-graph
+    /// gauge fixes the window). The corrected history is
+    /// `slam_rs.tracking.reanchored(poses, vio.map_snapshot())`.
     #[getter]
     fn world_from_rig<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.inner
@@ -141,24 +146,28 @@ impl Vio {
     /// with one warning on stderr; `"gpu"` raises `ValueError` instead of falling
     /// back. Invalid input and runtime initialization panics also raise
     /// `ValueError` (D32). `threads` controls only the CPU pool and is accepted
-    /// but inert on the GPU lane.
+    /// but inert on the GPU lane. `ba_backend` is where `finish_map`'s global BA
+    /// runs its PCG: `"follow"` (the default, the frontend's lane), `"cpu"` or
+    /// `"gpu"`, for benches and tests.
     #[new]
-    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto"))]
+    #[pyo3(signature = (calibration, config, *, threads = 1, max_keypoints = None, backend = "auto", ba_backend = "follow"))]
     fn new(
         calibration: PyRef<'_, Calibration>,
         config: PyRef<'_, VioConfig>,
         threads: usize,
         max_keypoints: Option<usize>,
         backend: &str,
+        ba_backend: &str,
     ) -> PyResult<Self> {
         let request: BackendRequest = backend.parse().map_err(PyValueError::new_err)?;
-        let backend: Backend = slam_rs::select_backend(request).map_err(value_error)?;
+        let gba: GbaRequest = ba_backend.parse().map_err(PyValueError::new_err)?;
+        let backends: Backends = slam_rs::select_backend(request, gba).map_err(value_error)?;
         Ok(Self {
-            inner: slam_rs::Vio::with_backend(
+            inner: slam_rs::Vio::with_backends(
                 config.inner.clone(),
                 calibration.inner.clone(),
                 frontend_options(threads, max_keypoints),
-                backend,
+                backends,
             )
             .map_err(value_error)?,
         })
@@ -182,6 +191,12 @@ impl Vio {
     #[getter]
     fn backend(&self) -> &'static str {
         self.inner.backend().name()
+    }
+
+    /// Where the global BA's PCG runs: `"cpu"` or `"gpu"`.
+    #[getter]
+    fn gba_lane(&self) -> &'static str {
+        self.inner.gba_lane().name()
     }
 
     /// Cameras this estimator expects in every frameset.
@@ -424,6 +439,33 @@ impl Vio {
             self.inner.frontend_timings(),
         )
         .map(Some)
+    }
+
+    /// A copy of the persistent keyframe map and the back end's counters at the
+    /// moment it was taken, or `None` when ``backend.enabled`` is off.
+    ///
+    /// Never waits for the back end: in Realtime it is the newest copy the
+    /// back-end thread posted (``flush`` makes it current).
+    fn map_snapshot(&self, py: Python<'_>) -> PyResult<Option<map::MapSnapshot>> {
+        let (Some(view), Some(mode)) = (
+            py.detach(|| self.inner.map_view()),
+            self.inner.backend_mode(),
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(map::MapSnapshot::new(view.view, view.counters, mode)))
+    }
+
+    /// The map's keyframes at the end of a sequence, after a global BA on the
+    /// map when ``run_gba``, or ``None`` when ``backend.enabled`` is off.
+    ///
+    /// Takes every stamp first. The window is untouched, so the poses ``track``
+    /// returned stay the raw VIO; the map keeps the GBA's. Call it after
+    /// ``flush``. A GBA that fails is reported in ``gba_failure``, and the
+    /// keyframes are then the map's after loops and PGO.
+    fn finish_map(&mut self, py: Python<'_>, run_gba: bool) -> Option<gba::MapResult> {
+        py.detach(|| self.inner.finish_map(run_gba))
+            .map(gba::MapResult::new)
     }
 
     fn __repr__(&self) -> String {
@@ -714,6 +756,19 @@ impl VioSnapshot {
     }
 }
 
+/// The name `backend.mode` gives a mode.
+fn backend_mode_name(mode: slam_rs::config::BackendMode) -> &'static str {
+    match mode {
+        slam_rs::config::BackendMode::Offline => "offline",
+        slam_rs::config::BackendMode::Realtime => "realtime",
+    }
+}
+
+/// `[tx, ty, tz, qx, qy, qz, qw]` per pose, flat.
+fn flat_poses(poses: &[slam_rs::lie::Se3<f64>]) -> Vec<f64> {
+    poses.iter().flat_map(slam_rs::pose_to_xyzw).collect()
+}
+
 /// The frontend options both entry points build, from the two knobs they expose.
 ///
 /// Everything else in `FrontendOptions` is a property of the port rather than of
@@ -898,6 +953,36 @@ impl VioConfig {
             }
         };
         Ok(())
+    }
+
+    /// ``backend.enabled``: whether `Vio` builds the persistent keyframe map.
+    #[getter]
+    fn backend_enabled(&self) -> bool {
+        self.inner.backend_enabled
+    }
+
+    /// ``backend.mode``: ``"offline"`` (inline) or ``"realtime"`` (own thread).
+    #[getter]
+    fn backend_mode(&self) -> &'static str {
+        backend_mode_name(self.inner.backend_mode)
+    }
+
+    /// The same configuration with the back end ``"off"`` (``backend.mode``
+    /// kept) or on in ``"offline"`` or ``"realtime"``; every other key unchanged.
+    fn with_backend(&self, mode: &str) -> PyResult<Self> {
+        let mode: Option<slam_rs::config::BackendMode> = match mode {
+            "off" => None,
+            "offline" => Some(slam_rs::config::BackendMode::Offline),
+            "realtime" => Some(slam_rs::config::BackendMode::Realtime),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "back-end mode {other:?} is not \"off\", \"offline\" or \"realtime\""
+                )));
+            }
+        };
+        Ok(Self {
+            inner: self.inner.with_backend(mode),
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -1452,19 +1537,72 @@ fn wrong_type(what: &str, name: &str, expected: &str) -> PyErr {
 #[pyfunction]
 fn select_backend(request: &str) -> PyResult<&'static str> {
     let request: BackendRequest = request.parse().map_err(PyValueError::new_err)?;
-    Ok(slam_rs::select_backend(request)
+    // The frontend's lane only: a CPU GBA request never runs the back-end probe.
+    Ok(slam_rs::select_backend(request, GbaRequest::Cpu)
         .map_err(value_error)?
+        .frontend
         .name())
 }
 
-/// How many device capability probes this process has run.
+/// How many device probes this process has run: capability validations plus
+/// GBA round trips.
 ///
-/// Validation runs once per process, so this is 0 before the first `auto` or
-/// `gpu` request and stays at its first value after it. The unit test tier
-/// asserts it stays at 0.
+/// Each runs once per process, so this is 0 before the first `auto` or `gpu`
+/// request and stays at its first value after it. The unit test tier asserts
+/// it stays at 0.
 #[pyfunction]
 fn device_probes_run() -> usize {
-    slam_rs::device_probes_run()
+    slam_rs::device_probes_run() + slam_rs::gba_probes_run()
+}
+
+/// `(t_ns, [tx, ty, tz, qx, qy, qz, qw])` rows from parallel timestamp and pose arrays.
+fn stamped_rows(
+    t_ns: &[i64],
+    poses: &PyReadonlyArray2<'_, f64>,
+    what: &str,
+) -> PyResult<Vec<(i64, [f64; 7])>> {
+    let poses = poses.as_array();
+    if poses.ncols() != 7 || poses.nrows() != t_ns.len() {
+        return Err(PyValueError::new_err(format!(
+            "{what}: {} timestamps need {} x 7 poses, got {:?}",
+            t_ns.len(),
+            t_ns.len(),
+            poses.shape()
+        )));
+    }
+    Ok(t_ns
+        .iter()
+        .zip(poses.rows())
+        .map(|(&t_ns, row)| (t_ns, std::array::from_fn(|i| row[i])))
+        .collect())
+}
+
+/// The final trajectory: every raw frame pose re-anchored on the optimized
+/// keyframes on both sides (`slam_rs::backend::reanchor_arrays`, PR f1).
+#[pyfunction]
+fn reanchor<'py>(
+    py: Python<'py>,
+    frame_t_ns: numpy::PyReadonlyArray1<'_, i64>,
+    frame_poses: PyReadonlyArray2<'_, f64>,
+    keyframe_t_ns: numpy::PyReadonlyArray1<'_, i64>,
+    keyframe_poses: PyReadonlyArray2<'_, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let frames = stamped_rows(frame_t_ns.as_slice()?, &frame_poses, "frames")?;
+    let keyframes = stamped_rows(keyframe_t_ns.as_slice()?, &keyframe_poses, "keyframes")?;
+    let keyframe_poses: Vec<slam_rs::lie::Se3<f64>> = keyframes
+        .iter()
+        .map(|(t_ns, pose)| {
+            slam_rs::pose_from_xyzw(pose).ok_or_else(|| {
+                PyValueError::new_err(format!("keyframes: no unit quaternion at {t_ns} ns"))
+            })
+        })
+        .collect::<PyResult<_>>()?;
+    let keyframe_t_ns: Vec<i64> = keyframes.iter().map(|&(t_ns, _)| t_ns).collect();
+    let anchored = slam_rs::backend::reanchor_arrays(&frames, &keyframe_t_ns, &keyframe_poses)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    numpy::ndarray::Array2::from_shape_vec((anchored.len(), 7), anchored.concat())
+        .map(|array| array.to_pyarray(py))
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// The compiled core of the `slam_rs` package.
@@ -1476,6 +1614,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("gpu_backend", slam_rs::GPU_BACKEND)?;
     module.add_function(wrap_pyfunction!(select_backend, module)?)?;
     module.add_function(wrap_pyfunction!(device_probes_run, module)?)?;
+    module.add_function(wrap_pyfunction!(reanchor, module)?)?;
     module.add_class::<Vio>()?;
     module.add_class::<VioResult>()?;
     module.add_class::<bootstrap::BootstrapAttempt>()?;
@@ -1486,5 +1625,9 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<OpticalFlow>()?;
     module.add_class::<FlowFrame>()?;
     module.add_class::<VioSnapshot>()?;
+    module.add_class::<map::MapSnapshot>()?;
+    module.add_class::<map::LoopCounts>()?;
+    module.add_class::<gba::MapResult>()?;
+    module.add_class::<gba::GbaRun>()?;
     Ok(())
 }

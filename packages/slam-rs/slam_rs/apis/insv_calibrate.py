@@ -354,7 +354,8 @@ def drive(vio: _core.Vio, framesets: Iterable[Frameset], imu: ImuStream, offset_
 def vio_with_readout(feed: SegmentFeed, vio_config: _core.VioConfig, backend: BackendRequest, readout_s: float) -> _core.Vio:
     """The feed's ``Vio`` with every camera's rolling-shutter readout replaced by ``readout_s`` (the shutter check)."""
     cameras: tuple[CameraCalib, ...] = tuple(replace(camera, readout_s=readout_s) for camera in feed.cameras)
-    return _core.Vio(_core.Calibration.from_catalog(cameras, feed.imu), vio_config, backend=backend)
+    # Only the frontend's tracks are read: the back end (on by default) stays off, as for every raw-only run.
+    return _core.Vio(_core.Calibration.from_catalog(cameras, feed.imu), vio_config.with_backend("off"), backend=backend)
 
 
 def scan_window(

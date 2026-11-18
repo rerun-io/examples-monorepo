@@ -181,3 +181,8 @@ except ValueError as error:
     assert "['cpu', 'cpu', 'cpu'] cpu" in result.stdout
     assert "gpu refused: frontend: wgpu found no" in result.stdout
     assert result.stderr.count("tracking on the CPU because the GPU frontend cannot run here") == 1, result.stderr
+
+
+def test_the_robocap_probe_names_its_raw_vio_output_as_the_layer_does() -> None:
+    """The probe writes the raw causal VIO (it is compared with a raw-VIO regression reference), so its file is ``slam_rs_vio.csv``; ``slam_rs.csv`` is the final run."""
+    assert robocap_probe.OUTPUT_NAME == "slam_rs_vio.csv"

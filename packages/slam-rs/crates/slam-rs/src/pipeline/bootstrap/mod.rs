@@ -658,6 +658,10 @@ impl<S: Scalar> Vio<S> {
         };
         let mut fresh =
             estimator::SqrtKeypointVio::with_initial_state(calibration, config, initial)?;
+        // The back end takes the replayed window's stamps in frame order, like any other run's
+        // (RootSLAM DESIGN FU1); the window's keyframes carry no images, so loop closing skips them.
+        #[cfg(feature = "backend")]
+        fresh.emit_map_stamps(self.map_runner.is_some());
         for sample in &accepted.imu {
             fresh.push_imu(*sample);
         }

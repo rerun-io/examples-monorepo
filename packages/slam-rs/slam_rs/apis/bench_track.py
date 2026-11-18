@@ -57,7 +57,7 @@ from numpy import ndarray
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuCalib, ImuStream
 from slam_rs.config import config_text_sha256, profiled_config_text
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import Lockstep, raw_vio
 
 Lane: TypeAlias = Literal["cpu", "gpu"]
 """Which frontend backend a round runs: the ported CPU one, or the CubeCL one."""
@@ -268,7 +268,7 @@ def run_lane(lane: Lane, round_index: int, framesets: Framesets, config: _core.V
         The round's per-call timings, wall time and CPU samples.
     """
     calibration: _core.Calibration = _core.Calibration.from_catalog(framesets.cameras, framesets.imu)
-    lockstep: Lockstep = Lockstep(vio=_core.Vio(calibration, config, backend=lane))
+    lockstep: Lockstep = Lockstep(vio=raw_vio(calibration, config, lane))
 
     sampler: CpuSampler = CpuSampler()
     sampler.start()
