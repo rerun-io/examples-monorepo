@@ -53,12 +53,10 @@ impl MapLandmark {
     /// link or unlink through it, and the redundancy score's count.
     pub fn frames(&self) -> impl Iterator<Item = FrameId> + '_ {
         let mut previous: Option<FrameId> = None;
-        self.obs.keys().filter_map(move |image| {
-            (previous != Some(image.frame_id)).then(|| {
-                previous = Some(image.frame_id);
-                image.frame_id
-            })
-        })
+        self.obs
+            .keys()
+            .map(|image| image.frame_id)
+            .filter(move |&frame| previous.replace(frame) != Some(frame))
     }
 }
 
