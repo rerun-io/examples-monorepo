@@ -40,13 +40,13 @@ and the lens brightness steps at the seams are not corrected. The stitch reads t
 recording as written (float32 statics), so a later ``--panorama`` run adds the layer beside an existing base without
 writing the base again. On clip B (X4 Air, 1920) the base alone takes about 13 s, with the panorama about 131 s.
 
-Cube layer (``--cube``; off by default). ``cube`` holds ten virtual pinholes per sampled frameset (every
-``cube_stride``-th): per lens the five faces of ``insta360_cube`` (front plus four half-faces past the seam), each
-sharing its lens's optical centre, at ``/world/rig_00/cam_02 .. cam_11`` (lens 0 front, left, right, up, down, then
-lens 1), with the face name ``cube_<lens>_<direction>`` on the node, a static face-from-IMU ``Transform3D``
-(``ChildFromParent``), a plain ``Pinhole`` (RDF) and an RGB AV1 ``VideoStream`` on the source frameset's stamp, plus a
-static ``SegmentationImage`` ``pinhole/valid_mask`` (1 = the ray lies inside the lens's half field). The tables come
-from the base recording's two cameras through ``MeiCamera.project``, so the layer can be added beside an existing base.
+Cube layer (``--cube``; off by default). ``cube`` holds the six-face cubemap of ``insta360_cube`` for every
+``cube_stride``-th frameset: ``N x N`` pinholes at ONE centre (the midpoint of the two lens centres), cube axes = camera
+0's, side faces joined at their centre line from the two lens images (no blend). ``/world/rig_00/cam_02 .. cam_07`` =
+``cube6_front0``, ``cube6_front1``, ``cube6_left``, ``cube6_right``, ``cube6_up``, ``cube6_down``, each with its name on
+the node, a static face-from-IMU ``Transform3D`` (``ChildFromParent``), a plain ``Pinhole`` (RDF) and an RGB AV1
+``VideoStream`` on the source frameset's stamp. The tables come from the base recording's two cameras through
+``MeiCamera.project``, so the layer can be added beside an existing base.
 
 Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)``
 (pixel centres at integers) looks along longitude ``lon = (u + 0.5) pi / 960 - pi / 2``, ``lon = atan2(x, z)`` in
@@ -106,9 +106,9 @@ PANO_ENTITY: str = f"{schema.rig_path(RIG)}/pano"
 PANORAMA_SIZE: tuple[int, int] = (1920, 960)
 """Width and height of ``insta360_io.PanoramaStitch.panorama``."""
 CUBE_LAYER: str = "cube"
-"""The cube faces, written only under ``--cube``: ten virtual pinholes per sampled frameset, ``cam_02 .. cam_11``."""
+"""The cubemap, written only under ``--cube``: six faces per sampled frameset, ``cam_02 .. cam_07``."""
 FIRST_FACE_CAM: int = 2
-"""Camera index of lens 0's front face; lens ``l``'s face ``d`` is ``2 + 5 l + DIRECTIONS.index(d)``."""
+"""Camera index of the first face; face ``k`` of ``insta360_cube.FACES`` is ``2 + k``."""
 RUN_SOURCE: str = "slam_rs"
 """The run layer the layouts show: slam-rs tracks these clips."""
 PROFILES_TOML: Path = Path(__file__).with_name("insta360_profiles.toml")
@@ -522,13 +522,13 @@ class Insta360Config(FrameLimitedConfig):
     pano_gop: int = 30
     """Panorama keyframe interval in frames, about one second."""
     cube: bool = False
-    """Also write the cube layer: ten virtual pinholes per sampled frameset (RGB remap + AV1 NVENC)."""
+    """Also write the cube layer: the six-face cubemap per sampled frameset (RGB remap + AV1 NVENC)."""
     cube_stride: int = 10
     """The cube layer samples every this-many framesets, from frameset 0."""
     cube_max_framesets: int | None = None
     """Keep only the first this-many sampled framesets (a sample pack); None keeps all."""
     cube_face_size: int | None = None
-    """Front face side ``N`` (a multiple of 32); None = ``lens_size * 800 / 1920``."""
+    """Face side ``N`` (a multiple of 32); None = ``lens_size * 800 / 1920``."""
     cube_cq: int = 14
     """NVENC constant-quality target of the faces: they feed SfM and splat training, so near visually lossless."""
     cube_gop: int = 10
@@ -689,82 +689,79 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             raise ValueError(f"the panorama holds {samples} frames for {frames} framesets")
 
     def write_cube(self, recording: rr.RecordingStream, capture: Capture, base: Path) -> None:
-        """Remap every sampled frameset's two lens images into the ten cube faces and log each face as AV1 on the frameset's stamp.
+        """Join every sampled frameset's two lens images into the six cube faces and log each face as AV1 on the frameset's stamp.
 
-        One lens at a time: its track is decoded once (RGB) and its five faces are encoded concurrently, one NVENC
-        session each.
+        Both lens tracks are decoded together (RGB) and the six faces are encoded concurrently, one NVENC session each.
         """
         clip: insta360_io.InsvClip = capture.clip
         lenses: LensCameras = cameras_from_recording(base)
         size: int = self.config.cube_face_size or cube.default_face_size(lenses.size[0])
         indices: Int64[ndarray, " k"] = cube_indices(int(capture.frame_ns.size), self.config.cube_stride, self.config.cube_max_framesets)
         times_ns: Int64[ndarray, " k"] = capture.frame_ns[indices] - capture.start_ns
+        faces: list[cube.CubeFace] = cube.cube_faces(size)
+        lens1_from_lens0: Float64[ndarray, "3 3"] = lenses.lens_from_rig[1][:3, :3] @ lenses.lens_from_rig[0][:3, :3].T
+        tables: list[cube.FaceTable] = [cube.face_table(face, lenses.cameras, lens1_from_lens0) for face in faces]
+        cams: list[int] = [FIRST_FACE_CAM + k for k in range(len(faces))]
         recording.send_property(
             "cube",
             rr.AnyValues(face_size=size, stride=self.config.cube_stride, framesets=int(indices.size), first_cam=FIRST_FACE_CAM, cq=self.config.cube_cq, gop=self.config.cube_gop),
         )
-        for lens in range(2):
-            faces: list[cube.CubeFace] = cube.lens_faces(lens, size)
-            tables: list[cube.RemapTable] = [cube.remap_table(face, lenses.cameras[lens]) for face in faces]
-            cams: list[int] = [FIRST_FACE_CAM + 5 * lens + k for k in range(len(faces))]
-            for cam, face, table in zip(cams, faces, tables, strict=True):
-                node: str = schema.cam_path(RIG, cam)
-                rr.log(node, rr.AnyValues(name=face.name, kind="rgb", camera_model="pinhole", source_lens=lens), static=True, recording=recording)
-                face_T_rig: Float64[ndarray, "4 4"] = cube.face_from_rig(face, lenses.lens_from_rig[lens])
-                rr.log(
-                    node,
-                    rr.Transform3D(translation=face_T_rig[:3, 3], mat3x3=face_T_rig[:3, :3], relation=rr.TransformRelation.ChildFromParent),
-                    static=True,
-                    recording=recording,
+        for cam, face in zip(cams, faces, strict=True):
+            node: str = schema.cam_path(RIG, cam)
+            rr.log(
+                node,
+                rr.AnyValues(name=face.name, kind="rgb", camera_model="pinhole", video_codec="av1", cq=self.config.cube_cq, gop=self.config.cube_gop),
+                static=True,
+                recording=recording,
+            )
+            face_T_rig: Float64[ndarray, "4 4"] = cube.face_from_rig(face, lenses.lens_from_rig)
+            rr.log(
+                node,
+                rr.Transform3D(translation=face_T_rig[:3, 3], mat3x3=face_T_rig[:3, :3], relation=rr.TransformRelation.ChildFromParent),
+                static=True,
+                recording=recording,
+            )
+            rr.log(
+                schema.pinhole_path(RIG, cam),
+                rr.Pinhole(image_from_camera=face.intrinsics, width=size, height=size, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.05),
+                static=True,
+                recording=recording,
+            )
+        with work_dir("insta360-cube-") as work, ThreadPoolExecutor(len(faces)) as pool:
+            channels: list[queue.Queue[bytes | None]] = [queue.Queue(maxsize=4) for _ in faces]
+            videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
+            encoders: list[Future[int]] = [
+                pool.submit(
+                    encode_frames_to_mp4,
+                    _channel_frames(channel),
+                    video,
+                    source=FrameSource("rgb24", width=size, height=size),
+                    fps=30,
+                    gop=self.config.cube_gop,
+                    cq=self.config.cube_cq,
                 )
-                pinhole: str = schema.pinhole_path(RIG, cam)
-                rr.log(
-                    pinhole,
-                    rr.Pinhole(image_from_camera=face.intrinsics, width=face.width, height=face.height, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.05),
-                    static=True,
-                    recording=recording,
-                )
-                # Fully transparent classes: the mask is data for consumers, it must not tint the face in a view.
-                rr.log(
-                    f"{pinhole}/valid_mask",
-                    rr.AnnotationContext([rr.ClassDescription(info=rr.AnnotationInfo(id=k, label=label, color=(0, 0, 0, 0))) for k, label in enumerate(("outside", "inside"))]),
-                    static=True,
-                    recording=recording,
-                )
-                rr.log(f"{pinhole}/valid_mask", rr.SegmentationImage(table.valid.astype(np.uint8)), static=True, recording=recording)
-            with work_dir("insta360-cube-") as work, ThreadPoolExecutor(len(faces)) as pool:
-                channels: list[queue.Queue[bytes | None]] = [queue.Queue(maxsize=4) for _ in faces]
-                videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
-                encoders: list[Future[int]] = [
-                    pool.submit(
-                        encode_frames_to_mp4,
-                        _channel_frames(channel),
-                        video,
-                        source=FrameSource("rgb24", width=face.width, height=face.height),
-                        fps=30,
-                        gop=self.config.cube_gop,
-                        cq=self.config.cube_cq,
+                for channel, video in zip(channels, videos, strict=True)
+            ]
+            with self.timer.stage("cube:faces"):
+                try:
+                    pairs = zip(
+                        *(rgb_frames(clip, clip.lens_track[lens], indices, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for lens in range(2)),
+                        strict=True,
                     )
-                    for channel, video, face in zip(channels, videos, faces, strict=True)
-                ]
-                with self.timer.stage(f"cube:lens{lens}"):
-                    try:
-                        images = rgb_frames(clip, clip.lens_track[lens], indices, batch_frames=self.config.batch_frames, threads=self.config.decode_threads)
-                        for image in images:
-                            for channel, encoder, table in zip(channels, encoders, tables, strict=True):
-                                _feed(channel, encoder, cube.remap(image, table).tobytes())
-                    finally:
-                        for channel, encoder in zip(channels, encoders, strict=True):
-                            if not encoder.done():
-                                _feed(channel, encoder, None)
-                    fed: list[int] = [encoder.result() for encoder in encoders]
-                if fed != [indices.size] * len(faces):
-                    raise ValueError(f"lens {lens}: the face encoders took {fed} frames for {indices.size} framesets")
-                for cam, video in zip(cams, videos, strict=True):
-                    rr.log(schema.cam_path(RIG, cam), rr.AnyValues(video_codec="av1", cq=self.config.cube_cq, gop=self.config.cube_gop), static=True, recording=recording)
-                    samples: int = log_video_stream(recording, video, schema.video_path(RIG, cam), times_ns=times_ns)
-                    if samples != indices.size:
-                        raise ValueError(f"cam_{cam:02d} holds {samples} frames for {indices.size} framesets")
+                    for images in pairs:
+                        for channel, encoder, table in zip(channels, encoders, tables, strict=True):
+                            _feed(channel, encoder, np.ascontiguousarray(cube.join(images, table)).tobytes())
+                finally:
+                    for channel, encoder in zip(channels, encoders, strict=True):
+                        if not encoder.done():
+                            _feed(channel, encoder, None)
+                fed: list[int] = [encoder.result() for encoder in encoders]
+            if fed != [indices.size] * len(faces):
+                raise ValueError(f"the face encoders took {fed} frames for {indices.size} framesets")
+            for cam, video in zip(cams, videos, strict=True):
+                samples: int = log_video_stream(recording, video, schema.video_path(RIG, cam), times_ns=times_ns)
+                if samples != indices.size:
+                    raise ValueError(f"cam_{cam:02d} holds {samples} frames for {indices.size} framesets")
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Both lenses and the panorama beside the rig in 3D, over the IMU plots."""
