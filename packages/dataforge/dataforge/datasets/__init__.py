@@ -22,12 +22,13 @@ from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
 from dataforge.datasets.show3d import Show3dConfig
 from dataforge.datasets.tartanair import TartanAirConfig
+from dataforge.datasets.tumvi import TumViConfig
 from dataforge.datasets.umetrack import UmetrackConfig
 from dataforge.datasets.vslam_lab import VslamLabConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), GenHumanEgoConfig(), GenrobotConfig(), GsiSixViewConfig(), Harmony4dConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), TartanAirConfig(), UmetrackConfig(), VslamLabConfig(), WildcapConfig())
+    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), GenHumanEgoConfig(), GenrobotConfig(), GsiSixViewConfig(), Harmony4dConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), TartanAirConfig(), TumViConfig(), UmetrackConfig(), VslamLabConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 

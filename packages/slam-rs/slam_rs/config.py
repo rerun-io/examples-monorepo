@@ -28,6 +28,18 @@ class DatasetProperties:
     """Catalog dataset name."""
     vio_config: Path
     """Dataset configuration path, relative to slam.toml."""
+    video_time_is_absolute: bool = field(default=False, skip_if_default=True)
+    """Whether the recordings' ``video_time`` already is the device clock (VSLAM-LAB keeps each benchmark's own stamps).
+
+    False is MSD, whose ``video_time`` is relative to ``property:capture:start_time_ns``;
+    :func:`slam_rs.catalog_feed.dataset_rig` turns it into the feed's rig profile.
+    """
+    frameset_tolerance_ns: int = field(default=0, skip_if_default=True)
+    """How far a camera's frame may sit from cam0's and still join its frameset; 0 demands the identical frame list in every camera.
+
+    EuRoC's raw cameras share stamps, but the VSLAM-LAB conversion keeps cam1 by frame count, not by stamp:
+    MH_04_difficult loses one stereo pair and V2_03_difficult its last 295, so it matches framesets instead.
+    """
 
 
 @serde(type_check=coerce, deny_unknown_fields=True)

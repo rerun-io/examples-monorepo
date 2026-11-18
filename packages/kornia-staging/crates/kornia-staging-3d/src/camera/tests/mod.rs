@@ -160,3 +160,95 @@ fn inverse_stops_backtracking_when_the_candidate_cannot_move() {
 
 #[cfg(feature = "serde")]
 mod basalt;
+
+#[test]
+fn to_f32_narrows_every_parameter_and_refuses_an_invalid_narrowed_model() {
+    let kb4 = [400.0, 400.0, 320.0, 240.0, 0.01, -0.002, 0.0003, 0.0];
+    let mut fisheye = [0.0; 16];
+    fisheye[..4].copy_from_slice(&[400.0, 400.0, 320.0, 240.0]);
+    let models = [
+        CameraModelKind::Pinhole(Pinhole::new([400.1, 410.2, 320.3, 240.4]).unwrap()),
+        CameraModelKind::Kb4(KannalaBrandt4::new(kb4).unwrap()),
+        CameraModelKind::BrownConrady(BrownConrady::new([1.0; 18], Some(0.7)).unwrap()),
+        CameraModelKind::Fisheye624(Fisheye624::new(fisheye).unwrap()),
+        CameraModelKind::DoubleSphere(
+            DoubleSphere::new([400.1, 410.2, 320.3, 240.4, -0.2, 0.6]).unwrap(),
+        ),
+        CameraModelKind::Eucm(Eucm::new([400.1, 410.2, 320.3, 240.4, 0.6, 1.1]).unwrap()),
+        CameraModelKind::Equirectangular(
+            Equirectangular::new([305.6, 305.6, 959.5, 479.5, 3.0]).unwrap(),
+        ),
+        CameraModelKind::Mei(
+            Mei::new(
+                [400.1, 410.2, 320.3, 240.4, 2.3],
+                1.75,
+                MeiDistortion::V3 {
+                    k: [0.1, 0.0, 0.0],
+                    p: [1e-4, 0.0],
+                },
+            )
+            .unwrap(),
+        ),
+        CameraModelKind::Mei(
+            Mei::new(
+                [400.1, 410.2, 320.3, 240.4, 2.3],
+                1.75,
+                MeiDistortion::V6 { d: [1e-3; 13] },
+            )
+            .unwrap(),
+        ),
+    ];
+    for model in models {
+        let narrowed = model.to_f32().unwrap();
+        let expected = match model {
+            CameraModelKind::Pinhole(m) => {
+                CameraModelKind::Pinhole(Pinhole::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::Kb4(m) => {
+                CameraModelKind::Kb4(KannalaBrandt4::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::BrownConrady(m) => CameraModelKind::BrownConrady(
+                BrownConrady::new(
+                    m.params().map(|v| v as f32),
+                    m.valid_radius().map(|v| v as f32),
+                )
+                .unwrap(),
+            ),
+            CameraModelKind::Fisheye624(m) => {
+                CameraModelKind::Fisheye624(Fisheye624::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::DoubleSphere(m) => CameraModelKind::DoubleSphere(
+                DoubleSphere::new(m.params().map(|v| v as f32)).unwrap(),
+            ),
+            CameraModelKind::Eucm(m) => {
+                CameraModelKind::Eucm(Eucm::new(m.params().map(|v| v as f32)).unwrap())
+            }
+            CameraModelKind::Equirectangular(m) => CameraModelKind::Equirectangular(
+                Equirectangular::new(m.params().map(|v| v as f32)).unwrap(),
+            ),
+            CameraModelKind::Mei(m) => {
+                let distortion = match m.distortion() {
+                    MeiDistortion::V3 { k, p } => MeiDistortion::V3 {
+                        k: k.map(|v| v as f32),
+                        p: p.map(|v| v as f32),
+                    },
+                    MeiDistortion::V6 { d } => MeiDistortion::V6 {
+                        d: d.map(|v| v as f32),
+                    },
+                };
+                CameraModelKind::Mei(
+                    Mei::new(
+                        m.params().map(|v| v as f32),
+                        m.half_field_rad() as f32,
+                        distortion,
+                    )
+                    .unwrap(),
+                )
+            }
+        };
+        assert_eq!(narrowed, expected);
+    }
+    // A focal length past f32's range narrows to infinity: no camera.
+    let huge = CameraModelKind::Pinhole(Pinhole::new([1e300, 400.0, 320.0, 240.0]).unwrap());
+    assert!(huge.to_f32().is_none());
+}

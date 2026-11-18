@@ -1,0 +1,29 @@
+# Golden parity tests of staged items against third-party reference outputs stored as `.rrd` on the NAS.
+# A workspace of its own (excluded from ../Cargo.toml): the Rerun 0.42 decoder it needs would otherwise
+# re-resolve the staging lock (kiddo/fixed) and enter the gate's build. Run: pixi run -e kornia-staging-dev
+# --frozen kornia-staging-golden.
+[workspace]
+
+[package]
+name = "kornia-staging-golden"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+description = "Golden tests of staged items against third-party reference outputs stored as .rrd fixtures (not a destination crate)."
+
+[dependencies]
+anyhow = "1"
+arrow = { version = "58.4", default-features = false }
+re_chunk = { version = "=0.42.0", default-features = false }
+re_log_encoding = { version = "=0.42.0", default-features = false, features = ["decoder"] }
+re_log_msg = { version = "=0.42.0", default-features = false }
+
+[dev-dependencies]
+kornia-image = { version = "0.2", default-features = false }
+kornia-bow = "0.2"
+kornia-staging-bow = { path = "../crates/kornia-staging-bow" }
+kornia-staging-imgproc = { path = "../crates/kornia-staging-imgproc", features = ["test-fixtures"] }
+
+[lints.rust]
+unsafe_code = "warn"

@@ -46,3 +46,7 @@ harness = false
 name = "patch_se2"
 harness = false
 required-features = ["test-oracles"]
+
+[[bench]]
+name = "brief"
+harness = false
