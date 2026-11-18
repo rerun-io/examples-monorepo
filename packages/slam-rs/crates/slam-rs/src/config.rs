@@ -893,8 +893,8 @@ mod tests {
         assert_eq!(offline.backend_mode, BackendMode::Offline);
         assert_eq!(
             VioConfig {
-                backend_enabled: false,
-                backend_mode: BackendMode::Realtime,
+                backend_enabled: base.backend_enabled,
+                backend_mode: base.backend_mode,
                 ..offline
             },
             base
