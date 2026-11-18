@@ -77,16 +77,10 @@ def write_masks(path: Path, stamps: list[int]) -> None:
                 recording.log(f"/world/rig_00/cam_0{lens}/pinhole/people_mask", rr.SegmentationImage(disc))
 
 
-def test_lens_discs_land_on_the_front_faces_at_every_face_stamp(tmp_path: Path) -> None:
-    from dataforge.apis.insta360_face_masks import Config, main
-
-    base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
-    write_base(base)
-    write_faces(faces, base)
-    write_masks(masks, [*STAMPS, 999_000_000])
-    main(Config(base=base, masks=masks, faces=faces, output=output))
-    found: dict[str, list[tuple[int, int]]] = {}
-    for chunk in rrc.RrdReader(output).stream():
+def read_masks(path: Path) -> dict[str, list[tuple[int, UInt8[ndarray, "h w"]]]]:
+    """Every face mask of a written layer: ``{entity: [(stamp, mask)]}``."""
+    found: dict[str, list[tuple[int, UInt8[ndarray, "h w"]]]] = {}
+    for chunk in rrc.RrdReader(path).stream():
         batch = chunk.to_record_batch()
         if "SegmentationImage:buffer" in batch.schema.names:
             for stamp, buffer, fmt in zip(
@@ -95,13 +89,48 @@ def test_lens_discs_land_on_the_front_faces_at_every_face_stamp(tmp_path: Path) 
                 batch.column("SegmentationImage:format").to_pylist(),
                 strict=True,
             ):
-                mask = np.asarray(buffer[0], dtype=np.uint8).reshape(fmt[0]["height"], fmt[0]["width"])
-                found.setdefault(chunk.entity_path, []).append((stamp, int(mask.sum())))
+                found.setdefault(chunk.entity_path, []).append(
+                    (stamp, np.asarray(buffer[0], dtype=np.uint8).reshape(fmt[0]["height"], fmt[0]["width"]))
+                )
+    return found
+
+
+def test_lens_discs_land_on_the_front_faces_at_every_face_stamp(tmp_path: Path) -> None:
+    from dataforge.apis.insta360_face_masks import Config, main
+
+    base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
+    write_base(base)
+    write_faces(faces, base)
+    write_masks(masks, [*STAMPS, 999_000_000])
+    main(Config(base=base, masks=masks, faces=faces, output=output, mask_invalid=False))
+    found = read_masks(output)
     assert sorted(found) == [f"/world/rig_00/cam_{cam:02d}/pinhole/people_mask" for cam in range(2, 12)]
     for entity, rows in found.items():
         assert sorted(stamp for stamp, _ in rows) == STAMPS, entity
         front: bool = entity.endswith(("cam_02/pinhole/people_mask", "cam_07/pinhole/people_mask"))
-        assert all((count > 0) == front for _, count in rows), entity
+        assert all((mask.sum() > 0) == front for _, mask in rows), entity
+
+
+def test_by_default_the_mask_also_covers_the_wedge_outside_the_lens_field_grown_by_the_margin(tmp_path: Path) -> None:
+    from dataforge.apis.insta360_face_masks import Config, main
+
+    base, faces, masks = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks"))
+    write_base(base)
+    write_faces(faces, base)
+    write_masks(masks, STAMPS)
+    plain, default, wide = (tmp_path / f"{name}.rrd" for name in ("plain", "default", "wide"))
+    main(Config(base=base, masks=masks, faces=faces, output=plain, mask_invalid=False))
+    main(Config(base=base, masks=masks, faces=faces, output=default))
+    main(Config(base=base, masks=masks, faces=faces, output=wide, invalid_margin_px=8))
+    people, masked, wider = read_masks(plain), read_masks(default), read_masks(wide)
+    for entity, rows in masked.items():
+        for (_, person), (_, mask), (_, grown) in zip(people[entity], rows, wider[entity], strict=True):
+            assert (mask >= person).all() and (grown >= mask).all()
+            if entity.endswith(("cam_02/pinhole/people_mask", "cam_07/pinhole/people_mask")):
+                np.testing.assert_array_equal(mask, person)  # a front face has no wedge
+            else:
+                # The wedge is a few pixels at the middle of the far edge; the margin grows it, more with 8 px than 4.
+                assert 0 < mask.sum() < grown.sum() < mask.size // 10, entity
 
 
 def test_a_face_stamp_without_a_lens_mask_is_an_error(tmp_path: Path) -> None:

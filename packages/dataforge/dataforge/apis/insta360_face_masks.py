@@ -4,7 +4,8 @@ Reads (a) the base recording (the two Mei lens cameras), (b) a mask layer with `
 ``/world/rig_00/cam_0{0,1}/pinhole/people_mask`` at lens resolution on ``video_time``, and (c) the cube layer (each
 face's ``Pinhole``, face-from-IMU ``Transform3D`` and ``source_lens``, and the face frame stamps). Writes a layer with
 ``SegmentationImage`` at ``/world/rig_00/cam_NN/pinhole/people_mask`` (NN = 02..11) on every face frame stamp, remapped
-with nearest-neighbour interpolation; pixels outside the lens field are 0. A face stamp without a mask on its lens is
+with nearest-neighbour interpolation. By default (``mask_invalid``) the mask is also 1 outside the lens field, grown by
+``invalid_margin_px``, so the one mask per face holds everything a consumer must ignore. A face stamp without a mask on its lens is
 an error.
 """
 
@@ -14,10 +15,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 
 from dataforge import schema, writing
@@ -42,6 +44,19 @@ class Config:
     """The cube layer (face geometry and stamps)."""
     output: Path
     """The face mask layer to write."""
+    mask_invalid: bool = True
+    """Also set the mask to 1 outside the lens field (the side faces' black wedges), so one mask per face says what to ignore."""
+    invalid_margin_px: int = 4
+    """Grow the outside-the-field region by this many pixels: encoded pixels next to the wedge are dark."""
+
+
+def invalid_region(valid: Bool[ndarray, "h w"], margin_px: int) -> UInt8[ndarray, "h w"]:
+    """1 outside the lens field, grown by ``margin_px`` (a disc); 0 elsewhere."""
+    outside: UInt8[ndarray, "h w"] = (~valid).astype(np.uint8)
+    if margin_px <= 0:
+        return outside
+    kernel: UInt8[ndarray, "k k"] = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin_px + 1, 2 * margin_px + 1))
+    return cv2.dilate(outside, kernel)
 
 
 def face_statics(faces: Path) -> dict[int, dict[str, object]]:
@@ -123,6 +138,11 @@ def main(config: Config) -> None:
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
     tables: dict[int, cube.RemapTable] = {cam: cube.remap_table(face, lenses.cameras[face.lens]) for cam, face in faces.items()}
     stamps: Int64[ndarray, " k"] = face_stamps(config.faces)
+    # The table's validity is the cube layer's valid_mask: the same Mei model and face geometry.
+    outside: dict[int, UInt8[ndarray, "h w"]] = {
+        cam: invalid_region(table.valid, config.invalid_margin_px) if config.mask_invalid else np.zeros(table.valid.shape, np.uint8)
+        for cam, table in tables.items()
+    }
     seen: dict[int, set[int]] = {0: set(), 1: set()}
     lens_size: tuple[int, int] = (lenses.size[1], lenses.size[0])
     with writing.atomic_recording(config.output, recording_id=config.base.stem, send_properties=False) as recording:
@@ -136,7 +156,9 @@ def main(config: Config) -> None:
             for cam, face in faces.items():
                 if face.lens == lens:
                     rr.log(
-                        f"{schema.pinhole_path(RIG, cam)}/{MASK_NAME}", rr.SegmentationImage(cube.remap_mask(mask, tables[cam])), recording=recording
+                        f"{schema.pinhole_path(RIG, cam)}/{MASK_NAME}",
+                        rr.SegmentationImage(cube.remap_mask(mask, tables[cam]) | outside[cam]),
+                        recording=recording,
                     )
         for lens, found in seen.items():
             absent: list[int] = sorted({int(s) for s in stamps} - found)
