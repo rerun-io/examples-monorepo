@@ -1,4 +1,4 @@
-"""Cube faces of an Insta360 lens: face geometry, the remap tables through the Rust Mei model, and the cross-lens seam."""
+"""The six-face cubemap of an Insta360 frameset: face geometry, the seam, the joined tables through the Rust Mei model."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from numpy import ndarray
 LENS: int = 384
 """Synthetic lens image size: a fifth of the X4 Air's 1920."""
 FACE: int = 160
-"""Face size of the synthetic tests (side faces 96 = 0.6 N)."""
+"""Face size of the synthetic tests."""
 XI: float = 2.315
 """Clip B's xi."""
 FOCAL: float = 1835.37 * LENS / 1920
@@ -41,152 +41,121 @@ def colour(rays: Float64[ndarray, "... 3"]) -> Float64[ndarray, "... 3"]:
     return 127.5 + 120.0 * unit
 
 
-def test_the_default_face_size_is_800_at_1920_and_every_side_is_a_multiple_of_32() -> None:
-    from dataforge.datasets.insta360_cube import default_face_size, lens_faces, side_size
+LENS1_FROM_LENS0: Float64[ndarray, "3 3"] = np.diag([-1.0, 1.0, -1.0]) @ np.array(
+    [[1.0, 0.0, 0.0], [0.0, np.cos(0.01), -np.sin(0.01)], [0.0, np.sin(0.01), np.cos(0.01)]]
+)
+"""Lens 1 looks the other way (half a turn about y), tilted 0.6 deg so the rotation path is exercised."""
+
+
+def test_the_default_face_size_is_800_at_1920_and_a_face_size_must_be_a_multiple_of_32() -> None:
+    from dataforge.datasets.insta360_cube import cube_faces, default_face_size
 
     assert default_face_size(1920) == 800
-    assert side_size(800) == 480
     assert default_face_size(3840) == 1600
-    for n in (160, 800, 1216, 1600):
-        for face in lens_faces(0, n):
-            assert face.width % 32 == 0 and face.height % 32 == 0
-    assert {(f.direction, f.width, f.height) for f in lens_faces(1, 800)} == {
-        ("front", 800, 800),
-        ("left", 480, 800),
-        ("right", 480, 800),
-        ("up", 800, 480),
-        ("down", 800, 480),
-    }
+    assert [face.size for face in cube_faces(800)] == [800] * 6
     with pytest.raises(ValueError, match="multiple of 32"):
-        lens_faces(0, 810)
+        cube_faces(810)
 
 
-def test_face_rotations_are_proper_and_each_face_looks_along_its_direction() -> None:
-    from dataforge.datasets.insta360_cube import lens_faces
+def test_the_six_faces_are_proper_rotations_that_look_along_each_cube_axis_once() -> None:
+    from dataforge.datasets.insta360_cube import cube_faces
 
-    looks: dict[str, tuple[float, float, float]] = {"front": (0, 0, 1), "right": (1, 0, 0), "left": (-1, 0, 0), "down": (0, 1, 0), "up": (0, -1, 0)}
-    for face in lens_faces(0, FACE):
-        rotation: Float64[ndarray, "3 3"] = face.lens_from_face
+    faces = cube_faces(FACE)
+    assert [face.name for face in faces] == ["cube6_front0", "cube6_front1", "cube6_left", "cube6_right", "cube6_up", "cube6_down"]
+    looks: list[tuple[float, ...]] = []
+    for face in faces:
+        rotation: Float64[ndarray, "3 3"] = face.cube_from_face
         np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-12)
         assert np.linalg.det(rotation) == pytest.approx(1.0)
-        np.testing.assert_allclose(rotation[:, 2], looks[face.direction])
-        assert face.intrinsics[0, 0] == face.intrinsics[1, 1] == FACE / 2
-        assert face.name == f"cube_0_{face.direction}"
+        looks.append(tuple(rotation[:, 2]))
+        np.testing.assert_allclose(face.intrinsics, [[FACE / 2, 0, (FACE - 1) / 2], [0, FACE / 2, (FACE - 1) / 2], [0, 0, 1]])
+    assert looks == [(0, 0, 1), (0, 0, -1), (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0)]
+    # Every direction is seen by exactly one face: the largest |coordinate| of a ray picks its face.
+    rng = np.random.default_rng(0)
+    for ray in rng.normal(size=(200, 3)):
+        seen: list[bool] = []
+        for face in faces:
+            local: Float64[ndarray, "3"] = face.cube_from_face.T @ ray
+            seen.append(bool(local[2] > 0 and abs(local[0]) < local[2] and abs(local[1]) < local[2]))
+        assert sum(seen) == 1
 
 
-def test_only_the_middle_of_a_side_face_s_far_edge_lies_past_the_100_deg_field() -> None:
-    """Tangent 0.2 past the seam is 11.3 deg on the face's centre line, beyond the 100 deg half field there only."""
-    from dataforge.datasets.insta360_cube import lens_faces, remap_table
+def test_the_seam_is_the_centre_line_of_the_four_side_faces() -> None:
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
 
-    for face in lens_faces(0, FACE):
-        rays: Float64[ndarray, "h w 3"] = face.rays() @ face.lens_from_face.T
-        off_axis_deg: Float64[ndarray, "h w"] = np.degrees(np.arccos(rays[..., 2] / np.linalg.norm(rays, axis=-1)))
-        valid = remap_table(face, camera()).valid
-        np.testing.assert_array_equal(valid, off_axis_deg <= 100.0)
-        if face.direction == "front":
-            assert off_axis_deg.max() < 55.0
-        else:
-            assert off_axis_deg.max() == pytest.approx(101.1, abs=0.3)
-            assert 0.98 < valid.mean() < 1.0
-            # The far edge: the corners stay inside the field (98 deg), the middle does not.
-            far = (
-                valid[:, -1]
-                if face.direction == "right"
-                else valid[:, 0]
-                if face.direction == "left"
-                else valid[-1]
-                if face.direction == "down"
-                else valid[0]
-            )
-            assert far[0] and far[-1] and not far[len(far) // 2]
+    for face in cube_faces(FACE):
+        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0).use_lens0
+        half: int = FACE // 2
+        expected: dict[str, bool] = {"cube6_front0": True, "cube6_front1": False}
+        if face.name in expected:
+            assert (use0 == expected[face.name]).all()
+            continue
+        # Lens 0 holds the half toward +Z0: image right on left, image left on right, image bottom on up, top on down.
+        sides = {
+            "cube6_left": (slice(None), slice(half, None)),
+            "cube6_right": (slice(None), slice(None, half)),
+            "cube6_up": (slice(half, None), slice(None)),
+            "cube6_down": (slice(None, half), slice(None)),
+        }
+        lens0 = np.zeros_like(use0)
+        lens0[sides[face.name]] = True
+        np.testing.assert_array_equal(use0, lens0)
 
 
-def test_a_face_remapped_from_a_painted_lens_shows_the_colour_of_its_own_rays() -> None:
-    from dataforge.datasets.insta360_cube import lens_faces, remap, remap_table
+def test_a_face_pixel_outside_the_lens_it_is_read_from_is_refused() -> None:
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
+
+    centre: float = (LENS - 1) / 2.0
+    narrow = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [XI, np.deg2rad(80.0)] + [0.0] * 13)
+    with pytest.raises(ValueError, match="outside the lens"):
+        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0)
+
+
+def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> None:
+    """Paint each lens from one colour-of-direction function (cube frame); every joined face shows it on its rays."""
+    from dataforge.datasets.insta360_cube import cube_faces, face_table, join
 
     u, v = np.meshgrid(np.arange(LENS, dtype=np.float64), np.arange(LENS, dtype=np.float64))
-    lens_image: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(unproject(u, v))), 0, 255).astype(np.uint8)
-    for face in lens_faces(0, FACE):
-        table = remap_table(face, camera())
-        expected: Float64[ndarray, "h w 3"] = colour(face.rays() @ face.lens_from_face.T)
-        error: Float64[ndarray, "n 3"] = np.abs(remap(lens_image, table).astype(np.float64) - expected)[table.valid]
-        # Bilinear interpolation of a smooth field plus the 0.5 rounding of the painted lens.
+    lens_rays: Float64[ndarray, "h w 3"] = unproject(u, v)
+    lens0: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays)), 0, 255).astype(np.uint8)
+    lens1: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays @ LENS1_FROM_LENS0)), 0, 255).astype(np.uint8)
+    for face in cube_faces(FACE):
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        expected: Float64[ndarray, "h w 3"] = colour(face.rays() @ face.cube_from_face.T)
+        error: Float64[ndarray, "h w 3"] = np.abs(join((lens0, lens1), table).astype(np.float64) - expected)
+        # Bilinear interpolation of a smooth field plus the 0.5 rounding of the painted lenses; no seam step.
         assert error.max() < 2.0, f"{face.name}: {error.max():.2f}"
 
 
-def test_a_ray_outside_the_half_field_maps_to_black() -> None:
-    from dataforge.datasets.insta360_cube import CubeFace, remap, remap_table
+def test_a_lens_mask_joins_nearest_onto_the_face_that_sees_it() -> None:
+    from dataforge.datasets.insta360_cube import cube_faces, face_table, join
 
-    centre: float = (FACE - 1) / 2
-    backward: CubeFace = CubeFace(
-        0, "back", np.diag([-1.0, 1.0, -1.0]), np.array([[FACE / 2, 0, centre], [0, FACE / 2, centre], [0, 0, 1.0]]), FACE, FACE
-    )
-    table = remap_table(backward, camera())
-    assert not table.valid.any()
-    assert (table.map_x == -1).all()
-    assert not remap(np.full((LENS, LENS, 3), 200, np.uint8), table).any()
-
-
-def test_the_seam_strips_of_the_two_lenses_see_the_same_directions() -> None:
-    """Lens 1 looks the other way (half a turn about y): each lens-0 side face has a lens-1 twin over the same strip."""
-    from dataforge.datasets.insta360_cube import lens_faces
-
-    lens0_from_lens1: Float64[ndarray, "3 3"] = np.diag([-1.0, 1.0, -1.0])
-    twins: dict[str, str] = {"right": "left", "left": "right", "up": "up", "down": "down"}
-    faces1 = {face.direction: face for face in lens_faces(1, FACE)}
-    for face0 in lens_faces(0, FACE)[1:]:
-        face1 = faces1[twins[face0.direction]]
-        np.testing.assert_allclose(lens0_from_lens1 @ face1.lens_from_face[:, 2], face0.lens_from_face[:, 2], atol=1e-12)
-        rays0: Float64[ndarray, "n 3"] = face0.rays().reshape(-1, 3)
-        across: int = 0 if face0.direction in ("left", "right") else 1
-        strip: Float64[ndarray, "m 3"] = rays0[np.abs(rays0[:, across]) <= 0.19]
-        assert len(strip) > 0
-        in_face1: Float64[ndarray, "m 3"] = (face1.lens_from_face.T @ lens0_from_lens1.T @ face0.lens_from_face @ strip.T).T
-        pixels: Float64[ndarray, "m 3"] = (face1.intrinsics @ (in_face1 / in_face1[:, 2:]).T).T
-        assert (pixels[:, 0] > -0.5).all() and (pixels[:, 0] < face1.width - 0.5).all()
-        assert (pixels[:, 1] > -0.5).all() and (pixels[:, 1] < face1.height - 0.5).all()
-
-
-def test_a_face_pose_in_the_rig_keeps_the_lens_centre() -> None:
-    from dataforge.datasets.insta360_cube import face_from_rig, lens_faces
-
-    lens_from_rig: Float64[ndarray, "4 4"] = np.eye(4)
-    lens_from_rig[:3, :3] = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
-    lens_from_rig[:3, 3] = [0.01, -0.02, 0.0166]
-    centre_in_rig: Float64[ndarray, "3"] = -lens_from_rig[:3, :3].T @ lens_from_rig[:3, 3]
-    for face in lens_faces(0, FACE):
-        pose: Float64[ndarray, "4 4"] = face_from_rig(face, lens_from_rig)
-        np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], centre_in_rig, atol=1e-12)
-        np.testing.assert_allclose(pose[:3, :3].T[:, 2], lens_from_rig[:3, :3].T @ face.lens_from_face[:, 2], atol=1e-12)
-
-
-def disc(centre: tuple[float, float], radius: float) -> UInt8[ndarray, "h w"]:
-    """A lens-plane label image: 1 inside a disc, 0 elsewhere."""
+    centre: float = (LENS - 1) / 2.0
     u, v = np.meshgrid(np.arange(LENS, dtype=np.float64), np.arange(LENS, dtype=np.float64))
-    return ((u - centre[0]) ** 2 + (v - centre[1]) ** 2 <= radius**2).astype(np.uint8)
-
-
-def test_a_disc_on_the_lens_lands_on_the_face_pixels_whose_rays_hit_it() -> None:
-    from dataforge.datasets.insta360_cube import lens_faces, remap_mask, remap_table
-
-    faces = {face.direction: face for face in lens_faces(0, FACE)}
-    # Discs on the optical axis and 80 deg toward +X (inside the right face, short of the seam).
-    targets: dict[str, Float64[ndarray, "3"]] = {
-        "front": np.array([0.0, 0.0, 1.0]),
-        "right": np.array([np.sin(np.deg2rad(80)), 0.0, np.cos(np.deg2rad(80))]),
-    }
-    for direction, ray in targets.items():
-        pixels, valid = camera().project(ray[None, :])
-        assert valid[0]
-        centre: tuple[float, float] = (float(pixels[0, 0]), float(pixels[0, 1]))
-        face = faces[direction]
-        table = remap_table(face, camera())
-        mask: UInt8[ndarray, "h w"] = remap_mask(disc(centre, 12.0), table)
-        assert set(np.unique(mask)) == {0, 1}
-        distance: Float64[ndarray, "h w"] = np.hypot(table.map_x - centre[0], table.map_y - centre[1])
-        # Nearest neighbour: a face pixel is 1 when its lens sample rounds into the disc.
+    disc: UInt8[ndarray, "h w"] = (np.hypot(u - centre, v - centre) <= 12.0).astype(np.uint8)
+    empty: UInt8[ndarray, "h w"] = np.zeros_like(disc)
+    for face in cube_faces(FACE):
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        mask: UInt8[ndarray, "n n"] = join((empty, disc), table, nearest=True)
+        assert set(np.unique(mask)) <= {0, 1}
+        if face.name != "cube6_front1":
+            assert not mask.any(), face.name
+            continue
+        distance: Float64[ndarray, "n n"] = np.hypot(table.map_x[1] - centre, table.map_y[1] - centre)
         assert (distance[mask == 1] <= 12.0 + 0.75).all()
         assert (mask[distance <= 12.0 - 0.75] == 1).all()
-        for other in faces.values():
-            if other.direction not in (direction, "front" if direction != "front" else "_"):
-                assert not remap_mask(disc(centre, 12.0), remap_table(other, camera())).any(), other.name
+
+
+def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:
+    from dataforge.datasets.insta360_cube import cube_faces, face_from_rig
+
+    lens_from_rig: list[Float64[ndarray, "4 4"]] = [np.eye(4), np.eye(4)]
+    lens_from_rig[0][:3, :3] = np.array([[0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    lens_from_rig[1][:3, :3] = LENS1_FROM_LENS0 @ lens_from_rig[0][:3, :3]
+    centres: list[Float64[ndarray, "3"]] = [np.array([0.01, -0.0166, 0.002]), np.array([0.01, 0.0166, 0.0])]
+    for pose, centre in zip(lens_from_rig, centres, strict=True):
+        pose[:3, 3] = -pose[:3, :3] @ centre
+    for face in cube_faces(FACE):
+        pose = face_from_rig(face, lens_from_rig)
+        np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], (centres[0] + centres[1]) / 2, atol=1e-12)
+        np.testing.assert_allclose(pose[:3, :3].T, lens_from_rig[0][:3, :3].T @ face.cube_from_face, atol=1e-12)
