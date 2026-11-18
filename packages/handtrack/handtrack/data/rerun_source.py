@@ -206,18 +206,29 @@ def coco133_labels(dataset, spec: SourceSpec, segment: str) -> FrameLabels:
         out.net_xy[at, c] = hands.net_xy
         out.in_front[at, c] = hands.in_front
     if teacher:
-        out.hand_label[teacher_unsure_sides(out.hand_label, out.image_valid)] = int(HandLabel.PARTIAL)
+        out.hand_label[teacher_unsure_sides(out.hand_label, out.image_valid, TEACHER_VIEW_GROUPS[spec.dataset])] = int(HandLabel.PARTIAL)
     return out
 
 
-def teacher_unsure_sides(hand_label: Int64[Tensor, "f c 2"], image_valid: Bool[Tensor, "f c"]) -> Bool[Tensor, "f c 2"]:
-    """Hands a teacher calls absent in a labelled image while it finds the same side in another camera of that frame.
+TEACHER_VIEW_GROUPS: dict[str, tuple[tuple[int, ...], ...]] = {"robocap-hands": ((0, 1, 2, 3), (4,), (5,))}
+"""Cameras of a teacher-labelled dataset that look at the same workspace. RoboCap's front pair (0-1) and down pair (2-3) see the hands
+together; the side cameras (4 left, 5 right) look away from them and see a hand only now and then."""
+
+
+def teacher_unsure_sides(hand_label: Int64[Tensor, "f c 2"], image_valid: Bool[Tensor, "f c"], groups: tuple[tuple[int, ...], ...]) -> Bool[Tensor, "f c 2"]:
+    """Hands a teacher calls absent in a labelled image while it finds the same side in another camera of that frame's view group.
 
     The teacher misses about a third of the hands a reviewer sees on RoboCap (2026-11-17, against Astra-reviewed boxes), and an
-    absent label teaches the detector to miss them too. When the side is in the scene, its absence here is unknown, so it gets
-    no presence loss (``PARTIAL``); frames where no camera finds the side keep their absent labels."""
-    seen: Bool[Tensor, "f 1 2"] = (hand_label == int(HandLabel.PRESENT)).any(dim=1, keepdim=True)
-    return (hand_label == int(HandLabel.ABSENT)) & seen & image_valid[..., None]
+    absent label teaches the detector to miss them too. When the side is in that group's view, its absence here is unknown, so it gets
+    no presence loss (``PARTIAL``). Cameras outside the group keep their absent labels: applying the rule across every camera left
+    the side cameras with almost no negatives, and a mid-run model hallucinated hands there (precision 0.33 -> 0.03)."""
+    unsure: Bool[Tensor, "f c 2"] = torch.zeros_like(image_valid[..., None].expand_as(hand_label))
+    for group in groups:
+        cameras: list[int] = list(group)
+        labels: Int64[Tensor, "f g 2"] = hand_label[:, cameras]
+        seen: Bool[Tensor, "f 1 2"] = (labels == int(HandLabel.PRESENT)).any(dim=1, keepdim=True)
+        unsure[:, cameras] = (labels == int(HandLabel.ABSENT)) & seen & image_valid[:, cameras, None]
+    return unsure
 
 
 def segment_frame_labels(dataset, spec: SourceSpec, segment: str, infos: dict) -> FrameLabels:
