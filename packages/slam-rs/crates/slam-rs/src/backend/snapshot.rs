@@ -98,15 +98,7 @@ impl MapBackend {
             point_ids,
             point_hosts,
             points_world,
-            covisibility_edges: graph
-                .node_ids()
-                .flat_map(|a| {
-                    graph
-                        .neighbours(a)
-                        .filter(move |&(b, _)| b > a)
-                        .map(move |(b, weight)| (a, b, weight))
-                })
-                .collect(),
+            covisibility_edges: graph.edges().collect(),
             stats: self.stats(),
             culls: self.cull_counts(),
             high_covisibility_weight: self.high_covisibility_weight(),

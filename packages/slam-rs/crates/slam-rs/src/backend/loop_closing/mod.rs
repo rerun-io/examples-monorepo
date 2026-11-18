@@ -687,7 +687,7 @@ impl MapBackend {
             schedule: config
                 .pnp_ransac_fixed_iterations
                 .map_or_else(IterationSchedule::default, |iterations| {
-                    IterationSchedule::RootSlamParity { iterations }
+                    IterationSchedule::OpenGv { iterations }
                 }),
             seed,
             refine: true,

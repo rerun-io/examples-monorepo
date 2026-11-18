@@ -6,8 +6,8 @@
 //! (`m >= log(1 - p) / log(1 - w^k)`, tightened as better models land). It is a
 //! copy, checked draw for draw against upstream under the `kornia-3d-interop`
 //! feature (`tests/gp3p_ransac.rs`), because kornia-3d depends on faer, which
-//! slam-rs removed for an aarch64 LLVM crash; the `ransac` feature needs only
-//! `rand`. Every random draw comes from one seeded [`ChaCha8Rng`]: the same
+//! consumers that hit faer's aarch64 LLVM crash cannot link; the `ransac`
+//! feature needs only `rand`. Every random draw comes from one seeded [`ChaCha8Rng`]: the same
 //! input and seed give the same pose and inliers, on any thread count.
 //!
 //! RootSLAM (`loop_closing.cpp:583-605`) runs OpenGV's `Ransac` with a sample of
@@ -21,11 +21,11 @@
 //! on 100 synthetic scenes at w = 0.3 (`tests/gp3p_ransac.rs`), the parity
 //! schedule finds the pose in about half of them, the adaptive one in all.
 //! [`IterationSchedule::Adaptive`] samples three, scores every solution, and caps
-//! at 500 with `p = 0.999`; [`IterationSchedule::RootSlamParity`] keeps OpenGV's
-//! sampling, confidence and cap for the rootslam-parity profile.
+//! at 500 with `p = 0.999`; [`IterationSchedule::OpenGv`] keeps OpenGV's
+//! sampling, confidence and cap, for a caller that needs OpenGV's draws.
 //!
 //! A caller that rejects loops below an inlier ratio (RootSLAM's
-//! `pnp_inliers_ratio`, DESIGN B1) passes it as
+//! `pnp_inliers_ratio`) passes it as
 //! [`Gp3pRansacConfig::min_inlier_ratio`]: the draws then stop once an
 //! acceptable model would have been found with the schedule's confidence, so a
 //! rejected candidate costs about 52 draws at 0.5 (17 at 0.7) instead of the cap.
@@ -34,12 +34,6 @@ use super::{refine, solve, validate, GeneralizedCorrespondence, Gp3pError, Gp3pP
 use kornia_staging_algebra::lie::RigidTransform;
 use rand::rngs::ChaCha8Rng;
 use rand::SeedableRng;
-
-/// RootSLAM's `loop_closing_pnp_ransac_threshold`: `1 - cos(angle)`, about
-/// 0.57° (10 mrad).
-pub const ROOTSLAM_THRESHOLD: f64 = 5e-5;
-/// RootSLAM's `loop_closing_pnp_ransac_iterations` on MSD and EuRoC (20 on TUM-VI).
-pub const ROOTSLAM_ITERATIONS: u32 = 35;
 
 /// How many hypotheses RANSAC draws.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,7 +49,6 @@ pub enum IterationSchedule {
     /// OpenGV as RootSLAM calls it: samples of four, the fourth correspondence
     /// picks among the GP3P solutions, confidence 0.99, and at most
     /// `iterations + 1` draws (OpenGV breaks on `iterations_ > max_iterations_`).
-    /// For the rootslam-parity profile only.
     ///
     /// Two known differences from OpenGV's draw count: here every draw counts,
     /// also one whose triple has no solution, where OpenGV skips a draw whose
@@ -64,27 +57,18 @@ pub enum IterationSchedule {
     /// which OpenGV keeps and scores. Draws without a solution are frequent
     /// (40-57 % of random triples at w = 0.3), so OpenGV evaluates somewhat
     /// more hypotheses for the same cap.
-    RootSlamParity {
-        /// `loop_closing_pnp_ransac_iterations`.
+    OpenGv {
+        /// OpenGV's `max_iterations_`.
         iterations: u32,
     },
 }
 
 impl Default for IterationSchedule {
-    /// `p = 0.999`, cap 500 (DESIGN B15).
+    /// `p = 0.999`, cap 500 (OpenGV's 20-35 binds: see the module doc).
     fn default() -> Self {
         Self::Adaptive {
             confidence: 0.999,
             max_iterations: 500,
-        }
-    }
-}
-
-impl IterationSchedule {
-    /// RootSLAM's MSD setting.
-    pub fn rootslam_parity() -> Self {
-        Self::RootSlamParity {
-            iterations: ROOTSLAM_ITERATIONS,
         }
     }
 }
@@ -105,14 +89,15 @@ pub struct Gp3pRansacConfig {
     /// and confidence `p` of the schedule) when that is below the schedule's
     /// cap: by then a model with `w_min` inliers would have been drawn with
     /// probability `p`, and a model below `w_min` is rejected by the caller.
-    /// Must lie in `(0, 1]`. The rootslam-parity profile passes `None`.
+    /// Must lie in `(0, 1]`.
     pub min_inlier_ratio: Option<f64>,
 }
 
 impl Default for Gp3pRansacConfig {
     fn default() -> Self {
         Self {
-            threshold: ROOTSLAM_THRESHOLD,
+            // `1 - cos(angle)`, about 0.57° (10 mrad): RootSLAM's loop-closing value.
+            threshold: 5e-5,
             schedule: IterationSchedule::default(),
             seed: 0,
             refine: true,
@@ -323,7 +308,7 @@ pub fn gp3p_ransac(
             confidence,
             max_iterations,
         } => (confidence, max_iterations, 3),
-        IterationSchedule::RootSlamParity { iterations } => (0.99, iterations.saturating_add(1), 4),
+        IterationSchedule::OpenGv { iterations } => (0.99, iterations.saturating_add(1), 4),
     };
     let max_iters = config
         .min_inlier_ratio
