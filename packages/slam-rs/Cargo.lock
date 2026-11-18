@@ -3266,6 +3266,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "kornia-image",
+ "kornia-staging-3d",
  "libc",
  "openh264",
  "thiserror",

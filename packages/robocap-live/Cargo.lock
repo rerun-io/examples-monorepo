@@ -3043,6 +3043,7 @@ name = "kornia-staging-io"
 version = "0.1.0"
 dependencies = [
  "kornia-image",
+ "kornia-staging-3d",
  "libc",
  "thiserror",
 ]
