@@ -156,8 +156,11 @@ impl<B: BackendWork> State<B> {
 /// `Arc` swap, never a step.
 struct Board<V> {
     posted: Mutex<Posted<V>>,
-    /// A reader has asked for a view: from then on the thread posts them.
-    subscribed: AtomicBool,
+    /// A reader has asked for a view since the last one posted: the next step
+    /// or query that changes the work posts one (and clears it). Views are
+    /// O(map), and readers take one a second at most, so the thread copies
+    /// the map only when one was asked for.
+    wanted: AtomicBool,
 }
 
 struct Posted<V> {
@@ -175,10 +178,11 @@ impl<V> Board<V> {
         }
     }
 
-    /// Post the counters and, when `take_view` (and on `force`), a new view.
+    /// Post the counters and, on `force` or when `take_view` and a reader
+    /// asked, a new view.
     fn post<B: BackendWork<View = V>>(&self, state: &mut State<B>, take_view: bool, force: bool) {
         let mut latest: Option<BackendView<V>> = None;
-        if force || (take_view && self.subscribed.load(Ordering::Acquire)) {
+        if force || (take_view && self.wanted.swap(false, Ordering::AcqRel)) {
             let started = std::time::Instant::now();
             let view: B::View = state.work.view();
             state.counters.publish.record(crate::duration_ns(started));
@@ -255,7 +259,7 @@ impl<B: BackendWork> BackendRunner<B> {
                     counters: first.counters,
                     latest: first,
                 }),
-                subscribed: AtomicBool::new(false),
+                wanted: AtomicBool::new(false),
             });
             let handle = std::thread::Builder::new()
                 .name("slam-rs-backend".into())
@@ -338,14 +342,15 @@ impl<B: BackendWork> BackendRunner<B> {
 
     /// A copy of the work and the counters it goes with; never waits for a
     /// step or query. Offline it is taken now (the steps run inside `submit`).
-    /// Realtime it is the newest one the thread posted: the first call returns
-    /// the one taken at start and asks the thread to post from then on; after
-    /// [`Self::flush`] it is current.
+    /// Realtime it is the newest one the thread posted, and the call asks the
+    /// thread to post a new one at the next change (so a reader that reads
+    /// once a second sees a map at most one read old); after [`Self::flush`]
+    /// it is current.
     pub fn view(&self) -> BackendView<B::View> {
         let Some(thread) = &self.thread else {
             return lock(&self.state).view();
         };
-        thread.board.subscribed.store(true, Ordering::Release);
+        thread.board.wanted.store(true, Ordering::Release);
         let mut latest: BackendView<B::View> = thread.board.posted().latest.clone();
         latest.counters.max_pending_stamps = thread.max_pending;
         latest
@@ -631,6 +636,25 @@ mod tests {
             "{:?}",
             current.counters
         );
+    }
+
+    /// Realtime copies the map only when a reader asked: without a `view` call
+    /// only the flush posts one.
+    #[test]
+    fn a_realtime_view_is_posted_only_when_a_reader_asks() {
+        let mut runner = BackendRunner::new(Recorder::default(), BackendMode::Realtime, 4).unwrap();
+        for t_ns in 0..5 {
+            runner.submit(stamp(t_ns));
+        }
+        runner.flush();
+        assert_eq!(runner.counters().publish.steps, 1, "the flush's post alone");
+        assert_eq!(*runner.view().view, vec![0, 1, 2, 3, 4]);
+        for t_ns in 5..8 {
+            runner.submit(stamp(t_ns));
+        }
+        runner.flush();
+        // At most one post for the one request, then the flush's.
+        assert!((2..=3).contains(&runner.counters().publish.steps));
     }
 
     /// Offline takes a view on demand, never posts one, and the view's

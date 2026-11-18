@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
-use crate::types::FrameId;
+use crate::types::{FrameId, LandmarkId};
 
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
@@ -358,25 +358,25 @@ impl MapBackend {
             let Some(landmark) = self.map.landmark(landmark_id) else {
                 continue;
             };
-            let others: BTreeSet<FrameId> = landmark
-                .obs
-                .keys()
-                .chain([&landmark.host])
-                .map(|image| image.frame_id)
-                .filter(|&other| other != id && self.graph.contains(other))
-                .collect();
-            for other in others {
-                *shared.entry(other).or_insert(0) += 1;
+            // Each observing keyframe once, and the host if it observes none.
+            let host: FrameId = landmark.host.frame_id;
+            let host_alone: Option<FrameId> =
+                (!landmark.frames().any(|f| f == host)).then_some(host);
+            for other in landmark.frames().chain(host_alone) {
+                if other != id && self.graph.contains(other) {
+                    *shared.entry(other).or_insert(0) += 1;
+                }
             }
         }
         shared
     }
 
-    /// `cullKeyframe`: remove `id` from the map and the graph, and lower the
-    /// edges between the keyframes that shared a landmark the removal took.
-    /// Returns the keyframes whose score inputs changed: `id`'s graph neighbours
-    /// and loop partners, and the observers of the landmarks it took. `None`,
-    /// changing nothing, for a protected or unknown keyframe.
+    /// `cullKeyframe`: remove `id` from the map and the graph; each landmark
+    /// the removal took lowers the edge between every two of its other
+    /// observers by one. Returns the keyframes whose score inputs changed:
+    /// `id`'s graph neighbours and loop partners, and the observers and hosts
+    /// of the landmarks it took. `None`, changing nothing, for a protected or
+    /// unknown keyframe.
     fn cull_keyframe(&mut self, id: FrameId) -> Option<BTreeSet<FrameId>> {
         if self.is_protected(id) {
             return None;
@@ -389,28 +389,103 @@ impl MapBackend {
             .chain(self.graph.loop_closures(id))
             .collect();
         self.graph.remove_keyframe(id);
+        let mut change = EdgeChange::default();
         for (_, landmark) in &removed {
-            let observers: Vec<FrameId> = landmark
-                .obs
-                .keys()
-                .map(|image| image.frame_id)
-                .filter(|&other| other != id)
-                .collect::<BTreeSet<FrameId>>()
-                .into_iter()
-                .collect();
-            for (k, &a) in observers.iter().enumerate() {
-                for &b in &observers[k + 1..] {
-                    self.graph.decrement_edge(a, b, 1);
-                }
-            }
+            let observers: BTreeSet<FrameId> = landmark.frames().filter(|&f| f != id).collect();
+            change.pairs(&observers, -1);
             touched.extend(observers);
             touched.insert(landmark.host.frame_id);
         }
+        change.apply(&mut self.graph);
         self.culled.insert(id);
         if let Some(loops) = self.loops.as_mut() {
             loops.forget(id);
         }
         Some(touched)
+    }
+
+    /// Carry out loop fusion's landmark edits (`merge_loop_landmarks`,
+    /// `map_database.cpp:259-336`) and raise the covisibility edges they
+    /// create, in RootSLAM's two passes: first every added observation, which
+    /// links `current` to every observer of the landmark (once per landmark),
+    /// then every fusion, which links every observer of one landmark to every
+    /// observer of the other. Returns (landmarks fused, observations added).
+    fn fuse_landmarks(
+        &mut self,
+        current: FrameId,
+        plan: Vec<loop_closing::LoopFusion>,
+    ) -> (usize, usize) {
+        let observers = |map: &KeyframeMap, id: LandmarkId| -> BTreeSet<FrameId> {
+            map.landmark(id)
+                .map(|landmark| landmark.frames().collect())
+                .unwrap_or_default()
+        };
+        let mut change = EdgeChange::default();
+        let (mut landmarks_fused, mut observations_added) = (0, 0);
+        let mut linked: BTreeSet<LandmarkId> = BTreeSet::new();
+        let (adds, fusions): (Vec<_>, Vec<_>) = plan
+            .into_iter()
+            .partition(|step| matches!(step, loop_closing::LoopFusion::AddObs { .. }));
+        for step in adds.into_iter().chain(fusions) {
+            match step {
+                loop_closing::LoopFusion::AddObs {
+                    landmark,
+                    image,
+                    pixel,
+                } => {
+                    if linked.insert(landmark) {
+                        change.across(&[current].into(), &observers(&self.map, landmark), 1);
+                    }
+                    observations_added +=
+                        usize::from(self.map.add_observation(landmark, image, pixel));
+                }
+                loop_closing::LoopFusion::Fuse { from, into } => {
+                    let (old, new) = (observers(&self.map, from), observers(&self.map, into));
+                    if self.map.merge_landmark(from, into) {
+                        change.across(&old, &new, 1);
+                        landmarks_fused += 1;
+                    }
+                }
+            }
+        }
+        change.apply(&mut self.graph);
+        (landmarks_fused, observations_added)
+    }
+}
+
+/// Covisibility edge changes, summed per keyframe pair and applied once.
+#[derive(Default)]
+struct EdgeChange(BTreeMap<(FrameId, FrameId), i64>);
+
+impl EdgeChange {
+    /// Add `by` to the edge between every two of `keyframes`.
+    fn pairs(&mut self, keyframes: &BTreeSet<FrameId>, by: i64) {
+        for &a in keyframes {
+            for &b in keyframes.range(a + 1..) {
+                *self.0.entry((a, b)).or_insert(0) += by;
+            }
+        }
+    }
+
+    /// Add `by` to the edge of `(a, b)` for every `a` in `left` and `b` in
+    /// `right`, `a != b`.
+    fn across(&mut self, left: &BTreeSet<FrameId>, right: &BTreeSet<FrameId>, by: i64) {
+        for &a in left {
+            for &b in right.iter().filter(|&&b| b != a) {
+                *self.0.entry((a.min(b), a.max(b))).or_insert(0) += by;
+            }
+        }
+    }
+
+    fn apply(self, graph: &mut CovisibilityGraph) {
+        for ((a, b), by) in self.0 {
+            let size: u32 = u32::try_from(by.unsigned_abs()).unwrap_or(u32::MAX);
+            if by > 0 {
+                graph.increment_edge(a, b, size);
+            } else if by < 0 {
+                graph.decrement_edge(a, b, size);
+            }
+        }
     }
 }
 

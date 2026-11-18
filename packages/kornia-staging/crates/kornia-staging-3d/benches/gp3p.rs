@@ -32,7 +32,11 @@ fn bench(c: &mut Criterion) {
             ("adaptive", IterationSchedule::default(), None),
             ("adaptive_wmin0.5", IterationSchedule::default(), Some(0.5)),
             ("adaptive_wmin0.7", IterationSchedule::default(), Some(0.7)),
-            ("parity35", IterationSchedule::rootslam_parity(), None),
+            (
+                "parity35",
+                IterationSchedule::OpenGv { iterations: 35 },
+                None,
+            ),
         ] {
             let config = Gp3pRansacConfig {
                 schedule,

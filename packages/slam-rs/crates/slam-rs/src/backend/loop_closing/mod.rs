@@ -709,7 +709,7 @@ impl MapBackend {
             schedule: config
                 .pnp_ransac_fixed_iterations
                 .map_or_else(IterationSchedule::default, |iterations| {
-                    IterationSchedule::RootSlamParity { iterations }
+                    IterationSchedule::OpenGv { iterations }
                 }),
             seed,
             refine: true,
@@ -868,55 +868,10 @@ impl MapBackend {
         event
     }
 
-    /// Carry out [`fusion_plan`] and raise the covisibility edges it creates
-    /// (`merge_loop_landmarks`): an added observation links the current
-    /// keyframe to every keyframe that sees the landmark (once per landmark);
-    /// a fusion links every observer of one to every observer of the other.
+    /// Carry out [`fusion_plan`] ([`MapBackend::fuse_landmarks`]).
     fn fuse(&mut self, current: FrameId, matches: &[LoopMatch]) -> LoopOutcome {
-        let mut increments: BTreeMap<(FrameId, FrameId), u32> = BTreeMap::new();
-        let mut bump = |a: FrameId, b: FrameId| {
-            if a != b {
-                *increments.entry((a.min(b), a.max(b))).or_insert(0) += 1;
-            }
-        };
-        let observers = |map: &super::KeyframeMap, id: LandmarkId| -> BTreeSet<FrameId> {
-            map.landmark(id)
-                .map(|lm| lm.obs.keys().map(|image| image.frame_id).collect())
-                .unwrap_or_default()
-        };
-        let (mut landmarks_fused, mut observations_added) = (0, 0);
-        let mut linked: BTreeSet<LandmarkId> = BTreeSet::new();
-        for step in fusion_plan(&self.map, current, matches) {
-            match step {
-                LoopFusion::AddObs {
-                    landmark,
-                    image,
-                    pixel,
-                } => {
-                    if linked.insert(landmark) {
-                        for other in observers(&self.map, landmark) {
-                            bump(current, other);
-                        }
-                    }
-                    observations_added +=
-                        usize::from(self.map.add_observation(landmark, image, pixel));
-                }
-                LoopFusion::Fuse { from, into } => {
-                    let (old, new) = (observers(&self.map, from), observers(&self.map, into));
-                    if self.map.merge_landmark(from, into) {
-                        for &a in &old {
-                            for &b in &new {
-                                bump(a, b);
-                            }
-                        }
-                        landmarks_fused += 1;
-                    }
-                }
-            }
-        }
-        for ((a, b), by) in increments {
-            self.graph.increment_edge(a, b, by);
-        }
+        let plan: Vec<LoopFusion> = fusion_plan(&self.map, current, matches);
+        let (landmarks_fused, observations_added) = self.fuse_landmarks(current, plan);
         LoopOutcome::Fused {
             landmarks_fused,
             observations_added,

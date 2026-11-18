@@ -2,11 +2,8 @@
 //! bindings and the Rerun layer. Everything is copied, in id order, so a
 //! snapshot stays valid while the back end goes on (D51).
 
-use nalgebra::{Vector3, Vector4};
-
 use super::pgo::{MapCorrection, PgoRun};
 use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
-use crate::landmark::StereographicParam;
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
 
@@ -63,30 +60,19 @@ pub struct SnapshotLoop {
 }
 
 impl MapBackend {
-    /// Copy the map. A point is `T_w_i(host) * t_i_c[cam] * unproject(direction)
-    /// / inv_dist`, as the window builds it. A landmark whose host keyframe or
-    /// camera is unknown, or with no finite position (`inv_dist <= 0`, at
-    /// infinity), is left out of the points (it still counts in `stats`), as
-    /// RootSLAM's map export keeps only finite positions.
+    /// Copy the map. A point is [`super::KeyframeMap::landmark_world`]; a
+    /// landmark it cannot place, or whose position overflows `f32`, is left out
+    /// of the points (it still counts in `stats`), as RootSLAM's map export
+    /// keeps only finite positions.
     pub fn snapshot(&self, t_i_c: &[Se3<f64>]) -> MapSnapshot {
         let keyframes = self.map.keyframes();
         let mut point_ids: Vec<LandmarkId> = Vec::with_capacity(self.map.landmarks().len());
         let mut point_hosts: Vec<FrameId> = Vec::with_capacity(self.map.landmarks().len());
         let mut points_world: Vec<[f32; 3]> = Vec::with_capacity(self.map.landmarks().len());
         for (&id, landmark) in self.map.landmarks() {
-            let (Some(host), Some(extrinsic)) = (
-                keyframes.get(&landmark.host.frame_id),
-                t_i_c.get(landmark.host.cam_id),
-            ) else {
+            let Some(point_w) = self.map.landmark_world(id, t_i_c) else {
                 continue;
             };
-            if landmark.inv_dist.is_nan() || landmark.inv_dist <= 0.0 {
-                continue;
-            }
-            let bearing: Vector4<f64> = StereographicParam::unproject(&landmark.direction);
-            let point_c: Vector3<f64> =
-                Vector3::new(bearing[0], bearing[1], bearing[2]) / landmark.inv_dist;
-            let point_w: Vector3<f64> = (host.pose * *extrinsic) * point_c;
             let point: [f32; 3] = [point_w.x as f32, point_w.y as f32, point_w.z as f32];
             if !point.iter().all(|value| value.is_finite()) {
                 continue;
@@ -114,15 +100,7 @@ impl MapBackend {
             point_ids,
             point_hosts,
             points_world,
-            covisibility_edges: graph
-                .node_ids()
-                .flat_map(|a| {
-                    graph
-                        .neighbours(a)
-                        .filter(move |&(b, _)| b > a)
-                        .map(move |(b, weight)| (a, b, weight))
-                })
-                .collect(),
+            covisibility_edges: graph.edges().collect(),
             stats: self.stats(),
             culls: self.cull_counts(),
             high_covisibility_weight: self.high_covisibility_weight(),
