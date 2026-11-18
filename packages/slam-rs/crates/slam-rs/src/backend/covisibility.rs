@@ -15,7 +15,11 @@
 //!   existing nodes (B19: `decrementEdge` creates both nodes through
 //!   `operator[]`);
 //! - an edge counts shared *landmarks*; RootSLAM counts every observation of
-//!   the other keyframe, so a landmark seen by two of its cameras counts twice;
+//!   the other keyframe, so a landmark seen by two of its cameras counts twice
+//!   (at insertion and at a loop fusion's added observations alike;
+//!   `map_database.cpp:281-284`); a fusion's observer cross product, which
+//!   counts a pair that sees both landmarks twice, is RootSLAM's own rule
+//!   (`map_database.cpp:311-321`);
 //! - "high covisibility" is a threshold passed in at query time, not a set kept
 //!   in step with one fixed value (the default, 96 shared landmarks, matches
 //!   RootSLAM's high edges per keyframe: see `VioConfig`);
