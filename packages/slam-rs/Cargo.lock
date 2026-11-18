@@ -3254,6 +3254,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
  "kornia-staging-algebra",
  "nalgebra",
  "rayon",

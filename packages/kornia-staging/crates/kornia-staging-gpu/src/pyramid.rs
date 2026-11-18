@@ -530,6 +530,25 @@ pub struct PyramidLaunch {
     arena: Arc<FrameArena>,
     levels: Vec<Level>,
     packed_input: (cubecl::server::Handle, usize, Arc<()>),
+    ingest: Ingest,
+}
+
+/// How level 0 is made from the packed bytes.
+enum Ingest {
+    /// The bytes are level 0 of every camera: the fused ingest widens them and reduces level 1.
+    Packed,
+    /// The bytes are two lens images; level 0 of each tile is gathered from its lens's level 1.
+    Lenses(Box<LensIngest>),
+}
+
+/// The bindings of the lens reduction and the gather.
+struct LensIngest {
+    lens: ImageSize,
+    table: (cubecl::server::Handle, usize),
+    level1: (cubecl::server::Handle, usize),
+    /// Level-1 width, height and per-lens stride.
+    source: [usize; 3],
+    unused_level0: cubecl::server::Handle,
 }
 
 impl PyramidLaunch {
@@ -543,14 +562,49 @@ impl PyramidLaunch {
             arena,
             levels,
             packed_input,
+            ingest,
         } = self;
         let strides = arena.strides;
         let cameras = arena.cameras;
         let buffers = arena.bindings();
+        let (handle, len, _lease) = &packed_input;
+        if let Ingest::Lenses(lenses) = &ingest {
+            let LensIngest {
+                lens,
+                table,
+                level1,
+                source,
+                unused_level0,
+            } = &**lenses;
+            kernels::launch_ingest(
+                client,
+                (handle, *len),
+                (unused_level0, 2),
+                (&level1.0, level1.1),
+                lens.width,
+                lens.height,
+                false,
+                source[2],
+                cameras,
+            );
+            // SAFETY: `prepare_lenses` checked the lens, table and tile geometry against the tables it
+            // uploaded; the arena's even allocation holds every tile's level 0 at `strides[0]`.
+            unsafe {
+                kernels::launch_gather(
+                    client,
+                    (&level1.0, level1.1),
+                    (&table.0, table.1),
+                    buffers[0],
+                    *source,
+                    [levels[0].width, levels[0].height],
+                    strides[0],
+                    cameras,
+                );
+            }
+        }
         for pair in levels.windows(2) {
             let [source, target] = [pair[0], pair[1]];
-            if source == levels[0] {
-                let (handle, len, _lease) = &packed_input;
+            if source == levels[0] && matches!(ingest, Ingest::Packed) {
                 kernels::launch_ingest(
                     client,
                     (handle, *len),
@@ -558,6 +612,7 @@ impl PyramidLaunch {
                     buffers[1],
                     source.width,
                     source.height,
+                    true,
                     strides[1],
                     cameras,
                 );
@@ -630,6 +685,79 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
         let Some(first) = out.first() else {
             return Ok(None);
         };
+        let expected =
+            (first.levels[0].width * first.levels[0].height * out.len()).next_multiple_of(4);
+        self.prepare_batch(packed, sizes, expected, out, Ingest::Packed)
+    }
+
+    /// Upload two lens images and prepare the two tile pyramids the stitch fills from them.
+    /// Returns `None` when the arena's binding limits require individual builds; the caller then
+    /// remaps on the host (`kornia_staging_imgproc::panorama`) and builds each tile.
+    ///
+    /// # Arguments
+    /// * `lenses` - Lens 0's then lens 1's u8 pixels, dense rows, padded to a four-byte length.
+    /// * `lens` - The size of each lens image; its floor-halved size must be the tables' source size.
+    /// * `tables` - The two tiles' tables, uploaded once on this client.
+    /// * `out` - Tile 0's and tile 1's persistent pyramids, level 0 of the tables' tile size.
+    ///
+    /// # Errors
+    /// Returns geometry or packed-length mismatches and typed device failures.
+    pub fn prepare_lenses(
+        &mut self,
+        lenses: &bytes::Bytes,
+        lens: ImageSize,
+        tables: &crate::stitch::TileTables<R>,
+        out: &mut [GpuPyramid<R>],
+    ) -> Result<Option<PyramidLaunch>, PyramidError> {
+        let tiles = crate::stitch::TILES;
+        if out.len() != tiles {
+            return Err(PyramidError::BatchSizeMismatch {
+                inputs: tiles,
+                outputs: out.len(),
+            });
+        }
+        if !tables.accepts_lens(lens) {
+            return Err(PyramidPlanError::GeometryMismatch {
+                expected_width: 2 * tables.source.width,
+                expected_height: 2 * tables.source.height,
+                width: lens.width,
+                height: lens.height,
+            }
+            .into());
+        }
+        let expected = (lens.width * lens.height * tiles).next_multiple_of(4);
+        let ingest = Ingest::Lenses(Box::new(LensIngest {
+            lens,
+            table: (tables.table.clone(), tables.table_len),
+            level1: (tables.level1.clone(), tiles * tables.level1_stride),
+            source: [
+                tables.source.width,
+                tables.source.height,
+                tables.level1_stride,
+            ],
+            unused_level0: tables.unused_level0.clone(),
+        }));
+        self.prepare_batch(
+            lenses,
+            std::iter::repeat_n(tables.tile, tiles),
+            expected,
+            out,
+            ingest,
+        )
+    }
+
+    /// The shared arena, upload and level-zero publication of a frameset batch.
+    fn prepare_batch(
+        &mut self,
+        packed: &bytes::Bytes,
+        sizes: impl Iterator<Item = ImageSize>,
+        expected: usize,
+        out: &mut [GpuPyramid<R>],
+        ingest: Ingest,
+    ) -> Result<Option<PyramidLaunch>, PyramidError> {
+        let Some(first) = out.first() else {
+            return Ok(None);
+        };
         let cameras = out.len();
         let (alignment, limit) = binding_limits(&self.client);
         let alignment = alignment / size_of::<u16>();
@@ -649,8 +777,6 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
             self.prepared.clear();
             return Ok(None);
         }
-        let expected =
-            (first.levels[0].width * first.levels[0].height * cameras).next_multiple_of(4);
         guarded(
             GpuError::DeviceLost {
                 what: "frameset pyramid",
@@ -764,6 +890,7 @@ impl<R: Runtime> GpuPyramidBuilder<R> {
                     arena,
                     levels: out[0].levels.clone(),
                     packed_input,
+                    ingest,
                 }))
             },
         )

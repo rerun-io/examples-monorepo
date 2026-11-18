@@ -28,3 +28,4 @@ libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 kornia-tensor.workspace = true
+kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }

@@ -19,6 +19,9 @@ pub mod color;
 /// Gaussian image pyramids.
 pub mod pyramid;
 
+/// Fixed-point remap tables, and the dual-fisheye stitch into equirectangular hemisphere tiles.
+pub mod panorama;
+
 /// Sparse optical flow.
 pub mod optical_flow;
 

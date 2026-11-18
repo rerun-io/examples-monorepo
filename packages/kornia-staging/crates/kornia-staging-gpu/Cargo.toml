@@ -44,6 +44,8 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 [dev-dependencies]
 kornia-staging-gpu = { path = ".", features = ["test-support"] }
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
+# The stitch tests parse the factory calibration strings and open the clip.
+kornia-staging-io.workspace = true
 # tests/gba_lanes.rs reads RootSLAM's exported GBA problems (Basalt calibrations).
 kornia-staging-3d = { workspace = true, features = ["serde"] }
 # Upstream umeyama_f64, the rigid fit the band checks compare positions with.

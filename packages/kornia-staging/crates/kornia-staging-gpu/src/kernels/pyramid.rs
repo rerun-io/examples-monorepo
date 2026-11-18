@@ -62,6 +62,8 @@ fn input_byte(src: &[u32], index: usize) -> u32 {
 
 /// Widen level zero and reduce level one in the same dispatch. All inputs are
 /// bytes, so the first filter's factor of 256 cancels its final division exactly.
+/// With `level0` false the widened level zero is not written (a lens image whose
+/// level one alone feeds the stitch); level one is the same either way.
 #[cube(launch_unchecked)]
 #[allow(clippy::too_many_arguments, clippy::manual_is_multiple_of)]
 fn ingest_kernel(
@@ -70,6 +72,7 @@ fn ingest_kernel(
     odd: &mut [u16],
     #[comptime] width: usize,
     #[comptime] height: usize,
+    #[comptime] level0: bool,
     even_stride: usize,
     odd_stride: usize,
 ) {
@@ -115,27 +118,31 @@ fn ingest_kernel(
         }
         horizontal[sy * SUBSAMPLE_W + x] = value;
     }
-    if c < dst_width && r < dst_height {
-        if comptime!(width.is_multiple_of(4) && height.is_multiple_of(2)) {
-            #[unroll]
-            for row in 0..2usize {
-                let slot = (2usize * r + row) * width + col2;
-                let bits =
-                    src[(src_base + slot) / 4usize] >> u32::cast_from(8usize * (slot % 4usize));
-                even[camera * even_stride + slot] = u16::cast_from((bits & 255u32) << 8u32);
-                even[camera * even_stride + slot + 1usize] = u16::cast_from(bits & 65_280u32);
-            }
-        } else {
-            // The final output owns an extra input row/column for odd geometry.
-            let end_x = min(col2 + 2usize, width);
-            let end_y = min(2usize * r + 2usize, height);
-            let end_x = select(c + 1usize == dst_width, width, end_x);
-            let end_y = select(r + 1usize == dst_height, height, end_y);
-            for sy in 2usize * r..end_y {
-                for sx in col2..end_x {
-                    let slot = sy * width + sx;
-                    even[camera * even_stride + slot] =
-                        u16::cast_from(input_byte(src, src_base + slot)) << 8u16;
+    // `level0` is comptime: a separate `if` keeps the branch out of the expanded kernel.
+    if level0 {
+        let even_base = camera * even_stride;
+        if c < dst_width && r < dst_height {
+            if comptime!(width.is_multiple_of(4) && height.is_multiple_of(2)) {
+                #[unroll]
+                for row in 0..2usize {
+                    let slot = (2usize * r + row) * width + col2;
+                    let bits =
+                        src[(src_base + slot) / 4usize] >> u32::cast_from(8usize * (slot % 4usize));
+                    even[even_base + slot] = u16::cast_from((bits & 255u32) << 8u32);
+                    even[even_base + slot + 1usize] = u16::cast_from(bits & 65_280u32);
+                }
+            } else {
+                // The final output owns an extra input row/column for odd geometry.
+                let end_x = min(col2 + 2usize, width);
+                let end_y = min(2usize * r + 2usize, height);
+                let end_x = select(c + 1usize == dst_width, width, end_x);
+                let end_y = select(r + 1usize == dst_height, height, end_y);
+                for sy in 2usize * r..end_y {
+                    for sx in col2..end_x {
+                        let slot = sy * width + sx;
+                        even[even_base + slot] =
+                            u16::cast_from(input_byte(src, src_base + slot)) << 8u16;
+                    }
                 }
             }
         }
@@ -268,7 +275,8 @@ pub(crate) fn launch_subsample_batch<R: Runtime>(
     }
 }
 
-/// Ingest dense byte frames into level zero and the first reduced level.
+/// Ingest dense byte frames into level zero and the first reduced level; with
+/// `level0` false, into the first reduced level alone (`even` is then not touched).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn launch_ingest<R: Runtime>(
     client: &ComputeClient<R>,
@@ -277,6 +285,7 @@ pub(crate) fn launch_ingest<R: Runtime>(
     odd: Buffer<'_>,
     width: usize,
     height: usize,
+    level0: bool,
     odd_stride: usize,
     cameras: usize,
 ) {
@@ -297,6 +306,7 @@ pub(crate) fn launch_ingest<R: Runtime>(
             BufferArg::from_raw_parts(odd.0.clone(), odd.1),
             width,
             height,
+            level0,
             even.1 / cameras,
             odd_stride,
         );
