@@ -454,6 +454,148 @@ tier = "euroc"
 hold_out = false
 decode_path = "cpu_gray8_dav1d_1thread"
 
+# TUM-VI, RootSLAM's TC (corridor), TM (magistrale), TR (room), TS (slides): their own tier, with no baseline in this file.
+# Outside the mocap room the ground truth covers only the start and the end of a run (corridor, magistrale, slides).
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor4"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__corridor5"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale4"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale5"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__magistrale6"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room4"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room5"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__room6"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__slides1"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__slides2"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
+[[segment]]
+dataset_name = "tum-vi"
+segment_id = "tum-vi__slides3"
+tier = "tumvi"
+hold_out = false
+decode_path = "cpu_gray8_dav1d_1thread"
+
 [robocap]
 has_ground_truth = false
 decode_path = "cpu_gray8_swscale_area_downscale3"

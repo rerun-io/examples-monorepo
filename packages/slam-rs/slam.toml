@@ -25,6 +25,13 @@ vio_config = "configs/euroc_config.json"
 video_time_is_absolute = true
 frameset_tolerance_ns = 1_000_000
 
+# TUM-VI 512x512 16-bit (RootSLAM's TC/TM/TR/TS) as dataforge's tum-vi conversion: KB4 stereo, imu_config.yaml's noise
+# model, the dataset's own clock on video_time. The conversion keeps only frames both cameras share, so framesets match exactly.
+[[dataset]]
+name = "tum-vi"
+vio_config = "configs/tumvi_config.json"
+video_time_is_absolute = true
+
 [robocap]
 device_id = "f408193e6447b3b0"
 vio_config = "configs/msdmo_config.json"
