@@ -19,7 +19,8 @@ gpu-wgpu = ["slam-rs/gpu-wgpu"]
 kornia-staging-io = { workspace = true, optional = true }
 kornia-image = { workspace = true, optional = true }
 kornia-staging-imgproc = { workspace = true, optional = true }
-slam-rs = { workspace = true }
+# The back end (persistent map) is host-only and always on for the CLI.
+slam-rs = { workspace = true, features = ["backend"] }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -7,8 +7,8 @@ use super::api::lie::{Se3, So3};
 use super::api::{ImageView, Vio, VioResult, VioStatus};
 use nalgebra::Vector3;
 
-const WIDTH: usize = 640;
-const HEIGHT: usize = 360;
+pub const WIDTH: usize = 640;
+pub const HEIGHT: usize = 360;
 const FOCAL: f64 = 300.0;
 const CEILING_M: f64 = 3.0;
 /// Texture lattice pitch on the ceiling, metres (6 px at 3 m).
