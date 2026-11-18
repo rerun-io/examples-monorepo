@@ -7,6 +7,7 @@
 //! and where the global BA's PCG lane follows that choice.
 
 mod pipeline;
+pub use pipeline::bootstrap;
 pub use pipeline::{
     Backend, BackendRequest, Backends, FrontendLane, FrontendTimings, GbaRequest, ImageView,
     OverlapTimings, PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,

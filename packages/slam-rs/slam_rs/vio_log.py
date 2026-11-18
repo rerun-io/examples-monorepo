@@ -520,7 +520,7 @@ class VioStage:
     """Where the trajectories, the window, the landmarks and the counters go."""
     times: StageTimes = field(default_factory=StageTimes)
     """Per-frameset wall time of each stage: ``track`` (the whole call), the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
-    rest of the call: estimator and glue) and the ``log`` work after it."""
+    rest of the call: bootstrap, estimator and glue) and the ``log`` work after it."""
     keypoints: list[int] = field(default_factory=list)
     """Keypoints the frontend holds after each frameset, summed over cameras."""
 

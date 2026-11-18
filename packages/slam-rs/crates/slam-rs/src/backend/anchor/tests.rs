@@ -86,3 +86,17 @@ fn no_keyframe_returns_the_frames_and_bad_inputs_are_refused() {
         Err(AnchorError::NotIncreasing { what: "frame", .. })
     ));
 }
+
+#[test]
+fn keyframes_before_the_first_frame_are_left_out_and_later_strays_still_refused() {
+    // An inertial bootstrap's window: keyframes at -20 and -10 ns reach the map, the first raw pose is at 0.
+    let frames = raw_frames();
+    let window = [(-20, pose(9.0, 9.0, 1.0)), (-10, pose(9.0, 9.0, 1.0))];
+    let keyframes = [(20, pose(2.5, 0.0, 0.1)), (60, pose(6.5, 0.2, 0.3))];
+    let with_window: Vec<(i64, Se3<f64>)> = window.iter().chain(&keyframes).copied().collect();
+    assert_eq!(reanchor(&frames, &with_window).unwrap(), reanchor(&frames, &keyframes).unwrap());
+    let stray: Vec<(i64, Se3<f64>)> = window.iter().copied().chain([(15, Se3::identity())]).collect();
+    assert_eq!(reanchor(&frames, &stray), Err(AnchorError::KeyframeNotAFrame { t_ns: 15 }));
+    // With no frame at all every keyframe is left out.
+    assert!(reanchor(&[], &with_window).unwrap().is_empty());
+}

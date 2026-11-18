@@ -164,6 +164,19 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
         stage.refuse_lost_framesets()
 
 
+def test_blanking_zeroes_only_the_named_cameras(texture: TextureFactory) -> None:
+    """``--blank-cameras`` wraps the frameset iterator: the named cameras get black images, the others are untouched."""
+    from slam_rs.apis.replay import blank
+
+    samples: Int64[ndarray, " n_samples"] = np.array([0, IMU_PERIOD_NS], dtype=np.int64)
+    originals: list[Frameset] = [frameset(step, texture, samples) for step in range(2)]
+    for original, blanked in zip(originals, blank(iter(originals), (1,)), strict=True):
+        assert np.array_equal(blanked.images[0], original.images[0])
+        assert not blanked.images[1].any()
+        assert original.images[1].any()
+    assert all(kept is original for kept, original in zip(blank(iter(originals), ()), originals, strict=True))
+
+
 def test_the_estimator_is_configured_from_basalts_own_two_files(settings: SlamConfig) -> None:
     """The RoboCap estimator uses the two configuration files named by its settings.
     Both files are checked into the package, so configuration needs no external bundle.

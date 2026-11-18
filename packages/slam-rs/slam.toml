@@ -37,3 +37,20 @@ device_id = "f408193e6447b3b0"
 vio_config = "configs/msdmo_config.json"
 calibration = "configs/robocap_calib_downscale3.json"
 
+
+# TartanAir V2 (dataforge `tartanair`): one trajectory, three camera sets.
+# The configs differ in more than the camera model, so a comparison across them includes these tuning
+# differences: `optical_flow_matching_default_depth` is 10.0 for pinhole and 2.0 for fisheye (the
+# pinhole value was raised because the 2 m default lost the stereo matches on the OldTown street scene).
+[[dataset]]
+name = "tartanair-pinhole"
+vio_config = "configs/tartanair_pinhole_config.json"
+
+[[dataset]]
+name = "tartanair-fisheye"
+vio_config = "configs/tartanair_fisheye_config.json"
+
+# Insta360 X4 Air (dataforge insta360, mei_v6 cameras) as a plain two-lens rig.
+[[dataset]]
+name = "insta360-native"
+vio_config = "configs/insta360_native_config.json"

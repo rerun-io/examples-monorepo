@@ -85,6 +85,80 @@ class VioStatus:
     def __eq__(self, other: object) -> bool: ...
     def __repr__(self) -> str: ...
 
+class BootstrapAttempt:
+    """One solve attempt of the inertial bootstrap (``config.vio_bootstrap``)."""
+
+    @property
+    def first_t_ns(self) -> int:
+        """First frameset of the window, ns."""
+
+    @property
+    def last_t_ns(self) -> int:
+        """Last frameset of the window, ns: when the attempt ran."""
+
+    @property
+    def frames(self) -> int:
+        """Framesets in the window."""
+
+    @property
+    def tracks(self) -> int:
+        """Tracks handed to the solver."""
+
+    @property
+    def tracks_used(self) -> int:
+        """Inlier tracks of the solve."""
+
+    @property
+    def verdict(self) -> str:
+        """The verdict's name: ``Accepted`` or the rejection reason, e.g. ``LowExcitation``."""
+
+    @property
+    def accepted(self) -> bool:
+        """Whether the solver accepted the window."""
+
+    @property
+    def excitation_mps2(self) -> float:
+        """Excitation, m/s^2."""
+
+    @property
+    def residual_rms_rad(self) -> float | None:
+        """RMS bearing error of the solve, rad; None when the attempt reports none."""
+
+    @property
+    def condition(self) -> float | None:
+        """Condition number of the reduced linear system; None when the attempt reports none."""
+
+    @property
+    def gravity_norm_unconstrained(self) -> float | None:
+        """Unconstrained ``|g|``, m/s^2; None when the attempt reports none."""
+
+    @property
+    def scale_sigma(self) -> float | None:
+        """Relative 1-sigma of the speed; None when the attempt reports none."""
+
+    def __repr__(self) -> str: ...
+
+class BootstrapReport:
+    """Every attempt of the inertial bootstrap and where it started the estimator."""
+
+    @property
+    def attempts(self) -> list[BootstrapAttempt]:
+        """The attempts in order."""
+
+    @property
+    def start_t_ns(self) -> int | None:
+        """The accepted window's first frameset, ns (the estimator's first state); None before a window is accepted."""
+
+    @property
+    def accepted_at_t_ns(self) -> int | None:
+        """The frameset that completed the accepted window, ns (the first pose published); None before a window is accepted."""
+
+    @property
+    def replayed(self) -> int:
+        """Framesets replayed into the fresh estimator."""
+
+    def __repr__(self) -> str: ...
+
 class VioResult:
     """What one :meth:`Vio.track` call produced."""
 
@@ -657,6 +731,9 @@ class Vio:
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
+    def bootstrap_report(self) -> BootstrapReport | None:
+        """The inertial bootstrap's attempts so far (``config.vio_bootstrap``), or None on the stereo start."""
+
     @property
     def frontend_timings_ms(self) -> dict[str, float]:
         """What the frontend lane cost on the last frameset that ran it, in ms: ``imu``, ``pyramid``, ``detect``,
@@ -696,6 +773,8 @@ class VioConfig:
 
     optical_flow_image_safe_radius: float
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
+    vio_bootstrap: str
+    """``config.vio_bootstrap``: ``"stereo"`` (default) or ``"inertial"``; anything else raises ``ValueError``."""
 
     @property
     def backend_enabled(self) -> bool:

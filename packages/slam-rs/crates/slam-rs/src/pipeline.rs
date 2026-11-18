@@ -1,6 +1,7 @@
 //! Vio sequencing, optional frontend lag, and deferred-solver ownership.
 
 use kornia_staging_algebra::Scalar;
+pub mod bootstrap;
 mod boundary;
 mod lag;
 mod lane;
@@ -67,6 +68,8 @@ pub struct Vio<S: Scalar = f32> {
     pending_observations: Option<std::sync::Arc<estimator::FlowObservations>>,
     /// Estimator wall time and exposed join wait on the last overlapping call.
     overlap_timings: lag::OverlapTimings,
+    /// The inertial bootstrap, when `config.vio_bootstrap` selects it.
+    bootstrap: bootstrap::BootstrapPhase,
     /// The back end over the persistent keyframe map, inline (Offline) or on
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
@@ -173,6 +176,7 @@ impl<S: Scalar> Vio<S> {
     ) -> Result<Self, VioError> {
         let backend: Backend = backends.frontend;
         let camera_count: usize = calibration.t_i_c.len();
+        let bootstrap = bootstrap::BootstrapPhase::for_config(&config, &calibration)?;
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
         let frontend_noise: kornia_staging_sensors::imu::ImuNoise<f64> =
@@ -216,6 +220,7 @@ impl<S: Scalar> Vio<S> {
             last_deferred: None,
             pending_observations: None,
             overlap_timings: lag::OverlapTimings::default(),
+            bootstrap,
             #[cfg(feature = "backend")]
             map_runner,
             #[cfg(feature = "backend")]
@@ -455,7 +460,7 @@ impl<S: Scalar> Vio<S> {
     /// accepted sample to both preintegrators, so the two could only differ by
     /// a bug.
     pub fn last_imu_t_ns(&self) -> Option<i64> {
-        self.estimator.newest_imu_t_ns()
+        self.bootstrap.newest_imu_t_ns(&self.estimator)
     }
 
     /// Add one IMU sample: `gyro` in rad/s, `accel` in m/s², both in the rig
@@ -476,7 +481,8 @@ impl<S: Scalar> Vio<S> {
                 accel: accel.into(),
             };
         self.frontend_imu.push_back(sample);
-        self.estimator.push_imu(sample);
+        self.bootstrap
+            .push_imu(&mut self.estimator, sample, &self.calib_f32);
         Ok(())
     }
 
@@ -593,7 +599,7 @@ impl<S: Scalar> Vio<S> {
         check_frameset(images, self.camera_count)?;
         self.frontend
             .check_frameset(t_ns, images.iter().map(|image| (image.width, image.height)))?;
-        if !self.estimator.imu_covers_frame(t_ns) {
+        if !self.bootstrap.imu_covers_frame(&self.estimator, t_ns) {
             return Ok(PreparedTrack {
                 vio: self,
                 t_ns,
@@ -617,13 +623,18 @@ impl<S: Scalar> Vio<S> {
                     t_w_i_current: predicted.t_w_i.cast(),
                 }
             }
-            None => {
-                // Waiting for stereo can take arbitrarily many frames. Keep
-                // only the interval a lagged first state could still need.
-                let keep_after = self.last_frame_t_ns.unwrap_or(t_ns);
-                self.drop_frontend_imu_through(keep_after);
-                frontend::flow::PosePrediction::default()
-            }
+            None => match self.last_frame_t_ns {
+                Some(previous_t_ns) if self.bootstrap.predicts_rotation() => {
+                    self.gyro_prediction(previous_t_ns, t_ns)?
+                }
+                _ => {
+                    // Waiting for stereo can take arbitrarily many frames. Keep
+                    // only the interval a lagged first state could still need.
+                    let keep_after = self.last_frame_t_ns.unwrap_or(t_ns);
+                    self.drop_frontend_imu_through(keep_after);
+                    frontend::flow::PosePrediction::default()
+                }
+            },
         };
         self.frontend_timings.imu_ns = duration_ns(mark);
 
@@ -686,6 +697,8 @@ impl<S: Scalar> Vio<S> {
                 return Ok(self.result(VioStatus::Buffered, t_ns));
             };
             completed
+        } else if self.bootstrap.is_running() {
+            return self.bootstrap_track(observations);
         } else {
             (
                 t_ns,
@@ -796,8 +809,33 @@ impl<S: Scalar> Vio<S> {
         Ok(pim)
     }
 
-    /// One sample off the frontend's buffer, calibrated in `f32` and cast back
-    /// to `f64`.
+    /// The gyro-only rotation from `previous_t_ns` to `t_ns`, before any
+    /// state exists (the inertial bootstrap): the frontend preintegration from
+    /// an identity state at rest with zero biases, of which only the rotation
+    /// is kept.
+    ///
+    /// # Errors
+    ///
+    /// What [`Self::frontend_preintegrate`] refuses.
+    fn gyro_prediction(
+        &mut self,
+        previous_t_ns: i64,
+        t_ns: i64,
+    ) -> Result<frontend::flow::PosePrediction, VioError> {
+        let rest: types::PoseVelBiasState<f64> = types::PoseVelBiasState {
+            t_ns: previous_t_ns,
+            ..types::PoseVelBiasState::default()
+        };
+        let pim: kornia_staging_sensors::imu::IntegratedImuMeasurement<f64> =
+            self.frontend_preintegrate(t_ns, &rest)?;
+        let predicted: kornia_staging_sensors::imu::NavState<f64> =
+            pim.predict_state(&rest.pose_vel_state(), &self.gravity());
+        Ok(frontend::flow::PosePrediction {
+            t_w_i_previous: crate::lie::Se3::identity(),
+            t_w_i_current: crate::lie::Se3::new(predicted.t_w_i.rotation, Vector3::zeros()).cast(),
+        })
+    }
+
     fn drop_frontend_imu_through(&mut self, t_ns: i64) {
         while self
             .frontend_imu
@@ -808,25 +846,11 @@ impl<S: Scalar> Vio<S> {
         }
     }
 
+    /// One sample off the frontend's buffer, calibrated.
     fn frontend_pop(&mut self) -> Option<imu::Popped<f64>> {
         let sample: kornia_staging_sensors::imu::CombinedImuSample =
             self.frontend_imu.pop_front()?;
-        Some(self.calibrated(&sample))
-    }
-
-    fn calibrated(
-        &self,
-        sample: &kornia_staging_sensors::imu::CombinedImuSample,
-    ) -> imu::Popped<f64> {
-        let accel: Vector3<f32> = self
-            .calib_f32
-            .calib_accel_bias
-            .calibrated(&Vector3::from(sample.accel.to_array()).cast());
-        let gyro: Vector3<f32> = self
-            .calib_f32
-            .calib_gyro_bias
-            .calibrated(&Vector3::from(sample.gyro.to_array()).cast());
-        (sample.timestamp_ns, gyro.cast::<f64>(), accel.cast::<f64>())
+        Some(calibrated(&self.calib_f32, &sample))
     }
 
     /// `opt_flow_state_queue->push(data)`.
@@ -878,6 +902,22 @@ impl<S: Scalar> Vio<S> {
         self.frontend.set_depth_guess(avg_depth as f32);
         Ok(())
     }
+}
+
+/// One raw sample calibrated in `f32` (what `Calibration<Scalar>` with
+/// `Scalar = float` means) and cast back to `f64`: the frontend's
+/// preintegration and the inertial bootstrap both read it.
+fn calibrated(
+    calibration: &calib::Calibration<f32>,
+    sample: &kornia_staging_sensors::imu::CombinedImuSample,
+) -> imu::Popped<f64> {
+    let accel: Vector3<f32> = calibration
+        .calib_accel_bias
+        .calibrated(&Vector3::from(sample.accel.to_array()).cast());
+    let gyro: Vector3<f32> = calibration
+        .calib_gyro_bias
+        .calibrated(&Vector3::from(sample.gyro.to_array()).cast());
+    (sample.timestamp_ns, gyro.cast::<f64>(), accel.cast::<f64>())
 }
 
 /// The rule every inertial sample meets, wherever it enters.

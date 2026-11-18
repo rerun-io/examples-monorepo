@@ -50,6 +50,21 @@ pub enum KeyframeMargCriteria {
     ForwardVector,
 }
 
+/// How the estimator gets its first state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VioBootstrap {
+    /// First-frameset stereo landmarks, gravity from one accelerometer
+    /// sample, zero velocity. Today's behaviour, bit for bit.
+    #[default]
+    #[serde(rename = "stereo")]
+    Stereo,
+    /// Solve velocity, gravity and biases from a moving window of tracks and
+    /// IMU (`kornia_staging_slam::init::inertial`), then start a fresh
+    /// estimator at the window's first frameset and replay the window.
+    #[serde(rename = "inertial")]
+    Inertial,
+}
+
 /// How the back end runs beside tracking (`backend.mode`, DESIGN §2).
 ///
 /// Both modes run the same [`crate::backend::MapBackend`] steps in the same
@@ -306,6 +321,9 @@ pub struct VioConfig {
     /// Which keyframe-removal rule applies.
     #[serde(rename = "config.vio_kf_marg_criteria")]
     pub vio_kf_marg_criteria: KeyframeMargCriteria,
+    /// How the first state is found; see [`VioBootstrap`].
+    #[serde(rename = "config.vio_bootstrap")]
+    pub vio_bootstrap: VioBootstrap,
 
     // ── the persistent map (back end, cargo feature `backend`) ──────────
     // One default set for every dataset (DESIGN §8). Keys RootSLAM also has
@@ -462,6 +480,7 @@ impl Default for VioConfig {
             vio_fix_long_term_keyframes: false,
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
+            vio_bootstrap: VioBootstrap::Stereo,
 
             backend_enabled: true,
             backend_mode: BackendMode::Offline,
