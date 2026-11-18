@@ -353,15 +353,14 @@ impl MapBackend {
             let Some(landmark) = self.map.landmark(landmark_id) else {
                 continue;
             };
-            let others: BTreeSet<FrameId> = landmark
-                .obs
-                .keys()
-                .chain([&landmark.host])
-                .map(|image| image.frame_id)
-                .filter(|&other| other != id && self.graph.contains(other))
-                .collect();
-            for other in others {
-                *shared.entry(other).or_insert(0) += 1;
+            // Each observing keyframe once, and the host if it observes none.
+            let host: FrameId = landmark.host.frame_id;
+            let host_alone: Option<FrameId> =
+                (!landmark.frames().any(|f| f == host)).then_some(host);
+            for other in landmark.frames().chain(host_alone) {
+                if other != id && self.graph.contains(other) {
+                    *shared.entry(other).or_insert(0) += 1;
+                }
             }
         }
         shared
@@ -387,8 +386,7 @@ impl MapBackend {
         self.graph.remove_keyframe(id);
         let mut change = EdgeChange::default();
         for (_, landmark) in &removed {
-            let mut observers: BTreeSet<FrameId> = landmark.observers();
-            observers.remove(&id);
+            let observers: BTreeSet<FrameId> = landmark.frames().filter(|&f| f != id).collect();
             change.pairs(&observers, -1);
             touched.extend(observers);
             touched.insert(landmark.host.frame_id);
@@ -413,7 +411,7 @@ impl MapBackend {
     ) -> (usize, usize) {
         let observers = |map: &KeyframeMap, id: LandmarkId| -> BTreeSet<FrameId> {
             map.landmark(id)
-                .map(MapLandmark::observers)
+                .map(|landmark| landmark.frames().collect())
                 .unwrap_or_default()
         };
         let mut change = EdgeChange::default();

@@ -48,10 +48,17 @@ pub struct MapLandmark {
 }
 
 impl MapLandmark {
-    /// The keyframes that observe it, each once: whom culling and loop fusion
-    /// link or unlink through it.
-    pub fn observers(&self) -> BTreeSet<FrameId> {
-        self.obs.keys().map(|image| image.frame_id).collect()
+    /// The keyframes that observe it, each once, in id order (`obs` is
+    /// ordered by frame, then camera): whom insertion, culling and loop fusion
+    /// link or unlink through it, and the redundancy score's count.
+    pub fn frames(&self) -> impl Iterator<Item = FrameId> + '_ {
+        let mut previous: Option<FrameId> = None;
+        self.obs.keys().filter_map(move |image| {
+            (previous != Some(image.frame_id)).then(|| {
+                previous = Some(image.frame_id);
+                image.frame_id
+            })
+        })
     }
 }
 
@@ -173,11 +180,6 @@ impl KeyframeMap {
             if !self.keyframes.contains_key(&stamped.host.frame_id) {
                 continue;
             }
-            let obs = stamped
-                .obs
-                .iter()
-                .filter(|(image, _)| self.keyframes.contains_key(&image.frame_id))
-                .map(|(image, pixel)| (*image, *pixel));
             let landmark: &mut MapLandmark =
                 self.landmarks
                     .entry(stamped.id)
@@ -191,19 +193,22 @@ impl KeyframeMap {
             landmark.host = stamped.host;
             landmark.direction = stamped.direction;
             landmark.inv_dist = stamped.inv_dist;
-            landmark.obs.extend(obs);
-            let images: Vec<TimeCamId> = landmark.obs.keys().copied().collect();
-            if old_host != stamped.host && !images.contains(&old_host) {
+            // Every image already in `obs` is indexed: index the new ones only.
+            for (image, pixel) in &stamped.obs {
+                if self.keyframes.contains_key(&image.frame_id)
+                    && landmark.obs.insert(*image, *pixel).is_none()
+                {
+                    self.by_image.entry(*image).or_default().insert(stamped.id);
+                }
+            }
+            if old_host != stamped.host && !landmark.obs.contains_key(&old_host) {
                 detach(&mut self.by_image, old_host, stamped.id);
             }
-            for image in images.into_iter().chain([stamped.host]) {
-                self.by_image.entry(image).or_default().insert(stamped.id);
-            }
-            if self
-                .landmarks
-                .get(&stamped.id)
-                .is_some_and(|lm| lm.obs.len() < MIN_OBSERVATIONS)
-            {
+            self.by_image
+                .entry(stamped.host)
+                .or_default()
+                .insert(stamped.id);
+            if landmark.obs.len() < MIN_OBSERVATIONS {
                 self.remove_landmark(stamped.id);
             }
         }
@@ -298,18 +303,16 @@ impl KeyframeMap {
             let Some(landmark) = self.landmarks.get_mut(&landmark_id) else {
                 continue;
             };
-            if landmark.host.frame_id == id {
+            let remaining: usize = landmark.obs.keys().filter(|i| i.frame_id != id).count();
+            if landmark.host.frame_id == id || remaining < MIN_OBSERVATIONS {
+                // Removed whole, as it was: its index entries in `id`'s images
+                // go with the `by_image` sweep below anyway.
                 if let Some(landmark) = self.remove_landmark(landmark_id) {
                     removed.push((landmark_id, landmark));
                 }
                 continue;
             }
-            let before: MapLandmark = landmark.clone();
             landmark.obs.retain(|image, _| image.frame_id != id);
-            if landmark.obs.len() < MIN_OBSERVATIONS {
-                self.remove_landmark(landmark_id);
-                removed.push((landmark_id, before));
-            }
         }
         self.by_image.retain(|image, _| image.frame_id != id);
         Some(removed)
@@ -323,11 +326,7 @@ impl KeyframeMap {
             .iter()
             .filter_map(|landmark_id| self.landmarks.get(landmark_id))
             .filter(|landmark| !(exclude_hosted && landmark.host.frame_id == id))
-            .filter(|landmark| {
-                let keyframes: BTreeSet<FrameId> =
-                    landmark.obs.keys().map(|image| image.frame_id).collect();
-                keyframes.len() > REDUNDANT_ABOVE_KEYFRAMES
-            })
+            .filter(|landmark| landmark.frames().count() > REDUNDANT_ABOVE_KEYFRAMES)
             .count();
         if seen.is_empty() {
             0.0
