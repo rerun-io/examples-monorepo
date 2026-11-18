@@ -407,7 +407,7 @@ fn golden(seq: &str) -> (GbaReport, RootbaRun, RootbaRun) {
         "{}\nrootba bal f32 {f32_run:?}\nrootba bal f64 {f64_run:?}",
         summary(seq, 4, &report, wall)
     );
-    // DESIGN §7.4: the final cost reaches rootba's (f32 and f64) within 0.5 %,
+    // The band: the final cost reaches rootba's (f32 and f64) within 0.5 %,
     // and is not suspiciously lower.
     let ours = report.final_cost.error;
     for rootba in [f32_run.final_cost, f64_run.final_cost] {
@@ -423,7 +423,7 @@ fn golden(seq: &str) -> (GbaReport, RootbaRun, RootbaRun) {
     (report, f32_run, f64_run)
 }
 
-/// DESIGN §7.4 / §10 d1 on MGO07 (pinhole-radtan rig, every LM step accepted):
+/// The band on MGO07 (pinhole-radtan rig, every LM step accepted):
 /// cost band, LM attempts and the CG iteration total within 15 % of rootba f32's.
 #[test]
 #[ignore = "reads RootSLAM's exported MGO07 GBA problem from the NAS"]
@@ -443,7 +443,7 @@ fn golden_mgo07_matches_rootba() {
     );
 }
 
-/// DESIGN §7.4 on TM1 (double-sphere rig, test-only camera): the cost band, and
+/// The band on TM1 (double-sphere rig, test-only camera): the cost band, and
 /// rejected LM steps that occur and are handled. A rejected attempt leaves the
 /// state, so the cost of the next attempt is measured from the same start;
 /// lambda grows after it; the accepted costs fall.
