@@ -272,6 +272,50 @@ impl<S: Scalar> CameraModelKind<S> {
     }
 }
 
+impl CameraModelKind<f64> {
+    /// The same model with every parameter narrowed to f32 (`as f32`); `None`
+    /// when the narrowed parameters do not make a valid camera.
+    pub fn to_f32(&self) -> Option<CameraModelKind<f32>> {
+        let narrow = |v: f64| v as f32;
+        Some(match self {
+            Self::Pinhole(m) => {
+                CameraModelKind::Pinhole(Pinhole::new(m.params().map(narrow)).ok()?)
+            }
+            Self::Kb4(m) => CameraModelKind::Kb4(KannalaBrandt4::new(m.params().map(narrow)).ok()?),
+            Self::BrownConrady(m) => CameraModelKind::BrownConrady(
+                BrownConrady::new(m.params().map(narrow), m.valid_radius().map(narrow)).ok()?,
+            ),
+            Self::Fisheye624(m) => {
+                CameraModelKind::Fisheye624(Fisheye624::new(m.params().map(narrow)).ok()?)
+            }
+            Self::DoubleSphere(m) => {
+                CameraModelKind::DoubleSphere(DoubleSphere::new(m.params().map(narrow)).ok()?)
+            }
+            Self::Eucm(m) => CameraModelKind::Eucm(Eucm::new(m.params().map(narrow)).ok()?),
+            Self::Equirectangular(m) => {
+                CameraModelKind::Equirectangular(Equirectangular::new(m.params().map(narrow)).ok()?)
+            }
+            Self::Mei(m) => {
+                let distortion = match m.distortion() {
+                    MeiDistortion::V3 { k, p } => MeiDistortion::V3 {
+                        k: k.map(narrow),
+                        p: p.map(narrow),
+                    },
+                    MeiDistortion::V6 { d } => MeiDistortion::V6 { d: d.map(narrow) },
+                };
+                CameraModelKind::Mei(
+                    Mei::new(
+                        m.params().map(narrow),
+                        narrow(m.half_field_rad()),
+                        distortion,
+                    )
+                    .ok()?,
+                )
+            }
+        })
+    }
+}
+
 #[inline]
 fn finite<S: Scalar, const N: usize>(values: [S; N]) -> bool {
     values.iter().all(|v| v.is_finite())

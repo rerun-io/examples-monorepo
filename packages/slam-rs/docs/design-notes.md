@@ -62,6 +62,10 @@ result.status, result.world_from_rig      # VioStatus, [tx ty tz qx qy qz qw]
 ```
 
 `track` returns a status and world-from-rig pose: `Tracking`, or `NeedMoreImu` with no state change; retry the same frameset.
+The pose is the raw, causal VIO: the back end never moves it, and because the pose-graph optimization holds the
+window and the newest map keyframe fixed, it is also the corrected pose of the current frame. Past frames are
+corrected after the fact: `slam_rs.tracking.reanchored(poses, vio.map_snapshot())` (Rust `MapSnapshot::reanchor`)
+re-anchors the frames tracked so far on the map's keyframes, two-sided; after `flush()` that is the final trajectory.
 `snapshot()` copies the last measured window and landmarks; it stays on the previous measurement during `NeedMoreImu`.
 `flow_frame()` copies the last accepted frameset’s keypoints; both accessors return `None` before their first result.
 
@@ -85,6 +89,8 @@ frame = vio.flow_frame()        # the keypoints of the last accepted frameset, o
 
 - Tiers: `smoke` (MIO10, MGO09), `release` (MIO07, MGO07, MIO14),
   and `listed` (the other five); the two hold-outs stay excluded from tuning.
+  `euroc` holds EuRoC's eleven sequences (catalog dataset `vslam-lab-euroc`),
+  apart so the MSD tiers run on a catalog without it.
 - Inputs and ground truth come from the catalog; an unavailable catalog fails
   integration tests. RoboCap has no ground truth and receives no ATE verdict.
 - Prefer the baseline for the host, lane and profile; otherwise use the first
@@ -137,8 +143,16 @@ retains only muxed streams. Allow several times the encoded size for transient
 Arrow, muxing and decoder buffers. The existing bounded-window feed
 remains the default for other tools and cap use.
 
-The layer animates the existing rig and adds a full trajectory, a recent trail,
-start/end markers and run metadata, following the Basalt layout. It preserves
+The layer writes two runs: the final trajectory under `/world/runs/slam_rs/{rig,
+trajectory,trail,endpoints}` and the raw causal VIO under the same parts of
+`/world/runs/slam_rs_vio`, plus run metadata on `/world/runs/slam_rs`. The final
+run is the raw VIO re-anchored on the map's keyframes (two-sided, as RootSLAM's
+`merge_frames_keyframes.py`; `slam_rs::backend::anchor`); with the back end off the
+two runs are equal. The
+dataset's `gt` layer owns `/world/rig_00`; the result does not write there, so a
+merged query of the rig reads ground truth only. A dataset without a `gt` layer
+(RoboCap) has no clash, and there the final run also animates `/world/rig_00`,
+which the cameras and the Follow view hang from. It preserves
 the base videos, sensor data and calibration. One estimator spans the session's
 file rolls. A run must finish with a finite pose for every supplied frameset
 before replacing the result. The DataForge blueprint includes both old Basalt
@@ -151,8 +165,14 @@ continues to supply its calibrated follow-eye settings.
 
 Layer generation does not load ground truth. When separate scoring tools need
 ground truth, the feed isolates the catalog's registered `gt` RRD in a
-temporary local catalog. This prevents estimated rig poses from entering later
-ground-truth queries through merged layers. The worker must be able to read
+temporary local catalog. Results no longer write `/world/rig_00` where a `gt`
+layer exists, but the isolation stays: a `slam_rs` layer registered before that
+change (or any other layer that writes the rig) would still merge into the
+ground truth, and the catalog API has no per-layer filter, so the GT-only
+catalog is the one read that is correct whatever else is registered. Remove the
+isolation, and read ground truth from the merged catalog, when no catalog that
+slam-rs reads still carries a `slam_rs` layer written before this change, that is
+when `slam-rs-catalog-layer` has regenerated every registered `slam_rs` layer. The worker must be able to read
 that registered URI; a `file://` URI requires the input storage mounted at the
 same path. An inaccessible source fails explicitly, without using merged poses
 as ground truth. No raw dataset files are parsed or copied.

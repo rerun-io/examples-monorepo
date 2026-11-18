@@ -40,10 +40,12 @@ const LAST_COMMITTED_T_NS: i64 = 37_012_000;
 const COMMITTED_IMU_HORIZON_NS: i64 = 40_000_000;
 
 /// The pipeline both tests drive: the fixture's config and calibration, one
-/// frontend thread so the reduction shape is fixed (D31).
+/// frontend thread so the reduction shape is fixed (D31), and the back end off:
+/// the window is the subject, and the back end's step timers are wall clocks
+/// the fingerprint would hash.
 fn pipeline<S: Scalar>() -> Vio<S> {
     Vio::new(
-        common::config(),
+        common::config().with_backend(None),
         common::calibration(),
         FrontendOptions {
             threads: 1,

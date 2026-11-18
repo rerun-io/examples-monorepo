@@ -5,6 +5,7 @@ inertial, and timestamp handling. Returned trajectories use the device clock.
 """
 
 import time
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -17,7 +18,7 @@ from scipy.spatial.transform import Rotation
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_calibration import ImuCalib
-from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, open_segment
+from slam_rs.catalog_feed import DEFAULT_WINDOW_S, ROBOCAP_RIG, CameraCalib, CatalogSegment, Frameset, SegmentFeed, dataset_rig, open_segment
 from slam_rs.config import SlamConfig, config_text_sha256
 from slam_rs.reference import ReferenceSegment, RobocapSession, resolved_flow_config
 from slam_rs.trajectory import Trajectory, shift_clock
@@ -198,6 +199,10 @@ class SegmentRun:
     """
     dropped: tuple[DroppedFrameset, ...] = ()
     """Explicitly rejected input timestamps, on the exported device clock."""
+    gba_failure: str | None = None
+    """Why the global BA failed, when it was asked for and did: ``final`` is then the map after loops and PGO."""
+    final: Trajectory | None = None
+    """The final trajectory (:func:`final_trajectory`: the global BA, then re-anchoring), at the estimate's timestamps; None with the back end off, where it is the estimate."""
 
 
     def unexplained_loss(self) -> str | None:
@@ -213,8 +218,68 @@ class SegmentRun:
         return None
 
 
-def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str) -> SegmentRun:
-    """Track framesets with IMU hold/retry; export estimates and truth on the device clock."""
+def reanchored(estimate: Trajectory, map_keyframes: _core.MapSnapshot | _core.MapResult | None) -> Trajectory:
+    """Every raw pose re-anchored on the map's keyframes on both sides (:func:`slam_rs._core.reanchor`).
+
+    Call it after :meth:`slam_rs._core.Vio.flush`, when every map keyframe is one of the poses. Mid-run it gives the
+    corrected history so far only when ``estimate`` reaches the snapshot's newest keyframe; one it does not reach
+    raises ``ValueError``.
+
+    Args:
+        estimate: The raw causal VIO poses, on the clock the estimator ran on (the map's keyframe ids are on it too).
+        map_keyframes: The map after the flush, or what :meth:`slam_rs._core.Vio.finish_map` returned; None (back end
+            off) returns ``estimate`` itself.
+
+    Returns:
+        One pose per raw pose, at the same timestamps.
+    """
+    if map_keyframes is None:
+        return estimate
+    final: Float64[ndarray, "n 7"] = _core.reanchor(estimate.t_ns, estimate.xyzw(), map_keyframes.keyframe_t_ns, map_keyframes.keyframe_poses)
+    return Trajectory.from_xyzw(estimate.t_ns, final)
+
+
+@dataclass(slots=True, frozen=True)
+class FinalRun:
+    """The run's final trajectory and the map it was re-anchored on."""
+
+    final: Trajectory
+    """The raw VIO re-anchored on the map's keyframes, at its timestamps; the raw VIO itself with the back end off."""
+    map_result: _core.MapResult | None
+    """What :meth:`slam_rs._core.Vio.finish_map` returned; None with the back end off."""
+    gba_failure: str | None
+    """Why the global BA failed, when it was asked for and did; ``final`` is then re-anchored on the map after loops and PGO."""
+
+
+def final_trajectory(vio: _core.Vio, estimate: Trajectory, *, run_gba: bool) -> FinalRun:
+    """The run's final trajectory (DESIGN §1, §2): the global BA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes.
+
+    Call it once, after the flush: the GBA writes its poses into the map. A GBA that fails costs only the GBA: the
+    core returns the map as loops and PGO left it with the reason (``MapResult.gba_failure``), and this warns once.
+
+    Args:
+        vio: The flushed estimator.
+        estimate: Its raw causal VIO poses, on the estimator's clock.
+        run_gba: Run the global BA; without it the final run is re-anchored on the map as loops and PGO left it.
+
+    Returns:
+        The final trajectory, the map it stands on and the GBA's failure, if any.
+    """
+    map_result: _core.MapResult | None = vio.finish_map(run_gba=run_gba)
+    gba_failure: str | None = None if map_result is None else map_result.gba_failure
+    if gba_failure is not None:
+        warnings.warn(f"the global BA failed ({gba_failure}); the final run is re-anchored on the map after loops and PGO", RuntimeWarning, stacklevel=2)
+    return FinalRun(final=reanchored(estimate, map_result), map_result=map_result, gba_failure=gba_failure)
+
+
+def drive(
+    feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str, run_gba: bool
+) -> SegmentRun:
+    """Track framesets with IMU hold/retry; export estimates, the final trajectory (:func:`final_trajectory`) and truth on the device clock.
+
+    ``run_gba`` runs the global BA for the final trajectory; callers that score only the raw VIO pass False and never
+    run it. A GBA that fails falls back as :func:`final_trajectory` says and is recorded in ``gba_failure``.
+    """
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
@@ -251,9 +316,12 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         position_m=np.array(positions, dtype=np.float64).reshape(-1, 3),
         quaternion_wxyz=np.array(quaternions, dtype=np.float64).reshape(-1, 4),
     )
+    finished: FinalRun = final_trajectory(lockstep.vio, estimate, run_gba=run_gba)
     # Both an uncovered input and a consumed pre-initialization input lack a pose.
     return SegmentRun(
         estimate=shift_clock(estimate, feed.export_offset_ns),
+        final=None if finished.map_result is None else shift_clock(finished.final, feed.export_offset_ns),
+        gba_failure=finished.gba_failure,
         framesets=replayed,
         lost=replayed - len(t_ns),
         wall_s=wall_s,
@@ -262,6 +330,15 @@ def drive(feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max
         median_tracker_ms=float(np.median(lockstep.elapsed_ms)) if lockstep.elapsed_ms else float("nan"),
         dropped=tuple(DroppedFrameset(drop.t_ns + feed.export_offset_ns, drop.reason) for drop in lockstep.dropped),
     )
+
+
+def raw_vio(calibration: _core.Calibration, flow: _core.VioConfig, backend: BackendRequest) -> _core.Vio:
+    """Build the ``Vio`` of a run scored on the raw VIO alone: the gate, the bench and the RoboCap fleet rows.
+
+    The back end is off whatever ``backend.enabled`` says, so its map step and loop queries never run inline on the
+    tracking thread, where they would land in the timed ``track`` calls the speed gate compares with its baselines.
+    """
+    return _core.Vio(calibration, flow.with_backend("off"), backend=backend)
 
 
 def run_segment(
@@ -281,12 +358,15 @@ def run_segment(
     """
     source = source or CatalogSegment(catalog or settings.catalog_url, segment.dataset_name, segment.segment_id)
     feed: SegmentFeed
-    with open_segment(source, decode_device="cpu") as feed:
+    with open_segment(source, profile=dataset_rig(settings.dataset(segment.dataset_name)), decode_device="cpu") as feed:
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend=backend))
-        return drive(feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text))
+        lockstep: Lockstep = Lockstep(vio=raw_vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend))
+        # The gate scores the raw VIO only: no GBA, so a GBA failure cannot fail it.
+        return drive(
+            feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text), run_gba=False
+        )
 
 
 def robocap_estimator_files(
@@ -380,4 +460,6 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text))
+        # A fleet row scores the raw VIO only, and RoboCap runs on Mali, where no back end runs until a probe-backed run
+        # exists (DESIGN Q7): the back end stays off here, as robocap-live builds without it.
+        return drive(feed, Lockstep(vio=raw_vio(calibration, flow, backend)), stop_ns, config_sha256=config_text_sha256(config_text), run_gba=False)
