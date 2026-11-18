@@ -1,8 +1,8 @@
 """MoGe-2 (TensorRT) depth and normal priors for every cube face, written in spirula's dataset folder layout.
 
-Front faces go to MoGe as they are. A half-face is first completed to its full N x N 90 deg face with the
-other lens's half-face as context (:func:`monopriors.cube_faces.join_half_faces`), and the prediction is
-cropped back to the half-face's own pixels, so each prior matches its training image pixel for pixel.
+Every face of the 6-face cubemap is a full centred 90 deg pinhole, so MoGe runs on each face image directly and the
+prior matches the training image pixel for pixel. Pixels outside a face's ``valid_mask`` (when it carries one) get
+no prior.
 
 Output (third-party input format for spirula, an export at the boundary, never a source of truth):
 ``<dataset>/depths/<face>/<t_ns>.png`` 16-bit z-depth in mm (0 = invalid) and
@@ -21,17 +21,8 @@ import torch
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 
-from monopriors.cube_faces import (
-    PIXEL_CENTRE_PX,
-    CubeFace,
-    FullFaceWindow,
-    depth_png_mm,
-    full_face_window,
-    join_half_faces,
-    normal_png_rgb,
-    opposite_half_face,
-)
-from monopriors.cube_layer import FaceFrameset, iter_framesets, open_rrd, read_cube_faces, read_valid_masks
+from monopriors.cube_faces import CubeFace, depth_png_mm, normal_png_rgb
+from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces, read_valid_masks
 from monopriors.models.moge_v2.export import resolve_num_tokens, token_grid_hw
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TrtPredictor
 
@@ -41,7 +32,7 @@ class MoGeSpirulaPriorsConfig:
     """Write MoGe-2 depth + normal priors for a cube-faces layer into a spirula dataset folder."""
 
     faces_rrd: Path
-    """The cube-faces layer ``.rrd`` (``/world/rig_NN/cam_NN`` named ``cube_<lens>_<direction>``)."""
+    """The cube-faces layer ``.rrd`` (``/world/rig_NN/cam_NN`` named ``cube6_<direction>``)."""
     dataset_dir: Path
     """The spirula dataset folder; ``depths/`` and ``normals/`` are written inside."""
     timeline: str = "video_time"
@@ -57,8 +48,6 @@ class MoGeSpirulaPriorsConfig:
     """TensorRT engine batch size."""
     mask_threshold: float = 0.5
     """MoGe validity probability below which depth and normal are written as invalid."""
-    pixel_centre_px: float = PIXEL_CENTRE_PX
-    """Pixel-centre convention of the layer's K (0.0 = OpenCV, as the faces layer writes it)."""
     max_framesets: int | None = None
     """Stop after this many framesets (for a quick look)."""
 
@@ -73,20 +62,10 @@ class _Job:
     """One network input and where its prediction goes."""
 
     face: CubeFace
-    window: FullFaceWindow
     t_ns: int
     rgb: UInt8[ndarray, "n n 3"]
-    lens_field: Bool[ndarray, "h w"]
+    lens_field: Bool[ndarray, "n n"]
     """The face's ``valid_mask``: pixels outside the lens field get no prior."""
-
-
-def network_input(face: CubeFace, frameset: FaceFrameset, faces: tuple[CubeFace, ...], pixel_centre_px: float) -> UInt8[ndarray, "n n 3"]:
-    """The full N x N face MoGe sees for ``face``: a front as it is, a half-face joined with its opposite."""
-    own_rgb: UInt8[ndarray, "h w 3"] = frameset.rgb_by_face[face.name]
-    if face.is_front:
-        return own_rgb
-    other: CubeFace = opposite_half_face(face, faces)
-    return join_half_faces(own_rgb, frameset.rgb_by_face[other.name], face, other, pixel_centre_px)
 
 
 def _exported_stamps(dataset_dir: Path, faces: tuple[CubeFace, ...]) -> dict[str, set[int]] | None:
@@ -100,12 +79,10 @@ def _exported_stamps(dataset_dir: Path, faces: tuple[CubeFace, ...]) -> dict[str
 def _write_prior(
     dataset_dir: Path, job: _Job, depth_m: Float32[ndarray, "n n"], normals: Float32[ndarray, "n n 3"], valid: Bool[ndarray, "n n"]
 ) -> None:
-    depth_crop: Float32[ndarray, "h w"] = job.window.crop(depth_m)
-    normal_crop: Float32[ndarray, "h w 3"] = job.window.crop(normals)
-    valid_crop: Bool[ndarray, "h w"] = job.window.crop(valid) & job.lens_field
+    valid_px: Bool[ndarray, "n n"] = valid & job.lens_field
     for kind, image in (
-        ("depths", depth_png_mm(depth_crop, valid_crop)),
-        ("normals", cv2.cvtColor(normal_png_rgb(normal_crop, valid_crop), cv2.COLOR_RGB2BGR)),
+        ("depths", depth_png_mm(depth_m, valid_px)),
+        ("normals", cv2.cvtColor(normal_png_rgb(normals, valid_px), cv2.COLOR_RGB2BGR)),
     ):
         path: Path = dataset_dir / kind / job.face.name / f"{job.t_ns}.png"
         if not cv2.imwrite(str(path), image):
@@ -114,13 +91,12 @@ def _write_prior(
 
 
 def main(config: MoGeSpirulaPriorsConfig) -> None:
-    """Run MoGe-2 on every (selected) face of every frameset and write the cropped priors."""
+    """Run MoGe-2 on every (selected) face of every frameset and write the priors."""
     side_tokens_hw: tuple[int, int] = token_grid_hw(1.0, resolve_num_tokens(config.resolution_level))
     with open_rrd(config.faces_rrd, "faces") as layer_segment:
         faces: tuple[CubeFace, ...] = read_cube_faces(layer_segment)
-        windows: dict[str, FullFaceWindow] = {face.name: full_face_window(face, config.pixel_centre_px) for face in faces}
-        lens_fields: dict[str, Bool[ndarray, "h w"]] = read_valid_masks(layer_segment, faces)
-        sides: set[int] = {window.side_px for window in windows.values()}
+        lens_fields: dict[str, Bool[ndarray, "n n"]] = read_valid_masks(layer_segment, faces)
+        sides: set[int] = {face.width for face in faces}
         if len(sides) != 1:
             raise ValueError(f"faces of different full sizes {sorted(sides)}; one square engine expected")
         exported: dict[str, set[int]] | None = _exported_stamps(config.dataset_dir, faces) if config.only_exported_images else None
@@ -163,8 +139,8 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
                 for face in faces:
                     if exported is not None and frameset.t_ns not in exported[face.name]:
                         continue
-                    rgb: UInt8[ndarray, "n n 3"] = network_input(face, frameset, faces, config.pixel_centre_px)
-                    pending.append(_Job(face=face, window=windows[face.name], t_ns=frameset.t_ns, rgb=rgb, lens_field=lens_fields[face.name]))
+                    rgb: UInt8[ndarray, "n n 3"] = frameset.rgb_by_face[face.name]
+                    pending.append(_Job(face=face, t_ns=frameset.t_ns, rgb=rgb, lens_field=lens_fields[face.name]))
                     if len(pending) == config.batch_size:
                         flush()
                 n_framesets += 1
