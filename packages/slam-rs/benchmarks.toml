@@ -61,11 +61,11 @@ decode_path = "cpu_gray8_dav1d_1thread"
 profile = "fast"
 lane = "gpu"
 host = "pablo-dl-server"
-core_sha256 = "67cec4d6669e5bf8c1390f051f3da10f4f27372e5c77a9f4dfdaccb7d2cab666"
+core_sha256 = "c8abfd7572714142df10764cf0a4c4d0de83aa577dd13e941534c8f20fd30d3f"
 framesets = 4095
-gt_rmse_cm = 2.1142785579360557
-median_tracker_ms = 2.7023139409720898
-measured_on = "2026-09-10"
+gt_rmse_cm = 2.4529801354843856
+median_tracker_ms = 1.2280233204364777
+measured_on = "2026-11-17"
 
 [[segment.baseline]]
 profile = "fast"
