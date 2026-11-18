@@ -13,10 +13,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use kornia_staging_3d::camera::{CameraModelKind, formats::BasaltCamera};
+use kornia_staging_3d::camera::{formats::BasaltCamera, CameraModelKind};
 use kornia_staging_algebra::{
-    Scalar,
     lie::{RigidTransform, Rotation3},
+    Scalar,
 };
 use kornia_staging_slam::sqrt_ba::{
     GbaCamera, GbaLandmark, GbaObservation, GbaProblem, GbaRigCamera, RelPoseConstraint,
