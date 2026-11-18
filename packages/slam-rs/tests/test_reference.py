@@ -309,11 +309,18 @@ def test_tum_vi_config_differs_from_msd_only_where_rootslams_tumvi_config_does(s
     """RootSLAM's tumvi_512_config: a 40 px detection grid on the 512 px images, a 320 px fisheye mask and LM from lambda 1e-7.
 
     Both stacks reset lambda to ``vio_lm_lambda_initial`` on every optimize, so the key is carried. ``vio_use_lm`` is
-    read by neither stack; it is copied as RootSLAM writes it. The rest is msdmg's.
+    read by neither stack; it is copied as RootSLAM writes it. Plus RootSLAM's TUM-VI loop gates (Pablo, option a: loop
+    settings per dataset; the values are pinned in config.rs). The rest is msdmg's.
     """
     msd: dict = json.loads(settings.vio_config_text("msd-g2"))["value0"]
     tumvi: dict = json.loads(settings.vio_config_text("tum-vi"))["value0"]
-    assert msd.keys() == tumvi.keys()
+    assert tumvi.keys() - msd.keys() == {
+        "backend.loop_closing.pnp_min_inliers",
+        "backend.loop_closing.reprojected_pnp_min_inliers",
+        "backend.loop_closing.pnp_inliers_ratio",
+        "config.loop_closing_pgo_min_covisibility_weight",
+    }
+    assert msd.keys() <= tumvi.keys()
     assert {key: tumvi[key] for key in msd if msd[key] != tumvi[key]} == {
         "config.optical_flow_detection_grid_size": 40,
         "config.optical_flow_image_safe_radius": 320.0,
@@ -323,14 +330,20 @@ def test_tum_vi_config_differs_from_msd_only_where_rootslams_tumvi_config_does(s
 
 
 def test_euroc_config_differs_from_msd_only_in_sensor_facts(settings: SlamConfig) -> None:
-    """A pinhole rig has no fisheye circle to mask, and its recall patch norms are RootSLAM's EuRoC values."""
+    """A pinhole rig has no fisheye circle to mask, its recall patch norms are RootSLAM's EuRoC values, and so are its loop
+    gates (Pablo, option a; the values are pinned in config.rs)."""
     msd: dict = json.loads(settings.vio_config_text("msd-g2"))["value0"]
     euroc: dict = json.loads(settings.vio_config_text("vslam-lab-euroc"))["value0"]
     assert {key for key in msd if msd[key] != euroc[key]} == {
         "config.optical_flow_image_safe_radius",
         "config.optical_flow_recall_max_patch_norms",
     }
-    assert msd.keys() == euroc.keys()
+    assert euroc.keys() - msd.keys() == {
+        "backend.loop_closing.reprojected_pnp_min_inliers",
+        "backend.loop_closing.pnp_inliers_ratio",
+        "config.loop_closing_pgo_min_covisibility_weight",
+    }
+    assert msd.keys() <= euroc.keys()
     assert euroc["config.optical_flow_image_safe_radius"] == 0.0
 
 

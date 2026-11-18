@@ -354,6 +354,10 @@ class MapSnapshot:
         """Whether each loop's landmarks were fused, at once or after a PGO; otherwise it was left unapplied."""
 
     @property
+    def loop_drift(self) -> Float64[ndarray, "n_loops 2"]:
+        """Each loop's drift when it was verified, ``[metres, degrees]`` of ``T_map^-1 T_pnp``, in :attr:`loop_edges` order."""
+
+    @property
     def loop_counts(self) -> LoopCounts:
         """What loop closing has done so far."""
 

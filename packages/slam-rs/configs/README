@@ -19,7 +19,23 @@ query, raw BRIEF tests, OpenGV's RANSAC schedule capped at 35 draws, inlier
 ratio 0, I6 pose-graph edges), for parity checks against RootSLAM runs only.
 It keeps the bug fixes (B3, B4, B8 and the others), so it reproduces
 RootSLAM's verification gates, not its candidate supply: compare loop counts
-per revisit window, not totals. tests/test_config_profiles.py checks overlays
+per revisit window, not totals. The k1 A/B (DESIGN §4: fast plus one knob at
+its parity value, MG, Offline, run-to-run band 0) kept every default. B5 kept
+at all cameras: mixed (MG +, EMH01 −). B1 and B12 are mixed, B15 regresses,
+B16 lacks runs. RootSLAM's TUM-VI loop gates (20 / 30 inliers) regress MG.
+Loop settings are per dataset, as RootSLAM ships them (Pablo, option a): the
+MSD configs set none and take the defaults (RootSLAM's msdmg values);
+euroc_config.json and tumvi_config.json set backend.loop_closing.pnp_min_inliers,
+.reprojected_pnp_min_inliers and .pnp_inliers_ratio (the ratio
+on the final PnP, B1) where RootSLAM's euroc and tumvi_512 configs differ from
+msdmg, and config.loop_closing_pgo_min_covisibility_weight: RootSLAM's 120 and
+150 observations times a1's MG ratio 96 / 100 = 115 and 144 landmarks.
+RootSLAM's RANSAC counts (35, 35, 20) cap the fixed schedule that only
+rootslam-parity turns on (at MSD's 35 for every dataset); the default RANSAC
+is adaptive and reads no count. Loop-closing knobs are flat keys
+(backend.loop_closing.<knob>), so rootslam-parity sets its own knobs and every
+dataset keeps the gates the profile does not set.
+tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 

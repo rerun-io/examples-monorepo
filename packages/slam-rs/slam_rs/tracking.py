@@ -332,6 +332,15 @@ def drive(
     )
 
 
+def raw_vio(calibration: _core.Calibration, flow: _core.VioConfig, backend: BackendRequest) -> _core.Vio:
+    """Build the ``Vio`` of a run scored on the raw VIO alone: the gate, the bench and the RoboCap fleet rows.
+
+    The back end is off whatever ``backend.enabled`` says, so its map step and loop queries never run inline on the
+    tracking thread, where they would land in the timed ``track`` calls the speed gate compares with its baselines.
+    """
+    return _core.Vio(calibration, flow.with_backend("off"), backend=backend)
+
+
 def run_segment(
     settings: SlamConfig,
     segment: ReferenceSegment,
@@ -353,7 +362,7 @@ def run_segment(
         flow: _core.VioConfig
         config_text: str
         flow, config_text = resolved_flow_config(settings, segment, profile=profile)
-        lockstep: Lockstep = Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend=backend))
+        lockstep: Lockstep = Lockstep(vio=raw_vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), flow, backend))
         # The gate scores the raw VIO only: no GBA, so a GBA failure cannot fail it.
         return drive(
             feed, lockstep, None if window_s is None else int(window_s * 1e9), max_framesets, config_sha256=config_text_sha256(config_text), run_gba=False
@@ -451,6 +460,6 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        # A fleet row scores the raw VIO only, and RoboCap runs on Mali, where no GBA runs until a probe-backed run
-        # exists (DESIGN Q7).
-        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text), run_gba=False)
+        # A fleet row scores the raw VIO only, and RoboCap runs on Mali, where no back end runs until a probe-backed run
+        # exists (DESIGN Q7): the back end stays off here, as robocap-live builds without it.
+        return drive(feed, Lockstep(vio=raw_vio(calibration, flow, backend)), stop_ns, config_sha256=config_text_sha256(config_text), run_gba=False)

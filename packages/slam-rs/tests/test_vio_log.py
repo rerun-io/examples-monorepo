@@ -621,7 +621,7 @@ def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
 def test_no_map_is_drawn_with_the_back_end_off(
     rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig(), backend="cpu")
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("off"), backend="cpu")
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "off.rrd", read_rows)
     assert len(logged.tracked) >= FRAMESETS - 2

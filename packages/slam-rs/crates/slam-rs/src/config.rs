@@ -295,9 +295,11 @@ pub struct VioConfig {
     // keep its `config.` names; keys of this port are under `backend.`.
     /// Build the persistent keyframe map beside the window. Read only by builds
     /// with the `backend` feature; the raw VIO poses are the same either way.
-    /// Off by default: opt in until loop closing (PR b2) gives the map a use
-    /// (a2 review). `backend.mode` says where it runs; Realtime never makes
-    /// tracking wait. Builds without the feature ignore it.
+    /// On by default (loops, PGO and the global BA give the final trajectory);
+    /// a run that scores only the raw VIO, or a device that cannot spare the
+    /// work, turns it off. `backend.mode` says where it runs; Realtime never
+    /// makes tracking wait. Builds without the feature (robocap-live, wasm,
+    /// iOS, embedded) ignore it.
     #[serde(rename = "backend.enabled")]
     pub backend_enabled: bool,
     /// Where the back end runs: inline (`offline`) or on its own thread
@@ -339,7 +341,11 @@ pub struct VioConfig {
     /// high edges first, so the count feeds back: 0.009 at 96 against 0.026 (92
     /// gives 0.028 on that map, but 1.19 and 0.36 on MG). No multiple of the
     /// median landmarks per keyframe fits: it would be 0.65 on MGO07, 1.85 on
-    /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17).
+    /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17). EuRoC and TUM-VI set
+    /// their own (Pablo, option a: loop settings per dataset): RootSLAM's 120 and
+    /// 150 observations at a1's MG ratio 96 / 100 give 115 and 144. That ratio
+    /// is carried over, not re-derived from those datasets' high edges per
+    /// keyframe.
     #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
     pub loop_closing_pgo_min_covisibility_weight: u32,
     /// Loop detection, verification and fusion (PR b2, DESIGN §3 rows 7-11).
@@ -438,7 +444,7 @@ impl Default for VioConfig {
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
 
-            backend_enabled: false,
+            backend_enabled: true,
             backend_mode: BackendMode::Offline,
             backend_realtime_max_queued_queries: std::num::NonZeroUsize::MIN.saturating_add(3),
             map_enable_culling: true,
@@ -463,9 +469,39 @@ impl Default for VioConfig {
 
 impl VioConfig {
     /// Read a wrapped config. Missing keys keep their defaults; unknown keys fail.
+    ///
+    /// Loop-closing knobs are flat keys like every other one,
+    /// `backend.loop_closing.<knob>`, so a profile overlay sets one knob and
+    /// keeps the dataset's others; they are folded into the
+    /// `backend.loop_closing` section here (a flat key wins over the same knob
+    /// in a written-out section).
     pub fn from_json_str(text: &str) -> Result<Self, ConfigError> {
-        let wrapper: Value0<Self> = serde_json::from_str(text)?;
-        wrapper.value0.check_ranges()
+        const SECTION: &str = "backend.loop_closing";
+        let mut document: Value0<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(text)?;
+        let values = &mut document.value0;
+        let flat: Vec<String> = values
+            .keys()
+            .filter(|key| key.starts_with("backend.loop_closing."))
+            .cloned()
+            .collect();
+        let section_is_object: bool = values.get(SECTION).is_none_or(serde_json::Value::is_object);
+        // A section that is not an object stays, and its flat keys fail as unknown.
+        if !flat.is_empty() && section_is_object {
+            let mut knobs: serde_json::Map<String, serde_json::Value> = match values.remove(SECTION)
+            {
+                Some(serde_json::Value::Object(knobs)) => knobs,
+                _ => serde_json::Map::new(),
+            };
+            for key in flat {
+                if let Some(value) = values.remove(&key) {
+                    knobs.insert(key[SECTION.len() + 1..].to_string(), value);
+                }
+            }
+            values.insert(SECTION.to_string(), serde_json::Value::Object(knobs));
+        }
+        let config: Self = serde_json::from_value(serde_json::Value::Object(document.value0))?;
+        config.check_ranges()
     }
 
     /// Refuse values the global BA cannot run with (a sigma <= 0 gives an
@@ -586,6 +622,8 @@ mod tests {
     const MSDMI_JSON: &str = include_str!("../../../configs/msdmi_config.json");
     const MSDMG_JSON: &str = include_str!("../../../configs/msdmg_config.json");
     const MSDMO_JSON: &str = include_str!("../../../configs/msdmo_config.json");
+    const EUROC_JSON: &str = include_str!("../../../configs/euroc_config.json");
+    const TUMVI_JSON: &str = include_str!("../../../configs/tumvi_config.json");
 
     fn every_fixture() -> [(&'static str, &'static str); 3] {
         [
@@ -689,11 +727,13 @@ mod tests {
 
     /// One default set for the persistent map (DESIGN §8, phase1/kf-density.md):
     /// RootSLAM's MSD values where they are one value, and one shared-landmark
-    /// covisibility weight instead of a per-dataset observation count.
+    /// covisibility weight instead of a per-dataset observation count. The
+    /// loop gates are the exception (Pablo, option a): each dataset config sets
+    /// RootSLAM's own values (the tests below); the MSD configs set none.
     #[test]
     fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
         let defaults = VioConfig::default();
-        assert!(!defaults.backend_enabled);
+        assert!(defaults.backend_enabled);
         assert!(defaults.map_enable_culling);
         assert_eq!(defaults.map_max_redundancy_score, 0.9);
         assert!(!defaults.map_redundancy_exclude_hosted_lms);
@@ -743,6 +783,76 @@ mod tests {
         ] {
             let text = format!(r#"{{"value0":{{"{dead}":3}}}}"#);
             assert!(VioConfig::from_json_str(&text).is_err(), "{dead} parsed");
+        }
+    }
+
+    /// RootSLAM's loop gates for one dataset, mapped as for MSD: the PnP
+    /// minimums as they are, the inlier ratio on the final PnP (B1), RANSAC
+    /// adaptive (RootSLAM's count is the fixed-schedule cap, which only
+    /// `rootslam-parity` turns on), and the covisibility weight in landmarks.
+    fn assert_loop_gates(text: &str, gates: (usize, usize, f64), covisibility: u32) {
+        let config = VioConfig::from_json_str(text).unwrap();
+        let loops = &config.backend_loop_closing;
+        assert_eq!(
+            (
+                loops.pnp_min_inliers,
+                loops.reprojected_pnp_min_inliers,
+                loops.pnp_inliers_ratio
+            ),
+            gates
+        );
+        assert_eq!(loops.pnp_ransac_fixed_iterations, None, "adaptive");
+        assert_eq!(
+            LoopClosingConfig {
+                pnp_min_inliers: 10,
+                reprojected_pnp_min_inliers: 20,
+                pnp_inliers_ratio: 0.5,
+                ..loops.clone()
+            },
+            LoopClosingConfig::default(),
+            "only the gates differ"
+        );
+        assert_eq!(
+            config.loop_closing_pgo_min_covisibility_weight,
+            covisibility
+        );
+    }
+
+    /// RootSLAM msdmg / msdmi / msdmo: 10 / 20 / 0.5, 100 observations -> 96.
+    #[test]
+    fn msd_loop_gates_are_rootslams_msd_values() {
+        for (_, text) in every_fixture() {
+            assert_loop_gates(text, (10, 20, 0.5), 96);
+        }
+    }
+
+    /// RootSLAM euroc: 10 / 30 / 0.7, 120 observations -> 115.
+    #[test]
+    fn euroc_loop_gates_are_rootslams_euroc_values() {
+        assert_loop_gates(EUROC_JSON, (10, 30, 0.7), 115);
+    }
+
+    /// RootSLAM tumvi_512: 20 / 30 / 0.6, 150 observations -> 144.
+    #[test]
+    fn tumvi_loop_gates_are_rootslams_tumvi_512_values() {
+        assert_loop_gates(TUMVI_JSON, (20, 30, 0.6), 144);
+    }
+
+    /// The parity profile overlays its loop knobs one by one: a dataset keeps
+    /// the gates the profile does not set (RootSLAM's euroc 10 / 30, tumvi_512
+    /// 20 / 30), where a whole-section overlay ran MSD's gates everywhere.
+    #[test]
+    fn the_parity_profile_keeps_each_datasets_loop_gates() {
+        let parity = include_str!("../../../configs/profiles/rootslam-parity.json");
+        for (text, gates) in [(EUROC_JSON, (10, 30)), (TUMVI_JSON, (20, 30))] {
+            let loops = VioConfig::with_overlay(text, parity)
+                .unwrap()
+                .backend_loop_closing;
+            assert_eq!(
+                (loops.pnp_min_inliers, loops.reprojected_pnp_min_inliers),
+                gates
+            );
+            assert_eq!(loops.pnp_inliers_ratio, 0.0, "the profile's own knob");
         }
     }
 
@@ -831,8 +941,8 @@ mod tests {
         assert_eq!(offline.backend_mode, BackendMode::Offline);
         assert_eq!(
             VioConfig {
-                backend_enabled: false,
-                backend_mode: BackendMode::Realtime,
+                backend_enabled: base.backend_enabled,
+                backend_mode: base.backend_mode,
                 ..offline
             },
             base

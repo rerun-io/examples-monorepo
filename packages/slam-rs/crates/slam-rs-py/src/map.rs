@@ -363,6 +363,20 @@ impl MapSnapshot {
         fused.to_pyarray(py)
     }
 
+    /// Drift of each loop when it was verified (translation and rotation of
+    /// `T_map^-1 T_pnp`), in the order of `loop_edges`: `float64[l, 2]`
+    /// (metres, degrees).
+    #[getter]
+    fn loop_drift<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let drift: Vec<f64> = self
+            .inner
+            .loops
+            .iter()
+            .flat_map(|edge| [edge.drift_m, edge.drift_deg])
+            .collect();
+        drift.to_pyarray(py).reshape((self.inner.loops.len(), 2))
+    }
+
     /// What loop closing has done so far.
     #[getter]
     fn loop_counts(&self) -> LoopCounts {
