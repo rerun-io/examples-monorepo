@@ -7,7 +7,6 @@ use gp3p_common::{observe, pose_error, random_pose, rig, scene, Rng};
 use kornia_3d::ransac::Estimator;
 use kornia_staging_3d::pose::gp3p::ransac::{
     gp3p_ransac, Gp3pEstimator, Gp3pRansacConfig, Gp3pRansacResult, IterationSchedule,
-    ROOTSLAM_ITERATIONS,
 };
 use kornia_staging_3d::pose::gp3p::{gp3p, GeneralizedCorrespondence, Gp3pError, Gp3pPose};
 use kornia_staging_algebra::lie::RigidTransform;
@@ -129,7 +128,7 @@ fn same_seed_same_result_on_any_thread() {
     let (c, _) = fixture(42, 120, 0.35);
     for schedule in [
         IterationSchedule::default(),
-        IterationSchedule::rootslam_parity(),
+        IterationSchedule::OpenGv { iterations: 35 },
     ] {
         let config = Gp3pRansacConfig {
             schedule,
@@ -201,15 +200,11 @@ fn parity_schedule_never_exceeds_opengv_draws() {
     for (seed, ratio) in [(0, 0.9), (1, 0.5), (2, 0.2)] {
         let (c, _) = fixture(400 + seed, 100, ratio);
         let config = Gp3pRansacConfig {
-            schedule: IterationSchedule::rootslam_parity(),
+            schedule: IterationSchedule::OpenGv { iterations: 35 },
             ..Gp3pRansacConfig::default()
         };
         if let Some(result) = gp3p_ransac(&c, &config).unwrap() {
-            assert!(
-                result.iterations <= ROOTSLAM_ITERATIONS + 1,
-                "{}",
-                result.iterations
-            );
+            assert!(result.iterations <= 35 + 1, "{}", result.iterations);
         }
     }
 }
@@ -224,7 +219,7 @@ fn b15_adaptive_finds_low_inlier_loops_that_the_fixed_cap_misses() {
         let (c, truth) = fixture(600 + seed, 100, 0.3);
         for (slot, schedule) in [
             IterationSchedule::default(),
-            IterationSchedule::rootslam_parity(),
+            IterationSchedule::OpenGv { iterations: 35 },
         ]
         .into_iter()
         .enumerate()
@@ -307,8 +302,8 @@ fn default_is_rootslam_threshold_with_adaptive_schedule() {
         }
     );
     assert_eq!(
-        IterationSchedule::rootslam_parity(),
-        IterationSchedule::RootSlamParity { iterations: 35 }
+        IterationSchedule::OpenGv { iterations: 35 },
+        IterationSchedule::OpenGv { iterations: 35 }
     );
     // Exact correspondences at the default threshold: every one is an inlier.
     let mut rng = Rng::new(4);
@@ -357,7 +352,7 @@ fn min_inlier_ratio_bounds_the_draws_below_the_acceptance_ratio() {
     let (c, _) = fixture(810, 150, 0.1);
     for (w_min, expected) in [(0.5, 36), (0.9, draws_for(0.9, 4, 0.99))] {
         let config = Gp3pRansacConfig {
-            schedule: IterationSchedule::rootslam_parity(),
+            schedule: IterationSchedule::OpenGv { iterations: 35 },
             min_inlier_ratio: Some(w_min),
             ..Gp3pRansacConfig::default()
         };
@@ -454,7 +449,7 @@ fn parity_ransac_recovers_a_clean_central_scene() {
         let truth = random_pose(&mut rng);
         let (c, truth_mask) = scene(&mut rng, &rig, &truth, 60, ratio, 0.0);
         let config = Gp3pRansacConfig {
-            schedule: IterationSchedule::rootslam_parity(),
+            schedule: IterationSchedule::OpenGv { iterations: 35 },
             seed,
             ..Gp3pRansacConfig::default()
         };

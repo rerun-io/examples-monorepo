@@ -337,7 +337,7 @@ fn f32_reaches_the_f64_result_within_the_band() {
         r64.final_cost.error < 0.5 * r64.initial_cost.error,
         "{r64:?}"
     );
-    // DESIGN §7.4: final cost f32 vs f64 within 1e-3 relative, KF poses within 1 mm.
+    // The band: final cost f32 vs f64 within 1e-3 relative, KF poses within 1 mm.
     let rel = (r32.final_cost.error - r64.final_cost.error).abs() / r64.final_cost.error;
     assert!(
         rel < 1e-3,
@@ -388,9 +388,9 @@ fn results_do_not_depend_on_the_thread_count() {
     assert_thread_count_independent(&problem.centred::<f32>().0, &rig32(&rig));
 }
 
-/// DESIGN B24: 10 km from the origin an f32 world point resolves to about 1 mm,
-/// which costs ~0.1 px at these depths. Centring in f64 before the cast keeps
-/// the f32 solve within the §7.4 band of f64; the uncentred cast leaves it.
+/// 10 km from the origin an f32 world point resolves to about 1 mm, which
+/// costs ~0.1 px at these depths. Centring in f64 before the cast keeps the
+/// f32 solve within the f32-vs-f64 band; the uncentred cast leaves it.
 #[test]
 fn f32_far_from_the_origin_needs_centring() {
     let (_, near, rig) = synthetic(12, 120, 2);
