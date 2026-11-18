@@ -419,7 +419,7 @@ def _triangulate_batch(
 
 @dataclass(frozen=True, slots=True)
 class _EpipolarCorrespondences:
-    """Same-camera matches of one rig pair, kept for the generalized essential matrix.
+    """Primary-camera matches of one rig pair (each source camera against its primary target camera), kept for the generalized essential matrix.
 
     The observation pass already asks the matcher for every one of these pairs, so the
     direction cross-check reads them off here instead of re-matching and re-joining.

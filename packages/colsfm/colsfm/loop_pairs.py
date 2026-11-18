@@ -84,7 +84,7 @@ def loop_camera_pairing(
       relative rotation of the two rig frames: for a profile that trusts its metric prior.
 
     Tie rule: the source's own camera stays the primary unless a camera that is not its stereo partner scores strictly
-    higher. So a mono rig and a stereo rig always get main's same-camera pairs, and a rig whose cameras look in several
+    higher. So a mono rig and a stereo rig always get the same-camera pairs of the old rule, and a rig whose cameras look in several
     directions gets the camera that faces the source anchor on a revisit walked another way (a cube face pairs with the
     opposite face after a 180 deg turn). A target camera without an image, or without keypoints, cannot be chosen. The
     rule chooses a camera; it never drops one.
