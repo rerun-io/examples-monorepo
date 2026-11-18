@@ -28,6 +28,7 @@ from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.database import Descriptors, KeypointsXY, database_transaction
 from colsfm.frames import FrameSource
+from colsfm.keypoint_masks import KeypointMask, MaskSource, keypoints_outside_mask
 
 NormalizedKeypoints: TypeAlias = Float32[ndarray, "num_keypoints 2"]
 """An ALIKED head's own output coordinates, normalised to [-1, 1] over the network input."""
@@ -199,6 +200,7 @@ def store_feature_batch(
     min_score: float,
     max_num_features: int,
     descriptor_type: pycolmap.FeatureExtractorType = DESCRIPTOR_TYPE,
+    masks: MaskSource | None = None,
 ) -> None:
     """Write one executed batch's keypoints and descriptors into the database.
 
@@ -215,6 +217,8 @@ def store_feature_batch(
         max_num_features: Keypoint ceiling per image; 0 or less keeps everything
             the gate left.
         descriptor_type: The label the stored descriptor blob carries.
+        masks: Per-image keypoint masks (`colsfm.keypoint_masks`), applied after the gate and the top-k: a keypoint on
+            a masked pixel is not stored, the rest keep their order and descriptors. None = unmasked.
     """
     # One transaction for the batch: an image's keypoints and its descriptors describe
     # each other, and an interrupted extraction that had left one without the other
@@ -227,6 +231,10 @@ def store_feature_batch(
             kept: Bool[ndarray, " num_keypoints"] = select_keypoints(scores, min_score=min_score, max_num_features=max_num_features)
             keypoints_xy: KeypointsXY = normalized_to_pixels(features.keypoints_bn2[index].reshape(-1, 2)[kept], task.image_width, task.image_height)
             descriptors: Descriptors = np.ascontiguousarray(features.descriptors_bnd[index].reshape(len(scores), -1)[kept])
+            mask: KeypointMask | None = None if masks is None else masks.mask(task.name, task.image_width, task.image_height)
+            if mask is not None:
+                outside: Bool[ndarray, " num_kept"] = keypoints_outside_mask(keypoints_xy, mask)
+                keypoints_xy, descriptors = np.ascontiguousarray(keypoints_xy[outside]), np.ascontiguousarray(descriptors[outside])
             database.write_keypoints(task.image_id, keypoints_xy)
             database.write_descriptors(
                 task.image_id,
@@ -283,6 +291,7 @@ def run_native_extraction(
     min_score: float,
     max_num_features: int,
     batch_size: int,
+    masks: MaskSource | None = None,
 ) -> None:
     """Execute every group on GPU frames and store what came back, one direct-binding runtime per engine.
 
@@ -294,6 +303,7 @@ def run_native_extraction(
         min_score: Gate on the scores; see `select_keypoints`.
         max_num_features: Keypoint ceiling per image.
         batch_size: Images executed together. The caller validates it against its own engines' profiles.
+        masks: Per-image keypoint masks; see `store_feature_batch`.
 
     Raises:
         RuntimeError: When an engine cannot be deserialised or fails to execute.
@@ -323,6 +333,7 @@ def run_native_extraction(
                     min_score=min_score,
                     max_num_features=max_num_features,
                     descriptor_type=model.descriptor_type,
+                    masks=masks,
                 )
 
 

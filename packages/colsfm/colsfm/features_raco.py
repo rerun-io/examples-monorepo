@@ -80,6 +80,7 @@ from colsfm.features_native import (
     run_native_extraction,
 )
 from colsfm.frames import FrameSource, ImageFolderFrames
+from colsfm.keypoint_masks import MaskSource
 from colsfm.model_assets import RACO_DYNAMIC_ONNX_PATH, RACO_ONNX_PATH
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
 
@@ -401,6 +402,7 @@ def extract_raco(
     native_resolution: bool = True,
     raco_engine: RacoEngineChoice = "auto",
     frames: FrameSource | None = None,
+    masks: MaskSource | None = None,
 ) -> TensorRTExtraction:
     """Run the batched RaCo-ALIKED engine over the named images and store the features.
 
@@ -426,6 +428,7 @@ def extract_raco(
             engine by definition.
         frames: Where the pixels come from as GPU tensors (`colsfm.frames`); None reads
             the image files under `image_root` through an `ImageFolderFrames`.
+        masks: Per-image keypoint masks (`colsfm.keypoint_masks`); None = unmasked.
 
     Returns:
         Keypoints stored per `image_id`, and the wall time of the whole pass
@@ -454,6 +457,7 @@ def extract_raco(
         min_score=min_score,
         max_num_features=max_num_features,
         batch_size=batch_size,
+        masks=masks,
     )
     elapsed_seconds: float = time.perf_counter() - started
     return keypoint_counts(database_path, [task.image_id for task in tasks]), elapsed_seconds

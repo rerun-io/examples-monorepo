@@ -65,6 +65,9 @@ class StreamKeyframes:
     """Image names, as `frames_meta.json` holds them."""
     t_ns: list[int]
     """Each keyframe's sample index value on the manifest's timeline as int64 (`CatalogVideo.t_ns`); the frame is matched by it."""
+    mask_entity: str | None = None
+    """A `SegmentationImage` entity (no leading slash) on the same stamps, nonzero = drop keypoints there
+    (`colsfm.keypoint_masks`); None = unmasked."""
 
     def __post_init__(self) -> None:
         """Check the two lists pair up."""
