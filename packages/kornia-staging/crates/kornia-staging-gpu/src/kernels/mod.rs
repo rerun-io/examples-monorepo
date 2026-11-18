@@ -26,7 +26,7 @@ pub(crate) mod linalg;
 
 /// IEEE float classification for device code.
 pub mod finite;
-mod trig;
+pub(crate) mod trig;
 
 #[cfg(all(test, feature = "wgpu"))]
 mod tests;
