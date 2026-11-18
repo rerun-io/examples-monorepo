@@ -72,7 +72,9 @@ def main(config: Config) -> None:
         backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
         print(f"{config.segment}: profile={config.profile}, backend={backend}, decode={decode_device}, load={load_s:.1f}s, "
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
-        run: SegmentRun = drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text))
+        run: SegmentRun = drive(feed, Lockstep(vio), config_sha256=config_text_sha256(config_text), run_gba=True)
+        if run.gba_failure is not None:
+            print(f"global BA: failed: {run.gba_failure}; the final run is re-anchored on the map after loops and PGO", flush=True)
         for drop in run.dropped:
             print(f"Dropped frameset {drop.t_ns}: {drop.reason}", flush=True)
         write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,

@@ -423,7 +423,7 @@ class VioLogger:
         there moves with it.
 
         Args:
-            final: The raw VIO re-anchored on the flushed map (:func:`slam_rs.tracking.reanchored`), on ``video_time``.
+            final: The final trajectory (:func:`slam_rs.tracking.final_trajectory`: GBA, then re-anchoring), on ``video_time``.
         """
         if len(final) < 2:
             return

@@ -342,6 +342,10 @@ pub struct VioConfig {
     /// MGO13 and 1.06 on MIPB08 (a1 review, 2026-11-17).
     #[serde(rename = "config.loop_closing_pgo_min_covisibility_weight")]
     pub loop_closing_pgo_min_covisibility_weight: u32,
+    /// Loop detection, verification and fusion (PR b2, DESIGN §3 rows 7-11).
+    /// Read only with the `backend` feature and `backend.enabled`.
+    #[serde(rename = "backend.loop_closing")]
+    pub backend_loop_closing: LoopClosingConfig,
 
     // ── the global BA at the end of a sequence (`Vio::finish_map`, PR d2) ──
     // rootba `bal` as RootSLAM's CI runs it (`run_sequence.sh`, DESIGN §3.1).
@@ -373,10 +377,6 @@ pub struct VioConfig {
     /// Solve in f64 instead of f32 (rootba `--use-double`; a debug lane).
     #[serde(rename = "backend.gba_use_double")]
     pub gba_use_double: bool,
-    /// Loop detection, verification and fusion (PR b2, DESIGN §3 rows 7-11).
-    /// Read only with the `backend` feature and `backend.enabled`.
-    #[serde(rename = "backend.loop_closing")]
-    pub backend_loop_closing: LoopClosingConfig,
 }
 
 impl Default for VioConfig {
@@ -447,6 +447,7 @@ impl Default for VioConfig {
             map_max_keyframes: 1500,
             map_batch_cull_size: 30,
             loop_closing_pgo_min_covisibility_weight: 96,
+            backend_loop_closing: LoopClosingConfig::default(),
             gba_max_iterations: 20,
             gba_cg_max_iterations: 500,
             gba_cg_eta: 0.1,
@@ -456,7 +457,6 @@ impl Default for VioConfig {
             gba_pose_graph_sigma_rotation: 0.01,
             gba_threads: std::num::NonZeroUsize::MIN.saturating_add(1),
             gba_use_double: false,
-            backend_loop_closing: LoopClosingConfig::default(),
         }
     }
 }

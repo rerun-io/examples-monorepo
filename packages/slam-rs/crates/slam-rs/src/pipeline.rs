@@ -71,8 +71,6 @@ pub struct Vio<S: Scalar = f32> {
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
-    /// Where the global BA's PCG runs.
-    gba_lane: Backend,
     /// Images of keyframes whose stamp has not gone to the back end yet, for
     /// loop closing (DESIGN §2.2: the stamp carries its own keyframe's images).
     #[cfg(feature = "backend")]
@@ -86,6 +84,8 @@ pub struct Vio<S: Scalar = f32> {
     /// by the Realtime query cap.
     #[cfg(feature = "backend")]
     image_slots: crate::estimator::ImageSlots,
+    /// Where the global BA's PCG runs.
+    gba_lane: Backend,
 }
 
 pub use lag::OverlapTimings;
@@ -218,13 +218,13 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_runner,
-            gba_lane: backends.gba,
             #[cfg(feature = "backend")]
             keyframe_images: std::collections::BTreeMap::new(),
             #[cfg(feature = "backend")]
             lagged_frames: None,
             #[cfg(feature = "backend")]
             image_slots: crate::estimator::ImageSlots::new(query_cap),
+            gba_lane: backends.gba,
         })
     }
 
@@ -234,30 +234,19 @@ impl<S: Scalar> Vio<S> {
     /// what [`Self::track`] returned; the map keeps the GBA's poses. Call it
     /// after [`Self::flush`]: a later keyframe stamp writes the window's poses
     /// over the GBA's for the keyframes still in the window. `None` when
-    /// `backend.enabled` is off.
-    ///
-    /// # Errors
-    ///
-    /// [`VioError::GlobalBa`] when the rig has a camera model the GBA cannot
-    /// project or the solver refuses the problem.
+    /// `backend.enabled` is off. A GBA that fails costs only the GBA:
+    /// [`crate::backend::MapResult::gba_failure`] says why, and the keyframes
+    /// are the map's after loops and PGO.
     ///
     /// # Panics
     ///
     /// Re-raises a panic of the back-end thread.
     #[cfg(feature = "backend")]
-    pub fn finish_map(
-        &mut self,
-        run_gba: bool,
-    ) -> Result<Option<crate::backend::MapResult>, VioError> {
+    pub fn finish_map(&mut self, run_gba: bool) -> Option<crate::backend::MapResult> {
         self.step_map();
         let config: &config::VioConfig = self.frontend.config();
-        let Some(runner) = self.map_runner.as_mut() else {
-            return Ok(None);
-        };
-        runner
-            .update(|backend| backend.finish(run_gba, config))
-            .map(Some)
-            .map_err(|error| VioError::GlobalBa(error.to_string()))
+        let runner = self.map_runner.as_mut()?;
+        Some(runner.update(|backend| backend.finish(run_gba, config)))
     }
 
     /// Read the persistent keyframe map itself; `None` when `backend.enabled`

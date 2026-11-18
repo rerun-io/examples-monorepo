@@ -31,12 +31,12 @@ def keyframe_trajectory(result: _core.MapResult, *, after_gba: bool) -> Trajecto
 
     Args:
         result: What :meth:`slam_rs._core.Vio.finish_map` returned.
-        after_gba: The poses after the global BA, or the ones the window left in the map.
+        after_gba: The poses after the global BA, or the map's before it (after loops and PGO: the +LC keyframes).
 
     Returns:
         One pose per map keyframe, oldest first, quaternions w-first.
     """
-    poses: Float64[ndarray, "k 7"] = result.keyframe_poses if after_gba else result.keyframe_poses_vio
+    poses: Float64[ndarray, "k 7"] = result.keyframe_poses if after_gba else result.keyframe_poses_before_gba
     return Trajectory.from_xyzw(result.keyframe_t_ns, poses)
 
 

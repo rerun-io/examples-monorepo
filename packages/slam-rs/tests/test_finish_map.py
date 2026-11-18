@@ -6,7 +6,7 @@ from typing import Literal
 import numpy as np
 import pytest
 from fixture_types import RigFactory, TextureFactory
-from jaxtyping import Float64, UInt8
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
@@ -45,7 +45,7 @@ def test_finish_map_returns_typed_keyframes_and_the_gba_scalars(
     assert plain.gba is None
     np.testing.assert_array_equal(plain.keyframe_t_ns, snapshot.keyframe_t_ns)
     np.testing.assert_array_equal(plain.keyframe_poses, snapshot.keyframe_poses)
-    np.testing.assert_array_equal(plain.keyframe_poses_vio, snapshot.keyframe_poses)
+    np.testing.assert_array_equal(plain.keyframe_poses_before_gba, snapshot.keyframe_poses)
 
     result: _core.MapResult | None = vio.finish_map(run_gba=True)
     assert result is not None
@@ -53,12 +53,12 @@ def test_finish_map_returns_typed_keyframes_and_the_gba_scalars(
     assert k == snapshot.keyframe_t_ns.shape[0] >= 1
     for array, dtype, shape in (
         (result.keyframe_t_ns, np.int64, (k,)),
-        (result.keyframe_poses_vio, np.float64, (k, 7)),
+        (result.keyframe_poses_before_gba, np.float64, (k, 7)),
         (result.keyframe_poses, np.float64, (k, 7)),
     ):
         assert array.dtype == dtype
         assert array.shape == shape
-    np.testing.assert_array_equal(result.keyframe_poses_vio, snapshot.keyframe_poses)
+    np.testing.assert_array_equal(result.keyframe_poses_before_gba, snapshot.keyframe_poses)
     np.testing.assert_allclose(np.linalg.norm(result.keyframe_poses[:, 3:], axis=1), 1.0, rtol=1e-9)
 
     gba: _core.GbaRun | None = result.gba
@@ -113,3 +113,49 @@ def test_ba_backend_is_parsed_and_a_cpu_frontend_never_probes_for_it(rig: RigFac
     assert (follow.backend, follow.gba_lane) == ("cpu", "cpu")
     with pytest.raises(ValueError, match="expected follow, cpu or gpu"):
         _core.Vio(rig(2), _core.VioConfig(), backend="cpu", ba_backend="auto")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("run_gba", [False, True])
+def test_the_final_trajectory_is_the_raw_vio_reanchored_on_the_finished_map(rig: RigFactory, texture: TextureFactory, run_gba: bool) -> None:
+    """``final_trajectory`` (PR k0): the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes; without it, f1's +LC final."""
+    from slam_rs.tracking import final_trajectory, reanchored
+    from slam_rs.trajectory import Trajectory
+
+    poses, vio = _tracked(rig, texture, "offline")
+    stacked: Float64[ndarray, "n 7"] = np.stack(poses)
+    estimate: Trajectory = Trajectory(
+        t_ns=np.arange(len(poses), dtype=np.int64) * 20_000_000, position_m=stacked[:, 0:3].copy(), quaternion_wxyz=np.roll(stacked[:, 3:7], 1, axis=1)
+    )
+    snapshot: _core.MapSnapshot | None = vio.map_snapshot()
+    assert snapshot is not None
+    lc_final: Trajectory = reanchored(estimate, snapshot)
+
+    run = final_trajectory(vio, estimate, run_gba=run_gba)
+    final, result = run.final, run.map_result
+    assert result is not None
+    assert (result.gba is not None) is run_gba
+    assert run.gba_failure is None
+    np.testing.assert_array_equal(final.t_ns, estimate.t_ns)
+    rows: Int64[ndarray, " k"] = np.searchsorted(estimate.t_ns, result.keyframe_t_ns)
+    np.testing.assert_array_equal(estimate.t_ns[rows], result.keyframe_t_ns)
+    np.testing.assert_allclose(final.position_m[rows], result.keyframe_poses[:, 0:3], rtol=0.0, atol=1e-12)
+    np.testing.assert_array_equal(final.position_m, reanchored(estimate, result).position_m)
+    if not run_gba:
+        np.testing.assert_array_equal(final.position_m, lc_final.position_m)
+        np.testing.assert_array_equal(final.quaternion_wxyz, lc_final.quaternion_wxyz)
+    # The raw VIO is not touched.
+    np.testing.assert_array_equal(estimate.position_m, stacked[:, 0:3])
+
+
+def test_the_final_trajectory_is_the_raw_vio_with_the_back_end_off(rig: RigFactory, texture: TextureFactory) -> None:
+    from slam_rs.tracking import final_trajectory
+    from slam_rs.trajectory import Trajectory
+
+    poses, vio = _tracked(rig, texture, None)
+    stacked: Float64[ndarray, "n 7"] = np.stack(poses)
+    estimate: Trajectory = Trajectory(
+        t_ns=np.arange(len(poses), dtype=np.int64) * 20_000_000, position_m=stacked[:, 0:3].copy(), quaternion_wxyz=np.roll(stacked[:, 3:7], 1, axis=1)
+    )
+    run = final_trajectory(vio, estimate, run_gba=True)
+    assert run.map_result is None
+    assert run.final is estimate

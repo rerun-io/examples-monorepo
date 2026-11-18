@@ -136,6 +136,19 @@ impl super::MapSnapshot {
     }
 }
 
+impl super::MapResult {
+    /// The final trajectory (DESIGN §1, §2): [`reanchor`] on the keyframes
+    /// [`crate::Vio::finish_map`] left, the global BA's when it ran. Frames as
+    /// [`super::MapSnapshot::reanchor`] takes them.
+    ///
+    /// # Errors
+    ///
+    /// As [`super::MapSnapshot::reanchor`].
+    pub fn reanchor(&self, frames: &[(i64, [f64; 7])]) -> Result<Vec<[f64; 7]>, AnchorError> {
+        reanchor_arrays(frames, &self.keyframe_t_ns, &self.keyframe_poses)
+    }
+}
+
 /// [`reanchor`] for `[tx, ty, tz, qx, qy, qz, qw]` frames on these keyframes.
 ///
 /// # Errors

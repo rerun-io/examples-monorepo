@@ -164,13 +164,13 @@ pub struct MapBackend {
     culled: BTreeSet<FrameId>,
     /// How many of `culled` the over-budget batches took.
     culled_over_budget: usize,
+    /// Loop closing (PR b2); `None` when it is off.
+    loops: Option<LoopClosing>,
     /// The rig's camera models for the global BA ([`Self::finish`]); `None`
     /// when the rig has a model the GBA cannot project.
     gba_rig: Option<gba::GbaRig>,
     /// Where the global BA's PCG runs (`select_backend`'s GBA lane).
     gba_lane: crate::Backend,
-    /// Loop closing (PR b2); `None` when it is off.
-    loops: Option<LoopClosing>,
 }
 
 /// Wall time of back-end calls, as [`BackendRunner`] measured them.
@@ -224,9 +224,9 @@ impl MapBackend {
             active: BTreeSet::new(),
             culled: BTreeSet::new(),
             culled_over_budget: 0,
+            loops,
             gba_rig,
             gba_lane,
-            loops,
         }
     }
 

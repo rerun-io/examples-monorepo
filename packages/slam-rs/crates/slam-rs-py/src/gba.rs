@@ -10,8 +10,10 @@ use crate::flat_poses;
 /// The map's keyframes at the end of a sequence (`Vio.finish_map`).
 ///
 /// Poses are `T_w_i` (world from IMU), `[tx, ty, tz, qx, qy, qz, qw]`, on the
-/// clock `track` was given. `keyframe_poses_vio` is what the window left in the
-/// map; `keyframe_poses` is the same after the global BA (equal without it).
+/// clock `track` was given. `keyframe_poses_before_gba` is the map after loops
+/// and PGO, before the global BA (the +LC keyframes; the window's own poses are
+/// `MapSnapshot.keyframe_raw_poses`); `keyframe_poses` is the same after the
+/// global BA (equal without it).
 #[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
 #[derive(Debug)]
 pub struct MapResult {
@@ -32,12 +34,15 @@ impl MapResult {
         self.inner.keyframe_t_ns.to_pyarray(py)
     }
 
-    /// `T_w_i` as the window left them: `float64[k, 7]`.
+    /// `T_w_i` in the map after loops and PGO, before the global BA: `float64[k, 7]`.
     #[getter]
-    fn keyframe_poses_vio<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        flat_poses(&self.inner.keyframe_poses_vio)
+    fn keyframe_poses_before_gba<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        flat_poses(&self.inner.keyframe_poses_before_gba)
             .to_pyarray(py)
-            .reshape((self.inner.keyframe_poses_vio.len(), 7))
+            .reshape((self.inner.keyframe_poses_before_gba.len(), 7))
     }
 
     /// `T_w_i` after the global BA: `float64[k, 7]`.
@@ -48,10 +53,20 @@ impl MapResult {
             .reshape((self.inner.keyframe_poses.len(), 7))
     }
 
-    /// The global BA, or `None` when `finish_map` ran without it.
+    /// The global BA, or `None` when `finish_map` ran without it or it failed.
     #[getter]
     fn gba(&self) -> Option<GbaRun> {
         self.inner.gba.clone().map(|run| GbaRun { run })
+    }
+
+    /// Why the global BA, asked for, failed (`"global BA: <reason>"`), or
+    /// `None`; the keyframes are then the map's after loops and PGO.
+    #[getter]
+    fn gba_failure(&self) -> Option<String> {
+        self.inner
+            .gba_failure
+            .as_ref()
+            .map(|error| format!("global BA: {error}"))
     }
 
     fn __repr__(&self) -> String {

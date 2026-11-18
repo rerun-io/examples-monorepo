@@ -26,8 +26,8 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.tracking import Lockstep, reanchored
-from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_scoring_csvs, write_trajectory
+from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
+from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
@@ -85,8 +85,9 @@ class Config:
     same in all three.
     """
     gba: bool = True
-    """With the map on: run the global BA on the map at the end (``Vio.finish_map``), draw its keyframes under
-    ``/world/runs/slam_rs/gba`` and write them to ``<output-csv stem>_gba_keyframes.csv``. The raw VIO is unchanged."""
+    """With the map on: run the global BA on the map after loops and PGO (``Vio.finish_map``) and re-anchor the final
+    trajectory on its keyframes; draw them under ``/world/runs/slam_rs/gba`` and write them to ``<output-csv
+    stem>_gba_keyframes.csv``. ``--no-gba`` re-anchors on the map as loops and PGO left it. The raw VIO is unchanged."""
     ba_backend: GbaRequest = "follow"
     """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
     ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
@@ -250,12 +251,21 @@ def main(config: Config) -> None:
         stage.refuse_lost_framesets()
 
         estimate: Trajectory = stage.logger.estimated()
-        # The final run: the raw VIO re-anchored on the flushed map's keyframes (the raw VIO itself with the back end off).
-        final: Trajectory = reanchored(estimate, stage.lockstep.vio.map_snapshot())
+        # The raw VIO first, beside the final run with ``_vio`` added to the stem (the names the scorer's
+        # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
+        # tracked run.
+        vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
+        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns))
+        # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
+        # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
+        finished: FinalRun = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
+        final: Trajectory = finished.final
+        map_result: _core.MapResult | None = finished.map_result
+        if finished.gba_failure is not None:
+            print(f"global BA: failed: {finished.gba_failure}")
         stage.logger.log_final_run(final)
-        vio_csv: Path = write_scoring_csvs(output_csv, final=final, raw=estimate, offset_ns=feed.export_offset_ns)
+        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns))
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
-        map_result: _core.MapResult | None = stage.lockstep.vio.finish_map(run_gba=config.gba)
         if map_result is not None and map_result.gba is not None:
             # At the cursor the flush left on the last frameset, beside the final map.
             log_map_result(map_result)

@@ -115,6 +115,49 @@ class VioResult:
 
     def __repr__(self) -> str: ...
 
+class LoopCounts:
+    """What loop closing has done so far (all zero when it is off)."""
+
+    @property
+    def indexed(self) -> int:
+        """Keyframes described and added to the database."""
+
+    @property
+    def without_images(self) -> int:
+        """Queries that found no images for their keyframe."""
+
+    @property
+    def images_stripped(self) -> int:
+        """Keyframe stamps whose images were dropped before the back end took them (Realtime, behind)."""
+
+    @property
+    def with_candidates(self) -> int:
+        """Queries that retrieved at least one candidate."""
+
+    @property
+    def candidates(self) -> int:
+        """Candidates validated."""
+
+    @property
+    def pnp_errors(self) -> int:
+        """GP3P RANSAC calls that refused their input (a bug upstream of it), each logged."""
+
+    @property
+    def verified(self) -> int:
+        """Loops that passed verification."""
+
+    @property
+    def fused(self) -> int:
+        """Loops fused at once."""
+
+    @property
+    def needs_pgo(self) -> int:
+        """Loops at or above the drift gate: the pose-graph optimization's triggers."""
+
+    @property
+    def optimized(self) -> int:
+        """Of those, closed by an applied pose-graph optimization."""
+
 class MapResult:
     """The map's keyframes at the end of a sequence (:meth:`Vio.finish_map`).
 
@@ -126,16 +169,23 @@ class MapResult:
         """Map keyframe timestamps, oldest first."""
 
     @property
-    def keyframe_poses_vio(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """``T_w_i`` as the window left them, before the global BA."""
+    def keyframe_poses_before_gba(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """``T_w_i`` in the map after loops and PGO, before the global BA (the +LC keyframes).
+
+        The window's own poses are :attr:`MapSnapshot.keyframe_raw_poses`.
+        """
 
     @property
     def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """``T_w_i`` after the global BA (equal to :attr:`keyframe_poses_vio` without it)."""
+        """``T_w_i`` after the global BA (equal to :attr:`keyframe_poses_before_gba` without it)."""
 
     @property
     def gba(self) -> GbaRun | None:
-        """The global BA, or None when :meth:`Vio.finish_map` ran without it."""
+        """The global BA, or None when :meth:`Vio.finish_map` ran without it or it failed."""
+
+    @property
+    def gba_failure(self) -> str | None:
+        """Why the global BA, asked for, failed (``"global BA: <reason>"``), or None; the keyframes are then the map's after loops and PGO."""
 
     def __repr__(self) -> str: ...
 
@@ -227,48 +277,6 @@ class GbaRun:
         """Whether it solved in f64 (``backend.gba_use_double``)."""
 
     def __repr__(self) -> str: ...
-class LoopCounts:
-    """What loop closing has done so far (all zero when it is off)."""
-
-    @property
-    def indexed(self) -> int:
-        """Keyframes described and added to the database."""
-
-    @property
-    def without_images(self) -> int:
-        """Queries that found no images for their keyframe."""
-
-    @property
-    def images_stripped(self) -> int:
-        """Keyframe stamps whose images were dropped before the back end took them (Realtime, behind)."""
-
-    @property
-    def with_candidates(self) -> int:
-        """Queries that retrieved at least one candidate."""
-
-    @property
-    def candidates(self) -> int:
-        """Candidates validated."""
-
-    @property
-    def pnp_errors(self) -> int:
-        """GP3P RANSAC calls that refused their input (a bug upstream of it), each logged."""
-
-    @property
-    def verified(self) -> int:
-        """Loops that passed verification."""
-
-    @property
-    def fused(self) -> int:
-        """Loops fused at once."""
-
-    @property
-    def needs_pgo(self) -> int:
-        """Loops at or above the drift gate: the pose-graph optimization's triggers."""
-
-    @property
-    def optimized(self) -> int:
-        """Of those, closed by an applied pose-graph optimization."""
 
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
@@ -641,10 +649,9 @@ class Vio:
         """The map's keyframes at the end of a sequence, after a global BA on the map when ``run_gba`` (PR d2); None when ``backend.enabled`` is off.
 
         Takes every stamp first. The window is untouched, so the poses :meth:`track` returned stay the raw VIO; the
-        map keeps the GBA's poses. Call it after :meth:`flush`.
-
-        Raises:
-            ValueError: The rig has a camera model the GBA cannot project, or the solver refused the problem.
+        map keeps the GBA's poses. Call it after :meth:`flush`. A GBA that fails (a camera model it cannot project,
+        the solver's refusal) is reported in :attr:`MapResult.gba_failure`, and the keyframes are then the map's after
+        loops and PGO.
         """
 
     def map_snapshot(self) -> MapSnapshot | None:

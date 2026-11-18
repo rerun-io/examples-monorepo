@@ -210,7 +210,7 @@ fn tilt_deg(est: &[Se3<f64>], reference: &[Se3<f64>]) -> f64 {
 fn a_drifted_map_keeps_the_input_world_z() {
     let (mut backend, _) = synthetic_map(16, 300, Vector3::new(30.0, -20.0, 1.0), 0.01, 0.03, 0.3);
     let before: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
-    let result = backend.finish(true, &VioConfig::default()).unwrap();
+    let result = backend.finish(true, &VioConfig::default());
     let tilt = tilt_deg(&result.keyframe_poses, &before);
     assert!(tilt < 0.01, "the GBA tilted the map by {tilt} deg");
 }
@@ -221,7 +221,7 @@ fn a_drifted_map_keeps_the_input_world_z() {
 fn a_zero_error_map_keeps_every_pose_and_world_z() {
     let (mut backend, _) = synthetic_map(12, 200, Vector3::new(30.0, -20.0, 1.0), 0.0, 0.0, 0.0);
     let before: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
-    let result = backend.finish(true, &VioConfig::default()).unwrap();
+    let result = backend.finish(true, &VioConfig::default());
     assert!(tilt_deg(&result.keyframe_poses, &before) < 0.01);
     for (a, b) in result.keyframe_poses.iter().zip(&before) {
         assert!(
@@ -433,12 +433,12 @@ fn a_drifted_synthetic_map_recovers_in_f32_and_f64_far_from_the_origin() {
             gba_use_double: use_double,
             ..VioConfig::default()
         };
-        let result = backend.finish(true, &config).unwrap();
+        let result = backend.finish(true, &config);
         let gba = result.gba.as_ref().unwrap();
         assert!(gba.report.iterations.len() <= 20);
         assert!(gba.report.final_cost.error < 0.01 * gba.report.initial_cost.error);
         assert_eq!(gba.report.final_cost.invalid, 0);
-        assert_eq!(result.keyframe_poses_vio, before);
+        assert_eq!(result.keyframe_poses_before_gba, before);
         let after: Vec<Se3<f64>> = backend.map().keyframes().values().map(|k| k.pose).collect();
         assert_eq!(result.keyframe_poses, after);
         let (rms_before, rms_after) = (aligned_rms(&before, &truth), aligned_rms(&after, &truth));
@@ -548,10 +548,10 @@ fn a_tilted_solution_is_rotated_back_and_keeps_its_cost() {
 fn finish_without_the_gba_returns_the_map_unchanged() {
     let (mut backend, _) = synthetic_map(6, 60, Vector3::zeros(), 0.02, 0.01, 0.3);
     let map_before = backend.map().clone();
-    let result = backend.finish(false, &VioConfig::default()).unwrap();
+    let result = backend.finish(false, &VioConfig::default());
     assert!(result.gba.is_none());
     assert_eq!(backend.map(), &map_before);
-    assert_eq!(result.keyframe_poses, result.keyframe_poses_vio);
+    assert_eq!(result.keyframe_poses, result.keyframe_poses_before_gba);
     assert_eq!(result.keyframe_t_ns, (1..=6).collect::<Vec<i64>>());
 }
 
@@ -560,7 +560,7 @@ fn finish_without_the_gba_returns_the_map_unchanged() {
 #[test]
 fn the_report_carries_the_iteration_scalars_and_stage_walls() {
     let (mut backend, _) = synthetic_map(8, 120, Vector3::zeros(), 0.02, 0.01, 0.3);
-    let result = backend.finish(true, &VioConfig::default()).unwrap();
+    let result = backend.finish(true, &VioConfig::default());
     let gba = result.gba.unwrap();
     assert!(!gba.report.iterations.is_empty() && gba.report.iterations.len() <= 20);
     assert!(
@@ -576,15 +576,22 @@ fn the_report_carries_the_iteration_scalars_and_stage_walls() {
     assert_eq!(gba.counts.pose_graph_rows, 7);
 }
 
-/// A map without the rig's camera models cannot run the GBA, and says so.
+/// A map without the rig's camera models cannot run the GBA: it says so and
+/// returns the map as it was, so the run keeps its +LC final.
 #[test]
-fn the_gba_needs_the_rig() {
-    let (backend, _) = synthetic_map(4, 30, Vector3::zeros(), 0.0, 0.0, 0.3);
-    let mut backend = backend;
+fn the_gba_needs_the_rig_and_its_failure_keeps_the_map() {
+    let (mut backend, _) = synthetic_map(4, 30, Vector3::zeros(), 0.0, 0.0, 0.3);
     backend.gba_rig = None;
-    assert!(backend.finish(false, &VioConfig::default()).is_ok());
-    assert!(matches!(
-        backend.finish(true, &VioConfig::default()),
-        Err(GbaDriverError::NoRig)
-    ));
+    let plain = backend.finish(false, &VioConfig::default());
+    assert_eq!(plain.gba_failure, None);
+    let failed = backend.finish(true, &VioConfig::default());
+    assert_eq!(failed.gba_failure, Some(GbaDriverError::NoRig));
+    assert!(failed.gba.is_none());
+    assert_eq!(
+        failed,
+        MapResult {
+            gba_failure: Some(GbaDriverError::NoRig),
+            ..plain
+        }
+    );
 }
