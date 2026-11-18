@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use kornia_image::{Image, ImageSize};
 use nalgebra::{Vector2, Vector3, Vector4};
-use proptest::prelude::*;
 
 use super::*;
 use crate::backend::{BackendWork, MapConfig};
@@ -668,7 +667,6 @@ fn a_revisit_is_verified_fused_and_linked_to_its_island() {
         );
         assert_eq!(loops.held_images(), 0, "images dropped after the query");
         assert_eq!(loops.counts().fused, 1);
-        assert!(s.backend.pinned.is_empty(), "unpinned once applied");
         let snapshot = s.backend.snapshot(&calibration(cameras).t_i_c);
         assert_eq!(snapshot.loop_counts.verified, 1);
         assert_eq!(snapshot.loops.len(), 1);
@@ -704,8 +702,12 @@ fn the_reprojection_pass_reads_the_image_and_leaves_the_keyframe_as_it_was() {
 }
 
 #[test]
-fn a_large_drift_is_kept_for_the_pose_graph_and_changes_no_map_entry() {
-    let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
+fn with_the_pose_graph_off_a_large_drift_changes_no_map_entry() {
+    let off = LoopClosingConfig {
+        pgo: false,
+        ..LoopClosingConfig::default()
+    };
+    let mut s = scene(1, 0.3, true, off, 100);
     let before = (s.backend.map().clone(), s.backend.graph().clone());
     s.backend.query(C);
     let event = &s.backend.loop_closing().unwrap().events()[0];
@@ -713,6 +715,147 @@ fn a_large_drift_is_kept_for_the_pose_graph_and_changes_no_map_entry() {
     assert!((event.drift_m - 0.3).abs() < 1e-6);
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
     assert_eq!(s.backend.loop_closing().unwrap().counts().needs_pgo, 1);
+}
+
+#[test]
+fn a_graph_the_solver_refuses_releases_the_loop_unapplied_and_records_it_once() {
+    // Zero sigmas give an infinite information matrix, which the solver refuses.
+    let refused = LoopClosingConfig {
+        pgo_edge_sigmas: [0.0, 0.0],
+        ..LoopClosingConfig::default()
+    };
+    let mut s = scene(1, 0.3, true, refused, 100);
+    let before = (s.backend.map().clone(), s.backend.graph().clone());
+    s.backend.query(C);
+    let loops = s.backend.loop_closing().unwrap();
+    assert_eq!(loops.events().len(), 1);
+    assert_eq!(loops.events()[0].outcome, LoopOutcome::NeedsPgo);
+    assert_eq!(loops.pgo().failures, 1);
+    assert!(loops.pgo().runs.is_empty());
+    assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 0));
+    assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
+    assert_eq!(s.backend.snapshot(&calibration(1).t_i_c).pgo_epoch, 0);
+}
+
+#[test]
+fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
+    let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
+    let t_i_c = calibration(1).t_i_c;
+    let before = s.backend.map().clone();
+    let kept = LandmarkId::from(keypoint_id(0, SEEN, 0));
+    let kept_before = before.landmark_world(kept, &t_i_c).unwrap();
+    let events = s.backend.query(C);
+    assert!(
+        matches!(
+            events[..],
+            [MapEvent::LoopVerified {
+                pgo_ns: Some(_),
+                ..
+            }]
+        ),
+        "timed for the runner's counters: {events:?}"
+    );
+    let loops = s.backend.loop_closing().unwrap();
+    let event = &loops.events()[0];
+    assert_eq!(
+        event.outcome,
+        LoopOutcome::Optimized {
+            landmarks_fused: 10,
+            observations_added: POINTS - 10
+        }
+    );
+    assert!((event.drift_m - 0.3).abs() < 1e-6);
+    assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 1));
+    let map = s.backend.map();
+    for id in [C, D] {
+        assert_eq!(
+            map.keyframe(id).unwrap().pose,
+            before.keyframe(id).unwrap().pose,
+            "the window is the gauge"
+        );
+    }
+    for id in [A, A2] {
+        let x = map.keyframe(id).unwrap().pose.translation.x;
+        assert!(
+            x > 0.15 && x < 0.35,
+            "the island follows the current drift: {x}"
+        );
+    }
+    let run = loops.pgo().runs[0];
+    assert_eq!((run.current, run.candidate, run.moved), (C, A, 2));
+    let host = map.keyframe(A).unwrap().pose * before.keyframe(A).unwrap().pose.inverse();
+    let kept_after = map.landmark_world(kept, &t_i_c).unwrap();
+    assert!(
+        (kept_after - host * kept_before).norm() < 1e-9,
+        "a landmark moves with its host"
+    );
+    assert_eq!(
+        s.backend.graph().loop_closures(C).collect::<Vec<_>>(),
+        vec![A]
+    );
+    let snapshot = s.backend.snapshot(&t_i_c);
+    assert_eq!(snapshot.pgo_epoch, 1);
+    let corrected: Vec<FrameId> = snapshot
+        .keyframe_t_ns
+        .iter()
+        .zip(
+            snapshot
+                .keyframe_poses
+                .iter()
+                .zip(&snapshot.keyframe_raw_poses),
+        )
+        .filter(|(_, (pose, raw))| pose != raw)
+        .map(|(&id, _)| id)
+        .collect();
+    assert_eq!(corrected, vec![A, A2]);
+    let row_a = snapshot
+        .keyframe_t_ns
+        .iter()
+        .position(|&id| id == A)
+        .unwrap();
+    assert_eq!(snapshot.keyframe_raw_poses[row_a], Se3::identity());
+    assert_eq!(
+        snapshot.keyframe_poses[row_a],
+        map.keyframe(A).unwrap().pose
+    );
+    assert_eq!(snapshot.pgo_runs, loops.pgo().runs);
+    assert!(snapshot.loops[0].fused, "fused after the PGO");
+}
+
+#[test]
+fn a_small_drift_runs_no_pose_graph() {
+    let mut s = scene(1, 0.05, true, LoopClosingConfig::default(), 100);
+    let events = s.backend.query(C);
+    assert!(matches!(
+        events[..],
+        [MapEvent::LoopVerified { pgo_ns: None, .. }]
+    ));
+    let loops = s.backend.loop_closing().unwrap();
+    assert!(matches!(
+        loops.events()[0].outcome,
+        LoopOutcome::Fused { .. }
+    ));
+    assert!(loops.pgo().runs.is_empty());
+    let snapshot = s.backend.snapshot(&calibration(1).t_i_c);
+    assert_eq!(snapshot.pgo_epoch, 0);
+    assert_eq!(snapshot.keyframe_raw_poses, snapshot.keyframe_poses);
+}
+
+#[test]
+fn two_runs_of_a_large_drift_loop_give_the_same_pose_graph_and_map() {
+    let run = || {
+        let mut s = scene(2, 0.3, true, LoopClosingConfig::default(), 100);
+        s.backend.query(C);
+        let loops = s.backend.loop_closing().unwrap();
+        (
+            loops.events().to_vec(),
+            loops.pgo().clone(),
+            s.backend.map().clone(),
+        )
+    };
+    let (first, second) = (run(), run());
+    assert_eq!(first.1.runs.len(), 1);
+    assert_eq!(first, second);
 }
 
 #[test]
@@ -756,111 +899,6 @@ fn a_query_without_images_or_a_dropped_one_holds_nothing() {
     assert_eq!(s.backend.loop_closing().unwrap().held_images(), 0);
     assert!(s.backend.query(C).is_empty());
     assert_eq!(s.backend.loop_closing().unwrap().counts().without_images, 1);
-}
-
-/// Steps `count` more keyframes, each leaving the window at once, so an
-/// over-budget map runs its batch cull.
-fn crowd(backend: &mut MapBackend, count: usize) {
-    for k in 0..count {
-        let id = 50 * SECOND + k as i64 * SECOND;
-        backend.step(keyframe_stamp(
-            id,
-            &[(id, Se3::identity())],
-            vec![],
-            vec![vec![]],
-            None,
-        ));
-        backend.step(MapStamp::Marginalized(MargStamp {
-            keyframe_poses: [(id, Se3::identity())].into_iter().collect(),
-            landmarks: vec![],
-        }));
-    }
-}
-
-#[test]
-fn without_a_pin_crowding_culls_the_island() {
-    // The B10 property below needs a cull that would take the island.
-    let mut s = scene(1, 0.05, false, LoopClosingConfig::default(), 100);
-    s.backend.config.max_keyframes = 2;
-    crowd(&mut s.backend, 3);
-    assert!(!s.backend.map().contains_keyframe(A) || !s.backend.map().contains_keyframe(A2));
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(12))]
-    /// B10: from detection to apply, culling never takes the island, the
-    /// current or the candidate keyframe; apply then finds them all.
-    #[test]
-    fn the_island_stays_in_the_map_from_detection_to_apply(budget in 1usize..5, steps in 1usize..6) {
-        let mut s = scene(1, 0.05, false, LoopClosingConfig::default(), 100);
-        s.backend.config.max_keyframes = budget;
-        let detection = s.backend.detect_loop(C).unwrap();
-        crowd(&mut s.backend, steps);
-        for id in detection.island.iter().chain([&C, &A]) {
-            prop_assert!(s.backend.map().contains_keyframe(*id));
-        }
-        let event = s.backend.apply_loop(detection);
-        let fused = matches!(event.outcome, LoopOutcome::Fused { .. });
-        prop_assert!(fused, "{:?}", event.outcome);
-        prop_assert!(s.backend.pinned.is_empty());
-    }
-}
-
-#[test]
-fn a_loop_left_for_the_pose_graph_keeps_its_matches_and_its_island_until_the_pgo_takes_it() {
-    // RootSLAM fuses after the PGO (`handle_loop_closure`), from the matches,
-    // and keeps the island protected until then (B10).
-    let mut s = scene(1, 0.3, true, LoopClosingConfig::default(), 100);
-    s.backend.query(C);
-    let event = s.backend.loop_closing().unwrap().events()[0].clone();
-    assert_eq!(event.outcome, LoopOutcome::NeedsPgo);
-    assert_eq!(event.detection.matches.len(), POINTS);
-    assert_eq!(
-        s.backend.loops_awaiting_pgo().collect::<Vec<_>>(),
-        vec![&event]
-    );
-    s.backend.config.max_keyframes = 1;
-    crowd(&mut s.backend, 4);
-    for id in [A, A2, C] {
-        assert!(s.backend.map().contains_keyframe(id), "{id} culled");
-    }
-    assert_eq!(s.backend.finish_pgo_loop(C), Some(event.detection));
-    assert!(s.backend.pinned.is_empty());
-    assert_eq!(s.backend.loops_awaiting_pgo().count(), 0);
-    assert_eq!(s.backend.finish_pgo_loop(C), None);
-}
-
-#[test]
-fn finishing_one_waiting_loop_keeps_the_pins_another_still_needs() {
-    let mut s = scene(1, 0.3, false, LoopClosingConfig::default(), 100);
-    s.backend.query(C);
-    // A second revisit 2 s later, with its own track ids, closes with A too.
-    let c3: FrameId = C + 2 * SECOND;
-    let drifted = Se3::new(So3::identity(), Vector3::new(0.3, 0.0, 0.0));
-    let keypoints = vec![
-        (0..SEEN)
-            .map(|k| (keypoint_id(0, k, 200_000), s.views[0].pixels[k]))
-            .collect(),
-    ];
-    let images = KeyframeImages(Arc::new(vec![s.views[0].image.clone()]));
-    s.backend.step(keyframe_stamp(
-        c3,
-        &[(C, drifted), (c3, drifted)],
-        vec![],
-        keypoints,
-        Some(&images),
-    ));
-    s.backend.query(c3);
-    let candidates: Vec<FrameId> = s
-        .backend
-        .loops_awaiting_pgo()
-        .map(|event| event.detection.candidate)
-        .collect();
-    assert_eq!(candidates, vec![A, A]);
-    s.backend.finish_pgo_loop(C).unwrap();
-    assert_eq!(s.backend.pinned, [A, A2, c3].into_iter().collect());
-    s.backend.finish_pgo_loop(c3).unwrap();
-    assert!(s.backend.pinned.is_empty());
 }
 
 #[test]

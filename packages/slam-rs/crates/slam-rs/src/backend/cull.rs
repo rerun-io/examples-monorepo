@@ -5,9 +5,10 @@
 //! redundant ([`KeyframeMap::redundancy_score`] at or above
 //! `map_max_redundancy_score`). A map over `map_max_keyframes` culls the
 //! `map_batch_cull_size` lowest-scored keyframes. Neither ever touches a
-//! protected keyframe: the root, the window's keyframes, and the keyframes loop
-//! closing has pinned (B10: RootSLAM leaves an island unprotected between
-//! its request and the response, then reads it with `.at()`).
+//! protected keyframe: the root and the window's keyframes. Loop closing needs
+//! no protection: it detects and applies in one query, with no cull between
+//! (B10: RootSLAM leaves an island unprotected between its request and the
+//! response, then reads it with `.at()`).
 //!
 //! The score is RootSLAM's weighted sum, computed from the map as it is when
 //! the batch runs, where RootSLAM freezes the coverage and landmark terms when

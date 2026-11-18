@@ -120,6 +120,10 @@ class LoopCounts:
         """Candidates validated."""
 
     @property
+    def pnp_errors(self) -> int:
+        """GP3P RANSAC calls that refused their input (a bug upstream of it), each logged."""
+
+    @property
     def verified(self) -> int:
         """Loops that passed verification."""
 
@@ -129,13 +133,17 @@ class LoopCounts:
 
     @property
     def needs_pgo(self) -> int:
-        """Loops left for the pose-graph optimization."""
+        """Loops at or above the drift gate: the pose-graph optimization's triggers."""
+
+    @property
+    def optimized(self) -> int:
+        """Of those, closed by an applied pose-graph optimization."""
 
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
 
-    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses: what
-    the back end starts from, before any loop closure moves them.
+    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses as the
+    pose-graph optimization (PGO) corrected them; the raw poses are the window's.
     """
 
     @property
@@ -148,7 +156,23 @@ class MapSnapshot:
 
     @property
     def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
-        """Raw keyframe poses ``T_w_i``, ``[tx, ty, tz, qx, qy, qz, qw]``."""
+        """Keyframe poses ``T_w_i`` as the map holds them (PGO-corrected), ``[tx, ty, tz, qx, qy, qz, qw]``."""
+
+    @property
+    def keyframe_raw_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """The window's keyframe poses, before any correction."""
+
+    @property
+    def pgo_epoch(self) -> int:
+        """Applied pose-graph optimizations so far (the correction epoch)."""
+
+    @property
+    def pgo_runs(self) -> Int64[ndarray, "n_pgo 5"]:
+        """Each applied PGO, oldest first: ``[current, candidate, moved, dropped_edges, iterations]``."""
+
+    @property
+    def pgo_us(self) -> tuple[int, int]:
+        """Wall time of the loops that ran a PGO (graph, solve, map write, fusion): total and slowest, microseconds."""
 
     @property
     def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
@@ -180,7 +204,7 @@ class MapSnapshot:
 
     @property
     def loop_fused(self) -> Bool[ndarray, " n_loops"]:
-        """Whether each loop was fused at once; otherwise it waits for the pose-graph optimization."""
+        """Whether each loop's landmarks were fused, at once or after a PGO; otherwise it was left unapplied."""
 
     @property
     def loop_counts(self) -> LoopCounts:

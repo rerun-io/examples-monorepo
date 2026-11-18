@@ -16,9 +16,10 @@ runs on its own thread and tracking never waits for it; reference and fast keep
 the offline default (inline, repeatable). profiles/rootslam-parity.json is the
 fast keys plus RootSLAM's values of the backend.loop_closing knobs (camera-0
 query, raw BRIEF tests, OpenGV's RANSAC schedule capped at 35 draws, inlier
-ratio 0), for parity checks against RootSLAM runs only. It keeps the bug fixes
-(B3, B4, B8 and the others), so it reproduces RootSLAM's verification gates,
-not its candidate supply: compare loop counts per revisit window, not totals. tests/test_config_profiles.py checks overlays
+ratio 0, I6 pose-graph edges), for parity checks against RootSLAM runs only.
+It keeps the bug fixes (B3, B4, B8 and the others), so it reproduces
+RootSLAM's verification gates, not its candidate supply: compare loop counts
+per revisit window, not totals. tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 

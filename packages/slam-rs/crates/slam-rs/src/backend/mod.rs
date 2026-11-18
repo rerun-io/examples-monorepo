@@ -14,6 +14,7 @@ pub mod covisibility;
 pub mod cull;
 pub mod loop_closing;
 pub mod map;
+pub mod pgo;
 pub mod runner;
 pub mod snapshot;
 
@@ -26,6 +27,7 @@ use crate::types::{FrameId, LandmarkId};
 pub use covisibility::{CovisibilityGraph, PoseGraphEdge, PoseGraphEdgeKind};
 pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOutcome};
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
+pub use pgo::{PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
 pub use snapshot::{MapSnapshot, SnapshotLoop};
 
@@ -88,8 +90,11 @@ pub enum MapEvent {
         current: FrameId,
         /// The keyframe it closes a loop with.
         candidate: FrameId,
-        /// Fused, left for the pose-graph optimization, or stale.
+        /// Fused, optimized then fused, or left unapplied.
         outcome: LoopOutcome,
+        /// Wall time of the apply, when it ran a pose-graph optimization
+        /// (graph, solve, map write and fusion; PR c2). It differs run to run.
+        pgo_ns: Option<u64>,
     },
 }
 
@@ -103,8 +108,6 @@ pub struct MapBackend {
     graph: CovisibilityGraph,
     /// Keyframes still in the window.
     active: BTreeSet<FrameId>,
-    /// Keyframes loop closing holds (an island from request to apply).
-    pinned: BTreeSet<FrameId>,
     /// Keyframes the map culled; a stamp never brings one back.
     culled: BTreeSet<FrameId>,
     /// How many of `culled` the over-budget batches took.
@@ -153,7 +156,6 @@ impl MapBackend {
             map: KeyframeMap::new(),
             graph: CovisibilityGraph::new(),
             active: BTreeSet::new(),
-            pinned: BTreeSet::new(),
             culled: BTreeSet::new(),
             culled_over_budget: 0,
             t_i_c: Vec::new(),
@@ -201,22 +203,9 @@ impl MapBackend {
         self.config.high_covisibility.max(1)
     }
 
-    /// Whether culling must leave `id` alone: the root, a window keyframe, or a
-    /// pinned one.
+    /// Whether culling must leave `id` alone: the root or a window keyframe.
     pub fn is_protected(&self, id: FrameId) -> bool {
-        self.graph.root() == Some(id) || self.active.contains(&id) || self.pinned.contains(&id)
-    }
-
-    /// Protect keyframes from culling until [`Self::unpin`] (B10).
-    pub fn pin(&mut self, ids: impl IntoIterator<Item = FrameId>) {
-        self.pinned.extend(ids);
-    }
-
-    /// Release keyframes [`Self::pin`] protected.
-    pub fn unpin(&mut self, ids: impl IntoIterator<Item = FrameId>) {
-        for id in ids {
-            self.pinned.remove(&id);
-        }
+        self.graph.root() == Some(id) || self.active.contains(&id)
     }
 
     /// Take one stamp from the window.

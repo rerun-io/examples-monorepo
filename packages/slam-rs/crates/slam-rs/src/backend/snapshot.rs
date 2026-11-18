@@ -2,6 +2,7 @@
 //! bindings and the Rerun layer. Everything is copied, in id order, so a
 //! snapshot stays valid while the back end goes on (D51).
 
+use super::pgo::PgoRun;
 use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats};
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
@@ -12,8 +13,10 @@ pub struct MapSnapshot {
     /// Map keyframes, oldest first.
     pub keyframe_t_ns: Vec<FrameId>,
     /// `T_w_i` of each keyframe as the map holds it: the window's solved (or,
-    /// once evicted, final) pose. Loop closing has not moved any yet.
+    /// once evicted, final) pose, as the pose-graph optimization corrected it.
     pub keyframe_poses: Vec<Se3<f64>>,
+    /// The window's pose of each keyframe, before any correction.
+    pub keyframe_raw_poses: Vec<Se3<f64>>,
     /// Whether each keyframe is still in the window.
     pub keyframe_active: Vec<bool>,
     /// Map landmarks the snapshot could place, in id order.
@@ -38,6 +41,11 @@ pub struct MapSnapshot {
     pub loop_counts: LoopCounts,
     /// Verified loops whose two keyframes are still in the map, oldest first.
     pub loops: Vec<SnapshotLoop>,
+    /// Applied PGOs so far, for re-anchoring (PR f1): a reader re-anchors
+    /// when it changes.
+    pub pgo_epoch: u64,
+    /// Applied PGOs, oldest first.
+    pub pgo_runs: Vec<PgoRun>,
 }
 
 /// One verified loop in a [`MapSnapshot`].
@@ -47,7 +55,8 @@ pub struct SnapshotLoop {
     pub current: FrameId,
     /// The keyframe it closes with.
     pub candidate: FrameId,
-    /// Fused at once (`false`: left for the pose-graph optimization).
+    /// Its landmarks were fused, at once or after a pose-graph optimization
+    /// (`false`: left unapplied, the optimization off or refused).
     pub fused: bool,
 }
 
@@ -74,9 +83,17 @@ impl MapBackend {
             points_world.push(point);
         }
         let graph = self.graph();
+        let pgo = self.loops.as_ref().map(|loops| loops.pgo());
         MapSnapshot {
             keyframe_t_ns: keyframes.keys().copied().collect(),
             keyframe_poses: keyframes.values().map(|keyframe| keyframe.pose).collect(),
+            keyframe_raw_poses: keyframes
+                .iter()
+                .map(|(id, keyframe)| {
+                    pgo.and_then(|pgo| pgo.raw.get(id).copied())
+                        .unwrap_or(keyframe.pose)
+                })
+                .collect(),
             keyframe_active: keyframes
                 .keys()
                 .map(|id| self.active.contains(id))
@@ -100,16 +117,20 @@ impl MapBackend {
                 .iter()
                 .flat_map(|loops| loops.events())
                 .filter(|event| {
-                    event.outcome != LoopOutcome::Stale
-                        && keyframes.contains_key(&event.detection.current)
+                    keyframes.contains_key(&event.detection.current)
                         && keyframes.contains_key(&event.detection.candidate)
                 })
                 .map(|event| SnapshotLoop {
                     current: event.detection.current,
                     candidate: event.detection.candidate,
-                    fused: matches!(event.outcome, LoopOutcome::Fused { .. }),
+                    fused: matches!(
+                        event.outcome,
+                        LoopOutcome::Fused { .. } | LoopOutcome::Optimized { .. }
+                    ),
                 })
                 .collect(),
+            pgo_epoch: pgo.map_or(0, |pgo| pgo.epoch()),
+            pgo_runs: pgo.map(|pgo| pgo.runs.clone()).unwrap_or_default(),
         }
     }
 }

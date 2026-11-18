@@ -306,6 +306,8 @@ impl<S: Scalar> Vio<S> {
             .map(|frame| frame.with_dense(Clone::clone))
             .collect::<Result<Vec<kornia_image::Image<u16, 1>>, _>>()
         else {
+            // Counted later as the query's `without_images`.
+            log::warn!("loop closing: keyframe {t_ns}'s images could not be copied");
             return;
         };
         self.keyframe_images.insert(

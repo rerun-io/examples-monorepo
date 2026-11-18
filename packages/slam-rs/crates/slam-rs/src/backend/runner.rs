@@ -73,6 +73,8 @@ pub struct BackendCounters {
     pub query: StepTiming,
     /// Wall time of the views the Realtime thread posted for readers.
     pub publish: StepTiming,
+    /// Wall time of the loops that ran a pose-graph optimization (PR c2).
+    pub pgo: StepTiming,
 }
 
 /// A copy of the work and the counters when it was taken: one moment.
@@ -130,6 +132,14 @@ impl<B: BackendWork> State<B> {
         let events: Vec<MapEvent> = self.work.query(keyframe);
         self.counters.query.record(crate::duration_ns(started));
         self.counters.queries_run += 1;
+        for event in &events {
+            if let MapEvent::LoopVerified {
+                pgo_ns: Some(ns), ..
+            } = event
+            {
+                self.counters.pgo.record(*ns);
+            }
+        }
         Some(!events.is_empty())
     }
 

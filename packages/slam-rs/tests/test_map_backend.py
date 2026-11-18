@@ -58,6 +58,7 @@ def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(
     k: int = snapshot.keyframe_t_ns.shape[0]
     p: int = snapshot.point_ids.shape[0]
     e: int = snapshot.covisibility_edges.shape[0]
+    r: int = snapshot.pgo_epoch
     assert k >= 1
     assert snapshot.keyframes == k
     for array, dtype, shape in (
@@ -69,6 +70,8 @@ def test_the_map_snapshot_has_typed_copied_arrays_and_never_moves_a_pose(
         (snapshot.points_world, np.float32, (p, 3)),
         (snapshot.covisibility_edges, np.int64, (e, 2)),
         (snapshot.covisibility_weights, np.uint32, (e,)),
+        (snapshot.keyframe_raw_poses, np.float64, (k, 7)),
+        (snapshot.pgo_runs, np.int64, (r, 5)),
     ):
         assert array.dtype == dtype
         assert array.shape == shape
