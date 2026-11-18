@@ -2673,6 +2673,8 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "criterion",
+ "kornia-3d",
+ "kornia-algebra",
  "kornia-image",
  "kornia-staging-3d",
  "kornia-staging-algebra",
