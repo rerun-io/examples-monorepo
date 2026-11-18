@@ -16,7 +16,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Int64, UInt8
+from jaxtyping import Bool, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import PinholeParameters
@@ -166,3 +166,23 @@ def read_people_masks(layer: LayerSegment, face: CubeFace, timeline: str, wanted
             raise ValueError(f"{entity} @ {t_ns}: {flat.size} pixels, the face is {face.width}x{face.height}")
         masks[int(t_ns)] = flat.reshape(face.height, face.width)
     return masks
+
+
+def read_valid_masks(layer: LayerSegment, faces: tuple[CubeFace, ...]) -> dict[str, Bool[ndarray, "h w"]]:
+    """Each face's static ``pinhole/valid_mask`` (1 = inside the lens field) as a bool image, by face name.
+
+    Raises:
+        ValueError: If a face has no valid mask or it has another size than the face.
+    """
+    entities: list[str] = [f"{face.entity}/pinhole/valid_mask" for face in faces]
+    table: pa.Table = layer.dataset.filter_segments(layer.segment_id).filter_contents(entities).reader(index=None).to_arrow_table()
+    valid: dict[str, Bool[ndarray, "h w"]] = {}
+    for face, entity in zip(faces, entities, strict=True):
+        column_name: str = f"{entity}:SegmentationImage:buffer"
+        if column_name not in table.column_names:
+            raise ValueError(f"segment {layer.segment_id}: {entity} has no SegmentationImage")
+        flat: UInt8[ndarray, " n_pixels"] = np.asarray(table.column(column_name).drop_null().combine_chunks()[0].values.flatten(), dtype=np.uint8)
+        if flat.size != face.width * face.height:
+            raise ValueError(f"{entity}: {flat.size} pixels, the face is {face.width}x{face.height}")
+        valid[face.name] = flat.reshape(face.height, face.width) == 1
+    return valid

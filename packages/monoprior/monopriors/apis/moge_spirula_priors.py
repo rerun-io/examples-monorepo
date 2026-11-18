@@ -31,7 +31,7 @@ from monopriors.cube_faces import (
     normal_png_rgb,
     opposite_half_face,
 )
-from monopriors.cube_layer import FaceFrameset, iter_framesets, open_rrd, read_cube_faces
+from monopriors.cube_layer import FaceFrameset, iter_framesets, open_rrd, read_cube_faces, read_valid_masks
 from monopriors.models.moge_v2.export import resolve_num_tokens, token_grid_hw
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TrtPredictor
 
@@ -76,6 +76,8 @@ class _Job:
     window: FullFaceWindow
     t_ns: int
     rgb: UInt8[ndarray, "n n 3"]
+    lens_field: Bool[ndarray, "h w"]
+    """The face's ``valid_mask``: pixels outside the lens field get no prior."""
 
 
 def network_input(face: CubeFace, frameset: FaceFrameset, faces: tuple[CubeFace, ...], pixel_centre_px: float) -> UInt8[ndarray, "n n 3"]:
@@ -100,7 +102,7 @@ def _write_prior(
 ) -> None:
     depth_crop: Float32[ndarray, "h w"] = job.window.crop(depth_m)
     normal_crop: Float32[ndarray, "h w 3"] = job.window.crop(normals)
-    valid_crop: Bool[ndarray, "h w"] = job.window.crop(valid)
+    valid_crop: Bool[ndarray, "h w"] = job.window.crop(valid) & job.lens_field
     for kind, image in (
         ("depths", depth_png_mm(depth_crop, valid_crop)),
         ("normals", cv2.cvtColor(normal_png_rgb(normal_crop, valid_crop), cv2.COLOR_RGB2BGR)),
@@ -117,6 +119,7 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
     with open_rrd(config.faces_rrd, "faces") as layer_segment:
         faces: tuple[CubeFace, ...] = read_cube_faces(layer_segment)
         windows: dict[str, FullFaceWindow] = {face.name: full_face_window(face, config.pixel_centre_px) for face in faces}
+        lens_fields: dict[str, Bool[ndarray, "h w"]] = read_valid_masks(layer_segment, faces)
         sides: set[int] = {window.side_px for window in windows.values()}
         if len(sides) != 1:
             raise ValueError(f"faces of different full sizes {sorted(sides)}; one square engine expected")
@@ -161,7 +164,7 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
                     if exported is not None and frameset.t_ns not in exported[face.name]:
                         continue
                     rgb: UInt8[ndarray, "n n 3"] = network_input(face, frameset, faces, config.pixel_centre_px)
-                    pending.append(_Job(face=face, window=windows[face.name], t_ns=frameset.t_ns, rgb=rgb))
+                    pending.append(_Job(face=face, window=windows[face.name], t_ns=frameset.t_ns, rgb=rgb, lens_field=lens_fields[face.name]))
                     if len(pending) == config.batch_size:
                         flush()
                 n_framesets += 1

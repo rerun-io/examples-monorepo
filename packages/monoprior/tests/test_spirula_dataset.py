@@ -3,7 +3,15 @@
 import numpy as np
 import pytest
 
-from monopriors.apis.spirula_dataset import ColmapImageKey, parse_image_key, read_colmap_cameras, rewrite_image_names
+from monopriors.apis.spirula_dataset import (
+    COLMAP_PIXEL_CENTRE_SHIFT_PX,
+    ColmapImageKey,
+    colmap_camera_line,
+    keep_mask,
+    parse_image_key,
+    read_colmap_cameras,
+    rewrite_image_names,
+)
 
 IMAGES_TXT: str = """# Image list with two lines of data per image:
 #   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
@@ -52,3 +60,19 @@ def test_read_colmap_cameras() -> None:
     cameras = read_colmap_cameras("# c\n2 PINHOLE 480 800 400 400 79.5 399.5\n")
     assert cameras[2].model == "PINHOLE" and (cameras[2].width, cameras[2].height) == (480, 800)
     np.testing.assert_array_equal(cameras[2].params, [400.0, 400.0, 79.5, 399.5])
+
+
+def test_camera_line_moves_the_principal_point_to_colmaps_pixel_centres() -> None:
+    camera = read_colmap_cameras("3 PINHOLE 480 800 400 400 79.5 399.5\n")[3]
+    assert COLMAP_PIXEL_CENTRE_SHIFT_PX == 0.5
+    assert colmap_camera_line(camera, COLMAP_PIXEL_CENTRE_SHIFT_PX) == "3 PINHOLE 480 800 400.0 400.0 80.0 400.0"
+    assert colmap_camera_line(camera, 0.0) == "3 PINHOLE 480 800 400.0 400.0 79.5 399.5"
+    with pytest.raises(ValueError, match="PINHOLE only"):
+        colmap_camera_line(read_colmap_cameras("1 SIMPLE_RADIAL 10 10 5 5 5 0.1\n")[1], 0.5)
+
+
+def test_keep_mask_drops_people_and_pixels_outside_the_lens_field() -> None:
+    valid = np.array([[True, True, False]])
+    people = np.array([[0, 1, 0]], dtype=np.uint8)
+    np.testing.assert_array_equal(keep_mask(valid, people), [[255, 0, 0]])
+    np.testing.assert_array_equal(keep_mask(valid, None), [[255, 255, 0]])

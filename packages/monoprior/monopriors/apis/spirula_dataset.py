@@ -15,11 +15,14 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from jaxtyping import Float64, UInt8
+from jaxtyping import Bool, Float64, UInt8
 from numpy import ndarray
 
 from monopriors.cube_faces import CubeFace
-from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces, read_people_masks
+from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces, read_people_masks, read_valid_masks
+
+COLMAP_PIXEL_CENTRE_SHIFT_PX: float = 0.5
+"""Added to cx, cy on export: the faces layer and colsfm put the first pixel centre at 0.0, spirula (COLMAP) at 0.5."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +66,24 @@ def read_colmap_cameras(text: str) -> dict[int, ColmapCamera]:
         camera: ColmapCamera = ColmapCamera(int(fields[0]), fields[1], int(fields[2]), int(fields[3]), np.asarray(fields[4:], dtype=np.float64))
         cameras[camera.camera_id] = camera
     return cameras
+
+
+def colmap_camera_line(camera: ColmapCamera, principal_point_shift_px: float) -> str:
+    """A ``cameras.txt`` row for a PINHOLE camera (fx fy cx cy) with cx, cy moved by ``principal_point_shift_px``.
+
+    Raises:
+        ValueError: For a non-PINHOLE camera.
+    """
+    if camera.model != "PINHOLE":
+        raise ValueError(f"camera {camera.camera_id} is {camera.model}; the export writes PINHOLE only")
+    params: Float64[ndarray, "4"] = camera.params + np.array([0.0, 0.0, principal_point_shift_px, principal_point_shift_px])
+    return " ".join([str(camera.camera_id), camera.model, str(camera.width), str(camera.height), *(repr(float(value)) for value in params)])
+
+
+def keep_mask(valid: Bool[ndarray, "h w"], people: UInt8[ndarray, "h w"] | None) -> UInt8[ndarray, "h w"]:
+    """spirula mask: 255 = keep, 0 = a person (``people`` 1) or outside the lens field (``valid`` false)."""
+    keep: Bool[ndarray, "h w"] = valid if people is None else valid & (people == 0)
+    return np.where(keep, 255, 0).astype(np.uint8)
 
 
 def _image_records(text: str) -> Iterator[tuple[str, str]]:
@@ -124,13 +145,17 @@ class SpirulaDatasetConfig:
     faces_rrd: Path
     """The cube-faces layer ``.rrd``."""
     masks_rrd: Path | None
-    """The people-mask layer ``.rrd`` (``<face entity>/pinhole/people_mask``, 1 = person); None writes no masks."""
+    """The people-mask layer ``.rrd`` (``<face entity>/pinhole/people_mask``, 1 = person or outside the lens field).
+    None builds the masks from the faces layer's static ``pinhole/valid_mask`` alone. Either way a pixel outside
+    ``valid_mask`` is never kept."""
     dataset_dir: Path
     """Output spirula dataset folder."""
     timeline: str = "video_time"
     """Timeline of the layers."""
     jpeg_quality: int = 95
     """JPEG quality of the training images."""
+    shift_principal_point: bool = True
+    """Add :data:`COLMAP_PIXEL_CENTRE_SHIFT_PX` to cx, cy (integer pixel centres -> COLMAP's); poses are unchanged."""
 
     def __post_init__(self) -> None:
         """Validate ranges."""
@@ -160,8 +185,7 @@ def _write_jpeg(path: Path, rgb: UInt8[ndarray, "h w 3"], quality: int) -> None:
     path.chmod(0o644)
 
 
-def _write_mask(path: Path, people: UInt8[ndarray, "h w"]) -> None:
-    keep: UInt8[ndarray, "h w"] = np.where(people == 0, 255, 0).astype(np.uint8)
+def _write_mask(path: Path, keep: UInt8[ndarray, "h w"]) -> None:
     if not cv2.imwrite(str(path), keep):
         raise OSError(f"could not write {path}")
     path.chmod(0o644)
@@ -180,6 +204,7 @@ def main(config: SpirulaDatasetConfig) -> None:
         all_faces: tuple[CubeFace, ...] = read_cube_faces(faces_layer)
         _check_cameras(cameras, keys, camera_ids, {face.name: face for face in all_faces})
         faces: tuple[CubeFace, ...] = tuple(face for face in all_faces if face.name in wanted)
+        valid_by_face: dict[str, Bool[ndarray, "h w"]] = read_valid_masks(faces_layer, faces)
         for face in faces:
             (config.dataset_dir / "images" / face.name).mkdir(parents=True, exist_ok=True)
         n_images: int = 0
@@ -196,27 +221,29 @@ def main(config: SpirulaDatasetConfig) -> None:
     if n_images != len(keys):
         raise ValueError(f"wrote {n_images} images but colsfm registered {len(keys)}: some registered stamps are not in the faces layer")
     n_masks: int = 0
+    people_by_face: dict[str, dict[int, UInt8[ndarray, "h w"]]] = {}
     if config.masks_rrd is not None:
         with open_rrd(config.masks_rrd, "masks") as masks_layer:
             for face in faces:
-                masks: dict[int, UInt8[ndarray, "h w"]] = read_people_masks(masks_layer, face, config.timeline, wanted[face.name])
-                missing: set[int] = wanted[face.name] - set(masks)
+                people_by_face[face.name] = read_people_masks(masks_layer, face, config.timeline, wanted[face.name])
+                missing: set[int] = wanted[face.name] - set(people_by_face[face.name])
                 if missing:
                     raise ValueError(f"{face.name}: no people_mask for {len(missing)} registered frames, e.g. {sorted(missing)[:3]}")
-                (config.dataset_dir / "masks" / face.name).mkdir(parents=True, exist_ok=True)
-                for t_ns, people in masks.items():
-                    _write_mask(config.dataset_dir / "masks" / face.name / f"{t_ns}.png", people)
-                    n_masks += 1
+    for face in faces:
+        (config.dataset_dir / "masks" / face.name).mkdir(parents=True, exist_ok=True)
+        for t_ns in sorted(wanted[face.name]):
+            people: UInt8[ndarray, "h w"] | None = people_by_face[face.name][t_ns] if people_by_face else None
+            _write_mask(config.dataset_dir / "masks" / face.name / f"{t_ns}.png", keep_mask(valid_by_face[face.name], people))
+            n_masks += 1
     (sparse_dir / "images.txt").write_text(images_text)
     used_camera_ids: set[int] = set(camera_ids.values())
     camera_lines: list[str] = ["# Camera list with one line of data per camera:", "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]"]
-    camera_lines += [
-        " ".join([str(camera.camera_id), camera.model, str(camera.width), str(camera.height), *(repr(float(value)) for value in camera.params)])
-        for camera in cameras.values()
-        if camera.camera_id in used_camera_ids
-    ]
+    shift_px: float = COLMAP_PIXEL_CENTRE_SHIFT_PX if config.shift_principal_point else 0.0
+    camera_lines += [colmap_camera_line(camera, shift_px) for camera in cameras.values() if camera.camera_id in used_camera_ids]
     (sparse_dir / "cameras.txt").write_text("\n".join(camera_lines) + "\n")
     shutil.copyfile(config.colsfm_sparse / "points3D.txt", sparse_dir / "points3D.txt")
     for path in sparse_dir.iterdir():
         path.chmod(0o644)
-    print(f"exported {n_images} images, {n_masks} masks, {len(used_camera_ids)} cameras over {len(faces)} faces -> {config.dataset_dir}")
+    print(
+        f"exported {n_images} images, {n_masks} masks ({'people + valid' if people_by_face else 'valid_mask only'}), cx/cy +{shift_px} px, {len(used_camera_ids)} cameras over {len(faces)} faces -> {config.dataset_dir}"
+    )
