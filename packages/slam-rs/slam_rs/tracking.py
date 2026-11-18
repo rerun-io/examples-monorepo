@@ -451,6 +451,7 @@ def run_robocap(
     ) as feed:
         check_calibration_matches_recording(calibration, feed.cameras, feed.imu, ROBOCAP_RIG.downscale)
         stop_ns: int | None = None if seconds <= 0.0 else int(feed.frame_t_ns[0]) + int(seconds * 1e9)
-        # A fleet row scores the raw VIO only, and RoboCap runs on Mali, where no GBA runs until a probe-backed run
-        # exists (DESIGN Q7).
-        return drive(feed, Lockstep(vio=_core.Vio(calibration, flow, backend=backend)), stop_ns, config_sha256=config_text_sha256(config_text), run_gba=False)
+        # A fleet row scores the raw VIO only, and RoboCap runs on Mali, where no back end runs until a probe-backed run
+        # exists (DESIGN Q7): the back end stays off here, as robocap-live builds without it.
+        vio: _core.Vio = _core.Vio(calibration, flow.with_backend("off"), backend=backend)
+        return drive(feed, Lockstep(vio=vio), stop_ns, config_sha256=config_text_sha256(config_text), run_gba=False)

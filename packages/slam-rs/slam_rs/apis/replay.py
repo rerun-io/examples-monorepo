@@ -80,7 +80,7 @@ class Config:
     map: Literal["off", "offline", "realtime"] | None = None
     """``--stage vio``: the back end's persistent keyframe map, drawn under ``/world/runs/slam_rs``; None keeps the profile's.
 
-    Off by default (opt in until loop closing gives the map a use). ``offline`` steps it inline (tracking waits, results
+    On by default (``backend.enabled``). ``offline`` steps it inline (tracking waits, results
     repeat); ``realtime`` runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the
     same in all three.
     """

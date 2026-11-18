@@ -295,9 +295,11 @@ pub struct VioConfig {
     // keep its `config.` names; keys of this port are under `backend.`.
     /// Build the persistent keyframe map beside the window. Read only by builds
     /// with the `backend` feature; the raw VIO poses are the same either way.
-    /// Off by default: opt in until loop closing (PR b2) gives the map a use
-    /// (a2 review). `backend.mode` says where it runs; Realtime never makes
-    /// tracking wait. Builds without the feature ignore it.
+    /// On by default (loops, PGO and the global BA give the final trajectory);
+    /// a run that scores only the raw VIO, or a device that cannot spare the
+    /// work, turns it off. `backend.mode` says where it runs; Realtime never
+    /// makes tracking wait. Builds without the feature (robocap-live, wasm,
+    /// iOS, embedded) ignore it.
     #[serde(rename = "backend.enabled")]
     pub backend_enabled: bool,
     /// Where the back end runs: inline (`offline`) or on its own thread
@@ -442,7 +444,7 @@ impl Default for VioConfig {
             vio_kf_marg_feature_ratio: 0.1,
             vio_kf_marg_criteria: KeyframeMargCriteria::Default,
 
-            backend_enabled: false,
+            backend_enabled: true,
             backend_mode: BackendMode::Offline,
             backend_realtime_max_queued_queries: std::num::NonZeroUsize::MIN.saturating_add(3),
             map_enable_culling: true,
@@ -701,7 +703,7 @@ mod tests {
     #[test]
     fn the_map_keys_default_to_one_set_and_take_rootslam_names() {
         let defaults = VioConfig::default();
-        assert!(!defaults.backend_enabled);
+        assert!(defaults.backend_enabled);
         assert!(defaults.map_enable_culling);
         assert_eq!(defaults.map_max_redundancy_score, 0.9);
         assert!(!defaults.map_redundancy_exclude_hosted_lms);
