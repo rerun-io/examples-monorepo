@@ -6,7 +6,8 @@ Seams under test (all public):
 * `RetrievalIndex.query` / `.score` — ranked candidates, self and temporal exclusion.
 * `RetrievalIndex.search` — the same, plus what the temporal gate dropped.
 * `read_descriptors_from_database` — the pycolmap read path.
-* `colsfm.vocab_tree.bow_matrix` / `all_pairs_l1_score` — the vocabulary's scoring.
+* `colsfm.vocab_tree.bow_matrix` / `all_pairs_l1_score` — the Python tree's scoring, kept for the parity check.
+* `bow_vocab` — the Rust vocabulary's TF-IDF and L1 score, against the spec's formulas and the Python tree.
 
 The Galileo test reads the shipped blob keyframe protos directly rather than running the
 feature extractor, so it is offline and needs no GPU. Its reader lives in this file
@@ -41,7 +42,8 @@ from colsfm.retrieval import (
     VocabConfig,
     build_retrieval_index,
 )
-from colsfm.vocab_tree import all_pairs_l1_score, bow_matrix, l1_score
+from colsfm.vocab_tree import VocabConfig as PythonVocabConfig
+from colsfm.vocab_tree import all_pairs_l1_score, bow_matrix, l1_score, vocab_similarity
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 """Repo root, so data paths resolve regardless of the working directory."""
@@ -449,6 +451,66 @@ def test_the_vectorised_l1_score_agrees_with_the_spec_reference() -> None:
             query: dict[int, float] = {word: float(value) for word, value in enumerate(dense[first]) if value > 0.0}
             document: dict[int, float] = {word: float(value) for word, value in enumerate(dense[second]) if value > 0.0}
             assert l1_score(query, document) == pytest.approx(float(scores[first, second]), abs=1e-6)
+
+
+def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
+    """`bow_vocab`'s similarity must equal the spec's TF-IDF (§7.2) and L1 score (§9.5), pair by pair.
+
+    The words come from the Rust tree itself (`Vocabulary.words`); the weights and the score
+    are then recomputed here from the spec's formulas: raw counts times `log(n_images / df)`,
+    zero-weight words dropped, rows L1-normalised, and the literal L1 expression.
+    """
+    from bow_vocab import Vocabulary
+
+    corpus: dict[int, Descriptors] = _random_corpus(6, 300, seed=3)
+    images: list[Descriptors] = [corpus[image_id] for image_id in sorted(corpus)]
+    vocabulary: Vocabulary = Vocabulary(np.concatenate(images), branching=4, depth=3, iterations=5, seed=0)
+    scores: Float32[ndarray, "n_images n_images"] = vocabulary.index(images).similarity()
+
+    counts: list[dict[int, int]] = []
+    for image in images:
+        words, tally = np.unique(vocabulary.words(image), return_counts=True)
+        counts.append({int(word): int(count) for word, count in zip(words, tally, strict=True)})
+    document_frequency: dict[int, int] = {}
+    for image_counts in counts:
+        for word in image_counts:
+            document_frequency[word] = document_frequency.get(word, 0) + 1
+    bows: list[dict[int, float]] = []
+    for image_counts in counts:
+        weights: dict[int, float] = {word: count * np.log(len(images) / document_frequency[word]) for word, count in image_counts.items()}
+        weights = {word: weight for word, weight in weights.items() if weight > 0.0}
+        total: float = sum(weights.values())
+        bows.append({word: weight / total for word, weight in weights.items()})
+
+    for first in range(len(images)):
+        assert scores[first, first] == 1.0
+        for second in range(len(images)):
+            if first != second:
+                assert l1_score(bows[first], bows[second]) == pytest.approx(float(scores[first, second]), abs=1e-5)
+
+
+def test_the_rust_vocabulary_ranks_like_the_python_tree(synthetic_corpus: SyntheticCorpus, synthetic_vocab_index: RetrievalIndex) -> None:
+    """Parity before the Python tree is deleted: on the same corpus, the same gated top-1 for every query.
+
+    `synthetic_vocab_index` is the Rust backend (`bow_vocab`); `vocab_similarity` is the Python
+    tree it replaces, with the same branching, depth, sample and seed. The trees differ in their
+    random draws, so the scores are not bit-equal; the ranking that loop closure reads must agree.
+    """
+    config: RetrievalConfig = RetrievalConfig(backend="vocab")
+    image_ids: tuple[int, ...] = synthetic_vocab_index.image_ids
+    counts: list[int] = [len(synthetic_corpus.descriptors[image_id]) for image_id in image_ids]
+    python_scores, python_words = vocab_similarity(synthetic_corpus.descriptors, image_ids, counts, PythonVocabConfig(), config.seed)
+    python_index: RetrievalIndex = RetrievalIndex(
+        image_ids=image_ids, similarity=python_scores, descriptors_per_image=0, config=config, build_seconds=0.0, n_words=python_words
+    )
+    assert python_words == synthetic_vocab_index.n_words
+    gate_us: int = 5 * FRAME_PERIOD_US
+    for query_id in image_ids:
+        rust_best: list[Candidate] = synthetic_vocab_index.query(
+            query_id, top_k=1, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us
+        )
+        python_best: list[Candidate] = python_index.query(query_id, top_k=1, min_time_gap_us=gate_us, timestamps=synthetic_corpus.timestamps_us)
+        assert [c.image_id for c in rust_best] == [c.image_id for c in python_best]
 
 
 VOCAB_PROBE_IMAGES: int = 100

@@ -1,0 +1,52 @@
+# rattler-build recipe for bow-vocab: kornia-staging-bow's seeded k-means vocabulary for float descriptors, TF-IDF bags
+# of words and inverted-file L1 scores, as the pyo3 module bow_vocab (colsfm's retrieval index). maturin builds it from
+# the crates/bow-vocab-py workspace member (pyproject.toml `manifest-path`). Same layout as packages/insta360-io:
+# kornia-staging is a second source, because the binding's path dependency points at ../kornia-staging/crates. pixi
+# rebuilds on changes under packages/bow-vocab only; after editing kornia-staging-bow, bump the build number.
+package:
+  name: bow-vocab
+  version: "0.1.0"
+
+source:
+  - path: .
+    target_directory: bow-vocab
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
+  - path: ../kornia-staging
+    target_directory: kornia-staging
+    filter:
+      exclude:
+        - target/**
+        - .pixi/**
+        - '**/__pycache__/**'
+
+build:
+  number: 0
+  script:
+    - cd bow-vocab
+    # pixi reuses the host prefix across source builds, and files left there are packaged: drop an earlier install.
+    - export SP_DIR="$(${{ PYTHON }} -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
+    - rm -rf "$SP_DIR/bow_vocab" "$SP_DIR"/bow_vocab-*.dist-info
+    - ${{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+
+requirements:
+  build:
+    - ${{ compiler('rust') }}
+    # The C compiler links the extension; no stdlib('c'): it would pin a sysroot to the workspace's glibc 2.35.
+    - ${{ compiler('c') }}
+  host:
+    - python 3.12.*
+    - pip
+    - maturin >=1.9.4,<2
+  run:
+    - python 3.12.*
+    - numpy
+
+tests:
+  - python:
+      imports:
+        - bow_vocab
+      pip_check: false
