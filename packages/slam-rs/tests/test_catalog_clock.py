@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
 import rerun as rr
 
@@ -85,6 +86,39 @@ def test_publishing_and_replacing_estimates_cannot_change_ground_truth(clock_rec
                 truth: Trajectory = feed.ground_truth_between(0, 100)
                 np.testing.assert_array_equal(truth.t_ns, [10, 30])
                 np.testing.assert_array_equal(truth.position_m[:, 0], [1.0, 3.0])
+
+
+def test_a_published_result_leaves_the_merged_rig_to_ground_truth(clock_recording: Path, tmp_path: Path) -> None:
+    """With base, gt and a slam_rs layer merged, ``/world/rig_00`` holds the ground truth alone and the run sits under its own path."""
+    from slam_rs.catalog_layer import POSE_SOURCE, write_layer
+    from slam_rs.tracking import SegmentRun
+    from slam_rs.trajectory import empty_trajectory
+
+    truth_path: Path = tmp_path / "gt.rrd"
+    with rr.RecordingStream("clock-test", recording_id="clock") as rec:
+        rec.save(truth_path)
+        for stamp, position in ((10, 1.0), (30, 3.0)):
+            rec.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
+            rec.log("/world/rig_00", rr.Transform3D(translation=[position, 0.0, 0.0], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, 0.0, 1.0])))
+    estimate: Trajectory = Trajectory(
+        t_ns=np.array([10, 20], dtype=np.int64), position_m=np.array([[99.0, 0.0, 0.0], [88.0, 0.0, 0.0]]), quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)),
+    )
+    result_path: Path = tmp_path / "slam_rs.rrd"
+    write_layer(result_path, "clock", SegmentRun(estimate=estimate, framesets=2, lost=0, wall_s=0.1, ground_truth=empty_trajectory(),
+                                                 median_tracker_ms=1.0, config_sha256="test", calibration_sha256="test-calibration"), clock_offset_ns=0, profile="fast", backend="cpu")
+    with rr.server.Server(datasets={"test": [clock_recording]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("test")
+        dataset.register([truth_path.as_uri()], layer_name="gt").wait()
+        dataset.register([result_path.as_uri()], layer_name=POSE_SOURCE).wait()
+        merged: pa.Table = (
+            dataset.filter_segments(["clock"]).filter_contents(["/world/rig_00", "/world/runs/slam_rs/rig"]).reader(index="video_time").to_arrow_table()
+        )
+    stamps: list[int] = merged["video_time"].combine_chunks().cast(pa.int64()).to_pylist()
+    # One translation per row, as a one-element list of xyz; None where the entity has no row at that time.
+    rig: list[float | None] = [None if row is None else row[0][0] for row in merged["/world/rig_00:Transform3D:translation"].to_pylist()]
+    run: list[float | None] = [None if row is None else row[0][0] for row in merged["/world/runs/slam_rs/rig:Transform3D:translation"].to_pylist()]
+    assert {stamp: value for stamp, value in zip(stamps, rig, strict=True) if value is not None} == {10: 1.0, 30: 3.0}
+    assert {stamp: value for stamp, value in zip(stamps, run, strict=True) if value is not None} == {10: 99.0, 20: 88.0}
 
 
 def test_unscored_feed_does_not_open_ground_truth_storage(clock_recording: Path) -> None:

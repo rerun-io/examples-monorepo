@@ -13,6 +13,9 @@ default = []
 # Separate buffers avoid CubeCL's shared-page alignment using uniform limits
 # on adapters whose storage-buffer alignment is larger.
 wgpu = ["dep:cubecl-wgpu", "dep:wgpu", "cubecl-wgpu/exclusive-memory-only"]
+# Test-only entry points: the matvec and dot one at a time, the host mirror of
+# the device sums, the PCG residual, and a round trip that returns zeros.
+test-support = []
 
 [dependencies]
 bytes.workspace = true
@@ -24,6 +27,9 @@ cubecl-environment.workspace = true
 kornia-staging-imgproc.workspace = true
 kornia-staging-algebra.workspace = true
 kornia-staging-3d.workspace = true
+# The global BA's reduced system and its PCG lane seam (linalg).
+kornia-staging-slam.workspace = true
+nalgebra.workspace = true
 thiserror.workspace = true
 log.workspace = true
 wgpu = { workspace = true, optional = true }
@@ -36,12 +42,17 @@ cubecl-wgpu = { workspace = true, optional = true, features = ["msl"] }
 cubecl-wgpu = { workspace = true, optional = true, features = ["spirv"] }
 
 [dev-dependencies]
+kornia-staging-gpu = { path = ".", features = ["test-support"] }
 kornia-staging-imgproc = { workspace = true, features = ["test-fixtures"] }
 # The stitch tests parse the factory calibration strings and open the clip.
 kornia-staging-io.workspace = true
+# tests/gba_lanes.rs reads RootSLAM's exported GBA problems (Basalt calibrations).
+kornia-staging-3d = { workspace = true, features = ["serde"] }
+# Upstream umeyama_f64, the rigid fit the band checks compare positions with.
+kornia-algebra.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-nalgebra.workspace = true
 approx.workspace = true
 criterion.workspace = true
 

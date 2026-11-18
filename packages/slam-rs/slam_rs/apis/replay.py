@@ -3,7 +3,7 @@
 import dataclasses
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -12,24 +12,25 @@ import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.stage_times import StageTimes
 
-from slam_rs import BackendRequest, _core
+from slam_rs import BackendRequest, GbaRequest, _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
     CatalogSegment,
     DecodeRequest,
     Frameset,
     LocalSegment,
-    RigProfile,
     SegmentFeed,
     SegmentSource,
+    dataset_rig,
     open_segment,
     select_decode_device,
 )
 from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
+from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.rig import TIMELINE
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import RUN_ENTITY, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
@@ -70,7 +71,7 @@ class Config:
     window_s: float = DEFAULT_WINDOW_S
     """Longest time window fetched from the catalog in one round trip."""
     output_csv: Path | None = None
-    """Where the estimated trajectory is written; defaults to ``data/<segment>/slam_rs.csv``."""
+    """Where the final trajectory is written; defaults to ``data/<segment>/slam_rs.csv``. The raw VIO goes beside it as ``<stem>_vio.csv``."""
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
     backend: BackendRequest = "auto"
@@ -101,6 +102,20 @@ class Config:
     ``--rr-config.save`` holds everything it logs) and its wall time. Poses, keypoints and counters are logged
     on every frameset regardless.
     """
+    map: Literal["off", "offline", "realtime"] | None = None
+    """``--stage vio``: the back end's persistent keyframe map, drawn under ``/world/runs/slam_rs``; None keeps the profile's.
+
+    On by default (``backend.enabled``). ``offline`` steps it inline (tracking waits, results
+    repeat); ``realtime`` runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the
+    same in all three.
+    """
+    gba: bool = True
+    """With the map on: run the global BA on the map after loops and PGO (``Vio.finish_map``) and re-anchor the final
+    trajectory on its keyframes; draw them under ``/world/runs/slam_rs/gba`` and write them to ``<output-csv
+    stem>_gba_keyframes.csv``. ``--no-gba`` re-anchors on the map as loops and PGO left it. The raw VIO is unchanged."""
+    ba_backend: GbaRequest = "follow"
+    """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
+    ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
 
 
 @dataclass(slots=True)
@@ -318,6 +333,8 @@ def main(config: Config) -> None:
         vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
     if config.vio_bootstrap is not None:
         vio_config.vio_bootstrap = config.vio_bootstrap
+    if config.map is not None:
+        vio_config = vio_config.with_backend(config.map)
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -337,7 +354,7 @@ def main(config: Config) -> None:
 
     with open_segment(
         source,
-        profile=RigProfile(decode_threads=config.decode_threads),
+        profile=replace(dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
         frame_stride=config.frame_stride,
         window_s=config.window_s,
         decode_device=select_decode_device(config.decode_device),
@@ -363,8 +380,10 @@ def main(config: Config) -> None:
             # host with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend)
-            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
+            vio: _core.Vio = _core.Vio(
+                _core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend, ba_backend=config.ba_backend
+            )
+            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else "") + f", GBA lane: {vio.gba_lane}")
             unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
             if unknown:
                 raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
@@ -386,8 +405,27 @@ def main(config: Config) -> None:
         stage.refuse_lost_framesets()
 
         estimate: Trajectory = stage.logger.estimated()
-        write_trajectory(output_csv, shift_clock(estimate, feed.export_offset_ns))
-        print(f"{len(estimate)} tracked poses -> {output_csv} (absolute ns)")
+        # The raw VIO first, beside the final run with ``_vio`` added to the stem (the names the scorer's
+        # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
+        # tracked run.
+        vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
+        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns))
+        # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
+        # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
+        finished: FinalRun = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
+        final: Trajectory = finished.final
+        map_result: _core.MapResult | None = finished.map_result
+        if finished.gba_failure is not None:
+            print(f"global BA: failed: {finished.gba_failure}")
+        stage.logger.log_final_run(final)
+        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns))
+        print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
+        if map_result is not None and map_result.gba is not None:
+            # At the cursor the flush left on the last frameset, beside the final map.
+            log_map_result(map_result)
+            gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
+            write_trajectory(gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns))
+            print(f"global BA: {map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")
             return
@@ -395,4 +433,5 @@ def main(config: Config) -> None:
         if len(reference) == 0:
             return
         print(f"vs ground truth, {coverage(reference, estimate):.1%} of its span covered")
-        print(ate(estimate, reference).summary())
+        print(f"raw VIO: {ate(estimate, reference).summary()}")
+        print(f"final: {ate(final, reference).summary()}")
