@@ -105,6 +105,7 @@ ignore_names = [
     "return_value",
     # PyAV decoder setting, read by the decoder.
     "thread_type",
+    "thread_count",
     "pix_fmt",
     # Pytest invokes this autouse capability fixture.
     "fixture_cuda_filter_available",

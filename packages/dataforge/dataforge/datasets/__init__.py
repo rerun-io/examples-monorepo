@@ -15,6 +15,7 @@ from dataforge.datasets.gsi_six_view import GsiSixViewConfig
 from dataforge.datasets.harmony4d import Harmony4dConfig
 from dataforge.datasets.hocap import HocapConfig
 from dataforge.datasets.hot3d import Hot3dAriaConfig, Hot3dQuest3Config
+from dataforge.datasets.insta360 import Insta360Config
 from dataforge.datasets.lamaria import LamariaConfig
 from dataforge.datasets.mamma import MammaConfig
 from dataforge.datasets.msd import MsdConfig
@@ -28,7 +29,7 @@ from dataforge.datasets.vslam_lab import VslamLabConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
 dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), GenHumanEgoConfig(), GenrobotConfig(), GsiSixViewConfig(), Harmony4dConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), TartanAirConfig(), TumViConfig(), UmetrackConfig(), VslamLabConfig(), WildcapConfig())
+    config.command: config for config in (AriaGen2PilotConfig(), Assembly101Config(), Egoexo4dConfig(), EpflConfig(), GenHumanEgoConfig(), GenrobotConfig(), GsiSixViewConfig(), Harmony4dConfig(), HocapConfig(), Hot3dAriaConfig(), Hot3dQuest3Config(), Insta360Config(), LamariaConfig(), MammaConfig(), MsdConfig(), RobocapConfig(), SelfcapConfig(), Show3dConfig(), TartanAirConfig(), TumViConfig(), UmetrackConfig(), VslamLabConfig(), WildcapConfig())
 }
 """Every dataset dataforge knows about, keyed by its CLI subcommand (``config.command``).
 
