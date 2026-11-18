@@ -32,7 +32,7 @@ class Built(Exception):
         self.readout_s: list[float | None] = calibration.readout_s
 
 
-def standin_vio(calibration: _core.Calibration, config: _core.VioConfig, backend: str = "auto") -> _core.Vio:
+def standin_vio(calibration: _core.Calibration, config: _core.VioConfig, backend: str = "auto", **_kwargs: object) -> _core.Vio:
     """Record what the tool built the estimator from, then stop the tool."""
     raise Built(calibration, config)
 
@@ -104,7 +104,8 @@ def test_replay_gate_and_catalog_layer_build_the_same_estimator(feed: FakeFeed, 
     assert gate.readout_s == [READOUT_S, READOUT_S]
     for other in (replayed, layered):
         assert other.calibration_json == gate.calibration_json
-        assert other.config_json == gate.config_json
+        # The gate scores the raw VIO, so it builds the same config with the back end off (`tracking.raw_vio`).
+        assert _core.VioConfig.from_json(other.config_json).with_backend("off").to_json() == gate.config_json
 
 
 def test_the_run_hash_covers_the_recording_derived_calibration(feed: FakeFeed) -> None:

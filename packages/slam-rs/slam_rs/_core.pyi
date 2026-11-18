@@ -7,11 +7,11 @@ exact: no ``Any``, and every array carries its dtype.
 from collections.abc import Sequence
 from typing import ClassVar, Literal
 
-from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
-from slam_rs import BackendRequest, Lane
+from slam_rs import BackendRequest, GbaRequest, Lane
 from slam_rs.catalog_calibration import CameraStatics
 from slam_rs.catalog_feed import RigProfile
 from slam_rs.catalog_timing import ImuStream
@@ -29,11 +29,28 @@ the CPU and ``backend="gpu"`` is refused.
 """
 
 def device_probes_run() -> int:
-    """How many device capability probes this process has run.
+    """How many device probes this process has run: capability validations plus GBA round trips.
 
-    Validation of the default device runs once per process, so this is 0
-    before the first ``auto`` or ``gpu`` request and constant after it. The
-    unit test tier asserts it stays at 0.
+    Each runs once per process, so this is 0 before the first ``auto`` or
+    ``gpu`` request and constant after it. The unit test tier asserts it stays
+    at 0.
+    """
+
+def reanchor(
+    frame_t_ns: Int64[ndarray, " n"],
+    frame_poses: Float64[ndarray, "n 7"],
+    keyframe_t_ns: Int64[ndarray, " k"],
+    keyframe_poses: Float64[ndarray, "k 7"],
+) -> Float64[ndarray, "n 7"]:
+    """The final trajectory: each raw frame pose re-anchored on the optimized keyframes on both sides.
+
+    A frame between keyframes ``i`` and ``i+1`` blends ``T_i_opt T_i_raw^-1 T_f_raw`` and the same from ``i+1``
+    (translation lerp, rotation slerp, by time); a keyframe takes its optimized pose; frames outside the keyframes
+    take the nearest keyframe's correction. ``T_i_raw`` is the keyframe's own row in the frames. Poses are
+    ``[tx, ty, tz, qx, qy, qz, qw]``; timestamps increase strictly.
+
+    Raises:
+        ValueError: Timestamps that do not increase, a keyframe that is not a frame, or mismatched shapes.
     """
 
 def select_backend(request: BackendRequest) -> Lane:
@@ -153,7 +170,9 @@ class VioResult:
     def world_from_rig(self) -> Float64[ndarray, " 7"] | None:
         """``[tx, ty, tz, qx, qy, qz, qw]``, metres and a unit quaternion (xyzw).
 
-        Only ``Tracking`` supplies a pose; every other status returns ``None``.
+        Only ``Tracking`` supplies a pose; every other status returns ``None``. This is the raw, causal VIO; the
+        back end never moves it, and the pose-graph gauge (window fixed) makes it this frame's corrected pose too.
+        The corrected history of earlier frames is ``slam_rs.tracking.reanchored(poses, vio.map_snapshot())``.
         """
 
     @property
@@ -167,6 +186,334 @@ class VioResult:
     @property
     def accel_bias(self) -> Float64[ndarray, " 3"] | None:
         """Accelerometer bias estimate, m/s^2."""
+
+    def __repr__(self) -> str: ...
+
+class LoopCounts:
+    """What loop closing has done so far (all zero when it is off)."""
+
+    @property
+    def indexed(self) -> int:
+        """Keyframes described and added to the database."""
+
+    @property
+    def without_images(self) -> int:
+        """Queries that found no images for their keyframe."""
+
+    @property
+    def images_stripped(self) -> int:
+        """Keyframe stamps whose images were dropped before the back end took them (Realtime, behind)."""
+
+    @property
+    def with_candidates(self) -> int:
+        """Queries that retrieved at least one candidate."""
+
+    @property
+    def candidates(self) -> int:
+        """Candidates validated."""
+
+    @property
+    def pnp_errors(self) -> int:
+        """GP3P RANSAC calls that refused their input (a bug upstream of it), each logged."""
+
+    @property
+    def verified(self) -> int:
+        """Loops that passed verification."""
+
+    @property
+    def fused(self) -> int:
+        """Loops fused at once."""
+
+    @property
+    def needs_pgo(self) -> int:
+        """Loops at or above the drift gate: the pose-graph optimization's triggers."""
+
+    @property
+    def optimized(self) -> int:
+        """Of those, closed by an applied pose-graph optimization."""
+
+class MapResult:
+    """The map's keyframes at the end of a sequence (:meth:`Vio.finish_map`).
+
+    Poses are ``T_w_i``, ``[tx, ty, tz, qx, qy, qz, qw]``, on the clock :meth:`Vio.track` was given.
+    """
+
+    @property
+    def keyframe_t_ns(self) -> Int64[ndarray, " n_keyframes"]:
+        """Map keyframe timestamps, oldest first."""
+
+    @property
+    def keyframe_poses_before_gba(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """``T_w_i`` in the map after loops and PGO, before the global BA (the +LC keyframes).
+
+        The window's own poses are :attr:`MapSnapshot.keyframe_raw_poses`.
+        """
+
+    @property
+    def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """``T_w_i`` after the global BA (equal to :attr:`keyframe_poses_before_gba` without it)."""
+
+    @property
+    def gba(self) -> GbaRun | None:
+        """The global BA, or None when :meth:`Vio.finish_map` ran without it or it failed."""
+
+    @property
+    def gba_failure(self) -> str | None:
+        """Why the global BA, asked for, failed (``"global BA: <reason>"``), or None; the keyframes are then the map's after loops and PGO."""
+
+    def __repr__(self) -> str: ...
+
+class GbaRun:
+    """One global BA over the map: what the problem held, each LM attempt, and the wall of each stage."""
+
+    @property
+    def lane(self) -> Lane:
+        """Where the PCG ran (always ``"cpu"`` with ``backend.gba_use_double``: the device lane is f32 only)."""
+
+    @property
+    def keyframes(self) -> int:
+        """Keyframe variables."""
+
+    @property
+    def keyframes_without_reprojection(self) -> int:
+        """Keyframes under ``backend.gba_min_obs_per_kf``: pose-graph rows only (B22)."""
+
+    @property
+    def landmarks(self) -> int:
+        """Landmarks in the problem."""
+
+    @property
+    def observations(self) -> int:
+        """Reprojection observations in the problem."""
+
+    @property
+    def pose_graph_rows(self) -> int:
+        """Pose-graph rows."""
+
+    @property
+    def nonfinite_landmarks(self) -> int:
+        """Landmarks left out for want of a finite position."""
+
+    @property
+    def initial_cost(self) -> float:
+        """``ERROR_VALID`` before the first step."""
+
+    @property
+    def final_cost(self) -> float:
+        """``ERROR_VALID`` of the returned state."""
+
+    @property
+    def termination(self) -> Literal["converged", "max_iterations", "lambda_overflow"]:
+        """Why the LM loop stopped."""
+
+    @property
+    def iteration_lambda(self) -> Float64[ndarray, " n_attempts"]:
+        """LM damping of each attempt."""
+
+    @property
+    def iteration_cost(self) -> Float64[ndarray, " n_attempts"]:
+        """Cost after each attempt's step; NaN where the step was not finite."""
+
+    @property
+    def iteration_accepted(self) -> Bool[ndarray, " n_attempts"]:
+        """Whether each attempt's step was kept."""
+
+    @property
+    def iteration_cg(self) -> Int64[ndarray, " n_attempts"]:
+        """PCG iterations of each attempt."""
+
+    @property
+    def iteration_stage_s(self) -> Float64[ndarray, "n_attempts 5"]:
+        """Wall seconds per attempt: stage 1 (linearize, QR), stage 2 (damping, preconditioner), PCG, back-substitution, evaluation."""
+
+    @property
+    def build_s(self) -> float:
+        """Wall seconds turning the map into the problem."""
+
+    @property
+    def solve_s(self) -> float:
+        """Wall seconds of the solve (centring, LM, uncentring, gauge)."""
+
+    @property
+    def apply_s(self) -> float:
+        """Wall seconds writing the result into the map."""
+
+    @property
+    def gauge_tilt_deg(self) -> float:
+        """How far the free gauge had tilted the solution's world z, degrees, before the driver brought it back onto the input poses."""
+
+    @property
+    def threads(self) -> int:
+        """Worker threads (``backend.gba_threads``)."""
+
+    @property
+    def use_double(self) -> bool:
+        """Whether it solved in f64 (``backend.gba_use_double``)."""
+
+    def __repr__(self) -> str: ...
+
+class MapSnapshot:
+    """The persistent keyframe map and the back end's counters, copied out (PR a2).
+
+    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses as the
+    pose-graph optimization (PGO) corrected them; the raw poses are the window's.
+    """
+
+    @property
+    def mode(self) -> Literal["offline", "realtime"]:
+        """Where the back end runs."""
+
+    @property
+    def keyframe_t_ns(self) -> Int64[ndarray, " n_keyframes"]:
+        """Map keyframe timestamps, oldest first."""
+
+    @property
+    def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """Keyframe poses ``T_w_i`` as the map holds them (PGO-corrected), ``[tx, ty, tz, qx, qy, qz, qw]``."""
+
+    @property
+    def keyframe_raw_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """The window's keyframe poses, before any correction."""
+
+    @property
+    def pgo_epoch(self) -> int:
+        """Applied pose-graph optimizations so far (the correction epoch)."""
+
+    @property
+    def pgo_runs(self) -> Int64[ndarray, "n_pgo 5"]:
+        """Each applied PGO, oldest first: ``[current, candidate, moved, dropped_edges, iterations]``."""
+
+    @property
+    def pgo_us(self) -> tuple[int, int]:
+        """Wall time of the loops that ran a PGO (graph, solve, map write, fusion): total and slowest, microseconds."""
+
+    @property
+    def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
+        """Whether each keyframe is still in the window."""
+
+    @property
+    def point_ids(self) -> Int64[ndarray, " n_points"]:
+        """Map point (landmark) ids."""
+
+    @property
+    def point_hosts(self) -> Int64[ndarray, " n_points"]:
+        """Timestamp of the keyframe hosting each point."""
+
+    @property
+    def points_world(self) -> Float32[ndarray, "n_points 3"]:
+        """Map points in the world frame, metres."""
+
+    @property
+    def covisibility_edges(self) -> Int64[ndarray, "n_edges 2"]:
+        """Covisibility edges as keyframe timestamp pairs, smaller first."""
+
+    @property
+    def covisibility_weights(self) -> UInt32[ndarray, " n_edges"]:
+        """Shared landmarks per covisibility edge."""
+
+    @property
+    def pose_graph_edges(self) -> Int64[ndarray, "n_pose_graph_edges 2"]:
+        """The edges a pose-graph optimization would take now, ``[from, to]`` keyframe timestamps."""
+
+    @property
+    def pose_graph_edge_kinds(self) -> UInt8[ndarray, " n_pose_graph_edges"]:
+        """Kind of each pose-graph edge: 0 spanning tree, 1 loop closure, 2 high covisibility."""
+
+    @property
+    def loop_edges(self) -> Int64[ndarray, "n_loops 2"]:
+        """Verified loops whose keyframes are still in the map, oldest first, as ``[current, candidate]`` timestamps."""
+
+    @property
+    def loop_fused(self) -> Bool[ndarray, " n_loops"]:
+        """Whether each loop's landmarks were fused, at once or after a PGO; otherwise it was left unapplied."""
+
+    @property
+    def loop_drift(self) -> Float64[ndarray, "n_loops 2"]:
+        """Each loop's drift when it was verified, ``[metres, degrees]`` of ``T_map^-1 T_pnp``, in :attr:`loop_edges` order."""
+
+    @property
+    def loop_counts(self) -> LoopCounts:
+        """What loop closing has done so far."""
+
+    @property
+    def keyframes(self) -> int:
+        """Map keyframes (RootSLAM's ``num_kfs``)."""
+
+    @property
+    def landmarks(self) -> int:
+        """Map landmarks (``num_lms``), placed in :attr:`points_world` or not."""
+
+    @property
+    def observations(self) -> int:
+        """(landmark, image) observations (``num_obs``)."""
+
+    @property
+    def culled_redundant(self) -> int:
+        """Keyframes culled as redundant when they left the window."""
+
+    @property
+    def culled_over_budget(self) -> int:
+        """Keyframes culled while the map was over its keyframe budget."""
+
+    @property
+    def high_covisibility_weight(self) -> int:
+        """Shared landmarks at which a covisibility edge is "high"."""
+
+    @property
+    def median_keyframe_landmarks(self) -> int:
+        """Median number of landmarks a map keyframe sees."""
+
+    @property
+    def retained_bytes(self) -> int:
+        """The map's payload in bytes (a lower bound on its heap)."""
+
+    @property
+    def stamps(self) -> int:
+        """Stamps the back end has taken."""
+
+    @property
+    def queries_run(self) -> int:
+        """Loop queries run."""
+
+    @property
+    def queries_dropped(self) -> int:
+        """Loop queries dropped because the back end was behind (Realtime only)."""
+
+    @property
+    def max_pending_stamps(self) -> int:
+        """Most stamps ever waiting for the back-end thread (0 Offline)."""
+
+    @property
+    def step_count(self) -> int:
+        """Steps timed."""
+
+    @property
+    def step_total_us(self) -> int:
+        """Wall time of all steps, microseconds."""
+
+    @property
+    def step_max_us(self) -> int:
+        """Wall time of the slowest step, microseconds."""
+
+    @property
+    def query_total_us(self) -> int:
+        """Wall time of all loop queries, microseconds."""
+
+    @property
+    def query_max_us(self) -> int:
+        """Wall time of the slowest loop query, microseconds."""
+
+    @property
+    def publish_count(self) -> int:
+        """Views the Realtime back-end thread posted for readers (0 in Offline)."""
+
+    @property
+    def publish_max_us(self) -> int:
+        """Wall time of the slowest posted view, microseconds."""
+
+    @property
+    def publish_total_us(self) -> int:
+        """Wall time of all posted views, microseconds."""
 
     def __repr__(self) -> str: ...
 
@@ -295,8 +642,15 @@ class Vio:
         threads: int = 1,
         max_keypoints: int | None = None,
         backend: BackendRequest = "auto",
+        ba_backend: GbaRequest = "follow",
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
+
+        ``ba_backend`` is where :meth:`finish_map`'s global BA runs its PCG:
+        ``"follow"`` (the default) takes the frontend's lane, the GPU only when
+        the back-end probe (a small GBA round trip) also passes, otherwise the CPU
+        with one warning; ``"cpu"`` or ``"gpu"`` choose it outright, for benches
+        and tests, and ``"gpu"`` raises ``ValueError`` when it cannot run.
 
         ``backend`` chooses the frontend through :func:`select_backend`. The
         default ``"auto"`` runs the pyramid, patch build and KLT tracker through
@@ -337,6 +691,9 @@ class Vio:
     @property
     def backend(self) -> Lane:
         """The lane this pipeline runs: ``"cpu"`` or ``"gpu"``."""
+    @property
+    def gba_lane(self) -> Lane:
+        """Where the global BA's PCG runs: ``"cpu"`` or ``"gpu"``."""
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
         """Add one uncalibrated IMU sample.
 
@@ -392,6 +749,23 @@ class Vio:
         """What the frontend lane cost on the last frameset that ran it, in ms: ``imu``, ``pyramid``, ``detect``,
         ``track`` and ``stereo``. Exists before the estimator has a state, unlike a snapshot's timings."""
 
+    def finish_map(self, run_gba: bool) -> MapResult | None:
+        """The map's keyframes at the end of a sequence, after a global BA on the map when ``run_gba`` (PR d2); None when ``backend.enabled`` is off.
+
+        Takes every stamp first. The window is untouched, so the poses :meth:`track` returned stay the raw VIO; the
+        map keeps the GBA's poses. Call it after :meth:`flush`. A GBA that fails (a camera model it cannot project,
+        the solver's refusal) is reported in :attr:`MapResult.gba_failure`, and the keyframes are then the map's after
+        loops and PGO.
+        """
+
+    def map_snapshot(self) -> MapSnapshot | None:
+        """A copy of the persistent keyframe map and the back end's counters at one moment; None when ``backend.enabled`` is off (the default).
+
+        Never waits for the back end. Offline it is current up to the last solved keyframe. In Realtime
+        (``backend.mode``) it is the newest copy the back-end thread posted, which can trail the stamps it still
+        holds; :meth:`flush` makes it current. The first Realtime call asks the thread to post copies from then on.
+        """
+
     def __repr__(self) -> str: ...
 
 class VioConfig:
@@ -411,6 +785,20 @@ class VioConfig:
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
     vio_bootstrap: str
     """``config.vio_bootstrap``: ``"stereo"`` (default) or ``"inertial"``; anything else raises ``ValueError``."""
+
+    @property
+    def backend_enabled(self) -> bool:
+        """``backend.enabled``: whether :class:`Vio` builds the persistent keyframe map (off by default)."""
+
+    @property
+    def backend_mode(self) -> Literal["offline", "realtime"]:
+        """``backend.mode``: ``offline`` steps the map inline (scoring, gates), ``realtime`` on its own thread (live)."""
+
+    def with_backend(self, mode: Literal["off", "offline", "realtime"]) -> VioConfig:
+        """The same configuration with the back end off (``backend.mode`` kept) or on in ``mode``; every other key unchanged.
+
+        Raises ``ValueError`` on any other mode.
+        """
 
     def __repr__(self) -> str: ...
 

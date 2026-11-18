@@ -9,7 +9,7 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 
 ## Run it
 
-From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`, `vslam-lab`:
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`, `msd`, `lamaria`, `show3d`, `vslam-lab`, `tum-vi`:
 
 ```bash
 # 1. Catalog server, in a tmux session so it outlives your shell. Registrations
@@ -526,6 +526,35 @@ camera `C`: `T_world_C = T_world_imu * T_imu_cam0 * T_cam0_C`, with `T_imu_cam0`
 COLMAP's `cam_from_world` is `T_world_C` inverted. The panorama has one centre and ignores the lens-centre baseline
 (33.3 mm on the X4 Air, 31.9 mm on the X5): each half is stitched from its own lens. With the profiles' zero lever
 arm the panorama centre is the IMU origin.
+
+### TUM-VI (tum-vi)
+
+`datasets/tumvi.py` converts the raw ASL tree of TUM-VI's 512x512 16-bit
+release (`dataset-<name>_512_16/`, extracted by hand under `--root`), with the
+readers in `tumvi_source.py`. One sequence is three layers under
+`tum-vi__<name>` (`room1`, `magistrale4`, ...):
+
+- `base`: cam0 and cam1 as AV1 videos at their KB4 pinholes (Kalibr's
+  equidistant model; `rig_T_cam` = `T_cam_imu` inverted, the rig frame is
+  the IMU's), only the frames both cameras share by stamp (the capture
+  properties count the rest), the 200 Hz IMU. The PNGs carry ~12
+  significant bits (steps of 16); the 8-bit video keeps the top 8;
+- `gt`: mocap0, world_T_imu0, every sample. Outside the motion-capture room
+  there is none, so corridor, magistrale and slides runs have ground truth at
+  their start and end only; `property:gt:span_*` lists the spans between
+  gaps over 1 s (in-room occlusions split them too: room2 has 6);
+- `sensor_metadata`: `dso/imu_config.yaml` as `ImuCalibration` on the IMU node,
+  with `applied_time_shift_ns` 0.
+
+Every stream keeps the dataset's own nanosecond stamps, unshifted. Like
+vslam-lab, it keeps no sidecars: the derived layers read the sequence's small
+files in place.
+
+```bash
+export DATAFORGE_OUTPUT_ROOT=<rrd tree>
+pixi run -e dataforge --frozen dataforge-convert --jobs 2 tum-vi --root <dir>
+pixi run -e dataforge --frozen dataforge-register tum-vi --root <dir>
+```
 
 ### Environment variables
 
