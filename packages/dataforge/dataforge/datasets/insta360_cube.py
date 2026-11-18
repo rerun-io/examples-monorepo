@@ -113,7 +113,9 @@ def lens_faces(lens: int, face_size: int) -> list[CubeFace]:
         cx: float = centre - (n - m if direction == "left" else 0)
         cy: float = centre - (n - m if direction == "up" else 0)
         intrinsics: Float64[ndarray, "3 3"] = np.array([[focal, 0.0, cx], [0.0, focal, cy], [0.0, 0.0, 1.0]])
-        faces.append(CubeFace(lens=lens, direction=direction, lens_from_face=_AXES[direction].copy(), intrinsics=intrinsics, width=width, height=height))
+        faces.append(
+            CubeFace(lens=lens, direction=direction, lens_from_face=_AXES[direction].copy(), intrinsics=intrinsics, width=width, height=height)
+        )
     return faces
 
 
@@ -150,3 +152,8 @@ def remap_table(face: CubeFace, camera: insta360_io.MeiCamera) -> RemapTable:
 def remap(image: UInt8[ndarray, "h w c"], table: RemapTable) -> UInt8[ndarray, "fh fw c"]:
     """Bilinear resample of a lens image through ``table``; black outside the lens field."""
     return cv2.remap(image, table.map_x, table.map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def remap_mask(mask: UInt8[ndarray, "h w"], table: RemapTable) -> UInt8[ndarray, "fh fw"]:
+    """Nearest-neighbour resample of a lens-plane label image through ``table``; 0 outside the lens field."""
+    return cv2.remap(mask, table.map_x, table.map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)

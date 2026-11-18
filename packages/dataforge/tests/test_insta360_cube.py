@@ -89,7 +89,15 @@ def test_only_the_middle_of_a_side_face_s_far_edge_lies_past_the_100_deg_field()
             assert off_axis_deg.max() == pytest.approx(101.1, abs=0.3)
             assert 0.98 < valid.mean() < 1.0
             # The far edge: the corners stay inside the field (98 deg), the middle does not.
-            far = valid[:, -1] if face.direction == "right" else valid[:, 0] if face.direction == "left" else valid[-1] if face.direction == "down" else valid[0]
+            far = (
+                valid[:, -1]
+                if face.direction == "right"
+                else valid[:, 0]
+                if face.direction == "left"
+                else valid[-1]
+                if face.direction == "down"
+                else valid[0]
+            )
             assert far[0] and far[-1] and not far[len(far) // 2]
 
 
@@ -110,7 +118,9 @@ def test_a_ray_outside_the_half_field_maps_to_black() -> None:
     from dataforge.datasets.insta360_cube import CubeFace, remap, remap_table
 
     centre: float = (FACE - 1) / 2
-    backward: CubeFace = CubeFace(0, "back", np.diag([-1.0, 1.0, -1.0]), np.array([[FACE / 2, 0, centre], [0, FACE / 2, centre], [0, 0, 1.0]]), FACE, FACE)
+    backward: CubeFace = CubeFace(
+        0, "back", np.diag([-1.0, 1.0, -1.0]), np.array([[FACE / 2, 0, centre], [0, FACE / 2, centre], [0, 0, 1.0]]), FACE, FACE
+    )
     table = remap_table(backward, camera())
     assert not table.valid.any()
     assert (table.map_x == -1).all()
@@ -148,3 +158,35 @@ def test_a_face_pose_in_the_rig_keeps_the_lens_centre() -> None:
         pose: Float64[ndarray, "4 4"] = face_from_rig(face, lens_from_rig)
         np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], centre_in_rig, atol=1e-12)
         np.testing.assert_allclose(pose[:3, :3].T[:, 2], lens_from_rig[:3, :3].T @ face.lens_from_face[:, 2], atol=1e-12)
+
+
+def disc(centre: tuple[float, float], radius: float) -> UInt8[ndarray, "h w"]:
+    """A lens-plane label image: 1 inside a disc, 0 elsewhere."""
+    u, v = np.meshgrid(np.arange(LENS, dtype=np.float64), np.arange(LENS, dtype=np.float64))
+    return ((u - centre[0]) ** 2 + (v - centre[1]) ** 2 <= radius**2).astype(np.uint8)
+
+
+def test_a_disc_on_the_lens_lands_on_the_face_pixels_whose_rays_hit_it() -> None:
+    from dataforge.datasets.insta360_cube import lens_faces, remap_mask, remap_table
+
+    faces = {face.direction: face for face in lens_faces(0, FACE)}
+    # Discs on the optical axis and 80 deg toward +X (inside the right face, short of the seam).
+    targets: dict[str, Float64[ndarray, "3"]] = {
+        "front": np.array([0.0, 0.0, 1.0]),
+        "right": np.array([np.sin(np.deg2rad(80)), 0.0, np.cos(np.deg2rad(80))]),
+    }
+    for direction, ray in targets.items():
+        pixels, valid = camera().project(ray[None, :])
+        assert valid[0]
+        centre: tuple[float, float] = (float(pixels[0, 0]), float(pixels[0, 1]))
+        face = faces[direction]
+        table = remap_table(face, camera())
+        mask: UInt8[ndarray, "h w"] = remap_mask(disc(centre, 12.0), table)
+        assert set(np.unique(mask)) == {0, 1}
+        distance: Float64[ndarray, "h w"] = np.hypot(table.map_x - centre[0], table.map_y - centre[1])
+        # Nearest neighbour: a face pixel is 1 when its lens sample rounds into the disc.
+        assert (distance[mask == 1] <= 12.0 + 0.75).all()
+        assert (mask[distance <= 12.0 - 0.75] == 1).all()
+        for other in faces.values():
+            if other.direction not in (direction, "front" if direction != "front" else "_"):
+                assert not remap_mask(disc(centre, 12.0), remap_table(other, camera())).any(), other.name

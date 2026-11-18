@@ -724,6 +724,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     static=True,
                     recording=recording,
                 )
+                # Fully transparent classes: the mask is data for consumers, it must not tint the face in a view.
+                rr.log(
+                    f"{pinhole}/valid_mask",
+                    rr.AnnotationContext([rr.ClassDescription(info=rr.AnnotationInfo(id=k, label=label, color=(0, 0, 0, 0))) for k, label in enumerate(("outside", "inside"))]),
+                    static=True,
+                    recording=recording,
+                )
                 rr.log(f"{pinhole}/valid_mask", rr.SegmentationImage(table.valid.astype(np.uint8)), static=True, recording=recording)
             with work_dir("insta360-cube-") as work, ThreadPoolExecutor(len(faces)) as pool:
                 channels: list[queue.Queue[bytes | None]] = [queue.Queue(maxsize=4) for _ in faces]
