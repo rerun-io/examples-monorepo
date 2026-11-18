@@ -1,6 +1,6 @@
-"""People-mask post-processing: instance union, tile layout and merge, dilation, decode windows, overlays.
+"""People-mask post-processing: instance union, tile layout and placement, dilation, decode windows, overlays.
 
-Pure numpy/OpenCV functions with no model or GPU, so the unit lane tests them on synthetic arrays.
+Pure numpy/OpenCV/torch functions with no model or GPU, so the unit lane tests them on synthetic arrays.
 """
 
 from collections.abc import Sequence
@@ -8,8 +8,10 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from jaxtyping import Bool, Int64, UInt8
+import torch
+from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
+from torch import Tensor
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,12 +75,14 @@ def tile_windows(height: int, width: int, *, grid: int, overlap: float) -> list[
     return [TileWindow(y0, y0 + tile_h, x0, x0 + tile_w) for y0 in (0, height - tile_h) for x0 in (0, width - tile_w)]
 
 
-def paste_tiles(full: Bool[ndarray, "h w"], tile_masks: Bool[ndarray, "t th tw"], windows: Sequence[TileWindow]) -> Bool[ndarray, "h w"]:
-    """OR each tile's mask into its window of the whole-image mask (returns a new array)."""
-    merged: Bool[ndarray, "h w"] = full.copy()
-    for tile_mask, window in zip(tile_masks, windows, strict=True):
-        merged[window.y0 : window.y1, window.x0 : window.x1] |= tile_mask
-    return merged
+def tile_to_image(
+    masks: Bool[Tensor, "n th tw"], xyxy: Float32[Tensor, "n 4"], window: TileWindow, *, height: int, width: int
+) -> tuple[Bool[Tensor, "n h w"], Float32[Tensor, "n 4"]]:
+    """Place instance masks and boxes found in a tile into the coordinates of the whole image."""
+    full: Bool[Tensor, "n h w"] = torch.zeros((masks.shape[0], height, width), dtype=torch.bool, device=masks.device)
+    full[:, window.y0 : window.y1, window.x0 : window.x1] = masks
+    offset: Float32[Tensor, "4"] = torch.tensor([window.x0, window.y0, window.x0, window.y0], dtype=torch.float32, device=xyxy.device)
+    return full, xyxy + offset
 
 
 def dilate_mask(mask: Bool[ndarray, "h w"], radius_px: int) -> Bool[ndarray, "h w"]:

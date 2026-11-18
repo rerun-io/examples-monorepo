@@ -52,22 +52,24 @@ def test_tile_windows_grid_one_is_empty() -> None:
     assert tile_windows(100, 100, grid=1, overlap=0.2) == []
 
 
-def test_paste_tiles_ors_tile_masks_into_place() -> None:
-    from posekit.ops.people_masks import paste_tiles, tile_windows
+def test_tile_to_image_places_masks_and_shifts_boxes() -> None:
+    import torch
 
-    full: Bool[ndarray, "h w"] = np.zeros((10, 10), dtype=bool)
-    full[0, 0] = True
+    from posekit.ops.people_masks import tile_to_image, tile_windows
+
     windows = tile_windows(10, 10, grid=2, overlap=0.2)
-    tile_h: int = windows[0].y1 - windows[0].y0
-    tile_w: int = windows[0].x1 - windows[0].x0
-    tile_masks: Bool[ndarray, "t th tw"] = np.zeros((4, tile_h, tile_w), dtype=bool)
-    tile_masks[3, -1, -1] = True  # bottom-right pixel of the bottom-right tile
+    window = windows[3]
+    tile_h: int = window.y1 - window.y0
+    tile_w: int = window.x1 - window.x0
+    masks = torch.zeros((1, tile_h, tile_w), dtype=torch.bool)
+    masks[0, -1, -1] = True  # bottom-right pixel of the bottom-right tile
+    xyxy = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
 
-    merged: Bool[ndarray, "h w"] = paste_tiles(full, tile_masks, windows)
+    placed = tile_to_image(masks, xyxy, window, height=10, width=10)
 
-    assert merged[0, 0] and merged[9, 9]
-    assert merged.sum() == 2
-    assert full.sum() == 1  # the input is not modified
+    assert placed[0].shape == (1, 10, 10)
+    assert placed[0][0, 9, 9] and int(placed[0].sum()) == 1
+    assert placed[1].tolist() == [[1.0 + window.x0, 2.0 + window.y0, 3.0 + window.x0, 4.0 + window.y0]]
 
 
 def test_dilate_mask_grows_by_radius_and_zero_is_identity() -> None:
@@ -106,3 +108,20 @@ def test_overlay_tints_masked_pixels_red_only() -> None:
     tinted: UInt8[ndarray, "h w 3"] = overlay_mask(rgb, mask, alpha=0.5)
     assert tinted[0, 0, 0] > 100 and tinted[0, 0, 1] < 100
     assert np.array_equal(tinted[1, 1], rgb[1, 1])
+
+
+def test_select_entities_globs_excludes_and_rejects_unmatched_patterns() -> None:
+    from posekit.apis.people_masks import select_entities
+
+    available: list[str] = [f"/world/rig_00/cam_{i:02d}/pinhole/video" for i in range(12)]
+    selected: list[str] = select_entities(available, ("/world/rig_00/cam_*/pinhole/video",), ("/world/rig_00/cam_00/*", "/world/rig_00/cam_01/*"))
+    assert selected == available[2:]
+    assert select_entities(available, ("/world/rig_00/cam_05/pinhole/video",), ()) == [available[5]]
+    with pytest.raises(ValueError, match="matches no VideoStream"):
+        select_entities(available, ("/world/rig_01/*",), ())
+
+
+def test_mask_entity_is_a_sibling_of_the_video() -> None:
+    from posekit.apis.people_masks import mask_entity
+
+    assert mask_entity("/world/rig_00/cam_03/pinhole/video") == "/world/rig_00/cam_03/pinhole/people_mask"
