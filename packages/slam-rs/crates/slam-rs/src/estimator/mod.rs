@@ -35,9 +35,14 @@ mod optimize;
 mod report;
 mod schedule;
 mod snapshot;
+mod stamp;
 mod triangulation;
 
 pub use snapshot::{SnapshotLandmark, VelBias, WindowSnapshot, WindowState};
+pub use stamp::{
+    ImageSlot, ImageSlots, KeyframeImages, KeyframeStamp, Keypoints, MapStamp, MargStamp,
+    StampLandmark,
+};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -219,6 +224,14 @@ pub struct SqrtKeypointVio<S: Scalar> {
     /// moves the window finishes it first, so only the timing of that work
     /// depends on the caller, never its result.
     deferred: Option<DeferredKeyframe>,
+
+    /// What the window has handed the persistent map and the map has not yet
+    /// taken; `None` (the default) emits nothing. Read-only copies of the
+    /// window: no number the window computes depends on it.
+    map_stamps: Option<Vec<MapStamp>>,
+    /// Keyframe poses a stamp asked for and the window did not hold; always 0
+    /// unless the window and the stamps disagree (logged at each miss).
+    missing_stamp_poses: usize,
 }
 
 /// Validate numerical domains before estimator arithmetic runs (D32).
@@ -398,6 +411,8 @@ impl<S: Scalar> SqrtKeypointVio<S> {
             frame_scratch: FrameUpdateScratch::default(),
             scratch: OptimizeScratch::default(),
             deferred: None,
+            map_stamps: None,
+            missing_stamp_poses: 0,
         })
     }
 
@@ -869,6 +884,9 @@ impl<S: Scalar> SqrtKeypointVio<S> {
                 let marg: MarginalizationOutcome =
                     self.marginalize(&num_points_connected, &lost_landmarks)?;
                 timings.marginalize_ns = marg.elapsed_ns;
+                if took_keyframe {
+                    self.stamp_keyframe(frame.t_ns);
+                }
                 MeasureTail {
                     lm,
                     termination,
