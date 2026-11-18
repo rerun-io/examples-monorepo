@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Staged for kornia-rs / kornia-bow: an inverted-file database with DBoW2's L1 query over kornia-bow bags of words."
+description = "Staged for kornia-rs / kornia-bow: an inverted-file database with DBoW2's L1 query over kornia-bow bags of words, and RootSLAM's HashBoW."
 
 [dependencies]
 kornia-bow.workspace = true
