@@ -69,8 +69,11 @@ fn strictly_increasing(what: &'static str, poses: &[(i64, Se3<f64>)]) -> Result<
 /// frames come back unchanged.
 ///
 /// `frames` are the raw per-frame poses and `keyframes` the optimized keyframe
-/// poses, each `(t_ns, T_w_i)` in strictly increasing time; every keyframe must
-/// be one of the frames.
+/// poses, each `(t_ns, T_w_i)` in strictly increasing time; every keyframe from
+/// the first frame on must be one of the frames. Keyframes before the first
+/// frame are left out: an inertial bootstrap replays its window into the map
+/// (they shape the map, its loops and the GBA) but reports its first pose after
+/// that window, so they have no raw pose to correct.
 ///
 /// # Errors
 ///
@@ -82,6 +85,9 @@ pub fn reanchor(
 ) -> Result<Vec<Se3<f64>>, AnchorError> {
     strictly_increasing("frame", frames)?;
     strictly_increasing("keyframe", keyframes)?;
+    let first_frame_t_ns: Option<i64> = frames.first().map(|&(t_ns, _)| t_ns);
+    let keyframes: &[(i64, Se3<f64>)] = &keyframes
+        [keyframes.partition_point(|&(t_ns, _)| first_frame_t_ns.is_none_or(|first| t_ns < first))..];
     // `T_opt · T_raw⁻¹` per keyframe, the left factor of both candidates.
     let corrections: Vec<(i64, Se3<f64>)> = keyframes
         .iter()
