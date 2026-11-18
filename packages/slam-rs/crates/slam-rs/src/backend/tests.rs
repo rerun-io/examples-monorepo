@@ -181,20 +181,12 @@ fn a_redundant_keyframe_is_culled_as_it_leaves_and_never_comes_back() {
 }
 
 #[test]
-fn the_root_and_pinned_keyframes_are_never_culled() {
+fn the_root_is_never_culled() {
     let mut backend = redundant_map();
     // Keyframe 1 is the root: redundant or not, it stays.
     let events = backend.step(marg(&[1], 1.0, vec![]));
     assert_eq!(events, vec![MapEvent::KeyframeMarginalized(1)]);
     assert!(backend.map().contains_keyframe(1));
-    // B10: a pinned keyframe survives its redundancy cull.
-    backend.pin([2]);
-    assert!(backend.is_protected(2));
-    let events = backend.step(marg(&[2], 2.0, vec![]));
-    assert_eq!(events, vec![MapEvent::KeyframeMarginalized(2)]);
-    assert!(backend.map().contains_keyframe(2));
-    backend.unpin([2]);
-    assert!(!backend.is_protected(2));
 }
 
 #[test]
@@ -295,10 +287,6 @@ enum Step {
     },
     /// Evict the oldest window keyframe.
     Marginalize,
-    /// Pin the keyframe this far back from the newest.
-    Pin(usize),
-    /// Release every pin.
-    UnpinAll,
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -310,23 +298,16 @@ fn step() -> impl Strategy<Value = Step> {
         4 => (2usize..5, prop::collection::vec(landmark, 0..8))
             .prop_map(|(window, landmarks)| Step::Keyframe { window, landmarks }),
         3 => Just(Step::Marginalize),
-        1 => (0usize..10).prop_map(Step::Pin),
-        1 => Just(Step::UnpinAll),
     ]
 }
 
 /// What must survive a step that marginalizes `releasing` (if any): the root,
-/// every pinned keyframe, and every window keyframe but the one leaving.
-fn protected(
-    backend: &MapBackend,
-    pinned: &BTreeSet<FrameId>,
-    releasing: Option<FrameId>,
-) -> BTreeSet<FrameId> {
+/// and every window keyframe but the one leaving.
+fn protected(backend: &MapBackend, releasing: Option<FrameId>) -> BTreeSet<FrameId> {
     let mut protected: BTreeSet<FrameId> = backend.active_keyframes().clone();
     if let Some(releasing) = releasing {
         protected.remove(&releasing);
     }
-    protected.extend(pinned.iter().copied());
     protected.extend(backend.graph().root());
     protected
 }
@@ -400,7 +381,6 @@ proptest! {
         );
         let mut made: Vec<FrameId> = Vec::new();
         let mut window: Vec<FrameId> = Vec::new();
-        let mut pinned: BTreeSet<FrameId> = BTreeSet::new();
         let mut next_landmark: u64 = 0;
         for step in steps {
             match step {
@@ -419,7 +399,7 @@ proptest! {
                             landmark(next_landmark, host, &obs)
                         })
                         .collect();
-                    let mut guard = protected(&backend, &pinned, None);
+                    let mut guard = protected(&backend, None);
                     guard.extend(window.iter().copied());
                     let stamp = keyframe(t, &window, landmarks);
                     let expected = rescored_batch(&backend, stamp.clone());
@@ -427,26 +407,16 @@ proptest! {
                     prop_assert_eq!(checked_step(&mut backend, stamp, &guard)?, expected);
                     while window.len() > size {
                         let oldest = window.remove(0);
-                        let guard = protected(&backend, &pinned, Some(oldest));
+                        let guard = protected(&backend, Some(oldest));
                         checked_step(&mut backend, marg(&[oldest], 0.0, vec![]), &guard)?;
                     }
                 }
                 Step::Marginalize => {
                     if window.len() > 1 {
                         let oldest = window.remove(0);
-                        let guard = protected(&backend, &pinned, Some(oldest));
+                        let guard = protected(&backend, Some(oldest));
                         checked_step(&mut backend, marg(&[oldest], 0.0, vec![]), &guard)?;
                     }
-                }
-                Step::Pin(back) => {
-                    if let Some(&id) = made.iter().rev().nth(back) {
-                        backend.pin([id]);
-                        pinned.insert(id);
-                    }
-                }
-                Step::UnpinAll => {
-                    backend.unpin(made.clone());
-                    pinned.clear();
                 }
             }
             let map = backend.map();

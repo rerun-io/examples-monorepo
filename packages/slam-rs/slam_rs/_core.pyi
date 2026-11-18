@@ -139,6 +139,10 @@ class LoopCounts:
         """Candidates validated."""
 
     @property
+    def pnp_errors(self) -> int:
+        """GP3P RANSAC calls that refused their input (a bug upstream of it), each logged."""
+
+    @property
     def verified(self) -> int:
         """Loops that passed verification."""
 

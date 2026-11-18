@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use kornia_image::{Image, ImageSize};
 use nalgebra::{Vector2, Vector3, Vector4};
-use proptest::prelude::*;
 
 use super::*;
 use crate::backend::{BackendWork, MapConfig};
@@ -695,7 +694,6 @@ fn a_revisit_is_verified_fused_and_linked_to_its_island() {
         );
         assert_eq!(loops.held_images(), 0, "images dropped after the query");
         assert_eq!(loops.counts().fused, 1);
-        assert!(s.backend.pinned.is_empty(), "unpinned once applied");
         let snapshot = s.backend.snapshot(&calibration(cameras).t_i_c);
         assert_eq!(snapshot.loop_counts.verified, 1);
         assert_eq!(snapshot.loops.len(), 1);
@@ -731,7 +729,7 @@ fn the_reprojection_pass_reads_the_image_and_leaves_the_keyframe_as_it_was() {
 }
 
 #[test]
-fn with_the_pose_graph_off_a_large_drift_changes_no_map_entry_and_releases_its_pins() {
+fn with_the_pose_graph_off_a_large_drift_changes_no_map_entry() {
     let off = LoopClosingConfig {
         pgo: false,
         ..LoopClosingConfig::default()
@@ -744,13 +742,6 @@ fn with_the_pose_graph_off_a_large_drift_changes_no_map_entry_and_releases_its_p
     assert!((event.drift_m - 0.3).abs() < 1e-6);
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
     assert_eq!(s.backend.loop_closing().unwrap().counts().needs_pgo, 1);
-    assert!(s.backend.pinned.is_empty(), "nothing will take the loop");
-    s.backend.config.max_keyframes = 1;
-    crowd(&mut s.backend, 4);
-    assert!(
-        !s.backend.map().contains_keyframe(A) || !s.backend.map().contains_keyframe(A2),
-        "the island is cullable again"
-    );
 }
 
 #[test]
@@ -770,8 +761,7 @@ fn a_graph_the_solver_refuses_releases_the_loop_unapplied_and_records_it_once() 
     assert!(loops.pgo().runs.is_empty());
     assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 0));
     assert_eq!((s.backend.map().clone(), s.backend.graph().clone()), before);
-    assert!(s.backend.pinned.is_empty());
-    assert_eq!(s.backend.map_correction().epoch, 0);
+    assert_eq!(s.backend.snapshot(&calibration(1).t_i_c).pgo_epoch, 0);
 }
 
 #[test]
@@ -799,10 +789,7 @@ fn realtime_and_offline_give_the_same_final_trajectory_through_a_pose_graph_opti
     };
     let offline = run(crate::config::BackendMode::Offline);
     let realtime = run(crate::config::BackendMode::Realtime);
-    assert_eq!(
-        offline.correction.epoch, 1,
-        "one pose-graph optimization ran"
-    );
+    assert_eq!(offline.pgo_epoch, 1, "one pose-graph optimization ran");
     assert_eq!(realtime, offline);
     // Each keyframe's raw pose, and a frame halfway to the next keyframe that
     // keeps the raw pose before it.
@@ -863,7 +850,6 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
     );
     assert!((event.drift_m - 0.3).abs() < 1e-6);
     assert_eq!((loops.counts().needs_pgo, loops.counts().optimized), (1, 1));
-    assert!(s.backend.pinned.is_empty(), "released after the fusion");
     let map = s.backend.map();
     for id in [C, D] {
         assert_eq!(
@@ -892,17 +878,20 @@ fn a_large_drift_runs_the_pose_graph_on_the_old_map_then_fuses() {
         vec![A]
     );
     let snapshot = s.backend.snapshot(&t_i_c);
-    assert_eq!(snapshot.correction.epoch, 1);
-    assert_eq!(
-        snapshot
-            .correction
-            .poses
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![A, A2]
-    );
-    assert_eq!(snapshot.correction.poses[&A], map.keyframe(A).unwrap().pose);
+    assert_eq!(snapshot.pgo_epoch, 1);
+    let corrected: Vec<FrameId> = snapshot
+        .keyframe_t_ns
+        .iter()
+        .zip(
+            snapshot
+                .keyframe_poses
+                .iter()
+                .zip(&snapshot.keyframe_raw_poses),
+        )
+        .filter(|(_, (pose, raw))| pose != raw)
+        .map(|(&id, _)| id)
+        .collect();
+    assert_eq!(corrected, vec![A, A2]);
     let row_a = snapshot
         .keyframe_t_ns
         .iter()
@@ -931,10 +920,9 @@ fn a_small_drift_runs_no_pose_graph() {
         LoopOutcome::Fused { .. }
     ));
     assert!(loops.pgo().runs.is_empty());
-    assert_eq!(
-        s.backend.map_correction(),
-        crate::backend::MapCorrection::default()
-    );
+    let snapshot = s.backend.snapshot(&calibration(1).t_i_c);
+    assert_eq!(snapshot.pgo_epoch, 0);
+    assert_eq!(snapshot.keyframe_raw_poses, snapshot.keyframe_poses);
 }
 
 #[test]
@@ -995,54 +983,6 @@ fn a_query_without_images_or_a_dropped_one_holds_nothing() {
     assert_eq!(s.backend.loop_closing().unwrap().held_images(), 0);
     assert!(s.backend.query(C).is_empty());
     assert_eq!(s.backend.loop_closing().unwrap().counts().without_images, 1);
-}
-
-/// Steps `count` more keyframes, each leaving the window at once, so an
-/// over-budget map runs its batch cull.
-fn crowd(backend: &mut MapBackend, count: usize) {
-    for k in 0..count {
-        let id = 50 * SECOND + k as i64 * SECOND;
-        backend.step(keyframe_stamp(
-            id,
-            &[(id, Se3::identity())],
-            vec![],
-            vec![vec![]],
-            None,
-        ));
-        backend.step(MapStamp::Marginalized(MargStamp {
-            keyframe_poses: [(id, Se3::identity())].into_iter().collect(),
-            landmarks: vec![],
-        }));
-    }
-}
-
-#[test]
-fn without_a_pin_crowding_culls_the_island() {
-    // The B10 property below needs a cull that would take the island.
-    let mut s = scene(1, 0.05, false, LoopClosingConfig::default(), 100);
-    s.backend.config.max_keyframes = 2;
-    crowd(&mut s.backend, 3);
-    assert!(!s.backend.map().contains_keyframe(A) || !s.backend.map().contains_keyframe(A2));
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(12))]
-    /// B10: from detection to apply, culling never takes the island, the
-    /// current or the candidate keyframe; apply then finds them all.
-    #[test]
-    fn the_island_stays_in_the_map_from_detection_to_apply(budget in 1usize..5, steps in 1usize..6) {
-        let mut s = scene(1, 0.05, false, LoopClosingConfig::default(), 100);
-        s.backend.config.max_keyframes = budget;
-        let detection = s.backend.detect_loop(C).unwrap();
-        crowd(&mut s.backend, steps);
-        for id in detection.island.iter().chain([&C, &A]) {
-            prop_assert!(s.backend.map().contains_keyframe(*id));
-        }
-        let event = s.backend.apply_loop(detection);
-        let fused = matches!(event.outcome, LoopOutcome::Fused { .. });
-        prop_assert!(fused, "{:?}", event.outcome);
-        prop_assert!(s.backend.pinned.is_empty());
-    }
 }
 
 #[test]
