@@ -237,6 +237,7 @@ def shortlist_rig_pairs(
     gap_seconds: float,
     score_threshold: float,
     counters: FunnelCounters,
+    query_all_cameras: bool = False,
 ) -> Shortlist:
     """Retrieve, gate, keep each query rig frame's `loop_candidates_per_frame` best target rig frames, then deduplicate.
 
@@ -259,11 +260,12 @@ def shortlist_rig_pairs(
         gap_seconds: The temporal gate actually applied.
         score_threshold: The resolved retrieval score gate.
         counters: Diagnostic counters, mutated in place.
+        query_all_cameras: Let every camera query, not only the left camera of each declared stereo pair.
 
     Returns:
         The best-scoring hit per unordered rig pair and the query rig frames that kept it among their candidates.
     """
-    allowed_camera_ids: set[int] = query_camera_ids(frames_meta)
+    allowed_camera_ids: set[int] = set(frames_meta.cameras) if query_all_cameras else query_camera_ids(frames_meta)
     gap_us: int = round(gap_seconds * MICROSECONDS_PER_SECOND)
     indexed: set[int] = set(index.image_ids)
 
