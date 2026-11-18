@@ -738,6 +738,8 @@ pub struct LoopCounts {
     with_candidates: u64,
     /// Candidates validated.
     candidates: u64,
+    /// GP3P RANSAC calls that refused their input (a bug upstream of it).
+    pnp_errors: u64,
     /// Loops that passed verification.
     verified: u64,
     /// Loops fused at once.
@@ -815,7 +817,7 @@ impl MapSnapshot {
                 .collect(),
             loop_fused: snapshot.loops.iter().map(|edge| edge.fused).collect(),
             loop_counts: snapshot.loop_counts,
-            pgo_epoch: snapshot.correction.epoch,
+            pgo_epoch: snapshot.pgo_epoch,
             pgo_runs: snapshot
                 .pgo_runs
                 .iter()
@@ -1086,6 +1088,7 @@ impl MapSnapshot {
             images_stripped: counts.images_stripped,
             with_candidates: counts.with_candidates,
             candidates: counts.candidates,
+            pnp_errors: counts.pnp_errors,
             verified: counts.verified,
             fused: counts.fused,
             needs_pgo: counts.needs_pgo,
