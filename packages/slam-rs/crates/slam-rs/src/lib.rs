@@ -3,16 +3,23 @@
 //! `slam-rs-py`. The CLI currently provides only `version`.
 //! [`Vio`] buffers IMU samples and processes frames synchronously, returning final
 //! values with deterministic replay (D17). GPU frontend support is feature-gated;
-//! [`select_backend`] is the one place a tool chooses between the two frontends.
+//! [`select_backend`] is the one place a tool chooses between the two frontends,
+//! and where the global BA's PCG lane follows that choice.
 
 mod pipeline;
 pub use pipeline::{
-    Backend, BackendRequest, FrontendLane, FrontendTimings, ImageView, OverlapTimings,
-    PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
-    device_probes_run, gpu_probe, select_backend,
+    Backend, BackendRequest, Backends, FrontendLane, FrontendTimings, GbaRequest, ImageView,
+    OverlapTimings, PreparedTrack, Vio, VioError, VioPose, VioResult, VioStatus, check_imu_sample,
+    device_probes_run, follow_frontend, gba_probes_run, gpu_probe, pose_from_xyzw, pose_to_xyzw,
+    probe_back_end, select_backend,
 };
 
 pub mod ba_base;
+// The persistent keyframe map (and, in later PRs, loop closing and the global
+// BA): host only. wasm, iOS and embedded builds leave it out and stay threadless;
+// the pixi build, the CLI and the Python bindings turn it on.
+#[cfg(feature = "backend")]
+pub mod backend;
 pub mod calib;
 pub mod camera;
 pub mod catalog_timing;

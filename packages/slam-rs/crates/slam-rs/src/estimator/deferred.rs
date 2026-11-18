@@ -105,6 +105,7 @@ impl<S: Scalar> SqrtKeypointVio<S> {
         let marg: MarginalizationOutcome =
             self.marginalize(&deferred.num_points_connected, &deferred.lost_landmarks)?;
         timings.marginalize_ns = marg.elapsed_ns;
+        self.stamp_keyframe(t_ns);
         timings.measure_ns = duration_ns(started);
         Ok(DeferredKeyframeStats {
             t_ns,

@@ -13,8 +13,9 @@ from typing import Literal
 
 import numpy as np
 import pytest
-from fixture_types import never
+from fixture_types import CameraFactory, RigFactory, never
 
+from slam_rs import _core
 from slam_rs.apis import bench_track
 from slam_rs.apis.bench_track import Config, Framesets, Lane, LaneRound, best_median_ms, interleave, main
 from slam_rs.catalog_feed import ImuCalib
@@ -125,3 +126,43 @@ def test_benchmark_records_identify_the_profile_and_one_resolved_config(
     assert all(f"profile={profile}" in record for record in records)
     digest: str = hashlib.sha256(profiled_config_text(config_path, profile).encode("utf-8")).hexdigest()
     assert printed.count(f"config_sha256={digest}") == 1
+
+
+class _Built(Exception):
+    """The stand-in Vio was asked for: the config it got is recorded."""
+
+
+def test_a_run_scored_on_the_raw_vio_has_no_back_end(rig: RigFactory) -> None:
+    """The gate, the bench and the RoboCap fleet rows score the raw VIO and time ``track``: the back end's map step
+    and loop queries must not run inline in them, whatever ``backend.enabled`` says."""
+    from slam_rs.tracking import raw_vio
+
+    vio: _core.Vio = raw_vio(rig(2), _core.VioConfig(), "cpu")
+    assert _core.VioConfig().backend_enabled is True
+    assert vio.map_snapshot() is None
+
+
+def test_the_bench_builds_its_vio_with_the_back_end_off(
+    camera: CameraFactory, imu: ImuCalib, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[bool] = []
+
+    def built(_calibration: _core.Calibration, config: _core.VioConfig, backend: str) -> _core.Vio:
+        seen.append(config.backend_enabled)
+        raise _Built
+
+    monkeypatch.setattr(_core, "Vio", built)
+    framesets: Framesets = Framesets(
+        images=np.zeros((1, 2, 1, 1), dtype=np.uint8),
+        t_ns=np.zeros(1, dtype=np.int64),
+        imu_offsets=np.zeros(2, dtype=np.int64),
+        imu_t=np.zeros(0, dtype=np.int64),
+        imu_gyro=np.zeros((0, 3)),
+        imu_accel=np.zeros((0, 3)),
+        safe_radius=0.0,
+        cameras=(camera(0, 0.0), camera(1, 0.1)),
+        imu=imu,
+    )
+    with pytest.raises(_Built):
+        bench_track.run_lane("cpu", 1, framesets, _core.VioConfig())
+    assert seen == [False]

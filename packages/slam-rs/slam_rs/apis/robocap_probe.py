@@ -26,6 +26,9 @@ from slam_rs.tracking import Lockstep, check_calibration_matches_recording, robo
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory, shift_clock, write_trajectory
 from slam_rs.vio_log import FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
+OUTPUT_NAME: str = "slam_rs_vio.csv"
+"""The probe's trajectory file: the raw causal VIO, under the name the scoring pair gives it (``slam_rs.csv`` is the final run)."""
+
 
 @dataclass(slots=True)
 class Config:
@@ -49,7 +52,7 @@ class Config:
     seconds: float = 0.0
     """Seconds from the first frameset; zero replays the full session."""
     output_csv: Path | None = None
-    """Where the estimated trajectory is written; defaults to ``data/robocap-<session>/slam_rs.csv``."""
+    """Where the raw VIO trajectory is written; defaults to ``data/robocap-<session>/slam_rs_vio.csv`` (:data:`OUTPUT_NAME`)."""
     log_frames: bool = True
     """Log the four camera images. Off measures the estimator's wall time without the JPEG encode."""
     window_s: float = 30.0
@@ -67,7 +70,7 @@ def main(config: Config) -> None:
     session: RobocapSession = benchmarks.robocap.session(config.session)
     if not benchmarks.robocap.is_listed(config.session):
         print(f"{config.session} is not in benchmarks.toml: replaying it from the catalog with no regression reference")
-    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / "slam_rs.csv"
+    output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / f"robocap-{session.session_id}" / OUTPUT_NAME
     calibration: _core.Calibration
     flow_config: _core.VioConfig
     calibration, flow_config, _config_text = robocap_estimator_files(settings, profile=config.profile)
@@ -146,7 +149,7 @@ def main(config: Config) -> None:
     # nothing below reads a frameset: the export and the ATE happen with it shut.
     stage.refuse_lost_framesets()
     write_trajectory(output_csv, shift_clock(estimate, export_offset_ns))
-    print(f"{len(estimate)} tracked poses -> {output_csv} (absolute device clock)")
+    print(f"{len(estimate)} tracked poses (raw VIO) -> {output_csv} (absolute device clock)")
     if len(estimate) == 0:
         print("no ATE: the estimator reported no tracked pose")
         return
