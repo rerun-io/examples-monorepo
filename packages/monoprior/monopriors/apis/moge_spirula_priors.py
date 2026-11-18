@@ -22,7 +22,7 @@ from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 
 from monopriors.cube_faces import PIXEL_CENTRE_PX, CubeFace, FullFaceWindow, depth_png_mm, full_face_window, join_half_faces, normal_png_rgb, opposite_half_face
-from monopriors.cube_layer import FaceFrameset, LayerSegment, iter_framesets, open_rrd, read_cube_faces
+from monopriors.cube_layer import FaceFrameset, iter_framesets, open_rrd, read_cube_faces
 from monopriors.models.moge_v2.export import resolve_num_tokens, token_grid_hw
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TrtPredictor
 
@@ -100,8 +100,7 @@ def _write_prior(dataset_dir: Path, job: _Job, depth_m: Float32[ndarray, "n n"],
 def main(config: MoGeSpirulaPriorsConfig) -> None:
     """Run MoGe-2 on every (selected) face of every frameset and write the cropped priors."""
     side_tokens_hw: tuple[int, int] = token_grid_hw(1.0, resolve_num_tokens(config.resolution_level))
-    with open_rrd(config.faces_rrd, "faces") as layer:
-        layer_segment: LayerSegment = layer
+    with open_rrd(config.faces_rrd, "faces") as layer_segment:
         faces: tuple[CubeFace, ...] = read_cube_faces(layer_segment)
         windows: dict[str, FullFaceWindow] = {face.name: full_face_window(face, config.pixel_centre_px) for face in faces}
         sides: set[int] = {window.side_px for window in windows.values()}
