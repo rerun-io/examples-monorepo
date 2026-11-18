@@ -109,3 +109,13 @@ def test_each_size_group_runs_on_its_own_runtime_and_releases_it_before_the_next
     assert _CountingRuntime.most_alive == 1
     assert _CountingRuntime.alive == 0
     assert all(read_keypoints(database_path, task.image_id).shape == (NUM_KEYPOINTS, 2) for task in tasks)
+
+
+def test_a_lower_pixel_budget_lowers_each_cube_face_engine_batch_and_the_default_is_unchanged() -> None:
+    from colsfm.features_raco import ALIKED_IMAGE_BINDING, raco_dynamic_profile, select_raco_engine
+
+    assert [select_raco_engine(size, "dynamic").maximum_batch_size for size in ((800, 800), (480, 800))] == [7, 8]
+    assert [select_raco_engine(size, "dynamic", 1_920_000).maximum_batch_size for size in ((800, 800), (480, 800), (800, 480))] == [3, 5, 5]
+    engine = select_raco_engine((800, 800), "dynamic", 1_920_000)
+    assert raco_dynamic_profile((800, 800), engine.maximum_batch_size)[ALIKED_IMAGE_BINDING][2] == (3, 3, 800, 800)
+    assert raco_dynamic_profile((800, 800)) == raco_dynamic_profile((800, 800), 7)

@@ -181,7 +181,7 @@ def raco_profile(network_height: int = NETWORK_HEIGHT, network_width: int = NETW
     }
 
 
-def raco_dynamic_profile(network_size: tuple[int, int] | None = None) -> dict[str, ShapeProfile]:
+def raco_dynamic_profile(network_size: tuple[int, int] | None = None, batch_ceiling: int | None = None) -> dict[str, ShapeProfile]:
     """The optimisation profile the shape-dynamic graph is built with.
 
     Without a size, one profile spanning 256x256 to 1216x1920. With one, the profile tops out at that size and is
@@ -191,6 +191,7 @@ def raco_dynamic_profile(network_size: tuple[int, int] | None = None) -> dict[st
 
     Args:
         network_size: `(network_height, network_width)` of the group the engine serves, or `None` for the full range.
+        batch_ceiling: The profile's max batch for a sized engine; `dynamic_batch_ceiling(network_size)` when None.
 
     Returns:
         One `(minimum, optimal, maximum)` shape for the `image` binding, at batch 1 to `DYNAMIC_MAXIMUM_BATCH_SIZE`.
@@ -201,7 +202,7 @@ def raco_dynamic_profile(network_size: tuple[int, int] | None = None) -> dict[st
         ceiling: int = DYNAMIC_MAXIMUM_BATCH_SIZE
     else:
         optimal = maximum = network_size
-        ceiling = dynamic_batch_ceiling(network_size)
+        ceiling = dynamic_batch_ceiling(network_size) if batch_ceiling is None else batch_ceiling
     return {
         ALIKED_IMAGE_BINDING: (
             (MINIMUM_BATCH_SIZE, 3, min(MINIMUM_NETWORK_SIDE, maximum[0]), min(MINIMUM_NETWORK_SIDE, maximum[1])),
@@ -271,7 +272,7 @@ def fixed_engine_size_group() -> tuple[int, int]:
     return network_size_for(NETWORK_HEIGHT, NETWORK_WIDTH)
 
 
-def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice = "auto") -> RacoEngine:
+def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice = "auto", batch_pixels: int | None = None) -> RacoEngine:
     """Pick the engine one size group runs on.
 
     `auto` exists because the dynamic engine is not free at the top of its
@@ -285,6 +286,7 @@ def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice =
     Args:
         network_size: `(network_height, network_width)` from `network_size_for`.
         choice: `auto` decides by size; `fixed` and `dynamic` force one engine.
+        batch_pixels: The dynamic engine's pixel budget per execution; `DYNAMIC_BATCH_PIXEL_BUDGET` when None.
 
     Returns:
         The graph, the input size to preprocess to, and the batch ceiling.
@@ -303,20 +305,22 @@ def select_raco_engine(network_size: tuple[int, int], choice: RacoEngineChoice =
         onnx_path=RACO_DYNAMIC_ONNX_PATH,
         network_height=network_size[0],
         network_width=network_size[1],
-        maximum_batch_size=dynamic_batch_ceiling(network_size),
+        maximum_batch_size=dynamic_batch_ceiling(network_size, batch_pixels),
     )
 
 
-def dynamic_batch_ceiling(network_size: tuple[int, int]) -> int:
+def dynamic_batch_ceiling(network_size: tuple[int, int], batch_pixels: int | None = None) -> int:
     """The batch ceiling of a shape-dynamic engine for one size: as many images as `DYNAMIC_BATCH_PIXEL_BUDGET` holds.
 
     Args:
         network_size: `(network_height, network_width)`.
+        batch_pixels: The pixel budget; `DYNAMIC_BATCH_PIXEL_BUDGET` when None.
 
     Returns:
         Between `MINIMUM_BATCH_SIZE` and `DYNAMIC_MAXIMUM_BATCH_SIZE`.
     """
-    fits: int = DYNAMIC_BATCH_PIXEL_BUDGET // max(1, network_size[0] * network_size[1])
+    budget: int = DYNAMIC_BATCH_PIXEL_BUDGET if batch_pixels is None else batch_pixels
+    fits: int = budget // max(1, network_size[0] * network_size[1])
     return max(MINIMUM_BATCH_SIZE, min(DYNAMIC_MAXIMUM_BATCH_SIZE, fits))
 
 
@@ -331,7 +335,7 @@ def engine_file(engine: RacoEngine) -> Path:
     """
     if engine.kind == "fixed":
         return resolve_engine(engine.onnx_path, raco_profile())
-    return resolve_engine(engine.onnx_path, raco_dynamic_profile((engine.network_height, engine.network_width)))
+    return resolve_engine(engine.onnx_path, raco_dynamic_profile((engine.network_height, engine.network_width), engine.maximum_batch_size))
 
 
 def _size_groups(tasks: Sequence[ImageTask]) -> dict[tuple[int, int], list[ImageTask]]:
@@ -353,7 +357,9 @@ def _size_groups(tasks: Sequence[ImageTask]) -> dict[tuple[int, int], list[Image
     return groups
 
 
-def extraction_groups(tasks: Sequence[ImageTask], *, native_resolution: bool, choice: RacoEngineChoice) -> list[ExtractionGroup]:
+def extraction_groups(
+    tasks: Sequence[ImageTask], *, native_resolution: bool, choice: RacoEngineChoice, batch_pixels: int | None = None
+) -> list[ExtractionGroup]:
     """Decide which engine runs which images, and at what size.
 
     The whole of RaCo's engine policy, and the only part of extraction this
@@ -368,6 +374,7 @@ def extraction_groups(tasks: Sequence[ImageTask], *, native_resolution: bool, ch
             `INPUT_DIM_DIVISOR`. `False` puts every image in one group at the
             fixed graph's declared 1920x1200.
         choice: Which engine serves a group; see `select_raco_engine`.
+        batch_pixels: The dynamic engines' pixel budget per execution; see `select_raco_engine`.
 
     Returns:
         One group per network size, first-seen size first; empty when there is
@@ -378,7 +385,7 @@ def extraction_groups(tasks: Sequence[ImageTask], *, native_resolution: bool, ch
     for network_size, group in sizes.items():
         if not group:
             continue
-        engine: RacoEngine = select_raco_engine(network_size, choice)
+        engine: RacoEngine = select_raco_engine(network_size, choice, batch_pixels)
         groups.append(
             ExtractionGroup(
                 engine_path=engine_file(engine),
@@ -403,6 +410,7 @@ def extract_raco(
     raco_engine: RacoEngineChoice = "auto",
     frames: FrameSource | None = None,
     masks: MaskSource | None = None,
+    batch_pixels: int | None = None,
 ) -> TensorRTExtraction:
     """Run the batched RaCo-ALIKED engine over the named images and store the features.
 
@@ -429,6 +437,7 @@ def extract_raco(
         frames: Where the pixels come from as GPU tensors (`colsfm.frames`); None reads
             the image files under `image_root` through an `ImageFolderFrames`.
         masks: Per-image keypoint masks (`colsfm.keypoint_masks`); None = unmasked.
+        batch_pixels: The dynamic engines' pixel budget per execution; see `select_raco_engine`.
 
     Returns:
         Keypoints stored per `image_id`, and the wall time of the whole pass
@@ -451,7 +460,7 @@ def extract_raco(
     tasks: list[ImageTask] = image_tasks(database_path, image_names)
     run_native_extraction(
         database_path,
-        extraction_groups(tasks, native_resolution=native_resolution, choice=engine_choice),
+        extraction_groups(tasks, native_resolution=native_resolution, choice=engine_choice, batch_pixels=batch_pixels),
         RACO_MODEL,
         frames if frames is not None else ImageFolderFrames(image_root),
         min_score=min_score,

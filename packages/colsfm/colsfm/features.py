@@ -137,6 +137,9 @@ class FeatureOptions:
     whichever engine `raco_engine` picks for that size. False is the legacy
     stretch on the fixed-shape graph, which is what `docs/kitti-06-results.md`
     §9 measured. `pycolmap` ignores it: it is already native."""
+    raco_batch_pixels: int | None = None
+    """On `raco` only: the shape-dynamic engines' pixel budget per execution (`PipelineOptions.raco_batch_pixels`);
+    None keeps `colsfm.features_raco.DYNAMIC_BATCH_PIXEL_BUDGET`."""
     raco_engine: RacoEngineChoice = "auto"
     """On `raco` with `native_resolution` only: which engine runs each size.
 
@@ -304,6 +307,7 @@ def extract_features(
                 max_num_features=options.max_num_features,
                 native_resolution=options.native_resolution,
                 raco_engine=options.raco_engine,
+                batch_pixels=options.raco_batch_pixels,
                 frames=source,
                 masks=masks,
             )
