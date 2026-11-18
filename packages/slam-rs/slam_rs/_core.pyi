@@ -516,6 +516,14 @@ class VioSnapshot:
         """What the non-keyframe frame update did: ``not_attempted``, ``taken``, or ``declined_<precondition>``."""
 
     @property
+    def gpu_one_wait(self) -> bool:
+        """The GPU lane collected this frameset's temporal and stereo results in one device wait; always False on the CPU lane."""
+
+    @property
+    def gpu_lookahead(self) -> bool:
+        """The GPU lane reused this frameset's lookahead image upload; always False on the CPU lane."""
+
+    @property
     def timings_ms(self) -> dict[str, float]:
         """Wall time each stage took on the last frame, in milliseconds.
 
@@ -649,6 +657,11 @@ class Vio:
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
+    @property
+    def frontend_timings_ms(self) -> dict[str, float]:
+        """What the frontend lane cost on the last frameset that ran it, in ms: ``imu``, ``pyramid``, ``detect``,
+        ``track`` and ``stereo``. Exists before the estimator has a state, unlike a snapshot's timings."""
+
     def finish_map(self, run_gba: bool) -> MapResult | None:
         """The map's keyframes at the end of a sequence, after a global BA on the map when ``run_gba`` (PR d2); None when ``backend.enabled`` is off.
 
@@ -731,6 +744,14 @@ class Calibration:
     @property
     def imu_T_cam(self) -> list[Float64[ndarray, "4 4"]]:
         """Copied camera-to-IMU matrices in rig order."""
+
+    @property
+    def gravity_ms2(self) -> float:
+        """Gravity magnitude, m/s²: the recording's, or 9.81 when it states none."""
+
+    @property
+    def readout_s(self) -> list[float | None]:
+        """Rolling-shutter readout per camera, seconds; None where the camera states none."""
 
     @property
     def imu_update_rate(self) -> float:
@@ -848,7 +869,9 @@ class OpticalFlow:
 
 
 def catalog_camera_calib(index: int, statics: CameraStatics, downscale: int) -> CameraCalib: ...
-def catalog_imu_calib(calibration: ImuCalibration, imu_t_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int) -> ImuCalib: ...
+def catalog_imu_calib(
+    calibration: ImuCalibration, imu_t_body: Float64[ndarray, "4 4"], applied_time_shift_ns: int, gravity_ms2: float | None
+) -> ImuCalib: ...
 def catalog_frame_nearest_anchor(times: Int64[ndarray, " n_frames"], cursor: int, anchor_t_ns: int, tolerance_ns: int) -> tuple[int | None, int]: ...
 def catalog_match_framesets(camera_t_ns: Sequence[Int64[ndarray, " n_frames"]], tolerance_ns: int) -> tuple[Int64[ndarray, " n_framesets"], Int64[ndarray, "n_framesets n_cameras"]]: ...
 def catalog_pair_imu(gyro_t_ns: Int64[ndarray, " n_gyro"], gyro_rad_s: Float64[ndarray, "n_gyro 3"], accel_t_ns: Int64[ndarray, " n_accel"], accel_m_s2: Float64[ndarray, "n_accel 3"], interpolate: bool) -> ImuStream: ...

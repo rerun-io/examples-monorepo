@@ -195,7 +195,7 @@ impl<S: Scalar> Vio<S> {
             .transpose()?;
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
-            estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
+            estimator::SqrtKeypointVio::new(calibration.cast(), config)?;
         #[cfg(feature = "backend")]
         estimator.emit_map_stamps(map_runner.is_some());
         Ok(Self {
@@ -226,6 +226,11 @@ impl<S: Scalar> Vio<S> {
             image_slots: crate::estimator::ImageSlots::new(query_cap),
             gba_lane: backends.gba,
         })
+    }
+
+    /// Gravity in the world frame, `(0, 0, -calibration.gravity_ms2)`.
+    fn gravity(&self) -> Vector3<f64> {
+        crate::imu::gravity(self.calib_f32.gravity_ms2)
     }
 
     /// The map's keyframes at the end of a sequence, after a global BA on the
@@ -606,7 +611,7 @@ impl<S: Scalar> Vio<S> {
                 let pim: kornia_staging_sensors::imu::IntegratedImuMeasurement<f64> =
                     self.frontend_preintegrate(t_ns, &latest)?;
                 let predicted: kornia_staging_sensors::imu::NavState<f64> =
-                    pim.predict_state(&latest.pose_vel_state(), &imu::gravity::<f64>());
+                    pim.predict_state(&latest.pose_vel_state(), &self.gravity());
                 frontend::flow::PosePrediction {
                     t_w_i_previous: latest.t_w_i.cast(),
                     t_w_i_current: predicted.t_w_i.cast(),

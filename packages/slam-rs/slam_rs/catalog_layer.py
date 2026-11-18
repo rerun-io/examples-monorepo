@@ -75,6 +75,7 @@ def write_layer(
             rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                              columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
         rec.log(f"{root}", rr.AnyValues(source="slam-rs catalog VIO", profile=profile, backend=backend, decoder=decoder, config_sha256=run.config_sha256,
+                                      calibration_sha256=run.calibration_sha256,
                                       num_poses=len(positions), num_framesets=run.framesets, num_dropped=len(run.dropped),
                                       wall_s=run.wall_s, median_tracker_ms=run.median_tracker_ms,
                                       export_to_video_time_offset_ns=clock_offset_ns), static=True)

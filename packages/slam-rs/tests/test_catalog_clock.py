@@ -105,7 +105,7 @@ def test_a_published_result_leaves_the_merged_rig_to_ground_truth(clock_recordin
     )
     result_path: Path = tmp_path / "slam_rs.rrd"
     write_layer(result_path, "clock", SegmentRun(estimate=estimate, framesets=2, lost=0, wall_s=0.1, ground_truth=empty_trajectory(),
-                                                 median_tracker_ms=1.0, config_sha256="test"), clock_offset_ns=0, profile="fast", backend="cpu")
+                                                 median_tracker_ms=1.0, config_sha256="test", calibration_sha256="test-calibration"), clock_offset_ns=0, profile="fast", backend="cpu")
     with rr.server.Server(datasets={"test": [clock_recording]}) as server:
         dataset: DatasetEntry = server.client().get_dataset("test")
         dataset.register([truth_path.as_uri()], layer_name="gt").wait()

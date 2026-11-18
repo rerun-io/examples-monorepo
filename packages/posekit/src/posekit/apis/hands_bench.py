@@ -17,7 +17,7 @@ batch 1 (detector) and ``wilor_pose_batch`` crops here, since the default static
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 from serde import serde, to_dict
+from simplecv.stage_times import StageSummary, StageTimes
 from torch import Tensor
 
 from posekit.cameras import CalibratedCamera, load_calibrated_camera
@@ -35,34 +36,6 @@ from posekit.predictions import HandDetections, HandPoses3d
 
 EXAMPLES: Path = Path(__file__).resolve().parents[3] / "assets" / "examples"
 BenchModel: TypeAlias = Literal["egohand", "egohand-fast", "wilor-tensorrt", "wilor-torch"]
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class StageSummary:
-    """One stage over the measured frames."""
-
-    median_ms: float
-    mean_ms: float
-    p90_ms: float
-    frames: int
-
-
-@dataclass(slots=True)
-class StageTimes:
-    """Per-frame milliseconds of every stage."""
-
-    values: dict[str, list[float]] = field(default_factory=dict)
-
-    def add(self, stage: str, milliseconds: float) -> None:
-        """Record one frame of one stage."""
-        self.values.setdefault(stage, []).append(milliseconds)
-
-    def summary(self) -> dict[str, StageSummary]:
-        """Median, mean and p90 per stage."""
-        return {
-            stage: StageSummary(float(np.median(v)), float(np.mean(v)), float(np.quantile(v, 0.9)), len(v)) for stage, v in self.values.items()
-        }
 
 
 @serde(deny_unknown_fields=True)

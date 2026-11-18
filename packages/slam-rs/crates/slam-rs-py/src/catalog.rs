@@ -46,6 +46,7 @@ fn catalog_camera_calib<'py>(
         transform_translation: statics.getattr("transform_translation")?.extract()?,
         transform_relation: statics.getattr("transform_relation")?.extract()?,
         distortion_valid_radius: statics.getattr("distortion_valid_radius")?.extract()?,
+        rolling_shutter_readout_s: statics.getattr("rolling_shutter_readout_s")?.extract()?,
     };
     let camera = CameraParts::from_catalog_statics(index, &raw, downscale).map_err(value_error)?;
     let kwargs = PyDict::new(py);
@@ -59,9 +60,12 @@ fn catalog_camera_calib<'py>(
     kwargs.set_item("model", camera.model)?;
     kwargs.set_item("distortion", camera.distortion.to_pyarray(py))?;
     kwargs.set_item("distortion_valid_radius", camera.distortion_valid_radius)?;
+    kwargs.set_item("readout_s", camera.readout_s)?;
     let pose: Vec<Vec<f64>> = camera
         .imu_t_cam_row_major
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|r| r.to_vec())
         .collect();
     kwargs.set_item("imu_T_cam", PyArray2::from_vec2(py, &pose)?)?;
@@ -76,6 +80,7 @@ fn catalog_imu_calib<'py>(
     calibration: &Bound<'py, PyAny>,
     imu_t_body: &Bound<'py, PyAny>,
     applied_time_shift_ns: i64,
+    gravity_ms2: Option<f64>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let raw = ImuStatics {
         rate_hz: calibration.getattr("rate_hz")?.extract()?,
@@ -84,6 +89,7 @@ fn catalog_imu_calib<'py>(
         gyro_bias_random_walk: calibration.getattr("gyro_bias_random_walk")?.extract()?,
         accel_bias_random_walk: calibration.getattr("accel_bias_random_walk")?.extract()?,
         applied_time_shift_ns,
+        gravity_ms2,
     };
     let imu = ImuParts::from_catalog_statics(&raw).map_err(value_error)?;
     let kwargs = PyDict::new(py);
@@ -93,6 +99,7 @@ fn catalog_imu_calib<'py>(
     kwargs.set_item("gyro_bias_std", imu.gyro_bias_std)?;
     kwargs.set_item("accel_bias_std", imu.accel_bias_std)?;
     kwargs.set_item("cam_time_offset_ns", imu.cam_time_offset_ns)?;
+    kwargs.set_item("gravity_ms2", imu.gravity_ms2)?;
     kwargs.set_item("imu_T_body", imu_t_body)?;
     py.import("slam_rs.rig")?
         .getattr("ImuCalib")?

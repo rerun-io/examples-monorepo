@@ -117,6 +117,7 @@ def camera() -> CameraFactory:
             model="kb4",
             distortion=np.zeros(4, dtype=np.float64),
             distortion_valid_radius=None,
+            readout_s=None,
             imu_T_cam=imu_T_cam,
         )
 
@@ -135,6 +136,7 @@ def imu() -> ImuCalib:
         gyro_bias_std=0.0001,
         accel_bias_std=0.001,
         cam_time_offset_ns=0,
+        gravity_ms2=None,
         imu_T_body=np.eye(4, dtype=np.float64),
     )
 
@@ -240,4 +242,4 @@ def robocap_imu() -> ImuCalib:
 
     return ImuCalib(frequency_hz=200.0, gyro_noise_std=0.0007300442812547, accel_noise_std=0.005955224218014,
                     gyro_bias_std=3.445397083168e-05, accel_bias_std=0.0001963150489218, cam_time_offset_ns=14_902_432,
-                    imu_T_body=np.eye(4, dtype=np.float64))
+                    gravity_ms2=None, imu_T_body=np.eye(4, dtype=np.float64))

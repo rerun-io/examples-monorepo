@@ -7,6 +7,7 @@ alignment to the ground truth. Until the final run exists, ``slam_rs`` repeats t
 sits on the raw run while the replay plays.
 """
 
+import time
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -16,6 +17,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
+from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
@@ -516,6 +518,11 @@ class VioStage:
     """The estimator and the D17 hold, which the V2 gate drives the same way."""
     logger: VioLogger
     """Where the trajectories, the window, the landmarks and the counters go."""
+    times: StageTimes = field(default_factory=StageTimes)
+    """Per-frameset wall time of each stage: ``track`` (the whole call), the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
+    rest of the call: estimator and glue) and the ``log`` work after it."""
+    keypoints: list[int] = field(default_factory=list)
+    """Keypoints the frontend holds after each frameset, summed over cameras."""
 
     @property
     def elapsed_ms(self) -> list[float]:
@@ -533,8 +540,25 @@ class VioStage:
         Args:
             frameset: The frameset to track, with the samples since the previous one.
         """
+        started: float = time.monotonic()
+        consumed: int = len(self.lockstep.consumed_ms)
         for held, result in self.lockstep.push(frameset):
             self._log_result(held, result)
+        vio: _core.Vio = self.lockstep.vio
+        calls: list[float] = self.lockstep.consumed_ms[consumed:]
+        if calls:
+            # The breakdown belongs to the last call; a frameset released from the IMU hold adds a second one.
+            frontend: dict[str, float] = vio.frontend_timings_ms
+            flow: float = frontend["pyramid"] + frontend["detect"] + frontend["track"] + frontend["stereo"]
+            self.times.add("track", sum(calls))
+            self.times.add("frontend", flow)
+            self.times.add("imu", frontend["imu"])
+            self.times.add("estimator", calls[-1] - flow - frontend["imu"])
+        # One copy of the frontend's keypoints per frameset, for the count.
+        frame: _core.FlowFrame | None = vio.flow_frame() if calls else None
+        if calls and frame is not None:
+            self.keypoints.append(sum(frame.num_tracks(camera) for camera in range(vio.camera_count)))
+        self.times.add("log", 1e3 * (time.monotonic() - started) - sum(calls))
 
     def flush(self) -> None:
         """Log the last lagged frame, then the final map (the flush made it current), before completing paths or exporting poses."""

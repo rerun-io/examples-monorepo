@@ -92,16 +92,26 @@ def test_finish_map_returns_typed_keyframes_and_the_gba_scalars(
         np.testing.assert_array_equal(with_map, without)
 
 
-@pytest.mark.parametrize(("model", "extra"), [("ds", {"xi": 0.0, "alpha": 0.5}), ("eucm", {"alpha": 0.5, "beta": 1.0})])
-def test_a_rig_the_gba_cannot_project_is_refused_before_any_frame(rig: RigFactory, model: str, extra: dict[str, float]) -> None:
-    """The GBA projects every model the frontend does, so a replay that tracked never meets ``finish_map``'s ValueError: ds and eucm stop at ``Vio(...)``."""
+def _rig_of(rig: RigFactory, model: str, extra: dict[str, float]) -> _core.Calibration:
+    """The two-camera test rig with every camera replaced by ``model``."""
     document: dict[str, dict[str, list[dict[str, object]]]] = json.loads(rig(2).to_json())
     for camera in document["value0"]["intrinsics"]:
         camera["camera_type"] = model
         camera["intrinsics"] = {"fx": 100.0, "fy": 100.0, "cx": 100.0, "cy": 100.0, **extra}
-    calibration: _core.Calibration = _core.Calibration.from_json(json.dumps(document))
-    with pytest.raises(ValueError, match=f"camera model {model} is parsed but its projection is not implemented"):
-        _core.Vio(calibration, _core.VioConfig().with_backend("offline"), backend="cpu")
+    return _core.Calibration.from_json(json.dumps(document))
+
+
+def test_a_rig_the_gba_cannot_project_is_refused_before_any_frame(rig: RigFactory) -> None:
+    """The GBA projects every model the frontend does, so a replay that tracked never meets ``finish_map``'s ValueError: ucm stops at ``Vio(...)``."""
+    with pytest.raises(ValueError, match="camera model ucm is parsed but its projection is not implemented"):
+        _core.Vio(_rig_of(rig, "ucm", {"alpha": 0.5}), _core.VioConfig().with_backend("offline"), backend="cpu")
+
+
+@pytest.mark.parametrize(("model", "extra"), [("ds", {"xi": 0.0, "alpha": 0.5}), ("eucm", {"alpha": 0.5, "beta": 1.0})])
+def test_fisheye_rigs_build_with_the_back_end_on(rig: RigFactory, model: str, extra: dict[str, float]) -> None:
+    """Double sphere and EUCM project in the frontend and in the GBA (``CameraModelKind::to_f32``), so they build with the map on."""
+    vio: _core.Vio = _core.Vio(_rig_of(rig, model, extra), _core.VioConfig().with_backend("offline"), backend="cpu")
+    assert vio.camera_count == 2
 
 
 def test_ba_backend_is_parsed_and_a_cpu_frontend_never_probes_for_it(rig: RigFactory) -> None:
