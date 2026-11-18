@@ -22,8 +22,10 @@ pub mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::calib::{BasaltCamera, CalibError, Calibration};
 use crate::config::VioConfig;
 use crate::estimator::{KeyframeStamp, MapStamp, MargStamp};
+use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
 
 pub use anchor::{AnchorError, reanchor, reanchor_arrays};
@@ -62,6 +64,53 @@ impl From<&VioConfig> for MapConfig {
             batch_cull_size: config.map_batch_cull_size,
             high_covisibility: config.loop_closing_pgo_min_covisibility_weight,
         }
+    }
+}
+
+/// The rig the back end works in, one entry per camera, built once from the
+/// calibration with its lists checked to the same length. Culling scores
+/// coverage with its image sizes, the snapshot, loop closing and the global
+/// BA place landmarks with its extrinsics, and loop closing and the global BA
+/// derive their camera models from its models.
+#[derive(Debug, Clone)]
+pub struct BackendRig {
+    /// Projection model per camera.
+    pub(crate) intrinsics: Vec<BasaltCamera<f64>>,
+    /// `T_i_c` per camera, its rotation renormalized (`Se3::cast`): the map has
+    /// always used the normalized extrinsics; the GBA's cameras are cast to f32 anyway.
+    pub(crate) t_i_c: Vec<Se3<f64>>,
+    /// `[width, height]` per camera, in pixels.
+    pub(crate) resolutions: Vec<[u32; 2]>,
+}
+
+impl BackendRig {
+    /// The rig of `calibration`.
+    ///
+    /// # Errors
+    ///
+    /// [`CalibError::RaggedCameraLists`] when the camera lists differ in length.
+    pub fn new(calibration: &Calibration<f64>) -> Result<Self, CalibError> {
+        let (extrinsics, intrinsics, resolutions) = (
+            calibration.t_i_c.len(),
+            calibration.intrinsics.len(),
+            calibration.resolution.len(),
+        );
+        if intrinsics != extrinsics || resolutions != extrinsics {
+            return Err(CalibError::RaggedCameraLists {
+                extrinsics,
+                intrinsics,
+                resolutions,
+            });
+        }
+        Ok(Self {
+            intrinsics: calibration.intrinsics.clone(),
+            t_i_c: calibration
+                .t_i_c
+                .iter()
+                .map(|t_i_c| t_i_c.cast::<f64>())
+                .collect(),
+            resolutions: calibration.resolution.clone(),
+        })
     }
 }
 
@@ -106,8 +155,7 @@ pub enum MapEvent {
 #[derive(Debug, Clone)]
 pub struct MapBackend {
     config: MapConfig,
-    /// Image size per camera, for the coverage score.
-    resolutions: Vec<[u32; 2]>,
+    rig: BackendRig,
     map: KeyframeMap,
     graph: CovisibilityGraph,
     /// Keyframes still in the window.
@@ -116,11 +164,11 @@ pub struct MapBackend {
     culled: BTreeSet<FrameId>,
     /// How many of `culled` the over-budget batches took.
     culled_over_budget: usize,
-    /// `T_i_c` per camera, which places the points of a [`BackendWork::view`].
-    t_i_c: Vec<crate::lie::Se3<f64>>,
     /// The rig's camera models for the global BA ([`Self::finish`]); `None`
     /// when the rig has a model the GBA cannot project.
     gba_rig: Option<gba::GbaRig>,
+    /// Where the global BA's PCG runs (`select_backend`'s GBA lane).
+    gba_lane: crate::Backend,
     /// Loop closing (PR b2); `None` when it is off.
     loops: Option<LoopClosing>,
 }
@@ -155,27 +203,31 @@ pub struct CullCounts {
 }
 
 impl MapBackend {
-    /// An empty map for a rig with these image sizes.
-    pub fn new(config: MapConfig, resolutions: Vec<[u32; 2]>) -> Self {
+    /// An empty map for `rig` with the map knobs of `config`, loop closing as
+    /// `config` says and the global BA's PCG on `gba_lane`. A camera model loop
+    /// closing or the global BA cannot use leaves that part off, with one
+    /// warning: the map still runs.
+    pub fn new(config: &VioConfig, rig: BackendRig, gba_lane: crate::Backend) -> Self {
+        let loops: Option<LoopClosing> =
+            LoopClosing::new(&config.backend_loop_closing, &rig.intrinsics).unwrap_or_else(
+                |error| {
+                    log::warn!("loop closing off: {error}");
+                    None
+                },
+            );
+        let gba_rig: Option<gba::GbaRig> = gba::GbaRig::of(&rig);
         Self {
-            config,
-            resolutions,
+            config: MapConfig::from(config),
+            rig,
             map: KeyframeMap::new(),
             graph: CovisibilityGraph::new(),
             active: BTreeSet::new(),
             culled: BTreeSet::new(),
             culled_over_budget: 0,
-            t_i_c: Vec::new(),
-            gba_rig: None,
-            loops: None,
+            gba_rig,
+            gba_lane,
+            loops,
         }
-    }
-
-    /// The rig's `T_i_c` per camera, so a view can place the map's points.
-    #[must_use]
-    pub fn with_extrinsics(mut self, t_i_c: Vec<crate::lie::Se3<f64>>) -> Self {
-        self.t_i_c = t_i_c;
-        self
     }
 
     /// The map.
@@ -277,7 +329,7 @@ impl MapBackend {
                 &backend.graph,
                 id,
                 high_weight,
-                &backend.resolutions,
+                &backend.rig.resolutions,
             )
         };
         let mut scores: BTreeMap<FrameId, f32> = self
@@ -489,7 +541,7 @@ impl BackendWork for MapBackend {
 
     /// [`MapBackend::snapshot`] with the rig's extrinsics.
     fn view(&self) -> MapSnapshot {
-        self.snapshot(&self.t_i_c)
+        self.snapshot()
     }
 
     fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {

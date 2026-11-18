@@ -2944,7 +2944,7 @@ description = "Build the core, then run the package golden reference tests"
 # does not compile these optional modules.
 [feature.slam-rs.tasks.slam-rs-wgpu-clippy]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]
-cmd = "cargo-clippy clippy -p slam-rs --features gpu-wgpu --all-targets -- -D warnings"
+cmd = "cargo-clippy clippy -p slam-rs --features gpu-wgpu,gpu-test-support --all-targets -- -D warnings"
 cwd = "packages/slam-rs"
 description = "Lint the portable wgpu lane, tests included, with warnings denied"
 
@@ -2960,9 +2960,9 @@ description = "Lint the portable wgpu lane, tests included, with warnings denied
 # runs separately because each binary shares one CubeCL client.
 [feature.slam-rs.tasks.slam-rs-wgpu-test]
 depends-on = ["slam-rs-build"]
-cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_capabilities -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu -- --nocapture && python -m pytest -q -ra -m integration tests/test_metal_python_host.py"
+cmd = "cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_kernels -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test frame_allocations -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_pool -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu --test gpu_capabilities -- --list | grep -c ': test' && cargo test --locked --offline -p slam-rs --features gpu-wgpu,gpu-test-support --test gba_probe_fallback -- --list | grep -c ': test' && cargo test --locked --offline --workspace --features slam-rs/gpu-wgpu,slam-rs/gpu-test-support -- --nocapture && python -m pytest -q -ra -m integration tests/test_metal_python_host.py"
 cwd = "packages/slam-rs"
-description = "Run workspace tests with wgpu, checking that all four GPU integration binaries contain tests"
+description = "Run workspace tests with wgpu, checking that all five GPU integration binaries contain tests"
 
 [feature.slam-rs.tasks.slam-rs-wgpu-doc]
 depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-staging" }]

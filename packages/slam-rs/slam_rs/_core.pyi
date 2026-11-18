@@ -11,7 +11,7 @@ from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
-from slam_rs import BackendRequest, Lane
+from slam_rs import BackendRequest, GbaRequest, Lane
 from slam_rs.catalog_calibration import CameraStatics
 from slam_rs.catalog_feed import RigProfile
 from slam_rs.catalog_timing import ImuStream
@@ -29,11 +29,11 @@ the CPU and ``backend="gpu"`` is refused.
 """
 
 def device_probes_run() -> int:
-    """How many device capability probes this process has run.
+    """How many device probes this process has run: capability validations plus GBA round trips.
 
-    Validation of the default device runs once per process, so this is 0
-    before the first ``auto`` or ``gpu`` request and constant after it. The
-    unit test tier asserts it stays at 0.
+    Each runs once per process, so this is 0 before the first ``auto`` or
+    ``gpu`` request and constant after it. The unit test tier asserts it stays
+    at 0.
     """
 
 def reanchor(
@@ -141,6 +141,10 @@ class MapResult:
 
 class GbaRun:
     """One global BA over the map: what the problem held, each LM attempt, and the wall of each stage."""
+
+    @property
+    def lane(self) -> Lane:
+        """Where the PCG ran (always ``"cpu"`` with ``backend.gba_use_double``: the device lane is f32 only)."""
 
     @property
     def keyframes(self) -> int:
@@ -544,8 +548,15 @@ class Vio:
         threads: int = 1,
         max_keypoints: int | None = None,
         backend: BackendRequest = "auto",
+        ba_backend: GbaRequest = "follow",
     ) -> None:
         """Build the pipeline for one rig; JSON files arrive through ``from_json``.
+
+        ``ba_backend`` is where :meth:`finish_map`'s global BA runs its PCG:
+        ``"follow"`` (the default) takes the frontend's lane, the GPU only when
+        the back-end probe (a small GBA round trip) also passes, otherwise the CPU
+        with one warning; ``"cpu"`` or ``"gpu"`` choose it outright, for benches
+        and tests, and ``"gpu"`` raises ``ValueError`` when it cannot run.
 
         ``backend`` chooses the frontend through :func:`select_backend`. The
         default ``"auto"`` runs the pyramid, patch build and KLT tracker through
@@ -576,6 +587,9 @@ class Vio:
     @property
     def backend(self) -> Lane:
         """The lane this pipeline runs: ``"cpu"`` or ``"gpu"``."""
+    @property
+    def gba_lane(self) -> Lane:
+        """Where the global BA's PCG runs: ``"cpu"`` or ``"gpu"``."""
     def push_imu(self, t_ns: int, gyro: Sequence[float], accel: Sequence[float]) -> None:
         """Add one uncalibrated IMU sample.
 

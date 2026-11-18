@@ -1,4 +1,5 @@
 use super::*;
+use crate::sqrt_ba::LaneSolve;
 use kornia_staging_3d::camera::Pinhole;
 use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion};
 
@@ -670,4 +671,126 @@ fn invalid_inputs_are_rejected() {
         solve_global(&mut p, &rig, &GbaOptions::default(), None).unwrap_err(),
         GbaError::Keyframe(40)
     );
+}
+
+/// A lane that runs [`pcg`] on the [`ReducedSystem`] view alone: what a device
+/// lane sees, solved on the host.
+struct ViewLane {
+    solves: usize,
+    fail_on: Option<usize>,
+}
+
+impl<S: Scalar> PcgLane<S> for ViewLane {
+    fn name(&self) -> &'static str {
+        "view"
+    }
+
+    fn solve(
+        &mut self,
+        system: &ReducedSystem<'_, S>,
+        preconditioner: &BlockJacobi<S>,
+        b: &[S],
+        x: &mut [S],
+        options: &PcgOptions,
+    ) -> Result<LaneSolve, PcgLaneError> {
+        self.solves += 1;
+        if self.fail_on == Some(self.solves) {
+            return Err(PcgLaneError {
+                lane: "view",
+                reason: "device lost".into(),
+            });
+        }
+        let summary = pcg(
+            |v, out| system.matvec(v, out),
+            preconditioner,
+            b,
+            x,
+            options,
+        );
+        Ok(LaneSolve {
+            summary,
+            upload_s: 0.0,
+            syncs: 0,
+        })
+    }
+}
+
+#[test]
+fn a_lane_on_the_reduced_view_reproduces_the_built_in_lane() {
+    let (_, problem, rig) = synthetic(10, 80, 2);
+    let options = GbaOptions::default();
+    let mut built_in = problem.clone();
+    let expected = solve_global(&mut built_in, &rig, &options, None).unwrap();
+    let mut lane = ViewLane {
+        solves: 0,
+        fail_on: None,
+    };
+    let mut viewed = problem.clone();
+    let got = solve_global_with(&mut viewed, &rig, &options, None, Some(&mut lane)).unwrap();
+    assert_eq!(lane.solves, got.iterations.len());
+    assert_eq!(got.iterations.len(), expected.iterations.len());
+    let rel = (got.final_cost.error - expected.final_cost.error).abs() / expected.final_cost.error;
+    assert!(
+        rel < 1e-9,
+        "{} vs {}",
+        got.final_cost.error,
+        expected.final_cost.error
+    );
+    assert!(pose_rms(&viewed, &built_in) < 1e-9);
+    // The built-in lane is unchanged by the seam: `solve_global_with(None)` is it.
+    let mut again = problem.clone();
+    let none = solve_global_with(&mut again, &rig, &options, None, None).unwrap();
+    assert_eq!(none.final_cost, expected.final_cost);
+    assert_eq!(again, built_in);
+}
+
+#[test]
+fn the_reduced_view_matvec_matches_the_built_in_matvec() {
+    let (_, problem, rig) = synthetic(8, 60, 2);
+    let mut solver = Solver::new(&problem, &rig, &GbaOptions::default()).unwrap();
+    solver.linearize(&problem, None);
+    let lambda = 1e-3;
+    let _ = solver.damp(lambda, None);
+    let n = 6 * problem.imu_from_world.len();
+    let x: Vec<f64> = (0..n).map(|i| wobble(i, 3)).collect();
+    let (mut built_in, mut viewed) = (vec![0.0; n], vec![0.0; n]);
+    solver.matvec(&x, &mut built_in, lambda, None);
+    let rel = solver.rel_blocks();
+    solver.reduced(lambda, &rel).matvec(&x, &mut viewed);
+    for (a, b) in built_in.iter().zip(&viewed) {
+        assert!((a - b).abs() <= 1e-12 * a.abs().max(1.0), "{a} vs {b}");
+    }
+}
+
+#[test]
+fn a_failing_lane_is_an_error_not_a_fallback() {
+    let (_, problem, rig) = synthetic(6, 30, 2);
+    let mut lane = ViewLane {
+        solves: 0,
+        fail_on: Some(2),
+    };
+    let mut p = problem.clone();
+    let error =
+        solve_global_with(&mut p, &rig, &GbaOptions::default(), None, Some(&mut lane)).unwrap_err();
+    assert_eq!(
+        error,
+        GbaError::Lane(PcgLaneError {
+            lane: "view",
+            reason: "device lost".into()
+        })
+    );
+    assert_eq!(error.to_string(), "the view PCG lane failed: device lost");
+    // The problem holds the state of the one attempt before the failure.
+    let mut one = problem.clone();
+    let first = GbaOptions {
+        max_iterations: 1,
+        ..GbaOptions::default()
+    };
+    let mut healthy = ViewLane {
+        solves: 0,
+        fail_on: None,
+    };
+    solve_global_with(&mut one, &rig, &first, None, Some(&mut healthy)).unwrap();
+    assert_eq!(p, one);
+    assert_ne!(p, problem, "the first attempt moved nothing");
 }

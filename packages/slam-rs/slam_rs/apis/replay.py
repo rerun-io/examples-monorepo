@@ -9,7 +9,7 @@ import numpy as np
 import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from slam_rs import BackendRequest, _core
+from slam_rs import BackendRequest, GbaRequest, _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
     CatalogSegment,
@@ -87,6 +87,9 @@ class Config:
     gba: bool = True
     """With the map on: run the global BA on the map at the end (``Vio.finish_map``), draw its keyframes under
     ``/world/runs/slam_rs/gba`` and write them to ``<output-csv stem>_gba_keyframes.csv``. The raw VIO is unchanged."""
+    ba_backend: GbaRequest = "follow"
+    """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
+    ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
 
 
 @dataclass(slots=True)
@@ -225,8 +228,10 @@ def main(config: Config) -> None:
             # host with no driver, no device or no adapter — and the shim
             # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
             # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend)
-            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else ""))
+            vio: _core.Vio = _core.Vio(
+                _core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend, ba_backend=config.ba_backend
+            )
+            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else "") + f", GBA lane: {vio.gba_lane}")
             stage = VioStage(
                 lockstep=Lockstep(vio=vio),
                 logger=VioLogger(

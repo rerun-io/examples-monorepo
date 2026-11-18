@@ -46,18 +46,23 @@ use crate::types::{FrameId, LandmarkId};
 /// The solver's report types, for callers that read a [`GbaRun`].
 pub use kornia_staging_slam::sqrt_ba::{GbaCost, GbaIteration, GbaStageSeconds, GbaTermination};
 
-/// The rig as the global BA sees it: each camera's model and `T_i_c`, fixed.
-/// The f32 lane casts them in [`solve`].
+/// The rig as the global BA sees it: each camera's model and `T_i_c`, fixed,
+/// in f64 and as the f32 lane solves with them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GbaRig {
     /// Camera models and extrinsics.
     pub cameras: Vec<GbaRigCamera<f64, CameraModelKind<f64>>>,
+    /// The same, cast to f32.
+    pub cameras_f32: Vec<GbaRigCamera<f32, CameraModelKind<f32>>>,
 }
 
 impl GbaRig {
     /// A rig from its staged camera models and extrinsics; `None` when the
     /// lists differ in length or a model does not survive the cast to f32.
     pub fn new(models: Vec<CameraModelKind<f64>>, t_i_c: &[Se3<f64>]) -> Option<Self> {
+        if models.len() != t_i_c.len() {
+            return None;
+        }
         let cameras: Vec<GbaRigCamera<f64, CameraModelKind<f64>>> = models
             .into_iter()
             .zip(t_i_c)
@@ -66,8 +71,37 @@ impl GbaRig {
                 imu_from_camera: *t,
             })
             .collect();
-        (cameras.len() == t_i_c.len() && cameras.iter().all(|c| c.model.to_f32().is_some()))
-            .then_some(Self { cameras })
+        let cameras_f32 = cameras
+            .iter()
+            .map(|c| {
+                Some(GbaRigCamera {
+                    model: c.model.to_f32()?,
+                    imu_from_camera: c.imu_from_camera.cast(),
+                })
+            })
+            .collect::<Option<_>>()?;
+        Some(Self {
+            cameras,
+            cameras_f32,
+        })
+    }
+
+    /// The back end's rig through the staged camera models; `None` (one
+    /// warning) when a model has no staged projection, which leaves the GBA
+    /// off for this rig.
+    pub(crate) fn of(rig: &super::BackendRig) -> Option<Self> {
+        let models: Result<Vec<_>, _> = rig
+            .intrinsics
+            .iter()
+            .map(crate::calib::BasaltCamera::to_staged)
+            .collect();
+        match models {
+            Ok(models) => Self::new(models, &rig.t_i_c),
+            Err(error) => {
+                log::warn!("the global BA is off for this rig: {error}");
+                None
+            }
+        }
     }
 }
 
@@ -132,6 +166,9 @@ pub struct GbaRun {
     pub solve_s: f64,
     /// Wall seconds: problem back into the map.
     pub apply_s: f64,
+    /// Where the PCG ran (the CPU when `backend.gba_use_double`: the device
+    /// lane is f32 only).
+    pub lane: crate::Backend,
     /// Worker threads used.
     pub threads: usize,
     /// Whether it ran in f64.
@@ -165,6 +202,10 @@ pub enum GbaDriverError {
     /// The worker pool could not start.
     #[error("could not start the global BA's threads: {0}")]
     Threads(String),
+    /// The GPU lane was chosen and cannot start (a lane that fails while
+    /// solving is [`GbaError::Lane`]).
+    #[error("the global BA's GPU lane cannot start: {0}")]
+    GpuLane(String),
 }
 
 /// The map as a global BA problem (DESIGN §3.1). `edges` are the pose-graph
@@ -275,12 +316,12 @@ pub fn map_problem(
 /// `bal` returns it; [`remove_gauge`] takes that out.
 ///
 /// # Errors
-/// The worker pool cannot start, a camera model does not cast to f32, or the
-/// solver refuses the problem.
+/// The worker pool cannot start, or the solver refuses the problem.
 pub fn solve(
     input: &GbaInput,
     rig: &GbaRig,
     config: &VioConfig,
+    lane: crate::Backend,
 ) -> Result<(GbaProblem<f64>, GbaReport), GbaDriverError> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.gba_threads.get())
@@ -295,23 +336,49 @@ pub fn solve(
         problem.uncentre_from(&centred, &centroid);
         report
     } else {
-        let cameras: Vec<GbaRigCamera<f32, CameraModelKind<f32>>> = rig
-            .cameras
-            .iter()
-            .map(|c| {
-                Some(GbaRigCamera {
-                    model: c.model.to_f32()?,
-                    imu_from_camera: c.imu_from_camera.cast(),
-                })
-            })
-            .collect::<Option<_>>()
-            .ok_or(GbaDriverError::NoRig)?;
+        let cameras: &[GbaRigCamera<f32, CameraModelKind<f32>>] = &rig.cameras_f32;
         let (mut centred, centroid) = input.problem.centred::<f32>();
-        let report = solve_global(&mut centred, &cameras, &options, Some(&pool))?;
+        let report = match lane {
+            crate::Backend::Cpu => solve_global(&mut centred, cameras, &options, Some(&pool))?,
+            crate::Backend::Gpu => solve_on_device(&mut centred, cameras, &options, &pool)?,
+        };
         problem.uncentre_from(&centred, &centroid);
         report
     };
     Ok((problem, report))
+}
+
+/// The f32 solve with the PCG on the device (`kornia_staging_gpu::linalg`).
+#[cfg(feature = "gpu-wgpu")]
+fn solve_on_device(
+    problem: &mut GbaProblem<f32>,
+    cameras: &[GbaRigCamera<f32, CameraModelKind<f32>>],
+    options: &GbaOptions,
+    pool: &rayon::ThreadPool,
+) -> Result<GbaReport, GbaDriverError> {
+    let client = kornia_staging_gpu::runtime::gpu_client()
+        .map_err(|error| GbaDriverError::GpuLane(error.to_string()))?;
+    let mut device = kornia_staging_gpu::linalg::GpuPcg::new(client);
+    Ok(kornia_staging_slam::sqrt_ba::solve_global_with(
+        problem,
+        cameras,
+        options,
+        Some(pool),
+        Some(&mut device),
+    )?)
+}
+
+/// A build without the GPU lane: `select_backend` never chooses it.
+#[cfg(not(feature = "gpu-wgpu"))]
+fn solve_on_device(
+    _: &mut GbaProblem<f32>,
+    _: &[GbaRigCamera<f32, CameraModelKind<f32>>],
+    _: &GbaOptions,
+    _: &rayon::ThreadPool,
+) -> Result<GbaReport, GbaDriverError> {
+    Err(GbaDriverError::GpuLane(
+        crate::VioError::GpuUnavailable.to_string(),
+    ))
 }
 
 /// Take the free gauge out of a solution: the rigid transform `G` that best
@@ -383,13 +450,6 @@ fn apply(map: &mut KeyframeMap, input: &GbaInput, solved: &GbaProblem<f64>, t_i_
 }
 
 impl MapBackend {
-    /// The rig the global BA projects through.
-    #[must_use]
-    pub fn with_gba_rig(mut self, rig: Option<GbaRig>) -> Self {
-        self.gba_rig = rig;
-        self
-    }
-
     /// The map's keyframes at the end of a sequence, after a global BA when
     /// `run_gba`. The pose-graph rows are the graph's
     /// [`super::CovisibilityGraph::pose_graph_edges`] at the high-covisibility
@@ -418,14 +478,14 @@ impl MapBackend {
         let started = Instant::now();
         let edges: Vec<PoseGraphEdge> =
             self.graph.pose_graph_edges(self.high_covisibility_weight());
-        let input: GbaInput = map_problem(&self.map, &edges, &self.t_i_c, config);
+        let input: GbaInput = map_problem(&self.map, &edges, &self.rig.t_i_c, config);
         let build_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        let (mut solved, report) = solve(&input, rig, config)?;
+        let (mut solved, report) = solve(&input, rig, config, self.gba_lane)?;
         let gauge: Se3<f64> = remove_gauge(&input.problem, &mut solved);
         let solve_s: f64 = started.elapsed().as_secs_f64();
         let started = Instant::now();
-        apply(&mut self.map, &input, &solved, &self.t_i_c);
+        apply(&mut self.map, &input, &solved, &self.rig.t_i_c);
         let apply_s: f64 = started.elapsed().as_secs_f64();
         Ok(MapResult {
             keyframe_t_ns,
@@ -440,6 +500,11 @@ impl MapBackend {
                 apply_s,
                 threads: config.gba_threads.get(),
                 use_double: config.gba_use_double,
+                lane: if config.gba_use_double {
+                    crate::Backend::Cpu
+                } else {
+                    self.gba_lane
+                },
             }),
         })
     }

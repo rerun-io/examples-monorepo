@@ -78,6 +78,7 @@ def test_finish_map_returns_typed_keyframes_and_the_gba_scalars(
     assert gba.termination in ("converged", "max_iterations", "lambda_overflow")
     assert gba.keyframes >= 1
     assert gba.threads == 2
+    assert gba.lane == "cpu"
     assert gba.use_double is False
     assert min(gba.build_s, gba.solve_s, gba.apply_s) >= 0.0
     assert 0.0 <= gba.gauge_tilt_deg < 1.0
@@ -101,3 +102,14 @@ def test_a_rig_the_gba_cannot_project_is_refused_before_any_frame(rig: RigFactor
     calibration: _core.Calibration = _core.Calibration.from_json(json.dumps(document))
     with pytest.raises(ValueError, match=f"camera model {model} is parsed but its projection is not implemented"):
         _core.Vio(calibration, _core.VioConfig().with_backend("offline"), backend="cpu")
+
+
+def test_ba_backend_is_parsed_and_a_cpu_frontend_never_probes_for_it(rig: RigFactory) -> None:
+    """``ba_backend`` takes ``follow``, ``cpu`` or ``gpu``; on a CPU frontend ``follow`` keeps the GBA on the CPU without the back-end probe."""
+    probes: int = _core.device_probes_run()
+    follow: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu", ba_backend="follow")
+    _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu", ba_backend="cpu")
+    assert _core.device_probes_run() == probes
+    assert (follow.backend, follow.gba_lane) == ("cpu", "cpu")
+    with pytest.raises(ValueError, match="expected follow, cpu or gpu"):
+        _core.Vio(rig(2), _core.VioConfig(), backend="cpu", ba_backend="auto")  # type: ignore[arg-type]

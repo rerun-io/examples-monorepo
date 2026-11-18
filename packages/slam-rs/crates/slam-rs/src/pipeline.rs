@@ -14,7 +14,10 @@ pub use boundary::{
 };
 pub use lane::FrontendLane;
 use lane::build_frontend;
-pub use select::{BackendRequest, device_probes_run, gpu_probe, select_backend};
+pub use select::{
+    BackendRequest, Backends, GbaRequest, device_probes_run, follow_frontend, gba_probes_run,
+    gpu_probe, probe_back_end, select_backend,
+};
 
 use crate::{calib, config, duration_ns, estimator, frontend, imu, types};
 use nalgebra::{Isometry3, UnitQuaternion, Vector3};
@@ -68,6 +71,8 @@ pub struct Vio<S: Scalar = f32> {
     /// its own thread (Realtime); `None` when `backend.enabled` is off.
     #[cfg(feature = "backend")]
     map_runner: Option<crate::backend::BackendRunner<crate::backend::MapBackend>>,
+    /// Where the global BA's PCG runs.
+    gba_lane: Backend,
     /// Images of keyframes whose stamp has not gone to the back end yet, for
     /// loop closing (DESIGN §2.2: the stamp carries its own keyframe's images).
     #[cfg(feature = "backend")]
@@ -123,7 +128,9 @@ impl<S: Scalar> Vio<S> {
         Self::with_backend(config, calibration, options, Backend::Cpu)
     }
 
-    /// The same pipeline on a named frontend backend (decision D21).
+    /// The same pipeline on a named frontend backend (decision D21). With
+    /// `backend.enabled`, the global BA's PCG follows the frontend
+    /// ([`follow_frontend`], DESIGN Q2/Q7).
     ///
     /// # Errors
     ///
@@ -136,6 +143,35 @@ impl<S: Scalar> Vio<S> {
         options: frontend::flow::FrontendOptions,
         backend: Backend,
     ) -> Result<Self, VioError> {
+        let gba: Backend = if config.backend_enabled {
+            follow_frontend(backend)
+        } else {
+            Backend::Cpu
+        };
+        Self::with_backends(
+            config,
+            calibration,
+            options,
+            Backends {
+                frontend: backend,
+                gba,
+            },
+        )
+    }
+
+    /// [`Self::with_backend`] with the global BA's PCG lane named as well
+    /// ([`select_backend`] resolves both).
+    ///
+    /// # Errors
+    /// As [`Self::with_backend`].
+    #[cfg_attr(not(feature = "backend"), allow(unused_variables))]
+    pub fn with_backends(
+        config: config::VioConfig,
+        calibration: calib::Calibration<f64>,
+        options: frontend::flow::FrontendOptions,
+        backends: Backends,
+    ) -> Result<Self, VioError> {
+        let backend: Backend = backends.frontend;
         let camera_count: usize = calibration.t_i_c.len();
         let frontend: FrontendLane = build_frontend(&config, &calibration, options, backend)?;
         let calib_f32: calib::Calibration<f32> = calibration.cast();
@@ -147,26 +183,16 @@ impl<S: Scalar> Vio<S> {
         let map_runner = config
             .backend_enabled
             .then(|| {
+                let rig = crate::backend::BackendRig::new(&calibration)
+                    .map_err(|error| VioError::BackendRig(error.to_string()))?;
                 crate::backend::BackendRunner::new(
-                    crate::backend::MapBackend::new(
-                        crate::backend::MapConfig::from(&config),
-                        calibration.resolution.clone(),
-                    )
-                    .with_extrinsics(
-                        calibration
-                            .t_i_c
-                            .iter()
-                            .map(|t_i_c| t_i_c.cast::<f64>())
-                            .collect(),
-                    )
-                    .with_loop_closing(&config, &calibration)
-                    .with_gba_rig(gba_rig(&calibration)),
+                    crate::backend::MapBackend::new(&config, rig, backends.gba),
                     config.backend_mode,
-                    config.backend_realtime_max_queued_queries.get(),
+                    query_cap,
                 )
+                .map_err(|error| VioError::BackendThread(error.to_string()))
             })
-            .transpose()
-            .map_err(|error| VioError::BackendThread(error.to_string()))?;
+            .transpose()?;
         #[cfg_attr(not(feature = "backend"), allow(unused_mut))]
         let mut estimator: estimator::SqrtKeypointVio<S> =
             estimator::SqrtKeypointVio::with_default_gravity(calibration.cast(), config)?;
@@ -192,6 +218,7 @@ impl<S: Scalar> Vio<S> {
             overlap_timings: lag::OverlapTimings::default(),
             #[cfg(feature = "backend")]
             map_runner,
+            gba_lane: backends.gba,
             #[cfg(feature = "backend")]
             keyframe_images: std::collections::BTreeMap::new(),
             #[cfg(feature = "backend")]
@@ -365,6 +392,11 @@ impl<S: Scalar> Vio<S> {
     /// Which frontend backend this pipeline runs.
     pub fn backend(&self) -> Backend {
         self.frontend.backend()
+    }
+
+    /// Where the global BA's PCG runs.
+    pub fn gba_lane(&self) -> Backend {
+        self.gba_lane
     }
 
     /// What the frontend lane cost on the last frameset that ran it.
@@ -934,24 +966,6 @@ fn check_frameset(images: &[ImageView<'_>], camera_count: usize) -> Result<(), V
         }
     }
     Ok(())
-}
-
-/// The rig's staged camera models for the global BA; `None` (one warning) when
-/// a model has no staged projection, which leaves the GBA off for this rig.
-#[cfg(feature = "backend")]
-fn gba_rig(calibration: &calib::Calibration<f64>) -> Option<crate::backend::GbaRig> {
-    let models: Result<Vec<_>, _> = calibration
-        .intrinsics
-        .iter()
-        .map(calib::BasaltCamera::to_staged)
-        .collect();
-    match models {
-        Ok(models) => crate::backend::GbaRig::new(models, &calibration.t_i_c),
-        Err(error) => {
-            log::warn!("the global BA is off for this rig: {error}");
-            None
-        }
-    }
 }
 
 /// Flatten an isometry into `[tx, ty, tz, qx, qy, qz, qw]`.

@@ -82,6 +82,12 @@ impl GbaRun {
 
 #[pymethods]
 impl GbaRun {
+    /// Where the PCG ran: `"cpu"` or `"gpu"`.
+    #[getter]
+    fn lane(&self) -> &'static str {
+        self.run.lane.name()
+    }
+
     /// Keyframe variables.
     #[getter]
     fn keyframes(&self) -> usize {

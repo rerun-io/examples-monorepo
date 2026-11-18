@@ -95,6 +95,11 @@ impl<S: Scalar> BlockJacobi<S> {
         }
     }
 
+    /// The inverted blocks, one per pose.
+    pub fn inverses(&self) -> &[Matrix6<S>] {
+        &self.inverses
+    }
+
     /// Blocks that were not positive definite.
     pub fn fallbacks(&self) -> usize {
         self.fallbacks
@@ -116,11 +121,24 @@ pub(crate) fn dot<S: Scalar>(a: &[S], b: &[S]) -> f64 {
 
 /// Solve `A x = b` from `x = 0`. `matvec(v, out)` writes `A v` into `out`.
 pub fn pcg<S: Scalar>(
+    matvec: impl FnMut(&[S], &mut [S]),
+    preconditioner: &BlockJacobi<S>,
+    b: &[S],
+    x: &mut [S],
+    options: &PcgOptions,
+) -> PcgSummary {
+    pcg_with_dot(matvec, preconditioner, b, x, options, dot)
+}
+
+/// [`pcg`] with every scalar sum taken by `dot`: an ablation seam, so a test
+/// can run the host PCG with another lane's sums.
+pub fn pcg_with_dot<S: Scalar>(
     mut matvec: impl FnMut(&[S], &mut [S]),
     preconditioner: &BlockJacobi<S>,
     b: &[S],
     x: &mut [S],
     options: &PcgOptions,
+    dot: impl Fn(&[S], &[S]) -> f64,
 ) -> PcgSummary {
     let n = b.len();
     x.fill(S::zero());

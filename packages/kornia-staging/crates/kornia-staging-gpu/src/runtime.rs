@@ -62,6 +62,33 @@ pub enum GpuError {
         /// The graphics backend cubecl-wgpu would have used.
         backend: &'static str,
     },
+    /// The back end's GBA round trip disagreed with the host.
+    #[error(
+        "the GBA's device PCG disagrees with the CPU lane on {wrong} of {count} \
+         solution entries of the startup round trip; run the global BA on the CPU"
+    )]
+    PcgRoundTrip {
+        /// Entries outside the tolerance.
+        wrong: usize,
+        /// Entries compared.
+        count: usize,
+    },
+    /// One block of the reduced camera system exceeds a storage binding.
+    #[error(
+        "a {bytes}-byte block of the GBA's reduced system exceeds the {limit}-byte binding limit"
+    )]
+    PcgBlockTooLarge {
+        /// Bytes the block needs.
+        bytes: usize,
+        /// The binding limit.
+        limit: usize,
+    },
+    /// A count of the GBA's reduced system does not fit the device's 32-bit indices.
+    #[error("the GBA's reduced system has a {what} the device cannot index")]
+    PcgLayout {
+        /// Which count.
+        what: &'static str,
+    },
     /// Constructing the CubeCL client panicked.
     #[error(
         "building the wgpu client panicked; the log carries the runtime's own \
