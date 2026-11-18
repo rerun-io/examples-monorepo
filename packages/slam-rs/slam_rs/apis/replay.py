@@ -76,6 +76,13 @@ class Config:
     """
     decode_device: DecodeRequest = "auto"
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
+    map: Literal["off", "offline", "realtime"] | None = None
+    """``--stage vio``: the back end's persistent keyframe map, drawn under ``/world/runs/slam_rs``; None keeps the profile's.
+
+    Off by default (opt in until loop closing gives the map a use). ``offline`` steps it inline (tracking waits, results
+    repeat); ``realtime`` runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the
+    same in all three.
+    """
 
 
 @dataclass(slots=True)
@@ -167,6 +174,8 @@ def main(config: Config) -> None:
         vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
         vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+    if config.map is not None:
+        vio_config = vio_config.with_backend(config.map)
     source: SegmentSource
     origin: str
     if config.rrd is not None:

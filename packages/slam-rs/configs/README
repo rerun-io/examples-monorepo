@@ -10,7 +10,10 @@ three keys in profiles/fast.json. profiles/live.json is the RoboCap live
 profile (robocap-live's default): the fast keys plus a deferred keyframe solve
 (port.keyframe_solve_deferred, D84) and 5 LM iterations. profiles/live30.json
 adds a 70 px detection grid (about 40 % less frontend work; outside the 10 s
-clip's ATE band, inside the full session's). tests/test_config_profiles.py checks overlays
+clip's ATE band, inside the full session's). Both live profiles set
+backend.mode to realtime: when backend.enabled turns the persistent map on, it
+runs on its own thread and tracking never waits for it; reference and fast keep
+the offline default (inline, repeatable). tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
 

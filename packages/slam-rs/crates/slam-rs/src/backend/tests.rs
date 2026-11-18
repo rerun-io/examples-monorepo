@@ -478,3 +478,95 @@ proptest! {
         }
     }
 }
+
+/// The snapshot (PR a2) copies the map in id order: keyframes with their
+/// window flag, world points from host pose x extrinsic x stereographic
+/// direction / inverse distance, and each covisibility edge once.
+#[test]
+fn a_map_snapshot_copies_keyframes_world_points_and_edges() {
+    let mut backend = backend(100, 10);
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![
+            landmark(10, 1, &[(1, 0), (2, 0)]),
+            landmark(11, 2, &[(2, 1), (1, 1)]),
+        ],
+    ));
+    backend.step(marg(&[1], 1.5, vec![]));
+    // Camera 0 sits 0.1 m along y of the IMU, camera 1 0.2 m along z.
+    let t_i_c: Vec<Se3<f64>> = vec![
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.1, 0.0)),
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.0, 0.2)),
+    ];
+
+    let snapshot: MapSnapshot = backend.snapshot(&t_i_c);
+
+    assert_eq!(snapshot.keyframe_t_ns, vec![1, 2]);
+    assert_eq!(snapshot.keyframe_poses, vec![pose(1.5), pose(2.0)]);
+    assert_eq!(snapshot.keyframe_active, vec![false, true]);
+    assert_eq!(snapshot.point_ids, vec![LandmarkId(10), LandmarkId(11)]);
+    assert_eq!(snapshot.point_hosts, vec![1, 2]);
+    // Direction (0, 0) is the optical axis; inverse distance 0.5 is 2 m.
+    // Landmark 10: host 1 (x = 1.5 after the marg stamp), camera 0.
+    // Landmark 11: host 2 (x = 2), camera 0 too (`landmark` hosts in camera 0).
+    assert_eq!(
+        snapshot.points_world,
+        vec![[1.5, 0.1, 2.0], [2.0, 0.1, 2.0]]
+    );
+    assert_eq!(snapshot.covisibility_edges, vec![(1, 2, 2)]);
+    assert_eq!(
+        snapshot.stats,
+        MapStats {
+            keyframes: 2,
+            landmarks: 2,
+            observations: 4
+        }
+    );
+    assert_eq!(snapshot.high_covisibility_weight, 2);
+    assert_eq!(snapshot.culls, CullCounts::default());
+}
+
+/// A landmark whose host camera has no extrinsic is left out, not invented.
+#[test]
+fn a_map_snapshot_skips_points_it_cannot_place() {
+    let mut backend = backend(100, 10);
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![landmark(10, 1, &[(1, 0), (2, 0)])],
+    ));
+    let snapshot: MapSnapshot = backend.snapshot(&[]);
+    assert!(snapshot.point_ids.is_empty());
+    assert!(snapshot.points_world.is_empty());
+    assert_eq!(snapshot.stats.landmarks, 1);
+}
+
+/// A landmark at infinity (`inv_dist` 0, which the window allows) has no
+/// finite position: left out of the points, still counted (RootSLAM's map
+/// export keeps finite positions only).
+#[test]
+fn a_map_snapshot_skips_points_at_infinity() {
+    let mut backend =
+        backend(100, 10).with_extrinsics(vec![Se3::new(So3::identity(), Vector3::zeros()); 2]);
+    let mut far: StampLandmark = landmark(11, 1, &[(1, 0), (2, 0)]);
+    far.inv_dist = 0.0;
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![landmark(10, 1, &[(1, 0), (2, 0)]), far],
+    ));
+    let snapshot: MapSnapshot = backend.view();
+    assert_eq!(snapshot.point_ids, vec![LandmarkId(10)]);
+    assert!(
+        snapshot
+            .points_world
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+    );
+    assert_eq!(snapshot.stats.landmarks, 2);
+}

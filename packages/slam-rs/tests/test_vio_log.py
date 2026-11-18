@@ -17,6 +17,7 @@ from it, because ``tests`` is not on the typechecker's search path and every
 module in this directory therefore stands alone.
 """
 
+import itertools
 import re
 from pathlib import Path
 from typing import NamedTuple
@@ -26,8 +27,19 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, Row, Rows, RowsReader, TextureFactory, gravity_batch
-from jaxtyping import Float64, Int64
+from fixture_types import (
+    FRAME_PERIOD_NS,
+    IMU_PERIOD_NS,
+    CameraFactory,
+    PipelineFactory,
+    RigFactory,
+    Row,
+    Rows,
+    RowsReader,
+    TextureFactory,
+    gravity_batch,
+)
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 
@@ -40,6 +52,10 @@ from slam_rs.vio_log import (
     IMAGE_PLANE_M,
     KEYFRAME_COLOR,
     LTKF_COLOR,
+    MAP_KEYFRAMES_ENTITY,
+    MAP_KEYFRAMES_EVERY_NS,
+    MAP_POINTS_ENTITY,
+    MAP_POINTS_EVERY_NS,
     MARGINALIZED_COLOR,
     POSE_COLOR,
     RUN_ENTITY,
@@ -65,6 +81,8 @@ class Logged(NamedTuple):
     """The logger that produced them, for its accumulated estimate."""
     recording: Path
     """The ``.rrd`` itself, for the rows :func:`conftest.read_rows` drops: the static ones."""
+    newest_keyframes: list[int]
+    """The window's newest keyframe at each tracked frameset (-1 with none), in order."""
 
 
 def straight_line(t_ns: Int64[ndarray, " n"]) -> Trajectory:
@@ -84,6 +102,7 @@ def drive(
     texture: TextureFactory,
     output: Path,
     read_rows: RowsReader,
+    map_every_ns: tuple[int, int] = (MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS),
 ) -> Logged:
     """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
 
@@ -94,6 +113,7 @@ def drive(
         texture: The scene each frameset is a shifted copy of.
         output: Where the ``.rrd`` is written.
         read_rows: Reads the recording back, from :mod:`conftest`.
+        map_every_ns: The logger's map-keyframes and map-points cadences.
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
@@ -101,8 +121,15 @@ def drive(
     rr.init("slam-rs-vio-log-test", recording_id=f"vio-log-{output.parent.name}")
     rr.save(output)
     frame_t_ns: Int64[ndarray, " n_frames"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
-    logger: VioLogger = VioLogger(cameras=cameras, ground_truth=references, frame_t_ns=frame_t_ns)
+    logger: VioLogger = VioLogger(
+        cameras=cameras,
+        ground_truth=references,
+        frame_t_ns=frame_t_ns,
+        map_keyframes_every_ns=map_every_ns[0],
+        map_points_every_ns=map_every_ns[1],
+    )
     tracked: list[int] = []
+    newest_keyframes: list[int] = []
     for step in range(FRAMESETS):
         t_ns: int = step * FRAME_PERIOD_NS
         samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
@@ -118,13 +145,21 @@ def drive(
         frame: _core.FlowFrame | None = vio.flow_frame()
         assert snapshot is not None
         assert frame is not None
-        logger.log(result, snapshot, frame, elapsed_ms=1.5)
+        # What `VioStage` does: read the map only when it is due (None with the back end off).
+        map_snapshot: _core.MapSnapshot | None = vio.map_snapshot() if logger.map_is_due(snapshot) else None
+        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_snapshot=map_snapshot)
         tracked.append(t_ns)
+        newest_keyframes.append(int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else -1)
+    # What `VioStage.flush` does: flush (which makes the map current), then draw the final map.
+    vio.flush()
+    final_map: _core.MapSnapshot | None = vio.map_snapshot()
+    if final_map is not None and tracked:
+        logger.log_final_map(final_map, tracked[-1])
     # What a replay ends with, and the other half of the segment form: the rows
     # above are one segment each, these are the whole paths, static.
     logger.log_complete_paths()
     rr.disconnect()
-    return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output)
+    return Logged(rows=read_rows(output), tracked=tracked, logger=logger, recording=output, newest_keyframes=newest_keyframes)
 
 
 @pytest.fixture
@@ -472,3 +507,75 @@ def test_every_logged_counter_sits_in_exactly_one_time_series_view(logged: Logge
         plotted += [str(entity) for entity in contents]
     assert sorted(plotted) == sorted(set(plotted)), "a counter is plotted in two views, so it is drawn against two axes"
     assert set(plotted) == counters, "every logged counter is plotted exactly once, and nothing else is"
+
+
+def test_the_map_is_drawn_under_the_run_as_keyframes_join_and_ends_on_the_final_map(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """With the back end on, the map's keyframes and points land under the run (DESIGN §8) at their cadences, then once more after the flush.
+
+    Keyframes with no cadence limit: one draw per keyframe join. Points at most once a second, longer than the run:
+    drawn at the first join and after the flush only. The last draws are the flushed map itself.
+    """
+    assert MAP_KEYFRAMES_ENTITY == "/world/runs/slam_rs/keyframes"
+    assert MAP_POINTS_ENTITY == "/world/runs/slam_rs/map/points"
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("offline"), backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    points_every_ns: int = 1_000_000_000
+    assert points_every_ns > FRAMESETS * FRAME_PERIOD_NS
+    logged: Logged = drive(
+        vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "map.rrd", read_rows, map_every_ns=(0, points_every_ns)
+    )
+    # Every frameset where the newest keyframe changed, then the final draw at the last frameset.
+    joins: list[int] = [
+        t for t, (previous, newest) in zip(logged.tracked, itertools.pairwise([-1, *logged.newest_keyframes]), strict=True) if newest not in (-1, previous)
+    ]
+    assert joins, "the synthetic run never added a keyframe"
+    keyframe_times: list[int] = [t for t, _ in logged.rows[MAP_KEYFRAMES_ENTITY]]
+    assert keyframe_times == [*joins, logged.tracked[-1]]
+    point_times: list[int] = [t for t, _ in logged.rows[MAP_POINTS_ENTITY]]
+    assert len(joins) >= 2, "the run must add keyframes after the first for the points' cadence to show"
+    assert point_times == [joins[0], logged.tracked[-1]]
+
+    final: _core.MapSnapshot | None = vio.map_snapshot()
+    assert final is not None
+    # The final draw shares the last frameset's time (which may have drawn too); one of the rows there is the flushed map.
+    last_keyframes: list[Float64[ndarray, "k 3"]] = [
+        np.asarray(values["Points3D:positions"], dtype=np.float64).reshape(-1, 3)
+        for t, values in logged.rows[MAP_KEYFRAMES_ENTITY]
+        if t == logged.tracked[-1]
+    ]
+    assert any(
+        drawn.shape == final.keyframe_poses[:, 0:3].shape and np.allclose(drawn, final.keyframe_poses[:, 0:3], rtol=1e-6, atol=1e-6)
+        for drawn in last_keyframes
+    )
+    last_points: list[Float32[ndarray, "p 3"]] = [
+        np.asarray(values["Points3D:positions"], dtype=np.float32).reshape(-1, 3) for t, values in logged.rows[MAP_POINTS_ENTITY] if t == logged.tracked[-1]
+    ]
+    assert any(np.array_equal(drawn, final.points_world) for drawn in last_points)
+    assert final.points_world.shape[0] >= 1
+    assert np.isfinite(final.points_world).all()
+
+
+def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """At the default cadences a 0.4 s run draws the map at its first keyframe and after the flush, never per keyframe."""
+    assert min(MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS) > FRAMESETS * FRAME_PERIOD_NS
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig().with_backend("realtime"), backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "rt.rrd", read_rows)
+    first_join: int = next(t for t, newest in zip(logged.tracked, logged.newest_keyframes, strict=True) if newest != -1)
+    assert [t for t, _ in logged.rows[MAP_KEYFRAMES_ENTITY]] == [first_join, logged.tracked[-1]]
+    assert [t for t, _ in logged.rows[MAP_POINTS_ENTITY]] == [first_join, logged.tracked[-1]]
+
+
+def test_no_map_is_drawn_with_the_back_end_off(
+    rig: RigFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    vio: _core.Vio = _core.Vio(rig(2), _core.VioConfig(), backend="cpu")
+    t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "off.rrd", read_rows)
+    assert len(logged.tracked) >= FRAMESETS - 2
+    assert MAP_KEYFRAMES_ENTITY not in logged.rows
+    assert MAP_POINTS_ENTITY not in logged.rows

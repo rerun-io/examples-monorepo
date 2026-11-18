@@ -3,6 +3,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -85,3 +86,33 @@ def test_an_unknown_overlay_key_is_rejected(tmp_path: Path, overlay: str, reject
     (profiles / "fast.json").write_text(overlay)
     with pytest.raises(ValueError, match=rejected):
         replace(settings, package_root=tmp_path).vio_config_text(dataset.name, profile="fast")
+
+
+@pytest.mark.parametrize("mode", ["off", "offline", "realtime"])
+def test_with_backend_sets_the_map_and_keeps_every_other_key(mode: Literal["off", "offline", "realtime"]) -> None:
+    from slam_rs import _core
+
+    base: _core.VioConfig = _core.VioConfig.from_json('{"value0": {"config.vio_max_iterations": 3, "backend.mode": "realtime"}}')
+    config: _core.VioConfig = base.with_backend(mode)
+    assert config.backend_enabled is (mode != "off")
+    assert config.backend_mode == ("realtime" if mode == "off" else mode)
+    assert base.backend_enabled is False
+    assert base.backend_mode == "realtime"
+    # Every other key unchanged: the same as writing the two keys into the base's JSON.
+    keys: str = f'"backend.enabled": {"false" if mode == "off" else "true"}, "backend.mode": "{"realtime" if mode == "off" else mode}"'
+    expected: _core.VioConfig = _core.VioConfig.from_json(f'{{"value0": {{"config.vio_max_iterations": 3, {keys}}}}}')
+    assert config.to_json() == expected.to_json()
+    with pytest.raises(ValueError, match="threaded"):
+        base.with_backend("threaded")  # pyrefly: ignore[bad-argument-type]
+
+
+def test_the_live_profiles_run_the_back_end_realtime_and_the_scoring_profiles_offline() -> None:
+    """DESIGN §8: gates and scoring step the map inline; live use gives it its own thread."""
+    from slam_rs import _core
+
+    settings: SlamConfig = load_slam_config()
+    dataset: DatasetProperties = settings.datasets[0]
+    for profile, mode in (("reference", "offline"), ("fast", "offline"), ("live", "realtime"), ("live30", "realtime")):
+        config: _core.VioConfig = _core.VioConfig.from_json(settings.vio_config_text(dataset.name, profile=profile))
+        assert config.backend_mode == mode, profile
+        assert config.backend_enabled is False, profile

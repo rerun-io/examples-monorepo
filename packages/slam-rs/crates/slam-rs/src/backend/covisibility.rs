@@ -244,24 +244,20 @@ impl CovisibilityGraph {
         true
     }
 
-    /// Every edge weight, each edge once, in `(smaller, larger)` id order.
-    pub fn edge_weights(&self) -> Vec<u32> {
-        self.nodes
-            .iter()
-            .flat_map(|(&a, node)| node.edges.range(a + 1..).map(|(_, &weight)| weight))
-            .collect()
+    /// Every edge once as `(smaller, larger, weight)`, in id order.
+    pub fn edges(&self) -> impl Iterator<Item = (FrameId, FrameId, u32)> + '_ {
+        self.nodes.iter().flat_map(|(&a, node)| {
+            node.edges
+                .range(a + 1..)
+                .map(move |(&b, &weight)| (a, b, weight))
+        })
     }
 
     /// Edges at or above `threshold`, each once as `(smaller, larger)`, in order.
     pub fn high_covisibility_edges(&self, threshold: u32) -> Vec<(FrameId, FrameId)> {
-        self.nodes
-            .iter()
-            .flat_map(|(&a, node)| {
-                node.edges
-                    .range(a + 1..)
-                    .filter(move |(_, weight)| **weight >= threshold)
-                    .map(move |(&b, _)| (a, b))
-            })
+        self.edges()
+            .filter(|&(_, _, weight)| weight >= threshold)
+            .map(|(a, b, _)| (a, b))
             .collect()
     }
 

@@ -1,8 +1,9 @@
 //! The persistent keyframe map on the moving-ceiling rig (DESIGN a1).
 //!
-//! The invariant: the raw VIO is bit-identical with the back end on or off,
-//! synchronous and deferred (D84) keyframes alike, because the window never
-//! reads the map. The map budget is small here, so the over-budget batch cull
+//! The invariant: the raw VIO is bit-identical with the back end off, Offline
+//! or Realtime (PR a2), synchronous and deferred (D84) keyframes alike, because
+//! the window never reads the map; and Realtime, with no loop query to drop
+//! yet, builds the map Offline builds. The map budget is small here, so the over-budget batch cull
 //! runs inside the comparison. And the map holds what the window handed it:
 //! more keyframes than the window, the window keyframes still active, solved
 //! poses, landmarks with two or more observations, and no image.
@@ -74,9 +75,10 @@ fn allocated_by<T>(body: impl FnOnce() -> T) -> (T, usize) {
 /// Map budget of the run: small, so the batch cull runs several times.
 const MAX_KEYFRAMES: usize = 6;
 
-fn pipeline_with_map(deferred: bool, enabled: bool) -> api::Vio<f32> {
+fn pipeline_with_map(deferred: bool, mode: Option<api::config::BackendMode>) -> api::Vio<f32> {
     let mut config = config(deferred);
-    config.backend_enabled = enabled;
+    config.backend_enabled = mode.is_some();
+    config.backend_mode = mode.unwrap_or_default();
     // More keyframes and a short keyframe budget, so
     // keyframes leave the window and the map outgrows it.
     config.vio_new_kf_keypoints_thresh = 0.9;
@@ -104,92 +106,122 @@ fn the_map_never_moves_a_vio_pose_while_it_culls() {
         .collect();
 
     for deferred in [false, true] {
-        let mut off = pipeline_with_map(deferred, false);
-        let mut on = pipeline_with_map(deferred, true);
-        assert!(off.map_backend().is_none());
+        let mut off = pipeline_with_map(deferred, None);
+        let mut on = pipeline_with_map(deferred, Some(api::config::BackendMode::Offline));
+        let mut realtime = pipeline_with_map(deferred, Some(api::config::BackendMode::Realtime));
+        assert!(off.map_snapshot().is_none());
         let without = run(&frames, &mut off);
         let with = run(&frames, &mut on);
+        let threaded = run(&frames, &mut realtime);
         assert_eq!(
             with.results, without.results,
             "the back end moved a pose (deferred = {deferred})"
         );
         assert_eq!(with.solves, without.solves);
+        // Realtime moves no pose either, and with no loop query to drop yet
+        // it builds the very map Offline builds.
+        assert_eq!(
+            threaded.results, without.results,
+            "the Realtime back end moved a pose (deferred = {deferred})"
+        );
+        assert_eq!(threaded.solves, without.solves);
 
         on.finish_deferred_keyframe().unwrap();
+        realtime.finish_deferred_keyframe().unwrap();
+        realtime.flush_backend();
+        assert_eq!(realtime.map_snapshot(), on.map_snapshot());
+        let counters = realtime.backend_counters().unwrap();
+        assert_eq!(counters, {
+            let mut offline = on.backend_counters().unwrap();
+            offline.max_pending_stamps = counters.max_pending_stamps;
+            offline.step = counters.step;
+            offline.query = counters.query;
+            offline.publish = counters.publish;
+            offline
+        });
+        // The flush posted the view Realtime readers get; Offline takes its views on demand.
+        assert!(counters.publish.steps >= 1, "{counters:?}");
+        assert_eq!(on.backend_counters().unwrap().publish.steps, 0);
+        assert!(counters.max_pending_stamps >= 1, "{counters:?}");
         assert_eq!(on.estimator().missing_stamp_poses(), 0);
-        let map_backend = on.map_backend().unwrap();
-        let map = map_backend.map();
-        let stats = map_backend.stats();
-        let culls = map_backend.cull_counts();
-        let window: Vec<i64> = on.estimator().kf_ids().collect();
-        eprintln!("deferred = {deferred}: {stats:?}, {culls:?}, window {window:?}");
-        // The batch cull ran inside the bit-identical comparison and held the
-        // budget.
-        assert!(culls.over_budget > 0, "{culls:?}");
-        assert!(stats.keyframes <= MAX_KEYFRAMES, "{stats:?}");
-        // The map is a superset of the window, and active = the window.
-        assert!(stats.keyframes > window.len(), "{stats:?}");
-        assert_eq!(
-            map_backend
-                .active_keyframes()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            window
-        );
-        // Window keyframes carry a solved pose: the one of the last keyframe
-        // solve, which later framesets may refine a little.
-        let snapshot = on.estimator().snapshot();
-        for id in &window {
-            let solved = snapshot
-                .states
-                .iter()
-                .chain(snapshot.poses.iter())
-                .find(|state| state.t_ns == *id)
-                .map(|state| state.t_w_i.cast::<f64>())
-                .unwrap();
-            let stored = map.keyframe(*id).unwrap().pose;
-            assert!((stored.translation - solved.translation).norm() < 1e-3);
-        }
-        assert!(stats.landmarks > 20, "{stats:?}");
-        assert!(stats.observations >= 2 * stats.landmarks);
-        assert!(
-            map.landmarks()
-                .values()
-                .all(|landmark| landmark.obs.len() >= 2)
-        );
-        // The graph spans the map with one tree.
-        assert_eq!(map_backend.graph().len(), stats.keyframes);
-        assert_eq!(
-            map_backend.graph().root(),
-            map.keyframes().keys().next().copied()
-        );
-        assert!(
-            map.keyframes()
-                .values()
-                .all(|keyframe| keyframe.keypoints.len() == 4)
-        );
-
-        // Retention (DESIGN §2.2), measured: a deep copy of the back end asks the
-        // allocator for every buffer the back end holds (about 37 KB per
-        // keyframe on this rig). One camera's image kept per keyframe, at
-        // pyramid level 0 or 1 (WIDTH x HEIGHT or WIDTH x HEIGHT / 4 bytes), would
-        // break the per-keyframe bound.
-        let (copy, held) = allocated_by(|| map_backend.clone());
-        drop(copy);
-        let per_keyframe: usize = held / stats.keyframes;
-        let counted: usize = map.retained_bytes();
-        eprintln!(
-            "deferred = {deferred}: back end holds {held} B ({per_keyframe} B per keyframe); \
-             retained_bytes counts {counted} B"
-        );
-        assert!(
-            per_keyframe < WIDTH * HEIGHT / 4,
-            "{per_keyframe} B per keyframe"
-        );
-        // `retained_bytes` (reported for long runs) is a lower bound within a
-        // known factor of what the allocator holds.
-        assert!(counted <= held, "{counted} > {held}");
-        assert!(held <= 4 * counted, "{held} > 4 x {counted}");
+        on.read_map(|map_backend| check_map(&on, map_backend, deferred))
+            .unwrap();
     }
+}
+
+/// What the map holds after the run, and what it costs.
+fn check_map(on: &api::Vio<f32>, map_backend: &api::backend::MapBackend, deferred: bool) {
+    let map = map_backend.map();
+    let stats = map_backend.stats();
+    let culls = map_backend.cull_counts();
+    let window: Vec<i64> = on.estimator().kf_ids().collect();
+    eprintln!("deferred = {deferred}: {stats:?}, {culls:?}, window {window:?}");
+    // The batch cull ran inside the bit-identical comparison and held the
+    // budget.
+    assert!(culls.over_budget > 0, "{culls:?}");
+    assert!(stats.keyframes <= MAX_KEYFRAMES, "{stats:?}");
+    // The map is a superset of the window, and active = the window.
+    assert!(stats.keyframes > window.len(), "{stats:?}");
+    assert_eq!(
+        map_backend
+            .active_keyframes()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        window
+    );
+    // Window keyframes carry a solved pose: the one of the last keyframe
+    // solve, which later framesets may refine a little.
+    let snapshot = on.estimator().snapshot();
+    for id in &window {
+        let solved = snapshot
+            .states
+            .iter()
+            .chain(snapshot.poses.iter())
+            .find(|state| state.t_ns == *id)
+            .map(|state| state.t_w_i.cast::<f64>())
+            .unwrap();
+        let stored = map.keyframe(*id).unwrap().pose;
+        assert!((stored.translation - solved.translation).norm() < 1e-3);
+    }
+    assert!(stats.landmarks > 20, "{stats:?}");
+    assert!(stats.observations >= 2 * stats.landmarks);
+    assert!(
+        map.landmarks()
+            .values()
+            .all(|landmark| landmark.obs.len() >= 2)
+    );
+    // The graph spans the map with one tree.
+    assert_eq!(map_backend.graph().len(), stats.keyframes);
+    assert_eq!(
+        map_backend.graph().root(),
+        map.keyframes().keys().next().copied()
+    );
+    assert!(
+        map.keyframes()
+            .values()
+            .all(|keyframe| keyframe.keypoints.len() == 4)
+    );
+
+    // Retention (DESIGN §2.2), measured: a deep copy of the back end asks the
+    // allocator for every buffer the back end holds (about 37 KB per
+    // keyframe on this rig). One camera's image kept per keyframe, at
+    // pyramid level 0 or 1 (WIDTH x HEIGHT or WIDTH x HEIGHT / 4 bytes), would
+    // break the per-keyframe bound.
+    let (copy, held) = allocated_by(|| map_backend.clone());
+    drop(copy);
+    let per_keyframe: usize = held / stats.keyframes;
+    let counted: usize = map.retained_bytes();
+    eprintln!(
+        "deferred = {deferred}: back end holds {held} B ({per_keyframe} B per keyframe); \
+             retained_bytes counts {counted} B"
+    );
+    assert!(
+        per_keyframe < WIDTH * HEIGHT / 4,
+        "{per_keyframe} B per keyframe"
+    );
+    // `retained_bytes` (reported for long runs) is a lower bound within a
+    // known factor of what the allocator holds.
+    assert!(counted <= held, "{counted} > {held}");
+    assert!(held <= 4 * counted, "{held} > 4 x {counted}");
 }

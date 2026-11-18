@@ -7,7 +7,7 @@ exact: no ``Any``, and every array carries its dtype.
 from collections.abc import Sequence
 from typing import ClassVar, Literal
 
-from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int32, Int64, UInt8, UInt32
 from numpy import ndarray
 from simplecv.imu_calibration import ImuCalibration
 
@@ -93,6 +93,131 @@ class VioResult:
     @property
     def accel_bias(self) -> Float64[ndarray, " 3"] | None:
         """Accelerometer bias estimate, m/s^2."""
+
+    def __repr__(self) -> str: ...
+
+class MapSnapshot:
+    """The persistent keyframe map and the back end's counters, copied out (PR a2).
+
+    Arrays are copies in id order. The keyframe poses are the window's solved (or, once evicted, final) poses: what
+    the back end starts from, before any loop closure moves them.
+    """
+
+    @property
+    def mode(self) -> Literal["offline", "realtime"]:
+        """Where the back end runs."""
+
+    @property
+    def keyframe_t_ns(self) -> Int64[ndarray, " n_keyframes"]:
+        """Map keyframe timestamps, oldest first."""
+
+    @property
+    def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """Raw keyframe poses ``T_w_i``, ``[tx, ty, tz, qx, qy, qz, qw]``."""
+
+    @property
+    def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
+        """Whether each keyframe is still in the window."""
+
+    @property
+    def point_ids(self) -> Int64[ndarray, " n_points"]:
+        """Map point (landmark) ids."""
+
+    @property
+    def point_hosts(self) -> Int64[ndarray, " n_points"]:
+        """Timestamp of the keyframe hosting each point."""
+
+    @property
+    def points_world(self) -> Float32[ndarray, "n_points 3"]:
+        """Map points in the world frame, metres."""
+
+    @property
+    def covisibility_edges(self) -> Int64[ndarray, "n_edges 2"]:
+        """Covisibility edges as keyframe timestamp pairs, smaller first."""
+
+    @property
+    def covisibility_weights(self) -> UInt32[ndarray, " n_edges"]:
+        """Shared landmarks per covisibility edge."""
+
+    @property
+    def keyframes(self) -> int:
+        """Map keyframes (RootSLAM's ``num_kfs``)."""
+
+    @property
+    def landmarks(self) -> int:
+        """Map landmarks (``num_lms``), placed in :attr:`points_world` or not."""
+
+    @property
+    def observations(self) -> int:
+        """(landmark, image) observations (``num_obs``)."""
+
+    @property
+    def culled_redundant(self) -> int:
+        """Keyframes culled as redundant when they left the window."""
+
+    @property
+    def culled_over_budget(self) -> int:
+        """Keyframes culled while the map was over its keyframe budget."""
+
+    @property
+    def high_covisibility_weight(self) -> int:
+        """Shared landmarks at which a covisibility edge is "high"."""
+
+    @property
+    def median_keyframe_landmarks(self) -> int:
+        """Median number of landmarks a map keyframe sees."""
+
+    @property
+    def retained_bytes(self) -> int:
+        """The map's payload in bytes (a lower bound on its heap)."""
+
+    @property
+    def stamps(self) -> int:
+        """Stamps the back end has taken."""
+
+    @property
+    def queries_run(self) -> int:
+        """Loop queries run."""
+
+    @property
+    def queries_dropped(self) -> int:
+        """Loop queries dropped because the back end was behind (Realtime only)."""
+
+    @property
+    def max_pending_stamps(self) -> int:
+        """Most stamps ever waiting for the back-end thread (0 Offline)."""
+
+    @property
+    def step_count(self) -> int:
+        """Steps timed."""
+
+    @property
+    def step_total_us(self) -> int:
+        """Wall time of all steps, microseconds."""
+
+    @property
+    def step_max_us(self) -> int:
+        """Wall time of the slowest step, microseconds."""
+
+    @property
+    def query_total_us(self) -> int:
+        """Wall time of all loop queries, microseconds."""
+
+    @property
+    def query_max_us(self) -> int:
+        """Wall time of the slowest loop query, microseconds."""
+
+    @property
+    def publish_count(self) -> int:
+        """Views the Realtime back-end thread posted for readers (0 in Offline)."""
+
+    @property
+    def publish_max_us(self) -> int:
+        """Wall time of the slowest posted view, microseconds."""
+
+    @property
+    def publish_total_us(self) -> int:
+        """Wall time of all posted views, microseconds."""
 
     def __repr__(self) -> str: ...
 
@@ -292,21 +417,13 @@ class Vio:
     def flow_frame(self) -> FlowFrame | None:
         """The keypoints the frontend tracked on the last accepted frameset, or None before the first."""
 
-    @property
-    def map_stats(self) -> dict[str, int] | None:
-        """The persistent map's counts; None when ``backend.enabled`` is off (the default).
+    def map_snapshot(self) -> MapSnapshot | None:
+        """A copy of the persistent keyframe map and the back end's counters at one moment; None when ``backend.enabled`` is off (the default).
 
-        Current up to the last solved keyframe. ``keyframes``, ``landmarks`` and ``observations`` are
-        RootSLAM's ``stats_map.json`` counts; ``culled_redundant`` and ``culled_over_budget`` count each culling
-        rule; ``covisibility_edges``, ``high_covisibility_weight`` (shared landmarks) and
-        ``high_covisibility_edges`` describe the graph; ``median_keyframe_landmarks`` is the median number of landmarks a map
-        keyframe sees; ``retained_bytes`` is the map's payload (a lower bound on its heap); ``step_count``,
-        ``step_total_us`` and ``step_max_us`` time the inline map steps.
+        Never waits for the back end. Offline it is current up to the last solved keyframe. In Realtime
+        (``backend.mode``) it is the newest copy the back-end thread posted, which can trail the stamps it still
+        holds; :meth:`flush` makes it current. The first Realtime call asks the thread to post copies from then on.
         """
-
-    @property
-    def map_covisibility_weights(self) -> list[int] | None:
-        """Every covisibility edge weight (shared landmarks), each edge once; None when the back end is off."""
 
     def __repr__(self) -> str: ...
 
@@ -325,6 +442,20 @@ class VioConfig:
 
     optical_flow_image_safe_radius: float
     """Circular mask that hides a fisheye's black corners, in pixels; 0 disables it."""
+
+    @property
+    def backend_enabled(self) -> bool:
+        """``backend.enabled``: whether :class:`Vio` builds the persistent keyframe map (off by default)."""
+
+    @property
+    def backend_mode(self) -> Literal["offline", "realtime"]:
+        """``backend.mode``: ``offline`` steps the map inline (scoring, gates), ``realtime`` on its own thread (live)."""
+
+    def with_backend(self, mode: Literal["off", "offline", "realtime"]) -> VioConfig:
+        """The same configuration with the back end off (``backend.mode`` kept) or on in ``mode``; every other key unchanged.
+
+        Raises ``ValueError`` on any other mode.
+        """
 
     def __repr__(self) -> str: ...
 
