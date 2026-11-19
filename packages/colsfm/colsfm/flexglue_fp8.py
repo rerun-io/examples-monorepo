@@ -12,15 +12,15 @@ prepares:
 
 The input projection, the positional encoding and the match head keep their precision. An input scale is the
 largest magnitude the calibration pairs produced, times `trtkit.onnx_qdq.LINEAR_INPUT_HEADROOM`. The scales live in
-the graph (`colsfm.matching.FlexGlueOptions.fp8_file`, one per set of thresholds), which `colsfm.apis.flexglue_fp8` writes once per machine and model;
-a run refuses to start without it (`colsfm.model_assets`), and matching refuses one calibrated from another prepared
-matcher (`check_fp8_graph`).
+the graph (`colsfm.matching.FlexGlueOptions.fp8_file`, one per set of thresholds), which `colsfm.apis.flexglue_fp8`
+writes once per machine and model; a run refuses to start without it (`colsfm.model_assets`), and matching refuses
+one calibrated from another prepared matcher (`check_fp8_graph`).
 
 Measured on the 5090 against the fp16/bf16 matcher (2026-11-19, calibration on the Galileo frames, every test segment
-outside it; timed back to back): the matching stage takes 22-23 % less time (MSD MGO05 28.1 -> 21.8 s, EuRoC V1_01
-19.2 -> 15.0 s, KITTI 06 44.2 -> 34.1 s, TartanAir V2 P004 cube faces 60.6 -> 46.4 s) and the whole run 8-12.5 %
-less, with ground-truth ATE equal or lower (MSD 12.10 -> 11.85 mm over two runs each, EuRoC 35.3 -> 35.2 mm, KITTI
-1,270 -> 1,254 mm, TartanAir 14.7 -> 13.2 mm).
+outside it): the matching stage takes 21-25 % less time (MSD MGO05 28.1 -> 21.7 s, EuRoC V1_01 19.2 -> 15.0 s, KITTI
+06 44.2 -> 34.8 s, TartanAir V2 P004 cube faces 60.8 -> 45.8 s) and the whole run 4-12 % less, with ground-truth ATE
+equal within its run-to-run spread (MSD 12.1 -> 11.3 mm, EuRoC 35.3 -> 35.3 mm, KITTI 1,270 -> 1,255 mm, TartanAir
+14.6 -> 14.6 mm; the cube's repeated runs of one arm differ by up to 2.2 mm).
 """
 
 from __future__ import annotations
