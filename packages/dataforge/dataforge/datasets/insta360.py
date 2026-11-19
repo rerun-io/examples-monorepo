@@ -20,9 +20,9 @@ Cube layer (``--cube``; off by default). ``cube`` holds the six-face cubemap of 
 ``cube6_front0``, ``cube6_front1``, ``cube6_left``, ``cube6_right``, ``cube6_up``, ``cube6_down``, each with its name on
 the node, a static face-from-IMU ``Transform3D`` (``ChildFromParent``), a plain ``Pinhole`` (RDF) and an RGB AV1
 ``VideoStream`` on the source frameset's stamp. The tables come from the base recording's two cameras through
-``MeiCamera.project``, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (default) the
-stage stays on the GPU: NVDEC decode, one remap per face, NVENC from device memory; ``cpu`` decodes with PyAV and remaps
-with OpenCV behind the same API.
+``MeiCamera.project``, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (the default when torch sees a GPU) the
+stage stays on the GPU (the dataforge-cuda env): NVDEC decode, one remap per face, NVENC from device memory; ``cpu``
+decodes with PyAV and remaps with OpenCV behind the same API, and encodes on NVENC when the host has it, else SVT-AV1.
 
 Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)``
 (pixel centres at integers) looks along longitude ``lon = (u + 0.5) pi / 960 - pi / 2``, ``lon = atan2(x, z)`` in
@@ -46,6 +46,8 @@ its own; with the profiles' zero lever arm the midpoint, and so the panorama cen
 from __future__ import annotations
 
 import contextlib
+import functools
+import io
 import itertools
 from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -261,11 +263,34 @@ def cube_indices(frames: int, stride: int, limit: int | None) -> Int64[ndarray, 
     return np.arange(0, frames, stride, dtype=np.int64)[:limit]
 
 
-def encode_face_videos(faces: Iterable[UInt8[Tensor, "f b 3 n n"]], videos: list[Path], *, size: int, gop: int, cq: int, device: torch.device) -> int:
-    """Encode batches of ``size`` x ``size`` RGB faces into one AV1 mp4 per face, one NVENC session each, fed from ``device``.
+SVTAV1_PRESET: int = 10
+"""SVT-AV1 preset of the software face encode (0 slowest .. 13 fastest)."""
 
-    Every encoder slot is reserved before the first encoder opens: a busy host waits for all of them at once instead of
-    opening some encoders and stalling the rest.
+
+@functools.cache
+def av1_nvenc_encodes() -> bool:
+    """Whether NVENC encodes AV1 on this host: one frame through torchcodec, in an encoder slot (a listed encoder is not
+    enough: a missing driver or an older GPU fails only when the session opens)."""
+    from torchcodec.encoders import Encoder
+
+    encoder = Encoder()
+    stream = encoder.add_video(height=256, width=256, frame_rate=1, device="cpu", codec="av1_nvenc")
+    try:
+        with nvenc_slot(), encoder.open_file_like(io.BytesIO(), format="mp4"):
+            stream.add_frames(torch.zeros((1, 3, 256, 256), dtype=torch.uint8))
+    except RuntimeError:
+        return False
+    return True
+
+
+def encode_face_videos(
+    faces: Iterable[UInt8[Tensor, "f b 3 n n"]], videos: list[Path], *, size: int, gop: int, cq: int, device: torch.device, codec: Literal["av1_nvenc", "libsvtav1"]
+) -> int:
+    """Encode batches of ``size`` x ``size`` RGB faces into one AV1 mp4 per face (yuv420p, a keyframe every ``gop``), fed from ``device``.
+
+    ``av1_nvenc``: one NVENC session per face (preset p4, vbr at ``cq``), every encoder slot reserved before the first
+    encoder opens, so a busy host waits for all of them at once instead of opening some and stalling the rest.
+    ``libsvtav1``: the software encoder at CRF ``cq``, for a host without NVENC.
 
     Returns:
         Frames each encoder took.
@@ -275,16 +300,15 @@ def encode_face_videos(faces: Iterable[UInt8[Tensor, "f b 3 n n"]], videos: list
     """
     from torchcodec.encoders import Encoder
 
+    settings: dict[str, object] = (
+        {"preset": NVENC_PRESET, "extra_options": nvenc_av1_options(gop=gop, cq=cq)} if codec == "av1_nvenc" else {"preset": SVTAV1_PRESET, "crf": cq, "extra_options": {"g": gop}}
+    )
     fed: int = 0
-    with nvenc_slot(len(videos)), contextlib.ExitStack() as opened:
+    with nvenc_slot(len(videos)) if codec == "av1_nvenc" else contextlib.nullcontext(), contextlib.ExitStack() as opened:
         streams = []
         for video in videos:
             encoder = Encoder()
-            streams.append(
-                encoder.add_video(
-                    height=size, width=size, frame_rate=CUBE_FPS, device=device, codec="av1_nvenc", preset=NVENC_PRESET, extra_options=nvenc_av1_options(gop=gop, cq=cq)
-                )
-            )
+            streams.append(encoder.add_video(height=size, width=size, frame_rate=CUBE_FPS, device=device, codec=codec, **settings))  # pyrefly: ignore[bad-argument-type]
             opened.enter_context(encoder.open_file(video))
         for batch in faces:
             for stream, face in zip(streams, batch, strict=True):
@@ -333,8 +357,9 @@ class Insta360Config(FrameLimitedConfig):
     """NVENC constant-quality target of the faces: they feed SfM and splat training, so near visually lossless."""
     cube_gop: int = 10
     """Face keyframe interval in sampled framesets."""
-    cube_device: Literal["cuda", "cpu"] = "cuda"
-    """Where the faces are decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory) or ``cpu``."""
+    cube_device: Literal["cuda", "cpu"] | None = None
+    """Where the faces are decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory; the dataforge-cuda
+    env) or ``cpu`` (PyAV, OpenCV remap; NVENC when the host has it, else software AV1). None: ``cuda`` when torch sees a GPU."""
 
 
 class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
@@ -452,8 +477,8 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
     def write_cube(self, recording: rr.RecordingStream, rig: insta360_io.InsvRig, base: Path) -> None:
         """Join every sampled frameset's two lens images into the six cube faces and log each face as AV1 on the frameset's stamp.
 
-        On ``cube_device``: both lenses decoded batch by batch, each face one remap of the stacked pair, six NVENC sessions fed
-        from the device (``cuda``: no host copy of a picture).
+        On ``cube_device``: both lenses decoded batch by batch, each face one remap of the stacked pair, six encoders fed from
+        the device (``cuda``: no host copy of a picture).
         """
         lenses: LensCameras = cameras_from_recording(base)
         size: int = self.config.cube_face_size or cube.default_face_size(lenses.size[0])
@@ -486,7 +511,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 static=True,
                 recording=recording,
             )
-        device: torch.device = torch.device(self.config.cube_device)
+        device: torch.device = torch.device(self.config.cube_device or ("cuda" if torch.cuda.is_available() else "cpu"))
         join = cube.CubeJoin(tables, lenses.size, device)
         with work_dir("insta360-cube-") as work:
             videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
@@ -494,7 +519,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 batch: int = max(1, CUBE_BATCH_PIXELS // (lenses.size[0] * lenses.size[1]))
                 pictures = lens_pictures(rig, indices, device, batch=batch, threads=self.config.decode_threads)
                 fed: int = encode_face_videos(
-                    (join.faces(lens0, lens1) for lens0, lens1 in pictures), videos, size=size, gop=self.config.cube_gop, cq=self.config.cube_cq, device=device
+                    (join.faces(lens0, lens1) for lens0, lens1 in pictures),
+                    videos,
+                    size=size,
+                    gop=self.config.cube_gop,
+                    cq=self.config.cube_cq,
+                    device=device,
+                    codec="av1_nvenc" if device.type == "cuda" or av1_nvenc_encodes() else "libsvtav1",
                 )
             if fed != indices.size:
                 raise ValueError(f"the face encoders took {fed} frames for {indices.size} framesets")

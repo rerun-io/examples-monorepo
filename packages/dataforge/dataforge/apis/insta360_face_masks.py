@@ -160,6 +160,7 @@ def main(config: Config) -> None:
             check_mask_covers_lens(mask.shape, scales.get(lens, (1.0, 1.0)), lens_shape)
             pending.setdefault(stamp, {})[lens] = mask
             if len(pending[stamp]) < 2:
+                pending[stamp][lens] = mask.copy()  # the view would hold its whole Arrow chunk until the pair completes
                 continue
             pair: dict[int, UInt8[ndarray, "h w"]] = pending.pop(stamp)
             done.add(stamp)
