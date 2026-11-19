@@ -1,6 +1,8 @@
 """SAM 3's dtype switch: the model runs under the asked autocast dtype (none for float32), and post-processing sees
 FP32 (a stand-in model and processor on the CPU; no weights)."""
 
+from typing import Any, Literal
+
 import pytest
 import torch
 from torch import Tensor
@@ -44,20 +46,22 @@ class FakeProcessor:
 
 
 @pytest.mark.parametrize(("dtype", "autocast"), [("float32", None), ("bfloat16", torch.bfloat16), ("float16", torch.float16)])
-def test_sam3_runs_under_the_asked_autocast_dtype(dtype: str, autocast: torch.dtype | None) -> None:
+def test_sam3_runs_under_the_asked_autocast_dtype(dtype: Literal["float32", "bfloat16", "float16"], autocast: torch.dtype | None) -> None:
     from posekit.models.base import SegmentationPrompts
     from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 
-    segmenter: Sam3Segmenter = object.__new__(Sam3Segmenter)
+    model: FakeModel = FakeModel()
+    processor: FakeProcessor = FakeProcessor()
+    segmenter: Any = object.__new__(Sam3Segmenter)  # the stand-ins are not Sam3Model / Sam3Processor
     segmenter.config = Sam3SegmenterConfig(device="cpu", dtype=dtype)
-    segmenter.model = FakeModel()
-    segmenter.processor = FakeProcessor()
+    segmenter.model = model
+    segmenter.processor = processor
     segmenter.input_hw = (16, 16)
 
     segmenter(torch.zeros(1, 8, 8, 3, dtype=torch.uint8), SegmentationPrompts(frame_indices=torch.zeros(0, dtype=torch.int64), text="person"))
 
-    assert segmenter.model.autocast == [autocast]
-    assert segmenter.processor.dtypes == [torch.float32]
+    assert model.autocast == [autocast]
+    assert processor.dtypes == [torch.float32]
 
 
 def test_people_masks_ask_sam3_for_float16_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
