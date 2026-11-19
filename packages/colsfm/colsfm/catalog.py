@@ -107,6 +107,10 @@ class CatalogInputConfig:
     """Largest |dt| between the reference frame and another camera's frame of the same rig frame."""
     output_root: Path = field(default_factory=lambda: DATA_DIR / "inputs")
     """Where the input snapshots go, one directory per complete source and sampling specification."""
+    mask_entity: str | None = None
+    """Keypoint mask per camera: the name of a `SegmentationImage` child of each camera's `pinhole` entity (e.g.
+    `people_mask` reads `<camera>/pinhole/people_mask`), on the video's stamps, nonzero = no keypoint there. Every
+    selected camera must carry it at every keyframe stamp. None = no mask."""
 
     def spec(self) -> str:
         """Everything that decides the snapshot's contents, as canonical JSON (`output_root` only says where it goes).
@@ -115,6 +119,8 @@ class CatalogInputConfig:
             Sorted-key JSON of every field but `output_root`.
         """
         fields: dict[str, object] = {f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.name != "output_root"}
+        if self.mask_entity is None:
+            del fields["mask_entity"]  # An unset mask is not part of the spec, so unmasked snapshot names stay stable.
         return json.dumps(fields, sort_keys=True, default=str)
 
     @property
@@ -505,6 +511,15 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
     started: float = time.perf_counter()
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.dataset)
     cameras: tuple[CatalogCameraModel, ...] = read_catalog_cameras(dataset, config.segment, config.cameras)
+    if config.mask_entity is not None:
+        mask_entities: set[str] = {
+            component.entity_path
+            for component in catalog_components(dataset.schema())
+            if component.archetype == "SegmentationImage" and component.field == "buffer"
+        }
+        unmasked: list[str] = [camera.name for camera in cameras if f"{camera.entity}/pinhole/{config.mask_entity}" not in mask_entities]
+        if unmasked:
+            raise ValueError(f"{config.segment}: cameras {unmasked} carry no SegmentationImage at <camera>/pinhole/{config.mask_entity}")
     trajectory: CatalogTrajectory = read_catalog_trajectory(dataset, config.segment, config.trajectory_entity, config.timeline)
     videos: tuple[CatalogVideo, ...] = read_catalog_videos(
         dataset, config.segment, [f"{camera.entity}/pinhole/video" for camera in cameras], config.timeline
@@ -547,6 +562,7 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
                 entity=f"{camera.entity.lstrip('/')}/pinhole/video",
                 names=[keyframe_image_name(camera.name, int(video.t_ns[index])) for index in chosen.values()],
                 t_ns=[int(video.t_ns[index]) for index in chosen.values()],
+                mask_entity=None if config.mask_entity is None else f"{camera.entity.lstrip('/')}/pinhole/{config.mask_entity}",
             )
         )
         print(f"[colsfm.catalog] {camera.name}: {len(chosen)} keyframes")

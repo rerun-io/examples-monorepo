@@ -7,9 +7,10 @@ mod x4air {
     use kornia_staging_3d::camera::formats::insta360::WindowCrop;
     include!("../../tests/common/x4air_lens.rs");
     pub(crate) const V3_STRING: &str = V3;
+    pub(crate) const V6_STRING: &str = V6;
     pub(crate) const WINDOW_CROP: WindowCrop = CROP;
 }
-pub(super) use x4air::{V3_STRING as V3, WINDOW_CROP as CROP};
+pub(super) use x4air::{V3_STRING as V3, V6_STRING as V6, WINDOW_CROP as CROP};
 
 pub(super) fn key(field: u64, wire: u64, out: &mut Vec<u8>) {
     varint((field << 3) | wire, out);
@@ -35,6 +36,11 @@ pub(super) fn varint_field(field: u64, v: u64, out: &mut Vec<u8>) {
 }
 
 pub(super) fn metadata(raw: bool) -> Vec<u8> {
+    metadata_with_lens(raw, 54, V3)
+}
+
+/// [`metadata`] with one lens string in `field` (54 V3, 111 V6) instead of the V3 string.
+pub(super) fn metadata_with_lens(raw: bool, field: u64, lens: &str) -> Vec<u8> {
     let mut m = Vec::new();
     bytes_field(2, b"Insta360 X4 Air", &mut m);
     bytes_field(3, b"v1.2.7_build1", &mut m);
@@ -53,7 +59,7 @@ pub(super) fn metadata(raw: bool) -> Vec<u8> {
     bytes_field(27, &crop, &mut m);
     key(28, 1, &mut m);
     m.extend_from_slice(&1.6f64.to_le_bytes());
-    bytes_field(54, V3.as_bytes(), &mut m);
+    bytes_field(field, lens.as_bytes(), &mut m);
     varint_field(62, u64::from(raw), &mut m);
     let mut ranges = Vec::new();
     varint_field(1, 32, &mut ranges);
@@ -80,6 +86,23 @@ pub(super) fn trailer_file(records: &[(u8, Vec<u8>)]) -> Vec<u8> {
     body.extend_from_slice(&index);
     body.extend_from_slice(&[0, 0]);
     body.extend_from_slice(&310u32.to_le_bytes());
+    close_trailer(body)
+}
+
+/// The same records as [`trailer_file`] in the layout of the bodies before the X4 (ONE X2, ONE R/RS, X3): no index,
+/// each record followed by its descriptor `[format][id][u32 size]`, the last one right before the footer.
+pub(super) fn chained_trailer_file(records: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut body = vec![0u8; 64];
+    for (id, record) in records {
+        body.extend_from_slice(record);
+        body.extend_from_slice(&[u8::from(*id == 1), *id]);
+        body.extend_from_slice(&(record.len() as u32).to_le_bytes());
+    }
+    close_trailer(body)
+}
+
+/// `1000` junk bytes, then `body` closed by the trailer footer (size, version 3, magic).
+fn close_trailer(mut body: Vec<u8>) -> Vec<u8> {
     let size = (body.len() + 72) as u32;
     body.extend_from_slice(&[0u8; 32]);
     body.extend_from_slice(&size.to_le_bytes());

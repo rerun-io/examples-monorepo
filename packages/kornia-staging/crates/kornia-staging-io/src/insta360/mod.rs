@@ -9,8 +9,8 @@
 //!
 //! The factory lens strings the metadata carries are a camera format:
 //! `kornia_staging_3d::camera::formats::insta360` parses them.
-use crate::container::hevc::HevcError;
 use crate::container::mp4::Mp4Error;
+use crate::container::nal::NalError;
 use kornia_staging_3d::camera::formats::insta360::LensStringError;
 
 mod clip;
@@ -34,7 +34,7 @@ pub enum Insta360Error {
     Mp4(#[from] Mp4Error),
     /// A video sample is malformed.
     #[error(transparent)]
-    Hevc(#[from] HevcError),
+    Nal(#[from] NalError),
     /// The trailer or a record is malformed or missing.
     #[error("malformed insv trailer: {0}")]
     Malformed(String),

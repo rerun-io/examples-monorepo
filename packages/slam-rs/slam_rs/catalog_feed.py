@@ -1028,6 +1028,27 @@ def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str
     return tuple(by_name[key] for key in wanted)
 
 
+def check_imu_is_rig_frame(rig_statics: pa.Table, segment_id: str) -> None:
+    """Refuse a rig whose frame is not its IMU's: the feed runs VIO in the IMU frame and never on an unposed IMU.
+
+    A rig that names no reference sensor has an IMU without a pose in the rig (the converter states why, e.g. the
+    ``insta360`` property's ``profile_note``). ``insv_calibrate`` opens recordings through this feed too, so it checks
+    a recording converted with a device profile; it does not measure a first one.
+
+    Raises:
+        ValueError: If the rig names no reference, its reference cell is malformed, or it names one other than ``imu_00``.
+    """
+    column: str = f"{RIG_ENTITY}:reference"
+    if column not in rig_statics.column_names or (rig_statics.num_rows > 0 and not rig_statics[column][0].is_valid):
+        raise ValueError(f"{segment_id}: the rig names no reference sensor, so its IMU has no pose in the rig; the feed runs VIO in the IMU frame")
+    try:
+        reference: str = _static_string(rig_statics, column)
+    except ValueError as error:
+        raise ValueError(f"{segment_id}: {error}") from error
+    if reference != "imu_00":
+        raise ValueError(f"{segment_id}: rig reference is {reference!r}, but the feed assumes the IMU is the rig frame")
+
+
 def _build_feed(
     sensor_dataset: DatasetEntry,
     gt_dataset: DatasetEntry | None,
@@ -1042,9 +1063,7 @@ def _build_feed(
     if frame_stride < 1:
         raise ValueError(f"frame_stride must be at least 1; got {frame_stride}")
     rig_statics: pa.Table = sensor_dataset.filter_segments([segment_id]).filter_contents([RIG_ENTITY, IMU_ENTITY]).reader(index=None).to_arrow_table()
-    reference: str = _static_string(rig_statics, f"{RIG_ENTITY}:reference")
-    if reference != "imu_00":
-        raise ValueError(f"{segment_id}: rig reference is {reference!r}, but the feed assumes the IMU is the rig frame")
+    check_imu_is_rig_frame(rig_statics, segment_id)
     # Validate calibration before fetching or decoding the large camera payloads.
     calibration: ImuCalibration = ImuCalibration.from_catalog(rig_statics, IMU_ENTITY)
     applied_shift_ns: int = _static_int(rig_statics, f"{IMU_ENTITY}:applied_time_shift_ns")

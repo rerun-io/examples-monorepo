@@ -1,5 +1,5 @@
-# rattler-build recipe for insta360-io: the Insta360 .insv clip reader and the CPU dual-fisheye stitch of
-# kornia-staging, as the pyo3 module insta360_io. maturin builds it from the crates/insta360-io-py workspace member
+# rattler-build recipe for insta360-io: the Insta360 .insv reader (Rust core + the InsvReader chunk layer in Python)
+# and the CPU dual-fisheye stitch of kornia-staging, as the package insta360_io. maturin builds it from the crates/insta360-io-py workspace member
 # (pyproject.toml `manifest-path`). Same layout as packages/depth-png, plus kornia-staging as a second source: the
 # binding's path dependencies point at ../kornia-staging/crates.
 package:
@@ -43,9 +43,13 @@ requirements:
   run:
     - python 3.12.*
     - numpy
+    - jaxtyping
+    # InsvReader yields Rerun chunks; the pin moves with every other rerun-sdk pin (AGENTS.md, "Testing Rerun builds").
+    - rerun-sdk ==0.42.0
 
 tests:
   - python:
       imports:
         - insta360_io
+        - insta360_io._insta360_io
       pip_check: false

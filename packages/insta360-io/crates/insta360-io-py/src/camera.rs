@@ -1,5 +1,7 @@
 //! A Mei camera as a calibration states it: a model name, `fx fy cx cy` and the coefficients in that model's order.
-use kornia_staging_3d::camera::{Mei, MeiDistortion};
+use kornia_staging_3d::camera::{CameraModel, Mei, MeiDistortion};
+use numpy::ndarray::{Array1, Array2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -106,6 +108,38 @@ impl MeiCamera {
             MeiDistortion::V3 { k, p } => head.into_iter().chain(k).chain(p).collect(),
             MeiDistortion::V6 { d } => head.into_iter().chain(d).collect(),
         }
+    }
+
+    /// Project `float64[n, 3]` points in the camera frame (any norm) to `float64[n, 2]` pixels and a `bool[n]`
+    /// validity: false where the forward model rejects the point (outside the half field, zero or non-finite),
+    /// and the pixel is NaN there. Pixel centres at integers.
+    fn project<'py>(
+        &self,
+        py: Python<'py>,
+        points: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<bool>>)> {
+        let shape = points.shape();
+        if shape.len() != 2 || shape[1] != 3 {
+            return Err(PyValueError::new_err(format!(
+                "points must be float64[n, 3]; got shape {shape:?}"
+            )));
+        }
+        let view = points.as_array();
+        let n = shape[0];
+        let camera = self.camera;
+        let (pixels, valid) = py.detach(|| {
+            let mut pixels = Array2::<f64>::from_elem((n, 2), f64::NAN);
+            let mut valid = Array1::<bool>::from_elem(n, false);
+            for (i, row) in view.outer_iter().enumerate() {
+                if let Ok([u, v]) = camera.project([row[0], row[1], row[2]]) {
+                    pixels[[i, 0]] = u;
+                    pixels[[i, 1]] = v;
+                    valid[i] = true;
+                }
+            }
+            (pixels, valid)
+        });
+        Ok((pixels.into_pyarray(py), valid.into_pyarray(py)))
     }
 }
 

@@ -379,7 +379,7 @@ ai-demos `0.42.0.post1` wheel (the pin's comment says why; rebuild inputs in ai-
 
 To bump, in one change:
 1. every conda `rerun-sdk` pin in `pixi.toml` (`grep -n 'rerun-sdk = ' pixi.toml`) and the
-   `rerun-sdk` run dependency in `packages/slam-rs/recipe.yaml`;
+   `rerun-sdk` run dependencies in `packages/slam-rs/recipe.yaml` and `packages/insta360-io/recipe.yaml`;
 2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately
    (while it is the ai-demos wheel, rebuild that with the fix for the new version, or return to PyPI if upstream has it);
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
