@@ -10,6 +10,7 @@ input format at the boundary, an export, never a source of truth.
 import shutil
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -220,21 +221,18 @@ def main(config: SpirulaDatasetConfig) -> None:
                 write.result()
     if n_images != len(keys):
         raise ValueError(f"wrote {n_images} images but colsfm registered {len(keys)}: some registered stamps are not in the faces layer")
-    n_masks: int = 0
-    people_by_face: dict[str, dict[int, UInt8[ndarray, "h w"]]] = {}
-    if config.masks_rrd is not None:
-        with open_rrd(config.masks_rrd, "masks") as masks_layer:
-            for face in faces:
-                people_by_face[face.name] = read_people_masks(masks_layer, face, config.timeline, wanted[face.name])
-                missing: set[int] = wanted[face.name] - set(people_by_face[face.name])
+    with open_rrd(config.masks_rrd, "masks") if config.masks_rrd is not None else nullcontext() as masks_layer:
+        for face in faces:
+            people_by_t: dict[int, UInt8[ndarray, "h w"]] | None = None
+            if masks_layer is not None:
+                people_by_t = read_people_masks(masks_layer, face, config.timeline, wanted[face.name])
+                missing: set[int] = wanted[face.name] - set(people_by_t)
                 if missing:
                     raise ValueError(f"{face.name}: no people_mask for {len(missing)} registered frames, e.g. {sorted(missing)[:3]}")
-    for face in faces:
-        (config.dataset_dir / "masks" / face.name).mkdir(parents=True, exist_ok=True)
-        for t_ns in sorted(wanted[face.name]):
-            people: UInt8[ndarray, "h w"] | None = people_by_face[face.name][t_ns] if people_by_face else None
-            _write_mask(config.dataset_dir / "masks" / face.name / f"{t_ns}.png", keep_mask(valid_by_face[face.name], people))
-            n_masks += 1
+            (config.dataset_dir / "masks" / face.name).mkdir(parents=True, exist_ok=True)
+            for t_ns in sorted(wanted[face.name]):
+                people: UInt8[ndarray, "h w"] | None = people_by_t[t_ns] if people_by_t is not None else None
+                _write_mask(config.dataset_dir / "masks" / face.name / f"{t_ns}.png", keep_mask(valid_by_face[face.name], people))
     (sparse_dir / "images.txt").write_text(images_text)
     used_camera_ids: set[int] = set(camera_ids.values())
     camera_lines: list[str] = ["# Camera list with one line of data per camera:", "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]"]
@@ -245,5 +243,5 @@ def main(config: SpirulaDatasetConfig) -> None:
     for path in sparse_dir.iterdir():
         path.chmod(0o644)
     print(
-        f"exported {n_images} images, {n_masks} masks ({'people + valid' if people_by_face else 'valid_mask only'}), cx/cy +{shift_px} px, {len(used_camera_ids)} cameras over {len(faces)} faces -> {config.dataset_dir}"
+        f"exported {n_images} images, {n_images} masks ({'people + valid' if config.masks_rrd is not None else 'valid_mask only'}), cx/cy +{shift_px} px, {len(used_camera_ids)} cameras over {len(faces)} faces -> {config.dataset_dir}"
     )
