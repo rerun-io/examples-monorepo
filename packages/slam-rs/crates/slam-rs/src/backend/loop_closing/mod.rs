@@ -79,11 +79,32 @@ type CameraMatch = (CamId, KeypointId, u64);
 
 struct LoopQuery<'a> {
     current: FrameId,
+    current_ids: BTreeSet<u64>,
     keypoints: &'a crate::estimator::Keypoints,
     images: &'a KeyframeImages,
     // The map does not change during verification. Candidates can share
     // island members, so compute each member's matches once per query.
     island_matches: BTreeMap<FrameId, Vec<CameraMatch>>,
+}
+
+impl<'a> LoopQuery<'a> {
+    fn new(
+        current: FrameId,
+        ours: &[DescriptorSet],
+        keypoints: &'a crate::estimator::Keypoints,
+        images: &'a KeyframeImages,
+    ) -> Self {
+        Self {
+            current,
+            current_ids: ours
+                .iter()
+                .flat_map(|cam| cam.ids.iter().copied())
+                .collect(),
+            keypoints,
+            images,
+            island_matches: BTreeMap::new(),
+        }
+    }
 }
 
 /// One correspondence between the current keyframe and a map landmark.
@@ -336,6 +357,18 @@ impl LoopClosing {
         }
     }
 
+    /// `validateCandidate`'s covisibility check and keyframe matching: the
+    /// initial match count, if the candidate passes both.
+    fn initial_matches(&self, query: &LoopQuery<'_>, candidate: FrameId) -> Option<usize> {
+        let ours = self.descriptors.get(&query.current)?;
+        let theirs = self.descriptors.get(&candidate)?;
+        if share_a_track(&query.current_ids, theirs) {
+            return None;
+        }
+        let initial = consolidate(match_cameras(ours, theirs, self.matching())).len();
+        (initial >= self.config.min_initial_matches).then_some(initial)
+    }
+
     fn matching(&self) -> MatchConfig {
         MatchConfig {
             max_distance: self.config.max_hamming_distance,
@@ -371,7 +404,7 @@ impl LoopClosing {
             })
             .collect();
 
-        // Description only reads the images. Insert its bags in camera order.
+        // Bags enter the database in camera order, so insert them serially.
         let mut bags: Vec<(CamId, BoW)> = Vec::new();
         for (cam, descriptors) in described.iter().take(images.0.len()).enumerate() {
             let words: Vec<[u64; 4]> = descriptors.values.iter().map(|d| d.0).collect();
@@ -583,31 +616,18 @@ impl MapBackend {
         }
         loops.counts.with_candidates += 1;
 
-        let ours = loops.descriptors.get(&keyframe)?;
-        let current_ids: BTreeSet<u64> = ours
-            .iter()
-            .flat_map(|cam| cam.ids.iter().copied())
-            .collect();
-        let matching = loops.matching();
+        let mut query = LoopQuery::new(
+            keyframe,
+            loops.descriptors.get(&keyframe)?,
+            &keypoints,
+            &images,
+        );
         // The first matching stage reads descriptors only. Run it across
         // candidates, then keep the original score order for geometry and PnP.
         let initial_matches: Vec<_> = candidates
             .par_iter()
-            .map(|candidate| {
-                let theirs = loops.descriptors.get(candidate)?;
-                if share_a_track(&current_ids, theirs) {
-                    return None;
-                }
-                let initial = consolidate(match_cameras(ours, theirs, matching)).len();
-                (initial >= loops.config.min_initial_matches).then_some(initial)
-            })
+            .map(|&candidate| loops.initial_matches(&query, candidate))
             .collect();
-        let mut query = LoopQuery {
-            current: keyframe,
-            keypoints: &keypoints,
-            images: &images,
-            island_matches: BTreeMap::new(),
-        };
         for (candidate, initial) in candidates.into_iter().zip(initial_matches) {
             self.loops.as_mut()?.counts.candidates += 1;
             if let Some(initial) = initial

@@ -1129,19 +1129,9 @@ fn an_island_landmark_its_keyframe_never_described_matches_nothing() {
     let images = loops.images.remove(&C).unwrap();
     loops.index(C, &keypoints, &images);
     let validate = |backend: &mut MapBackend| {
-        let mut query = LoopQuery {
-            current: C,
-            keypoints: &keypoints,
-            images: &images,
-            island_matches: BTreeMap::new(),
-        };
         let loops = backend.loops.as_ref().unwrap();
-        let initial = consolidate(match_cameras(
-            &loops.descriptors[&C],
-            &loops.descriptors[&A],
-            loops.matching(),
-        ))
-        .len();
+        let mut query = LoopQuery::new(C, &loops.descriptors[&C], &keypoints, &images);
+        let initial = loops.initial_matches(&query, A).unwrap();
         backend.validate(&mut query, A, initial).unwrap()
     };
     let before = validate(&mut s.backend);
