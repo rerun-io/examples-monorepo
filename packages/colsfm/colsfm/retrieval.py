@@ -678,7 +678,8 @@ def _vocab_similarity(
     per node, rayon-parallel and the same tree for a given seed at any thread count; every
     descriptor descends to its word, each image becomes an L1-normalised TF-IDF bag of words
     (`ln(n_images / df)`), and every pair gets its DBoW2 L1 score from one pass over the
-    inverted lists per row. The image arrays are borrowed by Rust, not copied.
+    inverted lists per row. The image arrays are borrowed by Rust, not copied: they must be
+    C-contiguous float32, as the database reader returns them.
 
     Args:
         descriptors_by_image: Descriptors per image id.
@@ -692,8 +693,10 @@ def _vocab_similarity(
     sample: Float32[ndarray, "n_sample descriptor_dim"] = _training_sample(descriptors_by_image, image_ids, config.training_descriptors, seed)
     vocabulary: Vocabulary = Vocabulary(sample, branching=config.branching, depth=config.depth, iterations=config.kmeans_iterations, seed=seed)
     del sample
-    images: list[Descriptors] = [np.ascontiguousarray(descriptors_by_image[image_id], dtype=np.float32) for image_id in image_ids]
-    return vocabulary.similarity(images), vocabulary.n_words
+    # Borrowed by Rust, not copied: `read_descriptors_from_database` yields C-contiguous float32 arrays, and the
+    # binding refuses anything else (ValueError for another layout, TypeError for another dtype) rather than
+    # copying a whole corpus.
+    return vocabulary.similarity([descriptors_by_image[image_id] for image_id in image_ids]), vocabulary.n_words
 
 
 # ======================================================================================

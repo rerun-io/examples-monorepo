@@ -468,6 +468,20 @@ def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
                 assert l1_score(bows[first], bows[second]) == pytest.approx(float(scores[first, second]), abs=1e-5)
 
 
+def test_the_vocab_backend_borrows_the_descriptors_and_refuses_a_layout_it_cannot() -> None:
+    """The vocab backend hands the per-image arrays to Rust without a copy, so a non-C-contiguous one is refused.
+
+    The database reader yields C-contiguous float32 arrays, which is the only production source;
+    converting a whole corpus would double its memory, so nothing converts.
+    """
+    corpus: dict[int, Descriptors] = _random_corpus(6, 300, seed=4)
+    config: RetrievalConfig = RetrievalConfig(backend="vocab", vocab=VocabConfig(branching=4, depth=2))
+    assert build_retrieval_index(corpus, config).similarity.shape == (6, 6)
+    corpus[3] = np.asfortranarray(corpus[3])
+    with pytest.raises(ValueError, match="C-contiguous"):
+        build_retrieval_index(corpus, config)
+
+
 def test_the_binding_refuses_arrays_it_would_misread() -> None:
     """`bow_vocab` borrows the numpy buffer, so it must refuse what it cannot read row by row.
 
