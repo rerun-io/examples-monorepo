@@ -29,7 +29,8 @@ def join_panoramas(device: str, lens0: UInt8[ndarray, "h w 3"], lens1: UInt8[nda
     pair = [torch.from_numpy(image).permute(2, 0, 1)[None].to(device) for image in (lens0, lens1)]
     join = PanoramaJoin(table, (LENS, LENS), torch.device(device))
     try:
-        for _ in range(frames):
+        joined = join.panoramas(pair[0], pair[1])
+        for _ in range(frames - 1):
             joined = join.panoramas(pair[0], pair[1])
     finally:
         join.close()
