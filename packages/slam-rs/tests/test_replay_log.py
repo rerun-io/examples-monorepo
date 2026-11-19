@@ -70,3 +70,30 @@ def test_a_frameset_without_samples_logs_nothing(tmp_path: Path, read_rows: Rows
     log_imu(ImuStream(t_ns=np.zeros(0, dtype=np.int64), gyro_rad_s=np.zeros((0, 3)), accel_m_s2=np.zeros((0, 3))))
     rr.disconnect()
     assert read_rows(output) == {}
+
+
+def test_the_masks_a_frameset_was_tracked_with_are_logged_with_their_scale(tmp_path: Path, read_rows: RowsReader) -> None:
+    """In the mask layer's own form: native resolution plus a static scale onto the camera's image."""
+    from rerun.chunk import RrdReader
+
+    from slam_rs.frontend_log import camera_entity
+    from slam_rs.vio_log import log_frame_masks
+
+    output: Path = tmp_path / "masks.rrd"
+    rr.init("slam-rs-replay-log-test", recording_id="replay-log-masks")
+    rr.save(output)
+    rr.set_time(TIMELINE, duration=np.timedelta64(1_000, "ns"))
+    mask = np.zeros((4, 5), dtype=np.uint8)
+    mask[1, 2] = 1
+    log_frame_masks((0, 1), [(20, 12), (20, 12)], [mask, None])
+    rr.disconnect()
+
+    rows: Rows = read_rows(output)
+    assert set(rows) == {f"{camera_entity(0)}/people_mask"}
+    assert len(rows[f"{camera_entity(0)}/people_mask"]) == 1
+    scales = [
+        chunk.to_record_batch().column("Transform3D:scale").to_pylist()
+        for chunk in RrdReader(output).stream().collect().stream()
+        if chunk.is_static and chunk.entity_path == f"{camera_entity(0)}/people_mask"
+    ]
+    assert scales == [[[[4.0, 3.0, 1.0]]]]  # one chunk, one row, one instance

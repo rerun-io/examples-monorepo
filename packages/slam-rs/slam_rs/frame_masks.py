@@ -47,15 +47,23 @@ class FrameMasks:
         self.stamps: list[Int64[ndarray, " n"]] = []
         """Per camera, every mask's ``video_time`` in ns, ascending."""
         statics: pa.Table = dataset.filter_segments([segment_id]).filter_contents(list(entities)).reader(index=None).to_arrow_table()
+        columns: set[str] = {str(column) for column in dataset.schema().column_names()}
         for entity, (width, height) in zip(entities, image_sizes, strict=True):
             scale_column: str = f"{entity}:Transform3D:scale"
             scale: list[float] = [1.0, 1.0]
             if scale_column in statics.column_names and statics.num_rows and statics[scale_column][0].is_valid:
                 scale = [float(value) for value in np.asarray(statics[scale_column][0].values.to_pylist(), dtype=np.float64).ravel()[:2]]
-            table: pa.Table = dataset.filter_segments([segment_id]).filter_contents([entity]).reader(index=TIMELINE).to_arrow_table()
             format_column: str = f"{entity}:SegmentationImage:format"
-            if format_column not in table.column_names:
+            if format_column not in columns:
                 raise ValueError(f"{segment_id}: no SegmentationImage at {entity}")
+            # Stamps and sizes only: the pixels are read a window at a time.
+            table: pa.Table = (
+                dataset.filter_segments([segment_id])
+                .filter_contents([entity])
+                .reader(index=TIMELINE)
+                .select(TIMELINE, format_column)
+                .to_arrow_table()
+            )
             table = table.filter(table[format_column].is_valid())
             if table.num_rows == 0:
                 raise ValueError(f"{segment_id}: no SegmentationImage at {entity}")
@@ -88,7 +96,9 @@ class FrameMasks:
                 .filter_contents([entity])
                 .reader(index=TIMELINE)
                 .select(TIMELINE, f"{entity}:SegmentationImage:buffer", f"{entity}:SegmentationImage:format")
-                .filter(col(TIMELINE).cast(pa.int64()).between(lit(start_ns), lit(last_ns)))
+                .filter(  # a plain comparison on the index column is applied by the server; a cast is not
+                    (col(TIMELINE) >= lit(pa.scalar(start_ns, pa.duration("ns")))) & (col(TIMELINE) <= lit(pa.scalar(last_ns, pa.duration("ns"))))
+                )
                 .to_arrow_table()
             )
             table = table.filter(table[2].is_valid())

@@ -675,12 +675,35 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
             # because the V2 gate drives the feed and `Vio` itself with
             # nothing logged.
             rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
+    if mode != "off" and frameset.masks is not None:
+        log_frame_masks(
+            tuple(camera.index for camera in feed.cameras), [(image.shape[1], image.shape[0]) for image in frameset.images], frameset.masks
+        )
     if frameset.ground_truth is not None:
         pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
         rr.log(
             RIG_ENTITY,
             rr.Transform3D(translation=pose_wxyz[0:3], quaternion=rr.Quaternion(xyzw=np.roll(pose_wxyz[3:7], -1))),
         )
+
+
+def log_frame_masks(cameras: tuple[int, ...], image_sizes: list[tuple[int, int]], masks: list[UInt8[ndarray, "mh mw"] | None]) -> None:
+    """Log the masks a frameset was tracked with, in the mask layer's form, at the time already set.
+
+    Each goes to ``<camera>/people_mask`` at its own resolution, with a static ``Transform3D`` that scales it onto the
+    camera's image, so the viewer draws it over the frame and the keypoints. A camera with no mask logs nothing.
+
+    Args:
+        cameras: Rig index of each camera, in frameset order.
+        image_sizes: ``(width, height)`` of each camera's image.
+        masks: Each camera's mask, or None.
+    """
+    for index, (width, height), mask in zip(cameras, image_sizes, masks, strict=True):
+        if mask is None:
+            continue
+        entity: str = f"{camera_entity(index)}/people_mask"
+        rr.log(entity, rr.Transform3D(scale=[width / mask.shape[1], height / mask.shape[0], 1.0]), static=True)
+        rr.log(entity, rr.SegmentationImage(mask))
 
 
 def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
