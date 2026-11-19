@@ -5,7 +5,7 @@
 //! Synthetic clustered data: `n_images x 2 048` 128-d descriptors. Image `i` draws its descriptors around 2 048
 //! centers picked from a window of 8 192 consecutive centers starting at `16 * i`, so neighbouring images share most of
 //! their structure and distant ones little, as frames along a trajectory do. Two sizes: 2 000 images (4.1 M
-//! descriptors, 2 GB) and 18 000 images (36.9 M descriptors, 19 GB; set `BOW_BENCH_SMALL_ONLY=1` to skip it).
+//! descriptors, 2 GB) and 18 000 images (36.9 M descriptors, 19 GB; only with `BOW_BENCH_LARGE=1`).
 //!
 //! Threads: rayon's default pool; set `RAYON_NUM_THREADS` to compare.
 
@@ -83,7 +83,7 @@ fn bench_size(c: &mut Criterion, n_images: usize) {
 
 fn vocabulary(c: &mut Criterion) {
     bench_size(c, 2_000);
-    if std::env::var_os("BOW_BENCH_SMALL_ONLY").is_none() {
+    if std::env::var_os("BOW_BENCH_LARGE").is_some() {
         bench_size(c, 18_000);
     }
 }
