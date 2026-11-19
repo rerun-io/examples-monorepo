@@ -73,7 +73,7 @@ def gray_frames(rig: insta360_io.InsvRig, lens: int, *, threads: int) -> Iterato
 
     ``reformat(format="gray8")`` as slam-rs's feed decodes, so the panorama is stitched from the pixels the tracker sees.
     """
-    decoder = av.CodecContext.create("hevc", "r")
+    decoder = av.CodecContext.create(rig.codec, "r")
     decoder.thread_count = threads
     decoder.thread_type = "NONE" if threads == 1 else "FRAME"
 
@@ -225,7 +225,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         for cam in range(2):
             name: str = f"lens{cam}"
             recording.log(schema.cam_path(RIG, cam), rr.AnyValues(name=name, kind="rgb"), static=True)
-            log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec="hevc" if rig.codec == "h265" else rig.codec, stream_id=f"track{rig.lens_track[cam]}")
+            log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec=rig.codec, stream_id=f"track{rig.lens_track[cam]}")
         frame_ns: Int64[ndarray, " n"] = rig.frame_ns()
         self.timer.capture_s = float(frame_ns[-1] - frame_ns[0]) / 1e9
         writing.send_capture_properties(

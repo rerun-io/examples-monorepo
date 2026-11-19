@@ -141,6 +141,20 @@ def test_a_clip_without_a_profile_converts_without_a_rig_reference_or_imu_noise(
     assert recording_properties(store, "insta360")["profile"] == "none"
 
 
+@pytest.mark.integration
+def test_the_panorama_decodes_both_lenses_of_an_h264_body(insv_x3_clip: Path) -> None:
+    """The X3 records H.264: the panorama's lens decoder follows the clip's codec."""
+    import insta360_io
+
+    from dataforge.datasets.insta360 import gray_frames
+
+    rig = insta360_io.InsvRig(str(insv_x3_clip), 30)
+    width, height = rig.resolution
+    for lens in range(2):
+        shapes = [frame.shape for frame in gray_frames(rig, lens, threads=1)]
+        assert shapes == [(height, width)] * 30
+
+
 @pytest.mark.golden
 def test_the_lenses_sit_33_3_mm_apart_along_the_lens_axis_with_the_factory_focal(converted: Converted) -> None:
     """Rig frame = IMU: lens 1 sits 33.29 mm behind lens 0 along +y_imu (V6 string), lens 0 looks along z_P = -y_imu."""

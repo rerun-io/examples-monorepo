@@ -55,7 +55,8 @@ from insta360_io._insta360_io import InsvRig
 LOG: logging.Logger = logging.getLogger(__name__)
 NO_PROFILE: str = "none"
 """The ``insta360`` property's ``profile`` of a clip read without a device profile."""
-CODECS: dict[str, rr.VideoCodec] = {"h264": rr.VideoCodec.H264, "h265": rr.VideoCodec.H265}
+CODECS: dict[str, rr.VideoCodec] = {"h264": rr.VideoCodec.H264, "hevc": rr.VideoCodec.H265}
+"""``InsvRig.codec`` (FFmpeg's names) as Rerun's codec."""
 
 ROWS_PER_CHUNK: int = 65_536
 """IMU and exposure samples per chunk (about a minute of the 1 kHz IMU)."""
@@ -205,7 +206,7 @@ class InsvReader:
             yield static_chunk(self.video_entity(lens), described(rr.VideoStream(codec=CODECS[rig.codec])))
             yield static_chunk(f"{self.cam(lens)}/exposure", described(rr.SeriesLines(names=["exposure_s"])))
         clip = {"source_file": self.path.name, "camera_type": rig.camera_type, "firmware": rig.firmware}
-        if rig.profile_name is None or rig.pano_from_imu is None:
+        if rig.profile_name is None:
             yield Chunk.from_property("insta360", rr.AnyValues(**clip, profile=NO_PROFILE, profile_note=rig.profile_note))
             return
         # The IMU is the rig origin.

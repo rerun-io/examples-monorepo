@@ -8,7 +8,7 @@
 //! shutter_i + constant` (mid-exposure of the middle row).
 //!
 //! Without one (a body nobody measured, or a mode outside every measured one), the clip is still read, and
-//! [`InsvRig::profile_note`] says why there is no profile: rig frame = the vendor frame P (the lens poses are the clip's
+//! [`InsvRig::profile`] says why there is no profile: rig frame = the vendor frame P (the lens poses are the clip's
 //! own factory calibration), frames sit at the raw record-4 stamps, the readout is the clip's own if it states one,
 //! and the IMU has no pose in the rig. Such a rig must not feed visual-inertial estimation.
 //!
@@ -40,10 +40,9 @@ pub enum RigError {
 pub struct InsvRig {
     /// The clip.
     pub clip: Insta360Clip,
-    /// The profile the clip's mode selected; `None` when no measured profile fits (see [`InsvRig::profile_note`]).
-    pub profile: Option<DeviceProfile>,
-    /// Empty with a profile; without one, why: the body has no profile, or the clip lies outside its measured modes.
-    pub profile_note: String,
+    /// The profile the clip's mode selected, or why no measured profile fits: the body has none, the clip lies
+    /// outside its measured modes, or its lenses differ in type.
+    pub profile: Result<DeviceProfile, String>,
     /// Rolling-shutter readout of each lens image: the clip's own when it states one, else the profile's; `None`
     /// without either.
     pub readout_s: Option<f64>,
@@ -51,8 +50,6 @@ pub struct InsvRig {
     pub lenses: [FactoryLens; 2],
     /// `T_rig_lens` of lens 0 and lens 1: in the IMU frame with a profile, in the vendor frame P without.
     pub rig_from_lens: [Isometry3<f64>; 2],
-    /// `R_imu_P`, the profile's measured rotation orthonormalised; `None` without a profile.
-    pub imu_from_pano: Option<Matrix3<f64>>,
     /// Frame times, ns (frames `0..frames`).
     pub frame_ns: Vec<i64>,
     /// Exposure time per frame of lens 0 (record 4) and lens 1 (record 12; record 4 without it).
@@ -122,16 +119,13 @@ impl InsvRig {
             )),
         };
         let clip_readout_s = m.rolling_shutter_ms.map(|ms| ms * 1e-3);
-        let (profile, profile_note) = match choose_profile(
+        let profile = choose_profile(
             profiles,
             &m.camera_type,
             lens_type,
             1e6 / median(&intervals),
             clip_readout_s,
-        ) {
-            Ok(profile) => (Some(profile), String::new()),
-            Err(why) => (None, why),
-        };
+        );
         let frames = frame_limit.map_or(vin0.len(), |limit| limit.min(vin0.len()));
         let record_t: Vec<i64> = vin0[..frames].iter().map(|e| e.t_us).collect();
         let exposure_s = [false, true].map(|vin1| {
@@ -141,8 +135,8 @@ impl InsvRig {
                 .collect::<Vec<_>>()
         });
         let frame_ns = match &profile {
-            Some(p) => p.frame_times_ns(&record_t, &exposure_s[0]),
-            None => {
+            Ok(p) => p.frame_times_ns(&record_t, &exposure_s[0]),
+            Err(_) => {
                 let raw: Vec<i64> = record_t.iter().map(|t| t * 1000).collect();
                 if raw.windows(2).any(|w| w[1] <= w[0]) {
                     Err("the exposure-record stamps are not increasing".to_owned())
@@ -159,12 +153,11 @@ impl InsvRig {
             .iter()
             .filter(|s| s.t_us * 1000 <= horizon)
             .collect();
-        let imu_from_pano = profile.as_ref().map(DeviceProfile::imu_from_pano);
         // Without a profile the rig frame is P itself: the identity rotation and no lever arm.
-        let rig_from_pano = imu_from_pano.unwrap_or_else(Matrix3::identity);
-        let lever_arm = profile
-            .as_ref()
-            .map_or_else(Vector3::zeros, DeviceProfile::lever_arm);
+        let (rig_from_pano, lever_arm) = profile.as_ref().map_or_else(
+            |_| (Matrix3::identity(), Vector3::zeros()),
+            |p| (p.imu_from_pano(), p.lever_arm()),
+        );
         let rig_from_lens = lenses.map(|lens| {
             let rotation = rig_from_pano * lens.pano_from_lens.rotation.matrix();
             let centre = rig_from_pano * (lens.pano_from_lens.translation.vector + lever_arm);
@@ -174,16 +167,14 @@ impl InsvRig {
             )
         });
         Ok(Self {
-            readout_s: clip_readout_s.or(profile.as_ref().map(|p| p.readout_s)),
+            readout_s: clip_readout_s.or(profile.as_ref().ok().map(|p| p.readout_s)),
             imu_ns: imu.iter().map(|s| s.t_us * 1000).collect(),
             accel: imu.iter().map(|s| s.accel_m_s2).collect(),
             gyro: imu.iter().map(|s| s.gyro_rad_s).collect(),
             clip,
             profile,
-            profile_note,
             lenses,
             rig_from_lens,
-            imu_from_pano,
             frame_ns,
             exposure_s,
         })
@@ -443,23 +434,17 @@ mod tests {
     #[test]
     fn the_profile_is_selected_on_the_lenses_the_rig_emits() {
         let measured = rig(x4_air_clip(4, [131, 131], Some([131, 131]), &in_order(4))).unwrap();
-        assert_eq!(measured.profile.map(|p| p.name), Some("x4-air".to_owned()));
+        assert_eq!(measured.profile.map(|p| p.name), Ok("x4-air".to_owned()));
         // The emitted cameras come from the V6 string; its lens types decide, whatever the V3 string says.
         let unmeasured = rig(x4_air_clip(4, [131, 131], Some([132, 132]), &in_order(4))).unwrap();
-        let note = unmeasured.profile_note;
-        assert!(
-            unmeasured.profile.is_none() && note.contains("lens type 132"),
-            "{note}"
-        );
+        let note = unmeasured.profile.unwrap_err();
+        assert!(note.contains("lens type 132"), "{note}");
         let mixed = rig(x4_air_clip(4, [131, 131], Some([132, 131]), &in_order(4))).unwrap();
-        let note = mixed.profile_note;
-        assert!(
-            mixed.profile.is_none() && note.contains("lenses of types 132 and 131"),
-            "{note}"
-        );
+        let note = mixed.profile.unwrap_err();
+        assert!(note.contains("lenses of types 132 and 131"), "{note}");
         // Without a V6 string the V3 lenses are emitted.
         let v3_only = rig(x4_air_clip(4, [131, 131], None, &in_order(4))).unwrap();
-        assert!(v3_only.profile.is_some());
+        assert!(v3_only.profile.is_ok());
     }
 
     #[test]

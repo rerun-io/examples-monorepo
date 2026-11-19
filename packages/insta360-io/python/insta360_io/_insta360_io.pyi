@@ -143,7 +143,7 @@ class InsvRig:
         """``R_P_imu``, row-major, orthonormalised; ``None`` without a profile."""
     @property
     def codec(self) -> str:
-        """Codec of both lens tracks: ``h264`` or ``h265``."""
+        """Codec of both lens tracks, as FFmpeg names it: ``h264`` or ``hevc``."""
     @property
     def lenses(self) -> list[InsvLens]:
         """Lens 0 and lens 1: V6 when the clip has a V6 string, else V3."""

@@ -94,19 +94,19 @@ impl InsvRig {
     /// Name of the selected device profile; `None` when no measured profile fits (`profile_note` says why).
     #[getter]
     fn profile_name(&self) -> Option<&str> {
-        self.rig.profile.as_ref().map(|p| p.name.as_str())
+        self.rig.profile.as_ref().ok().map(|p| p.name.as_str())
     }
 
     /// Version of the selected device profile.
     #[getter]
     fn profile_version(&self) -> Option<u32> {
-        self.rig.profile.as_ref().map(|p| p.version)
+        self.rig.profile.as_ref().ok().map(|p| p.version)
     }
 
     /// Empty with a profile; without one, why there is none.
     #[getter]
     fn profile_note(&self) -> &str {
-        &self.rig.profile_note
+        self.rig.profile.as_ref().err().map_or("", String::as_str)
     }
 
     /// The selected profile's IMU noise model.
@@ -115,6 +115,7 @@ impl InsvRig {
         self.rig
             .profile
             .as_ref()
+            .ok()
             .map(|p| ImuNoise::from(&p.imu_noise))
     }
 
@@ -128,18 +129,18 @@ impl InsvRig {
     /// `R_P_imu`, row-major: the profile's rotation, orthonormalised; `None` without a profile.
     #[getter]
     fn pano_from_imu(&self) -> Option<[[f64; 3]; 3]> {
-        self.rig.imu_from_pano.map(|m| {
-            let r = m.transpose();
+        self.rig.profile.as_ref().ok().map(|p| {
+            let r = p.imu_from_pano().transpose();
             std::array::from_fn(|row| std::array::from_fn(|column| r[(row, column)]))
         })
     }
 
-    /// Codec of both lens tracks: `h264` or `h265`.
+    /// Codec of both lens tracks, as FFmpeg names it: `h264` or `hevc`.
     #[getter]
     fn codec(&self) -> &'static str {
         match self.rig.clip.tracks[0].codec {
             VideoCodec::H264 => "h264",
-            VideoCodec::H265 => "h265",
+            VideoCodec::H265 => "hevc",
         }
     }
 
