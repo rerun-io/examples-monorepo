@@ -97,3 +97,5 @@ def test_the_masks_a_frameset_was_tracked_with_are_logged_with_their_scale(tmp_p
         if chunk.is_static and chunk.entity_path == f"{camera_entity(0)}/people_mask"
     ]
     assert scales == [[[[4.0, 3.0, 1.0]]]]  # one chunk, one row, one instance
+    statics = [chunk.to_record_batch().schema.names for chunk in RrdReader(output).stream().collect().stream() if chunk.is_static]
+    assert any("AnnotationContext:context" in names for names in statics)

@@ -687,6 +687,12 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
         )
 
 
+MASK_CLASSES: rr.AnnotationContext = rr.AnnotationContext(
+    [rr.AnnotationInfo(id=0, label="kept", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="masked", color=(40, 110, 255, 140))]
+)
+"""A mask's two classes: kept pixels draw nothing, masked ones a translucent blue over the frame."""
+
+
 def log_frame_masks(cameras: tuple[int, ...], image_sizes: list[tuple[int, int]], masks: list[UInt8[ndarray, "mh mw"] | None]) -> None:
     """Log the masks a frameset was tracked with, in the mask layer's form, at the time already set.
 
@@ -702,7 +708,7 @@ def log_frame_masks(cameras: tuple[int, ...], image_sizes: list[tuple[int, int]]
         if mask is None:
             continue
         entity: str = f"{camera_entity(index)}/people_mask"
-        rr.log(entity, rr.Transform3D(scale=[width / mask.shape[1], height / mask.shape[0], 1.0]), static=True)
+        rr.log(entity, rr.Transform3D(scale=[width / mask.shape[1], height / mask.shape[0], 1.0]), MASK_CLASSES, static=True)
         rr.log(entity, rr.SegmentationImage(mask))
 
 
