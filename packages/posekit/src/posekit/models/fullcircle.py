@@ -235,24 +235,26 @@ class FullCircleMasker:
         # normalised by the full size, which grid_sample maps onto any resolution of the same image.
         self.downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.work_size)) for s in sources]
         self.full_hw: list[tuple[int, int]] = [s.image_hw for s in sources]
-        self.rig_R_cams: Float64[Tensor, "n_src 3 3"] = torch.from_numpy(np.stack([s.rig_R_cam for s in sources])).to(device)
+        # Ray tables are solved in float64 and kept in float32, as is every per-frame projection through them.
+        rig_R_cams: Float64[Tensor, "n_src 3 3"] = torch.from_numpy(np.stack([s.rig_R_cam for s in sources])).to(device)
+        self.rig_R_cams: Float32[Tensor, "n_src 3 3"] = rig_R_cams.float()
         self.cameras: list[SphereCamera] = [s.camera for s in sources]
         self.face: PinholeCamera = PinholeCamera(config.face_size)
         face_rays, _ = self.face.unproject(pixel_grid(config.face_size, config.face_size, device))
-        self.face_rays: Float64[Tensor, "n 3"] = face_rays
+        self.face_rays: Float32[Tensor, "n 3"] = face_rays.float()
 
         self.synthetic: Kb4Camera = FULLCIRCLE_SYNTHETIC_LENS.scaled(config.synthetic_size / FULLCIRCLE_SYNTHETIC_SIZE)
         synthetic_rays, synthetic_valid = self.synthetic.unproject(pixel_grid(config.synthetic_size, config.synthetic_size, device))
-        self.synthetic_rays: Float64[Tensor, "n 3"] = synthetic_rays
+        self.synthetic_rays: Float32[Tensor, "n 3"] = synthetic_rays.float()
         self.synthetic_valid: Bool[Tensor, "s s"] = synthetic_valid.reshape(config.synthetic_size, config.synthetic_size)
 
         # Each mask pixel's ray in the rig frame (static), and the dilation radius at mask resolution (across).
-        self.mask_rays: list[Float64[Tensor, "n 3"]] = []
+        self.mask_rays: list[Float32[Tensor, "n 3"]] = []
         self.mask_ray_valid: list[Bool[Tensor, " n"]] = []
         self.mask_radius: list[int] = []
         for index, source in enumerate(sources):
             rays, valid = source.camera.unproject(pixel_grid(source.mask_hw[0], source.mask_hw[1], device, scale=source.mask_scale))
-            self.mask_rays.append(rays @ self.rig_R_cams[index].T)
+            self.mask_rays.append((rays @ rig_R_cams[index].T).float())
             self.mask_ray_valid.append(valid)
             self.mask_radius.append(math.ceil(config.dilate_px / source.mask_scale[0] - 1e-9))
 
@@ -297,7 +299,7 @@ class FullCircleMasker:
         images: list[Tensor] = self._work_images(frames)
         rig_R_faces: Float64[Tensor, "6 3 3"] = torch.from_numpy(rig_R_level @ FACE_ROTATIONS).to(self.device)
         # The six faces stacked into one 6s x s view: one sampling plan per frameset.
-        rays: Float64[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces.transpose(1, 2)
+        rays: Float32[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces.float().transpose(1, 2)
         view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
         stacked: UInt8[Tensor, "3 f s"] = sample_sphere(images, view).round().clamp(0, 255).to(torch.uint8)
         faces: UInt8[Tensor, "6 s s 3"] = rearrange(stacked, "c (f h) w -> f h w c", f=6).contiguous()
@@ -365,7 +367,7 @@ class FullCircleMasker:
         start: float = time.perf_counter()
         size: int = self.config.synthetic_size
         rig_R_view: Float64[ndarray, "3 3"] = look_at(direction, up)
-        rotation: Float64[Tensor, "3 3"] = torch.from_numpy(rig_R_view).to(self.device)
+        rotation: Float32[Tensor, "3 3"] = torch.from_numpy(rig_R_view).to(self.device, torch.float32)
         view: SphereView = view_from_rays(self.synthetic_rays @ rotation.T, size, size, self.cameras, self.rig_R_cams, self.full_hw)
         rendered: Float[Tensor, "3 s s"] = sample_sphere(self._work_images(frames), view) * self.synthetic_valid[None]
         synthetic: UInt8[Tensor, "s s 3"] = rearrange(rendered.round().clamp(0, 255).to(torch.uint8), "c h w -> h w c").contiguous()
