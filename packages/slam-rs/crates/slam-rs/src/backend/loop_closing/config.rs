@@ -95,6 +95,9 @@ pub struct LoopClosingConfig {
     /// `[translation m, rotation rad]` sigma of every pose-graph edge (B12).
     /// RootSLAM weighs every edge with I6 (1 m counts as 1 rad); parity `[1, 1]`.
     pub pgo_edge_sigmas: [f64; 2],
+    /// Workers that describe keyframes and screen candidates. `None`: Rayon's
+    /// global pool. A device with a fixed core budget sets it (RoboCap: 2).
+    pub threads: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for LoopClosingConfig {
@@ -128,6 +131,7 @@ impl Default for LoopClosingConfig {
             min_rot_reduction_deg: 2.0,
             pgo: true,
             pgo_edge_sigmas: [0.05, 0.01],
+            threads: None,
         }
     }
 }
@@ -138,6 +142,24 @@ mod tests {
 
     use super::*;
     use crate::config::VioConfig;
+
+    #[test]
+    fn threads_default_to_the_global_pool_and_take_a_flat_key() {
+        assert_eq!(VioConfig::default().backend_loop_closing.threads, None);
+        let capped =
+            VioConfig::from_json_str(r#"{"value0":{"backend.loop_closing.threads":2}}"#).unwrap();
+        assert_eq!(
+            capped
+                .backend_loop_closing
+                .threads
+                .map(std::num::NonZeroUsize::get),
+            Some(2)
+        );
+        for refused in [0, 1025] {
+            let text = format!(r#"{{"value0":{{"backend.loop_closing.threads":{refused}}}}}"#);
+            assert!(VioConfig::from_json_str(&text).is_err(), "{refused}");
+        }
+    }
 
     /// `backend.loop_closing` (PR b2): RootSLAM's MSD values with the fixed
     /// behaviour of B1, B5, B15, B16 and the PGO's B12 by default; the
