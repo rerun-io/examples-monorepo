@@ -46,24 +46,37 @@ fn covering_indices(image: usize, mask: usize) -> Vec<usize> {
 /// If `mask` is empty or `mask.data` is not `width * height` bytes; the caller
 /// checks both.
 pub fn masked_cells(mask: PixelMask<'_>, image: ImageSize, grid: &CellGrid) -> CellMasks {
-    assert!(mask.width > 0 && mask.height > 0 && mask.data.len() == mask.width * mask.height);
+    assert!(
+        mask.width > 0
+            && mask.height > 0
+            && mask.width.checked_mul(mask.height) == Some(mask.data.len())
+    );
     let columns: Vec<usize> = covering_indices(image.width, mask.width);
     let rows: Vec<usize> = covering_indices(image.height, mask.height);
     let cell: usize = grid.cell;
+    // The distinct mask indices one cell's pixels sample along an axis. They are contiguous when the mask is no finer
+    // than the image, and skip indices when it is finer.
+    let sampled = |covering: &[usize], start: usize, end: usize| -> Vec<usize> {
+        let mut indices: Vec<usize> = covering[start..(start + cell).min(end)].to_vec();
+        indices.dedup();
+        indices
+    };
+    let (grid_columns, grid_rows) = grid.dimensions();
+    let cell_columns: Vec<Vec<usize>> = (0..grid_columns)
+        .map(|column| sampled(&columns, grid.x_start + column * cell, image.width))
+        .collect();
+    let cell_rows: Vec<Vec<usize>> = (0..grid_rows)
+        .map(|row| sampled(&rows, grid.y_start + row * cell, image.height))
+        .collect();
     let mut out = CellMasks::default();
     for (column, row) in grid.cells() {
         let x: usize = grid.x_start + column * cell;
         let y: usize = grid.y_start + row * cell;
-        let x_last: usize = (x + cell).min(image.width) - 1;
-        let y_last: usize = (y + cell).min(image.height) - 1;
-        // The covering index is monotonic, so the cell's pixels cover exactly
-        // this mask rectangle.
-        let (mask_x0, mask_x1) = (columns[x], columns[x_last]);
-        let masked = (rows[y]..=rows[y_last]).any(|mask_row| {
-            let start: usize = mask_row * mask.width;
-            mask.data[start + mask_x0..=start + mask_x1]
+        let masked = cell_rows[row].iter().any(|&mask_row| {
+            let values: &[u8] = &mask.data[mask_row * mask.width..(mask_row + 1) * mask.width];
+            cell_columns[column]
                 .iter()
-                .any(|&value| value != 0)
+                .any(|&mask_column| values[mask_column] != 0)
         });
         if masked {
             out.masks.push(MaskRect {
@@ -226,10 +239,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_finer_mask_masks_only_the_pixels_the_image_samples() {
+        // An 80 px wide mask over a 40 px image: image column c samples mask column 2c + 1, so the
+        // set column 20 is never sampled and masks nothing.
+        let image = ImageSize {
+            width: 40,
+            height: 40,
+        };
+        let grid = grid(40, 40, 8);
+        let mut data = vec![0u8; 80 * 40];
+        data[20 * 80 + 20] = 1;
+        let mask = PixelMask {
+            width: 80,
+            height: 40,
+            data: &data,
+        };
+        assert_eq!(
+            masked_cells(mask, image, &grid),
+            brute_force(mask, image, &grid)
+        );
+        assert!(masked_cells(mask, image, &grid).masks.is_empty());
+    }
+
     proptest! {
         #[test]
         fn matches_the_pixel_rule(
-            (mask_w, mask_h) in (1usize..40, 1usize..40),
+            (mask_w, mask_h) in (1usize..200, 1usize..200),
             (image_w, image_h) in (40usize..160, 40usize..160),
             cell in prop::sample::select(vec![8usize, 10, 16]),
             seed in any::<u64>(),

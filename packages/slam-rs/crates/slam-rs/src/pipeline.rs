@@ -549,7 +549,7 @@ impl<S: Scalar> Vio<S> {
             if let Some(mask) = mask
                 && (mask.width == 0
                     || mask.height == 0
-                    || mask.data.len() != mask.width * mask.height)
+                    || mask.width.checked_mul(mask.height) != Some(mask.data.len()))
             {
                 return Err(VioError::FrameMask {
                     camera,

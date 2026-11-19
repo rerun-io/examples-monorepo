@@ -638,3 +638,25 @@ fn a_malformed_frame_mask_is_refused_without_change() {
         }
     );
 }
+
+#[test]
+fn a_frame_mask_whose_size_overflows_is_refused_without_change() {
+    let mut vio: Vio<f32> = pipeline();
+    let cameras: usize = common::calibration().t_i_c.len();
+    let short = [0u8; 10];
+    let mut masks: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = vec![None; cameras];
+    masks[0] = Some(slam_rs::frontend::masks::PixelMask {
+        width: usize::MAX / 2 + 1,
+        height: 2,
+        data: &short,
+    });
+    assert_eq!(
+        vio.set_frame_masks(&masks).unwrap_err(),
+        VioError::FrameMask {
+            camera: 0,
+            width: usize::MAX / 2 + 1,
+            height: 2,
+            len: 10
+        }
+    );
+}
