@@ -1,31 +1,38 @@
-//! The clip: the two HEVC lens tracks, the trailer and the parsed factory lenses, read and checked once.
+//! The clip: the two lens tracks (H.264 or HEVC), the trailer and the parsed factory lenses, read and checked once.
 use super::trailer::{read_trailer, Exposure, Trailer};
 use super::{malformed, Insta360Error};
-use crate::container::hevc::sample_to_annex_b;
-use crate::container::mp4::{read_hevc_tracks, VideoTrack};
+use crate::container::mp4::{read_video_tracks, VideoTrack};
+use crate::container::nal::sample_to_annex_b;
 use kornia_staging_3d::camera::formats::insta360::{parse_lens_string, FactoryLens};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// An Insta360 dual-fisheye clip: trailer, factory lenses and the two HEVC lens tracks.
+/// An Insta360 dual-fisheye clip: trailer, factory lenses and the two lens tracks.
+///
+/// Recent bodies (X4 and later) record both lenses into one file, one video track each. Older ones (ONE X2, ONE
+/// R/RS, X3) record one lens per file: `…_00_<seq>.insv` holds lens 0 and the trailer, `…_10_<seq>.insv` lens 1; the
+/// clip opens from either and reads both.
 ///
 /// Frame `i` of the clip is sample `i` of both lens tracks and exposure entry `first_frame_entry + i` of both sensor
 /// records; the clip holds the frames present in both tracks ([`Insta360Clip::frames`]).
 #[derive(Clone, Debug)]
 pub struct Insta360Clip {
-    /// File the clip was read from.
+    /// The file holding the trailer (the `_00_` file of a two-file clip).
     pub path: PathBuf,
     /// Metadata, IMU and exposure records.
     pub trailer: Trailer,
-    /// V3 factory calibration per lens, in lens order, at the track resolution with the window crop applied.
+    /// V3 factory calibration per lens (V6 on a body that writes no V3 string, the X6), in lens order, at the track
+    /// resolution with the window crop applied.
     pub lenses: [FactoryLens; 2],
     /// V6 factory calibration per lens when the clip carries it.
     pub lenses_v6: Option<[FactoryLens; 2]>,
     /// Video track index (into [`Insta360Clip::tracks`]) of each lens.
     pub lens_track: [usize; 2],
-    /// HEVC video tracks in file order.
+    /// The lens video tracks, in file order (a two-file clip: the `_00_` file's, then the `_10_` file's).
     pub tracks: Vec<VideoTrack>,
+    /// The file each track's samples are in.
+    pub track_paths: Vec<PathBuf>,
     /// Index of the exposure entry that is frame 0: the entry stamped `first_frame_timestamp`.
     pub first_frame_entry: usize,
 }
@@ -46,42 +53,92 @@ fn two_lenses(
     })
 }
 
+/// The member `lens` (`0` or `1`) of the two-file clip `path` belongs to, from its name: the field `00` or `10`
+/// after the time (`VID_<date>_<time>_<lens>_<seq>.insv`). `None` when the name has no such field.
+pub fn lens_file(path: &Path, lens: usize) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let mut parts: Vec<&str> = name.split('_').collect();
+    let field = parts.iter().position(|p| *p == "00" || *p == "10")?;
+    let replacement = ["00", "10"][lens];
+    parts[field] = replacement;
+    Some(path.with_file_name(parts.join("_")))
+}
+
 impl Insta360Clip {
     /// Read the container index and the trailer. Samples stay on disk; read them with [`Insta360Clip::sample_reader`].
     ///
     /// # Errors
-    /// Besides malformed input: two lens tracks of different sizes, a lens string that is not two supported lenses,
-    /// and a vin0 or vin1 exposure record without an entry for every frame are refused by name. A clip without a
-    /// vin1 record (the X5 writes only record 4) gives both lenses the vin0 entries.
+    /// Besides malformed input: a file that is neither two lens tracks nor one member of a two-file clip, lens tracks
+    /// of different sizes or codecs, a lens string that is not two supported lenses, and a vin0 or vin1 exposure
+    /// record without an entry for every frame are refused by name. A clip without a vin1 record (the X5 writes only
+    /// record 4) gives both lenses the vin0 entries.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Insta360Error> {
-        let path = path.as_ref().to_path_buf();
+        let given = path.as_ref().to_path_buf();
+        // A two-file clip's trailer is in its `_00_` file, whichever member was given.
+        let path = match lens_file(&given, 0) {
+            Some(first) if first != given && first.exists() => first,
+            _ => given,
+        };
         let mut file = BufReader::new(File::open(&path)?);
-        let tracks = read_hevc_tracks(&mut file)?;
+        let mut tracks = read_video_tracks(&mut file)?;
         let trailer = read_trailer(&mut file)?;
+        let mut track_paths = vec![path.clone(); tracks.len()];
+        let per_file = tracks.len() == 1;
+        if per_file {
+            let second = lens_file(&path, 1).filter(|p| *p != path).ok_or_else(|| {
+                Insta360Error::Unsupported(format!(
+                    "{} holds one video track and its name has no `_00_` lens field to find the other lens's file",
+                    path.display()
+                ))
+            })?;
+            let other =
+                read_video_tracks(&mut BufReader::new(File::open(&second).map_err(|e| {
+                    Insta360Error::Unsupported(format!(
+                        "{} holds one lens; the other lens's file {} could not be opened: {e}",
+                        path.display(),
+                        second.display()
+                    ))
+                })?))?;
+            if other.len() != 1 {
+                return Err(malformed(format!(
+                    "{} holds {} video tracks, a lens file holds 1",
+                    second.display(),
+                    other.len()
+                )));
+            }
+            tracks.extend(other);
+            track_paths.push(second);
+        }
         if tracks.len() != 2 {
             return Err(malformed(format!(
-                "expected 2 HEVC lens tracks, found {}",
+                "expected 2 lens video tracks (H.264 or HEVC), found {}",
                 tracks.len()
             )));
         }
         let size = [u32::from(tracks[0].width), u32::from(tracks[0].height)];
-        if [u32::from(tracks[1].width), u32::from(tracks[1].height)] != size {
+        if [u32::from(tracks[1].width), u32::from(tracks[1].height)] != size
+            || tracks[0].codec != tracks[1].codec
+        {
             return Err(Insta360Error::Unsupported(format!(
-                "lens tracks of {}x{} and {}x{} pixels; both lenses must share one size",
-                size[0], size[1], tracks[1].width, tracks[1].height
+                "lens tracks of {}x{} {:?} and {}x{} {:?}; both lenses must share one size and codec",
+                size[0], size[1], tracks[0].codec, tracks[1].width, tracks[1].height, tracks[1].codec
             )));
         }
         let m = &trailer.metadata;
-        let v3 = m
-            .offset_v3
-            .as_deref()
-            .ok_or_else(|| malformed("metadata has no V3 lens string (field 54)"))?;
-        let lenses = two_lenses(v3, "V3", m, size)?;
         let lenses_v6 = m
             .offset_v6
             .as_deref()
             .map(|s| two_lenses(s, "V6", m, size))
             .transpose()?;
+        let lenses = match (m.offset_v3.as_deref(), lenses_v6) {
+            (Some(v3), _) => two_lenses(v3, "V3", m, size)?,
+            (None, Some(v6)) => v6,
+            (None, None) => {
+                return Err(malformed(
+                    "metadata has no V3 (field 54) or V6 (field 111) lens string",
+                ))
+            }
+        };
         let first = m.first_frame_timestamp_us;
         let exposures = &trailer.exposures_vin0;
         // In i128, so times anywhere in i64 cannot overflow the difference.
@@ -97,11 +154,13 @@ impl Insta360Clip {
             })?;
         let clip = Self {
             path,
-            lens_track: m.lens_track(),
+            // One lens per file: the files name the lens order.
+            lens_track: if per_file { [0, 1] } else { m.lens_track() },
             trailer,
             lenses,
             lenses_v6,
             tracks,
+            track_paths,
             first_frame_entry,
         };
         let frames = clip.frames();
@@ -148,10 +207,15 @@ impl Insta360Clip {
         }
     }
 
-    /// Open the file for reading samples.
-    pub fn sample_reader(&self) -> Result<SampleReader, Insta360Error> {
+    /// Open the clip's files for reading samples.
+    pub fn sample_reader(&self) -> Result<SampleReader<'_>, Insta360Error> {
         Ok(SampleReader {
-            file: File::open(&self.path)?,
+            clip: self,
+            files: self
+                .track_paths
+                .iter()
+                .map(File::open)
+                .collect::<Result<_, _>>()?,
             scratch: Vec::new(),
         })
     }
@@ -159,31 +223,40 @@ impl Insta360Clip {
 
 /// Reads video samples of a clip as Annex B access units, one at a time.
 #[derive(Debug)]
-pub struct SampleReader {
-    file: File,
+pub struct SampleReader<'a> {
+    clip: &'a Insta360Clip,
+    files: Vec<File>,
     scratch: Vec<u8>,
 }
 
-impl SampleReader {
-    /// Read sample `index` of `track`, convert it to Annex B with parameter sets on IRAP samples, and append it to
-    /// `out`. Returns whether the sample is an IRAP picture.
+impl SampleReader<'_> {
+    /// Read sample `index` of track `track` (an index into [`Insta360Clip::tracks`]), convert it to Annex B with the
+    /// parameter sets on random-access samples, and append it to `out`. Returns whether the sample is a random-access
+    /// picture (an H.264 IDR, an HEVC IRAP).
     pub fn read_annex_b(
         &mut self,
-        track: &VideoTrack,
+        track: usize,
         index: usize,
         out: &mut Vec<u8>,
     ) -> Result<bool, Insta360Error> {
-        let sample = track
+        let t = self
+            .clip
+            .tracks
+            .get(track)
+            .ok_or_else(|| malformed(format!("track {track} of {}", self.clip.tracks.len())))?;
+        let sample = t
             .samples
             .get(index)
-            .ok_or_else(|| malformed(format!("sample {index} of {}", track.samples.len())))?;
+            .ok_or_else(|| malformed(format!("sample {index} of {}", t.samples.len())))?;
         self.scratch.resize(sample.size as usize, 0);
-        self.file.seek(SeekFrom::Start(sample.offset))?;
-        self.file.read_exact(&mut self.scratch)?;
+        let file = &mut self.files[track];
+        file.seek(SeekFrom::Start(sample.offset))?;
+        file.read_exact(&mut self.scratch)?;
         Ok(sample_to_annex_b(
+            t.codec,
             &self.scratch,
-            track.nal_length_size,
-            &track.parameter_sets,
+            t.nal_length_size,
+            &t.parameter_sets,
             out,
         )?)
     }
@@ -191,7 +264,9 @@ impl SampleReader {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{bytes_field, exposures, metadata, trailer_file, varint_field, V3};
+    use super::super::testing::{
+        bytes_field, exposures, metadata, metadata_with_lens, trailer_file, varint_field, V3, V6,
+    };
     use super::*;
     use crate::container::mp4::testing::{bx, trak, TrackSpec};
 
@@ -201,6 +276,7 @@ mod tests {
     /// An `hvc1` track of `samples` (1 or 2) six-byte samples, `width` pixels wide.
     fn track(id: u32, samples: usize, width: u16) -> Vec<u8> {
         let spec = TrackSpec {
+            h264: false,
             track_id: id,
             sizes: &[6, 6][..samples],
             chunk_offsets: &[8, 14][..samples],
@@ -276,7 +352,7 @@ mod tests {
         assert!(clip.lenses_v6.is_none());
         let mut reader = clip.sample_reader().unwrap();
         let mut out = Vec::new();
-        assert!(reader.read_annex_b(&clip.tracks[0], 0, &mut out).unwrap());
+        assert!(reader.read_annex_b(0, 0, &mut out).unwrap());
         assert_eq!(out, [0, 0, 0, 1, 0x40, 0x01, 0, 0, 0, 1, 0x26, 0x01]);
         std::fs::remove_dir_all(clip.path.parent().unwrap()).unwrap();
         // A first-frame time of i64::MIN and an exposure at i64::MAX: the distance between them does not overflow,
@@ -293,6 +369,56 @@ mod tests {
             open("far", &two_tracks(), &far),
             Err(Insta360Error::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn a_two_file_clip_opens_from_either_member_and_reads_lens_1_from_its_own_file() {
+        let dir =
+            std::env::temp_dir().join(format!("insta360-test-{}-two-file", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Lens 0 and the trailer in `_00_`, lens 1 in `_10_` (the ONE X2 / ONE R / X3 layout); the samples differ.
+        let mut first = bx(b"mdat", &[0, 0, 0, 2, 0x26, 0x01, 0, 0, 0, 2, 0x02, 0x01]);
+        first.extend(bx(b"moov", &track(1, 2, 1920)));
+        first.extend(bx(
+            b"inst",
+            &trailer_file(&records(metadata(true), Some(&ENTRIES)))[1000..],
+        ));
+        let mut second = bx(b"mdat", &[0, 0, 0, 2, 0x26, 0x07, 0, 0, 0, 2, 0x02, 0x07]);
+        second.extend(bx(b"moov", &track(1, 2, 1920)));
+        let (lens0, lens1) = (
+            dir.join("VID_20231126_111301_00_004.insv"),
+            dir.join("VID_20231126_111301_10_004.insv"),
+        );
+        std::fs::write(&lens0, &first).unwrap();
+        std::fs::write(&lens1, &second).unwrap();
+        for given in [&lens0, &lens1] {
+            let clip = Insta360Clip::open(given).unwrap();
+            assert_eq!(
+                (clip.path.as_path(), clip.lens_track),
+                (lens0.as_path(), [0, 1])
+            );
+            assert_eq!(clip.track_paths, vec![lens0.clone(), lens1.clone()]);
+            let mut reader = clip.sample_reader().unwrap();
+            let mut out = Vec::new();
+            reader.read_annex_b(1, 0, &mut out).unwrap();
+            assert_eq!(out[out.len() - 2..], [0x26, 0x07]);
+        }
+        // Without its `_10_` partner, a one-track file is refused by name.
+        std::fs::remove_file(&lens1).unwrap();
+        unsupported(Insta360Clip::open(&lens0), "other lens's file");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_body_without_a_v3_string_takes_its_lenses_from_v6() {
+        let clip = open(
+            "v6-only",
+            &two_tracks(),
+            &records(metadata_with_lens(true, 111, V6), Some(&ENTRIES)),
+        )
+        .unwrap();
+        assert_eq!(Some(clip.lenses), clip.lenses_v6);
+        std::fs::remove_dir_all(clip.path.parent().unwrap()).unwrap();
     }
 
     #[test]

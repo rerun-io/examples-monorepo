@@ -1,6 +1,6 @@
 # Insta360 device profiles: the calibration a clip does not carry, measured per body and video mode.
 #
-# Read by dataforge.datasets.insta360 (DeviceProfiles, load_profiles). A clip takes the profile whose camera type,
+# Read by insta360-io (crates/insta360-io-core, `profile.rs`; built into the module). A clip takes the profile whose camera type,
 # lens type, frame rate and rolling-shutter readout match its own (not its lens size: the reader states the factory
 # lenses at the track resolution, so one profile serves every resolution of a body); a clip outside every profile's
 # measured mode is refused with the property that differs. Bump `version` whenever a measured number changes: converted recordings
