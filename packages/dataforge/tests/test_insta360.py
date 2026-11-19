@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
@@ -22,8 +21,8 @@ if TYPE_CHECKING:
 
 FRAMES: int = 90
 """Framesets the asset tests convert: three seconds."""
-MIN_PSNR_DB: float = 38.0
-"""Floor for the first decoded panorama frame against the stitch at the default cq 34 (measured 41.7 dB on 2026-11-17)."""
+MIN_PSNR_DB: float = 36.0
+"""Floor for the first decoded panorama frame (RGB, 3840x1920) against the join at the default cq 34 (measured 37.4 dB on 2026-11-19)."""
 
 
 def angle_to_nearest_permutation_deg(rotation: Float64[ndarray, "3 3"]) -> float:
@@ -291,28 +290,26 @@ def test_the_panorama_layer_is_av1_on_the_base_frame_times(converted: Converted,
 
 
 @pytest.mark.golden
-def test_the_first_panorama_frame_is_the_stitch_within_38_db(converted: Converted, panorama_rrd: Path) -> None:
+def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: Converted, panorama_rrd: Path) -> None:
     import insta360_io
+    import torch
 
     from dataforge import paths
-    from dataforge.datasets.insta360 import PANO_ENTITY, gray_frames, stitch_from_recording
+    from dataforge.datasets.insta360 import PANO_ENTITY, cameras_from_recording, lens_pictures
+    from dataforge.datasets.insta360_panorama import SEAM_BAND_DEG, PanoramaJoin, default_panorama_width, panorama_table
 
-    chunks: list[rrc.Chunk] = [c for c in read_chunks(panorama_rrd) if c.entity_path == PANO_ENTITY and "VideoStream:sample" in c.to_record_batch().schema.names]
-    rows: list[tuple[int, bytes]] = [
-        (int(time), bytes(sample[0]))
-        for chunk in chunks
-        for time, sample in zip(
-            chunk.to_record_batch().column("video_time").cast(pa.int64()).to_pylist(), chunk.to_record_batch().column("VideoStream:sample").to_pylist(), strict=True
-        )
-    ]
-    first: bytes = min(rows)[1]
-    decoder = av.CodecContext.create("libdav1d", "r")
-    decoded: UInt8[ndarray, "h w"] = (decoder.decode(av.Packet(first)) + decoder.decode(None))[0].to_ndarray(format="gray")  # pyrefly: ignore[missing-attribute]
+    decoded: UInt8[ndarray, "k h w 3"] = decoded_rgb(panorama_rrd, PANO_ENTITY)
+    assert decoded.shape[1:] == (1920, 3840, 3)
     clip = insta360_io.InsvClip(str(converted.clip))
-    stitch: insta360_io.PanoramaStitch = stitch_from_recording(converted.targets[paths.BASE_LAYER])
-    lenses: list[Iterator[UInt8[ndarray, "h w"]]] = [gray_frames(clip, clip.lens_track[cam], 1, batch_frames=1, threads=1) for cam in range(2)]
-    expected: UInt8[ndarray, "960 1920"] = stitch.panorama(next(lenses[0]), next(lenses[1]))
-    mse: float = float(np.mean((decoded.astype(np.float64) - expected.astype(np.float64)) ** 2))
+    lenses = cameras_from_recording(converted.targets[paths.BASE_LAYER])
+    table = panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, default_panorama_width(lenses.size[0]), SEAM_BAND_DEG)
+    join = PanoramaJoin(table, lenses.size, torch.device("cuda"), flow=True)
+    try:
+        lens0, lens1 = next(lens_pictures(clip, np.zeros(1, dtype=np.int64), torch.device("cuda"), batch=1, batch_frames=1, threads=1))
+        expected: UInt8[ndarray, "h w 3"] = join.panoramas(lens0, lens1)[0].permute(1, 2, 0).cpu().numpy()
+    finally:
+        join.close()
+    mse: float = float(np.mean((decoded[0].astype(np.float64) - expected.astype(np.float64)) ** 2))
     psnr: float = 10.0 * np.log10(255.0**2 / mse)
     print(f"first panorama frame PSNR {psnr:.2f} dB")
     assert psnr > MIN_PSNR_DB

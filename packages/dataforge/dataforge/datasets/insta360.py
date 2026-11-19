@@ -1,6 +1,6 @@
 """Insta360 dual-fisheye ``.insv`` clips: one base recording per clip, and on request a derived panorama layer.
 
-The clip is read by ``insta360_io`` (packages/insta360-io: kornia-staging's ``.insv`` reader and CPU stitch). Its two
+The clip is read by ``insta360_io`` (packages/insta360-io: kornia-staging's ``.insv`` reader). Its two
 HEVC lens tracks are remuxed, not re-encoded: each sample becomes an Annex B access unit with the parameter sets in
 front of every IRAP. ``cam_00`` and ``cam_01`` are lens 0 and lens 1, whichever track holds them (``stream_id``).
 
@@ -33,12 +33,15 @@ noise) is a measured record in ``insta360_profiles.toml``, selected by the clip'
 (from the exposure stamps) and readout; a clip outside every profile's measured mode is refused, naming the property
 that differs. The IMU noise model is a placeholder, marked as such in its ``source``.
 
-Panorama layer (``--panorama``; off by default). ``panorama`` holds the 1920x960 equirectangular panorama at
-``/world/rig_00/pano``, stitched on the CPU from the two lens images of every frameset and encoded AV1 on NVENC, on
-the frame times. It is a derived output: nothing reads it as input, slam-rs tracks the two lens cameras of the base,
-and the lens brightness steps at the seams are not corrected. The stitch reads the two cameras from the base
-recording as written (float32 statics), so a later ``--panorama`` run adds the layer beside an existing base without
-writing the base again. On clip B (X4 Air, 1920) the base alone takes about 13 s, with the panorama about 131 s.
+Panorama layer (``--panorama``; off by default). ``panorama`` holds the RGB equirectangular panorama of every
+frameset at ``/world/rig_00/pano`` (``insta360_panorama``: ``W x W/2``, by default ``W`` = twice the lens width, 3840x1920
+at 1920), encoded AV1 on NVENC, on the frame times. Each pixel reads its own lens; in a seam band (``pano_band_deg``,
+default 5 deg either side of the seam plane) the two lenses are blended, on ``pano_device`` ``cuda`` (default) across an
+optical-flow seam (NVIDIA's flow engine) so near objects do not ghost, and on ``cpu`` with the plain feather. On
+``cuda`` the stage stays on the GPU: NVDEC decode, remap, flow, blend, NVENC from device memory. It is a derived
+output: nothing reads it as input, slam-rs tracks the two lens cameras of the base, and the lens brightness is not
+matched beyond the feather. The tables come from the base recording's two cameras as written (float32 statics), so a
+later ``--panorama`` run adds the layer beside an existing base without writing the base again.
 
 Cube layer (``--cube``; off by default). ``cube`` holds the six-face cubemap of ``insta360_cube`` for every
 ``cube_stride``-th frameset: ``N x N`` pinholes at ONE centre (the midpoint of the two lens centres), cube axes = camera
@@ -49,12 +52,13 @@ the node, a static face-from-IMU ``Transform3D`` (``ChildFromParent``), a plain 
 ``MeiCamera.project``, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (default) the
 stage stays on the GPU: NVDEC decode, one remap per face, NVENC from device memory; ``cpu`` runs the same code on the CPU.
 
-Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)``
-(pixel centres at integers) looks along longitude ``lon = (u + 0.5) pi / 960 - pi / 2``, ``lon = atan2(x, z)`` in
-``E``, and latitude ``lat = (v + 0.5) pi / 960 - pi / 2``, ``+y`` down: the left half is camera 0's hemisphere (centre
-column 480 = camera 0's ``+Z``), the right half camera 1's (column 1440 = ``-Z``). Each half is stitched from its own
-camera centre (only camera 1's rotation in camera 0 enters the tables), so the panorama ignores the lens-centre
-baseline: 33.3 mm on the X4 Air, 31.9 mm on the X5.
+Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)`` of a
+``W``-wide panorama (pixel centres at integers) looks along longitude ``lon = (u + 0.5) 2 pi / W - pi / 2``,
+``lon = atan2(x, z)`` in ``E``, and latitude ``lat = (v + 0.5) 2 pi / W - pi / 2``, ``+y`` down: the left half is camera
+0's hemisphere (centre column ``W/4`` = camera 0's ``+Z``), the right half camera 1's (column ``3W/4`` = ``-Z``). Both
+lenses are read from the rig centre (only camera 1's rotation in camera 0 enters the tables), so outside the seam band
+the panorama ignores the lens-centre baseline (33.3 mm on the X4 Air, 31.9 mm on the X5); in the band the flow seam
+takes it up.
 
 From the native poses to the panorama. ``E`` is fixed in the rig: ``T_cam0_E = (I, c1 / 2)``, with ``c1`` camera 1's
 centre in camera 0 (the translation of ``cam0_T_cam1``, from the ``cam_00`` and ``cam_01`` ``Transform3D``s,
@@ -98,10 +102,11 @@ from torch import Tensor
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
+from dataforge.datasets import insta360_panorama
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_camera_source, log_imu, log_rig_node, log_video_stream, time_column
-from dataforge.video_encoding import NVENC_PRESET, FrameSource, encode_frames_to_mp4, nvenc_av1_options, nvenc_slot, work_dir
+from dataforge.video_encoding import NVENC_PRESET, nvenc_av1_options, nvenc_slot, work_dir
 
 RIG: int = 0
 """One rig per clip."""
@@ -109,12 +114,10 @@ PANORAMA_LAYER: str = "panorama"
 """The derived panorama, written only under ``--panorama``: an AV1 ``VideoStream`` at ``PANO_ENTITY`` on the frame times."""
 PANO_ENTITY: str = f"{schema.rig_path(RIG)}/pano"
 """Where the panorama layer puts its video."""
-PANORAMA_SIZE: tuple[int, int] = (1920, 960)
-"""Width and height of ``insta360_io.PanoramaStitch.panorama``."""
 CUBE_LAYER: str = "cube"
 """The cubemap, written only under ``--cube``: six faces per sampled frameset, ``cam_02 .. cam_07``."""
-CUBE_BATCH_PIXELS: int = 16 * 1920 * 1920
-"""Lens pixels the cube layer decodes, joins and encodes per step: 16 framesets at 1920, 4 at 3840."""
+LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
+"""Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 CUBE_WINDOW_SAMPLES: int = 1024
 """Samples per lens decoder window of the cube layer (about 150 MB of HEVC at 1920); a window re-decodes at most the GOP
 before its first picture."""
@@ -288,18 +291,6 @@ def imu_from_lens(lens: insta360_io.InsvLens, imu_from_pano: Float64[ndarray, "3
     return pose
 
 
-def gray_frames(clip: insta360_io.InsvClip, track: int, frames: int, *, batch_frames: int, threads: int) -> Iterator[UInt8[ndarray, "h w"]]:
-    """The first ``frames`` pictures of one lens track as C-contiguous ``gray8``, read ``batch_frames`` samples at a time.
-
-    ``reformat(format="gray8")`` as slam-rs's feed decodes, so the panorama is stitched from the pixels the tracker sees.
-    """
-    for frame in _hevc_pictures(clip, track, frames, batch_frames=batch_frames, threads=threads):
-        converted: av.VideoFrame = frame.reformat(format="gray8")
-        plane = converted.planes[0]
-        padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(converted.height, plane.line_size)
-        yield padded[:, : converted.width].copy()
-
-
 def _hevc_pictures(clip: insta360_io.InsvClip, track: int, frames: int, *, batch_frames: int, threads: int) -> Iterator[av.VideoFrame]:
     """The pictures of the first ``frames`` samples of one lens track, read ``batch_frames`` samples at a time."""
     decoder = av.CodecContext.create("hevc", "r")
@@ -364,13 +355,6 @@ def cameras_from_recording(base: Path) -> LensCameras:
         cam_T_rig.append(pose)
     width, height = (int(v) for v in statics[f"{schema.pinhole_path(RIG, 0)}:Pinhole:resolution"][0])  # pyrefly: ignore[bad-index]
     return LensCameras(cameras=cameras, lens_from_rig=cam_T_rig, size=(width, height))
-
-
-def stitch_from_recording(base: Path) -> insta360_io.PanoramaStitch:
-    """The panorama stitch of a base recording's two cameras; camera 1's pose in camera 0 is ``cam0_T_rig * cam1_T_rig^-1``."""
-    lenses: LensCameras = cameras_from_recording(base)
-    cam0_T_cam1: Float64[ndarray, "4 4"] = lenses.lens_from_rig[0] @ np.linalg.inv(lenses.lens_from_rig[1])
-    return insta360_io.PanoramaStitch(lenses.cameras[0], lenses.cameras[1], cam0_T_cam1.tolist(), lenses.size)
 
 
 def rgb_frames(clip: insta360_io.InsvClip, track: int, indices: Int64[ndarray, " k"], *, batch_frames: int, threads: int) -> Iterator[UInt8[ndarray, "h w 3"]]:
@@ -450,8 +434,8 @@ def cube_indices(frames: int, stride: int, limit: int | None) -> Int64[ndarray, 
     return np.arange(0, frames, stride, dtype=np.int64)[:limit]
 
 
-def encode_face_videos(faces: Iterable[UInt8[Tensor, "f b 3 n n"]], videos: list[Path], *, size: int, gop: int, cq: int, device: torch.device) -> int:
-    """Encode batches of ``size`` x ``size`` RGB faces into one AV1 mp4 per face, one NVENC session each, fed from ``device``.
+def encode_videos(streams: Iterable[UInt8[Tensor, "f b 3 h w"]], videos: list[Path], *, width: int, height: int, gop: int, cq: int, device: torch.device) -> int:
+    """Encode batches of ``width`` x ``height`` RGB pictures into one AV1 mp4 per stream (cube face, panorama), one NVENC session each, fed from ``device``.
 
     Every encoder slot is reserved before the first encoder opens: a busy host waits for all of them at once instead of
     opening some encoders and stalling the rest.
@@ -460,20 +444,20 @@ def encode_face_videos(faces: Iterable[UInt8[Tensor, "f b 3 n n"]], videos: list
         Frames each encoder took.
 
     Raises:
-        ValueError: If ``DATAFORGE_NVENC_SLOTS`` is below the number of faces.
+        ValueError: If ``DATAFORGE_NVENC_SLOTS`` is below the number of streams.
     """
     from torchcodec.encoders import Encoder
 
     fed: int = 0
     with nvenc_slot(len(videos)), contextlib.ExitStack() as opened:
-        streams = []
+        encoders = []
         for video in videos:
             encoder = Encoder()
-            streams.append(encoder.add_video(height=size, width=size, frame_rate=CUBE_FPS, device=device, codec="av1_nvenc", preset=NVENC_PRESET, extra_options=nvenc_av1_options(gop=gop, cq=cq)))
+            encoders.append(encoder.add_video(height=height, width=width, frame_rate=CUBE_FPS, device=device, codec="av1_nvenc", preset=NVENC_PRESET, extra_options=nvenc_av1_options(gop=gop, cq=cq)))
             opened.enter_context(encoder.open_file(video))
-        for batch in faces:
-            for stream, face in zip(streams, batch, strict=True):
-                stream.add_frames(face)
+        for batch in streams:
+            for encoder_stream, pictures in zip(encoders, batch, strict=True):
+                encoder_stream.add_frames(pictures)
             fed += batch.shape[1]
     return fed
 
@@ -586,10 +570,17 @@ class Insta360Config(FrameLimitedConfig):
     batch_frames: int = 300
     """Samples read and sent per call, so a clip is never held in memory whole."""
     panorama: bool = False
-    """Also write the panorama layer (CPU stitch + AV1 NVENC, about 10x the base's time). Run again with it to add the
-    layer beside bases already written."""
+    """Also write the panorama layer (RGB equirectangular, flow seam, AV1 NVENC). Run again with it to add the layer
+    beside bases already written."""
+    pano_width: int | None = None
+    """Panorama width ``W`` (a multiple of 32; height ``W/2``); None = twice the lens width, its own density (3840 at 1920)."""
+    pano_band_deg: float = insta360_panorama.SEAM_BAND_DEG
+    """Half-width of the seam band, degrees either side of the seam plane, where the two lenses are blended."""
+    pano_device: Literal["cuda", "cpu"] = "cuda"
+    """Where the panorama is decoded and joined: ``cuda`` (NVDEC, CUDA remap, flow seam on NVOF, NVENC from device
+    memory) or ``cpu`` (PyAV, ``cv2.remap``, the band blended without flow)."""
     decode_threads: int = 4
-    """PyAV threads per lens decoder of the panorama layer, and of the cube layer on ``cpu``."""
+    """PyAV threads per lens decoder of the panorama and cube layers on ``cpu``."""
     pano_cq: int = 34
     """NVENC constant-quality target of the panorama: a viewing layer, not an analysis input."""
     pano_gop: int = 30
@@ -738,27 +729,47 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         )
 
     def write_panorama(self, recording: rr.RecordingStream, capture: Capture, base: Path) -> None:
-        """Stitch every frameset's two lens images into the panorama (frame ``E``, module docstring) and log it as AV1 on the frame times.
+        """Join every frameset's two lens images into the panorama (frame ``E``, module docstring) and log it as AV1 on the frame times.
 
-        The stitch is built from the two cameras as the base recording states them (``stitch_from_recording``), so it
-        is the stitch of anything else that reads that recording.
+        The tables come from the two cameras as the base recording states them (``cameras_from_recording``). On
+        ``pano_device`` ``cuda`` no picture leaves the GPU: NVDEC, remap, flow seam, NVENC.
         """
         clip: insta360_io.InsvClip = capture.clip
         frames: int = int(capture.frame_ns.size)
-        stitch: insta360_io.PanoramaStitch = stitch_from_recording(base)
-        lens0, lens1 = (
-            gray_frames(clip, clip.lens_track[cam], frames, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for cam in range(2)
+        lenses: LensCameras = cameras_from_recording(base)
+        width: int = self.config.pano_width or insta360_panorama.default_panorama_width(lenses.size[0])
+        table: insta360_panorama.PanoramaTable = insta360_panorama.panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, width, self.config.pano_band_deg)
+        device: torch.device = torch.device(self.config.pano_device)
+        seam: str = "flow" if device.type == "cuda" else "blend"
+        rr.log(
+            PANO_ENTITY,
+            rr.AnyValues(video_codec="av1", cq=self.config.pano_cq, gop=self.config.pano_gop, width=width, height=width // 2, seam=seam, seam_band_deg=self.config.pano_band_deg),
+            static=True,
+            recording=recording,
         )
-        panoramas: Iterator[bytes] = (stitch.panorama(a, b).tobytes() for a, b in zip(lens0, lens1, strict=True))
-        width, height = PANORAMA_SIZE
-        with work_dir("insta360-pano-") as work:
+        join = insta360_panorama.PanoramaJoin(table, lenses.size, device, flow=seam == "flow")
+        with work_dir("insta360-pano-") as work, contextlib.closing(join):
             video: Path = work / "pano.mp4"
-            with self.timer.stage("encode"):
-                # fps is the container's nominal rate only; log_video_stream puts every sample on its frame time.
-                encode_frames_to_mp4(
-                    panoramas, video, source=FrameSource("gray8", width=width, height=height), fps=30, gop=self.config.pano_gop, cq=self.config.pano_cq
+            with self.timer.stage("panorama"):
+                pictures = lens_pictures(
+                    clip,
+                    np.arange(frames, dtype=np.int64),
+                    device,
+                    batch=max(1, LENS_BATCH_PIXELS // (lenses.size[0] * lenses.size[1])),
+                    batch_frames=self.config.batch_frames,
+                    threads=self.config.decode_threads,
                 )
-            rr.log(PANO_ENTITY, rr.AnyValues(video_codec="av1", cq=self.config.pano_cq, gop=self.config.pano_gop), static=True, recording=recording)
+                fed: int = encode_videos(
+                    (join.panoramas(lens0, lens1)[None] for lens0, lens1 in pictures),
+                    [video],
+                    width=width,
+                    height=width // 2,
+                    gop=self.config.pano_gop,
+                    cq=self.config.pano_cq,
+                    device=device,
+                )
+            if fed != frames:
+                raise ValueError(f"the panorama encoder took {fed} frames for {frames} framesets")
             samples: int = log_video_stream(recording, video, PANO_ENTITY, times_ns=capture.frame_ns - capture.start_ns)
         if samples != frames:
             raise ValueError(f"the panorama holds {samples} frames for {frames} framesets")
@@ -807,12 +818,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
             with self.timer.stage("cube:faces"):
                 pictures = lens_pictures(
-                    clip, indices, device, batch=max(1, CUBE_BATCH_PIXELS // (lenses.size[0] * lenses.size[1])), batch_frames=self.config.batch_frames, threads=self.config.decode_threads
+                    clip, indices, device, batch=max(1, LENS_BATCH_PIXELS // (lenses.size[0] * lenses.size[1])), batch_frames=self.config.batch_frames, threads=self.config.decode_threads
                 )
-                fed: int = encode_face_videos(
+                fed: int = encode_videos(
                     (join.faces(lens0, lens1) for lens0, lens1 in pictures),
                     videos,
-                    size=size,
+                    width=size,
+                    height=size,
                     gop=self.config.cube_gop,
                     cq=self.config.cube_cq,
                     device=device,
