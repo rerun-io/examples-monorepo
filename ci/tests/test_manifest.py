@@ -21,6 +21,16 @@ def test_every_feature_declares_platforms() -> None:
     assert not missing, "Features without platforms:\n" + "\n".join(missing)
 
 
+def test_one_torchcodec_and_one_ffmpeg() -> None:
+    """Only feature.torchcodec declares torchcodec; every environment but robocap-recorder composes feature.ffmpeg."""
+    declaring: list[str] = sorted(name for name, feature in MANIFEST["feature"].items() if "torchcodec" in feature.get("dependencies", {}))
+    assert declaring == ["torchcodec"], f"torchcodec declared outside feature.torchcodec: {declaring}"
+    missing: list[str] = sorted(
+        name for name, environment in MANIFEST["environments"].items() if "ffmpeg" not in environment["features"] and name != "robocap-recorder"
+    )
+    assert not missing, "Environments without the ffmpeg feature:\n" + "\n".join(missing)
+
+
 @pytest.fixture(scope="module")
 def pyrefly() -> tuple[dict, set[Path]]:
     """pyrefly.toml plus its expanded project-includes, read once for all package cases."""
