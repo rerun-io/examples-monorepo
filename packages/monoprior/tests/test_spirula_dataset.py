@@ -27,7 +27,7 @@ IMAGES_TXT: str = """# Image list with two lines of data per image:
 
 
 def test_rewrite_points_names_at_jpegs_and_keeps_records() -> None:
-    text, keys, camera_ids = rewrite_image_names(IMAGES_TXT)
+    text, keys, camera_ids = rewrite_image_names(IMAGES_TXT, points_shift_px=0.0)
     lines: list[str] = [line for line in text.splitlines() if not line.startswith("#")]
     assert lines == [
         "0 1 0 0 0 0.1 0.2 0.3 2 cube6_front0/2262305829.jpg",
@@ -46,7 +46,7 @@ def test_rewrite_points_names_at_jpegs_and_keeps_records() -> None:
 
 
 def test_rewrite_handles_empty_points_line_at_end() -> None:
-    _, keys, _ = rewrite_image_names("1 1 0 0 0 0 0 0 1 cube6_up/5\n\n")
+    _, keys, _ = rewrite_image_names("1 1 0 0 0 0 0 0 1 cube6_up/5\n\n", points_shift_px=0.0)
     assert keys == {1: ColmapImageKey("cube6_up", 5)}
 
 
@@ -76,3 +76,19 @@ def test_keep_mask_drops_people_and_pixels_outside_the_lens_field() -> None:
     people = np.array([[0, 1, 0]], dtype=np.uint8)
     np.testing.assert_array_equal(keep_mask(valid, people), [[255, 0, 0]])
     np.testing.assert_array_equal(keep_mask(valid, None), [[255, 255, 0]])
+
+
+def test_exported_observations_stay_on_the_exported_projection() -> None:
+    camera = read_colmap_cameras("2 PINHOLE 800 800 400 400 399.5 399.5\n")[2]
+    point_cam: list[float] = [0.3, -0.2, 2.0]  # identity pose: world = camera frame
+    u: float = 400 * 0.3 / 2.0 + 399.5
+    v: float = 400 * -0.2 / 2.0 + 399.5
+    images_txt: str = f"0 1 0 0 0 0 0 0 2 cube6_front0/5\n{u!r} {v!r} 11\n"
+
+    text, _, _ = rewrite_image_names(images_txt, points_shift_px=COLMAP_PIXEL_CENTRE_SHIFT_PX)
+    fx, fy, cx, cy = (float(value) for value in colmap_camera_line(camera, COLMAP_PIXEL_CENTRE_SHIFT_PX).split()[4:])
+    x, y, point_id = text.splitlines()[-1].split()
+
+    assert point_id == "11"
+    assert float(x) == pytest.approx(fx * point_cam[0] / point_cam[2] + cx, abs=1e-9)
+    assert float(y) == pytest.approx(fy * point_cam[1] / point_cam[2] + cy, abs=1e-9)
