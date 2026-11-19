@@ -12,4 +12,4 @@ pub mod database;
 pub mod hash_bow;
 pub mod vocabulary;
 
-pub use database::{Database, EntryId, QueryResult};
+pub use database::{l1_similarity_matrix, Database, EntryId, QueryResult};

@@ -12,8 +12,8 @@
 //!   sums fixed chunks in a fixed order);
 //! * greedy descent to a leaf word, as DBoW2's `transform` and kornia-bow's `traverse` do;
 //! * [`tf_idf`]: term counts weighted by `ln(n_images / document frequency)`, L1-normalized, ready for
-//!   [`crate::Database`] and [`BoW::l1_similarity`];
-//! * [`similarity_matrix`]: every pair's DBoW2 L1 score at once, the per-run retrieval index.
+//!   [`crate::Database`], [`crate::l1_similarity_matrix`] (every pair's score at once, the per-run retrieval index)
+//!   and [`BoW::l1_similarity`].
 //!
 //! Descriptors are `[f32; D]` rows, the layout [`kornia_bow::metric::Feature<f32, D>`] dereferences to, so a
 //! C-contiguous `n x D` float32 buffer is borrowed with `<[f32]>::as_chunks::<D>()` instead of copied.
@@ -460,56 +460,6 @@ pub fn tf_idf<W: AsRef<[u32]> + Sync>(images: &[W]) -> Vec<BoW> {
             bow
         })
         .collect()
-}
-
-/// The dense `n x n` DBoW2 L1 score matrix (row-major) of a set of images, from the words of each image's
-/// descriptors: [`tf_idf`] bags, then `s(q, d) = -0.5 * sum over shared words of (|q_w - d_w| - |q_w| - |d_w|)`,
-/// clamped to `[0, 1]`. The diagonal is 1.0; an empty bag scores 0 against every other image.
-///
-/// The scores equal [`crate::Database::query`]'s on the same bags, bit for bit: the same terms are summed in f64 in
-/// the same order (query words in word order, entries in image order). Each row is one pass over the inverted lists
-/// of its words into a dense per-thread accumulator, so a row costs the postings it touches plus `n`, with no
-/// hashing and no sort; rows run in parallel.
-///
-/// ```
-/// use kornia_staging_bow::vocabulary::similarity_matrix;
-///
-/// let scores = similarity_matrix(&[vec![1, 2], vec![1, 3], vec![9]]);
-/// assert_eq!(scores[0], 1.0); // diagonal
-/// assert_eq!(scores[1], scores[3]); // symmetric
-/// assert_eq!(scores[2], 0.0); // no shared word
-/// ```
-pub fn similarity_matrix<W: AsRef<[u32]> + Sync>(images: &[W]) -> Vec<f32> {
-    let bows = tf_idf(images);
-    let n = bows.len();
-    // Inverted lists in image order, without weight-0 words (as the Database indexes them).
-    let mut inverted: HashMap<u32, Vec<(usize, f32)>> = HashMap::new();
-    for (entry, bow) in bows.iter().enumerate() {
-        for &(word, weight) in bow.0.iter().filter(|&&(_, w)| w != 0.0) {
-            inverted.entry(word).or_default().push((entry, weight));
-        }
-    }
-    let mut scores = vec![0.0f32; n * n];
-    if n == 0 {
-        return scores;
-    }
-    scores.par_chunks_mut(n).enumerate().for_each_init(
-        || vec![0.0f64; n],
-        |sums, (query, row)| {
-            sums.fill(0.0);
-            for &(word, q) in bows[query].0.iter().filter(|&&(_, w)| w != 0.0) {
-                for &(entry, d) in inverted.get(&word).into_iter().flatten() {
-                    let (q, d) = (f64::from(q), f64::from(d));
-                    sums[entry] += (q - d).abs() - q.abs() - d.abs();
-                }
-            }
-            for (score, &sum) in row.iter_mut().zip(sums.iter()) {
-                *score = ((-sum / 2.0) as f32).clamp(0.0, 1.0);
-            }
-            row[query] = 1.0;
-        },
-    );
-    scores
 }
 
 #[cfg(test)]

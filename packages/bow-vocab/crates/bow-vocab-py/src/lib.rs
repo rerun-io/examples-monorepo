@@ -6,7 +6,8 @@
 //! them (or to memory they alias) during a call. A wrong width or a non-C-contiguous array raises `ValueError`; an
 //! array of another dtype (float64, say) raises `TypeError` from PyO3's argument extraction.
 
-use kornia_staging_bow::vocabulary::{similarity_matrix, Vocabulary as Tree, VocabularyConfig};
+use kornia_staging_bow::l1_similarity_matrix;
+use kornia_staging_bow::vocabulary::{tf_idf, Vocabulary as Tree, VocabularyConfig};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -144,7 +145,7 @@ impl Vocabulary {
             let data: Vec<&[[f32; D]]> = images.iter().map(rows::<D>).collect::<PyResult<_>>()?;
             py.detach(|| {
                 let words: Vec<Vec<u32>> = data.par_iter().map(|image| tree.words(image)).collect();
-                similarity_matrix(&words)
+                l1_similarity_matrix(&tf_idf(&words))
             })
         });
         PyArray1::from_vec(py, scores).reshape([n, n])

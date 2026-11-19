@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
-use crate::Database;
+use crate::{l1_similarity_matrix, Database};
 
 /// `per_cluster` points around each of `centers`, jittered by a seeded generator within +-0.05.
 fn clustered<const D: usize>(centers: &[[f32; D]], per_cluster: usize, seed: u64) -> Vec<[f32; D]> {
@@ -71,7 +71,7 @@ fn same_seed_same_tree_words_and_scores_on_1_and_8_threads() {
         pool.install(|| {
             let vocabulary = Vocabulary::train(&data, &cfg).unwrap();
             let words: Vec<Vec<u32>> = images.iter().map(|image| vocabulary.words(image)).collect();
-            let scores = similarity_matrix(&words);
+            let scores = l1_similarity_matrix(&tf_idf(&words));
             (vocabulary, words, scores)
         })
     };
@@ -232,7 +232,7 @@ mod properties {
         /// The L1 score is symmetric and in [0, 1], and a bag scores 1 against itself. An image whose every word was
         /// dropped has an empty bag: the Database never returns it (it has no word to share), while kornia-bow's
         /// `l1_similarity` reads it as `1 - |q - d|_1 / 2` (1 against another empty bag, 0.5 against any other);
-        /// [`similarity_matrix`] scores it 0, as the Database does.
+        /// [`l1_similarity_matrix`] scores it 0, as the Database does.
         #[test]
         fn score_is_symmetric_bounded_and_one_on_itself(images in images()) {
             let bows = tf_idf(&images);
@@ -283,12 +283,12 @@ mod properties {
             }
         }
 
-        /// The dense matrix equals the Database's scores on the same bags: symmetric, diagonal 1, in [0, 1], and an
-        /// empty bag scores 0 against every other image.
+        /// The dense matrix equals the Database's scores on the same bags (exactly above the diagonal), is exactly
+        /// symmetric, 1 on the diagonal, in [0, 1], and an empty bag scores 0 against every other image.
         #[test]
         fn similarity_matrix_equals_database_scores(images in images()) {
-            let scores = similarity_matrix(&images);
             let bows = tf_idf(&images);
+            let scores = l1_similarity_matrix(&bows);
             let n = bows.len();
             prop_assert_eq!(scores.len(), n * n);
             let mut database = Database::new();
@@ -301,12 +301,15 @@ mod properties {
                     expected[hit.entry as usize] = hit.score.clamp(0.0, 1.0);
                 }
                 expected[q] = 1.0;
-                prop_assert_eq!(&scores[q * n..(q + 1) * n], &expected[..]);
+                // Bit-equal above the diagonal; below it the mirror holds the other order's sum (last-bit apart).
+                prop_assert_eq!(&scores[q * n + q..(q + 1) * n], &expected[q..]);
+                for e in 0..q {
+                    prop_assert!((scores[q * n + e] - expected[e]).abs() < 1e-6);
+                }
                 for d in 0..n {
                     let s = scores[q * n + d];
                     prop_assert!((0.0..=1.0).contains(&s));
-                    // f64 sums of `|q-d| - |q| - |d|` and `|d-q| - |d| - |q|` can differ in the last bit.
-                    prop_assert!((s - scores[d * n + q]).abs() < 1e-6);
+                    prop_assert_eq!(s, scores[d * n + q]);
                     if q != d && (bows[q].0.is_empty() || bows[d].0.is_empty()) {
                         prop_assert_eq!(s, 0.0);
                     }

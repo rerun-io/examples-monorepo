@@ -1,5 +1,6 @@
 //! Per-run vocabulary build, sized like a retrieval index over a video: train (a 200 000-descriptor sample, 10 x 5,
-//! 10 Lloyd iterations), assign every descriptor to its word, and the dense score matrix ([`similarity_matrix`]).
+//! 10 Lloyd iterations), assign every descriptor to its word, and the dense score matrix ([`tf_idf`] then
+//! [`l1_similarity_matrix`]).
 //!
 //! Synthetic clustered data: `n_images x 2 048` 128-d descriptors. Image `i` draws its descriptors around 2 048
 //! centers picked from a window of 8 192 consecutive centers starting at `16 * i`, so neighbouring images share most of
@@ -9,7 +10,8 @@
 //! Threads: rayon's default pool; set `RAYON_NUM_THREADS` to compare.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use kornia_staging_bow::vocabulary::{similarity_matrix, Vocabulary, VocabularyConfig};
+use kornia_staging_bow::l1_similarity_matrix;
+use kornia_staging_bow::vocabulary::{tf_idf, Vocabulary, VocabularyConfig};
 use rand::rngs::ChaCha8Rng;
 use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
@@ -74,7 +76,7 @@ fn bench_size(c: &mut Criterion, n_images: usize) {
     });
     group.bench_function("assign", |b| b.iter(|| assign(&vocabulary, &images)));
     group.bench_function("similarity_matrix", |b| {
-        b.iter(|| similarity_matrix(&words))
+        b.iter(|| l1_similarity_matrix(&tf_idf(&words)))
     });
     group.finish();
 }
