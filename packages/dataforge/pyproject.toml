@@ -34,6 +34,8 @@ paths = ["dataforge", "tests"]
 ignore_names = [
     # Fixture the Insta360 golden test reaches through request.getfixturevalue.
     "insv_x5_clip",
+    # Fixture the cube encoder-slot tests take through pytest.mark.usefixtures.
+    "slot_encoder",
     # Shared SelfCap API used by selfcap-curate and selfcap-soma (outside these scan paths).
     "SOMA_XLO", "SOMA_METRICS", "SOMA_JOINTS", "SOMA_EARS", "SAPIENS2_XYZ",
     "SOMA_LAYER",  # Public layer-name contract retained by the SelfCap schema review.
