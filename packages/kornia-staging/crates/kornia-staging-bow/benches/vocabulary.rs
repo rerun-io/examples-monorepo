@@ -47,19 +47,19 @@ fn images(n_images: usize) -> Vec<Vec<[f32; DIM]>> {
 }
 
 /// An even-stride training sample of about `SAMPLE` descriptors, the same quota from every image.
-fn sample(images: &[Vec<[f32; DIM]>]) -> Vec<[f32; DIM]> {
+fn sample(images: &[Vec<[f32; DIM]>]) -> Vec<f32> {
     let quota = SAMPLE.div_ceil(images.len()).max(1);
     let step = (PER_IMAGE / quota).max(1);
     images
         .iter()
-        .flat_map(|image| image.iter().step_by(step).take(quota).copied())
+        .flat_map(|image| image.iter().step_by(step).take(quota).flatten().copied())
         .collect()
 }
 
-fn assign(vocabulary: &Vocabulary<DIM>, images: &[Vec<[f32; DIM]>]) -> Vec<Vec<u32>> {
+fn assign(vocabulary: &Vocabulary, images: &[Vec<[f32; DIM]>]) -> Vec<Vec<u32>> {
     images
         .par_iter()
-        .map(|image| vocabulary.words(image))
+        .map(|image| vocabulary.words(image.as_flattened()))
         .collect()
 }
 
@@ -67,12 +67,12 @@ fn bench_size(c: &mut Criterion, n_images: usize) {
     let images = images(n_images);
     let config = VocabularyConfig::default();
     let training = sample(&images);
-    let vocabulary = Vocabulary::train(&training, &config).expect("train");
+    let vocabulary = Vocabulary::train(&training, DIM, &config).expect("train");
     let words = assign(&vocabulary, &images);
     let mut group = c.benchmark_group(format!("vocabulary_{n_images}_images"));
     group.sample_size(10);
     group.bench_function("train", |b| {
-        b.iter(|| Vocabulary::train(&training, &config).expect("train"))
+        b.iter(|| Vocabulary::train(&training, DIM, &config).expect("train"))
     });
     group.bench_function("assign", |b| b.iter(|| assign(&vocabulary, &images)));
     group.bench_function("similarity_matrix", |b| {

@@ -19,6 +19,14 @@ fn clustered<const D: usize>(centers: &[[f32; D]], per_cluster: usize, seed: u64
     points
 }
 
+/// Train on `N`-wide rows (the vocabulary reads them flat).
+fn train<const N: usize>(
+    data: &[[f32; N]],
+    cfg: &VocabularyConfig,
+) -> Result<Vocabulary, VocabularyError> {
+    Vocabulary::train(data.as_flattened(), N, cfg)
+}
+
 fn config(branching: usize, depth: usize, iterations: usize, seed: u64) -> VocabularyConfig {
     VocabularyConfig {
         branching,
@@ -39,20 +47,28 @@ fn random_points<const D: usize>(n: usize, seed: u64) -> Vec<[f32; D]> {
 fn rejects_invalid_settings() {
     let data = random_points::<4>(10, 0);
     assert_eq!(
-        Vocabulary::train(&data, &config(1, 2, 1, 0)).unwrap_err(),
+        train(&data, &config(1, 2, 1, 0)).unwrap_err(),
         VocabularyError::Branching(1)
     );
     assert_eq!(
-        Vocabulary::train(&data, &config(2, 0, 1, 0)).unwrap_err(),
+        train(&data, &config(2, 0, 1, 0)).unwrap_err(),
         VocabularyError::Depth(0)
     );
     assert_eq!(
-        Vocabulary::train(&data, &config(10, 10, 1, 0)).unwrap_err(),
+        train(&data, &config(10, 10, 1, 0)).unwrap_err(),
         VocabularyError::TooManyWords
     );
     assert_eq!(
-        Vocabulary::<4>::train(&[], &config(2, 2, 1, 0)).unwrap_err(),
+        train::<4>(&[], &config(2, 2, 1, 0)).unwrap_err(),
         VocabularyError::NoTrainingData
+    );
+    assert_eq!(
+        Vocabulary::train(&[0.0; 10], 0, &config(2, 2, 1, 0)).unwrap_err(),
+        VocabularyError::Dimension(0)
+    );
+    assert_eq!(
+        Vocabulary::train(&[0.0; 10], 3, &config(2, 2, 1, 0)).unwrap_err(),
+        VocabularyError::Dimension(3)
     );
 }
 
@@ -69,8 +85,11 @@ fn same_seed_same_tree_words_and_scores_on_1_and_8_threads() {
             .build()
             .unwrap();
         pool.install(|| {
-            let vocabulary = Vocabulary::train(&data, &cfg).unwrap();
-            let words: Vec<Vec<u32>> = images.iter().map(|image| vocabulary.words(image)).collect();
+            let vocabulary = train(&data, &cfg).unwrap();
+            let words: Vec<Vec<u32>> = images
+                .iter()
+                .map(|image| vocabulary.words(image.as_flattened()))
+                .collect();
             let scores = l1_similarity_matrix(&tf_idf(&words));
             (vocabulary, words, scores)
         })
@@ -86,8 +105,8 @@ fn same_seed_same_tree_words_and_scores_on_1_and_8_threads() {
 fn a_different_seed_gives_a_different_tree() {
     // Same seed across thread counts is the proptest `same_seed_same_vocabulary_across_thread_counts`.
     let data = random_points::<8>(5000, 1);
-    let a = Vocabulary::train(&data, &config(4, 3, 5, 42)).unwrap();
-    let b = Vocabulary::train(&data, &config(4, 3, 5, 43)).unwrap();
+    let a = train(&data, &config(4, 3, 5, 42)).unwrap();
+    let b = train(&data, &config(4, 3, 5, 43)).unwrap();
     assert_ne!(a.centroids, b.centroids);
 }
 
@@ -97,12 +116,14 @@ fn lloyd_iterations_recover_jittered_clusters_at_their_means() {
     // (k-means++ alone would leave them on training points).
     let centers = [[0.0f32, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]];
     let data = clustered(&centers, 50, 3);
-    let vocabulary = Vocabulary::train(&data, &config(4, 1, 10, 0)).unwrap();
+    let vocabulary = train(&data, &config(4, 1, 10, 0)).unwrap();
     for (point, center) in data.iter().zip(centers.iter().cycle()) {
         assert_eq!(vocabulary.word(point), vocabulary.word(center));
     }
     for center in &centers {
         let closest = vocabulary.centroids[0]
+            .as_chunks::<2>()
+            .0
             .iter()
             .map(|c| distance(c, center))
             .fold(f32::INFINITY, f32::min);
@@ -113,7 +134,7 @@ fn lloyd_iterations_recover_jittered_clusters_at_their_means() {
 #[test]
 fn word_is_the_greedy_descent() {
     let data = random_points::<6>(3000, 5);
-    let vocabulary = Vocabulary::train(&data, &config(3, 3, 4, 9)).unwrap();
+    let vocabulary = train(&data, &config(3, 3, 4, 9)).unwrap();
     assert_eq!(vocabulary.depth(), 3);
     assert_eq!(vocabulary.n_words(), 27);
     for point in random_points::<6>(200, 6) {
@@ -123,14 +144,15 @@ fn word_is_the_greedy_descent() {
             // `min_by` keeps the first of equal elements: ties go to the first slot.
             node = children
                 .min_by(|&a, &b| {
-                    distance(&point, &centroids[a]).total_cmp(&distance(&point, &centroids[b]))
+                    distance(&point, &centroids[a * 6..(a + 1) * 6])
+                        .total_cmp(&distance(&point, &centroids[b * 6..(b + 1) * 6]))
                 })
                 .unwrap();
         }
         assert_eq!(vocabulary.word(&point) as usize, node);
     }
     assert_eq!(
-        vocabulary.words(&data),
+        vocabulary.words(data.as_flattened()),
         data.iter().map(|p| vocabulary.word(p)).collect::<Vec<_>>()
     );
 }
@@ -138,10 +160,10 @@ fn word_is_the_greedy_descent() {
 #[test]
 fn shallow_sample_lowers_the_depth_and_small_nodes_keep_their_points() {
     let data = random_points::<2>(30, 2);
-    let vocabulary = Vocabulary::train(&data, &config(10, 5, 3, 0)).unwrap();
+    let vocabulary = train(&data, &config(10, 5, 3, 0)).unwrap();
     assert_eq!(vocabulary.depth(), 1); // 10^2 > 30
     let five = random_points::<2>(5, 4);
-    let vocabulary = Vocabulary::train(&five, &config(10, 1, 3, 0)).unwrap();
+    let vocabulary = train(&five, &config(10, 1, 3, 0)).unwrap();
     for (i, point) in five.iter().enumerate() {
         assert_eq!(vocabulary.word(point) as usize, i);
     }
@@ -150,7 +172,7 @@ fn shallow_sample_lowers_the_depth_and_small_nodes_keep_their_points() {
 #[test]
 fn duplicates_do_not_break_training() {
     let data = vec![[1.0f32, 2.0]; 100];
-    let vocabulary = Vocabulary::train(&data, &config(4, 2, 5, 0)).unwrap();
+    let vocabulary = train(&data, &config(4, 2, 5, 0)).unwrap();
     let word = vocabulary.word(&[1.0, 2.0]);
     assert!((word as usize) < vocabulary.n_words());
 }
@@ -208,16 +230,17 @@ mod properties {
         fn every_word_is_the_first_of_its_equal_slots(
             data in points(400), queries in points(50), branching in 2usize..5, depth in 1usize..4, seed in any::<u64>()
         ) {
-            let vocabulary = Vocabulary::train(&data, &VocabularyConfig { branching, depth, iterations: 3, seed }).unwrap();
+            let vocabulary = train(&data, &VocabularyConfig { branching, depth, iterations: 3, seed }).unwrap();
             let leaves = vocabulary.centroids.last().unwrap();
             for q in data.iter().chain(&queries) {
                 let word = vocabulary.word(q) as usize;
                 prop_assert!(word < vocabulary.n_words());
                 let first_sibling = word - word % branching;
-                let own = distance(q, &leaves[word]);
+                let slot = |i: usize| &leaves[i * 4..(i + 1) * 4];
+                let own = distance(q, slot(word));
                 for sibling in first_sibling..word {
-                    prop_assert!(distance(q, &leaves[sibling]) > own, "slot {} ties or beats word {}", sibling, word);
-                    prop_assert_ne!(leaves[sibling], leaves[word]);
+                    prop_assert!(distance(q, slot(sibling)) > own, "slot {} ties or beats word {}", sibling, word);
+                    prop_assert_ne!(slot(sibling), slot(word));
                 }
             }
         }
@@ -339,7 +362,7 @@ mod properties {
                 }
             }
             let data: Vec<[f32; 3]> = (0..per_cluster).flat_map(|_| centers.iter().copied()).collect();
-            let vocabulary = Vocabulary::train(&data, &VocabularyConfig { branching: n_clusters, depth: 1, iterations: 10, seed }).unwrap();
+            let vocabulary = train(&data, &VocabularyConfig { branching: n_clusters, depth: 1, iterations: 10, seed }).unwrap();
             let words: Vec<u32> = centers.iter().map(|c| vocabulary.word(c)).collect();
             let mut distinct = words.clone();
             distinct.sort_unstable();

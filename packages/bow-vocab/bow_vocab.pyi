@@ -3,8 +3,9 @@
 ``Vocabulary`` trains a tree on a descriptor sample (k-means++ then Lloyd iterations per node; the same seed gives the
 same tree for any thread count) and maps descriptors to words by greedy descent. ``Vocabulary.similarity`` scores
 every pair of a set of images with DBoW2's L1 score ``sum_w min(q_w, d_w)`` over their TF-IDF bags of words
-(``ln(n_images / df)``, L1-normalized). Descriptor arrays must be C-contiguous float32 with 64, 128 or 256 columns;
-they are borrowed, not copied, and read with the GIL released, so do not write to them during a call. A wrong width
+(``ln(n_images / df)``, L1-normalized). Descriptor arrays must be C-contiguous float32, of any width (the tree's,
+after training); they are borrowed, not copied, and read with the GIL released, so do not write to them during a
+call. A wrong width
 or layout (Fortran-ordered, strided) raises ``ValueError``; another dtype (float64) raises ``TypeError``.
 """
 

@@ -1,10 +1,11 @@
 //! The `bow_vocab` Python module: kornia-staging-bow's seeded hierarchical k-means vocabulary for float descriptors
-//! (`kornia_staging_bow::vocabulary`) and the dense DBoW2 L1 score matrix of a set of images.
+//! (`kornia_staging_bow::vocabulary`) and the dense DBoW2 L1 score matrix of a set of images
+//! (`kornia_staging_bow::l1_similarity_matrix`).
 //!
-//! Descriptor arrays are borrowed, not copied: a C-contiguous `n x D` float32 array is read as `n` rows of
-//! `[f32; D]`. `D` is 64, 128 or 256. Rust reads the arrays with the GIL released, so the caller must not write to
-//! them (or to memory they alias) during a call. A wrong width or a non-C-contiguous array raises `ValueError`; an
-//! array of another dtype (float64, say) raises `TypeError` from PyO3's argument extraction.
+//! Descriptor arrays are borrowed, not copied: a C-contiguous `n x dim` float32 array of any width is read in place.
+//! Rust reads the arrays with the GIL released, so the caller must not write to them (or to memory they alias)
+//! during a call. A wrong width or a non-C-contiguous array raises `ValueError`; an array of another dtype (float64,
+//! say) raises `TypeError` from PyO3's argument extraction.
 
 use kornia_staging_bow::l1_similarity_matrix;
 use kornia_staging_bow::vocabulary::{tf_idf, Vocabulary as Tree, VocabularyConfig};
@@ -13,77 +14,49 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-/// Borrow a C-contiguous `n x D` float32 array as `n` rows of `[f32; D]`; refuse any other width or layout (a
-/// Fortran-ordered or strided array would otherwise be read with its rows mixed).
-fn rows<'a, const D: usize>(array: &'a PyReadonlyArray2<'_, f32>) -> PyResult<&'a [[f32; D]]> {
+/// Borrow a C-contiguous float32 array of `dim` columns as its flat row-major values; refuse any other width or
+/// layout (a Fortran-ordered or strided array would otherwise be read with its rows mixed). `dim = None` accepts
+/// any width of at least 1 and returns it.
+fn rows<'a>(
+    array: &'a PyReadonlyArray2<'_, f32>,
+    dim: Option<usize>,
+) -> PyResult<(&'a [f32], usize)> {
     let cols = array.shape()[1];
-    if cols != D {
-        return Err(PyValueError::new_err(format!(
-            "expected {D} columns, got {cols}"
-        )));
+    match dim {
+        Some(d) if d != cols => {
+            return Err(PyValueError::new_err(format!(
+                "expected {d} columns, got {cols}"
+            )))
+        }
+        None if cols == 0 => {
+            return Err(PyValueError::new_err(
+                "descriptors need at least one column",
+            ))
+        }
+        _ => {}
     }
     if !array.is_c_contiguous() {
         return Err(PyValueError::new_err(
             "descriptors must be a C-contiguous float32 array",
         ));
     }
-    let (chunks, rest) = array
+    let values = array
         .as_slice()
-        .map_err(|_| PyValueError::new_err("descriptors must be a C-contiguous float32 array"))?
-        .as_chunks::<D>();
-    debug_assert!(rest.is_empty());
-    Ok(chunks)
-}
-
-/// Train a `D`-dimensional tree on `sample` without the GIL.
-fn train<const D: usize>(
-    py: Python<'_>,
-    sample: &PyReadonlyArray2<'_, f32>,
-    config: &VocabularyConfig,
-) -> PyResult<Tree<D>> {
-    let data = rows::<D>(sample)?;
-    py.detach(|| Tree::train(data, config))
-        .map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-/// The trained tree, for one of the supported descriptor sizes.
-enum Inner {
-    D64(Tree<64>),
-    D128(Tree<128>),
-    D256(Tree<256>),
-}
-
-/// Run `$body` with `$tree` bound to the tree of the matching size and `$d` to that size as a const.
-macro_rules! with_tree {
-    ($inner:expr, $tree:ident, $d:ident, $body:expr) => {
-        match $inner {
-            Inner::D64($tree) => {
-                const $d: usize = 64;
-                $body
-            }
-            Inner::D128($tree) => {
-                const $d: usize = 128;
-                $body
-            }
-            Inner::D256($tree) => {
-                const $d: usize = 256;
-                $body
-            }
-        }
-    };
+        .map_err(|_| PyValueError::new_err("descriptors must be a C-contiguous float32 array"))?;
+    Ok((values, cols))
 }
 
 /// A seeded hierarchical k-means vocabulary over float descriptors, trained once per run.
 #[pyclass(module = "bow_vocab", frozen)]
 struct Vocabulary {
-    inner: Inner,
+    tree: Tree,
 }
 
 #[pymethods]
 impl Vocabulary {
-    /// Train on `sample` (C-contiguous `n x D` float32, D in 64/128/256): k-means++ then up to `iterations` Lloyd
-    /// iterations per node, `branching` children per node, `depth` levels (lowered when the sample cannot fill
-    /// them). The same `seed` gives the same tree for any thread count.
+    /// Train on `sample` (C-contiguous `n x dim` float32): k-means++ then up to `iterations` Lloyd iterations per
+    /// node, `branching` children per node, `depth` levels (lowered when the sample cannot fill them). The same
+    /// `seed` gives the same tree for any thread count.
     #[new]
     #[pyo3(signature = (sample, *, branching, depth, iterations, seed))]
     fn new(
@@ -100,23 +73,17 @@ impl Vocabulary {
             iterations,
             seed,
         };
-        let inner = match sample.as_array().dim().1 {
-            64 => Inner::D64(train::<64>(py, &sample, &config)?),
-            128 => Inner::D128(train::<128>(py, &sample, &config)?),
-            256 => Inner::D256(train::<256>(py, &sample, &config)?),
-            d => {
-                return Err(PyValueError::new_err(format!(
-                    "descriptor size {d} is not supported (64, 128 or 256)"
-                )))
-            }
-        };
-        Ok(Self { inner })
+        let (data, dim) = rows(&sample, None)?;
+        let tree = py
+            .detach(|| Tree::train(data, dim, &config))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self { tree })
     }
 
     /// Size of the word-id range, `branching ** depth` (depth as built).
     #[getter]
     fn n_words(&self) -> usize {
-        with_tree!(&self.inner, tree, _D, tree.n_words())
+        self.tree.n_words()
     }
 
     /// The word of every row of `descriptors`, by greedy descent.
@@ -125,14 +92,12 @@ impl Vocabulary {
         py: Python<'py>,
         descriptors: PyReadonlyArray2<'py, f32>,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        let words = with_tree!(&self.inner, tree, D, {
-            let data = rows::<D>(&descriptors)?;
-            py.detach(|| tree.words(data))
-        });
+        let (data, _) = rows(&descriptors, Some(self.tree.dim()))?;
+        let words = py.detach(|| self.tree.words(data));
         Ok(PyArray1::from_vec(py, words))
     }
 
-    /// The symmetric `n x n` float32 DBoW2 L1 score matrix of `images` (one `n_i x D` float32 array each): every
+    /// The symmetric `n x n` float32 DBoW2 L1 score matrix of `images` (one `n_i x dim` float32 array each): every
     /// descriptor's word, TF-IDF bags (`ln(n_images / df)`, L1-normalized), scores in `[0, 1]`, 1.0 on the diagonal,
     /// 0 for an image whose bag is empty.
     fn similarity<'py>(
@@ -141,12 +106,16 @@ impl Vocabulary {
         images: Vec<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let n = images.len();
-        let scores = with_tree!(&self.inner, tree, D, {
-            let data: Vec<&[[f32; D]]> = images.iter().map(rows::<D>).collect::<PyResult<_>>()?;
-            py.detach(|| {
-                let words: Vec<Vec<u32>> = data.par_iter().map(|image| tree.words(image)).collect();
-                l1_similarity_matrix(&tf_idf(&words))
-            })
+        let data: Vec<&[f32]> = images
+            .iter()
+            .map(|image| rows(image, Some(self.tree.dim())).map(|(values, _)| values))
+            .collect::<PyResult<_>>()?;
+        let scores = py.detach(|| {
+            let words: Vec<Vec<u32>> = data
+                .par_iter()
+                .map(|image| self.tree.words(image))
+                .collect();
+            l1_similarity_matrix(&tf_idf(&words))
         });
         PyArray1::from_vec(py, scores).reshape([n, n])
     }

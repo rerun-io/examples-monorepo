@@ -480,10 +480,12 @@ def test_the_binding_refuses_arrays_it_would_misread() -> None:
     data: Float32[ndarray, "n 128"] = generator.standard_normal((400, 128)).astype(np.float32)
     settings: dict[str, int] = {"branching": 4, "depth": 2, "iterations": 3, "seed": 0}
     vocabulary: Vocabulary = Vocabulary(data, **settings)
-    misread: list[ndarray] = [np.asfortranarray(data), data[:, ::2], np.ascontiguousarray(data[:, :96])]
-    for bad in misread:
+    for misread in (np.asfortranarray(data), data[:, ::2]):
         with pytest.raises(ValueError):
-            Vocabulary(bad, **settings)
+            Vocabulary(misread, **settings)
+    narrow: Float32[ndarray, "n 96"] = np.ascontiguousarray(data[:, :96])
+    assert Vocabulary(narrow, **settings).n_words == 16  # any width trains; the tree's width is then the contract
+    for bad in (np.asfortranarray(data), data[:, ::2], narrow):
         with pytest.raises(ValueError):
             vocabulary.words(bad)
         with pytest.raises(ValueError):

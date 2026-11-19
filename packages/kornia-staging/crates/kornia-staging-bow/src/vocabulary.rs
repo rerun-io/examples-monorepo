@@ -15,8 +15,8 @@
 //!   [`crate::Database`], [`crate::l1_similarity_matrix`] (every pair's score at once, the per-run retrieval index)
 //!   and [`BoW::l1_similarity`].
 //!
-//! Descriptors are `[f32; D]` rows, the layout [`kornia_bow::metric::Feature<f32, D>`] dereferences to, so a
-//! C-contiguous `n x D` float32 buffer is borrowed with `<[f32]>::as_chunks::<D>()` instead of copied.
+//! Descriptors are `dim`-wide rows of a flat row-major `f32` slice, so a C-contiguous `n x dim` float32 buffer of any
+//! width is read without a copy.
 //!
 //! The tree keeps `branching^(level + 1)` centroid slots per level: the children of node `n` are slots
 //! `n * branching .. (n + 1) * branching` of the next level, and a word id is a slot of the last level. A slot no
@@ -72,6 +72,8 @@ pub enum VocabularyError {
     TooManyWords,
     /// Training needs at least one descriptor.
     NoTrainingData,
+    /// The descriptor width must be at least 1 and divide the data length.
+    Dimension(usize),
 }
 
 impl fmt::Display for VocabularyError {
@@ -81,32 +83,41 @@ impl fmt::Display for VocabularyError {
             Self::Depth(d) => write!(f, "depth must be at least 1, got {d}"),
             Self::TooManyWords => write!(f, "branching^depth does not fit a u32 word id"),
             Self::NoTrainingData => write!(f, "no training descriptors"),
+            Self::Dimension(d) => write!(
+                f,
+                "descriptor width {d} is 0 or does not divide the data length"
+            ),
         }
     }
 }
 
 impl std::error::Error for VocabularyError {}
 
-/// A trained hierarchical k-means vocabulary over `D`-dimensional float descriptors (squared L2).
+/// A trained hierarchical k-means vocabulary over `dim`-dimensional float descriptors (squared L2).
+///
+/// Descriptors are rows of a flat row-major `f32` slice (`n * dim` values), so a C-contiguous `n x dim` buffer is
+/// read without a copy, whatever the descriptor width.
 ///
 /// ```
 /// use kornia_staging_bow::vocabulary::{Vocabulary, VocabularyConfig};
 ///
-/// let data: Vec<[f32; 2]> = vec![[0.0, 0.0], [0.1, 0.0], [5.0, 5.0], [5.1, 5.0]];
+/// let data = [0.0f32, 0.0, 0.1, 0.0, 5.0, 5.0, 5.1, 5.0]; // four 2-d rows
 /// let config = VocabularyConfig { branching: 2, depth: 1, iterations: 5, seed: 7 };
-/// let vocabulary = Vocabulary::train(&data, &config).unwrap();
+/// let vocabulary = Vocabulary::train(&data, 2, &config).unwrap();
 /// assert_eq!(vocabulary.word(&[0.05, 0.0]), vocabulary.word(&[0.0, 0.0]));
 /// assert_ne!(vocabulary.word(&[0.0, 0.0]), vocabulary.word(&[5.0, 5.0]));
 /// ```
 #[derive(Clone, Debug)]
-pub struct Vocabulary<const D: usize> {
+pub struct Vocabulary {
+    dim: usize,
     branching: usize,
-    centroids: Vec<Vec<[f32; D]>>,
+    /// Per level, `branching^(level + 1)` centroid slots of `dim` values each, row-major.
+    centroids: Vec<Vec<f32>>,
 }
 
 /// Squared L2 distance.
 #[inline]
-fn distance<const D: usize>(a: &[f32; D], b: &[f32; D]) -> f32 {
+fn distance(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = 0.0f32;
     for (x, y) in a.iter().zip(b) {
         let d = x - y;
@@ -115,12 +126,13 @@ fn distance<const D: usize>(a: &[f32; D], b: &[f32; D]) -> f32 {
     sum
 }
 
-/// Index of the nearest of `centroids`; the first wins ties, so a slot that repeats an earlier one is never chosen.
+/// Index of the nearest of the `dim`-wide rows of `centroids`; the first wins ties, so a slot that repeats an
+/// earlier one is never chosen.
 #[inline]
-fn nearest<const D: usize>(point: &[f32; D], centroids: &[[f32; D]]) -> usize {
+fn nearest(point: &[f32], centroids: &[f32], dim: usize) -> usize {
     let mut best = 0;
     let mut best_distance = f32::INFINITY;
-    for (i, centroid) in centroids.iter().enumerate() {
+    for (i, centroid) in centroids.chunks_exact(dim).enumerate() {
         let d = distance(point, centroid);
         if d < best_distance {
             best_distance = d;
@@ -138,38 +150,41 @@ fn mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// Nearest-centroid labels of `points`, in parallel chunks.
-fn assign<const D: usize>(points: &[[f32; D]], centroids: &[[f32; D]], labels: &mut [u32]) {
+/// Nearest-centroid labels of the `dim`-wide rows of `points`, in parallel chunks.
+fn assign(points: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
     labels
         .par_chunks_mut(CHUNK)
-        .zip(points.par_chunks(CHUNK))
+        .zip(points.par_chunks(CHUNK * dim))
         .for_each(|(l, p)| {
-            for (label, point) in l.iter_mut().zip(p) {
-                *label = nearest(point, centroids) as u32;
+            for (label, point) in l.iter_mut().zip(p.chunks_exact(dim)) {
+                *label = nearest(point, centroids, dim) as u32;
             }
         });
 }
 
-/// k-means++ seeding and up to `iterations` Lloyd iterations of `points` (at least `k` of them) into `k` clusters.
+/// k-means++ seeding and up to `iterations` Lloyd iterations of the `dim`-wide rows of `points` (at least `k` of
+/// them) into `k` clusters.
 ///
-/// Returns the centroids and each point's label (nearest final centroid).
-fn kmeans<const D: usize>(
-    points: &[[f32; D]],
+/// Returns the `k * dim` centroids and each point's label (nearest final centroid).
+fn kmeans(
+    points: &[f32],
+    dim: usize,
     k: usize,
     iterations: usize,
     rng: &mut ChaCha8Rng,
-) -> (Vec<[f32; D]>, Vec<u32>) {
-    let n = points.len();
-    let mut centroids: Vec<[f32; D]> = Vec::with_capacity(k);
-    centroids.push(points[rng.random_range(0..n)]);
+) -> (Vec<f32>, Vec<u32>) {
+    let n = points.len() / dim;
+    let row = |i: usize| &points[i * dim..(i + 1) * dim];
+    let mut centroids: Vec<f32> = Vec::with_capacity(k * dim);
+    centroids.extend_from_slice(row(rng.random_range(0..n)));
     let mut nearest_distance: Vec<f32> = vec![f32::INFINITY; n];
-    while centroids.len() < k {
-        let last = *centroids.last().expect("one centroid");
+    while centroids.len() < k * dim {
+        let last = centroids[centroids.len() - dim..].to_vec();
         nearest_distance
             .par_chunks_mut(CHUNK)
-            .zip(points.par_chunks(CHUNK))
+            .zip(points.par_chunks(CHUNK * dim))
             .for_each(|(d, p)| {
-                for (d, p) in d.iter_mut().zip(p) {
+                for (d, p) in d.iter_mut().zip(p.chunks_exact(dim)) {
                     *d = d.min(distance(p, &last));
                 }
             });
@@ -189,44 +204,44 @@ fn kmeans<const D: usize>(
             // Every point coincides with a centroid already: duplicates collapse, as in DBoW2.
             rng.random_range(0..n)
         };
-        centroids.push(points[chosen]);
+        centroids.extend_from_slice(row(chosen));
     }
 
     let mut labels = vec![0u32; n];
-    assign(points, &centroids, &mut labels);
+    assign(points, &centroids, dim, &mut labels);
     for _ in 0..iterations {
         // Per-chunk sums, then added in chunk order: the same result for any thread count.
-        let partial: Vec<(Vec<[f64; D]>, Vec<usize>)> = points
-            .par_chunks(CHUNK)
+        let partial: Vec<(Vec<f64>, Vec<usize>)> = points
+            .par_chunks(CHUNK * dim)
             .zip(labels.par_chunks(CHUNK))
             .map(|(p, l)| {
-                let mut sums = vec![[0.0f64; D]; k];
+                let mut sums = vec![0.0f64; k * dim];
                 let mut counts = vec![0usize; k];
-                for (point, &label) in p.iter().zip(l) {
-                    let sum = &mut sums[label as usize];
-                    for (s, &x) in sum.iter_mut().zip(point) {
+                for (point, &label) in p.chunks_exact(dim).zip(l) {
+                    let label = label as usize;
+                    for (s, &x) in sums[label * dim..(label + 1) * dim].iter_mut().zip(point) {
                         *s += f64::from(x);
                     }
-                    counts[label as usize] += 1;
+                    counts[label] += 1;
                 }
                 (sums, counts)
             })
             .collect();
-        let mut sums = vec![[0.0f64; D]; k];
+        let mut sums = vec![0.0f64; k * dim];
         let mut counts = vec![0usize; k];
         for (chunk_sums, chunk_counts) in partial {
-            for ((sum, count), (chunk_sum, chunk_count)) in sums
-                .iter_mut()
-                .zip(counts.iter_mut())
-                .zip(chunk_sums.iter().zip(&chunk_counts))
-            {
+            for (count, chunk_count) in counts.iter_mut().zip(&chunk_counts) {
                 *count += chunk_count;
-                for (total, x) in sum.iter_mut().zip(chunk_sum) {
-                    *total += x;
-                }
+            }
+            for (total, x) in sums.iter_mut().zip(&chunk_sums) {
+                *total += x;
             }
         }
-        for ((centroid, sum), &count) in centroids.iter_mut().zip(&sums).zip(&counts) {
+        for ((centroid, sum), &count) in centroids
+            .chunks_exact_mut(dim)
+            .zip(sums.chunks_exact(dim))
+            .zip(&counts)
+        {
             // An empty cluster keeps its centroid, as scipy's kmeans2 does.
             if count > 0 {
                 let inverse = 1.0 / count as f64;
@@ -236,7 +251,7 @@ fn kmeans<const D: usize>(
             }
         }
         let previous = labels.clone();
-        assign(points, &centroids, &mut labels);
+        assign(points, &centroids, dim, &mut labels);
         if labels == previous {
             break;
         }
@@ -244,8 +259,8 @@ fn kmeans<const D: usize>(
     (centroids, labels)
 }
 
-impl<const D: usize> Vocabulary<D> {
-    /// Train a vocabulary on `data`, level by level; the nodes of a level run in parallel.
+impl Vocabulary {
+    /// Train a vocabulary on the `dim`-wide rows of `data`, level by level; the nodes of a level run in parallel.
     ///
     /// A node with fewer descriptors than `branching` keeps each of them as a child and fills the other slots with
     /// repeats of the last; a node no descriptor reached repeats its parent's centroid, so every descent ends at a
@@ -253,8 +268,13 @@ impl<const D: usize> Vocabulary<D> {
     ///
     /// # Errors
     ///
-    /// [`VocabularyError`] when the settings are invalid or `data` is empty.
-    pub fn train(data: &[[f32; D]], config: &VocabularyConfig) -> Result<Self, VocabularyError> {
+    /// [`VocabularyError`] when the settings are invalid, `dim` is 0 or does not divide `data.len()`, or `data` is
+    /// empty.
+    pub fn train(
+        data: &[f32],
+        dim: usize,
+        config: &VocabularyConfig,
+    ) -> Result<Self, VocabularyError> {
         let branching = config.branching;
         if branching < 2 {
             return Err(VocabularyError::Branching(branching));
@@ -268,16 +288,20 @@ impl<const D: usize> Vocabulary<D> {
         {
             return Err(VocabularyError::TooManyWords);
         }
+        if dim == 0 || !data.len().is_multiple_of(dim) {
+            return Err(VocabularyError::Dimension(dim));
+        }
         if data.is_empty() {
             return Err(VocabularyError::NoTrainingData);
         }
+        let n = data.len() / dim;
         let mut depth = 1;
-        while depth < config.depth && branching.pow(depth as u32 + 1) <= data.len() {
+        while depth < config.depth && branching.pow(depth as u32 + 1) <= n {
             depth += 1;
         }
 
-        let mut centroids: Vec<Vec<[f32; D]>> = Vec::with_capacity(depth);
-        let mut node_of: Vec<u32> = vec![0; data.len()];
+        let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(depth);
+        let mut node_of: Vec<u32> = vec![0; n];
         let mut n_nodes = 1usize;
         let mut first_node_id = 0u64; // nodes above this level, so (level, node) maps to one tree-wide id
         for _ in 0..depth {
@@ -290,7 +314,7 @@ impl<const D: usize> Vocabulary<D> {
                 bounds[i + 1] += bounds[i];
             }
             let mut cursor = bounds.clone();
-            let mut order = vec![0usize; data.len()];
+            let mut order = vec![0usize; n];
             for (i, &node) in node_of.iter().enumerate() {
                 order[cursor[node as usize]] = i;
                 cursor[node as usize] += 1;
@@ -299,29 +323,37 @@ impl<const D: usize> Vocabulary<D> {
             // Each node's child slots and its members' child labels. Unused slots repeat a used one, which `nearest`
             // never picks (ties go to the first slot): a node with `m < branching` members repeats slot `m - 1`, an
             // empty node (only below the root, which holds every descriptor) repeats its parent's centroid.
-            let fitted: Vec<(Vec<[f32; D]>, Vec<u32>)> = (0..n_nodes)
+            let fitted: Vec<(Vec<f32>, Vec<u32>)> = (0..n_nodes)
                 .into_par_iter()
                 .map(|node| {
                     let members = &order[bounds[node]..bounds[node + 1]];
                     if members.is_empty() {
-                        let parent = centroids.last().map_or([0.0f32; D], |level| level[node]);
-                        return (vec![parent; branching], Vec::new());
+                        let parent = centroids.last().map_or(vec![0.0f32; dim], |level| {
+                            level[node * dim..(node + 1) * dim].to_vec()
+                        });
+                        return (parent.repeat(branching), Vec::new());
                     }
-                    let points: Vec<[f32; D]> = members.iter().map(|&i| data[i]).collect();
-                    if points.len() < branching {
+                    let points: Vec<f32> = members
+                        .iter()
+                        .flat_map(|&i| data[i * dim..(i + 1) * dim].iter().copied())
+                        .collect();
+                    if members.len() < branching {
                         let mut slots = points.clone();
-                        slots.resize(branching, points[points.len() - 1]);
-                        return (slots, (0..points.len() as u32).collect());
+                        let last = points[points.len() - dim..].to_vec();
+                        for _ in members.len()..branching {
+                            slots.extend_from_slice(&last);
+                        }
+                        return (slots, (0..members.len() as u32).collect());
                     }
                     let mut rng = ChaCha8Rng::seed_from_u64(mix(
                         config.seed ^ mix(first_node_id + node as u64)
                     ));
-                    kmeans(&points, branching, config.iterations, &mut rng)
+                    kmeans(&points, dim, branching, config.iterations, &mut rng)
                 })
                 .collect();
 
-            let mut level_centroids = Vec::with_capacity(n_nodes * branching);
-            let mut child_of = vec![0u32; data.len()];
+            let mut level_centroids = Vec::with_capacity(n_nodes * branching * dim);
+            let mut child_of = vec![0u32; n];
             for (node, (slots, labels)) in fitted.into_iter().enumerate() {
                 for (&i, &label) in order[bounds[node]..bounds[node + 1]].iter().zip(&labels) {
                     child_of[i] = (node * branching) as u32 + label;
@@ -334,6 +366,7 @@ impl<const D: usize> Vocabulary<D> {
             n_nodes *= branching;
         }
         Ok(Self {
+            dim,
             branching,
             centroids,
         })
@@ -342,6 +375,11 @@ impl<const D: usize> Vocabulary<D> {
     /// Children per node.
     pub fn branching(&self) -> usize {
         self.branching
+    }
+
+    /// Values per descriptor.
+    pub fn dim(&self) -> usize {
+        self.dim
     }
 
     /// Levels actually built (the configured depth, lowered when the training set could not fill it).
@@ -354,25 +392,27 @@ impl<const D: usize> Vocabulary<D> {
         self.branching.pow(self.depth() as u32)
     }
 
-    /// The word of one descriptor: greedy descent, the nearest child at every level (the first of equal slots).
-    pub fn word(&self, descriptor: &[f32; D]) -> u32 {
-        let b = self.branching;
+    /// The word of one `dim`-wide descriptor: greedy descent, the nearest child at every level (the first of equal
+    /// slots).
+    pub fn word(&self, descriptor: &[f32]) -> u32 {
+        let (b, dim) = (self.branching, self.dim);
         let mut node = 0usize;
         for centroids in &self.centroids {
             let base = node * b;
-            node = base + nearest(descriptor, &centroids[base..base + b]);
+            node = base + nearest(descriptor, &centroids[base * dim..(base + b) * dim], dim);
         }
         node as u32
     }
 
-    /// [`Vocabulary::word`] of every descriptor, in parallel.
-    pub fn words(&self, descriptors: &[[f32; D]]) -> Vec<u32> {
-        let mut words = vec![0u32; descriptors.len()];
+    /// [`Vocabulary::word`] of every `dim`-wide row of `descriptors`, in parallel.
+    pub fn words(&self, descriptors: &[f32]) -> Vec<u32> {
+        let dim = self.dim;
+        let mut words = vec![0u32; descriptors.len() / dim];
         words
             .par_chunks_mut(CHUNK)
-            .zip(descriptors.par_chunks(CHUNK))
+            .zip(descriptors.par_chunks(CHUNK * dim))
             .for_each(|(w, d)| {
-                for (w, d) in w.iter_mut().zip(d) {
+                for (w, d) in w.iter_mut().zip(d.chunks_exact(dim)) {
                     *w = self.word(d);
                 }
             });
