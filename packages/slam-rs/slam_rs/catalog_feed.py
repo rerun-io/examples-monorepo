@@ -1100,21 +1100,15 @@ def _build_feed(
             payloads.append(wrap_mp4(video.samples, video.keyframes, fps=index.fps, codec=video.codec))
             del video
         cached_payloads = tuple(payloads)
-    cameras: tuple[CameraCalib, ...] = tuple(
-        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), profile.downscale)
-        for number, position in enumerate(camera_positions)
-    )
+    fed_statics: list[CameraStatics] = [read_camera_statics(camera_statics, rig_entities[position]) for position in camera_positions]
+    cameras: tuple[CameraCalib, ...] = tuple(camera_calib(number, statics, profile.downscale) for number, statics in enumerate(fed_statics))
     masks: FrameMasks | None = None
     if mask_entity is not None:
-        resolutions: list[tuple[int, int]] = []
-        for position in camera_positions:
-            width, height = read_camera_statics(camera_statics, rig_entities[position]).resolution_wh
-            resolutions.append((int(width), int(height)))
         masks = FrameMasks(
             sensor_dataset if mask_dataset is None else mask_dataset,
             segment_id,
             [f"{rig_entities[position]}/pinhole/{mask_entity}" for position in camera_positions],
-            resolutions,
+            [(int(statics.resolution_wh[0]), int(statics.resolution_wh[1])) for statics in fed_statics],
         )
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
     imu_T_body[:3, :3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:mat3x3").reshape(3, 3, order="F")
@@ -1195,7 +1189,8 @@ def open_segment(
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
             mask_dataset: DatasetEntry | None = client.get_dataset("masks") if "masks" in datasets else None
             yield _build_feed(
-                base, ground_truth, segment_ids[0], profile, frame_stride, window_s, cache_video, decode_device, mask_dataset, mask_entity
+                base, ground_truth, segment_ids[0], profile, frame_stride, window_s, cache_video, decode_device,
+                mask_dataset=mask_dataset, mask_entity=mask_entity,
             )
     else:
         resolved: CatalogSegment = source if source.dataset is not None else resolve_catalog_segments((source,))[0]
@@ -1216,5 +1211,5 @@ def open_segment(
                 ground_truth.register([resolved.ground_truth_uri]).wait()
             yield _build_feed(
                 resolved.dataset, ground_truth,
-                resolved.segment_id, profile, frame_stride, window_s, cache_video, decode_device, None, mask_entity,
+                resolved.segment_id, profile, frame_stride, window_s, cache_video, decode_device, mask_entity=mask_entity,
             )
