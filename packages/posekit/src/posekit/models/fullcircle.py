@@ -5,7 +5,8 @@ code theialab/fullcircle ``masking/`` at f8941d3 and theialab/sam-ui at c38098f)
 training and no manual prompt. Their eight steps, and where each lives here:
 
 1. Omni frame -> the six 90-degree cube faces (``omni2perspectives.py``): :meth:`FullCircleMasker.detect` renders the
-   faces straight from the source cameras through their rays (no intermediate panorama resample).
+   faces straight from the source cameras through their rays (no intermediate panorama resample), in a gravity-level
+   frame given per frameset (FullCircle's omni frames are Insta360 Studio panoramas, which are horizon-levelled).
 2. A person detector on every face (``mask_perspectives.py``: SAM 3, text ``person``, conf 0.25; the paper used
    YOLOv8): posekit's YOLOX-HumanArt (TensorRT) by default, SAM 3 ``person`` as the other choice.
 3. The detections -> one operator direction (``perspectives2omni.py`` -> ``centers/<frame>.csv``, read by
@@ -15,15 +16,26 @@ training and no manual prompt. Their eight steps, and where each lives here:
    that has one (earlier first at equal distance), as ``omni2synthetic.py`` does: :func:`fill_nearest`.
 4. A synthetic fisheye looking along that direction (``omni2synthetic.py``: ``look_at_camZ`` with up ``+Y``, the
    rear lens of ``mapping.txt`` as an OPENCV_FISHEYE at 2880 px with a 107.5 px border): the same lens scaled to the
-   tracker's input size.
+   tracker's input size, with one up hint per sequence (:func:`view_up`).
 5. SAM 2 on the synthetic fisheye sequence, one positive click at the image centre on the first frame, propagated
    forward (sam-ui ``tracking_gui.py --headless``, SAM 2.1 Hiera-L at 512 px): posekit's streaming EfficientTAM
-   (``Sam2VideoSegmenter``). sam-ui clicks ``(1440, 1440)`` -- the centre of a 2880 px frame -- on frames it has
-   resized to 512 px, so its click lies outside the image; the paper's intent, the image centre, is used here.
+   (``Sam2VideoSegmenter``), prompted with the detector's box around the view centre on the first frameset and
+   again every ``reprompt_every`` framesets (:meth:`FullCircleMasker._operator_prompt`). sam-ui clicks
+   ``(1440, 1440)`` -- the centre of a 2880 px frame -- on frames it has resized to 512 px, so its click lies outside
+   the image; the paper's intent is the image centre.
 6.-7. Synthetic mask -> omni -> raw fisheye masks (``synthetic2omni.py``, ``omni2fisheyes.py``): every source mask
    pixel looks its ray up in the synthetic mask (nearest), in one step.
 8. Dilation (``dilate.py``: 9x9 ellipse, 1 iteration at 2880 px, "about 4 pixels" in the paper): a disk of
    ``dilate_px`` image pixels, applied at mask resolution.
+
+Four changes, each forced by a measured failure (FullCircle's room3 scene: IoU against the masks FullCircle released;
+clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the operator):
+
+- Box prompt, not the centre click: EfficientTAM (FullCircle used SAM 2.1 Hiera-L) segments only the shirt on a torso
+  click (room3 IoU 0.20); with the box, 0.958.
+- Re-prompts: a single prompt drifted onto other people within 10 s of clip 007.
+- One up hint per sequence: with the operator below the camera (near +Y) the look-at fallback flipped the view.
+- Level faces: lens 0's +Y is not down on the X4 Air, and people lying sideways in the faces were missed.
 """
 
 from __future__ import annotations
