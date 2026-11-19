@@ -49,18 +49,6 @@ pub struct VocabularyConfig {
     pub seed: u64,
 }
 
-impl Default for VocabularyConfig {
-    /// 10 x 5 (100 000 words), 10 iterations, seed 0.
-    fn default() -> Self {
-        Self {
-            branching: 10,
-            depth: 5,
-            iterations: 10,
-            seed: 0,
-        }
-    }
-}
-
 /// Invalid vocabulary settings or inputs.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VocabularyError {
@@ -376,11 +364,6 @@ impl Vocabulary {
             branching,
             centroids,
         })
-    }
-
-    /// Children per node.
-    pub fn branching(&self) -> usize {
-        self.branching
     }
 
     /// Values per descriptor.

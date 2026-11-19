@@ -65,7 +65,12 @@ fn assign(vocabulary: &Vocabulary, images: &[Vec<[f32; DIM]>]) -> Vec<Vec<u32>> 
 
 fn bench_size(c: &mut Criterion, n_images: usize) {
     let images = images(n_images);
-    let config = VocabularyConfig::default();
+    let config = VocabularyConfig {
+        branching: 10,
+        depth: 5,
+        iterations: 10,
+        seed: 0,
+    };
     let training = sample(&images);
     let vocabulary = Vocabulary::train(&training, DIM, &config).expect("train");
     let words = assign(&vocabulary, &images);

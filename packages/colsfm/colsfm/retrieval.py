@@ -284,12 +284,15 @@ class VocabConfig:
     6.0 s against 13.6 s for 500 000, with no measurable recall difference on RoboCap."""
     kmeans_iterations: int = 10
     """Lloyd iterations per node after k-means++ seeding, matching
-    `weighted_kmeans_max_number_of_iterations` (`docs/spec/bow.md` §6.5). They are what
-    kornia-bow's own trainer lacks: with 1 iteration clip B's geometric loop recall falls from
-    1461 to 1306 of 2990 pairs."""
+    `weighted_kmeans_max_number_of_iterations` (`docs/spec/bow.md` §6.5); 0 keeps the seeds.
+    They are what kornia-bow's own trainer lacks: with 1 iteration the geometric loop recall of a
+    4,542-image cubemap clip falls from 1461 to 1306 of 2990 pairs."""
 
     def __post_init__(self) -> None:
-        """Reject settings that cannot produce a usable vocabulary.
+        """Reject settings that cannot produce a usable vocabulary, before minutes of extraction.
+
+        The Rust trainer checks its own invariants again; what it handles by design (a sample
+        smaller than the tree, which lowers the depth) is not refused here.
 
         Raises:
             ValueError: When any bound is below its smallest useful value.
@@ -298,10 +301,10 @@ class VocabConfig:
             raise ValueError(f"vocab branching must be at least 2, got {self.branching}")
         if self.depth < 1:
             raise ValueError(f"vocab depth must be at least 1, got {self.depth}")
-        if self.training_descriptors < self.branching:
-            raise ValueError(f"vocab training_descriptors must be at least branching, got {self.training_descriptors}")
-        if self.kmeans_iterations < 1:
-            raise ValueError(f"vocab kmeans_iterations must be at least 1, got {self.kmeans_iterations}")
+        if self.training_descriptors < 1:
+            raise ValueError(f"vocab training_descriptors must be at least 1, got {self.training_descriptors}")
+        if self.kmeans_iterations < 0:
+            raise ValueError(f"vocab kmeans_iterations must be at least 0, got {self.kmeans_iterations}")
 
 
 DEFAULT_VOCAB_CONFIG: VocabConfig = VocabConfig()
