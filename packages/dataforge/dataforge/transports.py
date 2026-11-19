@@ -297,7 +297,8 @@ def extract_zip_members(archive: ZipFile, members: Iterable[ZipInfo], root: Path
 
 def transfer_error(where: str, error: HfHubHTTPError | httpx.HTTPError) -> RuntimeError:
     """Name the file and the status only: the Hub's own message carries the signed CDN URL of the redirect."""
-    response: httpx.Response | None = error.response if isinstance(error, HfHubHTTPError | httpx.HTTPStatusError) else None
+    # No annotation: huggingface_hub types the response as httpx or httpx2 depending on its version.
+    response = error.response if isinstance(error, HfHubHTTPError | httpx.HTTPStatusError) else None
     status: str = f"HTTP {response.status_code}" if response is not None else "no response"
     return RuntimeError(f"{where}: {type(error).__name__} ({status})")
 

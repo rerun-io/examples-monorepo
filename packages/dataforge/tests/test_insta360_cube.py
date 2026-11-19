@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import av
 import insta360_io
@@ -12,6 +13,9 @@ import numpy as np
 import pytest
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 LENS: int = 384
 """Synthetic lens image size: a fifth of the X4 Air's 1920."""
@@ -287,7 +291,7 @@ def slot_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("torchcodec.encoders.Encoder", FakeEncoder)
 
 
-def face_batches() -> Iterable[object]:
+def face_batches() -> Iterator[Tensor]:
     """20 batches of one 8 x 8 frame for each of six faces."""
     import torch
 
