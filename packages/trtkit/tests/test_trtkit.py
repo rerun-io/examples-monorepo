@@ -436,6 +436,46 @@ def test_direct_binding_reads_device_inputs_in_place_and_grows_outputs_to_each_c
         runtime({"images": torch.randn(1, 3, 28, 28, device="cuda", dtype=torch.float64), "bias": bias.to(runtime._input_dtypes["bias"])})
 
 
+@pytest.mark.integration
+@cuda_only
+def test_close_frees_the_engine_at_once_and_a_closed_runtime_refuses_calls(tmp_path: Path) -> None:
+    """`with TensorRtDynamicRuntime(...)` releases its buffers, context and engine at the block's end, not at the next GC."""
+    from trtkit import DynamicDim, InputShapeProfile, TensorRtDynamicRuntime, ensure_engine
+
+    onnx_path: Path = tmp_path / "toy.onnx"
+    export_onnx(
+        _ToyDynamic().eval().cuda(),
+        (torch.zeros(2, 3, 28, 42, device="cuda"), torch.zeros(1, 4, device="cuda")),
+        onnx_path,
+        input_names=["images", "bias"],
+        output_names=["y"],
+        compute_dtype=torch.float16,
+        dynamic_dims={"images": {0: DynamicDim("batch", 1, 4), 2: DynamicDim("rows", 2, 6, multiple=14), 3: DynamicDim("cols", 2, 6, multiple=14)}},
+    )
+    config = TrtBuildConfig(
+        max_batch_size=4,
+        opt_batch_size=1,
+        workspace_gib=1.0,
+        shape_profiles=(
+            InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(4, 3, 84, 84)),
+            InputShapeProfile(name="bias", min_shape=(1, 4), opt_shape=(1, 4), max_shape=(1, 4)),
+        ),
+    )
+    engine_path: Path = ensure_engine(onnx_path, config, cache_dir=tmp_path)
+    images = torch.randn(4, 3, 84, 84, device="cuda")
+    bias = torch.randn(1, 4, device="cuda")
+    with TensorRtDynamicRuntime(engine_path, direct_binding=True) as runtime:
+        output = runtime({"images": images, "bias": bias})["y"]
+        output_bytes: int = output.numel() * output.element_size()
+        torch.cuda.synchronize()
+        del output
+        held: int = torch.cuda.memory_allocated()
+    assert held - torch.cuda.memory_allocated() >= output_bytes, "the output buffers go with the block, while the runtime is still referenced"
+    with pytest.raises(RuntimeError, match="closed"):
+        runtime({"images": images, "bias": bias})
+    runtime.close()  # idempotent
+
+
 @pytest.mark.parametrize("direct_binding", [False, True])
 def test_an_unresolved_output_shape_is_refused_before_anything_is_bound_or_launched(direct_binding: bool) -> None:
     """A context that resolves an output to `(-1, 2)`: refused by name and shape; nothing bound, allocated or run."""

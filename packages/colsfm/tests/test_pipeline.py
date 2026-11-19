@@ -720,3 +720,36 @@ def test_a_reference_run_without_a_state_file_still_reads(galileo_run: PipelineS
     shutil.copytree(galileo_run.options.output_dir, foreign)
     (foreign / RUN_STATE_NAME).unlink()
     read_run(foreign, "blob_style")
+
+
+def test_a_library_run_aligns_to_its_prior_before_it_publishes(galileo_input_dir: Path, tmp_path: Path) -> None:
+    """`align_to_prior` is applied by `run_pipeline` itself and lands in the typed, published summary."""
+    from colsfm.run_lifecycle import SUMMARY_NAME
+
+    if not (galileo_input_dir / FRAMES_META_NAME).is_file():
+        pytest.skip(f"missing {galileo_input_dir / FRAMES_META_NAME}")
+    options: PipelineOptions = replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "run", align_to_prior=True)
+
+    summary: PipelineSummary = run_pipeline(options)
+
+    assert summary.prior_alignment is not None and summary.prior_alignment.num_cameras >= 3
+    published: PipelineSummary = from_json(PipelineSummary, (tmp_path / "run" / SUMMARY_NAME).read_text())
+    assert published.prior_alignment == summary.prior_alignment
+
+
+def test_a_failed_prior_alignment_publishes_nothing(galileo_input_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The alignment is part of the run: when it fails, the destination keeps what it held (here: nothing)."""
+    from colsfm import prior_alignment
+
+    if not (galileo_input_dir / FRAMES_META_NAME).is_file():
+        pytest.skip(f"missing {galileo_input_dir / FRAMES_META_NAME}")
+
+    def refuse(*_: object) -> prior_alignment.PriorAlignment:
+        raise ValueError("no prior")
+
+    monkeypatch.setattr(prior_alignment, "fit_prior_alignment", refuse)
+    options: PipelineOptions = replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "run", align_to_prior=True)
+
+    with pytest.raises(ValueError, match="no prior"):
+        run_pipeline(options)
+    assert not (tmp_path / "run").exists()

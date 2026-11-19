@@ -519,6 +519,7 @@ def encode_frames_to_mp4(
     rotate_cw_quarter_turns: int = 0,
     ffmpeg: Path | None = None,
     filter_threads: int | None = None,
+    slot_fds: tuple[int, ...] | None = None,
 ) -> int:
     """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
 
@@ -551,6 +552,7 @@ def encode_frames_to_mp4(
             pixels must roll it the same way (``basalt.rotate_camera_cw``).
         ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
         filter_threads: CPU filter workers; cap when camera jobs also decode in parallel.
+        slot_fds: An ``nvenc_slot`` the caller already holds for this encoder; ``None`` takes one here.
 
     Returns:
         Number of frames fed into the encoder.
@@ -586,7 +588,7 @@ def encode_frames_to_mp4(
     complaints: list[bytes] = []
     fed: int = 0
     # One slot, no retry: a pipe consumes its frames once, so a session refused by an outside process fails the sequence.
-    with nvenc_slot() as fds:
+    with contextlib.nullcontext(slot_fds) if slot_fds is not None else nvenc_slot() as fds:
         process: subprocess.Popen[bytes] = subprocess.Popen(command, pass_fds=fds, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         assert process.stdin is not None and process.stderr is not None
         drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore

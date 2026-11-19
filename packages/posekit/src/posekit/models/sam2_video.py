@@ -49,6 +49,10 @@ class Sam2VideoSegmenterConfig:
     """Inference device."""
     memory_window_size: int = 7
     """Sliding window (frames) of non-prompt memories kept per tracked object."""
+    memory_on_device: bool = False
+    """Keep the memory bank on the inference device instead of host memory (no per-step copies)."""
+    bf16: bool = False
+    """Run the forward pass under bfloat16 autocast (the fp32 memory attention dominates the step time)."""
     max_conditional_memories: int = -1
     """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Bounded, the bank also stores
     only those (:class:`~posekit.models.sam2_memory_bank.BoundedForgetfulMemoryBank`), so a tracker re-prompted
@@ -88,6 +92,19 @@ class Sam2VideoSegmenter(VideoSegmenter):
         self._states = None
         self._frame_idx = 0
 
+    def drop_tracks(self, slot: int, track_ids: list[int]) -> None:
+        """Forget tracks of one batch slot (memories and identity); unknown ids are ignored."""
+        from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
+
+        if self._states is None:
+            return
+        bank = self._states[slot].memory_bank
+        assert isinstance(bank, SAM2ForgetfulObjectMemoryBank)
+        for track_id in track_ids:
+            bank.known_obj_ids.discard(track_id)
+            bank.conditional_memories.pop(track_id, None)
+            bank.non_conditional_memories.pop(track_id, None)
+
     @torch.inference_mode()
     def step(self, frames_rgb: UInt8[Tensor, "b h w 3"], prompts: SegmentationPrompts | None = None) -> BoxDetections:
         """Advance the tracker by one timestep.
@@ -123,7 +140,10 @@ class Sam2VideoSegmenter(VideoSegmenter):
             self._states = [
                 SAM2GenericVideoPredictorState.create(
                     video_hw=(frame_h, frame_w),
-                    memory_bank=SAM2ForgetfulObjectMemoryBank(memory_window_size=self.config.memory_window_size)
+                    memory_bank=SAM2ForgetfulObjectMemoryBank(
+                        memory_window_size=self.config.memory_window_size,
+                        storage_device=frames_rgb.device if self.config.memory_on_device else torch.device("cpu"),
+                    )
                     if self.config.max_conditional_memories < 0
                     else BoundedForgetfulMemoryBank(self.config.max_conditional_memories, self.config.memory_window_size),
                 )
@@ -146,7 +166,8 @@ class Sam2VideoSegmenter(VideoSegmenter):
                 and bool(slot_prompts)
                 and all(p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in slot_prompts)
             )
-            results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=single_clicks)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.bf16):
+                results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=single_clicks)
             for obj_id, result in results.items():
                 mask: Bool[Tensor, "h w"] = result.best_mask_logits[0, 0] > 0.0
                 # Branch-free mask bounding box: argmax of the row/column
@@ -191,7 +212,13 @@ class Sam2VideoSegmenter(VideoSegmenter):
             if prompts.points_xy is not None:
                 points_xy = prompts.points_xy[row : row + 1].float()
                 points_labels = torch.ones((1,), dtype=torch.long, device=points_xy.device)
-            sam2_prompts.append(SAM2Prompt(obj_id=track_id, points_coords=points_xy, points_labels=points_labels, boxes=boxes))
+            masks_logits: Float[Tensor, "1 h w"] | None = None
+            if prompts.masks is not None:
+                # binary mask -> saturated logits; SAM2 resizes the dense prompt to its 256 px mask grid
+                masks_logits = torch.where(prompts.masks[row : row + 1], 10.0, -10.0)
+            sam2_prompts.append(
+                SAM2Prompt(obj_id=track_id, points_coords=points_xy, points_labels=points_labels, boxes=boxes, masks_logits=masks_logits)
+            )
         return sam2_prompts
 
 

@@ -63,9 +63,9 @@ fn the_x4_air_clip_reads_whole() -> Result<(), Box<dyn std::error::Error>> {
     // Every IRAP sample converts with its parameter sets in front.
     let mut reader = clip.sample_reader()?;
     let mut out = Vec::new();
-    assert!(reader.read_annex_b(&clip.tracks[0], 0, &mut out)?);
+    assert!(reader.read_annex_b(0, 0, &mut out)?);
     assert_eq!(&out[..5], &[0, 0, 0, 1, 0x40]);
     out.clear();
-    assert!(!reader.read_annex_b(&clip.tracks[1], 1, &mut out)?);
+    assert!(!reader.read_annex_b(1, 1, &mut out)?);
     Ok(())
 }

@@ -24,7 +24,7 @@ and return GPU-resident predictions, so stages compose without host copies.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from jaxtyping import Float32, Int64, UInt8
+from jaxtyping import Bool, Float32, Int64, UInt8
 from torch import Tensor
 
 from posekit.cameras import CalibratedCamera
@@ -174,6 +174,8 @@ class SegmentationPrompts:
     """Optional image-space positive point prompt per instance."""
     track_ids: Int64[Tensor, "m"] | None = None
     """Optional identity to assign to each prompted instance (video mode)."""
+    masks: Bool[Tensor, "m h w"] | None = None
+    """Optional image-space dense mask prompt per instance (video mode, square frames), e.g. a detector's mask."""
     text: str | None = None
     """Optional open-vocabulary concept prompt shared by all frames (SAM3)."""
 
