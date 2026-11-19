@@ -1,24 +1,11 @@
 """Insta360 dual-fisheye ``.insv`` clips: one base recording per clip, and on request a derived panorama layer.
 
-The base is ``insta360_io.InsvReader``'s chunk stream (packages/insta360-io), sent as it comes with ``entity_path`` the
-rig ``/world/rig_00`` and ``timeline_name`` ``video_time``: both lens videos (the tracks' HEVC remuxed to Annex B in
-``Mp4Reader``'s chunk shapes, never re-encoded) at ``cam_NN/pinhole/video``, the two Mei cameras (``cam_NN``
-``Transform3D`` in the IMU frame, ``cam_NN/pinhole`` with ``mei_v6`` or ``mei_v3`` and its coefficients, and the
-rolling-shutter readout), the per-frame exposure at ``cam_NN/exposure``, the IMU at ``imu_00/{gyro,accel}`` and the
-recording property ``insta360``. The reader's module docstring states each of them; ``cam_00`` and ``cam_01`` are lens
-0 and lens 1, whichever track holds them (``stream_id``). This module adds only the exoego:v2 tags (rig node, sensor
-names, camera sources), the IMU noise model and the capture properties.
-
-Device profile. What the file does not carry (``R_P_imu``, the lever arm, the frame-time model, the readout, the IMU
-noise) is a measured record in insta360-io's ``insta360_profiles.toml``, selected by the clip's camera type, lens type,
-frame rate and readout. A clip of a body nobody measured, or outside every measured mode of its body, is converted
-without one (the reader warns and the ``insta360`` property says why): rig frame = the vendor lens frame, no rig
-reference, no IMU pose and no IMU noise model, so slam-rs refuses it. The IMU noise model is a placeholder, marked as
-such in its ``source``.
-
-Clock. ``video_time`` is the trailer clock, counted from the earliest frame or IMU sample (``capture:start_time_ns``).
-IMU times are the trailer's, without the vendor's ``gyro_timestamp`` subtraction: the profile's fit measured on that
-clock. Frame ``i`` is at the middle row's mid-exposure time on the IMU clock (the profile's frame-time model).
+The base is ``insta360_io.InsvReader``'s chunk stream (packages/insta360-io; the reader's module docstring states its
+entities, the device profile and the clock), sent as it comes with ``entity_path`` the rig ``/world/rig_00`` and
+``timeline_name`` ``video_time`` (``capture:start_time_ns`` is its zero). ``cam_00`` and ``cam_01`` are lens 0 and lens
+1, whichever track holds them (``stream_id``). This module adds only the exoego:v2 tags (rig node, sensor names, camera
+sources), the IMU noise model and the capture properties. A clip without a device profile gets no rig reference and no
+IMU noise model, so slam-rs refuses it. The IMU noise model is a placeholder, marked as such in its ``source``.
 
 Panorama layer (``--panorama``; off by default). ``panorama`` holds the 1920x960 equirectangular panorama at
 ``/world/rig_00/pano``, stitched on the CPU from the two lens images of every frameset and encoded AV1 on NVENC, on
@@ -212,14 +199,15 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         """The reader's chunks (videos, cameras, exposure, IMU), then the exoego:v2 tags, the IMU noise and the capture properties."""
         rig: insta360_io.InsvRig = reader.rig
         width, height = rig.resolution
-        for chunk in reader.stream():
+        for chunk in reader.chunks():
             rr.send_chunks(chunk, recording=recording)
-        noise: insta360_io.ImuNoise | None = rig.imu_noise
+        profiled: bool = rig.profile_name is not None
         # Without a device profile the IMU has no pose in the rig (the reader logged the reason), so no sensor is the
         # rig frame and the IMU gets no noise model: slam-rs refuses such a rig instead of running VIO on it.
-        log_rig_node(recording, RIG, reference=None if noise is None else "imu_00", num_cameras=2, name=rig.camera_type)
+        log_rig_node(recording, RIG, reference="imu_00" if profiled else None, num_cameras=2, name=rig.camera_type)
         imu_node: str = schema.imu_path(RIG, 0)
         recording.log(imu_node, rr.AnyValues(name="imu", kind="imu"), static=True)
+        noise: insta360_io.ImuNoise | None = rig.imu_noise
         if noise is not None:
             recording.log(
                 imu_node,
@@ -248,7 +236,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             start_time_ns=rig.start_ns,
             duration_s=self.timer.capture_s,
             clock_source="Insta360 trailer clock; "
-            + ("frames at the middle row's mid-exposure time" if noise is not None else "frames at the raw exposure-record stamps (no device profile)"),
+            + ("frames at the middle row's mid-exposure time" if profiled else "frames at the raw exposure-record stamps (no device profile)"),
         )
 
     def write_panorama(self, recording: rr.RecordingStream, rig: insta360_io.InsvRig, base: Path) -> None:

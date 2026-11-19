@@ -288,14 +288,19 @@ INSV_CLIP: str = "VID_20261116_125200_00_003.insv"
 """The Insta360 X4 Air clip the Insta360 tests open (2.3 GB, 2026-11-16, 7724 framesets)."""
 
 
+def insv_asset(what: str, name: str, *env_vars: str) -> Path:
+    """``<raw root>/insta360/<name>``, or the file the first set of ``env_vars`` names; a skip without it."""
+    from dataforge import paths
+
+    override: str | None = next((os.environ[v] for v in env_vars if os.environ.get(v)), None)
+    path: Path = Path(override) if override else paths.raw_root() / "insta360" / name
+    return raw_asset(f"{what} {name} (set {env_vars[0]})", path)
+
+
 @pytest.fixture(scope="session")
 def insv_clip() -> Path:
     """The X4 Air clip at ``<raw root>/insta360/``, or where ``DATAFORGE_INSTA360_CLIP`` (else ``SLAM_RS_INSV``) names it; a skip without it."""
-    from dataforge import paths
-
-    override: str | None = os.environ.get("DATAFORGE_INSTA360_CLIP") or os.environ.get("SLAM_RS_INSV")
-    path: Path = Path(override) if override else paths.raw_root() / "insta360" / INSV_CLIP
-    return raw_asset(f"the Insta360 clip {INSV_CLIP} (set DATAFORGE_INSTA360_CLIP)", path)
+    return insv_asset("the Insta360 clip", INSV_CLIP, "DATAFORGE_INSTA360_CLIP", "SLAM_RS_INSV")
 
 
 INSV_X5_CLIP: str = "VID_20261113_145021_00_003.insv"
@@ -305,11 +310,7 @@ INSV_X5_CLIP: str = "VID_20261113_145021_00_003.insv"
 @pytest.fixture(scope="session")
 def insv_x5_clip() -> Path:
     """The X5 clip at ``<raw root>/insta360/``, or where ``DATAFORGE_INSTA360_X5_CLIP`` names it; a skip without it."""
-    from dataforge import paths
-
-    override: str | None = os.environ.get("DATAFORGE_INSTA360_X5_CLIP")
-    path: Path = Path(override) if override else paths.raw_root() / "insta360" / INSV_X5_CLIP
-    return raw_asset(f"the Insta360 X5 clip {INSV_X5_CLIP} (set DATAFORGE_INSTA360_X5_CLIP)", path)
+    return insv_asset("the Insta360 X5 clip", INSV_X5_CLIP, "DATAFORGE_INSTA360_X5_CLIP")
 
 
 INSV_X3_CLIP: str = "samples/x3/VID_20231218_150323_00_022.insv"
@@ -319,11 +320,7 @@ INSV_X3_CLIP: str = "samples/x3/VID_20231218_150323_00_022.insv"
 @pytest.fixture(scope="session")
 def insv_x3_clip() -> Path:
     """The X3 clip's ``_00_`` file under ``<raw root>/insta360/``, or where ``DATAFORGE_INSTA360_X3_CLIP`` names it; a skip without it."""
-    from dataforge import paths
-
-    override: str | None = os.environ.get("DATAFORGE_INSTA360_X3_CLIP")
-    path: Path = Path(override) if override else paths.raw_root() / "insta360" / INSV_X3_CLIP
-    return raw_asset(f"the Insta360 X3 clip {INSV_X3_CLIP} (set DATAFORGE_INSTA360_X3_CLIP)", path)
+    return insv_asset("the Insta360 X3 clip", INSV_X3_CLIP, "DATAFORGE_INSTA360_X3_CLIP")
 
 
 def column_rows(store: rrc.ChunkStore, column: str) -> pa.Table:
