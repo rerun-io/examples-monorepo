@@ -1,4 +1,4 @@
-"""Cube-face pinholes of the casa-loma 6-face cubemap layer, and spirula's depth/normal prior encodings.
+"""Cube-face pinholes of the Insta360 cube-face layer (6-face cubemap), and spirula's depth/normal prior encodings.
 
 Every face is a full N x N 90 deg pinhole (fx = fy = N/2, principal point at the image centre with integer pixel
 centres: cx = cy = (N - 1) / 2), named ``cube6_<front0|front1|left|right|up|down>``. MoGe-2 runs on each face as
@@ -30,8 +30,6 @@ class CubeFace:
     """Image width, pixels."""
     height: int
     """Image height, pixels."""
-    face_R_rig: Float64[ndarray, "3 3"]
-    """Rotation taking rig (IMU) coordinates to face camera coordinates (RDF)."""
 
     def __post_init__(self) -> None:
         """Validate the name and that the face is a full centred 90 deg pinhole.

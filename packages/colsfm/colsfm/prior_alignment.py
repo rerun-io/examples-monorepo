@@ -2,7 +2,7 @@
 everything the run exports.
 
 Bundle adjustment pins the gauge at the start and has no prior residual, so on a long sequence the reconstruction's
-scale and heading drift away from the prior's (Casa Loma clip B: scale 0.80, 4.2 m median offset). When the prior is
+scale and heading drift away from the prior's (an Insta360 walk-through: scale 0.80, 4.2 m median offset). When the prior is
 the metric frame the rest of a pipeline lives in (a visual-inertial SLAM run), `align_run_directory` fits
 `prior ~ s R x + t` (Umeyama, `colsfm.rigid_fit.align_rigid`) on the camera centres of every registered image against
 the same images' prior poses (the run's input `frames_meta.json`), refits once without the residual outliers, and
@@ -12,10 +12,9 @@ applies it to `sparse/` (a similarity keeps every reprojection), the `kpmap/` me
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
@@ -23,41 +22,20 @@ import numpy as np
 import pycolmap
 from jaxtyping import Float64
 from numpy import ndarray
-from serde import serde, to_dict
+from serde.json import from_json, to_json
 
 from colsfm.export import EVERY_FRAME_METADATA_SUBPATH, KEYFRAME_METADATA_SUBPATH, SPARSE_DIR_NAME, write_tum_file
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, read_frames_meta, write_frames_meta
-from colsfm.geometry import TumPose, rigid3d_from_matrix
+from colsfm.geometry import TumPose, parse_tum_line, rigid3d_from_matrix
 from colsfm.rigid_fit import RigidAlignment, align_rigid
 from colsfm.run_lifecycle import SUMMARY_NAME
+from colsfm.run_report import PipelineSummary, PriorAlignment
 
 OUTLIER_FACTOR: Final[float] = 3.0
 """The refit drops cameras whose first-fit residual exceeds this many times the median residual."""
 
 SKIPPED_ENTRIES: Final[frozenset[str]] = frozenset({"database.db", "colsfm.rrd"})
-"""Not copied into a new run directory: the database is linked (8 GB on clip B), the layer is rewritten."""
-
-
-@serde(deny_unknown_fields=True)
-@dataclass(frozen=True, slots=True)
-class PriorAlignment:
-    """The similarity `prior ~ scale * R @ x + t` applied to a run, and how well it fits."""
-
-    scale: float
-    rotation_deg: float
-    rotation_xyzw: list[float]
-    translation_m: list[float]
-    residual_median_m: float
-    """Camera-centre residual after the fit, over the fitted cameras."""
-    residual_p90_m: float
-    num_cameras: int
-    """Registered images with a prior pose."""
-    num_fitted: int
-    """Of those, the ones the refit kept."""
-
-    def sim3d(self) -> pycolmap.Sim3d:
-        """The transform as pycolmap's `Sim3d` (new world from old world)."""
-        return pycolmap.Sim3d(self.scale, pycolmap.Rotation3d(np.asarray(self.rotation_xyzw)), np.asarray(self.translation_m))
+"""Not copied into a new run directory: the database is linked (GBs on a long run), the layer is rewritten."""
 
 
 def fit_prior_alignment(estimate_xyz: Float64[ndarray, "n 3"], prior_xyz: Float64[ndarray, "n 3"]) -> PriorAlignment:
@@ -95,14 +73,8 @@ def _transform_pose(alignment: pycolmap.Sim3d, world_T_body: pycolmap.Rigid3d) -
 
 
 def _transform_tum(path: Path, alignment: pycolmap.Sim3d) -> None:
-    poses: list[TumPose] = []
-    for line in path.read_text().splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        fields: list[float] = [float(value) for value in line.split()]
-        world_T_body = pycolmap.Rigid3d(pycolmap.Rotation3d(np.asarray(fields[4:8])), np.asarray(fields[1:4]))
-        poses.append(TumPose(round(fields[0] * 1e6), _transform_pose(alignment, world_T_body)))
-    write_tum_file(path, poses)
+    lines: list[str] = [line for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    write_tum_file(path, [TumPose(p.timestamp_microseconds, _transform_pose(alignment, p.world_T_body)) for p in map(parse_tum_line, lines)])
 
 
 def _transform_frames_meta(path: Path, alignment: pycolmap.Sim3d) -> None:
@@ -129,11 +101,9 @@ def align_run_directory(run_dir: Path, output_dir: Path, prior_frames_meta: Path
     Raises:
         ValueError: When fewer than three registered images have a prior pose.
     """
-    summary: dict[str, object] = json.loads((run_dir / SUMMARY_NAME).read_text())
+    summary: PipelineSummary = from_json(PipelineSummary, (run_dir / SUMMARY_NAME).read_text())
     if prior_frames_meta is None:
-        options = summary["options"]
-        assert isinstance(options, dict)
-        prior_frames_meta = Path(str(options["input_dir"])) / FRAMES_META_NAME
+        prior_frames_meta = summary.options.input_dir / FRAMES_META_NAME
     prior: dict[str, pycolmap.Rigid3d] = {keyframe.image_name: keyframe.world_T_cam for keyframe in read_frames_meta(prior_frames_meta).keyframes}
     reconstruction = pycolmap.Reconstruction(run_dir / SPARSE_DIR_NAME)
     names: list[str] = [image.name for image in reconstruction.images.values() if image.has_pose and image.name in prior]
@@ -160,8 +130,7 @@ def align_run_directory(run_dir: Path, output_dir: Path, prior_frames_meta: Path
             _transform_frames_meta(output_dir / subpath, sim3d)
     for tum in sorted((output_dir / "output_poses").rglob("*.tum")):
         _transform_tum(tum, sim3d)
-    summary["prior_alignment"] = to_dict(alignment)
-    (output_dir / SUMMARY_NAME).write_text(json.dumps(summary, indent=1) + "\n")
+    (output_dir / SUMMARY_NAME).write_text(to_json(replace(summary, prior_alignment=alignment)) + "\n")
     print(
         f"[colsfm] aligned to the prior ({prior_frames_meta}): scale {alignment.scale:.4f}, rotation {alignment.rotation_deg:.2f} deg, "
         f"translation {np.round(alignment.translation_m, 3).tolist()} m, residual median {alignment.residual_median_m:.3f} m / "

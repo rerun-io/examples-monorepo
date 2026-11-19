@@ -120,7 +120,7 @@ class CatalogInputConfig:
         """
         fields: dict[str, object] = {f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.name != "output_root"}
         if self.mask_entity is None:
-            del fields["mask_entity"]  # Unmasked inputs keep the snapshot names they had before the option existed.
+            del fields["mask_entity"]  # An unset mask is not part of the spec, so unmasked snapshot names stay stable.
         return json.dumps(fields, sort_keys=True, default=str)
 
     @property

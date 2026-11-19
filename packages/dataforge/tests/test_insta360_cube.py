@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable, Iterable
+from pathlib import Path
+
 import insta360_io
 import numpy as np
 import pytest
@@ -13,15 +17,15 @@ LENS: int = 384
 FACE: int = 160
 """Face size of the synthetic tests."""
 XI: float = 2.315
-"""Clip B's xi."""
+"""An X4 Air lens's xi."""
 FOCAL: float = 1835.37 * LENS / 1920
-"""Clip B's focal at the synthetic lens size."""
+"""An X4 Air lens's focal at the synthetic lens size."""
 HALF_FIELD: float = np.deg2rad(100.0)
 """The X4 Air's half field."""
 
 
 def camera() -> insta360_io.MeiCamera:
-    """A distortion-free Mei lens shaped like clip B's, so its inverse is closed form."""
+    """A distortion-free Mei lens shaped like an X4 Air lens, so its inverse is closed form."""
     centre: float = (LENS - 1) / 2.0
     return insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [XI, HALF_FIELD] + [0.0] * 13)
 
@@ -84,7 +88,7 @@ def test_the_seam_is_the_centre_line_of_the_four_side_faces() -> None:
     from dataforge.datasets.insta360_cube import cube_faces, face_table
 
     for face in cube_faces(FACE):
-        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0).use_lens0
+        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS)).use_lens0
         half: int = FACE // 2
         expected: dict[str, bool] = {"cube6_front0": True, "cube6_front1": False}
         if face.name in expected:
@@ -108,7 +112,7 @@ def test_a_face_pixel_outside_the_lens_it_is_read_from_is_refused() -> None:
     centre: float = (LENS - 1) / 2.0
     narrow = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [XI, np.deg2rad(80.0)] + [0.0] * 13)
     with pytest.raises(ValueError, match="outside the lens"):
-        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0)
+        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0, (LENS, LENS))
 
 
 def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> None:
@@ -120,7 +124,7 @@ def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> 
     lens0: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays)), 0, 255).astype(np.uint8)
     lens1: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays @ LENS1_FROM_LENS0)), 0, 255).astype(np.uint8)
     for face in cube_faces(FACE):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS))
         expected: Float64[ndarray, "h w 3"] = colour(face.rays() @ face.cube_from_face.T)
         error: Float64[ndarray, "h w 3"] = np.abs(join((lens0, lens1), table).astype(np.float64) - expected)
         # Bilinear interpolation of a smooth field plus the 0.5 rounding of the painted lenses; no seam step.
@@ -135,7 +139,7 @@ def test_a_lens_mask_joins_nearest_onto_the_face_that_sees_it() -> None:
     disc: UInt8[ndarray, "h w"] = (np.hypot(u - centre, v - centre) <= 12.0).astype(np.uint8)
     empty: UInt8[ndarray, "h w"] = np.zeros_like(disc)
     for face in cube_faces(FACE):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS))
         mask: UInt8[ndarray, "n n"] = join((empty, disc), table, nearest=True)
         assert set(np.unique(mask)) <= {0, 1}
         if face.name != "cube6_front1":
@@ -159,3 +163,77 @@ def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:
         pose = face_from_rig(face, lens_from_rig)
         np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], (centres[0] + centres[1]) / 2, atol=1e-12)
         np.testing.assert_allclose(pose[:3, :3].T, lens_from_rig[0][:3, :3].T @ face.cube_from_face, atol=1e-12)
+
+
+
+def test_a_face_pixel_projected_past_the_lens_image_edge_is_an_error() -> None:
+    """The Mei model accepts the ray, but an off-centre sensor ends before it lands: no silent black (or keep) pixels."""
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
+
+    shifted = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, (LENS - 1) / 2.0 + 120.0, (LENS - 1) / 2.0, [XI, HALF_FIELD] + [0.0] * 13)
+    with pytest.raises(ValueError, match="outside the lens"):
+        face_table(cube_faces(FACE)[0], [shifted, shifted], LENS1_FROM_LENS0, (LENS, LENS))
+
+def run_with_timeout(target: Callable[[], object], seconds: float) -> object:
+    """``target()``'s result or exception; a test failure, not a hung run, when it is still going after ``seconds``."""
+    outcome: list[object] = []
+    worker = threading.Thread(target=lambda: outcome.append(_call(target)), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"still running after {seconds} s: the face encoders deadlocked"
+    return outcome[0]
+
+
+def _call(target: Callable[[], object]) -> object:
+    try:
+        return target()
+    except ValueError as error:
+        return error
+
+
+@pytest.fixture
+def slot_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``encode_frames_to_mp4`` with its slot protocol (one ``nvenc_slot`` unless given descriptors) but no ffmpeg; slots in ``tmp_path``."""
+    import contextlib
+
+    from dataforge import video_encoding
+    from dataforge.datasets import insta360
+
+    def encode(frames: Iterable[bytes], output: Path, *, slot_fds: tuple[int, ...] | None = None, **_: object) -> int:
+        with contextlib.nullcontext(slot_fds) if slot_fds is not None else video_encoding.nvenc_slot():
+            taken: int = sum(1 for _ in frames)
+        output.write_bytes(b"")
+        return taken
+
+    monkeypatch.setattr(video_encoding, "NVENC_SLOT_DIR", tmp_path / "slots")
+    monkeypatch.setattr(insta360, "encode_frames_to_mp4", encode)
+
+
+@pytest.mark.usefixtures("slot_encoder")
+def test_six_faces_on_two_encoder_slots_fail_fast_instead_of_hanging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from dataforge.datasets.insta360 import encode_face_videos
+
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
+    frames = ([b"face"] * 6 for _ in range(20))
+    outcome = run_with_timeout(lambda: encode_face_videos(frames, [tmp_path / f"{k}.mp4" for k in range(6)], size=8, gop=10, cq=14), 20.0)
+    assert isinstance(outcome, ValueError) and "capacity is 2" in str(outcome)
+
+
+@pytest.mark.usefixtures("slot_encoder")
+def test_two_concurrent_cube_encodes_share_six_slots_without_deadlock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from dataforge.datasets.insta360 import encode_face_videos
+
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "6")
+
+    def one_run(name: str) -> list[int]:
+        frames = ([b"face"] * 6 for _ in range(20))
+        return encode_face_videos(frames, [tmp_path / f"{name}-{k}.mp4" for k in range(6)], size=8, gop=10, cq=14)
+
+    results: list[object] = []
+    runs = [threading.Thread(target=lambda name=name: results.append(one_run(name)), daemon=True) for name in ("a", "b")]
+    for run in runs:
+        run.start()
+    for run in runs:
+        run.join(30.0)
+    assert not any(run.is_alive() for run in runs), "two concurrent cube encodes deadlocked on the encoder slots"
+    assert results == [[20] * 6, [20] * 6]

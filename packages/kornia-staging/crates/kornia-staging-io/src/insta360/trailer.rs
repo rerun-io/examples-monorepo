@@ -118,7 +118,7 @@ fn parse_exposures(record: &[u8]) -> Result<Vec<Exposure>, Insta360Error> {
         .collect())
 }
 
-/// Read the trailer at the end of a clip through its index record.
+/// Read the trailer at the end of a clip, through its index record or, on bodies that write none, its descriptor chain.
 pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer, Insta360Error> {
     let file_len = reader.seek(SeekFrom::End(0))?;
     if file_len < FOOTER + 6 {
@@ -140,40 +140,63 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer, Insta360E
     let start = file_len
         .checked_sub(trailer_size)
         .ok_or_else(|| malformed(format!("trailer size {trailer_size} exceeds the file")))?;
+    // Two layouts. Recent bodies (X4 and later) close the trailer with an index record (id 0) whose 10-byte slots
+    // `[id][format][u32 size][u32 offset]` locate every record; on the X4 Air the records sit in 256 KiB slots, so
+    // only the index finds them. Older bodies (ONE X2, ONE R/RS, X3) write no index: each record is followed by its
+    // 6-byte descriptor `[format][id][u32 size]`, and the reader walks them backward from the footer.
+    let wanted = [
+        RECORD_METADATA,
+        RECORD_IMU,
+        RECORD_EXPOSURE_VIN0,
+        RECORD_EXPOSURE_VIN1,
+    ];
+    let mut located: Vec<(u8, u64, u64)> = Vec::new();
     let descriptor = read_at(file_len - FOOTER - 6, 6)?;
-    let (id, index_size) = (
-        descriptor[1],
-        u64::from(u32::from_le_bytes(bytes(&descriptor, 2))),
-    );
-    if id != 0 || !index_size.is_multiple_of(10) || index_size + FOOTER + 6 > trailer_size {
-        return Err(malformed(format!(
-            "index descriptor id {id} size {index_size}"
-        )));
+    let last_id = descriptor[1];
+    if last_id == 0 {
+        let index_size = u64::from(u32::from_le_bytes(bytes(&descriptor, 2)));
+        if !index_size.is_multiple_of(10) || index_size + FOOTER + 6 > trailer_size {
+            return Err(malformed(format!("index record of {index_size} bytes")));
+        }
+        let index = read_at(file_len - FOOTER - 6 - index_size, index_size as usize)?;
+        for slot in index.as_chunks::<10>().0 {
+            let id = slot[0];
+            let size = u64::from(u32::from_le_bytes(bytes(slot, 2)));
+            let offset = u64::from(u32::from_le_bytes(bytes(slot, 6)));
+            if wanted.contains(&id) {
+                located.push((id, start + offset, size));
+            }
+        }
+    } else {
+        // `end` is the trailer-relative end of the next descriptor to read.
+        let mut end = trailer_size - FOOTER;
+        while end >= 6 {
+            let descriptor = read_at(start + end - 6, 6)?;
+            let (id, size) = (
+                descriptor[1],
+                u64::from(u32::from_le_bytes(bytes(&descriptor, 2))),
+            );
+            let Some(record_start) = (end - 6).checked_sub(size) else {
+                return Err(malformed(format!(
+                    "record {id} of {size} bytes runs past the start of the {trailer_size}-byte trailer"
+                )));
+            };
+            if wanted.contains(&id) {
+                located.push((id, start + record_start, size));
+            }
+            end = record_start;
+        }
     }
-    let index = read_at(file_len - FOOTER - 6 - index_size, index_size as usize)?;
     let mut records: [Option<Vec<u8>>; 3] = [None, None, None];
     let mut metadata = None;
-    for slot in index.as_chunks::<10>().0 {
-        let (id, size, offset) = (
-            slot[0],
-            u64::from(u32::from_le_bytes(bytes(slot, 2))),
-            u64::from(u32::from_le_bytes(bytes(slot, 6))),
-        );
-        let wanted = [
-            RECORD_METADATA,
-            RECORD_IMU,
-            RECORD_EXPOSURE_VIN0,
-            RECORD_EXPOSURE_VIN1,
-        ];
-        if id == 0 || !wanted.contains(&id) {
-            continue;
-        }
-        if offset + size > trailer_size {
+    for (id, at, size) in located {
+        if at + size > start + trailer_size {
             return Err(malformed(format!(
-                "record {id} at {offset}+{size} overruns the {trailer_size}-byte trailer"
+                "record {id} at {}+{size} overruns the {trailer_size}-byte trailer",
+                at - start
             )));
         }
-        let bytes = read_at(start + offset, size as usize)?;
+        let bytes = read_at(at, size as usize)?;
         match id {
             RECORD_METADATA => metadata = Some(parse_metadata(&bytes)?),
             RECORD_IMU => records[0] = Some(bytes),
@@ -181,22 +204,52 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer, Insta360E
             _ => records[2] = Some(bytes),
         }
     }
-    let metadata = metadata.ok_or_else(|| malformed("no metadata record"))?;
+    let mut metadata = metadata.ok_or_else(|| malformed("no metadata record"))?;
     let [imu, vin0, vin1] = records;
+    let mut exposures_vin0 =
+        parse_exposures(&vin0.ok_or_else(|| malformed("no exposure record"))?)?;
+    let mut exposures_vin1 = vin1
+        .map(|r| parse_exposures(&r))
+        .transpose()?
+        .unwrap_or_default();
+    // Most bodies stamp exposures and the first frame in microseconds; the ONE X2 stamps them in milliseconds (33 or
+    // 34 apart at 30 fps). No video runs at 1000 frames a second, so a median spacing under 1000 means milliseconds.
+    let mut spacing: Vec<i64> = exposures_vin0
+        .windows(2)
+        .map(|w| w[1].t_us - w[0].t_us)
+        .collect();
+    spacing.sort_unstable();
+    if spacing
+        .get(spacing.len() / 2)
+        .is_some_and(|&median| median < MILLISECOND_STAMPS_BELOW)
+    {
+        for e in exposures_vin0.iter_mut().chain(exposures_vin1.iter_mut()) {
+            e.t_us = e
+                .t_us
+                .checked_mul(1000)
+                .ok_or_else(|| malformed("a millisecond exposure stamp overflows microseconds"))?;
+        }
+        metadata.first_frame_timestamp_us = metadata
+            .first_frame_timestamp_us
+            .checked_mul(1000)
+            .ok_or_else(|| malformed("a millisecond first-frame stamp overflows microseconds"))?;
+    }
     Ok(Trailer {
         imu: parse_imu(&imu.ok_or_else(|| malformed("no IMU record"))?, &metadata)?,
-        exposures_vin0: parse_exposures(&vin0.ok_or_else(|| malformed("no exposure record"))?)?,
-        exposures_vin1: vin1
-            .map(|r| parse_exposures(&r))
-            .transpose()?
-            .unwrap_or_default(),
+        exposures_vin0,
+        exposures_vin1,
         metadata,
     })
 }
 
+/// A median exposure spacing below this many stamp units is in milliseconds, not microseconds.
+const MILLISECOND_STAMPS_BELOW: i64 = 1000;
+
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{exposures, metadata, trailer_file, CROP};
+    use super::super::testing::{
+        chained_trailer_file, exposures, metadata, trailer_file, varint_field, CROP,
+    };
     use super::*;
     use std::io::Cursor;
 
@@ -289,6 +342,63 @@ mod tests {
             read_trailer(&mut Cursor::new(file)),
             Err(Insta360Error::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn a_trailer_without_an_index_is_read_through_its_descriptor_chain() {
+        let records = [
+            (1, metadata(true)),
+            (3, vec![0u8; 40]),
+            (2, vec![7u8; 33]), // a thumbnail the reader skips
+            (4, exposures(&[1_000_100, 1_000_200])),
+            (12, exposures(&[1_000_234])),
+        ];
+        let chained = read_trailer(&mut Cursor::new(chained_trailer_file(&records))).unwrap();
+        assert_eq!(
+            chained,
+            read_trailer(&mut Cursor::new(trailer_file(&records))).unwrap()
+        );
+        assert_eq!((chained.imu.len(), chained.exposures_vin0.len()), (2, 2));
+        // A descriptor whose record would start before the trailer is refused.
+        let mut file = chained_trailer_file(&records);
+        let n = file.len();
+        file[n - 72 - 4..n - 72].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            read_trailer(&mut Cursor::new(file)),
+            Err(Insta360Error::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn millisecond_exposure_stamps_are_read_as_microseconds() {
+        // A ONE X2 trailer: frames 33-34 ms apart, stated in milliseconds, the first frame too.
+        let mut m = metadata(false);
+        varint_field(24, 153_676, &mut m);
+        let records = [
+            (1, m),
+            (3, Vec::new()),
+            (4, exposures(&[153_687, 153_720, 153_754])),
+            (12, exposures(&[153_688])),
+        ];
+        let trailer = read_trailer(&mut Cursor::new(chained_trailer_file(&records))).unwrap();
+        let t: Vec<i64> = trailer.exposures_vin0.iter().map(|e| e.t_us).collect();
+        assert_eq!(t, [153_687_000, 153_720_000, 153_754_000]);
+        assert_eq!(trailer.exposures_vin1[0].t_us, 153_688_000);
+        assert_eq!(trailer.metadata.first_frame_timestamp_us, 153_676_000);
+        // Microsecond stamps 33 367 apart stay as they are.
+        let records = [
+            (1, metadata(false)),
+            (3, Vec::new()),
+            (4, exposures(&[1_000_200, 1_033_567, 1_066_934])),
+        ];
+        let trailer = read_trailer(&mut Cursor::new(trailer_file(&records))).unwrap();
+        assert_eq!(
+            (
+                trailer.exposures_vin0[1].t_us,
+                trailer.metadata.first_frame_timestamp_us
+            ),
+            (1_033_567, 1_000_200)
+        );
     }
 
     #[test]

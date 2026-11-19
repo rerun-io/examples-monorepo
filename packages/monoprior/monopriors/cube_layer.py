@@ -1,7 +1,7 @@
-"""Read the casa-loma cube-faces layer (and its people-mask layer) from a local ``.rrd``.
+"""Read the Insta360 cube-face layer (and its people-mask layer) from a local ``.rrd``.
 
 Faces are the camera nodes ``/world/rig_NN/cam_NN`` whose static ``name`` is ``cube6_<direction>``
-(CONTRACT "Cube faces"); the raw lenses (other names) are skipped. Geometry comes from the layer's static
+(dataforge's ``insta360`` cube layer); the raw lenses (other names) are skipped. Geometry comes from the layer's static
 ``Pinhole`` and ``Transform3D`` (face-from-rig), never from constants.
 """
 
@@ -16,7 +16,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Int64, UInt8
+from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import PinholeParameters
@@ -88,7 +88,6 @@ def read_cube_faces(layer: LayerSegment) -> tuple[CubeFace, ...]:
             k_matrix=np.asarray(calibration[entity].intrinsics.k_matrix, dtype=np.float64),
             width=int(calibration[entity].intrinsics.width),
             height=int(calibration[entity].intrinsics.height),
-            face_R_rig=np.asarray(calibration[entity].extrinsics.cam_R_world, dtype=np.float64),
         )
         for entity, name in names.items()
     )
@@ -104,12 +103,11 @@ class FaceFrameset:
     """RGB image per face name."""
 
 
-def _decode_rgb(video: CatalogVideo) -> Iterator[UInt8[ndarray, "h w 3"]]:
+def _decode(video: CatalogVideo) -> Iterator[av.VideoFrame]:
     """Decode a face stream frame by frame, in sample order."""
     data: bytes = wrap_mp4(video.samples, video.keyframes, 30, codec=video.codec)
     with av.open(BytesIO(data), mode="r") as container:
-        for frame in container.decode(video=0):
-            yield frame.to_ndarray(format="rgb24")
+        yield from container.decode(video=0)
 
 
 def iter_framesets(layer: LayerSegment, faces: tuple[CubeFace, ...], timeline: str, wanted_t_ns: set[int] | None = None) -> Iterator[FaceFrameset]:
@@ -125,18 +123,18 @@ def iter_framesets(layer: LayerSegment, faces: tuple[CubeFace, ...], timeline: s
     for face, video in zip(faces, videos, strict=True):
         if not np.array_equal(video.t_ns, stamps):
             raise ValueError(f"{face.name}: its frame stamps differ from {faces[0].name}'s; all faces of a frameset share one stamp")
-    decoders: list[Iterator[UInt8[ndarray, "h w 3"]]] = [_decode_rgb(video) for video in videos]
+    decoders: list[Iterator[av.VideoFrame]] = [_decode(video) for video in videos]
     for t_ns in stamps.tolist():
-        rgb_by_face: dict[str, UInt8[ndarray, "h w 3"]] = {}
+        frames: dict[str, av.VideoFrame] = {}
         for face, decoder in zip(faces, decoders, strict=True):
-            rgb: UInt8[ndarray, "h w 3"] | None = next(decoder, None)
-            if rgb is None:
+            frame: av.VideoFrame | None = next(decoder, None)
+            if frame is None:
                 raise ValueError(f"{face.name}: the stream decoded to fewer frames than its {len(stamps)} samples")
-            if rgb.shape != (face.height, face.width, 3):
-                raise ValueError(f"{face.name}: decoded {rgb.shape[1]}x{rgb.shape[0]}, the Pinhole says {face.width}x{face.height}")
-            rgb_by_face[face.name] = rgb
+            if (frame.height, frame.width) != (face.height, face.width):
+                raise ValueError(f"{face.name}: decoded {frame.width}x{frame.height}, the Pinhole says {face.width}x{face.height}")
+            frames[face.name] = frame
         if wanted_t_ns is None or t_ns in wanted_t_ns:
-            yield FaceFrameset(t_ns=int(t_ns), rgb_by_face=rgb_by_face)
+            yield FaceFrameset(t_ns=int(t_ns), rgb_by_face={name: frame.to_ndarray(format="rgb24") for name, frame in frames.items()})
 
 
 def read_people_masks(layer: LayerSegment, face: CubeFace, timeline: str, wanted_t_ns: set[int]) -> dict[int, UInt8[ndarray, "h w"]]:
@@ -166,30 +164,3 @@ def read_people_masks(layer: LayerSegment, face: CubeFace, timeline: str, wanted
             raise ValueError(f"{entity} @ {t_ns}: {flat.size} pixels, the face is {face.width}x{face.height}")
         masks[int(t_ns)] = flat.reshape(face.height, face.width)
     return masks
-
-
-def read_valid_masks(layer: LayerSegment, faces: tuple[CubeFace, ...]) -> dict[str, Bool[ndarray, "h w"]]:
-    """Each face's static ``pinhole/valid_mask`` (1 = inside the lens field) as a bool image, by face name.
-
-    A face without a ``valid_mask`` (the 6-face cubemap has no invalid pixels) is valid everywhere.
-
-    Raises:
-        ValueError: If a valid mask has another size than its face.
-    """
-    entities: list[str] = [f"{face.entity}/pinhole/valid_mask" for face in faces]
-    present: set[str] = {f"/{str(column.entity_path).lstrip('/')}" for column in layer.dataset.schema().component_columns()}
-    with_mask: list[str] = [entity for entity in entities if entity in present]
-    table: pa.Table | None = (
-        layer.dataset.filter_segments(layer.segment_id).filter_contents(with_mask).reader(index=None).to_arrow_table() if with_mask else None
-    )
-    valid: dict[str, Bool[ndarray, "h w"]] = {}
-    for face, entity in zip(faces, entities, strict=True):
-        column_name: str = f"{entity}:SegmentationImage:buffer"
-        if table is None or column_name not in table.column_names:
-            valid[face.name] = np.ones((face.height, face.width), dtype=bool)
-            continue
-        flat: UInt8[ndarray, " n_pixels"] = np.asarray(table.column(column_name).drop_null().combine_chunks()[0].values.flatten(), dtype=np.uint8)
-        if flat.size != face.width * face.height:
-            raise ValueError(f"{entity}: {flat.size} pixels, the face is {face.width}x{face.height}")
-        valid[face.name] = flat.reshape(face.height, face.width) == 1
-    return valid

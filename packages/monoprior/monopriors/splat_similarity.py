@@ -119,7 +119,7 @@ def read_ply(path: Path) -> tuple[bytes, np.ndarray]:
         raise ValueError(f"{path}: expected one vertex element, found {elements}")
     count: int = int(elements[0].split()[2])
     fields: list[tuple[str, str]] = [(line.split()[2], "<" + PLY_DTYPES[line.split()[1]]) for line in lines if line.startswith("property ")]
-    table: np.ndarray = np.frombuffer(raw, dtype=np.dtype(fields), count=count, offset=end).copy()
+    table: np.ndarray = np.frombuffer(raw, dtype=np.dtype(fields), count=count, offset=end)
     return header, table
 
 

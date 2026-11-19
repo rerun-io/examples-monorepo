@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import rerun as rr
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import CatalogClient
@@ -75,8 +76,6 @@ def read_slam_csv(path: Path, clock_offset_ns: int) -> tuple[Int64[ndarray, " n"
 
 def _base_clock(base_rrd: Path, timeline: str) -> tuple[str, int, Int64[ndarray, " m"]]:
     """The base recording's segment id, its `capture:start_time_ns`, and its first camera's video stamps."""
-    import rerun as rr
-
     with rr.server.Server(host="127.0.0.1", port=0, datasets={"base": [str(base_rrd)]}) as server:
         dataset = server.client().get_dataset("base")
         segment: str = dataset.segment_ids()[0]

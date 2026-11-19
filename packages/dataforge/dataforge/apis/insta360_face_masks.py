@@ -24,12 +24,10 @@ from numpy import ndarray
 
 from dataforge import schema, writing
 from dataforge.datasets import insta360_cube as cube
-from dataforge.datasets.insta360 import FIRST_FACE_CAM, RIG, LensCameras, cameras_from_recording
+from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording
 
 MASK_NAME: str = "people_mask"
 """The mask entity under each ``pinhole``, on the lenses and on the faces."""
-FACE_CAMS: range = range(FIRST_FACE_CAM, FIRST_FACE_CAM + len(cube.FACES))
-"""``cam_02 .. cam_07``: the cube faces."""
 
 
 @dataclass
@@ -50,8 +48,8 @@ def face_statics(faces: Path) -> dict[int, dict[str, object]]:
     """Each face camera's static components, ``{cam: {component: value}}``."""
     statics: dict[int, dict[str, object]] = {cam: {} for cam in FACE_CAMS}
     entities: dict[str, int] = {path: cam for cam in FACE_CAMS for path in (schema.cam_path(RIG, cam), schema.pinhole_path(RIG, cam))}
-    for chunk in rrc.RrdReader(faces).stream():
-        if chunk.is_static and chunk.entity_path in entities:
+    for chunk in rrc.RrdReader(faces).store().stream().filter(content=list(entities)):
+        if chunk.is_static:
             batch = chunk.to_record_batch()
             statics[entities[chunk.entity_path]].update(
                 {name: batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")}
@@ -87,8 +85,8 @@ def face_stamps(faces: Path) -> Int64[ndarray, " k"]:
     """The face frame stamps (``video_time``, ns) of the first face; the cube layer gives every face the same ones."""
     entity: str = schema.video_path(RIG, FACE_CAMS[0])
     stamps: list[int] = []
-    for chunk in rrc.RrdReader(faces).stream():
-        if chunk.entity_path == entity and not chunk.is_static:
+    for chunk in rrc.RrdReader(faces).store().stream().filter(content=[entity]):
+        if not chunk.is_static:
             batch = chunk.to_record_batch()
             if "VideoStream:sample" in batch.schema.names:
                 stamps += batch.column("video_time").cast("int64").to_pylist()
@@ -119,8 +117,8 @@ def lens_mask_scales(masks: Path) -> dict[int, tuple[float, float]]:
     """Each lens mask entity's static ``Transform3D`` scale ``(sx, sy)``; a lens without one is absent (scale 1)."""
     entities: dict[str, int] = {f"{schema.pinhole_path(RIG, lens)}/{MASK_NAME}": lens for lens in range(2)}
     scales: dict[int, tuple[float, float]] = {}
-    for chunk in rrc.RrdReader(masks).stream():
-        if chunk.is_static and chunk.entity_path in entities:
+    for chunk in rrc.RrdReader(masks).store().stream().filter(content=list(entities)):
+        if chunk.is_static:
             batch = chunk.to_record_batch()
             if "Transform3D:scale" in batch.schema.names and (value := batch.column("Transform3D:scale").to_pylist()[0]):
                 scales[entities[chunk.entity_path]] = (float(value[0][0]), float(value[0][1]))
@@ -149,23 +147,24 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    lens1_from_lens0: Float64[ndarray, "3 3"] = lenses.lens_from_rig[1][:3, :3] @ lenses.lens_from_rig[0][:3, :3].T
-    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lens1_from_lens0) for cam, face in faces.items()}
+    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for cam, face in faces.items()}
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
     scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
     pending: dict[int, dict[int, UInt8[ndarray, "h w"]]] = {}
     done: set[int] = set()
-    with writing.atomic_recording(config.output, recording_id=config.base.stem, send_properties=False) as recording:
+    recording_id: str = rrc.RrdReader(config.base).recordings()[0].recording_id
+    with writing.atomic_recording(config.output, recording_id=recording_id, send_properties=False) as recording:
         for lens, stamp, mask in lens_masks(config.masks, wanted):
             if stamp in done:
                 continue
-            pending.setdefault(stamp, {})[lens] = (
-                mask if lens not in scales and mask.shape == lens_shape else lens_image_mask(mask, scales.get(lens, (1.0, 1.0)), lens_shape)
-            )
+            pending.setdefault(stamp, {})[lens] = mask
             if len(pending[stamp]) < 2:
                 continue
-            pair: dict[int, UInt8[ndarray, "h w"]] = pending.pop(stamp)
+            pair: dict[int, UInt8[ndarray, "h w"]] = {
+                side: m if side not in scales and m.shape == lens_shape else lens_image_mask(m, scales.get(side, (1.0, 1.0)), lens_shape)
+                for side, m in pending.pop(stamp).items()
+            }
             done.add(stamp)
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
             for cam, table in tables.items():

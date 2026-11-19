@@ -23,7 +23,6 @@ import tyro
 from colsfm import DATA_DIR
 from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
-from colsfm.prior_alignment import align_run_directory
 from colsfm.rerun_layer import LayerSummary, write_run_layer
 from colsfm.run_config import PipelineOptions, SelectionOptions
 from colsfm.run_lifecycle import SUMMARY_NAME, CheapStageName
@@ -44,8 +43,6 @@ class RunCommand:
         """Run the pipeline and print where the summary landed."""
         summary: PipelineSummary = run_pipeline(self.options)
         print(f"[colsfm] summary written to {summary.options.output_dir / SUMMARY_NAME}")
-        if self.options.align_to_prior:
-            align_run_directory(summary.options.output_dir, summary.options.output_dir)
 
 
 @dataclass(frozen=True)
@@ -68,8 +65,6 @@ class CatalogCommand:
         options: PipelineOptions = dataclasses.replace(self.options, input_dir=prepared.input_dir, output_dir=output_dir)
         summary: PipelineSummary = run_pipeline(options)
         print(f"[colsfm] summary written to {summary.options.output_dir / SUMMARY_NAME}")
-        if options.align_to_prior:
-            align_run_directory(output_dir, output_dir)
         layer_path: Path = self.layer_path or DATA_DIR / "rrd" / f"{prepared.input_dir.name}.colsfm.rrd"
         layer: LayerSummary = write_run_layer(output_dir, layer_path, segment=self.source.segment, timeline=self.source.timeline)
         print(

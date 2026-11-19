@@ -1,10 +1,11 @@
 # insta360-io Cargo workspace: the PyO3 module `insta360_io` (`crates/insta360-io-py`) over kornia-staging's Insta360
 # `.insv` reader (kornia-staging-io) and the CPU dual-fisheye stitch (kornia-staging-imgproc). The core lives in
-# kornia-staging; this workspace is only the binding, as packages/depth-png's is for its core. maturin builds the module
+# kornia-staging (generic box, trailer and lens-string parsing); crates/insta360-io-core is the reader on top of it (device
+# profiles, the calibrated rig, the GOP demux), crates/insta360-io-py its binding. maturin builds the module
 # from crates/insta360-io-py (pyproject.toml, recipe.yaml). No GPU and no CubeCL, so no patched dependencies.
 [workspace]
 resolver = "2"
-members = ["crates/insta360-io-py"]
+members = ["crates/insta360-io-core", "crates/insta360-io-py"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +14,7 @@ rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
+insta360-io-core = { path = "crates/insta360-io-core" }
 kornia-image = { version = "0.2", default-features = false }
 kornia-staging-3d = { path = "../kornia-staging/crates/kornia-staging-3d" }
 kornia-staging-imgproc = { path = "../kornia-staging/crates/kornia-staging-imgproc" }

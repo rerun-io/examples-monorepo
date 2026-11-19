@@ -104,15 +104,17 @@ class FaceTable:
     """Where each pixel of a face reads the two lens images."""
 
     map_x: Float32[ndarray, "2 h w"]
-    """Lens x per face pixel, for lens 0 and lens 1 (``-1`` where that lens does not see the ray)."""
+    """Lens x per face pixel, for lens 0 and lens 1 (``-1`` where that lens does not see the ray or its image ends)."""
     map_y: Float32[ndarray, "2 h w"]
     """Lens y per face pixel, for lens 0 and lens 1."""
     use_lens0: Bool[ndarray, "h w"]
     """True where the pixel is read from lens 0 (its ray has ``z0 >= 0``)."""
 
 
-def face_table(face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_lens0: Float64[ndarray, "3 3"]) -> FaceTable:
-    """The table of ``face`` on the two lens cameras (built once per clip).
+def face_table(
+    face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_lens0: Float64[ndarray, "3 3"], lens_size: tuple[int, int]
+) -> FaceTable:
+    """The table of ``face`` on the two lens cameras, whose images are ``lens_size`` (width, height) (built once per clip).
 
     Raises:
         ValueError: If a face pixel lies outside the lens it is read from.
@@ -124,6 +126,8 @@ def face_table(face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_
     seen: list[Bool[ndarray, "h w"]] = []
     for camera, lens_rays in zip(cameras, (rays, rays @ lens1_from_lens0.T), strict=True):
         pixels, valid = camera.project(np.ascontiguousarray(lens_rays))
+        # The model accepts the ray; the sensor must also hold the pixel it lands on.
+        valid &= (pixels[:, 0] >= 0.0) & (pixels[:, 0] <= lens_size[0] - 1) & (pixels[:, 1] >= 0.0) & (pixels[:, 1] <= lens_size[1] - 1)
         maps.append(np.where(valid[:, None], pixels, -1.0))
         seen.append(valid.reshape(shape))
     outside: int = int((~np.where(use_lens0, seen[0], seen[1])).sum())

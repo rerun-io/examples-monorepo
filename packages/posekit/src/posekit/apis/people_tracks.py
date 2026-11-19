@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 import numpy as np
 import rerun as rr
 import torch
@@ -26,10 +25,19 @@ from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-from posekit.apis.people_masks import PERSON_CLASS_ID, MaskOptions, PeopleMasker, mask_entity, select_entities, set_frame_time
+from posekit.apis.people_masks import (
+    PEOPLE_MASK_ANNOTATION,
+    PERSON_CLASS_ID,
+    MaskOptions,
+    PeopleMasker,
+    mask_entity,
+    select_entities,
+    set_frame_time,
+    write_overlay,
+)
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_mask, overlay_mask
+from posekit.ops.people_masks import dilate_mask, selection_windows
 from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
 from posekit.predictions import BoxDetections
 
@@ -46,7 +54,7 @@ class TrackOptions:
     """Tracker steps between two SAM 3 re-detects (step 0 initialises).
 
     2 at stride 10 keeps every output frame within 10 frames of a SAM 3 detection: at 3 the tracker drifted off the
-    operator on lens 1 near frame 7040 (clip B) between re-detects.
+    operator on one lens between re-detects.
     """
     max_misses: int = 3
     """A track whose mask is empty for this many steps in a row is dropped."""
@@ -103,10 +111,7 @@ class StreamDecoder:
         """Mux the packets ``[keyframe before start, end)`` into an in-memory MP4 and open a decoder."""
         from torchcodec.decoders import VideoDecoder
 
-        keys: list[int] = [i for i in range(start + 1) if video.keyframes[i]]
-        if not keys:
-            raise ValueError(f"no keyframe at or before frame {start}")
-        self.first: int = keys[-1]
+        self.first: int = selection_windows(video.keyframes, [start])[0].first
         data: bytes = wrap_mp4(video.samples[self.first : end], video.keyframes[self.first : end], 30, codec=video.codec)
         self.decoder = VideoDecoder(data, device=device, seek_mode="exact")
 
@@ -167,8 +172,9 @@ class PeopleTracker:
                     iou: ndarray = mask_iou(self.last_masks[slot], det_masks[:, ::sub, ::sub]).cpu().numpy()
                 else:
                     iou = np.zeros((0, len(in_slot)), dtype=np.float32)
+                detection_iou: ndarray = mask_iou(det_masks[:, ::sub, ::sub], det_masks[:, ::sub, ::sub]).cpu().numpy()
                 plan: RedetectPlan = plan_redetect(
-                    self.live[slot], iou, threshold=self.options.match_iou, next_id=self.next_id, max_tracks=self.options.max_tracks
+                    self.live[slot], iou, detection_iou, threshold=self.options.match_iou, next_id=self.next_id, max_tracks=self.options.max_tracks
                 )
                 self.next_id = plan.next_id
                 confirmed: dict[int, bool] = {t: True for t, _ in plan.reanchor} | {t: False for t in plan.unmatched}
@@ -255,16 +261,7 @@ def main(config: PeopleTracksConfig) -> None:
     decoders: list[StreamDecoder] = [StreamDecoder(v, config.start, end, config.device) for v in videos]
     targets: list[str] = [mask_entity(e) for e in entities]
     for target in targets:
-        rr.log(
-            target,
-            rr.AnnotationContext(
-                [
-                    rr.AnnotationInfo(id=0, label="keep", color=(0, 0, 0, 0)),
-                    rr.AnnotationInfo(id=PERSON_CLASS_ID, label="person", color=(255, 0, 0, 160)),
-                ]
-            ),
-            static=True,
-        )
+        rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
     if config.overlay_dir is not None:
         config.overlay_dir.mkdir(parents=True, exist_ok=True)
     torch.cuda.synchronize()
@@ -285,11 +282,7 @@ def main(config: PeopleTracksConfig) -> None:
                 rr.log(targets[slot], rr.SegmentationImage(mask.astype(np.uint8) * PERSON_CLASS_ID))
                 n_masks += 1
                 if config.overlay_dir is not None and index in config.overlay_frames:
-                    slug: str = entity.strip("/").replace("/", "_")
-                    rgb: UInt8[ndarray, "h w 3"] = frames[slot, column].cpu().numpy()
-                    path: Path = config.overlay_dir / f"{slug}_{index:06d}.png"
-                    cv2.imwrite(str(path), cv2.cvtColor(overlay_mask(rgb, mask), cv2.COLOR_RGB2BGR))
-                    path.chmod(0o644)
+                    write_overlay(config.overlay_dir, entity, index, frames[slot, column].cpu().numpy(), mask)
         live: list[int] = [len(t) for t in tracker.live]
         elapsed: float = time.perf_counter() - run_start
         print(

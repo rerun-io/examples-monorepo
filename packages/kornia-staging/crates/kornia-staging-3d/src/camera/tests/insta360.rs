@@ -158,10 +158,21 @@ fn malformed_or_unsupported_lens_strings_are_named_errors_not_panics() {
         let error = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap_err();
         assert!(error.to_string().contains(&format!("{bad:?}")), "{error}");
     }
-    // A lens type other than 131 and 113 has no measured field of view.
-    let text = V3.replacen("_15360_7680_131_", "_15360_7680_132_", 1);
-    let error = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap_err();
-    assert!(error.to_string().contains("type 132"), "{error}");
+    // A lens type without an entry in the field table (132) gets the 190 degree default; 41 (ONE X2) is a 200 degree
+    // class and 156 a 195 degree one.
+    for (lens_type, half_field_deg) in [("132", 95.0), ("41", 100.0), ("156", 97.5)] {
+        let text = V3.replacen("_15360_7680_131_", &format!("_15360_7680_{lens_type}_"), 1);
+        let lenses = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap();
+        assert_eq!(
+            lenses[0].camera.half_field_rad(),
+            half_field_deg * std::f64::consts::PI / 180.0
+        );
+        // Each lens states its own type: the first lens's token changed, the second's did not.
+        assert_eq!(
+            [lenses[0].lens_type, lenses[1].lens_type],
+            [lens_type.parse::<u32>().unwrap(), 131]
+        );
+    }
     // A negative focal makes no camera.
     let text = V3.replacen("_7095.540_", "_-7095.540_", 1);
     let error = parse_lens_string(&text, Some(CROP), [1920, 1920]).unwrap_err();

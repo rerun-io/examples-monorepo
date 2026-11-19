@@ -1,4 +1,4 @@
-"""SAM 3 people masks on a real Insta360 lens frame (GPU, SAM 3 weights, the Casa Loma base recording)."""
+"""SAM 3 people masks on a real Insta360 lens frame (GPU, SAM 3 weights, an Insta360 base recording)."""
 
 import os
 from pathlib import Path
@@ -7,11 +7,7 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-BASE_RRD: Path = Path(
-    os.environ.get(
-        "POSEKIT_PEOPLE_MASKS_RRD", "/mnt/nas/ssd-8tb/scratch/casa-loma-pipeline/clipB/ingest/base/insta360__VID_20261116_125200_00_003.rrd"
-    )
-)
+BASE_RRD: str | None = os.environ.get("POSEKIT_PEOPLE_MASKS_RRD")
 """A recording whose lens 0 frame 0 shows the camera operator close to the camera."""
 
 
@@ -19,8 +15,8 @@ def test_people_masker_finds_the_operator_in_a_lens_frame() -> None:
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU")
-    if not BASE_RRD.exists():
-        pytest.skip(f"asset missing: {BASE_RRD} (set POSEKIT_PEOPLE_MASKS_RRD)")
+    if BASE_RRD is None or not Path(BASE_RRD).exists():
+        pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
     from simplecv.catalog_video import read_catalog_videos
 
