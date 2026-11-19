@@ -27,7 +27,7 @@ from serde import serde, to_dict
 
 from colsfm.export import EVERY_FRAME_METADATA_SUBPATH, KEYFRAME_METADATA_SUBPATH, SPARSE_DIR_NAME, write_tum_file
 from colsfm.frames_meta import FRAMES_META_NAME, FramesMeta, read_frames_meta, write_frames_meta
-from colsfm.geometry import TumPose, rigid3d_from_matrix
+from colsfm.geometry import TumPose, parse_tum_line, rigid3d_from_matrix
 from colsfm.rigid_fit import RigidAlignment, align_rigid
 from colsfm.run_lifecycle import SUMMARY_NAME
 
@@ -95,14 +95,8 @@ def _transform_pose(alignment: pycolmap.Sim3d, world_T_body: pycolmap.Rigid3d) -
 
 
 def _transform_tum(path: Path, alignment: pycolmap.Sim3d) -> None:
-    poses: list[TumPose] = []
-    for line in path.read_text().splitlines():
-        if not line.strip() or line.startswith("#"):
-            continue
-        fields: list[float] = [float(value) for value in line.split()]
-        world_T_body = pycolmap.Rigid3d(pycolmap.Rotation3d(np.asarray(fields[4:8])), np.asarray(fields[1:4]))
-        poses.append(TumPose(round(fields[0] * 1e6), _transform_pose(alignment, world_T_body)))
-    write_tum_file(path, poses)
+    lines: list[str] = [line for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    write_tum_file(path, [TumPose(p.timestamp_microseconds, _transform_pose(alignment, p.world_T_body)) for p in map(parse_tum_line, lines)])
 
 
 def _transform_frames_meta(path: Path, alignment: pycolmap.Sim3d) -> None:
