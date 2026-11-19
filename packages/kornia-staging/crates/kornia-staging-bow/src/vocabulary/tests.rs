@@ -57,6 +57,32 @@ fn rejects_invalid_settings() {
 }
 
 #[test]
+fn same_seed_same_tree_words_and_scores_on_1_and_8_threads() {
+    // 5 000 non-grid rows: more than three CHUNKs, so the Lloyd reductions combine several partial sums, and the
+    // root's assignment and the descent run in several parallel chunks. Train, assign and score inside each pool.
+    let data = random_points::<8>(5000, 11);
+    let images: Vec<Vec<[f32; 8]>> = data.chunks(250).map(<[[f32; 8]]>::to_vec).collect();
+    let cfg = config(4, 3, 5, 42);
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let vocabulary = Vocabulary::train(&data, &cfg).unwrap();
+            let words: Vec<Vec<u32>> = images.iter().map(|image| vocabulary.words(image)).collect();
+            let scores = similarity_matrix(&words);
+            (vocabulary, words, scores)
+        })
+    };
+    let (one, one_words, one_scores) = run(1);
+    let (eight, eight_words, eight_scores) = run(8);
+    assert_eq!(one.centroids, eight.centroids);
+    assert_eq!(one_words, eight_words);
+    assert_eq!(one_scores, eight_scores);
+}
+
+#[test]
 fn a_different_seed_gives_a_different_tree() {
     // Same seed across thread counts is the proptest `same_seed_same_vocabulary_across_thread_counts`.
     let data = random_points::<8>(5000, 1);
@@ -66,12 +92,15 @@ fn a_different_seed_gives_a_different_tree() {
 }
 
 #[test]
-fn lloyd_iterations_put_centroids_on_cluster_means() {
-    // Recovery of well-separated clusters is the proptest `well_separated_clusters_are_recovered`; this checks that
-    // the centroids are the cluster means (k-means++ alone would leave them on training points).
+fn lloyd_iterations_recover_jittered_clusters_at_their_means() {
+    // Jittered clusters, one fixed seed: every point gets its cluster's word, and the centroids are the cluster means
+    // (k-means++ alone would leave them on training points).
     let centers = [[0.0f32, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]];
     let data = clustered(&centers, 50, 3);
     let vocabulary = Vocabulary::train(&data, &config(4, 1, 10, 0)).unwrap();
+    for (point, center) in data.iter().zip(centers.iter().cycle()) {
+        assert_eq!(vocabulary.word(point), vocabulary.word(center));
+    }
     for center in &centers {
         let closest = vocabulary.centroids[0]
             .iter()
@@ -157,14 +186,6 @@ mod properties {
     use super::*;
     use proptest::prelude::*;
 
-    fn train_in(threads: usize, data: &[[f32; 4]], cfg: &VocabularyConfig) -> Vocabulary<4> {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap()
-            .install(|| Vocabulary::train(data, cfg).unwrap())
-    }
-
     /// Small random corpora: 4-d points on a coarse grid, so duplicates and ties occur.
     fn points(max: usize) -> impl Strategy<Value = Vec<[f32; 4]>> {
         proptest::collection::vec(
@@ -180,19 +201,6 @@ mod properties {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
-
-        /// The same seed gives the same tree and the same words, with 1 thread and with 8.
-        #[test]
-        fn same_seed_same_vocabulary_across_thread_counts(
-            data in points(600), branching in 2usize..5, depth in 1usize..4, iterations in 0usize..4, seed in any::<u64>()
-        ) {
-            let cfg = VocabularyConfig { branching, depth, iterations, seed };
-            let one = train_in(1, &data, &cfg);
-            let eight = train_in(8, &data, &cfg);
-            prop_assert_eq!(&one.centroids, &eight.centroids);
-            prop_assert_eq!(&one.live, &eight.live);
-            prop_assert_eq!(one.words(&data), eight.words(&data));
-        }
 
         /// Every descriptor, seen or not, lands on exactly one live leaf inside the word range.
         #[test]
@@ -306,9 +314,11 @@ mod properties {
             }
         }
 
-        /// Well-separated clusters (spacing 10, jitter 0.05) are recovered: one word per cluster, every point on it.
+        /// Distinct points, each repeated, are recovered for every seed: one word per point, every copy on it.
+        /// (k-means++ never seeds a point at distance 0 from a chosen centroid, so it picks each point once. Jittered
+        /// clusters can share a seed for some seeds; that case is the fixed-seed `lloyd_iterations_*` unit test.)
         #[test]
-        fn well_separated_clusters_are_recovered(
+        fn repeated_distinct_points_are_recovered(
             n_clusters in 2usize..7, per_cluster in 5usize..30, seed in any::<u64>(), placement in any::<u64>()
         ) {
             let mut rng = ChaCha8Rng::seed_from_u64(placement);
@@ -319,7 +329,7 @@ mod properties {
                     centers.push(c);
                 }
             }
-            let data = clustered(&centers, per_cluster, placement);
+            let data: Vec<[f32; 3]> = (0..per_cluster).flat_map(|_| centers.iter().copied()).collect();
             let vocabulary = Vocabulary::train(&data, &VocabularyConfig { branching: n_clusters, depth: 1, iterations: 10, seed }).unwrap();
             let words: Vec<u32> = centers.iter().map(|c| vocabulary.word(c)).collect();
             let mut distinct = words.clone();
