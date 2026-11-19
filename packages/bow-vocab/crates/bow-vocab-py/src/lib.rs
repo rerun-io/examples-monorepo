@@ -2,21 +2,29 @@
 //! (`kornia_staging_bow::vocabulary`) and the dense DBoW2 L1 score matrix of a set of images.
 //!
 //! Descriptor arrays are borrowed, not copied: a C-contiguous `n x D` float32 array is read as `n` rows of
-//! `[f32; D]`. `D` is 64, 128 or 256. The GIL is released while Rust works. Every refusal raises `ValueError`.
+//! `[f32; D]`. `D` is 64, 128 or 256. Rust reads the arrays with the GIL released, so the caller must not write to
+//! them (or to memory they alias) during a call. A wrong width or a non-C-contiguous array raises `ValueError`; an
+//! array of another dtype (float64, say) raises `TypeError` from PyO3's argument extraction.
 
 use kornia_staging_bow::vocabulary::{similarity_matrix, Vocabulary as Tree, VocabularyConfig};
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-/// Borrow a C-contiguous `n x D` float32 array as `n` rows of `[f32; D]`.
+/// Borrow a C-contiguous `n x D` float32 array as `n` rows of `[f32; D]`; refuse any other width or layout (a
+/// Fortran-ordered or strided array would otherwise be read with its rows mixed).
 fn rows<'a, const D: usize>(array: &'a PyReadonlyArray2<'_, f32>) -> PyResult<&'a [[f32; D]]> {
-    let (_, cols) = array.as_array().dim();
+    let cols = array.shape()[1];
     if cols != D {
         return Err(PyValueError::new_err(format!(
             "expected {D} columns, got {cols}"
         )));
+    }
+    if !array.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "descriptors must be a C-contiguous float32 array",
+        ));
     }
     let (chunks, rest) = array
         .as_slice()

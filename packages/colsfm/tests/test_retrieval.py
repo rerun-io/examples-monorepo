@@ -23,7 +23,7 @@ from typing import Final
 import numpy as np
 import pycolmap
 import pytest
-from jaxtyping import Float32, Int32
+from jaxtyping import Float32, Float64, Int32
 from numpy import ndarray
 
 from colsfm.database import read_descriptors_from_database
@@ -466,6 +466,38 @@ def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
         for second in range(len(images)):
             if first != second:
                 assert l1_score(bows[first], bows[second]) == pytest.approx(float(scores[first, second]), abs=1e-5)
+
+
+def test_the_binding_refuses_arrays_it_would_misread() -> None:
+    """`bow_vocab` borrows the numpy buffer, so it must refuse what it cannot read row by row.
+
+    A Fortran-ordered or strided array would be read with its rows mixed; a wrong width or dtype
+    is refused too. A C-contiguous row slice is a valid view and still works.
+    """
+    from bow_vocab import Vocabulary
+
+    generator: np.random.Generator = np.random.default_rng(5)
+    data: Float32[ndarray, "n 128"] = generator.standard_normal((400, 128)).astype(np.float32)
+    settings: dict[str, int] = {"branching": 4, "depth": 2, "iterations": 3, "seed": 0}
+    vocabulary: Vocabulary = Vocabulary(data, **settings)
+    misread: list[ndarray] = [np.asfortranarray(data), data[:, ::2], np.ascontiguousarray(data[:, :96])]
+    for bad in misread:
+        with pytest.raises(ValueError):
+            Vocabulary(bad, **settings)
+        with pytest.raises(ValueError):
+            vocabulary.words(bad)
+        with pytest.raises(ValueError):
+            vocabulary.similarity([data, bad])
+    wide: Float64[ndarray, "n 128"] = data.astype(np.float64)
+    with pytest.raises(TypeError):
+        Vocabulary(wide, **settings)
+    with pytest.raises(TypeError):
+        vocabulary.words(wide)
+    with pytest.raises(TypeError):
+        vocabulary.similarity([data, wide])
+    rows: Float32[ndarray, "m 128"] = data[10:50]
+    np.testing.assert_array_equal(vocabulary.words(rows), vocabulary.words(data)[10:50])
+    assert vocabulary.similarity([data[:200], rows]).shape == (2, 2)
 
 
 VOCAB_PROBE_IMAGES: int = 100
