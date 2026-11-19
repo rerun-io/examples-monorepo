@@ -12,12 +12,11 @@ that selects points for LightGlue+ happens later, on its scores (`colsfm.matchin
 
 from __future__ import annotations
 
-import gc
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol, TypeAlias, runtime_checkable
+from typing import Final, Literal, Protocol, Self, TypeAlias, runtime_checkable
 
 import numpy as np
 import pycolmap
@@ -67,6 +66,12 @@ class EngineRuntime(Protocol):
 
     def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         """Execute once and return output views valid until the next call."""
+        ...
+
+    def __enter__(self) -> Self: ...
+
+    def __exit__(self, *_: object) -> None:
+        """Release the context, engine and buffers (`close()`)."""
         ...
 
 
@@ -331,32 +336,27 @@ def run_native_extraction(
         for group in groups:
             if not group.tasks:
                 continue
-            runtime: EngineRuntime = (
-                open_runtime(group.engine_path) if open_runtime is not None else TensorRtDynamicRuntime(group.engine_path, direct_binding=True)
-            )
-            group_batch: int = min(batch_size, group.maximum_batch_size or batch_size)
-            declared_shape: tuple[int, ...] = runtime.max_input_shapes[model.image_binding]
-            network_height: int = group.network_height if group.network_height is not None else int(declared_shape[2])
-            network_width: int = group.network_width if group.network_width is not None else int(declared_shape[3])
-            for first in range(0, len(group.tasks), group_batch):
-                tasks: list[ImageTask] = list(group.tasks[first : first + group_batch])
-                network_tensor: Tensor = _device_batch(frames, tasks, network_height, network_width)
-                # The engine's views are valid until the next call: the database write is the one place they become host.
-                outputs: dict[str, ndarray] = {name: value.cpu().numpy() for name, value in runtime({model.image_binding: network_tensor}).items()}
-                store_feature_batch(
-                    database,
-                    tasks,
-                    FeatureBatch.from_bindings(outputs, len(tasks)),
-                    min_score=min_score,
-                    max_num_features=max_num_features,
-                    descriptor_type=model.descriptor_type,
-                    masks=masks,
-                )
-            # Release this group's context, engine and buffers before the next group opens its own.
-            del runtime, network_tensor, outputs
-            gc.collect()
+            # One group's context, engine and buffers at a time: the block closes them before the next group opens its own.
+            with open_runtime(group.engine_path) if open_runtime is not None else TensorRtDynamicRuntime(group.engine_path, direct_binding=True) as runtime:
+                group_batch: int = min(batch_size, group.maximum_batch_size or batch_size)
+                declared_shape: tuple[int, ...] = runtime.max_input_shapes[model.image_binding]
+                network_height: int = group.network_height if group.network_height is not None else int(declared_shape[2])
+                network_width: int = group.network_width if group.network_width is not None else int(declared_shape[3])
+                for first in range(0, len(group.tasks), group_batch):
+                    tasks: list[ImageTask] = list(group.tasks[first : first + group_batch])
+                    network_tensor: Tensor = _device_batch(frames, tasks, network_height, network_width)
+                    # The engine's views are valid until the next call: the database write is the one place they become host.
+                    outputs: dict[str, ndarray] = {name: value.cpu().numpy() for name, value in runtime({model.image_binding: network_tensor}).items()}
+                    store_feature_batch(
+                        database,
+                        tasks,
+                        FeatureBatch.from_bindings(outputs, len(tasks)),
+                        min_score=min_score,
+                        max_num_features=max_num_features,
+                        descriptor_type=model.descriptor_type,
+                        masks=masks,
+                    )
             if torch.cuda.is_initialized():
-                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
 
 
