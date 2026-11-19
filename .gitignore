@@ -149,6 +149,7 @@ packages/kornia-staging/target/
 packages/tsdf-rs/target/
 packages/depth-png/target/
 packages/insta360-io/target/
+packages/bow-vocab/target/
 packages/slam-rs/slam_rs/_core.so
 
 # robocap-live (its Cargo target is ignored by the package's own .gitignore)

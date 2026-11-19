@@ -211,6 +211,8 @@ name = "kornia-staging-bow"
 version = "0.1.0"
 dependencies = [
  "kornia-bow",
+ "rand",
+ "rayon",
 ]
 
 [[package]]

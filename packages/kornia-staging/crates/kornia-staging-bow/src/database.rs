@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use kornia_bow::BoW;
+use rayon::prelude::*;
 
 /// Id of a database entry: the order in which it was added, from 0. Ids of removed entries are not reused.
 pub type EntryId = u32;
@@ -134,8 +135,7 @@ impl Database {
         let mut sums: HashMap<EntryId, f64> = HashMap::new();
         for &(word, q) in bow.0.iter().filter(|&&(_, w)| w != 0.0) {
             for &(entry, d) in self.inverted.get(&word).into_iter().flatten() {
-                let (q, d) = (f64::from(q), f64::from(d));
-                *sums.entry(entry).or_default() += (q - d).abs() - q.abs() - d.abs();
+                *sums.entry(entry).or_default() += l1_term(q, d);
             }
         }
         let mut results: Vec<QueryResult> = sums
@@ -152,6 +152,71 @@ impl Database {
         }
         results
     }
+}
+
+/// One shared word's contribution to `|q - d|_1 - 2` for L1-normalized bags, in f64: `|q_w - d_w| - |q_w| - |d_w|`
+/// (DBoW2's `queryL1`). [`Database::query_where`] and [`l1_similarity_matrix`] both sum it, so they cannot drift.
+#[inline]
+fn l1_term(q: f32, d: f32) -> f64 {
+    let (q, d) = (f64::from(q), f64::from(d));
+    (q - d).abs() - q.abs() - d.abs()
+}
+
+/// The dense `n x n` L1 similarity matrix (row-major) of `bows`, as an all-pairs retrieval index: the [`Database`]
+/// score of every pair, clamped to `[0, 1]`, 1.0 on the diagonal; an empty bag scores 0 against every other bag.
+///
+/// The bags go into a [`Database`] (entry `i` is `bows[i]`), and each row `q` sums [`l1_term`] over its words'
+/// postings for the entries after `q` only, into a dense per-thread f64 buffer, in the same order as
+/// [`Database::query`]: `scores[q][e]` for `q < e` equals `Database::query(bows[q])`'s score of `e` bit for bit. The
+/// lower triangle mirrors the upper one, so the matrix is exactly symmetric and each pair is scored once. Rows run in
+/// parallel.
+///
+/// ```
+/// use kornia_bow::BoW;
+/// use kornia_staging_bow::l1_similarity_matrix;
+///
+/// let bows = [BoW(vec![(1, 0.5), (2, 0.5)]), BoW(vec![(1, 0.5), (3, 0.5)]), BoW(vec![(9, 1.0)])];
+/// let scores = l1_similarity_matrix(&bows);
+/// assert_eq!(scores[0], 1.0); // diagonal
+/// assert_eq!(scores[1], 0.5); // one shared word, weight 0.5 on both sides
+/// assert_eq!(scores[1], scores[3]); // symmetric
+/// assert_eq!(scores[2], 0.0); // no shared word
+/// ```
+pub fn l1_similarity_matrix(bows: &[BoW]) -> Vec<f32> {
+    let n = bows.len();
+    let mut database = Database::new();
+    for bow in bows {
+        database.add(bow);
+    }
+    let mut scores = vec![0.0f32; n * n];
+    if n == 0 {
+        return scores;
+    }
+    scores.par_chunks_mut(n).enumerate().for_each_init(
+        || vec![0.0f64; n],
+        |sums, (query, row)| {
+            let later = &mut sums[query + 1..];
+            later.fill(0.0);
+            for &(word, q) in bows[query].0.iter().filter(|&&(_, w)| w != 0.0) {
+                let postings = database.inverted.get(&word).map_or(&[][..], Vec::as_slice);
+                // Postings are in entry order: skip the entries up to `query`.
+                let first = postings.partition_point(|&(entry, _)| entry as usize <= query);
+                for &(entry, d) in &postings[first..] {
+                    later[entry as usize - query - 1] += l1_term(q, d);
+                }
+            }
+            for (score, &sum) in row[query + 1..].iter_mut().zip(later.iter()) {
+                *score = ((-sum / 2.0) as f32).clamp(0.0, 1.0);
+            }
+            row[query] = 1.0;
+        },
+    );
+    for query in 1..n {
+        for entry in 0..query {
+            scores[query * n + entry] = scores[entry * n + query];
+        }
+    }
+    scores
 }
 
 #[cfg(test)]

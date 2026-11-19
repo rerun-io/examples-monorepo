@@ -1303,6 +1303,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kornia-staging-3d"
+version = "0.1.0"
+dependencies = [
+ "kornia-algebra",
+ "kornia-staging-algebra",
+ "nalgebra",
+ "thiserror",
+]
+
+[[package]]
 name = "kornia-staging-algebra"
 version = "0.1.0"
 dependencies = [
@@ -1316,6 +1326,8 @@ name = "kornia-staging-bow"
 version = "0.1.0"
 dependencies = [
  "kornia-bow",
+ "rand 0.10.4",
+ "rayon",
 ]
 
 [[package]]
@@ -1339,6 +1351,7 @@ version = "0.1.0"
 dependencies = [
  "kornia-image",
  "kornia-imgproc",
+ "kornia-staging-3d",
  "kornia-staging-algebra",
  "nalgebra",
  "rayon",
