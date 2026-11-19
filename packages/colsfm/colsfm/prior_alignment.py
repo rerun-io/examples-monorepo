@@ -2,7 +2,7 @@
 everything the run exports.
 
 Bundle adjustment pins the gauge at the start and has no prior residual, so on a long sequence the reconstruction's
-scale and heading drift away from the prior's (Casa Loma clip B: scale 0.80, 4.2 m median offset). When the prior is
+scale and heading drift away from the prior's (an Insta360 walk-through: scale 0.80, 4.2 m median offset). When the prior is
 the metric frame the rest of a pipeline lives in (a visual-inertial SLAM run), `align_run_directory` fits
 `prior ~ s R x + t` (Umeyama, `colsfm.rigid_fit.align_rigid`) on the camera centres of every registered image against
 the same images' prior poses (the run's input `frames_meta.json`), refits once without the residual outliers, and
@@ -35,7 +35,7 @@ OUTLIER_FACTOR: Final[float] = 3.0
 """The refit drops cameras whose first-fit residual exceeds this many times the median residual."""
 
 SKIPPED_ENTRIES: Final[frozenset[str]] = frozenset({"database.db", "colsfm.rrd"})
-"""Not copied into a new run directory: the database is linked (8 GB on clip B), the layer is rewritten."""
+"""Not copied into a new run directory: the database is linked (GBs on a long run), the layer is rewritten."""
 
 
 @serde(deny_unknown_fields=True)

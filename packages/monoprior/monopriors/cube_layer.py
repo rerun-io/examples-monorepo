@@ -1,4 +1,4 @@
-"""Read the casa-loma cube-faces layer (and its people-mask layer) from a local ``.rrd``.
+"""Read the Insta360 cube-face layer (and its people-mask layer) from a local ``.rrd``.
 
 Faces are the camera nodes ``/world/rig_NN/cam_NN`` whose static ``name`` is ``cube6_<direction>``
 (CONTRACT "Cube faces"); the raw lenses (other names) are skipped. Geometry comes from the layer's static

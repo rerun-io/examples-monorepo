@@ -1,4 +1,4 @@
-"""Cube-face pinholes of the casa-loma 6-face cubemap layer, and spirula's depth/normal prior encodings.
+"""Cube-face pinholes of the Insta360 cube-face layer (6-face cubemap), and spirula's depth/normal prior encodings.
 
 Every face is a full N x N 90 deg pinhole (fx = fy = N/2, principal point at the image centre with integer pixel
 centres: cx = cy = (N - 1) / 2), named ``cube6_<front0|front1|left|right|up|down>``. MoGe-2 runs on each face as

@@ -46,7 +46,7 @@ class TrackOptions:
     """Tracker steps between two SAM 3 re-detects (step 0 initialises).
 
     2 at stride 10 keeps every output frame within 10 frames of a SAM 3 detection: at 3 the tracker drifted off the
-    operator on lens 1 near frame 7040 (clip B) between re-detects.
+    operator on one lens between re-detects.
     """
     max_misses: int = 3
     """A track whose mask is empty for this many steps in a row is dropped."""

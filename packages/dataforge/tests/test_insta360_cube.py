@@ -13,15 +13,15 @@ LENS: int = 384
 FACE: int = 160
 """Face size of the synthetic tests."""
 XI: float = 2.315
-"""Clip B's xi."""
+"""An X4 Air lens's xi."""
 FOCAL: float = 1835.37 * LENS / 1920
-"""Clip B's focal at the synthetic lens size."""
+"""An X4 Air lens's focal at the synthetic lens size."""
 HALF_FIELD: float = np.deg2rad(100.0)
 """The X4 Air's half field."""
 
 
 def camera() -> insta360_io.MeiCamera:
-    """A distortion-free Mei lens shaped like clip B's, so its inverse is closed form."""
+    """A distortion-free Mei lens shaped like an X4 Air lens, so its inverse is closed form."""
     centre: float = (LENS - 1) / 2.0
     return insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [XI, HALF_FIELD] + [0.0] * 13)
 

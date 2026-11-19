@@ -218,7 +218,7 @@ class PipelineOptions:
     """After the run, move the whole result into the pose prior's gauge with one similarity fitted on the registered
     cameras against their input poses (`colsfm.prior_alignment`): `sparse/`, `kpmap/`, the TUM files and the catalog
     layer. For a metric prior (visual-inertial SLAM) whose frame the rest of a pipeline lives in; bundle adjustment
-    itself lets scale and heading drift (clip B: scale 0.80)."""
+    itself lets scale and heading drift (scale 0.80 on an Insta360 walk-through)."""
     raco_batch_pixels: int | None = None
     """On `raco` only: pixels (batch x height x width) one shape-dynamic RaCo execution may hold, which sets each size
     group's batch ceiling and so its execution context's memory (about 1.2 GB per million pixels on the 5090). None keeps

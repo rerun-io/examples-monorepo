@@ -402,7 +402,7 @@ class LoopClosureConfig:
 
     For a rig that sees all around (a 360 camera's cube faces) the edge-size gates cannot tell a revisit from aliasing:
     a true revisit walked the other way rotates by ~180 deg, and look-alike ceilings match 180 deg off with over a
-    thousand inliers. Measured on Casa Loma clip B (raw VIO prior): true loops disagree with the prior by a median
+    thousand inliers. Measured on an Insta360 X4 Air walk-through (raw VIO prior): true loops disagree with the prior by a median
     0.53 m / 1.6 deg (revisit) and 0.6 m / 3.5 deg (start-end), false ones by 2-16 m and 60-179 deg."""
     max_prior_rotation_deg: float | None = None
     """Rotation half of the prior-consistency gate; None = no gate."""
