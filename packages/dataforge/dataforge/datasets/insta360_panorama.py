@@ -22,17 +22,13 @@ novel view between the two lenses, the flow sampled at ``x``), each through the 
 stability: NVOF seeds each frame's search from the last (temporal hints), and the flow is smoothed over frames
 (``FLOW_SMOOTHING``), so a join must see one clip's framesets in order.
 
-Seam kinds (``SeamKind``): ``flow`` (the flow seam, CUDA only), ``blend`` (the feather alone, no flow) and ``hard`` (each
-pixel from its own lens, no band work: the fastest, the seam a visible step). The flow's quality and cost are NVOF's
-preset (``slow`` is the best) and output grid (one vector per 1, 2 or 4 pixels square). ``cpu`` runs ``blend`` and
-``hard`` through the same API.
+``cpu`` blends the band without flow (``flow=False``), through the same API.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, TypeAlias
 
 import cv2
 import insta360_io
@@ -44,7 +40,7 @@ from numpy import ndarray
 from torch import Tensor
 
 from dataforge.datasets.insta360_cube import ALIGN, project_pair, stack_pair, stack_pair_hwc, stacked_grid
-from dataforge.nvof import OpticalFlow, PerfLevel
+from dataforge.nvof import OpticalFlow
 
 SEAM_BAND_DEG: float = 5.0
 """Default half-width of the seam band: inside the 10 deg both lenses see, clear of the camera body each lens sees past it."""
@@ -54,10 +50,8 @@ MIN_STRIP_ROWS: int = 32
 """NVOF's smallest image height."""
 MAX_STRIP_COLUMNS: int = 8192
 """NVOF's largest image width."""
-SeamKind: TypeAlias = Literal["flow", "blend", "hard"]
-"""How the band joins the two lenses: across the flow seam, by the feather alone, or not at all (each pixel's own lens)."""
-FlowGrid: TypeAlias = Literal[1, 2, 4]
-"""NVOF output grid: one flow vector per ``grid x grid`` block, sampled bilinearly in between."""
+FLOW_GRID: int = 4
+"""NVOF output grid: one vector per 4 x 4 block, sampled bilinearly in between."""
 FLOW_SMOOTHING: float = 0.5
 """Weight of the new flow in the running flow (exponential smoothing over frames)."""
 SUB_BATCH: int = 4
@@ -168,8 +162,8 @@ class FlowSeam:
         ValueError: If the strip is wider than NVOF takes.
     """
 
-    def __init__(self, table: PanoramaTable, lens_size: tuple[int, int], device: torch.device, *, preset: PerfLevel, grid: FlowGrid) -> None:
-        """``lens_size``: lens image ``(width, height)``; ``preset`` and ``grid``: NVOF's quality preset and output grid."""
+    def __init__(self, table: PanoramaTable, lens_size: tuple[int, int], device: torch.device) -> None:
+        """``lens_size``: lens image ``(width, height)``."""
         strip_width, strip_height = table.strip_size
         if strip_width > MAX_STRIP_COLUMNS:
             raise ValueError(f"a {strip_width}-column seam strip is wider than NVOF's {MAX_STRIP_COLUMNS}; use a narrower panorama")
@@ -180,9 +174,9 @@ class FlowSeam:
         self.band_strip_xy: Float32[Tensor, "n 2"] = torch.from_numpy(table.band_strip_xy).to(device)
         self.band_weight: Float32[Tensor, "n 1"] = torch.from_numpy(table.band_weight).to(device)[:, None]
         self.strip_scale: Float32[Tensor, "2"] = torch.tensor([2.0 / (strip_width - 1), 2.0 / (strip_height - 1)], device=device)
-        coarse_size: Float32[Tensor, "2"] = torch.tensor([-(-strip_width // grid), -(-strip_height // grid)], dtype=torch.float32, device=device)
-        # Flow block j covers strip pixels [gj, gj + g): its centre is pixel gj + (g - 1) / 2.
-        coarse_xy: Float32[Tensor, "n 2"] = (self.band_strip_xy - (grid - 1) / 2.0) / grid
+        coarse_size: Float32[Tensor, "2"] = torch.tensor([-(-strip_width // FLOW_GRID), -(-strip_height // FLOW_GRID)], dtype=torch.float32, device=device)
+        # Flow block j covers strip pixels [4j, 4j + 4): its centre is pixel 4j + 1.5.
+        coarse_xy: Float32[Tensor, "n 2"] = (self.band_strip_xy - (FLOW_GRID - 1) / 2.0) / FLOW_GRID
         self.band_flow_grid: Float32[Tensor, "1 1 n 2"] = (coarse_xy * 2.0 / (coarse_size - 1.0) - 1.0)[None, None]
         self.luma: Float32[Tensor, "1 3 1 1"] = torch.tensor(LUMA, device=device).view(1, 3, 1, 1)
         self.running: Float32[Tensor, "4 gh gw"] | None = None
@@ -190,7 +184,7 @@ class FlowSeam:
         self.sessions: list[OpticalFlow] = []
         try:
             for _ in range(2):
-                self.sessions.append(OpticalFlow(strip_width, strip_height, grid=grid, perf=preset))
+                self.sessions.append(OpticalFlow(strip_width, strip_height, grid=FLOW_GRID))
         except BaseException:
             self.close()
             raise
@@ -232,22 +226,19 @@ class FlowSeam:
 class PanoramaJoin:
     """The panoramas of lens pairs on one device, in frame order (the flow seam carries state from frame to frame).
 
-    ``cuda``: ``grid_sample`` remaps; ``cpu``: ``cv2.remap``. ``seam`` picks how the band is joined (module docstring).
-    Call ``close`` to free the NVOF sessions.
+    ``cuda``: ``grid_sample`` remaps, the band blended with (``flow=True``) or without the flow seam. ``cpu``: ``cv2.remap``
+    and the plain blend. Call ``close`` to free the NVOF sessions.
 
     Raises:
-        ValueError: If the flow seam is asked for off CUDA, or its strip is wider than NVOF takes.
+        ValueError: If ``flow`` is asked for off CUDA, or the strip is wider than NVOF takes.
     """
 
-    def __init__(
-        self, table: PanoramaTable, lens_size: tuple[int, int], device: torch.device, *, seam: SeamKind, flow_preset: PerfLevel = "slow", flow_grid: FlowGrid = 4
-    ) -> None:
-        """``lens_size``: lens image ``(width, height)``; ``flow_preset``, ``flow_grid``: NVOF's, for the flow seam."""
-        if seam == "flow" and device.type != "cuda":
-            raise ValueError("the flow seam runs on CUDA (NVOF); on the cpu the seam is blend or hard")
+    def __init__(self, table: PanoramaTable, lens_size: tuple[int, int], device: torch.device, *, flow: bool) -> None:
+        """``lens_size``: lens image ``(width, height)``."""
+        if flow and device.type != "cuda":
+            raise ValueError("the flow seam runs on CUDA (NVOF); the cpu join blends the band without flow")
         self.table: PanoramaTable = table
         self.device: torch.device = device
-        self.kind: SeamKind = seam
         self.seam: FlowSeam | None = None
         if device.type == "cpu":
             count: int = table.band_index.size
@@ -267,8 +258,8 @@ class PanoramaJoin:
         self.band_index: Int64[Tensor, " n"] = torch.from_numpy(table.band_index).to(device)
         self.band_weight: Float32[Tensor, " n"] = torch.from_numpy(table.band_weight).to(device)
         self.band_lens_grid: Float32[Tensor, "1 2 n 2"] = torch.from_numpy(stacked_grid(table.band_lens_xy, lens_size)).to(device)[None]
-        if seam == "flow":
-            self.seam = FlowSeam(table, lens_size, device, preset=flow_preset, grid=flow_grid)
+        if flow:
+            self.seam = FlowSeam(table, lens_size, device)
 
     def panoramas(self, lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[Tensor, "b 3 ph pw"]:
         """The panoramas of ``b`` consecutive lens pairs (RGB, channels first, on the device).
@@ -287,9 +278,6 @@ class PanoramaJoin:
             # Static grids: the framesets ride in the channels, so the bilinear weights are computed once per pixel.
             folded: Float32[Tensor, "1 sc r w"] = stacked.view(1, s * c, rows, columns)
             pano: Float32[Tensor, "s 3 ph pw"] = F.grid_sample(folded, self.pano_grid, mode="bilinear", padding_mode="zeros", align_corners=True).view(s, c, height, width)
-            if self.kind == "hard":
-                out[first : first + s] = pano.round_()
-                continue
             if self.seam is None:
                 reads: Float32[Tensor, "s 3 2 n"] = F.grid_sample(folded, self.band_lens_grid, mode="bilinear", padding_mode="zeros", align_corners=True).view(s, c, 2, -1)
             else:
@@ -300,21 +288,19 @@ class PanoramaJoin:
         return out
 
     def _cpu_panoramas(self, lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[Tensor, "b 3 ph pw"]:
-        """``cv2.remap`` of the stacked pair, the band blended without flow (``blend``) or left as read (``hard``)."""
+        """``cv2.remap`` of the stacked pair, the band blended without flow."""
         count: int = self.table.band_index.size
         weight: Float32[ndarray, "n 1"] = self.table.band_weight[:, None]
         stacked: UInt8[ndarray, "b r w 3"] = stack_pair_hwc(lens0, lens1)
         panoramas: list[UInt8[ndarray, "ph pw 3"]] = []
         for pair in stacked:
             pano: UInt8[ndarray, "ph pw 3"] = cv2.remap(pair, *self.pano_maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            panoramas.append(pano)
-            if self.kind == "hard":
-                continue
             reads: list[Float32[ndarray, "n 3"]] = [
                 cv2.remap(pair, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0).reshape(-1, pair.shape[-1])[:count].astype(np.float32)
                 for map_x, map_y in self.band_maps
             ]
             pano.reshape(-1, pair.shape[-1])[self.table.band_index] = np.rint(reads[0] + weight * (reads[1] - reads[0])).astype(np.uint8)
+            panoramas.append(pano)
         return torch.from_numpy(np.ascontiguousarray(np.stack(panoramas).transpose(0, 3, 1, 2)))
 
     def close(self) -> None:

@@ -55,7 +55,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, TypeAlias
 
 import av
 import insta360_io
@@ -77,7 +77,6 @@ from dataforge.datasets import insta360_panorama
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_camera_source, log_rig_node, log_video_stream
-from dataforge.nvof import PerfLevel
 from dataforge.video_encoding import NVENC_PRESET, nvenc_av1_options, nvenc_slot, work_dir
 
 RIG: int = 0
@@ -96,6 +95,8 @@ LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
+SeamKind: TypeAlias = Literal["flow", "blend"]
+"""How the panorama joins its seam band: the flow seam (``cuda``) or the plain feather (``cpu``)."""
 RUN_SOURCE: str = "slam_rs"
 """The run layer the layouts show: slam-rs tracks these clips."""
 
@@ -306,15 +307,8 @@ class Insta360Config(FrameLimitedConfig):
     pano_band_deg: float = insta360_panorama.SEAM_BAND_DEG
     """Half-width of the seam band, degrees either side of the seam plane, where the two lenses are blended."""
     pano_device: Literal["cuda", "cpu"] = "cuda"
-    """Where the panorama is decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory) or ``cpu``
-    (PyAV, ``cv2.remap``; ``blend`` or ``hard`` seam)."""
-    pano_seam: insta360_panorama.SeamKind = "flow"
-    """How the seam band joins the lenses: ``flow`` (optical-flow seam on NVOF, ``cuda`` only), ``blend`` (feather only,
-    no flow) or ``hard`` (each pixel from its own lens; the fastest, the seam a visible step)."""
-    pano_flow_preset: PerfLevel = "slow"
-    """NVOF quality preset of the flow seam: ``slow`` (best), ``medium`` or ``fast``."""
-    pano_flow_grid: insta360_panorama.FlowGrid = 4
-    """NVOF output grid of the flow seam: one flow vector per 1, 2 or 4 pixels square."""
+    """Where the panorama is decoded and joined: ``cuda`` (NVDEC, CUDA remap, flow seam on NVOF, NVENC from device
+    memory) or ``cpu`` (PyAV, ``cv2.remap``, the band blended without flow)."""
     decode_threads: int = 4
     """PyAV threads per lens decoder of the panorama and cube layers on ``cpu``."""
     pano_cq: int = 34
@@ -438,7 +432,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         table: insta360_panorama.PanoramaTable = insta360_panorama.panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, width, self.config.pano_band_deg)
         width, height = table.size
         device: torch.device = torch.device(self.config.pano_device)
-        seam: insta360_panorama.SeamKind = self.config.pano_seam
+        seam: SeamKind = "flow" if device.type == "cuda" else "blend"
         rr.log(
             PANO_ENTITY,
             rr.AnyValues(
@@ -449,13 +443,11 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 height=height,
                 seam=seam,
                 seam_band_deg=self.config.pano_band_deg,
-                flow_preset=self.config.pano_flow_preset,
-                flow_grid=self.config.pano_flow_grid,
             ),
             static=True,
             recording=recording,
         )
-        join = insta360_panorama.PanoramaJoin(table, lenses.size, device, seam=seam, flow_preset=self.config.pano_flow_preset, flow_grid=self.config.pano_flow_grid)
+        join = insta360_panorama.PanoramaJoin(table, lenses.size, device, flow=seam == "flow")
         with work_dir("insta360-pano-") as work, contextlib.closing(join):
             video: Path = work / "pano.mp4"
             with self.timer.stage("panorama"):

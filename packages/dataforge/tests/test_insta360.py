@@ -240,7 +240,7 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
     rig = insta360_io.InsvRig(str(converted.clip), 1)
     lenses = cameras_from_recording(converted.targets[paths.BASE_LAYER])
     table = panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, default_panorama_width(lenses.size[0]), SEAM_BAND_DEG)
-    join = PanoramaJoin(table, lenses.size, torch.device("cuda"), seam="flow")
+    join = PanoramaJoin(table, lenses.size, torch.device("cuda"), flow=True)
     try:
         lens0, lens1 = next(lens_pictures(rig, np.zeros(1, dtype=np.int64), torch.device("cuda"), batch=1, threads=1))
         expected: UInt8[ndarray, "h w 3"] = join.panoramas(lens0, lens1)[0].permute(1, 2, 0).cpu().numpy()
