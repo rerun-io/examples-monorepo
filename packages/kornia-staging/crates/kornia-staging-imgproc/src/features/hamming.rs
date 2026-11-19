@@ -204,7 +204,9 @@ mod tests {
             max_distance: 70,
             second_best_ratio: 1.0,
         };
+        // B17: Basalt with ratio 1.0 accepts the tie (best * 1.0 <= second) and keeps the last index.
         assert!(match_mutual(&[ones(0)], &[ones(5), ones(5)], config).is_empty());
+        // Also at distance 0, where Basalt accepts the tie for any ratio.
         assert!(match_mutual(&[ones(0)], &[ones(0), ones(0)], MatchConfig::default()).is_empty());
         assert_eq!(
             match_mutual(&[ones(0)], &[ones(5), ones(6)], config),
@@ -234,8 +236,8 @@ mod tests {
 
     #[test]
     fn a_missing_reverse_match_fails_the_mutual_check() {
-        // b[0] ties between a[0] and a[1]. Basalt default-inserts 0 for a
-        // missing reverse match and keeps (0, 0).
+        // B6: a[0] matches b[0], but b[0] ties between a[0] and a[1], so it has no match. Basalt's
+        // `matches_2_1[kv.second] == kv.first` default-inserts 0 for the missing key and keeps (0, 0).
         let a = [ones(0), ones(0)];
         let b = [ones(3), ones(100)];
         assert!(match_mutual(&a, &b, MatchConfig::default()).is_empty());

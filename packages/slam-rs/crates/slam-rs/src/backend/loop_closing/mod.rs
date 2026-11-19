@@ -62,7 +62,10 @@ struct DescriptorSet {
 impl DescriptorSet {
     fn from_ordered(descriptors: impl IntoIterator<Item = (u64, Descriptor256)>) -> Self {
         let (ids, values): (Vec<_>, Vec<_>) = descriptors.into_iter().unzip();
-        debug_assert!(ids.is_sorted());
+        debug_assert!(
+            ids.is_sorted_by(|a, b| a < b),
+            "ids must be unique and ascending"
+        );
         Self { ids, values }
     }
 
@@ -358,12 +361,13 @@ impl LoopClosing {
                 };
                 let pixels: Vec<[f32; 2]> =
                     camera_keypoints.iter().map(|(_, p)| [p.x, p.y]).collect();
-                let descriptors: BTreeMap<KeypointId, Descriptor256> = camera_keypoints
-                    .iter()
-                    .zip(describe_keypoints_u16(image, &pixels, brief))
-                    .filter_map(|((id, _), described)| Some((*id, described?.descriptor)))
-                    .collect();
-                DescriptorSet::from_ordered(descriptors.into_iter().map(|(id, d)| (id.0, d)))
+                // Keyframe keypoints are in id order, so the described subset is too.
+                DescriptorSet::from_ordered(
+                    camera_keypoints
+                        .iter()
+                        .zip(describe_keypoints_u16(image, &pixels, brief))
+                        .filter_map(|((id, _), described)| Some((id.0, described?.descriptor))),
+                )
             })
             .collect();
 
@@ -423,7 +427,8 @@ pub(crate) fn retrieve(
         .collect()
 }
 
-/// Whether any camera shares a described track with the current keyframe.
+/// Whether any camera shares a described track with the current keyframe
+/// (`checkCovisibility`): then they are covisible, not a loop.
 fn share_a_track(current_ids: &BTreeSet<u64>, candidate: &[DescriptorSet]) -> bool {
     candidate
         .iter()
@@ -431,7 +436,9 @@ fn share_a_track(current_ids: &BTreeSet<u64>, candidate: &[DescriptorSet]) -> bo
         .any(|id| current_ids.contains(id))
 }
 
-/// Mutual matches for every camera pair, in camera and descriptor ID order.
+/// Mutual matches for every camera pair, in camera and descriptor id order,
+/// as `(current camera, current keypoint, candidate id)` (`matchKeyframes`).
+/// Only described ids take part (B7).
 fn match_cameras(
     current: &[DescriptorSet],
     candidates: &[DescriptorSet],
@@ -612,8 +619,9 @@ impl MapBackend {
         None
     }
 
-    /// Continue verification after the initial matching gate: match the
-    /// island, run PnP, then try the reprojection pass and PnP again.
+    /// `validateCandidate` after the covisibility check and keyframe matching,
+    /// which `detect_loop` runs across candidates: island matching, PnP, the
+    /// reprojection pass and PnP again.
     fn validate(
         &mut self,
         query: &mut LoopQuery<'_>,
