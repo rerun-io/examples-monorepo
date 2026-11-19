@@ -8,7 +8,8 @@ the way `colsfm.matching_trt` drives LightGlue+:
   Each image runs once; its features stay in an LRU on the GPU (`FlexGlueTensorRT.features`), like COLMAP's cache.
 * **Matcher** (`flexglue_matcher_early_stop_fp16.onnx`): two feature maps and two keypoint sets -> `matches0`
   (mutual nearest neighbours on the regressed correspondences, already gated by confidence, distance and pair
-  covisibility inside the graph) and `covisibility_score`.
+  covisibility inside the graph) and `covisibility_score`. Its transformer runs in FP8 (`colsfm.flexglue_fp8`),
+  from a graph calibrated once per machine (`colsfm.apis.flexglue_fp8`).
 
 TensorRT cannot parse the matcher as shipped: it uses ONNX Runtime's contrib `com.microsoft.MultiHeadAttention` and
 `com.microsoft.Gelu`. `prepare_matcher_graph` rewrites both into standard ONNX ops (attention as reshape, matmul,
@@ -43,8 +44,10 @@ from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 from trtkit.trt_builder import onnx_content_hash
 
 from colsfm.database import ImagePair, KeypointsXY
+from colsfm.flexglue_fp8 import check_fp8_graph
 from colsfm.frames import FrameSource, open_frame_source
 from colsfm.matching import (
+    FLEXGLUE_FP8_FILE,
     FLEXGLUE_MODEL_FILES,
     MatchingOptions,
     MatchReport,
@@ -557,7 +560,9 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
     descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
-    matcher_engine: Path = resolve_engine(matcher_graph, matcher_profile(), precision="fp32")
+    fp8_graph: Path = models / FLEXGLUE_FP8_FILE
+    check_fp8_graph(fp8_graph, matcher_graph)
+    matcher_engine: Path = resolve_engine(fp8_graph, matcher_profile(), precision="fp32")
     owned: bool = frames is None
     source: FrameSource = open_frame_source(options.image_dir) if frames is None else frames
     try:
