@@ -136,7 +136,7 @@ def cameras_from_recording(base: Path) -> LensCameras:
     """
     entities: list[str] = [schema.cam_path(RIG, cam) for cam in range(2)] + [schema.pinhole_path(RIG, cam) for cam in range(2)]
     statics: dict[str, object] = {}
-    for chunk in rrc.RrdReader(base).stream():
+    for chunk in rrc.RrdReader(base).store().stream().filter(content=entities):
         if chunk.is_static and chunk.entity_path in entities:
             batch = chunk.to_record_batch()
             statics.update({f"{chunk.entity_path}:{name}": batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")})
