@@ -721,8 +721,7 @@ class Vio:
 
         ``masks``, when given, holds one entry per camera: None or a C-contiguous ``uint8`` segmentation mask at any
         resolution, nonzero = no features there, read through its scale to the camera's tracked image (the mask layer
-        contract). The frontend keeps no keypoint on a masked pixel: a detected corner there is dropped, and so is a
-        track that lands there.
+        contract). The frontend neither detects in nor keeps a track in a detection cell that holds a masked pixel.
         ``masks=None`` tracks unmasked, exactly as before masks existed.
 
         With ``port.frontend_lag`` enabled, the first call returns ``Buffered``.

@@ -189,12 +189,6 @@ impl<
         for index in 0..detected.corners.len() {
             let corner: [f32; 2] = detected.corners[index];
             let response: f32 = detected.responses[index];
-            // A corner on a masked pixel is not kept; its cell stays empty this frameset.
-            if let Some(kill) = self.track_kill_masks[camera].as_deref()
-                && kill.kills(corner[0], corner[1])
-            {
-                continue;
-            }
             let transform: AffineCompact2f =
                 AffineCompact2f::at(Vector2::new(corner[0], corner[1]));
             let id: KeypointId = KeypointId(self.last_keypoint_id);

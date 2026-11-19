@@ -48,23 +48,16 @@ use kornia_staging_imgproc::features::{
 use kornia_staging_imgproc::optical_flow::patch_tracker::FlowTransforms;
 use kornia_staging_slam::tracking::optical_flow::{CpuPatchTracker, PatchTracker, TrackInput};
 
-/// Pixels of one camera where no keypoint is kept, new or tracked: a mask at
-/// its own resolution over an image of `image_width x image_height`, read by
-/// the mask layer contract (see [`crate::frontend::masks`]): a position takes
-/// its nearest image pixel `(c, r)`, then the mask pixel that covers that
-/// pixel's centre, `(2c + 1) * width / (2 * image_width)` per axis.
+/// Pixels of one camera where a tracked keypoint is dropped: the rounded
+/// keypoint position indexes `killed`, row-major `width x height`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackKillMask {
-    /// Mask width in pixels.
+    /// Image width in pixels.
     pub width: usize,
-    /// Mask height in pixels.
+    /// Image height in pixels.
     pub height: usize,
-    /// Width of the camera image the mask covers.
-    pub image_width: usize,
-    /// Height of the camera image the mask covers.
-    pub image_height: usize,
-    /// `width * height` values, row-major; nonzero drops a keypoint there.
-    pub killed: Vec<u8>,
+    /// One flag per pixel; true drops a keypoint whose rounded position lands there.
+    pub killed: Vec<bool>,
 }
 
 impl TrackKillMask {
@@ -72,14 +65,12 @@ impl TrackKillMask {
     pub fn kills(&self, x: f32, y: f32) -> bool {
         let (column, row) = (x.round(), y.round());
         if !(column >= 0.0 && row >= 0.0)
-            || column as usize >= self.image_width
-            || row as usize >= self.image_height
+            || column as usize >= self.width
+            || row as usize >= self.height
         {
             return true;
         }
-        let mask_column = (2 * column as usize + 1) * self.width / (2 * self.image_width);
-        let mask_row = (2 * row as usize + 1) * self.height / (2 * self.image_height);
-        self.killed[mask_row * self.width + mask_column] != 0
+        self.killed[row as usize * self.width + column as usize]
     }
 }
 
@@ -537,12 +528,11 @@ impl<
     }
 
     /// Whether this frameset may take the stereo shortcut of the selected
-    /// backend: a previous frame exists, no camera has a mask (frame, static or pixel)
+    /// backend: a previous frame exists, no camera has a mask (frame or static)
     /// and every other camera is matched against camera 0.
     fn stereo_eligible(&self) -> bool {
         self.t_ns.is_some()
             && self.masks.iter().all(|masks| masks.masks.is_empty())
-            && self.track_kill_masks.iter().all(Option::is_none)
             && self
                 .detection_masks
                 .iter()
@@ -586,8 +576,8 @@ impl<
         Ok(())
     }
 
-    /// Keep no keypoint, new or tracked (temporal or stereo), on a marked
-    /// pixel: one optional mask per camera, covering that camera's image.
+    /// Drop tracked keypoints that land on a marked pixel, one optional mask
+    /// per camera, each the camera's own size.
     ///
     /// # Errors
     /// [`FrontendError::TrackKillMasks`] when the count is not the camera count
@@ -604,15 +594,11 @@ impl<
         }
         for (camera, mask) in masks.iter().enumerate() {
             if let Some(mask) = mask
-                && ([mask.image_width as u32, mask.image_height as u32]
-                    != self.cameras[camera].resolution
-                    || mask.width == 0
-                    || mask.height == 0
-                    || mask.killed.len() != mask.width * mask.height)
+                && [mask.width as u32, mask.height as u32] != self.cameras[camera].resolution
             {
                 return Err(FrontendError::TrackKillMasks {
                     camera,
-                    reason: "a track kill mask must cover its camera's image and hold width x height values",
+                    reason: "a track kill mask must be its camera's size",
                 });
             }
         }
