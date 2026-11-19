@@ -205,3 +205,19 @@ def test_the_main_registers_the_device_assets_too(tmp_path: Path, server: Server
     entry.register([target.as_uri()], layer_name="base").wait()
     publish_blueprints.main(publish_blueprints.Config(dataset=SelfcapConfig(), catalog_url=server.url(), catalog_name="selfcap-test", output_root=tmp_path / "output"))
     assert sorted(entry.assets_for_segment(FOUR)) == ["devices__iphone12__rig_00", "devices__oak_d_pro_w__rig_01", "devices__quest3s__rig_02"]
+
+
+def test_the_insta360_panorama_pane_shows_only_once_a_segment_holds_the_panorama_layer(server: Server, layer: Callable[[str, str], str]) -> None:
+    from dataforge.datasets.insta360 import PANO_ENTITY, PANORAMA_LAYER, Insta360Config, Insta360Dataset
+
+    dataset = Insta360Dataset(Insta360Config())
+
+    def panes(blueprint: rrb.Blueprint) -> list[str]:
+        return [str(view.origin) for view in blueprint_views(blueprint)]
+
+    assert PANO_ENTITY not in panes(dataset.default_blueprint()), "a base converted alone has no panorama to show"
+    entry: DatasetEntry = server.client().create_dataset("insta360-test")
+    entry.register([layer("base", FOUR), layer("base", THREE)], layer_name="base").wait()
+    assert PANO_ENTITY not in panes(dataset.catalog_blueprints(entry)[0])
+    entry.register([layer(PANORAMA_LAYER, FOUR)], layer_name=PANORAMA_LAYER).wait()
+    assert panes(dataset.catalog_blueprints(entry)[0]).count(PANO_ENTITY) == 1, "one segment's panorama is enough to show the pane"

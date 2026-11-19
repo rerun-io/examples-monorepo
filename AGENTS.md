@@ -200,7 +200,7 @@ screenshots of the Space page as proof.
 
 1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `ci/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
 2. Add `[feature.<name>]` in the root `pixi.toml`: conda deps, pypi deps (editable install), `activation.env` with `PACKAGE_DIR = "packages/<name>"`, and tasks with `cwd = "packages/<name>"`. Declare `platforms` explicitly (see **Platforms & lockfile**).
-3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature.
+3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature. Every environment composes `ffmpeg`; one that decodes video also composes `torchcodec`.
 4. Copy a package `.envrc` (defaults `PIXI_ENV` to `<name>-dev`) and add `packages/<name>/data/` to `.gitignore`.
 5. Register the package in `pyrefly.toml` in three places (see **Code Style**).
 6. Run `pixi install -e <name>-dev` to verify the solve.
@@ -418,7 +418,7 @@ release ships.
 
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
-- **gradio from conda-forge** — pinned exactly in `[feature.common.dependencies]`; it caps `pillow <13` itself. `gradio-rerun`: see **Testing Rerun builds**.
+- **gradio from conda-forge** — pinned exactly in `[feature.common.dependencies]`. `gradio-rerun`: see **Testing Rerun builds**.
 - **No dependency may need a build step during resolution** — `pixi lock` must never need package Python. Vendor the inference subset (as `monopriors/third_party/` does, with the upstream rev and patch list in the package `__init__` docstring), ship a prebuilt wheel, or give the package static metadata and build any CUDA extension through an explicit task.
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; that works from any Linux host, while macOS is limited to `pixi lock --check` (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — under pytest it silently swallows type violations. Always re-raise `BeartypeException`, defined with the `sys.modules` lookup from **Beartype** (never `from beartype.roar import ...` in package code):
