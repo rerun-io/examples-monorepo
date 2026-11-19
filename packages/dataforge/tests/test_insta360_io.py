@@ -292,3 +292,15 @@ def test_a_body_without_a_profile_is_read_loudly_without_an_imu_pose(insv_x3_cli
         assert codec.column("VideoStream:codec").to_pylist() == [[rr.VideoCodec.H264.value]]
         samples = sum(c.num_rows for c in chunks if c.entity_path == f"/rig/cam_{lens:02d}/pinhole/video" and "VideoStream:sample" in c.to_record_batch().schema.names)
         assert samples == 30
+
+
+@pytest.mark.integration
+def test_a_zero_frame_limit_and_reads_outside_the_rig_raise_instead_of_panicking(insv_x3_clip: Path) -> None:
+    with pytest.raises(ValueError, match="frame limit 0"):
+        insta360_io.InsvReader(insv_x3_clip, frame_limit=0)
+    rig = insta360_io.InsvRig(str(insv_x3_clip), 30)
+    for lens, start, stop in [(2, 0, 1), (0, 5, 3), (0, 0, 31), (1, 30, 31)]:
+        with pytest.raises(IndexError):
+            rig.read_packed(lens, start, stop)
+    with pytest.raises(IndexError):
+        rig.gops(2)

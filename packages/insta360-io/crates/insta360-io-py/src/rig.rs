@@ -2,7 +2,7 @@
 use crate::insv::{Imu, InsvLens};
 use crate::value_error;
 use insta360_io_core::profile::ImuNoise as CoreImuNoise;
-use insta360_io_core::rig::{InsvRig as CoreRig, Packed};
+use insta360_io_core::rig::{InsvRig as CoreRig, Packed, RigError};
 use kornia_staging_io::container::mp4::VideoCodec;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pyo3::exceptions::PyIndexError;
@@ -56,6 +56,14 @@ impl InsvRig {
         (lens < 2)
             .then_some(lens)
             .ok_or_else(|| PyIndexError::new_err(format!("lens {lens}; a clip has lenses 0 and 1")))
+    }
+}
+
+/// `IndexError` for a lens or range outside the rig, `ValueError` for every other refusal.
+fn rig_error(error: RigError) -> PyErr {
+    match error {
+        RigError::OutOfRange(why) => PyIndexError::new_err(why),
+        other => value_error(other),
     }
 }
 
@@ -200,7 +208,7 @@ impl InsvRig {
 
     /// GOPs of one lens as `(n, 2)` `[start, stop)` frame ranges: a keyframe and the samples up to the next one.
     fn gops<'py>(&self, py: Python<'py>, lens: usize) -> PyResult<Bound<'py, PyArray2<i64>>> {
-        let gops = self.rig.gops(self.lens(lens)?);
+        let gops = self.rig.gops(lens).map_err(rig_error)?;
         PyArray1::from_iter(py, gops.iter().flat_map(|g| [g.start as i64, g.end as i64]))
             .reshape([gops.len(), 2])
     }
@@ -214,20 +222,13 @@ impl InsvRig {
         start: usize,
         stop: usize,
     ) -> PyResult<PackedArrays<'py>> {
-        let lens = self.lens(lens)?;
-        if start > stop || stop > self.rig.frames() {
-            return Err(PyIndexError::new_err(format!(
-                "samples {start}..{stop} of {}",
-                self.rig.frames()
-            )));
-        }
         let Packed {
             data,
             offsets,
             keyframes,
         } = py
             .detach(|| self.rig.read_packed(lens, start..stop))
-            .map_err(value_error)?;
+            .map_err(rig_error)?;
         Ok((
             PyArray1::from_vec(py, data),
             PyArray1::from_vec(py, offsets),

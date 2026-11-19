@@ -30,6 +30,9 @@ pub enum RigError {
     /// The clip's records do not support a rig.
     #[error("{0}")]
     Invalid(String),
+    /// A lens or sample range outside the rig.
+    #[error("{0}")]
+    OutOfRange(String),
 }
 
 /// A clip read and checked, with its device profile applied when one fits.
@@ -67,7 +70,8 @@ impl InsvRig {
     /// last of them) when given.
     ///
     /// # Errors
-    /// A malformed clip, fewer than two frames, or frame times that do not keep increasing.
+    /// A malformed clip, fewer than two frames, a frame limit of 0, a lens track whose pictures are presented out of
+    /// decode order (B-frames), or frame times that do not keep increasing.
     pub fn open(path: impl AsRef<Path>, frame_limit: Option<usize>) -> Result<Self, RigError> {
         Self::from_clip(Insta360Clip::open(path)?, &builtin_profiles(), frame_limit)
     }
@@ -81,6 +85,25 @@ impl InsvRig {
         profiles: &[DeviceProfile],
         frame_limit: Option<usize>,
     ) -> Result<Self, RigError> {
+        if frame_limit == Some(0) {
+            return Err(RigError::Invalid(
+                "frame limit 0; a rig needs a frame".into(),
+            ));
+        }
+        // Frame `i` is sample `i` in decode order, so a track that shows its pictures in another order (B-frames)
+        // would pair pictures with the wrong exposure records.
+        for (lens, &track) in clip.lens_track.iter().enumerate() {
+            if clip.tracks[track]
+                .samples
+                .windows(2)
+                .any(|w| w[1].pts < w[0].pts)
+            {
+                return Err(RigError::Invalid(format!(
+                    "lens {lens}: pictures are presented out of decode order (B-frames); the reader pairs samples with \
+                     exposure records in decode order"
+                )));
+            }
+        }
         let vin0 = clip.frame_exposures(false);
         if vin0.len() < 2 {
             return Err(RigError::Invalid(format!(
@@ -178,20 +201,39 @@ impl InsvRig {
             .map_or(self.frame_ns[0], |&t| t.min(self.frame_ns[0]))
     }
 
+    /// The track index of lens `lens`.
+    fn track(&self, lens: usize) -> Result<usize, RigError> {
+        self.clip
+            .lens_track
+            .get(lens)
+            .copied()
+            .ok_or_else(|| RigError::OutOfRange(format!("lens {lens}; a rig has lenses 0 and 1")))
+    }
+
     /// Frames of lens `lens` cut into GOPs, as Rerun's `Mp4Reader` chunks a stream: each range is a keyframe plus
     /// every sample up to the next keyframe; a stream that does not open on a keyframe starts its first range anyway.
-    pub fn gops(&self, lens: usize) -> Vec<Range<usize>> {
-        let samples = &self.clip.tracks[self.clip.lens_track[lens]].samples[..self.frames()];
-        gop_ranges(samples.iter().map(|s| s.is_sync))
+    ///
+    /// # Errors
+    /// A lens other than 0 and 1.
+    pub fn gops(&self, lens: usize) -> Result<Vec<Range<usize>>, RigError> {
+        let samples = &self.clip.tracks[self.track(lens)?].samples[..self.frames()];
+        Ok(gop_ranges(samples.iter().map(|s| s.is_sync)))
     }
 
     /// Samples `range` of lens `lens` as Annex B access units (parameter sets on IRAPs), packed: the bytes of every
     /// sample back to back, `range.len() + 1` offsets into them, and each sample's IRAP flag.
     ///
     /// # Errors
-    /// A sample outside the track, a read failure or a malformed sample.
+    /// A lens other than 0 and 1 or a range outside the rig's frames ([`RigError::OutOfRange`]), a read failure or a
+    /// malformed sample.
     pub fn read_packed(&self, lens: usize, range: Range<usize>) -> Result<Packed, RigError> {
-        let track_index = self.clip.lens_track[lens];
+        let track_index = self.track(lens)?;
+        if range.start > range.end || range.end > self.frames() {
+            return Err(RigError::OutOfRange(format!(
+                "samples {range:?} of a rig of {} frames",
+                self.frames()
+            )));
+        }
         let track = &self.clip.tracks[track_index];
         let mut reader = self.clip.sample_reader()?;
         let bytes: u64 = track.samples[range.clone()]
@@ -418,6 +460,56 @@ mod tests {
         // Without a V6 string the V3 lenses are emitted.
         let v3_only = rig(x4_air_clip(4, [131, 131], None, &in_order(4))).unwrap();
         assert!(v3_only.profile.is_some());
+    }
+
+    #[test]
+    fn a_track_whose_pictures_are_presented_out_of_decode_order_is_refused() {
+        // I P B B in decode order, shown I B B P: the reader pairs samples with exposure records in decode order.
+        let reordered = [0, 3003, 1001, 2002];
+        for limit in [None, Some(1)] {
+            let error = InsvRig::from_clip(
+                x4_air_clip(4, [131, 131], None, &reordered),
+                &builtin_profiles(),
+                limit,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("lens 0") && error.contains("out of decode order"),
+                "{error}"
+            );
+        }
+        // A constant composition offset keeps the order.
+        let shifted: Vec<i64> = in_order(4).iter().map(|t| t + 2002).collect();
+        assert!(rig(x4_air_clip(4, [131, 131], None, &shifted)).is_ok());
+    }
+
+    #[test]
+    fn a_zero_frame_limit_and_reads_outside_the_rig_are_errors_not_panics() {
+        let zero = InsvRig::from_clip(
+            x4_air_clip(4, [131, 131], None, &in_order(4)),
+            &builtin_profiles(),
+            Some(0),
+        );
+        assert!(matches!(zero, Err(RigError::Invalid(ref why)) if why.contains("frame limit 0")));
+        let rig = InsvRig::from_clip(
+            x4_air_clip(4, [131, 131], None, &in_order(4)),
+            &builtin_profiles(),
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(rig.gops(1).unwrap(), vec![0..3]);
+        assert!(matches!(rig.gops(2), Err(RigError::OutOfRange(_))));
+        for (lens, (start, stop)) in [(2, (0, 1)), (0, (2, 1)), (0, (0, 4)), (1, (3, 4))] {
+            let range = start..stop;
+            assert!(
+                matches!(
+                    rig.read_packed(lens, range.clone()),
+                    Err(RigError::OutOfRange(_))
+                ),
+                "lens {lens} {range:?}"
+            );
+        }
     }
 
     #[test]

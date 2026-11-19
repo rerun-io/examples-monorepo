@@ -118,7 +118,8 @@ class InsvRig:
     def __init__(self, path: str, frame_limit: int | None = None) -> None:
         """Read the clip and select its profile; ``frame_limit`` keeps the first frames and the IMU up to 1 s past them.
 
-        Raises ``ValueError`` on a malformed clip or fewer than two frames.
+        Raises ``ValueError`` on a malformed clip, fewer than two frames, a ``frame_limit`` of 0, or a lens track whose
+        pictures are presented out of decode order (B-frames).
         """
     @property
     def camera_type(self) -> str: ...
@@ -164,9 +165,15 @@ class InsvRig:
     def imu(self) -> tuple[Int64[ndarray, " n"], Float64[ndarray, "n 3"], Float64[ndarray, "n 3"]]:
         """Times (ns), accel (m/s^2) and gyro (rad/s) in the IMU's axes."""
     def gops(self, lens: int) -> Int64[ndarray, "n_gops 2"]:
-        """``[start, stop)`` frame ranges: a keyframe and the samples up to the next one (the first opens on frame 0)."""
+        """``[start, stop)`` frame ranges: a keyframe and the samples up to the next one (the first opens on frame 0).
+
+        Raises ``IndexError`` for a lens other than 0 and 1.
+        """
     def read_packed(self, lens: int, start: int, stop: int) -> tuple[UInt8[ndarray, " n_bytes"], Int32[ndarray, " n_plus_1"], Bool[ndarray, " n"]]:
-        """Samples ``start..stop`` as Annex B access units back to back, their int32 offsets and IRAP flags (no GIL)."""
+        """Samples ``start..stop`` as Annex B access units back to back, their int32 offsets and IRAP flags (no GIL).
+
+        Raises ``IndexError`` for a lens other than 0 and 1 or a range outside ``0..num_frames``.
+        """
 
 class PanoramaStitch:
     """Two lens images in, the 1920x960 viewing panorama out, through the two hemisphere tiles.
