@@ -1,5 +1,5 @@
 //! Python access to the calibrated rig of a clip (`insta360_io_core::rig`): what `InsvReader` turns into Rerun chunks.
-use crate::insv::InsvLens;
+use crate::insv::{Imu, InsvLens};
 use crate::value_error;
 use insta360_io_core::profile::ImuNoise as CoreImuNoise;
 use insta360_io_core::rig::{InsvRig as CoreRig, Packed};
@@ -45,11 +45,6 @@ pub struct InsvRig {
     rig: CoreRig,
 }
 
-type Imu<'py> = (
-    Bound<'py, PyArray1<i64>>,
-    Bound<'py, PyArray2<f64>>,
-    Bound<'py, PyArray2<f64>>,
-);
 type PackedArrays<'py> = (
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,

@@ -50,7 +50,7 @@ pub struct InsvClip {
     clip: Insta360Clip,
 }
 
-type Imu<'py> = (
+pub(crate) type Imu<'py> = (
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray2<f64>>,

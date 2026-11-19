@@ -41,8 +41,6 @@ pub struct InsvRig {
     pub profile: Option<DeviceProfile>,
     /// Empty with a profile; without one, why: the body has no profile, or the clip lies outside its measured modes.
     pub profile_note: String,
-    /// What the clip states about its mode (lens type 0 when its lens strings state no single type).
-    pub mode: CaptureMode,
     /// Rolling-shutter readout of each lens image: the clip's own when it states one, else the profile's; `None`
     /// without either.
     pub readout_s: Option<f64>,
@@ -98,13 +96,17 @@ impl InsvRig {
             .as_deref()
             .or(m.offset_v6.as_deref())
             .unwrap_or_default();
-        let (mode, profile, profile_note) = choose_profile(
+        let clip_readout_s = m.rolling_shutter_ms.map(|ms| ms * 1e-3);
+        let (profile, profile_note) = match choose_profile(
             profiles,
             &m.camera_type,
             lens_type(lens_string),
             1e6 / median(&intervals),
-            m.rolling_shutter_ms.map(|ms| ms * 1e-3),
-        );
+            clip_readout_s,
+        ) {
+            Ok(profile) => (Some(profile), String::new()),
+            Err(why) => (None, why),
+        };
         let frames = frame_limit.map_or(vin0.len(), |limit| limit.min(vin0.len()));
         let record_t: Vec<i64> = vin0[..frames].iter().map(|e| e.t_us).collect();
         let exposure_s = [false, true].map(|vin1| {
@@ -134,10 +136,10 @@ impl InsvRig {
             .collect();
         let imu_from_pano = profile.as_ref().map(DeviceProfile::imu_from_pano);
         // Without a profile the rig frame is P itself: the identity rotation and no lever arm.
-        let (rig_from_pano, lever_arm) = match &profile {
-            Some(p) => (p.imu_from_pano(), p.lever_arm()),
-            None => (Matrix3::identity(), Vector3::zeros()),
-        };
+        let rig_from_pano = imu_from_pano.unwrap_or_else(Matrix3::identity);
+        let lever_arm = profile
+            .as_ref()
+            .map_or_else(Vector3::zeros, DeviceProfile::lever_arm);
         let lenses = clip.lenses_v6.unwrap_or(clip.lenses);
         let rig_from_lens = lenses.map(|lens| {
             let rotation = rig_from_pano * lens.pano_from_lens.rotation.matrix();
@@ -148,14 +150,13 @@ impl InsvRig {
             )
         });
         Ok(Self {
-            readout_s: mode.readout_s.or(profile.as_ref().map(|p| p.readout_s)),
+            readout_s: clip_readout_s.or(profile.as_ref().map(|p| p.readout_s)),
             imu_ns: imu.iter().map(|s| s.t_us * 1000).collect(),
             accel: imu.iter().map(|s| s.accel_m_s2).collect(),
             gyro: imu.iter().map(|s| s.gyro_rad_s).collect(),
             clip,
             profile,
             profile_note,
-            mode,
             lenses,
             rig_from_lens,
             imu_from_pano,
@@ -215,28 +216,24 @@ impl InsvRig {
     }
 }
 
-/// The clip's mode and the profile measured in it, or `None` and why: the body has no profile, the clip lies
-/// outside every measured mode of its body, or its lens strings state no single lens type.
+/// The profile measured in the clip's mode, or why there is none: the body has no profile, the clip lies outside
+/// every measured mode of its body, or its lens strings state no single lens type.
 pub fn choose_profile(
     profiles: &[DeviceProfile],
     camera_type: &str,
     lens_type: Result<u32, String>,
     frame_rate_hz: f64,
     readout_s: Option<f64>,
-) -> (CaptureMode, Option<DeviceProfile>, String) {
+) -> Result<DeviceProfile, String> {
     let mode = CaptureMode {
         camera_type: camera_type.to_owned(),
-        lens_type: *lens_type.as_ref().unwrap_or(&0),
+        lens_type: lens_type?,
         frame_rate_hz,
         readout_s,
     };
-    match lens_type.and_then(|_| select_profile(profiles, &mode).map_err(|e| e.to_string())) {
-        Ok(profile) => {
-            let profile = profile.clone();
-            (mode, Some(profile), String::new())
-        }
-        Err(why) => (mode, None, why),
-    }
+    select_profile(profiles, &mode)
+        .cloned()
+        .map_err(|e| e.to_string())
 }
 
 /// Samples read back to back.
@@ -279,38 +276,30 @@ mod tests {
     #[test]
     fn a_clip_without_a_fitting_profile_is_read_without_one_and_says_why() {
         let profiles = builtin_profiles();
-        let (_, profile, note) =
-            choose_profile(&profiles, "Insta360 X5", Ok(113), 29.9688, Some(0.021244));
-        assert_eq!(
-            (profile.map(|p| p.name), note.as_str()),
-            (Some("x5".to_owned()), "")
-        );
+        let profile = choose_profile(&profiles, "Insta360 X5", Ok(113), 29.9688, Some(0.021244));
+        assert_eq!(profile.map(|p| p.name), Ok("x5".to_owned()));
         // A measured body in an unmeasured mode (the public X5 sample records 25 fps).
-        let (_, profile, note) =
-            choose_profile(&profiles, "Insta360 X5", Ok(113), 25.0, Some(0.021244));
+        let note =
+            choose_profile(&profiles, "Insta360 X5", Ok(113), 25.0, Some(0.021244)).unwrap_err();
         assert!(
-            profile.is_none() && note.contains("frame rate 25.0000 Hz is not 29.97"),
+            note.contains("frame rate 25.0000 Hz is not 29.97"),
             "{note}"
         );
         // A body nobody measured.
-        let (mode, profile, note) = choose_profile(&profiles, "Insta360 X3", Ok(97), 29.97, None);
+        let note = choose_profile(&profiles, "Insta360 X3", Ok(97), 29.97, None).unwrap_err();
         assert!(
-            profile.is_none() && note.contains("no device profile for a \"Insta360 X3\""),
+            note.contains("no device profile for a \"Insta360 X3\""),
             "{note}"
         );
-        assert_eq!(mode.lens_type, 97);
         // Lens strings without a single lens type.
-        let (_, profile, note) = choose_profile(
+        let note = choose_profile(
             &profiles,
             "Insta360 X5",
             Err("mixed lens types".into()),
             29.97,
             None,
         );
-        assert_eq!(
-            (profile.is_none(), note.as_str()),
-            (true, "mixed lens types")
-        );
+        assert_eq!(note.map(|p| p.name), Err("mixed lens types".to_owned()));
     }
 
     #[test]

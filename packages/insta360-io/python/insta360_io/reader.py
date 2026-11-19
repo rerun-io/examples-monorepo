@@ -185,14 +185,11 @@ class InsvReader:
             camera = factory.camera
             rig_T_lens: Float64[ndarray, "4 4"] = np.asarray(rig.rig_from_lens(lens), dtype=np.float64)
             lens_R_rig: Float64[ndarray, "3 3"] = rig_T_lens[:3, :3].T
-            node = rr.AnyValues(camera_model=camera.model)
-            if rig.readout_s is not None:
-                node = rr.AnyValues(camera_model=camera.model, rolling_shutter_readout_s=rig.readout_s)
             yield static_chunk(
                 self.cam(lens),
                 described(
                     rr.Transform3D(translation=-lens_R_rig @ rig_T_lens[:3, 3], mat3x3=lens_R_rig, relation=rr.TransformRelation.ChildFromParent),
-                    node,
+                    rr.AnyValues(camera_model=camera.model, rolling_shutter_readout_s=rig.readout_s),
                 ),
             )
             pinhole = rr.Pinhole(
