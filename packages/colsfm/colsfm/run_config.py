@@ -215,7 +215,7 @@ class PipelineOptions:
     follow-up used, `image_area` scales it with the frame's resolution, `off` keeps every
     verified inlier."""
     align_to_prior: bool = False
-    """After the run, move the whole result into the pose prior's gauge with one similarity fitted on the registered
+    """Before the run is published, move the whole result into the pose prior's gauge with one similarity fitted on the registered
     cameras against their input poses (`colsfm.prior_alignment`): `sparse/`, `kpmap/`, the TUM files and the catalog
     layer. For a metric prior (visual-inertial SLAM) whose frame the rest of a pipeline lives in; bundle adjustment
     itself lets scale and heading drift (scale 0.80 on an Insta360 walk-through)."""

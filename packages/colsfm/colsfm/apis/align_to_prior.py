@@ -7,14 +7,16 @@ input is a catalog snapshot.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
+
+from serde.json import from_json
 
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
 from colsfm.prior_alignment import align_run_directory
 from colsfm.rerun_layer import write_run_layer
 from colsfm.run_lifecycle import SUMMARY_NAME
+from colsfm.run_report import PipelineSummary
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,7 @@ def main(config: Config) -> None:
         config: Run and destination.
     """
     align_run_directory(config.run_dir, config.output_dir, config.prior_frames_meta)
-    input_dir: Path = Path(json.loads((config.run_dir / SUMMARY_NAME).read_text())["options"]["input_dir"])
+    input_dir: Path = from_json(PipelineSummary, (config.run_dir / SUMMARY_NAME).read_text()).options.input_dir
     if (input_dir / FRAME_SOURCE_FILE).is_file():
         manifest = read_manifest(input_dir / FRAME_SOURCE_FILE)
         layer = write_run_layer(config.output_dir, config.output_dir / "colsfm.rrd", segment=manifest.segment, timeline=manifest.timeline)
