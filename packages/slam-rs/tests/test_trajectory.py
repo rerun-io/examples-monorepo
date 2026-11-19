@@ -302,5 +302,7 @@ def test_the_video_time_offset_is_the_export_offset_plus_the_camera_time_offset(
 
     relative = SimpleNamespace(export_offset_ns=1_000_000_000, imu=SimpleNamespace(cam_time_offset_ns=-2_500))
     absolute = SimpleNamespace(export_offset_ns=0, imu=SimpleNamespace(cam_time_offset_ns=7_000))
-    assert SegmentFeed.video_time_offset_ns.fget(relative) == 999_997_500
-    assert SegmentFeed.video_time_offset_ns.fget(absolute) == 7_000
+    offset = SegmentFeed.video_time_offset_ns.fget
+    assert offset is not None
+    assert offset(relative) == 999_997_500
+    assert offset(absolute) == 7_000
