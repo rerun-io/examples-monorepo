@@ -33,6 +33,10 @@ paths = ["dataforge", "tests"]
 # keyword-only parameters a test fake must accept to match the real catalog API.
 ignore_names = [
     "__cuda_array_interface__",  # read by torch.as_tensor (dataforge.nvof views NVOF buffers).
+    # Fixture the Insta360 golden test reaches through request.getfixturevalue.
+    "insv_x5_clip",
+    # Fixture the cube encoder-slot tests take through pytest.mark.usefixtures.
+    "slot_encoder",
     # Shared SelfCap API used by selfcap-curate and selfcap-soma (outside these scan paths).
     "SOMA_XLO", "SOMA_METRICS", "SOMA_JOINTS", "SOMA_EARS", "SAPIENS2_XYZ",
     "SOMA_LAYER",  # Public layer-name contract retained by the SelfCap schema review.
@@ -112,7 +116,6 @@ ignore_names = [
     "fixture_cuda_filter_available",
     # s3fs reads its retry count internally.
     "retries",
-    "slot_encoder",  # Fixture used only through pytest.mark.usefixtures (test_insta360_cube.py).
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true

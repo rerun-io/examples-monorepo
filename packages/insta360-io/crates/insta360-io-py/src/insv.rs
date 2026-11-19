@@ -4,9 +4,7 @@ use crate::value_error;
 use kornia_staging_3d::camera::formats::insta360::FactoryLens;
 use kornia_staging_io::insta360::Insta360Clip;
 use numpy::{PyArray1, PyArray2, ToPyArray};
-use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 
 /// One lens of the factory calibration at the track resolution, window crop applied.
 #[pyclass(module = "insta360_io", frozen, skip_from_py_object)]
@@ -45,18 +43,18 @@ impl From<&FactoryLens> for InsvLens {
     }
 }
 
-/// An open `.insv` clip: metadata, factory lenses, IMU, frame times, and the two HEVC lens tracks.
+/// An open `.insv` clip as the file states it (no device profile): metadata, factory lenses, IMU, frame times and the
+/// two HEVC lens tracks' layout. `InsvRig` applies a profile and reads the samples.
 #[pyclass(module = "insta360_io", frozen, skip_from_py_object)]
 pub struct InsvClip {
     clip: Insta360Clip,
 }
 
-type Imu<'py> = (
+pub(crate) type Imu<'py> = (
     Bound<'py, PyArray1<i64>>,
     Bound<'py, PyArray2<f64>>,
     Bound<'py, PyArray2<f64>>,
 );
-type Samples<'py> = (Vec<Bound<'py, PyBytes>>, Bound<'py, PyArray1<bool>>);
 
 #[pymethods]
 impl InsvClip {
@@ -189,35 +187,6 @@ impl InsvClip {
                 .collect::<Vec<_>>()
                 .to_pyarray(py),
         )
-    }
-
-    /// Samples `start..stop` of one track as Annex B access units (parameter sets on IRAPs) and their IRAP flags.
-    /// Read in batches: the samples stay on disk until asked for.
-    fn read_samples<'py>(
-        &self,
-        py: Python<'py>,
-        track: usize,
-        start: usize,
-        stop: usize,
-    ) -> PyResult<Samples<'py>> {
-        let t = self
-            .clip
-            .tracks
-            .get(track)
-            .ok_or_else(|| PyIndexError::new_err(format!("track {track}")))?;
-        let stop = stop.min(t.samples.len());
-        let mut reader = self.clip.sample_reader().map_err(value_error)?;
-        let (mut samples, mut keyframes, mut out) = (Vec::new(), Vec::new(), Vec::new());
-        for index in start..stop {
-            out.clear();
-            keyframes.push(
-                reader
-                    .read_annex_b(t, index, &mut out)
-                    .map_err(value_error)?,
-            );
-            samples.push(PyBytes::new(py, &out));
-        }
-        Ok((samples, keyframes.to_pyarray(py)))
     }
 }
 

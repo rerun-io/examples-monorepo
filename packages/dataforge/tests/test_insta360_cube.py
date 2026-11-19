@@ -88,7 +88,7 @@ def test_the_seam_is_the_centre_line_of_the_four_side_faces() -> None:
     from dataforge.datasets.insta360_cube import cube_faces, face_table
 
     for face in cube_faces(FACE):
-        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0).use_lens0
+        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS)).use_lens0
         half: int = FACE // 2
         expected: dict[str, bool] = {"cube6_front0": True, "cube6_front1": False}
         if face.name in expected:
@@ -112,7 +112,7 @@ def test_a_face_pixel_outside_the_lens_it_is_read_from_is_refused() -> None:
     centre: float = (LENS - 1) / 2.0
     narrow = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [XI, np.deg2rad(80.0)] + [0.0] * 13)
     with pytest.raises(ValueError, match="outside the lens"):
-        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0)
+        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0, (LENS, LENS))
 
 
 def lens_pair() -> tuple[UInt8[ndarray, "h w 3"], UInt8[ndarray, "h w 3"]]:
@@ -130,7 +130,7 @@ def join_faces(device: str, lens0: UInt8[ndarray, "h w 3"], lens1: UInt8[ndarray
 
     from dataforge.datasets.insta360_cube import CubeJoin, cube_faces, face_table
 
-    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0) for face in cube_faces(FACE)]
+    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS)) for face in cube_faces(FACE)]
     join = CubeJoin(tables, (LENS, LENS), torch.device(device))
     pair = [torch.from_numpy(image).permute(2, 0, 1)[None].to(device) for image in (lens0, lens1)]
     return join.faces(pair[0], pair[1])[:, 0].permute(0, 2, 3, 1).cpu().numpy()
@@ -156,7 +156,7 @@ def test_one_remap_of_the_stacked_pair_is_cv2_s_remap_of_the_lens_each_pixel_rea
     rng = np.random.default_rng(0)
     lenses = rng.integers(0, 256, size=(2, LENS, LENS, 3), dtype=np.uint8)
     for face, joined in zip(cube_faces(FACE), join_faces("cpu", lenses[0], lenses[1]), strict=True):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS))
         remapped = [cv2.remap(lens, table.map_x, table.map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for lens in lenses]
         expected: UInt8[ndarray, "n n 3"] = np.where(table.use_lens0[..., None], remapped[0], remapped[1])
         assert np.abs(joined.astype(np.int16) - expected).max() <= 1, face.name
@@ -172,7 +172,7 @@ def test_a_mask_face_is_cv2_s_nearest_remap_of_the_lens_mask_upsampled_by_contra
     rng = np.random.default_rng(1)
     masks = rng.integers(0, 4, size=(2, mask_size, mask_size), dtype=np.uint8)
     pick: Int64[ndarray, " h"] = (2 * np.arange(LENS) + 1) * mask_size // (2 * LENS)
-    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0) for face in cube_faces(FACE)]
+    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS)) for face in cube_faces(FACE)]
     joined: UInt8[ndarray, "f n n"] = MaskJoin(tables, (LENS, LENS)).faces(masks[0], masks[1])
     for table, face_mask in zip(tables, joined, strict=True):
         remapped = [cv2.remap(mask[np.ix_(pick, pick)], table.map_x, table.map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for mask in masks]
@@ -192,7 +192,7 @@ def test_the_cuda_join_of_noise_is_cv2_s_remap_within_one_level() -> None:
     rng = np.random.default_rng(2)
     lenses = rng.integers(0, 256, size=(2, LENS, LENS, 3), dtype=np.uint8)
     for face, joined in zip(cube_faces(FACE), join_faces("cuda", lenses[0], lenses[1]), strict=True):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS))
         remapped = [cv2.remap(lens, table.map_x, table.map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for lens in lenses]
         expected: UInt8[ndarray, "n n 3"] = np.where(table.use_lens0[..., None], remapped[0], remapped[1])
         assert np.abs(joined.astype(np.int16) - expected).max() <= 1, face.name
@@ -212,6 +212,15 @@ def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:
         np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], (centres[0] + centres[1]) / 2, atol=1e-12)
         np.testing.assert_allclose(pose[:3, :3].T, lens_from_rig[0][:3, :3].T @ face.cube_from_face, atol=1e-12)
 
+
+
+def test_a_face_pixel_projected_past_the_lens_image_edge_is_an_error() -> None:
+    """The Mei model accepts the ray, but an off-centre sensor ends before it lands: no silent black (or keep) pixels."""
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
+
+    shifted = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, (LENS - 1) / 2.0 + 120.0, (LENS - 1) / 2.0, [XI, HALF_FIELD] + [0.0] * 13)
+    with pytest.raises(ValueError, match="outside the lens"):
+        face_table(cube_faces(FACE)[0], [shifted, shifted], LENS1_FROM_LENS0, (LENS, LENS))
 
 def run_with_timeout(target: Callable[[], object], seconds: float) -> object:
     """``target()``'s result or exception; a test failure, not a hung run, when it is still going after ``seconds``."""

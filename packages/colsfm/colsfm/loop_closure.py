@@ -406,9 +406,6 @@ class LoopClosureConfig:
     0.53 m / 1.6 deg (revisit) and 0.6 m / 3.5 deg (start-end), false ones by 2-16 m and 60-179 deg."""
     max_prior_rotation_deg: float | None = None
     """Rotation half of the prior-consistency gate; None = no gate."""
-    query_all_cameras: bool = False
-    """Every camera issues retrieval queries even when stereo pairs are declared (the blob queries only their left
-    cameras). For a rig whose declared pairs are a few seam overlaps, not its main cameras (a 360 camera's cube faces)."""
     use_stored_weights: bool = False
     """When True the edge information is `loop_edge_information(inliers, loop_residual_weight)`
     instead of the identity. The blob's own solver discards the stored value; measured
@@ -463,7 +460,6 @@ class LoopClosureConfig:
             loop_residual_weight=config.loop_residual_weight,
             max_prior_translation_m=config.loop_max_prior_translation_m,
             max_prior_rotation_deg=config.loop_max_prior_rotation_deg,
-            query_all_cameras=config.loop_query_all_cameras,
         )
 
 
@@ -682,7 +678,6 @@ def plan_loop_search(
         gap_seconds=gap_seconds,
         score_threshold=score_threshold,
         counters=counters,
-        query_all_cameras=config.query_all_cameras,
     )
     pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)

@@ -118,13 +118,16 @@ def panorama_table(
     """
     if band_deg <= 0.0:
         raise ValueError(f"seam band {band_deg} deg must be positive")
-    lens_height: int = lens_size[1]
+    lens_width, lens_height = lens_size
 
     def stacked(rays: Float64[ndarray, "n 3"]) -> tuple[Float64[ndarray, "2 n 2"], Bool[ndarray, "2 n"]]:
+        """Each ray's pixel in lens 0 and lens 1 (stacked-pair rows), and whether it is inside the lens's field and image."""
         pixels0, valid0 = cameras[0].project(np.ascontiguousarray(rays))
         pixels1, valid1 = cameras[1].project(np.ascontiguousarray(rays @ lens1_from_lens0.T))
-        pixels: Float64[ndarray, "2 n 2"] = np.stack([pixels0, pixels1 + [0.0, lens_height + 1.0]])
-        return pixels, np.stack([valid0, valid1])
+        pixels: Float64[ndarray, "2 n 2"] = np.stack([pixels0, pixels1])
+        on_sensor: Bool[ndarray, "2 n"] = (pixels[..., 0] >= 0.0) & (pixels[..., 0] <= lens_width - 1) & (pixels[..., 1] >= 0.0) & (pixels[..., 1] <= lens_height - 1)
+        pixels[1, :, 1] += lens_height + 1.0
+        return pixels, np.stack([valid0, valid1]) & on_sensor
 
     band: float = math.radians(band_deg)
     step: float = 2.0 * math.pi / width

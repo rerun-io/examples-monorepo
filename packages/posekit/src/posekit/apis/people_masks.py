@@ -200,6 +200,13 @@ class PeopleMasker:
         return np.stack([dilate_mask(m, self.options.dilate_px) for m in union])
 
 
+def write_overlay(overlay_dir: Path, entity: str, index: int, rgb: UInt8[ndarray, "h w 3"], mask: Bool[ndarray, "h w"]) -> None:
+    """Save the frame with its person mask tinted red as ``<entity slug>_<index>.png`` (evidence images)."""
+    path: Path = overlay_dir / f"{entity.strip('/').replace('/', '_')}_{index:06d}.png"
+    cv2.imwrite(str(path), cv2.cvtColor(overlay_mask(rgb, mask), cv2.COLOR_RGB2BGR))
+    path.chmod(0o644)
+
+
 def decode_selected(video: CatalogVideo, indices: list[int], device: str) -> tuple[list[int], UInt8[Tensor, "n h w 3"]]:
     """NVDEC-decode the selected packets, one decoder per keyframe run.
 
@@ -268,11 +275,7 @@ def main(config: PeopleMasksConfig) -> None:
                     set_frame_time(config.timeline, video.times[index])
                     rr.log(target, rr.SegmentationImage(masks[row].astype(np.uint8) * PERSON_CLASS_ID))
                     if frames_cpu is not None and config.overlay_dir is not None:
-                        slug: str = entity.strip("/").replace("/", "_")
-                        cv2.imwrite(
-                            str(config.overlay_dir / f"{slug}_{index:06d}.png"),
-                            cv2.cvtColor(overlay_mask(frames_cpu[row], masks[row]), cv2.COLOR_RGB2BGR),
-                        )
+                        write_overlay(config.overlay_dir, entity, index, frames_cpu[row], masks[row])
                 person_px: Int64[ndarray, "n"] = masks.sum(axis=(1, 2)).astype(np.int64)
                 print(f"{entity} frames {decoded[0]}: person px {person_px.tolist()}")
     recording: rr.RecordingStream | None = rr.get_data_recording()
