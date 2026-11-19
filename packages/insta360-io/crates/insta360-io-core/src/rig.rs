@@ -14,7 +14,7 @@
 //!
 //! IMU times are the trailer's, without the vendor's `gyro_timestamp` subtraction: the profiles were fitted on that
 //! clock. Every time is in nanoseconds on the trailer clock.
-use crate::profile::{builtin_profiles, lens_type, select_profile, CaptureMode, DeviceProfile};
+use crate::profile::{builtin_profiles, select_profile, CaptureMode, DeviceProfile};
 use kornia_staging_3d::camera::formats::insta360::FactoryLens;
 use kornia_staging_io::insta360::{Insta360Clip, Insta360Error};
 use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion, Vector3};
@@ -91,16 +91,18 @@ impl InsvRig {
         let mut intervals: Vec<i64> = vin0.windows(2).map(|w| w[1].t_us - w[0].t_us).collect();
         intervals.sort_unstable();
         let m = &clip.trailer.metadata;
-        let lens_string = m
-            .offset_v3
-            .as_deref()
-            .or(m.offset_v6.as_deref())
-            .unwrap_or_default();
+        let lenses = clip.lenses_v6.unwrap_or(clip.lenses);
+        let lens_type = match lenses.map(|lens| lens.lens_type) {
+            [a, b] if a == b => Ok(a),
+            [a, b] => Err(format!(
+                "lenses of types {a} and {b}; a profile needs one lens type"
+            )),
+        };
         let clip_readout_s = m.rolling_shutter_ms.map(|ms| ms * 1e-3);
         let (profile, profile_note) = match choose_profile(
             profiles,
             &m.camera_type,
-            lens_type(lens_string),
+            lens_type,
             1e6 / median(&intervals),
             clip_readout_s,
         ) {
@@ -140,7 +142,6 @@ impl InsvRig {
         let lever_arm = profile
             .as_ref()
             .map_or_else(Vector3::zeros, DeviceProfile::lever_arm);
-        let lenses = clip.lenses_v6.unwrap_or(clip.lenses);
         let rig_from_lens = lenses.map(|lens| {
             let rotation = rig_from_pano * lens.pano_from_lens.rotation.matrix();
             let centre = rig_from_pano * (lens.pano_from_lens.translation.vector + lever_arm);
@@ -217,7 +218,7 @@ impl InsvRig {
 }
 
 /// The profile measured in the clip's mode, or why there is none: the body has no profile, the clip lies outside
-/// every measured mode of its body, or its lens strings state no single lens type.
+/// every measured mode of its body, or its two lenses are of different types.
 pub fn choose_profile(
     profiles: &[DeviceProfile],
     camera_type: &str,
@@ -271,6 +272,9 @@ fn median(sorted: &[i64]) -> f64 {
 mod tests {
     use super::*;
     use crate::profile::builtin_profiles;
+    use kornia_staging_3d::camera::formats::insta360::parse_lens_string;
+    use kornia_staging_io::container::mp4::{Sample, VideoCodec, VideoTrack};
+    use kornia_staging_io::insta360::{Exposure, Insta360Metadata, Trailer};
     use proptest::prelude::*;
 
     #[test]
@@ -300,6 +304,120 @@ mod tests {
             None,
         );
         assert_eq!(note.map(|p| p.name), Err("mixed lens types".to_owned()));
+    }
+
+    /// A lens string of `version` 3 or 6 for two lenses of these types (3840 x 1920 calibration frame).
+    fn lens_string(version: u32, types: [u32; 2]) -> String {
+        let coefficients = if version == 3 { 5 } else { 13 };
+        let mut tokens = vec!["2".to_owned()];
+        for (lens, lens_type) in types.iter().enumerate() {
+            let cx = 960.0 + 1920.0 * lens as f64;
+            tokens.extend(
+                [
+                    2.0, 1000.0, 1000.0, cx, 960.0, 0.0, 0.0, 90.0, 0.0, 0.0, 0.0,
+                ]
+                .map(|v: f64| v.to_string()),
+            );
+            tokens.extend(std::iter::repeat_n("0.0".to_owned(), coefficients));
+            tokens.extend(["3840".to_owned(), "1920".to_owned(), lens_type.to_string()]);
+        }
+        tokens.push((version << 16).to_string());
+        tokens.join("_")
+    }
+
+    /// An X4 Air clip in the measured mode with `frames` frames whose lens samples have these presentation times; no
+    /// file holds its samples.
+    fn x4_air_clip(
+        frames: usize,
+        v3_types: [u32; 2],
+        v6_types: Option<[u32; 2]>,
+        pts: &[i64],
+    ) -> Insta360Clip {
+        let parse = |text: &str| -> [FactoryLens; 2] {
+            parse_lens_string(text, None, [1920, 1920])
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        let (v3, v6) = (
+            lens_string(3, v3_types),
+            v6_types.map(|t| lens_string(6, t)),
+        );
+        let samples: Vec<Sample> = (0..frames)
+            .map(|i| Sample {
+                offset: 0,
+                size: 1,
+                dts: 1001 * i as i64,
+                pts: pts[i],
+                is_sync: i % 30 == 0,
+            })
+            .collect();
+        let track = VideoTrack {
+            track_id: 1,
+            codec: VideoCodec::H265,
+            width: 1920,
+            height: 1920,
+            timescale: 30000,
+            nal_length_size: 4,
+            parameter_sets: Vec::new(),
+            samples,
+        };
+        Insta360Clip {
+            path: "VID_x_00_001.insv".into(),
+            trailer: Trailer {
+                metadata: Insta360Metadata {
+                    camera_type: "Insta360 X4 Air".into(),
+                    offset_v3: Some(v3.clone()),
+                    offset_v6: v6.clone(),
+                    rolling_shutter_ms: Some(15.883),
+                    ..Default::default()
+                },
+                imu: Vec::new(),
+                exposures_vin0: (0..frames as i64)
+                    .map(|i| Exposure {
+                        t_us: 33_367 * i,
+                        exposure_s: 0.001,
+                    })
+                    .collect(),
+                exposures_vin1: Vec::new(),
+            },
+            lenses: parse(&v3),
+            lenses_v6: v6.as_deref().map(parse),
+            lens_track: [0, 1],
+            tracks: vec![track.clone(), track],
+            track_paths: vec!["VID_x_00_001.insv".into(); 2],
+            first_frame_entry: 0,
+        }
+    }
+
+    fn rig(clip: Insta360Clip) -> Result<InsvRig, RigError> {
+        InsvRig::from_clip(clip, &builtin_profiles(), None)
+    }
+
+    fn in_order(frames: usize) -> Vec<i64> {
+        (0..frames as i64).map(|i| 1001 * i).collect()
+    }
+
+    #[test]
+    fn the_profile_is_selected_on_the_lenses_the_rig_emits() {
+        let measured = rig(x4_air_clip(4, [131, 131], Some([131, 131]), &in_order(4))).unwrap();
+        assert_eq!(measured.profile.map(|p| p.name), Some("x4-air".to_owned()));
+        // The emitted cameras come from the V6 string; its lens types decide, whatever the V3 string says.
+        let unmeasured = rig(x4_air_clip(4, [131, 131], Some([132, 132]), &in_order(4))).unwrap();
+        let note = unmeasured.profile_note;
+        assert!(
+            unmeasured.profile.is_none() && note.contains("lens type 132"),
+            "{note}"
+        );
+        let mixed = rig(x4_air_clip(4, [131, 131], Some([132, 131]), &in_order(4))).unwrap();
+        let note = mixed.profile_note;
+        assert!(
+            mixed.profile.is_none() && note.contains("lenses of types 132 and 131"),
+            "{note}"
+        );
+        // Without a V6 string the V3 lenses are emitted.
+        let v3_only = rig(x4_air_clip(4, [131, 131], None, &in_order(4))).unwrap();
+        assert!(v3_only.profile.is_some());
     }
 
     #[test]

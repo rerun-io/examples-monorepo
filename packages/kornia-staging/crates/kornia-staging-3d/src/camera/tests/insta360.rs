@@ -167,6 +167,11 @@ fn malformed_or_unsupported_lens_strings_are_named_errors_not_panics() {
             lenses[0].camera.half_field_rad(),
             half_field_deg * std::f64::consts::PI / 180.0
         );
+        // Each lens states its own type: the first lens's token changed, the second's did not.
+        assert_eq!(
+            [lenses[0].lens_type, lenses[1].lens_type],
+            [lens_type.parse::<u32>().unwrap(), 131]
+        );
     }
     // A negative focal makes no camera.
     let text = V3.replacen("_7095.540_", "_-7095.540_", 1);

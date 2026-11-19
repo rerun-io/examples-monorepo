@@ -60,6 +60,8 @@ pub struct FactoryLens {
     /// within 0.25 px on the X4 Air clip. On the X4 Air the two centres sit about 16.56 mm either side of the
     /// origin along `Z`.
     pub pano_from_lens: IsometryMatrix3<f64>,
+    /// The lens class: the lens's `type` token.
+    pub lens_type: u32,
 }
 
 /// A lens string the parser refuses, with the reason.
@@ -116,10 +118,12 @@ pub fn parse_lens_string(
         )));
     }
     let mut lenses = Vec::with_capacity(count);
+    let mut types = Vec::with_capacity(count);
     let mut rotations = Vec::with_capacity(count);
     let mut translations = Vec::with_capacity(count);
     for (i, t) in body.chunks_exact(per_lens).enumerate() {
         let half_field_deg = half_field_deg(t[per_lens - 1]);
+        types.push(t[per_lens - 1] as u32);
         let frame = [t[per_lens - 3] / count as f64, t[per_lens - 2]];
         let (mut cx, mut cy, mut fx, mut fy) = (t[3] - frame[0] * i as f64, t[4], t[1], t[2]);
         let mut window = frame;
@@ -174,7 +178,8 @@ pub fn parse_lens_string(
         .into_iter()
         .zip(&pano_from_lens)
         .zip(&translations)
-        .map(|((camera, rotation), t)| {
+        .zip(types)
+        .map(|(((camera, rotation), t), lens_type)| {
             let d = Vector3::from_fn(|k, _| t[k] - origin[k]);
             FactoryLens {
                 camera,
@@ -182,6 +187,7 @@ pub fn parse_lens_string(
                     Translation3::from(pano_from_lens[0] * d),
                     Rotation3::from_matrix_unchecked(*rotation),
                 ),
+                lens_type,
             }
         })
         .collect())

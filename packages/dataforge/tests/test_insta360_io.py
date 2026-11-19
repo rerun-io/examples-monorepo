@@ -164,10 +164,15 @@ def test_the_lenses_are_mei_cameras_with_the_factory_coefficients(insv_clip: Pat
 
 @pytest.mark.integration
 def test_a_lens_of_a_type_without_a_field_entry_gets_the_190_degree_default(insv_clip: Path, tmp_path: Path) -> None:
-    """Lens 0 of the V6 string becomes type 132 (no entry in the field table): it opens with a 95 degree half field."""
-    clip = insta360_io.InsvClip(str(patched_clip(insv_clip, tmp_path, b"_131_2.314940_7149.220", b"_132_2.314940_7149.220")))
+    """Lens 0 of the V6 string becomes type 132 (no entry in the field table): it opens with a 95 degree half field, and
+    the rig, whose cameras are the V6 lenses, gets no device profile although the V3 string still states 131 twice."""
+    patched: Path = patched_clip(insv_clip, tmp_path, b"_131_2.314940_7149.220", b"_132_2.314940_7149.220")
+    clip = insta360_io.InsvClip(str(patched))
     assert clip.lenses_v6[0].camera.coefficients[1] == pytest.approx(math.radians(95.0))
     assert clip.lenses_v6[1].camera.coefficients[1] == pytest.approx(math.radians(100.0))
+    rig = insta360_io.InsvRig(str(patched), READER_FRAMES)
+    assert (rig.profile_name, rig.pano_from_imu) == (None, None)
+    assert "lenses of types 132 and 131" in rig.profile_note
 
 
 # ── InsvReader ────────────────────────────────────────────────────────────

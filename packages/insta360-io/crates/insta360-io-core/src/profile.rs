@@ -126,7 +126,7 @@ pub fn builtin_profiles() -> Vec<DeviceProfile> {
 pub struct CaptureMode {
     /// The clip's camera type.
     pub camera_type: String,
-    /// The lens type both lenses of the V3 factory string state.
+    /// The lens type both emitted lenses state (V6 lenses when the clip has them, else V3).
     pub lens_type: u32,
     /// From the median exposure-record-4 stamp interval.
     pub frame_rate_hz: f64,
@@ -238,37 +238,6 @@ pub fn select_profile<'a>(
     })
 }
 
-/// The lens type both lenses of a V3 factory lens string state: the last per-lens token.
-///
-/// # Errors
-/// A string too short to hold its lens count, or lenses of different types.
-pub fn lens_type(v3: &str) -> Result<u32, String> {
-    let tokens: Vec<&str> = v3.split('_').collect();
-    let number = |t: &str| {
-        t.parse::<f64>()
-            .map_err(|_| format!("V3 lens string token {t:?} is not a number"))
-    };
-    let count = number(tokens[0])? as usize;
-    if count == 0 || tokens.len() < 2 + count {
-        return Err(format!(
-            "the V3 lens string holds {} tokens for {count} lenses",
-            tokens.len()
-        ));
-    }
-    let per_lens = (tokens.len() - 2) / count;
-    let mut types: Vec<u32> = (0..count)
-        .map(|k| number(tokens[per_lens * (k + 1)]).map(|v| v as u32))
-        .collect::<Result<_, _>>()?;
-    types.sort_unstable();
-    types.dedup();
-    match types.as_slice() {
-        [one] => Ok(*one),
-        _ => Err(format!(
-            "the V3 lens string states lens types {types:?}; a profile needs one"
-        )),
-    }
-}
-
 /// The rotation nearest to `m` (SVD polar factor, determinant +1).
 pub fn orthonormal(m: &Matrix3<f64>) -> Matrix3<f64> {
     let svd = m.svd(true, true);
@@ -285,8 +254,6 @@ pub fn orthonormal(m: &Matrix3<f64>) -> Matrix3<f64> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-
-    const X5_V3: &str = "2_-0.010_-0.008_-0.003_0.000_0.000_0.000_10752_5376_113_-0.010_-0.008_-0.003_0.000_0.000_0.000_10752_5376_113_197632";
 
     fn mode(camera_type: &str, lens_type: u32, rate: f64, readout: Option<f64>) -> CaptureMode {
         CaptureMode {
@@ -370,13 +337,6 @@ mod tests {
             parse_profiles(&unknown),
             Err(ProfileError::Malformed(_))
         ));
-    }
-
-    #[test]
-    fn the_lens_type_is_the_last_per_lens_token() {
-        assert_eq!(lens_type(X5_V3), Ok(113));
-        let mixed = X5_V3.replacen("_10752_5376_113_", "_10752_5376_131_", 1);
-        assert!(lens_type(&mixed).unwrap_err().contains("[113, 131]"));
     }
 
     #[test]
