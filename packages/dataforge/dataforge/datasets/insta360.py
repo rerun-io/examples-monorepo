@@ -77,6 +77,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from serde import SerdeError, coerce, serde
 from serde.toml import from_toml
+from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models_from_store
 from simplecv.imu_calibration import ImuCalibration
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
@@ -206,7 +207,9 @@ def mode_differences(profile: DeviceProfile, mode: CaptureMode) -> list[str]:
     if abs(mode.frame_rate_hz - profile.frame_rate_hz) > profile.frame_rate_tolerance_hz:
         differences.append(f"frame rate {mode.frame_rate_hz:.4f} Hz is not {profile.frame_rate_hz} +- {profile.frame_rate_tolerance_hz} Hz")
     if mode.readout_s is not None and abs(mode.readout_s - profile.readout_s) > profile.readout_tolerance_s:
-        differences.append(f"rolling-shutter readout {mode.readout_s * 1e3:.4f} ms is not {profile.readout_s * 1e3:.4f} +- {profile.readout_tolerance_s * 1e3:.4f} ms")
+        differences.append(
+            f"rolling-shutter readout {mode.readout_s * 1e3:.4f} ms is not {profile.readout_s * 1e3:.4f} +- {profile.readout_tolerance_s * 1e3:.4f} ms"
+        )
     return differences
 
 
@@ -289,36 +292,22 @@ def stitch_from_recording(base: Path) -> insta360_io.PanoramaStitch:
     Raises:
         ValueError: If a camera is not a Mei camera or its statics are missing.
     """
-    entities: list[str] = [schema.cam_path(RIG, cam) for cam in range(2)] + [schema.pinhole_path(RIG, cam) for cam in range(2)]
-    statics: dict[str, object] = {}
-    for chunk in rrc.RrdReader(base).stream():
-        if chunk.is_static and chunk.entity_path in entities:
-            batch = chunk.to_record_batch()
-            statics.update({f"{chunk.entity_path}:{name}": batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")})
+    nodes: list[str] = [schema.cam_path(RIG, cam) for cam in range(2)]
+    models: dict[str, CatalogCameraCalibration] = read_camera_models_from_store(rrc.RrdReader(base).store(), nodes, str(base))
     cameras: list[insta360_io.MeiCamera] = []
-    cam_T_rig: list[Float64[ndarray, "4 4"]] = []
-    for cam in range(2):
-        pinhole: str = schema.pinhole_path(RIG, cam)
-        node: str = schema.cam_path(RIG, cam)
-        missing: list[str] = [
-            key
-            for key in (f"{pinhole}:simplecv.components.DistortionModel", f"{pinhole}:simplecv.components.DistortionCoefficients", f"{pinhole}:Pinhole:image_from_camera", f"{node}:Transform3D:mat3x3", f"{node}:Transform3D:translation")
-            if not statics.get(key)
-        ]
-        if missing:
-            raise ValueError(f"{base}: camera {cam} lacks {missing}")
-        model: str = str(statics[f"{pinhole}:simplecv.components.DistortionModel"][0])  # pyrefly: ignore[bad-index]
-        coefficients: list[float] = list(statics[f"{pinhole}:simplecv.components.DistortionCoefficients"][0])  # pyrefly: ignore[bad-index]
-        # Rerun stores the 3x3 matrices column-major.
-        k: Float64[ndarray, "3 3"] = np.asarray(statics[f"{pinhole}:Pinhole:image_from_camera"][0], dtype=np.float64).reshape(3, 3).T  # pyrefly: ignore[bad-index]
-        cameras.append(insta360_io.MeiCamera(model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), coefficients))
-        pose: Float64[ndarray, "4 4"] = np.eye(4)
-        pose[:3, :3] = np.asarray(statics[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T  # pyrefly: ignore[bad-index]
-        pose[:3, 3] = np.asarray(statics[f"{node}:Transform3D:translation"][0], dtype=np.float64)  # pyrefly: ignore[bad-index]
-        cam_T_rig.append(pose)
-    cam0_T_cam1: Float64[ndarray, "4 4"] = cam_T_rig[0] @ np.linalg.inv(cam_T_rig[1])
-    width, height = (int(v) for v in statics[f"{schema.pinhole_path(RIG, 0)}:Pinhole:resolution"][0])  # pyrefly: ignore[bad-index]
-    return insta360_io.PanoramaStitch(cameras[0], cameras[1], cam0_T_cam1.tolist(), (width, height))
+    for node in nodes:
+        distortion: CatalogDistortion | None = models[node].distortion
+        if distortion is None:
+            raise ValueError(f"{base}: {node} has no distortion model, so it is not a Mei camera")
+        k: Float64[ndarray, "3 3"] = np.asarray(models[node].pinhole.intrinsics.k_matrix, dtype=np.float64)
+        cameras.append(
+            insta360_io.MeiCamera(distortion.model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), distortion.coefficients.tolist())
+        )
+    cam0_T_cam1: Float64[ndarray, "4 4"] = models[nodes[0]].pinhole.extrinsics.cam_T_world @ np.linalg.inv(
+        models[nodes[1]].pinhole.extrinsics.cam_T_world
+    )
+    intrinsics = models[nodes[0]].pinhole.intrinsics
+    return insta360_io.PanoramaStitch(cameras[0], cameras[1], cam0_T_cam1.tolist(), (int(intrinsics.width), int(intrinsics.height)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,7 +515,9 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             rr.log(schema.pinhole_path(RIG, cam), PinholeWithDistortion(pinhole, distortion), static=True, recording=recording)
             log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec="hevc", stream_id=f"track{track}")
             exposure: str = f"{node}/exposure"
-            rr.send_columns(exposure, indexes=[time_column(video_ns)], columns=rr.Scalars.columns(scalars=capture.exposure_s[cam]), recording=recording)
+            rr.send_columns(
+                exposure, indexes=[time_column(video_ns)], columns=rr.Scalars.columns(scalars=capture.exposure_s[cam]), recording=recording
+            )
             rr.log(exposure, rr.SeriesLines(names=["exposure_s"]), static=True, recording=recording)
             video: str = schema.video_path(RIG, cam)
             rr.log(video, rr.VideoStream(codec=rr.VideoCodec.H265), static=True, recording=recording)
@@ -573,7 +564,8 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         frames: int = int(capture.frame_ns.size)
         stitch: insta360_io.PanoramaStitch = stitch_from_recording(base)
         lens0, lens1 = (
-            gray_frames(clip, clip.lens_track[cam], frames, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for cam in range(2)
+            gray_frames(clip, clip.lens_track[cam], frames, batch_frames=self.config.batch_frames, threads=self.config.decode_threads)
+            for cam in range(2)
         )
         panoramas: Iterator[bytes] = (stitch.panorama(a, b).tobytes() for a, b in zip(lens0, lens1, strict=True))
         width, height = PANORAMA_SIZE
@@ -582,7 +574,12 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             with self.timer.stage("encode"):
                 # fps is the container's nominal rate only; log_video_stream puts every sample on its frame time.
                 encode_frames_to_mp4(
-                    panoramas, video, source=FrameSource("gray8", width=width, height=height), fps=30, gop=self.config.pano_gop, cq=self.config.pano_cq
+                    panoramas,
+                    video,
+                    source=FrameSource("gray8", width=width, height=height),
+                    fps=30,
+                    gop=self.config.pano_gop,
+                    cq=self.config.pano_cq,
                 )
             rr.log(PANO_ENTITY, rr.AnyValues(video_codec="av1", cq=self.config.pano_cq, gop=self.config.pano_gop), static=True, recording=recording)
             samples: int = log_video_stream(recording, video, PANO_ENTITY, times_ns=capture.frame_ns - capture.start_ns)
