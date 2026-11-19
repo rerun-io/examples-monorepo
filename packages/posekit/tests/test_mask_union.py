@@ -61,7 +61,7 @@ def test_union_on_the_coarsest_grid_at_shared_stamps(tmp_path: Path) -> None:
     store = rrc.RrdReader(out).store()
     entity: str = "/world/rig_00/cam_00/pinhole/people_mask"
     np.testing.assert_array_equal(layer_statics(store)[entity], [2.0, 2.0])
-    union: dict[int, np.ndarray] = layer_masks(store, entity, "video_time", np.array([2.0, 2.0]), np.array([2.0, 2.0]))
+    union: dict[int, np.ndarray] = dict(layer_masks(store, entity, "video_time", np.array([2.0, 2.0]), np.array([2.0, 2.0])))
     assert sorted(union) == [0, 20]
     np.testing.assert_array_equal(np.argwhere(union[0]), [[0, 1]])
     np.testing.assert_array_equal(np.argwhere(union[20]), [[3, 3]])

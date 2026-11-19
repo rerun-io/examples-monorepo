@@ -5,17 +5,19 @@ recording's timeline, each at its own resolution with an optional static ``Trans
 pixels (none = scale 1). Per camera the union is written on the coarsest of the input grids: each finer mask is
 max-pooled onto it (a coarse cell is masked when any of its pixels is), so nothing is upsampled and no masked pixel
 is lost. The union exists at the stamps every layer has a mask on (a stride-5 and a stride-10 layer give every 10th
-frame). The inputs are already dilated; the union adds none.
+frame). The inputs are already dilated; the union adds none. Layers are read a chunk at a time and held bit-packed,
+so a 17.8 min clip with two 480 px layers needs a few hundred MB per camera.
 """
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -63,8 +65,9 @@ def layer_statics(store: rrc.LazyStore) -> dict[str, Float64[ndarray, "2"]]:
 
 def layer_masks(
     store: rrc.LazyStore, entity: str, timeline: str, cell_px: Float64[ndarray, "2"], target_cell_px: Float64[ndarray, "2"]
-) -> dict[int, Bool[ndarray, "h w"]]:
-    """One entity's masks by stamp (ns), pooled from cells of ``cell_px`` image pixels to cells of ``target_cell_px``.
+) -> Iterator[tuple[int, Bool[ndarray, "h w"]]]:
+    """One entity's masks with their stamps (ns) in file order, pooled from cells of ``cell_px`` image pixels to cells of
+    ``target_cell_px``, a chunk at a time.
 
     Raises:
         ValueError: If the target cell is not a whole multiple of this layer's cell.
@@ -73,8 +76,7 @@ def layer_masks(
     factor: int = int(round(float(ratio[0])))
     if abs(ratio[0] - factor) > 1e-6 or abs(ratio[1] - factor) > 1e-6:
         raise ValueError(f"{entity}: cells of {target_cell_px} px are not a whole multiple of {cell_px} px")
-    masks: dict[int, Bool[ndarray, "h w"]] = {}
-    for chunk in store.stream().filter(content=[entity], is_static=False).to_chunks():
+    for chunk in store.stream().filter(content=[entity], is_static=False):
         batch = chunk.to_record_batch()
         if "SegmentationImage:buffer" not in batch.schema.names:
             continue
@@ -82,8 +84,7 @@ def layer_masks(
         fmt: dict = batch.column("SegmentationImage:format").to_pylist()[0][0]
         values: ndarray = batch.column("SegmentationImage:buffer").flatten().flatten().to_numpy(zero_copy_only=False)
         stacked: Bool[ndarray, "n h w"] = values.reshape(len(stamps), fmt["height"], fmt["width"]) > 0
-        masks.update(zip(stamps.tolist(), pool_any(stacked, factor), strict=True))
-    return masks
+        yield from zip(stamps.tolist(), pool_any(stacked, factor), strict=True)
 
 
 def main(config: MaskUnionConfig) -> None:
@@ -100,16 +101,25 @@ def main(config: MaskUnionConfig) -> None:
         raise ValueError("the layers share no mask entity")
     for entity in entities:
         target_cell_px: Float64[ndarray, "2"] = np.max(np.stack([s[entity] for s in statics]), axis=0)
-        per_layer: list[dict[int, Bool[ndarray, "h w"]]] = [
-            layer_masks(store, entity, config.timeline, s[entity], target_cell_px) for store, s in zip(stores, statics, strict=True)
-        ]
+        per_layer: list[dict[int, UInt8[ndarray, " b"]]] = []
+        shapes: set[tuple[int, int]] = set()
+        for store, s in zip(stores, statics, strict=True):
+            packed: dict[int, UInt8[ndarray, " b"]] = {}
+            for stamp, mask in layer_masks(store, entity, config.timeline, s[entity], target_cell_px):
+                packed[stamp] = np.packbits(mask)
+                shapes.add(mask.shape)
+            per_layer.append(packed)
+        if len(shapes) > 1:
+            raise ValueError(f"{entity}: the layers pool to different grids {sorted(shapes)}")
         stamps: list[int] = sorted(set.intersection(*(set(m) for m in per_layer)))
         rr.log(entity, MASK_ANNOTATION, static=True)
         rr.log(entity, rr.Transform3D(scale=[float(target_cell_px[0]), float(target_cell_px[1]), 1.0]), static=True)
+        height, width = next(iter(shapes), (0, 0))
         for stamp in stamps:
-            union: Bool[ndarray, "h w"] = np.logical_or.reduce([m[stamp] for m in per_layer])
+            packed_union: UInt8[ndarray, " b"] = np.bitwise_or.reduce([m[stamp] for m in per_layer])
+            union: UInt8[ndarray, "h w"] = np.unpackbits(packed_union, count=height * width).reshape(height, width)
             rr.set_time(config.timeline, duration=np.timedelta64(stamp, "ns"))
-            rr.log(entity, rr.SegmentationImage(union.astype(np.uint8)))
+            rr.log(entity, rr.SegmentationImage(union))
         sizes: str = ", ".join(str(len(m)) for m in per_layer)
         print(f"{entity}: layers have {sizes} masks; union on {len(stamps)} shared stamps, cell {target_cell_px.tolist()} px")
     recording: rr.RecordingStream | None = rr.get_data_recording()
