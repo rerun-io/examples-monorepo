@@ -55,7 +55,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, TypeAlias
 
 import av
 import insta360_io
@@ -93,8 +93,10 @@ FACE_CAMS: range = range(FIRST_FACE_CAM, FIRST_FACE_CAM + len(cube.FACES))
 """``cam_02 .. cam_07``: the cube faces."""
 LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
-CUBE_FPS: int = 30
-"""Nominal rate of the muxed lens segments and the face videos; ``log_video_stream`` stamps the real times."""
+LENS_FPS: int = 30
+"""Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
+SeamKind: TypeAlias = Literal["flow", "blend"]
+"""How the panorama joins its seam band: the flow seam (``cuda``) or the plain feather (``cpu``)."""
 RUN_SOURCE: str = "slam_rs"
 """The run layer the layouts show: slam-rs tracks these clips."""
 
@@ -177,7 +179,7 @@ def rgb_frames(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"
             yield frame.to_ndarray(format="rgb24")
         decoded += 1
     if decoded < stop:
-        raise ValueError(f"lens {lens} decoded {decoded} pictures of the {stop} the cube layer needs")
+        raise ValueError(f"lens {lens} decoded {decoded} pictures of the {stop} asked for")
 
 
 def lens_batches(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"], device: torch.device, *, batch: int, threads: int) -> Iterator[UInt8[Tensor, "b 3 h w"]]:
@@ -212,10 +214,10 @@ def lens_batches(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " 
             data, bounds, irap = rig.read_packed(lens, start, stop)
             samples += [data[a:b] for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist(), strict=True)]
             keyframes += irap.tolist()
-        decoder = VideoDecoder(wrap_mp4(samples, keyframes, CUBE_FPS, codec=rig.codec), device=str(device), seek_mode="exact")
+        decoder = VideoDecoder(wrap_mp4(samples, keyframes, LENS_FPS, codec=rig.codec), device=str(device), seek_mode="exact")
         pictures: UInt8[Tensor, "b 3 h w"] = decoder.get_frames_at((offsets[segment] + wanted - starts[segment]).tolist()).data
         if decoder.cpu_fallback:
-            raise RuntimeError(f"NVDEC cannot decode lens {lens} ({decoder.cpu_fallback}); run with --cube-device cpu")
+            raise RuntimeError(f"NVDEC cannot decode lens {lens} ({decoder.cpu_fallback}); run the layer on the cpu device (--cube-device / --pano-device cpu)")
         yield pictures
 
 
@@ -245,7 +247,7 @@ def cube_indices(frames: int, stride: int, limit: int | None) -> Int64[ndarray, 
     return np.arange(0, frames, stride, dtype=np.int64)[:limit]
 
 
-def encode_videos(streams: Iterable[UInt8[Tensor, "f b 3 h w"]], videos: list[Path], *, width: int, height: int, gop: int, cq: int, device: torch.device) -> int:
+def encode_videos(batches: Iterable[UInt8[Tensor, "f b 3 h w"]], videos: list[Path], *, width: int, height: int, gop: int, cq: int, device: torch.device) -> int:
     """Encode batches of ``width`` x ``height`` RGB pictures into one AV1 mp4 per stream (a cube face, the panorama), one
     NVENC session each, fed from ``device``.
 
@@ -262,18 +264,18 @@ def encode_videos(streams: Iterable[UInt8[Tensor, "f b 3 h w"]], videos: list[Pa
 
     fed: int = 0
     with nvenc_slot(len(videos)), contextlib.ExitStack() as opened:
-        encoders = []
+        video_streams = []
         for video in videos:
             encoder = Encoder()
-            encoders.append(
+            video_streams.append(
                 encoder.add_video(
-                    height=height, width=width, frame_rate=CUBE_FPS, device=device, codec="av1_nvenc", preset=NVENC_PRESET, extra_options=nvenc_av1_options(gop=gop, cq=cq)
+                    height=height, width=width, frame_rate=LENS_FPS, device=device, codec="av1_nvenc", preset=NVENC_PRESET, extra_options=nvenc_av1_options(gop=gop, cq=cq)
                 )
             )
             opened.enter_context(encoder.open_file(video))
-        for batch in streams:
-            for encoder_stream, pictures in zip(encoders, batch, strict=True):
-                encoder_stream.add_frames(pictures)
+        for batch in batches:
+            for video_stream, pictures in zip(video_streams, batch, strict=True):
+                video_stream.add_frames(pictures)
             fed += batch.shape[1]
     return fed
 
@@ -428,8 +430,9 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         lenses: LensCameras = cameras_from_recording(base)
         width: int = self.config.pano_width or insta360_panorama.default_panorama_width(lenses.size[0])
         table: insta360_panorama.PanoramaTable = insta360_panorama.panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, width, self.config.pano_band_deg)
+        width, height = table.size
         device: torch.device = torch.device(self.config.pano_device)
-        flow: bool = device.type == "cuda"
+        seam: SeamKind = "flow" if device.type == "cuda" else "blend"
         rr.log(
             PANO_ENTITY,
             rr.AnyValues(
@@ -437,14 +440,14 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 cq=self.config.pano_cq,
                 gop=self.config.pano_gop,
                 width=width,
-                height=width // 2,
-                seam="flow" if flow else "blend",
+                height=height,
+                seam=seam,
                 seam_band_deg=self.config.pano_band_deg,
             ),
             static=True,
             recording=recording,
         )
-        join = insta360_panorama.PanoramaJoin(table, lenses.size, device, flow=flow)
+        join = insta360_panorama.PanoramaJoin(table, lenses.size, device, flow=seam == "flow")
         with work_dir("insta360-pano-") as work, contextlib.closing(join):
             video: Path = work / "pano.mp4"
             with self.timer.stage("panorama"):
@@ -454,7 +457,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     (join.panoramas(lens0, lens1)[None] for lens0, lens1 in pictures),
                     [video],
                     width=width,
-                    height=width // 2,
+                    height=height,
                     gop=self.config.pano_gop,
                     cq=self.config.pano_cq,
                     device=device,

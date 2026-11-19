@@ -90,7 +90,7 @@ def test_the_blend_ramps_from_lens_0_to_lens_1_across_the_band_and_each_lens_hol
     np.testing.assert_allclose(joined, 200.0 - 160.0 * lens1_weight, atol=1.0)
 
 
-def test_away_from_the_band_the_panorama_is_today_s_rust_stitch() -> None:
+def test_away_from_the_band_the_panorama_is_insta360_io_s_rust_stitch() -> None:
     """The X4 Air factory cameras, a smooth random scene: off the band the RGB join of a gray pair is the CPU stitch."""
     import cv2
     import torch
@@ -131,6 +131,8 @@ def test_nvof_finds_a_known_shift_of_a_texture() -> None:
         found = flow.flow(image[10:170, 10:650], image[13:173, 3:643])
     finally:
         flow.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        flow.flow(image[10:170, 10:650], image[13:173, 3:643])
     assert found.shape == (40, 160, 2)
     median = found[2:-2, 2:-2].reshape(-1, 2).median(0).values.tolist()
     assert median == pytest.approx([7.0, -3.0], abs=0.25)
@@ -199,3 +201,20 @@ def test_the_flow_seam_pulls_a_misregistered_lens_into_register_across_the_band(
         errors[name] = float(np.abs(joined[..., 0][inside].astype(np.float64) - between).mean())
     print(errors)
     assert errors["flow"] < 0.5 * errors["blend"]
+
+
+@pytest.mark.integration
+def test_a_closed_flow_seam_refuses_instead_of_falling_back_to_the_blend() -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    from dataforge.datasets.insta360_panorama import PanoramaJoin, panorama_table
+
+    table = panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, BAND_DEG)
+    join = PanoramaJoin(table, (LENS, LENS), torch.device("cuda"), flow=True)
+    pair = [torch.from_numpy(image).permute(2, 0, 1)[None].to("cuda") for image in lens_pair()]
+    assert join.panoramas(pair[0], pair[1]).shape == (1, 3, PANO // 2, PANO)
+    join.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        join.panoramas(pair[0], pair[1])
