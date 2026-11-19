@@ -125,7 +125,7 @@ class Lockstep:
         while self.pending:
             held: Frameset = self.pending[0]
             started: float = time.monotonic()
-            result: _core.VioResult = self.vio.track(held.t_ns, held.images)
+            result: _core.VioResult = self.vio.track(held.t_ns, held.images, held.masks)
             elapsed_ms: float = 1e3 * (time.monotonic() - started)
             if result.status == _core.VioStatus.NeedMoreImu:
                 self.retries += 1

@@ -62,6 +62,13 @@ class Config:
     """Local base recording; retains the selected dataset configuration and IMU model."""
     gt_rrd: Path | None = None
     """Optional local ground-truth recording; requires --rrd."""
+    mask_entity: str | None = None
+    """Segmentation masks for ``--stage vio``: the name of each camera's mask entity under its ``pinhole`` (e.g. ``people_mask``
+    reads ``<camera>/pinhole/people_mask``). The frontend neither detects nor keeps tracks where a camera's latest mask
+    at or before its frame is nonzero (``slam_rs.frame_masks``). None tracks every pixel."""
+    mask_rrd: Path | None = None
+    """Local mask layer recording for ``--mask-entity``; requires --rrd. None reads the masks from the base recording or the
+    catalog segment."""
     catalog: str | None = None
     """Catalog URL override; defaults to slam.toml. Exclusive with local recording files."""
     max_framesets: int | None = None
@@ -337,16 +344,20 @@ def main(config: Config) -> None:
         vio_config.vio_bootstrap = config.vio_bootstrap
     if config.map is not None:
         vio_config = vio_config.with_backend(config.map)
+    if config.mask_rrd is not None and config.mask_entity is None:
+        raise ValueError("--mask-rrd names a layer; --mask-entity names the masks in it")
+    if config.mask_entity is not None and config.stage != "vio":
+        raise ValueError("--mask-entity applies to --stage vio, the one stage that tracks with masks")
     source: SegmentSource
     origin: str
     if config.rrd is not None:
         if config.catalog is not None:
             raise ValueError("--catalog and --rrd name two sources for one replay")
-        source = LocalSegment(config.rrd, config.gt_rrd)
+        source = LocalSegment(config.rrd, config.gt_rrd, config.mask_rrd)
         origin = str(config.rrd)
     else:
-        if config.gt_rrd is not None:
-            raise ValueError("--gt-rrd requires --rrd")
+        if config.gt_rrd is not None or config.mask_rrd is not None:
+            raise ValueError("--gt-rrd and --mask-rrd require --rrd")
         origin = config.catalog or settings.catalog_url
         source = CatalogSegment(origin, dataset_name, config.segment)
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / config.segment / "slam_rs.csv"
@@ -360,6 +371,7 @@ def main(config: Config) -> None:
         frame_stride=config.frame_stride,
         window_s=config.window_s,
         decode_device=select_decode_device(config.decode_device),
+        mask_entity=config.mask_entity,
     ) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "

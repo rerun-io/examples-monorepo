@@ -6,8 +6,12 @@ database, so matching, loop closure and mapping never see a masked keypoint. The
 their descriptors.
 
 Masks come from the catalog: a catalog input names, per camera stream, a `SegmentationImage` entity on the same
-stamps as the video (`colsfm.frame_manifest.StreamKeyframes.mask_entity`), nonzero = drop. `CatalogMasks` reads each
-stream's masks once, on first use, and keeps them bit-packed (one bit per pixel).
+stamps as the video (`colsfm.frame_manifest.StreamKeyframes.mask_entity`), nonzero = drop. This is the monorepo's mask
+layer contract, shared with slam-rs (`slam_rs.frame_masks`): the mask is stored at the resolution it was computed at,
+with a static `Transform3D(scale=[W_img / W_mask, H_img / H_mask, 1])` on the same entity (none = scale 1). Each image
+pixel takes the mask pixel that covers its centre, `(2c + 1) * W_mask // (2 * W_img)` per axis, which is how the viewer
+draws the scaled mask. `CatalogMasks` reads each stream's masks once, on first use, keeps them bit-packed (one bit per
+pixel) and hands each one out at its image's resolution.
 """
 
 from __future__ import annotations
@@ -79,10 +83,12 @@ class CatalogMasks:
             if stream.mask_entity is not None
             for name, t_ns in zip(stream.names, stream.t_ns, strict=True)
         }
-        self.packed: dict[int, dict[int, tuple[int, UInt8[ndarray, " n"]]]] = {}
-        """Per stream index: sample t_ns -> (pixel count, `np.packbits` of the flat mask)."""
+        self.packed: dict[int, dict[int, tuple[int, int, UInt8[ndarray, " n"]]]] = {}
+        """Per stream index: sample t_ns -> (mask width, mask height, `np.packbits` of the flat mask)."""
+        self.scales: dict[int, tuple[float, float]] = {}
+        """Per stream index: the layer's (x, y) scale from mask pixels to image pixels."""
 
-    def _load(self, stream_index: int) -> dict[int, tuple[int, UInt8[ndarray, " n"]]]:
+    def _load(self, stream_index: int) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
         if stream_index not in self.packed:
             # Imported here: only a masked catalog input needs the client.
             from rerun.catalog import CatalogClient
@@ -90,6 +96,13 @@ class CatalogMasks:
             entity: str | None = self.manifest.streams[stream_index].mask_entity
             assert entity is not None
             dataset = CatalogClient(self.manifest.catalog_url).get_dataset(name=self.manifest.dataset)
+            statics: pa.Table = dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"]).reader(index=None).to_arrow_table()
+            scale_column: str = f"/{entity}:Transform3D:scale"
+            scale: tuple[float, float] = (1.0, 1.0)
+            if scale_column in statics.column_names and statics.num_rows and statics[scale_column][0].is_valid:
+                values: list[float] = [float(value) for value in np.asarray(statics[scale_column][0].values.to_pylist(), dtype=np.float64).ravel()]
+                scale = (values[0], values[1])
+            self.scales[stream_index] = scale
             table: pa.Table = (
                 dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"]).reader(index=self.manifest.timeline).to_arrow_table()
             )
@@ -99,10 +112,11 @@ class CatalogMasks:
             table = table.filter(table[column].is_valid())
             t_ns: ndarray = table[self.manifest.timeline].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64)
             buffers: pa.Array = table[column].combine_chunks().flatten()  # one instance per row -> list<uint8> per row
-            packed: dict[int, tuple[int, UInt8[ndarray, " n"]]] = {}
+            formats: list[dict[str, int]] = [row[0] for row in table[f"/{entity}:SegmentationImage:format"].to_pylist()]
+            packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = {}
             for row, stamp in enumerate(t_ns):
                 pixels: UInt8[ndarray, " n"] = buffers[row].values.to_numpy(zero_copy_only=False)
-                packed[int(stamp)] = (len(pixels), np.packbits(pixels != 0))
+                packed[int(stamp)] = (formats[row]["width"], formats[row]["height"], np.packbits(pixels != 0))
             self.packed[stream_index] = packed
             print(f"[colsfm.masks] /{entity}: {len(self.packed[stream_index])} masks")
         return self.packed[stream_index]
@@ -116,22 +130,31 @@ class CatalogMasks:
             height: The image's height.
 
         Returns:
-            `[height, width]` booleans, True = drop.
+            `[height, width]` booleans, True = drop: the stored mask read through its scale.
 
         Raises:
-            ValueError: When the stream is masked but has no mask at this image's stamp: a missing mask is an input
-                error, not an unmasked image.
+            ValueError: When the stream is masked but has no mask at this image's stamp (a missing mask is an input
+                error, not an unmasked image), or when the mask at its scale does not cover the image to within half a
+                pixel.
         """
         if name not in self.location:
             return None
         stream_index, t_ns = self.location[name]
-        packed: Mapping[int, tuple[int, UInt8[ndarray, " n"]]] = self._load(stream_index)
+        packed: Mapping[int, tuple[int, int, UInt8[ndarray, " n"]]] = self._load(stream_index)
         if t_ns not in packed:
             raise ValueError(f"{name}: no mask at t_ns {t_ns} in /{self.manifest.streams[stream_index].mask_entity}")
-        num_pixels, bits = packed[t_ns]
-        if num_pixels != width * height:
-            raise ValueError(f"{name}: the mask has {num_pixels} pixels, the image is {width}x{height}")
-        return np.unpackbits(bits, count=num_pixels).astype(bool).reshape(height, width)
+        mask_width, mask_height, bits = packed[t_ns]
+        scale_x, scale_y = self.scales[stream_index]
+        if abs(mask_width * scale_x - width) >= 0.5 or abs(mask_height * scale_y - height) >= 0.5:
+            raise ValueError(
+                f"{name}: the {mask_width}x{mask_height} mask at scale {scale_x:g}x{scale_y:g} does not cover the {width}x{height} image"
+            )
+        native: Bool[ndarray, "mask_height mask_width"] = np.unpackbits(bits, count=mask_width * mask_height).astype(bool).reshape(mask_height, mask_width)
+        if (mask_width, mask_height) == (width, height):
+            return native
+        rows: ndarray = (2 * np.arange(height) + 1) * mask_height // (2 * height)
+        columns: ndarray = (2 * np.arange(width) + 1) * mask_width // (2 * width)
+        return native[np.ix_(rows, columns)]
 
 
 class DictMasks:

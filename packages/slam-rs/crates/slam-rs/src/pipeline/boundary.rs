@@ -186,6 +186,18 @@ pub enum VioError {
         /// Bytes actually supplied.
         len: usize,
     },
+    /// A per-frame mask is empty or its buffer is not `width * height` bytes.
+    #[error("camera {camera}: mask {width}x{height} holds {len} bytes")]
+    FrameMask {
+        /// Index of the offending camera.
+        camera: usize,
+        /// Declared mask width.
+        width: usize,
+        /// Declared mask height.
+        height: usize,
+        /// Bytes actually supplied.
+        len: usize,
+    },
     /// The frontend refused the configuration, the rig or a frame.
     #[error("frontend: {0}")]
     Frontend(#[from] frontend::flow::FrontendError),
