@@ -753,7 +753,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 fed: list[int] = [encoder.result() for encoder in encoders]
             if fed != [indices.size] * len(faces):
                 raise ValueError(f"the face encoders took {fed} frames for {indices.size} framesets")
-            for cam, video in zip(cams, videos, strict=True):
+            for cam, video in zip(FACE_CAMS, videos, strict=True):
                 samples: int = log_video_stream(recording, video, schema.video_path(RIG, cam), times_ns=times_ns)
                 if samples != indices.size:
                     raise ValueError(f"cam_{cam:02d} holds {samples} frames for {indices.size} framesets")
