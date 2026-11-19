@@ -129,7 +129,12 @@ class Sam2VideoSegmenter(VideoSegmenter):
         for slot in range(batch_size):
             slot_prompts: list[SAM2Prompt] = self._prompts_for_slot(prompts, slot) if prompts is not None else []
             frame_chw: UInt8[Tensor, "3 h w"] = frames_rgb[slot].permute(2, 0, 1).contiguous()
-            results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=False)
+            # SAM 2's rule (`_use_multimask`): a lone click is ambiguous (shirt / person), so the prompted frame takes
+            # the best of three masks by predicted IoU; boxes and multi-point prompts take the single mask.
+            single_clicks: bool = bool(slot_prompts) and all(
+                p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in slot_prompts
+            )
+            results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=single_clicks)
             for obj_id, result in results.items():
                 mask: Bool[Tensor, "h w"] = result.best_mask_logits[0, 0] > 0.0
                 # Branch-free mask bounding box: argmax of the row/column
