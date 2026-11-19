@@ -3479,8 +3479,7 @@ description = "Launch the unified SAM3 + 2D pose Gradio playground"
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.dataforge]
-# CUDA lanes: the Insta360 cube layer decodes (NVDEC), remaps and encodes (NVENC) on the GPU.
-platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.dataforge.dependencies]
 python = "3.12.*"
@@ -3491,9 +3490,9 @@ insta360-io = { path = "packages/insta360-io" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
 requests = "*"
-# The Insta360 cube layer runs on torch + torchcodec (NVDEC decode, CUDA remap, NVENC encode from device memory).
-pytorch-gpu = ">=2.12,<2.13"
-cuda-version = "13.0.*"
+# CPU torch here (simplecv imports it at module load); dataforge-cuda swaps in the CUDA build.
+pytorch = ">=2.8.0"
+# The Insta360 cube layer's decoder and encoder (NVDEC/NVENC under dataforge-cuda; PyAV + software AV1 without a GPU).
 torchcodec = ">=0.14,<0.15"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
 # (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
@@ -3504,6 +3503,15 @@ torchcodec = ">=0.14,<0.15"
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 # libturbojpeg for PyTurboJPEG (pypi), which dlopens it from the env.
 libjpeg-turbo = ">=3.0.0,<4"
+
+# The GPU lane of the Insta360 cube layer: CUDA torch, so torchcodec decodes on NVDEC, remaps in CUDA and feeds NVENC
+# from device memory. Same code as the plain env; the cube device picks the lane.
+[feature.dataforge-cuda]
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.dataforge-cuda.dependencies]
+pytorch-gpu = ">=2.12,<2.13"
+cuda-version = "13.0.*"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
@@ -4736,6 +4744,17 @@ dataforge-dev = { features = [
     "dataforge",
     "dev",
 ], solve-group = "dataforge", no-default-feature = true }
+dataforge-cuda = { features = [
+    "common",
+    "dataforge",
+    "dataforge-cuda",
+], solve-group = "dataforge-cuda", no-default-feature = true }
+dataforge-cuda-dev = { features = [
+    "common",
+    "dataforge",
+    "dataforge-cuda",
+    "dev",
+], solve-group = "dataforge-cuda", no-default-feature = true }
 handtrack = { features = [
     "catalog-common",
     "rerun-prerelease",

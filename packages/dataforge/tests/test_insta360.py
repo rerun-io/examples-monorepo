@@ -295,3 +295,18 @@ def test_the_cube_layer_on_cuda_is_the_cpu_layer_within_the_nvenc_band(insv_clip
         assert cuda.shape == cpu.shape == (stamps.size, 800, 800, 3)
         mse: float = float(np.mean((cuda.astype(np.float64) - cpu.astype(np.float64)) ** 2))
         assert 10.0 * np.log10(255.0**2 / mse) > 40.0, f"cam_{cam:02d}"
+
+
+@pytest.mark.integration
+def test_the_cube_layer_without_nvenc_encodes_in_software_on_the_base_stamps(insv_clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-GPU lane: PyAV decode, OpenCV remap and SVT-AV1, six face videos on every tenth base stamp."""
+    from dataforge import paths, schema
+    from dataforge.datasets import insta360
+
+    monkeypatch.setattr(insta360, "av1_nvenc_encodes", lambda: False)
+    targets: dict[str, Path] = convert_layers(insv_clip, tmp_path, cube=True, cube_device="cpu")
+    stamps: Int64[ndarray, " k"] = video_times(targets[paths.BASE_LAYER], schema.video_path(0, 0))[::10]
+    for cam in insta360.FACE_CAMS:
+        entity: str = schema.video_path(0, cam)
+        np.testing.assert_array_equal(video_times(targets[insta360.CUBE_LAYER], entity), stamps)
+        assert decoded_rgb(targets[insta360.CUBE_LAYER], entity).shape == (stamps.size, 800, 800, 3)
