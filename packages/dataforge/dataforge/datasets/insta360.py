@@ -283,7 +283,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
 
     def segment_blueprint(self, *, panorama: bool) -> rrb.Blueprint:
         """Both lenses (and with ``panorama`` the panorama) beside the rig in 3D, over the IMU plots."""
-        lenses: list[rrb.View] = [blueprints.camera_view(f"lens{cam}", RIG, cam, contents=[schema.video_path(RIG, cam)]) for cam in range(2)]
+        lenses: list[rrb.Spatial2DView] = [blueprints.camera_view(f"lens{cam}", RIG, cam, contents=[schema.video_path(RIG, cam)]) for cam in range(2)]
         return blueprints.rig_blueprint(
             lenses + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
             rig=RIG,
