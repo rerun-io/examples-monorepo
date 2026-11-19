@@ -59,7 +59,8 @@ class MaskOptions:
     batch_size: int = 4
     """Images (or tiles) per SAM 3 call."""
     dtype: Literal["float32", "bfloat16", "float16"] = "float16"
-    """SAM 3's autocast dtype (:attr:`Sam3SegmenterConfig.dtype`)."""
+    """SAM 3's autocast dtype (:attr:`Sam3SegmenterConfig.dtype`). float16 keeps the clip B people layer within the band
+    against FP32 (mean IoU 0.990, recall >= 0.98 per size) at 2.5x SAM 3's speed; bfloat16 drifted (IoU 0.978)."""
 
 
 @dataclass

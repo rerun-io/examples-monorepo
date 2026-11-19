@@ -105,7 +105,7 @@ class Sam3Segmenter(PromptableSegmenter):
                 attention_mask=attention_mask.expand(batch_size, -1),
             )
         for key, value in outputs.items():
-            if isinstance(value, Tensor) and value.dtype in (torch.bfloat16, torch.float16):
+            if isinstance(value, Tensor) and value.is_floating_point():
                 outputs[key] = value.float()
         per_frame: list[dict[str, Tensor]] = self.processor.post_process_instance_segmentation(
             outputs,
