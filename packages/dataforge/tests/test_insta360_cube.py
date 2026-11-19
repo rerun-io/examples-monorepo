@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import insta360_io
@@ -180,13 +180,22 @@ def test_a_mask_face_is_cv2_s_nearest_remap_of_the_lens_mask_upsampled_by_contra
 
 
 @pytest.mark.integration
-def test_the_cuda_join_is_the_cpu_join_within_one_level() -> None:
+def test_the_cuda_join_of_noise_is_cv2_s_remap_within_one_level() -> None:
+    """Noise, so every interpolation weight shows: ``grid_sample`` against ``cv2.remap`` of the lens each pixel reads."""
+    import cv2
     import torch
+
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
-    lenses = lens_pair()
-    assert np.abs(join_faces("cuda", *lenses).astype(np.int16) - join_faces("cpu", *lenses)).max() <= 1
+    rng = np.random.default_rng(2)
+    lenses = rng.integers(0, 256, size=(2, LENS, LENS, 3), dtype=np.uint8)
+    for face, joined in zip(cube_faces(FACE), join_faces("cuda", lenses[0], lenses[1]), strict=True):
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        remapped = [cv2.remap(lens, table.map_x, table.map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for lens in lenses]
+        expected: UInt8[ndarray, "n n 3"] = np.where(table.use_lens0[..., None], remapped[0], remapped[1])
+        assert np.abs(joined.astype(np.int16) - expected).max() <= 1, face.name
 
 
 def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:
@@ -221,8 +230,12 @@ def _call(target: Callable[[], object]) -> object:
         return error
 
 
+SLOTS_HELD = threading.local()
+"""Encoder slots the current thread holds through ``insta360.nvenc_slot``."""
+
+
 class FakeEncoder:
-    """torchcodec's ``Encoder`` surface that ``encode_face_videos`` uses, without NVENC: frames are counted, files left empty."""
+    """torchcodec's ``Encoder`` surface that ``encode_face_videos`` uses, without NVENC; it opens only while all six slots are held."""
 
     def add_video(self, **_: object) -> FakeEncoder:
         return self
@@ -231,6 +244,7 @@ class FakeEncoder:
         del frames
 
     def open_file(self, dest: Path) -> FakeEncoder:
+        assert getattr(SLOTS_HELD, "count", 0) == 6, "an encoder opened before all six slots were reserved"
         dest.write_bytes(b"")
         return self
 
@@ -238,17 +252,29 @@ class FakeEncoder:
         return self
 
     def __exit__(self, *exc: object) -> None:
-        del exc
+        assert getattr(SLOTS_HELD, "count", 0) == 6, "the slots were released before an encoder closed"
 
 
 @pytest.fixture
 def slot_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """``encode_face_videos`` with its slot protocol (``nvenc_slot`` in ``tmp_path``) and a fake torchcodec encoder."""
+    """``encode_face_videos`` with its slot protocol (``nvenc_slot`` in ``tmp_path``, tracked per thread) and a fake torchcodec encoder."""
+    import contextlib
+
     from dataforge import video_encoding
     from dataforge.datasets import insta360
 
+    @contextlib.contextmanager
+    def tracked_slot(count: int = 1) -> Iterator[tuple[int, ...]]:
+        with video_encoding.nvenc_slot(count) as fds:
+            SLOTS_HELD.count = count
+            try:
+                yield fds
+            finally:
+                SLOTS_HELD.count = 0
+
     monkeypatch.setattr(video_encoding, "NVENC_SLOT_DIR", tmp_path / "slots")
-    monkeypatch.setattr(insta360, "Encoder", FakeEncoder)
+    monkeypatch.setattr(insta360, "nvenc_slot", tracked_slot)
+    monkeypatch.setattr("torchcodec.encoders.Encoder", FakeEncoder)
 
 
 def face_batches() -> Iterable[object]:
@@ -268,6 +294,7 @@ def test_six_faces_on_two_encoder_slots_fail_fast_instead_of_hanging(monkeypatch
     videos: list[Path] = [tmp_path / f"{k}.mp4" for k in range(6)]
     outcome = run_with_timeout(lambda: encode_face_videos(face_batches(), videos, size=8, gop=10, cq=14, device=torch.device("cpu")), 20.0)
     assert isinstance(outcome, ValueError) and "capacity is 2" in str(outcome)
+    assert not any(video.exists() for video in videos), "an encoder opened although the slots were refused"
 
 
 @pytest.mark.usefixtures("slot_encoder")
@@ -278,7 +305,7 @@ def test_two_concurrent_cube_encodes_share_six_slots_without_deadlock(monkeypatc
 
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "6")
 
-    def one_run(name: str) -> list[int]:
+    def one_run(name: str) -> int:
         return encode_face_videos(face_batches(), [tmp_path / f"{name}-{k}.mp4" for k in range(6)], size=8, gop=10, cq=14, device=torch.device("cpu"))
 
     results: list[object] = []
@@ -288,4 +315,4 @@ def test_two_concurrent_cube_encodes_share_six_slots_without_deadlock(monkeypatc
     for run in runs:
         run.join(30.0)
     assert not any(run.is_alive() for run in runs), "two concurrent cube encodes deadlocked on the encoder slots"
-    assert results == [[20] * 6, [20] * 6]
+    assert results == [20, 20]

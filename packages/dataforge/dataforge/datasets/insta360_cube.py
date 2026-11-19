@@ -143,37 +143,42 @@ def face_table(face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_
 class CubeJoin:
     """The faces of lens pairs on one device: each face is one bilinear remap of the stacked pair.
 
-    ``cuda``: one ``grid_sample`` for all faces. ``cpu``: one ``cv2.remap`` per face; torch's OpenMP
-    workers spin after each op and starve the PyAV decode threads (clip B 60 s: 31 s, 22 s with ``OMP_WAIT_POLICY=PASSIVE``).
+    ``cuda``: one ``grid_sample`` for all faces. ``cpu``: one ``cv2.remap`` per face; torch's OpenMP workers spin after each
+    op and starve the PyAV decode threads (clip B 60 s: 31 s, 22 s with ``OMP_WAIT_POLICY=PASSIVE``).
     """
 
     def __init__(self, tables: list[FaceTable], lens_size: tuple[int, int], device: torch.device) -> None:
         """``tables`` in face order; ``lens_size``: lens image ``(width, height)``."""
         width, height = lens_size
-        self.faces_count: int = len(tables)
         self.device: torch.device = device
         self.size: int = tables[0].map_x.shape[0]
         # Stacked rows: lens 0 on [0, h), a zero row (the remap's border on both sides of the seam), lens 1 on [h + 1, 2h + 1).
         x: Float64[ndarray, "f n n"] = np.stack([table.map_x for table in tables]).astype(np.float64)
         y: Float64[ndarray, "f n n"] = np.stack([np.where(table.use_lens0, table.map_y, table.map_y.astype(np.float64) + height + 1) for table in tables])
+        if device.type == "cpu":
+            self.maps: Float32[ndarray, "f 2 n n"] = np.stack([x, y], axis=1).astype(np.float32)
+            return
         grid: Float64[ndarray, "f n n 2"] = np.stack([x * 2.0 / (width - 1) - 1.0, y * 2.0 / (2 * height) - 1.0], axis=-1)
         self.grid: Float32[Tensor, "1 fn n 2"] = torch.from_numpy(grid.reshape(1, -1, self.size, 2).astype(np.float32)).to(device)
-        self.cv_maps: list[tuple[Float32[ndarray, "n n"], Float32[ndarray, "n n"]]] = [(x[k].astype(np.float32), y[k].astype(np.float32)) for k in range(len(tables))]
 
     def faces(self, lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[Tensor, "f b 3 n n"]:
         """Every face of ``b`` lens pairs (RGB, channels first, on the device), bilinear like ``cv2.INTER_LINEAR``; face-major."""
         b, c, h, w = lens0.shape
         if self.device.type == "cpu":
-            stacked: UInt8[ndarray, "b r w 3"] = np.zeros((b, 2 * h + 1, w, c), dtype=np.uint8)
+            stacked: UInt8[ndarray, "b r w 3"] = np.empty((b, 2 * h + 1, w, c), dtype=np.uint8)
             stacked[:, :h] = lens0.permute(0, 2, 3, 1).numpy()
+            stacked[:, h] = 0
             stacked[:, h + 1 :] = lens1.permute(0, 2, 3, 1).numpy()
-            faces: UInt8[ndarray, "f b n n 3"] = np.stack([[cv2.remap(pair, *maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for pair in stacked] for maps in self.cv_maps])
+            faces: UInt8[ndarray, "f b n n 3"] = np.stack(
+                [[cv2.remap(pair, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for pair in stacked] for map_x, map_y in self.maps]
+            )
             return torch.from_numpy(np.ascontiguousarray(faces.transpose(0, 1, 4, 2, 3)))
-        stacked_gpu: Float32[Tensor, "b 3 r w"] = torch.zeros((b, c, 2 * h + 1, w), dtype=torch.float32, device=self.device)
+        stacked_gpu: Float32[Tensor, "b 3 r w"] = torch.empty((b, c, 2 * h + 1, w), dtype=torch.float32, device=self.device)
         stacked_gpu[:, :, :h] = lens0
+        stacked_gpu[:, :, h] = 0.0
         stacked_gpu[:, :, h + 1 :] = lens1
         joined: Float32[Tensor, "b 3 fn n"] = F.grid_sample(stacked_gpu, self.grid.expand(b, -1, -1, -1), mode="bilinear", padding_mode="zeros", align_corners=True)
-        return joined.round_().to(torch.uint8).view(b, c, self.faces_count, self.size, self.size).permute(2, 0, 1, 3, 4).contiguous()
+        return joined.round_().to(torch.uint8).view(b, c, -1, self.size, self.size).permute(2, 0, 1, 3, 4).contiguous()
 
 
 class MaskJoin:
@@ -189,19 +194,19 @@ class MaskJoin:
         """Every face of a lens mask pair at any resolution that covers the lens image (contract v2)."""
         key: tuple[tuple[int, int], tuple[int, int]] = (mask0.shape, mask1.shape)
         if key not in self.index:
-            self.index[key] = np.stack([mask_index(table, self.lens_size, key) for table in self.tables])
+            self.index[key] = np.stack([self._index(table, key) for table in self.tables])
         return np.concatenate([mask0.ravel(), mask1.ravel(), np.zeros(1, dtype=np.uint8)])[self.index[key]]
 
-
-def mask_index(table: FaceTable, lens_size: tuple[int, int], mask_shapes: tuple[tuple[int, int], tuple[int, int]]) -> Int64[ndarray, "n n"]:
-    """Where each face pixel reads ``[mask0, mask1, 0]`` flattened: ``cv2.remap``'s nearest lens pixel (rounded half to even),
-    then the contract-v2 lookup into a ``hm x wm`` mask, ``(c, r) -> ((2r+1) hm // 2h, (2c+1) wm // 2w)``; a pixel off the lens reads 0."""
-    width, height = lens_size
-    (h0, w0), (h1, w1) = mask_shapes
-    col: Int64[ndarray, "n n"] = np.rint(table.map_x).astype(np.int64)
-    row: Int64[ndarray, "n n"] = np.rint(table.map_y).astype(np.int64)
-    hm: Int64[ndarray, "n n"] = np.where(table.use_lens0, h0, h1)
-    wm: Int64[ndarray, "n n"] = np.where(table.use_lens0, w0, w1)
-    index: Int64[ndarray, "n n"] = np.where(table.use_lens0, 0, h0 * w0) + (2 * row + 1) * hm // (2 * height) * wm + (2 * col + 1) * wm // (2 * width)
-    inside: Bool[ndarray, "n n"] = (col >= 0) & (col < width) & (row >= 0) & (row < height)
-    return np.where(inside, index, h0 * w0 + h1 * w1)
+    def _index(self, table: FaceTable, mask_shapes: tuple[tuple[int, int], tuple[int, int]]) -> Int64[ndarray, "n n"]:
+        """Where each face pixel reads ``[mask0, mask1, 0]`` flattened: ``cv2.remap``'s nearest lens pixel (rounded half to
+        even), then the contract-v2 lookup into a ``hm x wm`` mask, ``(c, r) -> ((2r+1) hm // 2h, (2c+1) wm // 2w)``; a pixel
+        off the lens reads 0."""
+        width, height = self.lens_size
+        (h0, w0), (h1, w1) = mask_shapes
+        col: Int64[ndarray, "n n"] = np.rint(table.map_x).astype(np.int64)
+        row: Int64[ndarray, "n n"] = np.rint(table.map_y).astype(np.int64)
+        hm: Int64[ndarray, "n n"] = np.where(table.use_lens0, h0, h1)
+        wm: Int64[ndarray, "n n"] = np.where(table.use_lens0, w0, w1)
+        index: Int64[ndarray, "n n"] = np.where(table.use_lens0, 0, h0 * w0) + (2 * row + 1) * hm // (2 * height) * wm + (2 * col + 1) * wm // (2 * width)
+        inside: Bool[ndarray, "n n"] = (col >= 0) & (col < width) & (row >= 0) & (row < height)
+        return np.where(inside, index, h0 * w0 + h1 * w1)

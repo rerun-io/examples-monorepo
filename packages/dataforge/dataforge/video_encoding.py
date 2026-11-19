@@ -313,13 +313,22 @@ def run_nvenc(run: Callable[[tuple[int, ...]], subprocess.CompletedProcess[str]]
         return run(fds)
 
 
+NVENC_PRESET: str = "p4"
+"""The AV1 NVENC preset of every dataforge encode."""
+
+
+def nvenc_av1_options(*, gop: int, cq: int) -> dict[str, int]:
+    """``_nvenc_args``'s rate control as torchcodec ``extra_options`` (its ``rc`` option is numeric: 1 = vbr); never B-frames."""
+    return {"rc": 1, "cq": cq, "bf": 0, "g": gop}
+
+
 def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     """Shared output options for pipe and file inputs; never emit B-frames."""
     return [
         "-c:v",
         "av1_nvenc",
         "-preset",
-        "p4",
+        NVENC_PRESET,
         "-rc",
         "vbr",
         "-cq",

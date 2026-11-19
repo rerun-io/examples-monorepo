@@ -111,6 +111,7 @@ ignore_names = [
     "fixture_cuda_filter_available",
     # s3fs reads its retry count internally.
     "retries",
+    "slot_encoder",  # Fixture used only through pytest.mark.usefixtures (test_insta360_cube.py).
 ]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
