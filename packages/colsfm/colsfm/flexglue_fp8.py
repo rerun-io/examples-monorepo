@@ -35,8 +35,9 @@ import numpy as np
 import onnx
 import torch
 from onnx import TensorProto, helper, numpy_helper
-from torch import Tensor
-from trtkit.onnx_qdq import LINEAR_INPUT_HEADROOM, fp8_input_qdq, fp8_weight_dq
+from trtkit.onnx_qdq import LINEAR_INPUT_HEADROOM, fp8_input_qdq, fp8_weight_dq, prune_dead
+
+from colsfm.matching import FLEXGLUE_FP8_COMMAND
 
 TRANSFORMER_WEIGHTS: Final[str] = "matcher.transformers."
 """Weight-name prefix of the linears that go to FP8; the head, the input projection and the posenc keep their precision."""
@@ -49,6 +50,9 @@ CALIBRATION_PAIRS: Final[int] = 200
 
 PROBABILITY_AMAX: Final[float] = 1.0
 """The softmax probabilities' range, fixed rather than calibrated."""
+
+SOURCE_PROPERTY: Final[str] = "colsfm_fp8_source"
+"""Metadata key of the FP8 graph naming the prepared matcher it was calibrated from."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +134,8 @@ def calibration_graph(model: onnx.ModelProto, targets: Fp8Targets) -> onnx.Model
 
 
 def quantize(model: onnx.ModelProto, targets: Fp8Targets, amax: Mapping[str, float]) -> onnx.ModelProto:
-    """Insert the FP8 Q/DQ nodes, with static scales from the calibrated maxima, into a copy of the matcher.
+    """Insert the FP8 Q/DQ nodes, with static scales from the calibrated maxima, into a copy of the matcher, and drop the
+    fp16 transformer weights they replace.
 
     Args:
         model: The prepared matcher; not modified.
@@ -187,14 +192,25 @@ def quantize(model: onnx.ModelProto, targets: Fp8Targets, amax: Mapping[str, flo
     del graph.node[:]
     graph.node.extend(nodes)
     graph.initializer.extend(added)
+    prune_dead(graph)
     for opset in quantized.opset_import:
         if opset.domain in ("", "ai.onnx"):
             opset.version = FP8_OPSET
     return quantized
 
 
-SOURCE_PROPERTY: Final[str] = "colsfm_fp8_source"
-"""Metadata key of the FP8 graph naming the prepared matcher it was calibrated from."""
+def fp8_source(fp8_graph: Path) -> str | None:
+    """The prepared matcher an FP8 graph was calibrated from (`SOURCE_PROPERTY`), or None when the graph is missing.
+
+    Args:
+        fp8_graph: The calibrated FP8 matcher.
+
+    Returns:
+        The prepared matcher's file name, or None.
+    """
+    if not fp8_graph.is_file():
+        return None
+    return next((p.value for p in onnx.load(fp8_graph, load_external_data=False).metadata_props if p.key == SOURCE_PROPERTY), None)
 
 
 def check_fp8_graph(fp8_graph: Path, matcher_graph: Path) -> None:
@@ -207,12 +223,11 @@ def check_fp8_graph(fp8_graph: Path, matcher_graph: Path) -> None:
     Raises:
         FileNotFoundError: When the FP8 graph is missing or stale, naming the calibration command.
     """
-    command: str = "pixi run -e colsfm python tools/flexglue_fp8.py --image-dirs <frame directories>"
     if not fp8_graph.is_file():
-        raise FileNotFoundError(f"No FP8 FlexGlue matcher at {fp8_graph}: calibrate it once with `{command}`")
-    source: str | None = next((p.value for p in onnx.load(fp8_graph, load_external_data=False).metadata_props if p.key == SOURCE_PROPERTY), None)
+        raise FileNotFoundError(f"No FP8 FlexGlue matcher at {fp8_graph}: calibrate it once with `{FLEXGLUE_FP8_COMMAND}`")
+    source: str | None = fp8_source(fp8_graph)
     if source != matcher_graph.name:
-        raise FileNotFoundError(f"{fp8_graph} was calibrated from {source!r}, not {matcher_graph.name}: recalibrate with `{command}`")
+        raise FileNotFoundError(f"{fp8_graph} was calibrated from {source!r}, not {matcher_graph.name}: recalibrate with `{FLEXGLUE_FP8_COMMAND}`")
 
 
 def calibration_pairs(image_dirs: Sequence[Sequence[Path]], count: int = CALIBRATION_PAIRS, seed: int = 0) -> list[tuple[Path, Path]]:
@@ -229,8 +244,7 @@ def calibration_pairs(image_dirs: Sequence[Sequence[Path]], count: int = CALIBRA
     Raises:
         ValueError: When a sequence is shorter than 12 frames.
     """
-    short: list[int] = [len(frames) for frames in image_dirs if len(frames) < 12]
-    if not image_dirs or short:
+    if not image_dirs or any(len(frames) < 12 for frames in image_dirs):
         raise ValueError(f"every calibration sequence needs at least 12 frames, got lengths {[len(f) for f in image_dirs]}")
     draw: random.Random = random.Random(seed)
     pairs: list[tuple[Path, Path]] = []
@@ -245,16 +259,3 @@ def calibration_pairs(image_dirs: Sequence[Sequence[Path]], count: int = CALIBRA
             other: Sequence[Path] = image_dirs[(index // len(image_dirs)) % len(image_dirs)]
             pairs.append((frames[first], other[draw.randrange(len(other))]))
     return pairs
-
-
-def update_maxima(maxima: dict[str, Tensor], outputs: Mapping[str, Tensor], names: Sequence[str]) -> None:
-    """Fold one calibration call's activations into the running maxima, on the GPU (no host round trip per pair).
-
-    Args:
-        maxima: Running maxima by activation, edited in place.
-        outputs: One call of the calibration graph.
-        names: The calibrated activations.
-    """
-    for name in names:
-        largest: Tensor = outputs[name].abs().amax().float()
-        maxima[name] = largest if name not in maxima else torch.maximum(maxima[name], largest)

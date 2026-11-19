@@ -127,7 +127,10 @@ FLEXGLUE_MODEL_FILES: Final[dict[str, str]] = {
 
 FLEXGLUE_FP8_FILE: Final[str] = "flexglue_matcher_fp8.onnx"
 """The FP8 matcher the TensorRT backend runs (`colsfm.flexglue_fp8`), calibrated on this machine by
-`python tools/flexglue_fp8.py --image-dirs <frame directories>`; it sits beside the downloaded graphs."""
+`FLEXGLUE_FP8_COMMAND`; it sits beside the downloaded graphs."""
+
+FLEXGLUE_FP8_COMMAND: Final[str] = "pixi run -e colsfm colsfm-flexglue-fp8"
+"""Calibrates `FLEXGLUE_FP8_FILE` on the Galileo frames (`tools/flexglue_fp8.py --image-dirs` for other frames)."""
 
 MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 """The ALIKED matchers COLMAP 4.2 offers; the pipeline uses LightGlue."""

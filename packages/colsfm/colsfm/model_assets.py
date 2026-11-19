@@ -27,7 +27,7 @@ from typing import Final
 
 from colsfm import DATA_DIR
 from colsfm.features import FeatureBackend
-from colsfm.matching import FLEXGLUE_FP8_FILE, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, MatchingBackend
+from colsfm.matching import FLEXGLUE_FP8_COMMAND, FLEXGLUE_FP8_FILE, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, MatchingBackend
 
 RACO_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco-aliked-b1-16.onnx"
 """The batch-dynamic RaCo-ALIKED graph; its engine is cached beside it.
@@ -56,7 +56,7 @@ both this and the batch-1 extractor under `packages/colsfm/data/models/raco/alik
 RACO_EXPORT_COMMANDS: Final[tuple[str, ...]] = (
     "pixi run -e colsfm colsfm-raco-export",
     "pixi run -e colsfm colsfm-download-flexglue",
-    "pixi run -e colsfm python tools/flexglue_fp8.py --image-dirs <frame directories>  (after the download)",
+    FLEXGLUE_FP8_COMMAND,
 )
 """The commands that produce every graph `required_raco_graphs` asks for: the RaCo export, the FlexGlue download and
 the FlexGlue FP8 calibration."""

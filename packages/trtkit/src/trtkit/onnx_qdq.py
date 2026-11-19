@@ -284,7 +284,7 @@ def _splice(graph: onnx.GraphProto, edits: _Edits) -> None:
     graph.initializer.extend(edits.initializers)
 
 
-def _prune_dead(graph: onnx.GraphProto) -> None:
+def prune_dead(graph: onnx.GraphProto) -> None:
     """Walk back from the outputs; the replaced weights and their Cast/Transpose chains fall away."""
     live: set[str] = {output.name for output in graph.output}
     kept: list[onnx.NodeProto] = []
@@ -342,7 +342,7 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
         raise ValueError(f"Planned modules are not weight MatMul/Conv nodes of the graph: {sorted(missing)}.")
     _rewrite_attention(graph, plan.attention, edits, plan.scale_dtype)
     _splice(graph, edits)
-    _prune_dead(graph)
+    prune_dead(graph)
     if not any(opset.domain == "trt.plugins" for opset in model.opset_import):
         model.opset_import.append(helper.make_opsetid("trt.plugins", 1))
     return model

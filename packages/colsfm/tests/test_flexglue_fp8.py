@@ -80,34 +80,44 @@ def test_only_transformer_linears_and_attention_cores_go_to_fp8() -> None:
     ]
 
 
-def _scales(model: onnx.ModelProto) -> dict[str, float]:
-    """Every scalar Q/DQ scale in the graph, by name, as float32."""
-    out: dict[str, float] = {}
-    for tensor in model.graph.initializer:
-        if tensor.name.endswith(".a_s8"):
-            raw = np.frombuffer(tensor.raw_data, dtype=np.uint16)
-            if tensor.data_type == TensorProto.FLOAT16:
-                out[tensor.name] = float(raw.view(np.float16)[0])
-            else:  # bfloat16: the high half of a float32
-                out[tensor.name] = float((raw.astype(np.uint32) << 16).view(np.float32)[0])
-    return out
+def _operand_scales(model: onnx.ModelProto) -> dict[tuple[str, int], tuple[float, int]]:
+    """The static scale and its dtype behind every dequantized MatMul operand, by `(node, input slot)`."""
+    scales = {t.name: (float(numpy_helper.to_array(t)), t.data_type) for t in model.graph.initializer if t.name.endswith(".a_s8")}
+    return {
+        (node.name, slot): scales[name.removesuffix(".a_dq8") + ".a_s8"]
+        for node in model.graph.node
+        if node.op_type == "MatMul"
+        for slot, name in enumerate(node.input)
+        if name.endswith(".a_dq8")
+    }
 
 
 def test_the_scales_baked_into_the_graph_are_the_calibrated_maxima_with_headroom() -> None:
     """Linear inputs: amax x 2 / 448 in fp16, one Q/DQ shared by both projections of x; core operands: amax x 2 / 448
-    in bf16; probabilities: 1 / 448. Weights become FP8 with per-channel scales, and the head stays as it was."""
+    in bf16; probabilities: 1 / 448. Weights become FP8 with per-channel scales, the fp16 weights they replace are
+    dropped, and the head stays as it was."""
     model = _toy_matcher()
     quantized = quantize(model, fp8_targets(model.graph), {"x": 3.0, "q_bf16": 10.0, "k_bf16": 20.0})
     ops = [node.op_type for node in quantized.graph.node]
     assert ops.count("QuantizeLinear") == 1 + 4  # x once, two operands per core
     assert ops.count("DequantizeLinear") == 1 + 4 + 2  # plus the two FP8 weights
-    scales = _scales(quantized)
-    assert len(scales) == 5
-    np.testing.assert_allclose(
-        sorted(scales.values()), sorted([3.0 * 2 / FP8_MAX, 10.0 * 2 / FP8_MAX, 20.0 * 2 / FP8_MAX, 20.0 * 2 / FP8_MAX, 1 / FP8_MAX]), rtol=1e-2
-    )
+    fp16, bf16 = TensorProto.FLOAT16, TensorProto.BFLOAT16
+    expected = {
+        ("mm_q", 0): (3.0 * 2 / FP8_MAX, fp16),
+        ("mm_k", 0): (3.0 * 2 / FP8_MAX, fp16),
+        ("mm_logits", 0): (10.0 * 2 / FP8_MAX, bf16),
+        ("mm_logits", 1): (20.0 * 2 / FP8_MAX, bf16),
+        ("mm_context", 0): (1 / FP8_MAX, bf16),
+        ("mm_context", 1): (20.0 * 2 / FP8_MAX, bf16),
+    }
+    scales = _operand_scales(quantized)
+    assert scales.keys() == expected.keys()
+    for operand, (scale, dtype) in expected.items():
+        assert scales[operand] == (pytest.approx(scale, rel=1e-2), dtype), operand
     weights = {t.name for t in quantized.graph.initializer if t.data_type == TensorProto.FLOAT8E4M3FN and t.dims}
     assert len(weights) == 2 and all("transformers" in name for name in weights)
+    assert [t.name for t in quantized.graph.initializer if t.name.endswith(".weight")] == ["matcher.heads.0.proj.weight"]
+    assert {"q_wt", "k_wt"}.isdisjoint(o for node in quantized.graph.node for o in node.output)
     head = next(node for node in quantized.graph.node if node.name == "mm_y")
     assert head.input[0] == "context"
     assert next(o.version for o in quantized.opset_import if o.domain == "") == 21

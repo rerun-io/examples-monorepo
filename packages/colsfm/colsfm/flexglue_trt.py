@@ -557,11 +557,11 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
         return MatchReport(device="cuda")
     flexglue_options: FlexGlueOptions = FlexGlueOptions(min_covisibility=options.flexglue_min_covisibility)
     models: Path = options.flexglue_model_dir
-    descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
-    descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
     fp8_graph: Path = models / FLEXGLUE_FP8_FILE
     check_fp8_graph(fp8_graph, matcher_graph)
+    descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
+    descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
     matcher_engine: Path = resolve_engine(fp8_graph, matcher_profile(), precision="fp32")
     owned: bool = frames is None
     source: FrameSource = open_frame_source(options.image_dir) if frames is None else frames

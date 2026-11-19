@@ -17,17 +17,15 @@ import numpy as np
 import onnx
 import torch
 from torch import Tensor
-from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 
 from colsfm.flexglue_fp8 import (
     CALIBRATION_PAIRS,
     SOURCE_PROPERTY,
     calibration_graph,
     calibration_pairs,
-    check_fp8_graph,
+    fp8_source,
     fp8_targets,
     quantize,
-    update_maxima,
 )
 from colsfm.flexglue_trt import (
     DESCRIPTOR_BATCH,
@@ -71,18 +69,14 @@ def main(config: Config) -> Path:
         The FP8 graph.
     """
     started: float = time.perf_counter()
-    sequences: list[list[Path]] = [sorted(p for p in directory.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES) for directory in config.image_dirs]
-    pairs: list[tuple[Path, Path]] = calibration_pairs(sequences, config.pairs)
     models: Path = config.model_dir
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", FlexGlueOptions())
     destination: Path = models / FLEXGLUE_FP8_FILE
-    try:
-        check_fp8_graph(destination, matcher_graph)
-    except FileNotFoundError:
-        pass
-    else:
+    if fp8_source(destination) == matcher_graph.name:
         print(f"[colsfm] flexglue fp8: {destination.name} present, calibrated from {matcher_graph.name}")
         return destination
+    sequences: list[list[Path]] = [sorted(p for p in directory.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES) for directory in config.image_dirs]
+    pairs: list[tuple[Path, Path]] = calibration_pairs(sequences, config.pairs)
     descriptor_engine: Path = resolve_engine(
         prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt"), descriptor_profile(), precision="fp16-trunk"
     )
@@ -91,25 +85,27 @@ def main(config: Config) -> Path:
     names: list[str] = targets.calibrated()
     images: list[Path] = list(dict.fromkeys(path for pair in pairs for path in pair))
     ids: dict[Path, int] = {path: index for index, path in enumerate(images)}
-    flexglue: FlexGlueTensorRT = FlexGlueTensorRT(descriptor_engine, resolve_engine(matcher_graph, matcher_profile()), cache_images=len(images))
-    for start in range(0, len(images), DESCRIPTOR_BATCH):
-        batch: list[Path] = images[start : start + DESCRIPTOR_BATCH]
-        decoded: list[tuple[int, Tensor, np.ndarray]] = []
-        for path in batch:
-            ((_, rgb),) = ImageFolderFrames(path.parent).frames([path.name])
-            height, width = int(rgb.shape[1]), int(rgb.shape[2])
-            grid: np.ndarray = (np.arange(LATTICE_SIDE, dtype=np.float32) + 0.5) / LATTICE_SIDE
-            lattice: np.ndarray = np.stack(np.meshgrid(grid * width, grid * height, indexing="xy"), -1).reshape(-1, 2).astype(np.float32)
-            decoded.append((ids[path], rgb, lattice))
-        flexglue.encode(decoded)
+    grid: np.ndarray = (np.arange(LATTICE_SIDE, dtype=np.float32) + 0.5) / LATTICE_SIDE
     maxima: dict[str, Tensor] = {}
     with TemporaryDirectory(prefix=".flexglue-fp8-", dir=models / "trt") as work:
         calibration_path: Path = Path(work) / f"{matcher_graph.stem}_calibration.onnx"
         onnx.save(calibration_graph(model, targets), calibration_path)
-        calibration: TensorRtDynamicRuntime = TensorRtDynamicRuntime(resolve_engine(calibration_path, matcher_profile()))
+        # The calibration graph serves as the matcher: encoding needs none, and calibration runs only this graph.
+        flexglue: FlexGlueTensorRT = FlexGlueTensorRT(
+            descriptor_engine, resolve_engine(calibration_path, matcher_profile()), cache_images=len(images)
+        )
+        for start in range(0, len(images), DESCRIPTOR_BATCH):
+            batch: list[Path] = images[start : start + DESCRIPTOR_BATCH]
+            decoded: list[tuple[int, Tensor, np.ndarray]] = []
+            for path in batch:
+                ((_, rgb),) = ImageFolderFrames(path.parent).frames([path.name])
+                height, width = int(rgb.shape[1]), int(rgb.shape[2])
+                lattice: np.ndarray = np.stack(np.meshgrid(grid * width, grid * height, indexing="xy"), -1).reshape(-1, 2).astype(np.float32)
+                decoded.append((ids[path], rgb, lattice))
+            flexglue.encode(decoded)
         for first, second in pairs:
             a, b = flexglue.images[ids[first]], flexglue.images[ids[second]]
-            outputs: dict[str, Tensor] = calibration(
+            outputs: dict[str, Tensor] = flexglue.matchers[0](
                 {
                     "features0": a.features,
                     "features1": b.features,
@@ -119,9 +115,10 @@ def main(config: Config) -> Path:
                     "image_size1": flexglue.size,
                 }
             )
-            update_maxima(maxima, outputs, names)
-        del calibration
-    del flexglue  # the descriptor, the matcher runtimes and the cached feature maps: free them for the FP8 engine build
+            for name in names:  # running maxima on the GPU: no host round trip per pair
+                largest: Tensor = outputs[name].abs().amax().float()
+                maxima[name] = largest if name not in maxima else torch.maximum(maxima[name], largest)
+        del flexglue  # the runtimes and the cached feature maps: free them for the FP8 engine build
     torch.cuda.empty_cache()
     amax: dict[str, float] = {name: float(value) for name, value in maxima.items()}
     quantized: onnx.ModelProto = quantize(model, targets, amax)
@@ -132,9 +129,10 @@ def main(config: Config) -> Path:
             SOURCE_PROPERTY: matcher_graph.name,
         },
     )
-    staged: Path = destination.with_suffix(".onnx.part")
-    onnx.save(quantized, staged)
-    staged.replace(destination)
+    with TemporaryDirectory(prefix=".flexglue-fp8-", dir=models) as stage:
+        staged: Path = Path(stage) / destination.name
+        onnx.save(quantized, staged)
+        staged.replace(destination)
     resolve_engine(destination, matcher_profile())
     print(
         f"[colsfm] flexglue fp8: {len(targets.linears)} linears and {len(targets.cores)} attention cores to FP8, maxima from {len(pairs)} pairs "
