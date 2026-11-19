@@ -88,7 +88,6 @@ def read_cube_faces(layer: LayerSegment) -> tuple[CubeFace, ...]:
             k_matrix=np.asarray(calibration[entity].intrinsics.k_matrix, dtype=np.float64),
             width=int(calibration[entity].intrinsics.width),
             height=int(calibration[entity].intrinsics.height),
-            face_R_rig=np.asarray(calibration[entity].extrinsics.cam_R_world, dtype=np.float64),
         )
         for entity, name in names.items()
     )

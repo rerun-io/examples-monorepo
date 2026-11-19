@@ -30,8 +30,6 @@ class CubeFace:
     """Image width, pixels."""
     height: int
     """Image height, pixels."""
-    face_R_rig: Float64[ndarray, "3 3"]
-    """Rotation taking rig (IMU) coordinates to face camera coordinates (RDF)."""
 
     def __post_init__(self) -> None:
         """Validate the name and that the face is a full centred 90 deg pinhole.

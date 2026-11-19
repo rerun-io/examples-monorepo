@@ -12,7 +12,7 @@ N: int = 800
 
 def _face(name: str = "cube6_left", width: int = N, height: int = N, cx: float = (N - 1) / 2) -> CubeFace:
     k_matrix: Float64[ndarray, "3 3"] = np.array([[N / 2, 0.0, cx], [0.0, N / 2, (N - 1) / 2], [0.0, 0.0, 1.0]])
-    return CubeFace(entity="/world/rig_00/cam_04", name=name, k_matrix=k_matrix, width=width, height=height, face_R_rig=np.eye(3))
+    return CubeFace(entity="/world/rig_00/cam_04", name=name, k_matrix=k_matrix, width=width, height=height)
 
 
 @pytest.mark.parametrize("name", ["cube6_front0", "cube6_front1", "cube6_left", "cube6_right", "cube6_up", "cube6_down"])
