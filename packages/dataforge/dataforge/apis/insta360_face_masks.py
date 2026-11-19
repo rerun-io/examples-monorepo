@@ -161,8 +161,8 @@ def main(config: Config) -> None:
             if len(pending[stamp]) < 2:
                 continue
             pair: dict[int, UInt8[ndarray, "h w"]] = {
-                lens: m if lens not in scales and m.shape == lens_shape else lens_image_mask(m, scales.get(lens, (1.0, 1.0)), lens_shape)
-                for lens, m in pending.pop(stamp).items()
+                side: m if side not in scales and m.shape == lens_shape else lens_image_mask(m, scales.get(side, (1.0, 1.0)), lens_shape)
+                for side, m in pending.pop(stamp).items()
             }
             done.add(stamp)
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))

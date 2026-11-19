@@ -223,9 +223,7 @@ def mode_differences(profile: DeviceProfile, mode: CaptureMode) -> list[str]:
     if abs(mode.frame_rate_hz - profile.frame_rate_hz) > profile.frame_rate_tolerance_hz:
         differences.append(f"frame rate {mode.frame_rate_hz:.4f} Hz is not {profile.frame_rate_hz} +- {profile.frame_rate_tolerance_hz} Hz")
     if mode.readout_s is not None and abs(mode.readout_s - profile.readout_s) > profile.readout_tolerance_s:
-        differences.append(
-            f"rolling-shutter readout {mode.readout_s * 1e3:.4f} ms is not {profile.readout_s * 1e3:.4f} +- {profile.readout_tolerance_s * 1e3:.4f} ms"
-        )
+        differences.append(f"rolling-shutter readout {mode.readout_s * 1e3:.4f} ms is not {profile.readout_s * 1e3:.4f} +- {profile.readout_tolerance_s * 1e3:.4f} ms")
     return differences
 
 
@@ -329,9 +327,7 @@ def cameras_from_recording(base: Path) -> LensCameras:
     for chunk in rrc.RrdReader(base).stream():
         if chunk.is_static and chunk.entity_path in entities:
             batch = chunk.to_record_batch()
-            statics.update(
-                {f"{chunk.entity_path}:{name}": batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")}
-            )
+            statics.update({f"{chunk.entity_path}:{name}": batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")})
     cameras: list[insta360_io.MeiCamera] = []
     cam_T_rig: list[Float64[ndarray, "4 4"]] = []
     for cam in range(2):
@@ -339,13 +335,7 @@ def cameras_from_recording(base: Path) -> LensCameras:
         node: str = schema.cam_path(RIG, cam)
         missing: list[str] = [
             key
-            for key in (
-                f"{pinhole}:simplecv.components.DistortionModel",
-                f"{pinhole}:simplecv.components.DistortionCoefficients",
-                f"{pinhole}:Pinhole:image_from_camera",
-                f"{node}:Transform3D:mat3x3",
-                f"{node}:Transform3D:translation",
-            )
+            for key in (f"{pinhole}:simplecv.components.DistortionModel", f"{pinhole}:simplecv.components.DistortionCoefficients", f"{pinhole}:Pinhole:image_from_camera", f"{node}:Transform3D:mat3x3", f"{node}:Transform3D:translation")
             if not statics.get(key)
         ]
         if missing:
@@ -370,9 +360,7 @@ def stitch_from_recording(base: Path) -> insta360_io.PanoramaStitch:
     return insta360_io.PanoramaStitch(lenses.cameras[0], lenses.cameras[1], cam0_T_cam1.tolist(), lenses.size)
 
 
-def rgb_frames(
-    clip: insta360_io.InsvClip, track: int, indices: Int64[ndarray, " k"], *, batch_frames: int, threads: int
-) -> Iterator[UInt8[ndarray, "h w 3"]]:
+def rgb_frames(clip: insta360_io.InsvClip, track: int, indices: Int64[ndarray, " k"], *, batch_frames: int, threads: int) -> Iterator[UInt8[ndarray, "h w 3"]]:
     """The pictures ``indices`` (increasing) of one lens track as ``rgb24``; every picture up to the last is decoded."""
     wanted: set[int] = {int(i) for i in indices}
     stop: int = int(indices[-1]) + 1
@@ -634,9 +622,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             rr.log(schema.pinhole_path(RIG, cam), PinholeWithDistortion(pinhole, distortion), static=True, recording=recording)
             log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec="hevc", stream_id=f"track{track}")
             exposure: str = f"{node}/exposure"
-            rr.send_columns(
-                exposure, indexes=[time_column(video_ns)], columns=rr.Scalars.columns(scalars=capture.exposure_s[cam]), recording=recording
-            )
+            rr.send_columns(exposure, indexes=[time_column(video_ns)], columns=rr.Scalars.columns(scalars=capture.exposure_s[cam]), recording=recording)
             rr.log(exposure, rr.SeriesLines(names=["exposure_s"]), static=True, recording=recording)
             video: str = schema.video_path(RIG, cam)
             rr.log(video, rr.VideoStream(codec=rr.VideoCodec.H265), static=True, recording=recording)
@@ -683,8 +669,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         frames: int = int(capture.frame_ns.size)
         stitch: insta360_io.PanoramaStitch = stitch_from_recording(base)
         lens0, lens1 = (
-            gray_frames(clip, clip.lens_track[cam], frames, batch_frames=self.config.batch_frames, threads=self.config.decode_threads)
-            for cam in range(2)
+            gray_frames(clip, clip.lens_track[cam], frames, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for cam in range(2)
         )
         panoramas: Iterator[bytes] = (stitch.panorama(a, b).tobytes() for a, b in zip(lens0, lens1, strict=True))
         width, height = PANORAMA_SIZE
@@ -693,12 +678,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             with self.timer.stage("encode"):
                 # fps is the container's nominal rate only; log_video_stream puts every sample on its frame time.
                 encode_frames_to_mp4(
-                    panoramas,
-                    video,
-                    source=FrameSource("gray8", width=width, height=height),
-                    fps=30,
-                    gop=self.config.pano_gop,
-                    cq=self.config.pano_cq,
+                    panoramas, video, source=FrameSource("gray8", width=width, height=height), fps=30, gop=self.config.pano_gop, cq=self.config.pano_cq
                 )
             rr.log(PANO_ENTITY, rr.AnyValues(video_codec="av1", cq=self.config.pano_cq, gop=self.config.pano_gop), static=True, recording=recording)
             samples: int = log_video_stream(recording, video, PANO_ENTITY, times_ns=capture.frame_ns - capture.start_ns)
@@ -719,14 +699,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         tables: list[cube.FaceTable] = [cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0) for face in faces]
         recording.send_property(
             "cube",
-            rr.AnyValues(
-                face_size=size,
-                stride=self.config.cube_stride,
-                framesets=int(indices.size),
-                first_cam=FIRST_FACE_CAM,
-                cq=self.config.cube_cq,
-                gop=self.config.cube_gop,
-            ),
+            rr.AnyValues(face_size=size, stride=self.config.cube_stride, framesets=int(indices.size), first_cam=FIRST_FACE_CAM, cq=self.config.cube_cq, gop=self.config.cube_gop),
         )
         for cam, face in zip(FACE_CAMS, faces, strict=True):
             node: str = schema.cam_path(RIG, cam)
@@ -767,12 +740,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             with self.timer.stage("cube:faces"):
                 try:
                     pairs = zip(
-                        *(
-                            rgb_frames(
-                                clip, clip.lens_track[lens], indices, batch_frames=self.config.batch_frames, threads=self.config.decode_threads
-                            )
-                            for lens in range(2)
-                        ),
+                        *(rgb_frames(clip, clip.lens_track[lens], indices, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for lens in range(2)),
                         strict=True,
                     )
                     for images in pairs:
