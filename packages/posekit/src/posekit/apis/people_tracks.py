@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import cv2
 import numpy as np
 import rerun as rr
 import torch
@@ -26,10 +25,19 @@ from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-from posekit.apis.people_masks import PEOPLE_MASK_ANNOTATION, PERSON_CLASS_ID, MaskOptions, PeopleMasker, mask_entity, select_entities, set_frame_time
+from posekit.apis.people_masks import (
+    PEOPLE_MASK_ANNOTATION,
+    PERSON_CLASS_ID,
+    MaskOptions,
+    PeopleMasker,
+    mask_entity,
+    select_entities,
+    set_frame_time,
+    write_overlay,
+)
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_mask, overlay_mask, selection_windows
+from posekit.ops.people_masks import dilate_mask, selection_windows
 from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
 from posekit.predictions import BoxDetections
 
@@ -274,11 +282,7 @@ def main(config: PeopleTracksConfig) -> None:
                 rr.log(targets[slot], rr.SegmentationImage(mask.astype(np.uint8) * PERSON_CLASS_ID))
                 n_masks += 1
                 if config.overlay_dir is not None and index in config.overlay_frames:
-                    slug: str = entity.strip("/").replace("/", "_")
-                    rgb: UInt8[ndarray, "h w 3"] = frames[slot, column].cpu().numpy()
-                    path: Path = config.overlay_dir / f"{slug}_{index:06d}.png"
-                    cv2.imwrite(str(path), cv2.cvtColor(overlay_mask(rgb, mask), cv2.COLOR_RGB2BGR))
-                    path.chmod(0o644)
+                    write_overlay(config.overlay_dir, entity, index, frames[slot, column].cpu().numpy(), mask)
         live: list[int] = [len(t) for t in tracker.live]
         elapsed: float = time.perf_counter() - run_start
         print(
