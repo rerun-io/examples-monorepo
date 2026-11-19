@@ -13,6 +13,7 @@ scene at infinity, as in a stitched panorama).
 """
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,12 +25,13 @@ import torch
 from einops import rearrange
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
-from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views
-from simplecv.catalog_video_codec import CatalogCodecName, wrap_mp4
+from simplecv.catalog_video import CatalogVideo, catalog_video_from_table
+from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
+from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
     FullCircleConfig,
     FullCircleMasker,
@@ -41,9 +43,6 @@ from posekit.models.fullcircle import (
     view_up,
 )
 from posekit.ops.sphere import MeiCamera
-
-OPERATOR_CLASS_ID: int = 1
-"""Mask value of the operator (nonzero = drop features there)."""
 
 
 @dataclass
@@ -109,24 +108,20 @@ def read_lens_sources(store: rrc.LazyStore, cameras: tuple[str, str], mask_downs
     missing: list[str] = sorted(needed - statics.keys())
     if missing:
         raise ValueError(f"missing lens statics {missing}")
-    cam_R_rig: list[Float64[ndarray, "3 3"]] = []
-    lenses: list[tuple[MeiCamera, tuple[int, int]]] = []
-    for camera in cameras:
+    # Rerun stores 3x3 matrices column-major; the lens Transform3D is ChildFromParent (lens from rig).
+    cam_R_rigs: list[Float64[ndarray, "3 3"]] = [
+        np.asarray(statics[f"{camera}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T for camera in cameras
+    ]
+    sources: list[SphereSource] = []
+    for camera, cam_R_rig in zip(cameras, cam_R_rigs, strict=True):
         pinhole: str = f"{camera}/pinhole"
-        # Rerun stores 3x3 matrices column-major; the lens Transform3D is ChildFromParent (lens from rig).
-        cam_R_rig.append(np.asarray(statics[f"{camera}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T)
         k: Float64[ndarray, "3 3"] = np.asarray(statics[f"{pinhole}:Pinhole:image_from_camera"][0], dtype=np.float64).reshape(3, 3).T
         width, height = (int(v) for v in statics[f"{pinhole}:Pinhole:resolution"][0])
         model: str = str(statics[f"{pinhole}:simplecv.components.DistortionModel"][0])
         coefficients: list[float] = [float(c) for c in statics[f"{pinhole}:simplecv.components.DistortionCoefficients"][0]]
-        lenses.append(
-            (MeiCamera.from_calibration(model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), coefficients), (height, width))
-        )
-    sources: list[SphereSource] = []
-    for index, (lens, image_hw) in enumerate(lenses):
-        cam0_R_cam: Float64[ndarray, "3 3"] = cam_R_rig[0] @ cam_R_rig[index].T
-        sources.append(SphereSource(lens, cam0_R_cam, image_hw, (image_hw[0] // mask_downscale, image_hw[1] // mask_downscale)))
-    return sources, cam_R_rig[0]
+        lens: MeiCamera = MeiCamera.from_calibration(model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), coefficients)
+        sources.append(SphereSource(lens, cam_R_rigs[0] @ cam_R_rig.T, (height, width), (height // mask_downscale, width // mask_downscale)))
+    return sources, cam_R_rigs[0]
 
 
 def read_lens_video(store: rrc.LazyStore, entity: str, timeline: str) -> CatalogVideo:
@@ -139,14 +134,7 @@ def read_lens_video(store: rrc.LazyStore, entity: str, timeline: str) -> Catalog
     if not chunks:
         raise ValueError(f"{entity}: no video in the recording")
     table: pa.Table = rrc.ChunkStore.from_chunks(chunks).reader(index=timeline).to_arrow_table()
-    sample: str = f"{entity}:VideoStream:sample"
-    if table[sample].null_count:
-        table = table.filter(table[sample].is_valid())
-    times: ndarray = table[timeline].combine_chunks().to_numpy(zero_copy_only=False)
-    if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
-        raise ValueError(f"{entity}: expected frames with strictly increasing timestamps")
-    codec: CatalogCodecName = catalog_codec(table[f"{entity}:VideoStream:codec"], entity)
-    return CatalogVideo(times, packet_views(table[sample]), catalog_keyframes(table[f"{entity}:VideoStream:is_keyframe"]), codec)
+    return catalog_video_from_table(table, entity, timeline, entity)
 
 
 def read_level_rotations(
@@ -186,9 +174,7 @@ def main(config: FullCircleMasksConfig) -> None:
     if config.rr_config.recording_id != segment_id:
         raise ValueError(f"pass --rr-config.recording-id {segment_id} so the mask layer joins the base recording")
     store: rrc.LazyStore = reader.store()
-    lens_setup: tuple[list[SphereSource], Float64[ndarray, "3 3"]] = read_lens_sources(store, config.cameras, config.mask_downscale)
-    sources: list[SphereSource] = lens_setup[0]
-    cam0_R_rig: Float64[ndarray, "3 3"] = lens_setup[1]
+    sources, cam0_R_rig = read_lens_sources(store, config.cameras, config.mask_downscale)
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     videos: list[CatalogVideo] = [read_lens_video(store, f"{camera}/pinhole/video", config.timeline) for camera in config.cameras]
@@ -223,30 +209,33 @@ def main(config: FullCircleMasksConfig) -> None:
         debug = rr.RecordingStream("fullcircle_debug", recording_id=f"{segment_id}-fullcircle-debug")
         debug.save(config.debug_rrd)
 
-    def framesets(indices: list[int]) -> list[list[UInt8[Tensor, "h w 3"]]]:
-        batches: list[Tensor] = [
-            rearrange(decoder.get_frames_at([i - first for i in indices]).data, "n c h w -> n h w c")
-            for decoder, first in zip(decoders, firsts, strict=True)
-        ]
-        return [[batch[column] for batch in batches] for column in range(len(indices))]
-
     decode_s: float = 0.0
+
+    def decoded_chunks() -> Iterator[tuple[int, list[int], list[list[UInt8[Tensor, "h w 3"]]]]]:
+        """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the lens frames."""
+        nonlocal decode_s
+        for begin in range(0, len(tracked), config.decode_chunk):
+            chunk: list[int] = tracked[begin : begin + config.decode_chunk]
+            tick: float = time.perf_counter()
+            batches: list[Tensor] = [
+                rearrange(decoder.get_frames_at([i - first for i in chunk]).data, "n c h w -> n h w c")
+                for decoder, first in zip(decoders, firsts, strict=True)
+            ]
+            torch.cuda.synchronize(device)
+            decode_s += time.perf_counter() - tick
+            yield begin, chunk, [[batch[column] for batch in batches] for column in range(len(chunk))]
+
     detect_start: float = time.perf_counter()
     directions: list[Float64[ndarray, "3"] | None] = []
-    for begin in range(0, len(tracked), config.decode_chunk):
-        chunk: list[int] = tracked[begin : begin + config.decode_chunk]
-        tick: float = time.perf_counter()
-        frames: list[list[Tensor]] = framesets(chunk)
-        torch.cuda.synchronize(device)
-        decode_s += time.perf_counter() - tick
-        for offset, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True)):
-            evidence: OperatorEvidence = masker.detect(lens_frames, levels[begin + offset])
+    for begin, chunk, frames in decoded_chunks():
+        for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
+            evidence: OperatorEvidence = masker.detect(lens_frames, levels[position])
             directions.append(evidence.direction)
-            if debug is not None and (begin + offset) % config.debug_every == 0:
+            if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 for face in range(6):
                     debug.log(f"faces/face_{face}", rr.Image(evidence.face_images[face].cpu().numpy()).compress(90))
-                    keep: ndarray = evidence.faces.numpy() == face
+                    keep: ndarray = evidence.faces == face
                     debug.log(
                         f"faces/face_{face}/persons", rr.Boxes2D(array=evidence.boxes[keep], array_format=rr.Box2DFormat.XYXY, colors=(255, 200, 0))
                     )
@@ -257,34 +246,28 @@ def main(config: FullCircleMasksConfig) -> None:
     up_level: Float64[ndarray, "3"] = view_up([level.T @ d for level, d in zip(levels, filled, strict=True)])
     print(f"view up hint (level frame) {up_level.tolist()}")
 
-    targets: list[str] = [f"{camera}/pinhole/people_mask" for camera in config.cameras]
+    targets: list[str] = [f"{camera}/pinhole/{MASK_NAME}" for camera in config.cameras]
     for target, source in zip(targets, sources, strict=True):
-        rr.log(target, rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (OPERATOR_CLASS_ID, "masked", (40, 110, 255, 140))]), static=True)
+        rr.log(target, MASK_ANNOTATION, static=True)
         rr.log(target, rr.Transform3D(scale=[source.image_hw[1] / source.mask_hw[1], source.image_hw[0] / source.mask_hw[0], 1.0]), static=True)
     if debug is not None:
-        debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (OPERATOR_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
+        debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
     track_start: float = time.perf_counter()
-    position: int = 0
-    for begin in range(0, len(tracked), config.decode_chunk):
-        chunk = tracked[begin : begin + config.decode_chunk]
-        tick = time.perf_counter()
-        frames = framesets(chunk)
-        torch.cuda.synchronize(device)
-        decode_s += time.perf_counter() - tick
-        for index, lens_frames in zip(chunk, frames, strict=True):
+    for begin, chunk, frames in decoded_chunks():
+        for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
             result: OperatorMasks = masker.track(lens_frames, filled[position], levels[position] @ up_level)
             for lens, target in enumerate(targets):
                 rr.set_time(config.timeline, duration=np.timedelta64(int(times[lens][index].view(np.int64)), "ns"))
-                rr.log(target, rr.SegmentationImage(result.source_masks[lens].to(torch.uint8).cpu().numpy() * OPERATOR_CLASS_ID))
+                rr.log(target, rr.SegmentationImage(result.source_masks[lens].to(torch.uint8).cpu().numpy() * MASKED_CLASS_ID))
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 debug.log("synthetic", rr.Image(result.synthetic_rgb.cpu().numpy()).compress(90))
                 debug.log("synthetic/mask", rr.SegmentationImage(result.synthetic_mask.to(torch.uint8).cpu().numpy()))
                 debug.log("operator_direction", rr.Arrows3D(vectors=[filled[position]], colors=(255, 0, 0)))
-            position += 1
         elapsed: float = time.perf_counter() - track_start
         if begin % (config.decode_chunk * 25) == 0:
-            print(f"frameset {chunk[-1]}: {position} tracked, {position / elapsed:.1f} framesets/s")
+            done: int = begin + len(chunk)
+            print(f"frameset {chunk[-1]}: {done} tracked, {done / elapsed:.1f} framesets/s")
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()
