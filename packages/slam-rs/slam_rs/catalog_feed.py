@@ -104,6 +104,7 @@ from slam_rs.catalog_timing import (
 )
 from slam_rs.config import DatasetProperties
 from slam_rs.frame_masks import FrameMasks, MaskCursor
+from slam_rs.prefetch import prefetch
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -162,6 +163,13 @@ def select_decode_device(requested: DecodeRequest = "auto") -> DecodeDevice:
             print(f"slam-rs: decoding on the CPU (PyAV/dav1d) because NVDEC is unavailable: {reason}", flush=True)
     return "cpu"
 
+
+PREFETCH_FRAMESETS: int = 64
+"""Framesets the feed decodes ahead of its caller: two NVDEC batches of 32, so one batch's decode hides behind tracking.
+
+The queue holds at most this many framesets' gray8 images (``sum(h * w)`` bytes each: 7 MB on the 1920 px Insta360
+lenses, 0.6 MB on MSD), and their masks are the cursor's own; the decoder's current batch or window comes on top.
+"""
 
 DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
@@ -612,7 +620,24 @@ class SegmentFeed:
         return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
     def framesets(self, stop_ns: int | None = None, start_ns: int | None = None) -> Iterator[Frameset]:
-        """Decode the segment and yield one frameset at a time.
+        """Decode the segment and yield one frameset at a time, read ahead on a worker thread.
+
+        One worker thread per iterator runs :meth:`_read_framesets` (decode, inertial, ground-truth and mask reads) up
+        to :data:`PREFETCH_FRAMESETS` framesets ahead of the caller (:func:`slam_rs.prefetch.prefetch`), so the
+        tracker does not stop while the next window or NVDEC batch decodes. The framesets, their order and their
+        timestamps are those of the inline read; a worker error is raised here; closing the iterator stops the worker.
+        On NVDEC the worker takes the caller's current CUDA device, and every decoder is opened, used and closed on
+        that one thread. See :meth:`_read_framesets` for the arguments.
+        """
+        cuda_device: int | None = None
+        if self.decode_device == "cuda":
+            import torch
+
+            cuda_device = torch.cuda.current_device()
+        return prefetch(self._read_framesets(stop_ns, start_ns, cuda_device), PREFETCH_FRAMESETS)
+
+    def _read_framesets(self, stop_ns: int | None, start_ns: int | None, cuda_device: int | None) -> Iterator[Frameset]:
+        """Decode the segment and yield one frameset at a time, on the calling thread.
 
         By default, video, inertial samples and ground truth are fetched one
         window at a time, bounding memory and startup cost. Window edges land on
@@ -640,6 +665,7 @@ class SegmentFeed:
                 are not fetched, and the frames of the window that covers it are
                 decoded but not yielded. The first yielded frameset carries every
                 inertial sample since that window's start. None starts at the beginning.
+            cuda_device: CUDA device the NVDEC decoders run on, made current on this thread; None on the CPU decoder.
 
         Yields:
             Framesets in time order, every :attr:`frame_stride`-th one.
@@ -649,6 +675,10 @@ class SegmentFeed:
                 decoded frame disagrees with the calibrated resolution, or a
                 window's inertial read leaves a gap at the boundary.
         """
+        if cuda_device is not None:
+            import torch
+
+            torch.cuda.set_device(cuda_device)
         # Each read reaches past both ends of its window. Forward, because a
         # frameset needs one sample beyond its own timestamp. Backward by a whole
         # frame period, because the first frameset of a window owns the samples
