@@ -4001,7 +4001,7 @@ cwd = "packages/kornia-staging"
 description = "Run the global-BA golden lanes against rootba bal (MGO07, TM1)"
 
 [feature.kornia-staging.tasks.gate]
-depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test", "kornia-staging-patch-test", "kornia-staging-patch-integration"]
+depends-on = ["lint", "typecheck", "deadcode", "kornia-staging-fmt-check", "kornia-staging-clippy", "kornia-staging-test", "kornia-staging-patch-test", "kornia-staging-patch-integration", "bow-vocab-rust-check"]
 description = "Run the Rust author checks for staged Kornia code"
 
 # ═══════════════════════════════════════════════════════════════════════════

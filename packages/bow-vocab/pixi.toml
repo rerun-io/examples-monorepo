@@ -6,3 +6,13 @@ version = "0.1.0"
 # pixi-build-python asks for a sysroot matching the workspace's glibc 2.35 virtual package, which conda-forge lacks.
 [package.build]
 backend = { name = "pixi-build-rattler-build", version = "*" }
+
+[package.build.config]
+# The binding compiles kornia-staging-bow from ../kornia-staging (the recipe's second source): list its sources so an
+# edit to the core crate rebuilds the binding.
+extra-input-globs = [
+  "../kornia-staging/Cargo.toml",
+  "../kornia-staging/Cargo.lock",
+  "../kornia-staging/crates/kornia-staging-bow/Cargo.toml",
+  "../kornia-staging/crates/kornia-staging-bow/src/**/*",
+]

@@ -1,8 +1,8 @@
 # rattler-build recipe for bow-vocab: kornia-staging-bow's seeded k-means vocabulary for float descriptors, TF-IDF bags
 # of words and inverted-file L1 scores, as the pyo3 module bow_vocab (colsfm's retrieval index). maturin builds it from
 # the crates/bow-vocab-py workspace member (pyproject.toml `manifest-path`). Same layout as packages/insta360-io:
-# kornia-staging is a second source, because the binding's path dependency points at ../kornia-staging/crates. pixi
-# rebuilds on changes under packages/bow-vocab only; after editing kornia-staging-bow, bump the build number.
+# kornia-staging is a second source, because the binding's path dependency points at ../kornia-staging/crates; pixi.toml's
+# extra-input-globs list kornia-staging-bow's sources, so an edit there rebuilds the binding.
 package:
   name: bow-vocab
   version: "0.1.0"
