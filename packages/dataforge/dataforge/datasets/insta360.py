@@ -73,7 +73,7 @@ from __future__ import annotations
 import contextlib
 import itertools
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,7 +95,7 @@ from simplecv.imu_calibration import ImuCalibration
 from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
-from torchcodec.encoders import Encoder
+from torchcodec.encoders import Encoder, VideoStream
 
 from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
@@ -428,6 +428,35 @@ def cube_indices(frames: int, stride: int, limit: int | None) -> Int64[ndarray, 
     return np.arange(0, frames, stride, dtype=np.int64)[:limit]
 
 
+def encode_face_videos(
+    faces: Iterable[UInt8[Tensor, "f b 3 n n"]], videos: list[Path], *, size: int, gop: int, cq: int, device: torch.device
+) -> list[int]:
+    """Encode batches of ``size`` x ``size`` RGB faces into one AV1 mp4 per face, one NVENC session each, fed from ``device``.
+
+    Every encoder slot is reserved before the first encoder opens: a busy host waits for all of them at once instead of
+    opening some encoders and stalling the rest.
+
+    Returns:
+        Frames each encoder took.
+
+    Raises:
+        ValueError: If ``DATAFORGE_NVENC_SLOTS`` is below the number of faces.
+    """
+    options: dict[str, int] = {"rc": 1, "cq": cq, "bf": 0, "g": gop}  # rc 1 = vbr; no B-frames
+    fed: list[int] = [0] * len(videos)
+    with nvenc_slot(len(videos)), contextlib.ExitStack() as opened:
+        streams: list[VideoStream] = []
+        for video in videos:
+            encoder: Encoder = Encoder()
+            streams.append(encoder.add_video(height=size, width=size, frame_rate=30, device=device, codec="av1_nvenc", preset="p4", extra_options=options))
+            opened.enter_context(encoder.open_file(video))
+        for batch in faces:
+            for k, (stream, face) in enumerate(zip(streams, batch, strict=True)):
+                stream.add_frames(face)
+                fed[k] += face.shape[0]
+    return fed
+
+
 @dataclass(frozen=True, slots=True)
 class ClipSource:
     """One ``.insv`` clip on disk."""
@@ -753,19 +782,19 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             )
         device: torch.device = torch.device(self.config.cube_device)
         join = cube.CubeJoin(tables, lenses.size, device)
-        nvenc: dict[str, int] = {"rc": 1, "cq": self.config.cube_cq, "bf": 0, "g": self.config.cube_gop}  # rc 1 = vbr; no B-frames
-        with work_dir("insta360-cube-") as work, nvenc_slot(len(faces)), contextlib.ExitStack() as encoders:
+        with work_dir("insta360-cube-") as work:
             videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
-            streams = []
-            for video in videos:
-                encoder = Encoder()
-                streams.append(encoder.add_video(height=size, width=size, frame_rate=30, device=device, codec="av1_nvenc", preset="p4", extra_options=nvenc))
-                encoders.enter_context(encoder.open_file(video))
             with self.timer.stage("cube:faces"):
-                for lens0, lens1 in lens_pictures(clip, indices, device, threads=self.config.decode_threads):
-                    for stream, face in zip(streams, join.faces(lens0, lens1), strict=True):
-                        stream.add_frames(face)
-                encoders.close()
+                fed: list[int] = encode_face_videos(
+                    (join.faces(lens0, lens1) for lens0, lens1 in lens_pictures(clip, indices, device, threads=self.config.decode_threads)),
+                    videos,
+                    size=size,
+                    gop=self.config.cube_gop,
+                    cq=self.config.cube_cq,
+                    device=device,
+                )
+            if fed != [indices.size] * len(faces):
+                raise ValueError(f"the face encoders took {fed} frames for {indices.size} framesets")
             for cam, video in zip(FACE_CAMS, videos, strict=True):
                 samples: int = log_video_stream(recording, video, schema.video_path(RIG, cam), times_ns=times_ns)
                 if samples != indices.size:
