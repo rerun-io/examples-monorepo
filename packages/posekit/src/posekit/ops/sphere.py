@@ -123,10 +123,13 @@ class MeiCamera:
         target: Float[Tensor, "n 2"] = torch.stack([(pixels[:, 0] - self.cx) / self.fx, (pixels[:, 1] - self.cy) / self.fy], dim=1)
         m: Float[Tensor, "n 2"] = target.clone()
         step: float = 1e-7
+        step_x: Float[Tensor, "2"] = torch.tensor([step, 0.0], dtype=m.dtype, device=m.device)
+        step_y: Float[Tensor, "2"] = torch.tensor([0.0, step], dtype=m.dtype, device=m.device)
         for _ in range(iterations):
-            residual: Float[Tensor, "n 2"] = self._distort(m) - target
-            dx: Float[Tensor, "n 2"] = (self._distort(m + torch.tensor([step, 0.0], dtype=m.dtype, device=m.device)) - self._distort(m)) / step
-            dy: Float[Tensor, "n 2"] = (self._distort(m + torch.tensor([0.0, step], dtype=m.dtype, device=m.device)) - self._distort(m)) / step
+            base: Float[Tensor, "n 2"] = self._distort(m)
+            residual: Float[Tensor, "n 2"] = base - target
+            dx: Float[Tensor, "n 2"] = (self._distort(m + step_x) - base) / step
+            dy: Float[Tensor, "n 2"] = (self._distort(m + step_y) - base) / step
             det: Float[Tensor, " n"] = dx[:, 0] * dy[:, 1] - dy[:, 0] * dx[:, 1]
             det = torch.where(det.abs() > 1e-12, det, torch.full_like(det, 1e-12))
             m = (
@@ -264,7 +267,7 @@ SphereCamera: TypeAlias = MeiCamera | Kb4Camera | EquirectCamera | PinholeCamera
 def cube_face_rotations() -> Float64[ndarray, "6 3 3"]:
     """``rig_R_face`` of the six 90-degree cube faces: +Z, -Z, -X, +X, -Y (up), +Y (down).
 
-    Image down is +Y on the four side faces; image right is +X on the up and down faces (the casa-loma cube layout).
+    Image down is +Y on the four side faces; image right is +X on the up and down faces (the Insta360 cube-face layer layout).
     """
     faces: list[list[list[int]]] = [
         [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
@@ -333,14 +336,12 @@ def view_from_rays(
     return SphereView(torch.stack(grids).float(), source.float().reshape(n_src, height, width))
 
 
-def sample_sphere(
-    images: list[Float[Tensor, "c h_src w_src"]], view: SphereView, mode: Literal["bilinear", "nearest"] = "bilinear"
-) -> Float[Tensor, "c h w"]:
+def sample_sphere(images: list[Float[Tensor, "c h_src w_src"]], view: SphereView) -> Float[Tensor, "c h w"]:
     """Render a planned view from source images (float, channels first); pixels outside every field are 0."""
     out: Tensor | None = None
     for index, image in enumerate(images):
         sampled: Float[Tensor, "c h w"] = F.grid_sample(
-            image[None], view.grids[index][None].to(image.dtype), mode=mode, padding_mode="border", align_corners=False
+            image[None], view.grids[index][None].to(image.dtype), mode="bilinear", padding_mode="border", align_corners=False
         )[0]
         part: Float[Tensor, "c h w"] = sampled * view.source[index][None].to(image.dtype)
         out = part if out is None else out + part
