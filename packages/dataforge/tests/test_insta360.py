@@ -271,6 +271,7 @@ def decoded_rgb(rrd: Path, entity: str) -> UInt8[ndarray, "k h w 3"]:
             times: list[int] = batch.column("video_time").cast(pa.int64()).to_pylist()
             rows += [(t, bytes(sample[0])) for t, sample in zip(times, batch.column("VideoStream:sample").to_pylist(), strict=True)]
     decoder = av.CodecContext.create("libdav1d", "r")
+    assert isinstance(decoder, av.video.codeccontext.VideoCodecContext)  # narrows the type under every PyAV stub version
     frames = [frame for _, sample in sorted(rows) for frame in decoder.decode(av.Packet(sample))] + list(decoder.decode(None))
     return np.stack([frame.to_ndarray(format="rgb24") for frame in frames])  # pyrefly: ignore[missing-attribute]
 
