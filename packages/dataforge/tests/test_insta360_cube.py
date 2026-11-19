@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable, Iterable
+from pathlib import Path
+
 import insta360_io
 import numpy as np
 import pytest
@@ -159,3 +163,68 @@ def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:
         pose = face_from_rig(face, lens_from_rig)
         np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], (centres[0] + centres[1]) / 2, atol=1e-12)
         np.testing.assert_allclose(pose[:3, :3].T, lens_from_rig[0][:3, :3].T @ face.cube_from_face, atol=1e-12)
+
+
+def run_with_timeout(target: Callable[[], object], seconds: float) -> object:
+    """``target()``'s result or exception; a test failure, not a hung run, when it is still going after ``seconds``."""
+    outcome: list[object] = []
+    worker = threading.Thread(target=lambda: outcome.append(_call(target)), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"still running after {seconds} s: the face encoders deadlocked"
+    return outcome[0]
+
+
+def _call(target: Callable[[], object]) -> object:
+    try:
+        return target()
+    except ValueError as error:
+        return error
+
+
+@pytest.fixture
+def slot_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``encode_frames_to_mp4`` with its slot protocol (one ``nvenc_slot`` unless given descriptors) but no ffmpeg; slots in ``tmp_path``."""
+    import contextlib
+
+    from dataforge import video_encoding
+    from dataforge.datasets import insta360
+
+    def encode(frames: Iterable[bytes], output: Path, *, slot_fds: tuple[int, ...] | None = None, **_: object) -> int:
+        with contextlib.nullcontext(slot_fds) if slot_fds is not None else video_encoding.nvenc_slot():
+            taken: int = sum(1 for _ in frames)
+        output.write_bytes(b"")
+        return taken
+
+    monkeypatch.setattr(video_encoding, "NVENC_SLOT_DIR", tmp_path / "slots")
+    monkeypatch.setattr(insta360, "encode_frames_to_mp4", encode)
+
+
+@pytest.mark.usefixtures("slot_encoder")
+def test_six_faces_on_two_encoder_slots_fail_fast_instead_of_hanging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from dataforge.datasets.insta360 import encode_face_videos
+
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
+    frames = ([b"face"] * 6 for _ in range(20))
+    outcome = run_with_timeout(lambda: encode_face_videos(frames, [tmp_path / f"{k}.mp4" for k in range(6)], size=8, gop=10, cq=14), 20.0)
+    assert isinstance(outcome, ValueError) and "capacity is 2" in str(outcome)
+
+
+@pytest.mark.usefixtures("slot_encoder")
+def test_two_concurrent_cube_encodes_share_six_slots_without_deadlock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from dataforge.datasets.insta360 import encode_face_videos
+
+    monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "6")
+
+    def one_run(name: str) -> list[int]:
+        frames = ([b"face"] * 6 for _ in range(20))
+        return encode_face_videos(frames, [tmp_path / f"{name}-{k}.mp4" for k in range(6)], size=8, gop=10, cq=14)
+
+    results: list[object] = []
+    runs = [threading.Thread(target=lambda name=name: results.append(one_run(name)), daemon=True) for name in ("a", "b")]
+    for run in runs:
+        run.start()
+    for run in runs:
+        run.join(30.0)
+    assert not any(run.is_alive() for run in runs), "two concurrent cube encodes deadlocked on the encoder slots"
+    assert results == [[20] * 6, [20] * 6]

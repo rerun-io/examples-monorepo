@@ -95,7 +95,7 @@ from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_camera_source, log_imu, log_rig_node, log_video_stream, time_column
-from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, work_dir
+from dataforge.video_encoding import FrameSource, encode_frames_to_mp4, nvenc_slot, work_dir
 
 RIG: int = 0
 """One rig per clip."""
@@ -400,6 +400,44 @@ def _feed(channel: queue.Queue[bytes | None], encoder: Future[int], item: bytes 
 def _channel_frames(channel: queue.Queue[bytes | None]) -> Iterator[bytes]:
     while (item := channel.get()) is not None:
         yield item
+
+
+def encode_face_videos(frames: Iterator[list[bytes]], videos: list[Path], *, size: int, gop: int, cq: int) -> list[int]:
+    """Encode the ``size`` x ``size`` RGB faces of every frameset into one AV1 mp4 per face, the encoders running at once.
+
+    The encoders are fed in lockstep, so every encoder slot is reserved before the first one starts: a busy host waits
+    for all of them at once instead of starting some encoders and stalling the rest.
+
+    Returns:
+        Frames each encoder took.
+
+    Raises:
+        ValueError: If ``DATAFORGE_NVENC_SLOTS`` is below the number of faces.
+    """
+    with nvenc_slot(len(videos)) as fds, ThreadPoolExecutor(len(videos)) as pool:
+        channels: list[queue.Queue[bytes | None]] = [queue.Queue(maxsize=4) for _ in videos]
+        encoders: list[Future[int]] = [
+            pool.submit(
+                encode_frames_to_mp4,
+                _channel_frames(channel),
+                video,
+                source=FrameSource("rgb24", width=size, height=size),
+                fps=30,
+                gop=gop,
+                cq=cq,
+                slot_fds=(fd,),
+            )
+            for channel, video, fd in zip(channels, videos, fds, strict=True)
+        ]
+        try:
+            for faces in frames:
+                for channel, encoder, face in zip(channels, encoders, faces, strict=True):
+                    _feed(channel, encoder, face)
+        finally:
+            for channel, encoder in zip(channels, encoders, strict=True):
+                if not encoder.done():
+                    _feed(channel, encoder, None)
+        return [encoder.result() for encoder in encoders]
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,35 +760,20 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 static=True,
                 recording=recording,
             )
-        with work_dir("insta360-cube-") as work, ThreadPoolExecutor(len(faces)) as pool:
-            channels: list[queue.Queue[bytes | None]] = [queue.Queue(maxsize=4) for _ in faces]
+        with work_dir("insta360-cube-") as work:
             videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
-            encoders: list[Future[int]] = [
-                pool.submit(
-                    encode_frames_to_mp4,
-                    _channel_frames(channel),
-                    video,
-                    source=FrameSource("rgb24", width=size, height=size),
-                    fps=30,
+            with self.timer.stage("cube:faces"):
+                pairs = zip(
+                    *(rgb_frames(clip, clip.lens_track[lens], indices, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for lens in range(2)),
+                    strict=True,
+                )
+                fed: list[int] = encode_face_videos(
+                    ([np.ascontiguousarray(cube.join(images, table)).tobytes() for table in tables] for images in pairs),
+                    videos,
+                    size=size,
                     gop=self.config.cube_gop,
                     cq=self.config.cube_cq,
                 )
-                for channel, video in zip(channels, videos, strict=True)
-            ]
-            with self.timer.stage("cube:faces"):
-                try:
-                    pairs = zip(
-                        *(rgb_frames(clip, clip.lens_track[lens], indices, batch_frames=self.config.batch_frames, threads=self.config.decode_threads) for lens in range(2)),
-                        strict=True,
-                    )
-                    for images in pairs:
-                        for channel, encoder, table in zip(channels, encoders, tables, strict=True):
-                            _feed(channel, encoder, np.ascontiguousarray(cube.join(images, table)).tobytes())
-                finally:
-                    for channel, encoder in zip(channels, encoders, strict=True):
-                        if not encoder.done():
-                            _feed(channel, encoder, None)
-                fed: list[int] = [encoder.result() for encoder in encoders]
             if fed != [indices.size] * len(faces):
                 raise ValueError(f"the face encoders took {fed} frames for {indices.size} framesets")
             for cam, video in zip(FACE_CAMS, videos, strict=True):
