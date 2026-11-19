@@ -200,7 +200,7 @@ screenshots of the Space page as proof.
 
 1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `ci/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
 2. Add `[feature.<name>]` in the root `pixi.toml`: conda deps, pypi deps (editable install), `activation.env` with `PACKAGE_DIR = "packages/<name>"`, and tasks with `cwd = "packages/<name>"`. Declare `platforms` explicitly (see **Platforms & lockfile**).
-3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature.
+3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature. Every environment composes `ffmpeg`; one that decodes video also composes `torchcodec`.
 4. Copy a package `.envrc` (defaults `PIXI_ENV` to `<name>-dev`) and add `packages/<name>/data/` to `.gitignore`.
 5. Register the package in `pyrefly.toml` in three places (see **Code Style**).
 6. Run `pixi install -e <name>-dev` to verify the solve.
