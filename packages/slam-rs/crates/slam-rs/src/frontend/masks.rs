@@ -79,6 +79,7 @@ pub fn masked_cells(mask: PixelMask<'_>, image: ImageSize, grid: &CellGrid) -> C
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use proptest::prelude::*;
 
@@ -86,15 +87,21 @@ mod tests {
         CellGrid::new(width, height, cell).unwrap()
     }
 
-    /// The rule stated in the module docs, pixel by pixel in f64.
+    /// The rule stated in the module docs, pixel by pixel, independently: the mask pixel `j` whose span
+    /// `[j * s, (j + 1) * s)` holds the pixel centre, found by search with exact integer comparisons. An f64 oracle is
+    /// not exact (98 / 20 = 4.9 has no binary form: a centre on a span's edge floors one pixel low).
     fn brute_force(mask: PixelMask<'_>, image: ImageSize, grid: &CellGrid) -> CellMasks {
-        let (sx, sy) = (
-            image.width as f64 / mask.width as f64,
-            image.height as f64 / mask.height as f64,
-        );
+        let covering = |pixel: usize, image: usize, size: usize| {
+            (0..size)
+                .find(|&j| {
+                    2 * j * image <= (2 * pixel + 1) * size
+                        && (2 * pixel + 1) * size < 2 * (j + 1) * image
+                })
+                .unwrap_or(size - 1)
+        };
         let masked_pixel = |c: usize, r: usize| {
-            let mc = (((c as f64 + 0.5) / sx).floor() as usize).min(mask.width - 1);
-            let mr = (((r as f64 + 0.5) / sy).floor() as usize).min(mask.height - 1);
+            let mc = covering(c, image.width, mask.width);
+            let mr = covering(r, image.height, mask.height);
             mask.data[mr * mask.width + mc] != 0
         };
         let mut out = CellMasks::default();
@@ -194,6 +201,29 @@ mod tests {
         );
         assert!(cells.in_bounds(961.0, 961.0));
         assert!(!cells.in_bounds(900.0, 961.0));
+    }
+
+    #[test]
+    fn a_span_edge_on_a_non_binary_scale_is_exact() {
+        // Shrunk from a proptest failure of an f64 oracle: scale 98 / 20 = 4.9.
+        let image = ImageSize {
+            width: 98,
+            height: 50,
+        };
+        let grid = grid(98, 50, 10);
+        let mut data = vec![0u8; 20 * 15];
+        for (index, value) in data.iter_mut().enumerate() {
+            *value = u8::from(index % 7 == 3);
+        }
+        let mask = PixelMask {
+            width: 20,
+            height: 15,
+            data: &data,
+        };
+        assert_eq!(
+            masked_cells(mask, image, &grid),
+            brute_force(mask, image, &grid)
+        );
     }
 
     proptest! {
