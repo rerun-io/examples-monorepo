@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import insta360_io
 import numpy as np
@@ -288,7 +289,7 @@ def test_the_reader_reproduces_the_pre_reader_conversion(model: str, request: py
     assert reader.rig.profile_name == model
     batches: list[tuple[str, pa.RecordBatch]] = [(c.entity_path, c.to_record_batch()) for c in reader.chunks() if not c.is_static]
 
-    def rows(entity: str, column: str) -> list[object]:
+    def rows(entity: str, column: str) -> list[Any]:
         return [row for path, batch in batches if path == entity and column in batch.schema.names for row in batch.column(column).to_pylist()]
 
     def times(entity: str, column: str) -> list[int]:

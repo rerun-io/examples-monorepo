@@ -10,6 +10,8 @@ integer remap as slam-rs's dual-fisheye lane, from two ``MeiCamera``s and the po
 refusal raises ``ValueError``.
 """
 
+from typing import Literal
+
 from jaxtyping import Bool, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 
@@ -142,7 +144,7 @@ class InsvRig:
     def pano_from_imu(self) -> list[list[float]] | None:
         """``R_P_imu``, row-major, orthonormalised; ``None`` without a profile."""
     @property
-    def codec(self) -> str:
+    def codec(self) -> Literal["h264", "hevc"]:
         """Codec of both lens tracks, as FFmpeg names it: ``h264`` or ``hevc``."""
     @property
     def lenses(self) -> list[InsvLens]:
