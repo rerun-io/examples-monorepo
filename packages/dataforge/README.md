@@ -514,7 +514,7 @@ By default a conversion writes the `base` layer only. `--panorama` also writes t
 equirectangular stitch of the two lens cameras at twice the lens width (3840x1920 at 1920; `--pano-width`), AV1 on
 NVENC, on the frame times. On `--pano-device cuda` (default) the stage stays on the GPU (NVDEC, remap, NVENC) and
 the two lenses meet across an optical-flow seam in a ±5 deg band (`--pano-band-deg`) on NVIDIA's flow engine (NVOF,
-from the driver); on `cpu` the band is the plain feather (no NVOF there; NVENC still encodes). About 46 s for clip
+from the driver); on `cpu` the band is the plain feather (no NVOF there; NVENC still encodes). About 43 s for clip
 B's 7,730 framesets on an RTX 5090. Run it again with the flag to add the layer beside bases already written; a
 layer that exists is skipped, so a panorama written by an older converter (gray, 1920x960) stays until `--force`.
 
