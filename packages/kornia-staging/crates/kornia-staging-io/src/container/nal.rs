@@ -36,19 +36,20 @@ fn is_random_access(codec: VideoCodec, t: u8) -> bool {
     }
 }
 
-/// The SPS and access-unit-delimiter NAL types of a codec.
-fn sps_and_aud(codec: VideoCodec) -> (u8, u8) {
+/// The access-unit-delimiter NAL type of a codec.
+fn aud(codec: VideoCodec) -> u8 {
     match codec {
-        VideoCodec::H264 => (7, 9),
-        VideoCodec::H265 => (33, 35),
+        VideoCodec::H264 => 9,
+        VideoCodec::H265 => 35,
     }
 }
 
 /// Convert one length-prefixed H.264 or HEVC sample into an Annex B access unit, appended to `out`.
 ///
 /// A random-access sample (an H.264 IDR, an HEVC IRAP) gets the out-of-band `parameter_sets` (SPS and PPS from
-/// `avcC`, or VPS, SPS and PPS from `hvcC`) in front of its first non-AUD NAL unless it already carries an SPS in band,
-/// so a decoder can start at any keyframe — what Rerun's `VideoStream` needs.
+/// `avcC`, or VPS, SPS and PPS from `hvcC`) in front of its first non-AUD NAL unless it carries every one of their
+/// types in band, so a decoder can start at any keyframe — what Rerun's `VideoStream` needs. In-band sets follow the
+/// inserted ones and so stay the active definitions.
 ///
 /// Returns whether the sample is a random-access picture.
 ///
@@ -91,11 +92,14 @@ pub fn sample_to_annex_b(
         nals.push(nal);
         at += n + len;
     }
-    let (sps, aud) = sps_and_aud(codec);
+    let aud = aud(codec);
     let irap = nals
         .iter()
         .any(|nal| is_random_access(codec, nal_type(codec, nal)));
-    let in_band = nals.iter().any(|nal| nal_type(codec, nal) == sps);
+    let in_band = parameter_sets.iter().all(|set| {
+        nals.iter()
+            .any(|nal| nal_type(codec, nal) == nal_type(codec, set))
+    });
     let mut inserted = !irap || in_band;
     for nal in nals {
         if !inserted && nal_type(codec, nal) != aud {
@@ -206,6 +210,35 @@ mod tests {
             &mut Vec::new()
         )
         .unwrap());
+    }
+
+    #[test]
+    fn a_keyframe_missing_some_parameter_sets_in_band_gets_the_out_of_band_ones_first() {
+        // An H.264 IDR carrying its SPS but not its PPS; the in-band SPS follows and so stays the active one.
+        let (sps, pps, in_band_sps): (&[u8], &[u8], &[u8]) =
+            (&[0x67, 0x64, 0x28], &[0x68, 0xee], &[0x67, 0x64, 0x29]);
+        let idr: &[u8] = &[0x65, 0x88];
+        let mut out = Vec::new();
+        assert!(sample_to_annex_b(
+            VideoCodec::H264,
+            &prefixed(&[in_band_sps, idr], 4),
+            4,
+            &[sps.to_vec(), pps.to_vec()],
+            &mut out
+        )
+        .unwrap());
+        assert_eq!(out, annex_b(&[sps, pps, in_band_sps, idr]));
+        // An HEVC IRAP with SPS and PPS in band but no VPS.
+        let mut out = Vec::new();
+        sample_to_annex_b(
+            VideoCodec::H265,
+            &prefixed(&[SPS, PPS, IDR], 4),
+            4,
+            &sets(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out, annex_b(&[VPS, SPS, PPS, SPS, PPS, IDR]));
     }
 
     #[test]
