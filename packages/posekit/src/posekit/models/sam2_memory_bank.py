@@ -1,5 +1,7 @@
 """A SAM 2 memory bank that also forgets prompted memories, for trackers re-prompted through long videos."""
 
+from collections.abc import Iterable
+
 from sam2.modeling.memory import ObjectMemory
 from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
 
@@ -22,8 +24,10 @@ class BoundedForgetfulMemoryBank(SAM2ForgetfulObjectMemoryBank):
         super().__init__(memory_window_size=memory_window_size)
         self.max_conditional_memories: int = max_conditional_memories
 
-    def prune_memories(self, obj_ids: list[int], current_frame_idx: int) -> dict[int, list[ObjectMemory]]:
-        """Prune non-prompted memories as the forgetful bank does, then prompted memories past the bound."""
+    def prune_memories(self, obj_ids: Iterable[int], current_frame_idx: int) -> dict[int, list[ObjectMemory]]:
+        """Prune non-prompted memories as the forgetful bank does, then prompted memories past the bound (the predictor
+        passes ``obj_ids`` as a set)."""
+        obj_ids = list(obj_ids)
         removed: dict[int, list[ObjectMemory]] = super().prune_memories(obj_ids, current_frame_idx)
         for obj_id in obj_ids:
             memories: list[ObjectMemory] = self.conditional_memories.get(obj_id, [])

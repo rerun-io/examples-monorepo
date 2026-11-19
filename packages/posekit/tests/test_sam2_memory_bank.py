@@ -15,9 +15,8 @@ MAX_PTRS: int = 16
 
 def _selected(bank, frame: int, max_conditional: int) -> tuple[list[int], list[int], list[int]]:
     selection = bank.select_memories([0], frame, max_conditional, NUM_MASKMEM - 1, MAX_PTRS)[0]
-    return tuple(
-        [m.frame_idx for m in memories] for memories in (selection.conditional_memories, selection.non_conditional_memories, selection.ptr_memories)
-    )
+    conditional, other, pointers = (selection.conditional_memories, selection.non_conditional_memories, selection.ptr_memories)
+    return [m.frame_idx for m in conditional], [m.frame_idx for m in other], [m.frame_idx for m in pointers]
 
 
 @settings(max_examples=60, deadline=None)

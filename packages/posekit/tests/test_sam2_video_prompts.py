@@ -24,7 +24,7 @@ def _multimask_flags(single_click_multimask: bool) -> list[bool]:
     segmenter: Sam2VideoSegmenter = Sam2VideoSegmenter.__new__(Sam2VideoSegmenter)
     segmenter.config = Sam2VideoSegmenterConfig(device="cpu", single_click_multimask=single_click_multimask)
     spy: _SpyPredictor = _SpyPredictor()
-    segmenter.predictor = spy
+    segmenter.predictor = spy  # pyrefly: ignore[bad-assignment]
     segmenter.reset()
     frame: torch.Tensor = torch.zeros((1, 8, 8, 3), dtype=torch.uint8)
     zero: torch.Tensor = torch.zeros(1, dtype=torch.long)
