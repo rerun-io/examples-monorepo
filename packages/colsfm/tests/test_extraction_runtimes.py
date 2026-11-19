@@ -25,7 +25,7 @@ NUM_KEYPOINTS: int = 3
 
 
 class _CountingRuntime:
-    """A fake engine runtime that records how many instances are alive at once."""
+    """A fake engine runtime that records how many instances are open at once; only ``close()`` releases one."""
 
     alive: int = 0
     most_alive: int = 0
@@ -37,8 +37,14 @@ class _CountingRuntime:
         type(self).opened.append(path)
         self.max_input_shapes: dict[str, tuple[int, ...]] = {"image": (8, 3, height, width)}
 
-    def __del__(self) -> None:
+    def close(self) -> None:
         type(self).alive -= 1
+
+    def __enter__(self) -> "_CountingRuntime":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
         batch: int = int(inputs["image"].shape[0])

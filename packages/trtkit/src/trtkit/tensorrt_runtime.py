@@ -11,7 +11,7 @@ ONNX exports) zero-pad up to their baked batch.
 
 import math
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Self, cast
 
 import torch
 from torch import Tensor
@@ -43,10 +43,36 @@ class _TrtEngine:
         self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
         self._use_cuda_graph: bool = use_cuda_graph
 
-    def __del__(self) -> None:
-        """Destroy captured engine launches before the execution context and engine they replay are released."""
+    def close(self) -> None:
+        """Release the CUDA graphs, I/O buffers, execution context and engine now, not at the next garbage collection.
+
+        Idempotent; a closed runtime refuses calls. ``with Runtime(...) as runtime:`` closes at the block's end.
+        """
+        if getattr(self, "_engine", None) is None:
+            return
+        self._stream.synchronize()
+        # Captured launches go before the context and engine they replay.
         for graph in getattr(self, "_graphs", {}).values():
             graph.reset()
+        self._graphs = {}
+        self._input_buffers = {}
+        self._output_buffers = {}
+        self._context = None
+        self._engine = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        """Close on collection when the owner did not."""
+        self.close()
+
+    def _require_open(self) -> None:
+        if self._context is None:
+            raise RuntimeError("this TensorRT runtime is closed")
 
     def _execute(self) -> None:
         """Launch the engine on the private stream, fenced against torch's current stream.
@@ -197,6 +223,7 @@ class TensorRtRuntime(_TrtEngine):
             batch size. Buffers are reused across calls — clone before mutating
             or holding results past the next call.
         """
+        self._require_open()
         batch_size: int = validate_runtime_inputs(self._spec, inputs)
         for tensor_spec in self._spec.inputs:
             tensor: Tensor = inputs[tensor_spec.name].to(dtype=tensor_spec.dtype)
@@ -341,6 +368,7 @@ class TensorRtDynamicRuntime(_TrtEngine):
                 by the input shapes (a negative, data-dependent dimension), or, with ``direct_binding``, an input is not
                 a contiguous CUDA tensor of its binding's dtype on the runtime's device.
         """
+        self._require_open()
         if set(inputs) != set(self._input_dtypes):
             raise ValueError(f"Runtime expects inputs {tuple(self._input_dtypes)}, got {tuple(inputs)}.")
         for name, tensor in inputs.items():
