@@ -49,7 +49,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from jaxtyping import Bool, Float, Float32, Float64, UInt8
+from jaxtyping import Bool, Float, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 from trtkit.backends import TensorRtBackendConfig
@@ -138,14 +138,10 @@ class OperatorEvidence:
 
     direction: Float64[ndarray, "3"] | None
     """Area-weighted mean direction of the detections in the rig frame (unit), ``None`` without detections."""
-    centres: Float64[ndarray, "n 3"]
-    """Each detection's centre ray in the rig frame."""
-    weights: Float64[ndarray, " n"]
-    """Each detection's area, face pixels."""
     boxes: Float32[ndarray, "n 4"]
     """Each detection's face-pixel box ``xyxy``."""
-    faces: Tensor
-    """Face index of each detection (int64, CPU)."""
+    faces: Int64[ndarray, " n"]
+    """Face index of each detection."""
     face_images: UInt8[Tensor, "6 s s 3"]
     """The six faces as the detector saw them."""
 
@@ -160,8 +156,6 @@ class OperatorMasks:
     """The synthetic fisheye the tracker saw."""
     synthetic_mask: Bool[Tensor, "s s"]
     """The tracker's mask on it."""
-    rig_R_view: Float64[ndarray, "3 3"]
-    """The synthetic view's rotation."""
 
 
 def fill_nearest(directions: list[Float64[ndarray, "3"] | None]) -> list[Float64[ndarray, "3"]]:
@@ -232,18 +226,14 @@ class FullCircleMasker:
         self.sources: list[SphereSource] = sources
         device: torch.device = torch.device(config.device)
         self.device: torch.device = device
-        self.downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.work_size)) for s in sources]
         # Sources see the work images, whose pixel (i, j) covers full pixels [f i - 0.5, f (i + 1) - 0.5): grids are
         # normalised by the full size, which grid_sample maps onto any resolution of the same image.
+        self.downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.work_size)) for s in sources]
+        self.full_hw: list[tuple[int, int]] = [s.image_hw for s in sources]
         self.rig_R_cams: Float64[Tensor, "n_src 3 3"] = torch.from_numpy(np.stack([s.rig_R_cam for s in sources])).to(device)
-        cameras: list[SphereCamera] = [s.camera for s in sources]
-        full_hw: list[tuple[int, int]] = [s.image_hw for s in sources]
-        self.cameras: list[SphereCamera] = cameras
-
-        self.full_hw: list[tuple[int, int]] = full_hw
-        face: PinholeCamera = PinholeCamera(config.face_size)
-        self.face: PinholeCamera = face
-        face_rays, _ = face.unproject(pixel_grid(config.face_size, config.face_size, device))
+        self.cameras: list[SphereCamera] = [s.camera for s in sources]
+        self.face: PinholeCamera = PinholeCamera(config.face_size)
+        face_rays, _ = self.face.unproject(pixel_grid(config.face_size, config.face_size, device))
         self.face_rays: Float64[Tensor, "n 3"] = face_rays
 
         self.synthetic: Kb4Camera = FULLCIRCLE_SYNTHETIC_LENS.scaled(config.synthetic_size / FULLCIRCLE_SYNTHETIC_SIZE)
@@ -279,6 +269,12 @@ class FullCircleMasker:
             images.append(F.avg_pool2d(chw[None], factor)[0] if factor > 1 else chw)
         return images
 
+    def _detect_people(self, images: UInt8[Tensor, "b s s 3"]) -> BoxDetections:
+        if self.yolox is not None:
+            return self.yolox(images)
+        assert self.sam3 is not None
+        return self.sam3(images, SegmentationPrompts(frame_indices=torch.arange(len(images), device=self.device), text=self.config.sam3_prompt))
+
     def _tick(self, key: str, start: float) -> float:
         torch.cuda.synchronize(self.device)
         now: float = time.perf_counter()
@@ -296,27 +292,18 @@ class FullCircleMasker:
         size: int = self.config.face_size
         images: list[Tensor] = self._work_images(frames)
         rig_R_faces: Float64[Tensor, "6 3 3"] = torch.from_numpy(rig_R_level @ FACE_ROTATIONS).to(self.device)
-        faces: UInt8[Tensor, "6 s s 3"] = torch.stack(
-            [
-                rearrange(
-                    sample_sphere(images, view_from_rays(self.face_rays @ rig_R_face.T, size, size, self.cameras, self.rig_R_cams, self.full_hw))
-                    .round()
-                    .clamp(0, 255)
-                    .to(torch.uint8),
-                    "c h w -> h w c",
-                )
-                for rig_R_face in rig_R_faces
-            ]
-        ).contiguous()
+        # The six faces stacked into one 6s x s view: one sampling plan per frameset.
+        rays: Float64[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces.transpose(1, 2)
+        view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
+        stacked: UInt8[Tensor, "3 f s"] = sample_sphere(images, view).round().clamp(0, 255).to(torch.uint8)
+        faces: UInt8[Tensor, "6 s s 3"] = rearrange(stacked, "c (f h) w -> f h w c", f=6).contiguous()
         start = self._tick("faces", start)
+        detections: BoxDetections = self._detect_people(faces)
+        boxes: Float32[Tensor, "n 4"] = detections.xyxy
         if self.yolox is not None:
-            detections: BoxDetections = self.yolox(faces)
-            boxes: Float32[Tensor, "n 4"] = detections.xyxy
             centres_px: Float[Tensor, "n 2"] = (boxes[:, :2] + boxes[:, 2:]) / 2
             areas: Float[Tensor, " n"] = (boxes[:, 2:] - boxes[:, :2]).clamp_min(0).prod(dim=1)
         else:
-            assert self.sam3 is not None
-            detections = self.sam3(faces, SegmentationPrompts(frame_indices=torch.arange(6, device=self.device), text=self.config.sam3_prompt))
             assert detections.masks is not None
             masks: Float[Tensor, "n s s"] = detections.masks.float()
             areas = masks.sum(dim=(1, 2))
@@ -324,8 +311,6 @@ class FullCircleMasker:
             centres_px = (
                 torch.stack([(masks.sum(dim=1) * coords).sum(dim=1), (masks.sum(dim=2) * coords).sum(dim=1)], dim=1) / areas.clamp_min(1)[:, None]
             )
-            boxes = detections.xyxy
-        face_index: Tensor = detections.frame_indices.cpu()
         rays, _ = self.face.unproject(centres_px.double())
         rotations: Float64[Tensor, "n 3 3"] = rig_R_faces[detections.frame_indices]
         centres: Float64[ndarray, "n 3"] = torch.einsum("nij,nj->ni", rotations, rays).cpu().numpy()
@@ -335,7 +320,7 @@ class FullCircleMasker:
             mean: Float64[ndarray, "3"] = np.average(centres, axis=0, weights=weights) if weights.sum() > 0 else centres.mean(axis=0)
             direction = mean / np.linalg.norm(mean)
         self._tick("detect", start)
-        return OperatorEvidence(direction, centres, weights, boxes.float().cpu().numpy(), face_index, faces)
+        return OperatorEvidence(direction, boxes.float().cpu().numpy(), detections.frame_indices.cpu().numpy(), faces)
 
     def _operator_prompt(self, synthetic: UInt8[Tensor, "s s 3"], first: bool) -> SegmentationPrompts | None:
         """A tracker prompt for the operator: the detector's box around the synthetic view's centre.
@@ -349,12 +334,7 @@ class FullCircleMasker:
         size: int = self.config.synthetic_size
         centre: float = (size - 1) / 2
         zero: Tensor = torch.zeros(1, dtype=torch.long, device=self.device)
-        detections: BoxDetections
-        if self.yolox is not None:
-            detections = self.yolox(synthetic[None])
-        else:
-            assert self.sam3 is not None
-            detections = self.sam3(synthetic[None], SegmentationPrompts(frame_indices=zero, text=self.config.sam3_prompt))
+        detections: BoxDetections = self._detect_people(synthetic[None])
         if detections.num_detections == 0:
             if not first:
                 return None
@@ -382,9 +362,7 @@ class FullCircleMasker:
         size: int = self.config.synthetic_size
         rig_R_view: Float64[ndarray, "3 3"] = look_at(direction, up)
         rotation: Float64[Tensor, "3 3"] = torch.from_numpy(rig_R_view).to(self.device)
-        view: SphereView = view_from_rays(
-            self.synthetic_rays @ rotation.T, size, size, self.cameras, self.rig_R_cams, [s.image_hw for s in self.sources]
-        )
+        view: SphereView = view_from_rays(self.synthetic_rays @ rotation.T, size, size, self.cameras, self.rig_R_cams, self.full_hw)
         rendered: Float[Tensor, "3 s s"] = sample_sphere(self._work_images(frames), view) * self.synthetic_valid[None]
         synthetic: UInt8[Tensor, "s s 3"] = rearrange(rendered.round().clamp(0, 255).to(torch.uint8), "c h w -> h w c").contiguous()
         start = self._tick("synthetic", start)
@@ -411,7 +389,7 @@ class FullCircleMasker:
             mask: Bool[Tensor, "mh mw"] = (hit[0, 0] > 0.5) & (valid & self.mask_ray_valid[index]).reshape(source.mask_hw)
             source_masks.append(disk_dilate(mask, self.mask_radius[index]))
         self._tick("backmap", start)
-        return OperatorMasks(source_masks, synthetic, synthetic_mask, rig_R_view)
+        return OperatorMasks(source_masks, synthetic, synthetic_mask)
 
 
 __all__ = (
