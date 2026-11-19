@@ -1,4 +1,4 @@
-"""The insta360_io module (packages/insta360-io) as dataforge calls it: the .insv reader and the CPU panorama stitch."""
+"""The insta360_io package (packages/insta360-io) as dataforge calls it: the clip, the reader and the CPU panorama stitch."""
 
 from __future__ import annotations
 
@@ -162,3 +162,95 @@ def test_the_lenses_are_mei_cameras_with_the_factory_coefficients(insv_clip: Pat
     # 7096.760 px per unit at the 7680 px calibration frame, cropped to 7424 and scaled to the 1920 px track.
     assert (camera.fx, camera.fy) == pytest.approx((7096.76 * 1920 / 7424, 7095.39 * 1920 / 7424), abs=1e-6)
     assert [(lens.camera.model, len(lens.camera.coefficients)) for lens in clip.lenses] == [("mei_v3", 7)] * 2
+
+
+# ── InsvReader ────────────────────────────────────────────────────────────
+
+READER_FRAMES: int = 90
+"""Framesets the reader tests read: three GOPs on the X4 Air, one and a half on the X5."""
+
+
+def test_a_clip_the_rig_cannot_open_is_refused(tmp_path: Path) -> None:
+    text: Path = tmp_path / "notes.insv"
+    text.write_bytes(b"not an mp4 container\n" * 40)
+    with pytest.raises(ValueError):
+        insta360_io.InsvReader(text)
+
+
+def chunk_shapes(stream: object, entity: str) -> list[tuple[bool, list[str], list[tuple[str, str]]]]:
+    """``(static, timelines, [(component, arrow type)])`` of each chunk at ``entity``, in stream order."""
+    import rerun.chunk as rrc
+
+    shapes: list[tuple[bool, list[str], list[tuple[str, str]]]] = []
+    for chunk in stream:  # pyrefly: ignore[not-iterable]
+        assert isinstance(chunk, rrc.Chunk)
+        if chunk.entity_path == entity:
+            schema = chunk.to_record_batch().schema
+            shapes.append((chunk.is_static, chunk.timeline_names, [(f.name, str(f.type)) for f in schema if not f.name.startswith("rerun.")]))
+    return shapes
+
+
+@pytest.mark.integration
+def test_each_lens_video_has_the_chunk_shapes_of_rerun_mp4_reader(insv_clip: Path, tmp_path: Path) -> None:
+    """Per lens, as ``Mp4Reader`` emits an HEVC mp4: a static codec chunk, one sample chunk per GOP, one keyframe chunk.
+
+    The reference is ``Mp4Reader`` itself on a three-GOP HEVC clip encoded here, compared type for type.
+    """
+    import subprocess
+
+    import pyarrow as pa
+    import rerun as rr
+    from rerun.experimental import Mp4Reader
+
+    mp4: Path = tmp_path / "gops.mp4"
+    encode: list[str] = ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=128x64:rate=30", "-t", "3", "-c:v", "libx265"]
+    subprocess.run([*encode, "-x265-params", "bframes=0:keyint=30:log-level=0", "-pix_fmt", "yuv420p", str(mp4)], check=True)
+    expected = chunk_shapes(Mp4Reader(mp4, entity_path="/v").stream(), "/v")
+    reader = insta360_io.InsvReader(insv_clip, frame_limit=READER_FRAMES)
+    assert reader.entity_path == str(insv_clip.absolute())
+    chunks = reader.stream().to_chunks()
+    for lens in range(2):
+        entity: str = f"{reader.entity_path}/cam_{lens:02d}/pinhole/video"
+        assert chunk_shapes(chunks, entity) == expected
+        ours = [c.to_record_batch() for c in chunks if c.entity_path == entity]
+        assert ours[0].column("VideoStream:codec").to_pylist() == [[rr.VideoCodec.H265.value]]
+        gop_starts: list[int] = [batch.column("video").cast(pa.int64())[0].as_py() for batch in ours[1:-1]]
+        assert [len(batch) for batch in ours[1:-1]] == [30, 30, 30]
+        assert ours[-1].column("video").cast(pa.int64()).to_pylist() == gop_starts
+        assert ours[-1].column("VideoStream:is_keyframe").to_pylist() == [[True]] * 3
+        # Annex B with the parameter sets on the IRAP: VPS, SPS, PPS, then the IDR/CRA slice.
+        first: bytes = bytes(ours[1].column("VideoStream:sample")[0].as_py()[0])
+        assert first.startswith(b"\x00\x00\x00\x01\x40\x01")
+
+
+GOLDEN: dict[str, tuple[str, str, int, int, int]] = {
+    "x4-air": ("6d0f685ebb4bf1f80056c43f53a5af35f096df513328991a78a3c783aa07c2df", "d6ba3d7ac26e54f974058a47bfa3d1ef8a68d08c91c56ffcfc1423cf9a762819", 260294829, 3229945829, 4219),
+    "x5": ("039214f0b3a4ae8cd53e8a4d92521fb9dc5af94b583bb3e95968a27a7544d3c9", "7a740602c5e6de7876a966886828fcca320ad73a00d6e9b782b1646b30e5ad1d", 164755000, 3134533000, 4149),
+}
+"""The first 90 framesets as the pre-reader converter wrote them (2026-11-18): sha256 of lens 0's and lens 1's samples in
+time order, the first and last frame time (ns on the reader's timeline), and the IMU samples up to 1 s past the last."""
+
+
+@pytest.mark.golden
+@pytest.mark.parametrize("model", ["x4-air", "x5"])
+def test_the_reader_reproduces_the_pre_reader_conversion(model: str, request: pytest.FixtureRequest) -> None:
+    """Samples, frame times and IMU of the first 90 framesets, bit for bit, on the X4 Air and the X5."""
+    import hashlib
+
+    import pyarrow as pa
+
+    clip: Path = request.getfixturevalue("insv_clip" if model == "x4-air" else "insv_x5_clip")
+    reader = insta360_io.InsvReader(clip, entity_path="/rig", frame_limit=READER_FRAMES)
+    assert reader.rig.profile_name == model
+    lens_hashes: list[str] = []
+    times: list[list[int]] = []
+    imu_rows: int = 0
+    chunks = reader.stream().to_chunks()
+    for lens in range(2):
+        batches = [c.to_record_batch() for c in chunks if c.entity_path == f"/rig/cam_{lens:02d}/pinhole/video" and not c.is_static]
+        samples = [b for b in batches if "VideoStream:sample" in b.schema.names]
+        lens_hashes.append(hashlib.sha256(b"".join(bytes(s[0]) for b in samples for s in b.column("VideoStream:sample").to_pylist())).hexdigest())
+        times.append([t for b in samples for t in b.column("video").cast(pa.int64()).to_pylist()])
+    imu_rows = sum(c.num_rows for c in chunks if c.entity_path == "/rig/imu_00/gyro")
+    assert times[0] == times[1]
+    assert (lens_hashes[0], lens_hashes[1], times[0][0], times[0][-1], imu_rows) == GOLDEN[model]

@@ -3485,7 +3485,7 @@ platforms = ["linux-64", "linux-aarch64"]
 python = "3.12.*"
 # Gen-HumanEgo's millimetre depth PNGs: Up-filter encode and decode in Rust (packages/depth-png).
 depth-png = { path = "packages/depth-png" }
-# Insta360 .insv clips: the clip reader and the CPU dual-fisheye stitch, in Rust (packages/insta360-io).
+# Insta360 .insv clips: the reader (InsvReader) and the CPU dual-fisheye stitch (packages/insta360-io).
 insta360-io = { path = "packages/insta360-io" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
@@ -3863,11 +3863,12 @@ cwd = "packages/depth-png"
 description = "rustfmt, clippy and the core crate's tests for packages/depth-png"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# insta360-io (PyO3 module over kornia-staging's Insta360 reader and stitch; dataforge takes the conda build)
+# insta360-io (the .insv reader: Rust core + PyO3 module + InsvReader; dataforge takes the conda build)
 # ═══════════════════════════════════════════════════════════════════════════
 # The Python module insta360_io is a pixi-build source package (packages/insta360-io/recipe.yaml), consumed as
 # `insta360-io = { path = "packages/insta360-io" }`; its Python tests live with its consumer (packages/dataforge/tests).
-# This feature checks the binding's Rust workspace: rustfmt, clippy with warnings denied, and the stitch-plan tests.
+# This feature checks the Rust workspace: rustfmt, clippy with warnings denied, the reader core's tests (profiles, rig,
+# GOP demux) and the stitch-plan tests.
 [feature.insta360-io-rust]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -3880,7 +3881,7 @@ python = "3.12.*"
 [feature.insta360-io-rust.tasks.insta360-io-rust-check]
 cmd = "cargo-fmt --all --check && cargo-clippy clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace"
 cwd = "packages/insta360-io"
-description = "rustfmt, clippy and the stitch-plan tests for packages/insta360-io"
+description = "rustfmt, clippy, the reader core and stitch-plan tests for packages/insta360-io"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # tsdf-rs (Rust core + PyO3 module; metrictrail, mast3r-slam and mvs take the conda build)
