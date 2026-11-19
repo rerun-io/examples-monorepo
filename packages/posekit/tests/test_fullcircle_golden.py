@@ -2,7 +2,7 @@
 
 Asset: one scene of huggingface.co/datasets/youlenda/FullCircle extracted (``<scene>/omni/images/frame_*.png`` and
 ``<scene>/omni/masks/frame_*_mask.png``), named by ``POSEKIT_FULLCIRCLE_SCENE``. On room3 (357 frames) the full run
-scores a mean IoU of 0.958; this test runs the first 40 frames.
+scores a mean IoU of 0.945 (median 0.957); this test runs the first 40 frames.
 """
 
 from __future__ import annotations

@@ -32,7 +32,7 @@ Four changes, each forced by a measured failure (FullCircle's room3 scene: IoU a
 clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the operator):
 
 - Box prompt, not the centre click: EfficientTAM (FullCircle used SAM 2.1 Hiera-L) segments only the shirt on a torso
-  click (room3 IoU 0.20); with the box, 0.958.
+  click (room3 IoU 0.20); with the box, 0.958 (0.945 with the re-prompts and memory bound below).
 - Re-prompts: a single prompt drifted onto other people within 10 s of clip 007.
 - One up hint per sequence: with the operator below the camera (near +Y) the look-at fallback flipped the view.
 - Level faces: lens 0's +Y is not down on the X4 Air, and people lying sideways in the faces were missed.
