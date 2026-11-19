@@ -56,11 +56,6 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 # The PyPI `catalog` extra, spelled out (rerun-sdk[catalog] == datafusion + pandas);
 # datafusion stays on PyPI (below).
 pandas = ">=2"
-# gradio from conda-forge. 6.32.0 carries gradio-app/gradio#14034 (writes 32-bit integer images as I;16 PNG, which
-# Pillow 13 requires); its build 1 (conda-forge/gradio-feedstock#214) allows pillow <14, build 0 still caps pillow <13.
-# Pillow 13 fixes CVE-2026-112403. Exact, so each bump is a deliberate change: re-check that a gradio-rerun app still
-# renders, and that the hands app's tab strip and example tiles still line up (posekit/hands_app_ui/theme.py styles
-# Gradio's own classes).
 gradio = "==6.32.0"                                        # pin-bump: hold
 
 [feature.common.target.linux-aarch64.dependencies]
