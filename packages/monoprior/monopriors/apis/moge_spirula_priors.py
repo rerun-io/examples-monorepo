@@ -1,8 +1,7 @@
 """MoGe-2 (TensorRT) depth and normal priors for every cube face, written in spirula's dataset folder layout.
 
 Every face of the 6-face cubemap is a full centred 90 deg pinhole, so MoGe runs on each face image directly and the
-prior matches the training image pixel for pixel. Pixels outside a face's ``valid_mask`` (when it carries one) get
-no prior.
+prior matches the training image pixel for pixel.
 
 Output (third-party input format for spirula, an export at the boundary, never a source of truth):
 ``<dataset>/depths/<face>/<t_ns>.png`` 16-bit z-depth in mm (0 = invalid) and
@@ -22,7 +21,7 @@ from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 
 from monopriors.cube_faces import CubeFace, depth_png_mm, normal_png_rgb
-from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces, read_valid_masks
+from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces
 from monopriors.models.moge_v2.export import resolve_num_tokens, token_grid_hw
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TrtPredictor
 
@@ -64,8 +63,6 @@ class _Job:
     face: CubeFace
     t_ns: int
     rgb: UInt8[ndarray, "n n 3"]
-    lens_field: Bool[ndarray, "n n"]
-    """The face's ``valid_mask``: pixels outside the lens field get no prior."""
 
 
 def _exported_stamps(dataset_dir: Path, faces: tuple[CubeFace, ...]) -> dict[str, set[int]] | None:
@@ -79,10 +76,9 @@ def _exported_stamps(dataset_dir: Path, faces: tuple[CubeFace, ...]) -> dict[str
 def _write_prior(
     dataset_dir: Path, job: _Job, depth_m: Float32[ndarray, "n n"], normals: Float32[ndarray, "n n 3"], valid: Bool[ndarray, "n n"]
 ) -> None:
-    valid_px: Bool[ndarray, "n n"] = valid & job.lens_field
     for kind, image in (
-        ("depths", depth_png_mm(depth_m, valid_px)),
-        ("normals", cv2.cvtColor(normal_png_rgb(normals, valid_px), cv2.COLOR_RGB2BGR)),
+        ("depths", depth_png_mm(depth_m, valid)),
+        ("normals", cv2.cvtColor(normal_png_rgb(normals, valid), cv2.COLOR_RGB2BGR)),
     ):
         path: Path = dataset_dir / kind / job.face.name / f"{job.t_ns}.png"
         if not cv2.imwrite(str(path), image):
@@ -95,7 +91,6 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
     side_tokens_hw: tuple[int, int] = token_grid_hw(1.0, resolve_num_tokens(config.resolution_level))
     with open_rrd(config.faces_rrd, "faces") as layer_segment:
         faces: tuple[CubeFace, ...] = read_cube_faces(layer_segment)
-        lens_fields: dict[str, Bool[ndarray, "n n"]] = read_valid_masks(layer_segment, faces)
         sides: set[int] = {face.width for face in faces}
         if len(sides) != 1:
             raise ValueError(f"faces of different full sizes {sorted(sides)}; one square engine expected")
@@ -140,7 +135,7 @@ def main(config: MoGeSpirulaPriorsConfig) -> None:
                     if exported is not None and frameset.t_ns not in exported[face.name]:
                         continue
                     rgb: UInt8[ndarray, "n n 3"] = frameset.rgb_by_face[face.name]
-                    pending.append(_Job(face=face, t_ns=frameset.t_ns, rgb=rgb, lens_field=lens_fields[face.name]))
+                    pending.append(_Job(face=face, t_ns=frameset.t_ns, rgb=rgb))
                     if len(pending) == config.batch_size:
                         flush()
                 n_framesets += 1

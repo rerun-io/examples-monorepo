@@ -118,8 +118,10 @@ class FaceTable:
     """True where the pixel is read from lens 0 (its ray has ``z0 >= 0``)."""
 
 
-def face_table(face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_lens0: Float64[ndarray, "3 3"]) -> FaceTable:
-    """The table of ``face`` on the two lens cameras (built once per clip).
+def face_table(
+    face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_lens0: Float64[ndarray, "3 3"], lens_size: tuple[int, int]
+) -> FaceTable:
+    """The table of ``face`` on the two lens cameras, whose images are ``lens_size`` (width, height) (built once per clip).
 
     Raises:
         ValueError: If a face pixel lies outside the lens it is read from.
@@ -129,10 +131,12 @@ def face_table(face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_
     use_lens0: Bool[ndarray, " n"] = rays[:, 2] >= 0.0
     pixels0, valid0 = cameras[0].project(np.ascontiguousarray(rays))
     pixels1, valid1 = cameras[1].project(np.ascontiguousarray(rays @ lens1_from_lens0.T))
-    outside: int = int((~np.where(use_lens0, valid0, valid1)).sum())
+    pixels: Float64[ndarray, "n 2"] = np.where(use_lens0[:, None], pixels0, pixels1)
+    # The model accepts the ray; the sensor must also hold the pixel it lands on.
+    on_sensor: Bool[ndarray, " n"] = (pixels[:, 0] >= 0.0) & (pixels[:, 0] <= lens_size[0] - 1) & (pixels[:, 1] >= 0.0) & (pixels[:, 1] <= lens_size[1] - 1)
+    outside: int = int((~(np.where(use_lens0, valid0, valid1) & on_sensor)).sum())
     if outside:
         raise ValueError(f"{face.name}: {outside} pixels lie outside the lens they are read from")
-    pixels: Float64[ndarray, "n 2"] = np.where(use_lens0[:, None], pixels0, pixels1)
     return FaceTable(
         map_x=pixels[:, 0].reshape(shape).astype(np.float32),
         map_y=pixels[:, 1].reshape(shape).astype(np.float32),

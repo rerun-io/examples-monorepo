@@ -132,6 +132,17 @@ def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) ->
     assert left[:, : FACE // 2].sum() > 0 and left[:, FACE // 2 :].sum() == 0
 
 
+def test_the_face_mask_layer_joins_the_base_recording_whatever_the_file_is_called(tmp_path: Path) -> None:
+    from dataforge.apis.insta360_face_masks import Config, main
+
+    base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("renamed-base", "faces", "masks", "out"))
+    write_base(base)
+    write_faces(faces)
+    write_masks(masks, STAMPS)
+    main(Config(base=base, masks=masks, faces=faces, output=output))
+    assert [entry.recording_id for entry in rrc.RrdReader(output).recordings()] == ["insta360__clip"]
+
+
 def test_a_face_stamp_without_a_mask_on_both_lenses_is_an_error(tmp_path: Path) -> None:
     from dataforge.apis.insta360_face_masks import Config, main
 

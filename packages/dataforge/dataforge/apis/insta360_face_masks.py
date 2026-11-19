@@ -146,13 +146,14 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0) for face in faces.values()], lenses.size)
+    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces.values()], lenses.size)
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
     scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
     pending: dict[int, dict[int, UInt8[ndarray, "h w"]]] = {}
     done: set[int] = set()
-    with writing.atomic_recording(config.output, recording_id=config.base.stem, send_properties=False) as recording:
+    recording_id: str = rrc.RrdReader(config.base).recordings()[0].recording_id
+    with writing.atomic_recording(config.output, recording_id=recording_id, send_properties=False) as recording:
         for lens, stamp, mask in lens_masks(config.masks, wanted):
             if stamp in done:
                 continue

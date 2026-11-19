@@ -47,7 +47,7 @@ def test_plan_redetect_reanchors_starts_and_drops_duplicates() -> None:
     # Detection 1 is new.
     iou: Float32[ndarray, "n m"] = np.array([[0.8, 0.0], [0.5, 0.0], [0.0, 0.1]], dtype=np.float32)
 
-    plan: RedetectPlan = plan_redetect([7, 9, 4], iou, threshold=0.3, next_id=10, max_tracks=8)
+    plan: RedetectPlan = plan_redetect([7, 9, 4], iou, np.eye(2, dtype=np.float32), threshold=0.3, next_id=10, max_tracks=8)
 
     assert plan.reanchor == ((7, 0),)
     assert plan.drop == (9,)
@@ -59,17 +59,28 @@ def test_plan_redetect_reanchors_starts_and_drops_duplicates() -> None:
 def test_plan_redetect_first_frame_and_track_cap() -> None:
     from posekit.ops.people_tracks import RedetectPlan, plan_redetect
 
-    plan: RedetectPlan = plan_redetect([], np.zeros((0, 3), dtype=np.float32), threshold=0.3, next_id=0, max_tracks=2)
+    plan: RedetectPlan = plan_redetect([], np.zeros((0, 3), dtype=np.float32), np.eye(3, dtype=np.float32), threshold=0.3, next_id=0, max_tracks=2)
 
     assert plan.reanchor == () and plan.drop == ()
     assert plan.start == ((0, 0), (1, 1))
     assert plan.next_id == 2
 
 
+def test_plan_redetect_starts_one_track_per_person_when_tiles_see_them_twice() -> None:
+    from posekit.ops.people_tracks import RedetectPlan, plan_redetect
+
+    # Detections 0 (whole image) and 1 (a tile) are the same person; detection 2 is someone else.
+    detection_iou: Float32[ndarray, "m m"] = np.array([[1.0, 0.9, 0.0], [0.9, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+
+    plan: RedetectPlan = plan_redetect([], np.zeros((0, 3), dtype=np.float32), detection_iou, threshold=0.3, next_id=0, max_tracks=2)
+
+    assert plan.start == ((0, 0), (1, 2))
+
+
 def test_plan_redetect_without_detections_keeps_tracks() -> None:
     from posekit.ops.people_tracks import RedetectPlan, plan_redetect
 
-    plan: RedetectPlan = plan_redetect([3, 5], np.zeros((2, 0), dtype=np.float32), threshold=0.3, next_id=6, max_tracks=8)
+    plan: RedetectPlan = plan_redetect([3, 5], np.zeros((2, 0), dtype=np.float32), np.zeros((0, 0), dtype=np.float32), threshold=0.3, next_id=6, max_tracks=8)
 
     assert plan == RedetectPlan(reanchor=(), start=(), drop=(), unmatched=(3, 5), next_id=6)
 

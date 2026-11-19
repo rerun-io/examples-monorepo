@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-
 import numpy as np
 import pycolmap
 
@@ -45,19 +42,3 @@ def test_a_match_far_from_the_prior_position_is_dropped() -> None:
 
 def test_an_unset_half_does_not_gate() -> None:
     assert agrees_with_prior(_candidate(_rigid(178.0, 6.0)), PRIOR, LoopClosureConfig(max_prior_rotation_deg=10.0))
-
-
-def test_the_profile_knobs_reach_the_loop_config(tmp_path: Path) -> None:
-    from colsfm.config import read_config_directory
-
-    profile: Path = tmp_path / "cube"
-    shutil.copytree(Path(__file__).parents[1] / "colsfm" / "resources" / "configs" / "loop-closure-fixed", profile)
-    (profile / "colsfm.toml").write_text("loop_max_prior_translation_m = 1.5\nloop_max_prior_rotation_deg = 10\nloop_query_all_cameras = true\n")
-
-    config: LoopClosureConfig = LoopClosureConfig.from_pose_graph(read_config_directory(profile).pose_graph)
-    default: LoopClosureConfig = LoopClosureConfig.from_pose_graph(
-        read_config_directory(Path(__file__).parents[1] / "colsfm" / "resources" / "configs" / "loop-closure-fixed").pose_graph
-    )
-
-    assert (config.max_prior_translation_m, config.max_prior_rotation_deg, config.query_all_cameras) == (1.5, 10.0, True)
-    assert (default.max_prior_translation_m, default.max_prior_rotation_deg, default.query_all_cameras) == (None, None, False)

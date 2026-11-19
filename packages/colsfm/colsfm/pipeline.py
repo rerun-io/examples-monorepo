@@ -107,6 +107,7 @@ from colsfm.matching import (
     MatchingOptions,
     MatchReport,
 )
+from colsfm.prior_alignment import align_run_directory
 from colsfm.run_config import PipelineOptions, ResolvedRun, SelectionOptions, resolve_run
 from colsfm.run_lifecycle import (
     EXTRINSIC_REFINEMENT_STAGE,
@@ -309,6 +310,8 @@ def run_pipeline(options: PipelineOptions, observer: PipelineObserver | None = N
     try:
         watcher.run_started(staged, stages, frames)
         summary: PipelineSummary = _run_stages(options, staged, resolved, workspace.ledger, watcher, started, frames)
+        if options.align_to_prior:
+            summary = replace(summary, prior_alignment=align_run_directory(workspace.staging_dir, workspace.staging_dir))
     except BaseException as error:
         workspace.fail(f"{type(error).__name__}: {error}")
         raise

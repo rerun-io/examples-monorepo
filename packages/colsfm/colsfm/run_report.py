@@ -101,6 +101,28 @@ class MappingStats:
         )
 
 
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class PriorAlignment:
+    """The similarity `prior ~ scale * R @ x + t` applied to a run, and how well it fits."""
+
+    scale: float
+    rotation_deg: float
+    rotation_xyzw: list[float]
+    translation_m: list[float]
+    residual_median_m: float
+    """Camera-centre residual after the fit, over the fitted cameras."""
+    residual_p90_m: float
+    num_cameras: int
+    """Registered images with a prior pose."""
+    num_fitted: int
+    """Of those, the ones the refit kept."""
+
+    def sim3d(self) -> pycolmap.Sim3d:
+        """The transform as pycolmap's `Sim3d` (new world from old world)."""
+        return pycolmap.Sim3d(self.scale, pycolmap.Rotation3d(np.asarray(self.rotation_xyzw)), np.asarray(self.translation_m))
+
+
 @serde
 @dataclass(frozen=True, slots=True)
 class PipelineSummary:
@@ -138,6 +160,8 @@ class PipelineSummary:
     """Per-camera extrinsic movement the refinement produced; empty when the flag is off."""
     extrinsic_refinement_rounds_run: int = 0
     """Rounds the regularised refinement actually took before it converged."""
+    prior_alignment: PriorAlignment | None = None
+    """The similarity `align_to_prior` applied to every exported product; None when it did not run."""
 
 
 @serde
