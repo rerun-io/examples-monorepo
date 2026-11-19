@@ -112,10 +112,10 @@ class FullCircleConfig:
     sam3_prompt: str = "person"
     """SAM 3 text prompt."""
     tracker: Sam2VideoSegmenterConfig = field(
-        default_factory=lambda: Sam2VideoSegmenterConfig(variant="efficienttam-s-512", max_conditional_memories=4)
+        default_factory=lambda: Sam2VideoSegmenterConfig(variant="efficienttam-s-512", max_conditional_memories=4, single_click_multimask=True)
     )
     """The video tracker on the synthetic fisheye; it attends to the 4 nearest re-prompted frames (all of them made the
-    17.8 min clip 007 slow down along the clip)."""
+    17.8 min clip 007 slow down along the clip), and the fallback centre click takes SAM 2's best-of-three mask."""
     reprompt_every: int = 6
     """Tracked framesets between two re-prompts of the tracker with the detector's box (0: FullCircle's single prompt)."""
     reprompt_radius: float = 0.15

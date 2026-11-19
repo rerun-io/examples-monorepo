@@ -52,6 +52,9 @@ class Sam2VideoSegmenterConfig:
     max_conditional_memories: int = -1
     """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Prompted memories are never
     pruned, so a tracker re-prompted through a long video needs a bound or its per-frame cost grows with the video."""
+    single_click_multimask: bool = False
+    """A prompt of one click per object takes the best of SAM 2's three masks by predicted IoU (SAM 2's
+    ``_use_multimask`` rule: a lone click is ambiguous, shirt or person); off, it takes the single mask."""
 
     def setup(self) -> "Sam2VideoSegmenter":
         """Download the checkpoint, build the predictor, and return a ready segmenter."""
@@ -133,10 +136,10 @@ class Sam2VideoSegmenter(VideoSegmenter):
         for slot in range(batch_size):
             slot_prompts: list[SAM2Prompt] = self._prompts_for_slot(prompts, slot) if prompts is not None else []
             frame_chw: UInt8[Tensor, "3 h w"] = frames_rgb[slot].permute(2, 0, 1).contiguous()
-            # SAM 2's rule (`_use_multimask`): a lone click is ambiguous (shirt / person), so the prompted frame takes
-            # the best of three masks by predicted IoU; boxes and multi-point prompts take the single mask.
-            single_clicks: bool = bool(slot_prompts) and all(
-                p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in slot_prompts
+            single_clicks: bool = (
+                self.config.single_click_multimask
+                and bool(slot_prompts)
+                and all(p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in slot_prompts)
             )
             results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=single_clicks)
             for obj_id, result in results.items():
