@@ -130,6 +130,17 @@ def test_the_clip_converts_into_mei_cameras_on_the_imu_with_their_readout_and_ex
         assert exposure.num_rows == FRAMES
 
 
+@pytest.mark.integration
+def test_a_clip_without_a_profile_converts_without_a_rig_reference_or_imu_noise(insv_x3_clip: Path, tmp_path: Path) -> None:
+    """The base of an unprofiled body names no rig reference and carries no IMU noise model, so slam-rs refuses it."""
+    from dataforge import paths, schema
+
+    store: rrc.ChunkStore = read_back(convert_layers(insv_x3_clip, tmp_path, panorama=False)[paths.BASE_LAYER])
+    assert "reference" not in static_values(store, schema.rig_path(0))
+    assert not any(key.startswith("ImuCalibration") or "noise" in key for key in static_values(store, schema.imu_path(0, 0)))
+    assert recording_properties(store, "insta360")["profile"] == "none"
+
+
 @pytest.mark.golden
 def test_the_lenses_sit_33_3_mm_apart_along_the_lens_axis_with_the_factory_focal(converted: Converted) -> None:
     """Rig frame = IMU: lens 1 sits 33.29 mm behind lens 0 along +y_imu (V6 string), lens 0 looks along z_P = -y_imu."""

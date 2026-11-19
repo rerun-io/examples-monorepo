@@ -11,8 +11,10 @@ names, camera sources), the IMU noise model and the capture properties.
 
 Device profile. What the file does not carry (``R_P_imu``, the lever arm, the frame-time model, the readout, the IMU
 noise) is a measured record in insta360-io's ``insta360_profiles.toml``, selected by the clip's camera type, lens type,
-frame rate and readout; a clip outside every profile's measured mode is refused, naming the property that differs. The
-IMU noise model is a placeholder, marked as such in its ``source``.
+frame rate and readout. A clip of a body nobody measured, or outside every measured mode of its body, is converted
+without one (the reader warns and the ``insta360`` property says why): rig frame = the vendor lens frame, no rig
+reference, no IMU pose and no IMU noise model, so slam-rs refuses it. The IMU noise model is a placeholder, marked as
+such in its ``source``.
 
 Clock. ``video_time`` is the trailer clock, counted from the earliest frame or IMU sample (``capture:start_time_ns``).
 IMU times are the trailer's, without the vendor's ``gyro_timestamp`` subtraction: the profile's fit measured on that
@@ -212,27 +214,30 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         width, height = rig.resolution
         for chunk in reader.stream():
             rr.send_chunks(chunk, recording=recording)
-        log_rig_node(recording, RIG, reference="imu_00", num_cameras=2, name=rig.camera_type)
+        noise: insta360_io.ImuNoise | None = rig.imu_noise
+        # Without a device profile the IMU has no pose in the rig (the reader logged the reason), so no sensor is the
+        # rig frame and the IMU gets no noise model: slam-rs refuses such a rig instead of running VIO on it.
+        log_rig_node(recording, RIG, reference=None if noise is None else "imu_00", num_cameras=2, name=rig.camera_type)
         imu_node: str = schema.imu_path(RIG, 0)
-        noise: insta360_io.ImuNoise = rig.imu_noise
         recording.log(imu_node, rr.AnyValues(name="imu", kind="imu"), static=True)
-        recording.log(
-            imu_node,
-            ImuCalibration(
-                gyro_noise_density=noise.gyro_noise_density,
-                accel_noise_density=noise.accel_noise_density,
-                gyro_bias_random_walk=noise.gyro_bias_random_walk,
-                accel_bias_random_walk=noise.accel_bias_random_walk,
-                rate_hz=noise.rate_hz,
-                source=noise.source,
-            ),
-            static=True,
-        )
-        recording.log(imu_node, rr.AnyValues(applied_time_shift_ns=0, time_shift_source="none: frames carry the profile's time model"), static=True)
+        if noise is not None:
+            recording.log(
+                imu_node,
+                ImuCalibration(
+                    gyro_noise_density=noise.gyro_noise_density,
+                    accel_noise_density=noise.accel_noise_density,
+                    gyro_bias_random_walk=noise.gyro_bias_random_walk,
+                    accel_bias_random_walk=noise.accel_bias_random_walk,
+                    rate_hz=noise.rate_hz,
+                    source=noise.source,
+                ),
+                static=True,
+            )
+            recording.log(imu_node, rr.AnyValues(applied_time_shift_ns=0, time_shift_source="none: frames carry the profile's time model"), static=True)
         for cam in range(2):
             name: str = f"lens{cam}"
             recording.log(schema.cam_path(RIG, cam), rr.AnyValues(name=name, kind="rgb"), static=True)
-            log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec="hevc", stream_id=f"track{rig.lens_track[cam]}")
+            log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec="hevc" if rig.codec == "h265" else rig.codec, stream_id=f"track{rig.lens_track[cam]}")
         frame_ns: Int64[ndarray, " n"] = rig.frame_ns()
         self.timer.capture_s = float(frame_ns[-1] - frame_ns[0]) / 1e9
         writing.send_capture_properties(
@@ -242,7 +247,8 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             num_frames=rig.num_frames,
             start_time_ns=rig.start_ns,
             duration_s=self.timer.capture_s,
-            clock_source="Insta360 trailer clock; frames at the middle row's mid-exposure time",
+            clock_source="Insta360 trailer clock; "
+            + ("frames at the middle row's mid-exposure time" if noise is not None else "frames at the raw exposure-record stamps (no device profile)"),
         )
 
     def write_panorama(self, recording: rr.RecordingStream, rig: insta360_io.InsvRig, base: Path) -> None:

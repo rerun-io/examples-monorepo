@@ -123,11 +123,9 @@ def patched_clip(clip: Path, tmp_path: Path, old: bytes, new: bytes) -> Path:
     [
         # Lens 1's z translation of the V6 string becomes infinite.
         (b"_-0.033291_0.95675713", b"_+infinity_0.95675713", "token \"\\+infinity\" is not a finite number"),
-        # Lens 0 of the lens strings is not the 200 deg lens class 131.
-        (b"_131_2.314940_7149.220", b"_132_2.314940_7149.220", "lens 0 has type 132"),
     ],
 )
-def test_a_clip_with_a_non_finite_token_or_an_unsupported_lens_is_refused_naming_the_reason(
+def test_a_clip_with_a_non_finite_token_is_refused_naming_the_reason(
     insv_clip: Path, tmp_path: Path, old: bytes, new: bytes, message: str
 ) -> None:
     insta360_io.InsvClip(str(patched_clip(insv_clip, tmp_path, old, old)))  # the sparse copy itself opens
@@ -162,6 +160,14 @@ def test_the_lenses_are_mei_cameras_with_the_factory_coefficients(insv_clip: Pat
     # 7096.760 px per unit at the 7680 px calibration frame, cropped to 7424 and scaled to the 1920 px track.
     assert (camera.fx, camera.fy) == pytest.approx((7096.76 * 1920 / 7424, 7095.39 * 1920 / 7424), abs=1e-6)
     assert [(lens.camera.model, len(lens.camera.coefficients)) for lens in clip.lenses] == [("mei_v3", 7)] * 2
+
+
+@pytest.mark.integration
+def test_a_lens_of_a_type_without_a_field_entry_gets_the_190_degree_default(insv_clip: Path, tmp_path: Path) -> None:
+    """Lens 0 of the V6 string becomes type 132 (no entry in the field table): it opens with a 95 degree half field."""
+    clip = insta360_io.InsvClip(str(patched_clip(insv_clip, tmp_path, b"_131_2.314940_7149.220", b"_132_2.314940_7149.220")))
+    assert clip.lenses_v6[0].camera.coefficients[1] == pytest.approx(math.radians(95.0))
+    assert clip.lenses_v6[1].camera.coefficients[1] == pytest.approx(math.radians(100.0))
 
 
 # ── InsvReader ────────────────────────────────────────────────────────────
@@ -254,3 +260,30 @@ def test_the_reader_reproduces_the_pre_reader_conversion(model: str, request: py
     imu_rows = sum(c.num_rows for c in chunks if c.entity_path == "/rig/imu_00/gyro")
     assert times[0] == times[1]
     assert (lens_hashes[0], lens_hashes[1], times[0][0], times[0][-1], imu_rows) == GOLDEN[model]
+
+
+@pytest.mark.integration
+def test_a_body_without_a_profile_is_read_loudly_without_an_imu_pose(insv_x3_clip: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The X3 (two files, H.264, no measured profile): one warning names the body and the reason, the property says so,
+    the IMU gets no pose, and both lenses still read in Mp4Reader's shapes."""
+    import logging
+
+    import rerun as rr
+
+    with caplog.at_level(logging.WARNING, logger="insta360_io.reader"):
+        reader = insta360_io.InsvReader(insv_x3_clip, entity_path="/rig", frame_limit=30)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "Insta360 X3" in warnings[0] and 'no device profile for a "Insta360 X3"' in warnings[0], warnings
+    rig = reader.rig
+    assert (rig.profile_name, rig.imu_noise, rig.pano_from_imu, rig.codec, rig.lens_track) == (None, None, None, "h264", (0, 1))
+    chunks = reader.stream().to_chunks()
+    entities = {c.entity_path for c in chunks}
+    assert "/rig/imu_00" not in entities and {"/rig/imu_00/gyro", "/rig/cam_00/pinhole/video", "/rig/cam_01/pinhole/video"} <= entities
+    insta360 = next(c for c in chunks if c.entity_path == "/__properties/insta360").to_record_batch()
+    assert insta360.column("profile").to_pylist() == [["none"]]
+    assert insta360.column("profile_note").to_pylist() == [[rig.profile_note]]
+    for lens in range(2):
+        codec = next(c for c in chunks if c.entity_path == f"/rig/cam_{lens:02d}/pinhole/video" and c.is_static).to_record_batch()
+        assert codec.column("VideoStream:codec").to_pylist() == [[rr.VideoCodec.H264.value]]
+        samples = sum(c.num_rows for c in chunks if c.entity_path == f"/rig/cam_{lens:02d}/pinhole/video" and "VideoStream:sample" in c.to_record_batch().schema.names)
+        assert samples == 30

@@ -504,7 +504,8 @@ sample in `Mp4Reader`'s chunk shapes, the cameras, exposure and IMU; dataforge a
 camera with its factory model, `mei_v6` (`mei_v3` without a V6 string), posed in the IMU frame through the device
 profile. What the file does not carry (IMU-to-rig rotation, lever arm, frame-time model, readout, IMU noise) is a
 measured record in insta360-io's `insta360_profiles.toml`, chosen by the clip's camera type, lens type, frame
-rate and readout: a clip outside every measured mode is refused, naming the property that differs. One profile
+rate and readout. A clip of an unmeasured body (or outside every measured mode) converts without one: the reader
+warns and records why, the IMU gets no pose and no noise model, and slam-rs refuses the recording. One profile
 serves every resolution of a body (the X4 Air at 1920 and 3840): the lens intrinsics come from the clip at its
 track size. The reader's module docstring (`insta360_io/reader.py`) states the frames, the clock and the
 rolling-shutter convention.

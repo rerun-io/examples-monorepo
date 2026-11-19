@@ -312,6 +312,20 @@ def insv_x5_clip() -> Path:
     return raw_asset(f"the Insta360 X5 clip {INSV_X5_CLIP} (set DATAFORGE_INSTA360_X5_CLIP)", path)
 
 
+INSV_X3_CLIP: str = "samples/x3/VID_20231218_150323_00_022.insv"
+"""An Insta360 X3 two-file clip (H.264, no device profile; Zenodo record 21611765, CC-BY-4.0), with its ``_10_`` partner."""
+
+
+@pytest.fixture(scope="session")
+def insv_x3_clip() -> Path:
+    """The X3 clip's ``_00_`` file under ``<raw root>/insta360/``, or where ``DATAFORGE_INSTA360_X3_CLIP`` names it; a skip without it."""
+    from dataforge import paths
+
+    override: str | None = os.environ.get("DATAFORGE_INSTA360_X3_CLIP")
+    path: Path = Path(override) if override else paths.raw_root() / "insta360" / INSV_X3_CLIP
+    return raw_asset(f"the Insta360 X3 clip {INSV_X3_CLIP} (set DATAFORGE_INSTA360_X3_CLIP)", path)
+
+
 def column_rows(store: rrc.ChunkStore, column: str) -> pa.Table:
     """Non-null rows of one component column, index-sorted."""
     from dataforge import schema
