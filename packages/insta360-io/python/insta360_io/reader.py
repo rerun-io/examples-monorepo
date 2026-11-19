@@ -43,7 +43,7 @@ from rerun.chunk import Chunk, LazyChunkStream
 
 from insta360_io._insta360_io import InsvRig
 
-IMU_ROWS_PER_CHUNK: int = 65_536
+ROWS_PER_CHUNK: int = 65_536
 """IMU and exposure samples per chunk (about a minute of the 1 kHz IMU)."""
 DISTORTION_MODEL: rr.ComponentDescriptor = rr.ComponentDescriptor("simplecv.components.DistortionModel", component_type="simplecv.components.DistortionModel")
 """The camera model name, as ``simplecv.rerun_custom_types.CameraDistortion`` writes it."""
@@ -135,15 +135,15 @@ class InsvReader:
         rig: InsvRig = self.rig
         yield from self.static_chunks()
         imu_ns, accel, gyro = rig.imu()
-        for first in range(0, imu_ns.size, IMU_ROWS_PER_CHUNK):
-            window = slice(first, first + IMU_ROWS_PER_CHUNK)
+        for first in range(0, imu_ns.size, ROWS_PER_CHUNK):
+            window = slice(first, first + ROWS_PER_CHUNK)
             for name, values in (("gyro", gyro), ("accel", accel)):
                 yield Chunk.from_columns(f"{self.entity_path}/imu_00/{name}", [self.time(imu_ns[window])], rr.Scalars.columns(scalars=values[window]))
         frame_ns: Int64[ndarray, " n"] = rig.frame_ns()
         exposure: Float64[ndarray, "2 n"] = rig.exposure_s()
         for lens in range(2):
-            for first in range(0, frame_ns.size, IMU_ROWS_PER_CHUNK):
-                window = slice(first, first + IMU_ROWS_PER_CHUNK)
+            for first in range(0, frame_ns.size, ROWS_PER_CHUNK):
+                window = slice(first, first + ROWS_PER_CHUNK)
                 yield Chunk.from_columns(f"{self.cam(lens)}/exposure", [self.time(frame_ns[window])], rr.Scalars.columns(scalars=exposure[lens, window]))
         gops: list[Int64[ndarray, "g 2"]] = [rig.gops(lens) for lens in range(2)]
         keyframe_ns: list[list[Int64[ndarray, " k"]]] = [[], []]
