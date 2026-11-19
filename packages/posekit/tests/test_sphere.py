@@ -99,8 +99,10 @@ def test_equirect_and_pinhole_round_trip() -> None:
 
 
 def test_pixel_grid_scale_centres() -> None:
-    grid: torch.Tensor = pixel_grid(1, 2, "cpu", scale=4.0)
+    grid: torch.Tensor = pixel_grid(1, 2, "cpu", scale=(4.0, 4.0))
     np.testing.assert_allclose(grid.numpy(), [[1.5, 1.5], [5.5, 1.5]])
+    anisotropic: torch.Tensor = pixel_grid(2, 2, "cpu", scale=(5.5, 4.0))
+    np.testing.assert_allclose(anisotropic.numpy(), [[2.25, 1.5], [7.75, 1.5], [2.25, 5.5], [7.75, 5.5]])
 
 
 def test_cube_faces_are_rotations_covering_the_sphere() -> None:

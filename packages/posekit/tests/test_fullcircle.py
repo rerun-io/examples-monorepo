@@ -101,3 +101,16 @@ def test_level_rotation_puts_gravity_on_y() -> None:
     assert abs(np.linalg.det(rig_R_level) - 1.0) < 1e-12
     np.testing.assert_allclose(rig_R_level.T @ (down / np.linalg.norm(down)), [0.0, 1.0, 0.0], atol=1e-12)
     np.testing.assert_allclose(level_rotation(np.array([0.0, 2.0, 0.0])), np.eye(3), atol=1e-12)
+
+
+def test_mask_cells_sample_where_the_written_scale_places_them() -> None:
+    from posekit.models.fullcircle import SphereSource
+    from posekit.ops.sphere import EquirectCamera, pixel_grid
+
+    # 11 x 8 image, 2 x 2 mask: 5.5 image pixels per cell across, 4 down.
+    source: SphereSource = SphereSource(EquirectCamera(11, 8), np.eye(3), (8, 11), (2, 2))
+    assert source.mask_scale == (5.5, 4.0)
+    centres: np.ndarray = pixel_grid(*source.mask_hw, "cpu", scale=source.mask_scale).numpy()
+    # Transform3D(scale=[sx, sy, 1]) puts mask cell (j, i) over image pixels [i sx, (i + 1) sx) x [j sy, (j + 1) sy).
+    expected: list[list[float]] = [[(i + 0.5) * 5.5 - 0.5, (j + 0.5) * 4.0 - 0.5] for j in range(2) for i in range(2)]
+    np.testing.assert_allclose(centres, expected)

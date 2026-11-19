@@ -30,14 +30,14 @@ from torch import Tensor
 MeiModel: TypeAlias = Literal["mei_v3", "mei_v6"]
 
 
-def pixel_grid(height: int, width: int, device: torch.device | str, scale: float = 1.0) -> Float64[Tensor, "n 2"]:
-    """Pixel centres of an ``height x width`` grid, row-major, in the coordinates of an image ``scale`` times larger.
+def pixel_grid(height: int, width: int, device: torch.device | str, scale: tuple[float, float] = (1.0, 1.0)) -> Float64[Tensor, "n 2"]:
+    """Pixel centres of an ``height x width`` grid, row-major, in the coordinates of an image ``scale = (sx, sy)`` times larger.
 
-    Cell ``(j, i)`` of the grid covers image pixels ``[i s - 0.5, (i + 1) s - 0.5)``, so its centre is
-    ``(i + 0.5) s - 0.5`` (``scale = 1``: the integer pixel centres).
+    Cell ``(j, i)`` of the grid covers image pixels ``[i sx - 0.5, (i + 1) sx - 0.5)`` across, so its centre is
+    ``((i + 0.5) sx - 0.5, (j + 0.5) sy - 0.5)`` (scale 1: the integer pixel centres).
     """
-    ys: Float64[Tensor, " h"] = (torch.arange(height, dtype=torch.float64, device=device) + 0.5) * scale - 0.5
-    xs: Float64[Tensor, " w"] = (torch.arange(width, dtype=torch.float64, device=device) + 0.5) * scale - 0.5
+    ys: Float64[Tensor, " h"] = (torch.arange(height, dtype=torch.float64, device=device) + 0.5) * scale[1] - 0.5
+    xs: Float64[Tensor, " w"] = (torch.arange(width, dtype=torch.float64, device=device) + 0.5) * scale[0] - 0.5
     grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
     return torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], dim=1)
 

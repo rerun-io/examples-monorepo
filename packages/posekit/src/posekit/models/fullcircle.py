@@ -98,6 +98,11 @@ class SphereSource:
     mask_hw: tuple[int, int]
     """Height and width of the mask written for this camera (a whole-number fraction of the image is not required)."""
 
+    @property
+    def mask_scale(self) -> tuple[float, float]:
+        """Image pixels per mask cell ``(sx, sy)``: the grid the masks are sampled on and the scale written with them."""
+        return (self.image_hw[1] / self.mask_hw[1], self.image_hw[0] / self.mask_hw[0])
+
 
 @dataclass(frozen=True, slots=True)
 class FullCircleConfig:
@@ -241,16 +246,15 @@ class FullCircleMasker:
         self.synthetic_rays: Float64[Tensor, "n 3"] = synthetic_rays
         self.synthetic_valid: Bool[Tensor, "s s"] = synthetic_valid.reshape(config.synthetic_size, config.synthetic_size)
 
-        # Each mask pixel's ray in the rig frame (static), and the dilation radius at mask resolution.
+        # Each mask pixel's ray in the rig frame (static), and the dilation radius at mask resolution (across).
         self.mask_rays: list[Float64[Tensor, "n 3"]] = []
         self.mask_ray_valid: list[Bool[Tensor, " n"]] = []
         self.mask_radius: list[int] = []
         for index, source in enumerate(sources):
-            scale: float = source.image_hw[1] / source.mask_hw[1]
-            rays, valid = source.camera.unproject(pixel_grid(source.mask_hw[0], source.mask_hw[1], device, scale=scale))
+            rays, valid = source.camera.unproject(pixel_grid(source.mask_hw[0], source.mask_hw[1], device, scale=source.mask_scale))
             self.mask_rays.append(rays @ self.rig_R_cams[index].T)
             self.mask_ray_valid.append(valid)
-            self.mask_radius.append(math.ceil(config.dilate_px / scale - 1e-9))
+            self.mask_radius.append(math.ceil(config.dilate_px / source.mask_scale[0] - 1e-9))
 
         self.yolox: YoloxDetector | None = config.yolox.setup() if config.detector == "yolox" else None
         self.sam3: Sam3Segmenter | None = config.sam3.setup() if config.detector == "sam3" else None
