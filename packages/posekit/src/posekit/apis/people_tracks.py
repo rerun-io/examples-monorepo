@@ -164,8 +164,9 @@ class PeopleTracker:
                     iou: ndarray = mask_iou(self.last_masks[slot], det_masks[:, ::sub, ::sub]).cpu().numpy()
                 else:
                     iou = np.zeros((0, len(in_slot)), dtype=np.float32)
+                detection_iou: ndarray = mask_iou(det_masks[:, ::sub, ::sub], det_masks[:, ::sub, ::sub]).cpu().numpy()
                 plan: RedetectPlan = plan_redetect(
-                    self.live[slot], iou, threshold=self.options.match_iou, next_id=self.next_id, max_tracks=self.options.max_tracks
+                    self.live[slot], iou, detection_iou, threshold=self.options.match_iou, next_id=self.next_id, max_tracks=self.options.max_tracks
                 )
                 self.next_id = plan.next_id
                 confirmed: dict[int, bool] = {t: True for t, _ in plan.reanchor} | {t: False for t in plan.unmatched}

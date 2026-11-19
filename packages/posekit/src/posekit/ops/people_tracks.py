@@ -55,12 +55,15 @@ def greedy_match(iou: Float32[ndarray, "n m"], threshold: float) -> list[tuple[i
     return pairs
 
 
-def plan_redetect(live_ids: list[int], iou: Float32[ndarray, "n m"], *, threshold: float, next_id: int, max_tracks: int) -> RedetectPlan:
+def plan_redetect(
+    live_ids: list[int], iou: Float32[ndarray, "n m"], detection_iou: Float32[ndarray, "m m"], *, threshold: float, next_id: int, max_tracks: int
+) -> RedetectPlan:
     """Match the detections of one stream (columns) to its live tracks (rows).
 
     Matched tracks are re-anchored on their detection. A live track that is not matched but overlaps a detection at or
     above ``threshold`` follows the same person as the winner and is dropped. Unmatched detections start new tracks while
-    the stream holds fewer than ``max_tracks``.
+    the stream holds fewer than ``max_tracks``, except one that overlaps an already matched or started detection at or
+    above ``threshold`` (``detection_iou``): the same person seen again, e.g. in a tile.
     """
     pairs: list[tuple[int, int]] = greedy_match(iou, threshold)
     matched_rows: set[int] = {row for row, _ in pairs}
@@ -69,9 +72,11 @@ def plan_redetect(live_ids: list[int], iou: Float32[ndarray, "n m"], *, threshol
     unmatched: list[int] = [t for row, t in enumerate(live_ids) if row not in matched_rows and t not in drop]
     n_tracks: int = len(live_ids) - len(drop)
     start: list[tuple[int, int]] = []
+    taken: list[int] = sorted(matched_cols)
     for col in range(iou.shape[1]):
-        if col in matched_cols or n_tracks >= max_tracks:
+        if col in matched_cols or n_tracks >= max_tracks or any(detection_iou[col, other] >= threshold for other in taken):
             continue
+        taken.append(col)
         start.append((next_id, col))
         next_id += 1
         n_tracks += 1
