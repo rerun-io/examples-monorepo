@@ -510,9 +510,13 @@ serves every resolution of a body (the X4 Air at 1920 and 3840): the lens intrin
 track size. The reader's module docstring (`insta360_io/reader.py`) states the frames, the clock and the
 rolling-shutter convention.
 
-By default a conversion writes the `base` layer only. `--panorama` also writes the derived `panorama` layer (the
-1920x960 equirectangular stitch of the two lens cameras, AV1 on NVENC, about 10x the base's time); run it again with
-the flag to add the layer beside bases already written.
+By default a conversion writes the `base` layer only. `--panorama` also writes the derived `panorama` layer: the RGB
+equirectangular stitch of the two lens cameras at twice the lens width (3840x1920 at 1920; `--pano-width`), AV1 on
+NVENC, on the frame times. On `--pano-device cuda` (default) the stage stays on the GPU (NVDEC, remap, NVENC) and
+the two lenses meet across an optical-flow seam in a ±5 deg band (`--pano-band-deg`) on NVIDIA's flow engine (NVOF,
+from the driver); on `cpu` the band is the plain feather (no NVOF there; NVENC still encodes). About 43 s for clip
+B's 7,730 framesets on an RTX 5090. Run it again with the flag to add the layer beside bases already written; a
+layer that exists is skipped, so a panorama written by an older converter (gray, 1920x960) stays until `--force`.
 
 ```bash
 DATAFORGE_OUTPUT_ROOT=<rrd> pixi run -e dataforge --frozen dataforge-convert insta360 --root <dir with .insv clips>
@@ -527,7 +531,7 @@ camera `C`: `T_world_C = T_world_imu * T_imu_cam0 * T_cam0_C`, with `T_imu_cam0`
 `cam_01` `Transform3D`s), and `Ry(+90 deg) = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]` because COLMAP centres its image on
 `+Z_C` while the panorama centres camera 0's hemisphere at a quarter of the width (`+Z_C` = camera 0's `+X`).
 COLMAP's `cam_from_world` is `T_world_C` inverted. The panorama has one centre and ignores the lens-centre baseline
-(33.3 mm on the X4 Air, 31.9 mm on the X5): each half is stitched from its own lens. With the profiles' zero lever
+(33.3 mm on the X4 Air, 31.9 mm on the X5) outside the seam band: each half is read from its own lens. With the profiles' zero lever
 arm the panorama centre is the IMU origin.
 
 ### TUM-VI (tum-vi)
@@ -614,7 +618,7 @@ is a nominal-rate fiction for such a file.
 | `harmony4d` | one Harmony4D sequence, read in place from its release zip (one zip per scene and split, fetched from the Hub) | **four** rrds: `base` with ~20 GoPros (OPENCV_FISHEYE, 4K JPEG frames as 1080p AV1) and, when worn, both Aria glasses' rgb/slam cameras (upright) and per-frame poses; `body_pose` (SMPL parameters, SMPL-45 joints, COCO-17 keypoints in COCO-133 per person), `body_mesh` (shipped SMPL vertices, 10 Hz), `projections` (through each full lens, plus the shipped boxes); see [docs/harmony4d.md](docs/harmony4d.md) |
 | `gsi-six-view` | one GSI episode, its two shipped rrds fetched through GSI's API | exoego:v2: `base` (rig, six H.265 views with GSI's pinholes in RDF, SLAM pose and path), `pose` (COCO-133 hands, wrists, confidence, MANO records), `hand_mesh`, `projections`; see [docs/gsi-six-view.md](docs/gsi-six-view.md) |
 | `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as the sensor's 16-bit PNGs (`EncodedDepthImage`) where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
-| `insta360` | one Insta360 dual-fisheye `.insv` clip in `--root` | `base` with both lens tracks remuxed as H.265 `VideoStream`s (no re-encode), each lens a `mei_v6` camera with its readout and exposure, the IMU as the rig reference; with `--panorama` also `panorama`, the 1920x960 AV1 equirectangular panorama on the frame times |
+| `insta360` | one Insta360 dual-fisheye `.insv` clip in `--root` | `base` with both lens tracks remuxed as H.265 `VideoStream`s (no re-encode), each lens a `mei_v6` camera with its readout and exposure, the IMU as the rig reference; with `--panorama` also `panorama`, the RGB AV1 equirectangular panorama at twice the lens width (3840x1920 at 1920), flow seam on CUDA, on the frame times |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and

@@ -32,6 +32,7 @@ paths = ["dataforge", "tests"]
 # Tyro-facing verb entry points and config fields (the CLI shims call them), plus the
 # keyword-only parameters a test fake must accept to match the real catalog API.
 ignore_names = [
+    "__cuda_array_interface__",  # read by torch.as_tensor (dataforge.nvof views NVOF buffers).
     # Fixture the Insta360 golden test reaches through request.getfixturevalue.
     "insv_x5_clip",
     # Fixture the cube encoder-slot tests take through pytest.mark.usefixtures.
