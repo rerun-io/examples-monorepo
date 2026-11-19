@@ -135,18 +135,27 @@ def test_a_missing_or_zero_maximum_is_refused(amax: dict[str, float]) -> None:
 
 def test_calibration_pairs_mix_neighbours_ten_apart_and_unrelated_frames(tmp_path: Path) -> None:
     """In turn per pair: a neighbour, a frame ten later, a frame of another sequence; the same draw for the same seed."""
-    sequences = [[tmp_path / f"{s}_{i:03d}.png" for i in range(30)] for s in ("a", "b")]
-    pairs = calibration_pairs(sequences, 12)
-    assert pairs == calibration_pairs(sequences, 12)
-    index = {path: (path.name[0], int(path.stem[2:])) for frames in sequences for path in frames}
-    for k, (first, second) in enumerate(pairs[:6]):
-        (sa, ia), (sb, ib) = index[first], index[second]
-        if k % 3 == 0:
-            assert (sa, ib - ia) == (sb, 1)
-        elif k % 3 == 1:
-            assert (sa, ib - ia) == (sb, 10)
+    for names in ("ab", "abc"):
+        sequences = [[tmp_path / f"{s}_{i:03d}.png" for i in range(30)] for s in names]
+        pairs = calibration_pairs(sequences, 60)
+        assert pairs == calibration_pairs(sequences, 60)
+        index = {path: (path.name[0], int(path.stem[2:])) for frames in sequences for path in frames}
+        for k, (first, second) in enumerate(pairs):
+            (sa, ia), (sb, ib) = index[first], index[second]
+            if k % 3 == 0:
+                assert (sa, ib - ia) == (sb, 1)
+            elif k % 3 == 1:
+                assert (sa, ib - ia) == (sb, 10)
+            else:
+                assert sa != sb, (names, k)
+        partners: dict[str, set[str]] = {}
+        for first, second in pairs[2::3]:
+            partners.setdefault(index[first][0], set()).add(index[second][0])
+        assert all(seen == set(names) - {letter} for letter, seen in partners.items()), partners
     with pytest.raises(ValueError, match="at least 12 frames"):
-        calibration_pairs([sequences[0][:11]], 3)
+        calibration_pairs([sequences[0][:11], sequences[1]], 3)
+    with pytest.raises(ValueError, match="at least two sequences"):
+        calibration_pairs([sequences[0]], 3)
 
 
 def test_a_weight_both_images_use_is_quantized_once() -> None:

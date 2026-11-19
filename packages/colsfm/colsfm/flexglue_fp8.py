@@ -244,7 +244,7 @@ def calibration_pairs(image_dirs: Sequence[Sequence[Path]], count: int = CALIBRA
     """Pairs that span what the matcher meets: neighbours, frames ten apart, and unrelated frames across sequences.
 
     Args:
-        image_dirs: Each sequence's frames, in capture order (at least 12 each).
+        image_dirs: Each sequence's frames, in capture order (at least two sequences, at least 12 frames each).
         count: Pairs to draw, in turn: neighbours, ten apart, then an unrelated frame of another sequence.
         seed: Seed of the draw.
 
@@ -252,20 +252,21 @@ def calibration_pairs(image_dirs: Sequence[Sequence[Path]], count: int = CALIBRA
         `count` image pairs.
 
     Raises:
-        ValueError: When a sequence is shorter than 12 frames.
+        ValueError: With fewer than two sequences or a sequence shorter than 12 frames.
     """
-    if not image_dirs or any(len(frames) < 12 for frames in image_dirs):
-        raise ValueError(f"every calibration sequence needs at least 12 frames, got lengths {[len(f) for f in image_dirs]}")
+    if len(image_dirs) < 2 or any(len(frames) < 12 for frames in image_dirs):
+        raise ValueError(f"calibration needs at least two sequences of at least 12 frames, got lengths {[len(f) for f in image_dirs]}")
     draw: random.Random = random.Random(seed)
     pairs: list[tuple[Path, Path]] = []
     for index in range(count):
-        frames: Sequence[Path] = image_dirs[index % len(image_dirs)]
+        sequence: int = index % len(image_dirs)
+        frames: Sequence[Path] = image_dirs[sequence]
         first: int = draw.randrange(len(frames) - 11)
         if index % 3 == 0:
             pairs.append((frames[first], frames[first + 1]))
         elif index % 3 == 1:
             pairs.append((frames[first], frames[first + 10]))
         else:
-            other: Sequence[Path] = image_dirs[(index // len(image_dirs)) % len(image_dirs)]
+            other: Sequence[Path] = image_dirs[(sequence + 1 + (index // len(image_dirs)) % (len(image_dirs) - 1)) % len(image_dirs)]
             pairs.append((frames[first], other[draw.randrange(len(other))]))
     return pairs
