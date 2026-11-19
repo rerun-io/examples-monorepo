@@ -88,7 +88,7 @@ def test_the_seam_is_the_centre_line_of_the_four_side_faces() -> None:
     from dataforge.datasets.insta360_cube import cube_faces, face_table
 
     for face in cube_faces(FACE):
-        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0).use_lens0
+        use0 = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS)).use_lens0
         half: int = FACE // 2
         expected: dict[str, bool] = {"cube6_front0": True, "cube6_front1": False}
         if face.name in expected:
@@ -112,7 +112,7 @@ def test_a_face_pixel_outside_the_lens_it_is_read_from_is_refused() -> None:
     centre: float = (LENS - 1) / 2.0
     narrow = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, centre, centre, [XI, np.deg2rad(80.0)] + [0.0] * 13)
     with pytest.raises(ValueError, match="outside the lens"):
-        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0)
+        face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0, (LENS, LENS))
 
 
 def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> None:
@@ -124,7 +124,7 @@ def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> 
     lens0: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays)), 0, 255).astype(np.uint8)
     lens1: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays @ LENS1_FROM_LENS0)), 0, 255).astype(np.uint8)
     for face in cube_faces(FACE):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS))
         expected: Float64[ndarray, "h w 3"] = colour(face.rays() @ face.cube_from_face.T)
         error: Float64[ndarray, "h w 3"] = np.abs(join((lens0, lens1), table).astype(np.float64) - expected)
         # Bilinear interpolation of a smooth field plus the 0.5 rounding of the painted lenses; no seam step.
@@ -139,7 +139,7 @@ def test_a_lens_mask_joins_nearest_onto_the_face_that_sees_it() -> None:
     disc: UInt8[ndarray, "h w"] = (np.hypot(u - centre, v - centre) <= 12.0).astype(np.uint8)
     empty: UInt8[ndarray, "h w"] = np.zeros_like(disc)
     for face in cube_faces(FACE):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS))
         mask: UInt8[ndarray, "n n"] = join((empty, disc), table, nearest=True)
         assert set(np.unique(mask)) <= {0, 1}
         if face.name != "cube6_front1":
@@ -164,6 +164,15 @@ def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:
         np.testing.assert_allclose(-pose[:3, :3].T @ pose[:3, 3], (centres[0] + centres[1]) / 2, atol=1e-12)
         np.testing.assert_allclose(pose[:3, :3].T, lens_from_rig[0][:3, :3].T @ face.cube_from_face, atol=1e-12)
 
+
+
+def test_a_face_pixel_projected_past_the_lens_image_edge_is_an_error() -> None:
+    """The Mei model accepts the ray, but an off-centre sensor ends before it lands: no silent black (or keep) pixels."""
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
+
+    shifted = insta360_io.MeiCamera("mei_v6", FOCAL, FOCAL, (LENS - 1) / 2.0 + 120.0, (LENS - 1) / 2.0, [XI, HALF_FIELD] + [0.0] * 13)
+    with pytest.raises(ValueError, match="outside the lens"):
+        face_table(cube_faces(FACE)[0], [shifted, shifted], LENS1_FROM_LENS0, (LENS, LENS))
 
 def run_with_timeout(target: Callable[[], object], seconds: float) -> object:
     """``target()``'s result or exception; a test failure, not a hung run, when it is still going after ``seconds``."""

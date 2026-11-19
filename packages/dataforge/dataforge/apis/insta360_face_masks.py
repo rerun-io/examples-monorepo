@@ -147,7 +147,7 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0) for cam, face in faces.items()}
+    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for cam, face in faces.items()}
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
     scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
