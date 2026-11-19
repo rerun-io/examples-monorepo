@@ -89,3 +89,57 @@ def test_fp16_scale_dtype_types_fp8_scales_for_fp16_graphs() -> None:
     assert types["fc1.w_fp8"] == TensorProto.FLOAT8E4M3FN
     with pytest.raises(ValueError, match="requires bfloat16 scales"):
         quantize_qdq(exported_graph(), QdqPlan({"fc1": Nvfp4Linear(1.0), "fc2": Nvfp4Linear(1.0)}, (), scale_dtype="float16"))
+
+
+def test_a_weight_two_matmuls_apply_is_quantized_once_with_a_range_per_input() -> None:
+    """A weight stored in the compute dtype (Transpose alone) that two MatMuls apply to different activations, as a
+    two-image matcher does: one FP8 weight, one input scale per activation."""
+    weight = numpy_helper.from_array(np.full((8, 8), 0.5, dtype=np.float16), "blocks.0.proj.weight")
+    nodes = [helper.make_node("Transpose", ["blocks.0.proj.weight"], ["proj.t"], perm=[1, 0])]
+    nodes += [helper.make_node("MatMul", [f"x{image}", "proj.t"], [f"y{image}"]) for image in (0, 1)]
+    graph = helper.make_graph(
+        nodes, "two_images",
+        [helper.make_tensor_value_info(f"x{image}", TensorProto.FLOAT16, [2, 8]) for image in (0, 1)],
+        [helper.make_tensor_value_info(f"y{image}", TensorProto.FLOAT16, [2, 8]) for image in (0, 1)],
+        [weight],
+    )
+    plan = QdqPlan({"blocks.0.proj": Fp8Linear({"x0": 2.0, "x1": 4.0})}, (), scale_dtype="float16")
+    result = quantize_qdq(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)]), plan)
+    tensors = {tensor.name: tensor for tensor in result.graph.initializer}
+    assert [name for name, tensor in tensors.items() if tensor.data_type == TensorProto.FLOAT8E4M3FN and tensor.dims] == ["blocks.0.proj.w_fp8"]
+    matmuls = [node for node in result.graph.node if node.op_type == "MatMul"]
+    assert [node.input[1] for node in matmuls] == ["blocks.0.proj.w_t"] * 2
+    assert [node.input[0] for node in matmuls] == ["blocks.0.proj.a_dq8", "blocks.0.proj@x1.a_dq8"]
+    scales = [float(numpy_helper.to_array(tensors[name])) for name in ("blocks.0.proj.a_s8", "blocks.0.proj@x1.a_s8")]
+    np.testing.assert_allclose(scales, [2.0 / 448.0, 4.0 / 448.0], rtol=1e-3)
+    onnx.checker.check_model(result)
+
+
+def test_softmax_attention_gets_fp8_q_k_probabilities_and_v() -> None:
+    """MatMul(q, k^T) -> Softmax -> MatMul(p, v): Q/DQ before both MatMuls, the probabilities on a fixed [0, 1] range;
+    an attention left out of the mapping keeps its precision."""
+    from trtkit.onnx_qdq import SOFTMAX_AMAX, Fp8Attention, quantize_softmax_attention, softmax_attentions
+
+    nodes: list[onnx.NodeProto] = []
+    for block in (0, 1):
+        nodes += [
+            helper.make_node("MatMul", ["q", "kt"], [f"logits{block}"]),
+            helper.make_node("Softmax", [f"logits{block}"], [f"p{block}"], axis=-1),
+            helper.make_node("MatMul", [f"p{block}", "v"], [f"out{block}"]),
+        ]
+    graph = helper.make_graph(
+        nodes, "attention",
+        [helper.make_tensor_value_info(name, TensorProto.BFLOAT16, shape) for name, shape in (("q", [4, 8]), ("kt", [8, 4]), ("v", [4, 8]))],
+        [helper.make_tensor_value_info(f"out{block}", TensorProto.BFLOAT16, [4, 8]) for block in (0, 1)],
+    )
+    assert [softmax.output[0] for _, softmax, _ in softmax_attentions(graph)] == ["p0", "p1"]
+    quantize_softmax_attention(graph, {"p1": Fp8Attention("block1", (2.0, 3.0, 4.0))})
+    quantized = [node.input[0] for node in graph.node if node.op_type == "QuantizeLinear"]
+    assert quantized == ["q", "kt", "p1", "v"]
+    scales = {t.name: float(numpy_helper.to_array(t)) for t in graph.initializer if t.name.endswith(".a_s8")}
+    expected = {"block1.q_fp8.a_s8": 2.0, "block1.k_fp8.a_s8": 3.0, "block1.softmax_fp8.a_s8": SOFTMAX_AMAX, "block1.v_fp8.a_s8": 4.0}
+    assert scales == {name: pytest.approx(amax / 448.0, rel=1e-2) for name, amax in expected.items()}
+    assert list(graph.node[0].input) == ["q", "kt"]  # block 0 keeps its precision
+    onnx.checker.check_model(helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)]))
+    with pytest.raises(ValueError, match="Not the Softmax output"):
+        quantize_softmax_attention(graph, {"logits0": Fp8Attention("block0", (1.0, 1.0, 1.0))})
