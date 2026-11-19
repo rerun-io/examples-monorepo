@@ -23,7 +23,7 @@ class FakeModel:
 
 
 class FakeTokenizer:
-    def __call__(self, texts: list[str], return_tensors: str) -> "FakeTokens":
+    def __call__(self, *_: object, **__: object) -> "FakeTokens":
         return FakeTokens()
 
 
