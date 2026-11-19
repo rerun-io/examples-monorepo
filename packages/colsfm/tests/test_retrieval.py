@@ -6,7 +6,7 @@ Seams under test (all public):
 * `RetrievalIndex.query` / `.score` — ranked candidates, self and temporal exclusion.
 * `RetrievalIndex.search` — the same, plus what the temporal gate dropped.
 * `read_descriptors_from_database` — the pycolmap read path.
-* `colsfm.vocab_tree.bow_matrix` / `all_pairs_l1_score` — the vocabulary's scoring.
+* `bow_vocab` — the Rust vocabulary's TF-IDF and L1 score, against the spec's formulas.
 
 The Galileo test reads the shipped blob keyframe protos directly rather than running the
 feature extractor, so it is offline and needs no GPU. Its reader lives in this file
@@ -23,7 +23,7 @@ from typing import Final
 import numpy as np
 import pycolmap
 import pytest
-from jaxtyping import Float32, Int32
+from jaxtyping import Float32, Float64, Int32
 from numpy import ndarray
 
 from colsfm.database import read_descriptors_from_database
@@ -41,7 +41,6 @@ from colsfm.retrieval import (
     VocabConfig,
     build_retrieval_index,
 )
-from colsfm.vocab_tree import all_pairs_l1_score, bow_matrix, l1_score
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 """Repo root, so data paths resolve regardless of the working directory."""
@@ -424,31 +423,97 @@ def test_the_vocabulary_backend_is_reproducible_and_the_seed_is_what_moves_it(
     assert reseeded.query(10, top_k=1)[0].score > 0.0
 
 
-def test_the_vectorised_l1_score_agrees_with_the_spec_reference() -> None:
-    """`all_pairs_l1_score` must equal `docs/spec/bow.md` §9.5's `l1_score`, pair by pair.
+def l1_score(query: dict[int, float], document: dict[int, float]) -> float:
+    """The DBoW2 L1 score of two L1-normalised BoW vectors, literally `docs/spec/bow.md` §9.5.
 
-    The vectorised path replaces `-0.5 * (|q - d| - |q| - |d|)` with `min(q, d)`, which is
-    the same thing for non-negative weights and is what lets the inverted index score every
-    pair in one pass. The identity is the load-bearing step, so it is checked against the
-    literal expression from the spec.
+    `s = -0.5 * sum_{w in q & d} (|q_w - d_w| - |q_w| - |d_w|)`.
     """
-    generator: np.random.Generator = np.random.default_rng(0)
-    n_images: int = 6
-    n_words: int = 40
-    words: Int32[ndarray, "n_descriptors"] = generator.integers(0, n_words, 600).astype(np.int32)
-    images: Int32[ndarray, "n_descriptors"] = np.repeat(np.arange(n_images, dtype=np.int32), 100)
-    bow = bow_matrix(words, images, n_images, n_words)
-    scores: Float32[ndarray, "n_images n_images"] = all_pairs_l1_score(bow)
-    dense: Float32[ndarray, "n_images n_words"] = bow.toarray()
-    np.testing.assert_allclose(dense.sum(axis=1), 1.0, atol=1e-6)
+    shared: set[int] = set(query) & set(document)
+    return -0.5 * sum(abs(query[word] - document[word]) - abs(query[word]) - abs(document[word]) for word in shared)
 
-    for first in range(n_images):
-        for second in range(n_images):
-            if first == second:
-                continue
-            query: dict[int, float] = {word: float(value) for word, value in enumerate(dense[first]) if value > 0.0}
-            document: dict[int, float] = {word: float(value) for word, value in enumerate(dense[second]) if value > 0.0}
-            assert l1_score(query, document) == pytest.approx(float(scores[first, second]), abs=1e-6)
+
+def test_the_rust_score_agrees_with_the_spec_tf_idf_and_l1_reference() -> None:
+    """`bow_vocab`'s similarity must equal the spec's TF-IDF (§7.2) and L1 score (§9.5), pair by pair.
+
+    The words come from the Rust tree itself (`Vocabulary.words`); the weights and the score
+    are then recomputed here from the spec's formulas: raw counts times `log(n_images / df)`,
+    zero-weight words dropped, rows L1-normalised, and the literal L1 expression.
+    """
+    from bow_vocab import Vocabulary
+
+    corpus: dict[int, Descriptors] = _random_corpus(6, 300, seed=3)
+    images: list[Descriptors] = [corpus[image_id] for image_id in sorted(corpus)]
+    vocabulary: Vocabulary = Vocabulary(np.concatenate(images), branching=4, depth=3, iterations=5, seed=0)
+    scores: Float32[ndarray, "n_images n_images"] = vocabulary.similarity(images)
+
+    counts: list[dict[int, int]] = []
+    for image in images:
+        words, tally = np.unique(vocabulary.words(image), return_counts=True)
+        counts.append({int(word): int(count) for word, count in zip(words, tally, strict=True)})
+    document_frequency: dict[int, int] = {}
+    for image_counts in counts:
+        for word in image_counts:
+            document_frequency[word] = document_frequency.get(word, 0) + 1
+    bows: list[dict[int, float]] = []
+    for image_counts in counts:
+        weights: dict[int, float] = {word: count * np.log(len(images) / document_frequency[word]) for word, count in image_counts.items()}
+        weights = {word: weight for word, weight in weights.items() if weight > 0.0}
+        total: float = sum(weights.values())
+        bows.append({word: weight / total for word, weight in weights.items()})
+
+    for first in range(len(images)):
+        assert scores[first, first] == 1.0
+        for second in range(len(images)):
+            if first != second:
+                assert l1_score(bows[first], bows[second]) == pytest.approx(float(scores[first, second]), abs=1e-5)
+
+
+def test_the_vocab_backend_borrows_the_descriptors_and_refuses_a_layout_it_cannot() -> None:
+    """The vocab backend hands the per-image arrays to Rust without a copy, so a non-C-contiguous one is refused.
+
+    The database reader yields C-contiguous float32 arrays, which is the only production source;
+    converting a whole corpus would double its memory, so nothing converts.
+    """
+    corpus: dict[int, Descriptors] = _random_corpus(6, 300, seed=4)
+    config: RetrievalConfig = RetrievalConfig(backend="vocab", vocab=VocabConfig(branching=4, depth=2))
+    assert build_retrieval_index(corpus, config).similarity.shape == (6, 6)
+    corpus[3] = np.asfortranarray(corpus[3])
+    with pytest.raises(ValueError, match="C-contiguous"):
+        build_retrieval_index(corpus, config)
+
+
+def test_the_binding_refuses_arrays_it_would_misread() -> None:
+    """`bow_vocab` borrows the numpy buffer, so it must refuse what it cannot read row by row.
+
+    A Fortran-ordered or strided array would be read with its rows mixed; a wrong width or dtype
+    is refused too. A C-contiguous row slice is a valid view and still works.
+    """
+    from bow_vocab import Vocabulary
+
+    generator: np.random.Generator = np.random.default_rng(5)
+    data: Float32[ndarray, "n 128"] = generator.standard_normal((400, 128)).astype(np.float32)
+    settings: dict[str, int] = {"branching": 4, "depth": 2, "iterations": 3, "seed": 0}
+    vocabulary: Vocabulary = Vocabulary(data, **settings)
+    for misread in (np.asfortranarray(data), data[:, ::2]):
+        with pytest.raises(ValueError):
+            Vocabulary(misread, **settings)
+    narrow: Float32[ndarray, "n 96"] = np.ascontiguousarray(data[:, :96])
+    assert Vocabulary(narrow, **settings).n_words == 16  # any width trains; the tree's width is then the contract
+    for bad in (np.asfortranarray(data), data[:, ::2], narrow):
+        with pytest.raises(ValueError):
+            vocabulary.words(bad)
+        with pytest.raises(ValueError):
+            vocabulary.similarity([data, bad])
+    wide: Float64[ndarray, "n 128"] = data.astype(np.float64)
+    with pytest.raises(TypeError):
+        Vocabulary(wide, **settings)
+    with pytest.raises(TypeError):
+        vocabulary.words(wide)
+    with pytest.raises(TypeError):
+        vocabulary.similarity([data, wide])
+    rows: Float32[ndarray, "m 128"] = data[10:50]
+    np.testing.assert_array_equal(vocabulary.words(rows), vocabulary.words(data)[10:50])
+    assert vocabulary.similarity([data[:200], rows]).shape == (2, 2)
 
 
 VOCAB_PROBE_IMAGES: int = 100
@@ -502,12 +567,11 @@ def test_the_vocabulary_backend_builds_the_whole_tree(vocab_build: VocabBuild) -
 
 @pytest.mark.perf
 def test_the_vocabulary_backend_builds_and_queries_inside_the_budget(vocab_build: VocabBuild) -> None:
-    """100 x 2048 descriptors: build and every query, both well under the pipeline budget (the fork measured 11.1 s and 0.07 s at 1000 images).
+    """100 x 2048 descriptors: build and every query, both well under the pipeline budget.
 
-    Measured here: 11.1 s to build and 0.07 s for all 1000 queries, because the inverted
-    index scores every pair during the build. The bounds are generous multiples so the test
-    fails on an algorithmic regression rather than on a busy machine. RoboCap's real 4528
-    images take 42 s to build and 1.4 s to query.
+    The build trains the vocabulary and scores every pair (0.3 s on all cores when measured),
+    so the queries only read the matrix (0.02 s for 100). The bounds are generous multiples so
+    the test fails on an algorithmic regression rather than on a busy machine.
     """
     assert vocab_build.build_seconds < 90.0
     assert vocab_build.query_seconds < 30.0

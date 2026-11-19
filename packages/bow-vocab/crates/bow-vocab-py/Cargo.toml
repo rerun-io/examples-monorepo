@@ -1,0 +1,26 @@
+[package]
+name = "bow-vocab-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "PyO3 bindings for kornia-staging-bow's seeded float-descriptor vocabulary, built by maturin as `bow_vocab`."
+
+[lints]
+workspace = true
+
+[lib]
+name = "bow_vocab"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+# The vocabulary is tested in Rust (kornia-staging-bow); the bindings from Python (packages/colsfm/tests).
+test = false
+doctest = false
+
+[dependencies]
+kornia-staging-bow.workspace = true
+numpy.workspace = true
+# No `extension-module` feature (deprecated in PyO3 0.29): maturin sets PYO3_BUILD_EXTENSION_MODULE and passes the
+# macOS `-undefined dynamic_lookup` link arguments itself.
+pyo3 = { workspace = true, features = ["abi3-py312"] }
+rayon.workspace = true

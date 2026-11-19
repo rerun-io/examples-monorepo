@@ -29,8 +29,10 @@ near 0.
 
 **Vocab** (`docs/spec/bow.md` §9.4 Option C, minus the parts §9.3 says to drop) trains a
 hierarchical k-means vocabulary, encodes each image as an L1-normalised TF-IDF vector and
-scores a pair with the blob's own DBoW2 L1 score (§7.4, §9.5). It lives in
-`colsfm.vocab_tree`; this module owns only the backend choice and the calibration.
+scores a pair with the blob's own DBoW2 L1 score (§7.4, §9.5). The tree, the words, the
+TF-IDF weights and the inverted-file score are Rust: `bow_vocab` (packages/bow-vocab), a
+binding over kornia-staging-bow's `vocabulary` module; this module draws the training
+sample and owns the backend choice and the calibration.
 
 Why brute force does not scale, measured
 ----------------------------------------
@@ -93,21 +95,17 @@ at 0.014 and 0.091 against the blob's own 0.7 maturity bar, and §9.4 concludes 
 by measurement instead. On the 4528 RoboCap images (9 253 392 ALIKED descriptors,
 everything the extractor produced, no subsampling):
 
-| tree | words | build | doc freq (median/max) | median IDF | top-1 within 2 rig frames |
-|---|---|---|---|---|---|
-| k=10, depth 4 | 10 000 | 67.3 s | 650 / 2094 | 1.94 | 4518/4528 |
-| k=10, depth 5 | 100 000 | 42.2 s | 36 / 1996 | 4.83 | 4517/4528 |
+| tree | words | doc freq (median/max) | median IDF | top-1 within 2 rig frames |
+|---|---|---|---|---|
+| k=10, depth 4 | 10 000 | 650 / 2094 | 1.94 | 4518/4528 |
+| k=10, depth 5 | 100 000 | 36 / 1996 | 4.83 | 4517/4528 |
 
-Depth 5 is both faster and healthier: the all-pairs scoring cost is `sum_w df_w^2`, so ten
+Depth 5 is both cheaper and healthier: the all-pairs scoring cost is `sum_w df_w^2`, so ten
 times more words makes the words ten times rarer and the scoring nearly ten times cheaper,
-while the IDF stops collapsing towards zero. The 42.2 s breaks down as 6.0 s training,
-12.4 s assignment, 0.6 s TF-IDF and 23.2 s all-pairs scoring; the 4528 `query` calls that
-follow cost 1.4 s together, because the scoring already happened. For comparison the blob
-spends 162.4 s on the vocabulary, 81.0 s on the index and 75.7 s on the association stage
-(`docs/open-pipeline-plan.md`).
+while the IDF stops collapsing towards zero.
 
 **Descriptors are not subsampled on the vocab path**, and that is a measured decision, not
-an oversight. Keeping 512 per image cuts the build to 20.3 s but moves the median gated
+an oversight. Keeping 512 per image cuts the build time but moves the median gated
 best score from 0.153 to 0.069 — the L1 score counts *shared* words, so thinning the
 descriptors thins the overlap and silently rescales the score out from under
 `GOOD_SCORE_THRESHOLD`. Using every descriptor is also what the blob does (§6.3: "no
@@ -119,8 +117,8 @@ What is deliberately not copied from `docs/spec/bow.md`
 * The integer-division IDF of §6.7 (`logf(N // df)`), reproduced only for bit-comparison
   (§9.3). The plain `log(n_images / df)` is used instead. Its one visible consequence —
   every word with `df > N/2` collapsing to weight 0 — happens naturally here, since
-  `log(N/df)` goes to 0 as `df` goes to `N`, and the zero rows are dropped by
-  `eliminate_zeros`.
+  `log(N/df)` goes to 0 as `df` goes to `N`, and Rust's `tf_idf` drops every weight-0
+  word from the bags.
 * `min_shared_word_number = 50` (§9.1, and `docs/spec/generate_association_main.md` §7.1
   item 4, which lists it as a "must keep"). The score already subsumes it: since every
   term of `s = sum_w min(q_w, d_w)` is bounded by `q_w`, a pair that shares few words can
@@ -152,10 +150,14 @@ from dataclasses import dataclass, field
 from typing import Final, Literal, TypeAlias
 
 import numpy as np
+from bow_vocab import Vocabulary
 from jaxtyping import Bool, Float32, Int32
 from numpy import ndarray
 
-from colsfm.vocab_tree import DEFAULT_VOCAB_CONFIG, Descriptors, SimilarityMatrix, VocabConfig, vocab_similarity
+from colsfm.database import Descriptors
+
+SimilarityMatrix: TypeAlias = Float32[ndarray, "n_images n_images"]
+"""Symmetric image-to-image scores in `[0, 1]`, with 1.0 on the diagonal."""
 
 RetrievalBackend: TypeAlias = Literal["auto", "brute_force", "vocab"]
 """How `build_retrieval_index` builds the score matrix; `auto` picks by image count."""
@@ -262,6 +264,50 @@ class BruteForceConfig:
 
 
 DEFAULT_BRUTE_FORCE_CONFIG: BruteForceConfig = BruteForceConfig()
+"""Shared immutable default, so `RetrievalConfig` holds no constructor call."""
+
+
+@dataclass(frozen=True, slots=True)
+class VocabConfig:
+    """Settings of the vocabulary-tree backend (`bow_vocab.Vocabulary`, trained per run)."""
+
+    branching: int = 10
+    """Children per vocabulary-tree node. The blob uses 9 (`docs/spec/bow.md` §3); 10 is the
+    same thing with round word counts."""
+    depth: int = 5
+    """Tree levels, so the vocabulary holds `branching ** depth` words — 100 000 here.
+    Measured against depth 4 on RoboCap: same top-1 recall, 1.6x faster to build and a median
+    IDF of 4.83 instead of 1.94. The blob's depth 7 is degenerate (`docs/spec/bow.md` §6.8)
+    and is not copied. Lowered automatically when the training sample cannot fill the tree."""
+    training_descriptors: int = 200_000
+    """Descriptors drawn (seeded, evenly across images) to train the tree. 200 000 trains in
+    6.0 s against 13.6 s for 500 000, with no measurable recall difference on RoboCap."""
+    kmeans_iterations: int = 10
+    """Lloyd iterations per node after k-means++ seeding, matching
+    `weighted_kmeans_max_number_of_iterations` (`docs/spec/bow.md` §6.5); 0 keeps the seeds.
+    They are what kornia-bow's own trainer lacks: with 1 iteration the geometric loop recall of a
+    4,542-image cubemap clip falls from 1461 to 1306 of 2990 pairs."""
+
+    def __post_init__(self) -> None:
+        """Reject settings that cannot produce a usable vocabulary, before minutes of extraction.
+
+        The Rust trainer checks its own invariants again; what it handles by design (a sample
+        smaller than the tree, which lowers the depth) is not refused here.
+
+        Raises:
+            ValueError: When any bound is below its smallest useful value.
+        """
+        if self.branching < 2:
+            raise ValueError(f"vocab branching must be at least 2, got {self.branching}")
+        if self.depth < 1:
+            raise ValueError(f"vocab depth must be at least 1, got {self.depth}")
+        if self.training_descriptors < 1:
+            raise ValueError(f"vocab training_descriptors must be at least 1, got {self.training_descriptors}")
+        if self.kmeans_iterations < 0:
+            raise ValueError(f"vocab kmeans_iterations must be at least 0, got {self.kmeans_iterations}")
+
+
+DEFAULT_VOCAB_CONFIG: VocabConfig = VocabConfig()
 """Shared immutable default, so `RetrievalConfig` holds no constructor call."""
 
 
@@ -582,6 +628,78 @@ def _brute_force_similarity(
 
 
 # ======================================================================================
+# vocabulary tree (docs/spec/bow.md §9.4 Option C), trained in Rust
+# ======================================================================================
+
+
+def _training_sample(
+    descriptors_by_image: Mapping[int, Descriptors],
+    image_ids: tuple[int, ...],
+    target: int,
+    seed: int,
+) -> Float32[ndarray, "n_sample descriptor_dim"]:
+    """Draw a seeded subsample of descriptors, spread evenly over the images.
+
+    A per-image quota rather than a global random subset keeps the vocabulary from
+    over-fitting whichever part of the sequence happens to be densest. Every image
+    contributes the same quota, so the sample is `target` rounded up to whole images;
+    truncating back to `target` would drop the tail of the sequence.
+
+    Args:
+        descriptors_by_image: Descriptors per image id.
+        image_ids: Image ids in the index's order.
+        target: How many descriptors to draw in total.
+        seed: Seed for the draw.
+
+    Returns:
+        C-contiguous float32 descriptors with shape `[n_sample, descriptor_dim]`.
+    """
+    generator: np.random.Generator = np.random.default_rng(seed)
+    quota: int = max(1, -(-target // len(image_ids)))
+    blocks: list[Descriptors] = []
+    for image_id in image_ids:
+        descriptors: Descriptors = descriptors_by_image[image_id]
+        if len(descriptors) <= quota:
+            blocks.append(descriptors)
+            continue
+        blocks.append(descriptors[np.sort(generator.choice(len(descriptors), quota, replace=False))])
+    return np.ascontiguousarray(np.concatenate(blocks, axis=0), dtype=np.float32)
+
+
+def _vocab_similarity(
+    descriptors_by_image: Mapping[int, Descriptors],
+    image_ids: tuple[int, ...],
+    config: VocabConfig,
+    seed: int,
+) -> tuple[SimilarityMatrix, int]:
+    """Train a vocabulary on a sample, encode every image and score every pair.
+
+    `bow_vocab` (kornia-staging-bow's `vocabulary` module): k-means++ then Lloyd iterations
+    per node, rayon-parallel and the same tree for a given seed at any thread count; every
+    descriptor descends to its word, each image becomes an L1-normalised TF-IDF bag of words
+    (`ln(n_images / df)`), and every pair gets its DBoW2 L1 score from one pass over the
+    inverted lists per row. The image arrays are borrowed by Rust, not copied: they must be
+    C-contiguous float32, as the database reader returns them.
+
+    Args:
+        descriptors_by_image: Descriptors per image id.
+        image_ids: Image ids in the index's order.
+        config: The vocabulary settings.
+        seed: Seed for the training subsample and the k-means.
+
+    Returns:
+        The symmetric score matrix and the vocabulary size.
+    """
+    sample: Float32[ndarray, "n_sample descriptor_dim"] = _training_sample(descriptors_by_image, image_ids, config.training_descriptors, seed)
+    vocabulary: Vocabulary = Vocabulary(sample, branching=config.branching, depth=config.depth, iterations=config.kmeans_iterations, seed=seed)
+    del sample
+    # Borrowed by Rust, not copied: `read_descriptors_from_database` yields C-contiguous float32 arrays, and the
+    # binding refuses anything else (ValueError for another layout, TypeError for another dtype) rather than
+    # copying a whole corpus.
+    return vocabulary.similarity([descriptors_by_image[image_id] for image_id in image_ids]), vocabulary.n_words
+
+
+# ======================================================================================
 # the stage
 # ======================================================================================
 
@@ -621,7 +739,7 @@ def build_retrieval_index(descriptors_by_image: Mapping[int, Descriptors], confi
 
     started: float = time.perf_counter()
     if backend == "vocab":
-        similarity, n_words = vocab_similarity(descriptors_by_image, image_ids, counts, settings.vocab, settings.seed)
+        similarity, n_words = _vocab_similarity(descriptors_by_image, image_ids, settings.vocab, settings.seed)
         descriptors_per_image: int = sum(counts) // n_images
     else:
         n_words = 0
@@ -631,8 +749,7 @@ def build_retrieval_index(descriptors_by_image: Mapping[int, Descriptors], confi
     build_seconds: float = time.perf_counter() - started
 
     print(
-        f"colsfm.retrieval: {backend} index over {n_images} images, "
-        f"{descriptors_per_image} descriptors/image, {n_words} words, {build_seconds:.1f}s"
+        f"colsfm.retrieval: {backend} index over {n_images} images, {descriptors_per_image} descriptors/image, {n_words} words, {build_seconds:.1f}s"
     )
     return RetrievalIndex(
         image_ids=image_ids,
