@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -57,8 +58,8 @@ class MaskOptions:
     """Fraction of each side two neighbouring tiles share (tiles = 2)."""
     batch_size: int = 4
     """Images (or tiles) per SAM 3 call."""
-    bf16: bool = True
-    """Run SAM 3 under bfloat16 autocast (:attr:`Sam3SegmenterConfig.bf16`); off: FP32."""
+    dtype: Literal["float32", "bfloat16", "float16"] = "float16"
+    """SAM 3's autocast dtype (:attr:`Sam3SegmenterConfig.dtype`)."""
 
 
 @dataclass
@@ -136,7 +137,7 @@ class PeopleMasker:
         self.options: MaskOptions = options
         self.prompts: SegmentationPrompts = SegmentationPrompts(frame_indices=torch.zeros(0, dtype=torch.int64), text=options.prompt)
         self.segmenter: Sam3Segmenter = Sam3SegmenterConfig(
-            device=device, score_threshold=options.score_threshold, mask_threshold=options.mask_threshold, bf16=options.bf16
+            device=device, score_threshold=options.score_threshold, mask_threshold=options.mask_threshold, dtype=options.dtype
         ).setup()
 
     def segment(self, images_rgb: UInt8[Tensor, "b h w 3"]) -> BoxDetections:

@@ -1,5 +1,5 @@
-"""SAM 3's bf16 switch: the model runs under bfloat16 autocast only when asked, and post-processing sees FP32
-(a stand-in model and processor on the CPU; no weights)."""
+"""SAM 3's dtype switch: the model runs under the asked autocast dtype (none for float32), and post-processing sees
+FP32 (a stand-in model and processor on the CPU; no weights)."""
 
 import pytest
 import torch
@@ -12,10 +12,10 @@ class FakeOutput(dict):
 
 class FakeModel:
     def __init__(self) -> None:
-        self.autocast: list[bool] = []
+        self.autocast: list[torch.dtype | None] = []
 
     def __call__(self, pixel_values: Tensor, input_ids: Tensor, attention_mask: Tensor) -> FakeOutput:
-        self.autocast.append(torch.is_autocast_enabled("cpu") and torch.get_autocast_dtype("cpu") == torch.bfloat16)
+        self.autocast.append(torch.get_autocast_dtype("cpu") if torch.is_autocast_enabled("cpu") else None)
         logits: Tensor = torch.ones(pixel_values.shape[0], 1, 4) @ torch.ones(4, 4)  # a matmul: bf16 under autocast
         return FakeOutput(pred_logits=logits, pred_masks=torch.zeros(pixel_values.shape[0], 1, 8, 8))
 
@@ -43,24 +43,24 @@ class FakeProcessor:
         return [{"scores": torch.zeros(0), "boxes": torch.zeros(0, 4), "masks": torch.zeros(0, 8, 8)}]
 
 
-@pytest.mark.parametrize("bf16", [False, True])
-def test_sam3_runs_under_bf16_autocast_only_when_asked(bf16: bool) -> None:
+@pytest.mark.parametrize(("dtype", "autocast"), [("float32", None), ("bfloat16", torch.bfloat16), ("float16", torch.float16)])
+def test_sam3_runs_under_the_asked_autocast_dtype(dtype: str, autocast: torch.dtype | None) -> None:
     from posekit.models.base import SegmentationPrompts
     from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 
     segmenter: Sam3Segmenter = object.__new__(Sam3Segmenter)
-    segmenter.config = Sam3SegmenterConfig(device="cpu", bf16=bf16)
+    segmenter.config = Sam3SegmenterConfig(device="cpu", dtype=dtype)
     segmenter.model = FakeModel()
     segmenter.processor = FakeProcessor()
     segmenter.input_hw = (16, 16)
 
     segmenter(torch.zeros(1, 8, 8, 3, dtype=torch.uint8), SegmentationPrompts(frame_indices=torch.zeros(0, dtype=torch.int64), text="person"))
 
-    assert segmenter.model.autocast == [bf16]
+    assert segmenter.model.autocast == [autocast]
     assert segmenter.processor.dtypes == [torch.float32]
 
 
-def test_people_masks_ask_sam3_for_bf16_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_people_masks_ask_sam3_for_float16_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     from posekit.apis.people_masks import MaskOptions, PeopleMasker
     from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 
@@ -73,7 +73,7 @@ def test_people_masks_ask_sam3_for_bf16_by_default(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(Sam3SegmenterConfig, "setup", setup)
 
     PeopleMasker(MaskOptions(), "cpu")
-    PeopleMasker(MaskOptions(bf16=False), "cpu")
+    PeopleMasker(MaskOptions(dtype="float32"), "cpu")
 
-    assert [c.bf16 for c in configs] == [True, False]
-    assert Sam3SegmenterConfig().bf16 is False  # other SAM 3 users keep FP32
+    assert [c.dtype for c in configs] == ["float16", "float32"]
+    assert Sam3SegmenterConfig().dtype == "float32"  # other SAM 3 users keep FP32
