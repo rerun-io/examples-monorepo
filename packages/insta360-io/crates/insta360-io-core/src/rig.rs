@@ -1,18 +1,23 @@
-//! The calibrated rig of one clip: two lens cameras posed in the IMU frame, frame and IMU times on one clock, the
-//! per-frame exposure, and the lens tracks cut into GOPs.
+//! The rig of one clip: two lens cameras, frame and IMU times on one clock, the per-frame exposure, and the lens tracks
+//! cut into GOPs.
 //!
-//! Rig frame = IMU frame. Lens `k` is posed as `T_imu_lens = T_imu_P * T_P_lens`: `T_P_lens` is the factory rotation
-//! and centre in the vendor rig frame P (V6 lens string when the clip has one, else V3), `T_imu_P = (R_imu_P,
-//! R_imu_P * lever_arm)` comes from the device profile. Frame `i` is stamped at its effective time on the IMU clock:
-//! the exposure-record-4 stamp plus the profile's `slope * shutter_i + constant` (mid-exposure of the middle row).
+//! With a device profile (the body and video mode one was measured in), rig frame = IMU frame. Lens `k` is posed as
+//! `T_imu_lens = T_imu_P * T_P_lens`: `T_P_lens` is the factory rotation and centre in the vendor rig frame P (V6 lens
+//! string when the clip has one, else V3), `T_imu_P = (R_imu_P, R_imu_P * lever_arm)` comes from the profile. Frame `i`
+//! is stamped at its effective time on the IMU clock: the exposure-record-4 stamp plus the profile's `slope *
+//! shutter_i + constant` (mid-exposure of the middle row).
+//!
+//! Without one (a body nobody measured, or a mode outside every measured one), the clip is still read, and
+//! [`InsvRig::profile_note`] says why there is no profile: rig frame = the vendor frame P (the lens poses are the clip's
+//! own factory calibration), frames sit at the raw record-4 stamps, the readout is the clip's own if it states one,
+//! and the IMU has no pose in the rig. Such a rig must not feed visual-inertial estimation.
+//!
 //! IMU times are the trailer's, without the vendor's `gyro_timestamp` subtraction: the profiles were fitted on that
 //! clock. Every time is in nanoseconds on the trailer clock.
-use crate::profile::{
-    builtin_profiles, lens_type, select_profile, CaptureMode, DeviceProfile, ProfileError,
-};
+use crate::profile::{builtin_profiles, lens_type, select_profile, CaptureMode, DeviceProfile};
 use kornia_staging_3d::camera::formats::insta360::FactoryLens;
 use kornia_staging_io::insta360::{Insta360Clip, Insta360Error};
-use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion};
+use nalgebra::{Isometry3, Matrix3, Rotation3, Translation3, UnitQuaternion, Vector3};
 use std::ops::Range;
 use std::path::Path;
 
@@ -22,31 +27,31 @@ pub enum RigError {
     /// The file is not a readable two-lens clip.
     #[error(transparent)]
     Clip(#[from] Insta360Error),
-    /// No device profile fits the clip.
-    #[error(transparent)]
-    Profile(#[from] ProfileError),
     /// The clip's records do not support a rig.
     #[error("{0}")]
     Invalid(String),
 }
 
-/// A clip read and checked, with its device profile applied.
+/// A clip read and checked, with its device profile applied when one fits.
 #[derive(Clone, Debug)]
 pub struct InsvRig {
     /// The clip.
     pub clip: Insta360Clip,
-    /// The profile the clip's mode selected.
-    pub profile: DeviceProfile,
-    /// What the clip states about its mode.
+    /// The profile the clip's mode selected; `None` when no measured profile fits (see [`InsvRig::profile_note`]).
+    pub profile: Option<DeviceProfile>,
+    /// Empty with a profile; without one, why: the body has no profile, or the clip lies outside its measured modes.
+    pub profile_note: String,
+    /// What the clip states about its mode (lens type 0 when its lens strings state no single type).
     pub mode: CaptureMode,
-    /// Rolling-shutter readout of each lens image: the clip's own when it states one, else the profile's.
-    pub readout_s: f64,
+    /// Rolling-shutter readout of each lens image: the clip's own when it states one, else the profile's; `None`
+    /// without either.
+    pub readout_s: Option<f64>,
     /// Lens 0 and lens 1: V6 when the clip has a V6 string, else V3.
     pub lenses: [FactoryLens; 2],
-    /// `T_imu_lens` of lens 0 and lens 1.
-    pub imu_from_lens: [Isometry3<f64>; 2],
-    /// `R_imu_P`, the profile's measured rotation orthonormalised.
-    pub imu_from_pano: Matrix3<f64>,
+    /// `T_rig_lens` of lens 0 and lens 1: in the IMU frame with a profile, in the vendor frame P without.
+    pub rig_from_lens: [Isometry3<f64>; 2],
+    /// `R_imu_P`, the profile's measured rotation orthonormalised; `None` without a profile.
+    pub imu_from_pano: Option<Matrix3<f64>>,
     /// Frame times, ns (frames `0..frames`).
     pub frame_ns: Vec<i64>,
     /// Exposure time per frame of lens 0 (record 4) and lens 1 (record 12; record 4 without it).
@@ -64,8 +69,7 @@ impl InsvRig {
     /// last of them) when given.
     ///
     /// # Errors
-    /// A malformed clip, fewer than two frames, no fitting profile, or frame times the profile's model does not keep
-    /// increasing.
+    /// A malformed clip, fewer than two frames, or frame times that do not keep increasing.
     pub fn open(path: impl AsRef<Path>, frame_limit: Option<usize>) -> Result<Self, RigError> {
         Self::from_clip(Insta360Clip::open(path)?, &builtin_profiles(), frame_limit)
     }
@@ -89,17 +93,18 @@ impl InsvRig {
         let mut intervals: Vec<i64> = vin0.windows(2).map(|w| w[1].t_us - w[0].t_us).collect();
         intervals.sort_unstable();
         let m = &clip.trailer.metadata;
-        let v3 = m
+        let lens_string = m
             .offset_v3
             .as_deref()
-            .ok_or_else(|| RigError::Invalid("the metadata has no V3 lens string".into()))?;
-        let mode = CaptureMode {
-            camera_type: m.camera_type.clone(),
-            lens_type: lens_type(v3).map_err(RigError::Invalid)?,
-            frame_rate_hz: 1e6 / median(&intervals),
-            readout_s: m.rolling_shutter_ms.map(|ms| ms * 1e-3),
-        };
-        let profile = select_profile(profiles, &mode)?.clone();
+            .or(m.offset_v6.as_deref())
+            .unwrap_or_default();
+        let (mode, profile, profile_note) = choose_profile(
+            profiles,
+            &m.camera_type,
+            lens_type(lens_string),
+            1e6 / median(&intervals),
+            m.rolling_shutter_ms.map(|ms| ms * 1e-3),
+        );
         let frames = frame_limit.map_or(vin0.len(), |limit| limit.min(vin0.len()));
         let record_t: Vec<i64> = vin0[..frames].iter().map(|e| e.t_us).collect();
         let exposure_s = [false, true].map(|vin1| {
@@ -108,9 +113,18 @@ impl InsvRig {
                 .map(|e| e.exposure_s)
                 .collect::<Vec<_>>()
         });
-        let frame_ns = profile
-            .frame_times_ns(&record_t, &exposure_s[0])
-            .map_err(RigError::Invalid)?;
+        let frame_ns = match &profile {
+            Some(p) => p.frame_times_ns(&record_t, &exposure_s[0]),
+            None => {
+                let raw: Vec<i64> = record_t.iter().map(|t| t * 1000).collect();
+                if raw.windows(2).any(|w| w[1] <= w[0]) {
+                    Err("the exposure-record stamps are not increasing".to_owned())
+                } else {
+                    Ok(raw)
+                }
+            }
+        }
+        .map_err(RigError::Invalid)?;
         let horizon = frame_limit.map_or(i64::MAX, |_| frame_ns[frames - 1] + 1_000_000_000);
         let imu: Vec<_> = clip
             .trailer
@@ -118,27 +132,32 @@ impl InsvRig {
             .iter()
             .filter(|s| s.t_us * 1000 <= horizon)
             .collect();
-        let imu_from_pano = profile.imu_from_pano();
-        let lever_arm = profile.lever_arm();
+        let imu_from_pano = profile.as_ref().map(DeviceProfile::imu_from_pano);
+        // Without a profile the rig frame is P itself: the identity rotation and no lever arm.
+        let (rig_from_pano, lever_arm) = match &profile {
+            Some(p) => (p.imu_from_pano(), p.lever_arm()),
+            None => (Matrix3::identity(), Vector3::zeros()),
+        };
         let lenses = clip.lenses_v6.unwrap_or(clip.lenses);
-        let imu_from_lens = lenses.map(|lens| {
-            let rotation = imu_from_pano * lens.pano_from_lens.rotation.matrix();
-            let centre = imu_from_pano * (lens.pano_from_lens.translation.vector + lever_arm);
+        let rig_from_lens = lenses.map(|lens| {
+            let rotation = rig_from_pano * lens.pano_from_lens.rotation.matrix();
+            let centre = rig_from_pano * (lens.pano_from_lens.translation.vector + lever_arm);
             Isometry3::from_parts(
                 Translation3::from(centre),
                 UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rotation)),
             )
         });
         Ok(Self {
-            readout_s: mode.readout_s.unwrap_or(profile.readout_s),
+            readout_s: mode.readout_s.or(profile.as_ref().map(|p| p.readout_s)),
             imu_ns: imu.iter().map(|s| s.t_us * 1000).collect(),
             accel: imu.iter().map(|s| s.accel_m_s2).collect(),
             gyro: imu.iter().map(|s| s.gyro_rad_s).collect(),
             clip,
             profile,
+            profile_note,
             mode,
             lenses,
-            imu_from_lens,
+            rig_from_lens,
             imu_from_pano,
             frame_ns,
             exposure_s,
@@ -170,7 +189,8 @@ impl InsvRig {
     /// # Errors
     /// A sample outside the track, a read failure or a malformed sample.
     pub fn read_packed(&self, lens: usize, range: Range<usize>) -> Result<Packed, RigError> {
-        let track = &self.clip.tracks[self.clip.lens_track[lens]];
+        let track_index = self.clip.lens_track[lens];
+        let track = &self.clip.tracks[track_index];
         let mut reader = self.clip.sample_reader()?;
         let bytes: u64 = track.samples[range.clone()]
             .iter()
@@ -186,12 +206,36 @@ impl InsvRig {
         for index in range {
             packed
                 .keyframes
-                .push(reader.read_annex_b(track, index, &mut packed.data)?);
+                .push(reader.read_annex_b(track_index, index, &mut packed.data)?);
             let end = i32::try_from(packed.data.len())
                 .map_err(|_| RigError::Invalid("a GOP of 2 GiB or more".into()))?;
             packed.offsets.push(end);
         }
         Ok(packed)
+    }
+}
+
+/// The clip's mode and the profile measured in it, or `None` and why: the body has no profile, the clip lies
+/// outside every measured mode of its body, or its lens strings state no single lens type.
+pub fn choose_profile(
+    profiles: &[DeviceProfile],
+    camera_type: &str,
+    lens_type: Result<u32, String>,
+    frame_rate_hz: f64,
+    readout_s: Option<f64>,
+) -> (CaptureMode, Option<DeviceProfile>, String) {
+    let mode = CaptureMode {
+        camera_type: camera_type.to_owned(),
+        lens_type: *lens_type.as_ref().unwrap_or(&0),
+        frame_rate_hz,
+        readout_s,
+    };
+    match lens_type.and_then(|_| select_profile(profiles, &mode).map_err(|e| e.to_string())) {
+        Ok(profile) => {
+            let profile = profile.clone();
+            (mode, Some(profile), String::new())
+        }
+        Err(why) => (mode, None, why),
     }
 }
 
@@ -229,7 +273,45 @@ fn median(sorted: &[i64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::builtin_profiles;
     use proptest::prelude::*;
+
+    #[test]
+    fn a_clip_without_a_fitting_profile_is_read_without_one_and_says_why() {
+        let profiles = builtin_profiles();
+        let (_, profile, note) =
+            choose_profile(&profiles, "Insta360 X5", Ok(113), 29.9688, Some(0.021244));
+        assert_eq!(
+            (profile.map(|p| p.name), note.as_str()),
+            (Some("x5".to_owned()), "")
+        );
+        // A measured body in an unmeasured mode (the public X5 sample records 25 fps).
+        let (_, profile, note) =
+            choose_profile(&profiles, "Insta360 X5", Ok(113), 25.0, Some(0.021244));
+        assert!(
+            profile.is_none() && note.contains("frame rate 25.0000 Hz is not 29.97"),
+            "{note}"
+        );
+        // A body nobody measured.
+        let (mode, profile, note) = choose_profile(&profiles, "Insta360 X3", Ok(97), 29.97, None);
+        assert!(
+            profile.is_none() && note.contains("no device profile for a \"Insta360 X3\""),
+            "{note}"
+        );
+        assert_eq!(mode.lens_type, 97);
+        // Lens strings without a single lens type.
+        let (_, profile, note) = choose_profile(
+            &profiles,
+            "Insta360 X5",
+            Err("mixed lens types".into()),
+            29.97,
+            None,
+        );
+        assert_eq!(
+            (profile.is_none(), note.as_str()),
+            (true, "mixed lens types")
+        );
+    }
 
     #[test]
     fn gops_open_on_keyframes_and_the_first_opens_on_frame_zero() {

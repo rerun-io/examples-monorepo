@@ -3,6 +3,7 @@ use crate::insv::InsvLens;
 use crate::value_error;
 use insta360_io_core::profile::ImuNoise as CoreImuNoise;
 use insta360_io_core::rig::{InsvRig as CoreRig, Packed};
+use kornia_staging_io::container::mp4::VideoCodec;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
@@ -87,35 +88,56 @@ impl InsvRig {
         &self.rig.clip.trailer.metadata.firmware
     }
 
-    /// Name of the selected device profile.
+    /// Name of the selected device profile; `None` when no measured profile fits (`profile_note` says why).
     #[getter]
-    fn profile_name(&self) -> &str {
-        &self.rig.profile.name
+    fn profile_name(&self) -> Option<&str> {
+        self.rig.profile.as_ref().map(|p| p.name.as_str())
     }
 
     /// Version of the selected device profile.
     #[getter]
-    fn profile_version(&self) -> u32 {
-        self.rig.profile.version
+    fn profile_version(&self) -> Option<u32> {
+        self.rig.profile.as_ref().map(|p| p.version)
+    }
+
+    /// Empty with a profile; without one, why there is none.
+    #[getter]
+    fn profile_note(&self) -> &str {
+        &self.rig.profile_note
     }
 
     /// The selected profile's IMU noise model.
     #[getter]
-    fn imu_noise(&self) -> ImuNoise {
-        ImuNoise::from(&self.rig.profile.imu_noise)
+    fn imu_noise(&self) -> Option<ImuNoise> {
+        self.rig
+            .profile
+            .as_ref()
+            .map(|p| ImuNoise::from(&p.imu_noise))
     }
 
-    /// Rolling-shutter readout of each lens image, seconds (first row to last).
+    /// Rolling-shutter readout of each lens image, seconds (first row to last); `None` when neither the clip nor a
+    /// profile states one.
     #[getter]
-    fn readout_s(&self) -> f64 {
+    fn readout_s(&self) -> Option<f64> {
         self.rig.readout_s
     }
 
-    /// `R_P_imu`, row-major: the profile's rotation, orthonormalised.
+    /// `R_P_imu`, row-major: the profile's rotation, orthonormalised; `None` without a profile.
     #[getter]
-    fn pano_from_imu(&self) -> [[f64; 3]; 3] {
-        let r = self.rig.imu_from_pano.transpose();
-        std::array::from_fn(|row| std::array::from_fn(|column| r[(row, column)]))
+    fn pano_from_imu(&self) -> Option<[[f64; 3]; 3]> {
+        self.rig.imu_from_pano.map(|m| {
+            let r = m.transpose();
+            std::array::from_fn(|row| std::array::from_fn(|column| r[(row, column)]))
+        })
+    }
+
+    /// Codec of both lens tracks: `h264` or `h265`.
+    #[getter]
+    fn codec(&self) -> &'static str {
+        match self.rig.clip.tracks[0].codec {
+            VideoCodec::H264 => "h264",
+            VideoCodec::H265 => "h265",
+        }
     }
 
     /// Lens 0 and lens 1 (V6 when the clip has a V6 string, else V3), at the track resolution.
@@ -124,9 +146,9 @@ impl InsvRig {
         self.rig.lenses.iter().map(InsvLens::from).collect()
     }
 
-    /// `T_imu_lens` of one lens, a row-major 4x4 matrix.
-    fn imu_from_lens(&self, lens: usize) -> PyResult<[[f64; 4]; 4]> {
-        let m = self.rig.imu_from_lens[self.lens(lens)?].to_homogeneous();
+    /// `T_rig_lens` of one lens, a row-major 4x4 matrix: rig = IMU frame with a profile, vendor frame P without.
+    fn rig_from_lens(&self, lens: usize) -> PyResult<[[f64; 4]; 4]> {
+        let m = self.rig.rig_from_lens[self.lens(lens)?].to_homogeneous();
         Ok(std::array::from_fn(|row| {
             std::array::from_fn(|column| m[(row, column)])
         }))

@@ -108,38 +108,47 @@ class ImuNoise:
     def source(self) -> str: ...
 
 class InsvRig:
-    """A clip with its device profile applied: two lens cameras in the IMU frame, times on one clock, the GOP demux.
+    """A clip with its device profile applied when one fits: two lens cameras, times on one clock, the GOP demux.
 
-    Every time is on the trailer clock in ns. Frame ``i`` is the exposure-record-4 stamp plus the profile's
-    ``slope * shutter_i + constant``: the mid-exposure time of the middle row on the IMU clock.
+    Every time is on the trailer clock in ns. With a profile, frame ``i`` is the exposure-record-4 stamp plus the
+    profile's ``slope * shutter_i + constant`` (the mid-exposure time of the middle row on the IMU clock); without one,
+    the raw stamp.
     """
 
     def __init__(self, path: str, frame_limit: int | None = None) -> None:
         """Read the clip and select its profile; ``frame_limit`` keeps the first frames and the IMU up to 1 s past them.
 
-        Raises ``ValueError`` on a malformed clip, fewer than two frames, or a clip outside every profile's mode.
+        Raises ``ValueError`` on a malformed clip or fewer than two frames.
         """
     @property
     def camera_type(self) -> str: ...
     @property
     def firmware(self) -> str: ...
     @property
-    def profile_name(self) -> str: ...
+    def profile_name(self) -> str | None:
+        """The measured profile the clip's body and mode selected; ``None`` when none fits (``profile_note`` says why)."""
     @property
-    def profile_version(self) -> int: ...
+    def profile_version(self) -> int | None: ...
     @property
-    def imu_noise(self) -> ImuNoise: ...
+    def profile_note(self) -> str:
+        """Empty with a profile; without one, why there is none."""
     @property
-    def readout_s(self) -> float:
+    def imu_noise(self) -> ImuNoise | None: ...
+    @property
+    def readout_s(self) -> float | None:
         """Rolling-shutter readout of each lens image (first row to last): the clip's own, else the profile's."""
     @property
-    def pano_from_imu(self) -> list[list[float]]:
-        """``R_P_imu``, row-major, orthonormalised."""
+    def pano_from_imu(self) -> list[list[float]] | None:
+        """``R_P_imu``, row-major, orthonormalised; ``None`` without a profile."""
+    @property
+    def codec(self) -> str:
+        """Codec of both lens tracks: ``h264`` or ``h265``."""
     @property
     def lenses(self) -> list[InsvLens]:
         """Lens 0 and lens 1: V6 when the clip has a V6 string, else V3."""
-    def imu_from_lens(self, lens: int) -> list[list[float]]:
-        """``T_imu_lens``, row-major 4x4: ``(R_imu_P R_P_lens, R_imu_P (c_P + lever_arm))``."""
+    def rig_from_lens(self, lens: int) -> list[list[float]]:
+        """``T_rig_lens``, row-major 4x4. With a profile rig = IMU frame, ``(R_imu_P R_P_lens, R_imu_P (c_P + lever_arm))``;
+        without one rig = the vendor frame P, ``(R_P_lens, c_P)``."""
     @property
     def lens_track(self) -> tuple[int, int]: ...
     @property

@@ -3,25 +3,33 @@
 Rerun 0.42's ``Mp4Reader`` cannot select a track, and a clip holds two (one per lens), so this reader emits the
 same chunk shapes itself, per lens: one static ``VideoStream:codec`` chunk, one ``VideoStream:sample`` chunk per GOP
 (a keyframe and the samples up to the next one) on the ``timeline_name`` duration timeline, and one trailing
-``VideoStream:is_keyframe`` chunk with a ``True`` row per keyframe. The samples are the tracks' own HEVC bitstream,
-remuxed to Annex B with the parameter sets in front of every IRAP, never re-encoded. Rust (``InsvRig``) reads and
-packs them without the GIL; the arrays reach Rerun without a copy.
+``VideoStream:is_keyframe`` chunk with a ``True`` row per keyframe. The samples are the tracks' own H.264 or HEVC
+bitstream (``VideoStream`` codec ``H264`` or ``H265``), remuxed to Annex B with the parameter sets in front of every
+keyframe (H.264 IDR, HEVC IRAP), never re-encoded. Rust (``InsvRig``) reads and packs them without the GIL; the arrays
+reach Rerun without a copy. Two-file clips (ONE X2, ONE R/RS, X3: lens 0 in ``…_00_…``, lens 1 in ``…_10_…``) open from
+either member.
 
 Beside the videos the reader states what the clip and its device profile say, as one camera rig under
 ``entity_path``, rig frame = IMU frame:
 
-- ``cam_NN``: static ``Transform3D`` ``cam_from_imu`` (``ChildFromParent``) and ``AnyValues`` ``camera_model`` and
+- ``cam_NN``: static ``Transform3D`` ``cam_from_rig`` (``ChildFromParent``) and ``AnyValues`` ``camera_model`` and
   ``rolling_shutter_readout_s`` (first row to last; row ``v`` of ``H`` is read ``readout * (v - (H - 1) / 2) / H``
-  after the frame time).
+  after the frame time; absent when neither the clip nor a profile states it).
 - ``cam_NN/pinhole``: static ``Pinhole`` (``fx, fy, cx, cy`` of the Mei camera, track pixels, RDF) and the camera
   model as the monorepo's ``simplecv.components.DistortionModel`` (``mei_v6``, or ``mei_v3`` without a V6 lens string)
   and ``simplecv.components.DistortionCoefficients`` (``xi, half_field_rad, d0 .. d12``; ``mei_v3``: ``xi,
   half_field_rad, k1, k2, k3, p1, p2``), which slam-rs reads.
 - ``cam_NN/pinhole/video``: the lens video, as above.
 - ``cam_NN/exposure``: per-frame exposure time (s), record 4 for lens 0 and record 12 for lens 1.
-- ``imu_00``: static identity ``Transform3D`` (the IMU is the rig origin); ``imu_00/gyro`` (rad/s) and
+- ``imu_00``: static identity ``Transform3D`` (the IMU is the rig origin; absent without a device profile); ``imu_00/gyro`` (rad/s) and
   ``imu_00/accel`` (m/s^2) as ``Scalars`` in the IMU's axes.
 - the recording property ``insta360``: camera type, firmware, device profile and its version, ``pano_from_imu``.
+
+Without a device profile. A body nobody has measured, or a clip outside every measured mode of its body, is still read,
+with one warning naming the body and the reason: rig frame = the vendor lens frame P (the lens poses are the clip's own
+factory calibration), frames at the raw exposure-record stamps, no ``Transform3D`` at ``imu_00`` (the IMU has no pose
+in the rig), and the ``insta360`` property states ``profile = "none"`` and ``profile_note`` (the reason) instead of the
+version and ``pano_from_imu``. Visual-inertial consumers (slam-rs) refuse such a recording.
 
 Time. Every temporal chunk is on one duration timeline (``timeline_name``, ``video`` by default as in
 ``Mp4Reader``): nanoseconds since the earliest frame or IMU sample on the trailer clock (``InsvRig.start_ns``).
@@ -30,6 +38,7 @@ Frames are at their effective time on the IMU clock (the device profile's frame-
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +51,11 @@ from numpy import ndarray
 from rerun.chunk import Chunk, LazyChunkStream
 
 from insta360_io._insta360_io import InsvRig
+
+LOG: logging.Logger = logging.getLogger(__name__)
+NO_PROFILE: str = "none"
+"""The ``insta360`` property's ``profile`` of a clip read without a device profile."""
+CODECS: dict[str, rr.VideoCodec] = {"h264": rr.VideoCodec.H264, "h265": rr.VideoCodec.H265}
 
 ROWS_PER_CHUNK: int = 65_536
 """IMU and exposure samples per chunk (about a minute of the 1 kHz IMU)."""
@@ -104,12 +118,14 @@ class InsvReader:
             frame_limit: Keep the first frames only (and the IMU up to 1 s past them).
 
         Raises:
-            ValueError: On a malformed clip or a clip outside every device profile's measured mode.
+            ValueError: On a malformed clip.
         """
         self.path: Path = Path(path).absolute()
         self.entity_path: str = str(self.path) if entity_path is None else entity_path
         self.timeline_name: str = timeline_name
         self.rig: InsvRig = InsvRig(str(self.path), frame_limit)
+        if self.rig.profile_name is None:
+            LOG.warning("%s (%s): read without a device profile: %s", self.path.name, self.rig.camera_type, self.rig.profile_note)
 
     def __repr__(self) -> str:
         return f"InsvReader({self.path})"
@@ -167,13 +183,16 @@ class InsvReader:
         width, height = rig.resolution
         for lens, factory in enumerate(rig.lenses):
             camera = factory.camera
-            imu_T_lens: Float64[ndarray, "4 4"] = np.asarray(rig.imu_from_lens(lens), dtype=np.float64)
-            lens_R_imu: Float64[ndarray, "3 3"] = imu_T_lens[:3, :3].T
+            rig_T_lens: Float64[ndarray, "4 4"] = np.asarray(rig.rig_from_lens(lens), dtype=np.float64)
+            lens_R_rig: Float64[ndarray, "3 3"] = rig_T_lens[:3, :3].T
+            node = rr.AnyValues(camera_model=camera.model)
+            if rig.readout_s is not None:
+                node = rr.AnyValues(camera_model=camera.model, rolling_shutter_readout_s=rig.readout_s)
             yield static_chunk(
                 self.cam(lens),
                 described(
-                    rr.Transform3D(translation=-lens_R_imu @ imu_T_lens[:3, 3], mat3x3=lens_R_imu, relation=rr.TransformRelation.ChildFromParent),
-                    rr.AnyValues(camera_model=camera.model, rolling_shutter_readout_s=rig.readout_s),
+                    rr.Transform3D(translation=-lens_R_rig @ rig_T_lens[:3, 3], mat3x3=lens_R_rig, relation=rr.TransformRelation.ChildFromParent),
+                    node,
                 ),
             )
             pinhole = rr.Pinhole(
@@ -186,15 +205,18 @@ class InsvReader:
             coefficients: pa.Array = pa.array([np.asarray(camera.coefficients, dtype=np.float32)], type=pa.list_(pa.float32()))
             distortion: list[Described] = [Described(DISTORTION_MODEL, pa.array([camera.model])), Described(DISTORTION_COEFFICIENTS, coefficients)]
             yield static_chunk(f"{self.cam(lens)}/pinhole", described(pinhole) + distortion)
-            yield static_chunk(self.video_entity(lens), described(rr.VideoStream(codec=rr.VideoCodec.H265)))
+            yield static_chunk(self.video_entity(lens), described(rr.VideoStream(codec=CODECS[rig.codec])))
             yield static_chunk(f"{self.cam(lens)}/exposure", described(rr.SeriesLines(names=["exposure_s"])))
+        clip = {"source_file": self.path.name, "camera_type": rig.camera_type, "firmware": rig.firmware}
+        if rig.profile_name is None or rig.pano_from_imu is None:
+            yield Chunk.from_property("insta360", rr.AnyValues(**clip, profile=NO_PROFILE, profile_note=rig.profile_note))
+            return
+        # The IMU is the rig origin.
         yield static_chunk(f"{self.entity_path}/imu_00", described(rr.Transform3D(translation=[0.0, 0.0, 0.0], mat3x3=np.eye(3, dtype=np.float32))))
         yield Chunk.from_property(
             "insta360",
             rr.AnyValues(
-                source_file=self.path.name,
-                camera_type=rig.camera_type,
-                firmware=rig.firmware,
+                **clip,
                 profile=rig.profile_name,
                 profile_version=rig.profile_version,
                 pano_from_imu=np.asarray(rig.pano_from_imu, dtype=np.float64).ravel().tolist(),
