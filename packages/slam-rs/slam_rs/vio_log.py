@@ -688,9 +688,11 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
 
 
 MASK_CLASSES: rr.AnnotationContext = rr.AnnotationContext(
-    [rr.AnnotationInfo(id=0, label="kept", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="masked", color=(40, 110, 255, 140))]
+    [rr.AnnotationInfo(id=0, label="kept", color=(255, 255, 255, 0)), rr.AnnotationInfo(id=1, label="masked", color=(40, 110, 255, 140))]
 )
-"""A mask's two classes: kept pixels draw nothing, masked ones a translucent blue over the frame."""
+"""Kept pixels draw nothing, masked ones a translucent blue over the frame. Class 0 needs an explicit colour with alpha 0
+and nonzero RGB: an unlisted class 0 gets an automatic solid colour, and (0, 0, 0, 0) is stored as 0, which the viewer
+also reads as "no colour"."""
 
 
 def log_frame_masks(cameras: tuple[int, ...], image_sizes: list[tuple[int, int]], masks: list[UInt8[ndarray, "mh mw"] | None]) -> None:
