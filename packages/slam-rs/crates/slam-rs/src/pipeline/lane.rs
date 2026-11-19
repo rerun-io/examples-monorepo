@@ -145,9 +145,12 @@ impl FrontendLane {
         on_lane!(self, |flow| flow.config())
     }
 
-    /// The grid one camera is detected on.
-    pub fn detection_grid(&self, camera: usize) -> kornia_staging_imgproc::features::CellGrid {
-        on_lane!(self, |flow| flow.detection_grid(camera))
+    /// Per-pixel masks, one optional per camera; see `FrameToFrameOpticalFlow::set_track_kill_masks`.
+    pub fn set_track_kill_masks(
+        &mut self,
+        masks: Vec<Option<std::sync::Arc<frontend::flow::TrackKillMask>>>,
+    ) -> Result<(), VioError> {
+        on_lane!(self, |flow| flow.set_track_kill_masks(masks)).map_err(Into::into)
     }
 
     /// Publish a new average scene depth.

@@ -331,8 +331,8 @@ impl Vio {
     ///
     /// `masks`, when given, holds one entry per camera: `None` or a `uint8[h, w]` segmentation mask at any
     /// resolution, nonzero = no features there; it is read through its scale to the camera's tracked image
-    /// (`slam_rs::frontend::masks`). The frontend neither detects in nor keeps a track in a detection cell that
-    /// holds a masked pixel. `masks=None` tracks unmasked, exactly as before masks existed.
+    /// (`slam_rs::frontend::masks`). The frontend keeps no keypoint on a masked pixel: a detected corner there is
+    /// dropped, and so is a track that lands there. `masks=None` tracks unmasked, exactly as before masks existed.
     #[pyo3(signature = (t_ns, images, masks = None))]
     fn track(
         &mut self,

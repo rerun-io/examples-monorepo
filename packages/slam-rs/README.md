@@ -51,8 +51,8 @@ Segmentation masks (people, the operator, a selfie stick) keep the frontend off 
 camera, a `SegmentationImage` at `<camera>/pinhole/<name>` (nonzero = masked) at the resolution it was computed at,
 with a static `Transform3D(scale=[W_img / W_mask, H_img / H_mask, 1])` on the same entity; masks may be sparser than
 the video, and each frame takes the latest one at or before it (`slam_rs.frame_masks`). colsfm reads the same layer for
-its keypoint masks. The frontend neither detects in nor keeps a track in a detection cell that holds a masked pixel
-(Basalt's per-frame `img->masks`). Without `--mask-entity` nothing changes.
+its keypoint masks. The frontend keeps no keypoint on a masked pixel: a detected corner there is dropped, and so is a
+track (temporal or stereo) that lands there. Without `--mask-entity` nothing changes.
 
 Every task builds the core first, so no manual build step is needed. Decoding
 follows the same rule as the frontend: NVDEC when CUDA is available, otherwise

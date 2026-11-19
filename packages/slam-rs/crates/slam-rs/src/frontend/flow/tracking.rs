@@ -164,14 +164,7 @@ impl<
     pub(super) fn finish_camera(&mut self, camera: usize) {
         self.finish_track_points(camera, camera);
         self.frame.cameras[camera].clear();
-        let kill: Option<&super::TrackKillMask> = self.track_kill_masks[camera].as_deref();
         for (slot, id) in self.tracked_ids.iter().enumerate() {
-            if let Some(kill) = kill {
-                let position: Vector2<f32> = self.tracked.get(slot).translation.into();
-                if kill.kills(position.x, position.y) {
-                    continue;
-                }
-            }
             // `keypoint_map_2.insert(result.begin(), result.end())`; the
             // cell counts are rebuilt afterwards by `updateCellCounts`.
             self.frame.cameras[camera].set(*id, &self.tracked.get(slot), NO_RESPONSE);
@@ -191,6 +184,12 @@ impl<
             let transform: AffineCompact2f = result.transform(slot);
             // `if (masks2.inBounds(t2.x(), t2.y())) continue;`.
             if self.masks[cam2].in_bounds(transform.translation[0], transform.translation[1]) {
+                continue;
+            }
+            // The pixel mask of the destination camera, temporal and stereo lanes alike.
+            if let Some(kill) = self.track_kill_masks[cam2].as_deref()
+                && kill.kills(transform.translation[0], transform.translation[1])
+            {
                 continue;
             }
             self.tracked_ids

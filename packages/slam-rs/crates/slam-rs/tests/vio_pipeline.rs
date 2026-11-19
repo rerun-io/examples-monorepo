@@ -553,11 +553,11 @@ fn keypoint_positions<S: Scalar>(vio: &Vio<S>, camera: usize) -> Vec<(f32, f32)>
         .collect()
 }
 
-/// A per-frame mask keeps every keypoint, new or tracked, out of the cells it
-/// covers, and only there; given at a quarter of the image's resolution, it is
-/// read through its scale. Masks of `None` change nothing, bit for bit.
+/// A per-frame mask keeps every keypoint, new or tracked, off its pixels and
+/// only there; given at a quarter of the image's resolution, it is read through
+/// its scale. Masks of `None` change nothing, bit for bit.
 #[test]
-fn frame_masks_keep_keypoints_out_of_masked_cells() {
+fn frame_masks_keep_keypoints_off_masked_pixels() {
     let calibration = common::calibration();
     let cameras: usize = calibration.t_i_c.len();
     let [width, height] = calibration.resolution[0];
@@ -567,18 +567,20 @@ fn frame_masks_keep_keypoints_out_of_masked_cells() {
     let left_half: Vec<u8> = (0..mask_width * mask_height)
         .map(|index| u8::from(index % mask_width < mask_width / 2))
         .collect();
+    let kill = slam_rs::frontend::flow::TrackKillMask {
+        width: mask_width,
+        height: mask_height,
+        image_width: width,
+        image_height: height,
+        killed: left_half.clone(),
+    };
 
     let mut unmasked: Vio<f32> = pipeline();
     drive_the_committed_framesets(&mut unmasked);
-    let left = |points: &[(f32, f32)]| {
-        points
-            .iter()
-            .filter(|(x, _)| (*x as usize) < width / 2)
-            .count()
-    };
+    let on_mask = |points: &[(f32, f32)]| points.iter().filter(|(x, y)| kill.kills(*x, *y)).count();
     assert!(
-        left(&keypoint_positions(&unmasked, 0)) > 0,
-        "the fixture has corners on the left"
+        on_mask(&keypoint_positions(&unmasked, 0)) > 0,
+        "the fixture has corners on the masked half"
     );
 
     let mut masked: Vio<f32> = pipeline();
@@ -590,14 +592,18 @@ fn frame_masks_keep_keypoints_out_of_masked_cells() {
     });
     masked.set_frame_masks(&masks).unwrap();
     drive_the_committed_framesets(&mut masked);
-    let grid = masked.frontend().detection_grid(0);
-    // The last cell column that touches the masked half is the one holding x = width / 2 - 1.
-    let masked_until: f32 =
-        (grid.x_start + (((width / 2 - 1) - grid.x_start) / grid.cell + 1) * grid.cell) as f32;
     let positions = keypoint_positions(&masked, 0);
     assert!(!positions.is_empty());
+    assert_eq!(on_mask(&positions), 0, "{positions:?}");
+    // Keypoints between the mask edge and the end of the detection cell it cuts survive: the mask is per pixel,
+    // where whole-cell masking would have emptied that strip.
+    let cell = common::config().optical_flow_detection_grid_size as usize;
+    let x_start = (width % cell) / 2;
+    let boundary_cell_end = (x_start + ((width / 2 - 1 - x_start) / cell + 1) * cell) as f32;
     assert!(
-        positions.iter().all(|(x, _)| *x >= masked_until),
+        positions
+            .iter()
+            .any(|(x, y)| !kill.kills(*x, *y) && *x < boundary_cell_end),
         "{positions:?}"
     );
     // The unmasked camera is free to differ (the rig's estimator sees fewer

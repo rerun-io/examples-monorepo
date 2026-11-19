@@ -62,8 +62,8 @@ pub struct Vio<S: Scalar = f32> {
     next_frames: frontend::input::PackedImages,
     /// Every camera is tracked on its images reduced by two; see [`MAX_FULL_RESOLUTION_WIDTH`].
     half: bool,
-    /// `img->masks`: whole detection cells of each camera where the frontend neither detects nor keeps a track;
-    /// empty unless [`Self::set_frame_masks`] filled them.
+    /// `img->masks`, always empty here: masks come from Monado. Segmentation masks go in per pixel instead
+    /// ([`Self::set_frame_masks`]).
     masks: Vec<kornia_staging_imgproc::features::CellMasks>,
     /// Cameras in the rig; every frameset must carry exactly this many.
     camera_count: usize,
@@ -528,9 +528,10 @@ impl<S: Scalar> Vio<S> {
         Ok(())
     }
 
-    /// Masks for the framesets that follow, until the next call: one optional mask per camera, at any resolution
-    /// (it is read through its scale to the camera's tracked image, see [`frontend::masks`]). `None` masks nothing,
-    /// and a pipeline that is never given a mask runs exactly as before.
+    /// Masks for the framesets that follow, until the next call: one optional mask per camera, at any resolution,
+    /// read through its scale to the camera's tracked image ([`frontend::flow::TrackKillMask`]). No keypoint is kept on
+    /// a masked pixel: a detected corner there is dropped, and so is a track (temporal or stereo) that lands there.
+    /// `None` masks nothing, and a pipeline that is never given a mask runs exactly as before.
     ///
     /// # Errors
     ///
@@ -560,23 +561,22 @@ impl<S: Scalar> Vio<S> {
                 });
             }
         }
-        for (camera, mask) in masks.iter().enumerate() {
-            self.masks[camera] = match mask {
-                Some(mask) => {
-                    let [width, height] = self.calib_f32.resolution[camera];
-                    let image = kornia_image::ImageSize {
-                        width: width as usize,
-                        height: height as usize,
-                    };
-                    frontend::masks::masked_cells(
-                        *mask,
-                        image,
-                        &self.frontend.detection_grid(camera),
-                    )
-                }
-                None => kornia_staging_imgproc::features::CellMasks::default(),
-            };
-        }
+        let kill_masks: Vec<Option<std::sync::Arc<frontend::flow::TrackKillMask>>> = masks
+            .iter()
+            .zip(&self.calib_f32.resolution)
+            .map(|(mask, &[width, height])| {
+                mask.map(|mask| {
+                    std::sync::Arc::new(frontend::flow::TrackKillMask {
+                        width: mask.width,
+                        height: mask.height,
+                        image_width: width as usize,
+                        image_height: height as usize,
+                        killed: mask.data.to_vec(),
+                    })
+                })
+            })
+            .collect();
+        self.frontend.set_track_kill_masks(kill_masks)?;
         Ok(())
     }
 
