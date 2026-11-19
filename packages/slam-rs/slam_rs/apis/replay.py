@@ -2,7 +2,7 @@
 
 import dataclasses
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -285,7 +285,8 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
     mask_log: FrameMaskLog | None = None if config.mask_entity is None else FrameMaskLog(config.mask_entity)
     times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
-    framesets: Iterator[Frameset] = blank(feed.framesets(stop_ns), config.blank_cameras)
+    source: Generator[Frameset, None, None] = feed.framesets(stop_ns)
+    framesets: Iterator[Frameset] = blank(source, config.blank_cameras)
     bootstrap: BootstrapLog = BootstrapLog()
     while config.max_framesets is None or replayed < config.max_framesets:
         waited: float = time.monotonic()
@@ -303,6 +304,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
             bootstrap.log_new(stage.lockstep.vio)
         elif stage is not None:
             stage.run(frameset)
+    source.close()  # a --max-framesets stop leaves the decode worker up to 64 framesets ahead; stop it and free them
 
     if isinstance(stage, VioStage):
         stage.flush()

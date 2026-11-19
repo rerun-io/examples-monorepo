@@ -1,13 +1,12 @@
-"""Run an iterator on one worker thread, a bounded number of items ahead of its consumer.
+"""Run a generator on one worker thread, a bounded number of items ahead of its consumer.
 
-The frameset feed decodes in bursts (one NVDEC batch or one fetched window at a time); read inline, the tracker stops
-for each burst. Ahead of it, on its own thread, decoding overlaps tracking: PyAV, NVDEC, the catalog reads and the Rust
-tracker all release the GIL.
+The overlap is real only where both sides release the GIL for their heavy work (decoders, catalog reads, a native
+core).
 """
 
 import queue
 import threading
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import cast
 
@@ -26,12 +25,11 @@ _END: object = object()
 """The worker's last item when its iterator ran out."""
 
 
-def prefetch[T](items: Iterator[T], depth: int) -> Generator[T, None, None]:
+def prefetch[T](items: Generator[T, None, None], depth: int) -> Generator[T, None, None]:
     """Yield ``items`` in order while one worker thread advances them up to ``depth`` items ahead.
 
-    ``items`` must be a generator not yet started (or another iterator safe to move to another thread): its body then
-    runs, and is closed, on the worker alone, so a resource that is bound to one thread (a torchcodec NVDEC decoder)
-    is opened, used and released on that thread. The worker holds at most ``depth`` finished items in the queue plus
+    ``items`` must not have started: its body then runs, and is closed, on the worker alone, so a resource that is
+    bound to one thread (a torchcodec NVDEC decoder) is opened, used and released on that thread. The worker holds at most ``depth`` finished items in the queue plus
     the one it is producing. Whatever the worker raises is raised here, at the position where the next item would
     have been. Closing this generator (``break``, an exception in the consumer, garbage collection) stops the worker,
     which closes ``items`` on its own thread, and returns once the worker has exited.
@@ -62,18 +60,16 @@ def prefetch[T](items: Iterator[T], depth: int) -> Generator[T, None, None]:
 
     def work() -> None:
         try:
-            try:
-                for item in items:
-                    if not put(item):
-                        return
-            finally:
-                if isinstance(items, Generator):
-                    items.close()
+            for item in items:
+                if not put(item) or stop.is_set():
+                    return
             put(_END)
         except BaseException as error:  # every failure, beartype's included, goes to the consumer
             put(_Failure(error))
+        finally:
+            items.close()
 
-    worker: threading.Thread = threading.Thread(target=work, name="slam-rs-prefetch", daemon=True)
+    worker: threading.Thread = threading.Thread(target=work, name="prefetch", daemon=True)
     worker.start()
     try:
         while True:
@@ -85,4 +81,6 @@ def prefetch[T](items: Iterator[T], depth: int) -> Generator[T, None, None]:
             yield cast(T, item)
     finally:
         stop.set()
+        while not ready.empty():  # frees a worker blocked on a full queue without waiting for its poll
+            ready.get_nowait()
         worker.join()

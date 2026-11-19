@@ -44,7 +44,7 @@ Five decisions matter here because each one can change the numbers:
 
 import hashlib
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from functools import cache
@@ -619,24 +619,20 @@ class SegmentFeed:
         offset_ns: int = self.imu.cam_time_offset_ns
         return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
-    def framesets(self, stop_ns: int | None = None, start_ns: int | None = None) -> Iterator[Frameset]:
+    def framesets(self, stop_ns: int | None = None, start_ns: int | None = None) -> Generator[Frameset, None, None]:
         """Decode the segment and yield one frameset at a time, read ahead on a worker thread.
 
         One worker thread per iterator runs :meth:`_read_framesets` (decode, inertial, ground-truth and mask reads) up
         to :data:`PREFETCH_FRAMESETS` framesets ahead of the caller (:func:`slam_rs.prefetch.prefetch`), so the
-        tracker does not stop while the next window or NVDEC batch decodes. The framesets, their order and their
-        timestamps are those of the inline read; a worker error is raised here; closing the iterator stops the worker.
-        On NVDEC the worker takes the caller's current CUDA device, and every decoder is opened, used and closed on
-        that one thread. See :meth:`_read_framesets` for the arguments.
+        tracker does not stop while the next window or NVDEC batch decodes: decoding, the catalog reads and the
+        tracker all release the GIL. The framesets, their order and their timestamps are those of the inline read; a
+        worker error is raised here; closing the iterator stops the worker. Every NVDEC decoder is opened, used and
+        closed on that one thread, and binds its CUDA device there itself (``simplecv.video_io.bind_cuda_device``).
+        See :meth:`_read_framesets` for the arguments.
         """
-        cuda_device: int | None = None
-        if self.decode_device == "cuda":
-            import torch
+        return prefetch(self._read_framesets(stop_ns, start_ns), PREFETCH_FRAMESETS)
 
-            cuda_device = torch.cuda.current_device()
-        return prefetch(self._read_framesets(stop_ns, start_ns, cuda_device), PREFETCH_FRAMESETS)
-
-    def _read_framesets(self, stop_ns: int | None, start_ns: int | None, cuda_device: int | None) -> Iterator[Frameset]:
+    def _read_framesets(self, stop_ns: int | None, start_ns: int | None) -> Generator[Frameset, None, None]:
         """Decode the segment and yield one frameset at a time, on the calling thread.
 
         By default, video, inertial samples and ground truth are fetched one
@@ -665,7 +661,6 @@ class SegmentFeed:
                 are not fetched, and the frames of the window that covers it are
                 decoded but not yielded. The first yielded frameset carries every
                 inertial sample since that window's start. None starts at the beginning.
-            cuda_device: CUDA device the NVDEC decoders run on, made current on this thread; None on the CPU decoder.
 
         Yields:
             Framesets in time order, every :attr:`frame_stride`-th one.
@@ -675,10 +670,6 @@ class SegmentFeed:
                 decoded frame disagrees with the calibrated resolution, or a
                 window's inertial read leaves a gap at the boundary.
         """
-        if cuda_device is not None:
-            import torch
-
-            torch.cuda.set_device(cuda_device)
         # Each read reaches past both ends of its window. Forward, because a
         # frameset needs one sample beyond its own timestamp. Backward by a whole
         # frame period, because the first frameset of a window owns the samples
