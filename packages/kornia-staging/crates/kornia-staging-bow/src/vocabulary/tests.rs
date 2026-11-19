@@ -118,10 +118,10 @@ fn word_is_the_greedy_descent() {
     assert_eq!(vocabulary.n_words(), 27);
     for point in random_points::<6>(200, 6) {
         let mut node = 0usize;
-        for (centroids, live) in vocabulary.centroids.iter().zip(&vocabulary.live) {
+        for centroids in &vocabulary.centroids {
             let children = node * 3..node * 3 + 3;
+            // `min_by` keeps the first of equal elements: ties go to the first slot.
             node = children
-                .filter(|&c| live[c])
                 .min_by(|&a, &b| {
                     distance(&point, &centroids[a]).total_cmp(&distance(&point, &centroids[b]))
                 })
@@ -202,17 +202,23 @@ mod properties {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
-        /// Every descriptor, seen or not, lands on exactly one live leaf inside the word range.
+        /// Every descriptor, seen or not, lands inside the word range on the first of its equal slots: no earlier
+        /// slot of the same leaf node is as near, so a slot that repeats an earlier one is never a word.
         #[test]
-        fn every_descriptor_maps_to_one_live_leaf(
+        fn every_word_is_the_first_of_its_equal_slots(
             data in points(400), queries in points(50), branching in 2usize..5, depth in 1usize..4, seed in any::<u64>()
         ) {
             let vocabulary = Vocabulary::train(&data, &VocabularyConfig { branching, depth, iterations: 3, seed }).unwrap();
-            let leaves = vocabulary.live.last().unwrap();
+            let leaves = vocabulary.centroids.last().unwrap();
             for q in data.iter().chain(&queries) {
                 let word = vocabulary.word(q) as usize;
                 prop_assert!(word < vocabulary.n_words());
-                prop_assert!(leaves[word], "word {} is a dead leaf", word);
+                let first_sibling = word - word % branching;
+                let own = distance(q, &leaves[word]);
+                for sibling in first_sibling..word {
+                    prop_assert!(distance(q, &leaves[sibling]) > own, "slot {} ties or beats word {}", sibling, word);
+                    prop_assert_ne!(leaves[sibling], leaves[word]);
+                }
             }
         }
 

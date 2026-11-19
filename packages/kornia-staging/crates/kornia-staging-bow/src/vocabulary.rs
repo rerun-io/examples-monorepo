@@ -19,8 +19,9 @@
 //! C-contiguous `n x D` float32 buffer is borrowed with `<[f32]>::as_chunks::<D>()` instead of copied.
 //!
 //! The tree keeps `branching^(level + 1)` centroid slots per level: the children of node `n` are slots
-//! `n * branching .. (n + 1) * branching` of the next level, and a word id is a slot of the last level. Slots no
-//! training descriptor reached are dead and never chosen.
+//! `n * branching .. (n + 1) * branching` of the next level, and a word id is a slot of the last level. A slot no
+//! training descriptor needed repeats an earlier slot of its node, and ties go to the first slot, so it is never
+//! chosen.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -101,7 +102,6 @@ impl std::error::Error for VocabularyError {}
 pub struct Vocabulary<const D: usize> {
     branching: usize,
     centroids: Vec<Vec<[f32; D]>>,
-    live: Vec<Vec<bool>>,
 }
 
 /// Squared L2 distance.
@@ -115,15 +115,12 @@ fn distance<const D: usize>(a: &[f32; D], b: &[f32; D]) -> f32 {
     sum
 }
 
-/// Index of the nearest of `centroids`, skipping dead ones (`live[i] == false`); the first wins ties.
+/// Index of the nearest of `centroids`; the first wins ties, so a slot that repeats an earlier one is never chosen.
 #[inline]
-fn nearest<const D: usize>(point: &[f32; D], centroids: &[[f32; D]], live: &[bool]) -> usize {
+fn nearest<const D: usize>(point: &[f32; D], centroids: &[[f32; D]]) -> usize {
     let mut best = 0;
     let mut best_distance = f32::INFINITY;
-    for (i, (centroid, &alive)) in centroids.iter().zip(live).enumerate() {
-        if !alive {
-            continue;
-        }
+    for (i, centroid) in centroids.iter().enumerate() {
         let d = distance(point, centroid);
         if d < best_distance {
             best_distance = d;
@@ -132,9 +129,6 @@ fn nearest<const D: usize>(point: &[f32; D], centroids: &[[f32; D]], live: &[boo
     }
     best
 }
-
-/// One node's child slots, which of them are live, and the child label of each of its members.
-type FittedNode<const D: usize> = (Vec<[f32; D]>, Vec<bool>, Vec<u32>);
 
 /// SplitMix64: decorrelates the per-node seeds.
 fn mix(mut x: u64) -> u64 {
@@ -146,13 +140,12 @@ fn mix(mut x: u64) -> u64 {
 
 /// Nearest-centroid labels of `points`, in parallel chunks.
 fn assign<const D: usize>(points: &[[f32; D]], centroids: &[[f32; D]], labels: &mut [u32]) {
-    let live = vec![true; centroids.len()];
     labels
         .par_chunks_mut(CHUNK)
         .zip(points.par_chunks(CHUNK))
         .for_each(|(l, p)| {
             for (label, point) in l.iter_mut().zip(p) {
-                *label = nearest(point, centroids, &live) as u32;
+                *label = nearest(point, centroids) as u32;
             }
         });
 }
@@ -254,8 +247,9 @@ fn kmeans<const D: usize>(
 impl<const D: usize> Vocabulary<D> {
     /// Train a vocabulary on `data`, level by level; the nodes of a level run in parallel.
     ///
-    /// A node with fewer descriptors than `branching` keeps each of them as a child and leaves the other slots
-    /// dead; a node no descriptor reached passes its centroid down unchanged, so every descent ends at a leaf.
+    /// A node with fewer descriptors than `branching` keeps each of them as a child and fills the other slots with
+    /// repeats of the last; a node no descriptor reached repeats its parent's centroid, so every descent ends at a
+    /// leaf.
     ///
     /// # Errors
     ///
@@ -283,7 +277,6 @@ impl<const D: usize> Vocabulary<D> {
         }
 
         let mut centroids: Vec<Vec<[f32; D]>> = Vec::with_capacity(depth);
-        let mut live: Vec<Vec<bool>> = Vec::with_capacity(depth);
         let mut node_of: Vec<u32> = vec![0; data.len()];
         let mut n_nodes = 1usize;
         let mut first_node_id = 0u64; // nodes above this level, so (level, node) maps to one tree-wide id
@@ -303,54 +296,39 @@ impl<const D: usize> Vocabulary<D> {
                 cursor[node as usize] += 1;
             }
 
-            let fitted: Vec<FittedNode<D>> = (0..n_nodes)
+            // Each node's child slots and its members' child labels. Unused slots repeat a used one, which `nearest`
+            // never picks (ties go to the first slot): a node with `m < branching` members repeats slot `m - 1`, an
+            // empty node (only below the root, which holds every descriptor) repeats its parent's centroid.
+            let fitted: Vec<(Vec<[f32; D]>, Vec<u32>)> = (0..n_nodes)
                 .into_par_iter()
                 .map(|node| {
                     let members = &order[bounds[node]..bounds[node + 1]];
-                    let mut slots = vec![[0.0f32; D]; branching];
-                    let mut alive = vec![false; branching];
                     if members.is_empty() {
-                        // Only below the root: level 0 is the root, which holds every descriptor, so an empty node
-                        // always has a parent level. A live parent passes its centroid down; a dead one stays dead.
-                        if let (Some(parent_centroids), Some(parent_live)) =
-                            (centroids.last(), live.last())
-                        {
-                            if parent_live[node] {
-                                slots[0] = parent_centroids[node];
-                                alive[0] = true;
-                            }
-                        }
-                        return (slots, alive, Vec::new());
+                        let parent = centroids.last().map_or([0.0f32; D], |level| level[node]);
+                        return (vec![parent; branching], Vec::new());
                     }
                     let points: Vec<[f32; D]> = members.iter().map(|&i| data[i]).collect();
                     if points.len() < branching {
-                        for (j, p) in points.iter().enumerate() {
-                            slots[j] = *p;
-                            alive[j] = true;
-                        }
-                        return (slots, alive, (0..points.len() as u32).collect());
+                        let mut slots = points.clone();
+                        slots.resize(branching, points[points.len() - 1]);
+                        return (slots, (0..points.len() as u32).collect());
                     }
                     let mut rng = ChaCha8Rng::seed_from_u64(mix(
                         config.seed ^ mix(first_node_id + node as u64)
                     ));
-                    let (found, labels) = kmeans(&points, branching, config.iterations, &mut rng);
-                    alive.iter_mut().for_each(|a| *a = true);
-                    (found, alive, labels)
+                    kmeans(&points, branching, config.iterations, &mut rng)
                 })
                 .collect();
 
             let mut level_centroids = Vec::with_capacity(n_nodes * branching);
-            let mut level_live = Vec::with_capacity(n_nodes * branching);
             let mut child_of = vec![0u32; data.len()];
-            for (node, (slots, alive, labels)) in fitted.into_iter().enumerate() {
+            for (node, (slots, labels)) in fitted.into_iter().enumerate() {
                 for (&i, &label) in order[bounds[node]..bounds[node + 1]].iter().zip(&labels) {
                     child_of[i] = (node * branching) as u32 + label;
                 }
                 level_centroids.extend(slots);
-                level_live.extend(alive);
             }
             centroids.push(level_centroids);
-            live.push(level_live);
             node_of = child_of;
             first_node_id += n_nodes as u64;
             n_nodes *= branching;
@@ -358,7 +336,6 @@ impl<const D: usize> Vocabulary<D> {
         Ok(Self {
             branching,
             centroids,
-            live,
         })
     }
 
@@ -377,18 +354,13 @@ impl<const D: usize> Vocabulary<D> {
         self.branching.pow(self.depth() as u32)
     }
 
-    /// The word of one descriptor: greedy descent, the nearest live child at every level.
+    /// The word of one descriptor: greedy descent, the nearest child at every level (the first of equal slots).
     pub fn word(&self, descriptor: &[f32; D]) -> u32 {
         let b = self.branching;
         let mut node = 0usize;
-        for (centroids, live) in self.centroids.iter().zip(&self.live) {
+        for centroids in &self.centroids {
             let base = node * b;
-            node = base
-                + nearest(
-                    descriptor,
-                    &centroids[base..base + b],
-                    &live[base..base + b],
-                );
+            node = base + nearest(descriptor, &centroids[base..base + b]);
         }
         node as u32
     }
