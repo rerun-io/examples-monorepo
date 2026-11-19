@@ -7,7 +7,7 @@ from pathlib import Path
 import pycolmap
 import pytest
 
-from colsfm.matching import FLEXGLUE_FP8_FILE, FLEXGLUE_MODEL_FILES, MatchingOptions, _matching_options
+from colsfm.matching import FLEXGLUE_MODEL_FILES, FlexGlueOptions, MatchingOptions, _matching_options
 from colsfm.model_assets import required_raco_graphs
 
 
@@ -34,5 +34,5 @@ def test_a_flexglue_run_requires_its_three_graphs_and_the_fp8_matcher() -> None:
     """The pre-flight names the FlexGlue graphs and the calibrated FP8 matcher (TensorRT backend only), next to the
     RaCo extractor; COLMAP's own ONNX Runtime FlexGlue needs no FP8 graph."""
     names = [path.name for path in required_raco_graphs("raco", "flexglue")]
-    assert names[1:] == [*FLEXGLUE_MODEL_FILES.values(), FLEXGLUE_FP8_FILE]
-    assert FLEXGLUE_FP8_FILE not in [path.name for path in required_raco_graphs("raco", "flexglue_ort")]
+    assert names[1:] == [*FLEXGLUE_MODEL_FILES.values(), FlexGlueOptions().fp8_file()]
+    assert FlexGlueOptions().fp8_file() not in [path.name for path in required_raco_graphs("raco", "flexglue_ort")]

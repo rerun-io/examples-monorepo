@@ -154,7 +154,7 @@ def fp8_weight_dq(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: 
     """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``.
 
     Public for model-specific rewrites that :func:`quantize_qdq` cannot plan, e.g. a graph that applies one weight in
-    several MatMuls (its names are per module, so give each use its own ``module``).
+    several MatMuls: quantize it once and let every MatMul read ``{module}.w_dq``.
     """
     torch_dtype, proto_dtype = _SCALE_TYPES[scale_dtype]
     scales: Tensor = (weight.abs().flatten(1).amax(1) / FP8_MAX).clamp_min(1e-12).to(torch_dtype)

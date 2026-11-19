@@ -1,6 +1,7 @@
 """Calibrate FlexGlue's FP8 matcher on image sequences and write its graph beside the prepared matcher.
 
-Run once per machine and model, before matching (a run refuses to start without the FP8 graph): `pixi run -e colsfm
+Run once per machine, model and `--min-covisibility` (each threshold has its own graph), before matching (a run refuses
+to start without the FP8 graph): `pixi run -e colsfm
 colsfm-flexglue-fp8` calibrates on the eight cameras of the Galileo sample. The transformer's activations depend on the
 images only (the quantized layers come before the keypoint head), so any sequences of real frames calibrate it. A
 valid FP8 graph is kept; a FlexGlue graph change (rewrite version, options) makes it stale and this recalibrates.
@@ -29,7 +30,6 @@ from colsfm.flexglue_fp8 import (
 )
 from colsfm.flexglue_trt import (
     DESCRIPTOR_BATCH,
-    FlexGlueOptions,
     FlexGlueTensorRT,
     descriptor_profile,
     matcher_profile,
@@ -37,7 +37,7 @@ from colsfm.flexglue_trt import (
     prepare_matcher_graph,
 )
 from colsfm.frames import ImageFolderFrames
-from colsfm.matching import FLEXGLUE_FP8_FILE, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES
+from colsfm.matching import FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions
 from colsfm.tensorrt_runtime import resolve_engine
 
 IMAGE_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg")
@@ -57,6 +57,8 @@ class Config:
     """Image pairs to calibrate on."""
     model_dir: Path = field(default_factory=lambda: FLEXGLUE_MODEL_DIR)
     """FlexGlue's graphs (`colsfm-download-flexglue`)."""
+    min_covisibility: float = FlexGlueOptions().min_covisibility
+    """The matching run's `MatchingOptions.flexglue_min_covisibility`: each threshold is folded into its own FP8 graph."""
 
 
 def main(config: Config) -> Path:
@@ -70,8 +72,9 @@ def main(config: Config) -> Path:
     """
     started: float = time.perf_counter()
     models: Path = config.model_dir
-    matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", FlexGlueOptions())
-    destination: Path = models / FLEXGLUE_FP8_FILE
+    options: FlexGlueOptions = FlexGlueOptions(min_covisibility=config.min_covisibility)
+    matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", options)
+    destination: Path = models / options.fp8_file()
     if fp8_source(destination) == matcher_graph.name:
         print(f"[colsfm] flexglue fp8: {destination.name} present, calibrated from {matcher_graph.name}")
         return destination

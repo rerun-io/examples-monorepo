@@ -47,8 +47,8 @@ from colsfm.database import ImagePair, KeypointsXY
 from colsfm.flexglue_fp8 import check_fp8_graph
 from colsfm.frames import FrameSource, open_frame_source
 from colsfm.matching import (
-    FLEXGLUE_FP8_FILE,
     FLEXGLUE_MODEL_FILES,
+    FlexGlueOptions,
     MatchingOptions,
     MatchReport,
     PairMatchStats,
@@ -81,28 +81,6 @@ GRAPH_REWRITE_VERSION: Final[int] = 3
 
 ATTENTION_HEADS_ATTRIBUTE: Final[str] = "num_heads"
 """The contrib `MultiHeadAttention` attribute that carries the head count."""
-
-
-@dataclass(frozen=True, slots=True)
-class FlexGlueOptions:
-    """FlexGlue's matcher thresholds, with COLMAP's defaults (`FlexGlueMatchingOptions`)."""
-
-    filter_threshold: float = 0.1
-    """Minimum match confidence (geometric mean of both directions)."""
-    max_distance_px: float = 3.0
-    """Keypoint-to-correspondence distance gate in the 512x512 frame; COLMAP passes infinity for a non-positive value."""
-    min_covisibility: float = 0.5
-    """A pair whose predicted covisibility is below this keeps no match."""
-    early_stop_decay: float = 0.5
-    """The early-stop gate after layers 2, 4, 6 and 8 (`min_covisibility * (1 - decay)^(9 - k)`); 1 disables it."""
-
-    def tag(self) -> str:
-        """A file-name-safe key for the folded graph and its engine.
-
-        Returns:
-            E.g. `ft0.1_md3_mc0.5_es0.5`.
-        """
-        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}_es{self.early_stop_decay:g}"
 
 
 def matcher_profile(max_keypoints: int = MATCHER_MAX_KEYPOINTS) -> dict[str, ShapeProfile]:
@@ -558,8 +536,7 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     flexglue_options: FlexGlueOptions = FlexGlueOptions(min_covisibility=options.flexglue_min_covisibility)
     models: Path = options.flexglue_model_dir
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
-    fp8_graph: Path = models / FLEXGLUE_FP8_FILE
-    check_fp8_graph(fp8_graph, matcher_graph)
+    fp8_graph: Path = check_fp8_graph(models, matcher_graph, flexglue_options)
     descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
     descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
     matcher_engine: Path = resolve_engine(fp8_graph, matcher_profile(), precision="fp32")

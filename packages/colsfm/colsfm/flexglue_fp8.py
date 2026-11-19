@@ -5,14 +5,14 @@ keypoint count): about 2 TFLOP per pair, which the fp16/bf16 engine runs near th
 cost of every tensor-core op it reaches. Quantized here, on the graph `colsfm.flexglue_trt.prepare_matcher_graph`
 prepares:
 
-* every transformer linear (`matcher.transformers.*`): FP8 weights with per-output-channel scales, FP8 inputs with one
-  static scale each (trtkit's `fp8_weight_dq` / `fp8_input_qdq`);
+* every transformer linear (`matcher.transformers.*`): FP8 weights with per-output-channel scales, quantized once per
+  weight (both images' MatMuls share it), FP8 inputs with one static scale each (trtkit's `fp8_weight_dq` / `fp8_input_qdq`);
 * both attention-core MatMuls of every attention (q.k^T and p.v): FP8 operands with static bf16 scales; the softmax
   probabilities use amax 1.
 
 The input projection, the positional encoding and the match head keep their precision. An input scale is the
 largest magnitude the calibration pairs produced, times `trtkit.onnx_qdq.LINEAR_INPUT_HEADROOM`. The scales live in
-the graph (`colsfm.matching.FLEXGLUE_FP8_FILE`), which `colsfm.apis.flexglue_fp8` writes once per machine and model;
+the graph (`colsfm.matching.FlexGlueOptions.fp8_file`, one per set of thresholds), which `colsfm.apis.flexglue_fp8` writes once per machine and model;
 a run refuses to start without it (`colsfm.model_assets`), and matching refuses one calibrated from another prepared
 matcher (`check_fp8_graph`).
 
@@ -37,7 +37,7 @@ import torch
 from onnx import TensorProto, helper, numpy_helper
 from trtkit.onnx_qdq import LINEAR_INPUT_HEADROOM, fp8_input_qdq, fp8_weight_dq, prune_dead
 
-from colsfm.matching import FLEXGLUE_FP8_COMMAND
+from colsfm.matching import FLEXGLUE_FP8_COMMAND, FlexGlueOptions
 
 TRANSFORMER_WEIGHTS: Final[str] = "matcher.transformers."
 """Weight-name prefix of the linears that go to FP8; the head, the input projection and the posenc keep their precision."""
@@ -161,23 +161,26 @@ def quantize(model: onnx.ModelProto, targets: Fp8Targets, amax: Mapping[str, flo
     added: list[onnx.TensorProto] = []
     inputs: dict[str, str] = {}
     """Dequantized name per quantized linear input: the q, k and v projections of one activation share it."""
+    transposed: dict[str, str] = {}
+    """Transposed FP8 weight per weight initializer: the MatMuls of both images share it."""
     for node in graph.node:
         if node.name in linears:
             activation, weight = linears[node.name]
-            module: str = f"{weight.removesuffix('.weight')}@{node.name}"
-            weight_initializers, weight_node = fp8_weight_dq(
-                module, torch.from_numpy(numpy_helper.to_array(weights[weight]).astype(np.float32)), "float16"
-            )
-            added.extend(weight_initializers)
-            nodes.append(weight_node)
+            if weight not in transposed:
+                module: str = weight.removesuffix(".weight")
+                weight_initializers, weight_node = fp8_weight_dq(
+                    module, torch.from_numpy(numpy_helper.to_array(weights[weight]).astype(np.float32)), "float16"
+                )
+                added.extend(weight_initializers)
+                nodes.extend([weight_node, helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0])])
+                transposed[weight] = f"{module}.w_t"
             if activation not in inputs:
                 input_initializers, input_nodes, inputs[activation] = fp8_input_qdq(
-                    activation, f"{module}.x", amax[activation] * LINEAR_INPUT_HEADROOM, "float16"
+                    activation, f"{weight.removesuffix('.weight')}@{node.name}.x", amax[activation] * LINEAR_INPUT_HEADROOM, "float16"
                 )
                 added.extend(input_initializers)
                 nodes.extend(input_nodes)
-            nodes.append(helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0]))
-            nodes.append(helper.make_node("MatMul", [inputs[activation], f"{module}.w_t"], list(node.output), name=node.name))
+            nodes.append(helper.make_node("MatMul", [inputs[activation], transposed[weight]], list(node.output), name=node.name))
         elif node.name in cores:
             dequantized: list[str] = []
             for slot, operand in enumerate(cores[node.name]):
@@ -213,21 +216,28 @@ def fp8_source(fp8_graph: Path) -> str | None:
     return next((p.value for p in onnx.load(fp8_graph, load_external_data=False).metadata_props if p.key == SOURCE_PROPERTY), None)
 
 
-def check_fp8_graph(fp8_graph: Path, matcher_graph: Path) -> None:
-    """Refuse an FP8 graph that is missing or was calibrated from another prepared matcher (an older rewrite or options).
+def check_fp8_graph(model_dir: Path, matcher_graph: Path, options: FlexGlueOptions) -> Path:
+    """Find the FP8 graph for these thresholds; refuse one that is missing or was calibrated from another prepared matcher.
 
     Args:
-        fp8_graph: The calibrated FP8 matcher.
-        matcher_graph: The prepared matcher this run would quantize.
+        model_dir: FlexGlue's graphs.
+        matcher_graph: The prepared matcher this run would quantize (its name carries the thresholds and the rewrite).
+        options: The thresholds folded into `matcher_graph`.
+
+    Returns:
+        The FP8 graph.
 
     Raises:
-        FileNotFoundError: When the FP8 graph is missing or stale, naming the calibration command.
+        FileNotFoundError: When the FP8 graph is missing or stale, naming the calibration command for these thresholds.
     """
+    fp8_graph: Path = model_dir / options.fp8_file()
+    command: str = f"{FLEXGLUE_FP8_COMMAND} --min-covisibility {options.min_covisibility:g}"
     if not fp8_graph.is_file():
-        raise FileNotFoundError(f"No FP8 FlexGlue matcher at {fp8_graph}: calibrate it once with `{FLEXGLUE_FP8_COMMAND}`")
+        raise FileNotFoundError(f"No FP8 FlexGlue matcher at {fp8_graph}: calibrate it once with `{command}`")
     source: str | None = fp8_source(fp8_graph)
     if source != matcher_graph.name:
-        raise FileNotFoundError(f"{fp8_graph} was calibrated from {source!r}, not {matcher_graph.name}: recalibrate with `{FLEXGLUE_FP8_COMMAND}`")
+        raise FileNotFoundError(f"{fp8_graph} was calibrated from {source!r}, not {matcher_graph.name}: recalibrate with `{command}`")
+    return fp8_graph
 
 
 def calibration_pairs(image_dirs: Sequence[Sequence[Path]], count: int = CALIBRATION_PAIRS, seed: int = 0) -> list[tuple[Path, Path]]:

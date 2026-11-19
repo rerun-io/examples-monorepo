@@ -20,6 +20,7 @@ from colsfm.flexglue_fp8 import (  # noqa: E402
     fp8_targets,
     quantize,
 )
+from colsfm.matching import FlexGlueOptions  # noqa: E402
 
 WIDTH: int = 8
 FP8_MAX: float = 448.0
@@ -148,18 +149,56 @@ def test_calibration_pairs_mix_neighbours_ten_apart_and_unrelated_frames(tmp_pat
         calibration_pairs([sequences[0][:11]], 3)
 
 
+def test_a_weight_both_images_use_is_quantized_once() -> None:
+    """The matcher applies each transformer weight to both images: one FP8 copy and one DQ serve both MatMuls, while each
+    image's activation keeps its own input scale."""
+    model = _toy_matcher()
+    graph = model.graph
+    graph.input.append(helper.make_tensor_value_info("x1", TensorProto.FLOAT16, [1, 4, WIDTH]))
+    graph.node.extend(
+        [
+            helper.make_node("Transpose", ["matcher.transformers.0.self_attn.Wqkv.weight"], ["q1_wt"], perm=[1, 0]),
+            helper.make_node("MatMul", ["x1", "q1_wt"], ["q1"], name="mm_q1"),
+        ]
+    )
+    graph.output.append(helper.make_tensor_value_info("q1", TensorProto.FLOAT16, [1, 4, WIDTH]))
+    quantized = quantize(model, fp8_targets(graph), {"x": 3.0, "x1": 4.0, "q_bf16": 10.0, "k_bf16": 20.0})
+    assert len([t for t in quantized.graph.initializer if t.data_type == TensorProto.FLOAT8E4M3FN and t.dims]) == 2
+    weight_reads = {node.name: node.input[1] for node in quantized.graph.node if node.name in ("mm_q", "mm_q1")}
+    assert weight_reads["mm_q"] == weight_reads["mm_q1"]
+    scales = _operand_scales(quantized)
+    assert scales[("mm_q", 0)][0] == pytest.approx(3.0 * 2 / FP8_MAX, rel=1e-2)
+    assert scales[("mm_q1", 0)][0] == pytest.approx(4.0 * 2 / FP8_MAX, rel=1e-2)
+
+
 def test_a_missing_or_stale_fp8_graph_is_refused(tmp_path: Path) -> None:
     """The FP8 graph records the prepared matcher it was calibrated from; another one (an older rewrite, other options)
     must be recalibrated, not reused."""
-    prepared = tmp_path / "matcher_v3.onnx"
-    fp8 = tmp_path / "flexglue_matcher_fp8.onnx"
+    options = FlexGlueOptions()
+    prepared = tmp_path / f"matcher_{options.tag()}_v3.onnx"
     with pytest.raises(FileNotFoundError, match="calibrate it once"):
-        check_fp8_graph(fp8, prepared)
+        check_fp8_graph(tmp_path, prepared, options)
     model = _toy_matcher()
-    helper.set_model_props(model, {SOURCE_PROPERTY: "matcher_v2.onnx"})
-    onnx.save(model, fp8)
+    helper.set_model_props(model, {SOURCE_PROPERTY: f"matcher_{options.tag()}_v2.onnx"})
+    onnx.save(model, tmp_path / options.fp8_file())
     with pytest.raises(FileNotFoundError, match="recalibrate"):
-        check_fp8_graph(fp8, prepared)
+        check_fp8_graph(tmp_path, prepared, options)
     helper.set_model_props(model, {SOURCE_PROPERTY: prepared.name})
-    onnx.save(model, fp8)
-    check_fp8_graph(fp8, prepared)
+    onnx.save(model, tmp_path / options.fp8_file())
+    assert check_fp8_graph(tmp_path, prepared, options) == tmp_path / options.fp8_file()
+
+
+def test_each_covisibility_threshold_has_its_own_fp8_graph(tmp_path: Path) -> None:
+    """The threshold is folded into the matcher, so a 0.6 run looks for its own FP8 graph and names the command that
+    calibrates it; the default graph beside it does not serve it."""
+    default, strict = FlexGlueOptions(), FlexGlueOptions(min_covisibility=0.6)
+    assert strict.fp8_file() != default.fp8_file() and "_mc0.6_" in strict.fp8_file()
+    model = _toy_matcher()
+    helper.set_model_props(model, {SOURCE_PROPERTY: f"matcher_{default.tag()}.onnx"})
+    onnx.save(model, tmp_path / default.fp8_file())
+    with pytest.raises(FileNotFoundError, match="--min-covisibility 0.6"):
+        check_fp8_graph(tmp_path, tmp_path / f"matcher_{strict.tag()}.onnx", strict)
+    helper.set_model_props(model, {SOURCE_PROPERTY: f"matcher_{strict.tag()}.onnx"})
+    onnx.save(model, tmp_path / strict.fp8_file())
+    assert check_fp8_graph(tmp_path, tmp_path / f"matcher_{strict.tag()}.onnx", strict) == tmp_path / strict.fp8_file()
+    assert check_fp8_graph(tmp_path, tmp_path / f"matcher_{default.tag()}.onnx", default) == tmp_path / default.fp8_file()
