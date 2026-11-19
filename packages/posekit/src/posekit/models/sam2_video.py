@@ -50,8 +50,9 @@ class Sam2VideoSegmenterConfig:
     memory_window_size: int = 7
     """Sliding window (frames) of non-prompt memories kept per tracked object."""
     max_conditional_memories: int = -1
-    """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Prompted memories are never
-    pruned, so a tracker re-prompted through a long video needs a bound or its per-frame cost grows with the video."""
+    """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Bounded, the bank also stores
+    only those (:class:`~posekit.models.sam2_memory_bank.BoundedForgetfulMemoryBank`), so a tracker re-prompted
+    through a long video keeps a constant per-frame cost and memory."""
     single_click_multimask: bool = False
     """A prompt of one click per object takes the best of SAM 2's three masks by predicted IoU (SAM 2's
     ``_use_multimask`` rule: a lone click is ambiguous, shirt or person); off, it takes the single mask."""
@@ -110,6 +111,8 @@ class Sam2VideoSegmenter(VideoSegmenter):
         from sam2.modeling.sam2_prompt import SAM2Prompt
         from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
+        from posekit.models.sam2_memory_bank import BoundedForgetfulMemoryBank
+
         validate_frames_rgb(frames_rgb)
         if prompts is not None and prompts.text is not None:
             raise ValueError("Sam2VideoSegmenter is visually prompted; text prompts are not supported.")
@@ -120,7 +123,9 @@ class Sam2VideoSegmenter(VideoSegmenter):
             self._states = [
                 SAM2GenericVideoPredictorState.create(
                     video_hw=(frame_h, frame_w),
-                    memory_bank=SAM2ForgetfulObjectMemoryBank(memory_window_size=self.config.memory_window_size),
+                    memory_bank=SAM2ForgetfulObjectMemoryBank(memory_window_size=self.config.memory_window_size)
+                    if self.config.max_conditional_memories < 0
+                    else BoundedForgetfulMemoryBank(self.config.max_conditional_memories, self.config.memory_window_size),
                 )
                 for _ in range(batch_size)
             ]
