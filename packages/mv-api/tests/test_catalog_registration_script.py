@@ -96,7 +96,7 @@ def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
     assert feature["pypi-dependencies"]["simplecv"] == {"path": "packages/simplecv", "editable": True}
     assert task["cmd"] == "python tools/apps/register_catalog_with_predictions.py"
     assert task["cwd"] == "packages/mv-api"
-    assert environment["features"] == ["mv-api-catalog-register-mac"]
+    assert environment["features"] == ["mv-api-catalog-register-mac", "ffmpeg"]  # every env composes ffmpeg (#665)
     assert environment["no-default-feature"] is True
     assert "cuda" not in environment["features"]
     assert "mv-api" not in environment["features"]
