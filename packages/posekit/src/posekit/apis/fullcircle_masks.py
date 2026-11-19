@@ -15,6 +15,7 @@ scene at infinity, as in a stitched panorama).
 
 import time
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -251,21 +252,32 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         debug = rr.RecordingStream("fullcircle_debug", recording_id=f"{segment_id}-fullcircle-debug")
         debug.save(config.debug_rrd)
 
-    decode_s: float = 0.0
+    decode_wait_s: float = 0.0
+
+    # One thread for every decode: an NVDEC decoder fails on a thread other than the one it first decoded on.
+    decode_thread: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="decode")
+
+    def decode(chunk: list[int]) -> list[list[UInt8[Tensor, "h w 3"]]]:
+        batches: list[Tensor] = [
+            rearrange(decoder.get_frames_at([i - first for i in chunk]).data, "n c h w -> n h w c")
+            for decoder, first in zip(decoders, firsts, strict=True)
+        ]
+        torch.cuda.synchronize(device)
+        return [[batch[column] for batch in batches] for column in range(len(chunk))]
 
     def decoded_chunks() -> Iterator[tuple[int, list[int], list[list[UInt8[Tensor, "h w 3"]]]]]:
-        """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the lens frames."""
-        nonlocal decode_s
-        for begin in range(0, len(tracked), config.decode_chunk):
-            chunk: list[int] = tracked[begin : begin + config.decode_chunk]
+        """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the
+        lens frames. The next chunk decodes on the decode thread while the caller computes on this one."""
+        nonlocal decode_wait_s
+        chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
+        pending: Future[list[list[Tensor]]] | None = decode_thread.submit(decode, chunks[0]) if chunks else None
+        for position, chunk in enumerate(chunks):
+            assert pending is not None
             tick: float = time.perf_counter()
-            batches: list[Tensor] = [
-                rearrange(decoder.get_frames_at([i - first for i in chunk]).data, "n c h w -> n h w c")
-                for decoder, first in zip(decoders, firsts, strict=True)
-            ]
-            torch.cuda.synchronize(device)
-            decode_s += time.perf_counter() - tick
-            yield begin, chunk, [[batch[column] for batch in batches] for column in range(len(chunk))]
+            frames: list[list[Tensor]] = pending.result()
+            decode_wait_s += time.perf_counter() - tick
+            pending = decode_thread.submit(decode, chunks[position + 1]) if position + 1 < len(chunks) else None
+            yield position * config.decode_chunk, chunk, frames
 
     detect_start: float = time.perf_counter()
     directions: list[Float64[ndarray, "3"] | None] = []
@@ -310,6 +322,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         if begin % (config.decode_chunk * 25) == 0:
             done: int = begin + len(chunk)
             print(f"frameset {chunk[-1]}: {done} tracked, {done / elapsed:.1f} framesets/s")
+    decode_thread.shutdown()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()
@@ -319,6 +332,6 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     total: float = time.perf_counter() - process_start
     steps: str = ", ".join(f"{k} {v:.1f} s" for k, v in masker.seconds.items())
     print(
-        f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; decode (both passes) {decode_s:.1f} s; steps: {steps}; "
+        f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; waiting for decode (both passes) {decode_wait_s:.1f} s; steps: {steps}; "
         f"{masker.prompts} tracker prompts; peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks"
     )
