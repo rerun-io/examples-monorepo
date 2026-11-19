@@ -55,7 +55,7 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Literal, TypeAlias
+from typing import ClassVar, Literal
 
 import av
 import insta360_io
@@ -95,8 +95,6 @@ LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
-SeamKind: TypeAlias = Literal["flow", "blend"]
-"""How the panorama joins its seam band: the flow seam (``cuda``) or the plain feather (``cpu``)."""
 RUN_SOURCE: str = "slam_rs"
 """The run layer the layouts show: slam-rs tracks these clips."""
 
@@ -432,23 +430,22 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         table: insta360_panorama.PanoramaTable = insta360_panorama.panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, width, self.config.pano_band_deg)
         width, height = table.size
         device: torch.device = torch.device(self.config.pano_device)
-        seam: SeamKind = "flow" if device.type == "cuda" else "blend"
-        rr.log(
-            PANO_ENTITY,
-            rr.AnyValues(
-                video_codec="av1",
-                cq=self.config.pano_cq,
-                gop=self.config.pano_gop,
-                width=width,
-                height=height,
-                seam=seam,
-                seam_band_deg=self.config.pano_band_deg,
-            ),
-            static=True,
-            recording=recording,
-        )
-        join = insta360_panorama.PanoramaJoin(table, lenses.size, device)
-        with work_dir("insta360-pano-") as work, contextlib.closing(join):
+        # The scratch directory first, so the join's NVOF sessions are always inside ``closing``.
+        with work_dir("insta360-pano-") as work, contextlib.closing(insta360_panorama.PanoramaJoin(table, lenses.size, device)) as join:
+            rr.log(
+                PANO_ENTITY,
+                rr.AnyValues(
+                    video_codec="av1",
+                    cq=self.config.pano_cq,
+                    gop=self.config.pano_gop,
+                    width=width,
+                    height=height,
+                    seam=join.seam_kind,
+                    seam_band_deg=self.config.pano_band_deg,
+                ),
+                static=True,
+                recording=recording,
+            )
             video: Path = work / "pano.mp4"
             with self.timer.stage("panorama"):
                 batch: int = max(1, LENS_BATCH_PIXELS // (lenses.size[0] * lenses.size[1]))

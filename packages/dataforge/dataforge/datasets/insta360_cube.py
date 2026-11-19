@@ -130,24 +130,29 @@ def project_pair(
     return pixels, np.stack([valid0, valid1]) & on_sensor
 
 
+def lens1_row(lens_height: int) -> int:
+    """The stacked pair's first lens-1 row: lens 0 on ``[0, h)``, the zero row ``h``, lens 1 from ``h + 1``."""
+    return lens_height + 1
+
+
 def stack_pair(lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> Float32[Tensor, "b 3 r w"]:
     """The stacked pair on the lenses' device: lens 0 on rows ``[0, h)``, a zero row (the remap's border on both sides of
     the seam), lens 1 on ``[h + 1, 2h + 1)``."""
     b, c, h, w = lens0.shape
-    stacked: Float32[Tensor, "b 3 r w"] = torch.empty((b, c, 2 * h + 1, w), dtype=torch.float32, device=lens0.device)
+    stacked: Float32[Tensor, "b 3 r w"] = torch.empty((b, c, lens1_row(h) + h, w), dtype=torch.float32, device=lens0.device)
     stacked[:, :, :h] = lens0
-    stacked[:, :, h] = 0.0
-    stacked[:, :, h + 1 :] = lens1
+    stacked[:, :, h : lens1_row(h)] = 0.0
+    stacked[:, :, lens1_row(h) :] = lens1
     return stacked
 
 
 def stack_pair_hwc(lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[ndarray, "b r w 3"]:
     """``stack_pair`` on the host, channels last, as ``cv2.remap`` reads it."""
     b, c, h, w = lens0.shape
-    stacked: UInt8[ndarray, "b r w 3"] = np.empty((b, 2 * h + 1, w, c), dtype=np.uint8)
+    stacked: UInt8[ndarray, "b r w 3"] = np.empty((b, lens1_row(h) + h, w, c), dtype=np.uint8)
     stacked[:, :h] = lens0.permute(0, 2, 3, 1).numpy()
-    stacked[:, h] = 0
-    stacked[:, h + 1 :] = lens1.permute(0, 2, 3, 1).numpy()
+    stacked[:, h : lens1_row(h)] = 0
+    stacked[:, lens1_row(h) :] = lens1.permute(0, 2, 3, 1).numpy()
     return stacked
 
 
@@ -194,7 +199,7 @@ class CubeJoin:
         self.size: int = tables[0].map_x.shape[0]
         # Rows of the stacked pair (``stack_pair``).
         x: Float64[ndarray, "f n n"] = np.stack([table.map_x for table in tables]).astype(np.float64)
-        y: Float64[ndarray, "f n n"] = np.stack([np.where(table.use_lens0, table.map_y, table.map_y.astype(np.float64) + height + 1) for table in tables])
+        y: Float64[ndarray, "f n n"] = np.stack([np.where(table.use_lens0, table.map_y, table.map_y.astype(np.float64) + lens1_row(height)) for table in tables])
         if device.type == "cpu":
             self.maps: Float32[ndarray, "f 2 n n"] = np.stack([x, y], axis=1).astype(np.float32)
             return

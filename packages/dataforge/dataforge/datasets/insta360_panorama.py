@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal, TypeAlias
 
 import cv2
 import insta360_io
@@ -39,7 +40,7 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
-from dataforge.datasets.insta360_cube import ALIGN, project_pair, stack_pair, stack_pair_hwc, stacked_grid
+from dataforge.datasets.insta360_cube import ALIGN, lens1_row, project_pair, stack_pair, stack_pair_hwc, stacked_grid
 from dataforge.nvof import OpticalFlow, PerfLevel
 
 SEAM_BAND_DEG: float = 5.0
@@ -60,8 +61,13 @@ FLOW_SMOOTHING: float = 0.5
 """Weight of the new flow in the running flow (exponential smoothing over frames)."""
 SUB_BATCH: int = 4
 """Framesets remapped together on CUDA: one 3840x1920 remap already fills the GPU, so a larger step only raises the float peak."""
+TABLE_BLOCK_RAYS: int = 1 << 22
+"""Rays projected at once while a table is built, in whole panorama rows: the float64 projection of a whole 7680x3840
+panorama would hold about 2.5 GB."""
 BAND_COLUMNS: int = 4096
 """Band pixels are remapped on the CPU as rows of this many."""
+SeamKind: TypeAlias = Literal["flow", "blend"]
+"""How a join fills the band: the flow seam or the plain feather."""
 LUMA: tuple[float, float, float] = (0.299, 0.587, 0.114)
 """RGB weights of the gray strips the flow sees."""
 
@@ -71,8 +77,8 @@ def default_panorama_width(lens_width: int) -> int:
     return max(ALIGN, ALIGN * round(2 * lens_width / ALIGN))
 
 
-def panorama_rays(width: int) -> Float64[ndarray, "h w 3"]:
-    """The unit ray of every panorama pixel in frame ``E``.
+def panorama_rays(width: int, rows: range | None = None) -> Float64[ndarray, "h w 3"]:
+    """The unit ray of every panorama pixel in frame ``E``, of the panorama rows ``rows`` (all by default).
 
     Raises:
         ValueError: If ``width`` is not a positive multiple of ``ALIGN``.
@@ -81,7 +87,7 @@ def panorama_rays(width: int) -> Float64[ndarray, "h w 3"]:
         raise ValueError(f"panorama width {width} is not a positive multiple of {ALIGN}")
     step: float = 2.0 * math.pi / width
     lon: Float64[ndarray, " w"] = (np.arange(width) + 0.5) * step - math.pi / 2.0
-    lat: Float64[ndarray, " h"] = (np.arange(width // 2) + 0.5) * step - math.pi / 2.0
+    lat: Float64[ndarray, " h"] = (np.asarray(rows if rows is not None else range(width // 2)) + 0.5) * step - math.pi / 2.0
     lon_grid, lat_grid = np.meshgrid(lon, lat)
     return np.stack([np.cos(lat_grid) * np.sin(lon_grid), np.sin(lat_grid), np.cos(lat_grid) * np.cos(lon_grid)], axis=-1)
 
@@ -124,38 +130,53 @@ def panorama_table(
     """
     if band_deg <= 0.0:
         raise ValueError(f"seam band {band_deg} deg must be positive")
-    lens1_row: Float64[ndarray, "2"] = np.array([0.0, lens_size[1] + 1.0])
     band: float = math.radians(band_deg)
     step: float = 2.0 * math.pi / width
-    rays: Float64[ndarray, "n 3"] = panorama_rays(width).reshape(-1, 3)
-    pixels, held = project_pair(cameras, lens1_from_lens0, lens_size, rays)
-    pixels[1] += lens1_row
-    lens1: Bool[ndarray, " n"] = rays[:, 2] < 0.0
-    outside: int = int((~np.where(lens1, held[1], held[0])).sum())
+    height: int = width // 2
+    strip_rows: int = max(MIN_STRIP_ROWS, 4 * round(2.0 * band / step / 4))
+    pano_xy: Float32[ndarray, "ph pw 2"] = np.empty((height, width, 2), dtype=np.float32)
+    band_index: list[Int64[ndarray, " k"]] = []
+    band_lens_xy: list[Float32[ndarray, "2 k 2"]] = []
+    band_delta: list[Float64[ndarray, " k"]] = []
+    band_phi: list[Float64[ndarray, " k"]] = []
+    outside: int = 0
+    block: int = max(1, TABLE_BLOCK_RAYS // width)
+    for top in range(0, height, block):
+        rays: Float64[ndarray, "n 3"] = panorama_rays(width, range(top, min(top + block, height))).reshape(-1, 3)
+        pixels, held = project_pair(cameras, lens1_from_lens0, lens_size, rays)
+        pixels[1, :, 1] += lens1_row(lens_size[1])
+        lens1: Bool[ndarray, " n"] = rays[:, 2] < 0.0
+        outside += int((~np.where(lens1, held[1], held[0])).sum())
+        pano_xy[top : top + rays.shape[0] // width] = np.where(lens1[:, None], pixels[1], pixels[0]).reshape(-1, width, 2)
+        delta: Float64[ndarray, " n"] = np.arcsin(np.clip(rays[:, 2], -1.0, 1.0))
+        inside: Int64[ndarray, " k"] = np.flatnonzero(np.abs(delta) < band)
+        for lens in range(2):
+            if not held[lens][inside].all():
+                raise ValueError(f"the seam band of +-{band_deg} deg reaches outside lens {lens}")
+        band_index.append(inside + top * width)
+        band_lens_xy.append(pixels[:, inside].astype(np.float32))
+        band_delta.append(delta[inside])
+        band_phi.append(np.mod(np.arctan2(rays[inside, 1], rays[inside, 0]), 2.0 * math.pi))
     if outside:
         raise ValueError(f"{outside} panorama pixels lie outside the lens they are read from")
-    delta: Float64[ndarray, " n"] = np.arcsin(np.clip(rays[:, 2], -1.0, 1.0))
-    index: Int64[ndarray, " k"] = np.flatnonzero(np.abs(delta) < band)
-    weight: Float64[ndarray, " k"] = (band - delta[index]) / (2.0 * band)
+    weight: Float64[ndarray, " k"] = (band - np.concatenate(band_delta)) / (2.0 * band)
     columns: int = width + 2 * STRIP_PAD
-    rows: int = max(MIN_STRIP_ROWS, 4 * round(2.0 * band / step / 4))
     phi: Float64[ndarray, " sw"] = (np.arange(columns) - STRIP_PAD + 0.5) * step
-    strip_delta: Float64[ndarray, " sh"] = band - (np.arange(rows) + 0.5) * 2.0 * band / rows
+    strip_delta: Float64[ndarray, " sh"] = band - (np.arange(strip_rows) + 0.5) * 2.0 * band / strip_rows
     phi_grid, delta_grid = np.meshgrid(phi, strip_delta)
     strip_rays: Float64[ndarray, "m 3"] = np.stack([np.cos(delta_grid) * np.cos(phi_grid), np.cos(delta_grid) * np.sin(phi_grid), np.sin(delta_grid)], axis=-1).reshape(-1, 3)
     strip_pixels, strip_held = project_pair(cameras, lens1_from_lens0, lens_size, strip_rays)
-    strip_pixels[1] += lens1_row
+    strip_pixels[1, :, 1] += lens1_row(lens_size[1])
     for lens in range(2):
-        if not (strip_held[lens].all() and held[lens][index].all()):
+        if not strip_held[lens].all():
             raise ValueError(f"the seam band of +-{band_deg} deg reaches outside lens {lens}")
-    band_phi: Float64[ndarray, " k"] = np.mod(np.arctan2(rays[index, 1], rays[index, 0]), 2.0 * math.pi)
     return PanoramaTable(
-        pano_xy=np.where(lens1[:, None], pixels[1], pixels[0]).reshape(width // 2, width, 2).astype(np.float32),
-        band_index=index,
+        pano_xy=pano_xy,
+        band_index=np.concatenate(band_index),
         band_weight=weight.astype(np.float32),
-        band_lens_xy=pixels[:, index].astype(np.float32),
-        band_strip_xy=np.stack([band_phi / step - 0.5 + STRIP_PAD, weight * rows - 0.5], axis=-1).astype(np.float32),
-        strip_lens_xy=strip_pixels.reshape(2, rows, columns, 2).astype(np.float32),
+        band_lens_xy=np.concatenate(band_lens_xy, axis=1),
+        band_strip_xy=np.stack([np.concatenate(band_phi) / step - 0.5 + STRIP_PAD, weight * strip_rows - 0.5], axis=-1).astype(np.float32),
+        strip_lens_xy=strip_pixels.reshape(2, strip_rows, columns, 2).astype(np.float32),
     )
 
 
@@ -256,10 +277,20 @@ class PanoramaJoin:
                 (np.ascontiguousarray(lens_map[..., 0]), np.ascontiguousarray(lens_map[..., 1])) for lens_map in band_maps
             ]
             return
-        self.pano_grid: Float32[Tensor, "1 ph pw 2"] = torch.from_numpy(stacked_grid(table.pano_xy, lens_size)).to(device)[None]
-        self.band_index: Int64[Tensor, " n"] = torch.from_numpy(table.band_index).to(device)
-        self.band_weight: Float32[Tensor, " n"] = torch.from_numpy(table.band_weight).to(device)
+        # The seam first: it refuses a strip wider than NVOF takes before the panorama's grids are allocated.
         self.seam = FlowSeam(table, lens_size, device)
+        try:
+            self.pano_grid: Float32[Tensor, "1 ph pw 2"] = torch.from_numpy(stacked_grid(table.pano_xy, lens_size)).to(device)[None]
+            self.band_index: Int64[Tensor, " n"] = torch.from_numpy(table.band_index).to(device)
+            self.band_weight: Float32[Tensor, " n"] = torch.from_numpy(table.band_weight).to(device)
+        except BaseException:
+            self.seam.close()
+            raise
+
+    @property
+    def seam_kind(self) -> SeamKind:
+        """How this join fills the band: the flow seam (``cuda``) or the plain feather (``cpu``)."""
+        return "blend" if self.seam is None else "flow"
 
     def panoramas(self, lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[Tensor, "b 3 ph pw"]:
         """The panoramas of ``b`` consecutive lens pairs (RGB, channels first, on the device).

@@ -70,6 +70,17 @@ def test_a_seam_band_beyond_either_lens_s_field_is_refused() -> None:
         panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, 0.0)
 
 
+def test_a_table_built_in_row_blocks_is_the_table_built_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataforge.datasets import insta360_panorama
+    from dataforge.datasets.insta360_panorama import panorama_table
+
+    whole = panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, BAND_DEG)
+    monkeypatch.setattr(insta360_panorama, "TABLE_BLOCK_RAYS", 7 * PANO)
+    blocks = panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, BAND_DEG)
+    for name in ("pano_xy", "band_index", "band_weight", "band_lens_xy", "band_strip_xy", "strip_lens_xy"):
+        np.testing.assert_array_equal(getattr(blocks, name), getattr(whole, name), err_msg=name)
+
+
 def test_a_scene_at_infinity_stitches_into_the_colour_of_each_panorama_ray() -> None:
     """Both lenses agree everywhere, so the blend band is invisible: every pixel is the colour of its own ray."""
     from dataforge.datasets.insta360_panorama import panorama_rays
@@ -227,3 +238,33 @@ def test_a_closed_flow_seam_refuses_instead_of_falling_back_to_the_blend() -> No
     join.close()
     with pytest.raises(RuntimeError, match="closed"):
         join.panoramas(pair[0], pair[1])
+
+
+@pytest.mark.integration
+def test_a_batch_across_the_sub_batch_boundary_is_the_same_framesets_joined_one_at_a_time() -> None:
+    """Five lens pairs whose lens 1 turns 0.5 deg more each frameset: one batch of five (sub-batches of 4 and 1, the flow
+    smoothed across them) and five calls of one, on fresh joins, give the same panoramas."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    from dataforge.datasets.insta360_panorama import SUB_BATCH, PanoramaJoin, panorama_table
+
+    assert SUB_BATCH < 5
+    u, v = np.meshgrid(np.arange(LENS, dtype=np.float64), np.arange(LENS, dtype=np.float64))
+    lens_rays: Float64[ndarray, "h w 3"] = unproject(u, v)
+    lens0 = torch.from_numpy(np.round(texture(lens_rays)).astype(np.uint8)).permute(2, 0, 1)
+    lens1 = torch.stack(
+        [torch.from_numpy(np.round(texture(lens_rays @ LENS1_FROM_LENS0 @ rotation_y(math.radians(0.5 * k)).T)).astype(np.uint8)).permute(2, 0, 1) for k in range(5)]
+    ).cuda()
+    lens0 = lens0[None].expand(5, -1, -1, -1).contiguous().cuda()
+    table = panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, BAND_DEG)
+    batched = PanoramaJoin(table, (LENS, LENS), torch.device("cuda"))
+    single = PanoramaJoin(table, (LENS, LENS), torch.device("cuda"))
+    try:
+        together = batched.panoramas(lens0, lens1)
+        apart = torch.cat([single.panoramas(lens0[k : k + 1], lens1[k : k + 1]) for k in range(5)])
+    finally:
+        batched.close()
+        single.close()
+    assert torch.equal(together, apart)

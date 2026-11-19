@@ -136,7 +136,8 @@ def _check(status: int, call: str) -> None:
 
 
 class OpticalFlow:
-    """One NVOF session for ``width`` x ``height`` grayscale pairs on the current CUDA device, run on the current stream.
+    """One NVOF session for ``width`` x ``height`` grayscale pairs, bound to the CUDA device and stream current when it is
+    made: NVOF reuses one set of buffers, so every call must come from that stream.
 
     With temporal hints on (the default), each ``flow`` call seeds its search from the previous call's flow: feed one
     sequence's pairs in order.
@@ -155,6 +156,7 @@ class OpticalFlow:
         _load("libcuda.so.1").cuCtxGetCurrent(ctypes.byref(context))
         if not context:
             raise RuntimeError("NVOF needs a current CUDA context")
+        self._stream: torch.cuda.Stream = torch.cuda.current_stream()
         self._handle: _Handle = _Handle()
         self._buffers: list[_Handle] = []
         self._views: list[Tensor] = []
@@ -162,7 +164,8 @@ class OpticalFlow:
         try:
             params = _InitParams(width, height, grid, 0, _MODE_OPTICALFLOW, _PERF_LEVELS[perf], 0, 0, None, 0, 0)
             _check(_INIT(self._api.init)(self._handle, ctypes.byref(params)), "init")
-            self._stream: int = 0
+            stream: int = self._stream.cuda_stream
+            _check(_SET_STREAMS(self._api.set_streams)(self._handle, stream, stream), "set streams")
             self._input = self._buffer(width, height, _USAGE_INPUT, _FORMAT_GRAYSCALE8, "|u1", 1)
             self._reference = self._buffer(width, height, _USAGE_INPUT, _FORMAT_GRAYSCALE8, "|u1", 1)
             self._output = self._buffer(-(-width // grid), -(-height // grid), _USAGE_OUTPUT, _FORMAT_SHORT2, "<i2", 2)
@@ -175,15 +178,12 @@ class OpticalFlow:
         """``f`` per grid block with ``input(x) ~ reference(x + f)``, pixels (NVOF's S10.5 fixed point divided out).
 
         Raises:
-            RuntimeError: After ``close``, or if NVOF fails.
+            RuntimeError: After ``close``, from another stream than the session's, or if NVOF fails.
         """
         if not self._handle:
             raise RuntimeError("the NVOF session is closed")
-        stream: int = torch.cuda.current_stream().cuda_stream
-        if stream != self._stream:
-            # NVOF reads and writes on the caller's stream, so the copies around it stay in order.
-            _check(_SET_STREAMS(self._api.set_streams)(self._handle, stream, stream), "set streams")
-            self._stream = stream
+        if torch.cuda.current_stream() != self._stream:
+            raise RuntimeError("an NVOF session runs on the CUDA stream it was made on")
         input_view, reference_view, output_view = self._views
         input_view.copy_(input[..., None])
         reference_view.copy_(reference[..., None])
@@ -193,8 +193,8 @@ class OpticalFlow:
         return output_view.float().div_(32.0)
 
     def close(self) -> None:
-        """Free the buffers and the session (after the stream's pending work); ``flow`` refuses afterwards."""
-        torch.cuda.current_stream().synchronize()
+        """Free the buffers and the session (after its stream's pending work); ``flow`` refuses afterwards."""
+        self._stream.synchronize()
         self._views.clear()
         for buffer in self._buffers:
             _DESTROY(self._api.destroy_buffer)(buffer)

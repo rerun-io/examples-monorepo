@@ -235,8 +235,18 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
     from dataforge.datasets.insta360 import PANO_ENTITY, cameras_from_recording, lens_pictures
     from dataforge.datasets.insta360_panorama import SEAM_BAND_DEG, PanoramaJoin, default_panorama_width, panorama_table
 
-    decoded: UInt8[ndarray, "k h w 3"] = decoded_rgb(panorama_rrd, PANO_ENTITY)
-    assert decoded.shape[1:] == (1920, 3840, 3)
+    # Only the first sample (a keyframe) is decoded: the whole layer at 3840x1920 RGB would hold about 2 GB.
+    chunks: list[rrc.Chunk] = [c for c in read_chunks(panorama_rrd) if c.entity_path == PANO_ENTITY and "VideoStream:sample" in c.to_record_batch().schema.names]
+    first: bytes = min(
+        (int(time), bytes(sample[0]))
+        for chunk in chunks
+        for time, sample in zip(
+            chunk.to_record_batch().column("video_time").cast(pa.int64()).to_pylist(), chunk.to_record_batch().column("VideoStream:sample").to_pylist(), strict=True
+        )
+    )[1]
+    decoder = av.CodecContext.create("libdav1d", "r")
+    decoded: UInt8[ndarray, "h w 3"] = (decoder.decode(av.Packet(first)) + decoder.decode(None))[0].to_ndarray(format="rgb24")  # pyrefly: ignore[missing-attribute]
+    assert decoded.shape == (1920, 3840, 3)
     rig = insta360_io.InsvRig(str(converted.clip), 1)
     lenses = cameras_from_recording(converted.targets[paths.BASE_LAYER])
     table = panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, default_panorama_width(lenses.size[0]), SEAM_BAND_DEG)
@@ -246,7 +256,7 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
         expected: UInt8[ndarray, "h w 3"] = join.panoramas(lens0, lens1)[0].permute(1, 2, 0).cpu().numpy()
     finally:
         join.close()
-    mse: float = float(np.mean((decoded[0].astype(np.float64) - expected.astype(np.float64)) ** 2))
+    mse: float = float(np.mean((decoded.astype(np.float64) - expected.astype(np.float64)) ** 2))
     psnr: float = 10.0 * np.log10(255.0**2 / mse)
     print(f"first panorama frame PSNR {psnr:.2f} dB")
     assert psnr > MIN_PSNR_DB
