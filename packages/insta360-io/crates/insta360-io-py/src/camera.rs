@@ -5,6 +5,9 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyUntypedArrayMet
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+/// What `MeiCamera.project` returns: `float64[n, 2]` pixels and their `bool[n]` validity.
+type Projection<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<bool>>);
+
 /// A unified (Mei) sphere camera with the Insta360 factory distortion.
 ///
 /// Built from what a calibration states (`model` `mei_v3` or `mei_v6`, `fx fy cx cy`, `coefficients`
@@ -117,7 +120,7 @@ impl MeiCamera {
         &self,
         py: Python<'py>,
         points: PyReadonlyArray2<'py, f64>,
-    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<bool>>)> {
+    ) -> PyResult<Projection<'py>> {
         let shape = points.shape();
         if shape.len() != 2 || shape[1] != 3 {
             return Err(PyValueError::new_err(format!(
