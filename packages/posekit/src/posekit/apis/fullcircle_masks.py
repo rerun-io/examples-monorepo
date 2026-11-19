@@ -259,7 +259,7 @@ def main(config: FullCircleMasksConfig) -> None:
 
     targets: list[str] = [f"{camera}/pinhole/people_mask" for camera in config.cameras]
     for target, source in zip(targets, sources, strict=True):
-        rr.log(target, rr.AnnotationContext([(0, "kept", (0, 0, 0, 0)), (OPERATOR_CLASS_ID, "masked", (40, 110, 255, 140))]), static=True)
+        rr.log(target, rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (OPERATOR_CLASS_ID, "masked", (40, 110, 255, 140))]), static=True)
         rr.log(target, rr.Transform3D(scale=[source.image_hw[1] / source.mask_hw[1], source.image_hw[0] / source.mask_hw[0], 1.0]), static=True)
     if debug is not None:
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (OPERATOR_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
