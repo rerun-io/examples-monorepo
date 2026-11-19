@@ -332,7 +332,7 @@ impl Vio {
     /// `masks`, when given, holds one entry per camera: `None` or a `uint8[h, w]` segmentation mask at any
     /// resolution, nonzero = no features there; it is read through its scale to the camera's tracked image
     /// (`slam_rs::frontend::masks`). The frontend neither detects in nor keeps a track in a detection cell that
-    /// holds a masked pixel. `masks=None` tracks unmasked, exactly as before masks existed.
+    /// holds a masked pixel. `masks=None` masks nothing.
     #[pyo3(signature = (t_ns, images, masks = None))]
     fn track(
         &mut self,
@@ -347,8 +347,8 @@ impl Vio {
                 .iter()
                 .enumerate()
                 .map(|(index, image)| {
-                    let array = gray_array(image, index)?;
-                    gray_pixels(&array, index)?;
+                    let array = gray_array(image, index, "image")?;
+                    gray_pixels(&array, index, "image")?;
                     Ok(array)
                 })
                 .collect::<PyResult<_>>()?;
@@ -356,7 +356,7 @@ impl Vio {
                 .iter()
                 .enumerate()
                 .map(|(index, array)| {
-                    let (data, width, height) = gray_pixels(array, index)?;
+                    let (data, width, height) = gray_pixels(array, index, "image")?;
                     Ok(ImageView {
                         width,
                         height,
@@ -850,19 +850,7 @@ impl Vio {
         let arrays: Vec<Option<PyReadonlyArray2<'_, u8>>> = masks
             .iter()
             .enumerate()
-            .map(|(index, mask)| {
-                mask.as_ref()
-                    .map(|mask| {
-                        mask.cast::<PyArray2<u8>>()
-                            .map(|array| array.readonly())
-                            .map_err(|_| {
-                                PyValueError::new_err(format!(
-                                    "mask {index} must be a 2-D uint8 numpy array or None"
-                                ))
-                            })
-                    })
-                    .transpose()
-            })
+            .map(|(index, mask)| mask.as_ref().map(|mask| gray_array(mask, index, "mask")).transpose())
             .collect::<PyResult<_>>()?;
         let views: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = arrays
             .iter()
@@ -871,12 +859,8 @@ impl Vio {
                 array
                     .as_ref()
                     .map(|array| {
-                        let shape: &[usize] = array.shape();
-                        let data: &[u8] = contiguous(array, &format!("mask {index}"), "mask")?;
-                        Ok(slam_rs::frontend::masks::PixelMask {
-                            width: shape[1],
-                            height: shape[0],
-                            data,
+                        gray_pixels(array, index, "mask").map(|(data, width, height)| {
+                            slam_rs::frontend::masks::PixelMask { width, height, data }
                         })
                     })
                     .transpose()
@@ -893,9 +877,10 @@ impl Vio {
 fn gray_array<'py>(
     object: &Bound<'py, PyAny>,
     index: usize,
+    what: &str,
 ) -> PyResult<PyReadonlyArray2<'py, u8>> {
     let array: &Bound<'py, PyArray2<u8>> = object.cast::<PyArray2<u8>>().map_err(|_| {
-        PyValueError::new_err(format!("image {index} must be a 2-D uint8 numpy array"))
+        PyValueError::new_err(format!("{what} {index} must be a 2-D uint8 numpy array"))
     })?;
     Ok(array.readonly())
 }
@@ -904,16 +889,17 @@ fn gray_array<'py>(
 fn gray_pixels<'a>(
     readonly: &'a PyReadonlyArray2<'_, u8>,
     index: usize,
+    what: &str,
 ) -> PyResult<(&'a [u8], usize, usize)> {
     let shape: &[usize] = readonly.shape();
-    let pixels: &[u8] = contiguous(readonly, &format!("image {index}"), "image")?;
+    let pixels: &[u8] = contiguous(readonly, &format!("{what} {index}"), what)?;
     Ok((pixels, shape[1], shape[0]))
 }
 
 /// Copy one C-contiguous `uint8[h, w]` array out of Python.
 fn gray_image(object: &Bound<'_, PyAny>, index: usize) -> PyResult<GrayImage> {
-    let readonly: PyReadonlyArray2<'_, u8> = gray_array(object, index)?;
-    let (pixels, width, height) = gray_pixels(&readonly, index)?;
+    let readonly: PyReadonlyArray2<'_, u8> = gray_array(object, index, "image")?;
+    let (pixels, width, height) = gray_pixels(&readonly, index, "image")?;
     Ok(GrayImage {
         width,
         height,
@@ -1423,8 +1409,8 @@ impl OpticalFlow {
         // outlive it. `fill_from_u8_strided` reuses the buffer whenever the
         // geometry is unchanged, which is every frame after the first.
         for (index, image) in images.iter().enumerate() {
-            let readonly: PyReadonlyArray2<'_, u8> = gray_array(image, index)?;
-            let (pixels, width, height) = gray_pixels(&readonly, index)?;
+            let readonly: PyReadonlyArray2<'_, u8> = gray_array(image, index, "image")?;
+            let (pixels, width, height) = gray_pixels(&readonly, index, "image")?;
             slam_rs::image::fill_from_u8_strided(
                 &mut self.images[index],
                 pixels,

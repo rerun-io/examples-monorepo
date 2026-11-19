@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn a_span_edge_on_a_non_binary_scale_is_exact() {
-        // Shrunk from a proptest failure of an f64 oracle: scale 98 / 20 = 4.9.
+        // Scale 98 / 20 = 4.9 has no binary form: centres land on span edges.
         let image = ImageSize {
             width: 98,
             height: 50,

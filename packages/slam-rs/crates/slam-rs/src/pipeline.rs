@@ -529,8 +529,7 @@ impl<S: Scalar> Vio<S> {
     }
 
     /// Masks for the framesets that follow, until the next call: one optional mask per camera, at any resolution
-    /// (it is read through its scale to the camera's tracked image, see [`frontend::masks`]). `None` masks nothing,
-    /// and a pipeline that is never given a mask runs exactly as before.
+    /// (it is read through its scale to the camera's tracked image, see [`frontend::masks`]). `None` masks nothing.
     ///
     /// # Errors
     ///
