@@ -172,8 +172,17 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             raise FileNotFoundError(f"no .insv clip in {self.config.root}: copy the camera's clips there")
 
     def discover(self) -> list[tuple[SequenceIdentity, ClipSource]]:
-        """Every ``.insv`` clip directly in the root, named by its file stem."""
-        return [(SequenceIdentity(self.config.name, (path.stem,)), ClipSource(path)) for path in sorted(self.config.root.glob("*.insv"))]
+        """Every ``.insv`` clip directly in the root, named by its file stem; a two-file clip (``…_00_…`` holds lens 0
+        and the trailer, ``…_10_…`` lens 1, as ``insta360_io`` pairs them) is one clip, named by its ``_00_`` file."""
+        paths: list[Path] = sorted(self.config.root.glob("*.insv"))
+        names: set[str] = {path.name for path in paths}
+
+        def is_lens_1_member(path: Path) -> bool:
+            parts: list[str] = path.name.split("_")
+            field: int | None = next((i for i, part in enumerate(parts) if part in ("00", "10")), None)
+            return field is not None and parts[field] == "10" and "_".join([*parts[:field], "00", *parts[field + 1 :]]) in names
+
+        return [(SequenceIdentity(self.config.name, (path.stem,)), ClipSource(path)) for path in paths if not is_lens_1_member(path)]
 
     def convert(self, identity: SequenceIdentity, source: ClipSource, *, force: bool) -> Path:
         """Write the pending layers of one clip: the base, and the panorama under ``--panorama``."""

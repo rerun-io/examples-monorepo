@@ -38,6 +38,22 @@ def test_each_clip_in_the_root_is_one_sequence_and_an_empty_root_is_refused(tmp_
         Insta360Config(root=tmp_path / "empty").setup().download()
 
 
+def test_a_two_file_clip_is_one_sequence_named_by_its_lens_0_file(tmp_path: Path) -> None:
+    """An X3 / ONE X2 clip is a `_00_` and a `_10_` file; either opens the whole clip, so only the `_00_` one is a sequence.
+    A `_10_` file without its partner stays a sequence, so converting it names the missing file."""
+    from dataforge.datasets.insta360 import ClipSource, Insta360Config
+
+    names: list[str] = ["VID_20231218_150323_00_022.insv", "VID_20231218_150323_10_022.insv", "VID_20261116_125200_00_003.insv", "VID_20231126_111301_10_004.insv"]
+    for name in names:
+        (tmp_path / name).write_bytes(b"")
+    found = Insta360Config(root=tmp_path).setup().discover()
+    assert [(identity.recording_id, source) for identity, source in found] == [
+        ("insta360__VID_20231126_111301_10_004", ClipSource(tmp_path / "VID_20231126_111301_10_004.insv")),
+        ("insta360__VID_20231218_150323_00_022", ClipSource(tmp_path / "VID_20231218_150323_00_022.insv")),
+        ("insta360__VID_20261116_125200_00_003", ClipSource(tmp_path / "VID_20261116_125200_00_003.insv")),
+    ]
+
+
 def test_convert_refuses_an_output_root_beneath_the_raw_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from dataforge.datasets.insta360 import ClipSource
 
