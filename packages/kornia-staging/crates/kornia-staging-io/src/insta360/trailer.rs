@@ -163,7 +163,7 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer, Insta360E
             let id = slot[0];
             let size = u64::from(u32::from_le_bytes(bytes(slot, 2)));
             let offset = u64::from(u32::from_le_bytes(bytes(slot, 6)));
-            if id != 0 && wanted.contains(&id) {
+            if wanted.contains(&id) {
                 located.push((id, start + offset, size));
             }
         }

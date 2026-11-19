@@ -86,14 +86,7 @@ pub(super) fn trailer_file(records: &[(u8, Vec<u8>)]) -> Vec<u8> {
     body.extend_from_slice(&index);
     body.extend_from_slice(&[0, 0]);
     body.extend_from_slice(&310u32.to_le_bytes());
-    let size = (body.len() + 72) as u32;
-    body.extend_from_slice(&[0u8; 32]);
-    body.extend_from_slice(&size.to_le_bytes());
-    body.extend_from_slice(&3u32.to_le_bytes());
-    body.extend_from_slice(MAGIC);
-    let mut file = vec![0x55u8; 1000];
-    file.extend(body);
-    file
+    close_trailer(body)
 }
 
 /// The same records as [`trailer_file`] in the layout of the bodies before the X4 (ONE X2, ONE R/RS, X3): no index,
@@ -105,6 +98,11 @@ pub(super) fn chained_trailer_file(records: &[(u8, Vec<u8>)]) -> Vec<u8> {
         body.extend_from_slice(&[u8::from(*id == 1), *id]);
         body.extend_from_slice(&(record.len() as u32).to_le_bytes());
     }
+    close_trailer(body)
+}
+
+/// `1000` junk bytes, then `body` closed by the trailer footer (size, version 3, magic).
+fn close_trailer(mut body: Vec<u8>) -> Vec<u8> {
     let size = (body.len() + 72) as u32;
     body.extend_from_slice(&[0u8; 32]);
     body.extend_from_slice(&size.to_le_bytes());

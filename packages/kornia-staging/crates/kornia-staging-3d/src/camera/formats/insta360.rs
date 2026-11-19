@@ -75,7 +75,7 @@ fn refuse(what: impl Into<String>) -> LensStringError {
 ///
 /// # Errors
 /// A token that is not a finite number, a version other than 3 and 6, a lens count that is not a whole number from
-/// 1 to 8 or does not match the token count, a lens type without a half field in `HALF_FIELD_DEG`, or values that make no valid camera.
+/// 1 to 8 or does not match the token count, or values that make no valid camera.
 pub fn parse_lens_string(
     text: &str,
     crop: Option<WindowCrop>,
