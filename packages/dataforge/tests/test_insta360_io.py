@@ -234,18 +234,51 @@ def test_each_lens_video_has_the_chunk_shapes_of_rerun_mp4_reader(insv_clip: Pat
         assert first.startswith(b"\x00\x00\x00\x01\x40\x01")
 
 
-GOLDEN: dict[str, tuple[str, str, int, int, int]] = {
-    "x4-air": ("6d0f685ebb4bf1f80056c43f53a5af35f096df513328991a78a3c783aa07c2df", "d6ba3d7ac26e54f974058a47bfa3d1ef8a68d08c91c56ffcfc1423cf9a762819", 260294829, 3229945829, 4219),
-    "x5": ("039214f0b3a4ae8cd53e8a4d92521fb9dc5af94b583bb3e95968a27a7544d3c9", "7a740602c5e6de7876a966886828fcca320ad73a00d6e9b782b1646b30e5ad1d", 164755000, 3134533000, 4149),
+GOLDEN: dict[str, dict[str, str]] = {
+    "x4-air": {
+        "lens0_samples": "6d0f685ebb4bf1f80056c43f53a5af35f096df513328991a78a3c783aa07c2df",
+        "lens1_samples": "d6ba3d7ac26e54f974058a47bfa3d1ef8a68d08c91c56ffcfc1423cf9a762819",
+        "lens0_sample_lengths": "e40f4055cbddcd3a979f2e5137c53dda4dafc424738ee8a116b95612146a567b",
+        "lens1_sample_lengths": "dcb3b64b50ae0ce93e2579f06172e6a30b4f9cd204f3d71f48461e12acc0098b",
+        "frame_times": "d7a487ba4ec123477415d2677dcb98040c3b5a25d98b36d075560a2d472e70f2",
+        "lens0_exposure": "0fda121e4860f8931120d0e236793502ad7a28784a1193845d0c20b890dfe6d8",
+        "lens1_exposure": "0fda121e4860f8931120d0e236793502ad7a28784a1193845d0c20b890dfe6d8",
+        "imu_times": "8a06cd3f6f23ff4cf14ad4a26349bc8f7b6cafa61ed6cafedc110195dc0eb700",
+        "gyro": "1837b9859847af7fa76e6ff4c79665e70beb3e3264f2c0087d63acb5cb89a586",
+        "accel": "bca134114d15d3c27806976b4db88defda698ae1a40954c588d3f06f197d0565",
+    },
+    "x5": {
+        "lens0_samples": "039214f0b3a4ae8cd53e8a4d92521fb9dc5af94b583bb3e95968a27a7544d3c9",
+        "lens1_samples": "7a740602c5e6de7876a966886828fcca320ad73a00d6e9b782b1646b30e5ad1d",
+        "lens0_sample_lengths": "fc08d795802907adc6bfec5a9064d78afff70ba0d05e737a0e1f271ec52bf8cc",
+        "lens1_sample_lengths": "f4520321d16b04e4fdfb727490a0d894879c84060250e99a46901b630f027625",
+        "frame_times": "e4fbe34cac1471cdd9d2c93235452bf320e63d6121023d8832efbabf2e00b1a9",
+        "lens0_exposure": "8b253eb6b3d79e2b01baeb29a715559104bacfe641cb39e4f02c64f9c451e6ab",
+        "lens1_exposure": "8b253eb6b3d79e2b01baeb29a715559104bacfe641cb39e4f02c64f9c451e6ab",
+        "imu_times": "17887a82cf7f29786516da262a12141530ed8daeb6652f56317e26136eba6305",
+        "gyro": "dea90afff2e59c34b4f3398e63cb71acb310c047dc8e97f40d02c18b1cae8c97",
+        "accel": "dca348101a4680794312b31574b79513675a7f8ecab3a075be2e0b030c25d0fe",
+    },
 }
-"""The first 90 framesets as the pre-reader converter wrote them (2026-11-18): sha256 of lens 0's and lens 1's samples in
-time order, the first and last frame time (ns on the reader's timeline), and the IMU samples up to 1 s past the last."""
+"""Per-signal sha256 of the first 90 framesets: the samples' bytes in time order, their lengths and the frame times
+(little-endian int64, ns on the reader's timeline), the exposures (float64, s), and the IMU up to 1 s past the last
+frame (times int64; gyro and accel float64, row-major ``n x 3``). The sample bytes, first and last frame time and IMU
+row count are the pre-reader converter's (2026-11-18); the other digests were frozen from the reader at 77065551a,
+which reproduced those."""
+
+
+def digest(values: object, dtype: str) -> str:
+    """sha256 of ``values`` as a C-ordered array of ``dtype``."""
+    import hashlib
+
+    return hashlib.sha256(np.ascontiguousarray(np.asarray(values, dtype=dtype)).tobytes()).hexdigest()
 
 
 @pytest.mark.golden
 @pytest.mark.parametrize("model", ["x4-air", "x5"])
 def test_the_reader_reproduces_the_pre_reader_conversion(model: str, request: pytest.FixtureRequest) -> None:
-    """Samples, frame times and IMU of the first 90 framesets, bit for bit, on the X4 Air and the X5."""
+    """Samples, sample lengths, frame times, exposures and IMU of the first 90 framesets, each bit for bit, on the X4
+    Air and the X5."""
     import hashlib
 
     import pyarrow as pa
@@ -253,18 +286,31 @@ def test_the_reader_reproduces_the_pre_reader_conversion(model: str, request: py
     clip: Path = request.getfixturevalue("insv_clip" if model == "x4-air" else "insv_x5_clip")
     reader = insta360_io.InsvReader(clip, entity_path="/rig", frame_limit=READER_FRAMES)
     assert reader.rig.profile_name == model
-    lens_hashes: list[str] = []
-    times: list[list[int]] = []
-    imu_rows: int = 0
-    chunks = reader.stream().to_chunks()
+    batches: list[tuple[str, pa.RecordBatch]] = [(c.entity_path, c.to_record_batch()) for c in reader.chunks() if not c.is_static]
+
+    def rows(entity: str, column: str) -> list[object]:
+        return [row for path, batch in batches if path == entity and column in batch.schema.names for row in batch.column(column).to_pylist()]
+
+    def times(entity: str, column: str) -> list[int]:
+        return [t for path, batch in batches if path == entity and column in batch.schema.names for t in batch.column("video").cast(pa.int64()).to_pylist()]
+
+    signals: dict[str, str] = {}
+    frame_times: list[list[int]] = []
     for lens in range(2):
-        batches = [c.to_record_batch() for c in chunks if c.entity_path == f"/rig/cam_{lens:02d}/pinhole/video" and not c.is_static]
-        samples = [b for b in batches if "VideoStream:sample" in b.schema.names]
-        lens_hashes.append(hashlib.sha256(b"".join(bytes(s[0]) for b in samples for s in b.column("VideoStream:sample").to_pylist())).hexdigest())
-        times.append([t for b in samples for t in b.column("video").cast(pa.int64()).to_pylist()])
-    imu_rows = sum(c.num_rows for c in chunks if c.entity_path == "/rig/imu_00/gyro")
-    assert times[0] == times[1]
-    assert (lens_hashes[0], lens_hashes[1], times[0][0], times[0][-1], imu_rows) == GOLDEN[model]
+        video: str = f"/rig/cam_{lens:02d}/pinhole/video"
+        samples: list[bytes] = [bytes(sample[0]) for sample in rows(video, "VideoStream:sample")]
+        signals[f"lens{lens}_samples"] = hashlib.sha256(b"".join(samples)).hexdigest()
+        signals[f"lens{lens}_sample_lengths"] = digest([len(sample) for sample in samples], "<i8")
+        frame_times.append(times(video, "VideoStream:sample"))
+        signals[f"lens{lens}_exposure"] = digest(rows(f"/rig/cam_{lens:02d}/exposure", "Scalars:scalars"), "<f8")
+    assert frame_times[0] == frame_times[1] and len(frame_times[0]) == READER_FRAMES
+    signals["frame_times"] = digest(frame_times[0], "<i8")
+    imu_times: list[int] = times("/rig/imu_00/gyro", "Scalars:scalars")
+    assert imu_times == times("/rig/imu_00/accel", "Scalars:scalars")
+    signals["imu_times"] = digest(imu_times, "<i8")
+    for name in ("gyro", "accel"):
+        signals[name] = digest(rows(f"/rig/imu_00/{name}", "Scalars:scalars"), "<f8")
+    assert signals == GOLDEN[model]
 
 
 @pytest.mark.integration
