@@ -78,7 +78,7 @@ impl Nearest {
     }
 
     fn matching_index(self, count: usize, config: MatchConfig) -> Option<usize> {
-        // With one candidate the original matcher skips the ratio test.
+        // A single candidate has no second best, so the ratio test does not apply.
         let separated = count == 1
             || (self.best < self.second
                 && f64::from(self.best) * config.second_best_ratio <= f64::from(self.second));
@@ -129,7 +129,8 @@ use distance_row as fill_distances;
 ///
 /// A pair `(i, j)` is kept when `a[i]` matches `b[j]` and `b[j]` matches `a[i]` under [`MatchConfig`]. Unlike
 /// Basalt, a descriptor whose reverse search finds no match never passes the mutual check (Basalt reads the
-/// missing reverse entry as index 0), and ties for the best distance are rejected even at ratio 1.0.
+/// missing reverse entry as index 0), and ties for the best distance never match (B17): Basalt's `matchFastHelper`
+/// accepts them when the ratio is 1.0 or the distance is 0 and keeps the last tied index.
 ///
 /// ```
 /// use kornia_staging_imgproc::features::{match_mutual, Descriptor256, MatchConfig};
@@ -149,7 +150,7 @@ pub fn match_mutual(
     // A distance above this bound cannot be an accepted best, tie the best,
     // or make an accepted best fail the ratio test. In that case a missing
     // second distance can stand in for any ignored distance.
-    let best_limit = (config.max_distance - 1).min(NO_DISTANCE - 1);
+    let best_limit = config.max_distance - 1;
     let ratio_limit = f64::from(best_limit) * config.second_best_ratio;
     let limit = best_limit.max(ratio_limit as u32).min(NO_DISTANCE - 1);
     let mut a_nearest = Vec::with_capacity(a.len());
