@@ -55,10 +55,6 @@ fn rejects_invalid_settings() {
         VocabularyError::Depth(0)
     );
     assert_eq!(
-        train(&data, &config(10, 10, 1, 0)).unwrap_err(),
-        VocabularyError::TooManyWords
-    );
-    assert_eq!(
         train::<4>(&[], &config(2, 2, 1, 0)).unwrap_err(),
         VocabularyError::NoTrainingData
     );
@@ -99,6 +95,18 @@ fn same_seed_same_tree_words_and_scores_on_1_and_8_threads() {
     assert_eq!(one.centroids, eight.centroids);
     assert_eq!(one_words, eight_words);
     assert_eq!(one_scores, eight_scores);
+}
+
+#[test]
+fn a_depth_beyond_the_sample_is_reduced_not_refused_or_narrowed() {
+    // Two rows, branching 2: depth 40 and depth 2^32 (which `as u32` would narrow to 0) both build one level.
+    let data = [[0.0f32, 0.0], [1.0, 1.0]];
+    for depth in [40, 1usize << 32] {
+        let vocabulary = train(&data, &config(2, depth, 3, 0)).unwrap();
+        assert_eq!(vocabulary.depth(), 1);
+        assert_eq!(vocabulary.n_words(), 2);
+        assert_ne!(vocabulary.word(&data[0]), vocabulary.word(&data[1]));
+    }
 }
 
 #[test]

@@ -68,7 +68,7 @@ pub enum VocabularyError {
     Branching(usize),
     /// The depth must be at least 1.
     Depth(usize),
-    /// `branching^depth` must fit word ids (`u32`).
+    /// `branching^depth` at the depth actually built must fit word ids (`u32`).
     TooManyWords,
     /// Training needs at least one descriptor.
     NoTrainingData,
@@ -282,12 +282,6 @@ impl Vocabulary {
         if config.depth < 1 {
             return Err(VocabularyError::Depth(config.depth));
         }
-        if branching
-            .checked_pow(config.depth as u32)
-            .is_none_or(|w| w > u32::MAX as usize)
-        {
-            return Err(VocabularyError::TooManyWords);
-        }
         if dim == 0 || !data.len().is_multiple_of(dim) {
             return Err(VocabularyError::Dimension(dim));
         }
@@ -295,9 +289,21 @@ impl Vocabulary {
             return Err(VocabularyError::NoTrainingData);
         }
         let n = data.len() / dim;
+        // The deepest tree the sample fills (`branching^depth <= n`), at least one level and at most `config.depth`;
+        // checked multiplication, so a huge configured depth is reduced, never narrowed or overflowed.
         let mut depth = 1;
-        while depth < config.depth && branching.pow(depth as u32 + 1) <= n {
-            depth += 1;
+        let mut n_words = branching;
+        while depth < config.depth {
+            match n_words.checked_mul(branching) {
+                Some(next) if next <= n => {
+                    n_words = next;
+                    depth += 1;
+                }
+                _ => break,
+            }
+        }
+        if n_words > u32::MAX as usize {
+            return Err(VocabularyError::TooManyWords);
         }
 
         let mut centroids: Vec<Vec<f32>> = Vec::with_capacity(depth);
