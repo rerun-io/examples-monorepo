@@ -192,14 +192,21 @@ def main(config: FullCircleMasksConfig) -> None:
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     videos: list[CatalogVideo] = [read_lens_video(store, f"{camera}/pinhole/video", config.timeline) for camera in config.cameras]
-    decoders: list[VideoDecoder] = [
-        VideoDecoder(wrap_mp4(v.samples, v.keyframes, config.fps, codec=v.codec), device=str(device), seek_mode="exact", num_ffmpeg_threads=0)
-        for v in videos
-    ]
     times: list[ndarray] = [v.times for v in videos]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
     tracked: list[int] = list(range(config.start, end, config.stride))
+    # Each decoder holds the packets from the keyframe at or before ``start`` to ``end``.
+    firsts: list[int] = [max(i for i in range(config.start + 1) if v.keyframes[i]) for v in videos]
+    decoders: list[VideoDecoder] = [
+        VideoDecoder(
+            wrap_mp4(v.samples[first:end], v.keyframes[first:end], config.fps, codec=v.codec),
+            device=str(device),
+            seek_mode="exact",
+            num_ffmpeg_threads=0,
+        )
+        for v, first in zip(videos, firsts, strict=True)
+    ]
     read_s: float = time.perf_counter() - process_start
     print(
         f"segment {segment_id}: {n_framesets} framesets, tracking {len(tracked)} (stride {config.stride}) over {config.start}..{end - 1}; read {read_s:.1f} s"
@@ -217,7 +224,10 @@ def main(config: FullCircleMasksConfig) -> None:
         debug.save(config.debug_rrd)
 
     def framesets(indices: list[int]) -> list[list[UInt8[Tensor, "h w 3"]]]:
-        batches: list[Tensor] = [rearrange(decoder.get_frames_at(indices).data, "n c h w -> n h w c") for decoder in decoders]
+        batches: list[Tensor] = [
+            rearrange(decoder.get_frames_at([i - first for i in indices]).data, "n c h w -> n h w c")
+            for decoder, first in zip(decoders, firsts, strict=True)
+        ]
         return [[batch[column] for batch in batches] for column in range(len(indices))]
 
     decode_s: float = 0.0
@@ -249,7 +259,7 @@ def main(config: FullCircleMasksConfig) -> None:
 
     targets: list[str] = [f"{camera}/pinhole/people_mask" for camera in config.cameras]
     for target, source in zip(targets, sources, strict=True):
-        rr.log(target, rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (OPERATOR_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
+        rr.log(target, rr.AnnotationContext([(0, "kept", (0, 0, 0, 0)), (OPERATOR_CLASS_ID, "masked", (40, 110, 255, 140))]), static=True)
         rr.log(target, rr.Transform3D(scale=[source.image_hw[1] / source.mask_hw[1], source.image_hw[0] / source.mask_hw[0], 1.0]), static=True)
     if debug is not None:
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (OPERATOR_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)

@@ -86,7 +86,8 @@ def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
     np.testing.assert_allclose(sources[0].rig_R_cam, np.eye(3), atol=1e-6)
     np.testing.assert_allclose(sources[1].rig_R_cam, cam_R_rigs[0] @ cam_R_rigs[1].T, atol=1e-6)
     assert sources[1].image_hw == (1920, 1920) and sources[1].mask_hw == (480, 480)
-    lens: MeiCamera = sources[0].camera
+    lens = sources[0].camera
+    assert isinstance(lens, MeiCamera)
     assert (lens.model, lens.cx, lens.cy) == ("mei_v6", 958.0, 966.0)
     np.testing.assert_allclose([lens.xi, lens.half_field_rad, *lens.distortion], coefficients, rtol=1e-6)
 

@@ -49,6 +49,9 @@ class Sam2VideoSegmenterConfig:
     """Inference device."""
     memory_window_size: int = 7
     """Sliding window (frames) of non-prompt memories kept per tracked object."""
+    max_conditional_memories: int = -1
+    """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Prompted memories are never
+    pruned, so a tracker re-prompted through a long video needs a bound or its per-frame cost grows with the video."""
 
     def setup(self) -> "Sam2VideoSegmenter":
         """Download the checkpoint, build the predictor, and return a ready segmenter."""
@@ -72,6 +75,7 @@ class Sam2VideoSegmenter(VideoSegmenter):
         repo_id, repo_type, filename = SAM2_VARIANT_WEIGHTS[config.variant]
         checkpoint_path: str = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=filename)
         self.predictor = build_sam2_generic_video_predictor(SAM2_VARIANT_CONFIGS[config.variant], checkpoint_path, device=config.device)
+        self.predictor.max_cond_frames_in_attn = config.max_conditional_memories
         self._states: list[SAM2GenericVideoPredictorState] | None = None
         self._frame_idx: int = 0
 
