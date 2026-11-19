@@ -144,11 +144,12 @@ def main(config: Config) -> None:
         # What the recording says its own clock is, not what this tool assumes:
         # zero here, `capture_start_time_ns` on MSD, and one rule for both tools.
         export_offset_ns: int = feed.export_offset_ns
+        video_time_offset_ns: int = feed.video_time_offset_ns
 
     # The feed's own in-process catalog server is what the `with` holds, and
     # nothing below reads a frameset: the export and the ATE happen with it shut.
     stage.refuse_lost_framesets()
-    write_trajectory(output_csv, shift_clock(estimate, export_offset_ns))
+    write_trajectory(output_csv, shift_clock(estimate, export_offset_ns), video_time_offset_ns=video_time_offset_ns)
     print(f"{len(estimate)} tracked poses (raw VIO) -> {output_csv} (absolute device clock)")
     if len(estimate) == 0:
         print("no ATE: the estimator reported no tracked pose")

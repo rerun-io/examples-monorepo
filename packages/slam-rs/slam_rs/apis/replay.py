@@ -411,7 +411,7 @@ def main(config: Config) -> None:
         # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
         # tracked run.
         vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
-        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns))
+        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns)
         # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
         # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
         finished: FinalRun = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
@@ -420,13 +420,15 @@ def main(config: Config) -> None:
         if finished.gba_failure is not None:
             print(f"global BA: failed: {finished.gba_failure}")
         stage.logger.log_final_run(final)
-        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns))
+        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns)
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
         if map_result is not None and map_result.gba is not None:
             # At the cursor the flush left on the last frameset, beside the final map.
             log_map_result(map_result)
             gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
-            write_trajectory(gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns))
+            write_trajectory(
+                gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns
+            )
             print(f"global BA: {map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")

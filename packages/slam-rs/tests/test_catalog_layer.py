@@ -112,7 +112,7 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     dataset: MagicMock = MagicMock(spec=DatasetEntry)
     resolved: CatalogSegment = CatalogSegment("rerun+http://catalog", segment_id.split("__")[0], segment_id, dataset, ground_truth_uri)
     feed: SimpleNamespace = SimpleNamespace(
-        export_offset_ns=0, imu=SimpleNamespace(cam_time_offset_ns=0), cameras=(), frame_t_ns=run.estimate.t_ns, camera_positions=(0, 1),
+        export_offset_ns=0, video_time_offset_ns=0, imu=SimpleNamespace(cam_time_offset_ns=0), cameras=(), frame_t_ns=run.estimate.t_ns, camera_positions=(0, 1),
     )
     monkeypatch.setattr(catalog_layer_api, "resolve_catalog_segments", lambda _sources: (resolved,))
     monkeypatch.setattr(catalog_layer_api, "select_decode_device", lambda _request: "cpu")
