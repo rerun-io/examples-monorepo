@@ -11,11 +11,31 @@
 use super::super::{Mei, MeiDistortion};
 use nalgebra::{IsometryMatrix3, Matrix3, Rotation3, Translation3, Vector3};
 
-/// Half field, degrees, of each lens type the reader supports: the largest angle off the axis whose pixels it uses.
-/// 131 (X4 Air): a 200 degree field (telemetry-parser `rig.rs`). 113 (X5): on the clip VID_20261113_145021_00_003
-/// the image circle keeps full brightness to 100 degrees through its V3 model and falls to half at 102.5-103.5
-/// degrees (the vignetted rim), so 100 degrees as well.
-const HALF_FIELD_DEG: [(f64, f64); 2] = [(131.0, 100.0), (113.0, 100.0)];
+/// Full optical field, degrees, per lens type (the lens class in the string's `type` token), after telemetry-parser's
+/// `rig.rs` `class_half_field_deg`; a type without an entry has a 190 degree field. Half of it is the largest angle
+/// off the axis whose pixels a camera uses. Checked here on two types: 131 (X4 Air), and 113 (X5), whose image circle
+/// on the clip VID_20261113_145021_00_003 keeps full brightness to 100 degrees through its V3 model and falls to half
+/// at 102.5-103.5 degrees (the vignetted rim).
+const FIELD_DEG: [(&[u32], f64); 2] = [
+    (
+        &[
+            19, 33, 38, 40, 41, 44, 70, 71, 85, 113, 131, 142, 149, 150, 193,
+        ],
+        200.0,
+    ),
+    (&[140, 141, 156], 195.0),
+];
+/// Full field of a lens type without an entry in [`FIELD_DEG`], degrees.
+const DEFAULT_FIELD_DEG: f64 = 190.0;
+
+/// Half field, degrees, of a lens type: [`FIELD_DEG`] or the 190 degree default.
+fn half_field_deg(lens_type: f64) -> f64 {
+    FIELD_DEG
+        .iter()
+        .find(|(types, _)| types.iter().any(|&t| f64::from(t) == lens_type))
+        .map_or(DEFAULT_FIELD_DEG, |(_, field)| *field)
+        / 2.0
+}
 
 /// `window_crop_info`: the sensor window a calibration string describes and the part of it the picture holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,13 +119,7 @@ pub fn parse_lens_string(
     let mut rotations = Vec::with_capacity(count);
     let mut translations = Vec::with_capacity(count);
     for (i, t) in body.chunks_exact(per_lens).enumerate() {
-        let lens_type = t[per_lens - 1];
-        let Some(&(_, half_field_deg)) = HALF_FIELD_DEG.iter().find(|(ty, _)| *ty == lens_type)
-        else {
-            return Err(refuse(format!(
-                "lens {i} has type {lens_type}; only types 131 (X4 Air) and 113 (X5), with a measured field, are supported"
-            )));
-        };
+        let half_field_deg = half_field_deg(t[per_lens - 1]);
         let frame = [t[per_lens - 3] / count as f64, t[per_lens - 2]];
         let (mut cx, mut cy, mut fx, mut fy) = (t[3] - frame[0] * i as f64, t[4], t[1], t[2]);
         let mut window = frame;
