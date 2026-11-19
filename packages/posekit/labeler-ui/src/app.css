@@ -1,0 +1,62 @@
+/* Element defaults shared by every component: page, buttons, key caps. Tokens live in theme.css. */
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: 450 15px/1.5 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button.btn {
+  font: 500 13px/1 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.0125em;
+  padding: 10px 14px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border-strong);
+  background: transparent;
+  color: var(--color-strong);
+  cursor: pointer;
+
+  &.primary {
+    background: var(--color-strong);
+    color: var(--color-on-strong);
+    border-color: var(--color-strong);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  & kbd {
+    margin-left: 8px;
+    color: inherit;
+    opacity: 0.7;
+    border: 0;
+    padding: 0;
+  }
+}
+
+kbd {
+  font: 500 11px var(--font-mono);
+  text-transform: uppercase;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-control);
+  padding: 0 5px;
+  color: var(--color-strong);
+}
+
+.label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.0125em;
+}

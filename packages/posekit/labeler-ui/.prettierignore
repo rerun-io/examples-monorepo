@@ -1,0 +1,5 @@
+# Package managers
+pnpm-lock.yaml
+
+# Build output (written outside this directory, but keep it out of a stray local build too)
+dist/
