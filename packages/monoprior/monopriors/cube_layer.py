@@ -16,7 +16,7 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Bool, Int64, UInt8
+from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import PinholeParameters
@@ -164,30 +164,3 @@ def read_people_masks(layer: LayerSegment, face: CubeFace, timeline: str, wanted
             raise ValueError(f"{entity} @ {t_ns}: {flat.size} pixels, the face is {face.width}x{face.height}")
         masks[int(t_ns)] = flat.reshape(face.height, face.width)
     return masks
-
-
-def read_valid_masks(layer: LayerSegment, faces: tuple[CubeFace, ...]) -> dict[str, Bool[ndarray, "h w"]]:
-    """Each face's static ``pinhole/valid_mask`` (1 = inside the lens field) as a bool image, by face name.
-
-    A face without a ``valid_mask`` (the 6-face cubemap has no invalid pixels) is valid everywhere.
-
-    Raises:
-        ValueError: If a valid mask has another size than its face.
-    """
-    entities: list[str] = [f"{face.entity}/pinhole/valid_mask" for face in faces]
-    present: set[str] = {f"/{str(column.entity_path).lstrip('/')}" for column in layer.dataset.schema().component_columns()}
-    with_mask: list[str] = [entity for entity in entities if entity in present]
-    table: pa.Table | None = (
-        layer.dataset.filter_segments(layer.segment_id).filter_contents(with_mask).reader(index=None).to_arrow_table() if with_mask else None
-    )
-    valid: dict[str, Bool[ndarray, "h w"]] = {}
-    for face, entity in zip(faces, entities, strict=True):
-        column_name: str = f"{entity}:SegmentationImage:buffer"
-        if table is None or column_name not in table.column_names:
-            valid[face.name] = np.ones((face.height, face.width), dtype=bool)
-            continue
-        flat: UInt8[ndarray, " n_pixels"] = np.asarray(table.column(column_name).drop_null().combine_chunks()[0].values.flatten(), dtype=np.uint8)
-        if flat.size != face.width * face.height:
-            raise ValueError(f"{entity}: {flat.size} pixels, the face is {face.width}x{face.height}")
-        valid[face.name] = flat.reshape(face.height, face.width) == 1
-    return valid

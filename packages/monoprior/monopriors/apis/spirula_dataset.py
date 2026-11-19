@@ -16,11 +16,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from jaxtyping import Bool, Float64, UInt8
+from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
 from monopriors.cube_faces import CubeFace
-from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces, read_people_masks, read_valid_masks
+from monopriors.cube_layer import iter_framesets, open_rrd, read_cube_faces, read_people_masks
 
 COLMAP_PIXEL_CENTRE_SHIFT_PX: float = 0.5
 """Added to cx, cy and POINTS2D on export: the faces layer and colsfm put the first pixel centre at 0.0, spirula (COLMAP) at 0.5."""
@@ -81,10 +81,9 @@ def colmap_camera_line(camera: ColmapCamera, principal_point_shift_px: float) ->
     return " ".join([str(camera.camera_id), camera.model, str(camera.width), str(camera.height), *(repr(float(value)) for value in params)])
 
 
-def keep_mask(valid: Bool[ndarray, "h w"], people: UInt8[ndarray, "h w"] | None) -> UInt8[ndarray, "h w"]:
-    """spirula mask: 255 = keep, 0 = a person (``people`` 1) or outside the lens field (``valid`` false)."""
-    keep: Bool[ndarray, "h w"] = valid if people is None else valid & (people == 0)
-    return np.where(keep, 255, 0).astype(np.uint8)
+def keep_mask(people: UInt8[ndarray, "h w"]) -> UInt8[ndarray, "h w"]:
+    """spirula mask: 255 = keep, 0 = a person (``people`` 1)."""
+    return np.where(people == 0, 255, 0).astype(np.uint8)
 
 
 def _image_records(text: str) -> Iterator[tuple[str, str]]:
@@ -148,9 +147,7 @@ class SpirulaDatasetConfig:
     faces_rrd: Path
     """The cube-faces layer ``.rrd``."""
     masks_rrd: Path | None
-    """The people-mask layer ``.rrd`` (``<face entity>/pinhole/people_mask``, 1 = person or outside the lens field).
-    None builds the masks from the faces layer's static ``pinhole/valid_mask`` alone. Either way a pixel outside
-    ``valid_mask`` is never kept."""
+    """The people-mask layer ``.rrd`` (``<face entity>/pinhole/people_mask``, 1 = person); None keeps every pixel."""
     dataset_dir: Path
     """Output spirula dataset folder."""
     timeline: str = "video_time"
@@ -209,7 +206,6 @@ def main(config: SpirulaDatasetConfig) -> None:
         all_faces: tuple[CubeFace, ...] = read_cube_faces(faces_layer)
         _check_cameras(cameras, keys, camera_ids, {face.name: face for face in all_faces})
         faces: tuple[CubeFace, ...] = tuple(face for face in all_faces if face.name in wanted)
-        valid_by_face: dict[str, Bool[ndarray, "h w"]] = read_valid_masks(faces_layer, faces)
         for face in faces:
             (config.dataset_dir / "images" / face.name).mkdir(parents=True, exist_ok=True)
         n_images: int = 0
@@ -235,8 +231,8 @@ def main(config: SpirulaDatasetConfig) -> None:
                     raise ValueError(f"{face.name}: no people_mask for {len(missing)} registered frames, e.g. {sorted(missing)[:3]}")
             (config.dataset_dir / "masks" / face.name).mkdir(parents=True, exist_ok=True)
             for t_ns in sorted(wanted[face.name]):
-                people: UInt8[ndarray, "h w"] | None = people_by_t[t_ns] if people_by_t is not None else None
-                _write_mask(config.dataset_dir / "masks" / face.name / f"{t_ns}.png", keep_mask(valid_by_face[face.name], people))
+                keep: UInt8[ndarray, "h w"] = keep_mask(people_by_t[t_ns]) if people_by_t is not None else np.full((face.height, face.width), 255, np.uint8)
+                _write_mask(config.dataset_dir / "masks" / face.name / f"{t_ns}.png", keep)
     (sparse_dir / "images.txt").write_text(images_text)
     used_camera_ids: set[int] = set(camera_ids.values())
     camera_lines: list[str] = ["# Camera list with one line of data per camera:", "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]"]
@@ -246,5 +242,5 @@ def main(config: SpirulaDatasetConfig) -> None:
     for path in sparse_dir.iterdir():
         path.chmod(0o644)
     print(
-        f"exported {n_images} images, {n_images} masks ({'people + valid' if config.masks_rrd is not None else 'valid_mask only'}), cx/cy +{shift_px} px, {len(used_camera_ids)} cameras over {len(faces)} faces -> {config.dataset_dir}"
+        f"exported {n_images} images, {n_images} masks ({'people' if config.masks_rrd is not None else 'keep all'}), cx/cy +{shift_px} px, {len(used_camera_ids)} cameras over {len(faces)} faces -> {config.dataset_dir}"
     )

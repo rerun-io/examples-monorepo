@@ -71,11 +71,8 @@ def test_camera_line_moves_the_principal_point_to_colmaps_pixel_centres() -> Non
         colmap_camera_line(read_colmap_cameras("1 SIMPLE_RADIAL 10 10 5 5 5 0.1\n")[1], 0.5)
 
 
-def test_keep_mask_drops_people_and_pixels_outside_the_lens_field() -> None:
-    valid = np.array([[True, True, False]])
-    people = np.array([[0, 1, 0]], dtype=np.uint8)
-    np.testing.assert_array_equal(keep_mask(valid, people), [[255, 0, 0]])
-    np.testing.assert_array_equal(keep_mask(valid, None), [[255, 255, 0]])
+def test_keep_mask_drops_people() -> None:
+    np.testing.assert_array_equal(keep_mask(np.array([[0, 1, 0]], dtype=np.uint8)), [[255, 0, 255]])
 
 
 def test_exported_observations_stay_on_the_exported_projection() -> None:
