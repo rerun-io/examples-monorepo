@@ -24,12 +24,10 @@ from numpy import ndarray
 
 from dataforge import schema, writing
 from dataforge.datasets import insta360_cube as cube
-from dataforge.datasets.insta360 import FIRST_FACE_CAM, RIG, LensCameras, cameras_from_recording
+from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording
 
 MASK_NAME: str = "people_mask"
 """The mask entity under each ``pinhole``, on the lenses and on the faces."""
-FACE_CAMS: range = range(FIRST_FACE_CAM, FIRST_FACE_CAM + len(cube.FACES))
-"""``cam_02 .. cam_07``: the cube faces."""
 
 
 @dataclass
@@ -149,8 +147,7 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    lens1_from_lens0: Float64[ndarray, "3 3"] = lenses.lens_from_rig[1][:3, :3] @ lenses.lens_from_rig[0][:3, :3].T
-    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lens1_from_lens0) for cam, face in faces.items()}
+    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0) for cam, face in faces.items()}
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
     scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
@@ -160,12 +157,13 @@ def main(config: Config) -> None:
         for lens, stamp, mask in lens_masks(config.masks, wanted):
             if stamp in done:
                 continue
-            pending.setdefault(stamp, {})[lens] = (
-                mask if lens not in scales and mask.shape == lens_shape else lens_image_mask(mask, scales.get(lens, (1.0, 1.0)), lens_shape)
-            )
+            pending.setdefault(stamp, {})[lens] = mask
             if len(pending[stamp]) < 2:
                 continue
-            pair: dict[int, UInt8[ndarray, "h w"]] = pending.pop(stamp)
+            pair: dict[int, UInt8[ndarray, "h w"]] = {
+                lens: m if lens not in scales and m.shape == lens_shape else lens_image_mask(m, scales.get(lens, (1.0, 1.0)), lens_shape)
+                for lens, m in pending.pop(stamp).items()
+            }
             done.add(stamp)
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
             for cam, table in tables.items():
