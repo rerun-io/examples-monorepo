@@ -211,3 +211,31 @@ def test_catalog_masks_read_a_native_resolution_mask_through_its_scale(tmp_path:
     expected[0:5, 8:12] = True
     assert got is not None
     np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.integration
+def test_catalog_masks_refuse_a_mask_with_more_than_one_byte_per_pixel(tmp_path: Path) -> None:
+    """The layer is uint8: a uint16 mask's bytes are not its pixels, so it is refused, not misread."""
+    import rerun as rr
+
+    entity: str = "/world/rig_00/cam_02/pinhole/people_mask"
+    rrd: Path = tmp_path / "masks.rrd"
+    recording = rr.RecordingStream("colsfm-test", recording_id="seg")
+    recording.save(rrd)
+    recording.set_time("video_time", duration=np.timedelta64(1_000, "ns"))
+    recording.log(entity, rr.SegmentationImage(np.array([[0, 1]], dtype=np.uint16)))
+    recording.flush()
+    recording.disconnect()
+
+    with rr.server.Server(host="127.0.0.1", port=0, datasets={"d": [str(rrd)]}) as server:
+        masks: CatalogMasks = CatalogMasks(
+            FrameSourceManifest(
+                catalog_url=server.url(),
+                dataset="d",
+                segment="seg",
+                timeline="video_time",
+                streams=[StreamKeyframes(entity="world/rig_00/cam_02/pinhole/video", names=["f/1000"], t_ns=[1_000], mask_entity=entity.lstrip("/"))],
+            )
+        )
+        with pytest.raises(ValueError, match="not one per pixel"):
+            masks.mask("f/1000", 2, 1)

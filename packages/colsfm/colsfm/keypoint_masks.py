@@ -92,20 +92,17 @@ class CatalogMasks:
         if stream_index not in self.packed:
             # Imported here: only a masked catalog input needs the client.
             from rerun.catalog import CatalogClient
+            from simplecv.rrd_query_utils import first_valid_value
 
             entity: str | None = self.manifest.streams[stream_index].mask_entity
             assert entity is not None
             dataset = CatalogClient(self.manifest.catalog_url).get_dataset(name=self.manifest.dataset)
-            statics: pa.Table = dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"]).reader(index=None).to_arrow_table()
+            layer = dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"])
+            statics: pa.Table = layer.reader(index=None).to_arrow_table()
             scale_column: str = f"/{entity}:Transform3D:scale"
-            scale: tuple[float, float] = (1.0, 1.0)
-            if scale_column in statics.column_names and statics.num_rows and statics[scale_column][0].is_valid:
-                values: list[float] = [float(value) for value in np.asarray(statics[scale_column][0].values.to_pylist(), dtype=np.float64).ravel()]
-                scale = (values[0], values[1])
-            self.scales[stream_index] = scale
-            table: pa.Table = (
-                dataset.filter_segments(self.manifest.segment).filter_contents([f"/{entity}"]).reader(index=self.manifest.timeline).to_arrow_table()
-            )
+            logged: list[float] | None = first_valid_value(statics[scale_column], allow_none=True) if scale_column in statics.column_names else None
+            self.scales[stream_index] = (1.0, 1.0) if logged is None else (float(logged[0]), float(logged[1]))
+            table: pa.Table = layer.reader(index=self.manifest.timeline).to_arrow_table()
             column: str = f"/{entity}:SegmentationImage:buffer"
             if column not in table.column_names:
                 raise ValueError(f"{self.manifest.segment}: no SegmentationImage at /{entity}")
@@ -116,7 +113,10 @@ class CatalogMasks:
             packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = {}
             for row, stamp in enumerate(t_ns):
                 pixels: UInt8[ndarray, " n"] = buffers[row].values.to_numpy(zero_copy_only=False)
-                packed[int(stamp)] = (formats[row]["width"], formats[row]["height"], np.packbits(pixels != 0))
+                mask_width, mask_height = formats[row]["width"], formats[row]["height"]
+                if len(pixels) != mask_width * mask_height:
+                    raise ValueError(f"/{entity} at t_ns {int(stamp)}: a {mask_width}x{mask_height} mask holds {len(pixels)} bytes, not one per pixel")
+                packed[int(stamp)] = (mask_width, mask_height, np.packbits(pixels != 0))
             self.packed[stream_index] = packed
             print(f"[colsfm.masks] /{entity}: {len(self.packed[stream_index])} masks")
         return self.packed[stream_index]
