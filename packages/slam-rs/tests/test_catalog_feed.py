@@ -223,18 +223,31 @@ def test_a_static_table_with_no_rows_names_the_entity() -> None:
 @pytest.mark.parametrize(
     ("reference", "message"),
     [
-        (None, "names no reference sensor .* no pose in the rig; slam-rs does not run VIO on an unposed IMU"),
+        (None, "^insta360__VID_x: the rig names no reference sensor, so its IMU has no pose in the rig; the feed runs VIO in the IMU frame$"),
         ([None], "names no reference sensor"),
         (["cam_00"], "rig reference is 'cam_00'"),
     ],
 )
 def test_a_rig_without_a_posed_imu_is_refused(reference: list[str | None] | None, message: str) -> None:
-    """An Insta360 clip converted without a device profile names no rig reference: the feed refuses it by name."""
+    """A rig that names no reference sensor (an Insta360 clip converted without a device profile is one) is refused."""
     column: str = f"{RIG_ENTITY}:reference"
     statics: pa.Table = pa.table({f"{RIG_ENTITY}:num_cameras": [2.0]}) if reference is None else pa.table({column: pa.array(reference, type=pa.string())})
     with pytest.raises(ValueError, match=message):
         check_imu_is_rig_frame(statics, "insta360__VID_x")
     check_imu_is_rig_frame(pa.table({column: ["imu_00"]}), "insta360__VID_x")
+
+
+@pytest.mark.parametrize(
+    ("statics", "message"),
+    [
+        (pa.table({f"{RIG_ENTITY}:reference": pa.array([], type=pa.string())}), "has no rows"),
+        (pa.table({f"{RIG_ENTITY}:reference": [3.0]}), "is not a string"),
+    ],
+)
+def test_a_malformed_rig_reference_is_named_as_malformed_not_as_missing(statics: pa.Table, message: str) -> None:
+    with pytest.raises(ValueError, match=message) as error:
+        check_imu_is_rig_frame(statics, "seg")
+    assert str(error.value).startswith("seg: ") and "names no reference sensor" not in str(error.value)
 
 
 def test_a_video_stream_with_no_codec_names_the_entity() -> None:

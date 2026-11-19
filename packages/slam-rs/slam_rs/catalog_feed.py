@@ -1031,22 +1031,20 @@ def select_cameras(statics: pa.Table, camera_count: int, camera_names: tuple[str
 def check_imu_is_rig_frame(rig_statics: pa.Table, segment_id: str) -> None:
     """Refuse a rig whose frame is not its IMU's: the feed runs VIO in the IMU frame and never on an unposed IMU.
 
-    A rig that names no reference sensor has an IMU without a pose in the rig; an Insta360 clip converted without a
-    measured device profile (insta360-io's ``insta360_profiles.toml``) is one, and says so in its ``insta360``
-    recording property (``profile = "none"``).
+    A rig that names no reference sensor has an IMU without a pose in the rig (the converter states why, e.g. the
+    ``insta360`` property's ``profile_note``). ``insv_calibrate`` opens recordings through this feed too, so it checks
+    a recording converted with a device profile; it does not measure a first one.
 
     Raises:
-        ValueError: If the rig names no reference, or names one other than ``imu_00``.
+        ValueError: If the rig names no reference, its reference cell is malformed, or it names one other than ``imu_00``.
     """
     column: str = f"{RIG_ENTITY}:reference"
+    if column not in rig_statics.column_names or (rig_statics.num_rows > 0 and not rig_statics[column][0].is_valid):
+        raise ValueError(f"{segment_id}: the rig names no reference sensor, so its IMU has no pose in the rig; the feed runs VIO in the IMU frame")
     try:
         reference: str = _static_string(rig_statics, column)
     except ValueError as error:
-        raise ValueError(
-            f"{segment_id}: the rig names no reference sensor ({error}), so its IMU has no pose in the rig; slam-rs does "
-            "not run VIO on an unposed IMU. An Insta360 clip converted without a device profile is such a recording: "
-            "measure a profile for its body and mode (insta360_profiles.toml) and convert it again"
-        ) from error
+        raise ValueError(f"{segment_id}: {error}") from error
     if reference != "imu_00":
         raise ValueError(f"{segment_id}: rig reference is {reference!r}, but the feed assumes the IMU is the rig frame")
 

@@ -1,6 +1,7 @@
 """Check an Insta360 recording's IMU calibration from its own pixels: there is no board in this project, so this is the procedure.
 
-It reports, and changes nothing:
+It needs a recording converted with a device profile (the seed rotation, IMU noise and time model come from it); the
+feed refuses one without (``catalog_feed.check_imu_is_rig_frame``). It reports, and changes nothing:
 
 1. ``R_P_imu``, the rotation from the IMU frame to the rig frame P, which has camera 0's axes. The native two-lens
    rig's frontend tracks both lenses over chosen spans; each consecutive frame pair gets a relative pose (rotation and translation
