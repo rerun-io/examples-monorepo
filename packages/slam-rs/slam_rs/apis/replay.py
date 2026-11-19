@@ -32,7 +32,7 @@ from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load
 from slam_rs.rig import TIMELINE
 from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import RUN_ENTITY, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import RUN_ENTITY, FrameMaskLog, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -283,6 +283,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
     # The stage that tracks needs the pixels its keypoints were computed on.
     mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
+    mask_log: FrameMaskLog | None = None if config.mask_entity is None else FrameMaskLog(config.mask_entity)
     times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
     framesets: Iterator[Frameset] = blank(feed.framesets(stop_ns), config.blank_cameras)
     bootstrap: BootstrapLog = BootstrapLog()
@@ -295,7 +296,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
         replayed += 1
         logged: float = time.monotonic()
-        log_frameset_inputs(feed, frameset, mode if log_images else "off")
+        log_frameset_inputs(feed, frameset, mode if log_images else "off", mask_log)
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
         if isinstance(stage, VioStage):
             stage.run(frameset)
