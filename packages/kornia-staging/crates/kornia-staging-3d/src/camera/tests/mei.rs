@@ -158,6 +158,29 @@ fn mei_rejects_at_and_beyond_the_field_edge() {
 }
 
 #[test]
+fn mei_with_xi_at_most_one_rejects_a_field_past_the_denominator_fold() {
+    // For xi <= 1 the map folds where z + xi |P| = 0, at acos(-xi): 143.13 degrees for xi = 0.8.
+    let param = [400.0, 410.0, 320.0, 240.0, 0.8];
+    let d = v3::<f64>();
+    for (xi, half_deg) in [(0.8, 160.0), (0.8, 143.2), (1.0, 180.0), (0.0, 91.0)] {
+        let param = [param[0], param[1], param[2], param[3], xi];
+        assert_eq!(
+            Mei::new(param, f64::to_radians(half_deg), d),
+            Err(InvalidCalibration),
+            "xi {xi} half field {half_deg}"
+        );
+    }
+    let fold_deg = (-0.8f64).acos().to_degrees();
+    let camera = Mei::new(param, (fold_deg - 0.1).to_radians(), d).unwrap();
+    let pixel = camera.project(bearing(fold_deg - 0.2, 30.0)).unwrap();
+    assert!(pixel.iter().all(|v| v.is_finite()), "{pixel:?}");
+    assert_eq!(
+        camera.project(bearing(150.0, 30.0)),
+        Err(ProjectionReject::OutsideDomain)
+    );
+}
+
+#[test]
 fn mei_is_one_camera_model_kind_and_round_trips_through_serde() {
     let mei = camera(X4AIR_V6.0, v6::<f64>());
     let kind = CameraModelKind::Mei(mei);

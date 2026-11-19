@@ -134,8 +134,9 @@ impl<S: Scalar> Mei<S> {
     /// Build a Mei camera.
     /// # Arguments
     /// * `param` - `[fx, fy, cx, cy, xi]`, `xi >= 0`.
-    /// * `half_field_rad` - largest angle off the optical axis that projects, in `(0, pi]`; for `xi > 1` the cone
-    ///   must stay inside the sphere's one-to-one region, `cos(half_field_rad) > -1 / xi`.
+    /// * `half_field_rad` - largest angle off the optical axis that projects, in `(0, pi]`; the cone must stay
+    ///   inside the sphere's one-to-one region, `cos(half_field_rad) > -xi` for `xi <= 1` (where
+    ///   `z + xi |P| > 0`) and `cos(half_field_rad) > -1 / xi` for `xi > 1`.
     /// * `distortion` - the distortion of the normalized sphere point.
     /// # Errors
     /// Rejects non-finite values, nonpositive focals, a negative `xi` or a field outside those bounds.
@@ -151,6 +152,7 @@ impl<S: Scalar> Mei<S> {
             || !distortion.finite()
             || !(half_field_rad > S::zero() && half_field_rad <= S::pi())
             || (xi > S::one() && cos_half_field * xi <= -S::one())
+            || (xi <= S::one() && cos_half_field <= -xi)
         {
             return Err(InvalidCalibration);
         }
