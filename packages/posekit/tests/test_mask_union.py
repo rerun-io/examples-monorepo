@@ -29,6 +29,7 @@ def test_pool_any_marks_a_cell_when_any_pixel_is_set() -> None:
     mask: np.ndarray = np.zeros((4, 6), dtype=bool)
     mask[1, 4] = True
     np.testing.assert_array_equal(pool_any(mask, 2), [[False, False, True], [False, False, False]])
+    np.testing.assert_array_equal(pool_any(np.stack([mask, ~mask]), 2), [pool_any(mask, 2), pool_any(~mask, 2)])
     with pytest.raises(ValueError, match="does not pool"):
         pool_any(mask, 4)
 

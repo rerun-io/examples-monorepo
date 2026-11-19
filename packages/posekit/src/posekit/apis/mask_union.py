@@ -19,8 +19,7 @@ from jaxtyping import Bool, Float64, Int64
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-MASK_NAME: str = "people_mask"
-"""Leaf entity of a mask under ``<camera>/pinhole``."""
+from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME
 
 
 @dataclass
@@ -36,16 +35,16 @@ class MaskUnionConfig:
     """Timeline of the masks."""
 
 
-def pool_any(mask: Bool[ndarray, "h w"], factor: int) -> Bool[ndarray, "hc wc"]:
-    """Max-pool a binary mask by a whole ``factor`` (a cell is set when any of its pixels is).
+def pool_any(mask: Bool[ndarray, "*n h w"], factor: int) -> Bool[ndarray, "*n hc wc"]:
+    """Max-pool binary masks by a whole ``factor`` (a cell is set when any of its pixels is).
 
     Raises:
         ValueError: If the mask size is not a multiple of ``factor``.
     """
-    height, width = mask.shape
+    height, width = mask.shape[-2:]
     if height % factor or width % factor:
         raise ValueError(f"a {width}x{height} mask does not pool by {factor}")
-    return mask.reshape(height // factor, factor, width // factor, factor).any(axis=(1, 3))
+    return mask.reshape(*mask.shape[:-2], height // factor, factor, width // factor, factor).any(axis=(-3, -1))
 
 
 def layer_statics(store: rrc.LazyStore) -> dict[str, Float64[ndarray, "2"]]:
@@ -83,8 +82,7 @@ def layer_masks(
         fmt: dict = batch.column("SegmentationImage:format").to_pylist()[0][0]
         values: ndarray = batch.column("SegmentationImage:buffer").flatten().flatten().to_numpy(zero_copy_only=False)
         stacked: Bool[ndarray, "n h w"] = values.reshape(len(stamps), fmt["height"], fmt["width"]) > 0
-        for stamp, mask in zip(stamps, stacked, strict=True):
-            masks[int(stamp)] = pool_any(mask, factor) if factor > 1 else mask
+        masks.update(zip(stamps.tolist(), pool_any(stacked, factor), strict=True))
     return masks
 
 
@@ -106,7 +104,7 @@ def main(config: MaskUnionConfig) -> None:
             layer_masks(store, entity, config.timeline, s[entity], target_cell_px) for store, s in zip(stores, statics, strict=True)
         ]
         stamps: list[int] = sorted(set.intersection(*(set(m) for m in per_layer)))
-        rr.log(entity, rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (1, "masked", (40, 110, 255, 140))]), static=True)
+        rr.log(entity, MASK_ANNOTATION, static=True)
         rr.log(entity, rr.Transform3D(scale=[float(target_cell_px[0]), float(target_cell_px[1]), 1.0]), static=True)
         for stamp in stamps:
             union: Bool[ndarray, "h w"] = np.logical_or.reduce([m[stamp] for m in per_layer])

@@ -1,0 +1,11 @@
+"""Mask layer contract (track 3, v2): per camera ``<camera>/pinhole/people_mask``, a ``SegmentationImage``
+(nonzero = masked) with a static ``Transform3D(scale=[sx, sy, 1])`` from mask cells to image pixels."""
+
+import rerun as rr
+
+MASK_NAME: str = "people_mask"
+"""Leaf entity of a mask under ``<camera>/pinhole``."""
+MASKED_CLASS_ID: int = 1
+"""Mask value of a masked pixel (nonzero = drop features there)."""
+MASK_ANNOTATION: rr.AnnotationContext = rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (MASKED_CLASS_ID, "masked", (40, 110, 255, 140))])
+"""Static annotation logged on every mask entity."""
