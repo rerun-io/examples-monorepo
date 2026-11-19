@@ -850,7 +850,11 @@ impl Vio {
         let arrays: Vec<Option<PyReadonlyArray2<'_, u8>>> = masks
             .iter()
             .enumerate()
-            .map(|(index, mask)| mask.as_ref().map(|mask| gray_array(mask, index, "mask")).transpose())
+            .map(|(index, mask)| {
+                mask.as_ref()
+                    .map(|mask| gray_array(mask, index, "mask"))
+                    .transpose()
+            })
             .collect::<PyResult<_>>()?;
         let views: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = arrays
             .iter()
@@ -860,7 +864,11 @@ impl Vio {
                     .as_ref()
                     .map(|array| {
                         gray_pixels(array, index, "mask").map(|(data, width, height)| {
-                            slam_rs::frontend::masks::PixelMask { width, height, data }
+                            slam_rs::frontend::masks::PixelMask {
+                                width,
+                                height,
+                                data,
+                            }
                         })
                     })
                     .transpose()
