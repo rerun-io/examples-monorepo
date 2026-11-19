@@ -1,7 +1,8 @@
 """Lens-plane masks to cubemap masks: join the people masks of the two Insta360 lenses into the six cube faces.
 
 Reads (a) the base recording (the two Mei lens cameras), (b) a mask layer with ``SegmentationImage`` uint8 at
-``/world/rig_00/cam_0{0,1}/pinhole/people_mask`` at lens resolution on ``video_time``, and (c) the cube layer (each
+``/world/rig_00/cam_0{0,1}/pinhole/people_mask`` on ``video_time`` (mask contract v2: at the resolution it was computed at,
+with a static ``Transform3D`` scale to the lens image; no transform = lens resolution), and (c) the cube layer (each
 face's name, ``Pinhole`` and face-from-IMU ``Transform3D``, and the face frame stamps). Writes a layer with
 ``SegmentationImage`` at ``/world/rig_00/cam_NN/pinhole/people_mask`` (NN = 02..07) on every face frame stamp, joined
 from the two lens masks through the faces' tables with nearest-neighbour interpolation. Every face pixel lies inside the
@@ -112,11 +113,37 @@ def lens_masks(masks: Path, stamps: set[int]) -> Iterator[tuple[int, int, UInt8[
                 yield entities[chunk.entity_path], stamp, np.asarray(buffer[0], dtype=np.uint8).reshape(fmt["height"], fmt["width"])
 
 
+def lens_mask_scales(masks: Path) -> dict[int, tuple[float, float]]:
+    """Each lens mask entity's static ``Transform3D`` scale ``(sx, sy)``; a lens without one is absent (scale 1)."""
+    entities: dict[str, int] = {f"{schema.pinhole_path(RIG, lens)}/{MASK_NAME}": lens for lens in range(2)}
+    scales: dict[int, tuple[float, float]] = {}
+    for chunk in rrc.RrdReader(masks).stream():
+        if chunk.is_static and chunk.entity_path in entities:
+            batch = chunk.to_record_batch()
+            if "Transform3D:scale" in batch.schema.names and (value := batch.column("Transform3D:scale").to_pylist()[0]):
+                scales[entities[chunk.entity_path]] = (float(value[0][0]), float(value[0][1]))
+    return scales
+
+
+def lens_image_mask(mask: UInt8[ndarray, "hm wm"], scale: tuple[float, float], image_shape: tuple[int, int]) -> UInt8[ndarray, "h w"]:
+    """The mask on the lens image's pixels by the contract-v2 lookup: pixel (c, r) reads mask[(2r+1)hm // 2h, (2c+1)wm // 2w].
+
+    Raises:
+        ValueError: If the mask's size times its scale is half a pixel or more from the image size.
+    """
+    (hm, wm), (h, w) = mask.shape, image_shape
+    if abs(wm * scale[0] - w) >= 0.5 or abs(hm * scale[1] - h) >= 0.5:
+        raise ValueError(f"a {wm}x{hm} mask at scale {scale} does not cover the {w}x{h} lens image")
+    rows: Int64[ndarray, " h"] = (2 * np.arange(h) + 1) * hm // (2 * h)
+    cols: Int64[ndarray, " w"] = (2 * np.arange(w) + 1) * wm // (2 * w)
+    return mask[np.ix_(rows, cols)]
+
+
 def main(config: Config) -> None:
     """Write the face mask layer.
 
     Raises:
-        ValueError: If a face stamp has no mask on both lenses, or a lens mask is not at the lens resolution.
+        ValueError: If a face stamp has no mask on both lenses, or a lens mask and its scale do not cover the lens image.
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
@@ -124,15 +151,16 @@ def main(config: Config) -> None:
     tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lens1_from_lens0) for cam, face in faces.items()}
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
+    scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
     pending: dict[int, dict[int, UInt8[ndarray, "h w"]]] = {}
     done: set[int] = set()
     with writing.atomic_recording(config.output, recording_id=config.base.stem, send_properties=False) as recording:
         for lens, stamp, mask in lens_masks(config.masks, wanted):
-            if mask.shape != lens_shape:
-                raise ValueError(f"lens {lens} mask at {stamp} is {mask.shape}, the lens is {lens_shape}")
             if stamp in done:
                 continue
-            pending.setdefault(stamp, {})[lens] = mask
+            pending.setdefault(stamp, {})[lens] = (
+                mask if lens not in scales and mask.shape == lens_shape else lens_image_mask(mask, scales.get(lens, (1.0, 1.0)), lens_shape)
+            )
             if len(pending[stamp]) < 2:
                 continue
             pair: dict[int, UInt8[ndarray, "h w"]] = pending.pop(stamp)

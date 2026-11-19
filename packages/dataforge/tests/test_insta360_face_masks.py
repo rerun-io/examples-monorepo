@@ -64,8 +64,13 @@ def write_faces(path: Path) -> None:
                 recording.log(f"{node}/pinhole/video", rr.VideoStream.from_fields(sample=b"\x00"))
 
 
-def write_masks(path: Path, stamps: list[int]) -> None:
-    """Lens 0: a disc on its optical axis. Lens 1: a disc 80 deg toward its +X (the cube's -X: ``cube6_left``)."""
+def write_masks(path: Path, stamps: list[int], factor: int = 1, scale: float | None = None) -> None:
+    """Lens 0: a disc on its optical axis. Lens 1: a disc 80 deg toward its +X (the cube's -X: ``cube6_left``).
+
+    ``factor`` > 1 writes each disc at 1/factor of the lens size (every factor-th pixel) with a static
+    ``Transform3D(scale=[scale, scale, 1])`` (mask contract v2; ``scale`` defaults to ``factor``); ``factor`` = 1 writes it full size
+    with no transform.
+    """
     import insta360_io
 
     centre: float = (LENS - 1) / 2
@@ -76,8 +81,13 @@ def write_masks(path: Path, stamps: list[int]) -> None:
         (np.hypot(u - centre, v - centre) <= 20).astype(np.uint8),
         (np.hypot(u - side[0, 0], v - side[0, 1]) <= 8).astype(np.uint8),
     ]
+    discs = [disc[factor // 2 :: factor, factor // 2 :: factor] for disc in discs]
     with rr.RecordingStream("test", recording_id="insta360__clip") as recording:
         recording.save(path)
+        if factor > 1:
+            for lens in range(2):
+                s: float = float(factor) if scale is None else scale
+                recording.log(f"/world/rig_00/cam_0{lens}/pinhole/people_mask", rr.Transform3D(scale=[s, s, 1.0]), static=True)
         for stamp in stamps:
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
             for lens in range(2):
@@ -132,3 +142,42 @@ def test_a_face_stamp_without_a_mask_on_both_lenses_is_an_error(tmp_path: Path) 
     with pytest.raises(ValueError, match="no mask on both lenses"):
         main(Config(base=base, masks=masks, faces=faces, output=output))
     assert not output.exists()
+
+
+def test_a_quarter_size_mask_with_its_scale_joins_like_its_nearest_upsample(tmp_path: Path) -> None:
+    """Contract v2: a mask at 1/4 of the lens size with a static scale of 4 gives the faces of the same mask repeated 4x4."""
+    from dataforge.apis.insta360_face_masks import Config, main
+
+    base, faces, small, full, out_small, out_full = (tmp_path / f"{n}.rrd" for n in ("base", "faces", "small", "full", "o1", "o2"))
+    write_base(base)
+    write_faces(faces)
+    write_masks(small, STAMPS, factor=4)
+    # The full-size reference: each quarter-size pixel repeated 4x4 (the contract's lookup for an integer scale).
+    with rr.RecordingStream("test", recording_id="insta360__clip") as recording:
+        recording.save(full)
+        for stamp in STAMPS:
+            recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
+            for entity, rows in read_masks(small).items():
+                mask = next(m for t, m in rows if t == stamp)
+                recording.log(entity, rr.SegmentationImage(np.repeat(np.repeat(mask, 4, axis=0), 4, axis=1)))
+    main(Config(base=base, masks=small, faces=faces, output=out_small))
+    main(Config(base=base, masks=full, faces=faces, output=out_full))
+    got, want = read_masks(out_small), read_masks(out_full)
+    assert sorted(got) == sorted(want)
+    for entity in want:
+        assert all(
+            np.array_equal(a, b)
+            for (_, a), (_, b) in zip(sorted(got[entity], key=lambda r: r[0]), sorted(want[entity], key=lambda r: r[0]), strict=True)
+        )
+    assert any(m.sum() > 0 for rows in got.values() for _, m in rows)
+
+
+def test_a_scale_that_does_not_reach_the_lens_size_is_an_error(tmp_path: Path) -> None:
+    from dataforge.apis.insta360_face_masks import Config, main
+
+    base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
+    write_base(base)
+    write_faces(faces)
+    write_masks(masks, STAMPS, factor=4, scale=3.0)
+    with pytest.raises(ValueError, match="scale"):
+        main(Config(base=base, masks=masks, faces=faces, output=output))
