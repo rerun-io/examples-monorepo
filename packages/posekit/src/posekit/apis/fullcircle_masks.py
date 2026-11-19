@@ -1,6 +1,7 @@
 """FullCircle operator masks for a dual-fisheye base recording: a ``people_mask`` layer on both lenses.
 
-Reads the lens videos and their Mei calibrations from a dataforge Insta360 base recording, runs
+Reads the lens videos, their Mei calibrations and the accelerometer of a dataforge Insta360 base recording from its
+catalog segment (only the packets of the run window), runs
 :class:`~posekit.models.fullcircle.FullCircleMasker` in FullCircle's two passes (detect the operator direction on
 every tracked frameset, fill the gaps from the nearest frameset, then track and map back) and writes the mask layer
 contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a ``SegmentationImage`` (uint8, 1 = operator)
@@ -20,12 +21,14 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-import rerun.chunk as rrc
 import torch
+from datafusion import col, lit
 from einops import rearrange
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
-from simplecv.catalog_video import CatalogVideo, catalog_video_from_table
+from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
+from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
@@ -49,11 +52,17 @@ from posekit.ops.sphere import MeiCamera
 class FullCircleMasksConfig:
     """Write a FullCircle operator-mask layer for the two lenses of an Insta360 base recording."""
 
-    rrd: Path
-    """Base recording (dataforge ``insta360``) with ``/world/rig_00/cam_00`` and ``cam_01``."""
     rr_config: RerunTyroConfig
     """Output sink: ``--rr-config.save <layer.rrd> --rr-config.headless --rr-config.recording-id <segment>
     --rr-config.application-id dataforge``."""
+    dataset: str | None = None
+    """Catalog dataset of the base recording (dataforge ``insta360``), read with ``segment`` from ``catalog_url``."""
+    segment: str | None = None
+    """The base recording's segment in ``dataset``."""
+    catalog_url: str = "rerun+http://127.0.0.1:51235"
+    """Catalog holding ``dataset``."""
+    rrd: Path | None = None
+    """A base recording not on a catalog yet, instead of ``dataset``/``segment``: served by an in-process catalog."""
     cameras: tuple[str, str] = ("/world/rig_00/cam_00", "/world/rig_00/cam_01")
     """The two lens camera nodes (each has ``pinhole`` and ``pinhole/video``)."""
     stride: int = 5
@@ -82,75 +91,85 @@ class FullCircleMasksConfig:
     """Nominal frame rate of the wrapping MP4 track (decoding only)."""
 
 
-def read_lens_sources(store: rrc.LazyStore, cameras: tuple[str, str], mask_downscale: int) -> tuple[list[SphereSource], Float64[ndarray, "3 3"]]:
+def read_lens_sources(
+    dataset: DatasetEntry, segment: str, cameras: tuple[str, str], mask_downscale: int
+) -> tuple[list[SphereSource], Float64[ndarray, "3 3"]]:
     """The two lens cameras of a base recording in lens 0's frame, and the rotation of rig (IMU) vectors into that frame.
 
     Raises:
         ValueError: If a lens lacks its calibration statics or is not a Mei camera.
     """
-    wanted: dict[str, list[str]] = {camera: [f"{camera}:Transform3D:mat3x3"] for camera in cameras} | {
-        f"{camera}/pinhole": [
-            f"{camera}/pinhole:simplecv.components.DistortionModel",
-            f"{camera}/pinhole:simplecv.components.DistortionCoefficients",
-            f"{camera}/pinhole:Pinhole:image_from_camera",
-            f"{camera}/pinhole:Pinhole:resolution",
-        ]
-        for camera in cameras
-    }
-    needed: set[str] = {key for keys in wanted.values() for key in keys}
-    statics: dict[str, list] = {}
-    for chunk in store.stream().filter(content=list(wanted)).to_chunks():
-        if chunk.is_static:
-            batch = chunk.to_record_batch()
-            for name in batch.schema.names:
-                if f"{chunk.entity_path}:{name}" in needed:
-                    statics[f"{chunk.entity_path}:{name}"] = batch.column(name).to_pylist()[0]
-    missing: list[str] = sorted(needed - statics.keys())
-    if missing:
-        raise ValueError(f"missing lens statics {missing}")
-    # Rerun stores 3x3 matrices column-major; the lens Transform3D is ChildFromParent (lens from rig).
-    cam_R_rigs: list[Float64[ndarray, "3 3"]] = [
-        np.asarray(statics[f"{camera}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T for camera in cameras
-    ]
+    models: dict[str, CatalogCameraCalibration] = read_camera_models(dataset, segment, cameras)
+    # The lens Transform3D is ChildFromParent (lens from rig).
+    cam_R_rigs: list[Float64[ndarray, "3 3"]] = [np.asarray(models[camera].pinhole.extrinsics.cam_R_world, dtype=np.float64) for camera in cameras]
     sources: list[SphereSource] = []
     for camera, cam_R_rig in zip(cameras, cam_R_rigs, strict=True):
-        pinhole: str = f"{camera}/pinhole"
-        k: Float64[ndarray, "3 3"] = np.asarray(statics[f"{pinhole}:Pinhole:image_from_camera"][0], dtype=np.float64).reshape(3, 3).T
-        width, height = (int(v) for v in statics[f"{pinhole}:Pinhole:resolution"][0])
-        model: str = str(statics[f"{pinhole}:simplecv.components.DistortionModel"][0])
-        coefficients: list[float] = [float(c) for c in statics[f"{pinhole}:simplecv.components.DistortionCoefficients"][0]]
-        lens: MeiCamera = MeiCamera.from_calibration(model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), coefficients)
+        model: CatalogCameraCalibration = models[camera]
+        if model.distortion is None:
+            raise ValueError(f"{camera}: no distortion model, so not a Mei camera")
+        k: Float64[ndarray, "3 3"] = np.asarray(model.pinhole.intrinsics.k_matrix, dtype=np.float64)
+        width, height = int(model.pinhole.intrinsics.width), int(model.pinhole.intrinsics.height)
+        lens: MeiCamera = MeiCamera.from_calibration(
+            model.distortion.model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), model.distortion.coefficients.tolist()
+        )
         sources.append(SphereSource(lens, cam_R_rigs[0] @ cam_R_rig.T, (height, width), (height // mask_downscale, width // mask_downscale)))
     return sources, cam_R_rigs[0]
 
 
-def read_lens_video(store: rrc.LazyStore, entity: str, timeline: str) -> CatalogVideo:
-    """One lens's encoded packets from the recording file, reading only that entity's chunks.
+def read_lens_index(dataset: DatasetEntry, segment: str, entity: str, timeline: str) -> tuple[ndarray, list[bool]]:
+    """One lens's frame stamps and keyframe flags, without its packets.
 
     Raises:
         ValueError: If the entity has no frames with strictly increasing stamps.
     """
-    chunks: list = store.stream().filter(content=[entity]).to_chunks()
-    if not chunks:
-        raise ValueError(f"{entity}: no video in the recording")
-    table: pa.Table = rrc.ChunkStore.from_chunks(chunks).reader(index=timeline).to_arrow_table()
-    return catalog_video_from_table(table, entity, timeline, entity)
+    sample: str = f"{entity}:VideoStream:sample"
+    keyframe: str = f"{entity}:VideoStream:is_keyframe"
+    view = dataset.filter_segments(segment).filter_contents([entity]).reader(index=timeline)
+    table: pa.Table = view.filter(col(sample).is_not_null()).select(timeline, keyframe).to_arrow_table()
+    times: ndarray = table[timeline].combine_chunks().to_numpy(zero_copy_only=False)
+    if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
+        raise ValueError(f"{segment} {entity}: expected frames with strictly increasing timestamps")
+    return times, catalog_keyframes(table[keyframe])
+
+
+def read_lens_window(dataset: DatasetEntry, segment: str, entity: str, timeline: str, times: ndarray) -> CatalogVideo:
+    """One lens's packets at ``times``, a run of its index read with one range query.
+
+    Raises:
+        ValueError: If the catalog returns other frames than ``times``.
+    """
+    view = dataset.filter_segments(segment).filter_contents([entity]).reader(index=timeline)
+    in_window = (col(timeline) >= lit(pa.scalar(times[0]))) & (col(timeline) <= lit(pa.scalar(times[-1])))
+    columns: list[str] = [f"{entity}:VideoStream:{component}" for component in ("sample", "is_keyframe", "codec")]
+    video: CatalogVideo = catalog_video_from_table(
+        view.filter(in_window).select(timeline, *columns).to_arrow_table(), entity, timeline, f"{segment} {entity}"
+    )
+    if not np.array_equal(video.times, times):
+        raise ValueError(f"{segment} {entity}: the catalog returned {len(video.times)} frames for {len(times)} indexed ones")
+    return video
 
 
 def read_level_rotations(
-    store: rrc.LazyStore, accel: str, timeline: str, stamps_ns: Int64[ndarray, " n"], cam0_R_rig: Float64[ndarray, "3 3"], window_s: float
+    dataset: DatasetEntry,
+    segment: str,
+    accel: str,
+    timeline: str,
+    stamps_ns: Int64[ndarray, " n"],
+    cam0_R_rig: Float64[ndarray, "3 3"],
+    window_s: float,
 ) -> list[Float64[ndarray, "3 3"]]:
     """Per stamp, ``rig_R_level`` in lens 0's frame: gravity is minus the mean specific force within ``window_s`` of it.
 
     Raises:
         ValueError: If the recording has no accelerometer series, or a window holds no sample.
     """
-    chunks: list = store.stream().filter(content=[accel], is_static=False).to_chunks()
-    if not chunks:
+    scalars: str = f"{accel}:Scalars:scalars"
+    view = dataset.filter_segments(segment).filter_contents([accel]).reader(index=timeline)
+    table: pa.Table = view.filter(col(scalars).is_not_null()).select(timeline, scalars).to_arrow_table()
+    if not table.num_rows:
         raise ValueError(f"{accel}: no accelerometer series to level the views with")
-    table: pa.Table = rrc.ChunkStore.from_chunks(chunks).reader(index=timeline).to_arrow_table()
     times: Int64[ndarray, " m"] = np.asarray(table[timeline].combine_chunks().to_numpy(zero_copy_only=False)).view(np.int64)
-    forces: Float64[ndarray, "m 3"] = np.asarray(table[f"{accel}:Scalars:scalars"].to_pylist(), dtype=np.float64)
+    forces: Float64[ndarray, "m 3"] = np.asarray(table[scalars].to_pylist(), dtype=np.float64)
     order: Int64[ndarray, " m"] = np.argsort(times)
     times, forces = times[order], forces[order]
     cumulative: Float64[ndarray, "m1 3"] = np.concatenate([np.zeros((1, 3)), np.cumsum(forces, axis=0)])
@@ -164,42 +183,65 @@ def read_level_rotations(
 
 
 def main(config: FullCircleMasksConfig) -> None:
-    """Write the operator-mask layer and print per-step timings."""
+    """Write the operator-mask layer from the catalog, or from ``rrd`` served in-process.
+
+    Raises:
+        ValueError: Unless exactly one of ``rrd`` and ``dataset`` + ``segment`` names the base.
+    """
+    if (config.rrd is None) == (config.dataset is None or config.segment is None):
+        raise ValueError("name the base recording with --dataset and --segment, or with --rrd")
+    if config.rrd is None:
+        assert config.dataset is not None and config.segment is not None
+        write_masks(config, CatalogClient(config.catalog_url).get_dataset(name=config.dataset), config.segment)
+        return
+    with rr.server.Server(datasets={"base": [str(config.rrd)]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("base")
+        segments: list[str] = list(dataset.segment_ids())
+        if len(segments) != 1:
+            raise ValueError(f"{config.rrd} holds {len(segments)} recordings; expected one")
+        write_masks(config, dataset, segments[0])
+
+
+def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id: str) -> None:
+    """Write the operator-mask layer of one segment and print per-step timings."""
     process_start: float = time.perf_counter()
-    reader: rrc.RrdReader = rrc.RrdReader(config.rrd)
-    recording_ids: list[str] = [entry.recording_id for entry in reader.recordings()]
-    if len(recording_ids) != 1:
-        raise ValueError(f"{config.rrd} holds {len(recording_ids)} recordings; expected one")
-    segment_id: str = recording_ids[0]
     if config.rr_config.recording_id != segment_id:
         raise ValueError(f"pass --rr-config.recording-id {segment_id} so the mask layer joins the base recording")
-    store: rrc.LazyStore = reader.store()
-    sources, cam0_R_rig = read_lens_sources(store, config.cameras, config.mask_downscale)
+    sources, cam0_R_rig = read_lens_sources(dataset, segment_id, config.cameras, config.mask_downscale)
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
-    videos: list[CatalogVideo] = [read_lens_video(store, f"{camera}/pinhole/video", config.timeline) for camera in config.cameras]
-    times: list[ndarray] = [v.times for v in videos]
+    entities: list[str] = [f"{camera}/pinhole/video" for camera in config.cameras]
+    indexes: list[tuple[ndarray, list[bool]]] = [read_lens_index(dataset, segment_id, entity, config.timeline) for entity in entities]
+    times: list[ndarray] = [index[0] for index in indexes]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
     tracked: list[int] = list(range(config.start, end, config.stride))
     # Each decoder holds the packets from the keyframe at or before ``start`` to ``end``.
-    firsts: list[int] = [max(i for i in range(config.start + 1) if v.keyframes[i]) for v in videos]
-    decoders: list[VideoDecoder] = [
-        VideoDecoder(
-            wrap_mp4(v.samples[first:end], v.keyframes[first:end], config.fps, codec=v.codec),
-            device=str(device),
-            seek_mode="exact",
-            num_ffmpeg_threads=0,
+    firsts: list[int] = [max(i for i in range(config.start + 1) if keyframes[i]) for _, keyframes in indexes]
+    decoders: list[VideoDecoder] = []
+    for entity, lens_times, first in zip(entities, times, firsts, strict=True):
+        window: CatalogVideo = read_lens_window(dataset, segment_id, entity, config.timeline, lens_times[first:end])
+        decoders.append(
+            VideoDecoder(
+                wrap_mp4(window.samples, window.keyframes, config.fps, codec=window.codec),
+                device=str(device),
+                seek_mode="exact",
+                num_ffmpeg_threads=0,
+            )
         )
-        for v, first in zip(videos, firsts, strict=True)
-    ]
     read_s: float = time.perf_counter() - process_start
     print(
         f"segment {segment_id}: {n_framesets} framesets, tracking {len(tracked)} (stride {config.stride}) over {config.start}..{end - 1}; read {read_s:.1f} s"
     )
 
     levels: list[Float64[ndarray, "3 3"]] = read_level_rotations(
-        store, config.accel, config.timeline, np.asarray([times[0][i] for i in tracked]).view(np.int64), cam0_R_rig, config.gravity_window_s
+        dataset,
+        segment_id,
+        config.accel,
+        config.timeline,
+        np.asarray([times[0][i] for i in tracked]).view(np.int64),
+        cam0_R_rig,
+        config.gravity_window_s,
     )
     load_start: float = time.perf_counter()
     masker: FullCircleMasker = FullCircleMasker(config.masker, sources)

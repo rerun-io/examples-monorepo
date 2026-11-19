@@ -329,9 +329,10 @@ models are posekit's own: YOLOX-HumanArt (TensorRT) or SAM 3 on the faces, Effic
 differs from FullCircle, and why, is in the module docstring.
 
 ```bash
-# operator-mask layer for an Insta360 base recording (dataforge insta360): <lens>/pinhole/people_mask on both lenses
-python tools/apps/fullcircle_masks.py --rrd <base.rrd> --rr-config.save <layer.rrd> --rr-config.headless \
-    --rr-config.recording-id <recording id of the base> --rr-config.application-id dataforge
+# operator-mask layer for an Insta360 base segment (dataforge insta360): <lens>/pinhole/people_mask on both lenses
+python tools/apps/fullcircle_masks.py --dataset <dataset> --segment <segment> --rr-config.save <layer.rrd> \
+    --rr-config.headless --rr-config.recording-id <segment> --rr-config.application-id dataforge
+# a base not registered yet: --rrd <base.rrd> instead of --dataset/--segment
 ```
 
 The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on every 5th frameset,

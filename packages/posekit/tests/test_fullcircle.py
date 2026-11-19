@@ -1,4 +1,4 @@
-"""FullCircle helpers: nearest-frame fill, the view up hint, disk dilation, and the lens statics reader."""
+"""FullCircle helpers: nearest-frame fill, the view up hint, disk dilation, mask scales, and the lens calibration reader."""
 
 from __future__ import annotations
 
@@ -58,9 +58,9 @@ def test_disk_dilate_radius() -> None:
     assert torch.equal(disk_dilate(mask, 0), mask)
 
 
+@pytest.mark.integration
 def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
     import rerun as rr
-    import rerun.chunk as rrc
     from scipy.spatial.transform import Rotation
     from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 
@@ -81,7 +81,8 @@ def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
         recording.log(f"{node}/pinhole", PinholeWithDistortion(pinhole, CameraDistortion("mei_v6", np.asarray(coefficients))), static=True)
     recording.flush()
     recording.disconnect()  # closes the file sink, which writes the footer the lazy store reads
-    sources, cam0_R_rig = read_lens_sources(rrc.RrdReader(path).store(), ("/world/rig_00/cam_00", "/world/rig_00/cam_01"), 4)
+    with rr.server.Server(datasets={"base": [path]}) as server:
+        sources, cam0_R_rig = read_lens_sources(server.client().get_dataset("base"), "test", ("/world/rig_00/cam_00", "/world/rig_00/cam_01"), 4)
     np.testing.assert_allclose(cam0_R_rig, cam_R_rigs[0], atol=1e-6)
     np.testing.assert_allclose(sources[0].rig_R_cam, np.eye(3), atol=1e-6)
     np.testing.assert_allclose(sources[1].rig_R_cam, cam_R_rigs[0] @ cam_R_rigs[1].T, atol=1e-6)
