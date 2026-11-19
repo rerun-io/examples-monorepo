@@ -69,6 +69,7 @@ import rerun.chunk as rrc
 import torch
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models_from_store
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.imu_calibration import ImuCalibration
@@ -399,6 +400,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     PANORAMA_LAYER: lambda recording: self.write_panorama(recording, reader.rig, targets[paths.BASE_LAYER]),
                     CUBE_LAYER: lambda recording: self.write_cube(recording, reader.rig, targets[paths.BASE_LAYER]),
                 },
+                base_blueprint=self.segment_blueprint(panorama=PANORAMA_LAYER in pending),
             )
         return targets[paths.BASE_LAYER]
 
@@ -555,13 +557,19 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     raise ValueError(f"cam_{cam:02d} holds {samples} frames for {indices.size} framesets")
 
     def default_blueprint(self) -> rrb.Blueprint:
-        """Both lenses and the panorama beside the rig in 3D, over the IMU plots."""
+        """The base's layout: no panorama pane, since the panorama is an opt-in derived layer."""
+        return self.segment_blueprint(panorama=False)
+
+    def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
+        """The segment layout shows the panorama pane when any registered segment holds the panorama layer."""
+        layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
+        return self.segment_blueprint(panorama=any(PANORAMA_LAYER in names for names in layer_names)), self.table_blueprint()
+
+    def segment_blueprint(self, *, panorama: bool) -> rrb.Blueprint:
+        """Both lenses (and with ``panorama`` the panorama) beside the rig in 3D, over the IMU plots."""
+        lenses: list[rrb.Spatial2DView] = [blueprints.camera_view(f"lens{cam}", RIG, cam, contents=[schema.video_path(RIG, cam)]) for cam in range(2)]
         return blueprints.rig_blueprint(
-            [
-                blueprints.camera_view("lens0", RIG, 0, contents=[schema.video_path(RIG, 0)]),
-                blueprints.camera_view("lens1", RIG, 1, contents=[schema.video_path(RIG, 1)]),
-                rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY),
-            ],
+            lenses + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
             rig=RIG,
             run_source=RUN_SOURCE,
             # Lens 0 looks along z_P = -y_imu; image up is -y_P = -x_imu.
