@@ -18,15 +18,16 @@ BAND_DEG: float = 5.0
 """Seam band half-width of the synthetic tests (the default)."""
 
 
-def join_panoramas(device: str, lens0: UInt8[ndarray, "h w 3"], lens1: UInt8[ndarray, "h w 3"], *, flow: bool, frames: int = 1) -> UInt8[ndarray, "ph pw 3"]:
-    """The panorama of one lens pair (synthetic cameras), joined ``frames`` times in a row on ``device``; the last one."""
+def join_panoramas(device: str, lens0: UInt8[ndarray, "h w 3"], lens1: UInt8[ndarray, "h w 3"], *, frames: int = 1) -> UInt8[ndarray, "ph pw 3"]:
+    """The panorama of one lens pair (synthetic cameras), joined ``frames`` times in a row on ``device`` (``cuda``: the
+    flow seam; ``cpu``: the plain feather); the last one."""
     import torch
 
     from dataforge.datasets.insta360_panorama import PanoramaJoin, panorama_table
 
     table = panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, BAND_DEG)
     pair = [torch.from_numpy(image).permute(2, 0, 1)[None].to(device) for image in (lens0, lens1)]
-    join = PanoramaJoin(table, (LENS, LENS), torch.device(device), flow=flow)
+    join = PanoramaJoin(table, (LENS, LENS), torch.device(device))
     try:
         for _ in range(frames):
             joined = join.panoramas(pair[0], pair[1])
@@ -73,7 +74,7 @@ def test_a_scene_at_infinity_stitches_into_the_colour_of_each_panorama_ray() -> 
     """Both lenses agree everywhere, so the blend band is invisible: every pixel is the colour of its own ray."""
     from dataforge.datasets.insta360_panorama import panorama_rays
 
-    joined: UInt8[ndarray, "h w 3"] = join_panoramas("cpu", *lens_pair(), flow=False)
+    joined: UInt8[ndarray, "h w 3"] = join_panoramas("cpu", *lens_pair())
     error: Float64[ndarray, "h w 3"] = np.abs(joined.astype(np.float64) - colour(panorama_rays(PANO)))
     assert error.max() < 2.0, f"{error.max():.2f}"
 
@@ -81,7 +82,7 @@ def test_a_scene_at_infinity_stitches_into_the_colour_of_each_panorama_ray() -> 
 def test_the_blend_ramps_from_lens_0_to_lens_1_across_the_band_and_each_lens_holds_its_side() -> None:
     bright: UInt8[ndarray, "h w 3"] = np.full((LENS, LENS, 3), 200, dtype=np.uint8)
     dark: UInt8[ndarray, "h w 3"] = np.full((LENS, LENS, 3), 40, dtype=np.uint8)
-    joined: Float64[ndarray, "h w"] = join_panoramas("cpu", bright, dark, flow=False)[..., 0].astype(np.float64)
+    joined: Float64[ndarray, "h w"] = join_panoramas("cpu", bright, dark)[..., 0].astype(np.float64)
     offset: Float64[ndarray, "h w"] = seam_offset_rad(PANO)
     band: float = math.radians(BAND_DEG)
     lens1_weight: Float64[ndarray, "h w"] = np.clip((band - offset) / (2.0 * band), 0.0, 1.0)
@@ -104,7 +105,7 @@ def test_away_from_the_band_the_panorama_is_insta360_io_s_rust_stitch() -> None:
     stitch = insta360_io.PanoramaStitch(factory_camera(0), factory_camera(1), [[-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, -1.0, -0.0333], [0.0, 0.0, 0.0, 1.0]], (1920, 1920))
     expected: UInt8[ndarray, "960 1920"] = stitch.panorama(lenses[0], lenses[1])
     table = panorama_table([factory_camera(0), factory_camera(1)], lens1_from_lens0, (1920, 1920), 1920, BAND_DEG)
-    join = PanoramaJoin(table, (1920, 1920), torch.device("cpu"), flow=False)
+    join = PanoramaJoin(table, (1920, 1920), torch.device("cpu"))
     pair = [torch.from_numpy(np.repeat(image[None, None], 3, axis=1)) for image in lenses]
     joined: UInt8[ndarray, "960 1920"] = join.panoramas(pair[0], pair[1])[0, 0].numpy()
     outside: np.ndarray = np.abs(seam_offset_rad(1920)) > math.radians(BAND_DEG) + 2 * math.pi / 1920
@@ -139,16 +140,24 @@ def test_nvof_finds_a_known_shift_of_a_texture() -> None:
 
 
 @pytest.mark.integration
-def test_the_cuda_blend_is_the_cpu_blend_within_one_level() -> None:
+def test_off_the_band_the_cuda_join_is_the_cpu_join_and_a_scene_at_infinity_stays_its_colour_across_the_flow_seam() -> None:
+    """Noise lenses off the band (every interpolation weight shows): within 1 level of ``cv2.remap``. The scene at infinity:
+    both lenses agree, the flow is about zero, and the flow seam keeps each band pixel the colour of its ray."""
     import torch
+
+    from dataforge.datasets.insta360_panorama import panorama_rays
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
     rng = np.random.default_rng(4)
     lenses = rng.integers(0, 256, size=(2, LENS, LENS, 3), dtype=np.uint8)
-    cpu = join_panoramas("cpu", lenses[0], lenses[1], flow=False)
-    cuda = join_panoramas("cuda", lenses[0], lenses[1], flow=False)
-    assert np.abs(cpu.astype(np.int16) - cuda).max() <= 1
+    outside: np.ndarray = np.abs(seam_offset_rad(PANO)) >= math.radians(BAND_DEG)
+    cpu = join_panoramas("cpu", lenses[0], lenses[1])
+    cuda = join_panoramas("cuda", lenses[0], lenses[1])
+    assert np.abs(cpu.astype(np.int16) - cuda)[outside].max() <= 1
+    joined: UInt8[ndarray, "h w 3"] = join_panoramas("cuda", *lens_pair(), frames=3)
+    error: Float64[ndarray, "h w 3"] = np.abs(joined.astype(np.float64) - colour(panorama_rays(PANO)))
+    assert error[~outside].mean() < 1.0 and error.max() < 4.0, f"band mean {error[~outside].mean():.2f}, max {error.max():.2f}"
 
 
 def texture(rays: Float64[ndarray, "... 3"]) -> Float64[ndarray, "... 3"]:
@@ -196,8 +205,8 @@ def test_the_flow_seam_pulls_a_misregistered_lens_into_register_across_the_band(
     )
     between: Float64[ndarray, " n"] = texture(turned)[:, 0]
     errors: dict[str, float] = {}
-    for name, flow in (("blend", False), ("flow", True)):
-        joined: UInt8[ndarray, "h w 3"] = join_panoramas("cuda", lens0, lens1, flow=flow, frames=3)
+    for name, device in (("blend", "cpu"), ("flow", "cuda")):
+        joined: UInt8[ndarray, "h w 3"] = join_panoramas(device, lens0, lens1, frames=3)
         errors[name] = float(np.abs(joined[..., 0][inside].astype(np.float64) - between).mean())
     print(errors)
     assert errors["flow"] < 0.5 * errors["blend"]
@@ -212,7 +221,7 @@ def test_a_closed_flow_seam_refuses_instead_of_falling_back_to_the_blend() -> No
     from dataforge.datasets.insta360_panorama import PanoramaJoin, panorama_table
 
     table = panorama_table([camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS), PANO, BAND_DEG)
-    join = PanoramaJoin(table, (LENS, LENS), torch.device("cuda"), flow=True)
+    join = PanoramaJoin(table, (LENS, LENS), torch.device("cuda"))
     pair = [torch.from_numpy(image).permute(2, 0, 1)[None].to("cuda") for image in lens_pair()]
     assert join.panoramas(pair[0], pair[1]).shape == (1, 3, PANO // 2, PANO)
     join.close()

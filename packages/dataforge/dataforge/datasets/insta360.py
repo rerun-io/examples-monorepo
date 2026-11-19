@@ -308,7 +308,7 @@ class Insta360Config(FrameLimitedConfig):
     """Half-width of the seam band, degrees either side of the seam plane, where the two lenses are blended."""
     pano_device: Literal["cuda", "cpu"] = "cuda"
     """Where the panorama is decoded and joined: ``cuda`` (NVDEC, CUDA remap, flow seam on NVOF, NVENC from device
-    memory) or ``cpu`` (PyAV, ``cv2.remap``, the band blended without flow)."""
+    memory) or ``cpu`` (PyAV, ``cv2.remap``; no NVOF there, so the band is the plain feather)."""
     decode_threads: int = 4
     """PyAV threads per lens decoder of the panorama and cube layers on ``cpu``."""
     pano_cq: int = 34
@@ -447,7 +447,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             static=True,
             recording=recording,
         )
-        join = insta360_panorama.PanoramaJoin(table, lenses.size, device, flow=seam == "flow")
+        join = insta360_panorama.PanoramaJoin(table, lenses.size, device)
         with work_dir("insta360-pano-") as work, contextlib.closing(join):
             video: Path = work / "pano.mp4"
             with self.timer.stage("panorama"):
