@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Staged for kornia-rs / kornia-bow: an inverted-file database with DBoW2's L1 query over kornia-bow bags of words, and RootSLAM's HashBoW."
+description = "Staged for kornia-rs / kornia-bow: an inverted-file database with DBoW2's L1 query over kornia-bow bags of words, RootSLAM's HashBoW, and a seeded k-means vocabulary for float descriptors."
 
 [dependencies]
 kornia-bow.workspace = true
+rand = { workspace = true, features = ["chacha"] }
+rayon.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
@@ -18,4 +20,8 @@ workspace = true
 
 [[bench]]
 name = "database"
+harness = false
+
+[[bench]]
+name = "vocabulary"
 harness = false
