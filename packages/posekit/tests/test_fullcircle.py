@@ -81,10 +81,22 @@ def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
         recording.log(f"{node}/pinhole", PinholeWithDistortion(pinhole, CameraDistortion("mei_v6", np.asarray(coefficients))), static=True)
     recording.flush()
     recording.disconnect()  # closes the file sink, which writes the footer the lazy store reads
-    sources = read_lens_sources(rrc.RrdReader(path).store(), ("/world/rig_00/cam_00", "/world/rig_00/cam_01"), 4)
+    sources, cam0_R_rig = read_lens_sources(rrc.RrdReader(path).store(), ("/world/rig_00/cam_00", "/world/rig_00/cam_01"), 4)
+    np.testing.assert_allclose(cam0_R_rig, cam_R_rigs[0], atol=1e-6)
     np.testing.assert_allclose(sources[0].rig_R_cam, np.eye(3), atol=1e-6)
     np.testing.assert_allclose(sources[1].rig_R_cam, cam_R_rigs[0] @ cam_R_rigs[1].T, atol=1e-6)
     assert sources[1].image_hw == (1920, 1920) and sources[1].mask_hw == (480, 480)
     lens: MeiCamera = sources[0].camera
     assert (lens.model, lens.cx, lens.cy) == ("mei_v6", 958.0, 966.0)
     np.testing.assert_allclose([lens.xi, lens.half_field_rad, *lens.distortion], coefficients, rtol=1e-6)
+
+
+def test_level_rotation_puts_gravity_on_y() -> None:
+    from posekit.models.fullcircle import level_rotation
+
+    down: np.ndarray = np.array([-0.56, 0.01, -0.83])
+    rig_R_level: np.ndarray = level_rotation(down)
+    np.testing.assert_allclose(rig_R_level @ rig_R_level.T, np.eye(3), atol=1e-12)
+    assert abs(np.linalg.det(rig_R_level) - 1.0) < 1e-12
+    np.testing.assert_allclose(rig_R_level.T @ (down / np.linalg.norm(down)), [0.0, 1.0, 0.0], atol=1e-12)
+    np.testing.assert_allclose(level_rotation(np.array([0.0, 2.0, 0.0])), np.eye(3), atol=1e-12)

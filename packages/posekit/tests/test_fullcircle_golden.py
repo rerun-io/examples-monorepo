@@ -39,7 +39,7 @@ def test_fullcircle_masks_match_released_masks() -> None:
     masker: FullCircleMasker = FullCircleMasker(
         FullCircleConfig(work_size=WIDTH, dilate_px=0.0), [SphereSource(EquirectCamera(WIDTH, HEIGHT), np.eye(3), (HEIGHT, WIDTH), (HEIGHT, WIDTH))]
     )
-    directions = [masker.detect([torch.from_numpy(f).cuda()]).direction for f in frames]
+    directions = [masker.detect([torch.from_numpy(f).cuda()], np.eye(3)).direction for f in frames]
     filled: list[np.ndarray] = fill_nearest(directions)
     up: np.ndarray = view_up(filled)
     ious: list[float] = []

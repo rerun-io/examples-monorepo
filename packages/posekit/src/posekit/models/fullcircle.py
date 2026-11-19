@@ -170,8 +170,19 @@ def fill_nearest(directions: list[Float64[ndarray, "3"] | None]) -> list[Float64
     return filled
 
 
+def level_rotation(down: Float64[ndarray, "3"]) -> Float64[ndarray, "3 3"]:
+    """``rig_R_level`` of the level frame: +Y along ``down`` (gravity, rig frame), +Z the rig's +Z made horizontal."""
+    y: Float64[ndarray, "3"] = down / np.linalg.norm(down)
+    forward: Float64[ndarray, "3"] = np.array([0.0, 0.0, 1.0])
+    if abs(float(forward @ y)) > 0.99:
+        forward = np.array([1.0, 0.0, 0.0])
+    z: Float64[ndarray, "3"] = forward - (forward @ y) * y
+    z = z / np.linalg.norm(z)
+    return np.stack([np.cross(y, z), y, z], axis=1)
+
+
 def view_up(directions: list[Float64[ndarray, "3"]]) -> Float64[ndarray, "3"]:
-    """The synthetic view's up hint for a sequence: FullCircle's +Y, or +Z when the operator sits near +Y.
+    """The synthetic view's up hint for a sequence (level frame): FullCircle's +Y, or +Z when the operator sits near +Y.
 
     FullCircle's look-at falls back to +X only within about 8 degrees of the up hint, so an operator below a camera
     held on a stick (direction near the nadir, +Y) flips the view's roll from frame to frame. When the median
@@ -207,8 +218,6 @@ class FullCircleMasker:
         device: torch.device = torch.device(config.device)
         self.device: torch.device = device
         self.downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.work_size)) for s in sources]
-        work_hw: list[tuple[int, int]] = [(s.image_hw[0] // f, s.image_hw[1] // f) for s, f in zip(sources, self.downscale, strict=True)]
-        self.work_hw: list[tuple[int, int]] = work_hw
         # Sources see the work images, whose pixel (i, j) covers full pixels [f i - 0.5, f (i + 1) - 0.5): grids are
         # normalised by the full size, which grid_sample maps onto any resolution of the same image.
         self.rig_R_cams: Float64[Tensor, "n_src 3 3"] = torch.from_numpy(np.stack([s.rig_R_cam for s in sources])).to(device)
@@ -216,13 +225,11 @@ class FullCircleMasker:
         full_hw: list[tuple[int, int]] = [s.image_hw for s in sources]
         self.cameras: list[SphereCamera] = cameras
 
+        self.full_hw: list[tuple[int, int]] = full_hw
         face: PinholeCamera = PinholeCamera(config.face_size)
         self.face: PinholeCamera = face
         face_rays, _ = face.unproject(pixel_grid(config.face_size, config.face_size, device))
-        self.face_views: list[SphereView] = [
-            view_from_rays(face_rays @ torch.from_numpy(rotation).to(device).T, config.face_size, config.face_size, cameras, self.rig_R_cams, full_hw)
-            for rotation in FACE_ROTATIONS
-        ]
+        self.face_rays: Float64[Tensor, "n 3"] = face_rays
 
         self.synthetic: Kb4Camera = FULLCIRCLE_SYNTHETIC_LENS.scaled(config.synthetic_size / FULLCIRCLE_SYNTHETIC_SIZE)
         synthetic_rays, synthetic_valid = self.synthetic.unproject(pixel_grid(config.synthetic_size, config.synthetic_size, device))
@@ -264,12 +271,27 @@ class FullCircleMasker:
         return now
 
     @torch.inference_mode()
-    def detect(self, frames: list[UInt8[Tensor, "h w 3"]]) -> OperatorEvidence:
-        """Steps 1-3 on one frameset: cube faces, person detection, the operator direction."""
+    def detect(self, frames: list[UInt8[Tensor, "h w 3"]], rig_R_level: Float64[ndarray, "3 3"]) -> OperatorEvidence:
+        """Steps 1-3 on one frameset: cube faces, person detection, the operator direction (rig frame).
+
+        The faces are those of the level frame (``rig_R_level``, +Y along gravity), so people stand upright in them, as
+        they do in the horizon-levelled panoramas FullCircle starts from (identity for an already level source).
+        """
         start: float = time.perf_counter()
+        size: int = self.config.face_size
         images: list[Tensor] = self._work_images(frames)
+        rig_R_faces: Float64[Tensor, "6 3 3"] = torch.from_numpy(rig_R_level @ FACE_ROTATIONS).to(self.device)
         faces: UInt8[Tensor, "6 s s 3"] = torch.stack(
-            [rearrange(sample_sphere(images, view).round().clamp(0, 255).to(torch.uint8), "c h w -> h w c") for view in self.face_views]
+            [
+                rearrange(
+                    sample_sphere(images, view_from_rays(self.face_rays @ rig_R_face.T, size, size, self.cameras, self.rig_R_cams, self.full_hw))
+                    .round()
+                    .clamp(0, 255)
+                    .to(torch.uint8),
+                    "c h w -> h w c",
+                )
+                for rig_R_face in rig_R_faces
+            ]
         ).contiguous()
         start = self._tick("faces", start)
         if self.yolox is not None:
@@ -290,7 +312,7 @@ class FullCircleMasker:
             boxes = detections.xyxy
         face_index: Tensor = detections.frame_indices.cpu()
         rays, _ = self.face.unproject(centres_px.double())
-        rotations: Float64[Tensor, "n 3 3"] = torch.from_numpy(FACE_ROTATIONS).to(self.device)[detections.frame_indices]
+        rotations: Float64[Tensor, "n 3 3"] = rig_R_faces[detections.frame_indices]
         centres: Float64[ndarray, "n 3"] = torch.einsum("nij,nj->ni", rotations, rays).cpu().numpy()
         weights: Float64[ndarray, " n"] = areas.double().cpu().numpy()
         direction: Float64[ndarray, "3"] | None = None
@@ -387,5 +409,6 @@ __all__ = (
     "SphereSource",
     "disk_dilate",
     "fill_nearest",
+    "level_rotation",
     "view_up",
 )
