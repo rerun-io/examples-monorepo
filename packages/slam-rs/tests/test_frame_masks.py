@@ -115,6 +115,19 @@ def test_two_cursors_over_one_layer_keep_their_own_masks(tmp_path: Path) -> None
         assert held_again is not None and int(held_again[0, 0]) == 1
 
 
+def test_the_stamps_are_read_window_by_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalog sends whole chunks, pixels included, even for a stamps-only select, so the stamps come in time windows."""
+    from slam_rs import frame_masks
+    from slam_rs.frame_masks import FrameMasks
+
+    monkeypatch.setattr(frame_masks, "STAMP_WINDOW_NS", 250)
+    path: Path = tmp_path / "masks.rrd"
+    stamps: list[int] = [100 * index + 7 for index in range(40)]
+    _write_layer(path, {CAM0: [(t_ns, _mask(8, 8, 1)) for t_ns in stamps]}, {})
+    with _dataset(path) as dataset:
+        assert FrameMasks(dataset, SEGMENT, [CAM0], [(8, 8)]).stamps[0].tolist() == stamps
+
+
 def test_a_mask_that_does_not_scale_onto_its_image_is_refused(tmp_path: Path) -> None:
     from slam_rs.frame_masks import FrameMasks
 

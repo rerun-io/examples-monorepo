@@ -32,6 +32,10 @@ MASK_WINDOW_NS: int = 2_000_000_000
 """How far past a frame one read of a camera's masks reaches: a cursor holds about this much of each camera's
 uncompressed masks (60 at 30 fps), whatever the video window."""
 
+STAMP_WINDOW_NS: int = 10_000_000_000
+"""The span of one stamps read. The catalog sends whole chunks, pixels included, even when only the index and the format
+are selected: one read of clip 007's 1920 px people layer held 12.5 GB, 10 s windows hold 0.65 GB at most."""
+
 
 class FrameMasks:
     """One segment's mask layer for the fed cameras: entities and stamps; ``MaskCursor`` reads the pixels."""
@@ -55,6 +59,9 @@ class FrameMasks:
         """Per camera, every mask's ``video_time`` in ns, ascending."""
         statics: pa.Table = dataset.filter_segments([segment_id]).filter_contents(list(entities)).reader(index=None).to_arrow_table()
         columns: set[str] = {str(column) for column in dataset.schema().column_names()}
+        ranges: pa.Table = dataset.filter_segments([segment_id]).get_index_ranges().to_arrow_table()
+        first_ns: int = int(ranges[f"{TIMELINE}:start"].cast(pa.int64())[0].as_py())
+        last_ns: int = int(ranges[f"{TIMELINE}:end"].cast(pa.int64())[0].as_py())
         for entity, (width, height) in zip(entities, image_sizes, strict=True):
             scale_column: str = f"{entity}:Transform3D:scale"
             logged: list[float] | None = first_valid_value(statics[scale_column], allow_none=True) if scale_column in statics.column_names else None
@@ -62,13 +69,18 @@ class FrameMasks:
             format_column: str = f"{entity}:SegmentationImage:format"
             if format_column not in columns:
                 raise ValueError(f"{segment_id}: no SegmentationImage at {entity}")
-            # Stamps and sizes only: the pixels are read a window at a time.
-            table: pa.Table = (
+            # Stamps and sizes only; the server still sends the pixels, so one time window at a time.
+            table: pa.Table = pa.concat_tables(
                 dataset.filter_segments([segment_id])
                 .filter_contents([entity])
                 .reader(index=TIMELINE)
                 .select(TIMELINE, format_column)
+                .filter(
+                    (col(TIMELINE) >= lit(pa.scalar(start_ns, pa.duration("ns"))))
+                    & (col(TIMELINE) < lit(pa.scalar(start_ns + STAMP_WINDOW_NS, pa.duration("ns"))))
+                )
                 .to_arrow_table()
+                for start_ns in range(first_ns, last_ns + 1, STAMP_WINDOW_NS)
             )
             table = table.filter(table[format_column].is_valid())
             if table.num_rows == 0:
