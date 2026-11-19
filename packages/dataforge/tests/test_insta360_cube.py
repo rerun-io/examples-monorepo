@@ -5,7 +5,7 @@ from __future__ import annotations
 import insta360_io
 import numpy as np
 import pytest
-from jaxtyping import Float64, UInt8
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 LENS: int = 384
@@ -111,39 +111,78 @@ def test_a_face_pixel_outside_the_lens_it_is_read_from_is_refused() -> None:
         face_table(cube_faces(FACE)[2], [narrow, narrow], LENS1_FROM_LENS0)
 
 
-def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> None:
-    """Paint each lens from one colour-of-direction function (cube frame); every joined face shows it on its rays."""
-    from dataforge.datasets.insta360_cube import cube_faces, face_table, join
-
+def lens_pair() -> tuple[UInt8[ndarray, "h w 3"], UInt8[ndarray, "h w 3"]]:
+    """Each lens painted from one colour-of-direction function (cube frame)."""
     u, v = np.meshgrid(np.arange(LENS, dtype=np.float64), np.arange(LENS, dtype=np.float64))
     lens_rays: Float64[ndarray, "h w 3"] = unproject(u, v)
     lens0: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays)), 0, 255).astype(np.uint8)
     lens1: UInt8[ndarray, "h w 3"] = np.clip(np.round(colour(lens_rays @ LENS1_FROM_LENS0)), 0, 255).astype(np.uint8)
-    for face in cube_faces(FACE):
-        table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
+    return lens0, lens1
+
+
+def join_faces(device: str, lens0: UInt8[ndarray, "h w 3"], lens1: UInt8[ndarray, "h w 3"]) -> UInt8[ndarray, "f n n 3"]:
+    """``CubeJoin.faces`` of one lens pair on ``device``, back as ``f n n 3``."""
+    import torch
+
+    from dataforge.datasets.insta360_cube import CubeJoin, cube_faces, face_table
+
+    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0) for face in cube_faces(FACE)]
+    join = CubeJoin(tables, (LENS, LENS), torch.device(device))
+    pair = [torch.from_numpy(image).permute(2, 0, 1)[None].to(device) for image in (lens0, lens1)]
+    return join.faces(pair[0], pair[1])[:, 0].permute(0, 2, 3, 1).cpu().numpy()
+
+
+def test_a_scene_at_infinity_joins_into_the_colour_of_each_face_s_own_rays() -> None:
+    """Every joined face shows the colour of its own rays."""
+    from dataforge.datasets.insta360_cube import cube_faces
+
+    for face, joined in zip(cube_faces(FACE), join_faces("cpu", *lens_pair()), strict=True):
         expected: Float64[ndarray, "h w 3"] = colour(face.rays() @ face.cube_from_face.T)
-        error: Float64[ndarray, "h w 3"] = np.abs(join((lens0, lens1), table).astype(np.float64) - expected)
+        error: Float64[ndarray, "h w 3"] = np.abs(joined.astype(np.float64) - expected)
         # Bilinear interpolation of a smooth field plus the 0.5 rounding of the painted lenses; no seam step.
         assert error.max() < 2.0, f"{face.name}: {error.max():.2f}"
 
 
-def test_a_lens_mask_joins_nearest_onto_the_face_that_sees_it() -> None:
-    from dataforge.datasets.insta360_cube import cube_faces, face_table, join
+def test_one_remap_of_the_stacked_pair_is_cv2_s_remap_of_the_lens_each_pixel_reads() -> None:
+    """Noise lenses, so every interpolation weight shows: within 1 of ``cv2.remap`` (fixed-point weights) everywhere."""
+    import cv2
 
-    centre: float = (LENS - 1) / 2.0
-    u, v = np.meshgrid(np.arange(LENS, dtype=np.float64), np.arange(LENS, dtype=np.float64))
-    disc: UInt8[ndarray, "h w"] = (np.hypot(u - centre, v - centre) <= 12.0).astype(np.uint8)
-    empty: UInt8[ndarray, "h w"] = np.zeros_like(disc)
-    for face in cube_faces(FACE):
+    from dataforge.datasets.insta360_cube import cube_faces, face_table
+
+    rng = np.random.default_rng(0)
+    lenses = rng.integers(0, 256, size=(2, LENS, LENS, 3), dtype=np.uint8)
+    for face, joined in zip(cube_faces(FACE), join_faces("cpu", lenses[0], lenses[1]), strict=True):
         table = face_table(face, [camera(), camera()], LENS1_FROM_LENS0)
-        mask: UInt8[ndarray, "n n"] = join((empty, disc), table, nearest=True)
-        assert set(np.unique(mask)) <= {0, 1}
-        if face.name != "cube6_front1":
-            assert not mask.any(), face.name
-            continue
-        distance: Float64[ndarray, "n n"] = np.hypot(table.map_x[1] - centre, table.map_y[1] - centre)
-        assert (distance[mask == 1] <= 12.0 + 0.75).all()
-        assert (mask[distance <= 12.0 - 0.75] == 1).all()
+        remapped = [cv2.remap(lens, table.map_x, table.map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for lens in lenses]
+        expected: UInt8[ndarray, "n n 3"] = np.where(table.use_lens0[..., None], remapped[0], remapped[1])
+        assert np.abs(joined.astype(np.int16) - expected).max() <= 1, face.name
+
+
+@pytest.mark.parametrize("mask_size", [LENS, LENS // 4])
+def test_a_mask_face_is_cv2_s_nearest_remap_of_the_lens_mask_upsampled_by_contract_v2(mask_size: int) -> None:
+    """Random labels at lens size and at a quarter of it: identical to ``cv2.INTER_NEAREST`` of the contract-v2 upsample."""
+    import cv2
+
+    from dataforge.datasets.insta360_cube import MaskJoin, cube_faces, face_table
+
+    rng = np.random.default_rng(1)
+    masks = rng.integers(0, 4, size=(2, mask_size, mask_size), dtype=np.uint8)
+    pick: Int64[ndarray, " h"] = (2 * np.arange(LENS) + 1) * mask_size // (2 * LENS)
+    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0) for face in cube_faces(FACE)]
+    joined: UInt8[ndarray, "f n n"] = MaskJoin(tables, (LENS, LENS)).faces(masks[0], masks[1])
+    for table, face_mask in zip(tables, joined, strict=True):
+        remapped = [cv2.remap(mask[np.ix_(pick, pick)], table.map_x, table.map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for mask in masks]
+        np.testing.assert_array_equal(face_mask, np.where(table.use_lens0, remapped[0], remapped[1]))
+
+
+@pytest.mark.integration
+def test_the_cuda_join_is_the_cpu_join_within_one_level() -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    lenses = lens_pair()
+    assert np.abs(join_faces("cuda", *lenses).astype(np.int16) - join_faces("cpu", *lenses)).max() <= 1
 
 
 def test_every_face_sits_at_the_midpoint_of_the_two_lens_centres() -> None:

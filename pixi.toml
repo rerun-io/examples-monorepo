@@ -3479,7 +3479,8 @@ description = "Launch the unified SAM3 + 2D pose Gradio playground"
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.dataforge]
-platforms = ["linux-64", "linux-aarch64"]
+# CUDA lanes: the Insta360 cube layer decodes (NVDEC), remaps and encodes (NVENC) on the GPU.
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.dataforge.dependencies]
 python = "3.12.*"
@@ -3490,16 +3491,17 @@ insta360-io = { path = "packages/insta360-io" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
 requests = "*"
-# CPU torch only satisfies simplecv's module-load import.
-pytorch-cpu = ">=2.8.0"
+# The Insta360 cube layer runs on torch + torchcodec (NVDEC decode, CUDA remap, NVENC encode from device memory).
+pytorch-gpu = ">=2.12,<2.13"
+cuda-version = "13.0.*"
+torchcodec = ">=0.14,<0.15"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
 # (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
 7zip = ">=24.09"
 # The AV1 encoder every image-sequence dataset goes through. conda-forge's build
 # carries av1_nvenc, so the default resolve_ffmpeg() works without DATAFORGE_FFMPEG.
-# 9.x builds link the env's libjxl; the 8.1 build-number pin other features carry
-# does not apply (9.0's build numbers restarted below it and would exclude it).
-ffmpeg = ">=9.0.1"
+# 8.1, as torchcodec 0.14 requires (<9); ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
 # libturbojpeg for PyTurboJPEG (pypi), which dlopens it from the env.
 libjpeg-turbo = ">=3.0.0,<4"
 
