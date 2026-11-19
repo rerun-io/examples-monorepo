@@ -26,10 +26,10 @@ from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-from posekit.apis.people_masks import PERSON_CLASS_ID, MaskOptions, PeopleMasker, mask_entity, select_entities, set_frame_time
+from posekit.apis.people_masks import PEOPLE_MASK_ANNOTATION, PERSON_CLASS_ID, MaskOptions, PeopleMasker, mask_entity, select_entities, set_frame_time
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_mask, overlay_mask
+from posekit.ops.people_masks import dilate_mask, overlay_mask, selection_windows
 from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
 from posekit.predictions import BoxDetections
 
@@ -103,10 +103,7 @@ class StreamDecoder:
         """Mux the packets ``[keyframe before start, end)`` into an in-memory MP4 and open a decoder."""
         from torchcodec.decoders import VideoDecoder
 
-        keys: list[int] = [i for i in range(start + 1) if video.keyframes[i]]
-        if not keys:
-            raise ValueError(f"no keyframe at or before frame {start}")
-        self.first: int = keys[-1]
+        self.first: int = selection_windows(video.keyframes, [start])[0].first
         data: bytes = wrap_mp4(video.samples[self.first : end], video.keyframes[self.first : end], 30, codec=video.codec)
         self.decoder = VideoDecoder(data, device=device, seek_mode="exact")
 
@@ -255,16 +252,7 @@ def main(config: PeopleTracksConfig) -> None:
     decoders: list[StreamDecoder] = [StreamDecoder(v, config.start, end, config.device) for v in videos]
     targets: list[str] = [mask_entity(e) for e in entities]
     for target in targets:
-        rr.log(
-            target,
-            rr.AnnotationContext(
-                [
-                    rr.AnnotationInfo(id=0, label="keep", color=(0, 0, 0, 0)),
-                    rr.AnnotationInfo(id=PERSON_CLASS_ID, label="person", color=(255, 0, 0, 160)),
-                ]
-            ),
-            static=True,
-        )
+        rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
     if config.overlay_dir is not None:
         config.overlay_dir.mkdir(parents=True, exist_ok=True)
     torch.cuda.synchronize()

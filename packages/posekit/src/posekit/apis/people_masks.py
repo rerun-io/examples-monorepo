@@ -31,6 +31,10 @@ from posekit.predictions import BoxDetections
 
 PERSON_CLASS_ID: int = 1
 """Mask value of a person pixel (0 = keep)."""
+PEOPLE_MASK_ANNOTATION: rr.AnnotationContext = rr.AnnotationContext(
+    [rr.AnnotationInfo(id=0, label="keep", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=PERSON_CLASS_ID, label="person", color=(255, 0, 0, 160))]
+)
+"""Class labels of a people-mask entity."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,15 +178,16 @@ class PeopleMasker:
         assert tiled.masks is not None and whole.masks is not None
         masks: list[Tensor] = [whole.masks]
         boxes: list[Tensor] = [whole.xyxy]
+        order: list[Tensor] = [whole.frame_indices]
+        scores: list[Tensor] = [whole.scores]
+        window_of: Tensor = tiled.frame_indices // n_frames
         for t, window in enumerate(windows):
-            rows: Bool[Tensor, "n"] = tiled.frame_indices // n_frames == t
+            rows: Bool[Tensor, "n"] = window_of == t
             placed: tuple[Tensor, Tensor] = tile_to_image(tiled.masks[rows], tiled.xyxy[rows], window, height=height, width=width)
             masks.append(placed[0])
             boxes.append(placed[1])
-        order: list[Tensor] = [whole.frame_indices] + [
-            tiled.frame_indices[tiled.frame_indices // n_frames == t] % n_frames for t in range(len(windows))
-        ]
-        scores: list[Tensor] = [whole.scores] + [tiled.scores[tiled.frame_indices // n_frames == t] for t in range(len(windows))]
+            order.append(tiled.frame_indices[rows] % n_frames)
+            scores.append(tiled.scores[rows])
         return BoxDetections(xyxy=torch.cat(boxes), scores=torch.cat(scores), frame_indices=torch.cat(order), masks=torch.cat(masks))
 
     def __call__(self, frames_rgb: UInt8[Tensor, "f h w 3"]) -> Bool[ndarray, "f h w"]:
@@ -244,16 +249,7 @@ def main(config: PeopleMasksConfig) -> None:
         segment_seconds: float = 0.0
         for entity in entities:
             target: str = mask_entity(entity)
-            rr.log(
-                target,
-                rr.AnnotationContext(
-                    [
-                        rr.AnnotationInfo(id=0, label="keep", color=(0, 0, 0, 0)),
-                        rr.AnnotationInfo(id=PERSON_CLASS_ID, label="person", color=(255, 0, 0, 160)),
-                    ]
-                ),
-                static=True,
-            )
+            rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
             video: CatalogVideo = read_catalog_videos(client.get_dataset(sources[entity].dataset), segment_id, [entity], config.timeline)[0]
             n_packets: int = len(video.samples)
             selected: list[int] = list(config.frames) if config.frames else list(range(0, n_packets, config.stride))
