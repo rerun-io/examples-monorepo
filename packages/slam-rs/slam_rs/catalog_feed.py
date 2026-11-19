@@ -103,7 +103,7 @@ from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
 from slam_rs.config import DatasetProperties
-from slam_rs.frame_masks import FrameMasks
+from slam_rs.frame_masks import FrameMasks, MaskCursor
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -619,7 +619,8 @@ class SegmentFeed:
         frames that are keyframes in every camera so each window decodes alone.
         With cached video, the whole segment is one window, including its IMU
         and ground truth. CPU decoding holds one image per camera; CUDA holds
-        a batch per camera.
+        a batch per camera. Masks come through this iterator's own short window
+        (``slam_rs.frame_masks.MaskCursor``), whatever the video window.
 
         Each frameset carries the inertial samples since the previous one, running
         one sample past its own timestamp, and the nearest ground-truth pose.
@@ -659,6 +660,7 @@ class SegmentFeed:
         margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
         emitted_imu_t_ns: int = -(2**62)
         bounds: list[tuple[int, int]] = [(0, len(self.frame_t_ns))] if self.cached_payloads is not None else _window_bounds(self.index, self.window_ns)
+        mask_cursor: MaskCursor | None = None if self.masks is None else MaskCursor(self.masks)
         for start, stop in bounds:
             window_first_ns: int = int(self.frame_t_ns[start])
             if stop_ns is not None and window_first_ns > stop_ns:
@@ -687,8 +689,6 @@ class SegmentFeed:
             camera_frames: list[Int64[ndarray, " n_window"]] = [
                 self.index.camera_t_ns[position][self.index.frame_index[start:stop, position]] for position in range(len(self.cameras))
             ]
-            if self.masks is not None:
-                self.masks.load(min(int(frames[0]) for frames in camera_frames), max(int(frames[-1]) for frames in camera_frames))
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
                 for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
@@ -717,7 +717,7 @@ class SegmentFeed:
                     emitted_imu_t_ns = int(frame_imu.t_ns[-1])
                 # Each camera holds the mask at or before its own frame's stamp, not the frameset's reference stamp.
                 masks: list[UInt8[ndarray, "mh mw"] | None] | None = (
-                    None if self.masks is None else self.masks.at([int(frames[frameset_index - start]) for frames in camera_frames])
+                    None if mask_cursor is None else mask_cursor.at([int(frames[frameset_index - start]) for frames in camera_frames])
                 )
                 yield Frameset(
                     t_ns=t_ns,
