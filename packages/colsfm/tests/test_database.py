@@ -22,7 +22,7 @@ from colsfm.database import (
     read_keypoints,
     read_two_view_geometry,
 )
-from colsfm.frames_meta import FramesMeta, read_frames_meta
+from colsfm.frames_meta import FramesMeta, KeyframeMeta, read_frames_meta
 from colsfm.reconstruction import RIG_ID, camera_sensor_id, vehicle_sensor_id
 
 
@@ -233,3 +233,30 @@ def test_the_existing_geometry_check_does_not_create_a_missing_database(tmp_path
     with pytest.raises(FileNotFoundError, match="No COLMAP database"):
         count_two_view_geometries(missing, [(1, 2)])
     assert list(tmp_path.iterdir()) == []
+
+
+def test_an_interrupted_create_database_leaves_no_rows(galileo: FramesMeta, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The import is one transaction: a failure halfway leaves an empty database, not a prefix of the collection.
+
+    One transaction is also what makes it fast on a network file system, where every commit is a round trip
+    (clip 007's 18,606 images: 106 s on the NAS one row per commit, 2.5 s locally).
+    """
+    import colsfm.database as database_module
+
+    written: list[int] = []
+    build_image = database_module._colmap_image
+
+    def failing_image(keyframe: KeyframeMeta) -> pycolmap.Image:
+        if len(written) == 10:
+            raise RuntimeError("interrupted")
+        written.append(1)
+        return build_image(keyframe)
+
+    monkeypatch.setattr(database_module, "_colmap_image", failing_image)
+    database_path: Path = tmp_path / "interrupted.db"
+    with pytest.raises(RuntimeError, match="interrupted"):
+        create_database(database_path, galileo)
+    with pycolmap.Database.open(database_path) as database:
+        assert database.num_images() == 0
+        assert database.num_frames() == 0
+        assert database.num_cameras() == 0
