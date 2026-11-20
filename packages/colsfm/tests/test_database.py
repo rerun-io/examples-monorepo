@@ -237,11 +237,7 @@ def test_the_existing_geometry_check_does_not_create_a_missing_database(tmp_path
 
 
 def test_an_interrupted_create_database_leaves_no_rows(synthetic_rig: SyntheticRig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The import is one transaction: a failure halfway leaves an empty database, not a prefix of the collection.
-
-    One transaction is also what makes it fast on a network file system, where every commit is a round trip
-    (clip 007's 18,606 images: 106 s on the NAS one row per commit, 2.5 s locally).
-    """
+    """The import is one transaction: a failure halfway leaves an empty database, not a prefix of the collection."""
     import colsfm.database as database_module
 
     written: list[int] = []

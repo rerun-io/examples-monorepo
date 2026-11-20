@@ -44,6 +44,7 @@ graph that pads with sentinel indices cannot write a corrupt match table.
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -62,6 +63,7 @@ from colsfm.database import (
     ImagePair,
     KeypointsXY,
     MatchIndices,
+    database_transaction,
 )
 from colsfm.matching import (
     MatchingOptions,
@@ -71,6 +73,9 @@ from colsfm.matching import (
     verify_and_report,
 )
 from colsfm.tensorrt_runtime import ShapeProfile, resolve_engine
+
+MATCH_WRITE_CHUNK: Final[int] = 1024
+"""Pairs whose matches one database transaction writes."""
 
 ImageFeatures: TypeAlias = tuple[KeypointsXY, Descriptors]
 """One image's keypoint pixels and its float descriptors, as the engine wants them."""
@@ -324,9 +329,12 @@ def match_pairs_tensorrt(
     with pycolmap.Database.open(database_path) as database:
         sizes: dict[int, tuple[int, int]] = _image_sizes(database)
         features: FeatureCache = FeatureCache(database)
-        for pair in pairs:
-            matches: MatchIndices = match_one_pair(runtime, features, sizes, pair, options, normalize)
-            database.write_matches(pair[0], pair[1], matches.astype(np.uint32))
+        # One commit per chunk, not per pair: on a network file system every commit is a round trip.
+        for chunk in itertools.batched(pairs, MATCH_WRITE_CHUNK):
+            with database_transaction(database):
+                for pair in chunk:
+                    matches: MatchIndices = match_one_pair(runtime, features, sizes, pair, options, normalize)
+                    database.write_matches(pair[0], pair[1], matches.astype(np.uint32))
 
     # No spatial cap here: LightGlue+ already ran SSC on its scores before verification (`match_one_pair`).
     report, _ = verify_and_report(database_path, pairs, options, device="cuda", started=started, cap=False)

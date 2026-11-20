@@ -117,8 +117,7 @@ def create_database(database_path: Path, frames_meta: FramesMeta, *, overwrite: 
     keyframe_by_id: dict[int, KeyframeMeta] = frames_meta.keyframe_by_id()
     rig_frames: tuple[RigFrame, ...] = frames_meta.rig_frames()
 
-    # One transaction: on a network file system every commit is a round trip (clip 007's 18,606 images took 106 s on the
-    # NAS one row per commit, 2.5 s locally), and an interrupted import leaves no prefix behind.
+    # One transaction: on a network file system every commit is a round trip, and an interrupted import leaves no prefix behind.
     with pycolmap.Database.open(database_path) as database, database_transaction(database):
         for camera in cameras.values():
             database.write_camera(camera, True)
