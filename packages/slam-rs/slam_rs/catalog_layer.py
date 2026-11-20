@@ -16,6 +16,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE
+from slam_rs.follow_frame import FOLLOW_ENTITY, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
 
@@ -45,7 +46,8 @@ def write_layer(
     ``clock_offset_ns`` is the feed's export offset plus camera-to-IMU offset.
     Explicit initialization and terminal IMU drops are recorded; unexplained
     losses, interior gaps and non-finite runs cannot replace an existing result.
-    ``animate_base_rig`` also writes the final poses on ``/world/rig_00``; only
+    ``animate_base_rig`` also writes the final poses on ``/world/rig_00``, and
+    the level follow frame that rides them (:mod:`slam_rs.follow_frame`); only
     for a dataset without a ``gt`` layer, where nothing else moves the rig.
     The caller decides from the catalog, so a dataset's ground truth must be
     registered as the layer named ``gt``: a base layer, or a layer by another
@@ -74,6 +76,8 @@ def write_layer(
         if animate_base_rig:
             rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                              columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
+            rec.send_columns(FOLLOW_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
+                             columns=rr.Transform3D.columns(translation=positions, quaternion=yaw_quaternion_xyzw(follow_yaw(times, positions))))
         rec.log(f"{root}", rr.AnyValues(source="slam-rs catalog VIO", profile=profile, backend=backend, decoder=decoder, config_sha256=run.config_sha256,
                                       calibration_sha256=run.calibration_sha256,
                                       num_poses=len(positions), num_framesets=run.framesets, num_dropped=len(run.dropped),

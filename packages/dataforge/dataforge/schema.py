@@ -46,6 +46,9 @@ directory and the other an entity path component.
 """
 
 
+FLOOR_GRID_PATH: str = "/world/floor_grid"
+"""One-metre cells on the floor under a walked rig's path, fixed in the world (slam-rs: ``slam_rs.follow_frame``)."""
+
 CAM0_REFERENCE: str = "cam_00"
 """Rig-node ``reference`` of a rig whose frame is its first camera's frame (``log_rig_node``).
 
@@ -62,6 +65,15 @@ def _index(value: int, kind: str) -> str:
 def rig_path(rig: int) -> str:
     """``/world/rig_NN`` — a static exo rig or the moving ego rig."""
     return f"/world/rig_{_index(rig, 'rig')}"
+
+
+def follow_path(rig: int) -> str:
+    """``/world/rig_NN_follow`` — the rig's level follow frame: its position, turned about the world's up axis only.
+
+    A viewer's follow view is rooted here, not at the rig, so its horizon stays level while the rig rolls and pitches.
+    The layer that moves the rig writes it (slam-rs: ``slam_rs.follow_frame``).
+    """
+    return f"{rig_path(rig)}_follow"
 
 
 def cam_path(rig: int, cam: int) -> str:

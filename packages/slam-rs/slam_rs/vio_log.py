@@ -21,6 +21,7 @@ from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
+from slam_rs.follow_frame import FLOOR_GRID_ENTITY, FOLLOW_ENTITY, FloorGrid, HeadingFilter, floor_grid, rig_height_m
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
 from slam_rs.landmark_colors import LandmarkColors
 from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
@@ -96,6 +97,8 @@ ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
 ROUTE_ALPHA: int = 40
 """How opaque a whole path is (:meth:`VioLogger.log_complete_paths`) beside the trail drawn up to the cursor."""
+FLOOR_GRID_RADIUS_UI: float = 0.5
+"""Stroke of a floor-grid edge, ui points: hairlines at every zoom."""
 ROUTE_RADIUS_M: float = 0.0015
 """How thick a whole path is, metres: under half the trail's, so the two read as one line and its ghost."""
 
@@ -220,7 +223,10 @@ class VioLogger:
     animate_base_rig: bool = False
     """Also move the dataset's rig (``/world/rig_00``) with the raw VIO pose: only for a replay viewed on its own, on a
     segment without ground truth. Off, the rig belongs to the layers that own it: ``gt``, or the catalog ``slam_rs``
-    layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`)."""
+    layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`). With the rig go its level
+    follow frame and, once the final map is known, the floor grid (:mod:`slam_rs.follow_frame`)."""
+    heading: HeadingFilter = field(default_factory=HeadingFilter)
+    """The follow frame's heading so far: the direction of travel, low-passed."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -299,6 +305,8 @@ class VioLogger:
         rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
         if self.animate_base_rig:
             rr.log(RIG_ENTITY, rig_pose)
+            half_yaw: float = 0.5 * self.heading.update(result.t_ns, pose[0:3])
+            rr.log(FOLLOW_ENTITY, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)])))
         if colors is not None:
             for camera, color in enumerate(colors):
                 self.landmark_colors.remember(frame.ids(camera), frame.positions(camera), color, self.tracked_resolution[camera])
@@ -441,6 +449,25 @@ class VioLogger:
         """
         self._log_map(map_snapshot, t_ns, final=True)
         log_pose_graph(map_snapshot)
+        self.log_floor_grid(map_snapshot.points_world.astype(np.float64))
+
+    def log_floor_grid(self, points_m: Float64[ndarray, "p 3"]) -> None:
+        """Lay the static floor grid under the walk so far, when this replay moves the rig and the map gives a floor.
+
+        The grid lies the rig's carrying height under the raw VIO path, the path the rig rides here; the height is
+        measured from ``points_m`` (:func:`slam_rs.follow_frame.rig_height_m`). No points around the walk, no grid.
+
+        Args:
+            points_m: Map points in the run's world, metres.
+        """
+        if not self.animate_base_rig or len(self.estimate_position_m) < 2:
+            return
+        path_m: Float64[ndarray, "n 3"] = np.array(self.estimate_position_m, dtype=np.float64)
+        height: float | None = rig_height_m(path_m, points_m)
+        if height is None:
+            return
+        grid: FloorGrid = floor_grid(path_m, height)
+        rr.log(FLOOR_GRID_ENTITY, rr.LineStrips3D(grid.strips, colors=grid.colors, radii=rr.Radius.ui_points(FLOOR_GRID_RADIUS_UI)), static=True)
 
     def log_final_run(self, final: Trajectory) -> None:
         """Draw the final run's whole path at the cursor the caller set (the last frameset's), under its own alignment.

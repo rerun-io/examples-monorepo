@@ -10,12 +10,14 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun.chunk as rrc
+from dataforge import schema
 from fixture_types import Rows, RowsReader
 from rerun.catalog import DatasetEntry
 
 from slam_rs.apis import catalog_layer as catalog_layer_api
 from slam_rs.catalog_feed import CatalogSegment
 from slam_rs.catalog_layer import write_layer
+from slam_rs.follow_frame import FLOOR_GRID_ENTITY, FOLLOW_ENTITY
 from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
 
@@ -73,6 +75,23 @@ def test_without_ground_truth_the_final_run_also_animates_the_base_rig(tmp_path:
     write_layer(path, "session", run, clock_offset_ns=7_014_902_432, profile="fast", backend="cpu", animate_base_rig=True)
     rows: Rows = read_rows(path)
     assert rows["/world/rig_00"] == rows["/world/runs/slam_rs/rig"]
+
+
+def test_the_layer_that_moves_the_base_rig_adds_its_level_follow_frame(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
+    """``/world/rig_00_follow`` rides the rig's position and turns about the world's up axis only, towards the walk."""
+    path: Path = tmp_path / "result.rrd"
+    write_layer(path, "session", run, clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=True)
+    rows: Rows = read_rows(path)
+    assert [row.t_ns for row in rows["/world/rig_00_follow"]] == [row.t_ns for row in rows["/world/rig_00"]]
+    np.testing.assert_allclose(rows["/world/rig_00_follow"][-1].values["Transform3D:translation"], [[1, 2, 3]])
+    # 1 m along x and 2 m along y in the second between the poses: a heading of atan2(2, 1) = 63.43 deg about z.
+    np.testing.assert_allclose(rows["/world/rig_00_follow"][-1].values["Transform3D:quaternion"], [[0.0, 0.0, 0.52573, 0.85065]], atol=1e-5)
+
+
+def test_the_follow_frame_and_the_floor_grid_have_the_names_the_dataforge_layouts_read() -> None:
+    """dataforge's Insta360 layout roots its follow views at ``schema.follow_path`` and shows ``schema.FLOOR_GRID_PATH``."""
+    assert FOLLOW_ENTITY == schema.follow_path(0) == "/world/rig_00_follow"
+    assert FLOOR_GRID_ENTITY == schema.FLOOR_GRID_PATH == "/world/floor_grid"
 
 
 class _FakeCalibration:
