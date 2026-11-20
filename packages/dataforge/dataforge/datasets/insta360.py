@@ -70,7 +70,8 @@ import torch
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models_from_store
+from simplecv.camera_parameters import MeiParameters
+from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models_from_store
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.imu_calibration import ImuCalibration
 from simplecv.video_io import bind_cuda_device
@@ -136,8 +137,8 @@ class LensCameras:
 
 
 def cameras_from_recording(base: Path) -> LensCameras:
-    """A base recording's ``cam_00`` and ``cam_01``, read through simplecv's calibration decoder: each its Mei model,
-    pinhole matrix and pose.
+    """A base recording's ``cam_00`` and ``cam_01``, read through simplecv's calibration decoder: each its Mei model
+    (either name, ``simplecv.camera_parameters.MEI_CATALOG_MODELS``) and pose.
 
     Raises:
         ValueError: If a camera is not a Mei camera or its statics are missing.
@@ -146,13 +147,12 @@ def cameras_from_recording(base: Path) -> LensCameras:
     models: dict[str, CatalogCameraCalibration] = read_camera_models_from_store(rrc.RrdReader(base).store(), nodes, str(base))
     cameras: list[insta360_io.MeiCamera] = []
     for node in nodes:
-        distortion: CatalogDistortion | None = models[node].distortion
-        if distortion is None:
-            raise ValueError(f"{base}: {node} has no distortion model, so it is not a Mei camera")
-        k: Float64[ndarray, "3 3"] = np.asarray(models[node].pinhole.intrinsics.k_matrix, dtype=np.float64)
-        cameras.append(
-            insta360_io.MeiCamera(distortion.model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), distortion.coefficients.tolist())
-        )
+        # The typed model reads either Mei name: gamma from the Pinhole (mei_v6) or from the coefficients (mei_v6_unified,
+        # whose Pinhole is the viewer's paraxial focal).
+        mei: MeiParameters | None = models[node].mei
+        if mei is None:
+            raise ValueError(f"{base}: {node} has no Mei distortion model, so it is not a Mei camera")
+        cameras.append(insta360_io.MeiCamera(mei.model, mei.gamma_x, mei.gamma_y, mei.cx, mei.cy, mei.sphere_coefficients()))
     lens_from_rig: list[Float64[ndarray, "4 4"]] = [np.asarray(models[node].pinhole.extrinsics.cam_T_world, dtype=np.float64) for node in nodes]
     intrinsics = models[nodes[0]].pinhole.intrinsics
     return LensCameras(cameras=cameras, lens_from_rig=lens_from_rig, size=(int(intrinsics.width), int(intrinsics.height)))
