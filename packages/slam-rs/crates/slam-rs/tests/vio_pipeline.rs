@@ -541,3 +541,122 @@ fn the_frame_update_lane_is_deterministic_and_takes_its_branch() {
     assert_eq!(drive::<f32>(), drive::<f32>());
     assert_eq!(drive::<f64>(), drive::<f64>());
 }
+
+/// Keypoints `camera` holds on the last frameset, as pixel positions.
+fn keypoint_positions<S: Scalar>(vio: &Vio<S>, camera: usize) -> Vec<(f32, f32)> {
+    let keypoints = &vio.frontend().frame().cameras[camera];
+    (0..keypoints.len())
+        .map(|index| {
+            let translation = keypoints.transform(index).translation;
+            (translation[0], translation[1])
+        })
+        .collect()
+}
+
+/// A per-frame mask keeps every keypoint, new or tracked, out of the cells it
+/// covers, and only there; given at a quarter of the image's resolution, it is
+/// read through its scale. Masks of `None` change nothing, bit for bit.
+#[test]
+fn frame_masks_keep_keypoints_out_of_masked_cells() {
+    let calibration = common::calibration();
+    let cameras: usize = calibration.t_i_c.len();
+    let [width, height] = calibration.resolution[0];
+    let (width, height) = (width as usize, height as usize);
+    // Camera 0's left half, at a quarter of its resolution.
+    let (mask_width, mask_height) = (width / 4, height / 4);
+    let left_half: Vec<u8> = (0..mask_width * mask_height)
+        .map(|index| u8::from(index % mask_width < mask_width / 2))
+        .collect();
+
+    let mut unmasked: Vio<f32> = pipeline();
+    drive_the_committed_framesets(&mut unmasked);
+    let left = |points: &[(f32, f32)]| {
+        points
+            .iter()
+            .filter(|(x, _)| (*x as usize) < width / 2)
+            .count()
+    };
+    assert!(
+        left(&keypoint_positions(&unmasked, 0)) > 0,
+        "the fixture has corners on the left"
+    );
+
+    let mut masked: Vio<f32> = pipeline();
+    let mut masks: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = vec![None; cameras];
+    masks[0] = Some(slam_rs::frontend::masks::PixelMask {
+        width: mask_width,
+        height: mask_height,
+        data: &left_half,
+    });
+    masked.set_frame_masks(&masks).unwrap();
+    drive_the_committed_framesets(&mut masked);
+    let grid = masked.frontend().detection_grid(0);
+    // The last cell column that touches the masked half is the one holding x = width / 2 - 1.
+    let masked_until: f32 =
+        (grid.x_start + (((width / 2 - 1) - grid.x_start) / grid.cell + 1) * grid.cell) as f32;
+    let positions = keypoint_positions(&masked, 0);
+    assert!(!positions.is_empty());
+    assert!(
+        positions.iter().all(|(x, _)| *x >= masked_until),
+        "{positions:?}"
+    );
+    // The unmasked camera is free to differ (the rig's estimator sees fewer
+    // stereo matches), but it still tracks.
+    assert!(!keypoint_positions(&masked, 1).is_empty());
+
+    let mut cleared: Vio<f32> = pipeline();
+    cleared.set_frame_masks(&vec![None; cameras]).unwrap();
+    drive_the_committed_framesets(&mut cleared);
+    assert_eq!(fingerprint(&cleared), fingerprint(&unmasked));
+}
+
+#[test]
+fn a_malformed_frame_mask_is_refused_without_change() {
+    let mut vio: Vio<f32> = pipeline();
+    let cameras: usize = common::calibration().t_i_c.len();
+    let short = [0u8; 10];
+    let mut masks: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = vec![None; cameras];
+    masks[1] = Some(slam_rs::frontend::masks::PixelMask {
+        width: 4,
+        height: 4,
+        data: &short,
+    });
+    assert_eq!(
+        vio.set_frame_masks(&masks).unwrap_err(),
+        VioError::FrameMask {
+            camera: 1,
+            width: 4,
+            height: 4,
+            len: 10
+        }
+    );
+    assert_eq!(
+        vio.set_frame_masks(&masks[..1]).unwrap_err(),
+        VioError::CameraCountMismatch {
+            expected: cameras,
+            actual: 1
+        }
+    );
+}
+
+#[test]
+fn a_frame_mask_whose_size_overflows_is_refused_without_change() {
+    let mut vio: Vio<f32> = pipeline();
+    let cameras: usize = common::calibration().t_i_c.len();
+    let short = [0u8; 10];
+    let mut masks: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = vec![None; cameras];
+    masks[0] = Some(slam_rs::frontend::masks::PixelMask {
+        width: usize::MAX / 2 + 1,
+        height: 2,
+        data: &short,
+    });
+    assert_eq!(
+        vio.set_frame_masks(&masks).unwrap_err(),
+        VioError::FrameMask {
+            camera: 0,
+            width: usize::MAX / 2 + 1,
+            height: 2,
+            len: 10
+        }
+    );
+}

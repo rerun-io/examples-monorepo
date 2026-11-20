@@ -103,6 +103,7 @@ from slam_rs.catalog_timing import (
     pair_accel_onto_gyro as pair_accel_onto_gyro,
 )
 from slam_rs.config import DatasetProperties
+from slam_rs.frame_masks import FrameMasks, MaskCursor
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -182,6 +183,9 @@ class Frameset:
     """
     ground_truth: Float64[ndarray, " 7"] | None
     """Nearest ground-truth pose as ``[tx, ty, tz, qw, qx, qy, qz]``, or None without a ``gt`` layer."""
+    masks: list[UInt8[ndarray, "mh mw"] | None] | None = None
+    """Per camera, the latest segmentation mask at or before its frame (``slam_rs.frame_masks``), or None for a camera with
+    no mask yet; None for the whole frameset when the feed reads no mask layer."""
 
     def image_digests(self) -> tuple[str, ...]:
         """Digest each camera's contiguous gray8 buffer in image order.
@@ -214,6 +218,8 @@ class LocalSegment:
     """Base layer: video, IMU and calibration."""
     gt_rrd: Path | None = None
     """Ground-truth layer; omitted when the dataset has none."""
+    mask_rrd: Path | None = None
+    """Mask layer (``slam_rs.frame_masks``); None reads the masks, if any are asked for, from the base layer."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -548,6 +554,8 @@ class SegmentFeed:
     """Muxed streams for an offline run; packet buffers are released after indexing and muxing."""
     decode_device: Literal["cpu", "cuda"] = "cpu"
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
+    masks: FrameMasks | None = None
+    """The fed cameras' segmentation masks; None feeds every frame unmasked."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -616,7 +624,8 @@ class SegmentFeed:
         frames that are keyframes in every camera so each window decodes alone.
         With cached video, the whole segment is one window, including its IMU
         and ground truth. CPU decoding holds one image per camera; CUDA holds
-        a batch per camera.
+        a batch per camera. Masks come through this iterator's own short window
+        (``slam_rs.frame_masks.MaskCursor``), whatever the video window.
 
         Each frameset carries the inertial samples since the previous one, running
         one sample past its own timestamp, and the nearest ground-truth pose.
@@ -656,6 +665,7 @@ class SegmentFeed:
         margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
         emitted_imu_t_ns: int = -(2**62)
         bounds: list[tuple[int, int]] = [(0, len(self.frame_t_ns))] if self.cached_payloads is not None else _window_bounds(self.index, self.window_ns)
+        mask_cursor: MaskCursor | None = None if self.masks is None else MaskCursor(self.masks)
         for start, stop in bounds:
             window_first_ns: int = int(self.frame_t_ns[start])
             if stop_ns is not None and window_first_ns > stop_ns:
@@ -681,6 +691,9 @@ class SegmentFeed:
             # camera that contributes no frame to this frameset still has its own
             # frames decoded in order, because dropping one breaks the next.
             decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
+            camera_frames: list[Int64[ndarray, " n_window"]] = [
+                self.index.camera_t_ns[position][self.index.frame_index[start:stop, position]] for position in range(len(self.cameras))
+            ]
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
                 for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
@@ -707,11 +720,16 @@ class SegmentFeed:
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
                 if len(frame_imu):
                     emitted_imu_t_ns = int(frame_imu.t_ns[-1])
+                # Each camera holds the mask at or before its own frame's stamp, not the frameset's reference stamp.
+                masks: list[UInt8[ndarray, "mh mw"] | None] | None = (
+                    None if mask_cursor is None else mask_cursor.at([int(frames[frameset_index - start]) for frames in camera_frames])
+                )
                 yield Frameset(
                     t_ns=t_ns,
                     images=images,
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),
+                    masks=masks,
                 )
 
     def _open_decoder(self, payload: bytes, camera: CameraCalib) -> Iterator[UInt8[ndarray, "h w"]]:
@@ -1063,8 +1081,10 @@ def _build_feed(
     window_s: float,
     cache_video: bool = False,
     decode_device: Literal["cpu", "cuda"] = "cpu",
+    mask_dataset: DatasetEntry | None = None,
+    mask_entity: str | None = None,
 ) -> SegmentFeed:
-    """Read calibration, IMU, ground truth and frameset timing for one segment."""
+    """Read calibration, IMU, ground truth, frameset timing and, with ``mask_entity``, the masks' stamps for one segment."""
     if frame_stride < 1:
         raise ValueError(f"frame_stride must be at least 1; got {frame_stride}")
     rig_statics: pa.Table = sensor_dataset.filter_segments([segment_id]).filter_contents([RIG_ENTITY, IMU_ENTITY]).reader(index=None).to_arrow_table()
@@ -1104,10 +1124,16 @@ def _build_feed(
             payloads.append(wrap_mp4(video.samples, video.keyframes, fps=index.fps, codec=video.codec))
             del video
         cached_payloads = tuple(payloads)
-    cameras: tuple[CameraCalib, ...] = tuple(
-        camera_calib(number, read_camera_statics(camera_statics, rig_entities[position]), profile.downscale)
-        for number, position in enumerate(camera_positions)
-    )
+    fed_statics: list[CameraStatics] = [read_camera_statics(camera_statics, rig_entities[position]) for position in camera_positions]
+    cameras: tuple[CameraCalib, ...] = tuple(camera_calib(number, statics, profile.downscale) for number, statics in enumerate(fed_statics))
+    masks: FrameMasks | None = None
+    if mask_entity is not None:
+        masks = FrameMasks(
+            sensor_dataset if mask_dataset is None else mask_dataset,
+            segment_id,
+            [f"{rig_entities[position]}/pinhole/{mask_entity}" for position in camera_positions],
+            [(int(statics.resolution_wh[0]), int(statics.resolution_wh[1])) for statics in fed_statics],
+        )
     imu_T_body: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
     imu_T_body[:3, :3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:mat3x3").reshape(3, 3, order="F")
     imu_T_body[:3, 3] = _static_values(rig_statics, f"{IMU_ENTITY}:Transform3D:translation")
@@ -1132,6 +1158,7 @@ def _build_feed(
         window_ns=int(window_s * 1e9),
         cached_payloads=cached_payloads,
         decode_device=decode_device,
+        masks=masks,
     )
 
 
@@ -1145,6 +1172,7 @@ def open_segment(
     cache_video: bool = False,
     decode_device: Literal["cpu", "cuda"] = "cpu",
     include_ground_truth: bool = True,
+    mask_entity: str | None = None,
 ) -> Iterator[SegmentFeed]:
     """Open one segment for reading, from local ``.rrd`` files or from a catalog server.
 
@@ -1161,6 +1189,8 @@ def open_segment(
         cache_video: Fetch compressed streams together once; RAM use scales with encoded segment size.
         decode_device: CPU PyAV or CUDA TorchCodec; CUDA requires the slam-rs-cuda environment.
         include_ground_truth: Read isolated GT for scoring; False reads only the estimator's inputs.
+        mask_entity: Name of each fed camera's mask entity under its ``pinhole`` (e.g. ``people_mask``), read from the
+            local source's ``mask_rrd`` (else its base layer) or from the catalog segment; None feeds no masks.
 
     Yields:
         The open feed.
@@ -1172,6 +1202,8 @@ def open_segment(
         datasets: dict[str, str | PathLike[str] | Sequence[str | PathLike[str]]] = {"base": [str(source.base_rrd)]}
         if include_ground_truth and source.gt_rrd is not None:
             datasets["gt"] = [str(source.gt_rrd)]
+        if mask_entity is not None and source.mask_rrd is not None:
+            datasets["masks"] = [str(source.mask_rrd)]
         with rr.server.Server(datasets=datasets) as server:
             client: CatalogClient = server.client()
             base: DatasetEntry = client.get_dataset("base")
@@ -1179,7 +1211,11 @@ def open_segment(
             segment_ids: list[str] = list(base.segment_ids())
             if len(segment_ids) != 1:
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
-            yield _build_feed(base, ground_truth, segment_ids[0], profile, frame_stride, window_s, cache_video, decode_device)
+            mask_dataset: DatasetEntry | None = client.get_dataset("masks") if "masks" in datasets else None
+            yield _build_feed(
+                base, ground_truth, segment_ids[0], profile, frame_stride, window_s, cache_video, decode_device,
+                mask_dataset=mask_dataset, mask_entity=mask_entity,
+            )
     else:
         resolved: CatalogSegment = source if source.dataset is not None else resolve_catalog_segments((source,))[0]
         assert resolved.dataset is not None
@@ -1199,5 +1235,5 @@ def open_segment(
                 ground_truth.register([resolved.ground_truth_uri]).wait()
             yield _build_feed(
                 resolved.dataset, ground_truth,
-                resolved.segment_id, profile, frame_stride, window_s, cache_video, decode_device,
+                resolved.segment_id, profile, frame_stride, window_s, cache_video, decode_device, mask_entity=mask_entity,
             )

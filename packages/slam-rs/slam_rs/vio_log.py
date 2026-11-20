@@ -646,7 +646,59 @@ def log_imu(imu: ImuStream) -> None:
         rr.send_columns(entity, indexes=[times], columns=rr.Scalars.columns(scalars=channel.reshape(-1)).partition([components] * len(imu)))
 
 
-def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) -> None:
+MASK_CLASSES: rr.AnnotationContext = rr.AnnotationContext(
+    [rr.AnnotationInfo(id=0, label="kept", color=(255, 255, 255, 0))]
+    + [rr.AnnotationInfo(id=label, label="masked", color=(40, 110, 255, 140)) for label in range(1, 256)]
+)
+"""Kept pixels draw nothing, every nonzero label a translucent blue over the frame. Class 0 needs an explicit colour with
+alpha 0 and nonzero RGB: an unlisted class 0 gets an automatic solid colour, and (0, 0, 0, 0) is stored as 0, which the
+viewer also reads as "no colour"."""
+
+
+class FrameMaskLog:
+    """Logs the masks a replay tracked with, in the mask layer's form, under the layer's own entity name.
+
+    Each camera's mask goes to ``<camera>/<name>`` at its own resolution, with a static ``Transform3D`` that scales it onto
+    the camera's image, so the viewer draws it over the frame and the keypoints. The statics are logged once per camera
+    and size, and a mask only when it differs from the camera's last one: a layer sparser than the video holds one mask
+    over many frames.
+    """
+
+    def __init__(self, name: str) -> None:
+        """Log under ``<camera>/<name>``.
+
+        Args:
+            name: The mask layer's entity name under each camera's ``pinhole`` (``--mask-entity``).
+        """
+        self.name: str = name
+        self.scaled: dict[int, tuple[int, int, int, int]] = {}
+        """Per camera index, the ``(image w, image h, mask w, mask h)`` its static scale was logged for."""
+        self.last: dict[int, UInt8[ndarray, "mh mw"]] = {}
+
+    def log(self, cameras: tuple[int, ...], image_sizes: list[tuple[int, int]], masks: list[UInt8[ndarray, "mh mw"] | None]) -> None:
+        """Log one frameset's masks at the time already set. A camera with no mask logs nothing.
+
+        Args:
+            cameras: Rig index of each camera, in frameset order.
+            image_sizes: ``(width, height)`` of each camera's image.
+            masks: Each camera's mask, or None.
+        """
+        for index, (width, height), mask in zip(cameras, image_sizes, masks, strict=True):
+            if mask is None:
+                continue
+            entity: str = f"{camera_entity(index)}/{self.name}"
+            size: tuple[int, int, int, int] = (width, height, mask.shape[1], mask.shape[0])
+            if self.scaled.get(index) != size:
+                rr.log(entity, rr.Transform3D(scale=[width / mask.shape[1], height / mask.shape[0], 1.0]), MASK_CLASSES, static=True)
+                self.scaled[index] = size
+            last: UInt8[ndarray, "mh mw"] | None = self.last.get(index)
+            if last is not None and last.shape == mask.shape and np.array_equal(last, mask):
+                continue
+            rr.log(entity, rr.SegmentationImage(mask))
+            self.last[index] = mask
+
+
+def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode, mask_log: FrameMaskLog | None = None) -> None:
     """Log what the estimator is fed for one frameset, at the frameset's own time.
 
     Every replay draws this rung whether or not a stage consumes it, and the two
@@ -657,6 +709,7 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
         feed: The open feed, for the cameras the images belong to.
         frameset: The frameset, with the inertial samples since the previous one.
         mode: How to draw the frames; see :data:`FrameMode`.
+        mask_log: Where the frameset's masks go, drawn with the frames; None logs no mask.
     """
     # The samples are what the estimator is fed, so they are logged in every
     # stage whether or not one consumes them.
@@ -675,6 +728,8 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode) 
             # because the V2 gate drives the feed and `Vio` itself with
             # nothing logged.
             rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
+    if mode != "off" and frameset.masks is not None and mask_log is not None:
+        mask_log.log(tuple(camera.index for camera in feed.cameras), [(image.shape[1], image.shape[0]) for image in frameset.images], frameset.masks)
     if frameset.ground_truth is not None:
         pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
         rr.log(

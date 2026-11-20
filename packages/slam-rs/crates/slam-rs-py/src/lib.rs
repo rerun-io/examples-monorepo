@@ -328,19 +328,27 @@ impl Vio {
     /// CubeCL panics on a lost device rather than returning an error, and every
     /// GPU stage runs inside a guard that turns that into the core's typed error
     /// before it can unwind through the released GIL (decision D32).
+    ///
+    /// `masks`, when given, holds one entry per camera: `None` or a `uint8[h, w]` segmentation mask at any
+    /// resolution, nonzero = no features there; it is read through its scale to the camera's tracked image
+    /// (`slam_rs::frontend::masks`). The frontend neither detects in nor keeps a track in a detection cell that
+    /// holds a masked pixel. `masks=None` masks nothing.
+    #[pyo3(signature = (t_ns, images, masks = None))]
     fn track(
         &mut self,
         py: Python<'_>,
         t_ns: i64,
         images: Vec<Bound<'_, PyAny>>,
+        masks: Option<Vec<Option<Bound<'_, PyAny>>>>,
     ) -> PyResult<VioResult> {
+        self.set_frame_masks(masks)?;
         if self.inner.backend() == slam_rs::Backend::Gpu {
             let arrays: Vec<PyReadonlyArray2<'_, u8>> = images
                 .iter()
                 .enumerate()
                 .map(|(index, image)| {
-                    let array = gray_array(image, index)?;
-                    gray_pixels(&array, index)?;
+                    let array = gray_array(image, index, "image")?;
+                    gray_pixels(&array, index, "image")?;
                     Ok(array)
                 })
                 .collect::<PyResult<_>>()?;
@@ -348,7 +356,7 @@ impl Vio {
                 .iter()
                 .enumerate()
                 .map(|(index, array)| {
-                    let (data, width, height) = gray_pixels(array, index)?;
+                    let (data, width, height) = gray_pixels(array, index, "image")?;
                     Ok(ImageView {
                         width,
                         height,
@@ -831,6 +839,45 @@ where
     readonly.as_slice().map_err(|_| refused())
 }
 
+impl Vio {
+    /// The masks `track` was given, one optional `uint8[h, w]` per camera, or none at all.
+    fn set_frame_masks(&mut self, masks: Option<Vec<Option<Bound<'_, PyAny>>>>) -> PyResult<()> {
+        let Some(masks) = masks else {
+            let none: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> =
+                vec![None; self.inner.frontend().camera_count()];
+            return self.inner.set_frame_masks(&none).map_err(value_error);
+        };
+        let arrays: Vec<Option<PyReadonlyArray2<'_, u8>>> = masks
+            .iter()
+            .enumerate()
+            .map(|(index, mask)| {
+                mask.as_ref()
+                    .map(|mask| gray_array(mask, index, "mask"))
+                    .transpose()
+            })
+            .collect::<PyResult<_>>()?;
+        let views: Vec<Option<slam_rs::frontend::masks::PixelMask<'_>>> = arrays
+            .iter()
+            .enumerate()
+            .map(|(index, array)| {
+                array
+                    .as_ref()
+                    .map(|array| {
+                        gray_pixels(array, index, "mask").map(|(data, width, height)| {
+                            slam_rs::frontend::masks::PixelMask {
+                                width,
+                                height,
+                                data,
+                            }
+                        })
+                    })
+                    .transpose()
+            })
+            .collect::<PyResult<_>>()?;
+        self.inner.set_frame_masks(&views).map_err(value_error)
+    }
+}
+
 /// Borrow one `uint8[h, w]` array out of Python: rank and dtype checked.
 ///
 /// Consumers either copy the bytes or widen them into reused [`Image<u16, 1>`]
@@ -838,9 +885,10 @@ where
 fn gray_array<'py>(
     object: &Bound<'py, PyAny>,
     index: usize,
+    what: &str,
 ) -> PyResult<PyReadonlyArray2<'py, u8>> {
     let array: &Bound<'py, PyArray2<u8>> = object.cast::<PyArray2<u8>>().map_err(|_| {
-        PyValueError::new_err(format!("image {index} must be a 2-D uint8 numpy array"))
+        PyValueError::new_err(format!("{what} {index} must be a 2-D uint8 numpy array"))
     })?;
     Ok(array.readonly())
 }
@@ -849,16 +897,17 @@ fn gray_array<'py>(
 fn gray_pixels<'a>(
     readonly: &'a PyReadonlyArray2<'_, u8>,
     index: usize,
+    what: &str,
 ) -> PyResult<(&'a [u8], usize, usize)> {
     let shape: &[usize] = readonly.shape();
-    let pixels: &[u8] = contiguous(readonly, &format!("image {index}"), "image")?;
+    let pixels: &[u8] = contiguous(readonly, &format!("{what} {index}"), what)?;
     Ok((pixels, shape[1], shape[0]))
 }
 
 /// Copy one C-contiguous `uint8[h, w]` array out of Python.
 fn gray_image(object: &Bound<'_, PyAny>, index: usize) -> PyResult<GrayImage> {
-    let readonly: PyReadonlyArray2<'_, u8> = gray_array(object, index)?;
-    let (pixels, width, height) = gray_pixels(&readonly, index)?;
+    let readonly: PyReadonlyArray2<'_, u8> = gray_array(object, index, "image")?;
+    let (pixels, width, height) = gray_pixels(&readonly, index, "image")?;
     Ok(GrayImage {
         width,
         height,
@@ -1368,8 +1417,8 @@ impl OpticalFlow {
         // outlive it. `fill_from_u8_strided` reuses the buffer whenever the
         // geometry is unchanged, which is every frame after the first.
         for (index, image) in images.iter().enumerate() {
-            let readonly: PyReadonlyArray2<'_, u8> = gray_array(image, index)?;
-            let (pixels, width, height) = gray_pixels(&readonly, index)?;
+            let readonly: PyReadonlyArray2<'_, u8> = gray_array(image, index, "image")?;
+            let (pixels, width, height) = gray_pixels(&readonly, index, "image")?;
             slam_rs::image::fill_from_u8_strided(
                 &mut self.images[index],
                 pixels,

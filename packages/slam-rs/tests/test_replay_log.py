@@ -70,3 +70,35 @@ def test_a_frameset_without_samples_logs_nothing(tmp_path: Path, read_rows: Rows
     log_imu(ImuStream(t_ns=np.zeros(0, dtype=np.int64), gyro_rad_s=np.zeros((0, 3)), accel_m_s2=np.zeros((0, 3))))
     rr.disconnect()
     assert read_rows(output) == {}
+
+
+def test_the_masks_a_frameset_was_tracked_with_are_logged_with_their_scale(tmp_path: Path, read_rows: RowsReader) -> None:
+    """In the mask layer's own form, under the layer's own name: native resolution plus a static scale onto the camera's
+    image, logged once; a mask is logged again only when it changes, and every nonzero label draws as masked."""
+    from rerun.chunk import RrdReader
+
+    from slam_rs.frontend_log import camera_entity
+    from slam_rs.vio_log import FrameMaskLog
+
+    output: Path = tmp_path / "masks.rrd"
+    rr.init("slam-rs-replay-log-test", recording_id="replay-log-masks")
+    rr.save(output)
+    first = np.zeros((4, 5), dtype=np.uint8)
+    first[1, 2] = 1
+    second = np.zeros((4, 5), dtype=np.uint8)
+    second[2, 3] = 2
+    mask_log = FrameMaskLog("face_mask")
+    for t_ns, mask in [(1_000, first), (2_000, first.copy()), (3_000, second)]:
+        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
+        mask_log.log((0, 1), [(20, 12), (20, 12)], [mask, None])
+    rr.disconnect()
+
+    entity: str = f"{camera_entity(0)}/face_mask"
+    rows: Rows = read_rows(output)
+    assert set(rows) == {entity}
+    assert len(rows[entity]) == 2
+    statics = [chunk.to_record_batch() for chunk in RrdReader(output).stream().collect().stream() if chunk.is_static and chunk.entity_path == entity]
+    assert [batch.column("Transform3D:scale").to_pylist() for batch in statics] == [[[[4.0, 3.0, 1.0]]]]  # one chunk, one row, one instance
+    (context,) = [batch.column("AnnotationContext:context").to_pylist() for batch in statics]
+    classes: dict[int, dict] = {entry["class_id"]: entry["class_description"]["info"] for entry in context[0][0]}  # one row, one instance
+    assert classes[2]["label"] == classes[1]["label"] == "masked" and classes[2]["color"] == classes[1]["color"]

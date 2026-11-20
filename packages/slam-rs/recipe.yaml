@@ -1,3 +1,8 @@
+context:
+  # The core output's files in slam_rs/: the abi3 extension and the modules that run on numpy + rerun-sdk. The catalog
+  # output gets every other file, so a new module lands in exactly one output.
+  core_files: __init__.py rig.py frontend_log.py config.py machine.py _core.so _core.pyi py.typed
+
 recipe:
   name: slam-rs
   version: "0.1.0"
@@ -36,8 +41,7 @@ outputs:
         - if: osx
           then: cp target/release/lib_core.dylib "$SP_DIR/slam_rs/_core.so"
           else: cp target/release/lib_core.so "$SP_DIR/slam_rs/_core.so"
-        - rm -f "$SP_DIR"/slam_rs/catalog_*.py "$SP_DIR"/slam_rs/{tracking,vio_log,cuda_decode,trajectory,reference}.py
-        - rm -rf "$SP_DIR/slam_rs/apis" "$SP_DIR/slam_rs/__pycache__"
+        - (cd "$SP_DIR/slam_rs" && for entry in *; do case " ${{ core_files }} " in *" $entry "*) ;; *) rm -rf "$entry" ;; esac; done)
     requirements:
       build:
         - ${{ compiler('c') }}
@@ -68,7 +72,7 @@ outputs:
         - cd slam-rs
         - python -m pip install . --no-deps --no-build-isolation -vv
         - export SP_DIR="$(python -c 'import sysconfig; print(sysconfig.get_path("platlib"))')"
-        - rm -f "$SP_DIR"/slam_rs/_core* "$SP_DIR/slam_rs/py.typed" "$SP_DIR"/slam_rs/{__init__,rig,frontend_log,config,machine}.py
+        - (cd "$SP_DIR/slam_rs" && rm -f ${{ core_files }})
         - rm -rf "$SP_DIR"/slam_rs-*.dist-info "$SP_DIR/slam_rs/__pycache__"
     requirements:
       host:

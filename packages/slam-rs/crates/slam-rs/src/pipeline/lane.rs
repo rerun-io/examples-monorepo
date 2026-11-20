@@ -145,6 +145,11 @@ impl FrontendLane {
         on_lane!(self, |flow| flow.config())
     }
 
+    /// The grid one camera is detected on.
+    pub fn detection_grid(&self, camera: usize) -> kornia_staging_imgproc::features::CellGrid {
+        on_lane!(self, |flow| flow.detection_grid(camera))
+    }
+
     /// Publish a new average scene depth.
     pub fn set_depth_guess(&mut self, depth: f32) {
         on_lane!(self, |flow| flow.set_depth_guess(depth));
