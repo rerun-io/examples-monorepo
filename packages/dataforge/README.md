@@ -530,7 +530,9 @@ people mask, the IMU as a strip. **colsfm**: the cloud growing with the walk and
 the slam-rs prior). slam-rs is orange and colsfm blue in every tab; a `--panorama` layer adds a fourth tab. The follow
 views are rooted at `/world/rig_00_follow`, the level frame the layer that moves the rig writes (slam-rs: the rig's
 position, turned about the world's up axis towards the walk), so the horizon holds while the stick swings; the same
-layer lays `/world/floor_grid` under the walk. The overviews frame the walk when the catalog dataset holds one walked
+layer lays `/world/floor_grid` under the walk. The runs draw their rigs in the dataset's own layout (camera, `pinhole`,
+picture): slam-rs's live rig and its window keyframes reference the lens frames, colsfm's cube rig the face frames
+(`VideoFrameReference` into the base's `VideoStream`s, nothing encoded again). The overviews frame the walk when the catalog dataset holds one walked
 segment: run `dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.
 
 Poses to the panorama (for colsfm / COLMAP `EQUIRECTANGULAR`). slam-rs tracks the two lens cameras and reports the

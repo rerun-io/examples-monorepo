@@ -7,7 +7,9 @@ alignment to the ground truth. Until the final run exists, ``slam_rs`` repeats t
 sits on the raw run while the replay plays.
 """
 
+import itertools
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -97,6 +99,10 @@ ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
 ROUTE_ALPHA: int = 40
 """How opaque a whole path is (:meth:`VioLogger.log_complete_paths`) beside the trail drawn up to the cursor."""
+SlotFamily: TypeAlias = Literal["window", "marginalized"]
+"""The two families of numbered frame slots under the run: the estimator's window, and what its last marginalization removed."""
+UNIFIED_SPHERE_MODELS: tuple[str, ...] = ("mei_v3", "mei_v6", "ds")
+"""Camera models whose focal is the unified sphere's ``gamma`` and whose first coefficient is ``xi`` (:func:`display_intrinsics`)."""
 FLOOR_GRID_RADIUS_UI: float = 0.5
 """Stroke of a floor-grid edge, ui points: hairlines at every zoom."""
 ROUTE_RADIUS_M: float = 0.0015
@@ -164,20 +170,42 @@ def image_from_camera(camera: CameraCalib) -> Float64[ndarray, "3 3"]:
     return np.array([[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
-def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child: str = "") -> None:
+def display_intrinsics(camera: CameraCalib) -> Float64[ndarray, "3 3"]:
+    """The pinhole a viewer should draw this camera's frustum (and the picture in it) with: its paraxial focal.
+
+    A viewer's ``Pinhole`` is a plain pinhole. A unified-sphere model's focal (mei's and the double sphere's ``gamma``)
+    is not what the lens projects at its axis: there a ray at angle ``t`` lands ``gamma / (1 + xi) * t`` pixels out.
+    Drawn with ``gamma`` itself, the X4 Air's 200 degree lens (xi 2.31) is a 55 degree frustum; with the paraxial
+    focal it is 120 degrees, which is what the middle of the picture covers. The other models' focal is paraxial
+    already. For display only: a calibration reader wants :func:`image_from_camera`.
+    """
+    intrinsics: Float64[ndarray, "3 3"] = image_from_camera(camera)
+    if camera.model in UNIFIED_SPHERE_MODELS:
+        intrinsics[0, 0] /= 1.0 + camera.distortion[0]
+        intrinsics[1, 1] /= 1.0 + camera.distortion[0]
+    return intrinsics
+
+
+def dataset_videos(camera_positions: Sequence[int]) -> tuple[str, ...]:
+    """The dataset's own ``VideoStream`` of each fed camera, by its position in the rig: what :attr:`VioLogger.video_entities` wants."""
+    return tuple(f"{RIG_ENTITY}/cam_{position:02d}/pinhole/video" for position in camera_positions)
+
+
+def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bool = False) -> None:
     """Log a rig's static camera geometry, so whatever moves it draws as frusta.
 
     Two rigs are drawn from the same calibration and this is the one place that
-    spells it: the dataset's own under ``/world/rig_00``, whose ``Pinhole`` sits
-    on the ``pinhole`` child the images and keypoints hang under, and the
-    estimated run's own copy under its run entity — without which the estimate
-    and the ground truth would move the same frusta.
+    spells it: the dataset's own under ``/world/rig_00`` and the estimated run's
+    own copy under its run entity — without which the estimate and the ground
+    truth would move the same frusta. Both have the dataset's layout: the
+    camera node carries the pose in the rig, its ``pinhole`` child the
+    ``Pinhole``, and the pictures and keypoints hang under that.
 
     Args:
         cameras: The rig's cameras, in rig order.
         entity_prefix: What ``cam_MM`` hangs under.
-        pinhole_child: Child entity the ``Pinhole`` goes on; empty puts it on the
-            camera itself, which is what a rig with no images wants.
+        display: The rig is a drawn copy, not the dataset's calibration: its frusta take
+            :func:`display_intrinsics`, so a wide lens's picture has the right size.
     """
     for camera in cameras:
         node: str = f"{entity_prefix}/cam_{camera.index:02d}"
@@ -187,9 +215,9 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child:
             static=True,
         )
         rr.log(
-            f"{node}{pinhole_child}",
+            f"{node}/pinhole",
             rr.Pinhole(
-                image_from_camera=image_from_camera(camera),
+                image_from_camera=display_intrinsics(camera) if display else image_from_camera(camera),
                 resolution=[camera.width, camera.height],
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=IMAGE_PLANE_M,
@@ -225,6 +253,10 @@ class VioLogger:
     segment without ground truth. Off, the rig belongs to the layers that own it: ``gt``, or the catalog ``slam_rs``
     layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`). With the rig go its level
     follow frame and, with the whole paths, the floor grid (:mod:`slam_rs.follow_frame`)."""
+    video_entities: tuple[str, ...] = ()
+    """The dataset's ``VideoStream`` of each camera, in :attr:`cameras` order. With them the run's rig references the
+    current frame of each lens under its ``pinhole`` and a window keyframe the frames of its own time
+    (``VideoFrameReference``: nothing is encoded again); empty, the frusta stay empty."""
     heading: HeadingFilter = field(default_factory=HeadingFilter)
     """The follow frame's heading so far: the direction of travel, low-passed."""
     floor_height: FloorHeight = field(default_factory=FloorHeight)
@@ -239,12 +271,19 @@ class VioLogger:
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
     """Previous window poses by timestamp, used to draw marginalized frames."""
-    pinholes: dict[tuple[int, int, int, int], rr.Pinhole] = field(init=False)
-    """Camera 0 frusta by role colour, reused for every slot and frameset."""
-    highest_slots: dict[Literal["window", "marginalized"], int] = field(default_factory=dict)
+    pinholes: dict[tuple[int, tuple[int, int, int, int]], rr.Pinhole] = field(init=False)
+    """Each camera's frustum by position in :attr:`cameras` and role colour, reused for every slot and frameset."""
+    highest_slots: dict[SlotFamily, int] = field(default_factory=dict)
     """Highest initialized slot index in each family; static rig offsets are logged once."""
-    previous_counts: dict[Literal["window", "marginalized"], int] = field(default_factory=dict)
-    """Number of slots drawn in each family on the previous frameset."""
+    window_slots: dict[int, int] = field(default_factory=dict)
+    """The slot each window frame holds, by frame timestamp. A frame keeps its slot while it is in the window, so a
+    keyframe's pictures are referenced (and decoded by the viewer) once, not again whenever an older frame leaves."""
+    marginalized_count: int = 0
+    """Marginalized slots drawn on the previous frameset."""
+    slot_frusta: dict[tuple[SlotFamily, int], tuple[int, int, int, int]] = field(default_factory=dict)
+    """The role colour each slot's frusta were last drawn in; they are logged again only when it changes or the slot was cleared."""
+    slot_pictures: dict[tuple[SlotFamily, int], int] = field(default_factory=dict)
+    """The frame each slot's pictures reference, for the slots that show any."""
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
     map_keyframe: int | None = None
@@ -262,18 +301,19 @@ class VioLogger:
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
-        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig")
+        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig", display=True)
+        for camera, video in zip(self.cameras, self.video_entities, strict=False):
+            rr.log(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference.from_fields(video_reference=video), static=True)
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
-        camera: CameraCalib = self.cameras[0]
-        camera_intrinsics: Float64[ndarray, "3 3"] = image_from_camera(camera)
         self.pinholes = {
-            color: rr.Pinhole(
-                image_from_camera=camera_intrinsics,
+            (position, color): rr.Pinhole(
+                image_from_camera=display_intrinsics(camera),
                 resolution=[camera.width, camera.height],
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=FRUSTUM_DEPTH_M,
                 color=color,
             )
+            for position, camera in enumerate(self.cameras)
             for color in (KEYFRAME_COLOR, LTKF_COLOR, POSE_COLOR, MARGINALIZED_COLOR)
         }
 
@@ -305,6 +345,8 @@ class VioLogger:
 
         rig_pose: rr.Transform3D = rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))
         rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
+        for camera, _ in zip(self.cameras, self.video_entities, strict=False):
+            rr.log(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference(nanoseconds=result.t_ns - self.cam_time_offset_ns))
         if self.animate_base_rig:
             rr.log(RIG_ENTITY, rig_pose)
             half_yaw: float = 0.5 * self.heading.update(result.t_ns, pose[0:3])
@@ -410,41 +452,82 @@ class VioLogger:
             return
         rr.log(f"{GT_ENTITY}/trajectory", rr.LineStrips3D([self.ground_truth_strip.position_m[drawn - 2 : drawn]], colors=GT_COLOR, radii=0.004))
 
-    def _log_camera_slots(
-        self, family: Literal["window", "marginalized"], poses: list[Float64[ndarray, " 7"]], colors: list[tuple[int, int, int, int]]
-    ) -> None:
-        """Draw poses as camera 0 frusta and clear slots that just became empty."""
-        camera: CameraCalib = self.cameras[0]
-        highest: int = self.highest_slots.get(family, -1)
-        for k, (pose, color) in enumerate(zip(poses, colors, strict=True)):
-            slot: str = f"{VIO_RUN_ENTITY}/{family}/{k:02d}"
-            if k > highest:
-                rr.log(
-                    f"{slot}/cam_00",
-                    rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
-                    static=True,
-                )
-            rr.log(slot, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
-            rr.log(f"{slot}/cam_00", self.pinholes[color])
-        for k in range(len(poses), self.previous_counts.get(family, 0)):
-            rr.log(f"{VIO_RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
-        self.previous_counts[family] = len(poses)
-        self.highest_slots[family] = max(highest, len(poses) - 1)
+    def _draw_slot(self, family: SlotFamily, k: int, t_ns: int, pose: Float64[ndarray, " 7"], color: tuple[int, int, int, int], *, pictures: bool) -> None:
+        """Draw one window or marginalized frame on its slot: the rig's pose, and a frustum a camera in the role's colour.
+
+        The pose goes out every frameset (the window refines it). The frusta go out when the slot's role colour
+        changed. With ``pictures`` and :attr:`video_entities`, each frustum references its lens's frame of ``t_ns``,
+        once for as long as the frame holds the slot.
+
+        Args:
+            family: ``window`` or ``marginalized``.
+            k: Slot index.
+            t_ns: The frame's stamp on the estimator's clock.
+            pose: ``world_from_rig`` as ``[tx, ty, tz, qx, qy, qz, qw]``.
+            color: The frame's role colour.
+            pictures: Whether the frusta show the frame's pictures.
+        """
+        slot: str = f"{VIO_RUN_ENTITY}/{family}/{k:02d}"
+        if k > self.highest_slots.get(family, -1):
+            for camera in self.cameras:
+                rr.log(f"{slot}/cam_{camera.index:02d}", rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]), static=True)
+            self.highest_slots[family] = k
+        rr.log(slot, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
+        if self.slot_frusta.get((family, k)) != color:
+            self.slot_frusta[family, k] = color
+            for position, camera in enumerate(self.cameras):
+                rr.log(f"{slot}/cam_{camera.index:02d}/pinhole", self.pinholes[position, color])
+        shown: int | None = self.slot_pictures.get((family, k))
+        wanted: int | None = t_ns if pictures and self.video_entities else None
+        if wanted == shown:
+            return
+        for camera, video in zip(self.cameras, self.video_entities, strict=False):
+            entity: str = f"{slot}/cam_{camera.index:02d}/pinhole/video"
+            if wanted is None:
+                rr.log(entity, rr.Clear(recursive=False))
+            else:
+                rr.log(entity, rr.VideoFrameReference(nanoseconds=wanted - self.cam_time_offset_ns, video_reference=video))
+        if wanted is None:
+            del self.slot_pictures[family, k]
+        else:
+            self.slot_pictures[family, k] = wanted
+
+    def _clear_slot(self, family: SlotFamily, k: int) -> None:
+        """Clear a slot that just emptied, once: Rerun keeps the latest state, so it stays empty until it is drawn again."""
+        rr.log(f"{VIO_RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
+        self.slot_frusta.pop((family, k), None)
+        self.slot_pictures.pop((family, k), None)
 
     def _log_window(self, snapshot: _core.VioSnapshot) -> None:
-        """Draw window and marginalized poses as Pinhole cameras, coloured by role."""
+        """Draw window and marginalized frames as the rig's cameras, coloured by role.
+
+        A window frame takes the lowest free slot when it enters and keeps it until it leaves; a keyframe's frusta
+        show its pictures. The frames the last marginalization removed are drawn once more, faded, where the previous
+        window had them, on slots of their own in order: they last one frameset, so they show no picture.
+        """
         poses: Float64[ndarray, "n_frames 7"] = snapshot.window_poses
-        colors: list[tuple[int, int, int, int]] = [
-            LTKF_COLOR if long_term else KEYFRAME_COLOR if keyframe else POSE_COLOR
-            for keyframe, long_term in zip(snapshot.window_keyframe, snapshot.window_long_term, strict=True)
-        ]
-        self._log_camera_slots("window", list(poses), colors)
+        stamps: list[int] = snapshot.window_t_ns.tolist()
+        present: set[int] = set(stamps)
+        freed: set[int] = {self.window_slots.pop(t_ns) for t_ns in [t_ns for t_ns in self.window_slots if t_ns not in present]}
+        taken: set[int] = set(self.window_slots.values())
+        for t_ns, pose, keyframe, long_term in zip(stamps, poses, snapshot.window_keyframe, snapshot.window_long_term, strict=True):
+            if t_ns not in self.window_slots:
+                self.window_slots[t_ns] = next(k for k in itertools.count() if k not in taken)
+                taken.add(self.window_slots[t_ns])
+            color: tuple[int, int, int, int] = LTKF_COLOR if long_term else KEYFRAME_COLOR if keyframe else POSE_COLOR
+            self._draw_slot("window", self.window_slots[t_ns], t_ns, pose, color, pictures=bool(keyframe))
+        for k in freed - taken:
+            self._clear_slot("window", k)
 
         # Removed frames retain the poses from the last snapshot that held them.
         leaving: set[int] = set(snapshot.marginalized.tolist())
-        marginalized: list[Float64[ndarray, " 7"]] = [pose for t_ns, pose in self.previous_window.items() if t_ns in leaving]
-        self._log_camera_slots("marginalized", marginalized, [MARGINALIZED_COLOR] * len(marginalized))
-        self.previous_window = {t_ns: pose for t_ns, pose in zip(snapshot.window_t_ns.tolist(), poses, strict=True)}
+        marginalized: list[tuple[int, Float64[ndarray, " 7"]]] = [(t_ns, pose) for t_ns, pose in self.previous_window.items() if t_ns in leaving]
+        for k, (t_ns, pose) in enumerate(marginalized):
+            self._draw_slot("marginalized", k, t_ns, pose, MARGINALIZED_COLOR, pictures=False)
+        for k in range(len(marginalized), self.marginalized_count):
+            self._clear_slot("marginalized", k)
+        self.marginalized_count = len(marginalized)
+        self.previous_window = {t_ns: pose for t_ns, pose in zip(stamps, poses, strict=True)}
 
     def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
         """Draw the window's landmarks in the colour of the image where each was first tracked."""
@@ -564,7 +647,7 @@ def log_calibration(cameras: tuple[CameraCalib, ...], *, gravity_world: bool = F
             catalog layer states it. Otherwise the root keeps ``RUB``.
     """
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP if gravity_world else rr.ViewCoordinates.RUB, static=True)
-    log_rig(cameras, RIG_ENTITY, pinhole_child="/pinhole")
+    log_rig(cameras, RIG_ENTITY)
 
 
 @dataclass(slots=True)

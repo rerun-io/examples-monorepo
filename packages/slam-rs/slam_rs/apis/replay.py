@@ -38,6 +38,7 @@ from slam_rs.vio_log import (
     FrameMode,
     VioLogger,
     VioStage,
+    dataset_videos,
     log_calibration,
     log_frameset_inputs,
     set_video_time,
@@ -434,6 +435,8 @@ def main(config: Config) -> None:
                     tracked_resolution=tuple(vio.tracked_resolution),
                     cam_time_offset_ns=feed.imu.cam_time_offset_ns,
                     animate_base_rig=config.animate_base_rig,
+                    # The base's own lens videos: the run's frusta reference their frames, nothing is encoded again.
+                    video_entities=dataset_videos(feed.camera_positions),
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))

@@ -85,7 +85,11 @@ KEYPOINT_RADIUS_UI: float = 2.5
 FRUSTUM_LINE_WIDTH: float = -1.5
 """Stroke of a frustum: 1.5 ui points (Rerun reads a negative width as ui points)."""
 WINDOW_SLOTS: int = 16
-"""Window frusta the replay may log (``window/NN``); an override on a slot that is not there is inert."""
+"""Window frames the replay may log (``window/NN``); an override on a slot that is not there is inert."""
+MARGINALIZED_SLOTS: int = 4
+"""The same for the frames a marginalization removed (``marginalized/NN``)."""
+LENSES: tuple[str, str] = ("cam_00", "cam_01")
+"""The two lens cameras, as slam-rs names them under its rig and under each window frame."""
 FOLLOW_PATH_WINDOW_S: float = 30.0
 """How far back of the cursor the follow view draws a path logged a segment a pose, in seconds."""
 OVERVIEW_PATH_WINDOW_S: float = 120.0
@@ -106,8 +110,8 @@ OVERVIEW_ASPECTS: tuple[float, float, float] = (2.7, 2.0, 1.4)
 
 FOLLOW_EYE: rrb.EyeControls3D = rrb.EyeControls3D(
     kind=rrb.Eye3DKind.Orbital,
-    position=(-3.2, -1.0, 1.5),
-    look_target=(1.5, 0.0, -0.2),
+    position=(-2.5, -1.1, 1.1),
+    look_target=(1.0, 0.0, -0.4),
     eye_up=(0.0, 0.0, 1.0),
     spin_speed=0.0,
 )
@@ -192,7 +196,20 @@ def frusta(root: str, cameras: Sequence[str], color: tuple[int, int, int], size_
 
 def lens_frusta(size_m: float) -> Overrides:
     """The two lenses of slam-rs's rig, in its colour."""
-    return frusta(f"{VIO}/rig", ("cam_00", "cam_01"), SLAM_COLOR, size_m)
+    return frusta(f"{VIO}/rig", [f"{lens}/pinhole" for lens in LENSES], SLAM_COLOR, size_m)
+
+
+def window_frusta(size_m: float) -> Overrides:
+    """Both lenses of every frame in the estimator's window, and of the frames its last marginalization removed."""
+    slots: list[str] = [f"window/{slot:02d}" for slot in range(WINDOW_SLOTS)] + [f"marginalized/{slot:02d}" for slot in range(MARGINALIZED_SLOTS)]
+    return frusta(VIO, [f"{slot}/{lens}/pinhole" for slot in slots for lens in LENSES], WINDOW_COLOR, size_m)
+
+
+def run_pictures() -> list[str]:
+    """Content rules that drop the pictures the two runs show in their frusta, and keep the frusta."""
+    lens: list[str] = [f"{VIO}/rig/{camera}/pinhole/video" for camera in LENSES]
+    faces: list[str] = [f"{COLSFM}/rig/{name}/pinhole/video" for name, _ in cube.FACES]
+    return [f"- {picture}/**" for picture in (*lens, *faces)]
 
 
 def face_frusta(size_m: float) -> Overrides:
@@ -208,13 +225,14 @@ def hidden(*entities: str) -> Overrides:
 def slam_overrides(*, close: bool) -> Overrides:
     """How a SLAM-tab 3D view draws slam-rs: the travelled path bright over the darkened whole walk, the map in its image colours.
 
-    The ``close`` (follow) view adds what happens at the rig: the window's frames, its landmarks and the two lenses.
+    The ``close`` (follow) view adds what happens at the rig: the two lenses with their pictures, the window's frames
+    (a keyframe's frusta hold the lens pictures of its own time) and its landmarks.
     """
     window_s: float = FOLLOW_PATH_WINDOW_S if close else OVERVIEW_PATH_WINDOW_S
     at_the_rig: Overrides = {
         f"{VIO}/landmarks": cloud(3.0),
-        **lens_frusta(0.25),
-        **frusta(VIO, [f"window/{slot:02d}/cam_00" for slot in range(WINDOW_SLOTS)] + ["marginalized/00/cam_00"], WINDOW_COLOR, 0.1),
+        **lens_frusta(0.35),
+        **window_frusta(0.15),
     }
     return {
         f"{VIO}/path": stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
@@ -230,11 +248,12 @@ def slam_overrides(*, close: bool) -> Overrides:
 
 
 def colsfm_overrides(*, close: bool) -> Overrides:
-    """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk, the path and the cube rig in blue."""
+    """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk, the path and the cube rig in
+    blue, each face's picture in its frustum."""
     return {
         f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, 2.0),
         f"{COLSFM}/points_growing": [blueprints.cursor_window(None), cloud(1.5 if close else 2.0)],
-        **face_frusta(0.3 if close else 0.6),
+        **face_frusta(0.35 if close else 0.6),
     }
 
 
@@ -381,6 +400,7 @@ def comparison_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
     scene: list[str] = [
         "/world/**",
         *pictures(),
+        *run_pictures(),
         f"- {COLSFM}/points_growing/**",
         f"- {POSITION_DIFFERENCE}/**",
         *(f"- {VIO}/{part}/**" for part in ("landmarks", "window", "marginalized", "trajectory", "trail")),

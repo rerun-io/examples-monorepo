@@ -6,6 +6,9 @@ segment it was read from:
 - `/world/runs/<source>/rig`: the optimised `world_T_rig` per registered rig frame, on `video_time` (the reference
   keyframe's timestamp), sent as columns;
 - `/world/runs/<source>/rig/<camera>`: the refined `rig_T_cam` and the camera's pinhole, so the frusta ride the rig;
+- `/world/runs/<source>/rig/<camera>/pinhole/video`: for a catalog input, a `VideoFrameReference` at each rig frame to
+  that camera's sample in the segment's own `VideoStream`, so each frustum shows the picture the run read (the same
+  camera, pinhole, video layout as the dataset's rig; nothing is copied or encoded again);
 - `/world/runs/<source>/points`: the sparse model, coloured from the images, static, so every layout shows the map;
 - `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
   (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
@@ -30,6 +33,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
+from colsfm.frame_manifest import FrameSourceManifest
 from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, KeyframeMeta, read_frames_meta
 from colsfm.rerun_log import camera_k_matrix
 from colsfm.run_lifecycle import KEYFRAME_DIR_NAME
@@ -220,6 +224,38 @@ def log_position_difference(
     recording.log(entity, rr.SeriesLines(names="distance to the prior [m]"), static=True)
 
 
+def log_frame_references(recording: rr.RecordingStream, root: str, frames_meta: FramesMeta, manifest: FrameSourceManifest) -> None:
+    """Log, under each rig camera's pinhole, a reference to its sample of every rig frame in the segment's video.
+
+    A row at the rig frame's time (the time `<root>/rig` takes that frame's pose) holds the sample's own stamp on the
+    stream, so pose and picture change together. The stream is the one the run read the keyframes from.
+
+    Args:
+        recording: The layer's recording.
+        root: `/world/runs/<source>`.
+        frames_meta: The rig frames the layer poses: the keyframes name their samples (`image_name`).
+        manifest: The run's frame source: each camera's stream and the stamp of each named sample.
+    """
+    by_id: dict[int, KeyframeMeta] = frames_meta.keyframe_by_id()
+    for stream in manifest.streams:
+        sample_ns: dict[str, int] = dict(zip(stream.names, stream.t_ns, strict=True))
+        shown: list[tuple[int, int, int]] = [
+            (rig_frame.timestamp_microseconds * 1000, sample_ns[by_id[keyframe_id].image_name], by_id[keyframe_id].camera_params_id)
+            for rig_frame in frames_meta.rig_frames()
+            for keyframe_id in rig_frame.keyframe_ids
+            if by_id[keyframe_id].image_name in sample_ns
+        ]
+        if not shown:
+            continue
+        entity: str = f"{root}/rig/{frames_meta.cameras[shown[0][2]].sensor_name}/pinhole/video"
+        recording.send_columns(
+            entity,
+            indexes=[rr.TimeColumn(manifest.timeline, duration=np.asarray([row for row, _, _ in shown], dtype="timedelta64[ns]"))],
+            columns=rr.VideoFrameReference.columns_nanos(np.asarray([sample for _, sample, _ in shown], dtype=np.int64)),
+        )
+        recording.log(entity, rr.VideoFrameReference.from_fields(video_reference=f"/{stream.entity.lstrip('/')}"), static=True)
+
+
 def open_layer(rrd_path: Path, segment: str) -> rr.RecordingStream:
     """A recording that saves to `rrd_path` and carries `segment` as its recording id (a layer of that segment).
 
@@ -262,7 +298,9 @@ def log_rig_trajectory(
     recording.log(f"{root}/trajectory", rr.LineStrips3D([world_T_rig[:, :3, 3]], colors=[color], radii=rr.Radius.ui_points(2.0)), static=True)
 
 
-def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str = DEFAULT_SOURCE, timeline: str = "video_time") -> LayerSummary:
+def write_run_layer(
+    run_dir: Path, rrd_path: Path, *, segment: str, source: str = DEFAULT_SOURCE, timeline: str = "video_time", frames: FrameSourceManifest | None = None
+) -> LayerSummary:
     """Write one finished run as a layer of `segment`.
 
     Args:
@@ -271,6 +309,8 @@ def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str 
         segment: The catalog segment (recording id) the run was read from.
         source: Run source under `/world/runs/`.
         timeline: Timeline of the rig poses; the segment's video timeline.
+        frames: The run's frame source, for a catalog input: the frusta then reference their pictures in the segment's
+            video streams (`log_frame_references`).
 
     Returns:
         What was written.
@@ -279,7 +319,8 @@ def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str 
     reconstruction: pycolmap.Reconstruction = artifacts.reconstruction
     registered: set[str] = {image.name for image in reconstruction.images.values() if image.has_pose}
     # One pose per input frame when the run wrote them; a run without them carries its registered keyframes.
-    times_ns, world_T_rig = rig_poses(artifacts.every_frame) if artifacts.every_frame is not None else rig_poses(artifacts.frames_meta, registered)
+    posed: FramesMeta = artifacts.frames_meta if artifacts.every_frame is None else artifacts.every_frame
+    times_ns, world_T_rig = rig_poses(posed) if artifacts.every_frame is not None else rig_poses(posed, registered)
     metrics: ReconstructionMetrics = reconstruction_metrics(reconstruction)
 
     root: str = f"/world/runs/{source}"
@@ -287,6 +328,8 @@ def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str 
     log_rig_trajectory(recording, root, times_ns, world_T_rig, timeline)
     for camera in artifacts.frames_meta.cameras.values():
         _log_camera(recording, f"{root}/rig/{camera.sensor_name}", camera)
+    if frames is not None:
+        log_frame_references(recording, root, posed, frames)
     points: Float64[ndarray, "p 3"] = artifacts.points_xyz()
     colors: UInt8[ndarray, "p 3"] = artifacts.points_rgb().astype(np.uint8)
     recording.log(f"{root}/points", rr.Points3D(points, colors=colors, radii=rr.Radius.ui_points(1.5)), static=True)

@@ -126,6 +126,23 @@ def test_the_follow_views_show_the_floor_around_the_cursor_and_the_overviews_all
         assert override(follow, schema.FLOOR_GRID_PATH) == [around], name
 
 
+def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> None:
+    """slam-rs and colsfm draw their rigs camera, then ``pinhole``, then the picture (the dataset's own layout): the
+    layout colours and sizes the ``pinhole`` entities, both lenses of the live rig and of every window frame, and the
+    six faces. The Comparison tab leaves the pictures out: there the frusta are the two sources' colours."""
+    layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
+    slam_follow: rrb.View = layout["SLAM"][1]
+    for entity in (f"{VIO}/rig/cam_00/pinhole", f"{VIO}/rig/cam_01/pinhole", f"{VIO}/window/00/cam_00/pinhole", f"{VIO}/window/08/cam_01/pinhole"):
+        assert any(isinstance(item, rr.Pinhole) for item in override(slam_follow, entity)), entity
+    assert not any("pinhole/video" in rule for rule in content_rules(slam_follow)), "the SLAM follow view shows the lens pictures"
+    for view in layout["colsfm"][:2]:
+        assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/rig/cube6_up/pinhole"))
+        assert not any("pinhole/video" in rule for rule in content_rules(view)), "the colsfm views show the face pictures"
+    for view in layout["Comparison"][:2]:
+        for picture in (f"{VIO}/rig/cam_01/pinhole/video", f"{COLSFM}/rig/cube6_down/pinhole/video"):
+            assert f"- {picture}/**" in content_rules(view), picture
+
+
 def test_each_source_keeps_one_colour_in_every_tab() -> None:
     """slam-rs is orange and colsfm blue wherever a path of theirs is drawn; in Comparison their clouds take the tint too."""
     layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
