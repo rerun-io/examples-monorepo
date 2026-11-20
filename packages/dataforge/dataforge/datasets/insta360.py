@@ -136,7 +136,8 @@ def segment_layout(*, panorama: bool) -> rrb.Blueprint:
     """Both lenses (and with ``panorama`` the panorama) beside two 3D views, over the IMU plots.
 
     The shared ``rig_blueprint``: an overview of the whole walk and a follow view rooted at ``/world/rig_00``, which a
-    pose layer animates (slam-rs's catalog layer and replay layer both do when the segment has no ``gt``). Overrides
+    pose layer animates (slam-rs's catalog layer when the segment has no ``gt``; the replay only with
+    ``--animate-base-rig``, for a recording viewed beside the base alone). Overrides
     on a missing entity are inert, so the same layout serves a base-only segment, a SLAM run and a colsfm run.
 
     What accumulates is logged once at its own time and shown through a cursor window: the VIO path (a segment per
