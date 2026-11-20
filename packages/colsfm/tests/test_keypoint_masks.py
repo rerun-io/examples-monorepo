@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from jaxtyping import Bool, Float32
 from numpy import ndarray
@@ -14,7 +15,7 @@ from colsfm.catalog import CatalogCameraModel, frames_meta_document
 from colsfm.database import create_database, read_descriptors_from_database, read_keypoints
 from colsfm.frame_manifest import FrameSourceManifest, StreamKeyframes
 from colsfm.frames_meta import FRAMES_META_NAME, read_frames_meta
-from colsfm.keypoint_masks import CatalogMasks, DictMasks, keypoints_outside_mask, open_mask_source
+from colsfm.keypoint_masks import CatalogMasks, DictMasks, keypoints_outside_mask, open_mask_source, pack_mask_table
 
 WIDTH: int = 64
 HEIGHT: int = 48
@@ -262,3 +263,40 @@ def test_packing_a_mask_table_skips_rows_without_a_mask_and_reads_every_batch() 
         width, height, bits = packed[stamp]
         assert (width, height) == (3, 2)
         assert np.array_equal(np.unpackbits(bits, count=6).astype(bool).reshape(2, 3), mask != 0)
+
+
+def _mask_table(entity: str, buffers: list[list[list[int]] | None], formats: list[list[dict[str, int]] | None]) -> pa.Table:
+    format_type = pa.struct([("width", pa.uint32()), ("height", pa.uint32())])
+    return pa.table(
+        {
+            "video_time": pa.array([10 * (index + 1) for index in range(len(buffers))], type=pa.int64()),
+            f"/{entity}:SegmentationImage:buffer": pa.array(buffers, type=pa.list_(pa.list_(pa.uint8()))),
+            f"/{entity}:SegmentationImage:format": pa.array(formats, type=pa.list_(format_type)),
+        }
+    )
+
+
+def test_an_empty_mask_row_is_absent_and_borrows_nothing() -> None:
+    """A cleared row (`[]`, valid but empty) has no mask; it must not read the next row's pixels or run past the end."""
+    entity: str = "world/cam/people_mask"
+    one = [1, 0, 0, 0, 0, 1]
+    size = [{"width": 3, "height": 2}]
+    packed = pack_mask_table(_mask_table(entity, [[], [one], []], [[], size, []]), "video_time", entity)
+    assert sorted(packed) == [20]
+    assert np.array_equal(np.unpackbits(packed[20][2], count=6), np.array(one, dtype=np.uint8))
+
+
+@pytest.mark.parametrize(
+    ("buffers", "formats", "message"),
+    [
+        ([[[1] * 6, [0] * 6]], [[{"width": 3, "height": 2}] * 2], "2 mask instances"),
+        ([[[1] * 6]], [None], "no format"),
+        ([[[1] * 6]], [[{"width": 3, "height": 3}]], "holds 6 bytes"),
+    ],
+    ids=["two-instances", "no-format", "wrong-size"],
+)
+def test_a_malformed_mask_row_names_its_entity_and_stamp(buffers: list, formats: list, message: str) -> None:
+    """One mask per present row, with its format, one byte per pixel; anything else stops the load and says where."""
+    entity: str = "world/cam/people_mask"
+    with pytest.raises(ValueError, match=rf"/world/cam/people_mask at t_ns 10: .*{message}"):
+        pack_mask_table(_mask_table(entity, buffers, formats), "video_time", entity)

@@ -68,7 +68,7 @@ def keypoints_outside_mask(keypoints_xy: Float32[ndarray, "n 2"], mask: Keypoint
 
 
 def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
-    """Bit-pack every mask of one `SegmentationImage` entity, keyed by its stamp; rows without a mask are skipped.
+    """Bit-pack every mask of one `SegmentationImage` entity, keyed by its stamp; rows without a mask (null or cleared) are skipped.
 
     Walks the table's record batches through the list offsets, so no mask byte is copied before `np.packbits`. The
     loader used to `filter` the table to the rows holding a mask first: an Arrow Take over a list-of-list column of
@@ -83,7 +83,7 @@ def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tu
         Stamp (ns) -> (mask width, mask height, `np.packbits` of the flat `!= 0` mask).
 
     Raises:
-        ValueError: When a mask does not hold one byte per pixel.
+        ValueError: When a row holds more than one mask, a mask has no format, or a mask does not hold one byte per pixel.
     """
     packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = {}
     for batch in table.to_batches():
@@ -99,12 +99,19 @@ def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tu
         byte_offsets: ndarray = instances.offsets.to_numpy()
         data: UInt8[ndarray, " n"] = instances.values.to_numpy(zero_copy_only=False)
         for row in np.flatnonzero(valid):
-            instance: int = int(instance_offsets[row])
-            pixels: UInt8[ndarray, " n"] = data[byte_offsets[instance] : byte_offsets[instance + 1]]
-            mask_format: list[dict[str, int]] | None = formats[row]
-            assert mask_format is not None
-            mask_width, mask_height = int(mask_format[0]["width"]), int(mask_format[0]["height"])
             stamp: int = int(stamps[row])
+            instance: int = int(instance_offsets[row])
+            # A cleared row (`[]`) is valid but empty: its start equals the next row's, so it has no mask of its own.
+            num_instances: int = int(instance_offsets[row + 1]) - instance
+            if num_instances == 0:
+                continue
+            if num_instances != 1:
+                raise ValueError(f"/{entity} at t_ns {stamp}: {num_instances} mask instances, expected 1")
+            mask_format: list[dict[str, int]] | None = formats[row]
+            if not mask_format or len(mask_format) != 1:
+                raise ValueError(f"/{entity} at t_ns {stamp}: a mask with no format (or {len(mask_format or [])}), expected 1")
+            pixels: UInt8[ndarray, " n"] = data[byte_offsets[instance] : byte_offsets[instance + 1]]
+            mask_width, mask_height = int(mask_format[0]["width"]), int(mask_format[0]["height"])
             if len(pixels) != mask_width * mask_height:
                 raise ValueError(f"/{entity} at t_ns {stamp}: a {mask_width}x{mask_height} mask holds {len(pixels)} bytes, not one per pixel")
             packed[stamp] = (mask_width, mask_height, np.packbits(pixels != 0))
