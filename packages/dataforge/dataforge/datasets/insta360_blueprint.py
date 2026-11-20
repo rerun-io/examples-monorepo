@@ -11,8 +11,10 @@ What the 3D views lean on, beside the runs themselves:
 
 - ``schema.follow_path``: the level follow frame the follow views are rooted at. A view rooted at the rig rolls and
   pitches with the stick, and the viewer's ``tracking_entity`` does not move the eye (0.42);
-- ``schema.FLOOR_GRID_PATH``: the floor under the walk. The built-in grid lies on the view origin's plane: it stands
-  still under a follow view, and in the world it sits at the rig's first height, through the cloud.
+- ``schema.FLOOR_GRID_PATH``: the floor under the walk, each edge at the time the walk passed it. The built-in grid
+  lies on the view origin's plane: it stands still under a follow view, and in the world it sits at the rig's first
+  height, through the cloud. An overview shows every floor of the walk; a follow view the floor of the
+  ``FOLLOW_FLOOR_WINDOW_S`` around the cursor, so on a walk over several storeys it draws the one under the rig.
 
 slam-rs writes both with the rig (``slam_rs.follow_frame``).
 
@@ -89,6 +91,8 @@ FOLLOW_PATH_WINDOW_S: float = 30.0
 OVERVIEW_PATH_WINDOW_S: float = 120.0
 """The same for the overview. Bounded on purpose: on clip 007 (1,069 s, 32 k segments) a window from the start played at
 7 fps in the native viewer, 120 s at 16.5 fps; the darkened whole path still shows where the walk went."""
+FOLLOW_FLOOR_WINDOW_S: float = 20.0
+"""How far either side of the cursor a follow view shows the floor, in seconds: about the grid's own reach at a walk."""
 IMU_WINDOW_S: float = 5.0
 """Half width of the IMU strip's time axis: a window that rides the cursor reads as a waveform, a whole clip as noise."""
 FOV_Y_RAD: float = float(np.radians(55.0))
@@ -254,25 +258,45 @@ def comparison_overrides(*, close: bool) -> Overrides:
     }
 
 
+def floor_window(half_s: float | None) -> rrb.VisibleTimeRanges:
+    """The floor a view shows: the edges the walk passed within ``half_s`` of the cursor, or with None all of them."""
+    if half_s is None:
+        return rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
+    return rrb.VisibleTimeRanges(
+        rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.cursor_relative(seconds=-half_s), end=rrb.TimeRangeBoundary.cursor_relative(seconds=half_s))
+    )
+
+
 def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeControls3D | None) -> rrb.Spatial3DView:
     """A tab's world view of the whole walk, with the rig's position as a dot.
 
     The rig is centimetres on a walk of tens of metres, so a point at its origin with a ui-point radius marks it at
-    any zoom. No built-in grid: the floor is ``schema.FLOOR_GRID_PATH``.
+    any zoom. No built-in grid: the floor is ``schema.FLOOR_GRID_PATH``, all of it.
     """
     return rrb.Spatial3DView(
         name=name,
         origin="/world",
         contents=contents,
-        overrides={schema.rig_path(RIG): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(6.0), colors=[RIG_MARK_COLOR]), **overrides},
+        overrides={
+            schema.rig_path(RIG): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(6.0), colors=[RIG_MARK_COLOR]),
+            schema.FLOOR_GRID_PATH: floor_window(None),
+            **overrides,
+        },
         eye_controls=eye,
         line_grid=False,
     )
 
 
 def follow(name: str, contents: list[str], overrides: Overrides) -> rrb.Spatial3DView:
-    """A tab's chase view, rooted at the level follow frame."""
-    return rrb.Spatial3DView(name=name, origin=schema.follow_path(RIG), contents=contents, overrides=overrides, eye_controls=FOLLOW_EYE, line_grid=False)
+    """A tab's chase view, rooted at the level follow frame, over the floor around the cursor."""
+    return rrb.Spatial3DView(
+        name=name,
+        origin=schema.follow_path(RIG),
+        contents=contents,
+        overrides={schema.FLOOR_GRID_PATH: floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
+        eye_controls=FOLLOW_EYE,
+        line_grid=False,
+    )
 
 
 def lens_pane(cam: int) -> rrb.Spatial2DView:

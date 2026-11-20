@@ -7,12 +7,14 @@ a lens on a stick points anywhere, the walk does not.
 
 The floor grid is one-metre cells the rig's carrying height under the walk, fixed in the world. A view's built-in grid
 lies on its origin's plane: it stands still under a view that follows the rig, and in a world view it sits at the
-rig's first height, not on the floor.
+rig's first height, not on the floor. Each edge carries the time the walk passed it, so a view can show the floor
+around the cursor: on a walk over several storeys a follow view then draws the floor under the rig and not the one
+above it.
 
 Both belong to the layer that moves ``/world/rig_00`` (:mod:`slam_rs.catalog_layer`, :mod:`slam_rs.vio_log`).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from jaxtyping import Float32, Float64, Int64, UInt8
@@ -24,7 +26,7 @@ from slam_rs.rig import RIG_ENTITY
 FOLLOW_ENTITY: str = f"{RIG_ENTITY}_follow"
 """The follow frame: ``Transform3D`` on ``video_time`` (dataforge's ``schema.follow_path``)."""
 FLOOR_GRID_ENTITY: str = "/world/floor_grid"
-"""The floor grid: one static ``LineStrips3D`` (dataforge's ``schema.FLOOR_GRID_PATH``)."""
+"""The floor grid: ``LineStrips3D`` rows on ``video_time``, a row per stretch of the walk (dataforge's ``schema.FLOOR_GRID_PATH``)."""
 HEADING_TAU_S: float = 1.5
 """Time constant of the heading's low-pass, seconds: a turn is followed in a few seconds, a swing of the stick is not."""
 MIN_SPEED_MPS: float = 0.15
@@ -38,13 +40,21 @@ GRID_COLOR: tuple[int, int, int] = (84, 86, 96)
 BACKGROUND_COLOR: tuple[int, int, int] = (13, 13, 14)
 """What the grid fades into: the viewer's dark background."""
 HEIGHT_RADIUS_M: float = 3.0
-"""Ground-plane radius around a path sample within which map points count as its surroundings."""
-HEIGHT_PERCENTILE: float = 5.0
-"""Percentile of the surrounding points' heights taken as the floor: under it lie only stray points."""
-HEIGHT_MIN_POINTS: int = 30
-"""Fewest surrounding points a path sample needs to give a floor height."""
-HEIGHT_SAMPLE_M: float = 1.0
-"""Path length between two samples of the rig height."""
+"""Ground-plane radius around the rig within which a window's landmarks count as its surroundings."""
+HEIGHT_PERCENTILE: float = 95.0
+"""Percentile of the landmarks' depths under the rig taken as the floor: over it lie only stray points. Clip B (one
+level, 60 s) and clip 007 (several storeys, 1,069 s) both end their depths in one dense layer at 1.75 to 2.0 m, with
+1.5 % of the landmarks under it; this percentile reads 1.90 m and 1.85 m."""
+HEIGHT_MIN_LANDMARKS: int = 500
+"""Fewest landmarks a walk must have shown around the rig before it gives a floor height."""
+HEIGHT_BIN_M: float = 0.01
+"""Resolution of the depth histogram."""
+HEIGHT_RANGE_M: float = 10.0
+"""Depths under (and heights over) the rig the histogram resolves; what lies beyond counts in its last bins."""
+GRID_SAMPLE_M: float = 0.5
+"""Walked ground between two poses the floor grid is laid under."""
+LEVEL_M: float = 2.2
+"""Two floors at one place on the ground are this far apart in height at least: under a storey, over a stair flight's step."""
 
 
 @dataclass(slots=True)
@@ -116,75 +126,107 @@ def path_samples(position_m: Float64[ndarray, "n 3"], spacing_m: float) -> Int64
     return np.flatnonzero(np.concatenate([[True], cell[1:] != cell[:-1]]))
 
 
-def rig_height_m(
-    position_m: Float64[ndarray, "n 3"],
-    points_m: Float64[ndarray, "p 3"],
-    *,
-    radius_m: float = HEIGHT_RADIUS_M,
-    percentile: float = HEIGHT_PERCENTILE,
-) -> float | None:
-    """How high over the floor the rig is carried, measured from the map around the walk.
+@dataclass(slots=True)
+class FloorHeight:
+    """How high over the floor the rig is carried, measured as the walk goes from the landmarks around it.
 
-    Each map point's height is taken against the pose nearest to it on the ground plane, so a floor that rises with
-    the walk (a ramp, a staircase) stays one height under it. At a sample every metre of the walk, the floor is the
-    low percentile of those heights within ``radius_m``; the result is the median over the samples, so a stretch
-    beside a drop (a balcony over a hall) does not move it.
-
-    Args:
-        position_m: Rig positions of the walk, z-up world, metres.
-        points_m: Map points in the same world.
-        radius_m: Ground-plane radius of a sample's surroundings.
-        percentile: Percentile of the surrounding heights taken as the floor.
-
-    Returns:
-        The carrying height in metres, or None when no sample has enough points around it.
+    Each pose brings the landmarks its window holds; those within ``radius_m`` on the ground plane add their depth
+    under the rig to one histogram, and the floor is its high percentile. Time-local on purpose: the final map of a
+    walk over several storeys has, under one pose, the floors of every storey (clip 007: the map gave 4.8 m).
     """
-    finite: Float64[ndarray, "q 3"] = points_m[np.isfinite(points_m).all(axis=1)]
-    if len(finite) < HEIGHT_MIN_POINTS or len(position_m) == 0:
-        return None
-    _, nearest_pose = KDTree(position_m[:, :2]).query(finite[:, :2])
-    under_rig_m: Float64[ndarray, " q"] = position_m[nearest_pose, 2] - finite[:, 2]
-    samples: Float64[ndarray, "k 3"] = position_m[path_samples(position_m, HEIGHT_SAMPLE_M)]
-    heights: list[float] = []
-    for around in KDTree(finite[:, :2]).query_ball_point(samples[:, :2], radius_m):
-        if len(around) >= HEIGHT_MIN_POINTS:
-            heights.append(float(np.percentile(under_rig_m[around], 100.0 - percentile)))
-    return float(np.median(heights)) if heights else None
+
+    radius_m: float = HEIGHT_RADIUS_M
+    """Ground-plane radius of the rig's surroundings."""
+    percentile: float = HEIGHT_PERCENTILE
+    """Percentile of the depths taken as the floor."""
+    counts: Int64[ndarray, " bins"] = field(default_factory=lambda: np.zeros(round(2 * HEIGHT_RANGE_M / HEIGHT_BIN_M), dtype=np.int64))
+    """Landmarks by depth under the rig, from ``-HEIGHT_RANGE_M`` (over it) to ``HEIGHT_RANGE_M``."""
+
+    def add(self, position_m: Float64[ndarray, " 3"], landmarks_m: Float64[ndarray, "p 3"]) -> None:
+        """Count the landmarks around one pose.
+
+        Args:
+            position_m: The rig's position in a z-up world, metres.
+            landmarks_m: The landmarks its window holds, same world.
+        """
+        around = np.linalg.norm(landmarks_m[:, :2] - position_m[:2], axis=1) < self.radius_m
+        depth_m: Float64[ndarray, " k"] = position_m[2] - landmarks_m[around, 2]
+        bins: Int64[ndarray, " k"] = np.floor((depth_m[np.isfinite(depth_m)] + HEIGHT_RANGE_M) / HEIGHT_BIN_M).astype(np.int64)
+        np.add.at(self.counts, np.clip(bins, 0, len(self.counts) - 1), 1)
+
+    def height_m(self) -> float | None:
+        """The carrying height in metres, or None while too few landmarks were seen around the rig."""
+        total: int = int(self.counts.sum())
+        if total < HEIGHT_MIN_LANDMARKS:
+            return None
+        at: int = int(np.searchsorted(np.cumsum(self.counts), self.percentile / 100.0 * total))
+        return (at + 0.5) * HEIGHT_BIN_M - HEIGHT_RANGE_M
 
 
 @dataclass(frozen=True, slots=True)
 class FloorGrid:
-    """The floor grid as ``LineStrips3D`` columns."""
+    """The floor grid as ``LineStrips3D`` columns, in time order."""
 
     strips: Float32[ndarray, "s 2 3"]
     """One cell edge per strip, world frame, metres."""
     colors: UInt8[ndarray, "s 3"]
     """Each edge's colour: :data:`GRID_COLOR` at the path, faded into the background away from it."""
+    t_ns: Int64[ndarray, " s"]
+    """When the walk passed each edge: the stamp of the pose it lies under."""
 
 
-def floor_grid(position_m: Float64[ndarray, "n 3"], rig_height: float, *, near_m: float = GRID_NEAR_M, far_m: float = GRID_FAR_M) -> FloorGrid:
+def floor_grid(
+    t_ns: Int64[ndarray, " n"], position_m: Float64[ndarray, "n 3"], rig_height: float, *, near_m: float = GRID_NEAR_M, far_m: float = GRID_FAR_M
+) -> FloorGrid:
     """One-metre cells on the floor under the walk, bright at the path and faded out ``far_m`` from it.
 
-    Each edge lies ``rig_height`` under the nearest pose, so the grid climbs a staircase with the walk. The fade is in
-    the colour, towards the viewer's background.
+    Each edge lies ``rig_height`` under the pose nearest to it on the ground plane and carries that pose's stamp. Where
+    the walk passes one place at heights :data:`LEVEL_M` or more apart (two storeys, a staircase over a hall), the
+    place gets an edge for each: the nearest pose first, then the nearest of those on another level, and so on.
 
     Args:
+        t_ns: Pose stamps, nanoseconds.
         position_m: Rig positions of the walk, z-up world, metres.
-        rig_height: How high over the floor the rig is carried (:func:`rig_height_m`), metres.
+        rig_height: How high over the floor the rig is carried (:class:`FloorHeight`), metres.
         near_m: Distance from the path up to which an edge has the full colour.
         far_m: Distance from the path at which the edges end.
+
+    Returns:
+        The edges in time order.
     """
-    tree: KDTree = KDTree(position_m[:, :2])
-    low: Float64[ndarray, " 2"] = np.floor(position_m[:, :2].min(axis=0) - far_m)
-    high: Float64[ndarray, " 2"] = np.ceil(position_m[:, :2].max(axis=0) + far_m)
+    sampled: Int64[ndarray, " k"] = path_samples(position_m, GRID_SAMPLE_M)
+    under_m: Float64[ndarray, "k 3"] = position_m[sampled] - np.array([0.0, 0.0, rig_height])
+    low: Float64[ndarray, " 2"] = np.floor(under_m[:, :2].min(axis=0) - far_m)
+    high: Float64[ndarray, " 2"] = np.ceil(under_m[:, :2].max(axis=0) + far_m)
     grid_x, grid_y = np.meshgrid(np.arange(low[0], high[0] + 1.0), np.arange(low[1], high[1] + 1.0), indexing="ij")
     corners: Float64[ndarray, "c 2"] = np.column_stack([grid_x.ravel(), grid_y.ravel()])
     starts: Float64[ndarray, "e 2"] = np.concatenate([corners, corners])
     ends: Float64[ndarray, "e 2"] = np.concatenate([corners + np.array([1.0, 0.0]), corners + np.array([0.0, 1.0])])
-    distance_m, nearest = tree.query(0.5 * (starts + ends))
-    keep = distance_m < far_m
-    fade: Float64[ndarray, " s"] = np.clip((far_m - distance_m[keep]) / (far_m - near_m), 0.0, 1.0) ** 1.5
-    floor_z: Float64[ndarray, " s"] = position_m[nearest[keep], 2] - rig_height
-    strips: Float64[ndarray, "s 2 3"] = np.stack([np.column_stack([starts[keep], floor_z]), np.column_stack([ends[keep], floor_z])], axis=1)
+    middles: Float64[ndarray, "e 2"] = 0.5 * (starts + ends)
+    edge: list[int] = []
+    pose: list[int] = []
+    distance: list[float] = []
+    for index, around in enumerate(KDTree(under_m[:, :2]).query_ball_point(middles, far_m)):
+        if not around:
+            continue
+        candidates: Int64[ndarray, " a"] = np.asarray(around, dtype=np.int64)
+        away_m: Float64[ndarray, " a"] = np.linalg.norm(under_m[candidates, :2] - middles[index], axis=1)
+        order: Int64[ndarray, " a"] = np.argsort(away_m, kind="stable")
+        order = order[away_m[order] < far_m]
+        candidates, away_m = candidates[order], away_m[order]
+        while len(candidates):
+            edge.append(index)
+            pose.append(int(candidates[0]))
+            distance.append(float(away_m[0]))
+            other_level = np.abs(under_m[candidates, 2] - under_m[candidates[0], 2]) >= LEVEL_M
+            candidates, away_m = candidates[other_level], away_m[other_level]
+    edges: Int64[ndarray, " s"] = np.asarray(edge, dtype=np.int64)
+    poses: Int64[ndarray, " s"] = np.asarray(pose, dtype=np.int64)
+    stamps: Int64[ndarray, " s"] = t_ns[sampled][poses]
+    in_time: Int64[ndarray, " s"] = np.argsort(stamps, kind="stable")
+    edges, poses, stamps = edges[in_time], poses[in_time], stamps[in_time]
+    fade: Float64[ndarray, " s"] = np.clip((far_m - np.asarray(distance, dtype=np.float64)[in_time]) / (far_m - near_m), 0.0, 1.0) ** 1.5
+    floor_z: Float64[ndarray, " s"] = under_m[poses, 2]
+    strips: Float64[ndarray, "s 2 3"] = np.stack([np.column_stack([starts[edges], floor_z]), np.column_stack([ends[edges], floor_z])], axis=1)
     colors: Float64[ndarray, "s 3"] = np.outer(fade, np.array(GRID_COLOR, dtype=np.float64)) + np.outer(1.0 - fade, np.array(BACKGROUND_COLOR, dtype=np.float64))
-    return FloorGrid(strips=strips.astype(np.float32), colors=np.rint(colors).astype(np.uint8))
+    return FloorGrid(strips=strips.astype(np.float32), colors=np.rint(colors).astype(np.uint8), t_ns=stamps)

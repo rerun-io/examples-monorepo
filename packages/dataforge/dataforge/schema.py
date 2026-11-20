@@ -47,7 +47,8 @@ directory and the other an entity path component.
 
 
 FLOOR_GRID_PATH: str = "/world/floor_grid"
-"""One-metre cells on the floor under a walked rig's path, fixed in the world (slam-rs: ``slam_rs.follow_frame``)."""
+"""One-metre cells on the floor under a walked rig's path, fixed in the world, each edge on ``video_time`` at the time
+the walk passed it (slam-rs: ``slam_rs.follow_frame``)."""
 
 CAM0_REFERENCE: str = "cam_00"
 """Rig-node ``reference`` of a rig whose frame is its first camera's frame (``log_rig_node``).

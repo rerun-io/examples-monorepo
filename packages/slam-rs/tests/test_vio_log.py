@@ -47,7 +47,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
-from slam_rs.follow_frame import FLOOR_GRID_ENTITY, FOLLOW_ENTITY
+from slam_rs.follow_frame import FLOOR_GRID_ENTITY, FOLLOW_ENTITY, FloorHeight
 from slam_rs.landmark_colors import pack_rgba
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
@@ -369,38 +369,33 @@ def test_the_rig_rides_the_estimate_only_when_asked(
     assert alone.rows[RIG_ENTITY] == alone.rows[f"{VIO_RUN_ENTITY}/rig"]
 
 
-def static_strips(recording: Path, entity: str) -> Float64[ndarray, "s 2 3"] | None:
-    """One static ``LineStrips3D`` entity's two-point strips, or None when the recording has no such entity."""
-    for chunk in rrc.RrdReader(recording).stream().collect().stream():
-        batch = chunk.to_record_batch()
-        if chunk.entity_path == entity and chunk.is_static and "LineStrips3D:strips" in batch.schema.names:
-            return np.asarray(batch.column("LineStrips3D:strips").to_pylist()[0], dtype=np.float64)
-    return None
-
-
 def test_a_replay_that_moves_the_rig_logs_its_level_follow_frame_and_the_floor_under_it(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """With the rig, the replay moves ``/world/rig_00_follow`` (the rig's position, a turn about z only) and, from map
-    points around the walk, lays the floor grid the carrying height under it. A replay that leaves the rig alone logs neither."""
+    """With the rig, the replay moves ``/world/rig_00_follow`` (the rig's position, a turn about z only) and, once the
+    landmarks around the rig gave a floor, lays the grid the carrying height under the walk, on the walk's own times.
+    A replay that leaves the rig alone logs neither."""
     rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
-    # A floor 1.6 m under the origin, where the synthetic rig stays.
-    floor: Float64[ndarray, "p 3"] = np.column_stack([np.random.default_rng(0).uniform(-2.0, 2.0, size=(200, 2)), np.full(200, -1.6)])
-    alone: Logged = drive(
-        pipeline(2), rig, empty_trajectory(), texture, tmp_path / "alone.rrd", read_rows, animate_base_rig=True, finish=lambda logger: logger.log_floor_grid(floor)
-    )
+    # A floor 1.6 m under the origin, where the synthetic rig stays; the synthetic scene itself has none.
+    floor: Float64[ndarray, "p 3"] = np.column_stack([np.random.default_rng(0).uniform(-2.0, 2.0, size=(600, 2)), np.full(600, -1.6)])
+
+    def lay(logger: VioLogger) -> None:
+        logger.floor_height = FloorHeight()
+        logger.floor_height.add(np.zeros(3), floor)
+        logger.log_floor_grid()
+
+    alone: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "alone.rrd", read_rows, animate_base_rig=True, finish=lay)
     assert [t_ns for t_ns, _ in alone.rows[FOLLOW_ENTITY]] == alone.tracked
     for follow, rig_row in zip(alone.rows[FOLLOW_ENTITY], alone.rows[RIG_ENTITY], strict=True):
         assert follow.values["Transform3D:translation"] == rig_row.values["Transform3D:translation"]
         np.testing.assert_allclose(np.asarray(follow.values["Transform3D:quaternion"])[0, :2], 0.0, atol=1e-12)
-    strips: Float64[ndarray, "s 2 3"] | None = static_strips(alone.recording, FLOOR_GRID_ENTITY)
-    assert strips is not None
     rig_z: float = float(np.median([row.values["Transform3D:translation"][0][2] for row in alone.rows[RIG_ENTITY]]))
-    np.testing.assert_allclose(strips[:, :, 2], rig_z - 1.6, atol=0.05)
+    assert alone.rows[FLOOR_GRID_ENTITY] and {t_ns for t_ns, _ in alone.rows[FLOOR_GRID_ENTITY]} <= set(alone.tracked), "each edge at a pose's time"
+    for _, values in alone.rows[FLOOR_GRID_ENTITY]:
+        np.testing.assert_allclose(np.asarray(values["LineStrips3D:strips"], dtype=np.float64)[:, :, 2], rig_z - 1.6, atol=0.05)
 
-    layer: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "layer.rrd", read_rows, finish=lambda logger: logger.log_floor_grid(floor))
-    assert layer.tracked and FOLLOW_ENTITY not in layer.rows
-    assert static_strips(layer.recording, FLOOR_GRID_ENTITY) is None
+    layer: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "layer.rrd", read_rows, finish=lay)
+    assert layer.tracked and FOLLOW_ENTITY not in layer.rows and FLOOR_GRID_ENTITY not in layer.rows
 
 
 def test_landmarks_take_the_colour_of_the_image_under_their_keypoint(

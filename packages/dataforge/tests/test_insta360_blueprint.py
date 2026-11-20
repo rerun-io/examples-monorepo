@@ -12,6 +12,7 @@ from numpy import ndarray
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
     COLSFM_COLOR,
+    FOLLOW_FLOOR_WINDOW_S,
     FOLLOW_PATH_WINDOW_S,
     OVERVIEW_PATH_WINDOW_S,
     PANO_ENTITY,
@@ -105,6 +106,24 @@ def test_paths_and_the_colsfm_cloud_accumulate_through_cursor_windows() -> None:
         assert f"- {COLSFM}/points/**" in content_rules(view), "the static copy would hide the growth"
     for view in layout["Comparison"][:2]:
         assert f"- {COLSFM}/points_growing/**" in content_rules(view), "the comparison shows both whole clouds"
+
+
+def test_the_follow_views_show_the_floor_around_the_cursor_and_the_overviews_all_of_it() -> None:
+    """slam-rs stamps each floor edge with the time the walk passed it. A follow view shows the floor of the seconds
+    around the cursor, so on a walk over several storeys it draws the floor under the rig and not the one above; an
+    overview shows every floor, whatever the cursor."""
+    around = rrb.VisibleTimeRanges(
+        rrb.VisibleTimeRange(
+            schema.TIMELINE,
+            start=rrb.TimeRangeBoundary.cursor_relative(seconds=-FOLLOW_FLOOR_WINDOW_S),
+            end=rrb.TimeRangeBoundary.cursor_relative(seconds=FOLLOW_FLOOR_WINDOW_S),
+        )
+    )
+    whole = rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
+    for name, views in tabs(segment_layout(panorama=False)).items():
+        overview, follow = views[:2]
+        assert override(overview, schema.FLOOR_GRID_PATH) == [whole], name
+        assert override(follow, schema.FLOOR_GRID_PATH) == [around], name
 
 
 def test_each_source_keeps_one_colour_in_every_tab() -> None:
