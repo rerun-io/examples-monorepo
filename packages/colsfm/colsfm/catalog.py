@@ -97,9 +97,7 @@ class CatalogInputConfig:
     when set, it is written as `ground_truth.txt` (TUM, at each rig frame's reference timestamp) so the run is scored."""
     frame_stride: int = 2
     """Use every Nth frame of the reference camera's video, before keyframe selection; the one default for every catalog
-    path (`run catalog`, `overview`). 2 halves the run with Sim(3) ATE within 5 % of every frame (MSD, EuRoC, KITTI 06,
-    TartanAir cube). On an Insta360 cube layer the frames are its framesets, already every `cube_stride`-th (10) of the
-    video, so 2 keeps every 20th frameset. `--source.frame-stride 1` keeps every frame."""
+    path (`run catalog`, `overview`). 2 halves the run at the same ATE (measurements: README); 1 keeps every frame."""
     trim_start_seconds: float = 0.0
     """Drop this much from the start of the reference camera's video."""
     trim_end_seconds: float = 0.0

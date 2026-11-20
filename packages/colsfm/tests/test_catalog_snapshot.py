@@ -93,12 +93,7 @@ def test_metadata_naming_other_images_than_the_manifest_is_refused(tmp_path: Pat
 
 
 def test_the_default_keeps_every_second_frame(tmp_path: Path) -> None:
-    """`frame_stride` defaults to 2 for every catalog path (`run catalog`, `overview`): it halves the run with ATE inside 5 %.
-
-    Measured on main 62123cd67 against stride x1 (Sim(3) ATE): MSD MGO05 -1.3 %, EuRoC V1_01 -0.9 %, KITTI 06 +1.7 %,
-    TartanAir P004 cube +3.6 % (3 runs), every selected keyframe registered; Insta360 clip 007 (on its stride-10 cube
-    layer) 9,420 of 9,420 images registered, 2,634 s -> 725 s with #673-#677.
-    """
+    """`frame_stride` defaults to 2 for every catalog path (`run catalog`, `overview`)."""
     config: CatalogInputConfig = CatalogInputConfig(dataset="msd-g2", segment="seg", output_root=tmp_path)
     assert config.frame_stride == 2
     assert config.input_dir.name.startswith("seg_s2_")
