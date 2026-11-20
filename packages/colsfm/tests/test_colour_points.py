@@ -8,10 +8,10 @@ import numpy as np
 import pycolmap
 import torch
 from conftest import build_reconstruction
+from mapping_helpers import SyntheticRig
 from torch import Tensor
 
 from colsfm.frames import colour_points
-from colsfm.frames_meta import FramesMeta
 
 
 class _RandomFrames:
@@ -54,15 +54,17 @@ def _reference_colours(reconstruction: pycolmap.Reconstruction, frames: _RandomF
     return {point_id: np.clip(np.rint(sums[point_id] / counts[point_id]), 0, 255).astype(np.uint8) for point_id in sums}
 
 
-def test_every_point_gets_the_rounded_mean_of_its_observation_samples(three_samples: FramesMeta) -> None:
-    reconstruction: pycolmap.Reconstruction = build_reconstruction(three_samples, error_px=0.3)
+def test_every_point_gets_the_rounded_mean_of_its_observation_samples(synthetic_rig: SyntheticRig) -> None:
+    """CPU only (the unit lane): the synthetic rig's poses, random RGB frames, the rule written out per point as reference."""
+    reconstruction: pycolmap.Reconstruction = build_reconstruction(synthetic_rig.frames_meta, error_px=0.3)
     sizes: dict[str, tuple[int, int]] = {
         image.name: (reconstruction.camera(image.camera_id).width, reconstruction.camera(image.camera_id).height)
         for image in reconstruction.images.values()
     }
     frames = _RandomFrames(sizes)
     expected: dict[int, np.ndarray] = _reference_colours(reconstruction, frames)
-    colour_points(reconstruction, frames)
+    coloured: int = colour_points(reconstruction, frames)
     assert expected
+    assert coloured == sum(int(colour.any()) for colour in expected.values())
     mismatched: list[int] = [point_id for point_id, colour in expected.items() if np.abs(reconstruction.points3D[point_id].color.astype(int) - colour.astype(int)).max() > 1]
     assert not mismatched

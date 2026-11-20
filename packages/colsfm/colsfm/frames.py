@@ -265,10 +265,11 @@ def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) 
     point_ids: ndarray = np.asarray(sorted(reconstruction.points3D), dtype=np.int64)
     if len(point_ids) == 0:
         return 0
-    # Rows and samples are gathered per image and summed once at the end: a per-image `np.bincount(minlength=points)`
-    # costs O(points) per image, which was 170 of the 194 s colsfm spent colouring clip 007 (18,606 images, 1.6 M points).
-    all_rows: list[ndarray] = []
-    all_samples: list[ndarray] = []
+    # Each image adds its samples into the observed rows only: a per-image `np.bincount(minlength=points)` costs O(points)
+    # per image, which was 170 of the 194 s colsfm spent colouring clip 007 (18,606 images, 1.6 M points). Memory stays
+    # O(points) plus one image's observations.
+    sums: ndarray = np.zeros((len(point_ids), 3), dtype=np.float64)
+    counts: ndarray = np.zeros(len(point_ids), dtype=np.int64)
     image_ids: list[int] = sorted(int(image_id) for image_id in reconstruction.reg_image_ids())
     names: list[str] = [reconstruction.image(image_id).name for image_id in image_ids]
     for image_id, (_, rgb) in zip(image_ids, frames.frames(names), strict=True):
@@ -284,14 +285,9 @@ def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) 
             continue
         grid: Tensor = torch.from_numpy((2.0 * xy[inside] / np.array([width, height]) - 1.0).astype(np.float32)).to(rgb.device)[None, None]
         sampled: ndarray = torch.nn.functional.grid_sample(rgb[None].float(), grid, mode="bilinear", align_corners=False)[0, :, 0].T.cpu().numpy()
-        all_rows.append(rows[inside])
-        all_samples.append(sampled.astype(np.float64))
-    if not all_rows:
-        return 0
-    stacked_rows: ndarray = np.concatenate(all_rows)
-    stacked_samples: ndarray = np.concatenate(all_samples)
-    sums: ndarray = np.stack([np.bincount(stacked_rows, weights=stacked_samples[:, channel], minlength=len(point_ids)) for channel in range(3)], axis=1)
-    counts: ndarray = np.bincount(stacked_rows, minlength=len(point_ids))
+        # `np.add.at`, not `sums[rows] += ...`: a point seen twice in one image adds both samples.
+        np.add.at(sums, rows[inside], sampled.astype(np.float64))
+        np.add.at(counts, rows[inside], 1)
     coloured: int = 0
     seen: ndarray = np.flatnonzero(counts)
     colours: ndarray = np.clip(np.rint(sums[seen] / counts[seen, None]), 0, 255).astype(np.uint8)
