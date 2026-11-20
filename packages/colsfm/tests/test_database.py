@@ -8,6 +8,7 @@ import numpy as np
 import pycolmap
 import pytest
 from jaxtyping import Float32
+from mapping_helpers import SyntheticRig
 from numpy import ndarray
 
 from colsfm.database import (
@@ -235,7 +236,7 @@ def test_the_existing_geometry_check_does_not_create_a_missing_database(tmp_path
     assert list(tmp_path.iterdir()) == []
 
 
-def test_an_interrupted_create_database_leaves_no_rows(galileo: FramesMeta, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_interrupted_create_database_leaves_no_rows(synthetic_rig: SyntheticRig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The import is one transaction: a failure halfway leaves an empty database, not a prefix of the collection.
 
     One transaction is also what makes it fast on a network file system, where every commit is a round trip
@@ -255,8 +256,9 @@ def test_an_interrupted_create_database_leaves_no_rows(galileo: FramesMeta, tmp_
     monkeypatch.setattr(database_module, "_colmap_image", failing_image)
     database_path: Path = tmp_path / "interrupted.db"
     with pytest.raises(RuntimeError, match="interrupted"):
-        create_database(database_path, galileo)
+        create_database(database_path, synthetic_rig.frames_meta)
     with pycolmap.Database.open(database_path) as database:
+        assert database.read_all_rigs() == []
         assert database.num_images() == 0
         assert database.num_frames() == 0
         assert database.num_cameras() == 0
