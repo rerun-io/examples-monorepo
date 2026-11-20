@@ -7,7 +7,9 @@ and its ``pinhole`` child a static ``Pinhole`` (``image_from_camera`` plus the
 transposed here — the one place that convention lives on the read side. A camera
 logged with distortion (``PinholeWithDistortion``) also carries the simplecv
 ``DistortionModel`` / ``DistortionCoefficients`` components on its ``pinhole`` child;
-``read_camera_models`` returns them alongside the pinhole.
+``read_camera_models`` returns them alongside the pinhole. ``camera_models_from_static_table`` decodes the static
+columns whatever they come from: the catalog (``read_camera_models``) or a recording file
+(``read_camera_models_from_store``).
 """
 
 from collections.abc import Sequence
@@ -15,6 +17,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pyarrow as pa
+import rerun.chunk as rrc
 from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
@@ -83,16 +86,39 @@ def read_camera_models(dataset: DatasetEntry, segment_id: str, camera_entities: 
     return _read_cameras(dataset, segment_id, camera_entities, with_distortion=True)
 
 
+def read_camera_models_from_store(store: rrc.LazyStore, camera_entities: Sequence[str], where: str) -> dict[str, CatalogCameraCalibration]:
+    """``read_camera_models`` for a recording file: the same static columns, read from its store.
+
+    Raises:
+        ValueError: As ``read_camera_models``, naming ``where`` (e.g. the file).
+    """
+    chunks: list[rrc.Chunk] = store.stream().filter(content=[f"{entity}/**" for entity in camera_entities], is_static=True).to_chunks()
+    table: pa.Table = rrc.ChunkStore.from_chunks(chunks).reader(index=None).to_arrow_table()
+    return camera_models_from_static_table(table, camera_entities, where)
+
+
 def _read_cameras(
     dataset: DatasetEntry, segment_id: str, camera_entities: Sequence[str], *, with_distortion: bool
 ) -> dict[str, CatalogCameraCalibration]:
     """One query for the camera nodes; the pinhole always, the distortion components only when asked for."""
     view = dataset.filter_segments(segment_id).filter_contents([f"{entity}/**" for entity in camera_entities])
-    table: pa.Table = view.reader(index=None).to_arrow_table()
+    return camera_models_from_static_table(
+        view.reader(index=None).to_arrow_table(), camera_entities, f"segment {segment_id}", with_distortion=with_distortion
+    )
+
+
+def camera_models_from_static_table(
+    table: pa.Table, camera_entities: Sequence[str], where: str, *, with_distortion: bool = True
+) -> dict[str, CatalogCameraCalibration]:
+    """Decode the camera nodes' calibration from a static table (``reader(index=None)`` of a catalog view or a store).
+
+    Raises:
+        ValueError: If a camera lacks one of the four calibration components, naming ``where``.
+    """
 
     def static_value(column_name: str) -> Float64[ndarray, " n"]:
         if column_name not in table.column_names:
-            raise ValueError(f"column {column_name} has no data in segment {segment_id}")
+            raise ValueError(f"column {column_name} has no data in {where}")
         return np.asarray(first_valid_value(table.column(column_name), component_name=column_name), dtype=np.float64).reshape(-1)
 
     calibration: dict[str, CatalogCameraCalibration] = {}

@@ -38,7 +38,7 @@ takes it up.
 
 From the native poses to the panorama. ``E`` is fixed in the rig: ``T_cam0_E = (I, c1 / 2)``, with ``c1`` camera 1's
 centre in camera 0 (the translation of ``cam0_T_cam1``, from the ``cam_00`` and ``cam_01`` ``Transform3D``s,
-``ChildFromParent``, as ``stitch_from_recording`` reads them). A COLMAP ``EQUIRECTANGULAR`` camera ``C`` (single
+``ChildFromParent``, as ``cameras_from_recording`` reads them). A COLMAP ``EQUIRECTANGULAR`` camera ``C`` (single
 centre; ``u = W (lon_C + pi) / (2 pi)`` in pixel-corner coordinates, image centre = ``+Z_C``, ``+y`` down) sees this
 panorama with its columns a quarter turn on, ``lon_E = lon_C + pi / 2``, so ``T_cam0_C = (Ry(+90 deg), c1 / 2)`` with
 ``Ry(+90 deg) = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]`` (``+Z_C`` is camera 0's ``+X``). slam-rs reports ``world_from_rig``
@@ -70,6 +70,7 @@ import torch
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models_from_store
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.imu_calibration import ImuCalibration
 from simplecv.video_io import bind_cuda_device
@@ -135,40 +136,26 @@ class LensCameras:
 
 
 def cameras_from_recording(base: Path) -> LensCameras:
-    """A base recording's ``cam_00`` and ``cam_01``: each its ``DistortionModel``, ``DistortionCoefficients``, pinhole matrix and pose.
+    """A base recording's ``cam_00`` and ``cam_01``, read through simplecv's calibration decoder: each its Mei model,
+    pinhole matrix and pose.
 
     Raises:
         ValueError: If a camera is not a Mei camera or its statics are missing.
     """
-    entities: list[str] = [schema.cam_path(RIG, cam) for cam in range(2)] + [schema.pinhole_path(RIG, cam) for cam in range(2)]
-    statics: dict[str, object] = {}
-    for chunk in rrc.RrdReader(base).store().stream().filter(content=entities):
-        if chunk.is_static and chunk.entity_path in entities:
-            batch = chunk.to_record_batch()
-            statics.update({f"{chunk.entity_path}:{name}": batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")})
+    nodes: list[str] = [schema.cam_path(RIG, cam) for cam in range(2)]
+    models: dict[str, CatalogCameraCalibration] = read_camera_models_from_store(rrc.RrdReader(base).store(), nodes, str(base))
     cameras: list[insta360_io.MeiCamera] = []
-    cam_T_rig: list[Float64[ndarray, "4 4"]] = []
-    for cam in range(2):
-        pinhole: str = schema.pinhole_path(RIG, cam)
-        node: str = schema.cam_path(RIG, cam)
-        missing: list[str] = [
-            key
-            for key in (f"{pinhole}:simplecv.components.DistortionModel", f"{pinhole}:simplecv.components.DistortionCoefficients", f"{pinhole}:Pinhole:image_from_camera", f"{node}:Transform3D:mat3x3", f"{node}:Transform3D:translation")
-            if not statics.get(key)
-        ]
-        if missing:
-            raise ValueError(f"{base}: camera {cam} lacks {missing}")
-        model: str = str(statics[f"{pinhole}:simplecv.components.DistortionModel"][0])  # pyrefly: ignore[bad-index]
-        coefficients: list[float] = list(statics[f"{pinhole}:simplecv.components.DistortionCoefficients"][0])  # pyrefly: ignore[bad-index]
-        # Rerun stores the 3x3 matrices column-major.
-        k: Float64[ndarray, "3 3"] = np.asarray(statics[f"{pinhole}:Pinhole:image_from_camera"][0], dtype=np.float64).reshape(3, 3).T  # pyrefly: ignore[bad-index]
-        cameras.append(insta360_io.MeiCamera(model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), coefficients))
-        pose: Float64[ndarray, "4 4"] = np.eye(4)
-        pose[:3, :3] = np.asarray(statics[f"{node}:Transform3D:mat3x3"][0], dtype=np.float64).reshape(3, 3).T  # pyrefly: ignore[bad-index]
-        pose[:3, 3] = np.asarray(statics[f"{node}:Transform3D:translation"][0], dtype=np.float64)  # pyrefly: ignore[bad-index]
-        cam_T_rig.append(pose)
-    width, height = (int(v) for v in statics[f"{schema.pinhole_path(RIG, 0)}:Pinhole:resolution"][0])  # pyrefly: ignore[bad-index]
-    return LensCameras(cameras=cameras, lens_from_rig=cam_T_rig, size=(width, height))
+    for node in nodes:
+        distortion: CatalogDistortion | None = models[node].distortion
+        if distortion is None:
+            raise ValueError(f"{base}: {node} has no distortion model, so it is not a Mei camera")
+        k: Float64[ndarray, "3 3"] = np.asarray(models[node].pinhole.intrinsics.k_matrix, dtype=np.float64)
+        cameras.append(
+            insta360_io.MeiCamera(distortion.model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), distortion.coefficients.tolist())
+        )
+    lens_from_rig: list[Float64[ndarray, "4 4"]] = [np.asarray(models[node].pinhole.extrinsics.cam_T_world, dtype=np.float64) for node in nodes]
+    intrinsics = models[nodes[0]].pinhole.intrinsics
+    return LensCameras(cameras=cameras, lens_from_rig=lens_from_rig, size=(int(intrinsics.width), int(intrinsics.height)))
 
 
 def rgb_frames(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"], *, threads: int) -> Iterator[UInt8[ndarray, "h w 3"]]:
