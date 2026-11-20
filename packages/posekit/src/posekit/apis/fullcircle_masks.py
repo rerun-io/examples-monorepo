@@ -87,7 +87,7 @@ class FullCircleMasksConfig:
     debug_every: int = 20
     """Tracked framesets between two evidence frames."""
     decode_chunk: int = 16
-    """Tracked framesets decoded per NVDEC call."""
+    """Tracked framesets decoded per NVDEC call, and detected per detector pass."""
     fps: int = 30
     """Nominal frame rate of the wrapping MP4 track (decoding only)."""
 
@@ -254,36 +254,38 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
 
     decode_wait_s: float = 0.0
 
-    # One thread for every decode: an NVDEC decoder fails on a thread other than the one it first decoded on.
-    decode_thread: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="decode")
+    # One thread per lens: an NVDEC decoder fails on a thread other than the one it first decoded on, and the two lenses
+    # decode in parallel (1.7x the frames per second of one thread for both on the 5090).
+    decode_threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{lens}") for lens in range(len(decoders))]
 
-    def decode(chunk: list[int]) -> list[list[UInt8[Tensor, "h w 3"]]]:
-        batches: list[Tensor] = [
-            rearrange(decoder.get_frames_at([i - first for i in chunk]).data, "n c h w -> n h w c")
-            for decoder, first in zip(decoders, firsts, strict=True)
-        ]
+    def decode(lens: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
+        frames: UInt8[Tensor, "n h w 3"] = rearrange(decoders[lens].get_frames_at([i - firsts[lens] for i in chunk]).data, "n c h w -> n h w c")
         torch.cuda.synchronize(device)
-        return [[batch[column] for batch in batches] for column in range(len(chunk))]
+        return frames
 
     def decoded_chunks() -> Iterator[tuple[int, list[int], list[list[UInt8[Tensor, "h w 3"]]]]]:
         """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the
-        lens frames. The next chunk decodes on the decode thread while the caller computes on this one."""
+        lens frames. The next chunk decodes on the decode threads while the caller computes on this one."""
         nonlocal decode_wait_s
         chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
-        pending: Future[list[list[Tensor]]] | None = decode_thread.submit(decode, chunks[0]) if chunks else None
+
+        def submit(chunk: list[int]) -> list[Future[Tensor]]:
+            return [thread.submit(decode, lens, chunk) for lens, thread in enumerate(decode_threads)]
+
+        pending: list[Future[Tensor]] = submit(chunks[0]) if chunks else []
         for position, chunk in enumerate(chunks):
-            assert pending is not None
             tick: float = time.perf_counter()
-            frames: list[list[Tensor]] = pending.result()
+            batches: list[Tensor] = [future.result() for future in pending]
             decode_wait_s += time.perf_counter() - tick
-            pending = decode_thread.submit(decode, chunks[position + 1]) if position + 1 < len(chunks) else None
+            pending = submit(chunks[position + 1]) if position + 1 < len(chunks) else []
+            frames: list[list[Tensor]] = [[batch[column] for batch in batches] for column in range(len(chunk))]
             yield position * config.decode_chunk, chunk, frames
 
     detect_start: float = time.perf_counter()
     directions: list[Float64[ndarray, "3"] | None] = []
     for begin, chunk, frames in decoded_chunks():
-        for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
-            evidence: OperatorEvidence = masker.detect(lens_frames, levels[position])
+        batch: list[OperatorEvidence] = masker.detect(frames, levels[begin : begin + len(chunk)])
+        for position, (index, evidence) in enumerate(zip(chunk, batch, strict=True), start=begin):
             directions.append(evidence.direction)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
@@ -308,21 +310,28 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
     track_start: float = time.perf_counter()
     for begin, chunk, frames in decoded_chunks():
+        chunk_masks: list[list[Tensor]] = [[] for _ in targets]
         for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
             result: OperatorMasks = masker.track(lens_frames, filled[position], levels[position] @ up_level)
-            for lens, target in enumerate(targets):
-                rr.set_time(config.timeline, duration=np.timedelta64(int(times[lens][index].view(np.int64)), "ns"))
-                rr.log(target, rr.SegmentationImage(result.source_masks[lens].to(torch.uint8).cpu().numpy() * MASKED_CLASS_ID))
+            for lens_masks, mask in zip(chunk_masks, result.source_masks, strict=True):
+                lens_masks.append(mask)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 debug.log("synthetic", rr.Image(result.synthetic_rgb.cpu().numpy()).compress(90))
                 debug.log("synthetic/mask", rr.SegmentationImage(result.synthetic_mask.to(torch.uint8).cpu().numpy()))
                 debug.log("operator_direction", rr.Arrows3D(vectors=[filled[position]], colors=(255, 0, 0)))
+        # One host copy per lens and chunk.
+        for lens, (target, lens_masks) in enumerate(zip(targets, chunk_masks, strict=True)):
+            host: UInt8[ndarray, "n mh mw"] = (torch.stack(lens_masks).to(torch.uint8) * MASKED_CLASS_ID).cpu().numpy()
+            for index, mask in zip(chunk, host, strict=True):
+                rr.set_time(config.timeline, duration=np.timedelta64(int(times[lens][index].view(np.int64)), "ns"))
+                rr.log(target, rr.SegmentationImage(mask))
         elapsed: float = time.perf_counter() - track_start
         if begin % (config.decode_chunk * 25) == 0:
             done: int = begin + len(chunk)
             print(f"frameset {chunk[-1]}: {done} tracked, {done / elapsed:.1f} framesets/s")
-    decode_thread.shutdown()
+    for thread in decode_threads:
+        thread.shutdown()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()
@@ -330,8 +339,8 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         debug.flush()
     track_wall: float = time.perf_counter() - track_start
     total: float = time.perf_counter() - process_start
-    steps: str = ", ".join(f"{k} {v:.1f} s" for k, v in masker.seconds.items())
+    steps: str = "".join(f"{k} {v:.1f} s, " for k, v in masker.seconds.items()) if config.masker.step_timing else "(--masker.step-timing), "
     print(
-        f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; waiting for decode (both passes) {decode_wait_s:.1f} s; steps: {steps}; "
+        f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; waiting for decode (both passes) {decode_wait_s:.1f} s; steps: {steps}"
         f"{masker.prompts} tracker prompts; peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks"
     )

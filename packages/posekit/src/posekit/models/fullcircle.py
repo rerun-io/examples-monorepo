@@ -57,7 +57,7 @@ from trtkit.backends import TensorRtBackendConfig
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
 from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
-from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig
+from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig, fp16_dynamic_yolox
 from posekit.ops.sphere import (
     Kb4Camera,
     PinholeCamera,
@@ -110,8 +110,13 @@ class FullCircleConfig:
 
     detector: OperatorDetector = "yolox"
     """Person detector on the cube faces: posekit YOLOX-HumanArt (TensorRT) or SAM 3 ``person``."""
-    yolox: YoloxDetectorConfig = field(default_factory=lambda: YoloxDetectorConfig(backend=TensorRtBackendConfig()))
-    """YOLOX variant, backend and thresholds."""
+    yolox: YoloxDetectorConfig = field(
+        default_factory=lambda: YoloxDetectorConfig(
+            backend=TensorRtBackendConfig(max_batch_size=48, opt_batch_size=48), onnx_transform=fp16_dynamic_yolox
+        )
+    )
+    """YOLOX variant, backend and thresholds: a dynamic-batch engine with an fp16 trunk that takes the faces of 8
+    framesets per call."""
     sam3: Sam3SegmenterConfig = field(default_factory=lambda: Sam3SegmenterConfig(score_threshold=0.25))
     """SAM 3 options (FullCircle runs it at conf 0.25)."""
     sam3_prompt: str = "person"
@@ -135,6 +140,8 @@ class FullCircleConfig:
     """Dilation radius in source-image pixels (FullCircle: about 4 px at 2880 px)."""
     device: str = "cuda"
     """Inference device."""
+    step_timing: bool = False
+    """Synchronise the device after each step to time it (:attr:`FullCircleMasker.seconds`); off, the steps queue freely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +273,7 @@ class FullCircleMasker:
         self.prompts: int = 0
         """Tracker prompts given so far (the first one included)."""
         self.seconds: dict[str, float] = {"faces": 0.0, "detect": 0.0, "synthetic": 0.0, "track": 0.0, "backmap": 0.0}
-        """Synchronised wall time per step since construction."""
+        """Synchronised wall time per step since construction (with ``config.step_timing``)."""
 
     def _work_images(self, frames: list[UInt8[Tensor, "h w 3"]]) -> list[Float[Tensor, "3 hw ww"]]:
         images: list[Tensor] = []
@@ -282,30 +289,33 @@ class FullCircleMasker:
         return self.sam3(images, SegmentationPrompts(frame_indices=torch.arange(len(images), device=self.device), text=self.config.sam3_prompt))
 
     def _tick(self, key: str, start: float) -> float:
+        if not self.config.step_timing:
+            return start
         torch.cuda.synchronize(self.device)
         now: float = time.perf_counter()
         self.seconds[key] += now - start
         return now
 
     @torch.inference_mode()
-    def detect(self, frames: list[UInt8[Tensor, "h w 3"]], rig_R_level: Float64[ndarray, "3 3"]) -> OperatorEvidence:
-        """Steps 1-3 on one frameset: cube faces, person detection, the operator direction (rig frame).
+    def detect(self, framesets: list[list[UInt8[Tensor, "h w 3"]]], rig_R_levels: list[Float64[ndarray, "3 3"]]) -> list[OperatorEvidence]:
+        """Steps 1-3 on a batch of framesets: cube faces, person detection (one detector call), the operator directions.
 
-        The faces are those of the level frame (``rig_R_level``, +Y along gravity), so people stand upright in them, as
-        they do in the horizon-levelled panoramas FullCircle starts from (identity for an already level source).
+        The faces are those of each frameset's level frame (``rig_R_levels``, +Y along gravity), so people stand upright
+        in them, as they do in the horizon-levelled panoramas FullCircle starts from (identity for an already level source).
         """
         start: float = time.perf_counter()
         size: int = self.config.face_size
-        images: list[Tensor] = self._work_images(frames)
-        rig_R_faces: Float64[Tensor, "6 3 3"] = torch.from_numpy(rig_R_level @ FACE_ROTATIONS).to(self.device)
-        # The six faces stacked into one 6s x s view: one sampling plan per frameset.
-        rays: Float32[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces.float().transpose(1, 2)
-        view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
-        stacked: UInt8[Tensor, "3 f s"] = sample_sphere(images, view).round().clamp(0, 255).to(torch.uint8)
-        faces: UInt8[Tensor, "6 s s 3"] = rearrange(stacked, "c (f h) w -> f h w c", f=6).contiguous()
+        rig_R_faces: Float64[Tensor, "b 6 3 3"] = torch.from_numpy(np.stack([level @ FACE_ROTATIONS for level in rig_R_levels])).to(self.device)
+        faces: UInt8[Tensor, "b6 s s 3"] = torch.empty((6 * len(framesets), size, size, 3), dtype=torch.uint8, device=self.device)
+        for index, frames in enumerate(framesets):
+            # The six faces stacked into one 6s x s view: one sampling plan per frameset.
+            rays: Float32[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces[index].float().transpose(1, 2)
+            view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
+            stacked: UInt8[Tensor, "3 f s"] = sample_sphere(self._work_images(frames), view).round().clamp(0, 255).to(torch.uint8)
+            faces[6 * index : 6 * index + 6] = rearrange(stacked, "c (f h) w -> f h w c", f=6)
         start = self._tick("faces", start)
         detections: BoxDetections = self._detect_people(faces)
-        boxes: Float32[Tensor, "n 4"] = detections.xyxy
+        boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
         if self.yolox is not None:
             centres_px: Float[Tensor, "n 2"] = (boxes[:, :2] + boxes[:, 2:]) / 2
             areas: Float[Tensor, " n"] = (boxes[:, 2:] - boxes[:, :2]).clamp_min(0).prod(dim=1)
@@ -318,15 +328,23 @@ class FullCircleMasker:
                 torch.stack([(masks.sum(dim=1) * coords).sum(dim=1), (masks.sum(dim=2) * coords).sum(dim=1)], dim=1) / areas.clamp_min(1)[:, None]
             )
         rays, _ = self.face.unproject(centres_px.double())
-        rotations: Float64[Tensor, "n 3 3"] = rig_R_faces[detections.frame_indices]
+        rotations: Float64[Tensor, "n 3 3"] = rig_R_faces.reshape(-1, 3, 3)[detections.frame_indices]
         centres: Float64[ndarray, "n 3"] = torch.einsum("nij,nj->ni", rotations, rays).cpu().numpy()
         weights: Float64[ndarray, " n"] = areas.double().cpu().numpy()
-        direction: Float64[ndarray, "3"] | None = None
-        if len(weights):
-            mean: Float64[ndarray, "3"] = np.average(centres, axis=0, weights=weights) if weights.sum() > 0 else centres.mean(axis=0)
-            direction = mean / np.linalg.norm(mean)
+        all_boxes: Float32[ndarray, "n 4"] = boxes.cpu().numpy()
+        face_ids: Int64[ndarray, " n"] = detections.frame_indices.cpu().numpy()
+        evidence: list[OperatorEvidence] = []
+        for index in range(len(framesets)):
+            keep: ndarray = face_ids // 6 == index
+            direction: Float64[ndarray, "3"] | None = None
+            if keep.any():
+                mean: Float64[ndarray, "3"] = (
+                    np.average(centres[keep], axis=0, weights=weights[keep]) if weights[keep].sum() > 0 else centres[keep].mean(axis=0)
+                )
+                direction = mean / np.linalg.norm(mean)
+            evidence.append(OperatorEvidence(direction, all_boxes[keep], face_ids[keep] % 6, faces[6 * index : 6 * index + 6]))
         self._tick("detect", start)
-        return OperatorEvidence(direction, boxes.float().cpu().numpy(), detections.frame_indices.cpu().numpy(), faces)
+        return evidence
 
     def _operator_prompt(self, synthetic: UInt8[Tensor, "s s 3"], first: bool) -> SegmentationPrompts | None:
         """A tracker prompt for the operator: the detector's box around the synthetic view's centre.

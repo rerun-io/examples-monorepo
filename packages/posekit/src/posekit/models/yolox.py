@@ -19,6 +19,7 @@ import tyro
 from jaxtyping import Float, UInt8
 from onnx import numpy_helper
 from torch import Tensor
+from trtkit.onnx_precision import fp16_trunk
 from trtkit.trt_builder import onnx_content_hash
 
 from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR, OnnxTransform, fetch_openmmlab_onnx, strip_detector_nms
@@ -152,3 +153,8 @@ def dynamic_yolox(source: Path) -> Path:
         partial.unlink(missing_ok=True)
     return dest
 
+
+
+def fp16_dynamic_yolox(source: Path) -> Path:
+    """:func:`dynamic_yolox` with its convolutional trunk in fp16 (box decode and graph I/O stay fp32)."""
+    return fp16_trunk(dynamic_yolox(source), Path(os.environ.get("POSEKIT_ONNX_CACHE", str(DEFAULT_ONNX_CACHE_DIR))).expanduser())
