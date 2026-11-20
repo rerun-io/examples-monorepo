@@ -511,10 +511,8 @@ class FlexGlueTensorRT:
 def descriptor_batch(pairs: Sequence[ImagePair], index: int, side: int, cached: Container[int]) -> list[int]:
     """The images one descriptor call encodes: `pairs[index][side]` and the next uncached images the pair loop needs.
 
-    The look-ahead starts where the loop is, not where an image was first needed. The older rule batched the images that
-    followed an image's *first* use; an image evicted and needed again then dragged in images long since matched. On clip
-    007's 41,958 loop pairs (18,606 images, a 512-image cache) that encoded 77,654 images in 9,746 calls; this rule
-    encodes 32,070.
+    The look-ahead starts where the loop is, not where an image was first needed, so an image evicted and needed again
+    does not drag in images long since matched.
 
     Args:
         pairs: The pair loop's sequence.
