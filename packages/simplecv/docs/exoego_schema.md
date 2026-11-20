@@ -176,6 +176,19 @@ writer whose source states a non-positive radius must **omit the key** rather
 than emit it, because the formats that carry one (basalt's `rpmax`, whose
 non-positive value disables the check) mean "no limit" by it, and a reader
 seeing `0.0` would conclude the model holds nowhere.
+**Camera models on `pinhole`.** The `Pinhole` is what a viewer draws and projects with: a plain pinhole. A camera
+whose model is more than a pinhole also carries `simplecv.components.DistortionModel` (a name) and
+`simplecv.components.DistortionCoefficients` (a float32 list) on the same entity (`PinholeWithDistortion`), and those
+are authoritative. For `brown_conrady` and `kannala_brandt` the `Pinhole` focal is the model's own (it is also the
+paraxial focal), and the coefficients are only the distortion. A model whose focal is *not* a pinhole focal states
+its own intrinsics in the coefficients, and the `Pinhole` holds the paraxial approximation only: the unified sphere
+(Mei, `simplecv.camera_parameters.MeiParameters`) is logged as `mei_v6_unified` (`gamma_x, gamma_y, xi,
+half_field_rad, d0 .. d12`) or `mei_v3_unified` (`... k1, k2, k3, p1, p2`), with the `Pinhole` focal
+`gamma / (1 + xi)`: drawn with `gamma`, a 200 degree lens (xi 2.3) is a 55 degree frustum, 1 + xi times too narrow.
+The older names `mei_v6` / `mei_v3` (coefficients without gamma, `gamma` as the `Pinhole` focal) are still read, so
+bases written before the unified names keep their meaning; readers go through `MeiParameters.from_catalog` (or
+`CatalogCameraCalibration.mei`), which takes both.
+
 `image_rotation_cw_deg` is a **clockwise rotation of 90, 180 or 270 degrees that
 the writer already applied to this camera's encoded frames**, for a sensor
 mounted rolled: the intrinsics, the distortion and the `rig_T_cam` on the same
