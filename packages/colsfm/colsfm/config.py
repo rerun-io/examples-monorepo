@@ -53,6 +53,10 @@ class ColsfmProfileConfig:
 
     loop_candidates_per_frame: int = 3
     """`colsfm.loop_closure.LoopClosureConfig.loop_candidates_per_frame`."""
+    loop_max_prior_translation_m: float | None = None
+    """`colsfm.loop_closure.LoopClosureConfig.max_prior_translation_m`; None = no prior-consistency gate."""
+    loop_max_prior_rotation_deg: float | None = None
+    """`colsfm.loop_closure.LoopClosureConfig.max_prior_rotation_deg`; None = no prior-consistency gate."""
 
 
 def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
@@ -307,6 +311,10 @@ class PoseGraphConfig:
     """Translation gate a loop edge must pass; 0.0 disables the gate."""
     loop_edge_rotation_threshold_degrees: float
     """Rotation gate a loop edge must pass; 0.0 disables the gate."""
+    loop_max_prior_translation_m: float | None = None
+    """From `colsfm.toml` (`LoopClosureConfig.max_prior_translation_m`)."""
+    loop_max_prior_rotation_deg: float | None = None
+    """From `colsfm.toml` (`LoopClosureConfig.max_prior_rotation_deg`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,6 +538,7 @@ def read_config_directory(
     matching_message: Message = read("matching_config")
     worker_message: Message = read("matching_task_worker_config")
     pose_graph_message: Message = read("pose_graph_config")
+    profile: ColsfmProfileConfig = read_colsfm_profile(directory)
     mapping_message: Message = read("vision_mapping_config")
 
     return CusfmConfig(
@@ -571,9 +580,11 @@ def read_config_directory(
             loop_closure_interval_ratio=float(pose_graph_message.loop_closure_interval_ratio),
             loop_residual_weight=float(pose_graph_message.loop_residual_weight),
             good_loop_threshold=float(pose_graph_message.good_loop_threshold),
-            loop_candidates_per_frame=read_colsfm_profile(directory).loop_candidates_per_frame,
+            loop_candidates_per_frame=profile.loop_candidates_per_frame,
             loop_edge_translation_threshold_meters=float(pose_graph_message.loop_edge_translation_threshold_meters),
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
+            loop_max_prior_translation_m=profile.loop_max_prior_translation_m,
+            loop_max_prior_rotation_deg=profile.loop_max_prior_rotation_deg,
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),

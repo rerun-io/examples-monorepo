@@ -280,6 +280,7 @@ from pathlib import Path
 from typing import Final
 
 import numpy as np
+import pycolmap
 
 from colsfm.config import PoseGraphConfig
 from colsfm.database import ImagePair, read_keypoints_batch
@@ -394,6 +395,17 @@ class LoopClosureConfig:
     The blob's 90 RoboCap LOOP edges rotate by 2.5-12.0 deg, median 7.2 — so its own 10 deg
     gate is already binding on its own output. 30 deg leaves headroom for the same reason
     as the translation gate."""
+    max_prior_translation_m: float | None = None
+    """Prior-consistency gate, applied to every measured candidate before each query rig frame keeps its best: the
+    candidate survives when its measured `source_T_target` and the prior trajectory's differ by at most this translation
+    (and `max_prior_rotation_deg`). None = no gate.
+
+    For a rig that sees all around (a 360 camera's cube faces) the edge-size gates cannot tell a revisit from aliasing:
+    a true revisit walked the other way rotates by ~180 deg, and look-alike ceilings match 180 deg off with over a
+    thousand inliers. Measured on an Insta360 X4 Air walk-through (raw VIO prior): true loops disagree with the prior by a median
+    0.53 m / 1.6 deg (revisit) and 0.6 m / 3.5 deg (start-end), false ones by 2-16 m and 60-179 deg."""
+    max_prior_rotation_deg: float | None = None
+    """Rotation half of the prior-consistency gate; None = no gate."""
     use_stored_weights: bool = False
     """When True the edge information is `loop_edge_information(inliers, loop_residual_weight)`
     instead of the identity. The blob's own solver discards the stored value; measured
@@ -446,6 +458,8 @@ class LoopClosureConfig:
             max_translation_m=config.loop_edge_translation_threshold_meters,
             max_rotation_deg=config.loop_edge_rotation_threshold_degrees,
             loop_residual_weight=config.loop_residual_weight,
+            max_prior_translation_m=config.loop_max_prior_translation_m,
+            max_prior_rotation_deg=config.loop_max_prior_rotation_deg,
         )
 
 
@@ -701,6 +715,10 @@ def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosu
         RigPoseEstimator, index=plan.rig_index, geometry=plan.geometry, keypoints=plan.keypoints, match_fn=match_fn, config=config.rig_pose
     )
     candidates: list[LoopCandidate] = _measure_groups(list(plan.groups), make_estimator, config, plan.counters)
+    if config.max_prior_translation_m is not None or config.max_prior_rotation_deg is not None:
+        consistent: list[LoopCandidate] = [candidate for candidate in candidates if agrees_with_prior(candidate, plan.rig_index.world_T_rig, config)]
+        print(f"[colsfm] loop closure: {len(candidates) - len(consistent)} of {len(candidates)} verified candidates disagree with the prior pose")
+        candidates = consistent
 
     edges: list[PoseGraphEdge] = []
     for candidate in best_per_query_rig(candidates, plan.queried_by, config.good_loop_threshold, plan.counters):
@@ -726,6 +744,24 @@ def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosu
         edges=len(gated),
     )
     return LoopClosureResult(edges=gated, diagnostics=diagnostics, candidates=candidates)
+
+
+def agrees_with_prior(candidate: LoopCandidate, world_T_rig: Mapping[int, pycolmap.Rigid3d], config: LoopClosureConfig) -> bool:
+    """Whether a measured loop agrees with the prior trajectory within the prior-consistency gate.
+
+    Args:
+        candidate: A measured candidate.
+        world_T_rig: Prior rig poses by rig id (`RigFrameIndex.world_T_rig`).
+        config: `max_prior_translation_m` and `max_prior_rotation_deg`; a None half does not gate.
+
+    Returns:
+        True when `prior_source_T_target^-1 * measured` is inside both bounds.
+    """
+    prior: pycolmap.Rigid3d = world_T_rig[candidate.hit.source_rig_id].inverse() * world_T_rig[candidate.hit.target_rig_id]
+    error: pycolmap.Rigid3d = prior.inverse() * candidate.estimate.source_T_target
+    translation_ok: bool = config.max_prior_translation_m is None or float(np.linalg.norm(error.translation)) <= config.max_prior_translation_m
+    rotation_ok: bool = config.max_prior_rotation_deg is None or float(np.rad2deg(error.rotation.angle())) <= config.max_prior_rotation_deg
+    return translation_ok and rotation_ok
 
 
 def find_loop_edges(

@@ -38,6 +38,12 @@ class MeiCamera:
     @property
     def coefficients(self) -> list[float]:
         """The coefficients in the order of ``model``."""
+    def project(self, points: Float64[ndarray, "n 3"]) -> tuple[Float64[ndarray, "n 2"], Bool[ndarray, " n"]]:
+        """Project camera-frame points (any norm) to pixels (centres at integers) and a validity mask.
+
+        Invalid where the forward model rejects the point (more than ``half_field_rad`` off the axis, zero or
+        non-finite); the pixel is NaN there. Raises ``ValueError`` unless ``points`` is ``float64[n, 3]``.
+        """
 
 class InsvLens:
     """One lens of an Insta360 factory calibration at the track resolution, window crop applied."""

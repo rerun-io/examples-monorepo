@@ -214,6 +214,16 @@ class PipelineOptions:
     `colsfm.matching.MatchLimitPolicy`. `fixed` is the 500 every run before the KITTI
     follow-up used, `image_area` scales it with the frame's resolution, `off` keeps every
     verified inlier."""
+    align_to_prior: bool = False
+    """Before the run is published, move the whole result into the pose prior's gauge with one similarity fitted on the registered
+    cameras against their input poses (`colsfm.prior_alignment`): `sparse/`, `kpmap/`, the TUM files and the catalog
+    layer. For a metric prior (visual-inertial SLAM) whose frame the rest of a pipeline lives in; bundle adjustment
+    itself lets scale and heading drift (scale 0.80 on an Insta360 walk-through)."""
+    raco_batch_pixels: int | None = None
+    """On `raco` only: pixels (batch x height x width) one shape-dynamic RaCo execution may hold, which sets each size
+    group's batch ceiling and so its execution context's memory (about 1.2 GB per million pixels on the 5090). None keeps
+    `colsfm.features_raco.DYNAMIC_BATCH_PIXEL_BUDGET` (2 x 1216 x 1920). Lower it on a shared GPU: 1920000 runs 800x800
+    cube faces three at a time in a 2.3 GB context instead of seven in 5.3 GB."""
     features_backend: FeatureBackend = "raco"
     """Which ALIKED runs: RaCo-ALIKED on its own TensorRT engine (`colsfm.features_raco`) or COLMAP's
     own ONNX one.
@@ -394,7 +404,9 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
     ba_plan.announce()
     return ResolvedRun(
         selection=options.selection,
-        features=FeatureOptions(backend=options.features_backend, num_threads=options.num_threads, device=options.device),
+        features=FeatureOptions(
+            backend=options.features_backend, num_threads=options.num_threads, device=options.device, raco_batch_pixels=options.raco_batch_pixels
+        ),
         matching_backend=options.matching_backend,
         match_limit=MatchLimitPolicy.of(options.match_cap_mode, options.max_matches_per_pair),
         # The mapper receives the plan itself, not the knobs it was made from: there is
