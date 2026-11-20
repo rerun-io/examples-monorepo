@@ -1457,6 +1457,13 @@
       "severity": "error"
     },
     {
+      "column": 1,
+      "path": "tests/test_colour_points.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `conftest`",
+      "severity": "error"
+    },
+    {
       "column": 8,
       "path": "tests/test_extrinsic_refinement.py",
       "name": "missing-import",

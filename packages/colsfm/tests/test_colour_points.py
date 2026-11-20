@@ -7,11 +7,11 @@ from collections.abc import Iterator, Sequence
 import numpy as np
 import pycolmap
 import torch
+from conftest import build_reconstruction
 from torch import Tensor
 
 from colsfm.frames import colour_points
 from colsfm.frames_meta import FramesMeta
-from conftest import build_reconstruction
 
 
 class _RandomFrames:
