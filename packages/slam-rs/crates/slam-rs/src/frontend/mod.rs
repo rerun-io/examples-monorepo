@@ -16,3 +16,5 @@ pub mod parallel;
 pub mod input;
 
 pub mod detect;
+
+pub mod masks;

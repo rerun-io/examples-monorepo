@@ -2,7 +2,7 @@
 
 import dataclasses
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -32,7 +32,7 @@ from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load
 from slam_rs.rig import TIMELINE
 from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import RUN_ENTITY, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import RUN_ENTITY, FrameMaskLog, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -62,6 +62,13 @@ class Config:
     """Local base recording; retains the selected dataset configuration and IMU model."""
     gt_rrd: Path | None = None
     """Optional local ground-truth recording; requires --rrd."""
+    mask_entity: str | None = None
+    """Segmentation masks for ``--stage vio``: the name of each camera's mask entity under its ``pinhole`` (e.g. ``people_mask``
+    reads ``<camera>/pinhole/people_mask``). The frontend neither detects nor keeps tracks where a camera's latest mask
+    at or before its frame is nonzero (``slam_rs.frame_masks``). None tracks every pixel."""
+    mask_rrd: Path | None = None
+    """Local mask layer recording for ``--mask-entity``; requires --rrd. None reads the masks from the base recording or the
+    catalog segment."""
     catalog: str | None = None
     """Catalog URL override; defaults to slam.toml. Exclusive with local recording files."""
     max_framesets: int | None = None
@@ -276,8 +283,10 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
     # The stage that tracks needs the pixels its keypoints were computed on.
     mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
+    mask_log: FrameMaskLog | None = None if config.mask_entity is None else FrameMaskLog(config.mask_entity)
     times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
-    framesets: Iterator[Frameset] = blank(feed.framesets(stop_ns), config.blank_cameras)
+    source: Generator[Frameset, None, None] = feed.framesets(stop_ns)
+    framesets: Iterator[Frameset] = blank(source, config.blank_cameras)
     bootstrap: BootstrapLog = BootstrapLog()
     while config.max_framesets is None or replayed < config.max_framesets:
         waited: float = time.monotonic()
@@ -288,13 +297,14 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
         replayed += 1
         logged: float = time.monotonic()
-        log_frameset_inputs(feed, frameset, mode if log_images else "off")
+        log_frameset_inputs(feed, frameset, mode if log_images else "off", mask_log)
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
         if isinstance(stage, VioStage):
             stage.run(frameset)
             bootstrap.log_new(stage.lockstep.vio)
         elif stage is not None:
             stage.run(frameset)
+    source.close()  # a --max-framesets stop leaves the decode worker up to 64 framesets ahead; stop it and free them
 
     if isinstance(stage, VioStage):
         stage.flush()
@@ -337,16 +347,20 @@ def main(config: Config) -> None:
         vio_config.vio_bootstrap = config.vio_bootstrap
     if config.map is not None:
         vio_config = vio_config.with_backend(config.map)
+    if config.mask_rrd is not None and config.mask_entity is None:
+        raise ValueError("--mask-rrd names a layer; --mask-entity names the masks in it")
+    if config.mask_entity is not None and config.stage != "vio":
+        raise ValueError("--mask-entity applies to --stage vio, the one stage that tracks with masks")
     source: SegmentSource
     origin: str
     if config.rrd is not None:
         if config.catalog is not None:
             raise ValueError("--catalog and --rrd name two sources for one replay")
-        source = LocalSegment(config.rrd, config.gt_rrd)
+        source = LocalSegment(config.rrd, config.gt_rrd, config.mask_rrd)
         origin = str(config.rrd)
     else:
-        if config.gt_rrd is not None:
-            raise ValueError("--gt-rrd requires --rrd")
+        if config.gt_rrd is not None or config.mask_rrd is not None:
+            raise ValueError("--gt-rrd and --mask-rrd require --rrd")
         origin = config.catalog or settings.catalog_url
         source = CatalogSegment(origin, dataset_name, config.segment)
     output_csv: Path = config.output_csv if config.output_csv is not None else Path("data") / config.segment / "slam_rs.csv"
@@ -360,6 +374,7 @@ def main(config: Config) -> None:
         frame_stride=config.frame_stride,
         window_s=config.window_s,
         decode_device=select_decode_device(config.decode_device),
+        mask_entity=config.mask_entity,
     ) as feed:
         print(
             f"{len(feed.cameras)} cameras, {len(feed.frame_t_ns)} framesets, ground truth "
@@ -411,7 +426,7 @@ def main(config: Config) -> None:
         # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
         # tracked run.
         vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
-        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns))
+        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns)
         # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
         # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
         finished: FinalRun = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
@@ -420,13 +435,15 @@ def main(config: Config) -> None:
         if finished.gba_failure is not None:
             print(f"global BA: failed: {finished.gba_failure}")
         stage.logger.log_final_run(final)
-        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns))
+        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns)
         print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
         if map_result is not None and map_result.gba is not None:
             # At the cursor the flush left on the last frameset, beside the final map.
             log_map_result(map_result)
             gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
-            write_trajectory(gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns))
+            write_trajectory(
+                gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns
+            )
             print(f"global BA: {map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
         if len(estimate) == 0:
             print("no ATE: the estimator reported no tracked pose")

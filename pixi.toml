@@ -3105,8 +3105,8 @@ slam-rs = { path = "packages/slam-rs" }
 slam-rs-catalog = { path = "packages/slam-rs" }
 
 [feature.slam-rs-pkg.tasks.slam-rs-pkg-check]
-cmd = "python -c \"import importlib.util, slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config; assert 'site-packages' in slam_rs.__file__, slam_rs.__file__; assert importlib.util.find_spec('slam_rs.catalog_feed'); print('slam-rs', slam_rs._core.__version__, slam_rs.__file__)\""
-description = "Import the installed slam-rs core output and check the catalog output is present"
+cmd = "python -c \"import importlib.util, slam_rs, slam_rs.rig, slam_rs.frontend_log, slam_rs.config; assert 'site-packages' in slam_rs.__file__, slam_rs.__file__; assert importlib.util.find_spec('slam_rs.catalog_feed'); print('slam-rs', slam_rs._core.__version__, slam_rs.__file__)\" && python -c \"import json, pathlib, sys; owned = {p.name: set(json.loads(p.read_text())['files']) for p in pathlib.Path(sys.prefix, 'conda-meta').glob('slam-rs-*.json')}; assert len(owned) == 2, sorted(owned); core, catalog = owned.values(); assert not core & catalog, sorted(core & catalog); print('disjoint files:', {name: len(files) for name, files in owned.items()})\""
+description = "Import the installed slam-rs core output, check the catalog output is present and that no file is in both"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)

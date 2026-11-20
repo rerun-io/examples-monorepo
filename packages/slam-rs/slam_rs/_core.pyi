@@ -714,8 +714,15 @@ class Vio:
         batch can be corrected and pushed again.
         """
 
-    def track(self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]]) -> VioResult:
+    def track(
+        self, t_ns: int, images: Sequence[UInt8[ndarray, "h w"]], masks: Sequence[UInt8[ndarray, "mh mw"] | None] | None = None
+    ) -> VioResult:
         """Process one frameset of ``camera_count`` C-contiguous ``(h, w)`` uint8 images.
+
+        ``masks``, when given, holds one entry per camera: None or a C-contiguous ``uint8`` segmentation mask at any
+        resolution, nonzero = no features there, read through its scale to the camera's tracked image (the mask layer
+        contract). The frontend neither detects in nor keeps a track in a detection cell that holds a masked pixel.
+        ``masks=None`` masks nothing.
 
         With ``port.frontend_lag`` enabled, the first call returns ``Buffered``.
         Later calls return the previous frame's estimate with its own ``t_ns``.
