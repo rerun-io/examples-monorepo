@@ -566,6 +566,15 @@ impl VioConfig {
         if eta.is_nan() || eta <= 0.0 || eta >= 1.0 {
             return out("backend.gba_cg_eta", eta, "in (0, 1)");
         }
+        if let Some(threads) = self.backend_loop_closing.threads
+            && threads.get() > crate::frontend::parallel::MAX_THREADS
+        {
+            return out(
+                "backend.loop_closing.threads",
+                threads.get() as f64,
+                "in 1..=1024",
+            );
+        }
         Ok(self)
     }
 

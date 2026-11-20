@@ -1035,6 +1035,26 @@ fn two_runs_give_the_same_loop_events_and_map() {
 }
 
 #[test]
+fn the_thread_count_never_changes_the_loop_events_or_map() {
+    let run = |threads: Option<usize>| {
+        let loops = LoopClosingConfig {
+            threads: threads.and_then(std::num::NonZeroUsize::new),
+            ..LoopClosingConfig::default()
+        };
+        let mut s = scene(2, 0.05, true, loops, 100);
+        s.backend.query(C);
+        (
+            s.backend.loop_closing().unwrap().events().to_vec(),
+            s.backend.map().clone(),
+        )
+    };
+    let global = run(None);
+    assert!(!global.0.is_empty());
+    assert_eq!(run(Some(1)), global);
+    assert_eq!(run(Some(2)), global);
+}
+
+#[test]
 fn a_query_without_images_or_a_dropped_one_holds_nothing() {
     let mut s = scene(1, 0.05, false, LoopClosingConfig::default(), 100);
     assert_eq!(s.backend.loop_closing().unwrap().held_images(), 1);

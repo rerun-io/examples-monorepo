@@ -32,6 +32,7 @@
 mod window;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use kornia_bow::BoW;
 use kornia_staging_3d::pose::gp3p::GeneralizedCorrespondence;
@@ -255,6 +256,8 @@ pub struct LoopClosing {
     counts: LoopCounts,
     /// What the pose-graph optimization has done (PR c2).
     pub(super) pgo: PgoState,
+    /// The configured workers; `None` runs on Rayon's global pool.
+    pool: Option<Arc<rayon::ThreadPool>>,
 }
 
 impl LoopClosing {
@@ -263,8 +266,8 @@ impl LoopClosing {
     ///
     /// # Errors
     ///
-    /// A camera model the projection code does not support, or a word size
-    /// outside HashBoW's range.
+    /// A camera model the projection code does not support, a word size
+    /// outside HashBoW's range, or workers the OS cannot start.
     pub fn new(
         config: &LoopClosingConfig,
         intrinsics: &[BasaltCamera<f64>],
@@ -286,7 +289,26 @@ impl LoopClosing {
             events: Vec::new(),
             counts: LoopCounts::default(),
             pgo: PgoState::default(),
+            pool: config
+                .threads
+                .map(|threads| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads.get())
+                        .thread_name(|i| format!("slam-rs-loop-{i}"))
+                        .build()
+                        .map(Arc::new)
+                })
+                .transpose()
+                .map_err(|error| error.to_string())?,
         }))
+    }
+
+    /// Run `f` on the configured workers, or on Rayon's global pool.
+    fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        match &self.pool {
+            Some(pool) => pool.install(f),
+            None => f(),
+        }
     }
 
     /// Every verified loop, oldest first.
@@ -385,24 +407,26 @@ impl LoopClosing {
         images: &KeyframeImages,
     ) -> Vec<(CamId, BoW)> {
         let brief: BriefConfig = self.brief();
-        let described: KeyframeDescriptors = keypoints
-            .par_iter()
-            .enumerate()
-            .map(|(cam, camera_keypoints)| {
-                let Some(image) = images.0.get(cam) else {
-                    return DescriptorSet::default();
-                };
-                let pixels: Vec<[f32; 2]> =
-                    camera_keypoints.iter().map(|(_, p)| [p.x, p.y]).collect();
-                // Keyframe keypoints are in id order, so the described subset is too.
-                DescriptorSet::from_ordered(
-                    camera_keypoints
-                        .iter()
-                        .zip(describe_keypoints_u16(image, &pixels, brief))
-                        .filter_map(|((id, _), described)| Some((id.0, described?.descriptor))),
-                )
-            })
-            .collect();
+        let described: KeyframeDescriptors = self.install(|| {
+            keypoints
+                .par_iter()
+                .enumerate()
+                .map(|(cam, camera_keypoints)| {
+                    let Some(image) = images.0.get(cam) else {
+                        return DescriptorSet::default();
+                    };
+                    let pixels: Vec<[f32; 2]> =
+                        camera_keypoints.iter().map(|(_, p)| [p.x, p.y]).collect();
+                    // Keyframe keypoints are in id order, so the described subset is too.
+                    DescriptorSet::from_ordered(
+                        camera_keypoints
+                            .iter()
+                            .zip(describe_keypoints_u16(image, &pixels, brief))
+                            .filter_map(|((id, _), described)| Some((id.0, described?.descriptor))),
+                    )
+                })
+                .collect()
+        });
 
         // Bags enter the database in camera order, so insert them serially.
         let mut bags: Vec<(CamId, BoW)> = Vec::new();
@@ -624,10 +648,12 @@ impl MapBackend {
         );
         // The first matching stage reads descriptors only. Run it across
         // candidates, then keep the original score order for geometry and PnP.
-        let initial_matches: Vec<_> = candidates
-            .par_iter()
-            .map(|&candidate| loops.initial_matches(&query, candidate))
-            .collect();
+        let initial_matches: Vec<_> = loops.install(|| {
+            candidates
+                .par_iter()
+                .map(|&candidate| loops.initial_matches(&query, candidate))
+                .collect()
+        });
         for (candidate, initial) in candidates.into_iter().zip(initial_matches) {
             self.loops.as_mut()?.counts.candidates += 1;
             if let Some(initial) = initial

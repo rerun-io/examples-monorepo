@@ -35,6 +35,11 @@ rootslam-parity turns on (at MSD's 35 for every dataset); the default RANSAC
 is adaptive and reads no count. Loop-closing knobs are flat keys
 (backend.loop_closing.<knob>), so rootslam-parity sets its own knobs and every
 dataset keeps the gates the profile does not set.
+backend.loop_closing.threads sets the workers that describe keyframes and
+screen loop candidates. Unset, loop closing uses Rayon's global pool (every
+core). A device with a fixed core budget caps it: for RoboCap, add
+"backend.loop_closing.threads": 2 to profiles/live.json and live30.json, inside
+the A76 budget. The live profiles do not set it yet; that waits for Cap B numbers.
 tests/test_config_profiles.py checks overlays
 and rejects unknown keys. tests/test_reference.py checks that every named
 configuration parses.
