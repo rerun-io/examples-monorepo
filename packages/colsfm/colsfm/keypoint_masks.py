@@ -70,9 +70,8 @@ def keypoints_outside_mask(keypoints_xy: Float32[ndarray, "n 2"], mask: Keypoint
 def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
     """Bit-pack every mask of one `SegmentationImage` entity, keyed by its stamp; rows without a mask (null or cleared) are skipped.
 
-    Walks the table's record batches through the list offsets, so no mask byte is copied before `np.packbits`. The
-    loader used to `filter` the table to the rows holding a mask first: an Arrow Take over a list-of-list column of
-    every mask in the segment, which on clip 007 (six 3,203-mask face streams) was most of the extraction stage.
+    Walks the table's record batches through the list offsets, so no mask byte is copied before `np.packbits`
+    (a `filter` first copies every mask in the segment).
 
     Args:
         table: The entity's rows on `timeline`, as the catalog reader returns them.

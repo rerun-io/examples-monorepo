@@ -244,17 +244,11 @@ def test_catalog_masks_refuse_a_mask_with_more_than_one_byte_per_pixel(tmp_path:
 
 def test_packing_a_mask_table_skips_rows_without_a_mask_and_reads_every_batch() -> None:
     """The loader walks record batches through their offsets; rows where the entity logged no mask are skipped."""
-    import pyarrow as pa
-
-    from colsfm.keypoint_masks import pack_mask_table
-
     entity: str = "world/cam/people_mask"
     masks: list[ndarray | None] = [np.array([[0, 1, 0], [1, 0, 0]], dtype=np.uint8), None, np.array([[2, 0, 0], [0, 0, 3]], dtype=np.uint8)]
-    buffers = pa.array([None if m is None else [m.ravel().tolist()] for m in masks], type=pa.list_(pa.list_(pa.uint8())))
-    format_type = pa.struct([("width", pa.uint32()), ("height", pa.uint32())])
-    formats = pa.array([None if m is None else [{"width": 3, "height": 2}] for m in masks], type=pa.list_(format_type))
-    stamps = pa.array([10, 20, 30], type=pa.int64())
-    whole = pa.table({"video_time": stamps, f"/{entity}:SegmentationImage:buffer": buffers, f"/{entity}:SegmentationImage:format": formats})
+    whole: pa.Table = _mask_table(
+        entity, [None if m is None else [m.ravel().tolist()] for m in masks], [None if m is None else [{"width": 3, "height": 2}] for m in masks]
+    )
     # Two batches, the second a slice, so offsets that do not start at zero are exercised.
     table = pa.Table.from_batches([whole.slice(0, 2).to_batches()[0], whole.slice(2, 1).to_batches()[0]])
     packed = pack_mask_table(table, "video_time", entity)
