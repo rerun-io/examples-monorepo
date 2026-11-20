@@ -1,8 +1,10 @@
 """FullCircle masks vs the masks FullCircle released with its dataset (scene ``room3``, equirect omni frames).
 
 Asset: one scene of huggingface.co/datasets/youlenda/FullCircle extracted (``<scene>/omni/images/frame_*.png`` and
-``<scene>/omni/masks/frame_*_mask.png``), named by ``POSEKIT_FULLCIRCLE_SCENE``. On room3 (357 frames) the full run
-scores a mean IoU of 0.945 (median 0.957); this test runs the first 40 frames.
+``<scene>/omni/masks/frame_*_mask.png``), named by ``POSEKIT_FULLCIRCLE_SCENE``. FullCircle captures at 5 fps; the
+Insta360 stage tracks at 3 Hz, so the scene is taken at half rate (every ``STRIDE``-th frame) with the default re-prompt
+cadence. On room3 at half rate (179 frames) the full run scores a mean IoU of 0.940 (median 0.956; all 357 frames
+with ``reprompt_every=6``: 0.945, median 0.957); this test runs the first 40 of them.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ cv2 = pytest.importorskip("cv2", reason="OpenCV reads the FullCircle PNGs")
 pytestmark = pytest.mark.golden
 
 FRAMES: int = 40
+STRIDE: int = 2
 HEIGHT, WIDTH = 720, 1440
 
 
@@ -30,7 +33,7 @@ def test_fullcircle_masks_match_released_masks() -> None:
     if scene_env is None or not torch.cuda.is_available():
         pytest.skip("needs POSEKIT_FULLCIRCLE_SCENE (an extracted FullCircle scene, e.g. room3) and a GPU")
     scene: Path = Path(scene_env)
-    paths: list[Path] = sorted((scene / "omni/images").glob("frame_*.png"))[:FRAMES]
+    paths: list[Path] = sorted((scene / "omni/images").glob("frame_*.png"))[::STRIDE][:FRAMES]
     if not paths:
         pytest.skip(f"no omni frames under {scene}")
     frames: list[np.ndarray] = [

@@ -66,8 +66,9 @@ class FullCircleMasksConfig:
     """A base recording not on a catalog yet, instead of ``dataset``/``segment``: served by an in-process catalog."""
     cameras: tuple[str, str] = ("/world/rig_00/cam_00", "/world/rig_00/cam_01")
     """The two lens camera nodes (each has ``pinhole`` and ``pinhole/video``)."""
-    stride: int = 5
-    """Framesets between two tracked framesets (5 at 30 fps = 6 Hz, near FullCircle's 5 fps captures)."""
+    stride: int = 10
+    """Framesets between two tracked framesets: 10 at 30 fps = 3 Hz, the stamps of the people layer that the union
+    keeps (FullCircle captures at 5 fps; the tracker re-prompt cadence, ``masker.reprompt_every``, is set for 3 Hz)."""
     start: int = 0
     """First frameset index."""
     end: int | None = None
