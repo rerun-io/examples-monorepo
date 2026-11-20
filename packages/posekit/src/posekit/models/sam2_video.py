@@ -137,15 +137,13 @@ class Sam2VideoSegmenter(VideoSegmenter):
         frame_h: int = int(frames_rgb.shape[1])
         frame_w: int = int(frames_rgb.shape[2])
         if self._states is None:
+            storage: torch.device = frames_rgb.device if self.config.memory_on_device else torch.device("cpu")
             self._states = [
                 SAM2GenericVideoPredictorState.create(
                     video_hw=(frame_h, frame_w),
-                    memory_bank=SAM2ForgetfulObjectMemoryBank(
-                        memory_window_size=self.config.memory_window_size,
-                        storage_device=frames_rgb.device if self.config.memory_on_device else torch.device("cpu"),
-                    )
+                    memory_bank=SAM2ForgetfulObjectMemoryBank(memory_window_size=self.config.memory_window_size, storage_device=storage)
                     if self.config.max_conditional_memories < 0
-                    else BoundedForgetfulMemoryBank(self.config.max_conditional_memories, self.config.memory_window_size),
+                    else BoundedForgetfulMemoryBank(self.config.max_conditional_memories, self.config.memory_window_size, storage),
                 )
                 for _ in range(batch_size)
             ]
