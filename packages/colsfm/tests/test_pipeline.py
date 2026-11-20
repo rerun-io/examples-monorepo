@@ -249,6 +249,10 @@ def test_the_caspar_run_ends_on_caspar_alone_by_default(galileo_caspar_run: Pipe
     assert galileo_run.mapping.polish_iterations is None
 
 
+# ── `--optimize-extrinsics`: the blob's second mapping pass ──────────────────────────
+
+
+@pytest.fixture(scope="module")
 def galileo_refined_run(galileo_input_dir: Path, tmp_path_factory: pytest.TempPathFactory) -> PipelineSummary:
     """The same smoke run with `--optimize-extrinsics`, into its own workspace.
 
