@@ -165,47 +165,24 @@ def calibrate_attention_amax(
 def _quantize_attention(model: onnx.ModelProto, attention_amax: dict[str, tuple[float, float, float]]) -> int:
     """FP8 Q/DQ on ``q * scale``, ``k^T``, softmax output and ``v`` of each split ViT block attention, in place.
 
-    Myelin then fuses an FP8 MHA. The softmax output needs its own Q/DQ
-    (static range [0, 1]): with only q/k/v quantized the MHA fusion breaks
-    and the engine doubles in latency. Blocks are found by the ``attn.v``
-    head tensor ``_split_qkv_linears`` names; decoder attention keeps fp16.
+    Myelin then fuses an FP8 MHA (trtkit's :func:`~trtkit.onnx_qdq.quantize_softmax_attention`). Blocks are found by
+    the ``attn.v`` head tensor ``_split_qkv_linears`` names; decoder attention keeps fp16.
 
     Returns:
         Number of attention blocks quantized.
     """
-    from trtkit.onnx_qdq import fp8_input_qdq
+    from trtkit.onnx_qdq import Fp8Attention, quantize_softmax_attention, softmax_attentions
 
-    graph = model.graph
-    producers: dict[str, onnx.NodeProto] = {output: node for node in graph.node for output in node.output}
-    consumers: dict[str, list[onnx.NodeProto]] = {}
-    for node in graph.node:
-        for name in node.input:
-            consumers.setdefault(name, []).append(node)
-    index_of: dict[str, int] = {node.output[0]: index for index, node in enumerate(graph.node)}
-    inserted: dict[int, list[onnx.NodeProto]] = {}
-    count: int = 0
-    for node in list(graph.node):
-        if node.op_type != "Softmax":
-            continue
-        scores: onnx.NodeProto | None = producers.get(node.input[0])
-        following: list[onnx.NodeProto] = consumers.get(node.output[0], [])
-        if scores is None or scores.op_type != "MatMul" or len(following) != 1 or following[0].op_type != "MatMul":
-            continue
-        context: onnx.NodeProto = following[0]
+    producers: dict[str, onnx.NodeProto] = {output: node for node in model.graph.node for output in node.output}
+    plan: dict[str, Fp8Attention] = {}
+    for _scores, softmax, context in softmax_attentions(model.graph):
         value_heads: onnx.NodeProto | None = producers.get(context.input[1])
         if value_heads is None or not value_heads.input[0].endswith("attn.v.heads"):
             continue
         block: str = value_heads.input[0].removesuffix(".v.heads")
-        q_amax, k_amax, v_amax = attention_amax[block.removeprefix("inner.").removeprefix("model.")]
-        for target, slot, tag, amax in ((scores, 0, "q", q_amax), (scores, 1, "k", k_amax), (context, 0, "softmax", 1.0), (context, 1, "v", v_amax)):
-            initializers, nodes, target.input[slot] = fp8_input_qdq(target.input[slot], f"{block}.{tag}_fp8", amax, "float16")
-            graph.initializer.extend(initializers)
-            inserted.setdefault(index_of[target.output[0]], []).extend(nodes)
-        count += 1
-    ordered: list[onnx.NodeProto] = [new for index, node in enumerate(graph.node) for new in [*inserted.get(index, []), node]]
-    graph.ClearField("node")
-    graph.node.extend(ordered)
-    return count
+        plan[softmax.output[0]] = Fp8Attention(block, attention_amax[block.removeprefix("inner.").removeprefix("model.")])
+    quantize_softmax_attention(model.graph, plan, "float16")
+    return len(plan)
 
 
 def _split_qkv_linears(model: onnx.ModelProto) -> int:

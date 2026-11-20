@@ -138,7 +138,7 @@ def main(config: Config) -> Path:
         staged.replace(destination)
     resolve_engine(destination, matcher_profile())
     print(
-        f"[colsfm] flexglue fp8: {len(targets.linears)} linears and {len(targets.cores)} attention cores to FP8, maxima from {len(pairs)} pairs "
+        f"[colsfm] flexglue fp8: {len(targets.linears)} linears and {len(targets.attentions)} attentions to FP8, maxima from {len(pairs)} pairs "
         f"({min(amax.values()):.3g} .. {max(amax.values()):.3g}) -> {destination.name}, engine built, {time.perf_counter() - started:.0f} s"
     )
     return destination

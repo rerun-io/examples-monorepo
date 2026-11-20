@@ -3,7 +3,8 @@
 A :class:`QdqPlan` names the precision of each module: NVFP4 or FP8 linears, FP8
 convolutions, FP8 inputs of native Attention ops, or unchanged source precision.
 Quantized entries carry the activation maximum that sets their input scale. :func:`quantize_qdq`
-rewrites the graph from that plan and :func:`save_with_external_data` publishes
+rewrites the graph from that plan, :func:`quantize_softmax_attention` adds FP8 operands to
+attentions spelled MatMul -> Softmax -> MatMul, and :func:`save_with_external_data` publishes
 the result. Tensor names and their order are part of the exported bytes, which
 key the TensorRT engine caches.
 """
@@ -31,7 +32,10 @@ NVFP4_GLOBAL_HEADROOM: float = 256.0
 LINEAR_INPUT_HEADROOM: float = 2.0
 """Factor on calibrated linear input maxima before they set static input scales."""
 LINEAR_WEIGHT_CHAIN: list[str] = ["Transpose", "Cast"]
-"""Producers between a torch-exported MatMul and its ``[out, in]`` weight initializer."""
+"""Producers between a torch-exported MatMul and its ``[out, in]`` weight initializer; a weight stored in the
+compute dtype has the Transpose alone."""
+SOFTMAX_AMAX: float = 1.0
+"""Range of softmax probabilities: a fixed static FP8 scale, not a calibrated one."""
 
 
 ScaleDtype: TypeAlias = Literal["bfloat16", "float16"]
@@ -56,8 +60,9 @@ class Nvfp4Linear:
 class Fp8Linear:
     """FP8 weights with per-output-channel scales; statically scaled FP8 inputs."""
 
-    input_amax: float
-    """Input magnitude the static FP8 input scale covers."""
+    input_amax: float | Mapping[str, float]
+    """Input magnitude the static FP8 input scale covers; one per input tensor when several MatMuls apply the weight to
+    different activations (e.g. one per image), which then share one FP8 weight."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +78,8 @@ ModulePrecision: TypeAlias = Nvfp4Linear | Fp8Linear | Fp8Conv
 
 @dataclass(frozen=True, slots=True)
 class Fp8Attention:
-    """Statically scaled FP8 query, key and value inputs of one native Attention op."""
+    """Statically scaled FP8 query, key and value inputs of one attention: a native Attention op (:class:`QdqPlan`) or a
+    MatMul -> Softmax -> MatMul (:func:`quantize_softmax_attention`)."""
 
     module: str
     """Name prefix of the new tensors, e.g. ``encoder.blocks.0.attn``."""
@@ -150,12 +156,8 @@ def fp8_input_qdq(tensor: str, prefix: str, amax: float, scale_dtype: ScaleDtype
     return _fp8_input(tensor, prefix, amax, f"{prefix}.a_zp", scale_dtype)
 
 
-def fp8_weight_dq(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], onnx.NodeProto]:
-    """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``.
-
-    Public for model-specific rewrites that :func:`quantize_qdq` cannot plan, e.g. a graph that applies one weight in
-    several MatMuls: quantize it once and let every MatMul read ``{module}.w_dq``.
-    """
+def _fp8_weight(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], onnx.NodeProto]:
+    """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``."""
     torch_dtype, proto_dtype = _SCALE_TYPES[scale_dtype]
     scales: Tensor = (weight.abs().flatten(1).amax(1) / FP8_MAX).clamp_min(1e-12).to(torch_dtype)
     codes: Tensor = (weight / scales.float().reshape(-1, *[1] * (weight.ndim - 1))).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
@@ -211,6 +213,8 @@ class _Edits:
     """Nodes to insert before the node at each original index."""
     quantized_inputs: dict[tuple[str, str], str] = field(default_factory=dict)
     """Dequantized name of each (activation, precision) already quantized."""
+    quantized_weights: dict[str, str] = field(default_factory=dict)
+    """Transposed dequantized weight of each module already quantized: every MatMul that applies the weight reads it."""
 
 
 def _rewrite_module(
@@ -223,39 +227,47 @@ def _rewrite_module(
     if (node.op_type == "Conv") != isinstance(precision, Fp8Conv):
         raise ValueError(f"{type(precision).__name__} does not apply to {node.op_type} {module}.")
     if isinstance(precision, Fp8Conv):
-        weight_initializers, weight_node = fp8_weight_dq(module, weight, scale_dtype)
+        weight_initializers, weight_node = _fp8_weight(module, weight, scale_dtype)
         input_initializers, input_nodes, dequantized_input = _fp8_input(node.input[0], module, precision.input_amax, f"{module}.a_zp", scale_dtype)
         edits.initializers.extend([*weight_initializers, *input_initializers])
         edits.inserted[index] = [weight_node, *input_nodes]
         node.input[0], node.input[1] = dequantized_input, f"{module}.w_dq"
         return
-    if chain != LINEAR_WEIGHT_CHAIN:
-        raise ValueError(f"Linear {module} reads its weight through {chain}, not {LINEAR_WEIGHT_CHAIN}.")
+    if chain not in (LINEAR_WEIGHT_CHAIN, LINEAR_WEIGHT_CHAIN[:1]):
+        raise ValueError(f"Linear {module} reads its weight through {chain}, not {LINEAR_WEIGHT_CHAIN} or {LINEAR_WEIGHT_CHAIN[:1]}.")
     activation: str = node.input[0]
+    first_use: bool = module not in edits.quantized_weights
+    # A further activation of a shared weight gets its own input names; a single-use module's names are unchanged.
+    input_prefix: str = module if first_use else f"{module}@{activation}"
     nodes: list[onnx.NodeProto] = []
     if isinstance(precision, Fp8Linear):
-        weight_initializers, weight_node = fp8_weight_dq(module, weight, scale_dtype)
-        edits.initializers.extend(weight_initializers)
-        nodes.append(weight_node)
+        if first_use:
+            weight_initializers, weight_node = _fp8_weight(module, weight, scale_dtype)
+            edits.initializers.extend(weight_initializers)
+            nodes.append(weight_node)
         key: tuple[str, str] = (activation, "fp8")
         if key not in edits.quantized_inputs:
+            input_amax: float = precision.input_amax if isinstance(precision.input_amax, float) else precision.input_amax[activation]
             # The zero point name is part of the released EgoHand export bytes.
             input_initializers, input_nodes, edits.quantized_inputs[key] = _fp8_input(
-                activation, module, precision.input_amax, f"{module}.a_zp8", scale_dtype
+                activation, input_prefix, input_amax, f"{input_prefix}.a_zp8", scale_dtype
             )
             edits.initializers.extend(input_initializers)
             nodes.extend(input_nodes)
     else:
-        weight_initializers, weight_nodes = _nvfp4_weight(module, weight)
-        edits.initializers.extend(weight_initializers)
-        nodes.extend(weight_nodes)
+        if first_use:
+            weight_initializers, weight_nodes = _nvfp4_weight(module, weight)
+            edits.initializers.extend(weight_initializers)
+            nodes.extend(weight_nodes)
         key = (activation, "fp4")
         if key not in edits.quantized_inputs:
-            input_initializers, input_nodes, edits.quantized_inputs[key] = _nvfp4_input(activation, module, precision.input_amax)
+            input_initializers, input_nodes, edits.quantized_inputs[key] = _nvfp4_input(activation, input_prefix, precision.input_amax)
             edits.initializers.extend(input_initializers)
             nodes.extend(input_nodes)
-    nodes.append(helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0]))
-    node.input[0], node.input[1] = edits.quantized_inputs[key], f"{module}.w_t"
+    if first_use:
+        nodes.append(helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0]))
+        edits.quantized_weights[module] = f"{module}.w_t"
+    node.input[0], node.input[1] = edits.quantized_inputs[key], edits.quantized_weights[module]
     edits.inserted[index] = nodes
 
 
@@ -276,6 +288,65 @@ def _rewrite_attention(
             edits.inserted.setdefault(index, []).extend(input_nodes)
 
 
+def softmax_attentions(graph: onnx.GraphProto) -> list[tuple[onnx.NodeProto, onnx.NodeProto, onnx.NodeProto]]:
+    """Every attention spelled ``MatMul(q, k^T) -> Softmax -> MatMul(p, v)``, in graph order.
+
+    Returns:
+        ``(scores, softmax, context)`` per attention: the Softmax reads the scores MatMul and only the context MatMul
+        reads the Softmax.
+    """
+    producers: dict[str, onnx.NodeProto] = {output: node for node in graph.node for output in node.output}
+    consumers: dict[str, list[onnx.NodeProto]] = {}
+    for node in graph.node:
+        for name in node.input:
+            consumers.setdefault(name, []).append(node)
+    found: list[tuple[onnx.NodeProto, onnx.NodeProto, onnx.NodeProto]] = []
+    for node in graph.node:
+        if node.op_type != "Softmax":
+            continue
+        scores: onnx.NodeProto | None = producers.get(node.input[0])
+        following: list[onnx.NodeProto] = consumers.get(node.output[0], [])
+        if scores is not None and scores.op_type == "MatMul" and len(following) == 1 and following[0].op_type == "MatMul":
+            found.append((scores, node, following[0]))
+    return found
+
+
+def quantize_softmax_attention(graph: onnx.GraphProto, attention: Mapping[str, Fp8Attention], scale_dtype: ScaleDtype = "bfloat16") -> None:
+    """Static FP8 Q/DQ on ``q``, ``k^T``, the softmax output (range ``SOFTMAX_AMAX``) and ``v`` of chosen attentions, in place.
+
+    TensorRT then fuses an FP8 MHA; with only q, k and v quantized the fusion breaks. New tensors are named
+    ``{module}.{q,k,softmax,v}_fp8``; their nodes go before the MatMul that reads them.
+
+    Args:
+        graph: Edited in place.
+        attention: The FP8 attentions by their Softmax output (:func:`softmax_attentions`); the others keep precision.
+        scale_dtype: Dtype of the attention operands.
+
+    Raises:
+        ValueError: When a key is not the Softmax output of a MatMul -> Softmax -> MatMul attention.
+    """
+    index_of: dict[str, int] = {node.output[0]: index for index, node in enumerate(graph.node)}
+    inserted: dict[int, list[onnx.NodeProto]] = {}
+    found: set[str] = set()
+    for scores, softmax, context in softmax_attentions(graph):
+        entry: Fp8Attention | None = attention.get(softmax.output[0])
+        if entry is None:
+            continue
+        found.add(softmax.output[0])
+        q_amax, k_amax, v_amax = entry.amax
+        operands = ((scores, 0, "q", q_amax), (scores, 1, "k", k_amax), (context, 0, "softmax", SOFTMAX_AMAX), (context, 1, "v", v_amax))
+        for target, slot, tag, amax in operands:
+            initializers, nodes, target.input[slot] = fp8_input_qdq(target.input[slot], f"{entry.module}.{tag}_fp8", amax, scale_dtype)
+            graph.initializer.extend(initializers)
+            inserted.setdefault(index_of[target.output[0]], []).extend(nodes)
+    missing: set[str] = set(attention) - found
+    if missing:
+        raise ValueError(f"Not the Softmax output of a MatMul -> Softmax -> MatMul attention: {sorted(missing)}.")
+    ordered: list[onnx.NodeProto] = [new for index, node in enumerate(graph.node) for new in [*inserted.get(index, []), node]]
+    graph.ClearField("node")
+    graph.node.extend(ordered)
+
+
 def _splice(graph: onnx.GraphProto, edits: _Edits) -> None:
     """Insert the new nodes before their consumers and append the new initializers."""
     ordered: list[onnx.NodeProto] = [new for index, node in enumerate(graph.node) for new in [*edits.inserted.get(index, []), node]]
@@ -284,7 +355,7 @@ def _splice(graph: onnx.GraphProto, edits: _Edits) -> None:
     graph.initializer.extend(edits.initializers)
 
 
-def prune_dead(graph: onnx.GraphProto) -> None:
+def _prune_dead(graph: onnx.GraphProto) -> None:
     """Walk back from the outputs; the replaced weights and their Cast/Transpose chains fall away."""
     live: set[str] = {output.name for output in graph.output}
     kept: list[onnx.NodeProto] = []
@@ -304,7 +375,8 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
     """Rewrite ``model`` in place from ``plan`` and drop the weights it replaces.
 
     Linears that read the same activation at the same precision share one input
-    quantization (Q/K/V projections, gated MLP inputs).
+    quantization (Q/K/V projections, gated MLP inputs); MatMuls that apply the same
+    weight share one quantized weight.
 
     Raises:
         ValueError: If a weight MatMul has no plan entry, an entry does not fit its
@@ -342,7 +414,7 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
         raise ValueError(f"Planned modules are not weight MatMul/Conv nodes of the graph: {sorted(missing)}.")
     _rewrite_attention(graph, plan.attention, edits, plan.scale_dtype)
     _splice(graph, edits)
-    prune_dead(graph)
+    _prune_dead(graph)
     if not any(opset.domain == "trt.plugins" for opset in model.opset_import):
         model.opset_import.append(helper.make_opsetid("trt.plugins", 1))
     return model

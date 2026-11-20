@@ -6,9 +6,9 @@ cost of every tensor-core op it reaches. Quantized here, on the graph `colsfm.fl
 prepares:
 
 * every transformer linear (`matcher.transformers.*`): FP8 weights with per-output-channel scales, quantized once per
-  weight (both images' MatMuls share it), FP8 inputs with one static scale each (trtkit's `fp8_weight_dq` / `fp8_input_qdq`);
-* both attention-core MatMuls of every attention (q.k^T and p.v): FP8 operands with static bf16 scales; the softmax
-  probabilities use amax 1.
+  weight (both images' MatMuls share it), FP8 inputs with one static scale each (trtkit's `quantize_qdq`);
+* every attention (q.k^T -> softmax -> p.v): FP8 q, k and v with static bf16 scales, the softmax probabilities on
+  [0, 1] (trtkit's `quantize_softmax_attention`).
 
 The input projection, the positional encoding and the match head keep their precision. An input scale is the
 largest magnitude the calibration pairs produced, times `trtkit.onnx_qdq.LINEAR_INPUT_HEADROOM`. The scales live in
@@ -31,11 +31,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-import numpy as np
 import onnx
-import torch
-from onnx import TensorProto, helper, numpy_helper
-from trtkit.onnx_qdq import LINEAR_INPUT_HEADROOM, fp8_input_qdq, fp8_weight_dq, prune_dead
+from onnx import TensorProto, helper
+from trtkit.onnx_qdq import (
+    LINEAR_INPUT_HEADROOM,
+    Fp8Attention,
+    Fp8Linear,
+    KeepPrecision,
+    QdqPlan,
+    quantize_qdq,
+    quantize_softmax_attention,
+    softmax_attentions,
+)
 
 from colsfm.matching import FLEXGLUE_FP8_COMMAND, FlexGlueOptions
 
@@ -48,33 +55,28 @@ FP8_OPSET: Final[int] = 21
 CALIBRATION_PAIRS: Final[int] = 200
 """Image pairs the activation maxima are taken over."""
 
-PROBABILITY_AMAX: Final[float] = 1.0
-"""The softmax probabilities' range, fixed rather than calibrated."""
-
 SOURCE_PROPERTY: Final[str] = "colsfm_fp8_source"
 """Metadata key of the FP8 graph naming the prepared matcher it was calibrated from."""
 
 
 @dataclass(frozen=True, slots=True)
 class Fp8Targets:
-    """The MatMuls of a prepared matcher graph that go to FP8, by node name."""
+    """The transformer linears and the attentions of a prepared matcher graph that go to FP8."""
 
-    linears: tuple[tuple[str, str, str], ...]
-    """`(node, activation, weight initializer)` per transformer linear; one weight may serve several nodes."""
-    cores: tuple[tuple[str, str, str], ...]
-    """`(node, left operand, right operand)` per attention-core MatMul (bf16 operands)."""
-    probabilities: frozenset[str]
-    """Left operands that are softmax outputs."""
+    linears: tuple[tuple[str, str], ...]
+    """`(activation, weight initializer)` per transformer linear MatMul; one weight serves the MatMuls of both images."""
+    attentions: tuple[tuple[str, str, str, str], ...]
+    """`(softmax output, q, k^T, v)` per attention (bf16 operands)."""
 
     def calibrated(self) -> list[str]:
         """The activations whose maxima calibration measures, in graph order, each once."""
-        names: list[str] = [activation for _, activation, _ in self.linears]
-        names += [operand for _, left, right in self.cores for operand in (left, right) if operand not in self.probabilities]
+        names: list[str] = [activation for activation, _ in self.linears]
+        names += [operand for _, q, k, v in self.attentions for operand in (q, k, v)]
         return list(dict.fromkeys(names))
 
 
 def fp8_targets(graph: onnx.GraphProto) -> Fp8Targets:
-    """Find the transformer linears (`MatMul(x, Transpose(weight))`) and the bf16 attention-core MatMuls.
+    """Find the transformer linears (`MatMul(x, Transpose(weight))`) and the attentions (MatMul -> Softmax -> MatMul).
 
     Args:
         graph: A matcher graph from `prepare_matcher_graph` (contrib ops rewritten, no conditionals).
@@ -83,34 +85,26 @@ def fp8_targets(graph: onnx.GraphProto) -> Fp8Targets:
         The FP8 targets.
 
     Raises:
-        ValueError: When the graph has no transformer linear or no attention core (not the FlexGlue matcher).
+        ValueError: When the graph has no transformer linear or no attention (not the FlexGlue matcher).
     """
     producers: dict[str, onnx.NodeProto] = {output: node for node in graph.node for output in node.output}
     initializers: set[str] = {tensor.name for tensor in graph.initializer}
-    linears: list[tuple[str, str, str]] = []
-    cores: list[tuple[str, str, str]] = []
-    probabilities: set[str] = set()
+    linears: list[tuple[str, str]] = []
     for node in graph.node:
-        if node.op_type != "MatMul":
-            continue
-        left, right = node.input
-        right_producer: onnx.NodeProto | None = producers.get(right)
-        if right_producer is None:
-            continue
+        weight: onnx.NodeProto | None = producers.get(node.input[1]) if node.op_type == "MatMul" else None
         if (
-            right_producer.op_type == "Transpose"
-            and right_producer.input[0] in initializers
-            and right_producer.input[0].startswith(TRANSFORMER_WEIGHTS)
+            weight is not None
+            and weight.op_type == "Transpose"
+            and weight.input[0] in initializers
+            and weight.input[0].startswith(TRANSFORMER_WEIGHTS)
         ):
-            linears.append((node.name, left, right_producer.input[0]))
-        elif right_producer.op_type == "Cast" and helper.get_attribute_value(right_producer.attribute[0]) == TensorProto.BFLOAT16:
-            cores.append((node.name, left, right))
-            left_producer: onnx.NodeProto | None = producers.get(left)
-            if left_producer is not None and left_producer.op_type == "Softmax":
-                probabilities.add(left)
-    if not linears or not cores:
-        raise ValueError(f"found {len(linears)} transformer linears and {len(cores)} attention cores; not a prepared FlexGlue matcher")
-    return Fp8Targets(linears=tuple(linears), cores=tuple(cores), probabilities=frozenset(probabilities))
+            linears.append((node.input[0], weight.input[0]))
+    attentions: list[tuple[str, str, str, str]] = [
+        (softmax.output[0], scores.input[0], scores.input[1], context.input[1]) for scores, softmax, context in softmax_attentions(graph)
+    ]
+    if not linears or not attentions:
+        raise ValueError(f"found {len(linears)} transformer linears and {len(attentions)} attentions; not a prepared FlexGlue matcher")
+    return Fp8Targets(linears=tuple(linears), attentions=tuple(attentions))
 
 
 def calibration_graph(model: onnx.ModelProto, targets: Fp8Targets) -> onnx.ModelProto:
@@ -125,10 +119,9 @@ def calibration_graph(model: onnx.ModelProto, targets: Fp8Targets) -> onnx.Model
     """
     calibration: onnx.ModelProto = onnx.ModelProto()
     calibration.CopyFrom(model)
-    core_operands: set[str] = {operand for _, left, right in targets.cores for operand in (left, right)}
+    operands: set[str] = {operand for _, q, k, v in targets.attentions for operand in (q, k, v)}
     calibration.graph.output.extend(
-        helper.make_tensor_value_info(name, TensorProto.BFLOAT16 if name in core_operands else TensorProto.FLOAT16, None)
-        for name in targets.calibrated()
+        helper.make_tensor_value_info(name, TensorProto.BFLOAT16 if name in operands else TensorProto.FLOAT16, None) for name in targets.calibrated()
     )
     return calibration
 
@@ -154,48 +147,28 @@ def quantize(model: onnx.ModelProto, targets: Fp8Targets, amax: Mapping[str, flo
     quantized: onnx.ModelProto = onnx.ModelProto()
     quantized.CopyFrom(model)
     graph: onnx.GraphProto = quantized.graph
-    weights: dict[str, onnx.TensorProto] = {tensor.name: tensor for tensor in graph.initializer}
-    linears: dict[str, tuple[str, str]] = {node: (activation, weight) for node, activation, weight in targets.linears}
-    cores: dict[str, tuple[str, str]] = {node: (left, right) for node, left, right in targets.cores}
-    nodes: list[onnx.NodeProto] = []
-    added: list[onnx.TensorProto] = []
-    inputs: dict[str, str] = {}
-    """Dequantized name per quantized linear input: the q, k and v projections of one activation share it."""
-    transposed: dict[str, str] = {}
-    """Transposed FP8 weight per weight initializer: the MatMuls of both images share it."""
+    producers: dict[str, onnx.NodeProto] = {output: node for node in graph.node for output in node.output}
+    initializers: set[str] = {tensor.name for tensor in graph.initializer}
+    modules: dict[str, Fp8Linear | KeepPrecision] = {}
     for node in graph.node:
-        if node.name in linears:
-            activation, weight = linears[node.name]
-            if weight not in transposed:
-                module: str = weight.removesuffix(".weight")
-                weight_initializers, weight_node = fp8_weight_dq(
-                    module, torch.from_numpy(numpy_helper.to_array(weights[weight]).astype(np.float32)), "float16"
-                )
-                added.extend(weight_initializers)
-                nodes.extend([weight_node, helper.make_node("Transpose", [f"{module}.w_dq"], [f"{module}.w_t"], perm=[1, 0])])
-                transposed[weight] = f"{module}.w_t"
-            if activation not in inputs:
-                input_initializers, input_nodes, inputs[activation] = fp8_input_qdq(
-                    activation, f"{weight.removesuffix('.weight')}@{node.name}.x", amax[activation] * LINEAR_INPUT_HEADROOM, "float16"
-                )
-                added.extend(input_initializers)
-                nodes.extend(input_nodes)
-            nodes.append(helper.make_node("MatMul", [inputs[activation], transposed[weight]], list(node.output), name=node.name))
-        elif node.name in cores:
-            dequantized: list[str] = []
-            for slot, operand in enumerate(cores[node.name]):
-                limit: float = PROBABILITY_AMAX if operand in targets.probabilities else amax[operand] * LINEAR_INPUT_HEADROOM
-                operand_initializers, operand_nodes, name = fp8_input_qdq(operand, f"{node.name}.in{slot}", limit, "bfloat16")
-                added.extend(operand_initializers)
-                nodes.extend(operand_nodes)
-                dequantized.append(name)
-            nodes.append(helper.make_node("MatMul", dequantized, list(node.output), name=node.name))
-        else:
-            nodes.append(node)
-    del graph.node[:]
-    graph.node.extend(nodes)
-    graph.initializer.extend(added)
-    prune_dead(graph)
+        weight: str = node.input[1] if node.op_type == "MatMul" else ""
+        while weight not in initializers and weight in producers:
+            weight = producers[weight].input[0]
+        if weight.endswith(".weight") and weight in initializers:
+            modules[weight.removesuffix(".weight")] = KeepPrecision()
+    inputs: dict[str, dict[str, float]] = {}
+    for activation, weight in targets.linears:
+        inputs.setdefault(weight.removesuffix(".weight"), {})[activation] = amax[activation] * LINEAR_INPUT_HEADROOM
+    modules.update({module: Fp8Linear(per_input) for module, per_input in inputs.items()})
+    quantize_qdq(quantized, QdqPlan(modules, attention=(), scale_dtype="float16"))
+    quantize_softmax_attention(
+        graph,
+        {
+            softmax: Fp8Attention(softmax, (amax[q] * LINEAR_INPUT_HEADROOM, amax[k] * LINEAR_INPUT_HEADROOM, amax[v] * LINEAR_INPUT_HEADROOM))
+            for softmax, q, k, v in targets.attentions
+        },
+        "bfloat16",
+    )
     for opset in quantized.opset_import:
         if opset.domain in ("", "ai.onnx"):
             opset.version = FP8_OPSET

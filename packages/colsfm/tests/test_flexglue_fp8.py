@@ -69,9 +69,8 @@ def test_only_transformer_linears_and_attention_cores_go_to_fp8() -> None:
     """The head linear keeps its precision; the shared projection input and the core operands are calibrated once each,
     the softmax probabilities not at all (their range is fixed)."""
     targets = fp8_targets(_toy_matcher().graph)
-    assert [node for node, _, _ in targets.linears] == ["mm_q", "mm_k"]
-    assert [node for node, _, _ in targets.cores] == ["mm_logits", "mm_context"]
-    assert targets.probabilities == {"probabilities"}
+    assert targets.linears == (("x", "matcher.transformers.0.self_attn.Wqkv.weight"), ("x", "matcher.transformers.0.self_attn.out.weight"))
+    assert targets.attentions == (("probabilities", "q_bf16", "k_bf16", "k_bf16"),)
     assert targets.calibrated() == ["x", "q_bf16", "k_bf16"]
     extra = calibration_graph(_toy_matcher(), targets).graph.output[1:]
     assert [(v.name, v.type.tensor_type.elem_type) for v in extra] == [
