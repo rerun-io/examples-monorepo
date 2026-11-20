@@ -106,6 +106,7 @@ def drive(
     read_rows: RowsReader,
     map_every_ns: tuple[int, int] = (MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS),
     finish: Callable[[VioLogger], None] | None = None,
+    colors: list[np.ndarray] | None = None,
 ) -> Logged:
     """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
 
@@ -118,6 +119,7 @@ def drive(
         read_rows: Reads the recording back, from :mod:`conftest`.
         map_every_ns: The logger's map-keyframes and map-points cadences.
         finish: Called with the logger at the last cursor, after the complete paths (what a replay ends with).
+        colors: Each frameset's RGB frames (``Frameset.colors``); None logs without them.
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
@@ -151,7 +153,7 @@ def drive(
         assert frame is not None
         # What `VioStage` does: read the map only when it is due (None with the back end off).
         map_snapshot: _core.MapSnapshot | None = vio.map_snapshot() if logger.map_is_due(snapshot) else None
-        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_snapshot=map_snapshot)
+        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_snapshot=map_snapshot, colors=colors)
         tracked.append(t_ns)
         newest_keyframes.append(int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else -1)
     # What `VioStage.flush` does: flush (which makes the map current), then draw the final map.
@@ -344,6 +346,28 @@ def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
         entity: str = f"/world/rig_00/cam_{index:02d}/pinhole/keypoints"
         assert [t_ns for t_ns, _ in logged.rows[entity]] == logged.tracked
         assert all(len(values["Points2D:positions"]) > 0 for _, values in logged.rows[entity])
+
+
+def test_the_rig_rides_the_estimate_only_without_ground_truth(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader, logged: Logged
+) -> None:
+    """A segment with no ground truth gets its rig moved by this layer, so a view rooted at the rig follows the estimate."""
+    assert RIG_ENTITY not in logged.rows, "with ground truth the rig is the truth's, not the estimate's"
+    alone: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), empty_trajectory(), texture, tmp_path / "alone.rrd", read_rows)
+    assert [t_ns for t_ns, _ in alone.rows[RIG_ENTITY]] == alone.tracked
+    assert alone.rows[RIG_ENTITY] == alone.rows[f"{VIO_RUN_ENTITY}/rig"]
+
+
+def test_landmarks_take_the_colour_of_the_image_under_their_keypoint(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
+    small: list[np.ndarray] = [np.full((rig[0].height // 4, rig[0].width // 4, 3), (10, 20, 30), dtype=np.uint8) for _ in rig]
+    reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
+    colored: Logged = drive(pipeline(2), rig, straight_line(reference_t_ns), texture, tmp_path / "rgb.rrd", read_rows, colors=small)
+    rows: list[Row] = [row for row in colored.rows[f"{VIO_RUN_ENTITY}/landmarks"] if len(row[1]["Points3D:positions"])]
+    assert rows, "the window holds landmarks"
+    assert all(set(values["Points3D:colors"]) == {packed((10, 20, 30, 255))} for _, values in rows)
 
 
 def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineFactory, camera: CameraFactory) -> None:

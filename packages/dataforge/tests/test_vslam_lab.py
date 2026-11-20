@@ -425,7 +425,7 @@ def test_predictions_take_the_palette_in_source_order_and_their_depth_stays_out_
     assert packed_rgb(overrides[schema.trajectory_path(schema.GT_RUN_SOURCE)]) == GT_PATH_COLOR
     assert packed_rgb(overrides[schema.trajectory_path("alpha")]) == PREDICTION_PALETTE[0]
     assert packed_rgb(overrides[schema.trajectory_path("zeta")]) == PREDICTION_PALETTE[1]
-    assert {f"- {schema.depth_path(0, 0)}/**", f"- {DEPTH}/**"} <= set(str(rig.contents).splitlines())
+    assert {f"- {schema.depth_path(0, 0)}/**", f"- {DEPTH}/**"} <= set(list(rig.contents))  # type: ignore[arg-type]
     pane: rrb.View = next(view for view in views if view.name == "alpha: depth")
     assert (pane.origin, pane.contents) == (DEPTH.rsplit("/", 1)[0], [DEPTH])
 

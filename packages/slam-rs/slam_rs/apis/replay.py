@@ -32,7 +32,7 @@ from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load
 from slam_rs.rig import TIMELINE
 from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import RUN_ENTITY, FrameMaskLog, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import COLOR_DOWNSCALE, RUN_ENTITY, FrameMaskLog, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -382,7 +382,7 @@ def main(config: Config) -> None:
         )
         if not feed.has_ground_truth:
             print("ground truth absent, not scored")
-        log_calibration(feed.cameras)
+        log_calibration(feed.cameras, gravity_world=not feed.has_ground_truth)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
             stage = FrontendStage(
@@ -413,7 +413,8 @@ def main(config: Config) -> None:
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
-        _replay(feed, config, stage)
+        # The landmarks take their colour from the frames: the estimator's own stay gray, the logger gets an RGB copy.
+        _replay(dataclasses.replace(feed, color_downscale=COLOR_DOWNSCALE) if isinstance(stage, VioStage) else feed, config, stage)
         if not isinstance(stage, VioStage):
             return
         # The per-frameset segments show where the run had got to; these show

@@ -43,10 +43,17 @@ def test_cuda_rejects_source_resolution_mismatch(video: bytes) -> None:
 
 @pytest.mark.parametrize(("downscale", "height", "width"), [(1, 64, 96), (3, 21, 32)])
 def test_cuda_preserves_calibrated_integer_downscale(video: bytes, downscale: int, height: int, width: int) -> None:
-    frames: list[UInt8[ndarray, "h w"]] = list(decode_gray_cuda(video, (height, width), downscale))
+    frames: list[UInt8[ndarray, "h w"]] = [gray for gray, color in decode_gray_cuda(video, (height, width), downscale) if color is None]
     assert len(frames) == 1
     for frame in frames:
         assert frame.shape == (height, width)
         assert frame.dtype == np.uint8
         assert frame.flags.c_contiguous
         np.testing.assert_allclose(frame, 100, atol=2)
+
+
+def test_cuda_pairs_each_gray_frame_with_a_smaller_rgb_copy_on_request(video: bytes) -> None:
+    pairs = list(decode_gray_cuda(video, (64, 96), 1, color_downscale=4))
+    assert len(pairs) == 1
+    gray, color = pairs[0]
+    assert gray.shape == (64, 96) and color is not None and color.shape == (16, 24, 3) and color.dtype == np.uint8

@@ -14,14 +14,14 @@ from typing import Literal, TypeAlias
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Bool, Float64, Int64, UInt8, UInt32
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
-from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints, track_colors
+from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
 from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
@@ -77,7 +77,11 @@ MARGINALIZED_COLOR: tuple[int, int, int, int] = (255, 90, 90, 70)
 MAP_KEYFRAME_COLOR: tuple[int, int, int, int] = (255, 160, 60, 255)
 """A map keyframe that has left the window; window keyframes keep :data:`KEYFRAME_COLOR`."""
 MAP_POINT_COLOR: tuple[int, int, int, int] = (200, 200, 210, 120)
-"""A map point: faint, so the window's landmarks stay readable on top."""
+"""A map point whose image colour is unknown: faint, so the window's landmarks stay readable on top."""
+LANDMARK_COLOR: tuple[int, int, int, int] = (200, 200, 210, 255)
+"""A window landmark whose image colour is unknown (the frames came without :attr:`Frameset.colors`)."""
+COLOR_DOWNSCALE: int = 4
+"""How much smaller the RGB copy a replay samples landmark colours from is than the tracked frame."""
 
 FRUSTUM_DEPTH_M: float = 0.08
 """Window frusta's ``image_plane_distance``, metres: an orientation marker, not a claim about range.
@@ -234,6 +238,12 @@ class VioLogger:
     """Least video time between two map-keyframes draws (:data:`MAP_KEYFRAMES_EVERY_NS`)."""
     map_points_every_ns: int = MAP_POINTS_EVERY_NS
     """Least video time between two map-points draws (:data:`MAP_POINTS_EVERY_NS`)."""
+    tracked_widths: tuple[int, ...] = ()
+    """Width of the frames each camera is tracked on, which the keypoints are in; empty means the calibrated width."""
+    landmark_rgba: dict[int, int] = field(default_factory=dict)
+    """Packed RGBA of every landmark id seen so far: the image's colour under its keypoint where it was first tracked.
+
+    A landmark's id is its keypoint's (``LandmarkId::from(KeypointId)``), so the frontend's tracks name the pixel."""
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
@@ -259,6 +269,7 @@ class VioLogger:
         frame: _core.FlowFrame,
         elapsed_ms: float,
         map_snapshot: _core.MapSnapshot | None = None,
+        colors: list[UInt8[ndarray, "ch cw 3"]] | None = None,
     ) -> None:
         """Log one tracked frameset: the keypoints, the estimated and ground-truth paths, the rig, the window, the landmarks and the counters.
 
@@ -268,6 +279,7 @@ class VioLogger:
             frame: The keypoints the estimator's own frontend tracked.
             elapsed_ms: Wall time the ``track`` call took.
             map_snapshot: The back end's map, when the caller read it (see :meth:`map_is_due`); drawn under the run.
+            colors: The frameset's frames in RGB (:attr:`Frameset.colors`), which colour the landmarks; None draws them grey.
         """
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
@@ -276,7 +288,15 @@ class VioLogger:
         self.estimate_position_m.append(pose[0:3].copy())
         self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
 
-        rr.log(f"{VIO_RUN_ENTITY}/rig", rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
+        rig_pose: rr.Transform3D = rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))
+        rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
+        if len(self.ground_truth) == 0:
+            # Nothing else moves the dataset's rig on a segment without ground truth, so this layer does, and every
+            # view rooted at the rig (the dataforge follow view) rides the estimate. With ground truth the rig stays the
+            # truth's (``log_frameset_inputs``).
+            rr.log(RIG_ENTITY, rig_pose)
+        if colors is not None:
+            self._remember_colors(frame, colors)
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
         log_keypoints(frame)
@@ -390,11 +410,30 @@ class VioLogger:
         self._log_camera_slots("marginalized", marginalized, [MARGINALIZED_COLOR] * len(marginalized))
         self.previous_window = {t_ns: pose for t_ns, pose in zip(snapshot.window_t_ns.tolist(), poses, strict=True)}
 
+    def _remember_colors(self, frame: _core.FlowFrame, colors: list[UInt8[ndarray, "ch cw 3"]]) -> None:
+        """Give every track id not seen before the colour of the image under its keypoint, in the first camera that has it."""
+        for camera, color in enumerate(colors):
+            ids: Int64[ndarray, " n"] = frame.ids(camera)
+            new: Bool[ndarray, " n"] = np.fromiter((track not in self.landmark_rgba for track in ids.tolist()), dtype=bool, count=len(ids))
+            if not new.any():
+                continue
+            width: int = self.tracked_widths[camera] if self.tracked_widths else self.cameras[camera].width
+            scale: float = color.shape[1] / width
+            uv: Int64[ndarray, "k 2"] = (frame.positions(camera)[new] * scale).astype(np.int64)
+            rgb: UInt8[ndarray, "k 3"] = color[np.clip(uv[:, 1], 0, color.shape[0] - 1), np.clip(uv[:, 0], 0, color.shape[1] - 1)]
+            packed: Int64[ndarray, " k"] = (rgb[:, 0].astype(np.int64) << 24) | (rgb[:, 1].astype(np.int64) << 16) | (rgb[:, 2].astype(np.int64) << 8) | 255
+            self.landmark_rgba.update(zip(ids[new].tolist(), packed.tolist(), strict=True))
+
+    def _colors_of(self, ids: Int64[ndarray, " n"], unknown: tuple[int, int, int, int]) -> UInt32[ndarray, " n"]:
+        """Packed RGBA per landmark id: its remembered image colour, else ``unknown``."""
+        fallback: int = (unknown[0] << 24) | (unknown[1] << 16) | (unknown[2] << 8) | unknown[3]
+        return np.fromiter((self.landmark_rgba.get(landmark, fallback) for landmark in ids.tolist()), dtype=np.uint32, count=len(ids))
+
     def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
-        """Draw the window's landmarks, coloured by the keyframe that hosts them."""
+        """Draw the window's landmarks in the colour of the image where each was first tracked."""
         rr.log(
             f"{VIO_RUN_ENTITY}/landmarks",
-            rr.Points3D(snapshot.landmark_positions, colors=track_colors(snapshot.landmark_hosts), radii=0.008),
+            rr.Points3D(snapshot.landmark_positions, colors=self._colors_of(snapshot.landmark_ids, LANDMARK_COLOR), radii=0.008),
         )
 
     def map_is_due(self, snapshot: _core.VioSnapshot) -> bool:
@@ -446,7 +485,7 @@ class VioLogger:
         log_loops(map_snapshot)
         self.map_keyframes_t_ns = t_ns
         if final or self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
-            rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=MAP_POINT_COLOR, radii=0.004))
+            rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=self._colors_of(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004))
             self.map_points_t_ns = t_ns
 
     def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
@@ -495,14 +534,19 @@ class VioLogger:
         return result
 
 
-def log_calibration(cameras: tuple[CameraCalib, ...]) -> None:
+def log_calibration(cameras: tuple[CameraCalib, ...], *, gravity_world: bool = False) -> None:
     """Log the rig's static geometry so the images sit in the right place in 3D.
 
     The ``Pinhole`` goes on the ``pinhole`` child, which is the dataset's own
     layout: the images and the keypoints hang under it, so they are the pixels of
     the camera that projects them.
+
+    Args:
+        cameras: The rig's cameras.
+        gravity_world: The world is the estimator's own (no ground truth to align to): gravity-aligned, z up, as the
+            catalog layer states it. Otherwise the root keeps ``RUB``.
     """
-    rr.log("/", rr.ViewCoordinates.RUB, static=True)
+    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP if gravity_world else rr.ViewCoordinates.RUB, static=True)
     log_rig(cameras, RIG_ENTITY, pinhole_child="/pinhole")
 
 
@@ -526,6 +570,7 @@ class VioStage:
 
     def __post_init__(self) -> None:
         """Draw the keypoints in each camera's own pixels: a rig wider than 2048 px is tracked on frames reduced by two."""
+        self.logger.tracked_widths = tuple(width for width, _ in self.lockstep.vio.tracked_resolution)
         for camera, (width, _) in zip(self.logger.cameras, self.lockstep.vio.tracked_resolution, strict=True):
             if width != camera.width:
                 rr.log(f"{camera_entity(camera.index)}/keypoints", rr.Transform3D(scale=2.0), static=True)
@@ -588,7 +633,7 @@ class VioStage:
         assert frame.t_ns == result.t_ns
         # None with the back end off; read only when a keyframe joined and the map is due (never waits for the back end).
         map_snapshot: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot() if self.logger.map_is_due(snapshot) else None
-        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_snapshot)
+        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_snapshot, held.colors)
 
     def refuse_lost_framesets(self) -> None:
         """Stop the run when a frameset never got the inertial samples that cover it.

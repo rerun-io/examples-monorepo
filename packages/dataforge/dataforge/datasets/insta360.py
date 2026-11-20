@@ -102,6 +102,64 @@ LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
 RUN_SOURCE: str = "slam_rs"
 """The run layer the layouts show: slam-rs tracks these clips."""
+VIO_SOURCE: str = "slam_rs_vio"
+"""slam-rs's raw causal VIO run, in the same layer: the replay draws it a segment a frameset, with its landmarks."""
+COLSFM_SOURCE: str = "colsfm"
+"""The colsfm layer: refined rig, frusta, and the sparse cloud logged at each point's first observing keyframe."""
+FOLLOW_PATH_WINDOW_S: float = 30.0
+"""How far back of the cursor the follow view draws a path logged a segment a pose, in seconds."""
+KEYPOINT_COLOR: tuple[int, int, int] = (60, 220, 120)
+"""Tracked keypoints on the lenses: the green the clip B overview drew them in."""
+KEYPOINT_RADIUS_UI: float = 2.5
+"""Keypoint radius in ui points: a 2 px image radius shrinks below one screen pixel on a 1920 px lens in a small pane."""
+
+
+def lens_pane(cam: int) -> rrb.Spatial2DView:
+    """One lens: its video, the tracked keypoints of a slam-rs layer over it, and the people mask the trackers ignored.
+
+    The replay's own frames (``pinhole/image``, gray) are left out: the base video is the same picture in colour.
+    """
+    pinhole: str = schema.pinhole_path(RIG, cam)
+    return blueprints.camera_view(
+        f"lens{cam}",
+        RIG,
+        cam,
+        contents=[schema.video_path(RIG, cam), f"{pinhole}/keypoints", f"{pinhole}/people_mask"],
+        overrides={f"{pinhole}/keypoints": rr.Points2D.from_fields(colors=KEYPOINT_COLOR, radii=rr.Radius.ui_points(KEYPOINT_RADIUS_UI))},
+    )
+
+
+def segment_layout(*, panorama: bool) -> rrb.Blueprint:
+    """Both lenses (and with ``panorama`` the panorama) beside two 3D views, over the IMU plots.
+
+    The shared ``rig_blueprint``: an overview of the whole walk and a follow view rooted at ``/world/rig_00``, which a
+    pose layer animates (slam-rs's catalog layer and replay layer both do when the segment has no ``gt``). Overrides
+    on a missing entity are inert, so the same layout serves a base-only segment, a SLAM run and a colsfm run.
+
+    What accumulates is logged once at its own time and shown through a cursor window: the VIO path (a segment per
+    frameset) since the start in the overview and over the last ``FOLLOW_PATH_WINDOW_S`` in the follow view, and the
+    colsfm cloud (a row per keyframe) since the start in both, so it grows along the walk. The replay's window and
+    marginalized frusta stay in the follow view only.
+    """
+    vio_path: str = schema.trajectory_path(VIO_SOURCE)
+    colsfm_points: str = f"{schema.run_path(COLSFM_SOURCE)}/points"
+    images: list[str] = [f"{schema.pinhole_path(RIG, cam)}/image" for cam in range(2)]
+    return blueprints.rig_blueprint(
+        [lens_pane(cam) for cam in range(2)] + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
+        rig=RIG,
+        run_source=RUN_SOURCE,
+        extra_run_sources=(VIO_SOURCE, COLSFM_SOURCE),
+        # Lens 0 looks along z_P = -y_imu; image up is -y_P = -x_imu.
+        eye_controls=blueprints.follow_eye_controls((0.0, -1.0, 0.0), (-1.0, 0.0, 0.0)),
+        plots=blueprints.imu_plots(RIG, 0),
+        overview_exclude=[*images, f"{schema.run_path(VIO_SOURCE)}/window", f"{schema.run_path(VIO_SOURCE)}/marginalized"],
+        follow_exclude=images,
+        overview_overrides={vio_path: blueprints.cursor_window(None), colsfm_points: blueprints.cursor_window(None)},
+        follow_overrides={
+            vio_path: [blueprints.cursor_window(FOLLOW_PATH_WINDOW_S), rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(3.0))],
+            colsfm_points: blueprints.cursor_window(None),
+        },
+    )
 
 
 def _pictures(rig: insta360_io.InsvRig, lens: int, frames: int, *, threads: int) -> Iterator[av.VideoFrame]:
@@ -400,7 +458,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     PANORAMA_LAYER: lambda recording: self.write_panorama(recording, reader.rig, targets[paths.BASE_LAYER]),
                     CUBE_LAYER: lambda recording: self.write_cube(recording, reader.rig, targets[paths.BASE_LAYER]),
                 },
-                base_blueprint=self.segment_blueprint(panorama=PANORAMA_LAYER in pending),
+                base_blueprint=segment_layout(panorama=PANORAMA_LAYER in pending),
             )
         return targets[paths.BASE_LAYER]
 
@@ -558,24 +616,12 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
 
     def default_blueprint(self) -> rrb.Blueprint:
         """The base's layout: no panorama pane, since the panorama is an opt-in derived layer."""
-        return self.segment_blueprint(panorama=False)
+        return segment_layout(panorama=False)
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
         """The segment layout shows the panorama pane when any registered segment holds the panorama layer."""
         layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
-        return self.segment_blueprint(panorama=any(PANORAMA_LAYER in names for names in layer_names)), self.table_blueprint()
-
-    def segment_blueprint(self, *, panorama: bool) -> rrb.Blueprint:
-        """Both lenses (and with ``panorama`` the panorama) beside the rig in 3D, over the IMU plots."""
-        lenses: list[rrb.Spatial2DView] = [blueprints.camera_view(f"lens{cam}", RIG, cam, contents=[schema.video_path(RIG, cam)]) for cam in range(2)]
-        return blueprints.rig_blueprint(
-            lenses + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
-            rig=RIG,
-            run_source=RUN_SOURCE,
-            # Lens 0 looks along z_P = -y_imu; image up is -y_P = -x_imu.
-            eye_controls=blueprints.follow_eye_controls((0.0, -1.0, 0.0), (-1.0, 0.0, 0.0)),
-            plots=blueprints.imu_plots(RIG, 0),
-        )
+        return segment_layout(panorama=any(PANORAMA_LAYER in names for names in layer_names)), self.table_blueprint()
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Preview card: the rig beside lens 0."""

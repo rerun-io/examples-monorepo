@@ -10,13 +10,16 @@ from simplecv.video_io import TorchCodecVideoReader
 from torch import Tensor
 
 
-def decode_gray_cuda(payload: bytes, resize_hw: tuple[int, int], downscale: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
+def decode_gray_cuda(
+    payload: bytes, resize_hw: tuple[int, int], downscale: int = 1, color_downscale: int | None = None
+) -> Iterator[tuple[UInt8[ndarray, "h w"], UInt8[ndarray, "ch cw 3"] | None]]:
     """Decode sequential batches, resize and convert RGB to gray on CUDA, then copy the small images to Rust's CPU input.
 
     Uses RGB luminance weights after NVDEC color conversion, so rounding and
     clipped chroma can differ from PyAV's direct YUV-to-gray path.
     The native dimensions after integer downscaling must match calibration;
-    resizing must not make an incompatible source look valid.
+    resizing must not make an incompatible source look valid. With ``color_downscale`` each gray frame comes with an RGB
+    copy that many times smaller (strided on the GPU, for colouring what is drawn); otherwise the pair's second item is None.
     """
     reader: TorchCodecVideoReader = TorchCodecVideoReader(payload, device="cuda", seek_mode="exact", resize_hw=resize_hw)
     try:
@@ -29,7 +32,12 @@ def decode_gray_cuda(payload: bytes, resize_hw: tuple[int, int], downscale: int 
             gray: UInt8[Tensor, "b h w"] = (rgb.float() * weights).sum(dim=1).round().clamp(0, 255).to(dtype=torch.uint8)
             # One host copy per frame: a view into one batch array would leave its last holder (the consumer, behind
             # the feed's prefetch) to unmap 32 frames at once, 118 MB on a 1920 px lens, every 32 framesets.
-            for frame in gray:
-                yield frame.cpu().numpy()
+            if color_downscale is None:
+                for frame in gray:
+                    yield frame.cpu().numpy(), None
+                continue
+            small: UInt8[Tensor, "b ch cw 3"] = rearrange(rgb[:, :, ::color_downscale, ::color_downscale], "b c h w -> b h w c").contiguous()
+            for frame, color in zip(gray, small, strict=True):
+                yield frame.cpu().numpy(), color.cpu().numpy()
     finally:
         reader.close()
