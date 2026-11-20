@@ -1,8 +1,9 @@
-//! A minimal ISO-BMFF (MP4) demuxer for HEVC video tracks.
+//! A minimal ISO-BMFF (MP4) demuxer for H.264 and HEVC video tracks.
 //!
 //! It reads only what a remux needs: the top-level box walk (32-bit, 64-bit and to-end-of-file sizes), `moov`
-//! wherever it sits, and for each `hvc1`/`hev1` track the `hvcC` parameter sets and the sample table. Box layouts
-//! follow ISO/IEC 14496-12 (sample tables, edit lists) and ISO/IEC 14496-15 section 8.3.3 (`hvcC`).
+//! wherever it sits, and for each `avc1`/`avc3` or `hvc1`/`hev1` track the parameter sets of its `avcC` or `hvcC` and
+//! the sample table. Box layouts follow ISO/IEC 14496-12 (sample tables, edit lists) and ISO/IEC 14496-15 sections
+//! 5.3.3 (`avcC`) and 8.3.3 (`hvcC`).
 use std::io::{Read, Seek, SeekFrom};
 
 /// Why a file could not be demuxed.
@@ -34,13 +35,22 @@ pub struct Sample {
     pub is_sync: bool,
 }
 
-/// One HEVC video track: its decoder configuration and its samples in decode order.
+/// The video codec of a track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoCodec {
+    /// H.264 / AVC (`avc1`, `avc3`).
+    H264,
+    /// H.265 / HEVC (`hvc1`, `hev1`).
+    H265,
+}
+
+/// One H.264 or HEVC video track: its decoder configuration and its samples in decode order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoTrack {
     /// `tkhd` track id.
     pub track_id: u32,
-    /// Sample entry four-character code, `hvc1` or `hev1`.
-    pub codec: [u8; 4],
+    /// The codec of the sample entry.
+    pub codec: VideoCodec,
     /// Coded width from the sample entry, pixels.
     pub width: u16,
     /// Coded height from the sample entry, pixels.
@@ -49,7 +59,8 @@ pub struct VideoTrack {
     pub timescale: u32,
     /// Bytes in each NAL length prefix (`lengthSizeMinusOne + 1`).
     pub nal_length_size: u8,
-    /// VPS, SPS and PPS NAL units from `hvcC`, in that order, without length prefixes.
+    /// The parameter sets without length prefixes: SPS and PPS from `avcC`, or VPS, SPS and PPS from `hvcC`, in that
+    /// order.
     pub parameter_sets: Vec<Vec<u8>>,
     /// Samples in decode order.
     pub samples: Vec<Sample>,
@@ -154,8 +165,8 @@ pub fn read_moov<R: Read + Seek>(reader: &mut R) -> Result<Vec<u8>, Mp4Error> {
     Err(Mp4Error::NoMoov)
 }
 
-/// Read every HEVC video track of a file. Tracks of other codecs and handlers are skipped.
-pub fn read_hevc_tracks<R: Read + Seek>(reader: &mut R) -> Result<Vec<VideoTrack>, Mp4Error> {
+/// Read every H.264 and HEVC video track of a file. Tracks of other codecs and handlers are skipped.
+pub fn read_video_tracks<R: Read + Seek>(reader: &mut R) -> Result<Vec<VideoTrack>, Mp4Error> {
     let file_len = reader.seek(SeekFrom::End(0))?;
     let moov = read_moov(reader)?;
     let mut tracks = Vec::new();
@@ -186,27 +197,32 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Option<VideoTrack>, Mp4Error
     let timescale = u32_at(mdhd, if full_box_version(mdhd)? == 1 { 20 } else { 12 })?;
     let stbl = need(need(mdia, b"minf")?, b"stbl")?;
     let stsd = need(stbl, b"stsd")?;
-    let Some((codec, entry)) = children(stsd.get(8..).ok_or_else(|| malformed("short stsd"))?)?
+    let Some((fourcc, entry)) = children(stsd.get(8..).ok_or_else(|| malformed("short stsd"))?)?
         .into_iter()
         .next()
     else {
         return Err(malformed("empty stsd"));
     };
-    if &codec != b"hvc1" && &codec != b"hev1" {
-        return Ok(None);
-    }
+    let (codec, config): (VideoCodec, &[u8; 4]) = match &fourcc {
+        b"avc1" | b"avc3" => (VideoCodec::H264, b"avcC"),
+        b"hvc1" | b"hev1" => (VideoCodec::H265, b"hvcC"),
+        _ => return Ok(None),
+    };
     // VisualSampleEntry: 6 reserved, data_reference_index, 16 pre-defined/reserved, width, height, then 50 more bytes.
     let (width, height) = (
         u16::from_be_bytes(field(entry, 24)?),
         u16::from_be_bytes(field(entry, 26)?),
     );
-    let hvcc = need(
+    let config = need(
         entry
             .get(78..)
             .ok_or_else(|| malformed("short visual sample entry"))?,
-        b"hvcC",
+        config,
     )?;
-    let (nal_length_size, parameter_sets) = parse_hvcc(hvcc)?;
+    let (nal_length_size, parameter_sets) = match codec {
+        VideoCodec::H264 => parse_avcc(config)?,
+        VideoCodec::H265 => parse_hvcc(config)?,
+    };
     let media_time = match child(trak, b"edts")?
         .map(|edts| need(edts, b"elst"))
         .transpose()?
@@ -225,6 +241,27 @@ fn parse_trak(trak: &[u8], file_len: u64) -> Result<Option<VideoTrack>, Mp4Error
         parameter_sets,
         samples,
     }))
+}
+
+/// `avcC`: the NAL length size and the SPS and PPS arrays (ISO/IEC 14496-15 section 5.3.3.1.2).
+fn parse_avcc(b: &[u8]) -> Result<(u8, Vec<Vec<u8>>), Mp4Error> {
+    let nal_length_size = (field::<1>(b, 4)?[0] & 0x03) + 1;
+    let mut at = 5usize;
+    let mut sets = Vec::new();
+    // The SPS count sits in the low five bits of its byte; the PPS count fills its byte.
+    for mask in [0x1f, 0xff] {
+        let count = field::<1>(b, at)?[0] & mask;
+        at += 1;
+        for _ in 0..count {
+            let len = usize::from(u16::from_be_bytes(field(b, at)?));
+            let nal = b
+                .get(at + 2..at + 2 + len)
+                .ok_or_else(|| malformed("avcC NAL past the end"))?;
+            sets.push(nal.to_vec());
+            at += 2 + len;
+        }
+    }
+    Ok((nal_length_size, sets))
 }
 
 /// `hvcC`: the NAL length size and the VPS, SPS and PPS arrays (ISO/IEC 14496-15 section 8.3.3.1.2).
@@ -452,8 +489,9 @@ pub(crate) mod testing {
         out
     }
 
-    /// The parts of one synthetic HEVC track.
+    /// The parts of one synthetic HEVC (or, with `h264`, H.264) track.
     pub struct TrackSpec<'a> {
+        pub h264: bool,
         pub track_id: u32,
         pub sizes: &'a [u32],
         pub chunk_offsets: &'a [u64],
@@ -463,10 +501,29 @@ pub(crate) mod testing {
         pub stss: Option<&'a [u32]>,
         pub media_time: i32,
         pub co64: bool,
+        /// `(nal type, nal)`: HEVC types 32-34, or H.264 types 7 (SPS) and 8 (PPS).
         pub parameter_sets: &'a [(u8, &'a [u8])],
     }
 
-    /// A `trak` box for an `hvc1` track with the given tables.
+    /// `avcC` with 4-byte NAL lengths: the type-7 sets, then the type-8 sets.
+    fn avcc(parameter_sets: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut out = vec![1, 0x64, 0, 0x28, 0xfc | 3];
+        for (t, mask) in [(7u8, 0xe0u8), (8, 0)] {
+            let sets: Vec<&[u8]> = parameter_sets
+                .iter()
+                .filter(|(k, _)| *k == t)
+                .map(|(_, n)| *n)
+                .collect();
+            out.push(mask | sets.len() as u8);
+            for nal in sets {
+                out.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+                out.extend_from_slice(nal);
+            }
+        }
+        out
+    }
+
+    /// A `trak` box for an `hvc1` (or `avc1`) track with the given tables.
     pub fn trak(spec: &TrackSpec) -> Vec<u8> {
         let mut tkhd = vec![0u8; 8];
         tkhd.extend_from_slice(&spec.track_id.to_be_bytes());
@@ -489,9 +546,13 @@ pub(crate) mod testing {
         let mut entry = vec![0u8; 78];
         entry[24..26].copy_from_slice(&1920u16.to_be_bytes());
         entry[26..28].copy_from_slice(&1080u16.to_be_bytes());
-        entry.extend(bx(b"hvcC", &hvcc));
+        if spec.h264 {
+            entry.extend(bx(b"avcC", &avcc(spec.parameter_sets)));
+        } else {
+            entry.extend(bx(b"hvcC", &hvcc));
+        }
         let mut stsd_body = 1u32.to_be_bytes().to_vec();
-        stsd_body.extend(bx(b"hvc1", &entry));
+        stsd_body.extend(bx(if spec.h264 { b"avc1" } else { b"hvc1" }, &entry));
         let mut stsz = vec![0u8; 4];
         stsz.extend_from_slice(&(spec.sizes.len() as u32).to_be_bytes());
         for s in spec.sizes {
@@ -568,6 +629,7 @@ mod tests {
         co64: bool,
     ) -> TrackSpec<'a> {
         TrackSpec {
+            h264: false,
             track_id: 1,
             sizes,
             chunk_offsets: offsets,
@@ -579,6 +641,24 @@ mod tests {
             co64,
             parameter_sets: &[(34, PPS), (32, VPS), (33, SPS)],
         }
+    }
+
+    #[test]
+    fn an_avc1_track_reads_its_sps_and_pps_from_avcc() {
+        let (sps, pps): (&[u8], &[u8]) = (&[0x67, 0x64, 0x00, 0x28], &[0x68, 0xee, 0x3c]);
+        let spec = TrackSpec {
+            h264: true,
+            parameter_sets: &[(8, pps), (7, sps)],
+            ..spec(&[10, 20, 30, 40], &[100, 200], &[[1, 2, 1]], false)
+        };
+        let tracks = read_video_tracks(&mut Cursor::new(bx(b"moov", &trak(&spec)))).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].codec, VideoCodec::H264);
+        assert_eq!(tracks[0].parameter_sets, vec![sps.to_vec(), pps.to_vec()]);
+        assert_eq!(tracks[0].nal_length_size, 4);
+        assert_eq!(tracks[0].samples.len(), 4);
+        // An avcC whose SPS runs past its end is refused, not read past it.
+        assert!(parse_avcc(&[1, 0x64, 0, 0x28, 0xff, 0xe1, 0, 9, 0x67]).is_err());
     }
 
     #[test]
@@ -594,7 +674,7 @@ mod tests {
             &trak(&spec(&[10, 20, 30, 40], &[100, 200], &[[1, 2, 1]], false)),
         ));
         file.extend(bx(b"inst", &[7u8; 12]));
-        let tracks = read_hevc_tracks(&mut Cursor::new(file)).unwrap();
+        let tracks = read_video_tracks(&mut Cursor::new(file)).unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!(
             tracks[0].parameter_sets,
@@ -618,7 +698,7 @@ mod tests {
             &[[1, 2, 1]],
             false,
         )));
-        assert_eq!(read_hevc_tracks(&mut Cursor::new(file)).unwrap().len(), 1);
+        assert_eq!(read_video_tracks(&mut Cursor::new(file)).unwrap().len(), 1);
     }
 
     #[test]
@@ -650,7 +730,7 @@ mod tests {
                 b"moov",
                 &trak(&spec(&[10, 20, 30, 40], &offsets, &stsc, co64)),
             );
-            let samples = read_hevc_tracks(&mut Cursor::new(file))
+            let samples = read_video_tracks(&mut Cursor::new(file))
                 .unwrap()
                 .remove(0)
                 .samples;
@@ -777,7 +857,7 @@ mod tests {
             )),
         );
         assert!(matches!(
-            read_hevc_tracks(&mut Cursor::new(file)),
+            read_video_tracks(&mut Cursor::new(file)),
             Err(Mp4Error::Malformed(_))
         ));
     }

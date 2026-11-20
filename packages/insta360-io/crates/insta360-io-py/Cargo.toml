@@ -17,6 +17,7 @@ crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
+insta360-io-core.workspace = true
 kornia-image.workspace = true
 kornia-staging-3d.workspace = true
 kornia-staging-imgproc.workspace = true

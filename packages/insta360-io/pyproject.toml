@@ -7,10 +7,12 @@ build-backend = "maturin"
 name = "insta360-io"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["numpy"]
+dependencies = ["jaxtyping", "numpy", "pyarrow", "rerun-sdk"]
 
 [tool.maturin]
 bindings = "pyo3"
 manifest-path = "crates/insta360-io-py/Cargo.toml"
-module-name = "insta360_io"
-# insta360_io.pyi (next to this file) ships as insta360_io/__init__.pyi with py.typed.
+# Mixed package: the compiled half is insta360_io._insta360_io (stubs: python/insta360_io/_insta360_io.pyi), the Python
+# half (python/insta360_io: InsvReader, the Rerun chunk layer) ships beside it with py.typed.
+module-name = "insta360_io._insta360_io"
+python-source = "python"

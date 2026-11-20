@@ -498,14 +498,17 @@ DATAFORGE_OUTPUT_ROOT=<rrd> pixi run -e dataforge --frozen dataforge-convert tar
 
 ### Insta360 (insta360)
 
-Local device captures: each `.insv` clip directly in `--root` is one sequence. `insta360_io`
-(`packages/insta360-io`) reads the clip; the two HEVC lens tracks are remuxed sample for sample. Each lens is a
+Local device captures: each `.insv` clip directly in `--root` is one sequence. The base is the chunk stream of
+`insta360_io.InsvReader` (`packages/insta360-io`), sent as it comes: the two HEVC lens tracks remuxed sample for
+sample in `Mp4Reader`'s chunk shapes, the cameras, exposure and IMU; dataforge adds only its exoego tags. Each lens is a
 camera with its factory model, `mei_v6` (`mei_v3` without a V6 string), posed in the IMU frame through the device
 profile. What the file does not carry (IMU-to-rig rotation, lever arm, frame-time model, readout, IMU noise) is a
-measured record in `dataforge/datasets/insta360_profiles.toml`, chosen by the clip's camera type, lens type, frame
-rate and readout: a clip outside every measured mode is refused, naming the property that differs. One profile
+measured record in insta360-io's `insta360_profiles.toml`, chosen by the clip's camera type, lens type, frame
+rate and readout. A clip of an unmeasured body (or outside every measured mode) converts without one: the reader
+warns and records why, the IMU gets no pose and no noise model, and slam-rs refuses the recording. One profile
 serves every resolution of a body (the X4 Air at 1920 and 3840): the lens intrinsics come from the clip at its
-track size. The module docstring states the frames, the clock and the rolling-shutter convention.
+track size. The reader's module docstring (`insta360_io/reader.py`) states the frames, the clock and the
+rolling-shutter convention.
 
 By default a conversion writes the `base` layer only. `--panorama` also writes the derived `panorama` layer (the
 1920x960 equirectangular stitch of the two lens cameras, AV1 on NVENC, about 10x the base's time); run it again with
