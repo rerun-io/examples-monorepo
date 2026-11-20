@@ -50,3 +50,22 @@ git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS
 ```
 
 Drop an adapter when upstream CASPAR supports its model.
+
+## caspar-reduced-camera-system.patch
+
+Hand-written on top of the three patches above (applied last), 8 files, +244 -16. Reproduce it with
+`python rcs_edit.py <checkout>` (colsfm-speed-5x scratch, scripts/rcs_edit.py) on a checkout that has the other
+patches applied, then `git diff --full-index -- src`.
+
+- **PCG beta.** Symforce 0.12's `solver.cc.jinja` calls `BetaFromNumDenom(beta_numerator, alpha_numerator)`, and only
+  `DoAlphaFirst` writes `alpha_numerator`, so every iteration after the first divides by `rho_0`: the PCG loses
+  conjugacy after its second iteration. `BetaFromNumDenom` now stores `rho_k` as the next denominator.
+- **Reduced camera system** (`SolverParams::reduced_camera_system`, off in Caspar, on in COLMAP's
+  `CasparBundleAdjustmentOptions`): the Point nodes are eliminated inside the PCG. The right-hand side becomes
+  `g_c - H_cp H_pp^-1 g_p`; the matvec is the generated `DoJtjpDirect` run twice (point part of `p` zeroed, then
+  `p = (0, -H_pp^-1 H_pc p)` accumulating into `w`, which enters holding `M p`), with `PointNormalize` as the exact
+  damped `H_pp^-1`; points are back-substituted after the PCG; the PCG stops on the Ceres/rootba Q criterion
+  (`reduced_pcg_eta` 0.1, at most `reduced_pcg_iter_max` 500). New helpers: `Scale` and `Subtract` in solver_tools.
+- Why both: on KITTI 06 (colsfm mapping rounds, f32) CASPAR alone went from 1,184 mm Sim(3) ATE to 816 mm; beta
+  alone reaches 1,172 mm; the reduced system without the beta fix 1,086 mm. Ceres f64 with CASPAR's own algorithm
+  (CGNR, 20 CG iterations per step) stalls the same way, so f32 was never the cause.

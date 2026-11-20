@@ -1,0 +1,423 @@
+diff --git a/src/colmap/estimators/bundle_adjustment_caspar.cc b/src/colmap/estimators/bundle_adjustment_caspar.cc
+index 731219002bfb5f41166f963257cf3cd4073b3640..4b91d8387d232560adf1589d29924d13cd60aeef 100644
+--- a/src/colmap/estimators/bundle_adjustment_caspar.cc
++++ b/src/colmap/estimators/bundle_adjustment_caspar.cc
+@@ -966,6 +966,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
+       params.pcg_rel_score_exit = co.pcg_rel_score_exit;
+       params.pcg_rel_decrease_min = co.pcg_rel_decrease_min;
+       params.solver_rel_decrease_min = co.solver_rel_decrease_min;
++      params.reduced_camera_system = co.reduced_camera_system ? 1 : 0;
++      params.reduced_pcg_iter_max = co.reduced_pcg_iter_max;
++      params.reduced_pcg_eta = co.reduced_pcg_eta;
+     }
+ 
+     const size_t device_id =
+diff --git a/src/colmap/estimators/bundle_adjustment_caspar.h b/src/colmap/estimators/bundle_adjustment_caspar.h
+index 779004cb875020b6c5131d0d1aec2f21b90b0a18..d48c291d53bc6f1852074aa9ffaa4fc88d95ec21 100644
+--- a/src/colmap/estimators/bundle_adjustment_caspar.h
++++ b/src/colmap/estimators/bundle_adjustment_caspar.h
+@@ -91,6 +91,11 @@ struct CasparBundleAdjustmentOptions {
+   double pcg_rel_score_exit = -1.0;
+   double pcg_rel_decrease_min = -1.0;
+   double solver_rel_decrease_min = 1.0;
++  // Eliminate the 3D points inside the solver's PCG (reduced camera system), stop the PCG on the Q criterion with
++  // reduced_pcg_eta and at most reduced_pcg_iter_max iterations. Off = the full-system PCG above.
++  bool reduced_camera_system = true;
++  int reduced_pcg_iter_max = 500;
++  double reduced_pcg_eta = 0.1;
+   std::string gpu_index = "-1";
+   bool collect_iteration_data = false;
+ };
+diff --git a/src/pycolmap/estimators/bundle_adjustment.cc b/src/pycolmap/estimators/bundle_adjustment.cc
+index f38896c4ce20868e67aaeb2516ff83487346562e..10c5eccbf2883709181f45d785fc8a7c049b7e6c 100644
+--- a/src/pycolmap/estimators/bundle_adjustment.cc
++++ b/src/pycolmap/estimators/bundle_adjustment.cc
+@@ -305,6 +305,15 @@ void BindBundleAdjuster(py::module& m) {
+           .def_readwrite("solver_rel_decrease_min",
+                          &CasparBAOpts::solver_rel_decrease_min,
+                          "Minimum relative solver decrease.")
++          .def_readwrite("reduced_camera_system",
++                         &CasparBAOpts::reduced_camera_system,
++                         "Eliminate the 3D points inside the PCG (reduced camera system).")
++          .def_readwrite("reduced_pcg_iter_max",
++                         &CasparBAOpts::reduced_pcg_iter_max,
++                         "PCG iteration cap with reduced_camera_system.")
++          .def_readwrite("reduced_pcg_eta",
++                         &CasparBAOpts::reduced_pcg_eta,
++                         "Q-criterion forcing term with reduced_camera_system.")
+           .def_readwrite("gpu_index",
+                          &CasparBAOpts::gpu_index,
+                          "Which GPU to use for solving the problem.");
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc b/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
+index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..8ddb86664ac364ff7541b7135b86947eee05e112 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
+@@ -2999,12 +2999,22 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+       DoResJac();
+     }
+     score_best_pcg = score_best;
+-    for (pcg_iter_ = 0; pcg_iter_ < params_.pcg_iter_max; pcg_iter_++) {
++    const bool reduced = UseReducedCameraSystem();
++    const int pcg_iter_cap = reduced ? params_.reduced_pcg_iter_max : params_.pcg_iter_max;
++    double pcg_q = 0.0;
++    if (reduced) {
++      RcsReduceRhs();
++    }
++    for (pcg_iter_ = 0; pcg_iter_ < pcg_iter_cap; pcg_iter_++) {
+       DoNormalize();
+ 
+       if (pcg_iter_ == 0) {
+         Copy(marker__r_k_start_, marker__r_k_end_, marker__w_start_);
+-        DoJtjpDirect();
++        if (reduced) {
++          RcsMatvec();
++        } else {
++          DoJtjpDirect();
++        }
+         DoAlphaFirst();
+         DoUpdateStepFirst();
+         DoUpdateRFirst();
+@@ -3012,7 +3022,11 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+         DoBeta();
+         DoUpdateP();
+         DoUpdateMp();
+-        DoJtjpDirect();
++        if (reduced) {
++          RcsMatvec();
++        } else {
++          DoJtjpDirect();
++        }
+         DoAlpha();
+         DoUpdateStep();
+         DoUpdateR();
+@@ -3057,11 +3071,23 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+           break;
+         }
+       }
+-      if (pcg_r_kp1_norm2_ < pcg_r_0_norm2_ * params_.pcg_rel_error_exit) {
++      if (reduced) {
++        // Q(x_k) = Q(x_{k-1}) - alpha_k rho_k / 2 with rho_k = r_k . z_k; stop once k (Q_k - Q_{k-1}) / Q_k < eta.
++        const double alpha = ReadCuMem(solver__alpha_);
++        const double rho = ReadCuMem(pcg_iter_ == 0 ? solver__alpha_numerator_ : solver__beta_numerator_);
++        const double decrease = 0.5 * alpha * rho;
++        pcg_q -= decrease;
++        if (pcg_q < 0.0 && (pcg_iter_ + 1) * decrease < -pcg_q * params_.reduced_pcg_eta) {
++          break;
++        }
++      } else if (pcg_r_kp1_norm2_ < pcg_r_0_norm2_ * params_.pcg_rel_error_exit) {
+         break;
+       }
+     }
+-    pcg_iter_ = std::min(pcg_iter_, params_.pcg_iter_max - 1);
++    pcg_iter_ = std::min(pcg_iter_, pcg_iter_cap - 1);
++    if (reduced) {
++      RcsBackSubstitute();
++    }
+ 
+     if (params_.pcg_rel_decrease_min == -1.0f &&
+         params_.pcg_rel_score_exit == -1.0f) {
+@@ -6245,6 +6271,133 @@ void GraphSolver::DoJtjpDirect() {
+       full_opencv_split_fixed_focal_and_extra_fixed_principal_point_num_);
+ }
+ 
++
++// ---------------------------------------------------------------------------------------------------------------
++// Reduced camera system. The PCG above runs on the full normal equations, cameras and points together, so a long
++// trajectory's low-frequency (drift) modes barely move in pcg_iter_max iterations. With reduced_camera_system the
++// Point nodes are eliminated: the PCG runs on S = H_cc - H_cp H_pp^-1 H_pc (implicit, damped), the points are
++// back-substituted after it, and the PCG stops on the Q criterion (Ceres / rootba) instead of the residual norm.
++// Everything reuses the generated kernels: the matvec is DoJtjpDirect (it accumulates the coupling terms into w,
++// which enters holding the block-diagonal M p), and PointNormalize is the exact damped H_pp^-1 per point. Keeping
++// the Point part of r_k at zero keeps the Point parts of z, p, Mp and step at zero through the unchanged PCG updates.
++// ---------------------------------------------------------------------------------------------------------------
++bool GraphSolver::UseReducedCameraSystem() const {
++  return params_.reduced_camera_system != 0 && params_.pcg_rel_decrease_min == -1.0f &&
++         params_.pcg_rel_score_exit == -1.0f && Point_num_ > 0;
++}
++
++void GraphSolver::RcsPointSolve(float* in, float* out) {
++  PointNormalize(nodes__Point__precond_diag_, Point_num_, nodes__Point__precond_tril_, Point_num_, in, Point_num_,
++                 solver__current_diag_, out, Point_num_, Point_num_);
++}
++
++void GraphSolver::RcsCameraPToZ() {
++  Copy(nodes__FullOpenCVPose__p_, nodes__FullOpenCVPose__p_end__, nodes__FullOpenCVPose__z_);
++  Copy(nodes__OpenCVFisheyeCalib__p_, nodes__OpenCVFisheyeCalib__p_end__, nodes__OpenCVFisheyeCalib__z_);
++  Copy(nodes__OpenCVFisheyeFocalAndExtra__p_, nodes__OpenCVFisheyeFocalAndExtra__p_end__, nodes__OpenCVFisheyeFocalAndExtra__z_);
++  Copy(nodes__OpenCVFisheyePose__p_, nodes__OpenCVFisheyePose__p_end__, nodes__OpenCVFisheyePose__z_);
++  Copy(nodes__OpenCVFisheyePrincipalPoint__p_, nodes__OpenCVFisheyePrincipalPoint__p_end__, nodes__OpenCVFisheyePrincipalPoint__z_);
++  Copy(nodes__PinholeCalib__p_, nodes__PinholeCalib__p_end__, nodes__PinholeCalib__z_);
++  Copy(nodes__PinholeFocal__p_, nodes__PinholeFocal__p_end__, nodes__PinholeFocal__z_);
++  Copy(nodes__PinholePose__p_, nodes__PinholePose__p_end__, nodes__PinholePose__z_);
++  Copy(nodes__PinholePrincipalPoint__p_, nodes__PinholePrincipalPoint__p_end__, nodes__PinholePrincipalPoint__z_);
++  Copy(nodes__SimpleRadialCalib__p_, nodes__SimpleRadialCalib__p_end__, nodes__SimpleRadialCalib__z_);
++  Copy(nodes__SimpleRadialFocalAndExtra__p_, nodes__SimpleRadialFocalAndExtra__p_end__, nodes__SimpleRadialFocalAndExtra__z_);
++  Copy(nodes__SimpleRadialPose__p_, nodes__SimpleRadialPose__p_end__, nodes__SimpleRadialPose__z_);
++  Copy(nodes__SimpleRadialPrincipalPoint__p_, nodes__SimpleRadialPrincipalPoint__p_end__, nodes__SimpleRadialPrincipalPoint__z_);
++}
++
++void GraphSolver::RcsCameraZToP() {
++  Copy(nodes__FullOpenCVPose__z_, nodes__FullOpenCVPose__z_end__, nodes__FullOpenCVPose__p_);
++  Copy(nodes__OpenCVFisheyeCalib__z_, nodes__OpenCVFisheyeCalib__z_end__, nodes__OpenCVFisheyeCalib__p_);
++  Copy(nodes__OpenCVFisheyeFocalAndExtra__z_, nodes__OpenCVFisheyeFocalAndExtra__z_end__, nodes__OpenCVFisheyeFocalAndExtra__p_);
++  Copy(nodes__OpenCVFisheyePose__z_, nodes__OpenCVFisheyePose__z_end__, nodes__OpenCVFisheyePose__p_);
++  Copy(nodes__OpenCVFisheyePrincipalPoint__z_, nodes__OpenCVFisheyePrincipalPoint__z_end__, nodes__OpenCVFisheyePrincipalPoint__p_);
++  Copy(nodes__PinholeCalib__z_, nodes__PinholeCalib__z_end__, nodes__PinholeCalib__p_);
++  Copy(nodes__PinholeFocal__z_, nodes__PinholeFocal__z_end__, nodes__PinholeFocal__p_);
++  Copy(nodes__PinholePose__z_, nodes__PinholePose__z_end__, nodes__PinholePose__p_);
++  Copy(nodes__PinholePrincipalPoint__z_, nodes__PinholePrincipalPoint__z_end__, nodes__PinholePrincipalPoint__p_);
++  Copy(nodes__SimpleRadialCalib__z_, nodes__SimpleRadialCalib__z_end__, nodes__SimpleRadialCalib__p_);
++  Copy(nodes__SimpleRadialFocalAndExtra__z_, nodes__SimpleRadialFocalAndExtra__z_end__, nodes__SimpleRadialFocalAndExtra__p_);
++  Copy(nodes__SimpleRadialPose__z_, nodes__SimpleRadialPose__z_end__, nodes__SimpleRadialPose__p_);
++  Copy(nodes__SimpleRadialPrincipalPoint__z_, nodes__SimpleRadialPrincipalPoint__z_end__, nodes__SimpleRadialPrincipalPoint__p_);
++}
++
++void GraphSolver::RcsZeroCameraP() {
++  Zero(nodes__FullOpenCVPose__p_, nodes__FullOpenCVPose__p_end__);
++  Zero(nodes__OpenCVFisheyeCalib__p_, nodes__OpenCVFisheyeCalib__p_end__);
++  Zero(nodes__OpenCVFisheyeFocalAndExtra__p_, nodes__OpenCVFisheyeFocalAndExtra__p_end__);
++  Zero(nodes__OpenCVFisheyePose__p_, nodes__OpenCVFisheyePose__p_end__);
++  Zero(nodes__OpenCVFisheyePrincipalPoint__p_, nodes__OpenCVFisheyePrincipalPoint__p_end__);
++  Zero(nodes__PinholeCalib__p_, nodes__PinholeCalib__p_end__);
++  Zero(nodes__PinholeFocal__p_, nodes__PinholeFocal__p_end__);
++  Zero(nodes__PinholePose__p_, nodes__PinholePose__p_end__);
++  Zero(nodes__PinholePrincipalPoint__p_, nodes__PinholePrincipalPoint__p_end__);
++  Zero(nodes__SimpleRadialCalib__p_, nodes__SimpleRadialCalib__p_end__);
++  Zero(nodes__SimpleRadialFocalAndExtra__p_, nodes__SimpleRadialFocalAndExtra__p_end__);
++  Zero(nodes__SimpleRadialPose__p_, nodes__SimpleRadialPose__p_end__);
++  Zero(nodes__SimpleRadialPrincipalPoint__p_, nodes__SimpleRadialPrincipalPoint__p_end__);
++}
++
++void GraphSolver::RcsCameraStepToP() {
++  Copy(nodes__FullOpenCVPose__step_, nodes__FullOpenCVPose__step_end__, nodes__FullOpenCVPose__p_);
++  Copy(nodes__OpenCVFisheyeCalib__step_, nodes__OpenCVFisheyeCalib__step_end__, nodes__OpenCVFisheyeCalib__p_);
++  Copy(nodes__OpenCVFisheyeFocalAndExtra__step_, nodes__OpenCVFisheyeFocalAndExtra__step_end__, nodes__OpenCVFisheyeFocalAndExtra__p_);
++  Copy(nodes__OpenCVFisheyePose__step_, nodes__OpenCVFisheyePose__step_end__, nodes__OpenCVFisheyePose__p_);
++  Copy(nodes__OpenCVFisheyePrincipalPoint__step_, nodes__OpenCVFisheyePrincipalPoint__step_end__, nodes__OpenCVFisheyePrincipalPoint__p_);
++  Copy(nodes__PinholeCalib__step_, nodes__PinholeCalib__step_end__, nodes__PinholeCalib__p_);
++  Copy(nodes__PinholeFocal__step_, nodes__PinholeFocal__step_end__, nodes__PinholeFocal__p_);
++  Copy(nodes__PinholePose__step_, nodes__PinholePose__step_end__, nodes__PinholePose__p_);
++  Copy(nodes__PinholePrincipalPoint__step_, nodes__PinholePrincipalPoint__step_end__, nodes__PinholePrincipalPoint__p_);
++  Copy(nodes__SimpleRadialCalib__step_, nodes__SimpleRadialCalib__step_end__, nodes__SimpleRadialCalib__p_);
++  Copy(nodes__SimpleRadialFocalAndExtra__step_, nodes__SimpleRadialFocalAndExtra__step_end__, nodes__SimpleRadialFocalAndExtra__p_);
++  Copy(nodes__SimpleRadialPose__step_, nodes__SimpleRadialPose__step_end__, nodes__SimpleRadialPose__p_);
++  Copy(nodes__SimpleRadialPrincipalPoint__step_, nodes__SimpleRadialPrincipalPoint__step_end__, nodes__SimpleRadialPrincipalPoint__p_);
++}
++
++// r_k = r_0 reduced: g_c - H_cp H_pp^-1 g_p on the cameras, 0 on the points; Mp = r_k (M p_0 = r_0 in the PCG).
++void GraphSolver::RcsReduceRhs() {
++  Copy(marker__r_0_start_, marker__r_0_end_, marker__r_k_start_);
++  RcsPointSolve(nodes__Point__r_k_, nodes__Point__z_);
++  Scale(nodes__Point__z_, nodes__Point__z_ + 4 * Point_num_, -1.0f);
++  RcsZeroCameraP();
++  Copy(nodes__Point__z_, nodes__Point__z_ + 4 * Point_num_, nodes__Point__p_);
++  Copy(marker__r_k_start_, marker__r_k_end_, marker__w_start_);
++  DoJtjpDirect();
++  Copy(marker__w_start_, marker__w_end_, marker__r_k_start_);
++  Zero(nodes__Point__r_k_, nodes__Point__r_k_ + 4 * Point_num_);
++  Copy(marker__r_k_start_, marker__r_k_end_, marker__Mp_start_);
++  Zero(nodes__Point__p_, nodes__Point__p_ + 4 * Point_num_);
++  Zero(nodes__Point__z_, nodes__Point__z_ + 4 * Point_num_);
++  Zero(nodes__Point__w_, nodes__Point__w_ + 4 * Point_num_);
++}
++
++// w = S p on the cameras and 0 on the points; w enters holding M p, p has a zero Point part.
++void GraphSolver::RcsMatvec() {
++  DoJtjpDirect();  // w_points = H_pc p
++  RcsPointSolve(nodes__Point__w_, nodes__Point__z_);
++  Scale(nodes__Point__z_, nodes__Point__z_ + 4 * Point_num_, -1.0f);
++  RcsCameraPToZ();
++  RcsZeroCameraP();
++  Copy(nodes__Point__z_, nodes__Point__z_ + 4 * Point_num_, nodes__Point__p_);
++  DoJtjpDirect();  // w_cameras += H_cp (-H_pp^-1 H_pc p)
++  RcsCameraZToP();
++  Zero(nodes__Point__p_, nodes__Point__p_ + 4 * Point_num_);
++  Zero(nodes__Point__z_, nodes__Point__z_ + 4 * Point_num_);
++  Zero(nodes__Point__w_, nodes__Point__w_ + 4 * Point_num_);
++}
++
++// step_points = H_pp^-1 (g_p - H_pc step_cameras).
++void GraphSolver::RcsBackSubstitute() {
++  RcsCameraStepToP();
++  Zero(nodes__Point__p_, nodes__Point__p_ + 4 * Point_num_);
++  Zero(marker__w_start_, marker__w_end_);
++  DoJtjpDirect();
++  Subtract(nodes__Point__r_0_, nodes__Point__r_0_ + 4 * Point_num_, nodes__Point__w_, nodes__Point__w_);
++  RcsPointSolve(nodes__Point__w_, nodes__Point__step_);
++  Zero(nodes__Point__w_, nodes__Point__w_ + 4 * Point_num_);
++}
++
+ void GraphSolver::DoAlphaFirst() {
+   Zero(solver__alpha_numerator_, solver__alpha_denominator_ + 1);
+   float *p_kp1;
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver.h b/src/thirdparty/Symforce-Caspar/generated/f32/solver.h
+index ad2817088893c6aa41f32502fb4d38948da0eb9d..52b7d2918033da3f9dca75283708b9f10a9a1550 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver.h
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver.h
+@@ -6562,6 +6562,16 @@ private:
+   void DoResJac();
+   void DoNormalize();
+   void DoJtjpDirect();
++  // Reduced camera system (params_.reduced_camera_system): see solver.cc.
++  bool UseReducedCameraSystem() const;
++  void RcsPointSolve(float* in, float* out);
++  void RcsCameraPToZ();
++  void RcsCameraZToP();
++  void RcsZeroCameraP();
++  void RcsCameraStepToP();
++  void RcsReduceRhs();
++  void RcsMatvec();
++  void RcsBackSubstitute();
+   void DoAlphaFirst();
+   void DoAlpha();
+   void DoUpdateStepFirst();
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver_params.h b/src/thirdparty/Symforce-Caspar/generated/f32/solver_params.h
+index c7dfdf68f33b7257cf7dca1a99bb2984b35059a6..dcaf5ab9808ebe76bf01cb90e0e97f364c328d20 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver_params.h
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver_params.h
+@@ -21,6 +21,12 @@ struct SolverParams {
+   T pcg_rel_score_exit = -1.0f;    // disabled if == -1.0f
+   T pcg_rel_decrease_min = -1.0f;  // disabled if == -1.0f
+   T solver_rel_decrease_min = 1.0f;
++  // Reduced camera system: eliminate the Point nodes inside the PCG (implicit Schur complement, exact damped
++  // point blocks, back-substitution), stop the PCG on the Ceres/rootba Q criterion with reduced_pcg_eta, cap it at
++  // reduced_pcg_iter_max. Needs pcg_rel_decrease_min and pcg_rel_score_exit disabled (-1); otherwise ignored.
++  int reduced_camera_system = 0;
++  int reduced_pcg_iter_max = 500;
++  T reduced_pcg_eta = 0.1f;
+ 
+   // Templated conversion constructor to enable automatic type conversion
+   SolverParams() = default;
+@@ -38,6 +44,9 @@ struct SolverParams {
+         pcg_rel_error_exit(static_cast<T>(other.pcg_rel_error_exit)),
+         pcg_rel_score_exit(static_cast<T>(other.pcg_rel_score_exit)),
+         pcg_rel_decrease_min(static_cast<T>(other.pcg_rel_decrease_min)),
+-        solver_rel_decrease_min(static_cast<T>(other.solver_rel_decrease_min)) {}
++        solver_rel_decrease_min(static_cast<T>(other.solver_rel_decrease_min)),
++        reduced_camera_system(other.reduced_camera_system),
++        reduced_pcg_iter_max(other.reduced_pcg_iter_max),
++        reduced_pcg_eta(static_cast<T>(other.reduced_pcg_eta)) {}
+ };
+ }  // namespace caspar
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
+index 5954fb0490e3e1363a41fea4b08d2cbafdfc3d4b..8703c751a3a6308cbec3f9116bdfcee95bf249ea 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
+@@ -57,15 +57,40 @@ void AlphaFromNumDenom(const T* alpha_numerator, const T* alpha_denominator, T*
+ }
+ 
+ template <typename T>
+-__global__ void BetaFromNumDenomKernel(const T* beta_num, const T* beta_denum, T* beta) {
++__global__ void BetaFromNumDenomKernel(const T* beta_num, T* beta_denum, T* beta) {
+   *beta = *beta_num / *beta_denum;
++  *beta_denum = *beta_num;
+ }
+ 
+ template <typename T>
+-void BetaFromNumDenom(const T* beta_num, const T* beta_denum, T* beta) {
++void BetaFromNumDenom(const T* beta_num, T* beta_denum, T* beta) {
+   BetaFromNumDenomKernel<T><<<1, 1>>>(beta_num, beta_denum, beta);
+ }
+ 
++template <typename T>
++__global__ void ScaleKernel(T* x, size_t n, T a) {
++  const size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
++  if (i < n) x[i] *= a;
++}
++
++template <typename T>
++void Scale(T* start, T* end, T a) {
++  const size_t n = end - start;
++  if (n > 0) ScaleKernel<T><<<(n + 255) / 256, 256>>>(start, n, a);
++}
++
++template <typename T>
++__global__ void SubtractKernel(const T* a, const T* b, T* out, size_t n) {
++  const size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x;
++  if (i < n) out[i] = a[i] - b[i];
++}
++
++template <typename T>
++void Subtract(const T* a_start, const T* a_end, const T* b, T* out) {
++  const size_t n = a_end - a_start;
++  if (n > 0) SubtractKernel<T><<<(n + 255) / 256, 256>>>(a_start, b, out, n);
++}
++
+ // Explicit instantiations
+ template void Zero<float>(float* start, float* end);
+ template void Zero<double>(double* start, double* end);
+@@ -79,9 +104,8 @@ template void AlphaFromNumDenom<double>(const double* alpha_numerator,
+                                         const double* alpha_denominator, double* alpha,
+                                         double* neg_alpha);
+ 
+-template void BetaFromNumDenom<float>(const float* beta_num, const float* beta_denum, float* beta);
+-template void BetaFromNumDenom<double>(const double* beta_num, const double* beta_denum,
+-                                       double* beta);
++template void BetaFromNumDenom<float>(const float* beta_num, float* beta_denum, float* beta);
++template void BetaFromNumDenom<double>(const double* beta_num, double* beta_denum, double* beta);
+ 
+ template float Sum<float>(const float* start, const float* end, float* target_ptr,
+                           float* scratch_ptr, bool copy_to_host);
+@@ -90,5 +114,9 @@ template double Sum<double>(const double* start, const double* end, double* targ
+ 
+ template float ReadCuMem<float>(const float* const data);
+ template double ReadCuMem<double>(const double* const data);
++template void Scale<float>(float* start, float* end, float a);
++template void Scale<double>(double* start, double* end, double a);
++template void Subtract<float>(const float* a_start, const float* a_end, const float* b, float* out);
++template void Subtract<double>(const double* a_start, const double* a_end, const double* b, double* out);
+ 
+ }  // namespace caspar
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h
+index 7a7a649e37c8f41b8b7c2d0539c2ef1d96e84436..d22157438866f512cb2628fd1d4895bbc496113f 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h
+@@ -17,8 +17,9 @@ template <typename T>
+ void AlphaFromNumDenom(const T* alpha_numerator, const T* alpha_denominator, T* alpha,
+                        T* neg_alpha);
+ 
++// beta = beta_num / beta_denum, then beta_denum = beta_num: the next iteration divides by this one's r.z.
+ template <typename T>
+-void BetaFromNumDenom(const T* beta_num, const T* beta_denum, T* beta);
++void BetaFromNumDenom(const T* beta_num, T* beta_denum, T* beta);
+ 
+ template <typename T>
+ T Sum(const T* start, const T* end, T* target_ptr, T* scratch_ptr, bool copy_to_host = true);
+@@ -26,6 +27,14 @@ T Sum(const T* start, const T* end, T* target_ptr, T* scratch_ptr, bool copy_to_
+ template <typename T>
+ T ReadCuMem(const T* const data);
+ 
++// x[i] *= a over [start, end).
++template <typename T>
++void Scale(T* start, T* end, T a);
++
++// out[i] = a[i] - b[i] over [a_start, a_end); out may alias b.
++template <typename T>
++void Subtract(const T* a_start, const T* a_end, const T* b, T* out);
++
+ // Explicit instantiations
+ extern template void Zero<float>(float* start, float* end);
+ extern template void Zero<double>(double* start, double* end);
+@@ -40,10 +49,8 @@ extern template void AlphaFromNumDenom<double>(const double* alpha_numerator,
+                                                const double* alpha_denominator, double* alpha,
+                                                double* neg_alpha);
+ 
+-extern template void BetaFromNumDenom<float>(const float* beta_num, const float* beta_denum,
+-                                             float* beta);
+-extern template void BetaFromNumDenom<double>(const double* beta_num, const double* beta_denum,
+-                                              double* beta);
++extern template void BetaFromNumDenom<float>(const float* beta_num, float* beta_denum, float* beta);
++extern template void BetaFromNumDenom<double>(const double* beta_num, double* beta_denum, double* beta);
+ 
+ extern template float Sum<float>(const float* start, const float* end, float* target_ptr,
+                                  float* scratch_ptr, bool copy_to_host);
+@@ -52,5 +59,9 @@ extern template double Sum<double>(const double* start, const double* end, doubl
+ 
+ extern template float ReadCuMem<float>(const float* const data);
+ extern template double ReadCuMem<double>(const double* const data);
++extern template void Scale<float>(float* start, float* end, float a);
++extern template void Scale<double>(double* start, double* end, double a);
++extern template void Subtract<float>(const float* a_start, const float* a_end, const float* b, float* out);
++extern template void Subtract<double>(const double* a_start, const double* a_end, const double* b, double* out);
+ 
+ }  // namespace caspar

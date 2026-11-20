@@ -193,19 +193,19 @@ class PipelineOptions:
     ba_num_threads: int | None = None
     """Ceres threads; None takes `bundle_adjustment_config.num_threads` (8) from the config,
     which is what the blob solves with. Set 1 for a bit-reproducible solve."""
-    caspar_ceres_polish: bool = True
-    """Finish a `--ba-backend caspar` run with one Ceres global bundle adjustment.
+    caspar_ceres_polish: bool = False
+    """Finish a `--ba-backend caspar` run with one Ceres global bundle adjustment (Cauchy loss).
 
-    On by default: it is what makes the GPU backend shippable — KITTI 06 goes from
-    1.299 m to 0.904 m Sim(3) ATE for 9.8 s on top of 31.5 s of CASPAR rounds, against
-    the Ceres mapper's 0.895 m in 148.5 s (`docs/caspar-build.md` § Shipped: CASPAR +
-    Ceres polish). `--no-caspar-ceres-polish` is the ablation. Inert on `ceres`,
-    fallbacks included, which have already converged."""
+    Off by default. It used to be what made the GPU backend usable: unpatched CASPAR stopped short of its own
+    least-squares minimum (KITTI 06 mapping: 1,184 mm Sim(3) alone, 776 mm polished). With recipes/colmap-src
+    `caspar-reduced-camera-system.patch` (points eliminated inside the PCG, its beta fixed) CASPAR alone reaches
+    816 mm, and the polish costs 467 s on clip 007 (146 iterations at 4 threads). `--caspar-ceres-polish` turns
+    it back on. Inert on `ceres`, fallbacks included, which have already converged."""
     caspar_option: tuple[str, ...] = ()
     """CASPAR solver overrides as `name=value`, e.g. `--caspar-option solver_iter_max=1000
     pcg_iter_max=80`. Read only when `--ba-backend caspar` actually runs; see
-    `colsfm.mapping.CasparOptions` for the names and `docs/caspar-build.md`
-    § Convergence sweep for what moving them buys."""
+    `colsfm.ba_backend.CasparOptions` for the names (`reduced_pcg_iter_max` and `reduced_pcg_eta` steer the
+    reduced camera system of recipes/colmap-src `caspar-reduced-camera-system.patch`)."""
     max_matches_per_pair: int | None = BLOB_MATCH_TOP_K
     """Verified matches kept per pair after the spatial subsample; None keeps every inlier.
     The blob's `match_top_k`; see `colsfm.matching.subsample_matches_by_coverage`."""

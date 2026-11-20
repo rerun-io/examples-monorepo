@@ -200,7 +200,7 @@ def caspar_enabled() -> bool:
 
     The `BundleAdjustmentBackend.CASPAR` enum is bound unconditionally, so it proves
     nothing; a pycolmap without `CASPAR_ENABLED` refuses only when the adjuster is
-    created (`docs/caspar-build.md`). An empty problem is enough to ask, and cheap.
+    created. An empty problem is enough to ask, and cheap.
     """
     options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
     options.backend = pycolmap.BundleAdjustmentBackend.CASPAR

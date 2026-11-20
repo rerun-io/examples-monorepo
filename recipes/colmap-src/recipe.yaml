@@ -14,6 +14,14 @@
 #       pattern of upstream PR #4657).
 #   add-caspar-adapters-generated-f32.patch  Symforce 0.12.0 output: 266 new fp32 kernels (224 fisheye, 42
 #       FULL_OPENCV) plus the 4 regenerated aggregates (solver.{h,cc}, caspar_mappings.{h,cu}). Not hand-editable.
+#   caspar-reduced-camera-system.patch       hand-written, 8 files (+244 -16): CASPAR's PCG ran on the full normal
+#       equations (cameras and points together) and computed beta as rho_k / rho_0 (Symforce 0.12's solver template
+#       never refreshes alpha_numerator), so it stopped short of its own least-squares minimum (KITTI 06 mapping:
+#       1,184 mm Sim(3) ATE alone, 776 mm only after a Ceres polish). The patch fixes beta and adds an option-gated
+#       reduced camera system (on in COLMAP's CasparBundleAdjustmentOptions): points eliminated inside the PCG
+#       (implicit Schur product from the generated matvec and Point normalize kernels, back-substitution after it),
+#       PCG stopped on the Ceres/rootba Q criterion (reduced_pcg_eta 0.1, reduced_pcg_iter_max 500). KITTI 06: 816 mm
+#       alone. Edits the generated solver.cc / solver_tools / solver_params and the COLMAP option + pycolmap binding.
 #   add-database-transaction-rollback.patch  hand-written hook, 4 files: `DatabaseTransaction::Rollback` (SQLite
 #       ROLLBACK TRANSACTION) and pycolmap's `with DatabaseTransaction(db):` rolling back when the block raises.
 #       Upstream commits on an exception, so colsfm's chunk writes (matches + verified geometries) could not be
@@ -48,10 +56,11 @@ source:
     - patches/add-caspar-adapters.patch
     - patches/add-caspar-adapters-generated-f32.patch
     - patches/add-database-transaction-rollback.patch
+    - patches/caspar-reduced-camera-system.patch
 
 build:
   # Bump with every patch or build-script edit: the build string hash does not follow them (recipes/README.md).
-  number: 2
+  number: 3
   string: main137f216_caspar_fisheye_fullopencv_cuda130_sm${{ cuda_arch }}_py312_${{ build_number }}
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
@@ -62,6 +71,7 @@ build:
     - grep -q "class FullOpenCVAdapter" src/colmap/estimators/caspar/caspar_model_adapter.h
     - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -ci full_\\?opencv)" -eq 42
     - grep -q "void RollbackTransaction() const override" src/colmap/scene/database_sqlite.cc
+    - grep -q "void GraphSolver::RcsReduceRhs()" src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
     # conda's onnxruntime-cpp nests its headers under include/onnxruntime/core/session/; COLMAP includes them flat.
     - export CPATH="$PREFIX/include/onnxruntime/core/session${CPATH:+:$CPATH}"
     # Step 1: libcolmap with CASPAR. FETCH_ONNX=OFF: the fetched prebuilt onnxruntime is CUDA 12. FETCH_FAISS and

@@ -244,7 +244,7 @@ def test_the_caspar_run_records_its_ceres_polish_in_the_summary(
 
     The polish solves inside `run_mapping`, so its seconds belong to the
     `reconstruction` stage of `runtime.csv` and only `MappingStats` names them
-    separately (`docs/caspar-build.md` § Shipped: CASPAR + Ceres polish).
+    separately.
     """
     polish_seconds: float | None = galileo_caspar_run.mapping.polish_seconds
     assert polish_seconds is not None
@@ -467,7 +467,7 @@ def test_the_default_run_is_the_fast_full_pipeline() -> None:
     assert default.features_backend == "raco"
     assert default.matching_backend == "flexglue"
     assert default.ba_backend == "caspar"
-    assert default.caspar_ceres_polish is True
+    assert default.caspar_ceres_polish is False
     assert default.optimize_extrinsics is True
     assert default.regularised_extrinsics is True
     assert default.loop_closure is True

@@ -93,8 +93,7 @@ def test_caspar_solver_options_reach_the_options_object(
 ) -> None:
     """`BaExecutionPlan.caspar_options` lands on `BundleAdjustmentOptions.caspar`, cast.
 
-    The convergence sweep of `docs/caspar-build.md` moves CASPAR's stopping rules
-    from the command line, so the dict has to arrive at the solver intact — and the
+    `--caspar-option` moves CASPAR's stopping rules from the command line, so the dict has to arrive at the solver intact — and the
     two iteration counters are C++ ints, which pybind11 will not take a float for.
     """
     ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
@@ -444,8 +443,7 @@ def test_the_polish_option_set_is_the_ceres_one_built_from_the_same_config(
 ) -> None:
     """`ceres_polish_options` differs from the CASPAR round options in the backend only.
 
-    `docs/caspar-build.md` § Ceres polish experiment measured the recovery with
-    colsfm's own solve — the config's loss and scale, its iteration cap, SPARSE_SCHUR
+    The polish was measured with colsfm's own solve — the config's loss and scale, its iteration cap, SPARSE_SCHUR
     and the same frozen extrinsics — so the polish has to be that solve and not a
     fresh set of defaults.
     """
@@ -469,14 +467,14 @@ def test_the_polish_option_set_is_the_ceres_one_built_from_the_same_config(
     assert polish.refine_extra_params is False
 
 
-def test_the_polish_is_on_by_default_and_switches_off() -> None:
-    """The ablation switch reaches the plan, and the default is the shipped behaviour.
+def test_the_polish_is_off_by_default_and_switches_on() -> None:
+    """The switch reaches the plan, and the default is the shipped behaviour: CASPAR alone (reduced camera system).
 
     `ceres_polish` is only ever True on a plan that ended on CASPAR: a Ceres run has
     already converged, so the plan zeroes the request rather than leaving the mapper
     to test the backend a second time.
     """
-    assert PipelineOptions(input_dir=Path(), output_dir=Path()).caspar_ceres_polish is True
+    assert PipelineOptions(input_dir=Path(), output_dir=Path()).caspar_ceres_polish is False
     assert caspar_plan(supported_camera_models=CASPAR_STOCK_CAMERA_MODELS).ceres_polish is True
     assert not caspar_plan(
         ceres_polish=False, supported_camera_models=CASPAR_STOCK_CAMERA_MODELS

@@ -59,7 +59,7 @@ BUNDLE_ADJUSTMENT_BACKEND: Final[dict[BaBackend, pycolmap.BundleAdjustmentBacken
     "caspar": pycolmap.BundleAdjustmentBackend.CASPAR,
 }
 """The name to pycolmap's enum. The enum is bound unconditionally, so its presence proves
-nothing about the build — only a solve does (`docs/caspar-build.md`)."""
+nothing about the build — only a solve does."""
 
 CASPAR_STOCK_CAMERA_MODELS: Final[frozenset[str]] = frozenset({"PINHOLE", "SIMPLE_RADIAL"})
 """The two models stock CASPAR (COLMAP 4.2.0) projects, and the floor every build meets.
