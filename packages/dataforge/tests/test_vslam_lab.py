@@ -19,7 +19,7 @@ import pytest
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
-from conftest import column_rows, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
+from conftest import column_rows, content_rules, raw_asset, read_back, recording_properties  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64, UInt8, UInt16
 from numpy import ndarray
 from test_vslam_lab_source import EUROC_CALIBRATION, TUM_CALIBRATION  # pyrefly: ignore[missing-import]
@@ -425,7 +425,7 @@ def test_predictions_take_the_palette_in_source_order_and_their_depth_stays_out_
     assert packed_rgb(overrides[schema.trajectory_path(schema.GT_RUN_SOURCE)]) == GT_PATH_COLOR
     assert packed_rgb(overrides[schema.trajectory_path("alpha")]) == PREDICTION_PALETTE[0]
     assert packed_rgb(overrides[schema.trajectory_path("zeta")]) == PREDICTION_PALETTE[1]
-    assert {f"- {schema.depth_path(0, 0)}/**", f"- {DEPTH}/**"} <= set(list(rig.contents))  # type: ignore[arg-type]
+    assert {f"- {schema.depth_path(0, 0)}/**", f"- {DEPTH}/**"} <= set(content_rules(rig))
     pane: rrb.View = next(view for view in views if view.name == "alpha: depth")
     assert (pane.origin, pane.contents) == (DEPTH.rsplit("/", 1)[0], [DEPTH])
 

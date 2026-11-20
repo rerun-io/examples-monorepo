@@ -29,7 +29,7 @@ from simplecv.rerun_eye_controls import follow_eye_controls as follow_eye_contro
 
 from dataforge import schema
 
-TRAIL_WINDOW_S: float = -10.0
+TRAIL_WINDOW_S: float = 10.0
 """How far back of the cursor the follow view's motion trail reaches, in seconds."""
 DIM_TRAJECTORY_COLOR: tuple[int, int, int] = (90, 110, 140)
 """Tint the follow view repaints the full path in: cool and desaturated, so it sits behind the trail."""
@@ -125,7 +125,7 @@ def trail_window_range() -> rrb.VisibleTimeRanges:
     limits it to this window. A trail precomputed as a rolling window on every row (each row of GSI's
     ``/slam/trail`` holds the last 29 segments) stores every position again and again, and an unlimited one is the path.
     """
-    return cursor_window(-TRAIL_WINDOW_S)
+    return cursor_window(TRAIL_WINDOW_S)
 
 
 def cursor_window(start_s: float | None) -> rrb.VisibleTimeRanges:

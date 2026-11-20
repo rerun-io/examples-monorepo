@@ -100,12 +100,12 @@ LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
-RUN_SOURCE: str = "slam_rs"
+RUN_SOURCE: str = schema.SLAM_RS_SOURCE
 """The run layer the layouts show: slam-rs tracks these clips."""
-VIO_SOURCE: str = "slam_rs_vio"
+VIO_SOURCE: str = schema.SLAM_RS_VIO_SOURCE
 """slam-rs's raw causal VIO run, in the same layer: the replay draws it a segment a frameset, with its landmarks."""
-COLSFM_SOURCE: str = "colsfm"
-"""The colsfm layer: refined rig, frusta, and the sparse cloud logged at each point's first observing keyframe."""
+COLSFM_SOURCE: str = schema.COLSFM_SOURCE
+"""The colsfm layer: refined rig, frusta, the static sparse cloud (``points``) and the same cloud by first view (``points_growing``)."""
 FOLLOW_PATH_WINDOW_S: float = 30.0
 """How far back of the cursor the follow view draws a path logged a segment a pose, in seconds."""
 OVERVIEW_PATH_WINDOW_S: float = 120.0
@@ -141,12 +141,13 @@ def segment_layout(*, panorama: bool) -> rrb.Blueprint:
 
     What accumulates is logged once at its own time and shown through a cursor window: the VIO path (a segment per
     frameset) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in the follow view,
-    and the colsfm cloud (a row per keyframe) since the start in both, so it grows along the walk. The replay's window and
+    and the colsfm cloud by first view (``points_growing``, a row per rig frame) since the start in both, so it grows along
+    the walk; its static copy (``points``, what every other layout shows) is left out. The replay's window and
     marginalized frusta stay in the follow view only.
     """
     vio_path: str = schema.trajectory_path(VIO_SOURCE)
-    colsfm_points: str = f"{schema.run_path(COLSFM_SOURCE)}/points"
-    images: list[str] = [f"{schema.pinhole_path(RIG, cam)}/image" for cam in range(2)]
+    colsfm_points: str = f"{schema.run_path(COLSFM_SOURCE)}/points_growing"
+    hidden: list[str] = [*(f"{schema.pinhole_path(RIG, cam)}/image" for cam in range(2)), f"{schema.run_path(COLSFM_SOURCE)}/points"]
     return blueprints.rig_blueprint(
         [lens_pane(cam) for cam in range(2)] + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
         rig=RIG,
@@ -155,8 +156,8 @@ def segment_layout(*, panorama: bool) -> rrb.Blueprint:
         # Lens 0 looks along z_P = -y_imu; image up is -y_P = -x_imu.
         eye_controls=blueprints.follow_eye_controls((0.0, -1.0, 0.0), (-1.0, 0.0, 0.0)),
         plots=blueprints.imu_plots(RIG, 0),
-        overview_exclude=[*images, f"{schema.run_path(VIO_SOURCE)}/window", f"{schema.run_path(VIO_SOURCE)}/marginalized"],
-        follow_exclude=images,
+        overview_exclude=[*hidden, f"{schema.run_path(VIO_SOURCE)}/window", f"{schema.run_path(VIO_SOURCE)}/marginalized"],
+        follow_exclude=hidden,
         overview_overrides={vio_path: blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S), colsfm_points: blueprints.cursor_window(None)},
         follow_overrides={
             vio_path: [blueprints.cursor_window(FOLLOW_PATH_WINDOW_S), rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(3.0))],

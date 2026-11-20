@@ -30,6 +30,13 @@ EXOEGO_SCHEMA_VERSION: str = "exoego:v2"
 DATAFORGE_SCHEMA_VERSION: str = "dataforge:v1"
 """Value of the ``property:capture:schema`` recording property."""
 
+SLAM_RS_SOURCE: str = "slam_rs"
+"""Run source of slam-rs's catalog result layer (its final, loop-closed poses) under ``/world/runs/``."""
+SLAM_RS_VIO_SOURCE: str = "slam_rs_vio"
+"""Run source of slam-rs's raw causal VIO replay, in the same layer."""
+COLSFM_SOURCE: str = "colsfm"
+"""Run source of the colsfm layer (``colsfm.rerun_layer.DEFAULT_SOURCE``): rig, frusta, ``points`` (static) and
+``points_growing`` (each point at its first observing rig frame). colsfm does not depend on dataforge; a test pins the names."""
 GT_RUN_SOURCE: str = "gt"
 """Run source of the ground-truth trajectory and trail under ``/world/runs/``.
 

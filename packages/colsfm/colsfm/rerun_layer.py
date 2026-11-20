@@ -6,8 +6,9 @@ segment it was read from:
 - `/world/runs/<source>/rig`: the optimised `world_T_rig` per registered rig frame, on `video_time` (the reference
   keyframe's timestamp), sent as columns;
 - `/world/runs/<source>/rig/<camera>`: the refined `rig_T_cam` and the camera's pinhole, so the frusta ride the rig;
-- `/world/runs/<source>/points`: the sparse model, coloured from the images, each point on `video_time` at the first
-  keyframe that observes it (one row per keyframe), so a cumulative visible time range grows the cloud along the walk;
+- `/world/runs/<source>/points`: the sparse model, coloured from the images, static, so every layout shows the map;
+- `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
+  (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
 - `/world/runs/<source>/trajectory`: the whole optimised path as one line strip;
 - the `colsfm` recording property: the run's headline numbers (registered images, points, reprojection, wall time).
 
@@ -152,19 +153,6 @@ def read_rrd_trajectory(rrd_path: Path, entity: str, timeline: str) -> tuple[Int
     return t_ns[keep], poses
 
 
-def first_seen_ns(tracks: list[list[int]], image_t_ns: dict[int, int]) -> Int64[ndarray, " p"]:
-    """The time each point is first observed: the earliest timestamp among the images of its track.
-
-    Args:
-        tracks: Per point, the image ids of its track.
-        image_t_ns: Image id -> the image's capture time, nanoseconds on the layer's timeline.
-
-    Returns:
-        One timestamp per point, in point order.
-    """
-    return np.asarray([min(image_t_ns[image_id] for image_id in track) for track in tracks], dtype=np.int64)
-
-
 def log_points_by_first_view(
     recording: rr.RecordingStream,
     entity: str,
@@ -173,16 +161,16 @@ def log_points_by_first_view(
     seen_ns: Int64[ndarray, " p"],
     timeline: str,
 ) -> None:
-    """Log the cloud as one row per first-seen time (a keyframe), each holding the points that keyframe first observes.
+    """Log the cloud as one row per first-seen time (a rig frame), each holding the points that rig frame first observes.
 
-    Rows, not one chunk per point: 1.6 M points of a 1 km clip land in ~18 k rows. The radius is one static value.
+    Rows, not one chunk per point: 1.6 M points of a 1 km clip land in one row per rig frame. The radius is one static value.
 
     Args:
         recording: The layer's recording.
         entity: The points entity.
         xyz: Positions, metres.
         rgb: Colours.
-        seen_ns: Per point, when it is first observed (`first_seen_ns`).
+        seen_ns: Per point, when it is first observed.
         timeline: The segment's video timeline.
     """
     order: Int64[ndarray, " p"] = np.argsort(seen_ns, kind="stable")
@@ -264,11 +252,17 @@ def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str 
         _log_camera(recording, f"{root}/rig/{camera.sensor_name}", camera)
     points: Float64[ndarray, "p 3"] = artifacts.points_xyz()
     colors: UInt8[ndarray, "p 3"] = artifacts.points_rgb().astype(np.uint8)
+    recording.log(f"{root}/points", rr.Points3D(points, colors=colors, radii=rr.Radius.ui_points(1.5)), static=True)
+    # Each image on its rig frame's clock, the clock of `<root>/rig`: one row per rig frame, not per camera image.
     image_t_ns: dict[int, int] = {
-        keyframe_id: keyframe.timestamp_microseconds * 1000 for keyframe_id, keyframe in artifacts.frames_meta.keyframe_by_id().items()
+        keyframe_id: rig_frame.timestamp_microseconds * 1000 for rig_frame in artifacts.frames_meta.rig_frames() for keyframe_id in rig_frame.keyframe_ids
     }
-    tracks: list[list[int]] = [[element.image_id for element in point.track.elements] for point in reconstruction.points3D.values()]
-    log_points_by_first_view(recording, f"{root}/points", points, colors, first_seen_ns(tracks, image_t_ns), timeline)
+    seen_ns: Int64[ndarray, " p"] = np.fromiter(
+        (min(image_t_ns[element.image_id] for element in point.track.elements) for point in reconstruction.points3D.values()),
+        dtype=np.int64,
+        count=len(reconstruction.points3D),
+    )
+    log_points_by_first_view(recording, f"{root}/points_growing", points, colors, seen_ns, timeline)
     recording.send_property(
         "colsfm",
         rr.AnyValues(

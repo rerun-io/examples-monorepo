@@ -92,7 +92,7 @@ IMU_DEVICE: int = 0
 """v1 logs the middle IMU (``dev0``) only. TODO(dataforge): also emit dev1/dev2."""
 RUN_SOURCE: str = "basalt"
 """Processing source of the pose layer the blueprints already lay out; nothing writes it yet."""
-EXTRA_RUN_SOURCES: tuple[str, ...] = ("slam_rs", "slam_rs_vio")
+EXTRA_RUN_SOURCES: tuple[str, ...] = (schema.SLAM_RS_SOURCE, schema.SLAM_RS_VIO_SOURCE)
 """Further pose runs RoboCap sessions carry: the slam-rs catalog result layer writes its final
 run and its raw causal VIO run, and both get the same dim path and trail window."""
 SESSION_DIR_RE: re.Pattern[str] = re.compile(r"^(?P<device>[0-9a-f]+)_session_(?P<session>\d+)$")

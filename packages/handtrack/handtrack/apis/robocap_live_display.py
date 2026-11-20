@@ -63,13 +63,6 @@ class Config:
     """Cap mesh to use instead of the one under ``root``; the asset has no mesh when neither is readable."""
 
 
-def whole_path() -> rrb.VisibleTimeRanges:
-    """Everything from the start of the stream up to the cursor: an accumulating, edge-per-frameset trajectory."""
-    return rrb.VisibleTimeRanges(
-        rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
-    )
-
-
 def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """The live layout: two 3D views and six camera panes over timing, fps and drop plots.
 
@@ -91,7 +84,7 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
             rig_path: rr.Points3D(
                 [[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(RIG_DOT_RADIUS_UI_POINTS), colors=[RIG_DOT_COLOR], labels=["rig"], show_labels=True
             ),
-            trajectory: whole_path(),
+            trajectory: blueprints.cursor_window(None),
             trail: rrb.EntityBehavior(visible=False),
         },
         eye_controls=blueprints.eye_controls_from_pose(position=OVERVIEW_EYE, look_target=OVERVIEW_TARGET, eye_up=(0.0, 0.0, 1.0)),
@@ -106,15 +99,9 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                 rr.LineStrips3D.from_fields(
                     colors=blueprints.DIM_TRAJECTORY_COLOR, radii=rr.Radius.ui_points(blueprints.DIM_TRAJECTORY_RADIUS_UI_POINTS)
                 ),
-                whole_path(),
+                blueprints.cursor_window(None),
             ],
-            trail: rrb.VisibleTimeRanges(
-                rrb.VisibleTimeRange(
-                    schema.TIMELINE,
-                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=blueprints.TRAIL_WINDOW_S),
-                    end=rrb.TimeRangeBoundary.cursor_relative(),
-                )
-            ),
+            trail: blueprints.trail_window_range(),
         },
         # A chase eye close behind and above the head, aimed at where the hands work: the cap and both hands fill the view.
         eye_controls=blueprints.follow_eye_controls(RIG_FORWARD, RIG_UP, back_m=0.45, up_m=0.25, ahead_m=0.35, aim_down_m=0.25),
