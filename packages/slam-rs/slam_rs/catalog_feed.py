@@ -44,10 +44,10 @@ Five decisions matter here because each one can change the numbers:
 
 import hashlib
 import threading
-from collections.abc import Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
-from functools import cache
+from functools import cache, partial
 from importlib.util import find_spec
 from io import BytesIO
 from os import PathLike
@@ -195,8 +195,8 @@ class Frameset:
     """Per camera, the latest segmentation mask at or before its frame (``slam_rs.frame_masks``), or None for a camera with
     no mask yet; None for the whole frameset when the feed reads no mask layer."""
     colors: list[UInt8[ndarray, "ch cw 3"]] | None = None
-    """Per camera, the frame in RGB at :attr:`SegmentFeed.color_downscale` of its size, for colouring what is drawn
-    (the estimator never sees it); None when the feed decodes gray only."""
+    """Per camera, the frame in RGB at :func:`color_copy_size` (:attr:`SegmentFeed.color_downscale`), for colouring what
+    is drawn (the estimator never sees it); None when the feed decodes gray only."""
 
     def image_digests(self) -> tuple[str, ...]:
         """Digest each camera's contiguous gray8 buffer in image order.
@@ -436,7 +436,23 @@ def read_camera_statics(statics: pa.Table, entity: str) -> CameraStatics:
     )
 
 
-def decode_gray(mp4_bytes: bytes, downscale: int = 1, threads: int = 1) -> Iterator[UInt8[ndarray, "h w"]]:
+ColorCopy: TypeAlias = Callable[[], UInt8[ndarray, "ch cw 3"]]
+"""A decoded frame's small RGB copy, made when called: a feed converts only the frames of the framesets it yields."""
+
+
+def color_copy_size(width: int, height: int, color_downscale: int) -> tuple[int, int]:
+    """``(width, height)`` of the RGB copy of a ``width`` x ``height`` frame: each side divided and floored, at least one.
+
+    Both decoders area-resample to this size, so a keypoint's colour does not depend on the decode device.
+    """
+    if color_downscale < 1:
+        raise ValueError(f"color_downscale must be at least 1; got {color_downscale}")
+    return max(width // color_downscale, 1), max(height // color_downscale, 1)
+
+
+def decode_gray(
+    mp4_bytes: bytes, downscale: int = 1, threads: int = 1, color_downscale: int | None = None
+) -> Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]:
     """Decode an in-memory MP4 to C-contiguous ``gray8`` frames, one decoder thread unless ``threads`` asks for more.
 
     ``reformat(format="gray8")`` performs the limited-to-full range expansion the
@@ -460,9 +476,12 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1, threads: int = 1) -> Itera
         mp4_bytes: MP4 produced by :func:`wrap_mp4`.
         downscale: Integer factor to shrink each frame by.
         threads: Decoder threads; above one PyAV decodes with frame threading (same pixels, more latency).
+        color_downscale: Also pair each frame with an RGB copy at :func:`color_copy_size` of the gray frame (a second
+            ``SWS_AREA`` call on the same decoded picture, made when the copy is called); None pairs it with None. The gray
+            frame is the same either way.
 
     Yields:
-        One grayscale image per frame, in decode order.
+        ``(gray, colour copy or None)`` per frame, in decode order.
 
     Raises:
         ValueError: If ``downscale`` is below one.
@@ -487,43 +506,11 @@ def decode_gray(mp4_bytes: bytes, downscale: int = 1, threads: int = 1) -> Itera
             )
             plane = gray.planes[0]
             padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)
-            yield padded[:, : gray.width].copy()
-
-
-def decode_gray_rgb(
-    mp4_bytes: bytes, downscale: int, threads: int, color_downscale: int
-) -> Iterator[tuple[UInt8[ndarray, "h w"], UInt8[ndarray, "ch cw 3"]]]:
-    """:func:`decode_gray`'s frames, each with an RGB copy ``color_downscale`` times smaller, from one decode.
-
-    The gray frame is the same conversion :func:`decode_gray` makes, so tracking does not change; the RGB copy is a
-    second ``swscale`` call on the same decoded picture (area resampling).
-
-    Args:
-        mp4_bytes: MP4 produced by :func:`wrap_mp4`.
-        downscale: Integer factor to shrink the gray frame by.
-        threads: Decoder threads.
-        color_downscale: Integer factor to shrink the RGB copy by, from the gray frame's size.
-
-    Yields:
-        ``(gray, rgb)`` per frame, in decode order.
-    """
-    if downscale < 1 or color_downscale < 1:
-        raise ValueError(f"downscale and color_downscale must be at least 1; got {downscale}, {color_downscale}")
-    container: av.container.InputContainer = av.open(BytesIO(mp4_bytes), mode="r")
-    with container:
-        stream = container.streams.video[0]
-        stream.thread_count = threads
-        stream.thread_type = "NONE" if threads == 1 else "FRAME"
-        for frame in container.decode(stream):
-            width: int = max(frame.width // downscale, 1)
-            height: int = max(frame.height // downscale, 1)
-            gray = frame.reformat(format="gray8") if downscale == 1 else frame.reformat(width=width, height=height, format="gray8", interpolation="AREA")
-            plane = gray.planes[0]
-            padded: UInt8[ndarray, "h stride"] = np.frombuffer(plane, dtype=np.uint8).reshape(gray.height, plane.line_size)
-            rgb: UInt8[ndarray, "ch cw 3"] = frame.to_ndarray(
-                width=max(width // color_downscale, 1), height=max(height // color_downscale, 1), format="rgb24", interpolation="AREA"
-            )
-            yield padded[:, : gray.width].copy(), rgb
+            color: ColorCopy | None = None
+            if color_downscale is not None:
+                color_w, color_h = color_copy_size(gray.width, gray.height, color_downscale)
+                color = partial(frame.to_ndarray, width=color_w, height=color_h, format="rgb24", interpolation="AREA")
+            yield padded[:, : gray.width].copy(), color
 
 
 @dataclass(slots=True, frozen=True)
@@ -744,7 +731,7 @@ class SegmentFeed:
                 )
             window_gt: Trajectory = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
 
-            decoders: list[Iterator[tuple[UInt8[ndarray, "h w"], UInt8[ndarray, "ch cw 3"] | None]]] = []
+            decoders: list[Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]] = []
             cursor: list[int] = []
             for position, camera in enumerate(self.cameras):
                 window: tuple[bytes, int] = self._window_payload(position, start, stop)
@@ -754,18 +741,17 @@ class SegmentFeed:
             # camera that contributes no frame to this frameset still has its own
             # frames decoded in order, because dropping one breaks the next.
             decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
-            decoded_colors: list[UInt8[ndarray, "ch cw 3"] | None] = [None] * len(self.cameras)
+            decoded_colors: list[ColorCopy | None] = [None] * len(self.cameras)
             camera_frames: list[Int64[ndarray, " n_window"]] = [
                 self.index.camera_t_ns[position][self.index.frame_index[start:stop, position]] for position in range(len(self.cameras))
             ]
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
-                colors: list[UInt8[ndarray, "ch cw 3"]] = []
                 for position, (camera, decoder) in enumerate(zip(self.cameras, decoders, strict=True)):
                     rig_camera: int = self.camera_positions[position]
                     wanted: int = int(self.index.frame_index[frameset_index, position])
                     while cursor[position] < wanted:
-                        pair: tuple[UInt8[ndarray, "h w"], UInt8[ndarray, "ch cw 3"] | None] | None = next(decoder, None)
+                        pair: tuple[UInt8[ndarray, "h w"], ColorCopy | None] | None = next(decoder, None)
                         if pair is None:
                             raise ValueError(f"{self.segment_id}: cam_{rig_camera:02d} ran out of frames at its frame {cursor[position] + 1}")
                         decoded[position], decoded_colors[position] = pair
@@ -777,11 +763,15 @@ class SegmentFeed:
                             f"{self.segment_id}: cam_{rig_camera:02d} decoded {current.shape}, calibration says {(camera.height, camera.width)}"
                         )
                     images.append(current)
-                    if (color := decoded_colors[position]) is not None:
-                        colors.append(color)
                 t_ns: int = int(self.frame_t_ns[frameset_index])
                 if frameset_index % self.frame_stride or (start_ns is not None and t_ns < start_ns):
                     continue
+                # Only a yielded frameset pays for its RGB copies.
+                colors: list[UInt8[ndarray, "ch cw 3"]] | None = None
+                if self.color_downscale is not None:
+                    copies: list[ColorCopy] = [copy for copy in decoded_colors if copy is not None]
+                    assert len(copies) == len(images), "every camera's decoder pairs its frames with an RGB copy"
+                    colors = [copy() for copy in copies]
                 lead_index: int = int(np.searchsorted(window_imu.t_ns, t_ns, side="right"))
                 lead_ns: int = int(window_imu.t_ns[min(lead_index, len(window_imu) - 1)]) if len(window_imu) else t_ns
                 frame_imu: ImuStream = window_imu.between(emitted_imu_t_ns, max(lead_ns, t_ns))
@@ -797,18 +787,16 @@ class SegmentFeed:
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),
                     masks=masks,
-                    colors=colors if len(colors) == len(images) else None,
+                    colors=colors,
                 )
 
-    def _open_decoder(self, payload: bytes, camera: CameraCalib) -> Iterator[tuple[UInt8[ndarray, "h w"], UInt8[ndarray, "ch cw 3"] | None]]:
+    def _open_decoder(self, payload: bytes, camera: CameraCalib) -> Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]:
         """Keep the reference pixel conversion distinct from NVDEC; with :attr:`color_downscale`, pair each frame with its RGB copy."""
         if self.decode_device == "cuda":
             from slam_rs.cuda_decode import decode_gray_cuda
 
             return decode_gray_cuda(payload, (camera.height, camera.width), self.profile.downscale, self.color_downscale)
-        if self.color_downscale is not None:
-            return decode_gray_rgb(payload, self.profile.downscale, self.profile.decode_threads, self.color_downscale)
-        return ((image, None) for image in decode_gray(payload, self.profile.downscale, self.profile.decode_threads))
+        return decode_gray(payload, self.profile.downscale, self.profile.decode_threads, self.color_downscale)
 
     def _window_payload(self, position: int, start: int, stop: int) -> tuple[bytes, int]:
         """Muxed window and its first source-frame index, before frameset matching."""

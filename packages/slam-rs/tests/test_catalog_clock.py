@@ -6,6 +6,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
+from fixture_types import CameraFactory, PipelineFactory, TextureFactory
 
 pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
 
@@ -145,3 +146,76 @@ def test_feed_refuses_missing_calibration_before_decoding(tmp_path: Path) -> Non
         recording.log("/world/rig_00/imu_00", rr.AnyValues(kind="imu", applied_time_shift_ns=0), static=True)
     with pytest.raises(ValueError, match="unknown.*IMU calibration.*gyro_noise_density"), open_segment(LocalSegment(path)):
         pytest.fail("missing calibration was accepted")
+
+
+def _replay_layer(path: Path, pipeline: PipelineFactory, camera: CameraFactory, texture: TextureFactory, *, animate_base_rig: bool) -> list[int]:
+    """What ``replay --stage vio`` writes on a segment without ground truth: the raw VIO under its own run, nothing on the
+    dataset's rig unless asked. Returns the stamps it tracked."""
+    from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, gravity_batch
+
+    from slam_rs import _core
+    from slam_rs.catalog_feed import Frameset, ImuStream
+    from slam_rs.tracking import Lockstep
+    from slam_rs.trajectory import empty_trajectory
+    from slam_rs.vio_log import VioLogger, VioStage
+
+    vio: _core.Vio = pipeline(2)
+    frame_t_ns: np.ndarray = np.arange(12, dtype=np.int64) * FRAME_PERIOD_NS
+    with rr.RecordingStream("clock-test", recording_id="clock") as rec:  # entering makes it the global stream the replay logs to
+        rec.save(path)
+        stage: VioStage = VioStage(
+            Lockstep(vio),
+            VioLogger(cameras=(camera(0, 0.0), camera(1, 0.1)), ground_truth=empty_trajectory(), frame_t_ns=frame_t_ns,
+                      tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=0, animate_base_rig=animate_base_rig),
+        )
+        for step, t_ns in enumerate(frame_t_ns.tolist()):
+            samples: np.ndarray = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+            gyro, accel = gravity_batch(samples)
+            stage.run(Frameset(t_ns=t_ns, images=[texture(step, 0), texture(step - 2, 0)], imu=ImuStream(t_ns=samples, gyro_rad_s=gyro, accel_m_s2=accel),
+                               ground_truth=None))
+        stage.flush()
+    return stage.logger.estimate_t_ns
+
+
+def _colsfm_prior(dataset: DatasetEntry, segment: str) -> tuple[list[int], list[float]]:
+    """``/world/rig_00`` read the way colsfm reads its default pose prior (``colsfm.catalog.read_catalog_trajectory``):
+    across every layer, sorted by stamp, the first row of equal stamps kept. Returns stamps and x positions."""
+    entity: str = "/world/rig_00"
+    table: pa.Table = dataset.filter_segments(segment).filter_contents([entity]).reader(index="video_time").to_arrow_table()
+    table = table.filter(table[f"{entity}:Transform3D:quaternion"].is_valid())
+    stamps: np.ndarray = table["video_time"].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64)
+    x: np.ndarray = np.asarray(table[f"{entity}:Transform3D:translation"].combine_chunks().flatten().flatten().to_numpy(zero_copy_only=False)).reshape(-1, 3)[:, 0]
+    order: np.ndarray = np.argsort(stamps, kind="stable")
+    stamps, x = stamps[order], x[order]
+    keep: np.ndarray = np.concatenate([[True], np.diff(stamps) > 0])
+    return stamps[keep].tolist(), x[keep].tolist()
+
+
+def test_without_ground_truth_the_catalog_layer_alone_owns_the_rig_pose_prior(
+    clock_recording: Path, tmp_path: Path, pipeline: PipelineFactory, camera: CameraFactory, texture: TextureFactory
+) -> None:
+    """Base (no gt) + the replay layer + the catalog slam_rs layer, whose final poses differ from the raw VIO: colsfm's
+    prior is the final run alone. A replay that also moved the rig (``--animate-base-rig``) would mix the raw run in."""
+    from slam_rs.catalog_layer import POSE_SOURCE, write_layer
+    from slam_rs.tracking import SegmentRun
+    from slam_rs.trajectory import empty_trajectory
+
+    layer_stamps: list[int] = _replay_layer(tmp_path / "replay.rrd", pipeline, camera, texture, animate_base_rig=False)
+    assert layer_stamps, "the replay tracked"
+    alone_stamps: list[int] = _replay_layer(tmp_path / "replay-alone.rrd", pipeline, camera, texture, animate_base_rig=True)
+    raw: Trajectory = Trajectory(t_ns=np.array([10, 20, 30], dtype=np.int64), position_m=np.array([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]),
+                                 quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (3, 1)))
+    final: Trajectory = Trajectory(t_ns=raw.t_ns, position_m=raw.position_m + [100.0, 0.0, 0.0], quaternion_wxyz=raw.quaternion_wxyz)
+    result_path: Path = tmp_path / "slam_rs.rrd"
+    write_layer(result_path, "clock", SegmentRun(estimate=raw, final=final, framesets=3, lost=0, wall_s=0.1, ground_truth=empty_trajectory(),
+                                                 median_tracker_ms=1.0, config_sha256="test", calibration_sha256="test-calibration"),
+                clock_offset_ns=0, profile="fast", backend="cpu", animate_base_rig=True)
+    with rr.server.Server(datasets={"test": [clock_recording]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("test")
+        dataset.register([result_path.as_uri()], layer_name=POSE_SOURCE).wait()
+        dataset.register([(tmp_path / "replay.rrd").as_uri()], layer_name="slam_rs_replay").wait()
+        assert _colsfm_prior(dataset, "clock") == ([10, 20, 30], [101.0, 102.0, 103.0])
+        # The hazard the default avoids: a second writer puts raw VIO rows into the same prior.
+        dataset.register([(tmp_path / "replay-alone.rrd").as_uri()], layer_name="slam_rs_replay", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+        mixed_stamps, _ = _colsfm_prior(dataset, "clock")
+    assert set(alone_stamps) <= set(mixed_stamps) and len(mixed_stamps) > 3

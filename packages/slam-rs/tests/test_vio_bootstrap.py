@@ -138,7 +138,7 @@ def test_each_attempt_goes_into_the_recording_once_at_its_own_time(
     monkeypatch.setattr(replay.rr, "log", lambda entity, *_args, **_kwargs: logged.append((cursor[0], entity)))
     monkeypatch.setattr(replay.rr, "send_property", lambda name, *_args: properties.append(name))
     vio: _core.Vio = still_rig_until_first_attempt(rig, texture)
-    bootstrap: replay.BootstrapLog = replay.BootstrapLog()
+    bootstrap: replay.BootstrapLog = replay.BootstrapLog(cam_time_offset_ns=0)
     bootstrap.log_new(vio)
     bootstrap.log_new(vio)
     report: _core.BootstrapReport | None = vio.bootstrap_report()

@@ -39,6 +39,8 @@ PipelineFactory: TypeAlias = Callable[[int], _core.Vio]
 """The whole pipeline on a rig of the given camera count."""
 TextureFactory: TypeAlias = Callable[[int, int], UInt8[ndarray, "h w"]]
 """The synthetic scene, shifted by whole pixels in x and y."""
+Mp4Factory: TypeAlias = Callable[[UInt8[ndarray, "h w 3"], int], bytes]
+"""An in-memory H.264 MP4 of one RGB picture repeated for a number of frames."""
 
 
 class Row(NamedTuple):

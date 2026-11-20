@@ -29,6 +29,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from fixture_types import (
+    FRAME,
     FRAME_PERIOD_NS,
     IMU_PERIOD_NS,
     CameraFactory,
@@ -46,6 +47,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
+from slam_rs.landmark_colors import pack_rgba
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
     FRUSTUM_DEPTH_M,
@@ -107,6 +109,7 @@ def drive(
     map_every_ns: tuple[int, int] = (MAP_KEYFRAMES_EVERY_NS, MAP_POINTS_EVERY_NS),
     finish: Callable[[VioLogger], None] | None = None,
     colors: list[np.ndarray] | None = None,
+    animate_base_rig: bool = False,
 ) -> Logged:
     """Log ``FRAMESETS`` framesets of the synthetic rig and read the recording back.
 
@@ -120,6 +123,7 @@ def drive(
         map_every_ns: The logger's map-keyframes and map-points cadences.
         finish: Called with the logger at the last cursor, after the complete paths (what a replay ends with).
         colors: Each frameset's RGB frames (``Frameset.colors``); None logs without them.
+        animate_base_rig: The logger's :attr:`VioLogger.animate_base_rig`.
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
@@ -131,6 +135,9 @@ def drive(
         cameras=cameras,
         ground_truth=references,
         frame_t_ns=frame_t_ns,
+        tracked_resolution=tuple(vio.tracked_resolution),
+        cam_time_offset_ns=0,
+        animate_base_rig=animate_base_rig,
         map_keyframes_every_ns=map_every_ns[0],
         map_points_every_ns=map_every_ns[1],
     )
@@ -348,12 +355,15 @@ def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
         assert all(len(values["Points2D:positions"]) > 0 for _, values in logged.rows[entity])
 
 
-def test_the_rig_rides_the_estimate_only_without_ground_truth(
-    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader, logged: Logged
+def test_the_rig_rides_the_estimate_only_when_asked(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """A segment with no ground truth gets its rig moved by this layer, so a view rooted at the rig follows the estimate."""
-    assert RIG_ENTITY not in logged.rows, "with ground truth the rig is the truth's, not the estimate's"
-    alone: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), empty_trajectory(), texture, tmp_path / "alone.rrd", read_rows)
+    """The dataset's rig belongs to the layers that own it (gt, or the catalog slam_rs layer): the replay leaves it alone,
+    even without ground truth, unless a recording viewed on its own asks for it."""
+    rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
+    layer: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "layer.rrd", read_rows)
+    assert layer.tracked and RIG_ENTITY not in layer.rows
+    alone: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "alone.rrd", read_rows, animate_base_rig=True)
     assert [t_ns for t_ns, _ in alone.rows[RIG_ENTITY]] == alone.tracked
     assert alone.rows[RIG_ENTITY] == alone.rows[f"{VIO_RUN_ENTITY}/rig"]
 
@@ -361,13 +371,17 @@ def test_the_rig_rides_the_estimate_only_without_ground_truth(
 def test_landmarks_take_the_colour_of_the_image_under_their_keypoint(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
+    """Each camera's copy has its own colour: a landmark takes the colour of the first camera that tracked it."""
     rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
-    small: list[np.ndarray] = [np.full((rig[0].height // 4, rig[0].width // 4, 3), (10, 20, 30), dtype=np.uint8) for _ in rig]
+    tones: list[tuple[int, int, int]] = [(10, 20, 30), (200, 100, 50)]
+    small: list[np.ndarray] = [np.full((cam.height // 4, cam.width // 4, 3), tone, dtype=np.uint8) for cam, tone in zip(rig, tones, strict=True)]
     reference_t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     colored: Logged = drive(pipeline(2), rig, straight_line(reference_t_ns), texture, tmp_path / "rgb.rrd", read_rows, colors=small)
     rows: list[Row] = [row for row in colored.rows[f"{VIO_RUN_ENTITY}/landmarks"] if len(row[1]["Points3D:positions"])]
     assert rows, "the window holds landmarks"
-    assert all(set(values["Points3D:colors"]) == {packed((10, 20, 30, 255))} for _, values in rows)
+    seen: set[int] = set().union(*(values["Points3D:colors"] for _, values in rows))
+    assert packed((*tones[0], 255)) in seen, "camera 0 hosts landmarks"
+    assert seen <= {packed((*tone, 255)) for tone in tones}, "every landmark has an image colour"
 
 
 def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineFactory, camera: CameraFactory) -> None:
@@ -376,14 +390,15 @@ def test_a_run_without_references_still_logs_everything_else(pipeline: PipelineF
         cameras=(camera(0, 0.0), camera(1, 0.1)),
         ground_truth=empty_trajectory(),
         frame_t_ns=np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64),
+        tracked_resolution=((FRAME, FRAME), (FRAME, FRAME)),
+        cam_time_offset_ns=0,
     )
     assert len(logger.estimated()) == 0
 
 
 def packed(color: tuple[int, int, int, int]) -> int:
     """A colour as the recording stores it: one RGBA integer."""
-    r, g, b, a = color
-    return (r << 24) | (g << 16) | (b << 8) | a
+    return int(pack_rgba(np.array([color[:3]], dtype=np.uint8), color[3])[0])
 
 
 def slot_entities(rows: Rows, prefix: str) -> list[str]:

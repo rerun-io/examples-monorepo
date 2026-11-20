@@ -35,7 +35,7 @@ from numpy import ndarray
 # Package imports (fixture_types imports slam_rs) stay inside the fixtures: pytest-beartype instruments slam_rs only
 # if this file has not imported it.
 if TYPE_CHECKING:
-    from fixture_types import CameraFactory, FrontendFactory, PipelineFactory, RigFactory, Rows, RowsReader, TextureFactory
+    from fixture_types import CameraFactory, FrontendFactory, Mp4Factory, PipelineFactory, RigFactory, Rows, RowsReader, TextureFactory
 
     from slam_rs import _core
     from slam_rs.catalog_feed import CameraCalib, ImuCalib
@@ -231,6 +231,32 @@ def texture() -> TextureFactory:
         blocks: UInt8[ndarray, "b b"] = np.random.default_rng(20250907).integers(0, 256, (FRAME // 2, FRAME // 2), dtype=np.uint8)
         image: UInt8[ndarray, "h w"] = np.repeat(np.repeat(blocks, 2, axis=0), 2, axis=1)
         return np.ascontiguousarray(np.roll(image, (shift_y, shift_x), axis=(0, 1)))
+
+    return build
+
+
+@pytest.fixture(scope="session")
+def synthetic_mp4() -> Mp4Factory:
+    """One RGB picture, encoded ``frames`` times into an in-memory yuv420p H.264 MP4 (even sides only)."""
+    from io import BytesIO
+
+    import av
+    from av.container import OutputContainer
+    from av.video.stream import VideoStream
+
+    def build(picture: UInt8[ndarray, "h w 3"], frames: int) -> bytes:
+        buffer: BytesIO = BytesIO()
+        container: OutputContainer
+        with av.open(buffer, mode="w", format="mp4") as container:
+            stream: VideoStream = container.add_stream("libx264", rate=30)
+            stream.width, stream.height, stream.pix_fmt = picture.shape[1], picture.shape[0], "yuv420p"
+            stream.options = {"crf": "0"}
+            for _ in range(frames):
+                for packet in stream.encode(av.VideoFrame.from_ndarray(picture, format="rgb24")):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        return buffer.getvalue()
 
     return build
 

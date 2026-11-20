@@ -105,9 +105,16 @@ def main(config: Config) -> None:
         # The same drive `replay --stage vio` runs: the D17 hold, the D32
         # invariant asserts and the rows at the held frameset's own time are one
         # contract, not two copies of one.
+        vio: _core.Vio = _core.Vio(calibration, flow_config, backend=config.backend)
         stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(calibration, flow_config, backend=config.backend)),
-            logger=VioLogger(cameras=feed.cameras, ground_truth=empty_trajectory(), frame_t_ns=feed.frame_t_ns),
+            lockstep=Lockstep(vio=vio),
+            logger=VioLogger(
+                cameras=feed.cameras,
+                ground_truth=empty_trajectory(),
+                frame_t_ns=feed.frame_t_ns,
+                tracked_resolution=tuple(vio.tracked_resolution),
+                cam_time_offset_ns=feed.imu.cam_time_offset_ns,
+            ),
         )
 
         replayed: int = 0
@@ -118,7 +125,7 @@ def main(config: Config) -> None:
             if frameset.t_ns > last_ns:
                 break
             replayed += 1
-            log_frameset_inputs(feed, frameset, mode)
+            log_frameset_inputs(feed.cameras, feed.imu.cam_time_offset_ns, frameset, mode)
             stage.run(frameset)
         stage.flush()
         elapsed: float = time.monotonic() - started

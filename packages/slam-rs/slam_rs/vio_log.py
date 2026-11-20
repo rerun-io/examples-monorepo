@@ -14,14 +14,15 @@ from typing import Literal, TypeAlias
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Bool, Float64, Int64, UInt8, UInt32
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
-from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream, SegmentFeed
+from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
+from slam_rs.landmark_colors import LandmarkColors
 from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
@@ -198,18 +199,28 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, pinhole_child:
 class VioLogger:
     """Logs one frameset's estimator output, and carries the paths between them.
 
-    The two reference trajectories are handed over whole, on the same
-    ``video_time`` clock the replay logs on; the estimate accumulates as it is
-    produced. Every ``log`` call writes at the caller's time cursor and nowhere
-    else.
+    The two reference trajectories are handed over whole, on the estimator's
+    clock the results come on (:attr:`SegmentFeed.frame_t_ns`); the estimate
+    accumulates as it is produced. Every ``log`` call writes at the caller's time
+    cursor and nowhere else; :func:`set_video_time` puts that cursor on the base
+    video's ``video_time``.
     """
 
     cameras: tuple[CameraCalib, ...]
     """The rig's cameras, in rig order."""
     ground_truth: Trajectory
-    """Ground truth for the whole segment, on ``video_time``; may be empty."""
+    """Ground truth for the whole segment, on the estimator's clock; may be empty."""
     frame_t_ns: Int64[ndarray, " n_frames"]
     """The segment's frameset times: the cadence used to draw ground truth."""
+    tracked_resolution: tuple[tuple[int, int], ...]
+    """``(width, height)`` of the frames each camera is tracked on (``Vio.tracked_resolution``), which the keypoints are in."""
+    cam_time_offset_ns: int
+    """The estimator's clock minus the base video's ``video_time`` (:attr:`ImuCalib.cam_time_offset_ns`): what
+    :func:`set_video_time` removes, so every row lands on the base frame it belongs to."""
+    animate_base_rig: bool = False
+    """Also move the dataset's rig (``/world/rig_00``) with the raw VIO pose: only for a replay viewed on its own, on a
+    segment without ground truth. Off, the rig belongs to the layers that own it: ``gt``, or the catalog ``slam_rs``
+    layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`)."""
     estimate_t_ns: list[int] = field(default_factory=list)
     """Timestamps of the poses reported so far, in replay order."""
     estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
@@ -238,12 +249,8 @@ class VioLogger:
     """Least video time between two map-keyframes draws (:data:`MAP_KEYFRAMES_EVERY_NS`)."""
     map_points_every_ns: int = MAP_POINTS_EVERY_NS
     """Least video time between two map-points draws (:data:`MAP_POINTS_EVERY_NS`)."""
-    tracked_widths: tuple[int, ...] = ()
-    """Width of the frames each camera is tracked on, which the keypoints are in; empty means the calibrated width."""
-    landmark_rgba: dict[int, int] = field(default_factory=dict)
-    """Packed RGBA of every landmark id seen so far: the image's colour under its keypoint where it was first tracked.
-
-    A landmark's id is its keypoint's (``LandmarkId::from(KeypointId)``), so the frontend's tracks name the pixel."""
+    landmark_colors: LandmarkColors = field(default_factory=LandmarkColors)
+    """The image's colour under each landmark's keypoint where it was first tracked."""
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
@@ -290,13 +297,11 @@ class VioLogger:
 
         rig_pose: rr.Transform3D = rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))
         rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
-        if len(self.ground_truth) == 0:
-            # Nothing else moves the dataset's rig on a segment without ground truth, so this layer does, and every
-            # view rooted at the rig (the dataforge follow view) rides the estimate. With ground truth the rig stays the
-            # truth's (``log_frameset_inputs``).
+        if self.animate_base_rig:
             rr.log(RIG_ENTITY, rig_pose)
         if colors is not None:
-            self._remember_colors(frame, colors)
+            for camera, color in enumerate(colors):
+                self.landmark_colors.remember(frame.ids(camera), frame.positions(camera), color, self.tracked_resolution[camera])
         # The estimator's own frontend output, on the frontend rung's paths and
         # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
         log_keypoints(frame)
@@ -410,30 +415,11 @@ class VioLogger:
         self._log_camera_slots("marginalized", marginalized, [MARGINALIZED_COLOR] * len(marginalized))
         self.previous_window = {t_ns: pose for t_ns, pose in zip(snapshot.window_t_ns.tolist(), poses, strict=True)}
 
-    def _remember_colors(self, frame: _core.FlowFrame, colors: list[UInt8[ndarray, "ch cw 3"]]) -> None:
-        """Give every track id not seen before the colour of the image under its keypoint, in the first camera that has it."""
-        for camera, color in enumerate(colors):
-            ids: Int64[ndarray, " n"] = frame.ids(camera)
-            new: Bool[ndarray, " n"] = np.fromiter((track not in self.landmark_rgba for track in ids.tolist()), dtype=bool, count=len(ids))
-            if not new.any():
-                continue
-            width: int = self.tracked_widths[camera] if self.tracked_widths else self.cameras[camera].width
-            scale: float = color.shape[1] / width
-            uv: Int64[ndarray, "k 2"] = (frame.positions(camera)[new] * scale).astype(np.int64)
-            rgb: UInt8[ndarray, "k 3"] = color[np.clip(uv[:, 1], 0, color.shape[0] - 1), np.clip(uv[:, 0], 0, color.shape[1] - 1)]
-            packed: Int64[ndarray, " k"] = (rgb[:, 0].astype(np.int64) << 24) | (rgb[:, 1].astype(np.int64) << 16) | (rgb[:, 2].astype(np.int64) << 8) | 255
-            self.landmark_rgba.update(zip(ids[new].tolist(), packed.tolist(), strict=True))
-
-    def _colors_of(self, ids: Int64[ndarray, " n"], unknown: tuple[int, int, int, int]) -> UInt32[ndarray, " n"]:
-        """Packed RGBA per landmark id: its remembered image colour, else ``unknown``."""
-        fallback: int = (unknown[0] << 24) | (unknown[1] << 16) | (unknown[2] << 8) | unknown[3]
-        return np.fromiter((self.landmark_rgba.get(landmark, fallback) for landmark in ids.tolist()), dtype=np.uint32, count=len(ids))
-
     def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
         """Draw the window's landmarks in the colour of the image where each was first tracked."""
         rr.log(
             f"{VIO_RUN_ENTITY}/landmarks",
-            rr.Points3D(snapshot.landmark_positions, colors=self._colors_of(snapshot.landmark_ids, LANDMARK_COLOR), radii=0.008),
+            rr.Points3D(snapshot.landmark_positions, colors=self.landmark_colors.lookup(snapshot.landmark_ids, LANDMARK_COLOR), radii=0.008),
         )
 
     def map_is_due(self, snapshot: _core.VioSnapshot) -> bool:
@@ -485,7 +471,7 @@ class VioLogger:
         log_loops(map_snapshot)
         self.map_keyframes_t_ns = t_ns
         if final or self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
-            rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=self._colors_of(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004))
+            rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004))
             self.map_points_t_ns = t_ns
 
     def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
@@ -570,8 +556,7 @@ class VioStage:
 
     def __post_init__(self) -> None:
         """Draw the keypoints in each camera's own pixels: a rig wider than 2048 px is tracked on frames reduced by two."""
-        self.logger.tracked_widths = tuple(width for width, _ in self.lockstep.vio.tracked_resolution)
-        for camera, (width, _) in zip(self.logger.cameras, self.lockstep.vio.tracked_resolution, strict=True):
+        for camera, (width, _) in zip(self.logger.cameras, self.logger.tracked_resolution, strict=True):
             if width != camera.width:
                 rr.log(f"{camera_entity(camera.index)}/keypoints", rr.Transform3D(scale=2.0), static=True)
 
@@ -621,12 +606,12 @@ class VioStage:
         if last_t_ns is None and self.logger.estimate_t_ns:
             last_t_ns = self.logger.estimate_t_ns[-1]
         if final is not None and last_t_ns is not None:
-            rr.set_time(TIMELINE, duration=np.timedelta64(last_t_ns, "ns"))
+            set_video_time(last_t_ns, self.logger.cam_time_offset_ns)
             self.logger.log_final_map(final, last_t_ns)
 
     def _log_result(self, held: Frameset, result: _core.VioResult) -> None:
         """Log a result with the keypoints and timestamp of its own input frame."""
-        rr.set_time(TIMELINE, duration=np.timedelta64(held.t_ns, "ns"))
+        set_video_time(held.t_ns, self.logger.cam_time_offset_ns)
         snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
         frame: _core.FlowFrame = self.lockstep.flow_frame()
         assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
@@ -671,7 +656,21 @@ class VioStage:
         )
 
 
-def log_imu(imu: ImuStream) -> None:
+def set_video_time(t_ns: int, cam_time_offset_ns: int) -> None:
+    """Put the time cursor on the base video's frame for an estimator-clock stamp.
+
+    The feed hands the estimator ``video_time`` plus the camera-to-IMU offset (:attr:`SegmentFeed.frame_t_ns`); a replay
+    row written at that stamp would sit beside the base frame, not on it, and a latest-at query at the frame would read
+    the previous row. Every replay row goes through here, so the offset is removed once, at the logging boundary.
+
+    Args:
+        t_ns: A stamp on the estimator's clock.
+        cam_time_offset_ns: :attr:`ImuCalib.cam_time_offset_ns` of the feed the stamp came from.
+    """
+    rr.set_time(TIMELINE, duration=np.timedelta64(t_ns - cam_time_offset_ns, "ns"))
+
+
+def log_imu(imu: ImuStream, cam_time_offset_ns: int) -> None:
     """Log one frameset's inertial samples, one column per channel.
 
     Two ``send_columns`` calls instead of a ``set_time`` and two ``log`` calls per
@@ -681,11 +680,12 @@ def log_imu(imu: ImuStream) -> None:
     the partition says.
 
     Args:
-        imu: The samples since the previous frameset, on the ``video_time`` clock.
+        imu: The samples since the previous frameset, on the estimator's clock.
+        cam_time_offset_ns: What :func:`set_video_time` removes, so the samples sit on the base recording's own rows.
     """
     if not len(imu):
         return
-    times: rr.TimeColumn = rr.TimeColumn(TIMELINE, duration=imu.t_ns.astype("timedelta64[ns]"))
+    times: rr.TimeColumn = rr.TimeColumn(TIMELINE, duration=(imu.t_ns - cam_time_offset_ns).astype("timedelta64[ns]"))
     components: int = imu.gyro_rad_s.shape[1]
     for entity, channel in ((f"{IMU_ENTITY}/gyro", imu.gyro_rad_s), (f"{IMU_ENTITY}/accel", imu.accel_m_s2)):
         rr.send_columns(entity, indexes=[times], columns=rr.Scalars.columns(scalars=channel.reshape(-1)).partition([components] * len(imu)))
@@ -743,24 +743,27 @@ class FrameMaskLog:
             self.last[index] = mask
 
 
-def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode, mask_log: FrameMaskLog | None = None) -> None:
-    """Log what the estimator is fed for one frameset, at the frameset's own time.
+def log_frameset_inputs(
+    cameras: tuple[CameraCalib, ...], cam_time_offset_ns: int, frameset: Frameset, mode: FrameMode, mask_log: FrameMaskLog | None = None
+) -> None:
+    """Log what the estimator is fed for one frameset, on the base video's frame of it (:func:`set_video_time`).
 
     Every replay draws this rung whether or not a stage consumes it, and the two
     tools that drive a stage draw the same one: a channel added here reaches both
     rather than one of them.
 
     Args:
-        feed: The open feed, for the cameras the images belong to.
+        cameras: The feed's cameras (:attr:`SegmentFeed.cameras`), which the images belong to.
+        cam_time_offset_ns: The feed's :attr:`ImuCalib.cam_time_offset_ns`, which :func:`set_video_time` removes.
         frameset: The frameset, with the inertial samples since the previous one.
         mode: How to draw the frames; see :data:`FrameMode`.
         mask_log: Where the frameset's masks go, drawn with the frames; None logs no mask.
     """
     # The samples are what the estimator is fed, so they are logged in every
     # stage whether or not one consumes them.
-    log_imu(frameset.imu)
-    rr.set_time(TIMELINE, duration=np.timedelta64(frameset.t_ns, "ns"))
-    for camera, image in zip(feed.cameras, frameset.images, strict=True):
+    log_imu(frameset.imu, cam_time_offset_ns)
+    set_video_time(frameset.t_ns, cam_time_offset_ns)
+    for camera, image in zip(cameras, frameset.images, strict=True):
         entity: str = f"{camera_entity(camera.index)}/image"
         if mode == "downscaled":
             small: UInt8[ndarray, "h w"] = np.ascontiguousarray(image[::IMAGE_DOWNSCALE, ::IMAGE_DOWNSCALE])
@@ -774,7 +777,7 @@ def log_frameset_inputs(feed: SegmentFeed, frameset: Frameset, mode: FrameMode, 
             # nothing logged.
             rr.log(entity, rr.Image(image, color_model="L").compress(jpeg_quality=JPEG_QUALITY))
     if mode != "off" and frameset.masks is not None and mask_log is not None:
-        mask_log.log(tuple(camera.index for camera in feed.cameras), [(image.shape[1], image.shape[0]) for image in frameset.images], frameset.masks)
+        mask_log.log(tuple(camera.index for camera in cameras), [(image.shape[1], image.shape[0]) for image in frameset.images], frameset.masks)
     if frameset.ground_truth is not None:
         pose_wxyz: Float64[ndarray, " 7"] = frameset.ground_truth
         rr.log(
