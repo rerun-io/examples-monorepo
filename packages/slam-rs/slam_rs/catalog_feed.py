@@ -554,6 +554,11 @@ class SegmentFeed:
         """Whether a ``gt`` layer is attached."""
         return self.gt_dataset is not None
 
+    @property
+    def video_time_offset_ns(self) -> int:
+        """What an exported trajectory stamp (estimator clock + :attr:`export_offset_ns`) minus is the segment's ``video_time``."""
+        return self.export_offset_ns + self.imu.cam_time_offset_ns
+
     def stop_ns_after(self, max_framesets: int | None) -> int | None:
         """When a count of framesets runs out, as a time :meth:`framesets` can stop at.
 

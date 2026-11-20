@@ -277,3 +277,32 @@ def test_ate_refuses_nonfinite_positions_before_alignment(value: float, bad_refe
     scored: ScoringResult = score_trajectory(estimate, reference)
     assert scored.result is None
     assert scored.unscored == message
+
+
+def test_an_export_states_how_to_reach_the_segments_video_time(tmp_path: Path) -> None:
+    """The CSV stays on the absolute clock, and its header says what to subtract to land on ``video_time``."""
+    from slam_rs.trajectory import read_video_time_offset
+
+    video_time_ns: Int64[ndarray, " n"] = np.array([0, 33_366_667, 66_733_333], dtype=np.int64)
+    offset_ns: int = 1_763_313_120_000_000_000 + 4_000_000  # capture start + camera-to-IMU offset
+    estimate: Trajectory = Trajectory(t_ns=video_time_ns + offset_ns, position_m=np.zeros((3, 3)), quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (3, 1)))
+    path: Path = tmp_path / "slam_rs.csv"
+
+    write_trajectory(path, estimate, video_time_offset_ns=offset_ns)
+
+    np.testing.assert_array_equal(read_trajectory(path).t_ns - read_video_time_offset(path), video_time_ns)
+    write_trajectory(path, estimate)
+    assert read_video_time_offset(path) is None
+
+
+def test_the_video_time_offset_is_the_export_offset_plus_the_camera_time_offset() -> None:
+    from types import SimpleNamespace
+
+    from slam_rs.catalog_feed import SegmentFeed
+
+    relative = SimpleNamespace(export_offset_ns=1_000_000_000, imu=SimpleNamespace(cam_time_offset_ns=-2_500))
+    absolute = SimpleNamespace(export_offset_ns=0, imu=SimpleNamespace(cam_time_offset_ns=7_000))
+    offset = SegmentFeed.video_time_offset_ns.fget
+    assert offset is not None
+    assert offset(relative) == 999_997_500
+    assert offset(absolute) == 7_000

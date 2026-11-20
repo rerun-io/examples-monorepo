@@ -77,7 +77,7 @@ def main(config: Config) -> None:
             print(f"global BA: failed: {run.gba_failure}; the final run is re-anchored on the map after loops and PGO", flush=True)
         for drop in run.dropped:
             print(f"Dropped frameset {drop.t_ns}: {drop.reason}", flush=True)
-        write_layer(output, config.segment, run, clock_offset_ns=feed.export_offset_ns + feed.imu.cam_time_offset_ns,
+        write_layer(output, config.segment, run, clock_offset_ns=feed.video_time_offset_ns,
                     profile=config.profile, backend=backend, decoder=decode_device, animate_base_rig=not segment.has_ground_truth)
     dataset.register([output.as_uri()], layer_name=POSE_SOURCE, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
     print(f"Registered {len(run.estimate)} poses / {run.framesets} framesets, {len(run.dropped)} explained drops; "
