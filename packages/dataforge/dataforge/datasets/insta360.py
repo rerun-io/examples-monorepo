@@ -108,6 +108,9 @@ COLSFM_SOURCE: str = "colsfm"
 """The colsfm layer: refined rig, frusta, and the sparse cloud logged at each point's first observing keyframe."""
 FOLLOW_PATH_WINDOW_S: float = 30.0
 """How far back of the cursor the follow view draws a path logged a segment a pose, in seconds."""
+OVERVIEW_PATH_WINDOW_S: float = 120.0
+"""The same for the overview. Bounded on purpose: on clip 007 (1,069 s, 32 k segments) a window from the start played at
+7 fps in the native viewer, 120 s at 16.5 fps; the replay's faint static whole path still shows where the walk went."""
 KEYPOINT_COLOR: tuple[int, int, int] = (60, 220, 120)
 """Tracked keypoints on the lenses: the green the clip B overview drew them in."""
 KEYPOINT_RADIUS_UI: float = 2.5
@@ -137,8 +140,8 @@ def segment_layout(*, panorama: bool) -> rrb.Blueprint:
     on a missing entity are inert, so the same layout serves a base-only segment, a SLAM run and a colsfm run.
 
     What accumulates is logged once at its own time and shown through a cursor window: the VIO path (a segment per
-    frameset) since the start in the overview and over the last ``FOLLOW_PATH_WINDOW_S`` in the follow view, and the
-    colsfm cloud (a row per keyframe) since the start in both, so it grows along the walk. The replay's window and
+    frameset) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in the follow view,
+    and the colsfm cloud (a row per keyframe) since the start in both, so it grows along the walk. The replay's window and
     marginalized frusta stay in the follow view only.
     """
     vio_path: str = schema.trajectory_path(VIO_SOURCE)
@@ -154,7 +157,7 @@ def segment_layout(*, panorama: bool) -> rrb.Blueprint:
         plots=blueprints.imu_plots(RIG, 0),
         overview_exclude=[*images, f"{schema.run_path(VIO_SOURCE)}/window", f"{schema.run_path(VIO_SOURCE)}/marginalized"],
         follow_exclude=images,
-        overview_overrides={vio_path: blueprints.cursor_window(None), colsfm_points: blueprints.cursor_window(None)},
+        overview_overrides={vio_path: blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S), colsfm_points: blueprints.cursor_window(None)},
         follow_overrides={
             vio_path: [blueprints.cursor_window(FOLLOW_PATH_WINDOW_S), rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(3.0))],
             colsfm_points: blueprints.cursor_window(None),

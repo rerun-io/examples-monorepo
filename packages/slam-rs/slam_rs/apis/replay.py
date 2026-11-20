@@ -32,7 +32,17 @@ from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load
 from slam_rs.rig import TIMELINE
 from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import COLOR_DOWNSCALE, RUN_ENTITY, FrameMaskLog, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import (
+    COLOR_DOWNSCALE,
+    RUN_ENTITY,
+    FrameMaskLog,
+    FrameMode,
+    VioLogger,
+    VioStage,
+    log_calibration,
+    log_frameset_inputs,
+    vio_blueprint,
+)
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import rerun.blueprint as rrb
 
 from dataforge import blueprints, schema, writing
-from dataforge.datasets.insta360 import COLSFM_SOURCE, FOLLOW_PATH_WINDOW_S, RIG, VIO_SOURCE, segment_layout
+from dataforge.datasets.insta360 import COLSFM_SOURCE, FOLLOW_PATH_WINDOW_S, OVERVIEW_PATH_WINDOW_S, RIG, VIO_SOURCE, segment_layout
 
 
 def test_the_layout_has_an_overview_and_a_follow_view_that_rides_the_rig() -> None:
@@ -27,11 +27,13 @@ def test_paths_and_the_colsfm_cloud_accumulate_through_cursor_windows() -> None:
     points: str = f"{schema.run_path(COLSFM_SOURCE)}/points"
     overview_overrides = overview.visualizer_overrides or {}
     follow_overrides = follow.visualizer_overrides or {}
-    assert overview_overrides[vio_path] == blueprints.cursor_window(None)
+    assert overview_overrides[vio_path] == blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S), "a bounded window keeps a long walk fast"
     assert overview_overrides[points] == blueprints.cursor_window(None), "the cloud grows from the start of the walk"
     assert follow_overrides[points] == blueprints.cursor_window(None)
     follow_path = follow_overrides[vio_path]
-    assert isinstance(follow_path, list) and blueprints.cursor_window(FOLLOW_PATH_WINDOW_S) in follow_path, "the follow view draws the recent path only"
+    assert isinstance(follow_path, list) and blueprints.cursor_window(FOLLOW_PATH_WINDOW_S) in follow_path, (
+        "the follow view draws the recent path only"
+    )
     assert overview_overrides[schema.trail_path(VIO_SOURCE)] == rrb.EntityBehavior(visible=False)
 
 
