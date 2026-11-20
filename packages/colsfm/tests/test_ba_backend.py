@@ -30,6 +30,7 @@ from colsfm.ba_backend import (
     parse_caspar_options,
     resolve_ba_plan,
     resolve_backend,
+    resolve_caspar_mode,
 )
 
 STOCK_CAPABILITY: CasparCapability = CasparCapability(
@@ -67,7 +68,7 @@ def test_an_integer_knob_keeps_its_integer_type() -> None:
 
 def test_a_double_knob_keeps_its_fractional_value() -> None:
     """The damping and exit knobs are doubles and are not rounded."""
-    assert parse_caspar_options(("pcg_rel_error_exit=0.01",)) == {"pcg_rel_error_exit": 0.01}
+    assert parse_caspar_options(("diag_scaling_up=2.5",)) == {"diag_scaling_up": 2.5}
 
 
 def test_a_fractional_value_for_an_integer_knob_is_refused() -> None:
@@ -99,6 +100,46 @@ def test_a_non_numeric_value_is_refused() -> None:
     """Every settable CASPAR knob is a number."""
     with pytest.raises(ValueError, match="needs a number"):
         parse_caspar_options(("solver_iter_max=many",))
+
+
+def test_without_a_mode_the_reduced_camera_system_keeps_its_own_knobs() -> None:
+    """No mode and no full-system knob: the build's default (the reduced camera system) runs, with its knobs as given."""
+    assert resolve_caspar_mode({"reduced_pcg_iter_max": 200, "solver_iter_max": 50}) == {"reduced_pcg_iter_max": 200, "solver_iter_max": 50}
+
+
+@pytest.mark.parametrize("knob", ["pcg_iter_max", "pcg_rel_error_exit", "pcg_rel_score_exit", "pcg_rel_decrease_min"])
+def test_a_full_system_knob_without_a_mode_selects_the_full_system(knob: str) -> None:
+    """`pcg_iter_max=80` used to be accepted and then ignored by the reduced default; it now means the full system."""
+    assert resolve_caspar_mode({knob: 1})["reduced_camera_system"] is False
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"reduced_camera_system": True, "pcg_iter_max": 80}, "apply to the full-system PCG only"),
+        ({"reduced_camera_system": False, "reduced_pcg_eta": 0.2}, "apply to the reduced camera system only"),
+        ({"pcg_iter_max": 80, "reduced_pcg_iter_max": 200}, "sets both the full-system"),
+        ({"reduced_pcg_iter_max": 0}, "reduced_pcg_iter_max must be at least 1"),
+        ({"reduced_pcg_eta": 1.0}, r"reduced_pcg_eta must be in \(0, 1\)"),
+        ({"reduced_pcg_eta": float("nan")}, r"reduced_pcg_eta must be in \(0, 1\)"),
+    ],
+    ids=["reduced-with-full-knob", "full-with-reduced-knob", "both-families", "zero-cap", "eta-one", "eta-nan"],
+)
+def test_contradictory_or_invalid_modes_are_refused_before_the_run(options: CasparOptions, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        resolve_caspar_mode(options)
+
+
+def test_the_reduced_camera_system_switch_parses_as_a_bool() -> None:
+    """The one bool solver control `--caspar-option` takes: true/false/1/0, anything else refused."""
+    if "reduced_camera_system" not in caspar_option_types():
+        pytest.skip("this pycolmap predates recipes/colmap-src caspar-reduced-camera-system.patch")
+    for raw, expected in (("false", False), ("0", False), ("True", True), ("1", True)):
+        parsed: CasparOptions = parse_caspar_options((f"reduced_camera_system={raw}",))
+        assert parsed == {"reduced_camera_system": expected} and isinstance(parsed["reduced_camera_system"], bool)
+    with pytest.raises(ValueError, match="takes true or false"):
+        parse_caspar_options(("reduced_camera_system=0.5",))
+    assert parse_caspar_options(("pcg_iter_max=80",)) == {"pcg_iter_max": 80, "reduced_camera_system": False}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

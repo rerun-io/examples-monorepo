@@ -4214,7 +4214,7 @@ description = "Download the 226-frame r2b Galileo sample (8 pinhole cameras, gro
 cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo --min-inter-frame-distance 0.0"
 depends-on = ["colsfm-download-galileo", "colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
-description = "The default pipeline (RaCo, FlexGlue, loop closure, CASPAR + Ceres polish, extrinsic refinement) on Galileo"
+description = "The default pipeline (RaCo, FlexGlue, loop closure, CASPAR, extrinsic refinement) on Galileo"
 
 [feature.colsfm.tasks.colsfm-galileo-ablation]
 # Every keyframe, as colsfm-galileo.

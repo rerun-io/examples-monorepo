@@ -33,7 +33,7 @@ whose temporal `Transform3D` is the initial trajectory, stride, trim) and every 
 |---|---|---|
 | `--features-backend` | `raco` (RaCo-ALIKED, TensorRT) | `pycolmap` (COLMAP's ALIKED through ONNX Runtime; no engine) |
 | `--matching-backend` | `flexglue` (FlexGlue on TensorRT, covisibility gate) | `raco` (LightGlue+, TensorRT, real SSC); `pycolmap` (COLMAP's LightGlue); `flexglue_ort` (COLMAP's ONNX Runtime FlexGlue, parity reference, image folders only) |
-| `--ba-backend` | `caspar` (COLMAP's GPU bundle adjuster) + one Ceres polish | `ceres` |
+| `--ba-backend` | `caspar` (COLMAP's GPU bundle adjuster; reduced camera system, no closing Ceres solve) | `ceres`; `--caspar-ceres-polish` adds one Ceres global bundle adjustment after CASPAR; `--caspar-option reduced_camera_system=false` runs CASPAR's full-system PCG |
 | `--optimize-extrinsics` | on (regularised, cuSFM's priors) | `--no-optimize-extrinsics`, `--no-regularised-extrinsics` |
 | `--loop-closure` | on | `--no-loop-closure` |
 

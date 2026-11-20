@@ -137,7 +137,8 @@ loop — the per-round gate `g_k` filters at 25, 20, 15, 10, 5 px *before* each
 solve, and `filter_degenerate_points` / `filter_projection_failures` run after it.
 That is enough: an ablation on KITTI 06 — Ceres with `loss_type: TRIVIAL` — scores
 0.899 m Sim(3) ATE against the robust run's 0.895 m, so the loss is not what
-CASPAR's 1.299 m costs (NOTES.md "CASPAR backend"). Its float32 arithmetic is.
+CASPAR's 1.299 m cost (NOTES.md "CASPAR backend"). Its PCG was: a beta recurrence bug and a full-system solve
+stopped it short of the minimum, which recipes/colmap-src fixes (`patches/PROVENANCE.md`).
 
 Three more constraints, all from COLMAP 4.2.0's source and all handled here:
 observations from a camera model the build has no adapter for are *silently
