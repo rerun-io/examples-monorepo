@@ -49,45 +49,88 @@ impl Default for MatchConfig {
     }
 }
 
-/// The index in `candidates` that `query` matches under `config`, if any.
-///
-/// The best distance must be below `config.max_distance`, strictly below the second best, and pass the ratio test.
-/// Requiring a strict gap means a tie for the best candidate never matches, whatever the ratio; Basalt's
-/// `matchFastHelper` accepts ties when the ratio is 1.0 or the distance is 0 and keeps the last tied index.
-fn best_match(
-    query: &Descriptor256,
-    candidates: &[Descriptor256],
-    config: MatchConfig,
-) -> Option<usize> {
-    let mut best: Option<(usize, u32)> = None;
-    let mut second: Option<u32> = None;
-    for (index, candidate) in candidates.iter().enumerate() {
-        let distance = query.hamming(candidate);
-        match best {
-            Some((_, best_distance)) if distance >= best_distance => {
-                if second.is_none_or(|s| distance < s) {
-                    second = Some(distance);
-                }
-            }
-            _ => {
-                second = best.map(|(_, d)| d);
-                best = Some((index, distance));
-            }
+/// Largest possible 256-bit Hamming distance plus one.
+const NO_DISTANCE: u32 = 257;
+
+#[derive(Clone, Copy)]
+struct Nearest {
+    index: usize,
+    best: u32,
+    second: u32,
+}
+
+impl Nearest {
+    const EMPTY: Self = Self {
+        index: 0,
+        best: NO_DISTANCE,
+        second: NO_DISTANCE,
+    };
+
+    #[inline]
+    fn insert(&mut self, index: usize, distance: u32) {
+        if distance < self.best {
+            self.second = self.best;
+            self.best = distance;
+            self.index = index;
+        } else {
+            self.second = self.second.min(distance);
         }
     }
-    let (index, distance) = best?;
-    let separated = second.is_none_or(|s| {
-        distance < s && f64::from(distance) * config.second_best_ratio <= f64::from(s)
-    });
-    (distance < config.max_distance && separated).then_some(index)
+
+    fn matching_index(self, count: usize, config: MatchConfig) -> Option<usize> {
+        // A single candidate has no second best, so the ratio test does not apply.
+        let separated = count == 1
+            || (self.best < self.second
+                && f64::from(self.best) * config.second_best_ratio <= f64::from(self.second));
+        (self.best < NO_DISTANCE && self.best < config.max_distance && separated)
+            .then_some(self.index)
+    }
 }
+
+// Write contiguous distances so LLVM can vectorize popcount independently
+// of the best/second-best updates.
+#[inline(always)]
+fn distance_row(query: &Descriptor256, candidates: &[Descriptor256], row: &mut [u32]) {
+    for (out, candidate) in row.iter_mut().zip(candidates) {
+        *out = query.hamming(candidate);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+fn fill_distances(query: &Descriptor256, candidates: &[Descriptor256], row: &mut [u32]) {
+    #[target_feature(enable = "avx512f,avx512vpopcntdq")]
+    unsafe fn avx512(query: &Descriptor256, candidates: &[Descriptor256], row: &mut [u32]) {
+        distance_row(query, candidates, row);
+    }
+
+    #[target_feature(enable = "popcnt")]
+    unsafe fn popcnt(query: &Descriptor256, candidates: &[Descriptor256], row: &mut [u32]) {
+        distance_row(query, candidates, row);
+    }
+
+    if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vpopcntdq")
+    {
+        // SAFETY: Both CPU features and OS support were checked above.
+        unsafe { avx512(query, candidates, row) }
+    } else if std::is_x86_feature_detected!("popcnt") {
+        // SAFETY: The CPU supports POPCNT.
+        unsafe { popcnt(query, candidates, row) }
+    } else {
+        distance_row(query, candidates, row);
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+use distance_row as fill_distances;
 
 /// Mutual nearest-neighbour matches between two descriptor sets, as Basalt's `matchDescriptors`, ordered by `a`
 /// index.
 ///
 /// A pair `(i, j)` is kept when `a[i]` matches `b[j]` and `b[j]` matches `a[i]` under [`MatchConfig`]. Unlike
 /// Basalt, a descriptor whose reverse search finds no match never passes the mutual check (Basalt reads the
-/// missing reverse entry as index 0), and ties for the best distance are rejected (see [`MatchConfig`]).
+/// missing reverse entry as index 0), and ties for the best distance never match (B17): Basalt's `matchFastHelper`
+/// accepts them when the ratio is 1.0 or the distance is 0 and keeps the last tied index.
 ///
 /// ```
 /// use kornia_staging_imgproc::features::{match_mutual, Descriptor256, MatchConfig};
@@ -100,11 +143,38 @@ pub fn match_mutual(
     b: &[Descriptor256],
     config: MatchConfig,
 ) -> Vec<(usize, usize)> {
-    let b_to_a: Vec<Option<usize>> = b.iter().map(|d| best_match(d, a, config)).collect();
-    a.iter()
+    if config.max_distance == 0 || a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+
+    // A distance above this bound cannot be an accepted best, tie the best,
+    // or make an accepted best fail the ratio test. In that case a missing
+    // second distance can stand in for any ignored distance.
+    let best_limit = config.max_distance - 1;
+    let ratio_limit = f64::from(best_limit) * config.second_best_ratio;
+    let limit = best_limit.max(ratio_limit as u32).min(NO_DISTANCE - 1);
+    let mut a_nearest = Vec::with_capacity(a.len());
+    let mut b_nearest = vec![Nearest::EMPTY; b.len()];
+    let mut row = vec![0; b.len()];
+    for (i, query) in a.iter().enumerate() {
+        fill_distances(query, b, &mut row);
+        let mut nearest = Nearest::EMPTY;
+        for (j, (&distance, reverse)) in row.iter().zip(&mut b_nearest).enumerate() {
+            if distance <= limit {
+                nearest.insert(j, distance);
+                reverse.insert(i, distance);
+            }
+        }
+        a_nearest.push(nearest);
+    }
+
+    a_nearest
+        .into_iter()
         .enumerate()
-        .filter_map(|(i, d)| best_match(d, b, config).map(|j| (i, j)))
-        .filter(|&(i, j)| b_to_a[j] == Some(i))
+        .filter_map(|(i, nearest)| {
+            let j = nearest.matching_index(b.len(), config)?;
+            (b_nearest[j].matching_index(a.len(), config) == Some(i)).then_some((i, j))
+        })
         .collect()
 }
 
@@ -131,28 +201,38 @@ mod tests {
 
     #[test]
     fn ties_for_the_best_never_match() {
-        // B17: Basalt with ratio 1.0 accepts the tie (best * 1.0 <= second) and keeps the last index.
         let config = MatchConfig {
             max_distance: 70,
             second_best_ratio: 1.0,
         };
-        assert_eq!(best_match(&ones(0), &[ones(5), ones(5)], config), None);
+        // B17: Basalt with ratio 1.0 accepts the tie (best * 1.0 <= second) and keeps the last index.
+        assert!(match_mutual(&[ones(0)], &[ones(5), ones(5)], config).is_empty());
         // Also at distance 0, where Basalt accepts the tie for any ratio.
+        assert!(match_mutual(&[ones(0)], &[ones(0), ones(0)], MatchConfig::default()).is_empty());
         assert_eq!(
-            best_match(&ones(0), &[ones(0), ones(0)], MatchConfig::default()),
-            None
+            match_mutual(&[ones(0)], &[ones(5), ones(6)], config),
+            vec![(0, 0)]
         );
-        assert_eq!(best_match(&ones(0), &[ones(5), ones(6)], config), Some(0));
     }
 
     #[test]
     fn ratio_and_distance_gates() {
         let config = MatchConfig::default();
-        assert_eq!(best_match(&ones(0), &[ones(10), ones(12)], config), Some(0)); // 12 <= 12
-        assert_eq!(best_match(&ones(0), &[ones(11), ones(13)], config), None); // 13.2 > 13
-        assert_eq!(best_match(&ones(0), &[ones(70)], config), None);
-        assert_eq!(best_match(&ones(0), &[ones(69)], config), Some(0));
-        assert_eq!(best_match(&ones(0), &[], config), None);
+        assert_eq!(
+            match_mutual(&[ones(0)], &[ones(10), ones(12)], config),
+            vec![(0, 0)]
+        );
+        assert!(match_mutual(&[ones(0)], &[ones(11), ones(13)], config).is_empty());
+        // The runner-up can fail the ratio test even if its own distance
+        // would be too large to match.
+        assert!(match_mutual(&[ones(0)], &[ones(69), ones(82)], config).is_empty());
+        assert_eq!(
+            match_mutual(&[ones(0)], &[ones(69), ones(83)], config),
+            vec![(0, 0)]
+        );
+        assert!(match_mutual(&[ones(0)], &[ones(70)], config).is_empty());
+        assert_eq!(match_mutual(&[ones(0)], &[ones(69)], config), vec![(0, 0)]);
+        assert!(match_mutual(&[ones(0)], &[], config).is_empty());
     }
 
     #[test]
@@ -161,13 +241,81 @@ mod tests {
         // `matches_2_1[kv.second] == kv.first` default-inserts 0 for the missing key and keeps (0, 0).
         let a = [ones(0), ones(0)];
         let b = [ones(3), ones(100)];
-        assert_eq!(best_match(&a[0], &b, MatchConfig::default()), Some(0));
-        assert_eq!(best_match(&b[0], &a, MatchConfig::default()), None);
         assert!(match_mutual(&a, &b, MatchConfig::default()).is_empty());
     }
 
     fn descriptor() -> impl Strategy<Value = Descriptor256> {
         proptest::array::uniform4(any::<u64>()).prop_map(Descriptor256)
+    }
+
+    // The original two directional scans are the oracle for the optimized matcher.
+    fn reference_best_match(
+        query: &Descriptor256,
+        candidates: &[Descriptor256],
+        config: MatchConfig,
+    ) -> Option<usize> {
+        let mut best: Option<(usize, u32)> = None;
+        let mut second: Option<u32> = None;
+        for (index, candidate) in candidates.iter().enumerate() {
+            let distance = query.hamming(candidate);
+            match best {
+                Some((_, best_distance)) if distance >= best_distance => {
+                    if second.is_none_or(|s| distance < s) {
+                        second = Some(distance);
+                    }
+                }
+                _ => {
+                    second = best.map(|(_, d)| d);
+                    best = Some((index, distance));
+                }
+            }
+        }
+        let (index, distance) = best?;
+        let separated = second.is_none_or(|s| {
+            distance < s && f64::from(distance) * config.second_best_ratio <= f64::from(s)
+        });
+        (distance < config.max_distance && separated).then_some(index)
+    }
+
+    proptest! {
+        #[test]
+        fn mutual_matches_equal_the_original_two_pass_matcher(
+            center in descriptor(),
+            a_masks in proptest::collection::vec(0..=256u32, 0..32),
+            b_masks in proptest::collection::vec(0..=256u32, 0..32),
+            a_random in proptest::collection::vec(descriptor(), 0..8),
+            b_random in proptest::collection::vec(descriptor(), 0..8),
+            config in prop_oneof![
+                Just(MatchConfig::default()),
+                (0..=258u32, prop_oneof![
+                    -2.0f64..=4.0,
+                    Just(1.0),
+                    Just(f64::NAN),
+                    Just(f64::INFINITY),
+                    Just(f64::NEG_INFINITY),
+                ]).prop_map(|(max_distance, second_best_ratio)| MatchConfig {
+                    max_distance,
+                    second_best_ratio,
+                }),
+            ],
+        ) {
+            // Clustered descriptors produce close matches, ties and ratio-test failures.
+            // Independent descriptors exercise the remaining word/bit patterns.
+            let cluster = |masks: Vec<u32>, mut descriptors: Vec<Descriptor256>| {
+                descriptors.extend(masks.into_iter().map(|n| {
+                    let mask = ones(n).0;
+                    Descriptor256(std::array::from_fn(|i| center.0[i] ^ mask[i]))
+                }));
+                descriptors
+            };
+            let a = cluster(a_masks, a_random);
+            let b = cluster(b_masks, b_random);
+            let expected: Vec<_> = a.iter().enumerate()
+                .filter_map(|(i, d)| reference_best_match(d, &b, config).map(|j| (i, j)))
+                .filter(|&(i, j)| reference_best_match(&b[j], &a, config) == Some(i))
+                .collect();
+            prop_assert_eq!(match_mutual(&a, &b, config), expected);
+        }
     }
 
     proptest! {

@@ -4,7 +4,6 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kornia_image::{Image, ImageSize};
@@ -493,12 +492,12 @@ fn matching_skips_undescribed_ids_keeps_one_match_per_keypoint_and_spots_shared_
         let mut rng = Rng::new(seed);
         Descriptor256([rng.next(), rng.next(), rng.next(), rng.next()])
     };
-    let current: KeyframeDescriptors = vec![BTreeMap::from([
-        (KeypointId(1), d(1)),
-        (KeypointId(2), d(2)),
-    ])];
+    let current: KeyframeDescriptors = vec![DescriptorSet::from_ordered([(1, d(1)), (2, d(2))])];
     // B7: an id without a descriptor is absent from the set, never an all-zero one.
-    let island = vec![vec![(5, d(1)), (6, d(2))], vec![(7, d(1))]];
+    let island = [
+        DescriptorSet::from_ordered([(5, d(1)), (6, d(2))]),
+        DescriptorSet::from_ordered([(7, d(1))]),
+    ];
     let matches = match_cameras(&current, &island, MatchConfig::default());
     assert_eq!(
         matches,
@@ -512,14 +511,18 @@ fn matching_skips_undescribed_ids_keeps_one_match_per_keypoint_and_spots_shared_
         consolidate(matches),
         vec![(0, KeypointId(1), 5), (0, KeypointId(2), 6)]
     );
-    let other: KeyframeDescriptors = vec![BTreeMap::new(), BTreeMap::from([(KeypointId(2), d(9))])];
+    let current_ids = BTreeSet::from([1, 2]);
+    let other = [
+        DescriptorSet::default(),
+        DescriptorSet::from_ordered([(2, d(9))]),
+    ];
     assert!(
-        share_a_track(&current, &other),
+        share_a_track(&current_ids, &other),
         "a shared track id means covisible"
     );
     assert!(!share_a_track(
-        &current,
-        &vec![BTreeMap::from([(KeypointId(3), d(1))])]
+        &current_ids,
+        &[DescriptorSet::from_ordered([(3, d(1))])]
     ));
 }
 
@@ -1125,16 +1128,25 @@ fn an_island_landmark_its_keyframe_never_described_matches_nothing() {
     let loops = s.backend.loops.as_mut().unwrap();
     let images = loops.images.remove(&C).unwrap();
     loops.index(C, &keypoints, &images);
-    let before = s.backend.validate(C, A, &keypoints, &images).unwrap();
+    let validate = |backend: &mut MapBackend| {
+        let loops = backend.loops.as_ref().unwrap();
+        let mut query = LoopQuery::new(C, &loops.descriptors[&C], &keypoints, &images);
+        let initial = loops.initial_matches(&query, A).unwrap();
+        backend.validate(&mut query, A, initial).unwrap()
+    };
+    let before = validate(&mut s.backend);
     let loops = s.backend.loops.as_mut().unwrap();
-    loops.descriptors.get_mut(&C).unwrap()[0].insert(KeypointId(9_999_999), Descriptor256([0; 4]));
+    let described = &mut loops.descriptors.get_mut(&C).unwrap()[0];
+    let index = described.ids.binary_search(&9_999_999).unwrap_err();
+    described.ids.insert(index, 9_999_999);
+    described.values.insert(index, Descriptor256([0; 4]));
     let hosted = LandmarkId::from(keypoint_id(0, 0, 100_000));
     assert!(
         s.backend
             .map
             .add_observation(hosted, TimeCamId::new(A2, 0), Vector2::new(5.0, 5.0))
     );
-    let after = s.backend.validate(C, A, &keypoints, &images).unwrap();
+    let after = validate(&mut s.backend);
     assert_eq!(after.stages, before.stages);
 }
 

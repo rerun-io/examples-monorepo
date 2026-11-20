@@ -9,7 +9,7 @@
 //! 2. **Retrieve.** Query with every camera's bag (B5; camera 0 under
 //!    `rootslam-parity`), score each keyframe by its best (query camera, entry
 //!    camera) pair before keeping the best N (B4), sort by score then id and
-//!    validate in that order (B3). Candidates are at least
+//!    accept the first that passes in that order (B3). Candidates are at least
 //!    `frame_time_margin_s` older.
 //! 3. **Validate** each candidate until one passes: reject it if it shares a
 //!    tracked keypoint with the current keyframe (covisible, not a loop);
@@ -41,6 +41,7 @@ use kornia_staging_imgproc::features::{
     BriefConfig, BriefSmoothing, Descriptor256, MatchConfig, describe_keypoints_u16, match_mutual,
 };
 use nalgebra::{Vector2, Vector3, Vector4};
+use rayon::prelude::*;
 
 use super::pgo::PgoState;
 use super::{MapBackend, MapEvent};
@@ -51,8 +52,60 @@ use crate::estimator::{ImageSlot, KeyframeImages};
 use crate::lie::Se3;
 use crate::types::{CamId, FrameId, KeypointId, LandmarkId, TimeCamId};
 
-/// Descriptors of one keyframe: per camera, keypoint id to descriptor.
-type KeyframeDescriptors = Vec<BTreeMap<KeypointId, Descriptor256>>;
+/// One camera's descriptors in ID order, contiguous for Hamming matching.
+#[derive(Debug, Clone, Default)]
+struct DescriptorSet {
+    ids: Vec<u64>,
+    values: Vec<Descriptor256>,
+}
+
+impl DescriptorSet {
+    fn from_ordered(descriptors: impl IntoIterator<Item = (u64, Descriptor256)>) -> Self {
+        let (ids, values): (Vec<_>, Vec<_>) = descriptors.into_iter().unzip();
+        debug_assert!(
+            ids.is_sorted_by(|a, b| a < b),
+            "ids must be unique and ascending"
+        );
+        Self { ids, values }
+    }
+
+    fn get(&self, id: u64) -> Option<&Descriptor256> {
+        self.ids.binary_search(&id).ok().map(|i| &self.values[i])
+    }
+}
+
+type KeyframeDescriptors = Vec<DescriptorSet>;
+type CameraMatch = (CamId, KeypointId, u64);
+
+struct LoopQuery<'a> {
+    current: FrameId,
+    current_ids: BTreeSet<u64>,
+    keypoints: &'a crate::estimator::Keypoints,
+    images: &'a KeyframeImages,
+    // The map does not change during verification. Candidates can share
+    // island members, so compute each member's matches once per query.
+    island_matches: BTreeMap<FrameId, Vec<CameraMatch>>,
+}
+
+impl<'a> LoopQuery<'a> {
+    fn new(
+        current: FrameId,
+        ours: &[DescriptorSet],
+        keypoints: &'a crate::estimator::Keypoints,
+        images: &'a KeyframeImages,
+    ) -> Self {
+        Self {
+            current,
+            current_ids: ours
+                .iter()
+                .flat_map(|cam| cam.ids.iter().copied())
+                .collect(),
+            keypoints,
+            images,
+            island_matches: BTreeMap::new(),
+        }
+    }
+}
 
 /// One correspondence between the current keyframe and a map landmark.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -304,6 +357,18 @@ impl LoopClosing {
         }
     }
 
+    /// `validateCandidate`'s covisibility check and keyframe matching: the
+    /// initial match count, if the candidate passes both.
+    fn initial_matches(&self, query: &LoopQuery<'_>, candidate: FrameId) -> Option<usize> {
+        let ours = self.descriptors.get(&query.current)?;
+        let theirs = self.descriptors.get(&candidate)?;
+        if share_a_track(&query.current_ids, theirs) {
+            return None;
+        }
+        let initial = consolidate(match_cameras(ours, theirs, self.matching())).len();
+        (initial >= self.config.min_initial_matches).then_some(initial)
+    }
+
     fn matching(&self) -> MatchConfig {
         MatchConfig {
             max_distance: self.config.max_hamming_distance,
@@ -320,20 +385,29 @@ impl LoopClosing {
         images: &KeyframeImages,
     ) -> Vec<(CamId, BoW)> {
         let brief: BriefConfig = self.brief();
-        let mut described: KeyframeDescriptors = Vec::with_capacity(keypoints.len());
+        let described: KeyframeDescriptors = keypoints
+            .par_iter()
+            .enumerate()
+            .map(|(cam, camera_keypoints)| {
+                let Some(image) = images.0.get(cam) else {
+                    return DescriptorSet::default();
+                };
+                let pixels: Vec<[f32; 2]> =
+                    camera_keypoints.iter().map(|(_, p)| [p.x, p.y]).collect();
+                // Keyframe keypoints are in id order, so the described subset is too.
+                DescriptorSet::from_ordered(
+                    camera_keypoints
+                        .iter()
+                        .zip(describe_keypoints_u16(image, &pixels, brief))
+                        .filter_map(|((id, _), described)| Some((id.0, described?.descriptor))),
+                )
+            })
+            .collect();
+
+        // Bags enter the database in camera order, so insert them serially.
         let mut bags: Vec<(CamId, BoW)> = Vec::new();
-        for (cam, camera_keypoints) in keypoints.iter().enumerate() {
-            let Some(image) = images.0.get(cam) else {
-                described.push(BTreeMap::new());
-                continue;
-            };
-            let pixels: Vec<[f32; 2]> = camera_keypoints.iter().map(|(_, p)| [p.x, p.y]).collect();
-            let descriptors: BTreeMap<KeypointId, Descriptor256> = camera_keypoints
-                .iter()
-                .zip(describe_keypoints_u16(image, &pixels, brief))
-                .filter_map(|((id, _), described)| Some((*id, described?.descriptor)))
-                .collect();
-            let words: Vec<[u64; 4]> = descriptors.values().map(|d| d.0).collect();
+        for (cam, descriptors) in described.iter().take(images.0.len()).enumerate() {
+            let words: Vec<[u64; 4]> = descriptors.values.iter().map(|d| d.0).collect();
             let bag: BoW = self.bow.bag(&words);
             self.bow.insert(
                 FrameCamId {
@@ -343,7 +417,6 @@ impl LoopClosing {
                 &bag,
             );
             bags.push((cam, bag));
-            described.push(descriptors);
         }
         self.descriptors.insert(keyframe, described);
         self.counts.indexed += 1;
@@ -387,32 +460,28 @@ pub(crate) fn retrieve(
         .collect()
 }
 
-/// Whether two keyframes share a described keypoint id, i.e. a track
+/// Whether any camera shares a described track with the current keyframe
 /// (`checkCovisibility`): then they are covisible, not a loop.
-pub(crate) fn share_a_track(a: &KeyframeDescriptors, b: &KeyframeDescriptors) -> bool {
-    let ids: BTreeSet<KeypointId> = a.iter().flat_map(|cam| cam.keys().copied()).collect();
-    b.iter()
-        .flat_map(|cam| cam.keys())
-        .any(|id| ids.contains(id))
+fn share_a_track(current_ids: &BTreeSet<u64>, candidate: &[DescriptorSet]) -> bool {
+    candidate
+        .iter()
+        .flat_map(|cam| &cam.ids)
+        .any(|id| current_ids.contains(id))
 }
 
-/// Mutual matches of the current keyframe's descriptors (per camera) against
-/// candidate descriptors (per camera, `(id, descriptor)`), every camera pair,
+/// Mutual matches for every camera pair, in camera and descriptor id order,
 /// as `(current camera, current keypoint, candidate id)` (`matchKeyframes`).
 /// Only described ids take part (B7).
-pub(crate) fn match_cameras(
-    current: &KeyframeDescriptors,
-    candidates: &[Vec<(u64, Descriptor256)>],
+fn match_cameras(
+    current: &[DescriptorSet],
+    candidates: &[DescriptorSet],
     config: MatchConfig,
-) -> Vec<(CamId, KeypointId, u64)> {
-    let mut matches: Vec<(CamId, KeypointId, u64)> = Vec::new();
+) -> Vec<CameraMatch> {
+    let mut matches = Vec::new();
     for (cam, described) in current.iter().enumerate() {
-        let ids: Vec<KeypointId> = described.keys().copied().collect();
-        let descriptors: Vec<Descriptor256> = described.values().copied().collect();
         for candidate in candidates {
-            let theirs: Vec<Descriptor256> = candidate.iter().map(|(_, d)| *d).collect();
-            for (i, j) in match_mutual(&descriptors, &theirs, config) {
-                matches.push((cam, ids[i], candidate[j].0));
+            for (i, j) in match_mutual(&described.values, &candidate.values, config) {
+                matches.push((cam, KeypointId(described.ids[i]), candidate.ids[j]));
             }
         }
     }
@@ -420,7 +489,7 @@ pub(crate) fn match_cameras(
 }
 
 /// Keep the first match of each (camera, current keypoint) (`consolidateMatches`).
-pub(crate) fn consolidate(matches: Vec<(CamId, KeypointId, u64)>) -> Vec<(CamId, KeypointId, u64)> {
+fn consolidate(matches: Vec<CameraMatch>) -> Vec<CameraMatch> {
     let mut seen: BTreeSet<(CamId, KeypointId)> = BTreeSet::new();
     matches
         .into_iter()
@@ -542,63 +611,73 @@ impl MapBackend {
         let keypoints = self.map.keyframe(keyframe)?.keypoints.clone();
         let bags = loops.index(keyframe, &keypoints, &images);
         let candidates: Vec<FrameId> = retrieve(&loops.bow, &bags, keyframe, &loops.config);
-        if !candidates.is_empty() {
-            loops.counts.with_candidates += 1;
+        if candidates.is_empty() {
+            return None;
         }
-        let detection = candidates
-            .into_iter()
-            .find_map(|candidate| self.validate(keyframe, candidate, &keypoints, &images))?;
-        Some(detection)
+        loops.counts.with_candidates += 1;
+
+        let mut query = LoopQuery::new(
+            keyframe,
+            loops.descriptors.get(&keyframe)?,
+            &keypoints,
+            &images,
+        );
+        // The first matching stage reads descriptors only. Run it across
+        // candidates, then keep the original score order for geometry and PnP.
+        let initial_matches: Vec<_> = candidates
+            .par_iter()
+            .map(|&candidate| loops.initial_matches(&query, candidate))
+            .collect();
+        for (candidate, initial) in candidates.into_iter().zip(initial_matches) {
+            self.loops.as_mut()?.counts.candidates += 1;
+            if let Some(initial) = initial
+                && let Some(detection) = self.validate(&mut query, candidate, initial)
+            {
+                return Some(detection);
+            }
+        }
+        None
     }
 
-    /// `validateCandidate`: covisibility check, keyframe matching, island
-    /// matching, PnP, the reprojection pass and PnP again.
+    /// `validateCandidate` after the covisibility check and keyframe matching,
+    /// which `detect_loop` runs across candidates: island matching, PnP, the
+    /// reprojection pass and PnP again.
     fn validate(
         &mut self,
-        current: FrameId,
+        query: &mut LoopQuery<'_>,
         candidate: FrameId,
-        keypoints: &crate::estimator::Keypoints,
-        images: &KeyframeImages,
+        initial: usize,
     ) -> Option<LoopDetection> {
-        self.loops.as_mut()?.counts.candidates += 1;
+        let current = query.current;
         let loops = self.loops.as_ref()?;
         let config: LoopClosingConfig = loops.config.clone();
         let matching: MatchConfig = loops.matching();
-        let ours: &KeyframeDescriptors = loops.descriptors.get(&current)?;
-        let theirs: &KeyframeDescriptors = loops.descriptors.get(&candidate)?;
-        if share_a_track(ours, theirs) {
-            return None;
-        }
-        let candidate_sets: Vec<Vec<(u64, Descriptor256)>> = theirs
-            .iter()
-            .map(|cam| cam.iter().map(|(id, d)| (id.0, *d)).collect())
-            .collect();
-        let initial = consolidate(match_cameras(ours, &candidate_sets, matching)).len();
-        if initial < config.min_initial_matches {
-            return None;
-        }
+        let ours = loops.descriptors.get(&current)?;
 
         // The island and its landmarks, each with the descriptor its keyframe
         // gave the keypoint of the same id (B7: none, no match).
         let island: Vec<FrameId> = std::iter::once(candidate)
             .chain(self.graph.top_covisible(candidate, config.island_size))
             .collect();
-        let mut island_matches: Vec<(CamId, KeypointId, u64)> = Vec::new();
+        let mut island_matches: Vec<CameraMatch> = Vec::new();
         for &kf in &island {
-            let Some(described) = loops.descriptors.get(&kf) else {
-                continue;
-            };
-            let sets: Vec<Vec<(u64, Descriptor256)>> = described
-                .iter()
-                .enumerate()
-                .map(|(cam, by_id)| {
-                    self.map
-                        .landmarks_in_image(TimeCamId::new(kf, cam))
-                        .filter_map(|lm| Some((lm.0, *by_id.get(&KeypointId(lm.0))?)))
-                        .collect()
-                })
-                .collect();
-            island_matches.extend(match_cameras(ours, &sets, matching));
+            let matches = query.island_matches.entry(kf).or_insert_with(|| {
+                let Some(described) = loops.descriptors.get(&kf) else {
+                    return Vec::new();
+                };
+                let sets: Vec<DescriptorSet> = described
+                    .iter()
+                    .enumerate()
+                    .map(|(cam, by_id)| {
+                        let ids = self.map.landmarks_in_image(TimeCamId::new(kf, cam));
+                        DescriptorSet::from_ordered(
+                            ids.filter_map(|lm| Some((lm.0, *by_id.get(lm.0)?))),
+                        )
+                    })
+                    .collect();
+                match_cameras(ours, &sets, matching)
+            });
+            island_matches.extend_from_slice(matches);
         }
         let island_matches = consolidate(island_matches);
         let mut stages = LoopStages {
@@ -610,7 +689,7 @@ impl MapBackend {
             return None;
         }
         let pixel_of = |cam: CamId, id: KeypointId| -> Option<Vector2<f32>> {
-            let list = keypoints.get(cam)?;
+            let list = query.keypoints.get(cam)?;
             let index = list.binary_search_by_key(&id, |(k, _)| *k).ok()?;
             Some(list[index].1)
         };
@@ -642,7 +721,7 @@ impl MapBackend {
         )?;
         stages.inliers = matches.len();
         if config.reproject_landmarks {
-            matches.extend(self.reproject(candidate, &matches, &pose, images));
+            matches.extend(self.reproject(candidate, &matches, &pose, query.images));
             stages.reprojection_matches = matches.len();
             (pose, matches) = self.solve_pnp(
                 &matches,
@@ -776,7 +855,7 @@ impl MapBackend {
                 }
                 let (Some(point), Some(target)) = (
                     self.map.landmark_world(landmark, &self.rig.t_i_c),
-                    by_id.get(&KeypointId(landmark.0)),
+                    by_id.get(landmark.0),
                 ) else {
                     continue;
                 };
