@@ -318,6 +318,27 @@ H.264 input passes through unchanged. HEVC input in MP4 or MOV is transcoded to 
 using the GPU when available, so browsers can decode it. Other codecs depend on Rerun
 `Mp4Reader` support; MPEG-4 Part 2 (`mp4v`) is not supported and fails at load.
 
+## 360 operator masks (FullCircle)
+
+`posekit.models.fullcircle` masks the person holding a 360 camera, the method of FullCircle
+([paper](https://arxiv.org/abs/2603.22572), [code](https://github.com/theialab/fullcircle)): a person detector on
+the six cube faces finds the operator's direction, a synthetic fisheye looks along it, a video tracker segments the
+operator there, and each mask pixel of the source cameras looks its ray up in that view. The geometry
+(`posekit.ops.sphere`: Mei v3/v6, Kannala-Brandt, equirect and pinhole ray maps) runs in torch on the GPU, and the
+models are posekit's own: YOLOX-HumanArt (TensorRT) or SAM 3 on the faces, EfficientTAM as the tracker. Where it
+differs from FullCircle, and why, is in the module docstring.
+
+```bash
+# operator-mask layer for an Insta360 base segment (dataforge insta360): <lens>/pinhole/people_mask on both lenses
+python tools/apps/fullcircle_masks.py --dataset <dataset> --segment <segment> --rr-config.save <layer.rrd> \
+    --rr-config.headless --rr-config.recording-id <segment> --rr-config.application-id dataforge
+# a base not registered yet: --rrd <base.rrd> instead of --dataset/--segment
+```
+
+The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on every 5th frameset,
+already dilated. On FullCircle's room3 scene the masks match the masks FullCircle released with its dataset at a mean
+IoU of 0.945, median 0.957 (golden test `tests/test_fullcircle_golden.py`, asset `POSEKIT_FULLCIRCLE_SCENE`).
+
 ## What runs today, and how well
 
 Every implementation is parity-validated against its reference:
@@ -331,6 +352,7 @@ Every implementation is parity-validated against its reference:
 | Sapiens2 pose | `TopDownPose2d` | trt (default); torch · onnx · trt (`bf16-1024`) | bf16-1024 (d31, 2026-10-31); pre-port goldens | PCK@0.01 body/hands 0.911/0.971 (NVFP4); port bit-identical |
 | SAM3 | `PromptableSegmenter` | torch | HF processor | mask IoU ≥ 0.997 |
 | SAM2/EfficientTAM | `VideoSegmenter` | torch | — | stable 30-frame track, IoU ≥ 0.97 |
+| FullCircle | 360 operator masks | YOLOX trt + EfficientTAM | FullCircle's released room3 masks | mean IoU 0.945 (median 0.957) |
 | CLIP ViT-B/32 | `IdentityEncoder` | torch | PIL pipeline | cosine ≥ 0.985 |
 | MammaNet (in mamma) | `TopDownDenseLandmarks2d` | torch | mamma estimator | bitwise-equal |
 | SAM 3D Body | `TopDownBodyPose3d` | torch | pre-port package | bitwise in its env; 3x run-to-run noise here |

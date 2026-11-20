@@ -82,16 +82,24 @@ def read_catalog_videos(dataset: DatasetEntry, segment_id: str, entities: Sequen
     paths: list[str] = [f"/{entity.strip('/')}" for entity in entities]
     columns: list[str] = [f"{entity}:VideoStream:{component}" for entity in paths for component in ("sample", "is_keyframe", "codec")]
     table: pa.Table = dataset.filter_segments(segment_id).filter_contents(paths).reader(index=timeline).select(timeline, *columns).to_arrow_table()
-    videos: list[CatalogVideo] = []
-    for entity in paths:
-        sample_column: str = f"{entity}:VideoStream:sample"
-        # Rows from the other cameras can share timestamps but have null packets.
-        # Filter the camera's projected columns before flattening nested buffers.
-        camera: pa.Table = table.select([timeline, sample_column, f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec"])
+    return tuple(catalog_video_from_table(table, entity, timeline, f"{segment_id} {entity}") for entity in paths)
+
+
+def catalog_video_from_table(table: pa.Table, entity: str, timeline: str, where: str) -> CatalogVideo:
+    """One camera's packets from a table that holds its ``VideoStream`` columns on ``timeline``.
+
+    Raises:
+        ValueError: If the camera has no frames with strictly increasing timestamps, or no codec (naming ``where``).
+    """
+    sample_column: str = f"{entity}:VideoStream:sample"
+    # Rows from the other cameras can share timestamps but have null packets.
+    # Filter the camera's projected columns before flattening nested buffers; the filter
+    # copies every packet (~10x the read on a 17.8 min 1920 px lens), so only when needed.
+    camera: pa.Table = table.select([timeline, sample_column, f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec"])
+    if camera[sample_column].null_count:
         camera = camera.filter(camera[sample_column].is_valid())
-        times: Shaped[ndarray, " n_frames"] = camera[timeline].combine_chunks().to_numpy(zero_copy_only=False)
-        if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
-            raise ValueError(f"{segment_id} {entity}: expected frames with strictly increasing timestamps")
-        codec: CatalogCodecName = catalog_codec(camera[f"{entity}:VideoStream:codec"], f"{segment_id} {entity}")
-        videos.append(CatalogVideo(times, packet_views(camera[sample_column]), catalog_keyframes(camera[f"{entity}:VideoStream:is_keyframe"]), codec))
-    return tuple(videos)
+    times: Shaped[ndarray, " n_frames"] = camera[timeline].combine_chunks().to_numpy(zero_copy_only=False)
+    if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
+        raise ValueError(f"{where}: expected frames with strictly increasing timestamps")
+    codec: CatalogCodecName = catalog_codec(camera[f"{entity}:VideoStream:codec"], where)
+    return CatalogVideo(times, packet_views(camera[sample_column]), catalog_keyframes(camera[f"{entity}:VideoStream:is_keyframe"]), codec)

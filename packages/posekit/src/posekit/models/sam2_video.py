@@ -53,6 +53,13 @@ class Sam2VideoSegmenterConfig:
     """Keep the memory bank on the inference device instead of host memory (no per-step copies)."""
     bf16: bool = False
     """Run the forward pass under bfloat16 autocast (the fp32 memory attention dominates the step time)."""
+    max_conditional_memories: int = -1
+    """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Bounded, the bank also stores
+    only those (:class:`~posekit.models.sam2_memory_bank.BoundedForgetfulMemoryBank`), so a tracker re-prompted
+    through a long video keeps a constant per-frame cost and memory."""
+    single_click_multimask: bool = False
+    """A prompt of one click per object takes the best of SAM 2's three masks by predicted IoU (SAM 2's
+    ``_use_multimask`` rule: a lone click is ambiguous, shirt or person); off, it takes the single mask."""
 
     def setup(self) -> "Sam2VideoSegmenter":
         """Download the checkpoint, build the predictor, and return a ready segmenter."""
@@ -76,6 +83,7 @@ class Sam2VideoSegmenter(VideoSegmenter):
         repo_id, repo_type, filename = SAM2_VARIANT_WEIGHTS[config.variant]
         checkpoint_path: str = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=filename)
         self.predictor = build_sam2_generic_video_predictor(SAM2_VARIANT_CONFIGS[config.variant], checkpoint_path, device=config.device)
+        self.predictor.max_cond_frames_in_attn = config.max_conditional_memories
         self._states: list[SAM2GenericVideoPredictorState] | None = None
         self._frame_idx: int = 0
 
@@ -120,6 +128,8 @@ class Sam2VideoSegmenter(VideoSegmenter):
         from sam2.modeling.sam2_prompt import SAM2Prompt
         from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
+        from posekit.models.sam2_memory_bank import BoundedForgetfulMemoryBank
+
         validate_frames_rgb(frames_rgb)
         if prompts is not None and prompts.text is not None:
             raise ValueError("Sam2VideoSegmenter is visually prompted; text prompts are not supported.")
@@ -133,7 +143,9 @@ class Sam2VideoSegmenter(VideoSegmenter):
                     memory_bank=SAM2ForgetfulObjectMemoryBank(
                         memory_window_size=self.config.memory_window_size,
                         storage_device=frames_rgb.device if self.config.memory_on_device else torch.device("cpu"),
-                    ),
+                    )
+                    if self.config.max_conditional_memories < 0
+                    else BoundedForgetfulMemoryBank(self.config.max_conditional_memories, self.config.memory_window_size),
                 )
                 for _ in range(batch_size)
             ]
@@ -149,8 +161,13 @@ class Sam2VideoSegmenter(VideoSegmenter):
         for slot in range(batch_size):
             slot_prompts: list[SAM2Prompt] = self._prompts_for_slot(prompts, slot) if prompts is not None else []
             frame_chw: UInt8[Tensor, "3 h w"] = frames_rgb[slot].permute(2, 0, 1).contiguous()
+            single_clicks: bool = (
+                self.config.single_click_multimask
+                and bool(slot_prompts)
+                and all(p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in slot_prompts)
+            )
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.bf16):
-                results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=False)
+                results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=single_clicks)
             for obj_id, result in results.items():
                 mask: Bool[Tensor, "h w"] = result.best_mask_logits[0, 0] > 0.0
                 # Branch-free mask bounding box: argmax of the row/column
