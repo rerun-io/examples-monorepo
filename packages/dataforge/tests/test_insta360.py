@@ -74,14 +74,14 @@ class Converted(NamedTuple):
     """Layer files by layer name; the panorama exists only once ``panorama_rrd`` ran."""
 
 
-def convert_layers(clip: Path, output_root: Path, *, panorama: bool) -> dict[str, Path]:
-    """Convert the clip's first ``FRAMES`` framesets under ``output_root``: the base, and the panorama if asked."""
+def convert_layers(clip: Path, output_root: Path, **layers: object) -> dict[str, Path]:
+    """Convert the clip's first ``FRAMES`` framesets under ``output_root``: the base, and the layers ``Insta360Config`` options ask for."""
     from dataforge.datasets.insta360 import ClipSource, Insta360Config
     from dataforge.identity import SequenceIdentity
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("DATAFORGE_OUTPUT_ROOT", str(output_root))
-        dataset = Insta360Config(root=clip.parent, frame_limit=FRAMES, panorama=panorama).setup()
+        dataset = Insta360Config(root=clip.parent, frame_limit=FRAMES, **layers).setup()  # pyrefly: ignore[bad-argument-type]
         identity: SequenceIdentity = SequenceIdentity(dataset.config.name, (clip.stem,))
         dataset.convert(identity, ClipSource(clip), force=False)
         return dataset.targets(identity)
@@ -171,6 +171,25 @@ def test_the_panorama_decodes_both_lenses_of_an_h264_body(insv_x3_clip: Path) ->
         assert shapes == [(height, width)] * 30
 
 
+@pytest.mark.integration
+def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_clip: Path) -> None:
+    """The X3 (H.264, a GOP of 16, its lenses in two files) at stride 7 in batches of 5, so batches span several GOP segments."""
+    import insta360_io
+    import torch
+
+    from dataforge.datasets.insta360 import lens_pictures
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    rig = insta360_io.InsvRig(str(insv_x3_clip), 120)
+    indices: Int64[ndarray, " k"] = np.arange(0, 120, 7, dtype=np.int64)
+    pairs = {device: list(lens_pictures(rig, indices, torch.device(device), batch=5, threads=4)) for device in ("cuda", "cpu")}
+    for lens in range(2):
+        cuda, cpu = (torch.cat([pair[lens] for pair in pairs[device]]).cpu().numpy().astype(np.int16) for device in ("cuda", "cpu"))
+        assert cuda.shape == (indices.size, 3, rig.resolution[1], rig.resolution[0])
+        assert np.abs(cuda - cpu).max() <= 1, f"lens {lens}"
+
+
 @pytest.mark.golden
 def test_the_lenses_sit_33_3_mm_apart_along_the_lens_axis_with_the_factory_focal(converted: Converted) -> None:
     """Rig frame = IMU: lens 1 sits 33.29 mm behind lens 0 along +y_imu (V6 string), lens 0 looks along z_P = -y_imu."""
@@ -234,3 +253,54 @@ def test_the_first_panorama_frame_is_the_stitch_within_38_db(converted: Converte
     psnr: float = 10.0 * np.log10(255.0**2 / mse)
     print(f"first panorama frame PSNR {psnr:.2f} dB")
     assert psnr > MIN_PSNR_DB
+
+
+def decoded_rgb(rrd: Path, entity: str) -> UInt8[ndarray, "k h w 3"]:
+    """Every ``VideoStream`` sample at ``entity``, in time order, decoded (libdav1d) to RGB."""
+    rows: list[tuple[int, bytes]] = []
+    for chunk in read_chunks(rrd):
+        batch = chunk.to_record_batch()
+        if chunk.entity_path == entity and "VideoStream:sample" in batch.schema.names:
+            times: list[int] = batch.column("video_time").cast(pa.int64()).to_pylist()
+            rows += [(t, bytes(sample[0])) for t, sample in zip(times, batch.column("VideoStream:sample").to_pylist(), strict=True)]
+    decoder = av.CodecContext.create("libdav1d", "r")
+    assert isinstance(decoder, av.video.codeccontext.VideoCodecContext)  # narrows the type under every PyAV stub version
+    frames = [frame for _, sample in sorted(rows) for frame in decoder.decode(av.Packet(sample))] + list(decoder.decode(None))
+    return np.stack([frame.to_ndarray(format="rgb24") for frame in frames])  # pyrefly: ignore[missing-attribute]
+
+
+@pytest.mark.integration
+def test_the_cube_layer_on_cuda_is_the_cpu_layer_within_the_nvenc_band(insv_clip: Path, nvenc_ffmpeg: Path, tmp_path: Path) -> None:
+    """Every tenth frameset of the first ``FRAMES``: six face videos on the base's stamps, CUDA and CPU within 40 dB."""
+    import torch
+
+    from dataforge import paths, schema
+    from dataforge.datasets.insta360 import CUBE_LAYER, FACE_CAMS
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    layers: dict[str, dict[str, Path]] = {device: convert_layers(insv_clip, tmp_path / device, cube=True, cube_device=device) for device in ("cuda", "cpu")}
+    stamps: Int64[ndarray, " k"] = video_times(layers["cuda"][paths.BASE_LAYER], schema.video_path(0, 0))[::10]
+    for cam in FACE_CAMS:
+        entity: str = schema.video_path(0, cam)
+        np.testing.assert_array_equal(video_times(layers["cuda"][CUBE_LAYER], entity), stamps)
+        np.testing.assert_array_equal(video_times(layers["cpu"][CUBE_LAYER], entity), stamps)
+        cuda, cpu = (decoded_rgb(layers[device][CUBE_LAYER], entity) for device in ("cuda", "cpu"))
+        assert cuda.shape == cpu.shape == (stamps.size, 800, 800, 3)
+        mse: float = float(np.mean((cuda.astype(np.float64) - cpu.astype(np.float64)) ** 2))
+        assert 10.0 * np.log10(255.0**2 / mse) > 40.0, f"cam_{cam:02d}"
+
+
+@pytest.mark.integration
+def test_the_cube_layer_without_nvenc_encodes_in_software_on_the_base_stamps(insv_clip: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-GPU lane: PyAV decode, OpenCV remap and SVT-AV1, six face videos on every tenth base stamp."""
+    from dataforge import paths, schema
+    from dataforge.datasets import insta360
+
+    monkeypatch.setattr(insta360, "av1_nvenc_encodes", lambda: False)
+    targets: dict[str, Path] = convert_layers(insv_clip, tmp_path, cube=True, cube_device="cpu")
+    stamps: Int64[ndarray, " k"] = video_times(targets[paths.BASE_LAYER], schema.video_path(0, 0))[::10]
+    for cam in insta360.FACE_CAMS:
+        entity: str = schema.video_path(0, cam)
+        np.testing.assert_array_equal(video_times(targets[insta360.CUBE_LAYER], entity), stamps)
+        assert decoded_rgb(targets[insta360.CUBE_LAYER], entity).shape == (stamps.size, 800, 800, 3)

@@ -3480,8 +3480,8 @@ insta360-io = { path = "packages/insta360-io" }
 tyro = ">=0.9.1,<0.10"
 # transports.http_fetch streams and resumes LaMAria's Apache-served files with it.
 requests = "*"
-# CPU torch only satisfies simplecv's module-load import.
-pytorch-cpu = ">=2.8.0"
+# CPU torch here (simplecv imports it at module load); dataforge-cuda swaps in the CUDA build.
+pytorch = ">=2.8.0"
 # 7zz: the only extractor that reads MSD's Info-ZIP multi-volume archives
 # (<seq>.z01/.z02/.zip), which Python's zipfile refuses outright.
 7zip = ">=24.09"
@@ -3491,6 +3491,15 @@ pytorch-cpu = ">=2.8.0"
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 # libturbojpeg for PyTurboJPEG (pypi), which dlopens it from the env.
 libjpeg-turbo = ">=3.0.0,<4"
+
+# The GPU lane of the Insta360 cube layer: CUDA torch, so torchcodec decodes on NVDEC, remaps in CUDA and feeds NVENC
+# from device memory. Same code as the plain env; the cube device picks the lane.
+[feature.dataforge-cuda]
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.dataforge-cuda.dependencies]
+pytorch-gpu = ">=2.12,<2.13"
+cuda-version = "13.0.*"
 
 [feature.dataforge.pypi-dependencies]
 dataforge = { path = "packages/dataforge", editable = true }
@@ -4801,13 +4810,30 @@ dataforge = { features = [
     "common",
     "dataforge",
     "ffmpeg",
+    "torchcodec",
 ], solve-group = "dataforge", no-default-feature = true }
 dataforge-dev = { features = [
     "common",
     "dataforge",
     "dev",
     "ffmpeg",
+    "torchcodec",
 ], solve-group = "dataforge", no-default-feature = true }
+dataforge-cuda = { features = [
+    "common",
+    "dataforge",
+    "dataforge-cuda",
+    "ffmpeg",
+    "torchcodec",
+], solve-group = "dataforge-cuda", no-default-feature = true }
+dataforge-cuda-dev = { features = [
+    "common",
+    "dataforge",
+    "dataforge-cuda",
+    "dev",
+    "ffmpeg",
+    "torchcodec",
+], solve-group = "dataforge-cuda", no-default-feature = true }
 handtrack = { features = [
     "catalog-common",
     "rerun-prerelease",

@@ -313,13 +313,22 @@ def run_nvenc(run: Callable[[tuple[int, ...]], subprocess.CompletedProcess[str]]
         return run(fds)
 
 
+NVENC_PRESET: str = "p4"
+"""The AV1 NVENC preset of every dataforge encode."""
+
+
+def nvenc_av1_options(*, gop: int, cq: int) -> dict[str, int]:
+    """``_nvenc_args``'s rate control as torchcodec ``extra_options`` (its ``rc`` option is numeric: 1 = vbr); never B-frames."""
+    return {"rc": 1, "cq": cq, "bf": 0, "g": gop}
+
+
 def _nvenc_args(*, gop: int, cq: int) -> list[str]:
     """Shared output options for pipe and file inputs; never emit B-frames."""
     return [
         "-c:v",
         "av1_nvenc",
         "-preset",
-        "p4",
+        NVENC_PRESET,
         "-rc",
         "vbr",
         "-cq",
@@ -519,7 +528,6 @@ def encode_frames_to_mp4(
     rotate_cw_quarter_turns: int = 0,
     ffmpeg: Path | None = None,
     filter_threads: int | None = None,
-    slot_fds: tuple[int, ...] | None = None,
 ) -> int:
     """Encode an iterable of frames into an AV1 mp4 by piping them through ffmpeg.
 
@@ -552,7 +560,6 @@ def encode_frames_to_mp4(
             pixels must roll it the same way (``basalt.rotate_camera_cw``).
         ffmpeg: Binary to use; ``None`` resolves via ``resolve_ffmpeg()``.
         filter_threads: CPU filter workers; cap when camera jobs also decode in parallel.
-        slot_fds: An ``nvenc_slot`` the caller already holds for this encoder; ``None`` takes one here.
 
     Returns:
         Number of frames fed into the encoder.
@@ -588,7 +595,7 @@ def encode_frames_to_mp4(
     complaints: list[bytes] = []
     fed: int = 0
     # One slot, no retry: a pipe consumes its frames once, so a session refused by an outside process fails the sequence.
-    with contextlib.nullcontext(slot_fds) if slot_fds is not None else nvenc_slot() as fds:
+    with nvenc_slot() as fds:
         process: subprocess.Popen[bytes] = subprocess.Popen(command, pass_fds=fds, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         assert process.stdin is not None and process.stderr is not None
         drain: threading.Thread = threading.Thread(target=lambda: complaints.append(process.stderr.read()), daemon=True)  # pyrefly: ignore

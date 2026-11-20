@@ -5,7 +5,8 @@ Reads (a) the base recording (the two Mei lens cameras), (b) a mask layer with `
 with a static ``Transform3D`` scale to the lens image; no transform = lens resolution), and (c) the cube layer (each
 face's name, ``Pinhole`` and face-from-IMU ``Transform3D``, and the face frame stamps). Writes a layer with
 ``SegmentationImage`` at ``/world/rig_00/cam_NN/pinhole/people_mask`` (NN = 02..07) on every face frame stamp, joined
-from the two lens masks through the faces' tables with nearest-neighbour interpolation. Every face pixel lies inside the
+from the two lens masks through the faces' tables with nearest-neighbour interpolation: one gather per face from the
+native-resolution masks (``insta360_cube.MaskJoin``). Every face pixel lies inside the
 lens it is read from (``insta360_cube.face_table`` checks it), so the mask is the people mask alone. A face stamp
 without a mask on both lenses is an error.
 """
@@ -48,8 +49,8 @@ def face_statics(faces: Path) -> dict[int, dict[str, object]]:
     """Each face camera's static components, ``{cam: {component: value}}``."""
     statics: dict[int, dict[str, object]] = {cam: {} for cam in FACE_CAMS}
     entities: dict[str, int] = {path: cam for cam in FACE_CAMS for path in (schema.cam_path(RIG, cam), schema.pinhole_path(RIG, cam))}
-    for chunk in rrc.RrdReader(faces).store().stream().filter(content=list(entities)):
-        if chunk.is_static:
+    for chunk in rrc.RrdReader(faces).store().stream().filter(is_static=True, content=list(entities)):
+        if chunk.entity_path in entities:
             batch = chunk.to_record_batch()
             statics[entities[chunk.entity_path]].update(
                 {name: batch.column(name).to_pylist()[0] for name in batch.schema.names if not name.startswith("rerun")}
@@ -85,8 +86,8 @@ def face_stamps(faces: Path) -> Int64[ndarray, " k"]:
     """The face frame stamps (``video_time``, ns) of the first face; the cube layer gives every face the same ones."""
     entity: str = schema.video_path(RIG, FACE_CAMS[0])
     stamps: list[int] = []
-    for chunk in rrc.RrdReader(faces).store().stream().filter(content=[entity]):
-        if not chunk.is_static:
+    for chunk in rrc.RrdReader(faces).store().stream().filter(is_static=False, content=entity):
+        if chunk.entity_path == entity:
             batch = chunk.to_record_batch()
             if "VideoStream:sample" in batch.schema.names:
                 stamps += batch.column("video_time").cast("int64").to_pylist()
@@ -117,26 +118,24 @@ def lens_mask_scales(masks: Path) -> dict[int, tuple[float, float]]:
     """Each lens mask entity's static ``Transform3D`` scale ``(sx, sy)``; a lens without one is absent (scale 1)."""
     entities: dict[str, int] = {f"{schema.pinhole_path(RIG, lens)}/{MASK_NAME}": lens for lens in range(2)}
     scales: dict[int, tuple[float, float]] = {}
-    for chunk in rrc.RrdReader(masks).store().stream().filter(content=list(entities)):
-        if chunk.is_static:
+    # The manifest's lazy store reads only the chunks it keeps (a full stream decodes every mask: 14 s on clip 007).
+    for chunk in rrc.RrdReader(masks).store().stream().filter(is_static=True, content=list(entities)):
+        if chunk.entity_path in entities:
             batch = chunk.to_record_batch()
             if "Transform3D:scale" in batch.schema.names and (value := batch.column("Transform3D:scale").to_pylist()[0]):
                 scales[entities[chunk.entity_path]] = (float(value[0][0]), float(value[0][1]))
     return scales
 
 
-def lens_image_mask(mask: UInt8[ndarray, "hm wm"], scale: tuple[float, float], image_shape: tuple[int, int]) -> UInt8[ndarray, "h w"]:
-    """The mask on the lens image's pixels by the contract-v2 lookup: pixel (c, r) reads mask[(2r+1)hm // 2h, (2c+1)wm // 2w].
+def check_mask_covers_lens(shape: tuple[int, int], scale: tuple[float, float], image_shape: tuple[int, int]) -> None:
+    """Mask contract v2: an ``hm x wm`` mask times its scale is the lens image size to within half a pixel.
 
     Raises:
-        ValueError: If the mask's size times its scale is half a pixel or more from the image size.
+        ValueError: If it is not.
     """
-    (hm, wm), (h, w) = mask.shape, image_shape
+    (hm, wm), (h, w) = shape, image_shape
     if abs(wm * scale[0] - w) >= 0.5 or abs(hm * scale[1] - h) >= 0.5:
         raise ValueError(f"a {wm}x{hm} mask at scale {scale} does not cover the {w}x{h} lens image")
-    rows: Int64[ndarray, " h"] = (2 * np.arange(h) + 1) * hm // (2 * h)
-    cols: Int64[ndarray, " w"] = (2 * np.arange(w) + 1) * wm // (2 * w)
-    return mask[np.ix_(rows, cols)]
 
 
 def main(config: Config) -> None:
@@ -147,7 +146,7 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    tables: dict[int, cube.FaceTable] = {cam: cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for cam, face in faces.items()}
+    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces.values()], lenses.size)
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
     scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)
@@ -158,17 +157,15 @@ def main(config: Config) -> None:
         for lens, stamp, mask in lens_masks(config.masks, wanted):
             if stamp in done:
                 continue
+            check_mask_covers_lens(mask.shape, scales.get(lens, (1.0, 1.0)), lens_shape)
             pending.setdefault(stamp, {})[lens] = mask
             if len(pending[stamp]) < 2:
+                pending[stamp][lens] = mask.copy()  # the view would hold its whole Arrow chunk until the pair completes
                 continue
-            pair: dict[int, UInt8[ndarray, "h w"]] = {
-                side: m if side not in scales and m.shape == lens_shape else lens_image_mask(m, scales.get(side, (1.0, 1.0)), lens_shape)
-                for side, m in pending.pop(stamp).items()
-            }
+            pair: dict[int, UInt8[ndarray, "h w"]] = pending.pop(stamp)
             done.add(stamp)
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
-            for cam, table in tables.items():
-                joined: UInt8[ndarray, "n n"] = cube.join((pair[0], pair[1]), table, nearest=True)
+            for cam, joined in zip(faces, join.faces(pair[0], pair[1]), strict=True):
                 rr.log(f"{schema.pinhole_path(RIG, cam)}/{MASK_NAME}", rr.SegmentationImage(joined), recording=recording)
         absent: list[int] = sorted(wanted - done)
         if absent:
