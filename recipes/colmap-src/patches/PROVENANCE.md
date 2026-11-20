@@ -1,7 +1,8 @@
-# Provenance of the Caspar adapter patches
+# Provenance of the colmap-src patches
 
-Both patches apply, in this order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main, 2026-11-15, after
-FlexGlue #4908..#4969). `SHA256SUMS` hashes all 274 files they touch (verified by the recipe's Step 0 before the build).
+The five patches apply, in `recipe.yaml`'s order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main,
+2026-11-15, after FlexGlue #4908..#4969). `SHA256SUMS` hashes all 284 files they touch (verified by the recipe's Step 0
+before the build); re-hash with the `git diff --name-only` command below, all five patches committed.
 
 | Patch | Kind | Content |
 |---|---|---|
@@ -45,29 +46,27 @@ Cut and checked:
 git diff --full-index 137f2168 HEAD -- doc/faq.rst src/colmap/estimators/bundle_adjustment_caspar.cc \
   src/colmap/estimators/caspar/caspar_model_adapter.h src/thirdparty/Symforce-Caspar/caspar_generate.py   # hand-written
 git diff --full-index 137f2168 HEAD -- src/thirdparty/Symforce-Caspar/generated/f32                      # generated
-git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS
-# fresh checkout of 137f2168: git apply both patches; sha256sum -c SHA256SUMS -> 274/274
+git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS   # with all five patches committed
+# fresh checkout of 137f2168: git apply the five patches; sha256sum -c SHA256SUMS -> 284/284
 ```
 
 Drop an adapter when upstream CASPAR supports its model.
 
 ## caspar-pcg-beta-recurrence.patch and caspar-reduced-camera-system.patch
 
-Generated, not hand-edited: `tools/caspar_solver_edits.py` is their tracked source. On a checkout of the pin with the
-three patches above applied (in recipe order):
+Hand-written patches, cut like the others. One part depends on the generated layout: the span helpers in `solver.cc`
+(`RcsReduceRhs`, `RcsMatvec`, `RcsBackSubstitute`, ...) name the node types before and after `Point`.
+`tools/caspar_rcs_helpers.py` reads that layout from the allocation code, refuses one the span copies would get wrong
+(an allocation between the blocks, a block size or alignment that differs from `r_k`'s), and checks that `solver.cc`
+holds the helper block it renders. On a checkout of the pin with the three patches above committed as `base`:
 
 ```bash
-git add -A src doc && git commit -qm base
-python recipes/colmap-src/tools/caspar_solver_edits.py beta <checkout> && git -C <checkout> commit -qam beta
-python recipes/colmap-src/tools/caspar_solver_edits.py reduced <checkout>
-git -C <checkout> diff --full-index base beta  > patches/caspar-pcg-beta-recurrence.patch
-git -C <checkout> diff --full-index beta      > patches/caspar-reduced-camera-system.patch
-(cd <checkout> && sha256sum <the files listed in SHA256SUMS>) > patches/SHA256SUMS
+git -C <checkout> apply <recipe>/patches/caspar-pcg-beta-recurrence.patch && git -C <checkout> commit -qam beta
+git -C <checkout> apply <recipe>/patches/caspar-reduced-camera-system.patch      # then edit, if needed
+python <recipe>/tools/caspar_rcs_helpers.py <checkout>   # after a solver regeneration: paste the block it prints
+git -C <checkout> diff --full-index base beta > <recipe>/patches/caspar-pcg-beta-recurrence.patch
+git -C <checkout> diff --full-index beta      > <recipe>/patches/caspar-reduced-camera-system.patch
 ```
-
-The script asserts every text it replaces, and it reads the camera-side buffer spans from the generated allocation code
-(the blocks before and after `Point` in each per-node vector), so a regenerated solver with a new camera node type is
-covered without an edit, and a changed layout stops the script instead of producing a silently partial patch.
 
 - **PCG beta** (`caspar-pcg-beta-recurrence.patch`, 2 files). Symforce 0.12's `solver.cc.jinja` calls
   `BetaFromNumDenom(beta_numerator, alpha_numerator)`, and only `DoAlphaFirst` writes `alpha_numerator`, so every
@@ -95,5 +94,5 @@ covered without an edit, and a changed layout stops the script instead of produc
 - Not done: CASPAR applies no robust loss (its factors take no weight input; IRLS would regenerate every factor).
 
 Follow-up: move both edits into Symforce-Caspar's generator (`solver.cc.jinja` and `caspar_generate.py`), so the solver
-is emitted with them and this script goes away. The beta fix is a one-line upstream report (draft, not filed).
+is emitted with them and `tools/caspar_rcs_helpers.py` goes away. The beta fix is a one-line upstream report (draft, not filed).
 
