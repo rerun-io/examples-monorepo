@@ -150,8 +150,12 @@ def fp8_input_qdq(tensor: str, prefix: str, amax: float, scale_dtype: ScaleDtype
     return _fp8_input(tensor, prefix, amax, f"{prefix}.a_zp", scale_dtype)
 
 
-def _fp8_weight(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], onnx.NodeProto]:
-    """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``."""
+def fp8_weight_dq(module: str, weight: Float[Tensor, "out *rest"], scale_dtype: ScaleDtype = "bfloat16") -> tuple[list[TensorProto], onnx.NodeProto]:
+    """FP8 weights with per-output-channel scales of ``scale_dtype``; the node writes ``{module}.w_dq``.
+
+    Public for model-specific rewrites that :func:`quantize_qdq` cannot plan, e.g. a graph that applies one weight in
+    several MatMuls: quantize it once and let every MatMul read ``{module}.w_dq``.
+    """
     torch_dtype, proto_dtype = _SCALE_TYPES[scale_dtype]
     scales: Tensor = (weight.abs().flatten(1).amax(1) / FP8_MAX).clamp_min(1e-12).to(torch_dtype)
     codes: Tensor = (weight / scales.float().reshape(-1, *[1] * (weight.ndim - 1))).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
@@ -219,7 +223,7 @@ def _rewrite_module(
     if (node.op_type == "Conv") != isinstance(precision, Fp8Conv):
         raise ValueError(f"{type(precision).__name__} does not apply to {node.op_type} {module}.")
     if isinstance(precision, Fp8Conv):
-        weight_initializers, weight_node = _fp8_weight(module, weight, scale_dtype)
+        weight_initializers, weight_node = fp8_weight_dq(module, weight, scale_dtype)
         input_initializers, input_nodes, dequantized_input = _fp8_input(node.input[0], module, precision.input_amax, f"{module}.a_zp", scale_dtype)
         edits.initializers.extend([*weight_initializers, *input_initializers])
         edits.inserted[index] = [weight_node, *input_nodes]
@@ -230,7 +234,7 @@ def _rewrite_module(
     activation: str = node.input[0]
     nodes: list[onnx.NodeProto] = []
     if isinstance(precision, Fp8Linear):
-        weight_initializers, weight_node = _fp8_weight(module, weight, scale_dtype)
+        weight_initializers, weight_node = fp8_weight_dq(module, weight, scale_dtype)
         edits.initializers.extend(weight_initializers)
         nodes.append(weight_node)
         key: tuple[str, str] = (activation, "fp8")
@@ -280,7 +284,7 @@ def _splice(graph: onnx.GraphProto, edits: _Edits) -> None:
     graph.initializer.extend(edits.initializers)
 
 
-def _prune_dead(graph: onnx.GraphProto) -> None:
+def prune_dead(graph: onnx.GraphProto) -> None:
     """Walk back from the outputs; the replaced weights and their Cast/Transpose chains fall away."""
     live: set[str] = {output.name for output in graph.output}
     kept: list[onnx.NodeProto] = []
@@ -338,7 +342,7 @@ def quantize_qdq(model: onnx.ModelProto, plan: QdqPlan) -> onnx.ModelProto:
         raise ValueError(f"Planned modules are not weight MatMul/Conv nodes of the graph: {sorted(missing)}.")
     _rewrite_attention(graph, plan.attention, edits, plan.scale_dtype)
     _splice(graph, edits)
-    _prune_dead(graph)
+    prune_dead(graph)
     if not any(opset.domain == "trt.plugins" for opset in model.opset_import):
         model.opset_import.append(helper.make_opsetid("trt.plugins", 1))
     return model

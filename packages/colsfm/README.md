@@ -16,6 +16,7 @@ of this package.
 ```bash
 pixi run -e colsfm colsfm-raco-export        # once: RaCo-ALIKED + LightGlue+ ONNX graphs -> packages/colsfm/data/models
 pixi run -e colsfm colsfm-download-flexglue  # once: FlexGlue's ONNX graphs (sha256-pinned) -> packages/colsfm/data/models/flexglue
+pixi run -e colsfm colsfm-flexglue-fp8       # once: FlexGlue's FP8 matcher, calibrated on the Galileo frames (TensorRT backend)
 pixi run -e colsfm colsfm-galileo            # r2b Galileo sample (downloaded by colsfm-download-galileo), default pipeline
 pixi run -e colsfm colsfm-galileo-ablation   # COLMAP's own ALIKED + LightGlue, Ceres, no refinement, no loops
 pixi run -e colsfm colsfm-robocap            # RoboCap fisheye segment s00000021 from the Spark catalog (slam_rs start)

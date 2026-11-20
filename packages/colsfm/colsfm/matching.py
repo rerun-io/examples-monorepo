@@ -125,6 +125,40 @@ FLEXGLUE_MODEL_FILES: Final[dict[str, str]] = {
 }
 """`pycolmap.FlexGlueMatchingOptions` field to the graph it loads (cvg/FlexGlue v0.1, as COLMAP pins them)."""
 
+
+@dataclass(frozen=True, slots=True)
+class FlexGlueOptions:
+    """FlexGlue's matcher thresholds, with COLMAP's defaults (`FlexGlueMatchingOptions`)."""
+
+    filter_threshold: float = 0.1
+    """Minimum match confidence (geometric mean of both directions)."""
+    max_distance_px: float = 3.0
+    """Keypoint-to-correspondence distance gate in the 512x512 frame; COLMAP passes infinity for a non-positive value."""
+    min_covisibility: float = 0.5
+    """A pair whose predicted covisibility is below this keeps no match."""
+    early_stop_decay: float = 0.5
+    """The early-stop gate after layers 2, 4, 6 and 8 (`min_covisibility * (1 - decay)^(9 - k)`); 1 disables it."""
+
+    def tag(self) -> str:
+        """A file-name-safe key for the folded graph and its engine.
+
+        Returns:
+            E.g. `ft0.1_md3_mc0.5_es0.5`.
+        """
+        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}_es{self.early_stop_decay:g}"
+
+    def fp8_file(self) -> str:
+        """The FP8 matcher calibrated for these thresholds (`colsfm.flexglue_fp8`); it sits beside the downloaded graphs.
+
+        Returns:
+            E.g. `flexglue_matcher_fp8_ft0.1_md3_mc0.5_es0.5.onnx`.
+        """
+        return f"flexglue_matcher_fp8_{self.tag()}.onnx"
+
+
+FLEXGLUE_FP8_COMMAND: Final[str] = "pixi run -e colsfm colsfm-flexglue-fp8"
+"""Calibrates `FlexGlueOptions.fp8_file` on the Galileo frames (`tools/flexglue_fp8.py --image-dirs` for other frames)."""
+
 MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 """The ALIKED matchers COLMAP 4.2 offers; the pipeline uses LightGlue."""
 

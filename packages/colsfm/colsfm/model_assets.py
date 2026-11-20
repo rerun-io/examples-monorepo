@@ -27,7 +27,7 @@ from typing import Final
 
 from colsfm import DATA_DIR
 from colsfm.features import FeatureBackend
-from colsfm.matching import FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, MatchingBackend
+from colsfm.matching import FLEXGLUE_FP8_COMMAND, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions, MatchingBackend
 
 RACO_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco-aliked-b1-16.onnx"
 """The batch-dynamic RaCo-ALIKED graph; its engine is cached beside it.
@@ -53,8 +53,13 @@ RACO_LIGHTGLUE_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco" / "aliked_l
 Not committed either. Produce it with `pixi run -e colsfm colsfm-raco-export`, which writes
 both this and the batch-1 extractor under `packages/colsfm/data/models/raco/aliked_lightglue/`."""
 
-RACO_EXPORT_COMMANDS: Final[tuple[str, ...]] = ("pixi run -e colsfm colsfm-raco-export", "pixi run -e colsfm colsfm-download-flexglue")
-"""The commands that produce every graph `required_raco_graphs` asks for: the RaCo export and the FlexGlue download."""
+RACO_EXPORT_COMMANDS: Final[tuple[str, ...]] = (
+    "pixi run -e colsfm colsfm-raco-export",
+    "pixi run -e colsfm colsfm-download-flexglue",
+    FLEXGLUE_FP8_COMMAND,
+)
+"""The commands that produce every graph `required_raco_graphs` asks for: the RaCo export, the FlexGlue download and
+the FlexGlue FP8 calibration."""
 
 PYCOLMAP_ABLATION_FLAGS: Final[str] = "--features-backend pycolmap --matching-backend pycolmap"
 """The documented no-GPU-engine path: COLMAP's own ALIKED and LightGlue, downloaded by COLMAP."""
@@ -77,6 +82,8 @@ def required_raco_graphs(features_backend: FeatureBackend, matching_backend: Mat
         graphs.append(RACO_LIGHTGLUE_ONNX_PATH)
     if matching_backend in ("flexglue", "flexglue_ort"):
         graphs.extend(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values())
+    if matching_backend == "flexglue":
+        graphs.append(FLEXGLUE_MODEL_DIR / FlexGlueOptions().fp8_file())  # a run keeps FlexGlue's default thresholds
     return tuple(graphs)
 
 

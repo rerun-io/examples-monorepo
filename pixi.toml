@@ -4197,6 +4197,13 @@ cmd = "python tools/download_flexglue.py"
 cwd = "packages/colsfm"
 description = "Download FlexGlue's ONNX graphs (cvg/FlexGlue v0.1, sha256-pinned as in COLMAP) into packages/colsfm/data/models/flexglue"
 
+[feature.colsfm.tasks.colsfm-flexglue-fp8]
+# The eight Galileo cameras as calibration sequences; a valid FP8 graph is kept (rerun after a FlexGlue graph change).
+cmd = "python tools/flexglue_fp8.py --image-dirs data/r2b_galileo/front_stereo_camera_left data/r2b_galileo/front_stereo_camera_right data/r2b_galileo/back_stereo_camera_left data/r2b_galileo/back_stereo_camera_right data/r2b_galileo/left_stereo_camera_left data/r2b_galileo/left_stereo_camera_right data/r2b_galileo/right_stereo_camera_left data/r2b_galileo/right_stereo_camera_right"
+depends-on = ["colsfm-download-galileo", "colsfm-download-flexglue"]
+cwd = "packages/colsfm"
+description = "Calibrate FlexGlue's FP8 matcher (TensorRT backend) on the Galileo frames, once per machine -> packages/colsfm/data/models/flexglue"
+
 [feature.colsfm.tasks.colsfm-download-galileo]
 cmd = "python tools/download_galileo.py"
 cwd = "packages/colsfm"
@@ -4205,7 +4212,7 @@ description = "Download the 226-frame r2b Galileo sample (8 pinhole cameras, gro
 [feature.colsfm.tasks.colsfm-galileo]
 # --min-inter-frame-distance 0.0: the Galileo demo is a 0.93 s, 0.66 m sweep of 29 rig frames, and cuSFM's demo keeps all 226 keyframes.
 cmd = "python tools/run.py run --input-dir data/r2b_galileo --output-dir data/runs/galileo --min-inter-frame-distance 0.0"
-depends-on = ["colsfm-download-galileo", "colsfm-raco-export", "colsfm-download-flexglue"]
+depends-on = ["colsfm-download-galileo", "colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
 description = "The default pipeline (RaCo, FlexGlue, loop closure, CASPAR + Ceres polish, extrinsic refinement) on Galileo"
 
@@ -4218,13 +4225,13 @@ description = "The no-engine ablation on Galileo (COLMAP's ALIKED + LightGlue, C
 
 [feature.colsfm.tasks.colsfm-robocap]
 cmd = "python tools/run.py catalog --source.dataset robocap --source.segment robocap__f408193e6447b3b0__s00000021 --source.cameras left_front right_front left right --source.stereo-pairs left_front right_front --source.frame-stride 4 --source.trim-start-seconds 2 --source.trim-end-seconds 2"
-depends-on = ["colsfm-raco-export", "colsfm-download-flexglue"]
+depends-on = ["colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
 description = "The default pipeline on the RoboCap fisheye segment s00000021 from the Spark catalog, starting from its slam_rs trajectory"
 
 [feature.colsfm.tasks.colsfm-kitti06]
 cmd = "python tools/run.py catalog --source.dataset dataforge-vslam-lab-kitti --source.segment vslam-lab-kitti__06 --source.cameras rgb_0 rgb_1 --source.stereo-pairs rgb_0 rgb_1 --source.trajectory-entity /world/runs/cuvslam/rig --options.config-dir colsfm/resources/configs/kitti --options.min-inter-frame-distance 0.5"
-depends-on = ["colsfm-raco-export", "colsfm-download-flexglue"]
+depends-on = ["colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
 description = "The default pipeline on KITTI 06 from the Spark catalog, starting from the cuvslam layer (the cuVSLAM SLAM trajectory)"
 

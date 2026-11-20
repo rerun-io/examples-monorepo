@@ -8,7 +8,8 @@ the way `colsfm.matching_trt` drives LightGlue+:
   Each image runs once; its features stay in an LRU on the GPU (`FlexGlueTensorRT.features`), like COLMAP's cache.
 * **Matcher** (`flexglue_matcher_early_stop_fp16.onnx`): two feature maps and two keypoint sets -> `matches0`
   (mutual nearest neighbours on the regressed correspondences, already gated by confidence, distance and pair
-  covisibility inside the graph) and `covisibility_score`.
+  covisibility inside the graph) and `covisibility_score`. Its transformer runs in FP8 (`colsfm.flexglue_fp8`),
+  from a graph calibrated once per machine (`colsfm.apis.flexglue_fp8`).
 
 TensorRT cannot parse the matcher as shipped: it uses ONNX Runtime's contrib `com.microsoft.MultiHeadAttention` and
 `com.microsoft.Gelu`. `prepare_matcher_graph` rewrites both into standard ONNX ops (attention as reshape, matmul,
@@ -43,9 +44,11 @@ from trtkit.tensorrt_runtime import TensorRtDynamicRuntime
 from trtkit.trt_builder import onnx_content_hash
 
 from colsfm.database import ImagePair, KeypointsXY
+from colsfm.flexglue_fp8 import check_fp8_graph
 from colsfm.frames import FrameSource, open_frame_source
 from colsfm.matching import (
     FLEXGLUE_MODEL_FILES,
+    FlexGlueOptions,
     MatchingOptions,
     MatchReport,
     PairMatchStats,
@@ -78,28 +81,6 @@ GRAPH_REWRITE_VERSION: Final[int] = 3
 
 ATTENTION_HEADS_ATTRIBUTE: Final[str] = "num_heads"
 """The contrib `MultiHeadAttention` attribute that carries the head count."""
-
-
-@dataclass(frozen=True, slots=True)
-class FlexGlueOptions:
-    """FlexGlue's matcher thresholds, with COLMAP's defaults (`FlexGlueMatchingOptions`)."""
-
-    filter_threshold: float = 0.1
-    """Minimum match confidence (geometric mean of both directions)."""
-    max_distance_px: float = 3.0
-    """Keypoint-to-correspondence distance gate in the 512x512 frame; COLMAP passes infinity for a non-positive value."""
-    min_covisibility: float = 0.5
-    """A pair whose predicted covisibility is below this keeps no match."""
-    early_stop_decay: float = 0.5
-    """The early-stop gate after layers 2, 4, 6 and 8 (`min_covisibility * (1 - decay)^(9 - k)`); 1 disables it."""
-
-    def tag(self) -> str:
-        """A file-name-safe key for the folded graph and its engine.
-
-        Returns:
-            E.g. `ft0.1_md3_mc0.5_es0.5`.
-        """
-        return f"ft{self.filter_threshold:g}_md{self.max_distance_px:g}_mc{self.min_covisibility:g}_es{self.early_stop_decay:g}"
 
 
 def matcher_profile(max_keypoints: int = MATCHER_MAX_KEYPOINTS) -> dict[str, ShapeProfile]:
@@ -554,10 +535,11 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
         return MatchReport(device="cuda")
     flexglue_options: FlexGlueOptions = FlexGlueOptions(min_covisibility=options.flexglue_min_covisibility)
     models: Path = options.flexglue_model_dir
+    matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
+    fp8_graph: Path = check_fp8_graph(models, matcher_graph, flexglue_options)
     descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
     descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
-    matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
-    matcher_engine: Path = resolve_engine(matcher_graph, matcher_profile(), precision="fp32")
+    matcher_engine: Path = resolve_engine(fp8_graph, matcher_profile(), precision="fp32")
     owned: bool = frames is None
     source: FrameSource = open_frame_source(options.image_dir) if frames is None else frames
     try:
