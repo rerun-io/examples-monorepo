@@ -394,6 +394,8 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
         ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
+        # The reduced camera system (recipes/colmap-src) is off in COLMAP's defaults; `--caspar-option` may turn it off.
+        ba_options.caspar.reduced_camera_system = True
         apply_caspar_options(ba_options.caspar, plan.caspar_options)
     return ba_options
 
@@ -611,10 +613,8 @@ def _polish_with_ceres(
     and every difference between them is the solve's. Only the numeric-sanity guards
     every round runs after its solve run here too: a converged polish can also walk a
     weakly constrained point behind a camera (MSD MGO07: 2 of 89,470 points at
-    1e154 px, which made the mean 1.9e149 px). Off by default since CASPAR solves the reduced camera system
-    (recipes/colmap-src `caspar-reduced-camera-system.patch`): on KITTI 06 CASPAR alone then ends at its own
-    least-squares minimum (a Ceres least-squares solve from there: 2 iterations, no change), and the polish only
-    trades it for the Cauchy minimum. `--caspar-ceres-polish` turns it back on.
+    1e154 px, which made the mean 1.9e149 px). Off by default: CASPAR reaches its own least-squares minimum, and the
+    polish only trades it for the Cauchy minimum (`--caspar-ceres-polish`).
 
     Args:
         reconstruction: The model the rounds left behind, adjusted in place.
@@ -699,9 +699,7 @@ def run_mapping(
             lowest image id when None, which is cuSFM's own choice (§6.3).
 
     With `--caspar-ceres-polish` a CASPAR run ends on one Ceres bundle adjustment over the final model, with no
-    filtering around it. It is off by default: before recipes/colmap-src `caspar-reduced-camera-system.patch`,
-    CASPAR's PCG ran on the full normal equations with a beta bug and stopped while a few percent of the cost was
-    still reachable, which the polish recovered; the patched solver reaches the least-squares minimum itself. It is skipped whenever the solves ran
+    filtering around it (off by default; see `_polish_with_ceres`). It is skipped whenever the solves ran
     on Ceres — every fallback included — because Ceres' own answer is a fixed point
     of it (one iteration, no cost change, 25 femtometres of rig motion, measured).
 

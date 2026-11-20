@@ -409,8 +409,8 @@ def resolve_caspar_mode(options: CasparOptions) -> CasparOptions:
 
     With no `reduced_camera_system` given, a full-system knob (`FULL_SYSTEM_OPTIONS`) selects the full system: the
     reduced default would otherwise run while silently ignoring it. A mode given explicitly must not come with the other
-    mode's knobs, and the reduced knobs are range-checked here, before the run creates anything (the solver checks
-    them again).
+    mode's knobs, and the reduced knobs are range-checked here, before the run creates anything. `reduced_pcg_eta` is
+    checked as the f32 the solver uses, as the solver checks it (0.99999999 rounds to 1.0).
 
     Args:
         options: Parsed overrides.
@@ -432,8 +432,8 @@ def resolve_caspar_mode(options: CasparOptions) -> CasparOptions:
         raise ValueError(f"[colsfm] --caspar-option {reduced} apply to the reduced camera system only; drop them or pass reduced_camera_system=true")
     if "reduced_pcg_iter_max" in options and options["reduced_pcg_iter_max"] < 1:
         raise ValueError(f"[colsfm] --caspar-option reduced_pcg_iter_max must be at least 1, got {options['reduced_pcg_iter_max']}")
-    if "reduced_pcg_eta" in options and not 0.0 < options["reduced_pcg_eta"] < 1.0:
-        raise ValueError(f"[colsfm] --caspar-option reduced_pcg_eta must be in (0, 1), got {options['reduced_pcg_eta']}")
+    if "reduced_pcg_eta" in options and not 0.0 < np.float32(options["reduced_pcg_eta"]) < 1.0:
+        raise ValueError(f"[colsfm] --caspar-option reduced_pcg_eta must be in (0, 1) as an f32, got {options['reduced_pcg_eta']}")
     return {**options, "reduced_camera_system": False} if mode is None and full else options
 
 
@@ -488,8 +488,7 @@ def parse_caspar_options(items: tuple[str, ...]) -> CasparOptions:
                 f"write {int(value)} if that is what you meant"
             )
         options[key] = int(value) if expected is int else value
-    # The mode only exists in a build with the reduced camera system; an older build has no such switch to infer.
-    return resolve_caspar_mode(options) if "reduced_camera_system" in types else options
+    return resolve_caspar_mode(options)
 
 
 def apply_caspar_options(caspar: pycolmap.CasparBundleAdjustmentOptions, overrides: CasparOptions) -> None:

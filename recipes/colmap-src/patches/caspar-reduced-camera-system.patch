@@ -37,7 +37,7 @@ index 731219002bfb5f41166f963257cf3cd4073b3640..4431eff49be194878b35272ce43b6f3e
  
      const size_t device_id =
 diff --git a/src/colmap/estimators/bundle_adjustment_caspar.h b/src/colmap/estimators/bundle_adjustment_caspar.h
-index 779004cb875020b6c5131d0d1aec2f21b90b0a18..f52bb966842c0baf608770f581a81f34d59ca732 100644
+index 779004cb875020b6c5131d0d1aec2f21b90b0a18..0fb6c4d507d616723cab22745a0e321764465baf 100644
 --- a/src/colmap/estimators/bundle_adjustment_caspar.h
 +++ b/src/colmap/estimators/bundle_adjustment_caspar.h
 @@ -91,6 +91,13 @@ struct CasparBundleAdjustmentOptions {
@@ -48,7 +48,7 @@ index 779004cb875020b6c5131d0d1aec2f21b90b0a18..f52bb966842c0baf608770f581a81f34
 +  // with reduced_pcg_eta in (0, 1) after at most reduced_pcg_iter_max (>= 1) iterations; pcg_iter_max and
 +  // pcg_rel_error_exit then do not apply, and pcg_rel_decrease_min / pcg_rel_score_exit must stay -1.
 +  // false = the full-system PCG.
-+  bool reduced_camera_system = true;
++  bool reduced_camera_system = false;
 +  int reduced_pcg_iter_max = 500;
 +  double reduced_pcg_eta = 0.1;
    std::string gpu_index = "-1";
@@ -75,7 +75,7 @@ index f38896c4ce20868e67aaeb2516ff83487346562e..5f0c99ead7bd086dd25e7b49f5018ec3
                           &CasparBAOpts::gpu_index,
                           "Which GPU to use for solving the problem.");
 diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc b/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
-index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c04fa958d9 100644
+index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..b987b6febf1e383e2d8d2cc285a307526ab983f6 100644
 --- a/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
 +++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
 @@ -1,6 +1,7 @@
@@ -86,7 +86,7 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
  #include <chrono>
  #include <stdexcept>
  
-@@ -2982,6 +2983,18 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+@@ -2982,6 +2983,22 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
               cudaMemcpyHostToDevice);
  
    float up_scale = params_.diag_scaling_up;
@@ -98,14 +98,18 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
 +      throw std::invalid_argument("reduced camera system: pcg_rel_decrease_min and pcg_rel_score_exit must be -1");
 +    }
 +  }
-+  // With no Point nodes there is nothing to eliminate: the full system is the camera system.
-+  reduced_ = params_.reduced_camera_system != 0 && Point_num_ > 0;
++  // The requested mode sets the policy. The Schur product needs Point nodes; without any, the PCG's own product
++  // already is the camera system's.
++  reduced_ = params_.reduced_camera_system != 0;
++  eliminate_points_ = reduced_ && Point_num_ > 0;
 +  const int pcg_iter_cap = reduced_ ? params_.reduced_pcg_iter_max : params_.pcg_iter_max;
-+  void (GraphSolver::*matvec)() = reduced_ ? &GraphSolver::RcsMatvec : &GraphSolver::DoJtjpDirect;
++  void (GraphSolver::*matvec)() = eliminate_points_ ? &GraphSolver::RcsMatvec : &GraphSolver::DoJtjpDirect;
++  // rho and alpha must be finite and positive for a step and for the Q criterion; anything else ends the PCG.
++  const auto usable = [](double x) { return x > 0.0 && std::isfinite(x); };
    float quality;
  
    std::chrono::time_point<std::chrono::steady_clock> t0 =
-@@ -2999,21 +3012,47 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+@@ -2999,21 +3016,47 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
        DoResJac();
      }
      score_best_pcg = score_best;
@@ -113,7 +117,7 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
 +    double pcg_q = 0.0;  // the reduced PCG's model decrease, with this iteration's rho and alpha
 +    double pcg_rho = 0.0;
 +    double pcg_alpha = 0.0;
-+    if (reduced_) {
++    if (eliminate_points_) {
 +      RcsReduceRhs();
 +    }
 +    for (pcg_iter_ = 0; pcg_iter_ < pcg_iter_cap; pcg_iter_++) {
@@ -127,8 +131,8 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
 +        if (reduced_) {
 +          pcg_rho = ReadCuMem(solver__alpha_numerator_);
 +          pcg_alpha = ReadCuMem(solver__alpha_);
-+          if (!(pcg_rho > 0.0) || !std::isfinite(pcg_alpha)) {
-+            Zero(nodes__FullOpenCVPose__step_, nodes__SimpleRadialPrincipalPoint__step_end__);
++          if (!usable(pcg_rho) || !usable(pcg_alpha)) {
++            RcsZeroStep();
 +            break;
 +          }
 +        }
@@ -138,7 +142,7 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
          DoBeta();
 +        if (reduced_) {
 +          pcg_rho = ReadCuMem(solver__beta_numerator_);
-+          if (!(pcg_rho > 0.0) || !std::isfinite(pcg_rho)) {
++          if (!usable(pcg_rho)) {
 +            break;
 +          }
 +        }
@@ -149,14 +153,14 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
          DoAlpha();
 +        if (reduced_) {
 +          pcg_alpha = ReadCuMem(solver__alpha_);
-+          if (!(pcg_alpha > 0.0) || !std::isfinite(pcg_alpha)) {
++          if (!usable(pcg_alpha)) {
 +            break;
 +          }
 +        }
          DoUpdateStep();
          DoUpdateR();
        }
-@@ -3057,11 +3096,21 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
+@@ -3057,11 +3100,21 @@ SolveResult GraphSolver::solve(bool print_progress, bool verbose_logging) {
            break;
          }
        }
@@ -174,13 +178,13 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
      }
 -    pcg_iter_ = std::min(pcg_iter_, params_.pcg_iter_max - 1);
 +    pcg_iter_ = std::min(pcg_iter_, pcg_iter_cap - 1);
-+    if (reduced_) {
++    if (eliminate_points_) {
 +      RcsBackSubstitute();
 +    }
  
      if (params_.pcg_rel_decrease_min == -1.0f &&
          params_.pcg_rel_score_exit == -1.0f) {
-@@ -6245,6 +6294,76 @@ void GraphSolver::DoJtjpDirect() {
+@@ -6245,6 +6298,81 @@ void GraphSolver::DoJtjpDirect() {
        full_opencv_split_fixed_focal_and_extra_fixed_principal_point_num_);
  }
  
@@ -209,6 +213,11 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
 +void GraphSolver::RcsZeroCameras(float* first, float* point, float* point_end, float* last_end) {
 +  Zero(first, point);
 +  Zero(point_end, last_end);
++}
++
++// step = 0 on every block: the reduced PCG's exit before its first step.
++void GraphSolver::RcsZeroStep() {
++  Zero(nodes__FullOpenCVPose__step_, nodes__SimpleRadialPrincipalPoint__step_end__);
 +}
 +
 +// r_k = r_0 reduced: g_c - H_cp H_pp^-1 g_p on the cameras, 0 on the points; Mp = r_k (M p_0 = r_0 in the PCG).
@@ -257,7 +266,7 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
  void GraphSolver::DoAlphaFirst() {
    Zero(solver__alpha_numerator_, solver__alpha_denominator_ + 1);
    float *p_kp1;
-@@ -6600,8 +6719,10 @@ void GraphSolver::DoUpdateRFirst() {
+@@ -6600,8 +6728,10 @@ void GraphSolver::DoUpdateRFirst() {
        SimpleRadialPrincipalPoint_num_, solver__r_0_norm2_tot_,
        solver__r_kp1_norm2_tot_, SimpleRadialPrincipalPoint_num_);
  
@@ -270,7 +279,7 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
  }
  
  void GraphSolver::DoUpdateR() {
-@@ -6679,7 +6800,9 @@ void GraphSolver::DoUpdateR() {
+@@ -6679,7 +6809,9 @@ void GraphSolver::DoUpdateR() {
        solver__neg_alpha_, nodes__SimpleRadialPrincipalPoint__r_k_,
        SimpleRadialPrincipalPoint_num_, solver__r_kp1_norm2_tot_,
        SimpleRadialPrincipalPoint_num_);
@@ -282,19 +291,21 @@ index e923297b7bc2009da556a99b1e9a97a9c8fe38e6..757e59a01d82d9864a1671c652c911c0
  
  float GraphSolver::DoRetractScore() {
 diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver.h b/src/thirdparty/Symforce-Caspar/generated/f32/solver.h
-index ad2817088893c6aa41f32502fb4d38948da0eb9d..a0b52d21c35cf18d5c8d88ce2c222c84792b5610 100644
+index ad2817088893c6aa41f32502fb4d38948da0eb9d..0e985783e6ec9c88c2f35dcff00ffde1efe5297a 100644
 --- a/src/thirdparty/Symforce-Caspar/generated/f32/solver.h
 +++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver.h
-@@ -6562,6 +6562,15 @@ private:
+@@ -6562,6 +6562,17 @@ private:
    void DoResJac();
    void DoNormalize();
    void DoJtjpDirect();
 +  // Reduced camera system (params_.reduced_camera_system): see solver.cc.
-+  bool reduced_ = false;  // this solve eliminates the Point nodes
++  bool reduced_ = false;  // this solve runs the reduced PCG policy: its cap, the Q stop rule, the breakdown guards
++  bool eliminate_points_ = false;  // and has Point nodes to eliminate: Schur product, back-substitution
 +  void RcsPointSolve(float* in, float* out);
 +  void RcsCopyCameras(const float* src_first, const float* src_point, const float* src_point_end,
 +                      const float* src_last_end, float* dst_first, float* dst_point_end);
 +  void RcsZeroCameras(float* first, float* point, float* point_end, float* last_end);
++  void RcsZeroStep();
 +  void RcsReduceRhs();
 +  void RcsMatvec();
 +  void RcsBackSubstitute();

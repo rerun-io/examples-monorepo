@@ -122,8 +122,9 @@ def test_a_full_system_knob_without_a_mode_selects_the_full_system(knob: str) ->
         ({"reduced_pcg_iter_max": 0}, "reduced_pcg_iter_max must be at least 1"),
         ({"reduced_pcg_eta": 1.0}, r"reduced_pcg_eta must be in \(0, 1\)"),
         ({"reduced_pcg_eta": float("nan")}, r"reduced_pcg_eta must be in \(0, 1\)"),
+        ({"reduced_pcg_eta": 0.99999999}, r"reduced_pcg_eta must be in \(0, 1\)"),
     ],
-    ids=["reduced-with-full-knob", "full-with-reduced-knob", "both-families", "zero-cap", "eta-one", "eta-nan"],
+    ids=["reduced-with-full-knob", "full-with-reduced-knob", "both-families", "zero-cap", "eta-one", "eta-nan", "eta-rounds-to-one-in-f32"],
 )
 def test_contradictory_or_invalid_modes_are_refused_before_the_run(options: CasparOptions, message: str) -> None:
     with pytest.raises(ValueError, match=message):
@@ -132,8 +133,6 @@ def test_contradictory_or_invalid_modes_are_refused_before_the_run(options: Casp
 
 def test_the_reduced_camera_system_switch_parses_as_a_bool() -> None:
     """The one bool solver control `--caspar-option` takes: true/false/1/0, anything else refused."""
-    if "reduced_camera_system" not in caspar_option_types():
-        pytest.skip("this pycolmap predates recipes/colmap-src caspar-reduced-camera-system.patch")
     for raw, expected in (("false", False), ("0", False), ("True", True), ("1", True)):
         parsed: CasparOptions = parse_caspar_options((f"reduced_camera_system={raw}",))
         assert parsed == {"reduced_camera_system": expected} and isinstance(parsed["reduced_camera_system"], bool)

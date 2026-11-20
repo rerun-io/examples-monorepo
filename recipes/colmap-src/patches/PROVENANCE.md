@@ -73,16 +73,19 @@ git -C <checkout> diff --full-index beta      > <recipe>/patches/caspar-reduced-
   iteration after the first divides by `rho_0`: the PCG loses conjugacy from its third iteration on.
   `BetaFromNumDenom` now stores `rho_k` as the next denominator. colsfm `tests/test_caspar_solver.py` checks it: a
   full-system PCG capped at 10 iterations per step ends 2.0e-5 above Ceres' minimum with the fix, 8.4e-5 without.
-- **Reduced camera system** (`caspar-reduced-camera-system.patch`, 9 files; `SolverParams::reduced_camera_system`,
-  off in Caspar, on in COLMAP's `CasparBundleAdjustmentOptions`): the Point nodes are eliminated inside the PCG. The
-  right-hand side becomes `g_c - H_cp H_pp^-1 g_p`; the matvec (chosen once per solve) is the generated
-  `DoJtjpDirect` run twice (point part of `p` zeroed, then `p = (0, -H_pp^-1 H_pc p)` accumulating into `w`, which
-  enters holding `M p`), with `PointNormalize` as the exact damped `H_pp^-1`; points are back-substituted after the
-  PCG; the PCG stops on the Ceres/rootba Q criterion (`reduced_pcg_eta` 0.1, at most `reduced_pcg_iter_max` 500).
-  A zero reduced right-hand side (no camera gradient or no camera block) gives a zero camera step; `rho_k = 0`
-  (exact convergence) stops before the next division; a non-finite or non-positive `alpha` stops before the step
-  update, keeping the last finite iterate. `reduced_pcg_iter_max >= 1`, `reduced_pcg_eta` in (0, 1) and no
-  per-iteration score exit are checked in COLMAP's adapter and again in `solve()`. The residual-norm readbacks only
+- **Reduced camera system** (`caspar-reduced-camera-system.patch`, 9 files; `reduced_camera_system`, off by default
+  in Caspar's `SolverParams` and in COLMAP's `CasparBundleAdjustmentOptions`; colsfm turns it on): the Point nodes are
+  eliminated inside the PCG. The right-hand side becomes `g_c - H_cp H_pp^-1 g_p`; the matvec (chosen once per solve)
+  is the generated `DoJtjpDirect` run twice (point part of `p` zeroed, then `p = (0, -H_pp^-1 H_pc p)` accumulating
+  into `w`, which enters holding `M p`), with `PointNormalize` as the exact damped `H_pp^-1`; points are
+  back-substituted after the PCG; the PCG stops on the Ceres/rootba Q criterion (`reduced_pcg_eta` 0.1, at most
+  `reduced_pcg_iter_max` 500). The mode sets that policy even with no Point node, where only the elimination is
+  skipped (a direct solver caller; COLMAP's adapter keeps constant points as Point nodes).
+  `rho` and `alpha` must be finite and positive at every iteration: otherwise the PCG stops before the step update,
+  with a zero camera step at the first iteration (a zero reduced right-hand side: no camera gradient or no camera
+  block) and the last iterate after it. `reduced_pcg_iter_max >= 1`, `reduced_pcg_eta` in (0, 1) and no
+  per-iteration score exit are checked in COLMAP's adapter (double) and again in `solve()` on the f32 values the
+  solver uses (0.99999999 passes the first and rounds to 1.0f). The residual-norm readbacks only
   feed the full system's stop rule, so the reduced PCG skips them. New helpers: `Scale` and `Subtract` in
   solver_tools; `BundleAdjustmentCaspar.reduced_*` registered in the COLMAP CLI.
 - Measurements. KITTI 06 (colsfm mapping rounds, f32): CASPAR alone went from 1,184 mm Sim(3) ATE to 816 mm; beta alone

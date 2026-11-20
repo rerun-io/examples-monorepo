@@ -110,6 +110,11 @@ void GraphSolver::RcsZeroCameras(float* first, float* point, float* point_end, f
   Zero(point_end, last_end);
 }}
 
+// step = 0 on every block: the reduced PCG's exit before its first step.
+void GraphSolver::RcsZeroStep() {{
+  Zero(nodes__{first}__step_, nodes__{last}__step_end__);
+}}
+
 // r_k = r_0 reduced: g_c - H_cp H_pp^-1 g_p on the cameras, 0 on the points; Mp = r_k (M p_0 = r_0 in the PCG).
 void GraphSolver::RcsReduceRhs() {{
   Copy(marker__r_0_start_, marker__r_0_end_, marker__r_k_start_);

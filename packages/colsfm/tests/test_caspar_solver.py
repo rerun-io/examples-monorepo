@@ -3,9 +3,12 @@
 `caspar-pcg-beta-recurrence.patch` (beta_k = rho_k / rho_{k-1}) and `caspar-reduced-camera-system.patch` (Point blocks
 eliminated inside the PCG, Q stopping rule, guards for exact convergence and breakdown, validated parameters). Each
 problem is solved by CASPAR and by Ceres from the same start; the sum of squared reprojection errors must agree.
+CASPAR's options go through `apply_caspar_options`, the production cast path.
 """
 
 from __future__ import annotations
+
+import ctypes
 
 import numpy as np
 import pycolmap
@@ -13,6 +16,7 @@ import pytest
 from jaxtyping import Float64
 from numpy import ndarray
 
+from colsfm.ba_backend import apply_caspar_options
 from colsfm.reconstruction import RIG_ID, camera_sensor_id
 
 WIDTH_PX, HEIGHT_PX = 640, 480
@@ -22,8 +26,6 @@ WIDTH_PX, HEIGHT_PX = 640, 480
 def _needs_the_patched_caspar(caspar_enabled: bool) -> None:
     if not caspar_enabled:
         pytest.skip("pycolmap is built without CASPAR")
-    if not hasattr(pycolmap.BundleAdjustmentOptions().caspar, "reduced_camera_system"):
-        pytest.skip("this pycolmap predates recipes/colmap-src caspar-reduced-camera-system.patch")
 
 
 def _problem(num_frames: int, *, noise_px: float = 0.5, perturb: bool = True, seed: int = 0) -> pycolmap.Reconstruction:
@@ -77,21 +79,32 @@ def _problem(num_frames: int, *, noise_px: float = 0.5, perturb: bool = True, se
     return reconstruction
 
 
-def _solve(reconstruction: pycolmap.Reconstruction, backend: str, constant_frames: list[int], caspar: dict[str, int | float | bool]) -> None:
+def _solve(
+    reconstruction: pycolmap.Reconstruction,
+    backend: str,
+    constant_frames: list[int],
+    caspar: dict[str, int | float | bool],
+    *,
+    camera_only: bool = False,
+) -> None:
+    """One bundle adjustment. `camera_only`: the points fixed, the shared focal length free (CASPAR's PinholeFocal)."""
     config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
     for image_id in sorted(reconstruction.images):
         config.add_image(image_id)
     for frame_id in constant_frames:
         config.set_constant_rig_from_world_pose(frame_id)
-    config.set_constant_cam_intrinsics(1)
+    if not camera_only:
+        config.set_constant_cam_intrinsics(1)
     options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
     options.print_summary = False
-    options.refine_focal_length = options.refine_extra_params = options.refine_principal_point = options.refine_sensor_from_rig = False
+    options.refine_principal_point = options.refine_sensor_from_rig = False
+    # CASPAR refuses a free focal length with a fixed distortion block; PINHOLE has none, so the two move together.
+    options.refine_focal_length = options.refine_extra_params = camera_only
+    options.refine_points3D = not camera_only
     if backend == "caspar":
         options.backend = pycolmap.BundleAdjustmentBackend.CASPAR
         options.caspar.gpu_index = "-1"
-        for name, value in caspar.items():
-            setattr(options.caspar, name, value)
+        apply_caspar_options(options.caspar, caspar)
     else:
         for tolerance in ("function_tolerance", "gradient_tolerance", "parameter_tolerance"):
             setattr(options.ceres.solver_options, tolerance, 1e-12)
@@ -136,7 +149,9 @@ def test_caspar_reaches_the_ceres_minimum(case: str, mode: str) -> None:
     reference: pycolmap.Reconstruction = _problem(num_frames, noise_px=0.0 if exact else 0.5, perturb=not exact)
     _solve(reference, "ceres", constant, {})
     reconstruction: pycolmap.Reconstruction = _problem(num_frames, noise_px=0.0 if exact else 0.5, perturb=not exact)
-    caspar: dict[str, int | float | bool] = {} if mode == "reduced" else {"reduced_camera_system": False, "pcg_iter_max": 500, "pcg_rel_error_exit": 1e-12}
+    caspar: dict[str, int | float | bool] = (
+        {"reduced_camera_system": True} if mode == "reduced" else {"reduced_camera_system": False, "pcg_iter_max": 500, "pcg_rel_error_exit": 1e-12}
+    )
     _solve(reconstruction, "caspar", constant, caspar)
     error, expected = _squared_error(reconstruction), _squared_error(reference)
     assert np.isfinite(error)
@@ -155,11 +170,53 @@ def test_the_pcg_beta_recurrence_keeps_the_directions_conjugate() -> None:
 
 
 @pytest.mark.parametrize(
-    "caspar",
-    [{"reduced_pcg_iter_max": 0}, {"reduced_pcg_eta": float("nan")}, {"reduced_pcg_eta": 1.0}, {"pcg_rel_score_exit": 0.5}],
-    ids=["zero-cap", "nan-eta", "eta-one", "score-exit-with-reduced"],
+    ("caspar", "message"),
+    [
+        ({"reduced_pcg_iter_max": 0}, "Check failed"),
+        ({"reduced_pcg_eta": float("nan")}, "Check failed"),
+        ({"reduced_pcg_eta": 1.0}, "Check failed"),
+        ({"pcg_rel_score_exit": 0.5}, "Check failed"),
+        # Passes the adapter's double check and rounds to 1.0f: the solver's own f32 check refuses it.
+        ({"reduced_pcg_eta": 0.99999999}, r"reduced_pcg_eta in \(0, 1\)"),
+    ],
+    ids=["zero-cap", "nan-eta", "eta-one", "score-exit-with-reduced", "eta-rounds-to-one"],
 )
-def test_the_solver_refuses_invalid_reduced_parameters(caspar: dict[str, int | float | bool]) -> None:
+def test_the_solver_refuses_invalid_reduced_parameters(caspar: dict[str, int | float | bool], message: str) -> None:
     """The native boundary checks what colsfm's parser also checks, so a direct pycolmap user gets the same refusal."""
-    with pytest.raises(ValueError, match="Check failed"):
-        _solve(_problem(3), "caspar", [1], caspar)
+    with pytest.raises(ValueError, match=message):
+        _solve(_problem(3), "caspar", [1], {"reduced_camera_system": True, **caspar})
+
+
+def _pcg_iterations(capfd: pytest.CaptureFixture[str], reconstruction: pycolmap.Reconstruction, caspar: dict[str, int | float | bool]) -> list[int]:
+    """Solve camera-only on CASPAR and return the PCG iteration index of each LM step, from the solver's progress lines."""
+    level: int = pycolmap.logging.verbose_level
+    pycolmap.logging.verbose_level = 2  # VLOG(2) turns on CASPAR's per-step progress print
+    try:
+        capfd.readouterr()
+        _solve(reconstruction, "caspar", [], caspar, camera_only=True)
+        ctypes.CDLL(None).fflush(None)  # the solver prints with printf, block-buffered into the capture file
+        out: str = capfd.readouterr().out
+    finally:
+        pycolmap.logging.verbose_level = level
+    return [int(line.split("pcg_iter:")[1].split()[0]) for line in out.splitlines() if "pcg_iter:" in line]
+
+
+def test_a_camera_only_solve_keeps_the_reduced_pcg_policy(capfd: pytest.CaptureFixture[str]) -> None:
+    """Fixed points, free poses, a free shared focal length: the requested reduced mode sets the PCG's cap and stop rule.
+
+    COLMAP's adapter keeps constant points as (factor-free) Point nodes, so this exercises the elimination path; the
+    solver keeps the same policy with no Point node at all, which only a direct GraphSolver caller can reach."""
+    one_step: dict[str, int | float | bool] = {"solver_iter_max": 1}
+    capped: pycolmap.Reconstruction = _problem(8)
+    capped_iterations: list[int] = _pcg_iterations(capfd, capped, {**one_step, "reduced_camera_system": True, "reduced_pcg_iter_max": 1})
+    uncapped: pycolmap.Reconstruction = _problem(8)
+    uncapped_iterations: list[int] = _pcg_iterations(capfd, uncapped, {**one_step, "reduced_camera_system": True, "reduced_pcg_eta": 1e-6})
+    full_one: pycolmap.Reconstruction = _problem(8)
+    _pcg_iterations(capfd, full_one, {**one_step, "reduced_camera_system": False, "pcg_iter_max": 1})
+    assert capped_iterations == [0], f"cap 1 ran PCG iterations {capped_iterations}"
+    assert uncapped_iterations and uncapped_iterations[0] >= 3, f"uncapped: {uncapped_iterations}; the case must need several iterations"
+    start: float = _squared_error(_problem(8))
+    capped_error, uncapped_error, full_error = _squared_error(capped), _squared_error(uncapped), _squared_error(full_one)
+    # One PCG iteration without points is the full system's first iteration: the same step.
+    assert capped_error == pytest.approx(full_error, rel=1e-5)
+    assert uncapped_error < capped_error < start, f"start {start:.3f}, cap 1 {capped_error:.3f}, uncapped {uncapped_error:.3f} px^2"

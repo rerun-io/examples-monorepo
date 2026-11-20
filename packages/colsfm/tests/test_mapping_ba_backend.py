@@ -82,6 +82,9 @@ def test_the_caspar_backend_reaches_the_options_the_solver_reads(
     assert ba_options.refine_sensor_from_rig is False
     assert ba_options.refine_extra_params == ba_options.refine_focal_length
     assert ba_options.caspar.gpu_index == "-1"
+    # COLMAP's default is the full-system PCG; colsfm solves the reduced camera system.
+    assert pycolmap.BundleAdjustmentOptions().caspar.reduced_camera_system is False
+    assert ba_options.caspar.reduced_camera_system is True
     on_gpu: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
         isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan, use_gpu=True)
     )
@@ -111,6 +114,7 @@ def test_caspar_solver_options_reach_the_options_object(
     assert ba_options.caspar.pcg_iter_max == 80
     assert isinstance(ba_options.caspar.pcg_iter_max, int)
     assert ba_options.caspar.pcg_rel_error_exit == pytest.approx(1e-6)
+    assert ba_options.caspar.reduced_camera_system is False, "a full-system knob selects the full system"
     # Untouched knobs keep COLMAP's defaults, and `use_gpu` still owns `gpu_index`.
     defaults: dict[str, object] = pycolmap.BundleAdjustmentOptions().caspar.todict()
     assert ba_options.caspar.diag_init == defaults["diag_init"]

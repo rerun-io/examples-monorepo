@@ -23,7 +23,7 @@
 #       the third iteration on. BetaFromNumDenom now keeps rho_k as the next divisor.
 #   caspar-reduced-camera-system.patch       hand-written, 9 files (its span helpers rendered from the generated layout by
 #       tools/caspar_rcs_helpers.py): an option-gated
-#       reduced camera system (on in COLMAP's CasparBundleAdjustmentOptions): points eliminated inside the PCG
+#       reduced camera system (off by default; colsfm turns it on): points eliminated inside the PCG
 #       (implicit Schur product from the generated matvec and Point normalize kernels, back-substitution after it),
 #       PCG stopped on the Ceres/rootba Q criterion (reduced_pcg_eta 0.1, reduced_pcg_iter_max 500), guarded against
 #       exact convergence and breakdown, parameters validated. Camera buffer spans come from the generated layout.
