@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from mapping_helpers import FixedFrames
 from torch import Tensor
 
 from colsfm.catalog import CatalogCameraModel, frames_meta_document
@@ -31,7 +31,7 @@ class _CountingRuntime:
     most_alive: int = 0
     opened: list[Path] = []
 
-    def __init__(self, path: Path, height: int, width: int) -> None:
+    def __init__(self, path: Path, width: int, height: int) -> None:
         type(self).alive += 1
         type(self).most_alive = max(type(self).most_alive, type(self).alive)
         type(self).opened.append(path)
@@ -53,21 +53,6 @@ class _CountingRuntime:
             "descriptors": torch.zeros((batch, NUM_KEYPOINTS, 128)),
             "scores": torch.ones((batch, NUM_KEYPOINTS)),
         }
-
-
-class _BlankFrames:
-    """CPU frames of the size each name's camera has."""
-
-    def __init__(self, sizes: dict[str, tuple[int, int]]) -> None:
-        self.sizes: dict[str, tuple[int, int]] = sizes
-
-    def frames(self, names: Sequence[str]) -> Iterator[tuple[str, Tensor]]:
-        for name in names:
-            height, width = self.sizes[name]
-            yield name, torch.zeros((3, height, width), dtype=torch.uint8)
-
-    def close(self) -> None:
-        """Nothing held."""
 
 
 def test_each_size_group_runs_on_its_own_runtime_and_releases_it_before_the_next(tmp_path: Path) -> None:
@@ -97,14 +82,14 @@ def test_each_size_group_runs_on_its_own_runtime_and_releases_it_before_the_next
         )
         for task in tasks
     ]
-    sizes: dict[str, tuple[int, int]] = {task.name: (task.image_height, task.image_width) for task in tasks}
+    sizes: dict[str, tuple[int, int]] = {task.name: (task.image_width, task.image_height) for task in tasks}
     _CountingRuntime.alive, _CountingRuntime.most_alive, _CountingRuntime.opened = 0, 0, []
 
     run_native_extraction(
         database_path,
         groups,
         RACO_MODEL,
-        _BlankFrames(sizes),
+        FixedFrames(sizes, random=False),
         min_score=0.0,
         max_num_features=0,
         batch_size=8,

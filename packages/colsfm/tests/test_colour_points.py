@@ -2,36 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-
 import numpy as np
 import pycolmap
-import torch
 from conftest import build_reconstruction
-from mapping_helpers import SyntheticRig
-from torch import Tensor
+from mapping_helpers import FixedFrames, SyntheticRig
 
 from colsfm.frames import colour_points
 
 
-class _RandomFrames:
-    """A frame source of fixed random RGB images, one per name, at each image's camera size."""
-
-    def __init__(self, sizes: dict[str, tuple[int, int]]) -> None:
-        self.frames_by_name: dict[str, Tensor] = {
-            name: torch.from_numpy(np.random.default_rng(index).integers(0, 256, (3, height, width), dtype=np.uint8))
-            for index, (name, (width, height)) in enumerate(sorted(sizes.items()))
-        }
-
-    def frames(self, names: Sequence[str]) -> Iterator[tuple[str, Tensor]]:
-        for name in names:
-            yield name, self.frames_by_name[name]
-
-    def close(self) -> None:
-        """Nothing to release."""
-
-
-def _reference_colours(reconstruction: pycolmap.Reconstruction, frames: _RandomFrames) -> dict[int, np.ndarray]:
+def _reference_colours(reconstruction: pycolmap.Reconstruction, frames: FixedFrames) -> dict[int, np.ndarray]:
     """The rule written out point by point: round(mean over observations of the bilinear sample at xy - 0.5)."""
     sums: dict[int, np.ndarray] = {}
     counts: dict[int, int] = {}
@@ -61,7 +40,7 @@ def test_every_point_gets_the_rounded_mean_of_its_observation_samples(synthetic_
         image.name: (reconstruction.camera(image.camera_id).width, reconstruction.camera(image.camera_id).height)
         for image in reconstruction.images.values()
     }
-    frames = _RandomFrames(sizes)
+    frames = FixedFrames(sizes, random=True)
     expected: dict[int, np.ndarray] = _reference_colours(reconstruction, frames)
     coloured: int = colour_points(reconstruction, frames)
     assert expected

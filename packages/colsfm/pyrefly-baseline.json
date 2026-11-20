@@ -1464,6 +1464,13 @@
       "severity": "error"
     },
     {
+      "column": 1,
+      "path": "tests/test_extraction_runtimes.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
       "column": 8,
       "path": "tests/test_extrinsic_refinement.py",
       "name": "missing-import",
