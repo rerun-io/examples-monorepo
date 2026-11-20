@@ -244,8 +244,6 @@ def main(config: PeopleTracksConfig) -> None:
     if config.output_every % config.track.stride or config.start % config.output_every:
         raise ValueError("track.stride must divide output_every, and start must be a multiple of output_every")
     process_start: float = time.perf_counter()
-    # The host side of the loop is bookkeeping: torch's OpenMP workers only spin-waited between ops (12 cores on clip 007).
-    torch.set_num_threads(1)
     torch.cuda.reset_peak_memory_stats()
     with rr.server.Server(datasets={"in": [str(config.rrd)]}) as server:
         dataset = server.client().get_dataset("in")
