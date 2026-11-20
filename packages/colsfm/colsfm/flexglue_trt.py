@@ -23,13 +23,14 @@ Pre- and post-processing mirror `src/colmap/feature/flexglue.cc` at the recipe's
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Container, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 import onnx
@@ -507,30 +508,53 @@ class FlexGlueTensorRT:
         return results
 
 
-def descriptor_batch(need: Sequence[int], index: int, cached: Container[int]) -> list[int]:
-    """The images one descriptor call encodes: `need[index]` and the next uncached images the pair loop needs after it.
+def descriptor_batch(pairs: Sequence[ImagePair], index: int, side: int, cached: Container[int]) -> list[int]:
+    """The images one descriptor call encodes: `pairs[index][side]` and the next uncached images the pair loop needs.
 
-    `need` is every pair's two images in matching order, so the look-ahead starts where the loop is, not where an image
-    was first needed. The older rule batched the images that followed an image's *first* use; an image evicted and needed
-    again then dragged in images long since matched. On clip 007's 41,958 loop pairs (18,606 images, a 512-image cache)
-    that encoded 77,654 images in 9,746 calls; this rule, simulated on the same pair list, encodes 32,118 in 4,132.
+    The look-ahead starts where the loop is, not where an image was first needed. The older rule batched the images that
+    followed an image's *first* use; an image evicted and needed again then dragged in images long since matched. On clip
+    007's 41,958 loop pairs (18,606 images, a 512-image cache) that encoded 77,654 images in 9,746 calls; this rule
+    encodes 32,070.
 
     Args:
-        need: The images in the order the pair loop asks for them, repeats included.
-        index: Position of the image that missed the cache.
+        pairs: The pair loop's sequence.
+        index: Pair whose image missed the cache.
+        side: 0 for the pair's first image, 1 for its second.
         cached: Images whose features are cached.
 
     Returns:
-        At most `DESCRIPTOR_BATCH` distinct uncached images, `need[index]` first, found within the next
-        `4 * DESCRIPTOR_BATCH` entries.
+        At most `DESCRIPTOR_BATCH` distinct uncached images, the missed one first, found within the next
+        `4 * DESCRIPTOR_BATCH` endpoints.
     """
-    batch: list[int] = [need[index]]
-    for candidate in need[index + 1 : index + 1 + 4 * DESCRIPTOR_BATCH]:
+    batch: list[int] = [pairs[index][side]]
+    window: int = 4 * DESCRIPTOR_BATCH
+    upcoming: Iterator[int] = (image_id for pair in pairs[index : index + 1 + window // 2] for image_id in pair)
+    for candidate in itertools.islice(upcoming, side + 1, side + 1 + window):
         if len(batch) == DESCRIPTOR_BATCH:
             break
         if candidate not in cached and candidate not in batch:
             batch.append(candidate)
     return batch
+
+
+def pair_schedule(pairs: Sequence[ImagePair], images: OrderedDict[int, Any], encode: Callable[[list[int]], None]) -> Iterator[int]:
+    """Walk the pairs in order, encoding what each needs: yields a pair's index once both of its images are cached.
+
+    Args:
+        pairs: The pair loop's sequence.
+        images: The feature cache, least recently used first; `encode` fills it and evicts from it.
+        encode: Encodes a `descriptor_batch` into `images`.
+
+    Yields:
+        Each pair's index, in order, with both images cached and the first refreshed so encoding the second cannot evict it.
+    """
+    for index, pair in enumerate(pairs):
+        for side in (0, 1):
+            if pair[side] in images:
+                images.move_to_end(pair[side])
+            else:
+                encode(descriptor_batch(pairs, index, side, images))
+        yield index
 
 
 def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], options: MatchingOptions, frames: FrameSource | None = None) -> MatchReport:
@@ -592,16 +616,7 @@ def _match_pairs_flexglue(
         names: dict[int, str] = {image.image_id: image.name for image in database.read_all_images()}
         cameras, sizes = verifier_inputs(database)
         flexglue: FlexGlueTensorRT = FlexGlueTensorRT(descriptor_engine, matcher_engine)
-        # Every image the pair loop asks for, in order: a descriptor batch is the next uncached stretch of it.
-        need: list[int] = [image_id for pair in pairs for image_id in pair]
-
-        def ensure(position: int) -> None:
-            image_id: int = need[position]
-            if image_id in flexglue.images:
-                # Refresh it: encoding the pair's other image must not evict this one before the matcher reads it.
-                flexglue.images.move_to_end(image_id)
-                return
-            batch_ids: list[int] = descriptor_batch(need, position, flexglue.images)
+        def encode(batch_ids: list[int]) -> None:
             decoded: list[tuple[str, Tensor]] = list(frames.frames([names[candidate] for candidate in batch_ids]))
             flexglue.encode(
                 [
@@ -611,10 +626,8 @@ def _match_pairs_flexglue(
             )
 
         def downloaded_chunks() -> Iterator[list[PairToVerify]]:
-            for index, (image_id1, image_id2) in enumerate(pairs):
-                ensure(2 * index)
-                ensure(2 * index + 1)
-                flexglue.enqueue((image_id1, image_id2))
+            for index in pair_schedule(pairs, flexglue.images, encode):
+                flexglue.enqueue(pairs[index])
                 if (index + 1) % options.verify.verify_chunk_pairs == 0 or index + 1 == len(pairs):
                     yield flexglue.flush()
 
