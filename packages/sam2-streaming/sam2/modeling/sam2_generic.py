@@ -202,6 +202,8 @@ class SAM2Generic(SAM2Base):
         if self.add_tpos_enc_to_obj_ptrs:
             # Only built when used: the host->device copy of the python frame
             # indices is a sync point and blocks CUDA-graph capture.
+            # A (ptr_seq_len, B) nested list gives every batch element its own
+            # pointer frames (objects batched across different histories).
             obj_ptrs_frame_idx = torch.tensor(obj_ptrs_frame_idx, device=obj_ptrs.device)
             obj_tpos_rel = (
                 (current_frame_idx - obj_ptrs_frame_idx) * tpos_sign_mul
@@ -215,7 +217,8 @@ class SAM2Generic(SAM2Base):
 
             obj_tpos_rel = get_1d_sine_pe(obj_tpos_rel / t_diff_max, dim=tpos_dim)
             obj_tpos_rel = self.obj_ptr_tpos_proj.forward(obj_tpos_rel)
-            obj_tpos_rel = obj_tpos_rel.unsqueeze(1).expand(-1, B, self.mem_dim)
+            if obj_tpos_rel.ndim == 2:
+                obj_tpos_rel = obj_tpos_rel.unsqueeze(1).expand(-1, B, self.mem_dim)
         else:
             obj_tpos_rel = obj_ptrs.new_zeros(len(obj_ptrs_frame_idx), B, self.mem_dim)
 
@@ -520,7 +523,10 @@ class SAM2Generic(SAM2Base):
         img_embeddings: list[torch.Tensor],
         prompt_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         multimask_output: bool = True,
+        best_only: bool = False,
     ) -> SAM2Result:
+        """Decode masks; ``best_only`` keeps only the highest-IoU hypothesis (and its IoU) per object before the
+        upscaling, which is per-channel, so that mask is the one ``best_mask_logits`` returns otherwise."""
 
         low_res_img_embeddings = img_embeddings[-1]
         high_res_img_embeddings = img_embeddings[:-1]
@@ -572,6 +578,11 @@ class SAM2Generic(SAM2Base):
             repeat_image=False,  # TODO
             high_res_features=high_res_img_embeddings,
         )
+
+        if best_only and masks_logits.shape[1] > 1 and not self.non_overlap_masks:
+            best = torch.argmax(ious, dim=1, keepdim=True)
+            masks_logits = torch.take_along_dim(masks_logits, best[..., None, None], dim=1)
+            ious = torch.take_along_dim(ious, best, dim=1)
 
         # Upscale the masks to the image_size
         masks_logits = self._transforms.postprocess_masks(

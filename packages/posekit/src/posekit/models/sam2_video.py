@@ -61,6 +61,9 @@ class Sam2VideoSegmenterConfig:
     """A prompt of one click per object takes the best of SAM 2's three masks by predicted IoU (SAM 2's
     ``_use_multimask`` rule: a lone click is ambiguous, shirt or person); off, it takes the single mask."""
 
+    fused_rope: bool = True
+    """Rotary encodings in one Triton kernel per tensor (sam2-streaming ``fused_rope``, same masks); needs Triton."""
+
     def setup(self) -> "Sam2VideoSegmenter":
         """Download the checkpoint, build the predictor, and return a ready segmenter."""
         return Sam2VideoSegmenter(self)
@@ -84,6 +87,11 @@ class Sam2VideoSegmenter(VideoSegmenter):
         checkpoint_path: str = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=filename)
         self.predictor = build_sam2_generic_video_predictor(SAM2_VARIANT_CONFIGS[config.variant], checkpoint_path, device=config.device)
         self.predictor.max_cond_frames_in_attn = config.max_conditional_memories
+        if config.fused_rope:
+            from sam2.modeling import fused_rope
+
+            # A module switch of the fork, read by every RoPEAttention: on for all predictors in the process.
+            fused_rope.ENABLED = fused_rope.triton is not None
         self._states: list[SAM2GenericVideoPredictorState] | None = None
         self._frame_idx: int = 0
 
@@ -126,6 +134,7 @@ class Sam2VideoSegmenter(VideoSegmenter):
         """
         from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
         from sam2.modeling.sam2_prompt import SAM2Prompt
+        from sam2.modeling.sam2_result import SAM2Result
         from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
         from posekit.models.sam2_memory_bank import BoundedForgetfulMemoryBank
@@ -153,47 +162,40 @@ class Sam2VideoSegmenter(VideoSegmenter):
             raise ValueError(f"Batch size changed between steps: state has {len(self._states)} slots, got {batch_size} frames.")
 
         device: torch.device = frames_rgb.device
-        xyxy_rows: list[Tensor] = []
-        score_rows: list[Tensor] = []
-        mask_rows: list[Tensor] = []
-        slot_ids: list[int] = []
-        track_ids: list[int] = []
-        for slot in range(batch_size):
-            slot_prompts: list[SAM2Prompt] = self._prompts_for_slot(prompts, slot) if prompts is not None else []
-            frame_chw: UInt8[Tensor, "3 h w"] = frames_rgb[slot].permute(2, 0, 1).contiguous()
-            single_clicks: bool = (
-                self.config.single_click_multimask
-                and bool(slot_prompts)
-                and all(p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in slot_prompts)
-            )
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.bf16):
-                results = self.predictor.forward(self._states[slot], self._frame_idx, frame_chw, prompts=slot_prompts, multimask_output=single_clicks)
-            for obj_id, result in results.items():
-                mask: Bool[Tensor, "h w"] = result.best_mask_logits[0, 0] > 0.0
-                # Branch-free mask bounding box: argmax of the row/column
-                # projections finds the first True; zeros when fully occluded.
-                # Keeps the streaming loop free of per-object GPU->CPU syncs.
-                cols: Bool[Tensor, "w"] = mask.any(dim=0)
-                rows: Bool[Tensor, "h"] = mask.any(dim=1)
-                x0: Tensor = cols.int().argmax()
-                y0: Tensor = rows.int().argmax()
-                x1: Tensor = frame_w - cols.flip(0).int().argmax()
-                y1: Tensor = frame_h - rows.flip(0).int().argmax()
-                box: Float[Tensor, "4"] = torch.where(cols.any(), torch.stack([x0, y0, x1, y1]).float(), torch.zeros(4, device=device))
-                xyxy_rows.append(box)
-                score_rows.append(result.ious.max().float())
-                mask_rows.append(mask)
-                slot_ids.append(slot)
-                track_ids.append(int(obj_id))
+        slot_prompts: list[list[SAM2Prompt]] = [self._prompts_for_slot(prompts, slot) if prompts is not None else [] for slot in range(batch_size)]
+        single_clicks: list[bool] = [
+            self.config.single_click_multimask
+            and bool(sp)
+            and all(p.boxes is None and p.points_coords is not None and int(p.points_coords.shape[0]) == 1 for p in sp)
+            for sp in slot_prompts
+        ]
+        # One predictor pass for every slot and object (grouped batches per module, see forward_batched).
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.bf16):
+            per_slot = self.predictor.forward_batched(self._states, self._frame_idx, frames_rgb.permute(0, 3, 1, 2), slot_prompts, single_clicks)
         self._frame_idx += 1
-        if not xyxy_rows:
+        rows_out: list[tuple[int, int, SAM2Result]] = [
+            (slot, obj_id, result) for slot, results in enumerate(per_slot) for obj_id, result in results.items()
+        ]
+        if not rows_out:
             return BoxDetections.empty(device, mask_hw=(frame_h, frame_w), with_track_ids=True)
+        masks: Bool[Tensor, "n h w"] = torch.cat([result.masks_logits[:, 0] for _, _, result in rows_out]) > 0.0
+        # Branch-free mask bounding boxes: argmax of the row/column projections finds the first True; zeros when fully
+        # occluded. Keeps the streaming loop free of GPU->CPU syncs.
+        cols: Bool[Tensor, "n w"] = masks.any(dim=1)
+        rows: Bool[Tensor, "n h"] = masks.any(dim=2)
+        corners: list[Tensor] = [
+            cols.int().argmax(dim=1),
+            rows.int().argmax(dim=1),
+            frame_w - cols.flip(1).int().argmax(dim=1),
+            frame_h - rows.flip(1).int().argmax(dim=1),
+        ]
+        boxes: Float[Tensor, "n 4"] = torch.stack(corners, dim=1).float()
         return BoxDetections(
-            xyxy=torch.stack(xyxy_rows),
-            scores=torch.stack(score_rows),
-            frame_indices=torch.tensor(slot_ids, dtype=torch.long, device=device),
-            masks=torch.stack(mask_rows),
-            track_ids=torch.tensor(track_ids, dtype=torch.long, device=device),
+            xyxy=torch.where(cols.any(dim=1, keepdim=True), boxes, 0.0),
+            scores=torch.cat([result.ious.max(dim=1).values for _, _, result in rows_out]).float(),
+            frame_indices=torch.tensor([slot for slot, _, _ in rows_out], dtype=torch.long, device=device),
+            masks=masks,
+            track_ids=torch.tensor([obj_id for _, obj_id, _ in rows_out], dtype=torch.long, device=device),
         )
 
     def _prompts_for_slot(self, prompts: SegmentationPrompts, slot: int) -> list:
