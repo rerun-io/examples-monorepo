@@ -44,7 +44,7 @@ Five decisions matter here because each one can change the numbers:
 
 import hashlib
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from functools import cache
@@ -104,6 +104,7 @@ from slam_rs.catalog_timing import (
 )
 from slam_rs.config import DatasetProperties
 from slam_rs.frame_masks import FrameMasks, MaskCursor
+from slam_rs.prefetch import prefetch
 from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
@@ -162,6 +163,13 @@ def select_decode_device(requested: DecodeRequest = "auto") -> DecodeDevice:
             print(f"slam-rs: decoding on the CPU (PyAV/dav1d) because NVDEC is unavailable: {reason}", flush=True)
     return "cpu"
 
+
+PREFETCH_FRAMESETS: int = 64
+"""Framesets the feed decodes ahead of its caller: two NVDEC batches of 32, so one batch's decode hides behind tracking.
+
+The queue holds at most this many framesets' gray8 images (``sum(h * w)`` bytes each: 7 MB on the 1920 px Insta360
+lenses, 0.6 MB on MSD), and their masks are the cursor's own; the decoder's current batch or window comes on top.
+"""
 
 DEFAULT_WINDOW_S: float = 60.0
 """Time window a long segment is cut into: a 7.6 s two-camera segment is 8.5 MB, so a 2,000 s one is not one query."""
@@ -616,8 +624,21 @@ class SegmentFeed:
         offset_ns: int = self.imu.cam_time_offset_ns
         return shift_clock(_read_ground_truth(self.gt_dataset, self.segment_id, first_ns - offset_ns, last_ns - offset_ns), offset_ns)
 
-    def framesets(self, stop_ns: int | None = None, start_ns: int | None = None) -> Iterator[Frameset]:
-        """Decode the segment and yield one frameset at a time.
+    def framesets(self, stop_ns: int | None = None, start_ns: int | None = None) -> Generator[Frameset, None, None]:
+        """Decode the segment and yield one frameset at a time, read ahead on a worker thread.
+
+        One worker thread per iterator runs :meth:`_read_framesets` (decode, inertial, ground-truth and mask reads) up
+        to :data:`PREFETCH_FRAMESETS` framesets ahead of the caller (:func:`slam_rs.prefetch.prefetch`), so the
+        tracker does not stop while the next window or NVDEC batch decodes: decoding, the catalog reads and the
+        tracker all release the GIL. The framesets, their order and their timestamps are those of the inline read; a
+        worker error is raised here; closing the iterator stops the worker. Every NVDEC decoder is opened, used and
+        closed on that one thread, and binds its CUDA device there itself (``simplecv.video_io.bind_cuda_device``).
+        See :meth:`_read_framesets` for the arguments.
+        """
+        return prefetch(self._read_framesets(stop_ns, start_ns), PREFETCH_FRAMESETS)
+
+    def _read_framesets(self, stop_ns: int | None, start_ns: int | None) -> Generator[Frameset, None, None]:
+        """Decode the segment and yield one frameset at a time, on the calling thread.
 
         By default, video, inertial samples and ground truth are fetched one
         window at a time, bounding memory and startup cost. Window edges land on
