@@ -249,7 +249,7 @@ SLOTS_HELD = threading.local()
 
 
 class FakeEncoder:
-    """torchcodec's ``Encoder`` surface that ``encode_face_videos`` uses, without NVENC; it opens only while all six slots are held."""
+    """torchcodec's ``Encoder`` surface that ``encode_videos`` uses, without NVENC; it opens only while all six slots are held."""
 
     def add_video(self, **_: object) -> FakeEncoder:
         return self
@@ -271,7 +271,7 @@ class FakeEncoder:
 
 @pytest.fixture
 def slot_encoder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """``encode_face_videos`` with its slot protocol (``nvenc_slot`` in ``tmp_path``, tracked per thread) and a fake torchcodec encoder."""
+    """``encode_videos`` with its slot protocol (``nvenc_slot`` in ``tmp_path``, tracked per thread) and a fake torchcodec encoder."""
     import contextlib
 
     from dataforge import video_encoding
@@ -302,11 +302,11 @@ def face_batches() -> Iterator[Tensor]:
 def test_six_faces_on_two_encoder_slots_fail_fast_instead_of_hanging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import torch
 
-    from dataforge.datasets.insta360 import encode_face_videos
+    from dataforge.datasets.insta360 import encode_videos
 
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "2")
     videos: list[Path] = [tmp_path / f"{k}.mp4" for k in range(6)]
-    outcome = run_with_timeout(lambda: encode_face_videos(face_batches(), videos, size=8, gop=10, cq=14, device=torch.device("cpu"), codec="av1_nvenc"), 20.0)
+    outcome = run_with_timeout(lambda: encode_videos(face_batches(), videos, width=8, height=8, gop=10, cq=14, device=torch.device("cpu"), codec="av1_nvenc"), 20.0)
     assert isinstance(outcome, ValueError) and "capacity is 2" in str(outcome)
     assert not any(video.exists() for video in videos), "an encoder opened although the slots were refused"
 
@@ -315,12 +315,12 @@ def test_six_faces_on_two_encoder_slots_fail_fast_instead_of_hanging(monkeypatch
 def test_two_concurrent_cube_encodes_share_six_slots_without_deadlock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import torch
 
-    from dataforge.datasets.insta360 import encode_face_videos
+    from dataforge.datasets.insta360 import encode_videos
 
     monkeypatch.setenv("DATAFORGE_NVENC_SLOTS", "6")
 
     def one_run(name: str) -> int:
-        return encode_face_videos(face_batches(), [tmp_path / f"{name}-{k}.mp4" for k in range(6)], size=8, gop=10, cq=14, device=torch.device("cpu"), codec="av1_nvenc")
+        return encode_videos(face_batches(), [tmp_path / f"{name}-{k}.mp4" for k in range(6)], width=8, height=8, gop=10, cq=14, device=torch.device("cpu"), codec="av1_nvenc")
 
     results: list[object] = []
     runs = [threading.Thread(target=lambda name=name: results.append(one_run(name)), daemon=True) for name in ("a", "b")]
@@ -336,14 +336,14 @@ def test_faces_encode_in_software_av1_with_the_nvenc_contract(tmp_path: Path) ->
     """A host without NVENC: SVT-AV1 writes yuv420p AV1, a keyframe every ``gop``, every frame in order."""
     import torch
 
-    from dataforge.datasets.insta360 import encode_face_videos
+    from dataforge.datasets.insta360 import encode_videos
 
     size: int = 96
     ramp = torch.arange(size, dtype=torch.uint8).expand(size, size)
     frames = torch.stack([torch.stack([ramp + 2 * k] * 3) for k in range(25)])
     batches = (frames[i : i + 5].unsqueeze(0).repeat(2, 1, 1, 1, 1) for i in range(0, 25, 5))
     videos: list[Path] = [tmp_path / f"{k}.mp4" for k in range(2)]
-    assert encode_face_videos(batches, videos, size=size, gop=10, cq=14, device=torch.device("cpu"), codec="libsvtav1") == 25
+    assert encode_videos(batches, videos, width=size, height=size, gop=10, cq=14, device=torch.device("cpu"), codec="libsvtav1") == 25
     for video in videos:
         with av.open(str(video)) as container:
             stream = container.streams.video[0]

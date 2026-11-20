@@ -118,6 +118,50 @@ class FaceTable:
     """True where the pixel is read from lens 0 (its ray has ``z0 >= 0``)."""
 
 
+def project_pair(
+    cameras: list[insta360_io.MeiCamera], lens1_from_lens0: Float64[ndarray, "3 3"], lens_size: tuple[int, int], rays: Float64[ndarray, "n 3"]
+) -> tuple[Float64[ndarray, "2 n 2"], Bool[ndarray, "2 n"]]:
+    """Each ray (lens-0 axes) as a pixel of lens 0 and of lens 1, and whether that lens holds it: its model accepts the ray
+    and its ``lens_size`` (width, height) image holds the pixel."""
+    pixels0, valid0 = cameras[0].project(np.ascontiguousarray(rays))
+    pixels1, valid1 = cameras[1].project(np.ascontiguousarray(rays @ lens1_from_lens0.T))
+    pixels: Float64[ndarray, "2 n 2"] = np.stack([pixels0, pixels1])
+    on_sensor: Bool[ndarray, "2 n"] = (pixels[..., 0] >= 0.0) & (pixels[..., 0] <= lens_size[0] - 1) & (pixels[..., 1] >= 0.0) & (pixels[..., 1] <= lens_size[1] - 1)
+    return pixels, np.stack([valid0, valid1]) & on_sensor
+
+
+def lens1_row(lens_height: int) -> int:
+    """The stacked pair's first lens-1 row: lens 0 on ``[0, h)``, the zero row ``h``, lens 1 from ``h + 1``."""
+    return lens_height + 1
+
+
+def stack_pair(lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> Float32[Tensor, "b 3 r w"]:
+    """The stacked pair on the lenses' device: lens 0 on rows ``[0, h)``, a zero row (the remap's border on both sides of
+    the seam), lens 1 on ``[h + 1, 2h + 1)``."""
+    b, c, h, w = lens0.shape
+    stacked: Float32[Tensor, "b 3 r w"] = torch.empty((b, c, lens1_row(h) + h, w), dtype=torch.float32, device=lens0.device)
+    stacked[:, :, :h] = lens0
+    stacked[:, :, h : lens1_row(h)] = 0.0
+    stacked[:, :, lens1_row(h) :] = lens1
+    return stacked
+
+
+def stack_pair_hwc(lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[ndarray, "b r w 3"]:
+    """``stack_pair`` on the host, channels last, as ``cv2.remap`` reads it."""
+    b, c, h, w = lens0.shape
+    stacked: UInt8[ndarray, "b r w 3"] = np.empty((b, lens1_row(h) + h, w, c), dtype=np.uint8)
+    stacked[:, :h] = lens0.permute(0, 2, 3, 1).numpy()
+    stacked[:, h : lens1_row(h)] = 0
+    stacked[:, lens1_row(h) :] = lens1.permute(0, 2, 3, 1).numpy()
+    return stacked
+
+
+def stacked_grid(xy: Float32[ndarray, "*shape 2"] | Float64[ndarray, "*shape 2"], lens_size: tuple[int, int]) -> Float32[ndarray, "*shape 2"]:
+    """Stacked-pair pixels as ``grid_sample`` coordinates (``align_corners=True``): x over ``[0, w - 1]``, y over ``[0, 2h]``."""
+    width, height = lens_size
+    return (xy.astype(np.float64) * [2.0 / (width - 1), 2.0 / (2 * height)] - 1.0).astype(np.float32)
+
+
 def face_table(
     face: CubeFace, cameras: list[insta360_io.MeiCamera], lens1_from_lens0: Float64[ndarray, "3 3"], lens_size: tuple[int, int]
 ) -> FaceTable:
@@ -129,12 +173,9 @@ def face_table(
     rays: Float64[ndarray, "n 3"] = face.rays().reshape(-1, 3) @ face.cube_from_face.T
     shape: tuple[int, int] = (face.size, face.size)
     use_lens0: Bool[ndarray, " n"] = rays[:, 2] >= 0.0
-    pixels0, valid0 = cameras[0].project(np.ascontiguousarray(rays))
-    pixels1, valid1 = cameras[1].project(np.ascontiguousarray(rays @ lens1_from_lens0.T))
-    pixels: Float64[ndarray, "n 2"] = np.where(use_lens0[:, None], pixels0, pixels1)
-    # The model accepts the ray; the sensor must also hold the pixel it lands on.
-    on_sensor: Bool[ndarray, " n"] = (pixels[:, 0] >= 0.0) & (pixels[:, 0] <= lens_size[0] - 1) & (pixels[:, 1] >= 0.0) & (pixels[:, 1] <= lens_size[1] - 1)
-    outside: int = int((~(np.where(use_lens0, valid0, valid1) & on_sensor)).sum())
+    lens_pixels, held = project_pair(cameras, lens1_from_lens0, lens_size, rays)
+    pixels: Float64[ndarray, "n 2"] = np.where(use_lens0[:, None], lens_pixels[0], lens_pixels[1])
+    outside: int = int((~np.where(use_lens0, held[0], held[1])).sum())
     if outside:
         raise ValueError(f"{face.name}: {outside} pixels lie outside the lens they are read from")
     return FaceTable(
@@ -153,34 +194,28 @@ class CubeJoin:
 
     def __init__(self, tables: list[FaceTable], lens_size: tuple[int, int], device: torch.device) -> None:
         """``tables`` in face order; ``lens_size``: lens image ``(width, height)``."""
-        width, height = lens_size
+        height: int = lens_size[1]
         self.device: torch.device = device
         self.size: int = tables[0].map_x.shape[0]
-        # Stacked rows: lens 0 on [0, h), a zero row (the remap's border on both sides of the seam), lens 1 on [h + 1, 2h + 1).
+        # Rows of the stacked pair (``stack_pair``).
         x: Float64[ndarray, "f n n"] = np.stack([table.map_x for table in tables]).astype(np.float64)
-        y: Float64[ndarray, "f n n"] = np.stack([np.where(table.use_lens0, table.map_y, table.map_y.astype(np.float64) + height + 1) for table in tables])
+        y: Float64[ndarray, "f n n"] = np.stack([np.where(table.use_lens0, table.map_y, table.map_y.astype(np.float64) + lens1_row(height)) for table in tables])
         if device.type == "cpu":
             self.maps: Float32[ndarray, "f 2 n n"] = np.stack([x, y], axis=1).astype(np.float32)
             return
-        grid: Float64[ndarray, "f n n 2"] = np.stack([x * 2.0 / (width - 1) - 1.0, y * 2.0 / (2 * height) - 1.0], axis=-1)
-        self.grid: Float32[Tensor, "1 fn n 2"] = torch.from_numpy(grid.reshape(1, -1, self.size, 2).astype(np.float32)).to(device)
+        grid: Float32[ndarray, "f n n 2"] = stacked_grid(np.stack([x, y], axis=-1), lens_size)
+        self.grid: Float32[Tensor, "1 fn n 2"] = torch.from_numpy(grid.reshape(1, -1, self.size, 2)).to(device)
 
     def faces(self, lens0: UInt8[Tensor, "b 3 h w"], lens1: UInt8[Tensor, "b 3 h w"]) -> UInt8[Tensor, "f b 3 n n"]:
         """Every face of ``b`` lens pairs (RGB, channels first, on the device), bilinear like ``cv2.INTER_LINEAR``; face-major."""
-        b, c, h, w = lens0.shape
+        b, c = lens0.shape[:2]
         if self.device.type == "cpu":
-            stacked: UInt8[ndarray, "b r w 3"] = np.empty((b, 2 * h + 1, w, c), dtype=np.uint8)
-            stacked[:, :h] = lens0.permute(0, 2, 3, 1).numpy()
-            stacked[:, h] = 0
-            stacked[:, h + 1 :] = lens1.permute(0, 2, 3, 1).numpy()
+            stacked: UInt8[ndarray, "b r w 3"] = stack_pair_hwc(lens0, lens1)
             faces: UInt8[ndarray, "f b n n 3"] = np.stack(
                 [[cv2.remap(pair, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) for pair in stacked] for map_x, map_y in self.maps]
             )
             return torch.from_numpy(np.ascontiguousarray(faces.transpose(0, 1, 4, 2, 3)))
-        stacked_gpu: Float32[Tensor, "b 3 r w"] = torch.empty((b, c, 2 * h + 1, w), dtype=torch.float32, device=self.device)
-        stacked_gpu[:, :, :h] = lens0
-        stacked_gpu[:, :, h] = 0.0
-        stacked_gpu[:, :, h + 1 :] = lens1
+        stacked_gpu: Float32[Tensor, "b 3 r w"] = stack_pair(lens0, lens1)
         joined: Float32[Tensor, "b 3 fn n"] = F.grid_sample(stacked_gpu, self.grid.expand(b, -1, -1, -1), mode="bilinear", padding_mode="zeros", align_corners=True)
         return joined.round_().to(torch.uint8).view(b, c, -1, self.size, self.size).permute(2, 0, 1, 3, 4).contiguous()
 
