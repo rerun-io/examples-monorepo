@@ -221,3 +221,42 @@ def test_the_insta360_panorama_pane_shows_only_once_a_segment_holds_the_panorama
     assert PANO_ENTITY not in panes(dataset.catalog_blueprints(entry)[0])
     entry.register([layer(PANORAMA_LAYER, FOUR)], layer_name=PANORAMA_LAYER).wait()
     assert panes(dataset.catalog_blueprints(entry)[0]).count(PANO_ENTITY) == 1, "one segment's panorama is enough to show the pane"
+
+
+def test_the_insta360_overviews_frame_the_walk_of_a_dataset_with_one_walked_segment(server: Server, layer: Callable[[str, str], str], tmp_path: Path) -> None:
+    """The layer that moves the rig writes its follow frame; with one such segment the catalog layout's three overviews
+    look at the middle of that walk. No walked segment, or two, and the viewer frames the views itself."""
+    from dataforge.datasets.insta360 import Insta360Config, Insta360Dataset
+
+    dataset = Insta360Dataset(Insta360Config())
+
+    def targets(entry: DatasetEntry) -> list[list[float] | None]:
+        found: list[list[float] | None] = []
+        for view in blueprint_views(dataset.catalog_blueprints(entry)[0]):
+            if view.origin != "/world":
+                continue
+            eye = view.properties.get("EyeControls3D")
+            if eye is None:
+                found.append(None)
+                continue
+            assert isinstance(eye, rrb.EyeControls3D) and eye.look_target is not None
+            found.append(eye.look_target.as_arrow_array().to_pylist()[0])
+        return found
+
+    def walked(segment: str) -> str:
+        """A SLAM layer of ``segment``: the follow frame along a walk from (0, 0, 1) to (10, 4, 1)."""
+        target: Path = tmp_path / "slam" / f"{segment}.rrd"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with recording_to(target, recording_id=segment, send_properties=False) as recording:
+            for step in range(11):
+                recording.set_time(schema.TIMELINE, duration=float(step))
+                recording.log(schema.follow_path(0), rr.Transform3D(translation=[float(step), 0.4 * step, 1.0]))
+        return target.as_uri()
+
+    entry: DatasetEntry = server.client().create_dataset("insta360-walk-test")
+    entry.register([layer("base", FOUR), layer("base", THREE)], layer_name="base").wait()
+    assert targets(entry) == [None, None, None]
+    entry.register([walked(FOUR)], layer_name="slam").wait()
+    assert targets(entry) == [[5.0, 2.0, 1.0]] * 3
+    entry.register([walked(THREE)], layer_name="slam").wait()
+    assert targets(entry) == [None, None, None], "one blueprint cannot frame two walks"

@@ -80,91 +80,21 @@ from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets import insta360_panorama
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
+from dataforge.datasets.insta360_blueprint import FACE_CAMS, FIRST_FACE_CAM, PANO_ENTITY, RIG, segment_layout, segment_walk
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_camera_source, log_rig_node, log_video_stream
 from dataforge.video_encoding import NVENC_PRESET, nvenc_av1_options, nvenc_slot, work_dir
 
-RIG: int = 0
-"""One rig per clip."""
 PANORAMA_LAYER: str = "panorama"
 """The derived panorama, written only under ``--panorama``: an AV1 ``VideoStream`` at ``PANO_ENTITY`` on the frame times."""
-PANO_ENTITY: str = f"{schema.rig_path(RIG)}/pano"
-"""Where the panorama layer puts its video."""
 CUBE_LAYER: str = "cube"
 """The cubemap, written only under ``--cube``: six faces per sampled frameset, ``cam_02 .. cam_07``."""
-FIRST_FACE_CAM: int = 2
-"""Camera index of the first face; face ``k`` of ``insta360_cube.FACES`` is ``2 + k``."""
-FACE_CAMS: range = range(FIRST_FACE_CAM, FIRST_FACE_CAM + len(cube.FACES))
-"""``cam_02 .. cam_07``: the cube faces."""
 LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
 RUN_SOURCE: str = schema.SLAM_RS_SOURCE
-"""The run layer the layouts show: slam-rs tracks these clips."""
-VIO_SOURCE: str = schema.SLAM_RS_VIO_SOURCE
-"""slam-rs's raw causal VIO run, in the same layer: the replay draws it a segment a frameset, with its landmarks."""
-COLSFM_SOURCE: str = schema.COLSFM_SOURCE
-"""The colsfm layer: refined rig, frusta, the static sparse cloud (``points``) and the same cloud by first view (``points_growing``)."""
-FOLLOW_PATH_WINDOW_S: float = 30.0
-"""How far back of the cursor the follow view draws a path logged a segment a pose, in seconds."""
-OVERVIEW_PATH_WINDOW_S: float = 120.0
-"""The same for the overview. Bounded on purpose: on clip 007 (1,069 s, 32 k segments) a window from the start played at
-7 fps in the native viewer, 120 s at 16.5 fps; the replay's faint static whole path still shows where the walk went."""
-KEYPOINT_COLOR: tuple[int, int, int] = (60, 220, 120)
-"""Tracked keypoints on the lenses: the green the clip B overview drew them in."""
-KEYPOINT_RADIUS_UI: float = 2.5
-"""Keypoint radius in ui points: a 2 px image radius shrinks below one screen pixel on a 1920 px lens in a small pane."""
-
-
-def lens_pane(cam: int) -> rrb.Spatial2DView:
-    """One lens: its video, the tracked keypoints of a slam-rs layer over it, and the people mask the trackers ignored.
-
-    The replay's own frames (``pinhole/image``, gray) are left out: the base video is the same picture in colour.
-    """
-    pinhole: str = schema.pinhole_path(RIG, cam)
-    return blueprints.camera_view(
-        f"lens{cam}",
-        RIG,
-        cam,
-        contents=[schema.video_path(RIG, cam), f"{pinhole}/keypoints", f"{pinhole}/people_mask"],
-        overrides={f"{pinhole}/keypoints": rr.Points2D.from_fields(colors=KEYPOINT_COLOR, radii=rr.Radius.ui_points(KEYPOINT_RADIUS_UI))},
-    )
-
-
-def segment_layout(*, panorama: bool) -> rrb.Blueprint:
-    """Both lenses (and with ``panorama`` the panorama) beside two 3D views, over the IMU plots.
-
-    The shared ``rig_blueprint``: an overview of the whole walk and a follow view rooted at ``/world/rig_00``, which a
-    pose layer animates (slam-rs's catalog layer when the segment has no ``gt``; the replay only with
-    ``--animate-base-rig``, for a recording viewed beside the base alone). Overrides
-    on a missing entity are inert, so the same layout serves a base-only segment, a SLAM run and a colsfm run.
-
-    What accumulates is logged once at its own time and shown through a cursor window: the VIO path (a segment per
-    frameset) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in the follow view,
-    and the colsfm cloud by first view (``points_growing``, a row per rig frame) since the start in both, so it grows along
-    the walk; its static copy (``points``, what every other layout shows) is left out. The replay's window and
-    marginalized frusta stay in the follow view only.
-    """
-    vio_path: str = schema.trajectory_path(VIO_SOURCE)
-    colsfm_points: str = f"{schema.run_path(COLSFM_SOURCE)}/points_growing"
-    hidden: list[str] = [*(f"{schema.pinhole_path(RIG, cam)}/image" for cam in range(2)), f"{schema.run_path(COLSFM_SOURCE)}/points"]
-    return blueprints.rig_blueprint(
-        [lens_pane(cam) for cam in range(2)] + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
-        rig=RIG,
-        run_source=RUN_SOURCE,
-        extra_run_sources=(VIO_SOURCE, COLSFM_SOURCE),
-        # Lens 0 looks along z_P = -y_imu; image up is -y_P = -x_imu.
-        eye_controls=blueprints.follow_eye_controls((0.0, -1.0, 0.0), (-1.0, 0.0, 0.0)),
-        plots=blueprints.imu_plots(RIG, 0),
-        overview_exclude=[*hidden, f"{schema.run_path(VIO_SOURCE)}/window", f"{schema.run_path(VIO_SOURCE)}/marginalized"],
-        follow_exclude=hidden,
-        overview_overrides={vio_path: blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S), colsfm_points: blueprints.cursor_window(None)},
-        follow_overrides={
-            vio_path: [blueprints.cursor_window(FOLLOW_PATH_WINDOW_S), rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(3.0))],
-            colsfm_points: blueprints.cursor_window(None),
-        },
-    )
+"""The run layer the segment-table card shows: slam-rs tracks these clips."""
 
 
 def _pictures(rig: insta360_io.InsvRig, lens: int, frames: int, *, threads: int) -> Iterator[av.VideoFrame]:
@@ -624,9 +554,10 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         return segment_layout(panorama=False)
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
-        """The segment layout shows the panorama pane when any registered segment holds the panorama layer."""
+        """The segment layout shows the panorama tab when any registered segment holds the panorama layer, and its
+        overviews frame the walk when the dataset holds one walked segment (``insta360_blueprint.segment_walk``)."""
         layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
-        return segment_layout(panorama=any(PANORAMA_LAYER in names for names in layer_names)), self.table_blueprint()
+        return segment_layout(panorama=any(PANORAMA_LAYER in names for names in layer_names), walk=segment_walk(entry)), self.table_blueprint()
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Preview card: the rig beside lens 0."""

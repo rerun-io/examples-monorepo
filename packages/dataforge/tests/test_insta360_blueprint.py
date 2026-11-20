@@ -81,9 +81,10 @@ def test_the_slam_tab_shows_both_lenses_with_keypoints_and_masks_over_a_short_im
         assert content_rules(pane) == [schema.video_path(RIG, cam), f"{pinhole}/keypoints", f"{pinhole}/people_mask"]
     plots: list[rrb.View] = [view for view in views if isinstance(view, rrb.TimeSeriesView)]
     assert [content_rules(view) for view in plots] == [[schema.gyro_path(RIG, 0)], [schema.accel_path(RIG, 0)]]
-    root = segment_layout(panorama=False).root_container
-    slam = root.contents[0]
-    assert isinstance(slam, rrb.Vertical) and slam.row_shares is not None and slam.row_shares[0] >= 5 * slam.row_shares[1], "the IMU is a strip"
+    slam = list(segment_layout(panorama=False).root_container.contents)[0]
+    assert isinstance(slam, rrb.Vertical) and slam.row_shares is not None
+    shares: Float64[ndarray, " 2"] = np.asarray(slam.row_shares, dtype=np.float64)
+    assert shares[0] >= 5 * shares[1], "the IMU is a strip"
 
 
 def test_the_colsfm_tab_shows_the_six_cube_faces_with_their_masks() -> None:

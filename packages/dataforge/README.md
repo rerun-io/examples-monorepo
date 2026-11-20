@@ -523,6 +523,16 @@ DATAFORGE_OUTPUT_ROOT=<rrd> pixi run -e dataforge --frozen dataforge-convert ins
 DATAFORGE_OUTPUT_ROOT=<rrd> pixi run -e dataforge --frozen dataforge-convert insta360 --root <dir with .insv clips> --panorama
 ```
 
+Viewer layout (`datasets/insta360_blueprint.py`): three tabs with one skeleton, an overview of the walk, a follow view
+and the source's own pictures. **SLAM**: slam-rs's map and VIO path, both lenses with the tracked keypoints and the
+people mask, the IMU as a strip. **colsfm**: the cloud growing with the walk and the six cube faces with their masks.
+**Comparison**: both paths, rigs and clouds in one world, and the colsfm layer's `position_difference` (metres from
+the slam-rs prior). slam-rs is orange and colsfm blue in every tab; a `--panorama` layer adds a fourth tab. The follow
+views are rooted at `/world/rig_00_follow`, the level frame the layer that moves the rig writes (slam-rs: the rig's
+position, turned about the world's up axis towards the walk), so the horizon holds while the stick swings; the same
+layer lays `/world/floor_grid` under the walk. The overviews frame the walk when the catalog dataset holds one walked
+segment: run `dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.
+
 Poses to the panorama (for colsfm / COLMAP `EQUIRECTANGULAR`). slam-rs tracks the two lens cameras and reports the
 rig pose `T_world_imu` (the rig reference is `imu_00`). The panorama frame has camera 0's axes and its origin at the
 midpoint of the two camera centres, so one rigid transform from the base statics takes a pose to the panorama
