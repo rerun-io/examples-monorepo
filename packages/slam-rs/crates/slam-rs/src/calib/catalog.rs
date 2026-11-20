@@ -102,7 +102,11 @@ impl CameraParts<f64> {
         let d = downscale as f64;
         let k = raw.image_from_camera;
         let (fx, fy, first) = if unified {
-            (raw.distortion_coefficients[0], raw.distortion_coefficients[1], 2)
+            (
+                raw.distortion_coefficients[0],
+                raw.distortion_coefficients[1],
+                2,
+            )
         } else {
             (k[0], k[4], 0)
         };
@@ -203,8 +207,21 @@ mod tests {
         // The X4 Air's lens 0: gamma 1835.37 / 1835.01, xi 2.31494, half field 100 deg, mei_v6 factory terms.
         let (gx, gy, xi) = (1835.37, 1835.01, 2.31494);
         let sphere = vec![
-            xi, 1.745_329_2, 0.94, -1.68, 2.19, 3.86, 0.0, -0.005, 0.0016, -0.0033, 0.004, 0.0083, -0.0013,
-            0.024, -0.0014,
+            xi,
+            1.745_329_2,
+            0.94,
+            -1.68,
+            2.19,
+            3.86,
+            0.0,
+            -0.005,
+            0.0016,
+            -0.0033,
+            0.004,
+            0.0083,
+            -0.0013,
+            0.024,
+            -0.0014,
         ];
         let statics = |model: &str, coefficients: Vec<f64>, fx: f64, fy: f64| CameraStatics {
             distortion_model: model.into(),
@@ -221,7 +238,12 @@ mod tests {
         let mut unified_coefficients = vec![gx, gy];
         unified_coefficients.extend(&sphere);
         // The Pinhole states the paraxial focal; it must not reach the estimator.
-        let unified = statics("mei_v6_unified", unified_coefficients, gx / (1.0 + xi), gy / (1.0 + xi));
+        let unified = statics(
+            "mei_v6_unified",
+            unified_coefficients,
+            gx / (1.0 + xi),
+            gy / (1.0 + xi),
+        );
         for downscale in [1, 2] {
             let a = CameraParts::from_catalog_statics(0, &old, downscale)?;
             let b = CameraParts::from_catalog_statics(0, &unified, downscale)?;
