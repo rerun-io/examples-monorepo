@@ -10,6 +10,8 @@ segment it was read from:
 - `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
   (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
 - `/world/runs/<source>/trajectory`: the whole optimised path as one line strip;
+- `/world/runs/<source>/position_difference`: how far each optimised rig frame lies from the prior pose the run started
+  from (the run's own `keyframes/frames_meta.json`), in metres, on `video_time`; left out for a run without that file;
 - the `colsfm` recording property: the run's headline numbers (registered images, points, reprojection, wall time).
 
 The recording id is the segment id, which is what lets a catalog register the file as a layer of that segment.
@@ -28,8 +30,9 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
-from colsfm.frames_meta import CameraParams, FramesMeta, KeyframeMeta
+from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, KeyframeMeta, read_frames_meta
 from colsfm.rerun_log import camera_k_matrix
+from colsfm.run_lifecycle import KEYFRAME_DIR_NAME
 
 APPLICATION_ID: Final[str] = "colsfm"
 """Application id of a layer written here."""
@@ -183,6 +186,40 @@ def log_points_by_first_view(
     recording.log(entity, rr.Points3D.from_fields(radii=rr.Radius.ui_points(1.5)), static=True)
 
 
+def log_position_difference(
+    recording: rr.RecordingStream,
+    entity: str,
+    prior_t_ns: Int64[ndarray, " n"],
+    prior_xyz: Float64[ndarray, "n 3"],
+    t_ns: Int64[ndarray, " m"],
+    xyz: Float64[ndarray, "m 3"],
+    timeline: str,
+) -> None:
+    """Log the distance between the optimised and the prior rig position at every rig frame both hold.
+
+    The frames are matched by timestamp: the run keeps the prior's stamps, so nothing is interpolated.
+
+    Args:
+        recording: The layer's recording.
+        entity: The scalar entity.
+        prior_t_ns: Timestamps of the prior rig frames, nanoseconds, increasing.
+        prior_xyz: Their positions, metres.
+        t_ns: Timestamps of the optimised rig frames, nanoseconds, increasing.
+        xyz: Their positions, metres.
+        timeline: The segment's video timeline.
+    """
+    shared, in_prior, in_run = np.intersect1d(prior_t_ns, t_ns, return_indices=True)
+    if shared.size == 0:
+        return
+    difference_m: Float64[ndarray, " k"] = np.linalg.norm(xyz[in_run] - prior_xyz[in_prior], axis=1)
+    recording.send_columns(
+        entity,
+        indexes=[rr.TimeColumn(timeline, duration=shared.astype("timedelta64[ns]"))],
+        columns=rr.Scalars.columns(scalars=difference_m),
+    )
+    recording.log(entity, rr.SeriesLines(names="distance to the prior [m]"), static=True)
+
+
 def open_layer(rrd_path: Path, segment: str) -> rr.RecordingStream:
     """A recording that saves to `rrd_path` and carries `segment` as its recording id (a layer of that segment).
 
@@ -263,6 +300,11 @@ def write_run_layer(run_dir: Path, rrd_path: Path, *, segment: str, source: str 
         count=len(reconstruction.points3D),
     )
     log_points_by_first_view(recording, f"{root}/points_growing", points, colors, seen_ns, timeline)
+    # The keyframes the run selected, with the poses it was given: what the optimisation started from.
+    prior_path: Path = run_dir / KEYFRAME_DIR_NAME / FRAMES_META_NAME
+    if prior_path.is_file():
+        prior_ns, world_T_prior = rig_poses(read_frames_meta(prior_path))
+        log_position_difference(recording, f"{root}/position_difference", prior_ns, world_T_prior[:, :3, 3], times_ns, world_T_rig[:, :3, 3], timeline)
     recording.send_property(
         "colsfm",
         rr.AnyValues(
