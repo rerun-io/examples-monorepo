@@ -23,7 +23,7 @@ from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
-from slam_rs.follow_frame import FLOOR_GRID_ENTITY, FOLLOW_ENTITY, FloorGrid, FloorHeight, HeadingFilter, floor_grid
+from slam_rs.follow_frame import FloorGrid, FloorHeight, HeadingFilter, floor_entity, floor_grid, follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
 from slam_rs.landmark_colors import LandmarkColors
 from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
@@ -251,8 +251,9 @@ class VioLogger:
     animate_base_rig: bool = False
     """Also move the dataset's rig (``/world/rig_00``) with the raw VIO pose: only for a replay viewed on its own, on a
     segment without ground truth. Off, the rig belongs to the layers that own it: ``gt``, or the catalog ``slam_rs``
-    layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`). With the rig go its level
-    follow frame and, with the whole paths, the floor grid (:mod:`slam_rs.follow_frame`)."""
+    layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`). Each run's level follow
+    frame and floor are written either way (:mod:`slam_rs.follow_frame`): the raw run's as it goes, the final run's
+    with it (:meth:`log_final_run`)."""
     video_entities: tuple[str, ...] = ()
     """The dataset's ``VideoStream`` of each camera, in :attr:`cameras` order. With them the run's rig references the
     current frame of each lens under its ``pinhole`` and a window keyframe the frames of its own time
@@ -349,9 +350,9 @@ class VioLogger:
             rr.log(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference(nanoseconds=result.t_ns - self.cam_time_offset_ns))
         if self.animate_base_rig:
             rr.log(RIG_ENTITY, rig_pose)
-            half_yaw: float = 0.5 * self.heading.update(result.t_ns, pose[0:3])
-            rr.log(FOLLOW_ENTITY, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)])))
-            self.floor_height.add(pose[0:3], snapshot.landmark_positions.astype(np.float64))
+        half_yaw: float = 0.5 * self.heading.update(result.t_ns, pose[0:3])
+        rr.log(follow_entity(VIO_RUN_ENTITY), rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)])))
+        self.floor_height.add(pose[0:3], snapshot.landmark_positions.astype(np.float64))
         if colors is not None:
             for camera, color in enumerate(colors):
                 self.landmark_colors.remember(frame.ids(camera), frame.positions(camera), color, self.tracked_resolution[camera])
@@ -408,26 +409,31 @@ class VioLogger:
             if len(trajectory) < 2:
                 continue
             rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=(*color, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
-        self.log_floor_grid()
+        self.log_floor_grid(VIO_RUN_ENTITY, self.estimated())
 
-    def log_floor_grid(self) -> None:
-        """Lay the floor grid under the walk, when this replay moves the rig and its landmarks gave a floor.
+    def log_floor_grid(self, run_entity: str, trajectory: Trajectory) -> None:
+        """Lay the floor grid under one run's walk, when the landmarks around the rig gave a floor.
 
-        The grid lies the rig's carrying height (:attr:`floor_height`) under the raw VIO path, the path the rig rides
-        here. Its edges go on ``video_time`` at the time the walk passed them, a row per stamp, so a view chooses how
-        much of the floor it shows around the cursor.
+        The grid lies the rig's carrying height (:attr:`floor_height`) under ``trajectory``. Its edges go on
+        ``video_time`` at the time the walk passed them, a row per stamp, so a view chooses how much of the floor it
+        shows around the cursor.
+
+        Args:
+            run_entity: The run the floor belongs to (:func:`slam_rs.follow_frame.floor_entity`).
+            trajectory: That run's poses, on the estimator's clock.
         """
         height: float | None = self.floor_height.height_m()
-        if not self.animate_base_rig or height is None or len(self.estimate_position_m) < 2:
+        if height is None or len(trajectory) < 2:
             return
-        grid: FloorGrid = floor_grid(np.array(self.estimate_t_ns, dtype=np.int64), np.array(self.estimate_position_m, dtype=np.float64), height)
+        grid: FloorGrid = floor_grid(trajectory.t_ns, trajectory.position_m, height)
         stamps, counts = np.unique(grid.t_ns, return_counts=True)
+        entity: str = floor_entity(run_entity)
         rr.send_columns(
-            FLOOR_GRID_ENTITY,
+            entity,
             indexes=[rr.TimeColumn(TIMELINE, duration=(stamps - self.cam_time_offset_ns).astype("timedelta64[ns]"))],
             columns=rr.LineStrips3D.columns(strips=grid.strips, colors=grid.colors).partition(counts.tolist()),
         )
-        rr.log(FLOOR_GRID_ENTITY, rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(FLOOR_GRID_RADIUS_UI)), static=True)
+        rr.log(entity, rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(FLOOR_GRID_RADIUS_UI)), static=True)
 
     def _log_paths(self) -> None:
         """Draw the segment each trajectory gained at this cursor.
@@ -569,6 +575,15 @@ class VioLogger:
         if len(final) < 2:
             return
         rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([final.position_m], colors=FINAL_COLOR, radii=0.004))
+        # What a view of the final run needs at every cursor, not only from the last frameset on: the whole path
+        # (static, as the raw run's), its level follow frame and its floor, on the walk's own times.
+        rr.log(f"{RUN_ENTITY}/path", rr.LineStrips3D([final.position_m], colors=(*FINAL_COLOR, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
+        rr.send_columns(
+            follow_entity(RUN_ENTITY),
+            indexes=[rr.TimeColumn(TIMELINE, duration=(final.t_ns - self.cam_time_offset_ns).astype("timedelta64[ns]"))],
+            columns=rr.Transform3D.columns(translation=final.position_m, quaternion=yaw_quaternion_xyzw(follow_yaw(final.t_ns, final.position_m))),
+        )
+        self.log_floor_grid(RUN_ENTITY, final)
         alignment: SimilarityTransform = IDENTITY
         if len(self.ground_truth) and len(final) >= MIN_ASSOCIATED_POSES:
             against_truth: AteResult = ate(final, self.ground_truth)

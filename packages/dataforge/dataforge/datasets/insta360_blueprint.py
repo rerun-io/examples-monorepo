@@ -9,9 +9,11 @@ blueprint serves a base-only segment, a SLAM run and a colsfm run.
 
 What the 3D views lean on, beside the runs themselves:
 
-- ``schema.follow_path``: the level follow frame the follow views are rooted at. A view rooted at the rig rolls and
+- ``schema.follow_path(source)``: the level follow frame of the run a tab shows, where its follow view is rooted: the
+  causal VIO in the SLAM tab, the final slam-rs path in colsfm and Comparison (colsfm's prior; clip 007: 16 m from
+  the VIO at 65 s). A view rooted at a rig rolls and
   pitches with the stick, and the viewer's ``tracking_entity`` does not move the eye (0.42);
-- ``schema.FLOOR_GRID_PATH``: the floor under the walk, each edge at the time the walk passed it. The built-in grid
+- ``schema.floor_path(source)``: the floor under that run's walk, each edge at the time the walk passed it. The built-in grid
   lies on the view origin's plane: it stands still under a follow view, and in the world it sits at the rig's first
   height, through the cloud. An overview shows every floor of the walk; a follow view the floor of the
   ``FOLLOW_FLOOR_WINDOW_S`` around the cursor, so on a walk over several storeys it draws the one under the rig.
@@ -152,7 +154,7 @@ def walk_eye(walk: Float64[ndarray, "n 3"], *, aspect: float) -> rrb.EyeControls
 
 
 def segment_walk(entry: DatasetEntry) -> Float64[ndarray, "n 3"] | None:
-    """The walk of a dataset's one walked segment, read off its follow frame, or None.
+    """The walk of a dataset's one walked segment, read off the final slam-rs run's follow frame, or None.
 
     A catalog dataset has one segment blueprint. Its overviews can frame a walk only when one segment has one: a
     dataset of several walked clips gets the viewer's own framing.
@@ -160,7 +162,7 @@ def segment_walk(entry: DatasetEntry) -> Float64[ndarray, "n 3"] | None:
     Args:
         entry: The catalog dataset, its layers registered.
     """
-    follow_frame: str = schema.follow_path(RIG)
+    follow_frame: str = schema.follow_path(schema.SLAM_RS_SOURCE)
     column: str = f"{follow_frame}:Transform3D:translation"
     if column not in {found.name for found in entry.schema().component_columns()}:
         return None
@@ -260,7 +262,7 @@ def colsfm_overrides(*, close: bool) -> Overrides:
 
 
 def comparison_overrides(*, close: bool) -> Overrides:
-    """How a Comparison-tab 3D view draws both sources: two paths, two rigs, two clouds, each in its source's colour.
+    """How a Comparison-tab 3D view draws both sources: the final slam-rs path and colsfm's, colsfm's rig, two clouds, each in its source's colour.
 
     The paths lie centimetres apart. In the overview slam-rs is the wide stroke and colsfm the narrow one on it, so
     both show where they agree and two lines where they part; close up they have one width.
@@ -268,13 +270,12 @@ def comparison_overrides(*, close: bool) -> Overrides:
     wide, narrow = (3.5, 3.5) if close else (6.0, 2.0)
     size_m: float = 0.25 if close else 0.5
     return {
-        f"{VIO}/path": stroke(SLAM_COLOR, wide),
+        f"{SLAM}/path": stroke(SLAM_COLOR, wide),
         f"{SLAM}/trajectory": stroke(SLAM_COLOR, wide),
         f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, narrow),
         f"{SLAM}/map/points": cloud(1.5, shade(SLAM_COLOR, CLOUD_SHADE)),
         f"{COLSFM}/points": cloud(1.5, shade(COLSFM_COLOR, CLOUD_SHADE)),
         **hidden(f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes", f"{SLAM}/loops"),
-        **lens_frusta(size_m),
         **face_frusta(size_m),
     }
 
@@ -288,21 +289,21 @@ def floor_window(half_s: float | None) -> rrb.VisibleTimeRanges:
     )
 
 
-def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeControls3D | None) -> rrb.Spatial3DView:
-    """A tab's world view of the whole walk, with the rig's position as a dot.
+def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeControls3D | None, source: str) -> rrb.Spatial3DView:
+    """A tab's world view of the whole walk of ``source``, with that run's position as a dot.
 
-    The rig is centimetres on a walk of tens of metres, so a point at its origin with a ui-point radius marks it at
-    any zoom. No built-in grid: the floor is ``schema.FLOOR_GRID_PATH``, all of it.
+    The rig is centimetres on a walk of tens of metres, so a point at the follow frame's origin with a ui-point radius
+    marks it at any zoom. No built-in grid: the floor is ``schema.floor_path(source)``, all of it.
     """
     return rrb.Spatial3DView(
         name=name,
         origin="/world",
         contents=contents,
         overrides={
-            schema.rig_path(RIG): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(6.0), colors=[RIG_MARK_COLOR]),
+            schema.follow_path(source): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(6.0), colors=[RIG_MARK_COLOR]),
             # From the overview distance the floor's edges merge into a haze over the walk (clip 007: 41,687 edges, six
             # storeys), so it takes one faint colour there; the follow views keep the layer's own fade.
-            schema.FLOOR_GRID_PATH: [floor_window(None), rr.LineStrips3D.from_fields(colors=OVERVIEW_FLOOR_COLOR)],
+            schema.floor_path(source): [floor_window(None), rr.LineStrips3D.from_fields(colors=OVERVIEW_FLOOR_COLOR)],
             **overrides,
         },
         eye_controls=eye,
@@ -310,13 +311,13 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
     )
 
 
-def follow(name: str, contents: list[str], overrides: Overrides) -> rrb.Spatial3DView:
-    """A tab's chase view, rooted at the level follow frame, over the floor around the cursor."""
+def follow(name: str, contents: list[str], overrides: Overrides, source: str) -> rrb.Spatial3DView:
+    """A tab's chase view, rooted at the level follow frame of ``source``, over that run's floor around the cursor."""
     return rrb.Spatial3DView(
         name=name,
-        origin=schema.follow_path(RIG),
+        origin=schema.follow_path(source),
         contents=contents,
-        overrides={schema.FLOOR_GRID_PATH: floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
+        overrides={schema.floor_path(source): floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
         eye_controls=FOLLOW_EYE,
         line_grid=False,
     )
@@ -367,12 +368,13 @@ def imu_strip() -> rrb.Horizontal:
 
 def slam_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
     """slam-rs: the map and the VIO path, the follow view of the window, both lenses, over the IMU strip."""
-    scene: list[str] = ["/world/**", *pictures(), f"- {COLSFM}/**"]
+    # The causal VIO is what this tab shows: its window, landmarks and lens frusta live in that run's frame.
+    scene: list[str] = ["/world/**", *pictures(), f"- {COLSFM}/**", f"- {schema.floor_path(schema.SLAM_RS_SOURCE)}/**"]
     return rrb.Vertical(
         rrb.Horizontal(
             rrb.Vertical(
-                overview("Overview: SLAM map and VIO path", scene, slam_overrides(close=False), eye),
-                follow("Follow: level chase view, VIO window and landmarks", scene, slam_overrides(close=True)),
+                overview("Overview: SLAM map and VIO path", scene, slam_overrides(close=False), eye, schema.SLAM_RS_VIO_SOURCE),
+                follow("Follow: level chase view, VIO window and landmarks", scene, slam_overrides(close=True), schema.SLAM_RS_VIO_SOURCE),
                 row_shares=[5, 4],
             ),
             rrb.Vertical(lens_pane(0), lens_pane(1)),
@@ -386,11 +388,18 @@ def slam_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
 
 def colsfm_tab(eye: rrb.EyeControls3D | None) -> rrb.Horizontal:
     """colsfm: the cloud that grows with the walk, the follow view of the cube rig, and the six faces it reads."""
-    scene: list[str] = [f"{COLSFM}/**", f"- {COLSFM}/points/**", f"- {POSITION_DIFFERENCE}/**", schema.rig_path(RIG), schema.FLOOR_GRID_PATH]
+    # Followed on the final slam-rs path, the prior colsfm refined: its rig stays within a metre or so of it.
+    scene: list[str] = [
+        f"{COLSFM}/**",
+        f"- {COLSFM}/points/**",
+        f"- {POSITION_DIFFERENCE}/**",
+        schema.follow_path(schema.SLAM_RS_SOURCE),
+        schema.floor_path(schema.SLAM_RS_SOURCE),
+    ]
     return rrb.Horizontal(
         rrb.Vertical(
-            overview("Overview: colsfm cloud grows with the walk", scene, colsfm_overrides(close=False), eye),
-            follow("Follow: level chase view, cube rig", scene, colsfm_overrides(close=True)),
+            overview("Overview: colsfm cloud grows with the walk", scene, colsfm_overrides(close=False), eye, schema.SLAM_RS_SOURCE),
+            follow("Follow: level chase view, cube rig", scene, colsfm_overrides(close=True), schema.SLAM_RS_SOURCE),
             row_shares=[5, 4],
         ),
         rrb.Grid(*(face_pane(cam, name) for cam, (name, _) in zip(FACE_CAMS, cube.FACES, strict=True)), grid_columns=2, name="Cube faces"),
@@ -407,13 +416,14 @@ def comparison_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
         *run_pictures(),
         f"- {COLSFM}/points_growing/**",
         f"- {POSITION_DIFFERENCE}/**",
-        *(f"- {VIO}/{part}/**" for part in ("landmarks", "window", "marginalized", "trajectory", "trail")),
+        # The final path is what colsfm started from; the causal VIO stands metres off it early in a long walk.
+        f"- {VIO}/**",
         f"- {schema.trail_path(schema.SLAM_RS_SOURCE)}/**",
     ]
     return rrb.Vertical(
         rrb.Horizontal(
-            overview("Overview: slam-rs (orange) and colsfm (blue), paths and clouds", scene, comparison_overrides(close=False), eye),
-            follow("Follow: the two rigs side by side", scene, comparison_overrides(close=True)),
+            overview("Overview: slam-rs final (orange) and colsfm (blue), paths and clouds", scene, comparison_overrides(close=False), eye, schema.SLAM_RS_SOURCE),
+            follow("Follow: colsfm's rig on the final slam-rs path", scene, comparison_overrides(close=True), schema.SLAM_RS_SOURCE),
             column_shares=[3, 2],
         ),
         rrb.TimeSeriesView(

@@ -244,13 +244,13 @@ def test_the_insta360_overviews_frame_the_walk_of_a_dataset_with_one_walked_segm
         return found
 
     def walked(segment: str) -> str:
-        """A SLAM layer of ``segment``: the follow frame along a walk from (0, 0, 1) to (10, 4, 1)."""
+        """A SLAM layer of ``segment``: the final run's follow frame along a walk from (0, 0, 1) to (10, 4, 1)."""
         target: Path = tmp_path / "slam" / f"{segment}.rrd"
         target.parent.mkdir(parents=True, exist_ok=True)
         with recording_to(target, recording_id=segment, send_properties=False) as recording:
             for step in range(11):
                 recording.set_time(schema.TIMELINE, duration=float(step))
-                recording.log(schema.follow_path(0), rr.Transform3D(translation=[float(step), 0.4 * step, 1.0]))
+                recording.log(schema.follow_path(schema.SLAM_RS_SOURCE), rr.Transform3D(translation=[float(step), 0.4 * step, 1.0]))
         return target.as_uri()
 
     entry: DatasetEntry = server.client().create_dataset("insta360-walk-test")

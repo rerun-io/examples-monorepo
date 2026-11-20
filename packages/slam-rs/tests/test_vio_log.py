@@ -48,7 +48,7 @@ from simplecv.ops.umeyama import SimilarityTransform
 
 from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
-from slam_rs.follow_frame import FLOOR_GRID_ENTITY, FOLLOW_ENTITY, FloorHeight
+from slam_rs.follow_frame import FloorHeight, floor_entity, follow_entity
 from slam_rs.landmark_colors import pack_rgba
 from slam_rs.trajectory import AteResult, Trajectory, ate, empty_trajectory
 from slam_rs.vio_log import (
@@ -433,33 +433,55 @@ def test_the_rig_rides_the_estimate_only_when_asked(
     assert alone.rows[RIG_ENTITY] == alone.rows[f"{VIO_RUN_ENTITY}/rig"]
 
 
-def test_a_replay_that_moves_the_rig_logs_its_level_follow_frame_and_the_floor_under_it(
+def test_each_run_gets_its_own_level_follow_frame_floor_and_path(
     pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
 ) -> None:
-    """With the rig, the replay moves ``/world/rig_00_follow`` (the rig's position, a turn about z only) and, once the
-    landmarks around the rig gave a floor, lays the grid the carrying height under the walk, on the walk's own times.
-    A replay that leaves the rig alone logs neither."""
+    """The raw VIO run's follow frame rides its poses as they come (a turn about z only); once the final run is known,
+    the final run gets its own follow frame, floor and whole path, at the same times. A follow view of the final run
+    must not centre on the causal VIO: on clip 007 they part by 16 m at 65 s. Run-scoped, so with or without the base rig."""
     rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
     # A floor 1.6 m under the origin, where the synthetic rig stays; the synthetic scene itself has none.
     floor: Float64[ndarray, "p 3"] = np.column_stack([np.random.default_rng(0).uniform(-2.0, 2.0, size=(600, 2)), np.full(600, -1.6)])
+    shift: Float64[ndarray, " 3"] = np.array([5.0, 0.0, 0.0])
 
-    def lay(logger: VioLogger) -> None:
+    def finish(logger: VioLogger) -> None:
         logger.floor_height = FloorHeight()
         logger.floor_height.add(np.zeros(3), floor)
-        logger.log_floor_grid()
+        logger.log_complete_paths()
+        estimate: Trajectory = logger.estimated()
+        logger.log_final_run(dataclasses.replace(estimate, position_m=estimate.position_m + shift))
 
-    alone: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "alone.rrd", read_rows, animate_base_rig=True, finish=lay)
-    assert [t_ns for t_ns, _ in alone.rows[FOLLOW_ENTITY]] == alone.tracked
-    for follow, rig_row in zip(alone.rows[FOLLOW_ENTITY], alone.rows[RIG_ENTITY], strict=True):
+    logged: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "runs.rrd", read_rows, finish=finish)
+    vio_follow: str = follow_entity(VIO_RUN_ENTITY)
+    final_follow: str = follow_entity(RUN_ENTITY)
+    assert vio_follow == "/world/runs/slam_rs_vio/follow" and final_follow == "/world/runs/slam_rs/follow"
+    assert [t_ns for t_ns, _ in logged.rows[vio_follow]] == logged.tracked
+    for follow, rig_row in zip(logged.rows[vio_follow], logged.rows[f"{VIO_RUN_ENTITY}/rig"], strict=True):
         assert follow.values["Transform3D:translation"] == rig_row.values["Transform3D:translation"]
         np.testing.assert_allclose(np.asarray(follow.values["Transform3D:quaternion"])[0, :2], 0.0, atol=1e-12)
-    rig_z: float = float(np.median([row.values["Transform3D:translation"][0][2] for row in alone.rows[RIG_ENTITY]]))
-    assert alone.rows[FLOOR_GRID_ENTITY] and {t_ns for t_ns, _ in alone.rows[FLOOR_GRID_ENTITY]} <= set(alone.tracked), "each edge at a pose's time"
-    for _, values in alone.rows[FLOOR_GRID_ENTITY]:
-        np.testing.assert_allclose(np.asarray(values["LineStrips3D:strips"], dtype=np.float64)[:, :, 2], rig_z - 1.6, atol=0.05)
+    final_rows = logged.rows[final_follow]
+    assert [t_ns for t_ns, _ in final_rows] == logged.tracked, "the final follow frame covers the whole walk, on its times"
+    for final_row, vio_row in zip(final_rows, logged.rows[vio_follow], strict=True):
+        np.testing.assert_allclose(np.asarray(final_row.values["Transform3D:translation"]) - np.asarray(vio_row.values["Transform3D:translation"]), [shift], atol=1e-9)
+    rig_z: float = float(np.median([row.values["Transform3D:translation"][0][2] for row in logged.rows[f"{VIO_RUN_ENTITY}/rig"]]))
+    for run in (VIO_RUN_ENTITY, RUN_ENTITY):
+        floor_rows = logged.rows[floor_entity(run)]
+        assert floor_rows and {t_ns for t_ns, _ in floor_rows} <= set(logged.tracked), run
+        for _, values in floor_rows:
+            np.testing.assert_allclose(np.asarray(values["LineStrips3D:strips"], dtype=np.float64)[:, :, 2], rig_z - 1.6, atol=0.05)
+    final_x: Float64[ndarray, " s"] = np.concatenate([np.asarray(v["LineStrips3D:strips"], dtype=np.float64)[:, :, 0].ravel() for _, v in logged.rows[floor_entity(RUN_ENTITY)]])
+    vio_x: Float64[ndarray, " s"] = np.concatenate([np.asarray(v["LineStrips3D:strips"], dtype=np.float64)[:, :, 0].ravel() for _, v in logged.rows[floor_entity(VIO_RUN_ENTITY)]])
+    assert abs(float(np.median(final_x) - np.median(vio_x)) - 5.0) < 1.0, "each floor lies under its own run"
+    assert static_strips(logged.recording, f"{RUN_ENTITY}/path") is not None, "the final run's whole path, static, for every cursor"
 
-    layer: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "layer.rrd", read_rows, finish=lay)
-    assert layer.tracked and FOLLOW_ENTITY not in layer.rows and FLOOR_GRID_ENTITY not in layer.rows
+
+def static_strips(recording: Path, entity: str) -> Float64[ndarray, "s n 3"] | None:
+    """One static ``LineStrips3D`` entity's strips, or None when the recording has no such entity."""
+    for chunk in rrc.RrdReader(recording).stream().collect().stream():
+        batch = chunk.to_record_batch()
+        if chunk.entity_path == entity and chunk.is_static and "LineStrips3D:strips" in batch.schema.names:
+            return np.asarray(batch.column("LineStrips3D:strips").to_pylist()[0], dtype=np.float64)
+    return None
 
 
 def test_landmarks_take_the_colour_of_the_image_under_their_keypoint(
@@ -788,7 +810,7 @@ def test_the_live_run_is_the_raw_vio_and_the_final_run_has_its_own_alignment(
     for part in ("rig", "window/00", "landmarks", "trajectory"):
         assert f"{VIO_RUN_ENTITY}/{part}" in logged.rows, part
     assert f"{RUN_ENTITY}/rig" not in logged.rows
-    assert sorted(static_path_lengths(logged.recording)) == sorted([f"{VIO_RUN_ENTITY}/path", f"{GT_ENTITY}/path"])
+    assert sorted(static_path_lengths(logged.recording)) == sorted([f"{VIO_RUN_ENTITY}/path", f"{GT_ENTITY}/path", f"{RUN_ENTITY}/path"])
 
     # The final run: its whole path once, at the last cursor, under its own alignment.
     (final,) = finals

@@ -46,10 +46,6 @@ directory and the other an entity path component.
 """
 
 
-FLOOR_GRID_PATH: str = "/world/floor_grid"
-"""One-metre cells on the floor under a walked rig's path, fixed in the world, each edge on ``video_time`` at the time
-the walk passed it (slam-rs: ``slam_rs.follow_frame``)."""
-
 CAM0_REFERENCE: str = "cam_00"
 """Rig-node ``reference`` of a rig whose frame is its first camera's frame (``log_rig_node``).
 
@@ -66,15 +62,6 @@ def _index(value: int, kind: str) -> str:
 def rig_path(rig: int) -> str:
     """``/world/rig_NN`` — a static exo rig or the moving ego rig."""
     return f"/world/rig_{_index(rig, 'rig')}"
-
-
-def follow_path(rig: int) -> str:
-    """``/world/rig_NN_follow`` — the rig's level follow frame: its position, turned about the world's up axis only.
-
-    A viewer's follow view is rooted here, not at the rig, so its horizon stays level while the rig rolls and pitches.
-    The layer that moves the rig writes it (slam-rs: ``slam_rs.follow_frame``).
-    """
-    return f"{rig_path(rig)}_follow"
 
 
 def cam_path(rig: int, cam: int) -> str:
@@ -165,6 +152,22 @@ def trajectory_path(source: str) -> str:
 def trail_path(source: str) -> str:
     """``.../runs/<source>/trail`` — the source's cursor-relative trajectory trail."""
     return f"{run_path(source)}/trail"
+
+
+def follow_path(source: str) -> str:
+    """``.../runs/<source>/follow`` — the source's level follow frame: its rig position, turned about the world's up axis only.
+
+    A viewer's follow view is rooted here, not at a rig, so its horizon stays level while the rig rolls and pitches.
+    Per source: a view of one run centres on that run's path (the causal VIO and the final path part by metres).
+    slam-rs writes one for each of its runs (``slam_rs.follow_frame``).
+    """
+    return f"{run_path(source)}/follow"
+
+
+def floor_path(source: str) -> str:
+    """``.../runs/<source>/floor_grid`` — one-metre cells on the floor under the source's walk, each edge on
+    ``video_time`` at the time the walk passed it (slam-rs: ``slam_rs.follow_frame``)."""
+    return f"{run_path(source)}/floor_grid"
 
 
 def capture_property(name: str) -> str:

@@ -59,14 +59,19 @@ def test_the_tabs_are_slam_colsfm_and_comparison_and_the_panorama_only_with_its_
     assert [str(view.origin) for view in with_panorama["Panorama"]] == [PANO_ENTITY]
 
 
-def test_every_tab_starts_with_a_world_overview_and_a_level_follow_view() -> None:
-    """The same two 3D views lead every tab: the overview in the world, the follow view in the yaw-only follow frame
-    (a view rooted at the rig rolls and pitches with it), which the layer that moves the rig writes."""
-    assert schema.follow_path(RIG) == "/world/rig_00_follow"
+FOLLOWED: dict[str, str] = {"SLAM": schema.SLAM_RS_VIO_SOURCE, "colsfm": schema.SLAM_RS_SOURCE, "Comparison": schema.SLAM_RS_SOURCE}
+"""The run each tab's follow view centres on: the SLAM tab shows the causal VIO (its window, landmarks and lens frusta
+live in that run's frame), colsfm and Comparison the final path colsfm started from (clip 007: 16 m from the VIO at 65 s)."""
+
+
+def test_every_tab_starts_with_a_world_overview_and_a_follow_view_on_the_path_it_shows() -> None:
+    """The same two 3D views lead every tab: the overview in the world, the follow view in the level follow frame of
+    the run the tab shows (a view rooted at a rig rolls and pitches with it)."""
+    assert schema.follow_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/follow"
     for name, views in tabs(segment_layout(panorama=False)).items():
         overview, follow = views[:2]
         assert isinstance(overview, rrb.Spatial3DView) and overview.origin == "/world", name
-        assert isinstance(follow, rrb.Spatial3DView) and follow.origin == schema.follow_path(RIG), name
+        assert isinstance(follow, rrb.Spatial3DView) and follow.origin == schema.follow_path(FOLLOWED[name]), name
         for view in (overview, follow):
             rules: list[str] = content_rules(view)
             assert f"- {schema.cam_path(RIG, 0)}/**" in rules or "/world/**" not in rules, "no picture is drawn in 3D"
@@ -122,14 +127,20 @@ def test_the_follow_views_show_the_floor_around_the_cursor_and_the_overviews_all
     whole = rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
     for name, views in tabs(segment_layout(panorama=False)).items():
         overview, follow = views[:2]
-        floor: list[object] = override(overview, schema.FLOOR_GRID_PATH)
+        floor_entity: str = schema.floor_path(FOLLOWED[name])
+        floor: list[object] = override(overview, floor_entity)
         assert whole in floor, name
         # Far off, a walk's floor edges merge into a haze (clip 007: 41,687 edges over six storeys): one faint colour.
         strips: rr.LineStrips3D = next(item for item in floor if isinstance(item, rr.LineStrips3D))
         assert strips.colors is not None
         packed_rgba: int = strips.colors.as_arrow_array().to_pylist()[0]
         assert max((packed_rgba >> 24) & 255, (packed_rgba >> 16) & 255, (packed_rgba >> 8) & 255) <= 40, name
-        assert override(follow, schema.FLOOR_GRID_PATH) == [around], name
+        assert override(follow, floor_entity) == [around], name
+        other: str = schema.floor_path(schema.SLAM_RS_SOURCE if FOLLOWED[name] == schema.SLAM_RS_VIO_SOURCE else schema.SLAM_RS_VIO_SOURCE)
+        for view in (overview, follow):
+            rules: list[str] = content_rules(view)
+            dropped: bool = any(rule.startswith("- ") and rule.endswith("/**") and other.startswith(rule[2:-3]) for rule in rules)
+            assert dropped or "/world/**" not in rules, (name, "one floor per tab")
 
 
 def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> None:
@@ -145,7 +156,7 @@ def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> No
         assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/rig/cube6_up/pinhole"))
         assert not any("pinhole/video" in rule for rule in content_rules(view)), "the colsfm views show the face pictures"
     for view in layout["Comparison"][:2]:
-        for picture in (f"{VIO}/rig/cam_01/pinhole/video", f"{COLSFM}/rig/cube6_down/pinhole/video"):
+        for picture in (f"{COLSFM}/rig/cube6_down/pinhole/video",):
             assert f"- {picture}/**" in content_rules(view), picture
 
 
@@ -156,7 +167,7 @@ def test_each_source_keeps_one_colour_in_every_tab() -> None:
         assert stroke_color(view, f"{VIO}/trajectory") == packed(SLAM_COLOR)
     assert stroke_color(layout["colsfm"][1], f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
     for view in layout["Comparison"][:2]:
-        assert stroke_color(view, f"{VIO}/path") == packed(SLAM_COLOR)
+        assert stroke_color(view, f"{SLAM}/path") == packed(SLAM_COLOR)
         assert stroke_color(view, f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
         tints: dict[str, tuple[int, ...]] = {}
         for entity in (f"{SLAM}/map/points", f"{COLSFM}/points"):
@@ -164,6 +175,21 @@ def test_each_source_keeps_one_colour_in_every_tab() -> None:
             assert points.colors is not None, "a cloud in its own image colours cannot be told from the other"
             tints[entity] = tuple(points.colors.as_arrow_array().to_pylist())
         assert tints[f"{SLAM}/map/points"] != tints[f"{COLSFM}/points"]
+
+
+def test_colsfm_and_comparison_show_the_final_path_and_no_causal_vio() -> None:
+    """colsfm started from the final slam-rs path; the causal VIO (and its rig, window and pictures) would stand metres
+    off early in a long walk. The rig mark of each overview sits on the followed run."""
+    for name in ("colsfm", "Comparison"):
+        for view in tabs(segment_layout(panorama=False))[name][:2]:
+            rules: list[str] = content_rules(view)
+            assert f"- {VIO}/**" in rules or ("/world/**" not in rules and not any(rule.startswith(VIO) for rule in rules)), name
+            assert f"- {schema.rig_path(RIG)}" in rules or schema.rig_path(RIG) not in rules, (name, "the base rig rides the VIO in a replay")
+    comparison: list[rrb.View] = tabs(segment_layout(panorama=False))["Comparison"]
+    assert stroke_color(comparison[0], f"{SLAM}/path") == packed(SLAM_COLOR)
+    for name, views in tabs(segment_layout(panorama=False)).items():
+        mark = override(views[0], schema.follow_path(FOLLOWED[name]))
+        assert any(isinstance(item, rr.Points3D) for item in mark), name
 
 
 def test_the_comparison_plots_the_position_difference_the_colsfm_layer_writes() -> None:
@@ -197,6 +223,7 @@ def test_the_run_sources_name_the_entities_their_producers_write() -> None:
     assert schema.trajectory_path(schema.SLAM_RS_VIO_SOURCE) == "/world/runs/slam_rs_vio/trajectory"
     assert schema.run_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs"
     # slam_rs.follow_frame (a slam-rs test pins its two names to these).
-    assert schema.follow_path(0) == "/world/rig_00_follow" and schema.FLOOR_GRID_PATH == "/world/floor_grid"
+    assert schema.follow_path(schema.SLAM_RS_VIO_SOURCE) == "/world/runs/slam_rs_vio/follow"
+    assert schema.floor_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/floor_grid"
     # colsfm.rerun_layer.write_run_layer (colsfm does not depend on dataforge).
     assert f"{COLSFM}/points_growing" == "/world/runs/colsfm/points_growing"

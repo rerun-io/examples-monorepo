@@ -11,7 +11,9 @@ rig's first height, not on the floor. Each edge carries the time the walk passed
 around the cursor: on a walk over several storeys a follow view then draws the floor under the rig and not the one
 above it.
 
-Both belong to the layer that moves ``/world/rig_00`` (:mod:`slam_rs.catalog_layer`, :mod:`slam_rs.vio_log`).
+Both are per run, under ``/world/runs/<run>`` (:func:`follow_entity`, :func:`floor_entity`): the replay writes the raw
+VIO run's as it goes and the final run's once it is known (:mod:`slam_rs.vio_log`); the catalog layer writes both
+follow frames (:mod:`slam_rs.catalog_layer`).
 """
 
 from dataclasses import dataclass, field
@@ -21,12 +23,20 @@ from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from scipy.spatial import KDTree
 
-from slam_rs.rig import RIG_ENTITY
 
-FOLLOW_ENTITY: str = f"{RIG_ENTITY}_follow"
-"""The follow frame: ``Transform3D`` on ``video_time`` (dataforge's ``schema.follow_path``)."""
-FLOOR_GRID_ENTITY: str = "/world/floor_grid"
-"""The floor grid: ``LineStrips3D`` rows on ``video_time``, a row per stretch of the walk (dataforge's ``schema.FLOOR_GRID_PATH``)."""
+def follow_entity(run_entity: str) -> str:
+    """A run's level follow frame: ``Transform3D`` on ``video_time`` (dataforge's ``schema.follow_path``).
+
+    Run-scoped: a view that shows one run centres on that run's path. The causal VIO and the final loop-closed path
+    part by metres (clip 007: 16 m at 65 s), so one frame for both would put one of them off screen.
+    """
+    return f"{run_entity}/follow"
+
+
+def floor_entity(run_entity: str) -> str:
+    """The floor under a run's walk: ``LineStrips3D`` rows on ``video_time`` (dataforge's ``schema.floor_path``)."""
+    return f"{run_entity}/floor_grid"
+
 HEADING_TAU_S: float = 1.5
 """Time constant of the heading's low-pass, seconds: a turn is followed in a few seconds, a swing of the stick is not."""
 MIN_SPEED_MPS: float = 0.15
