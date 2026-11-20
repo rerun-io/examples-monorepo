@@ -35,7 +35,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from scipy.spatial.transform import Rotation, Slerp
 from serde import serde
 from serde.json import to_json
-from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
+from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.rrd_query_utils import first_valid_value
@@ -68,7 +68,32 @@ PROJECTION_BY_DISTORTION_MODEL: Final[dict[str, tuple[ProjectionModel, int]]] = 
 
 Kannala-Brandt's first four slots are k1..k4. `brown_conrady` is OpenCV's coefficient vector (k1 k2 p1 p2 k3 k4 k5 k6
 ...), whose first eight are COLMAP FULL_OPENCV's distortion parameters in the same order. A camera without a
-`DistortionModel` (or with an unknown one) is PINHOLE."""
+`DistortionModel` (or with an unknown one) is PINHOLE, except the models `UNSUPPORTED_MODEL_PREFIXES` refuses."""
+
+UNSUPPORTED_MODEL_PREFIXES: Final[tuple[str, ...]] = ("mei_",)
+"""Distortion models with no cuSFM projection that must not fall back to PINHOLE: the unified sphere (``mei_v3``,
+``mei_v6`` and their ``_unified`` names, simplecv ``MEI_CATALOG_MODELS``). Read as a pinhole, a 200 deg Mei lens maps
+with the wrong projection everywhere off its axis."""
+
+
+def projection_of(entity: str, distortion: CatalogDistortion | None) -> tuple[ProjectionModel, tuple[float, ...]]:
+    """The cuSFM projection and distortion coefficients of one catalog camera.
+
+    Raises:
+        ValueError: For a model colsfm cannot map (``UNSUPPORTED_MODEL_PREFIXES``), naming the camera.
+    """
+    if distortion is None:
+        return "PINHOLE", ()
+    if distortion.model.startswith(UNSUPPORTED_MODEL_PREFIXES):
+        raise ValueError(
+            f"{entity}: distortion model {distortion.model} has no cuSFM projection; feed colsfm the cube faces "
+            "(dataforge --cube), which are pinholes, not the lenses"
+        )
+    if distortion.model not in PROJECTION_BY_DISTORTION_MODEL:
+        return "PINHOLE", ()
+    projection, count = PROJECTION_BY_DISTORTION_MODEL[distortion.model]
+    return projection, tuple(float(value) for value in distortion.coefficients[:count])
+
 
 Transform: TypeAlias = Float64[ndarray, "4 4"]
 """A homogeneous rigid transform."""
@@ -251,11 +276,7 @@ def read_catalog_cameras(dataset: DatasetEntry, segment: str, names: Sequence[st
         entity: str = camera.transform_entity
         name_values = _static_values(names_table, f"{entity}:name")
         model: CatalogCameraCalibration = models[entity]
-        projection: ProjectionModel = "PINHOLE"
-        distortion: tuple[float, ...] = ()
-        if model.distortion is not None and model.distortion.model in PROJECTION_BY_DISTORTION_MODEL:
-            projection, count = PROJECTION_BY_DISTORTION_MODEL[model.distortion.model]
-            distortion = tuple(float(value) for value in model.distortion.coefficients[:count])
+        projection, distortion = projection_of(entity, model.distortion)
         cameras.append(
             CatalogCameraModel(
                 entity=entity,
