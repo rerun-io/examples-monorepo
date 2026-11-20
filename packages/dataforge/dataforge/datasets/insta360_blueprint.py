@@ -95,6 +95,8 @@ FOLLOW_PATH_WINDOW_S: float = 30.0
 OVERVIEW_PATH_WINDOW_S: float = 120.0
 """The same for the overview. Bounded on purpose: on clip 007 (1,069 s, 32 k segments) a window from the start played at
 7 fps in the native viewer, 120 s at 16.5 fps; the darkened whole path still shows where the walk went."""
+OVERVIEW_FLOOR_COLOR: tuple[int, int, int] = (30, 31, 36)
+"""The floor in an overview: a step over the background, so the walk's floor is a hint under the clouds and paths."""
 FOLLOW_FLOOR_WINDOW_S: float = 20.0
 """How far either side of the cursor a follow view shows the floor, in seconds: about the grid's own reach at a walk."""
 IMU_WINDOW_S: float = 5.0
@@ -298,7 +300,9 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
         contents=contents,
         overrides={
             schema.rig_path(RIG): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(6.0), colors=[RIG_MARK_COLOR]),
-            schema.FLOOR_GRID_PATH: floor_window(None),
+            # From the overview distance the floor's edges merge into a haze over the walk (clip 007: 41,687 edges, six
+            # storeys), so it takes one faint colour there; the follow views keep the layer's own fade.
+            schema.FLOOR_GRID_PATH: [floor_window(None), rr.LineStrips3D.from_fields(colors=OVERVIEW_FLOOR_COLOR)],
             **overrides,
         },
         eye_controls=eye,

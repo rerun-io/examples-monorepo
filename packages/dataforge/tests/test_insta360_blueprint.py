@@ -122,7 +122,13 @@ def test_the_follow_views_show_the_floor_around_the_cursor_and_the_overviews_all
     whole = rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
     for name, views in tabs(segment_layout(panorama=False)).items():
         overview, follow = views[:2]
-        assert override(overview, schema.FLOOR_GRID_PATH) == [whole], name
+        floor: list[object] = override(overview, schema.FLOOR_GRID_PATH)
+        assert whole in floor, name
+        # Far off, a walk's floor edges merge into a haze (clip 007: 41,687 edges over six storeys): one faint colour.
+        strips: rr.LineStrips3D = next(item for item in floor if isinstance(item, rr.LineStrips3D))
+        assert strips.colors is not None
+        packed_rgba: int = strips.colors.as_arrow_array().to_pylist()[0]
+        assert max((packed_rgba >> 24) & 255, (packed_rgba >> 16) & 255, (packed_rgba >> 8) & 255) <= 40, name
         assert override(follow, schema.FLOOR_GRID_PATH) == [around], name
 
 
