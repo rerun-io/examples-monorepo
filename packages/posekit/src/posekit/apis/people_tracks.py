@@ -144,7 +144,8 @@ def prefetched_chunks(
 
     def decode(slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
         frames: UInt8[Tensor, "n h w 3"] = decoders[slot].result().frames(chunk)
-        torch.cuda.synchronize(device)
+        # This thread's stream only: a device-wide synchronize invalidates a CUDA graph the tracker captures meanwhile.
+        torch.cuda.current_stream(device).synchronize()
         return frames
 
     def submit(chunk: list[int]) -> list[Future[Tensor]]:
@@ -304,10 +305,6 @@ def main(config: PeopleTracksConfig) -> None:
     tracker = PeopleTracker(config.track, config.mask, config.device)
     targets: list[str] = [mask_entity(e) for e in entities]
     factor: int = config.mask_downscale
-    for entity, decoder in zip(entities, decoders, strict=True):
-        meta = decoder.decoder.metadata
-        if meta.height % factor or meta.width % factor:
-            raise ValueError(f"mask_downscale {factor} does not divide the {meta.width}x{meta.height} frames of {entity}")
     for target in targets:
         rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
         rr.log(target, rr.Transform3D(scale=[float(factor), float(factor), 1.0]), static=True)
@@ -317,8 +314,10 @@ def main(config: PeopleTracksConfig) -> None:
     run_start: float = time.perf_counter()
     print(f"model load + decoder setup {run_start - load_start:.1f} s")
     n_masks: int = 0
-    for chunk, frames in zip(chunks, decoded, strict=True):
+    for position, (chunk, frames) in enumerate(zip(chunks, decoded, strict=True)):
         n_slots, height, width = int(frames.shape[0]), int(frames.shape[2]), int(frames.shape[3])
+        if position == 0 and (height % factor or width % factor):
+            raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
         for column, index in enumerate(chunk):
             union: Bool[Tensor, "s h w"] = tracker.step(frames[:, column])
             if index % config.output_every:
