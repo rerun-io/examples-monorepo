@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
@@ -92,6 +93,17 @@ def dilate_mask(mask: Bool[ndarray, "h w"], radius_px: int) -> Bool[ndarray, "h 
     kernel: UInt8[ndarray, "k k"] = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius_px + 1, 2 * radius_px + 1))
     grown: UInt8[ndarray, "h w"] = cv2.dilate(mask.astype(np.uint8), kernel)
     return grown.astype(bool)
+
+
+def dilate_masks(masks: Bool[Tensor, "n h w"], radius_px: int) -> Bool[Tensor, "n h w"]:
+    """``dilate_mask`` on the masks' device: the same OpenCV disc, as one convolution (0 returns the masks unchanged)."""
+    if radius_px <= 0:
+        return masks
+    kernel: UInt8[ndarray, "k k"] = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius_px + 1, 2 * radius_px + 1))
+    weights: Float32[Tensor, "1 1 k k"] = torch.from_numpy(kernel).to(masks.device, torch.float32)[None, None]
+    # Sums of 0/1 products stay exact integers in float32 (also with TF32 inputs), so > 0.5 is the binary dilation.
+    hits: Float32[Tensor, "n 1 h w"] = F.conv2d(masks[:, None].float(), weights, padding=radius_px)
+    return hits[:, 0] > 0.5
 
 
 def selection_windows(keyframes: Sequence[bool], indices: Sequence[int]) -> list[DecodeWindow]:

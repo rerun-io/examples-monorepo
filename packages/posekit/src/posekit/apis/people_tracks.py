@@ -5,8 +5,11 @@ NVDEC. Every ``redetect_every`` tracker steps SAM 3 runs on all streams; its ins
 by mask IoU (matched tracks are re-anchored on the SAM 3 box, unmatched instances start tracks, duplicate tracks are
 dropped). A track that stays empty for ``max_misses`` steps, or that SAM 3 does not confirm at ``max_unconfirmed``
 re-detects in a row, is dropped. On frames that are a multiple of
-``output_every`` the union of the track masks (and of the SAM 3 masks on a re-detect step) is logged as a
-``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask`` with the frame's own stamp.
+``output_every`` the union of the track masks (and of the SAM 3 masks on a re-detect step) is dilated at full
+resolution and logged as a ``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask``
+with the frame's own stamp, in the mask layer contract (track 3, v2): ``mask_downscale`` times smaller than the frame
+(a cell is masked when any of its pixels is, the pooling ``mask_union`` would do), with one static
+``Transform3D(scale=[mask_downscale, mask_downscale, 1])`` to frame pixels.
 """
 
 import time
@@ -37,7 +40,7 @@ from posekit.apis.people_masks import (
 )
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_mask, selection_windows
+from posekit.ops.people_masks import dilate_masks, selection_windows
 from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
 from posekit.predictions import BoxDetections
 
@@ -90,6 +93,9 @@ class PeopleTracksConfig:
     """Masks are written for the frame indices that are multiples of this."""
     timeline: str = "video_time"
     """Timeline of the video streams and of the masks."""
+    mask_downscale: int = 4
+    """Mask size = frame size / this (480 px for 1920 px lenses, FullCircle's grid); must divide the frame size. 1 = full
+    resolution."""
     mask: MaskOptions = field(default_factory=MaskOptions)
     """SAM 3 options (prompt, thresholds, tiles) and the output dilation."""
     track: TrackOptions = field(default_factory=TrackOptions)
@@ -260,8 +266,10 @@ def main(config: PeopleTracksConfig) -> None:
     tracker = PeopleTracker(config.track, config.mask, config.device)
     decoders: list[StreamDecoder] = [StreamDecoder(v, config.start, end, config.device) for v in videos]
     targets: list[str] = [mask_entity(e) for e in entities]
+    factor: int = config.mask_downscale
     for target in targets:
         rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
+        rr.log(target, rr.Transform3D(scale=[float(factor), float(factor), 1.0]), static=True)
     if config.overlay_dir is not None:
         config.overlay_dir.mkdir(parents=True, exist_ok=True)
     torch.cuda.synchronize()
@@ -271,18 +279,22 @@ def main(config: PeopleTracksConfig) -> None:
     for begin in range(0, len(tracked), config.decode_chunk):
         chunk: list[int] = tracked[begin : begin + config.decode_chunk]
         frames: UInt8[Tensor, "s n h w 3"] = torch.stack([d.frames(chunk) for d in decoders])
+        n_slots, height, width = int(frames.shape[0]), int(frames.shape[2]), int(frames.shape[3])
+        if height % factor or width % factor:
+            raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames")
         for column, index in enumerate(chunk):
             union: Bool[Tensor, "s h w"] = tracker.step(frames[:, column])
             if index % config.output_every:
                 continue
-            masks: Bool[ndarray, "s h w"] = union.cpu().numpy()
+            dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
+            cells: Bool[Tensor, "s hm wm"] = dilated.view(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+            masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
             for slot, entity in enumerate(entities):
-                mask: Bool[ndarray, "h w"] = dilate_mask(masks[slot], config.mask.dilate_px)
                 set_frame_time(config.timeline, videos[slot].times[index])
-                rr.log(targets[slot], rr.SegmentationImage(mask.astype(np.uint8) * PERSON_CLASS_ID))
+                rr.log(targets[slot], rr.SegmentationImage(masks[slot]))
                 n_masks += 1
                 if config.overlay_dir is not None and index in config.overlay_frames:
-                    write_overlay(config.overlay_dir, entity, index, frames[slot, column].cpu().numpy(), mask)
+                    write_overlay(config.overlay_dir, entity, index, frames[slot, column].cpu().numpy(), dilated[slot].cpu().numpy())
         live: list[int] = [len(t) for t in tracker.live]
         elapsed: float = time.perf_counter() - run_start
         print(

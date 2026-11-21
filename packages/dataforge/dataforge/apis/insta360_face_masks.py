@@ -6,7 +6,7 @@ with a static ``Transform3D`` scale to the lens image; no transform = lens resol
 face's name, ``Pinhole`` and face-from-IMU ``Transform3D``, and the face frame stamps). Writes a layer with
 ``SegmentationImage`` at ``/world/rig_00/cam_NN/pinhole/people_mask`` (NN = 02..07) on every face frame stamp, joined
 from the two lens masks through the faces' tables with nearest-neighbour interpolation: one gather per face from the
-native-resolution masks (``insta360_cube.MaskJoin``). Every face pixel lies inside the
+native-resolution masks (``insta360_cube.MaskJoin``, on the GPU when there is one). Every face pixel lies inside the
 lens it is read from (``insta360_cube.face_table`` checks it), so the mask is the people mask alone. A face stamp
 without a mask on both lenses is an error.
 """
@@ -16,10 +16,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
+import torch
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
@@ -43,6 +45,8 @@ class Config:
     """The cube layer (face geometry and stamps)."""
     output: Path
     """The face mask layer to write."""
+    device: Literal["cuda", "cpu"] | None = None
+    """Where the faces are gathered (``insta360_cube.MaskJoin``); default ``cuda`` when torch sees a GPU."""
 
 
 def face_statics(faces: Path) -> dict[int, dict[str, object]]:
@@ -146,7 +150,8 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces.values()], lenses.size)
+    device: torch.device = torch.device(config.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces.values()], lenses.size, device)
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
     scales: dict[int, tuple[float, float]] = lens_mask_scales(config.masks)

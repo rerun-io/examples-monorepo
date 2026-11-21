@@ -221,20 +221,26 @@ class CubeJoin:
 
 
 class MaskJoin:
-    """The faces of lens mask pairs (label images): one nearest gather per face, on the host where the masks are read and written."""
+    """The faces of lens mask pairs (label images): one nearest gather of all faces, on ``device``.
 
-    def __init__(self, tables: list[FaceTable], lens_size: tuple[int, int]) -> None:
-        """``tables`` in face order; ``lens_size``: lens image ``(width, height)``."""
+    The masks are read and written on the host; on ``cuda`` only the pair goes up and the faces come down (clip 007's
+    3,203 pairs: the host gather took 6 s of the 14 s remap).
+    """
+
+    def __init__(self, tables: list[FaceTable], lens_size: tuple[int, int], device: torch.device | None = None) -> None:
+        """``tables`` in face order; ``lens_size``: lens image ``(width, height)``; ``device`` default the host."""
         self.tables: list[FaceTable] = tables
         self.lens_size: tuple[int, int] = lens_size
-        self.index: dict[tuple[tuple[int, int], tuple[int, int]], Int64[ndarray, "f n n"]] = {}
+        self.device: torch.device = device or torch.device("cpu")
+        self.index: dict[tuple[tuple[int, int], tuple[int, int]], Int64[Tensor, "f n n"]] = {}
 
     def faces(self, mask0: UInt8[ndarray, "h0 w0"], mask1: UInt8[ndarray, "h1 w1"]) -> UInt8[ndarray, "f n n"]:
         """Every face of a lens mask pair at any resolution that covers the lens image (contract v2)."""
         key: tuple[tuple[int, int], tuple[int, int]] = (mask0.shape, mask1.shape)
         if key not in self.index:
-            self.index[key] = np.stack([self._index(table, key) for table in self.tables])
-        return np.concatenate([mask0.ravel(), mask1.ravel(), np.zeros(1, dtype=np.uint8)])[self.index[key]]
+            self.index[key] = torch.from_numpy(np.stack([self._index(table, key) for table in self.tables])).to(self.device)
+        pair: UInt8[ndarray, " m"] = np.concatenate([mask0.ravel(), mask1.ravel(), np.zeros(1, dtype=np.uint8)])
+        return torch.take(torch.from_numpy(pair).to(self.device), self.index[key]).cpu().numpy()
 
     def _index(self, table: FaceTable, mask_shapes: tuple[tuple[int, int], tuple[int, int]]) -> Int64[ndarray, "n n"]:
         """Where each face pixel reads ``[mask0, mask1, 0]`` flattened: ``cv2.remap``'s nearest lens pixel (rounded half to

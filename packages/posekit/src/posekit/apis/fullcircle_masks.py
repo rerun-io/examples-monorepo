@@ -1,7 +1,7 @@
 """FullCircle operator masks for a dual-fisheye base recording: a ``people_mask`` layer on both lenses.
 
 Reads the lens videos, their Mei calibrations and the accelerometer of a dataforge Insta360 base recording from its
-catalog segment (only the packets of the run window), runs
+catalog segment (both lenses in one read; the decoders get the packets of the run window), runs
 :class:`~posekit.models.fullcircle.FullCircleMasker` in FullCircle's two passes (detect the operator direction on
 every tracked frameset, fill the gaps from the nearest frameset, then track and map back) and writes the mask layer
 contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a ``SegmentationImage`` (uint8, 1 = operator)
@@ -23,13 +23,13 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
-from datafusion import col, lit
+from datafusion import col
 from einops import rearrange
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
-from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
+from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
@@ -117,39 +117,6 @@ def read_lens_sources(
     return sources, cam_R_rigs[0]
 
 
-def read_lens_index(dataset: DatasetEntry, segment: str, entity: str, timeline: str) -> tuple[ndarray, list[bool]]:
-    """One lens's frame stamps and keyframe flags, without its packets.
-
-    Raises:
-        ValueError: If the entity has no frames with strictly increasing stamps.
-    """
-    sample: str = f"{entity}:VideoStream:sample"
-    keyframe: str = f"{entity}:VideoStream:is_keyframe"
-    view = dataset.filter_segments(segment).filter_contents([entity]).reader(index=timeline)
-    table: pa.Table = view.filter(col(sample).is_not_null()).select(timeline, keyframe).to_arrow_table()
-    times: ndarray = table[timeline].combine_chunks().to_numpy(zero_copy_only=False)
-    if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
-        raise ValueError(f"{segment} {entity}: expected frames with strictly increasing timestamps")
-    return times, catalog_keyframes(table[keyframe])
-
-
-def read_lens_window(dataset: DatasetEntry, segment: str, entity: str, timeline: str, times: ndarray) -> CatalogVideo:
-    """One lens's packets at ``times``, a run of its index read with one range query.
-
-    Raises:
-        ValueError: If the catalog returns other frames than ``times``.
-    """
-    view = dataset.filter_segments(segment).filter_contents([entity]).reader(index=timeline)
-    in_window = (col(timeline) >= lit(pa.scalar(times[0]))) & (col(timeline) <= lit(pa.scalar(times[-1])))
-    columns: list[str] = [f"{entity}:VideoStream:{component}" for component in ("sample", "is_keyframe", "codec")]
-    video: CatalogVideo = catalog_video_from_table(
-        view.filter(in_window).select(timeline, *columns).to_arrow_table(), entity, timeline, f"{segment} {entity}"
-    )
-    if not np.array_equal(video.times, times):
-        raise ValueError(f"{segment} {entity}: the catalog returned {len(video.times)} frames for {len(times)} indexed ones")
-    return video
-
-
 def read_level_rotations(
     dataset: DatasetEntry,
     segment: str,
@@ -212,19 +179,19 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     entities: list[str] = [f"{camera}/pinhole/video" for camera in config.cameras]
-    indexes: list[tuple[ndarray, list[bool]]] = [read_lens_index(dataset, segment_id, entity, config.timeline) for entity in entities]
-    times: list[ndarray] = [index[0] for index in indexes]
+    # Both lenses in one read (a 17.8 min clip: 12 s; the catalog sends whole chunks, so an index-only read costs as much).
+    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, entities, config.timeline)
+    times: list[ndarray] = [video.times for video in videos]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
     tracked: list[int] = list(range(config.start, end, config.stride))
     # Each decoder holds the packets from the keyframe at or before ``start`` to ``end``.
-    firsts: list[int] = [max(i for i in range(config.start + 1) if keyframes[i]) for _, keyframes in indexes]
+    firsts: list[int] = [max(i for i in range(config.start + 1) if video.keyframes[i]) for video in videos]
     decoders: list[VideoDecoder] = []
-    for entity, lens_times, first in zip(entities, times, firsts, strict=True):
-        window: CatalogVideo = read_lens_window(dataset, segment_id, entity, config.timeline, lens_times[first:end])
+    for video, first in zip(videos, firsts, strict=True):
         decoders.append(
             VideoDecoder(
-                wrap_mp4(window.samples, window.keyframes, config.fps, codec=window.codec),
+                wrap_mp4(video.samples[first:end], video.keyframes[first:end], config.fps, codec=video.codec),
                 device=str(device),
                 seek_mode="exact",
                 num_ffmpeg_threads=0,
