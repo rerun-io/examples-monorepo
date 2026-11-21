@@ -16,7 +16,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.stage_times import StageTimes
@@ -55,11 +55,16 @@ MAP_POINTS_ENTITY: str = f"{RUN_ENTITY}/map/points"
 MAP_KEYFRAMES_EVERY_NS: int = 1_000_000_000
 """Least video time between two draws of the map keyframes (at most ``map_max_keyframes`` points, ~24 kB a draw)."""
 MAP_POINTS_EVERY_NS: int = 5_000_000_000
-"""Least video time between two draws of the map points (tens of thousands of points, ~0.5 MB a draw on MIPB08).
-
-Each draw is the whole map, so drawing at every new keyframe would grow the recording with keyframes x map size;
-at a fixed video-time cadence it grows linearly with the clip. The final map is drawn once more after the flush.
-"""
+"""Least video time between two draws of the map points' changed blocks (:class:`MapPointBlocks`). The final map is
+drawn whole once more after the flush."""
+MAP_POINT_BLOCKS_ENTITY: str = f"{MAP_POINTS_ENTITY}/blocks"
+"""Parent of the map-point blocks the run draws while it goes on; cleared at the final draw, which puts the whole map
+on :data:`MAP_POINTS_ENTITY` itself (where a layout's overrides find it)."""
+KEYFRAMES_PER_BLOCK: int = 32
+"""Host keyframes per map-point block: one entity per block keeps the viewer's per-entity cost low (~47 entities on a
+24-minute walk) while a local BA or a loop closure redraws only the blocks it moved."""
+MAP_POINT_TOLERANCE_M: float = 0.001
+"""A block is drawn again when one of its points moved more than this since its last draw, or its point set changed."""
 VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
@@ -227,6 +232,58 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
 
 
 @dataclass(slots=True)
+class MapPointBlocks:
+    """Which map-point blocks to draw again: the map's points grouped by host keyframe, ``keyframes_per_block`` keyframes
+    a block in the order they joined the map, each block remembered as last drawn.
+
+    Drawing the whole map at every cadence grew the recording with clip length x map size (1.0 GB of map points on a
+    24-minute walk). A block is drawn again only when its point set changed (new, culled or re-hosted points) or one of
+    its points moved past ``tolerance_m``: the local BA touches the newest blocks, a loop closure the blocks it moved.
+    """
+
+    keyframes_per_block: int = KEYFRAMES_PER_BLOCK
+    """Host keyframes a block holds (:data:`KEYFRAMES_PER_BLOCK`)."""
+    tolerance_m: float = MAP_POINT_TOLERANCE_M
+    """Largest point move, metres, that does not redraw its block (:data:`MAP_POINT_TOLERANCE_M`)."""
+    block_of_host: dict[int, int] = field(default_factory=dict)
+    """Block of every host keyframe seen so far, by keyframe timestamp: a keyframe keeps its block for the whole run."""
+    drawn: dict[int, tuple[Int64[ndarray, " p"], Float32[ndarray, "p 3"]]] = field(default_factory=dict)
+    """Each block's point ids (ascending) and positions as last drawn."""
+
+    def changed(
+        self, point_ids: Int64[ndarray, " p"], point_hosts: Int64[ndarray, " p"], points_world: Float32[ndarray, "p 3"]
+    ) -> list[tuple[int, Int64[ndarray, " q"], Float32[ndarray, "q 3"]]]:
+        """The blocks to draw again, ascending, with their points (ids ascending); an emptied block comes back with no points.
+
+        Args:
+            point_ids: :attr:`slam_rs._core.MapSnapshot.point_ids`.
+            point_hosts: :attr:`slam_rs._core.MapSnapshot.point_hosts`, the host keyframe's timestamp of each point.
+            points_world: :attr:`slam_rs._core.MapSnapshot.points_world`.
+        """
+        hosts, host_index = np.unique(point_hosts, return_inverse=True)
+        for host in hosts.tolist():
+            if host not in self.block_of_host:
+                self.block_of_host[host] = len(self.block_of_host) // self.keyframes_per_block
+        blocks: Int64[ndarray, " p"] = np.asarray([self.block_of_host[host] for host in hosts.tolist()], dtype=np.int64)[host_index]
+        order: Int64[ndarray, " p"] = np.lexsort((point_ids, blocks))
+        blocks, ids, positions = blocks[order], point_ids[order], points_world[order]
+        starts: list[int] = np.flatnonzero(np.r_[True, blocks[1:] != blocks[:-1]]).tolist() if blocks.shape[0] else []
+        ends: list[int] = [*starts[1:], blocks.shape[0]] if starts else []
+        redraw: list[tuple[int, Int64[ndarray, " q"], Float32[ndarray, "q 3"]]] = []
+        for start, end in zip(starts, ends, strict=True):
+            block: int = int(blocks[start])
+            block_ids, block_positions = ids[start:end], positions[start:end]
+            last = self.drawn.get(block)
+            if last is None or not np.array_equal(last[0], block_ids) or float(np.abs(last[1] - block_positions).max()) > self.tolerance_m:
+                self.drawn[block] = (block_ids, block_positions)
+                redraw.append((block, block_ids, block_positions))
+        for block in sorted(set(self.drawn) - set(blocks.tolist())):
+            del self.drawn[block]
+            redraw.append((block, np.zeros(0, dtype=np.int64), np.zeros((0, 3), dtype=np.float32)))
+        return sorted(redraw, key=lambda item: item[0])
+
+
+@dataclass(slots=True)
 class VioLogger:
     """Logs one frameset's estimator output, and carries the paths between them.
 
@@ -299,6 +356,8 @@ class VioLogger:
     """Least video time between two map-points draws (:data:`MAP_POINTS_EVERY_NS`)."""
     landmark_colors: LandmarkColors = field(default_factory=LandmarkColors)
     """The image's colour under each landmark's keypoint where it was first tracked."""
+    map_point_blocks: MapPointBlocks = field(default_factory=MapPointBlocks)
+    """The map-point blocks as last drawn, so a draw logs only what changed."""
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
@@ -599,8 +658,19 @@ class VioLogger:
         rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(map_snapshot.keyframe_poses[:, 0:3], colors=colors, radii=0.012))
         log_loops(map_snapshot)
         self.map_keyframes_t_ns = t_ns
-        if final or self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
+        if final:
+            # The end of the run: one entity holds the whole map from here on, where a layout's overrides find it.
+            rr.log(MAP_POINT_BLOCKS_ENTITY, rr.Clear(recursive=True))
             rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004))
+            self.map_points_t_ns = t_ns
+        elif self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
+            # While the run goes on, only the blocks whose points changed; their size comes from the view (no radii logged).
+            for block, ids, positions in self.map_point_blocks.changed(map_snapshot.point_ids, map_snapshot.point_hosts, map_snapshot.points_world):
+                path: str = f"{MAP_POINT_BLOCKS_ENTITY}/{block:04d}"
+                if ids.shape[0]:
+                    rr.log(path, rr.Points3D(positions, colors=self.landmark_colors.lookup(ids, MAP_POINT_COLOR)))
+                else:
+                    rr.log(path, rr.Clear(recursive=False))
             self.map_points_t_ns = t_ns
 
     def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
@@ -964,6 +1034,8 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                     name="world",
                     contents=["/world/**"],
                     overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, VIO_RUN_ENTITY, GT_ENTITY)},
+                    # The map-point blocks log no radii, so each view (and a dataset's layout) sizes them.
+                    defaults=[rr.Points3D.from_fields(radii=0.004)],
                 ),
                 rrb.Vertical(*views),
                 column_shares=[2, 1],

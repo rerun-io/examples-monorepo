@@ -11,6 +11,8 @@ from numpy import ndarray
 
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
+    MAP_BLOCK_UI_FOLLOW,
+    MAP_BLOCK_UI_OVERVIEW,
     COLSFM_COLOR,
     FOLLOW_FLOOR_WINDOW_S,
     FOLLOW_PATH_WINDOW_S,
@@ -227,3 +229,15 @@ def test_the_run_sources_name_the_entities_their_producers_write() -> None:
     assert schema.floor_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/floor_grid"
     # colsfm.rerun_layer.write_run_layer (colsfm does not depend on dataforge).
     assert f"{COLSFM}/points_growing" == "/world/runs/colsfm/points_growing"
+
+
+def test_every_3d_view_sizes_the_slam_map_blocks_by_a_view_default() -> None:
+    """slam-rs draws its map in blocks under ``map/points/blocks`` while the run goes on (one entity per 32 keyframes, no
+    radii logged); overrides reach only an exact entity, so each world view sizes them by a Points3D default instead."""
+    for name, views in tabs(segment_layout(panorama=False)).items():
+        if name not in ("SLAM", "colsfm", "Comparison"):
+            continue
+        for view, size in zip(views[:2], (MAP_BLOCK_UI_OVERVIEW, MAP_BLOCK_UI_FOLLOW), strict=True):
+            points: list[rr.Points3D] = [item for item in view.defaults if isinstance(item, rr.Points3D)]
+            assert len(points) == 1 and points[0].radii is not None, (name, view.name)
+            assert points[0].radii.as_arrow_array().to_pylist() == [-size], (name, view.name)

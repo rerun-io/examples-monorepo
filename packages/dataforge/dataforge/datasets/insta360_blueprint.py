@@ -178,6 +178,12 @@ def shade(color: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
     return (round(color[0] * factor), round(color[1] * factor), round(color[2] * factor))
 
 
+MAP_BLOCK_UI_OVERVIEW: float = 2.0
+"""Size, ui points, of the clouds an overview draws without an override of their own: slam-rs's map blocks."""
+MAP_BLOCK_UI_FOLLOW: float = 1.5
+"""The same in a follow view."""
+
+
 def cloud(radius_ui: float, color: tuple[int, int, int] | None = None) -> rr.Points3D:
     """A cloud's display size in ui points and, with ``color``, one tint in place of its own colours."""
     return rr.Points3D.from_fields(radii=rr.Radius.ui_points(radius_ui), colors=color)
@@ -306,6 +312,9 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
             schema.floor_path(source): [floor_window(None), rr.LineStrips3D.from_fields(colors=OVERVIEW_FLOOR_COLOR)],
             **overrides,
         },
+        # slam-rs draws its map in blocks under ``map/points/blocks`` while the run goes on (no radii logged); an override
+        # reaches only one exact entity, so the view sizes them. The final map on ``map/points`` keeps its override.
+        defaults=[rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_BLOCK_UI_OVERVIEW))],
         eye_controls=eye,
         line_grid=False,
     )
@@ -318,6 +327,7 @@ def follow(name: str, contents: list[str], overrides: Overrides, source: str) ->
         origin=schema.follow_path(source),
         contents=contents,
         overrides={schema.floor_path(source): floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
+        defaults=[rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_BLOCK_UI_FOLLOW))],
         eye_controls=FOLLOW_EYE,
         line_grid=False,
     )
