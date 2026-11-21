@@ -24,7 +24,8 @@ from einops import rearrange
 from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
-from simplecv.nvdec_444 import Nvdec444Decoder
+from simplecv.nvdec_444 import Nvdec444Decoder, converts_color_space
+from simplecv.ops.gpu_image import area_downscale_uint8
 
 T = TypeVar("T")
 
@@ -96,24 +97,6 @@ def open_decoder(video: Path, device: torch.device | str) -> VideoDecoder:
     if decoder.cpu_fallback:
         logger.warning("NVDEC cannot decode %s, the CPU decodes it (slower): %s", video, decoder.cpu_fallback)
     return decoder
-
-
-def area_downscale_uint8(frames: UInt8[torch.Tensor, "b 3 h w"], size_hw: tuple[int, int]) -> UInt8[torch.Tensor, "b 3 hh ww"]:
-    """Area (box-filter) resize of uint8 frames, as ``interpolate(mode="area")``, rounded back to uint8.
-
-    For an integer factor (3840x2160 -> 1280x720 is exactly 3x) area interpolation is the mean of each
-    factor x factor block, i.e. ``avg_pool2d`` with that kernel and stride; torch runs ``mode="area"`` as
-    ``adaptive_avg_pool2d``, whose kernel fills a few percent of an RTX 5090 at 4K (1.2 ms for 4 frames).
-    Other sizes keep ``interpolate(mode="area")``. (Not cv2's INTER_AREA, which rounds half up on integer
-    ratios; see ``monopriors``' ``gpu_image.area_resize``.)
-    """
-    h, w = int(frames.shape[2]), int(frames.shape[3])
-    factor_h, factor_w = h // size_hw[0], w // size_hw[1]
-    if factor_h >= 1 and factor_h == factor_w and h == size_hw[0] * factor_h and w == size_hw[1] * factor_w:
-        pooled: torch.Tensor = torch.nn.functional.avg_pool2d(frames.float(), kernel_size=factor_h, stride=factor_h)
-    else:
-        pooled = torch.nn.functional.interpolate(frames.float(), size=size_hw, mode="area")
-    return pooled.round_().clamp_(0, 255).to(torch.uint8)
 
 
 def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR:
@@ -545,10 +528,16 @@ class TorchCodecVideoReader:
     def _open_nvdec_444(self, source: Path | bytes, pixel_format: str | None, color_space: str | None) -> Nvdec444Decoder | None:
         """A PyNvVideoCodec NVDEC decoder for an 8-bit 4:4:4 file torchcodec's NVDEC rejected, or ``None``.
 
-        ``None`` when the stream is not ``yuv444p``, the source is bytes, PyNvVideoCodec is not installed, or
-        NVDEC refuses the stream; the CPU fallback then stays. Frames match the CPU decode within 1 LSB.
+        ``None`` when the stream is not ``yuv444p``, signals a colour matrix the conversion does not reproduce
+        (torchcodec's CPU decode does), the source is bytes, PyNvVideoCodec is not installed, or NVDEC refuses the
+        stream; the CPU fallback then stays. Frames match the CPU decode within 1 LSB.
         """
-        if pixel_format != "yuv444p" or not isinstance(source, Path) or importlib.util.find_spec("PyNvVideoCodec") is None:
+        if (
+            pixel_format != "yuv444p"
+            or not converts_color_space(color_space)
+            or not isinstance(source, Path)
+            or importlib.util.find_spec("PyNvVideoCodec") is None
+        ):
             return None
         try:
             return self._decode(lambda: Nvdec444Decoder(source, self.device, color_space))
@@ -568,7 +557,9 @@ class TorchCodecVideoReader:
         return self._decode_thread.submit(bound).result()
 
     def close(self) -> None:
-        """Stop the owned decoder thread. Safe to call more than once."""
+        """Stop the owned decoder thread (and a 4:4:4 decoder's own thread). Safe to call more than once."""
+        if isinstance(self._decoder, Nvdec444Decoder):
+            self._decoder.close()
         if self._decode_thread is not None:
             self._decode_thread.shutdown(wait=True, cancel_futures=True)
             self._decode_thread = None

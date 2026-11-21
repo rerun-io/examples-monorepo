@@ -13,7 +13,8 @@ from pathlib import Path
 
 import torch
 from jaxtyping import UInt8
-from simplecv.video_io import TorchCodecMultiVideoReader, area_downscale_uint8
+from simplecv.ops.gpu_image import area_downscale_uint8
+from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.capture_lock import GRAPH_CAPTURE_LOCK
@@ -102,7 +103,12 @@ def ramped_chunk_ranges(start: int, stop: int, chunk_size: int, first: int = 4) 
     The first tick waits for the whole first chunk (32 native-4K frames x 4 cameras take ~0.2 s on
     NVDEC); a short first chunk starts the loop sooner. Each doubled chunk decodes while the previous
     one is consumed, because decode runs several times faster than the loop.
+
+    Raises:
+        ValueError: ``chunk_size`` or ``first`` is not positive (the ranges would never reach ``stop``).
     """
+    if chunk_size < 1 or first < 1:
+        raise ValueError(f"chunk_size and first must be positive, got {chunk_size} and {first}")
     ranges: list[tuple[int, int]] = []
     size: int = min(first, chunk_size)
     while start < stop:
@@ -198,6 +204,8 @@ class StreamingPipeline:
         """
         import time
 
+        if chunk_size < 1:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
         profiler: StageProfiler = StageProfiler()
         self.logger.setup(timing_doc=timing_doc)
 

@@ -7,33 +7,56 @@ surface on the GPU, and the conversion to RGB happens here in one pass, with the
 
 :class:`Nvdec444Decoder` offers the part of torchcodec's ``VideoDecoder`` surface that
 :class:`simplecv.video_io.TorchCodecVideoReader` uses, so the reader swaps it in when torchcodec falls back.
-Like every NVDEC decoder it must be created and used on one thread.
+NVDEC is thread-affine, so the decoder owns one thread and runs every native call (open, advance, re-open) there,
+whichever thread asks for frames.
 """
 
 import importlib
+import threading
 from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 from jaxtyping import Float32, UInt8
 from torch import Tensor
 
-# (Kr, Kb) luma coefficients per FFmpeg color_space name; unknown or unset streams read as BT.601,
-# FFmpeg's default for YUV->RGB.
-_LUMA_COEFFICIENTS: dict[str, tuple[float, float]] = {
-    "bt470bg": (0.299, 0.114),
-    "smpte170m": (0.299, 0.114),
+T = TypeVar("T")
+
+_BT601: tuple[float, float] = (0.299, 0.114)
+# (Kr, Kb) luma coefficients per FFmpeg color_space name the conversion handles. Unset or unknown metadata reads as
+# BT.601, FFmpeg's default for YUV->RGB; any other signalled matrix (smpte240m, ycgco, bt2020c, ...) is not converted
+# here, so the reader leaves such streams to torchcodec's CPU decode.
+_LUMA_COEFFICIENTS: dict[str | None, tuple[float, float]] = {
+    None: _BT601,
+    "": _BT601,
+    "unknown": _BT601,
+    "unspecified": _BT601,
+    "bt470bg": _BT601,
+    "smpte170m": _BT601,
     "bt709": (0.2126, 0.0722),
     "bt2020nc": (0.2627, 0.0593),
     "bt2020_ncl": (0.2627, 0.0593),
 }
 
 
+def converts_color_space(color_space: str | None) -> bool:
+    """Whether :func:`limited_range_yuv_to_rgb_matrix` reproduces FFmpeg's conversion for this ``color_space``."""
+    return color_space in _LUMA_COEFFICIENTS
+
+
 def limited_range_yuv_to_rgb_matrix(color_space: str | None) -> Float32[Tensor, "3 3"]:
-    """Matrix taking limited-range ``[Y-16, U-128, V-128]`` to full-range RGB, for an FFmpeg ``color_space`` name."""
-    kr, kb = _LUMA_COEFFICIENTS.get(color_space or "", (0.299, 0.114))
+    """Matrix taking limited-range ``[Y-16, U-128, V-128]`` to full-range RGB, for an FFmpeg ``color_space`` name.
+
+    Raises:
+        ValueError: ``color_space`` is a signalled matrix this conversion does not handle (see :func:`converts_color_space`).
+    """
+    if not converts_color_space(color_space):
+        raise ValueError(f"no YUV->RGB matrix for color_space {color_space!r}")
+    kr, kb = _LUMA_COEFFICIENTS[color_space]
     kg: float = 1.0 - kr - kb
     y_scale: float = 255.0 / 219.0
     c_scale: float = 255.0 / 224.0
@@ -75,29 +98,61 @@ class Nvdec444Decoder:
     """
 
     def __init__(self, source: Path, device: str, color_space: str | None) -> None:
-        """Open ``source`` on the GPU of ``device`` (``cuda`` or ``cuda:N``); call on the decode thread.
+        """Open ``source`` on the GPU of ``device`` (``cuda`` or ``cuda:N``), on the decoder's own thread.
 
         Raises:
-            ValueError: The stream does not decode to 8-bit planar 4:4:4.
+            ValueError: The stream does not decode to 8-bit planar 4:4:4, or ``color_space`` is not converted here.
         """
+        self.device: torch.device = torch.device(device)
+        self._matrix: Float32[Tensor, "3 3"] = limited_range_yuv_to_rgb_matrix(color_space).to(self.device)
+        self._source: Path = source
+        self._thread: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nvdec-444")
+        self._thread_ident: int = self._thread.submit(threading.get_ident).result()
+        try:
+            self._run(self._start)
+        except BaseException:
+            self.close()
+            raise
+
+    def _run(self, fn: Callable[[], T]) -> T:
+        """Run ``fn`` on the decoder's thread (directly when already there)."""
+        if threading.get_ident() == self._thread_ident:
+            return fn()
+        assert self._thread is not None, "decoder is closed"
+        return self._thread.submit(fn).result()
+
+    def _start(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.set_device(self.device)  # NVDEC needs the CUDA context current on the decode thread
         # PyNvVideoCodec binds its API from a compiled module at import time; type checkers see none of it.
         self._nvc: Any = importlib.import_module("PyNvVideoCodec")
-        self._source: Path = source
-        self.device: torch.device = torch.device(device)
         self._gpu_id: int = self.device.index if self.device.index is not None else torch.cuda.current_device()
-        self._matrix: Float32[Tensor, "3 3"] = limited_range_yuv_to_rgb_matrix(color_space).to(self.device)
         self._open()
         self.width: int = int(self._demuxer.Width())
         self.height: int = int(self._demuxer.Height())
         # The demuxer's ChromaFormat() reads 4:2:0 on 4:4:4 files; the first surface's shape is the check.
         # Frame 0 stays queued for the first read.
         if not self._fill(0):
-            raise ValueError(f"{source}: no frames")
+            raise ValueError(f"{self._source}: no frames")
+
+    def close(self) -> None:
+        """Release the native decoder on its thread and stop the thread. Safe to call more than once."""
+        if self._thread is None:
+            return
+        self._thread.submit(self._release).result()
+        self._thread.shutdown(wait=True)
+        self._thread = None
+
+    def _release(self) -> None:
+        # Drop the native decoder and demuxer here, on their thread.
+        self._packets = iter(())
+        self.__dict__.pop("_decoder", None)
+        self.__dict__.pop("_demuxer", None)
 
     def _open(self) -> None:
         nvc = self._nvc
-        self._demuxer = nvc.CreateDemuxer(str(self._source))
-        self._decoder = nvc.CreateDecoder(
+        self._demuxer: Any = nvc.CreateDemuxer(str(self._source))
+        self._decoder: Any = nvc.CreateDecoder(
             gpuid=self._gpu_id,
             codec=self._demuxer.GetNvCodecId(),
             # Decode on the thread's current torch stream, so the surfaces are ordered before the conversion.
@@ -144,11 +199,17 @@ class Nvdec444Decoder:
                 return frame
 
     def get_frames_at(self, indices: list[int]) -> DecodedFrames:
-        """RGB frames at ``indices`` as ``n 3 h w`` (ascending indices decode in one pass)."""
-        frames: UInt8[Tensor, "n 3 h w"] = torch.empty((len(indices), 3, self.height, self.width), dtype=torch.uint8, device=self.device)
-        for slot, index in enumerate(indices):
-            frames[slot] = self._frame(index)
-        return DecodedFrames(frames)
+        """RGB frames at ``indices`` as ``n 3 h w`` (ascending indices decode in one pass); any calling thread."""
+
+        def decode() -> UInt8[Tensor, "n 3 h w"]:
+            frames: UInt8[Tensor, "n 3 h w"] = torch.empty((len(indices), 3, self.height, self.width), dtype=torch.uint8, device=self.device)
+            for slot, index in enumerate(indices):
+                frames[slot] = self._frame(index)
+            # The caller's stream may differ from this thread's: settle the frames before handing them over.
+            torch.cuda.current_stream(self.device).synchronize()
+            return frames
+
+        return DecodedFrames(self._run(decode))
 
     def get_frames_in_range(self, start: int, stop: int) -> DecodedFrames:
         """RGB frames ``[start, stop)`` as ``n 3 h w``."""
@@ -159,4 +220,4 @@ class Nvdec444Decoder:
         return DecodedFrames(self.get_frames_at([index]).data[0])
 
 
-__all__ = ("DecodedFrames", "Nvdec444Decoder", "limited_range_yuv_to_rgb_matrix", "yuv444_planes_to_rgb")
+__all__ = ("DecodedFrames", "Nvdec444Decoder", "converts_color_space", "limited_range_yuv_to_rgb_matrix", "yuv444_planes_to_rgb")

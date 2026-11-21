@@ -2,7 +2,7 @@
 
 import torch
 
-from simplecv.video_io import area_downscale_uint8
+from simplecv.ops.gpu_image import area_downscale_uint8
 
 
 def test_area_downscale_matches_area_interpolation() -> None:

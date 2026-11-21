@@ -120,12 +120,13 @@ def gpu_crop_batch(
 
 
 def gpu_crop_frame(
-    frame: UInt8[torch.Tensor, "3 h w"],
+    frame: UInt8[torch.Tensor, "3 h w"] | Float32[torch.Tensor, "3 h w"],
     centers: Float64[ndarray, "k 2"],
     bbox_sizes: Float64[ndarray, "k 2"],
     config: MammaNetConfig,
 ) -> Float32[torch.Tensor, "k 3 ch cw"]:
-    """:func:`gpu_crop_batch` of ``k`` boxes in one uint8 frame, converting only the pixels the crops read.
+    """:func:`gpu_crop_batch` of ``k`` boxes in one RGB frame (uint8 or float 0..255), converting only the pixels the
+    crops read.
 
     A native-4K frame in float32 is ~100 MB; a person's crop window is a few percent of it. The window
     is the union of the crop rectangles (``center +- size/2``) plus the two pixels bilinear reads on each
