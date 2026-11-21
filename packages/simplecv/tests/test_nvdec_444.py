@@ -1,8 +1,9 @@
 """The YUV444 -> RGB conversion behind simplecv.nvdec_444 (CPU; the NVDEC path is tested in mamma's integration lane)."""
 
+import pytest
 import torch
 
-from simplecv.nvdec_444 import limited_range_yuv_to_rgb_matrix, yuv444_planes_to_rgb
+from simplecv.nvdec_444 import converts_color_space, limited_range_yuv_to_rgb_matrix, yuv444_planes_to_rgb
 
 
 def _convert(y: int, u: int, v: int, color_space: str | None) -> list[int]:
@@ -24,3 +25,15 @@ def test_bt601_and_bt709_primaries() -> None:
 
 def test_unknown_color_space_reads_as_bt601() -> None:
     assert _convert(81, 90, 240, None) == _convert(81, 90, 240, "smpte170m")
+
+
+def test_only_matrices_the_conversion_reproduces_are_eligible() -> None:
+    """A signalled SMPTE 240M stream must not be converted as BT.601 (14 levels off): it is not eligible, so the
+    reader leaves it to torchcodec's CPU decode. Unset or unknown metadata keeps FFmpeg's BT.601 default."""
+    for color_space in (None, "unknown", "bt470bg", "smpte170m", "bt709", "bt2020nc"):
+        assert converts_color_space(color_space), color_space
+    for color_space in ("smpte240m", "ycgco", "bt2020c", "fcc"):
+        assert not converts_color_space(color_space), color_space
+        with pytest.raises(ValueError):
+            limited_range_yuv_to_rgb_matrix(color_space)
+    assert _convert(128, 90, 200, None) == _convert(128, 90, 200, "bt470bg")
