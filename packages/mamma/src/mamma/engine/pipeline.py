@@ -96,6 +96,22 @@ def decode_backend(reader: TorchCodecMultiVideoReader) -> str:
     return "NVDEC" if reader.device.startswith("cuda") else "torchcodec CPU"
 
 
+def ramped_chunk_ranges(start: int, stop: int, chunk_size: int, first: int = 4) -> list[tuple[int, int]]:
+    """``[start, stop)`` split into decode chunks of ``first``, 2x, 4x, ... frames, then ``chunk_size``.
+
+    The first tick waits for the whole first chunk (32 native-4K frames x 4 cameras take ~0.2 s on
+    NVDEC); a short first chunk starts the loop sooner. Each doubled chunk decodes while the previous
+    one is consumed, because decode runs several times faster than the loop.
+    """
+    ranges: list[tuple[int, int]] = []
+    size: int = min(first, chunk_size)
+    while start < stop:
+        ranges.append((start, min(start + size, stop)))
+        start += size
+        size = min(size * 2, chunk_size)
+    return ranges
+
+
 def iter_decoded_chunks(
     reader: TorchCodecMultiVideoReader,
     chunk_ranges: list[tuple[int, int]],
@@ -196,9 +212,7 @@ class StreamingPipeline:
             frame_count: int = min(window_end, self.reader.frame_cnt)
         else:
             frame_count = min(start_frame + max_frames, self.reader.frame_cnt)
-        chunk_ranges: list[tuple[int, int]] = [
-            (s, min(s + chunk_size, frame_count)) for s in range(start_frame, frame_count, chunk_size)
-        ]
+        chunk_ranges: list[tuple[int, int]] = ramped_chunk_ranges(start_frame, frame_count, chunk_size)
 
         # Fit + its logging run one tick deep on a worker: fit(t) overlaps
         # track/landmarks(t+1) — fit feeds nothing upstream. With a collector

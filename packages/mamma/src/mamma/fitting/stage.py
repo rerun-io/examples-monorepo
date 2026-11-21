@@ -45,6 +45,9 @@ class FittingStage:
         )
         if config.compile_iter and config.use_cuda_graph and torch.device(config.device).type == "cuda" and os.environ.get("PIXI_DEV_MODE") != "1":
             self._prewarm_compile()
+        # The first person's fitter, built now: SlidingWindowFitter construction (smplx.create, ~0.6 s)
+        # would otherwise stall the first fit inside the streaming loop.
+        self._spare_fitter: SlidingWindowFitter | None = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
 
     def _prewarm_compile(self) -> None:
         """Compile the fitter's graphed iterations now, before streaming starts.
@@ -144,7 +147,8 @@ class FittingStage:
 
             fitter: SlidingWindowFitter | None = self._fitters.get(obj_id)
             if fitter is None:
-                fitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
+                fitter = self._spare_fitter or SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
+                self._spare_fitter = None
                 self._fitters[obj_id] = fitter
                 if self.faces is None:
                     self.faces = fitter.model.faces
