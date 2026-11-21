@@ -407,6 +407,10 @@ def run_loop_closure_stage(
     if not descriptors:
         print("[colsfm] loop closure: the database holds no descriptors; no loop edges")
         return LoopClosureStageResult(edges=[], num_pairs_matched=0)
+    empty: list[int] = [image_id for image_id, d in descriptors.items() if d.shape[0] == 0]
+    if empty:  # an image with no keypoints (fully masked or black face) cannot close a loop
+        print(f"[colsfm] loop closure: {len(empty)} images without descriptors left out of retrieval: {empty[:10]}")
+        descriptors = {image_id: d for image_id, d in descriptors.items() if d.shape[0] > 0}
     index: RetrievalIndex = build_retrieval_index(descriptors)
     # The index is built; the raw descriptors are not read again. On RoboCap they are
     # 4.7 GB, which would otherwise stay resident for the whole stage -- through the
