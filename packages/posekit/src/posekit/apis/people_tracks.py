@@ -54,7 +54,9 @@ from posekit.predictions import BoxDetections
 class TrackOptions:
     """How SAM 3 detections are propagated by the video tracker."""
 
-    tracker: Sam2VideoSegmenterConfig = field(default_factory=lambda: Sam2VideoSegmenterConfig(memory_on_device=True, bf16=True))
+    tracker: Sam2VideoSegmenterConfig = field(
+        default_factory=lambda: Sam2VideoSegmenterConfig(memory_on_device=True, bf16=True, max_conditional_memories=4)
+    )
     """EfficientTAM variant and memory options."""
     stride: int = 10
     """Frames between two tracker steps; must divide ``output_every``."""

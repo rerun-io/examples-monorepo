@@ -94,8 +94,16 @@
 - `index_tensor` is public (posekit's `Sam2VideoSegmenter` uses it), and `forward_batched` refuses
   `non_overlap_masks` as well as `non_overlap_masks_for_mem_enc`: its batch rows belong to different
   videos, so a non-overlap constraint across rows would let one video's object suppress another's.
-- Open (mask-speed thermo reviews, 2026-11-21): mamma keeps its own `batched_forward.py` and
-  `steady_graph.py` for this predictor (one object per camera, no prompts); moving mamma onto
-  `forward_batched` + `GraphCache` and deleting those 512 lines is a follow-up with the mamma gate and a
-  timing run. Also open: `fused_rope` enabled once at set-up per predictor
+- `forward_batched(best_only=False)` returns every hypothesis of the mask decoder (memories still encode
+  the best); `GraphCache.capture=False` replays what is captured and runs other signatures eagerly. mamma's
+  steady tick uses both: it captures on a synthetic stream before its worker threads start, then turns
+  capture off (its own `batched_forward.py` and `steady_graph.py` are gone). `forward_batched(one_graph=True)`
+  (with `graphs`) makes a step without prompts one graph per signature: image encoder, every memory-layout
+  group, memory encoder and the batching between them; the memories enter stacked (one tensor per kind and
+  group) and the index tensors are cached on the device, so a steady step is a few cats and one replay, as
+  mamma's old whole-tick graph was.
+- `sam2/modeling/sam2_memory.py` `try_add_memories` copies row i as `memory_embeddings[i : i + 1].clone()`
+  instead of `[[i]]`: the same values, without the pageable host-to-device index copy that waited for all
+  queued GPU work once per object.
+- Open (mask-speed thermo reviews, 2026-11-21): `fused_rope` enabled once at set-up per predictor
   instead of the process-wide switch and the first-call fallback.
