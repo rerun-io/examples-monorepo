@@ -30,6 +30,8 @@ from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
 from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
 from mamma.tracking.identity import (
+    CLIP_WEIGHT,
+    EPIPOLAR_WEIGHT,
     ClipEncoder,
     FeatureBank,
     assign_hungarian,
@@ -321,7 +323,7 @@ class MultiViewTracker:
                         s_epi[row, col] = epipolar_score(
                             f_matrix, ref_centers[row], center, self._sigma_px, self._max_dist_px
                         )
-                combined = (0.35 * s_clip + 0.65 * s_epi).astype(np.float32)
+                combined = (CLIP_WEIGHT * s_clip + EPIPOLAR_WEIGHT * s_epi).astype(np.float32)
             matches: dict[int, int] = assign_hungarian(combined, min_score=BOOTSTRAP_MIN_SCORE)
             for row, col in matches.items():
                 obj_id = obj_ids[row]
@@ -427,7 +429,7 @@ class MultiViewTracker:
                         continue
                     for col, center in enumerate(dets.centers_xy1):
                         s_epi[row, col] = epipolar_score(f_matrix, ref_pt, center, self._sigma_px, self._max_dist_px)
-                combined = (0.35 * s_clip + 0.65 * s_epi).astype(np.float32)
+                combined = (CLIP_WEIGHT * s_clip + EPIPOLAR_WEIGHT * s_epi).astype(np.float32)
             matches: dict[int, int] = assign_hungarian(combined, min_score=BOOTSTRAP_MIN_SCORE)
             # Conflict-IoU guard: never prompt two subjects onto overlapping boxes
             # (drop the lower combined-score one; it coasts on prior SAM2 memory).

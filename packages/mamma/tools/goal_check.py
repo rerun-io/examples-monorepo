@@ -45,8 +45,8 @@ def main() -> int:
     results["golden"] = ok
 
     print("=" * 70)
-    print("[2/6] dynamic golden gate (validate_dynamic, running_jumping vs the original DAG, or the dataset prediction when that file is absent)")
-    ok, out = run([py, "tools/validate_dynamic.py", "--rr-config.headless", *engine_args], PKG)
+    print("[2/6] dynamic golden gate (validate_dynamic, running_jumping vs the dataset MAMMA prediction: --reference pred)")
+    ok, out = run([py, "tools/validate_dynamic.py", "--rr-config.headless", "--reference", "pred", *engine_args], PKG)
     print(out)
     results["dynamic"] = ok
 
