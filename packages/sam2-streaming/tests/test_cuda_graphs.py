@@ -92,10 +92,8 @@ def test_re_prompts_past_the_bound_keep_steady_steps_on_graphs(efficienttam_ti, 
     saved: int = predictor.max_cond_frames_in_attn
     predictor.max_cond_frames_in_attn = bound
     try:
-        states = [
-            SAM2GenericVideoPredictorState.create((256, 256), SAM2ForgetfulObjectMemoryBank(storage_device=device, max_conditional_memories=bound))
-            for _ in range(2)
-        ]
+        banks = [SAM2ForgetfulObjectMemoryBank(storage_device=device, max_conditional_memories=bound) for _ in range(2)]
+        states = [SAM2GenericVideoPredictorState.create((256, 256), bank) for bank in banks]
         cache = GraphCache()
         eager_on_late_steady_steps: list[int] = []
         for step in range(60):
@@ -107,6 +105,6 @@ def test_re_prompts_past_the_bound_keep_steady_steps_on_graphs(efficienttam_ti, 
             if not prompted and step >= 30:
                 eager_on_late_steady_steps.append(cache.eager - eager_before)
         assert sum(eager_on_late_steady_steps) == 0, eager_on_late_steady_steps
-        assert all(len(state.memory_bank.conditional_memories[0]) <= bound + 2 for state in states)
+        assert all(len(bank.conditional_memories[0]) <= bound + 2 for bank in banks)
     finally:
         predictor.max_cond_frames_in_attn = saved
