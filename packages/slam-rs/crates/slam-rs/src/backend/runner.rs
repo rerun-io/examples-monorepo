@@ -22,8 +22,9 @@
 //! once a reader has asked for one, each time it has stepped every stamp
 //! waiting and after a query that changed the work; it posts it on a board
 //! whose lock only guards an `Arc` swap. The work's own lock stays the thread's
-//! for a whole step or query (in b2 a loop query and PGO), and only
-//! [`BackendRunner::read`] (tests, diagnostics) takes it from outside. Offline
+//! for a whole step or query (in b2 a loop query and PGO). From outside,
+//! [`BackendRunner::read`] (tests, diagnostics) waits for it and
+//! [`BackendRunner::try_read`] (the map delta) gives up when it is held. Offline
 //! steps inside `submit`, so a view taken from the work there never waits.
 
 use std::collections::VecDeque;

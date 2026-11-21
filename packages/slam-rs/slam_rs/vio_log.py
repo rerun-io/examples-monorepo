@@ -10,7 +10,7 @@ sits on the raw run while the replay plays.
 import itertools
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Literal, TypeAlias
 
 import numpy as np
@@ -240,7 +240,7 @@ class PoseLog:
     write past it, so an estimate taken earlier stays as it was.
     """
 
-    capacity: int = 1024
+    capacity: InitVar[int] = 1024
     """Rows the arrays start with."""
     count: int = 0
     """Poses appended."""
@@ -251,10 +251,10 @@ class PoseLog:
     quaternion_wxyz: Float64[ndarray, "c 4"] = field(init=False)
     """Orientations, scalar first."""
 
-    def __post_init__(self) -> None:
-        self.t_ns = np.zeros(self.capacity, dtype=np.int64)
-        self.position_m = np.zeros((self.capacity, 3), dtype=np.float64)
-        self.quaternion_wxyz = np.zeros((self.capacity, 4), dtype=np.float64)
+    def __post_init__(self, capacity: int) -> None:
+        self.t_ns = np.zeros(capacity, dtype=np.int64)
+        self.position_m = np.zeros((capacity, 3), dtype=np.float64)
+        self.quaternion_wxyz = np.zeros((capacity, 4), dtype=np.float64)
 
     def __len__(self) -> int:
         return self.count
@@ -279,10 +279,6 @@ class PoseLog:
         """The newest pose's timestamp; None before the first."""
         return int(self.t_ns[self.count - 1]) if self.count else None
 
-    def last_positions(self, n: int) -> Float64[ndarray, "m 3"]:
-        """The newest ``n`` positions (fewer at the start of a run)."""
-        return self.position_m[max(0, self.count - n) : self.count]
-
 
 @dataclass(slots=True)
 class MapPointBlocks:
@@ -301,6 +297,8 @@ class MapPointBlocks:
     """Largest point move, metres, that does not redraw its block (:data:`MAP_POINT_TOLERANCE_M`)."""
     block_of_host: dict[int, int] = field(default_factory=dict)
     """Block of every host keyframe seen so far, by keyframe timestamp: a keyframe keeps its block for the whole run."""
+    hosts_of_block: dict[int, list[int]] = field(default_factory=dict)
+    """The host keyframes of each block, in the order they joined it."""
     host_points: dict[int, tuple[Int64[ndarray, " p"], Float32[ndarray, "p 3"]]] = field(default_factory=dict)
     """Each host's point ids (ascending) and world positions as the last delta that touched it gave them."""
     marked: set[int] = field(default_factory=set)
@@ -329,29 +327,35 @@ class MapPointBlocks:
         order: Int64[ndarray, " p"] = np.lexsort((point_ids, point_hosts))
         point_ids, point_hosts, points_world = point_ids[order], point_hosts[order], points_world[order]
         hosts, starts = np.unique(point_hosts, return_index=True)
-        ends: list[int] = [*starts[1:].tolist(), point_hosts.shape[0]] if starts.shape[0] else []
-        delivered: dict[int, tuple[int, int]] = dict(zip(hosts.tolist(), zip(starts.tolist(), ends, strict=True), strict=True))
+        # Copies, not views: a view would keep this whole delta alive for as long as one of its hosts stays untouched.
+        delivered: dict[int, tuple[Int64[ndarray, " q"], Float32[ndarray, "q 3"]]] = (
+            {
+                host: (ids.copy(), positions.copy())
+                for host, ids, positions in zip(hosts.tolist(), np.split(point_ids, starts[1:]), np.split(points_world, starts[1:]), strict=True)
+            }
+            if len(hosts)
+            else {}
+        )
         present: set[int] = set(keyframe_t_ns.tolist())
         for host in changed_hosts.tolist():
-            span = delivered.get(host)
-            if host in present and span is not None:
+            if host in present and host in delivered:
                 if host not in self.block_of_host:
-                    self.block_of_host[host] = len(self.block_of_host) // self.keyframes_per_block
-                self.host_points[host] = (point_ids[span[0] : span[1]], points_world[span[0] : span[1]])
-            elif self.host_points.pop(host, None) is None:
+                    block: int = len(self.block_of_host) // self.keyframes_per_block
+                    self.block_of_host[host] = block
+                    self.hosts_of_block.setdefault(block, []).append(host)
+                self.host_points[host] = delivered[host]
+            elif host in self.host_points:
+                del self.host_points[host]
+            else:
                 continue
             self.marked.add(self.block_of_host[host])
 
     def redraw(self) -> list[tuple[int, Int64[ndarray, " q"], Float32[ndarray, "q 3"]]]:
         """The marked blocks to draw again, ascending, with their points (ids ascending); a block left with no points
         comes back empty. Clears the marks."""
-        hosts_of: dict[int, list[int]] = {}
-        for host, block in self.block_of_host.items():
-            if block in self.marked and host in self.host_points:
-                hosts_of.setdefault(block, []).append(host)
         redraw: list[tuple[int, Int64[ndarray, " q"], Float32[ndarray, "q 3"]]] = []
         for block in sorted(self.marked):
-            parts = [self.host_points[host] for host in hosts_of.get(block, [])]
+            parts = [self.host_points[host] for host in self.hosts_of_block[block] if host in self.host_points]
             if not parts:
                 if self.drawn.pop(block, None) is not None:
                     redraw.append((block, np.zeros(0, dtype=np.int64), np.zeros((0, 3), dtype=np.float32)))
@@ -585,9 +589,10 @@ class VioLogger:
         appended, not from :meth:`estimated`: a segment needs two poses, not the
         whole trajectory rebuilt behind them.
         """
-        t_ns: int = self.poses.last_t_ns() or 0
-        if len(self.poses) >= 2:
-            segment: Float64[ndarray, "2 3"] = self.poses.last_positions(2).copy()
+        last: int = len(self.poses) - 1
+        t_ns: int = int(self.poses.t_ns[last])
+        if last >= 1:
+            segment: Float64[ndarray, "2 3"] = self.poses.position_m[last - 1 : last + 1].copy()
             rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 2:
@@ -681,8 +686,8 @@ class VioLogger:
     def map_is_due(self, snapshot: _core.VioSnapshot) -> bool:
         """Whether to read the map now: a keyframe joined the window since the last read, and the keyframes are due.
 
-        The map changes only when a keyframe's stamp reaches the back end, and a long run's map holds tens of
-        thousands of points, so it is read (and drawn) at most every :attr:`map_keyframes_every_ns` of video time.
+        The map changes only when a keyframe's stamp reaches the back end, so it is read at most every
+        :attr:`map_keyframes_every_ns` of video time. A read carries only the hosts changed since :attr:`map_revision`.
         """
         if len(snapshot.kf_ids) == 0 or int(snapshot.kf_ids[-1]) == self.map_keyframe:
             return False
@@ -698,7 +703,10 @@ class VioLogger:
         self._log_map_keyframes(map_snapshot, t_ns)
         # The end of the run: one entity holds the whole map from here on, where a layout's overrides find it.
         rr.log(MAP_POINT_BLOCKS_ENTITY, rr.Clear(recursive=True))
-        rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004))
+        rr.log(
+            MAP_POINTS_ENTITY,
+            rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004),
+        )
         self.map_points_t_ns = t_ns
         log_pose_graph(map_snapshot)
 
@@ -744,7 +752,9 @@ class VioLogger:
         """While the run goes on: the keyframes and loops, the delta into :attr:`map_point_blocks`, and when the points
         are due only the blocks whose points changed (their size comes from the view: no radii logged)."""
         self._log_map_keyframes(map_delta, t_ns)
-        self.map_point_blocks.apply(map_delta.keyframe_t_ns, map_delta.changed_hosts, map_delta.point_ids, map_delta.point_hosts, map_delta.points_world)
+        self.map_point_blocks.apply(
+            map_delta.keyframe_t_ns, map_delta.changed_hosts, map_delta.point_ids, map_delta.point_hosts, map_delta.points_world
+        )
         self.map_revision = map_delta.revision
         if self.map_points_t_ns is not None and t_ns - self.map_points_t_ns < self.map_points_every_ns:
             return

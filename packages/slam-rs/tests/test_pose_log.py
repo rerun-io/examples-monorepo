@@ -15,7 +15,6 @@ def test_appended_poses_come_back_in_order_past_the_initial_capacity() -> None:
     np.testing.assert_array_equal(estimate.t_ns, np.arange(11, dtype=np.int64) * 10)
     np.testing.assert_array_equal(estimate.position_m, np.stack([p for _, p, _ in poses]))
     np.testing.assert_array_equal(estimate.quaternion_wxyz, np.stack([q for _, _, q in poses]))
-    np.testing.assert_array_equal(log.last_positions(2), np.stack([poses[-2][1], poses[-1][1]]))
 
 
 def test_a_trajectory_taken_earlier_is_not_changed_by_later_appends() -> None:
@@ -30,4 +29,3 @@ def test_a_trajectory_taken_earlier_is_not_changed_by_later_appends() -> None:
 def test_an_empty_log_has_no_trajectory_and_no_last_time() -> None:
     log = PoseLog()
     assert len(log) == 0 and len(log.trajectory()) == 0 and log.last_t_ns() is None
-    assert log.last_positions(2).shape == (0, 3)

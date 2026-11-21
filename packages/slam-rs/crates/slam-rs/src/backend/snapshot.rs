@@ -156,11 +156,8 @@ impl MapBackend {
         let mut point_hosts: Vec<FrameId> = Vec::new();
         let mut points_world: Vec<[f32; 3]> = Vec::new();
         for &host in changed_hosts.iter().filter(|host| keyframes.contains_key(host)) {
-            let hosted: std::collections::BTreeSet<LandmarkId> = (0..self.rig.t_i_c.len())
-                .flat_map(|cam| self.map.landmarks_in_image(crate::types::TimeCamId::new(host, cam)))
-                .filter(|id| self.map.landmark(*id).is_some_and(|landmark| landmark.host.frame_id == host))
-                .collect();
-            for id in hosted {
+            let hosted = self.map.landmarks_of_keyframe(host).into_iter();
+            for id in hosted.filter(|id| self.map.landmark(*id).is_some_and(|landmark| landmark.host.frame_id == host)) {
                 if let Some(point) = self.placed_point(id) {
                     point_ids.push(id);
                     point_hosts.push(host);

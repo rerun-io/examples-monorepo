@@ -251,7 +251,7 @@ def slam_overrides(*, close: bool) -> Overrides:
         schema.trail_path(schema.SLAM_RS_SOURCE): [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, 3.0)],
         # The final path lands on the VIO path at the last frameset; the darkened stroke keeps the VIO path readable.
         f"{SLAM}/trajectory": stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
-        f"{SLAM}/map/points": cloud(1.5 if close else 2.0),
+        f"{SLAM}/map/points": cloud(MAP_BLOCK_UI_FOLLOW if close else MAP_BLOCK_UI_OVERVIEW),
         **hidden(schema.trail_path(schema.SLAM_RS_VIO_SOURCE), f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes"),
         **(at_the_rig if close else hidden(f"{VIO}/landmarks", f"{VIO}/window", f"{VIO}/marginalized", f"{VIO}/rig")),
     }
@@ -314,7 +314,7 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
         },
         # slam-rs draws its map in blocks under ``map/points/blocks`` while the run goes on (no radii logged); an override
         # reaches only one exact entity, so the view sizes them. The final map on ``map/points`` keeps its override.
-        defaults=[rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_BLOCK_UI_OVERVIEW))],
+        defaults=[cloud(MAP_BLOCK_UI_OVERVIEW)],
         eye_controls=eye,
         line_grid=False,
     )
@@ -327,7 +327,7 @@ def follow(name: str, contents: list[str], overrides: Overrides, source: str) ->
         origin=schema.follow_path(source),
         contents=contents,
         overrides={schema.floor_path(source): floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
-        defaults=[rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_BLOCK_UI_FOLLOW))],
+        defaults=[cloud(MAP_BLOCK_UI_FOLLOW)],
         eye_controls=FOLLOW_EYE,
         line_grid=False,
     )
