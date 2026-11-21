@@ -216,3 +216,28 @@ def order_bootstrap_candidates(
     # lexsort: last key is primary -> ineligible after eligible; then distance (eligible) / support; then score.
     secondary: Float64[ndarray, "n"] = np.where(eligible, np.asarray(distances), -support_arr)
     return [int(i) for i in np.lexsort((-np.asarray(ref_scores, dtype=np.float64), secondary, ~eligible))]
+
+
+def continues_track(
+    det_box: Float32[ndarray, "4"], own_box: Float32[ndarray, "4"] | None, other_boxes: list[Float32[ndarray, "4"]], min_cover: float
+) -> bool:
+    """Whether a re-detected box continues a live track rather than moving it onto someone else.
+
+    The box must cover at least ``min_cover`` of the track's own current box (a drifted, shrunken mask still counts) and
+    cover it more than it covers any other live person's box. After people touch, appearance and epipolar scores are a
+    near-tie that numerical noise decides, so the current track keeps its identity unless it is lost. The original MAMMA
+    gets this stability offline, from anchors over the whole clip and a geometric whole-track vote; a causal tracker
+    has only the present track to lean on.
+    """
+    if own_box is None:
+        return False
+    own: float = _covered_fraction(own_box, det_box)
+    return own >= min_cover and all(own > _covered_fraction(other, det_box) for other in other_boxes)
+
+
+def _covered_fraction(box: Float32[ndarray, "4"], by: Float32[ndarray, "4"]) -> float:
+    """Fraction of ``box``'s area inside ``by`` (xyxy)."""
+    w: float = max(0.0, min(float(box[2]), float(by[2])) - max(float(box[0]), float(by[0])))
+    h: float = max(0.0, min(float(box[3]), float(by[3])) - max(float(box[1]), float(by[1])))
+    area: float = max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+    return w * h / area if area > 0.0 else 0.0

@@ -35,6 +35,7 @@ from mamma.tracking.identity import (
     EPIPOLAR_WEIGHT,
     FeatureBank,
     assign_hungarian,
+    continues_track,
     epipolar_score,
     fundamental_matrix,
     order_bootstrap_candidates,
@@ -52,6 +53,9 @@ BANK_UPDATE_MIN_SCORE: float = 0.35
 LOST_TICKS_BEFORE_REPROMPT: int = 5
 """Consecutive empty-mask ticks before a camera is eligible for re-prompting."""
 ANCHOR_CONFLICT_IOU: float = 0.65
+REANCHOR_MIN_COVER: float = 0.5
+"""A live track is re-anchored (and its CLIP bank fed) only from a re-detected box covering at least this fraction of
+its own current box, and more than it covers any other live person's box (``identity.continues_track``)."""
 """Re-detect prompts for two different subjects whose boxes overlap by >= this
 are de-conflicted (suppress the lower-scoring one) — mirrors the original's
 ``anchor_conflict_iou`` so SAM2 is never prompted with two near-identical boxes
@@ -466,11 +470,18 @@ class MultiViewTracker:
                     rb, cb = matched[b]
                     if bbox_iou_xyxy(dets.boxes_xyxy[ca], dets.boxes_xyxy[cb]) >= ANCHOR_CONFLICT_IOU:
                         dropped.add(ra if combined[ra, ca] < combined[rb, cb] else rb)
+            live: CameraTracks = self._last_tracks[cam_idx] if self._last_tracks is not None else {}
             for row, col in matches.items():
                 if row in dropped:
                     continue
                 obj_id: int = obj_ids[row]
                 confident: bool = bool(s_clip[row, col] >= BANK_UPDATE_MIN_SCORE)
+                if obj_id not in lost:
+                    # A live track keeps its identity: only a box that continues it re-anchors it or feeds its bank.
+                    own = live.get(obj_id)
+                    others = [t.bbox_xyxy for oid, t in live.items() if oid != obj_id and oid not in lost and t.bbox_xyxy is not None]
+                    if not continues_track(dets.boxes_xyxy[col], own.bbox_xyxy if own is not None else None, others, REANCHOR_MIN_COVER):
+                        continue
                 if confident:
                     self.bank.append(obj_id, det_feats[col])
                 # Lost tracks always re-prompt; live tracks only on a confident

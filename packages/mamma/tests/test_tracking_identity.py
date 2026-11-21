@@ -192,3 +192,22 @@ def test_default_detector_is_yolov12x() -> None:
 
     detector = TrackerConfig().detector
     assert isinstance(detector, YoloDetectorConfig) and Path(detector.weights) == Path("data/weights/yolo/yolo12x.pt")
+
+
+def test_a_live_track_is_not_moved_onto_another_person() -> None:
+    """Re-anchoring keeps identity: a box continues a track only if it covers that track's box best (people in contact)."""
+    import numpy as np
+
+    from mamma.tracking.identity import continues_track
+
+    a = np.array([100.0, 100.0, 200.0, 400.0], np.float32)  # person A's current box
+    b = np.array([170.0, 100.0, 270.0, 400.0], np.float32)  # person B, touching A
+    b_detected = np.array([168.0, 98.0, 272.0, 402.0], np.float32)
+    head_only = np.array([130.0, 100.0, 170.0, 150.0], np.float32)  # A's mask drifted to the head
+    a_detected = np.array([98.0, 98.0, 202.0, 402.0], np.float32)
+
+    assert continues_track(a_detected, a, [b], 0.5)
+    assert not continues_track(b_detected, a, [b], 0.5)  # B's box covers B's own box better: not A's
+    assert continues_track(a_detected, head_only, [b], 0.5)  # a drifted mask is still re-anchored to the full body
+    assert continues_track(a_detected, a, [], 0.5)
+    assert not continues_track(a_detected, None, [b], 0.5)
