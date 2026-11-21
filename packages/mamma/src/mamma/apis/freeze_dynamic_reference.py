@@ -6,11 +6,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from jaxtyping import Float32
+from jaxtyping import Float32, Int64
 from numpy import ndarray
 from serde import SerdeError, from_dict, serde
 
-from mamma.eval.dynamic_reference import write_reference
+from mamma.eval.dynamic_reference import ENTITY, FRAME_TIMELINE
+
+
+def write_reference(path: Path, frames: Int64[ndarray, "f"], vertices: Float32[ndarray, "f v 3"], fps: float, source: str) -> None:
+    """Write ``vertices`` (one row per frame in ``frames``) to ``path``."""
+    import rerun as rr
+
+    if len(frames) != len(vertices):
+        raise ValueError(f"{len(frames)} frames for {len(vertices)} vertex rows")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    recording = rr.RecordingStream("mamma-dynamic-reference")
+    recording.save(path)
+    recording.send_columns(
+        ENTITY,
+        indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=frames), rr.TimeColumn("time", duration=frames / fps)],
+        columns=rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3)).partition([vertices.shape[1]] * len(frames)),
+    )
+    recording.send_property("reference", rr.AnyValues(source=source, fps=fps))
+    recording.flush()
 
 
 @serde

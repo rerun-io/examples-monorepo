@@ -5,7 +5,8 @@ Layout (the stream logger's mesh layout): ``/world/meshes/person_0`` holds ``Mes
 ``/__properties/reference`` names the source. Values are float32 and read back bit-exactly.
 
 The original-DAG output (``ma_3d_dynamic``) was lost in 2026-11; the reference since is the dataset's own MAMMA
-prediction (``pred/params_00.npz``) forwarded through SMPL-X v1.1 neutral, frozen by ``tools/freeze_dynamic_reference.py``.
+prediction (``pred/params_00.npz``) forwarded through SMPL-X v1.1 neutral, written by
+``mamma.apis.freeze_dynamic_reference.write_reference`` (``tools/freeze_dynamic_reference.py``).
 """
 
 from __future__ import annotations
@@ -20,24 +21,6 @@ ENTITY: str = "/world/meshes/person_0"
 """Entity of the reference mesh (``WORLD_TAG/meshes/person_<id>`` as the stream logger writes it)."""
 FRAME_TIMELINE: str = "frame"
 """Sequence timeline holding each row's video frame index."""
-
-
-def write_reference(path: Path, frames: Int64[ndarray, "f"], vertices: Float32[ndarray, "f v 3"], fps: float, source: str) -> None:
-    """Write ``vertices`` (one row per frame in ``frames``) to ``path``."""
-    import rerun as rr
-
-    if len(frames) != len(vertices):
-        raise ValueError(f"{len(frames)} frames for {len(vertices)} vertex rows")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    recording = rr.RecordingStream("mamma-dynamic-reference")
-    recording.save(path)
-    recording.send_columns(
-        ENTITY,
-        indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=frames), rr.TimeColumn("time", duration=frames / fps)],
-        columns=rr.Mesh3D.columns(vertex_positions=vertices.reshape(-1, 3)).partition([vertices.shape[1]] * len(frames)),
-    )
-    recording.send_property("reference", rr.AnyValues(source=source, fps=fps))
-    recording.flush()
 
 
 def load_reference(path: Path) -> tuple[Int64[ndarray, "f"], Float32[ndarray, "f v 3"], str]:

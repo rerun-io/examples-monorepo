@@ -11,7 +11,8 @@ pytest.importorskip("rerun", reason="the reference is an .rrd")
 
 
 def test_reference_round_trips_bit_exactly(tmp_path: Path) -> None:
-    from mamma.eval.dynamic_reference import load_reference, write_reference
+    from mamma.apis.freeze_dynamic_reference import write_reference
+    from mamma.eval.dynamic_reference import load_reference
 
     generator: np.random.Generator = np.random.default_rng(0)
     vertices = generator.standard_normal((6, 7, 3)).astype(np.float32)
