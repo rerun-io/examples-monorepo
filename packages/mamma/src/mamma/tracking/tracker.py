@@ -1,11 +1,11 @@
 """Causal multiview person tracking: bootstrap once, then forward-only.
 
 Per the realtime handoff design: YOLO + CLIP + epipolar identity run only at
-bootstrap and on a sparse re-detect cadence; the dense per-tick work batches
-``encode_image`` across all cameras, then runs the cheap memory/decoder via a
-single B=n_cams ``batched_propagate`` (per-camera ``forward_embeddings`` on
-prompt/re-detect ticks), with a ``SAM2ForgetfulObjectMemoryBank`` per camera so
-memory stays bounded.
+bootstrap and on a sparse re-detect cadence; a steady tick (no prompts) is one
+``forward_batched`` call of the sam2-streaming predictor (every camera and object
+batched per module, CUDA graphs per input signature); prompt/re-detect ticks batch
+``encode_image`` across cameras and run per-camera ``forward_embeddings``. Each
+camera has a ``SAM2ForgetfulObjectMemoryBank``, so memory stays bounded.
 
 One predictor (one set of weights) serves all cameras; per-camera state lives
 in ``SAM2GenericVideoPredictorState``.
@@ -13,27 +13,33 @@ in ``SAM2GenericVideoPredictorState``.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
+from sam2.cuda_graphs import GraphCache
+from sam2.modeling.sam2_prompt import SAM2Prompt
+from sam2.modeling.sam2_result import SAM2Result
+from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
 from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
 from mamma.tracking.identity import (
+    CLIP_WEIGHT,
+    EPIPOLAR_WEIGHT,
     ClipEncoder,
     FeatureBank,
     assign_hungarian,
     epipolar_score,
     fundamental_matrix,
+    order_bootstrap_candidates,
     resolve_epipolar_px,
 )
-from mamma.tracking.steady_graph import SteadyTickGraphs, SteadyTickOutputs, steady_structures
 
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP+epipolar score to accept a cross-camera bootstrap match."""
@@ -46,6 +52,9 @@ ANCHOR_CONFLICT_IOU: float = 0.65
 are de-conflicted (suppress the lower-scoring one) — mirrors the original's
 ``anchor_conflict_iou`` so SAM2 is never prompted with two near-identical boxes
 for two people during contact (prevents per-object memory poisoning)."""
+CAPTURE_TICKS_PER_PROMPT: int = 12
+"""Propagated ticks after each prompt of the synthetic stream that captures the
+steady tick's CUDA graphs at construction (the memory window fills in ~6)."""
 
 
 def _disable_dead_hole_filling(predictor: object) -> None:
@@ -121,13 +130,15 @@ class TrackerConfig:
     pixel-identical (0.999 IoU) at ~15.0 s vs 11.76 s wall for the 12.1 s clip.
     Set 4 to prioritize the realtime gate over mask cosmetics."""
     cuda_graph: bool = True
-    """Replay the steady-state batched tick (single object, no prompts) from a
-    CUDA graph per memory structure instead of ~1200 eager launches; outputs
-    identical to the eager path. Prompt,
-    re-detect, multi-object, and non-precaptured-structure ticks stay eager."""
+    """Replay the steady tick's modules (image encoder, memory attention per
+    memory layout, mask decoder, memory encoder) from CUDA graphs instead of
+    ~1200 eager launches; outputs identical to the eager path. Graphs are
+    captured at construction only (one object per camera); prompt and
+    re-detect ticks, and signatures not captured then, stay eager."""
     cuda_graph_max_conditional: int = 4
-    """Graphs are captured at construction for 1..N conditional memories (one
-    per prompt tick: bootstrap + each re-prompt); later ticks run eagerly."""
+    """Prompted (conditional) memories each object attends to, the most recent (SAM 2 ``max_cond_frames_in_attn``;
+    the bank stores only those), and graphs are captured at construction for 1..N of them: one per prompt tick
+    (bootstrap + each re-prompt), so a long run keeps replaying graphs after any number of re-prompts."""
     fused_rope: bool = True
     """Rotary position encoding in one Triton kernel per q/k (memory attention
     12.3 -> 8.1 ms GPU per batched tick, identical output) instead of five
@@ -159,6 +170,10 @@ class MultiViewTracker:
             config.sam2_config, str(config.sam2_checkpoint), device=config.device
         )
         _disable_dead_hole_filling(self.predictor)
+        # Attend to the cuda_graph_max_conditional most recent prompted memories (the bank stores only those): each
+        # routine re-prompt adds one, and unbounded the steady step's signature grew past the captured graphs after
+        # ~4 re-prompts (~16 s single subject, ~2 s with several), every later tick eager and slower.
+        self.predictor.max_cond_frames_in_attn = config.cuda_graph_max_conditional
         if config.compile_image_encoder:
             encoder = self.predictor.image_encoder
             encoder.forward = torch.compile(encoder.forward, dynamic=False)
@@ -166,11 +181,6 @@ class MultiViewTracker:
             from sam2.modeling import fused_rope
 
             fused_rope.ENABLED = fused_rope.triton is not None
-        # The fork builds these before the model moves to the GPU; keep them
-        # resident so no tick pays (or graph-captures) a host->device copy.
-        with torch.inference_mode():
-            sparse, dense = self.predictor.empty_prompt_embeddings
-            self.predictor.empty_prompt_embeddings = (sparse.to(config.device), dense.to(config.device))
         self._states = [
             SAM2GenericVideoPredictorState.create(
                 video_hw=self._video_hw,
@@ -178,22 +188,19 @@ class MultiViewTracker:
                     memory_temporal_stride=1,
                     memory_window_size=config.memory_window_size,
                     storage_device=torch.device(config.device),
+                    max_conditional_memories=config.cuda_graph_max_conditional,
                 ),
             )
             for _ in cameras
         ]
-        self._graphs: SteadyTickGraphs | None = None
+        self._graphs: GraphCache | None = None
         if config.cuda_graph:
-            # Captured now, before the pipeline starts its worker threads.
-            self._graphs = SteadyTickGraphs(self.predictor, self._video_hw)
-            structures = steady_structures(
-                self.predictor,
-                self._states[0].memory_bank,
-                config.cuda_graph_max_conditional,
-                frame_step=config.track_stride,
-            )
-            with torch.inference_mode():
-                self._graphs.precapture(len(cameras), structures)
+            # Captured now, before the pipeline starts its worker threads: a capture cannot overlap the fit
+            # worker, CUDA rejects that thread's torch.cuda.synchronize() while any stream captures (in every
+            # capture mode) and the error invalidates the capture too. Later signatures stay eager.
+            self._graphs = GraphCache()
+            self._capture_steady_graphs()
+            self._graphs.capture = False
         self.detector: PersonDetector = PersonDetector(config.yolo_checkpoint, device=config.device)
         self.encoder: ClipEncoder = ClipEncoder(device=config.device)
         self.bank: FeatureBank = FeatureBank()
@@ -210,6 +217,42 @@ class MultiViewTracker:
         self._sigma_px: float
         self._max_dist_px: float
         self._sigma_px, self._max_dist_px = resolve_epipolar_px(cameras[0].width, cameras[0].height)
+
+    def _capture_steady_graphs(self) -> None:
+        """Run a synthetic stream through ``forward_batched`` so the steady tick's graphs are captured.
+
+        Copies of the empty memory banks see a prompt on blank frames, then
+        ``CAPTURE_TICKS_PER_PROMPT`` propagated ticks, ``cuda_graph_max_conditional``
+        times, at the tracker's ``track_stride``: the banks' own selection rules
+        (window, pruning, pointers) decide which memory layouts a single-subject
+        stream visits. A layout seen twice is captured; the ramp after each prompt,
+        seen once, is left to the eager path.
+        """
+
+        h, w = self._video_hw
+        states = [SAM2GenericVideoPredictorState.create(self._video_hw, copy.deepcopy(s.memory_bank)) for s in self._states]
+        frames: UInt8[torch.Tensor, "c 3 h w"] = torch.zeros((len(states), 3, h, w), dtype=torch.uint8, device=self.device)
+        box: torch.Tensor = torch.tensor([[0.0, 0.0, w / 2, h / 2]], device=self.device)
+        frame_idx: int = 0
+        for _ in range(self.config.cuda_graph_max_conditional):
+            for tick in range(CAPTURE_TICKS_PER_PROMPT + 1):
+                prompts = [[SAM2Prompt(obj_id=0, boxes=box)] if tick == 0 else [] for _ in states]
+                self._forward_batched(states, frame_idx, frames, prompts)
+                frame_idx += self.config.track_stride
+        torch.cuda.synchronize()
+
+    def _forward_batched(
+        self,
+        states: list[SAM2GenericVideoPredictorState],
+        frame_idx: int,
+        frames: UInt8[torch.Tensor, "c 3 h w"],
+        prompts: list[list[SAM2Prompt]],
+    ) -> list[dict[int, SAM2Result]]:
+        """One ``forward_batched`` step over every camera, with every mask hypothesis (tracks read hypothesis 0); a
+        steady step is one CUDA graph replay where captured."""
+        # No autocast cast cache with graphs: a graph must not read a cached cast that the region's exit frees.
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=self._graphs is None):
+            return self.predictor.forward_batched(states, frame_idx, frames, prompts, [False] * len(states), graphs=self._graphs, best_only=False, one_graph=True)
 
     def _fundamental(self, source_idx: int, target_idx: int) -> Float64[ndarray, "3 3"] | None:
         src: CameraCalibration = self.cameras[source_idx]
@@ -244,7 +287,17 @@ class MultiViewTracker:
         n_subjects: int = min(len(ref), expected) if expected is not None else len(ref)
         ref_order: list[int] = [int(i) for i in np.argsort(-ref.scores)[:n_subjects]]
         if expected is not None and len(ref) > expected:
-            ref_order = self._rig_central_order(ref_idx, detections)[:n_subjects]
+            # The capture subject is the person every camera sees, inside the camera ring.
+            ref_order = order_bootstrap_candidates(
+                ref_idx,
+                ref.scores,
+                [d.centers_xy1 for d in detections],
+                [cam.k_matrix for cam in self.cameras],
+                [cam.world_to_cam for cam in self.cameras],
+                self._sigma_px,
+                self._max_dist_px,
+                BOOTSTRAP_MIN_SCORE,
+            )[:n_subjects]
         obj_ids: list[int] = list(range(n_subjects))
 
         ref_feats: Float32[torch.Tensor, "n 512"] = self.encoder.encode([ref.crops[i] for i in ref_order])
@@ -270,7 +323,7 @@ class MultiViewTracker:
                         s_epi[row, col] = epipolar_score(
                             f_matrix, ref_centers[row], center, self._sigma_px, self._max_dist_px
                         )
-                combined = (0.35 * s_clip + 0.65 * s_epi).astype(np.float32)
+                combined = (CLIP_WEIGHT * s_clip + EPIPOLAR_WEIGHT * s_epi).astype(np.float32)
             matches: dict[int, int] = assign_hungarian(combined, min_score=BOOTSTRAP_MIN_SCORE)
             for row, col in matches.items():
                 obj_id = obj_ids[row]
@@ -279,53 +332,6 @@ class MultiViewTracker:
 
         self.bootstrapped = True
         return self._forward_all(frame_idx, frames, prompts_per_cam)
-
-    def _rig_central_order(self, ref_idx: int, detections: list[PersonDetections]) -> list[int]:
-        """Reference detections ordered by 3D distance to the rig centre (XY).
-
-        Each reference box centre is triangulated (two-view DLT) with its best
-        epipolar match in every other camera; the median over cameras is its
-        rough position. The capture subject stands inside the camera ring,
-        bystanders at its edge. Boxes with no match in any camera go last.
-        """
-        ref: PersonDetections = detections[ref_idx]
-        src: CameraCalibration = self.cameras[ref_idx]
-        p_ref: Float64[ndarray, "3 4"] = src.k_matrix @ src.world_to_cam[:3, :]
-        cam_centers: Float64[ndarray, "c 3"] = np.stack(
-            [-cam.world_to_cam[:3, :3].T @ cam.world_to_cam[:3, 3] for cam in self.cameras]
-        )
-        rig_xy: Float64[ndarray, "2"] = cam_centers[:, :2].mean(axis=0)
-        distances: list[float] = []
-        for x_ref in ref.centers_xy1:
-            points: list[Float64[ndarray, "3"]] = []
-            for cam_idx, dets in enumerate(detections):
-                f_matrix: Float64[ndarray, "3 3"] | None = self._fundamental(ref_idx, cam_idx) if cam_idx != ref_idx else None
-                if f_matrix is None or len(dets) == 0:
-                    continue
-                scores: list[float] = [
-                    epipolar_score(f_matrix, x_ref, x_t, self._sigma_px, self._max_dist_px) for x_t in dets.centers_xy1
-                ]
-                best: int = int(np.argmax(scores))
-                if scores[best] < BOOTSTRAP_MIN_SCORE:
-                    continue
-                tgt: CameraCalibration = self.cameras[cam_idx]
-                p_tgt: Float64[ndarray, "3 4"] = tgt.k_matrix @ tgt.world_to_cam[:3, :]
-                x_t = dets.centers_xy1[best]
-                a: Float64[ndarray, "4 4"] = np.stack(
-                    [
-                        x_ref[0] * p_ref[2] - p_ref[0],
-                        x_ref[1] * p_ref[2] - p_ref[1],
-                        x_t[0] * p_tgt[2] - p_tgt[0],
-                        x_t[1] * p_tgt[2] - p_tgt[1],
-                    ]
-                )
-                homog: Float64[ndarray, "4"] = np.linalg.svd(a)[2][-1]
-                if abs(homog[3]) > 1e-9:
-                    points.append(homog[:3] / homog[3])
-            distances.append(
-                float(np.linalg.norm(np.median(np.stack(points), axis=0)[:2] - rig_xy)) if points else float("inf")
-            )
-        return [int(i) for i in np.lexsort((-ref.scores, np.asarray(distances)))]
 
     # ── Steady state ───────────────────────────────────────────────────────
 
@@ -423,7 +429,7 @@ class MultiViewTracker:
                         continue
                     for col, center in enumerate(dets.centers_xy1):
                         s_epi[row, col] = epipolar_score(f_matrix, ref_pt, center, self._sigma_px, self._max_dist_px)
-                combined = (0.35 * s_clip + 0.65 * s_epi).astype(np.float32)
+                combined = (CLIP_WEIGHT * s_clip + EPIPOLAR_WEIGHT * s_epi).astype(np.float32)
             matches: dict[int, int] = assign_hungarian(combined, min_score=BOOTSTRAP_MIN_SCORE)
             # Conflict-IoU guard: never prompt two subjects onto overlapping boxes
             # (drop the lower combined-score one; it coasts on prior SAM2 memory).
@@ -503,21 +509,20 @@ class MultiViewTracker:
             self._lost_ticks[cam_idx][obj_id] = self._lost_ticks[cam_idx].get(obj_id, 0) + 1
         return TrackedObject(obj_id=obj_id, mask=mask, bbox_xyxy=bbox, score=score)
 
-    def _tracks_from_batched(self, batched, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
-        """Convert a B=n_cams SAM2Result into per-camera tracks (sync-free)."""
-        from mamma.tracking.batched_forward import first_hypothesis_stats
-
-        masks, stats = first_hypothesis_stats(batched.masks_logits, batched.ious)
-        return self._tracks_from_masks(masks, stats)
-
-    def _tracks_from_masks(
-        self, masks: Bool[torch.Tensor, "c h w"], stats: Float32[torch.Tensor, "c 7"]
-    ) -> list[CameraTracks]:
-        """Per-camera object-0 tracks from batched masks + GPU stats (one host copy)."""
-        all_stats: Float32[ndarray, "c 7"] = stats.cpu().numpy()
-        return [
-            {0: self._resolve_track(cam_idx, 0, masks[cam_idx], all_stats[cam_idx])} for cam_idx in range(masks.shape[0])
-        ]
+    def _tracks_from_results(self, per_cam: list[dict[int, SAM2Result]]) -> list[CameraTracks]:
+        """Per-camera tracks from ``forward_batched`` results: hypothesis 0 of each object, stats on the GPU, one host copy."""
+        rows: list[tuple[int, int]] = [(cam_idx, obj_id) for cam_idx, results in enumerate(per_cam) for obj_id in results]
+        tracks: list[CameraTracks] = [{} for _ in per_cam]
+        if not rows:
+            return tracks
+        masks, stats = first_hypothesis_stats(
+            torch.cat([per_cam[cam_idx][obj_id].masks_logits[:, :1] for cam_idx, obj_id in rows]),
+            torch.cat([per_cam[cam_idx][obj_id].ious[:, :1] for cam_idx, obj_id in rows]),
+        )
+        all_stats: Float32[ndarray, "n 7"] = stats.cpu().numpy()
+        for row, (cam_idx, obj_id) in enumerate(rows):
+            tracks[cam_idx][obj_id] = self._resolve_track(cam_idx, obj_id, masks[row], all_stats[row])
+        return tracks
 
     def _forward_all(
         self,
@@ -525,87 +530,38 @@ class MultiViewTracker:
         frames: list[UInt8[torch.Tensor, "3 h w"]],
         prompts_per_cam: list[dict[int, Float32[ndarray, "4"]]],
     ) -> list[CameraTracks]:
-        from sam2.modeling.sam2_prompt import SAM2Prompt
+        # Every tick, prompted or steady, is one batched pass over all cameras and objects (memory attention, mask
+        # decode, memory encode batched per memory layout; CUDA graphs where captured). Prompted objects decode a single
+        # mask (multimask off: with multimask the predicted-IoU argmax intermittently picks the whole-scene candidate);
+        # every object's track reads hypothesis 0.
+        prompts: list[list[SAM2Prompt]] = [
+            [SAM2Prompt(obj_id=obj_id, boxes=torch.as_tensor(box, device=self.device).reshape(1, 4)) for obj_id, box in cam_prompts.items()]
+            for cam_prompts in prompts_per_cam
+        ]
+        return self._tracks_from_results(self._forward_batched(self._states, frame_idx, torch.stack(frames, dim=0), prompts))
 
-        # Batch the (dominant) image-encoder cost across cameras, then run the
-        # cheap per-camera memory/decoder via forward_embeddings. One autocast/
-        # inference_mode context for the whole tick (entering per camera costs
-        # measurable CPU at this rate).
-        if self._graphs is not None and not any(prompts_per_cam):
-            with torch.inference_mode():
-                replayed: SteadyTickOutputs | None = self._graphs.step(self._states, frame_idx, frames)
-            if replayed is not None:
-                return self._tracks_from_masks(replayed.masks, replayed.stats)
 
-        autocast = torch.autocast("cuda", dtype=torch.bfloat16)
-        with torch.inference_mode(), autocast:
-            batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
-            # The fork annotates encode_image as Tensor pairs, but it returns
-            # multi-level lists (one tensor per FPN level) at runtime.
-            encoded = cast("tuple[list[torch.Tensor], list[torch.Tensor]]", self.predictor.encode_image(batch))
-            embeddings: list[torch.Tensor] = encoded[0]
-            pos_embeddings: list[torch.Tensor] = encoded[1]
+def first_hypothesis_stats(masks_logits: torch.Tensor, ious: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Binary mask of hypothesis 0 and its per-row stats, all on GPU.
 
-        # Steady-state fast path: one B=n_cams propagation (memory attention,
-        # mask decode, memory encode batched across cameras) instead of the
-        # fork's per-camera python loop. Falls back below on prompts/misalign.
-        if not any(prompts_per_cam):
-            from mamma.tracking.batched_forward import batched_propagate
-
-            with torch.inference_mode(), autocast:
-                batched = batched_propagate(
-                    self.predictor, self._states, frame_idx, embeddings, pos_embeddings, self._video_hw
-                )
-            if batched is not None:
-                return self._tracks_from_batched(batched, frames)
-
-        results: list[CameraTracks] = []
-        for cam_idx in range(len(frames)):
-            prompts: list[SAM2Prompt] = [
-                SAM2Prompt(obj_id=obj_id, boxes=torch.as_tensor(box, device=self.device).reshape(1, 4))
-                for obj_id, box in prompts_per_cam[cam_idx].items()
-            ]
-            state = self._states[cam_idx]
-            if not prompts and not state.memory_bank.known_obj_ids:
-                results.append({})
-                continue
-            cam_embeddings = [level[cam_idx : cam_idx + 1] for level in embeddings]
-            cam_pos = [level[cam_idx : cam_idx + 1] for level in pos_embeddings]
-            with torch.inference_mode(), autocast:
-                # Single-mask output: with multimask the predicted-IoU argmax
-                # intermittently selects the whole-scene candidate during
-                # propagation (observed as full-frame masks on crossing_arms).
-                raw: dict = self.predictor.forward_embeddings(
-                    state, frame_idx, cam_embeddings, cam_pos, prompts=prompts, multimask_output=False
-                )
-            # Stay sync-free inside the loop: gather per-object stats on GPU and
-            # do ONE device->host copy per camera at the end (each .item()/
-            # .tolist() in the loop would stall the pipeline ~1-2 ms).
-            entries: list[tuple[int, Bool[torch.Tensor, "h w"]]] = []
-            stats_rows: list[torch.Tensor] = []
-            h: int = frames[cam_idx].shape[1]
-            w: int = frames[cam_idx].shape[2]
-            for obj_id, result in raw.items():
-                # multimask_output=False -> exactly one mask candidate.
-                mask: Bool[torch.Tensor, "h w"] = result.masks_logits[0, 0] > 0.0
-                rows: torch.Tensor = mask.any(dim=1).int()
-                cols: torch.Tensor = mask.any(dim=0).int()
-                stats: torch.Tensor = torch.stack(
-                    [
-                        rows.sum(),
-                        cols.argmax(),  # x_min (0 when empty)
-                        rows.argmax(),  # y_min
-                        (w - 1) - cols.flip(0).argmax(),  # x_max
-                        (h - 1) - rows.flip(0).argmax(),  # y_max
-                    ]
-                ).float()
-                stats = torch.cat([stats, result.ious[0, 0:1].float(), mask.sum().reshape(1).float()])
-                entries.append((obj_id, mask))
-                stats_rows.append(stats)
-            tracks: CameraTracks = {}
-            if entries:
-                all_stats: Float32[ndarray, "k 7"] = torch.stack(stats_rows).cpu().numpy()
-                for (obj_id, mask), row in zip(entries, all_stats, strict=True):
-                    tracks[obj_id] = self._resolve_track(cam_idx, obj_id, mask, row)
-            results.append(tracks)
-        return results
+    Returns ``(masks (n, h, w) bool, stats (n, 7) float32)`` with stats rows
+    ``[bbox_h_rows, x_min, y_min, x_max, y_max, pred_iou, area_px]``.
+    """
+    masks: torch.Tensor = masks_logits[:, 0] > 0.0
+    h: int = masks.shape[1]
+    w: int = masks.shape[2]
+    rows: torch.Tensor = masks.any(dim=2).int()
+    cols: torch.Tensor = masks.any(dim=1).int()
+    stats: torch.Tensor = torch.stack(
+        [
+            rows.sum(dim=1),
+            cols.argmax(dim=1),
+            rows.argmax(dim=1),
+            (w - 1) - cols.flip(1).argmax(dim=1),
+            (h - 1) - rows.flip(1).argmax(dim=1),
+        ],
+        dim=1,
+    ).float()
+    area_px: torch.Tensor = masks.reshape(masks.shape[0], -1).sum(dim=1, keepdim=True).float()
+    stats = torch.cat([stats, ious[:, 0:1].float(), area_px], dim=1)
+    return masks, stats

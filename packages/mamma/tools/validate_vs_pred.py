@@ -30,46 +30,7 @@ import torch
 import tyro
 from jaxtyping import Float
 from numpy import ndarray
-
-from mamma.fitting.smplx_wrapper import build_smplx_neutral, smplx_forward_per_parts
-
-# Standard SMPL-X 165-dim axis-angle full-pose layout.
-_GLOBAL = slice(0, 3)
-_BODY = slice(3, 66)
-_JAW = slice(66, 69)
-_LHAND = slice(75, 120)
-_RHAND = slice(120, 165)
-
-
-def forward_params_to_verts(
-    model,
-    poses: Float[ndarray, "f 165"],
-    betas: Float[ndarray, "nb"],
-    trans: Float[ndarray, "f 3"],
-    device: str,
-    chunk: int = 64,
-) -> Float[ndarray, "f 10475 3"]:
-    """Forward flat 165-dim SMPL-X params through the neutral model, chunked."""
-    n_frames: int = poses.shape[0]
-    betas_t: Float[torch.Tensor, "1 nb"] = torch.as_tensor(betas.reshape(1, -1), dtype=torch.float32, device=device)
-    verts_out: list[ndarray] = []
-    for start in range(0, n_frames, chunk):
-        end: int = min(start + chunk, n_frames)
-        t_block: Float[torch.Tensor, "t 165"] = torch.as_tensor(poses[start:end].astype(np.float32), device=device)
-        trans_block: Float[torch.Tensor, "t 3"] = torch.as_tensor(trans[start:end].astype(np.float32), device=device)
-        with torch.inference_mode():
-            out = smplx_forward_per_parts(
-                model,
-                global_orient=t_block[:, _GLOBAL],
-                body_pose=t_block[:, _BODY],
-                left_hand_pose=t_block[:, _LHAND],
-                right_hand_pose=t_block[:, _RHAND],
-                jaw_pose=t_block[:, _JAW],
-                betas=betas_t,
-                transl=trans_block,
-            )
-        verts_out.append(out.vertices.detach().cpu().numpy())
-    return np.concatenate(verts_out, axis=0)
+from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
 
 def _pve_series(
@@ -128,13 +89,13 @@ def _load_our_subject(run_dir: Path, nn: int) -> dict | None:
 
 
 def main(config: ValidateVsPredConfig) -> int:
-    model = build_smplx_neutral(config.model_dir, device=config.device)
 
     # --- Forward every pred subject; load every emitted subject -----------------
     pred_subj: list[Float[ndarray, "f 10475 3"]] = []
     for mm in range(config.n_people):
         pp = np.load(config.pred_dir / f"params_{mm:02d}.npz", allow_pickle=True)
-        pred_subj.append(forward_params_to_verts(model, pp["poses"].astype(np.float32), pp["betas"].reshape(-1).astype(np.float32), pp["trans"].astype(np.float32), config.device))
+        layer = SmplxLayerTorch(betas=pp["betas"].reshape(-1).astype(np.float32), model_root_dir=config.model_dir, flat_hand_mean=False)
+        pred_subj.append(layer.to(config.device).forward_batched(pp["poses"].astype(np.float32), pp["trans"].astype(np.float32)).vertices)
     our_subj: list[dict | None] = [_load_our_subject(config.run_dir, nn) for nn in range(config.n_people)]
 
     n_emitted: int = sum(s is not None for s in our_subj)

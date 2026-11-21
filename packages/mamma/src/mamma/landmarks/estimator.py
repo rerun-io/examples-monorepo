@@ -12,9 +12,9 @@ from numpy import ndarray
 
 from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
-from mamma.landmarks.crops import box_geometry, gpu_crop_batch, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
+from mamma.landmarks.crops import box_geometry, gpu_crop_frame, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
-from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES
+from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, INPUT_NAMES, OUTPUT_NAMES
 
 
 @dataclass(slots=True)
@@ -91,7 +91,8 @@ class LandmarkEstimator:
         crop_masks: list[torch.Tensor] = []
         for cam_idx, cam_tracks in enumerate(tracks):
             for obj_id, track in sorted(cam_tracks.items()):
-                if track.bbox_xyxy is None:
+                # No box, or a degenerate one (a one-pixel-wide mask sliver): nothing to crop.
+                if track.bbox_xyxy is None or track.bbox_xyxy[2] <= track.bbox_xyxy[0] or track.bbox_xyxy[3] <= track.bbox_xyxy[1]:
                     continue
                 center, bbox_size = box_geometry(track.bbox_xyxy, self.config)
                 entries.append((cam_idx, obj_id))
@@ -109,33 +110,34 @@ class LandmarkEstimator:
 
         # RGB sampled from the (possibly hi-res) source; masks sampled from the
         # engine-res tracker output. Same normalized region either way. Each
-        # camera's frame is converted to float once and expanded (a view, no
-        # copy) over its people: a native-4K float frame is ~100 MB, so copying
-        # it per person and stacking cost ~0.8 GB of writes per tick. Entries
-        # are camera-major, so the per-camera crops concatenate in entry order.
+        # camera's crop window is converted to float once and expanded (a view,
+        # no copy) over its people. Entries are camera-major, so the per-camera
+        # crops concatenate in entry order.
         rgb_source: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor] = frames_hires if frames_hires is not None else frames
         s: float = hires_scale if frames_hires is not None else 1.0
-        # One host->device upload of all crop geometry (engine-res and hi-res,
-        # scaled in float64 on the host as before); per-camera rows are
-        # contiguous slices because entries are camera-major.
-        geom: Float32[torch.Tensor, "n 8"] = to_device_f32(
-            np.concatenate([centers, sizes, centers * s, sizes * s], axis=1), masks_batch.device
-        )
+        geom: Float32[torch.Tensor, "n 4"] = to_device_f32(np.concatenate([centers, sizes], axis=1), masks_batch.device)
         centers_t, sizes_t = geom[:, 0:2], geom[:, 2:4]
+        # Entries are camera-major: each camera's rows are one contiguous slice.
         cam_crops: list[Float32[torch.Tensor, "k 3 ch cw"]] = []
         for cam_idx in sorted({cam for cam, _ in entries}):
             rows: list[int] = [row for row, (cam, _) in enumerate(entries) if cam == cam_idx]
             lo, hi = rows[0], rows[-1] + 1
-            frame_view: Float32[torch.Tensor, "k 3 h w"] = rgb_source[cam_idx].float().unsqueeze(0).expand(len(rows), -1, -1, -1)
-            crops, _ = gpu_crop_batch(frame_view, geom[lo:hi, 4:6], geom[lo:hi, 6:8], None, self.config)
-            cam_crops.append(crops)
+            cam_crops.append(gpu_crop_frame(rgb_source[cam_idx], centers[lo:hi] * s, sizes[lo:hi] * s, self.config))
         img_crops: Float32[torch.Tensor, "n 3 ch cw"] = torch.cat(cam_crops, dim=0)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers_t, sizes_t, self.config)
-        if self.runner is not None and img_crops.shape[0] <= 4:
-            out: dict[str, torch.Tensor | None] = dict(self.runner({INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops}))
-        else:
+        out: dict[str, torch.Tensor | None]
+        if self.runner is None:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
                 out = self.model(img_crops, mask_crops)
+        else:
+            # The engine takes at most ENGINE_BATCH crops, so more people x cameras run in chunks (an eager batch of
+            # 28+ crops ran out of memory). Outputs live in the runner's buffers: keep a copy before the next call.
+            n_crops: int = img_crops.shape[0]
+            parts: list[dict[str, torch.Tensor | None]] = []
+            for lo in range(0, n_crops, ENGINE_BATCH):
+                part = dict(self.runner({INPUT_NAMES[0]: img_crops[lo : lo + ENGINE_BATCH], INPUT_NAMES[1]: mask_crops[lo : lo + ENGINE_BATCH]}))
+                parts.append(part if n_crops <= ENGINE_BATCH else {k: None if v is None else v.clone() for k, v in part.items()})
+            out = parts[0] if len(parts) == 1 else {k: torch.cat([v for p in parts if (v := p[k]) is not None]) for k in OUTPUT_NAMES}
 
         joints2d_raw = out[OUTPUT_NAMES[0]]
         visibility_raw = out[OUTPUT_NAMES[1]]

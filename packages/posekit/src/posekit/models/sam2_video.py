@@ -56,7 +56,7 @@ class Sam2VideoSegmenterConfig:
     """Run the forward pass under bfloat16 autocast (the fp32 memory attention dominates the step time)."""
     max_conditional_memories: int = -1
     """Prompted-frame memories each frame attends to, the temporally nearest (-1: all). Bounded, the bank also stores
-    only those (:class:`~posekit.models.sam2_memory_bank.BoundedForgetfulMemoryBank`), so a tracker re-prompted
+    only those (sam2-streaming ``SAM2ForgetfulObjectMemoryBank(max_conditional_memories=...)``), so a tracker re-prompted
     through a long video keeps a constant per-frame cost and memory."""
     single_click_multimask: bool = False
     """A prompt of one click per object takes the best of SAM 2's three masks by predicted IoU (SAM 2's
@@ -145,8 +145,6 @@ class Sam2VideoSegmenter(VideoSegmenter):
         from sam2.modeling.sam2_result import SAM2Result
         from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
-        from posekit.models.sam2_memory_bank import BoundedForgetfulMemoryBank
-
         validate_frames_rgb(frames_rgb)
         if prompts is not None and prompts.text is not None:
             raise ValueError("Sam2VideoSegmenter is visually prompted; text prompts are not supported.")
@@ -158,9 +156,11 @@ class Sam2VideoSegmenter(VideoSegmenter):
             self._states = [
                 SAM2GenericVideoPredictorState.create(
                     video_hw=(frame_h, frame_w),
-                    memory_bank=SAM2ForgetfulObjectMemoryBank(memory_window_size=self.config.memory_window_size, storage_device=storage)
-                    if self.config.max_conditional_memories < 0
-                    else BoundedForgetfulMemoryBank(self.config.max_conditional_memories, self.config.memory_window_size, storage),
+                    memory_bank=SAM2ForgetfulObjectMemoryBank(
+                        memory_window_size=self.config.memory_window_size,
+                        storage_device=storage,
+                        max_conditional_memories=self.config.max_conditional_memories,
+                    ),
                 )
                 for _ in range(batch_size)
             ]

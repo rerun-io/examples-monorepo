@@ -1,23 +1,13 @@
-"""sam2-streaming ``GraphCache``: replayed CUDA graphs give the eager results, bit for bit."""
+"""``GraphCache``: replayed CUDA graphs give the eager results, bit for bit."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import pytest
 import torch
 
-pytest.importorskip("sam2", reason="the streaming SAM 2 fork is in the posekit envs only")
-
 pytestmark = pytest.mark.integration
-
-
-def _scene(step: int) -> torch.Tensor:
-    """Two lenses, 256 px: a square moving right on lens 0, a disc moving down and a fixed square on lens 1."""
-    frames: torch.Tensor = torch.full((2, 256, 256, 3), 40, dtype=torch.uint8)
-    frames[0, 80:150, 30 + 4 * step : 100 + 4 * step] = torch.tensor([220, 60, 60], dtype=torch.uint8)
-    yy, xx = torch.meshgrid(torch.arange(256), torch.arange(256), indexing="ij")
-    frames[1][(yy - 60 - 5 * step) ** 2 + (xx - 128) ** 2 < 35**2] = torch.tensor([60, 200, 90], dtype=torch.uint8)
-    frames[1, 180:230, 20:70] = torch.tensor([200, 200, 40], dtype=torch.uint8)
-    return frames
 
 
 def _needs_gpu() -> None:
@@ -48,17 +38,15 @@ def test_graph_cache_replays_match_eager_per_signature() -> None:
     assert cache.replays == 8
 
 
+@pytest.mark.parametrize("one_graph", [False, True])
 @pytest.mark.parametrize("bf16", [False, True])
-def test_forward_batched_with_graphs_is_bit_identical(bf16: bool) -> None:
-    _needs_gpu()
+def test_forward_batched_with_graphs_is_bit_identical(bf16: bool, one_graph: bool, efficienttam_ti, scene: Callable[[int], torch.Tensor]) -> None:
     from sam2.cuda_graphs import GraphCache
     from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
     from sam2.modeling.sam2_prompt import SAM2Prompt
     from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
-    from posekit.models.sam2_video import cached_predictor
-
-    predictor = cached_predictor("efficienttam-ti-512")
+    predictor = efficienttam_ti
     device = torch.device("cuda")
 
     def states() -> list[SAM2GenericVideoPredictorState]:
@@ -76,14 +64,47 @@ def test_forward_batched_with_graphs_is_bit_identical(bf16: bool) -> None:
     eager, graphed = states(), states()
     cache = GraphCache()
     for step in range(14):
-        frames: torch.Tensor = _scene(step % 8).to(device).permute(0, 3, 1, 2)
+        frames: torch.Tensor = scene(step % 8).to(device).permute(0, 3, 1, 2)
         prompts: list[list[SAM2Prompt]] = prompts_at.get(step, [[], []])
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16, cache_enabled=False):
             want = predictor.forward_batched(eager, step, frames, prompts, [False, False])
-            got = predictor.forward_batched(graphed, step, frames, prompts, [False, False], graphs=cache)
+            got = predictor.forward_batched(graphed, step, frames, prompts, [False, False], graphs=cache, one_graph=one_graph)
         for slot in range(2):
             assert list(got[slot]) == list(want[slot])
             for obj_id, result in got[slot].items():
                 torch.testing.assert_close(result.masks_logits, want[slot][obj_id].masks_logits, rtol=0, atol=0)
                 torch.testing.assert_close(result.obj_ptrs, want[slot][obj_id].obj_ptrs, rtol=0, atol=0)
     assert cache.replays > cache.captures > 0
+
+
+def test_re_prompts_past_the_bound_keep_steady_steps_on_graphs(efficienttam_ti, scene: Callable[[int], torch.Tensor]) -> None:
+    """With max_cond_frames_in_attn and the bank bounded to N, re-prompting more than N times leaves the steady step's
+    signature unchanged: after warm-up every steady step replays a graph (unbounded, each prompt adds a conditional
+    memory and the next steady step is a new, eager signature)."""
+    from sam2.cuda_graphs import GraphCache
+    from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
+    from sam2.modeling.sam2_prompt import SAM2Prompt
+    from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
+
+    predictor = efficienttam_ti
+    device = torch.device("cuda")
+    bound: int = 2
+    saved: int = predictor.max_cond_frames_in_attn
+    predictor.max_cond_frames_in_attn = bound
+    try:
+        banks = [SAM2ForgetfulObjectMemoryBank(storage_device=device, max_conditional_memories=bound) for _ in range(2)]
+        states = [SAM2GenericVideoPredictorState.create((256, 256), bank) for bank in banks]
+        cache = GraphCache()
+        eager_on_late_steady_steps: list[int] = []
+        for step in range(60):
+            frames: torch.Tensor = scene(step % 8).to(device).permute(0, 3, 1, 2)
+            prompted: bool = step % 5 == 0  # 12 prompts, far past the bound of 2
+            prompts = [[SAM2Prompt(obj_id=0, boxes=torch.tensor([[30.0 + step % 7, 80.0, 100.0, 150.0]], device=device))] if prompted else [] for _ in states]
+            eager_before: int = cache.eager
+            predictor.forward_batched(states, step, frames, prompts, [False, False], graphs=cache, one_graph=True)
+            if not prompted and step >= 30:
+                eager_on_late_steady_steps.append(cache.eager - eager_before)
+        assert sum(eager_on_late_steady_steps) == 0, eager_on_late_steady_steps
+        assert all(len(bank.conditional_memories[0]) <= bound + 2 for bank in banks)
+    finally:
+        predictor.max_cond_frames_in_attn = saved

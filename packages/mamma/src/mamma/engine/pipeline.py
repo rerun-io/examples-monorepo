@@ -13,6 +13,7 @@ from pathlib import Path
 
 import torch
 from jaxtyping import UInt8
+from simplecv.ops.gpu_image import area_downscale_uint8
 from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.calibration.npz_contract import CameraCalibration
@@ -82,14 +83,39 @@ class PipelineStats:
 def decode_backend(reader: TorchCodecMultiVideoReader) -> str:
     """Name the decoder behind ``reader`` for run summaries.
 
-    NVDEC rejects some streams (HEVC/H.264 4:4:4) and torchcodec then decodes
-    them on the CPU and uploads full frames, an order of magnitude slower; the
-    summary says so instead of the run being silently slow.
+    torchcodec's NVDEC rejects 4:4:4 streams (HEVC/H.264); the reader then decodes
+    8-bit 4:4:4 files through PyNvVideoCodec on NVDEC, and anything else on the CPU
+    (full-frame uploads, an order of magnitude slower). The summary names the path
+    instead of the run being silently slow.
     """
     fallback_count: int = sum(cam.cpu_fallback for cam in reader.video_readers)
     if fallback_count > 0:
         return f"torchcodec CPU fallback (NVDEC rejected {fallback_count}/{len(reader.video_readers)} cameras; slow path)"
+    nvdec_444_count: int = sum(cam.backend == "NVDEC 4:4:4" for cam in reader.video_readers)
+    if nvdec_444_count > 0:
+        return f"NVDEC (4:4:4 through PyNvVideoCodec on {nvdec_444_count}/{len(reader.video_readers)} cameras)"
     return "NVDEC" if reader.device.startswith("cuda") else "torchcodec CPU"
+
+
+def ramped_chunk_ranges(start: int, stop: int, chunk_size: int, first: int = 4) -> list[tuple[int, int]]:
+    """``[start, stop)`` split into decode chunks of ``first``, 2x, 4x, ... frames, then ``chunk_size``.
+
+    The first tick waits for the whole first chunk (32 native-4K frames x 4 cameras take ~0.2 s on
+    NVDEC); a short first chunk starts the loop sooner. Each doubled chunk decodes while the previous
+    one is consumed, because decode runs several times faster than the loop.
+
+    Raises:
+        ValueError: ``chunk_size`` or ``first`` is not positive (the ranges would never reach ``stop``).
+    """
+    if chunk_size < 1 or first < 1:
+        raise ValueError(f"chunk_size and first must be positive, got {chunk_size} and {first}")
+    ranges: list[tuple[int, int]] = []
+    size: int = min(first, chunk_size)
+    while start < stop:
+        ranges.append((start, min(start + size, stop)))
+        start += size
+        size = min(size * 2, chunk_size)
+    return ranges
 
 
 def iter_decoded_chunks(
@@ -178,6 +204,8 @@ class StreamingPipeline:
         """
         import time
 
+        if chunk_size < 1:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
         profiler: StageProfiler = StageProfiler()
         self.logger.setup(timing_doc=timing_doc)
 
@@ -192,9 +220,7 @@ class StreamingPipeline:
             frame_count: int = min(window_end, self.reader.frame_cnt)
         else:
             frame_count = min(start_frame + max_frames, self.reader.frame_cnt)
-        chunk_ranges: list[tuple[int, int]] = [
-            (s, min(s + chunk_size, frame_count)) for s in range(start_frame, frame_count, chunk_size)
-        ]
+        chunk_ranges: list[tuple[int, int]] = ramped_chunk_ranges(start_frame, frame_count, chunk_size)
 
         # Fit + its logging run one tick deep on a worker: fit(t) overlaps
         # track/landmarks(t+1) — fit feeds nothing upstream. With a collector
@@ -216,12 +242,7 @@ class StreamingPipeline:
                     if self.engine_hw is not None:
                         frames_hires = frames
                         with torch.profiler.record_function("stage::resize"):
-                            lo: UInt8[torch.Tensor, "c 3 h w"] = (
-                                torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
-                                .round_()
-                                .clamp_(0, 255)
-                                .to(torch.uint8)
-                            )
+                            lo: UInt8[torch.Tensor, "c 3 h w"] = area_downscale_uint8(torch.stack(frames), self.engine_hw)
                         frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None

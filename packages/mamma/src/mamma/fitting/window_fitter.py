@@ -8,8 +8,10 @@ then a few warm-started Adam iterations per tick, emitting the newest frame.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -78,10 +80,8 @@ class FitterConfig:
     a zero-lag causal one are exactly the ones this recovers."""
     emit_stride: int = 2
     """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
-    pure read-out — fit quality is unchanged. CAUTION: on skipped ticks push()
-    returns the PREVIOUS FitResult, so ``FitResult.frame_idx`` lags the tick —
-    consumers indexing results by frame_idx (e.g. a ResultCollector) must set
-    1, as validate_golden does."""
+    pure read-out — fit quality is unchanged. On skipped ticks push() returns
+    None; consumers that need a fit for every frame (validate_golden) set 1."""
     lbfgs_polish: bool = True
     """Eager LBFGS refinement (lr 0.3, strong-wolfe — the original's actual
     optimizer; its YAML 'Adam' field is dead config) on HARD ticks only:
@@ -203,6 +203,30 @@ def _initial_body_pose(device: str) -> Float32[torch.Tensor, "63"]:
     return body
 
 
+@dataclass(frozen=True, slots=True)
+class BodyModel:
+    """The neutral SMPL-X model, the 512-landmark vertex sampling and the sampled model built from them: read-only
+    after construction, so one stage loads it once and every person's fitter shares it (``smplx.create`` plus the
+    pickle take ~0.6 s, which a person appearing mid-stream would otherwise stall on)."""
+
+    model: Any
+    """Neutral SMPL-X ``smplx`` module (16 betas, MANO-mean hands)."""
+    verts_to_landmarks: Float32[torch.Tensor, "n v"]
+    """Vertex sampling of the 512 dense landmarks."""
+    sampled: SampledSmplx
+    """SMPL-X forward restricted to the landmark rows."""
+
+    @classmethod
+    def load(cls, smplx_model_dir: Path, downsampled_verts_pkl: Path, device: str) -> BodyModel:
+        import pickle
+
+        model = build_smplx_neutral(smplx_model_dir, device=device)
+        with open(downsampled_verts_pkl, "rb") as f:
+            mat: Float32[torch.Tensor, "n v"] = pickle.load(f)
+        verts_to_landmarks: Float32[torch.Tensor, "n v"] = mat.float().to(device)
+        return cls(model, verts_to_landmarks, SampledSmplx(model, verts_to_landmarks))
+
+
 class SlidingWindowFitter:
     """Causal SMPL-X fitter for one person."""
 
@@ -211,28 +235,26 @@ class SlidingWindowFitter:
         k_per_cam: list[Float32[torch.Tensor, "3 3"]],
         world_to_cam_per_cam: list[Float32[torch.Tensor, "4 4"]],
         config: FitterConfig,
+        body: BodyModel,
     ) -> None:
-        import pickle
-
         self.config: FitterConfig = config
         self.device: str = config.device
         self.k_per_cam = [k.to(config.device) for k in k_per_cam]
         self.world_to_cam_per_cam = [e.to(config.device) for e in world_to_cam_per_cam]
-        self.model = build_smplx_neutral(config.smplx_model_dir, device=config.device)
-        with open(config.downsampled_verts_pkl, "rb") as f:
-            mat: Float32[torch.Tensor, "n v"] = pickle.load(f)
-        self.verts_to_landmarks: Float32[torch.Tensor, "n v"] = mat.float().to(config.device)
+        self.model = body.model
+        self.verts_to_landmarks: Float32[torch.Tensor, "n v"] = body.verts_to_landmarks
+        self.sampled_model: SampledSmplx = body.sampled
 
         self.betas: Float32[torch.Tensor, "1 nb"] = torch.zeros(1, NUM_BETAS, device=config.device, requires_grad=True)
         self.hand_pose_left: Float32[torch.Tensor, "45"] = torch.zeros(45, device=config.device)
         self.hand_pose_right: Float32[torch.Tensor, "45"] = torch.zeros(45, device=config.device)
         self.jaw_pose: Float32[torch.Tensor, "3"] = torch.zeros(3, device=config.device)
-        self.sampled_model: SampledSmplx = SampledSmplx(self.model, self.verts_to_landmarks)
         self._window: list[_WindowFrame] = []
         self._bootstrapped: bool = False
+        self._has_emitted: bool = False
+        """A stride-skipped tick returns None only once the first fit has been emitted (that one goes out at once)."""
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static: dict[str, torch.Tensor | list[torch.Tensor]] = {}
-        self._last_emit: FitResult | None = None
         self._head_fits: list[FitResult] = []
         self._valid_counts: list[float] = []
         self._rest_joints: Float32[ndarray, "55 3"] | None = None
@@ -254,8 +276,8 @@ class SlidingWindowFitter:
         floor_contact: Float32[torch.Tensor, "n"] | None = None,
         optimize: bool = True,
     ) -> FitResult | None:
-        """Add one tick's observations; returns the newest frame's fit (or None
-        before the first window fills)."""
+        """Add one tick's observations; returns the emitted frame's fit, or None before the first
+        window fills and on ticks ``emit_stride`` skips."""
         anchors_valid_f: Float32[torch.Tensor, "n"] = anchors_valid.float().detach()
         anchors3d_d: Float32[torch.Tensor, "n 3"] = anchors3d.detach()
         if self._window:
@@ -328,23 +350,25 @@ class SlidingWindowFitter:
             head_count: int = max(0, len(self._window) - 1 - self.config.emit_lag)
             self._head_fits = [self._emit(i) for i in range(head_count)]
         elif optimize:
+            # Read the anchor count before queueing the replays: read after them, the host would wait for
+            # all tick_iters replays before it could launch anything else. Same value, same decision.
+            count: float = float(anchors_valid_f.sum().item()) if self.config.lbfgs_polish else 0.0
             if self.config.use_cuda_graph:
                 self._optimize_graphed()
             else:
                 self._optimize(self.config.tick_iters, optimize_betas=False)
             if self.config.lbfgs_polish:
-                count: float = float(anchors_valid_f.sum().item())
                 self._valid_counts.append(count)
                 if len(self._valid_counts) > 60:
                     self._valid_counts.pop(0)
                 median: float = float(np.median(self._valid_counts))
                 if len(self._valid_counts) >= 20 and count < 0.75 * median:
                     self._lbfgs_polish()
-        if self.config.emit_stride > 1 and frame_idx % self.config.emit_stride != 0 and self._last_emit is not None:
-            return self._last_emit
+        if self.config.emit_stride > 1 and frame_idx % self.config.emit_stride != 0 and self._has_emitted:
+            return None
+        self._has_emitted = True
         emit_index: int = -1 - min(self.config.emit_lag, len(self._window) - 1)
-        self._last_emit = self._emit(emit_index)
-        return self._last_emit
+        return self._emit(emit_index)
 
     # ── CUDA-graph steady state ──────────────────────────────────────────────
 
@@ -402,7 +426,10 @@ class SlidingWindowFitter:
         # Inductor (default mode: no cudagraphs of its own) fuses the forward and
         # AOTAutograd's backward into a handful of triton kernels; the manual
         # graph below then captures those instead of hundreds of tiny eager ops.
-        loss_fn = torch.compile(window_loss, dynamic=False) if cfg.compile_iter else window_loss
+        # Eager while beartype runs (PIXI_DEV_MODE=1, set by tests/conftest.py): dynamo cannot trace
+        # beartype's wrapper around window_loss and raises a desynchronization error.
+        compile_iter: bool = cfg.compile_iter and os.environ.get("PIXI_DEV_MODE") != "1"
+        loss_fn = torch.compile(window_loss, dynamic=False) if compile_iter else window_loss
 
         def one_iter() -> None:
             optimizer.zero_grad(set_to_none=False)
@@ -614,17 +641,35 @@ class SlidingWindowFitter:
                 self.betas,
                 f.trans.unsqueeze(0),
             )
-        pose_full: Float32[ndarray, "165"] = (
-            torch.cat([f.global_orient, f.body_pose, self.jaw_pose, torch.zeros(6, device=self.device), self.hand_pose_left, self.hand_pose_right])
+        n_verts: int = out.vertices.shape[1]
+        n_joints: int = out.joints.shape[1]
+        n_betas: int = self.betas.shape[1]
+        # One device->host copy (one stream sync) for everything the result carries.
+        packed: Float32[ndarray, "k"] = (
+            torch.cat(
+                [
+                    out.vertices[0].reshape(-1),
+                    out.joints[0].reshape(-1),
+                    f.global_orient,
+                    f.body_pose,
+                    self.jaw_pose,
+                    torch.zeros(6, device=self.device),
+                    self.hand_pose_left,
+                    self.hand_pose_right,
+                    self.betas[0].detach(),
+                    f.trans,
+                ]
+            )
             .cpu()
             .numpy()
         )
+        verts_np, joints_np, pose_full, betas_np, trans_np = np.split(packed, np.cumsum([n_verts * 3, n_joints * 3, 165, n_betas]))
         return FitResult(
             frame_idx=f.frame_idx,
-            vertices=out.vertices[0].cpu().numpy(),
-            joints=out.joints[0].cpu().numpy(),
+            vertices=verts_np.reshape(n_verts, 3),
+            joints=joints_np.reshape(n_joints, 3),
             pose=pose_full,
-            betas=self.betas[0].detach().cpu().numpy(),
-            trans=f.trans.cpu().numpy(),
+            betas=betas_np,
+            trans=trans_np,
             rest_joints=self._rest_joints,
         )

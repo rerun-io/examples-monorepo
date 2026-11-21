@@ -42,6 +42,10 @@ class GraphCache:
     """Eager calls of a signature before it is captured (a capture costs about two eager calls)."""
     max_graphs: int = 4096
     """Signatures beyond this many captured graphs stay eager."""
+    capture: bool = True
+    """False: replay the graphs captured so far, run every other signature eagerly. A capture must not overlap a
+    ``torch.cuda.synchronize()`` on another thread (CUDA rejects it and invalidates the capture), so a caller with GPU
+    worker threads captures before it starts them, then turns this off."""
     captures: int = 0
     replays: int = 0
     eager: int = 0
@@ -68,8 +72,12 @@ class GraphCache:
         )
         captured: _Captured | None = self._graphs.get(signature)
         if captured is None:
+            if not self.capture or len(self._graphs) >= self.max_graphs:
+                # Never captured: no layout bookkeeping, which would otherwise grow with every new signature.
+                self.eager += 1
+                return fn(*inputs)
             calls, layouts = self._seen.get(signature, (0, None))
-            if calls < self.capture_after or len(self._graphs) >= self.max_graphs:
+            if calls < self.capture_after:
                 outputs = fn(*inputs)
                 self._seen[signature] = (calls + 1, pytree.tree_map_only(torch.Tensor, lambda t: torch.empty_like(t, device="meta"), outputs))
                 self.eager += 1

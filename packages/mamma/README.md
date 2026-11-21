@@ -129,7 +129,9 @@ tools/           tyro CLIs: demos, validate_golden, benchmark, goal_check, profi
   per-tick cost at stride 1) + columnar `rr.log` batching / worker
   consolidation. Fallback: collapse-triggered re-track (stride 4 + densify when
   mask area drops >40% vs running median).
-- **Multi-person hardening:** the batched steady-state tracker path assumes a
-  single subject (`obj_id=0`); Assembly101 scenes have several people.
+- **Multi-person hardening:** steady ticks batch every camera and object through
+  sam2-streaming's `forward_batched`, but the CUDA graphs are captured at
+  construction for one subject per camera only; with several people (Assembly101)
+  those ticks run eagerly.
 - **Live sources:** the pipeline is causal end-to-end; an RTSP/webcam adapter
   producing `MultiViewSequence`-shaped input would make it a live capture demo.
