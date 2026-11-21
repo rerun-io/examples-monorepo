@@ -13,7 +13,8 @@ from pathlib import Path
 
 import torch
 from jaxtyping import UInt8
-from simplecv.video_io import TorchCodecMultiVideoReader, area_downscale_uint8
+from simplecv.ops.gpu_image import area_downscale_uint8
+from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.capture_lock import GRAPH_CAPTURE_LOCK

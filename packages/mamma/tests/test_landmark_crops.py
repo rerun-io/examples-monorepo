@@ -40,15 +40,17 @@ def _track(obj_id: int, box_xyxy: list[float] | None, hw: tuple[int, int], devic
     return TrackedObject(obj_id=obj_id, mask=torch.ones(hw, dtype=torch.bool, device=device), bbox_xyxy=bbox, score=1.0)
 
 
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.integration)])
-def test_hires_crops_match_per_person_frame_copies(device: str) -> None:
+def test_hires_crops_match_per_person_frame_copies(device: str, dtype: torch.dtype) -> None:
+    """Crops of uint8 and float (0..255) frames, the two inputs LandmarkEstimator.estimate accepts."""
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU")
     generator: torch.Generator = torch.Generator().manual_seed(0)
     engine_hw: tuple[int, int] = (36, 64)
     hires_scale: float = 3.0
-    frames_hires: list[UInt8[torch.Tensor, "3 hh ww"]] = [
-        torch.randint(0, 256, (3, 108, 192), dtype=torch.uint8, generator=generator).to(device) for _ in range(3)
+    frames_hires: list[torch.Tensor] = [
+        torch.randint(0, 256, (3, 108, 192), dtype=torch.uint8, generator=generator).to(device=device, dtype=dtype) for _ in range(3)
     ]
     frames: list[UInt8[torch.Tensor, "3 h w"]] = [torch.zeros(3, *engine_hw, dtype=torch.uint8, device=device) for _ in range(3)]
     boxes: dict[tuple[int, int], list[float]] = {(0, 2): [2.0, 1.0, 20.0, 30.0], (0, 7): [30.0, 4.0, 50.0, 34.0], (2, 5): [10.0, 5.0, 40.0, 33.0]}
