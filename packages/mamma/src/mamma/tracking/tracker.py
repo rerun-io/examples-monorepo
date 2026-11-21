@@ -204,7 +204,7 @@ class MultiViewTracker:
             self._graphs = GraphCache()
             self._capture_steady_graphs()
             self._graphs.capture = False
-        self.detector = config.detector.setup()
+        self.detector = place_detector(config.detector, config.device).setup()
         self.encoder = ClipIdentityConfig(device=config.device).setup()
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False
@@ -556,6 +556,23 @@ class MultiViewTracker:
             for cam_prompts in prompts_per_cam
         ]
         return self._tracks_from_results(self._forward_batched(self._states, frame_idx, torch.stack(frames, dim=0), prompts))
+
+
+def place_detector(detector: DetectorConfig, device: str) -> DetectorConfig:
+    """``detector`` on the tracker's ``device``: the torch detectors' ``device`` and the ONNX backend's ordinal (a TensorRT
+    backend runs on the current device). The detector config's own default is ``cuda``, which differs from an
+    indexed tracker device and would put weights and frames on different GPUs."""
+    import dataclasses
+
+    from posekit.models import RtDetrDetectorConfig, YoloDetectorConfig, YoloxDetectorConfig
+    from trtkit.backends import OnnxBackendConfig
+
+    if isinstance(detector, RtDetrDetectorConfig | YoloDetectorConfig):
+        return dataclasses.replace(detector, device=device)
+    target: torch.device = torch.device(device)
+    if isinstance(detector, YoloxDetectorConfig) and isinstance(detector.backend, OnnxBackendConfig) and target.type == "cuda":
+        return dataclasses.replace(detector, backend=dataclasses.replace(detector.backend, device_id=target.index or 0))
+    return detector
 
 
 def first_hypothesis_stats(masks_logits: torch.Tensor, ious: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

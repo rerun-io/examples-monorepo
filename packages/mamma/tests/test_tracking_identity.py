@@ -141,3 +141,19 @@ def test_bootstrap_order_scenario_fails_on_rig_distance_alone(monkeypatch: pytes
 def test_bootstrap_order_rig_distance_separates_well_seen_bystanders() -> None:
     """A bystander every camera sees well stays eligible; the rig-centre distance ranks the subject first."""
     assert _order(np.array([2.2, -1.8, 1.0]), operator_in_all=True)[0] == 0
+
+
+def test_detector_goes_to_the_tracker_device() -> None:
+    """The detector config's own default device ('cuda') must not override an indexed tracker device."""
+    from posekit.models import RtDetrDetectorConfig, YoloDetectorConfig, YoloxDetectorConfig
+    from trtkit.backends import OnnxBackendConfig
+
+    from mamma.tracking.tracker import place_detector
+
+    placed_rtdetr = place_detector(RtDetrDetectorConfig(), "cuda:1")
+    placed_yolo = place_detector(YoloDetectorConfig(), "cuda:1")
+    placed_yolox = place_detector(YoloxDetectorConfig(backend=OnnxBackendConfig()), "cuda:1")
+    assert isinstance(placed_rtdetr, RtDetrDetectorConfig) and placed_rtdetr.device == "cuda:1"
+    assert isinstance(placed_yolo, YoloDetectorConfig) and placed_yolo.device == "cuda:1"
+    assert isinstance(placed_yolox, YoloxDetectorConfig) and isinstance(placed_yolox.backend, OnnxBackendConfig)
+    assert placed_yolox.backend.device_id == 1
