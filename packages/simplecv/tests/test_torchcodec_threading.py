@@ -28,6 +28,8 @@ class _Metadata:
     height: int = 2
     num_frames: int = 6
     average_fps: float = 30.0
+    pixel_format: str = "yuv420p"
+    color_space: str | None = None
 
 
 class _FrameBatch:
