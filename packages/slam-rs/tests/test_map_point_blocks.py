@@ -11,7 +11,9 @@ def map_of(hosts: list[int], points_per_host: int = 3) -> tuple[Int64[ndarray, "
     """Point ids, hosts and world positions of a map whose keyframe ``h`` hosts ``points_per_host`` points near x = h."""
     point_hosts: Int64[ndarray, " p"] = np.repeat(np.asarray(hosts, dtype=np.int64), points_per_host)
     point_ids: Int64[ndarray, " p"] = np.arange(point_hosts.shape[0], dtype=np.int64) + 100
-    positions: Float32[ndarray, "p 3"] = np.stack([point_hosts.astype(np.float32), np.zeros_like(point_hosts, dtype=np.float32), np.arange(point_hosts.shape[0], dtype=np.float32)], axis=1)
+    positions: Float32[ndarray, "p 3"] = np.stack(
+        [point_hosts.astype(np.float32), np.zeros_like(point_hosts, dtype=np.float32), np.arange(point_hosts.shape[0], dtype=np.float32)], axis=1
+    )
     return point_ids, point_hosts, positions
 
 

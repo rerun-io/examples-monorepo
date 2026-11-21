@@ -11,11 +11,11 @@ from numpy import ndarray
 
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
-    MAP_BLOCK_UI_FOLLOW,
-    MAP_BLOCK_UI_OVERVIEW,
     COLSFM_COLOR,
     FOLLOW_FLOOR_WINDOW_S,
     FOLLOW_PATH_WINDOW_S,
+    MAP_BLOCK_UI_FOLLOW,
+    MAP_BLOCK_UI_OVERVIEW,
     OVERVIEW_PATH_WINDOW_S,
     PANO_ENTITY,
     RIG,
