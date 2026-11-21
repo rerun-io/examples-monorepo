@@ -56,7 +56,11 @@ class ValidateDynamicConfig:
     data_dir: Path = Path("data/inputs/outdoors/running_jumping")
     """Dynamic capture inputs (MAMMA NPZ layout)."""
     golden_npz: Path = Path("data/golden/ma_3d_dynamic/outdoors/running_jumping/verts_joints_body_id-00.npz")
-    """Frozen original-DAG verts/joints for this clip (ma_3d output)."""
+    """Frozen original-DAG verts/joints for this clip (ma_3d output). When absent, the
+    reference is the dataset's own MAMMA prediction (``<data_dir>/pred/params_00.npz``)
+    forwarded through SMPL-X."""
+    model_dir: Path = Path("data/body_models")
+    """Body-model root containing ``smplx/SMPLX_NEUTRAL.npz`` (pred fallback only)."""
     mammanet_weights: Path = Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors")
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
@@ -82,8 +86,22 @@ class ValidateDynamicConfig:
 
 def main(config: ValidateDynamicConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
-    golden = np.load(config.golden_npz, allow_pickle=True)
-    golden_verts: Float32[ndarray, "f v 3"] = golden["pred_vertices"]
+    golden_verts: Float32[ndarray, "f v 3"]
+    if config.golden_npz.exists():
+        golden_verts = np.load(config.golden_npz, allow_pickle=True)["pred_vertices"]
+    else:
+        from mamma.fitting.smplx_wrapper import build_smplx_neutral, forward_params_to_verts
+
+        pred_npz: Path = config.data_dir / "pred" / "params_00.npz"
+        print(f"note: {config.golden_npz} absent; reference = dataset MAMMA prediction {pred_npz}")
+        pp = np.load(pred_npz, allow_pickle=True)
+        golden_verts = forward_params_to_verts(
+            build_smplx_neutral(config.model_dir, device=config.device),
+            pp["poses"].astype(np.float32),
+            pp["betas"].reshape(-1).astype(np.float32),
+            pp["trans"].astype(np.float32),
+            config.device,
+        ).astype(np.float32)
     print(f"sequence {sequence.name}: {sequence.frame_count} frames; golden verts {golden_verts.shape}")
 
     collector: ResultCollector = _FitsOnlyCollector()

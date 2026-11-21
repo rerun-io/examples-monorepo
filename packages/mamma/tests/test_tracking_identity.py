@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 from jaxtyping import Float32, Float64
 from numpy import ndarray
@@ -13,6 +14,7 @@ from mamma.tracking.identity import (
     assign_hungarian,
     epipolar_score,
     fundamental_matrix,
+    order_bootstrap_candidates,
     resolve_epipolar_px,
 )
 
@@ -91,3 +93,51 @@ def test_bbox_iou_xyxy() -> None:
     assert abs(bbox_iou_xyxy(box, half) - (50.0 / 150.0)) < 1e-6
     disjoint: Float32[ndarray, "4"] = np.array([20.0, 20.0, 30.0, 30.0], dtype=np.float32)
     assert bbox_iou_xyxy(box, disjoint) == 0.0
+
+
+def _ring_rig() -> tuple[Float64[ndarray, "3 3"], list[Float64[ndarray, "4 4"]]]:
+    """Four cameras on a 3 m ring at 1.5 m height, all looking at the origin (cam 2 at -x)."""
+    k: Float64[ndarray, "3 3"] = np.array([[800.0, 0.0, 640.0], [0.0, 800.0, 360.0], [0.0, 0.0, 1.0]])
+    positions: list[Float64[ndarray, "3"]] = [np.array([3.0 * np.cos(a), 3.0 * np.sin(a), 1.5]) for a in np.arange(4) * np.pi / 2]
+    return k, [_look_at_extrinsics(p) for p in positions]
+
+
+_SUBJECT: Float64[ndarray, "3"] = np.array([0.0, 0.0, 1.0])
+
+
+def _order(operator: Float64[ndarray, "3"], operator_in_all: bool, subject: Float64[ndarray, "3"] = _SUBJECT) -> list[int]:
+    """Bootstrap order of [subject, operator] as seen by reference camera 2 (subject at the ring centre)."""
+    k, w2cs = _ring_rig()
+    sigma_px, max_dist_px = resolve_epipolar_px(1280, 720)
+    centers: list[Float32[ndarray, "m 3"]] = []
+    for w2c in w2cs:
+        people = [subject, operator] if operator_in_all else [subject]
+        centers.append(np.stack([_project(k, w2c, p) for p in people]).astype(np.float32))
+    centers[2] = np.stack([_project(k, w2cs[2], subject), _project(k, w2cs[2], operator)]).astype(np.float32)
+    # The operator's YOLO score is lower; the rig distance must not depend on it.
+    return order_bootstrap_candidates(2, centers[2], np.array([0.9, 0.8], np.float32), centers, [k] * 4, w2cs, sigma_px, max_dist_px, 0.25)
+
+
+# Off-centre subject, operator at the ring edge seen only by the reference camera. Over a 7448-layout sweep
+# (subject within 1.2 m of the centre, operator anywhere inside the ring) the old rule picked the operator in
+# 2104 layouts and the support filter in 52 (operator nearly on the subject's epipolar lines).
+_SUBJECT_OFF: Float64[ndarray, "3"] = np.array([-1.2, -1.2, 1.0])
+_OPERATOR_BEHIND: Float64[ndarray, "3"] = np.array([-1.8, -0.6, 1.0])
+
+
+def test_bootstrap_order_prefers_the_person_every_camera_sees() -> None:
+    """An operator seen only by the reference camera never outranks the subject every camera sees."""
+    assert _order(_OPERATOR_BEHIND, operator_in_all=False, subject=_SUBJECT_OFF)[0] == 0
+
+
+def test_bootstrap_order_scenario_fails_on_rig_distance_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the support filter (the old rule), rig distance on borrowed matches picks the operator."""
+    import mamma.tracking.identity as identity
+
+    monkeypatch.setattr(identity, "SUPPORT_ELIGIBLE_FRAC", 0.0)
+    assert _order(_OPERATOR_BEHIND, operator_in_all=False, subject=_SUBJECT_OFF)[0] == 1
+
+
+def test_bootstrap_order_rig_distance_separates_well_seen_bystanders() -> None:
+    """A bystander every camera sees well stays eligible; the rig-centre distance ranks the subject first."""
+    assert _order(np.array([2.2, -1.8, 1.0]), operator_in_all=True)[0] == 0

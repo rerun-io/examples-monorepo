@@ -171,3 +171,74 @@ def assign_hungarian(score: Float32[ndarray, "k n"], min_score: float) -> dict[i
     cols: ndarray
     rows, cols = linear_sum_assignment(1.0 - score)
     return {int(r): int(c) for r, c in zip(rows, cols, strict=True) if score[r, c] >= min_score}
+
+
+SUPPORT_ELIGIBLE_FRAC: float = 0.9
+"""A bootstrap candidate stays eligible for the rig-centre ranking only when its
+cross-camera epipolar support is at least this fraction of the best candidate's."""
+
+
+def order_bootstrap_candidates(
+    ref_idx: int,
+    ref_centers: Float32[ndarray, "n 3"] | Float64[ndarray, "n 3"],
+    ref_scores: Float32[ndarray, "n"],
+    centers_per_cam: list[Float32[ndarray, "m 3"]],
+    k_matrices: list[Float64[ndarray, "3 3"]],
+    world_to_cams: list[Float64[ndarray, "4 4"]],
+    sigma_px: float,
+    max_dist_px: float,
+    min_score: float,
+) -> list[int]:
+    """Reference-camera detections ordered for bootstrap: best-supported first, then nearest the rig centre.
+
+    Support is the sum, over the other cameras, of the candidate's best epipolar score there: the capture
+    subject stands inside the ring and every camera sees it, so its support is near the camera count. A
+    person seen well by the reference camera alone (an operator behind a tripod) borrows the subject's
+    detection in every other camera as its "best" match; those scores pass ``min_score`` but stay low,
+    and the rays they triangulate meet near the subject, so the rig distance alone ranks such a person
+    first. Candidates within ``SUPPORT_ELIGIBLE_FRAC`` of the best support are ranked by the XY distance
+    of their multi-view position (two-view DLT per supporting camera, median) to the rig centre, as
+    before; the rest follow by support. Bystanders that every camera sees well (MammaEval's ball
+    thrower) stay eligible and the rig distance separates them.
+    """
+    p_ref: Float64[ndarray, "3 4"] = k_matrices[ref_idx] @ world_to_cams[ref_idx][:3, :]
+    cam_centers: Float64[ndarray, "c 3"] = np.stack([-w2c[:3, :3].T @ w2c[:3, 3] for w2c in world_to_cams])
+    rig_xy: Float64[ndarray, "2"] = cam_centers[:, :2].mean(axis=0)
+    supports: list[float] = []
+    distances: list[float] = []
+    for x_ref in np.asarray(ref_centers, dtype=np.float64):
+        support: float = 0.0
+        points: list[Float64[ndarray, "3"]] = []
+        for cam_idx, centers in enumerate(centers_per_cam):
+            if cam_idx == ref_idx or len(centers) == 0:
+                continue
+            f_matrix: Float64[ndarray, "3 3"] | None = fundamental_matrix(
+                k_matrices[ref_idx], world_to_cams[ref_idx], k_matrices[cam_idx], world_to_cams[cam_idx]
+            )
+            if f_matrix is None:
+                continue
+            scores: list[float] = [epipolar_score(f_matrix, x_ref, x_t, sigma_px, max_dist_px) for x_t in centers]
+            best: int = int(np.argmax(scores))
+            if scores[best] < min_score:
+                continue
+            support += scores[best]
+            p_tgt: Float64[ndarray, "3 4"] = k_matrices[cam_idx] @ world_to_cams[cam_idx][:3, :]
+            x_t: Float64[ndarray, "3"] = np.asarray(centers[best], dtype=np.float64)
+            a: Float64[ndarray, "4 4"] = np.stack(
+                [
+                    x_ref[0] * p_ref[2] - p_ref[0],
+                    x_ref[1] * p_ref[2] - p_ref[1],
+                    x_t[0] * p_tgt[2] - p_tgt[0],
+                    x_t[1] * p_tgt[2] - p_tgt[1],
+                ]
+            )
+            homog: Float64[ndarray, "4"] = np.linalg.svd(a)[2][-1]
+            if abs(homog[3]) > 1e-9:
+                points.append(homog[:3] / homog[3])
+        supports.append(support)
+        distances.append(float(np.linalg.norm(np.median(np.stack(points), axis=0)[:2] - rig_xy)) if points else float("inf"))
+    support_arr: Float64[ndarray, "n"] = np.asarray(supports)
+    eligible: ndarray = support_arr >= SUPPORT_ELIGIBLE_FRAC * support_arr.max() if support_arr.max() > 0 else np.ones(len(supports), bool)
+    # lexsort: last key is primary -> ineligible after eligible; then distance (eligible) / support; then score.
+    secondary: Float64[ndarray, "n"] = np.where(eligible, np.asarray(distances), -support_arr)
+    return [int(i) for i in np.lexsort((-np.asarray(ref_scores, dtype=np.float64), secondary, ~eligible))]
