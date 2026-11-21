@@ -167,9 +167,7 @@ def drive(
         frame: _core.FlowFrame | None = vio.flow_frame()
         assert snapshot is not None
         assert frame is not None
-        # What `VioStage` does: read the map only when it is due (None with the back end off).
-        map_delta: _core.MapDelta | None = vio.map_delta(logger.map_revision) if logger.map_is_due(snapshot) else None
-        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_delta=map_delta, colors=colors)
+        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_delta=logger.read_map(vio, snapshot), colors=colors)
         tracked.append(t_ns)
         newest_keyframes.append(int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else -1)
     # What `VioStage.flush` does: flush (which makes the map current), then draw the final map.
@@ -775,12 +773,11 @@ def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "rt.rrd", read_rows)
     first_join: int = next(t for t, newest in zip(logged.tracked, logged.newest_keyframes, strict=True) if newest != -1)
-    # Realtime never waits for the back-end thread: a read it holds the map for comes back None, and the draw follows
-    # on the next frameset that finds it free.
-    keyframe_times: list[int] = [t for t, _ in logged.rows[MAP_KEYFRAMES_ENTITY]]
-    assert len(keyframe_times) == 2 and first_join <= keyframe_times[0] < logged.tracked[-1] and keyframe_times[1] == logged.tracked[-1]
+    # Realtime never waits for the back-end thread: the read hands out the newest delta it posted, so the draws keep
+    # their exact times whatever the thread is doing.
+    assert [t for t, _ in logged.rows[MAP_KEYFRAMES_ENTITY]] == [first_join, logged.tracked[-1]]
     block_times: set[int] = {t for e, rows in logged.rows.items() if e.startswith(f"{MAP_POINT_BLOCKS_ENTITY}/") for t, _ in rows}
-    assert block_times <= {keyframe_times[0]}, "blocks are drawn only at the points' cadence (a map with no points yet draws none)"
+    assert block_times <= {first_join}, "blocks are drawn only at the points' cadence (a map with no points yet draws none)"
     assert [t for t, _ in logged.rows[MAP_POINTS_ENTITY]] == [logged.tracked[-1]]
 
 

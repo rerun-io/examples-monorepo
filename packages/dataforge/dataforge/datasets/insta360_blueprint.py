@@ -178,12 +178,6 @@ def shade(color: tuple[int, int, int], factor: float) -> tuple[int, int, int]:
     return (round(color[0] * factor), round(color[1] * factor), round(color[2] * factor))
 
 
-MAP_BLOCK_UI_OVERVIEW: float = 2.0
-"""Size, ui points, of the clouds an overview draws without an override of their own: slam-rs's map blocks."""
-MAP_BLOCK_UI_FOLLOW: float = 1.5
-"""The same in a follow view."""
-
-
 def cloud(radius_ui: float, color: tuple[int, int, int] | None = None) -> rr.Points3D:
     """A cloud's display size in ui points and, with ``color``, one tint in place of its own colours."""
     return rr.Points3D.from_fields(radii=rr.Radius.ui_points(radius_ui), colors=color)
@@ -251,7 +245,7 @@ def slam_overrides(*, close: bool) -> Overrides:
         schema.trail_path(schema.SLAM_RS_SOURCE): [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, 3.0)],
         # The final path lands on the VIO path at the last frameset; the darkened stroke keeps the VIO path readable.
         f"{SLAM}/trajectory": stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
-        f"{SLAM}/map/points": cloud(MAP_BLOCK_UI_FOLLOW if close else MAP_BLOCK_UI_OVERVIEW),
+        f"{SLAM}/map/points": cloud(1.5 if close else 2.0),
         **hidden(schema.trail_path(schema.SLAM_RS_VIO_SOURCE), f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes"),
         **(at_the_rig if close else hidden(f"{VIO}/landmarks", f"{VIO}/window", f"{VIO}/marginalized", f"{VIO}/rig")),
     }
@@ -279,6 +273,8 @@ def comparison_overrides(*, close: bool) -> Overrides:
         f"{SLAM}/path": stroke(SLAM_COLOR, wide),
         f"{SLAM}/trajectory": stroke(SLAM_COLOR, wide),
         f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, narrow),
+        # The final map only: while the run goes on slam-rs draws its map as blocks under ``map/points/blocks``, which
+        # no override can reach (exact paths only), so they keep their image colours until the final draw replaces them.
         f"{SLAM}/map/points": cloud(1.5, shade(SLAM_COLOR, CLOUD_SHADE)),
         f"{COLSFM}/points": cloud(1.5, shade(COLSFM_COLOR, CLOUD_SHADE)),
         **hidden(f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes", f"{SLAM}/loops"),
@@ -312,9 +308,6 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
             schema.floor_path(source): [floor_window(None), rr.LineStrips3D.from_fields(colors=OVERVIEW_FLOOR_COLOR)],
             **overrides,
         },
-        # slam-rs draws its map in blocks under ``map/points/blocks`` while the run goes on (no radii logged); an override
-        # reaches only one exact entity, so the view sizes them. The final map on ``map/points`` keeps its override.
-        defaults=[cloud(MAP_BLOCK_UI_OVERVIEW)],
         eye_controls=eye,
         line_grid=False,
     )
@@ -327,7 +320,6 @@ def follow(name: str, contents: list[str], overrides: Overrides, source: str) ->
         origin=schema.follow_path(source),
         contents=contents,
         overrides={schema.floor_path(source): floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
-        defaults=[cloud(MAP_BLOCK_UI_FOLLOW)],
         eye_controls=FOLLOW_EYE,
         line_grid=False,
     )
@@ -432,7 +424,7 @@ def comparison_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
     ]
     return rrb.Vertical(
         rrb.Horizontal(
-            overview("Overview: slam-rs final (orange) and colsfm (blue), paths and clouds", scene, comparison_overrides(close=False), eye, schema.SLAM_RS_SOURCE),
+            overview("Overview: slam-rs (live map in image colours, orange once final) and colsfm (blue)", scene, comparison_overrides(close=False), eye, schema.SLAM_RS_SOURCE),
             follow("Follow: colsfm's rig on the final slam-rs path", scene, comparison_overrides(close=True), schema.SLAM_RS_SOURCE),
             column_shares=[3, 2],
         ),
