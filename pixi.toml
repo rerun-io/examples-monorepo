@@ -3143,9 +3143,9 @@ pynvvideocodec = "==2.2.4"
 PACKAGE_DIR = "packages/mamma"
 
 [feature.mamma.tasks._download-mamma-inputs]
-cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' --include 'golden/**' --include 'body_models/**' --local-dir data/"
+cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz && test -e data/golden/ma_3d_dynamic/outdoors/running_jumping/reference.rrd || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' --include 'golden/**' --include 'body_models/**' --local-dir data/"
 cwd = "packages/mamma"
-outputs = ["packages/mamma/data/inputs/indoors/crossing_arms/meta/global.npz"]
+outputs = ["packages/mamma/data/inputs/indoors/crossing_arms/meta/global.npz", "packages/mamma/data/golden/ma_3d_dynamic/outdoors/running_jumping/reference.rrd"]
 description = "Download crossing_arms inputs + slim golden + body models (private HF repo)"
 
 [feature.mamma.tasks._download-mamma-weights]

@@ -1,7 +1,9 @@
 """Dynamic golden gate: run the streaming pipeline on the full running_jumping
-clip (478 frames, runs + jumps) and gate per-frame PVE against the original
-5-stage DAG's SMPL-X output. Unlike validate_golden's 30-frame quasi-static
-slice, this covers fast motion — the failure mode the strides regressions hid.
+clip (478 frames, runs + jumps) and gate per-frame PVE against the frozen
+reference (``data/golden/ma_3d_dynamic/outdoors/running_jumping/reference.rrd``,
+see ``mamma.eval.dynamic_reference``). Unlike validate_golden's 30-frame
+quasi-static slice, this covers fast motion — the failure mode the strides
+regressions hid.
 
 Exit code 0 = PASS, 1 = FAIL.
 """
@@ -11,7 +13,6 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import tyro
@@ -23,6 +24,7 @@ from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.pipeline import ResultCollector, StreamingPipeline, build_streaming_pipeline
 from mamma.engine.types import CameraTracks
+from mamma.eval.dynamic_reference import load_reference
 from mamma.fitting.stage import TickFitOutput
 from mamma.fitting.window_fitter import FitterConfig
 from mamma.landmarks.estimator import CameraLandmarks
@@ -56,15 +58,9 @@ class ValidateDynamicConfig:
     """Window fitter settings (emit every frame — the comparison needs fresh meshes)."""
     data_dir: Path = Path("data/inputs/outdoors/running_jumping")
     """Dynamic capture inputs (MAMMA NPZ layout)."""
-    reference: Literal["pred", "dag"] = "pred"
-    """What the PVE is measured against, stated in every result line: ``pred`` = the dataset's own MAMMA prediction
-    (``<data_dir>/pred/params_00.npz`` forwarded through SMPL-X; 5.1 mm PVE from the original DAG on crossing_arms
-    60:90); ``dag`` = the frozen original-DAG output (``golden_npz``, missing from the data repo since 2026-11). A
-    missing reference fails; switching references needs its own baseline."""
-    golden_npz: Path = Path("data/golden/ma_3d_dynamic/outdoors/running_jumping/verts_joints_body_id-00.npz")
-    """Frozen original-DAG verts/joints for this clip (ma_3d output), for ``reference dag``."""
-    model_dir: Path = Path("data/body_models")
-    """Body-model root containing ``smplx/SMPLX_NEUTRAL.npz`` (``reference pred``)."""
+    reference_rrd: Path = Path("data/golden/ma_3d_dynamic/outdoors/running_jumping/reference.rrd")
+    """Frozen reference vertices (``mamma.eval.dynamic_reference``): the dataset's MAMMA prediction through SMPL-X, frozen
+    on 2026-11-21 because the original-DAG output was lost. A missing file fails the gate."""
     mammanet_weights: Path = Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors")
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
@@ -90,24 +86,14 @@ class ValidateDynamicConfig:
 
 def main(config: ValidateDynamicConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
-    golden_verts: Float32[ndarray, "f v 3"]
-    if config.reference == "dag":
-        if not config.golden_npz.exists():
-            print(f"FAIL: reference dag selected but {config.golden_npz} is missing")
-            return 1
-        reference: str = f"original DAG, {config.golden_npz}"
-        golden_verts = np.load(config.golden_npz, allow_pickle=True)["pred_vertices"]
-    else:
-        from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
-
-        pred_npz: Path = config.data_dir / "pred" / "params_00.npz"
-        if not pred_npz.exists():
-            print(f"FAIL: reference pred selected but {pred_npz} is missing")
-            return 1
-        reference = f"dataset MAMMA prediction, {pred_npz}"
-        pp = np.load(pred_npz, allow_pickle=True)
-        layer = SmplxLayerTorch(betas=pp["betas"].reshape(-1).astype(np.float32), model_root_dir=config.model_dir, flat_hand_mean=False)
-        golden_verts = layer.to(config.device).forward_batched(pp["poses"].astype(np.float32), pp["trans"].astype(np.float32)).vertices
+    try:
+        reference_frames, golden_verts, reference = load_reference(config.reference_rrd)
+    except (FileNotFoundError, ValueError) as error:
+        print(f"FAIL: {error}")
+        return 1
+    if reference_frames.tolist() != list(range(sequence.frame_count)):
+        print(f"FAIL: {config.reference_rrd} must hold every frame 0..{sequence.frame_count - 1} of {sequence.name} in order")
+        return 1
     print(f"sequence {sequence.name}: {sequence.frame_count} frames; golden verts {golden_verts.shape}")
 
     collector: ResultCollector = _FitsOnlyCollector()

@@ -147,6 +147,7 @@ class Nvdec444Decoder:
     def _release(self) -> None:
         # Drop the native decoder and demuxer here, on their thread.
         self._packets = iter(())
+        self.__dict__.pop("_ready", None)  # decoded frames still queued: full-resolution RGB on the GPU
         self.__dict__.pop("_decoder", None)
         self.__dict__.pop("_demuxer", None)
 
