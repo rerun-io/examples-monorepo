@@ -38,8 +38,9 @@ def test_graph_cache_replays_match_eager_per_signature() -> None:
     assert cache.replays == 8
 
 
+@pytest.mark.parametrize("one_graph", [False, True])
 @pytest.mark.parametrize("bf16", [False, True])
-def test_forward_batched_with_graphs_is_bit_identical(bf16: bool, efficienttam_ti, scene: Callable[[int], torch.Tensor]) -> None:
+def test_forward_batched_with_graphs_is_bit_identical(bf16: bool, one_graph: bool, efficienttam_ti, scene: Callable[[int], torch.Tensor]) -> None:
     from sam2.cuda_graphs import GraphCache
     from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
     from sam2.modeling.sam2_prompt import SAM2Prompt
@@ -67,7 +68,7 @@ def test_forward_batched_with_graphs_is_bit_identical(bf16: bool, efficienttam_t
         prompts: list[list[SAM2Prompt]] = prompts_at.get(step, [[], []])
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16, cache_enabled=False):
             want = predictor.forward_batched(eager, step, frames, prompts, [False, False])
-            got = predictor.forward_batched(graphed, step, frames, prompts, [False, False], graphs=cache)
+            got = predictor.forward_batched(graphed, step, frames, prompts, [False, False], graphs=cache, one_graph=one_graph)
         for slot in range(2):
             assert list(got[slot]) == list(want[slot])
             for obj_id, result in got[slot].items():

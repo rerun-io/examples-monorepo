@@ -236,10 +236,11 @@ class MultiViewTracker:
     def _forward_batched(
         self, states: list, frame_idx: int, frames: UInt8[torch.Tensor, "c 3 h w"], prompts: list[list]
     ) -> list[dict[int, SAM2Result]]:
-        """One ``forward_batched`` step over every camera, with every mask hypothesis (tracks read hypothesis 0)."""
+        """One ``forward_batched`` step over every camera, with every mask hypothesis (tracks read hypothesis 0); a
+        steady step is one CUDA graph replay where captured."""
         # No autocast cast cache with graphs: a graph must not read a cached cast that the region's exit frees.
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=self._graphs is None):
-            return self.predictor.forward_batched(states, frame_idx, frames, prompts, [False] * len(states), graphs=self._graphs, best_only=False)
+            return self.predictor.forward_batched(states, frame_idx, frames, prompts, [False] * len(states), graphs=self._graphs, best_only=False, one_graph=True)
 
     def _fundamental(self, source_idx: int, target_idx: int) -> Float64[ndarray, "3 3"] | None:
         src: CameraCalibration = self.cameras[source_idx]
@@ -540,8 +541,8 @@ class MultiViewTracker:
         if not rows:
             return tracks
         masks, stats = first_hypothesis_stats(
-            torch.cat([per_cam[cam_idx][obj_id].masks_logits for cam_idx, obj_id in rows]),
-            torch.cat([per_cam[cam_idx][obj_id].ious for cam_idx, obj_id in rows]),
+            torch.cat([per_cam[cam_idx][obj_id].masks_logits[:, :1] for cam_idx, obj_id in rows]),
+            torch.cat([per_cam[cam_idx][obj_id].ious[:, :1] for cam_idx, obj_id in rows]),
         )
         all_stats: Float32[ndarray, "n 7"] = stats.cpu().numpy()
         for row, (cam_idx, obj_id) in enumerate(rows):
