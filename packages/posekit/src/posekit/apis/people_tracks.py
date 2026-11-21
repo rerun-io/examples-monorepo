@@ -81,8 +81,8 @@ class TrackOptions:
     """Prompt the tracker with the SAM 3 mask as well as its box (keeps small people and the operator on shape)."""
     lookahead: bool = True
     """Run SAM 3 for the next re-detect step on a worker thread and its own CUDA stream while the tracker steps before it
-    run (SAM 3 is GEMM-bound, the tracker launch-bound, so they overlap on the GPU). Same masks as ``False``, which runs
-    SAM 3 in line."""
+    run, the tracker on a high-priority stream (SAM 3 is GEMM-bound, the tracker launch-bound, so they overlap on the
+    GPU). Same masks as ``False``, which runs SAM 3 in line on the tracker's stream."""
 
 
 @dataclass
