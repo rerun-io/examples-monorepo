@@ -212,7 +212,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
 
         return {obj_id: result for obj_id, result in zip(all_obj_ids, batched_results)}
 
-    def _index_tensor(self, values: list, dtype: torch.dtype = torch.long) -> torch.Tensor:
+    def index_tensor(self, values: list, dtype: torch.dtype = torch.long) -> torch.Tensor:
         """``values`` on the device without a host sync: a copy from pageable host memory waits for all queued GPU work,
         one from pinned memory with ``non_blocking`` does not."""
         if self.device.type != "cuda":
@@ -245,7 +245,8 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         from sam2.modeling.memory import ObjectMemory
 
         assert len(states) == len(prompts) == len(multimask_output) == frames.shape[0]
-        assert not self.non_overlap_masks_for_mem_enc, "the memory encoder batch mixes videos"
+        # a batch row is one object of one video: non-overlap constraints across rows would let videos suppress each other
+        assert not self.non_overlap_masks_for_mem_enc and not self.non_overlap_masks, "the batch mixes videos"
         video_hw: tuple[int, int] = states[0].video_hw
         assert all(s.video_hw == video_hw for s in states) and tuple(frames.shape[-2:]) == video_hw
         if graphs is not None:
@@ -304,7 +305,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
 
         results: list[SAM2Result | None] = [None] * len(items)
         for key, members in groups.items():
-            slots = self._index_tensor([items[i][0] for i in members])
+            slots = self.index_tensor([items[i][0] for i in members])
             group_img = [level.index_select(0, slots) for level in img_embeddings]
             if key[0] == "prompt":
                 group_prompts: list[SAM2Prompt] = [items[i][2] for i in members]
@@ -396,7 +397,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         if not items:
             return outputs
         all_results = SAM2Result.cat(results)
-        slots = self._index_tensor([item[0] for item in items])
+        slots = self.index_tensor([item[0] for item in items])
 
         def encode(low: torch.Tensor, masks_logits: torch.Tensor, obj_score_logits: torch.Tensor, is_prompt: torch.Tensor):
             return self.encode_memory(img_embeddings=[low], masks_logits=masks_logits, obj_score_logits=obj_score_logits, is_prompt=is_prompt)
@@ -408,7 +409,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
                 img_embeddings[-1].index_select(0, slots),
                 all_results.masks_logits,
                 all_results.obj_score_logits,
-                self._index_tensor([item[2] is not None for item in items], torch.bool),
+                self.index_tensor([item[2] is not None for item in items], torch.bool),
             ],
         )
         for slot, state in enumerate(states):
@@ -416,7 +417,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
             if not rows:
                 continue
             obj_ids = [items[i][1] for i in rows]
-            index = self._index_tensor(rows)
+            index = self.index_tensor(rows)
             state.memory_bank.try_add_memories(
                 frame_idx=frame_idx,
                 obj_ids=obj_ids,

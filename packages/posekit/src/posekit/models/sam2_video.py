@@ -202,9 +202,9 @@ class Sam2VideoSegmenter(VideoSegmenter):
         return BoxDetections(
             xyxy=torch.where(cols.any(dim=1, keepdim=True), boxes, 0.0),
             scores=torch.cat([result.ious.max(dim=1).values for _, _, result in rows_out]).float(),
-            frame_indices=self.predictor._index_tensor([slot for slot, _, _ in rows_out]),
+            frame_indices=self.predictor.index_tensor([slot for slot, _, _ in rows_out]),
             masks=masks,
-            track_ids=self.predictor._index_tensor([obj_id for _, obj_id, _ in rows_out]),
+            track_ids=self.predictor.index_tensor([obj_id for _, obj_id, _ in rows_out]),
         )
 
     def _prompts_for_slot(self, prompts: SegmentationPrompts, slot: int) -> list:
