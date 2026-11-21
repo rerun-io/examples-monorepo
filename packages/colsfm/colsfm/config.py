@@ -324,7 +324,8 @@ class VisionMappingConfig:
     min_num_matches_per_pair: int
     """Drop an image pair with fewer matches than this."""
     depth_threshold: float
-    """World-frame Z cap in metres, one axis and one-sided; not a camera depth."""
+    """Largest distance in metres from a point to its nearest observing camera centre
+    (`colsfm.point_filters.filter_degenerate_points`); cuSFM reads it as a world-Z cap."""
     search_depth: int
     """Maximum BFS hop count when growing one track over the match graph."""
     min_correspondences: int
