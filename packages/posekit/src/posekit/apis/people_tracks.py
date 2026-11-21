@@ -26,11 +26,10 @@ import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 from jaxtyping import Bool, UInt8
 from numpy import ndarray
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
@@ -46,7 +45,7 @@ from posekit.apis.people_masks import (
 )
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_masks, selection_windows
+from posekit.ops.people_masks import dilate_masks
 from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
 from posekit.predictions import BoxDetections
 
@@ -118,58 +117,6 @@ class PeopleTracksConfig:
     """Tracker frames decoded per NVDEC call."""
     device: str = "cuda"
     """Inference and decode device."""
-
-
-class StreamDecoder:
-    """Sequential NVDEC decode of one stream from the keyframe before ``start``."""
-
-    def __init__(self, video: CatalogVideo, start: int, end: int, device: str) -> None:
-        """Mux the packets ``[keyframe before start, end)`` into an in-memory MP4 and open a decoder."""
-        from torchcodec.decoders import VideoDecoder
-
-        self.first: int = selection_windows(video.keyframes, [start])[0].first
-        data: bytes = wrap_mp4(video.samples[self.first : end], video.keyframes[self.first : end], 30, codec=video.codec)
-        self.decoder = VideoDecoder(data, device=device, seek_mode="exact")
-
-    def frames(self, indices: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        """RGB frames at ascending stream indices."""
-        batch: UInt8[Tensor, "n 3 h w"] = self.decoder.get_frames_at([i - self.first for i in indices]).data
-        # NVDEC frames are NHWC in memory (NCHW is a view), so this is a view, not a copy
-        return rearrange(batch, "n c h w -> n h w c").contiguous()
-
-
-def prefetched_chunks(
-    videos: tuple[CatalogVideo, ...], chunks: list[list[int]], start: int, end: int, device: str
-) -> Iterator[UInt8[Tensor, "s n h w 3"]]:
-    """The frames of each chunk, all streams stacked. Decoding starts at the call, and the next chunk decodes on one
-    thread per stream while the caller computes on the current one (two NVDEC threads decode twice the frames per
-    second of one on the 5090).
-
-    A torchcodec CUDA decoder fails on a thread other than the one that created it, so each decoder is made on its thread.
-    """
-    threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in range(len(videos))]
-    decoders: list[Future[StreamDecoder]] = [thread.submit(StreamDecoder, v, start, end, device) for thread, v in zip(threads, videos, strict=True)]
-
-    def decode(slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        frames: UInt8[Tensor, "n h w 3"] = decoders[slot].result().frames(chunk)
-        # This thread's stream only: a device-wide synchronize invalidates a CUDA graph the tracker captures meanwhile.
-        torch.cuda.current_stream(device).synchronize()
-        return frames
-
-    def submit(chunk: list[int]) -> list[Future[Tensor]]:
-        return [thread.submit(decode, slot, chunk) for slot, thread in enumerate(threads)]
-
-    def stacked(pending: list[Future[Tensor]]) -> Iterator[UInt8[Tensor, "s n h w 3"]]:
-        try:
-            for position in range(len(chunks)):
-                batches: list[Tensor] = [future.result() for future in pending]
-                pending = submit(chunks[position + 1]) if position + 1 < len(chunks) else []
-                yield torch.stack(batches)
-        finally:
-            for thread in threads:
-                thread.shutdown(cancel_futures=True)
-
-    return stacked(submit(chunks[0]) if chunks else [])
 
 
 class PeopleTracker:
@@ -361,7 +308,8 @@ def main(config: PeopleTracksConfig) -> None:
 
     load_start: float = time.perf_counter()
     chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
-    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = prefetched_chunks(videos, chunks, config.start, end, config.device)
+    # decoding starts here, overlapping the model load
+    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = (torch.stack(batches) for batches in PrefetchedChunks(videos, chunks, config.start, end, config.device))
     tracker = PeopleTracker(config.track, config.mask, config.device)
     targets: list[str] = [mask_entity(e) for e in entities]
     factor: int = config.mask_downscale

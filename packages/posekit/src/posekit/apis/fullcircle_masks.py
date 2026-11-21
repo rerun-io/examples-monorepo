@@ -15,7 +15,6 @@ scene at infinity, as in a stitched panorama).
 
 import time
 from collections.abc import Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -24,16 +23,14 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from datafusion import col
-from einops import rearrange
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
@@ -190,18 +187,6 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
     tracked: list[int] = list(range(config.start, end, config.stride))
-    # Each decoder holds the packets from the keyframe at or before ``start`` to ``end``.
-    firsts: list[int] = [max(i for i in range(config.start + 1) if video.keyframes[i]) for video in videos]
-    decoders: list[VideoDecoder] = []
-    for video, first in zip(videos, firsts, strict=True):
-        decoders.append(
-            VideoDecoder(
-                wrap_mp4(video.samples[first:end], video.keyframes[first:end], config.fps, codec=video.codec),
-                device=str(device),
-                seek_mode="exact",
-                num_ffmpeg_threads=0,
-            )
-        )
     read_s: float = time.perf_counter() - process_start
     print(
         f"segment {segment_id}: {n_framesets} framesets, tracking {len(tracked)} (stride {config.stride}) over {config.start}..{end - 1}; read {read_s:.1f} s"
@@ -228,32 +213,16 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
 
     decode_wait_s: float = 0.0
 
-    # One thread per lens: an NVDEC decoder fails on a thread other than the one it first decoded on, and the two lenses
-    # decode in parallel (1.7x the frames per second of one thread for both on the 5090).
-    decode_threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{lens}") for lens in range(len(decoders))]
-
-    def decode(lens: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        frames: UInt8[Tensor, "n h w 3"] = rearrange(decoders[lens].get_frames_at([i - firsts[lens] for i in chunk]).data, "n c h w -> n h w c")
-        torch.cuda.synchronize(device)
-        return frames
+    chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
 
     def decoded_chunks() -> Iterator[tuple[int, list[int], list[list[UInt8[Tensor, "h w 3"]]]]]:
         """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the
-        lens frames. The next chunk decodes on the decode threads while the caller computes on this one."""
+        lens frames. The next chunk decodes on one thread per lens while the caller computes on this one."""
         nonlocal decode_wait_s
-        chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
-
-        def submit(chunk: list[int]) -> list[Future[Tensor]]:
-            return [thread.submit(decode, lens, chunk) for lens, thread in enumerate(decode_threads)]
-
-        pending: list[Future[Tensor]] = submit(chunks[0]) if chunks else []
-        for position, chunk in enumerate(chunks):
-            tick: float = time.perf_counter()
-            batches: list[Tensor] = [future.result() for future in pending]
-            decode_wait_s += time.perf_counter() - tick
-            pending = submit(chunks[position + 1]) if position + 1 < len(chunks) else []
-            frames: list[list[Tensor]] = [[batch[column] for batch in batches] for column in range(len(chunk))]
-            yield position * config.decode_chunk, chunk, frames
+        prefetched = PrefetchedChunks(videos, chunks, config.start, end, str(device), config.fps)
+        for position, (chunk, batches) in enumerate(zip(chunks, prefetched, strict=True)):
+            yield position * config.decode_chunk, chunk, [[batch[column] for batch in batches] for column in range(len(chunk))]
+        decode_wait_s += prefetched.wait_s
 
     detect_start: float = time.perf_counter()
     directions: list[Float64[ndarray, "3"] | None] = []

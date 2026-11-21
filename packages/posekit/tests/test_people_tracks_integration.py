@@ -19,9 +19,10 @@ def test_people_tracker_keeps_the_operator_between_redetects() -> None:
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
     from simplecv.catalog_video import read_catalog_videos
+    from simplecv.catalog_video_decode import StreamDecoder
 
     from posekit.apis.people_masks import MaskOptions
-    from posekit.apis.people_tracks import PeopleTracker, StreamDecoder, TrackOptions
+    from posekit.apis.people_tracks import PeopleTracker, TrackOptions
     from posekit.ops.people_tracks import mask_iou
 
     entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
@@ -51,8 +52,7 @@ def test_prefetched_chunks_match_the_sequential_decode() -> None:
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
     from simplecv.catalog_video import read_catalog_videos
-
-    from posekit.apis.people_tracks import StreamDecoder, prefetched_chunks
+    from simplecv.catalog_video_decode import PrefetchedChunks, StreamDecoder
 
     entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
     with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
@@ -62,7 +62,7 @@ def test_prefetched_chunks_match_the_sequential_decode() -> None:
     decoders = [StreamDecoder(v, 10, 71, "cuda") for v in videos]
     expected = [torch.stack([d.frames(chunk) for d in decoders]) for chunk in chunks]
 
-    got = list(prefetched_chunks(videos, chunks, 10, 71, "cuda"))
+    got = [torch.stack(batches) for batches in PrefetchedChunks(videos, chunks, 10, 71, "cuda")]
 
     assert len(got) == len(chunks)
     assert all(torch.equal(g, e) for g, e in zip(got, expected, strict=True))
@@ -76,9 +76,10 @@ def test_people_tracker_lookahead_gives_the_same_masks() -> None:
         pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
     import rerun as rr
     from simplecv.catalog_video import read_catalog_videos
+    from simplecv.catalog_video_decode import StreamDecoder
 
     from posekit.apis.people_masks import MaskOptions
-    from posekit.apis.people_tracks import PeopleTracker, StreamDecoder, TrackOptions
+    from posekit.apis.people_tracks import PeopleTracker, TrackOptions
 
     entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
     with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
