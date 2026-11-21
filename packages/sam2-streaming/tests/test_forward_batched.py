@@ -71,3 +71,33 @@ def test_forward_batched_matches_per_slot_forward_in_fp32(efficienttam_ti, scene
                 iou: float = float((mask_want & mask_got).sum() / (mask_want | mask_got).sum().clamp_min(1))
                 assert iou > 0.999, (step, slot, obj_id, iou)
                 assert mask_got.any()
+
+
+@pytest.mark.integration
+def test_all_hypotheses_keep_the_best_one_and_the_same_memories(efficienttam_ti, scene: Callable[[int], torch.Tensor]) -> None:
+    """``best_only=False`` returns the decoder's three propagated hypotheses; the best of them is the ``best_only`` mask."""
+    from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
+    from sam2.modeling.sam2_prompt import SAM2Prompt
+    from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
+
+    predictor = efficienttam_ti
+    device = torch.device("cuda")
+
+    def states() -> list[SAM2GenericVideoPredictorState]:
+        return [SAM2GenericVideoPredictorState.create((256, 256), SAM2ForgetfulObjectMemoryBank(storage_device=device)) for _ in range(2)]
+
+    first: list[list[SAM2Prompt]] = [
+        [SAM2Prompt(obj_id=0, boxes=torch.tensor([[30.0, 80.0, 100.0, 150.0]], device=device))],
+        [SAM2Prompt(obj_id=0, boxes=torch.tensor([[93.0, 25.0, 163.0, 95.0]], device=device))],
+    ]
+    best, every = states(), states()
+    for step in range(6):
+        frames: torch.Tensor = scene(step).to(device).permute(0, 3, 1, 2)
+        prompts: list[list[SAM2Prompt]] = first if step == 0 else [[], []]
+        want = predictor.forward_batched(best, step, frames, prompts, [False, False])
+        got = predictor.forward_batched(every, step, frames, prompts, [False, False], best_only=False)
+        for slot in range(2):
+            result = got[slot][0]
+            assert result.masks_logits.shape[1] == (1 if step == 0 else 3)
+            torch.testing.assert_close(result.best_mask_logits, want[slot][0].masks_logits, rtol=0, atol=0)
+            torch.testing.assert_close(result.obj_ptrs, want[slot][0].obj_ptrs, rtol=0, atol=0)

@@ -232,6 +232,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         prompts: list[list[SAM2Prompt]],
         multimask_output: list[bool],
         graphs: GraphCache | None = None,
+        best_only: bool = True,
     ) -> list[dict[int, SAM2Result]]:
         """``forward`` for several videos at the same timestep, each module run once per group instead of per object.
 
@@ -239,7 +240,9 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         prompt layout, propagated objects by memory layout (numbers of conditional, non-conditional and pointer
         memories); each group is one batch through memory attention and the mask decoder, and one memory-encoder call
         covers every object. Per object the operations are those of ``forward`` (each pointer memory keeps its own
-        frame index); only batch-size-dependent kernel numerics differ. The masks carry the best hypothesis only.
+        frame index); only batch-size-dependent kernel numerics differ. With ``best_only`` the masks carry the best
+        hypothesis only; without, every hypothesis the mask decoder makes, in its order (three for propagated objects,
+        as ``forward``), and the memories still encode the best one.
         With ``graphs``, the image encoder, memory attention, mask decoder and memory encoder replay CUDA graphs per
         input signature (same kernels and layouts, so the same results); the selection and batching glue stays eager.
 
@@ -267,10 +270,10 @@ class SAM2GenericVideoPredictor(SAM2Generic):
             slots = self.index_tensor([item.slot for item in group])
             group_img = [level.index_select(0, slots) for level in img_embeddings]
             if isinstance(layout, _PromptLayout):
-                result = self._decode_prompted(layout, group, group_img, video_hw, graphs)
+                result = self._decode_prompted(layout, group, group_img, video_hw, graphs, best_only)
             else:
                 group_low_pos = img_pos_embeddings[-1].index_select(0, slots)
-                result = self._propagate(layout, group, group_img, group_low_pos, frame_idx, video_hw, graphs)
+                result = self._propagate(layout, group, group_img, group_low_pos, frame_idx, video_hw, graphs, best_only)
             for row, index in enumerate(members):
                 by_index[index] = result[row]
 
@@ -315,6 +318,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         img_embeddings: list[torch.Tensor],
         video_hw: tuple[int, int],
         graphs: GraphCache | None,
+        best_only: bool,
     ) -> SAM2Result:
         """Masks of a group of prompted objects (one prompt layout): one prompt-encoder and one mask-decoder batch."""
         group_prompts: list[SAM2Prompt] = [item.prompt for item in group]
@@ -333,11 +337,11 @@ class SAM2GenericVideoPredictor(SAM2Generic):
                     img_embeddings=list(tensors[:n_levels]),
                     prompt_embeddings=(tensors[n_levels], tensors[n_levels + 1]),
                     multimask_output=layout.multimask,
-                    best_only=True,
+                    best_only=best_only,
                 )
             )
 
-        return SAM2Result(*_run(graphs, ("prompted", video_hw, layout.multimask), decode, [*img_embeddings, *prompt_embeddings]))
+        return SAM2Result(*_run(graphs, ("prompted", video_hw, layout.multimask, best_only), decode, [*img_embeddings, *prompt_embeddings]))
 
     def _propagate(
         self,
@@ -348,6 +352,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         frame_idx: int,
         video_hw: tuple[int, int],
         graphs: GraphCache | None,
+        best_only: bool,
     ) -> SAM2Result:
         """Masks of a group of propagated objects (one memory layout): memory k of every object stacks into one
         (B, ...) tensor, then one memory-attention and one mask-decoder batch."""
@@ -393,11 +398,11 @@ class SAM2GenericVideoPredictor(SAM2Generic):
                     img_embeddings=list(levels),
                     prompt_embeddings=(empty_sparse.expand(n, -1, -1), empty_dense.expand(n, -1, -1, -1)),
                     multimask_output=True,
-                    best_only=True,
+                    best_only=best_only,
                 )
             )
 
-        return SAM2Result(*_run(graphs, ("propagated", video_hw), decode, [*img_embeddings[:-1], conditioned_low]))
+        return SAM2Result(*_run(graphs, ("propagated", video_hw, best_only), decode, [*img_embeddings[:-1], conditioned_low]))
 
     def _store_memories(
         self,
@@ -410,7 +415,8 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         graphs: GraphCache | None,
     ) -> list[dict[int, SAM2Result]]:
         """One memory-encoder call for every object, then each state's bank stores its own rows."""
-        all_results = SAM2Result.cat(results)
+        all_results = SAM2Result.cat(results)  # objects with different hypothesis counts are reduced to the best one
+        best_masks = all_results.masks_logits if all_results.masks_logits.shape[1] == 1 else all_results.best_mask_logits
         slots = self.index_tensor([item.slot for item in items])
 
         def encode(low: torch.Tensor, masks_logits: torch.Tensor, obj_score_logits: torch.Tensor, is_prompt: torch.Tensor):
@@ -422,7 +428,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
             encode,
             [
                 low_res_img_embeddings.index_select(0, slots),
-                all_results.masks_logits,
+                best_masks,
                 all_results.obj_score_logits,
                 self.index_tensor([item.prompt is not None for item in items], torch.bool),
             ],
