@@ -72,9 +72,10 @@ def test_existing_2d_configs_parse_on_the_cli() -> None:
     """The graph-transform hook is code-only; it must not break CLI parsing (posekit-video-pose --help)."""
     import tyro
 
-    from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, RtmPoseConfig, YoloxDetectorConfig
+    from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, RtmPoseConfig, YoloDetectorConfig, YoloxDetectorConfig
 
     assert isinstance(tyro.cli(AnnotatedDetectorConfig, args=["yolox"]), YoloxDetectorConfig)
+    assert isinstance(tyro.cli(AnnotatedDetectorConfig, args=["yolo"]), YoloDetectorConfig)
     assert isinstance(tyro.cli(AnnotatedPose2dConfig, args=["rtmpose"]), RtmPoseConfig)
 
 
@@ -115,3 +116,4 @@ def test_fast_body_cli_can_select_unquantized_backbone() -> None:
     config = tyro.cli(AnnotatedBodyPose3dConfig, args=["sam3d-body-fast", "--backbone-precision", "bf16"])
     assert isinstance(config, Sam3dBodyFastConfig)
     assert config.backbone_precision == "bf16"
+

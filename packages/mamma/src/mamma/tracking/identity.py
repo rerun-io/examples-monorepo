@@ -5,7 +5,7 @@ parts removed: the bank is append-only with FIFO eviction (no whole-sequence
 gallery passes), and cross-camera identity transfer uses single-frame epipolar
 geometry exactly as the original bootstrap did.
 
-Original defaults preserved: ViT-B-32 @ laion2b_s34b_b79k, bank size 64,
+Original defaults preserved: ViT-B-32 @ laion2b_s34b_b79k (posekit's ClipIdentity), bank size 64,
 near-duplicate skip at cosine > 0.998, combined score = 0.35*CLIP + 0.65*epipolar,
 sigma_px = max(24, 0.055*diag), max_dist_px = max(2*sigma, 0.12*diag).
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float32, Float64, UInt8
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 CLIP_WEIGHT: float = 0.35
@@ -26,34 +26,6 @@ BANK_MAX_SIZE: int = 64
 """Maximum CLIP features kept per person (FIFO eviction)."""
 DUPLICATE_COSINE: float = 0.998
 """Features more similar than this to an existing bank entry are skipped."""
-
-
-class ClipEncoder:
-    """open-clip ViT-B-32 (laion2b_s34b_b79k) image encoder for person crops."""
-
-    def __init__(self, device: str = "cuda") -> None:
-        from typing import Any
-
-        import open_clip
-        from PIL import Image
-
-        self._image_cls = Image
-        # open_clip's factory has loose stubs; keep the handles dynamically typed.
-        created: Any = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
-        self.model: Any = created[0].to(device).eval()
-        self.preprocess: Any = created[2]
-        self.device: str = device
-
-    def encode(self, crops: list[UInt8[ndarray, "ch cw 3"]]) -> Float32[torch.Tensor, "n 512"]:
-        """Encode RGB crops to CLIP features (CPU float32, unnormalized)."""
-        if not crops:
-            return torch.zeros((0, 512), dtype=torch.float32)
-        batch: Float32[torch.Tensor, "n 3 224 224"] = torch.stack(
-            [self.preprocess(self._image_cls.fromarray(crop)) for crop in crops], dim=0
-        ).to(self.device)
-        with torch.inference_mode():
-            feats: torch.Tensor = self.model.encode_image(batch)
-        return feats.detach().cpu().float()
 
 
 class FeatureBank:
@@ -244,3 +216,28 @@ def order_bootstrap_candidates(
     # lexsort: last key is primary -> ineligible after eligible; then distance (eligible) / support; then score.
     secondary: Float64[ndarray, "n"] = np.where(eligible, np.asarray(distances), -support_arr)
     return [int(i) for i in np.lexsort((-np.asarray(ref_scores, dtype=np.float64), secondary, ~eligible))]
+
+
+def continues_track(
+    det_box: Float32[ndarray, "4"], own_box: Float32[ndarray, "4"] | None, other_boxes: list[Float32[ndarray, "4"]], min_cover: float
+) -> bool:
+    """Whether a re-detected box continues a live track rather than moving it onto someone else.
+
+    The box must cover at least ``min_cover`` of the track's own current box (a drifted, shrunken mask still counts) and
+    cover it more than it covers any other live person's box. After people touch, appearance and epipolar scores are a
+    near-tie that numerical noise decides, so the current track keeps its identity unless it is lost. The original MAMMA
+    gets this stability offline, from anchors over the whole clip and a geometric whole-track vote; a causal tracker
+    has only the present track to lean on.
+    """
+    if own_box is None:
+        return False
+    own: float = _covered_fraction(own_box, det_box)
+    return own >= min_cover and all(own > _covered_fraction(other, det_box) for other in other_boxes)
+
+
+def _covered_fraction(box: Float32[ndarray, "4"], by: Float32[ndarray, "4"]) -> float:
+    """Fraction of ``box``'s area inside ``by`` (xyxy)."""
+    w: float = max(0.0, min(float(box[2]), float(by[2])) - max(float(box[0]), float(by[0])))
+    h: float = max(0.0, min(float(box[3]), float(by[3])) - max(float(box[1]), float(by[1])))
+    area: float = max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+    return w * h / area if area > 0.0 else 0.0

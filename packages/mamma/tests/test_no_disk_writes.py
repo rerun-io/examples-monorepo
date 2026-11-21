@@ -67,7 +67,6 @@ def test_streaming_run_creates_no_files() -> None:
     scaled = [c.scaled_to(height=resize_hw[0], width=resize_hw[1]) for c in sequence.cameras]
     tracker_cfg = TrackerConfig(
         sam2_checkpoint=_DATA / "weights/efficienttam/efficienttam_ti.pt",
-        yolo_checkpoint=_DATA / "weights/yolo/yolo12x.pt",
         expected_subjects=1,
     )
     fitter_cfg = FitterConfig(
