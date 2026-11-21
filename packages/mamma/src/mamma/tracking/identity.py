@@ -180,7 +180,6 @@ cross-camera epipolar support is at least this fraction of the best candidate's.
 
 def order_bootstrap_candidates(
     ref_idx: int,
-    ref_centers: Float32[ndarray, "n 3"] | Float64[ndarray, "n 3"],
     ref_scores: Float32[ndarray, "n"],
     centers_per_cam: list[Float32[ndarray, "m 3"]],
     k_matrices: list[Float64[ndarray, "3 3"]],
@@ -189,7 +188,8 @@ def order_bootstrap_candidates(
     max_dist_px: float,
     min_score: float,
 ) -> list[int]:
-    """Reference-camera detections ordered for bootstrap: best-supported first, then nearest the rig centre.
+    """Reference-camera detections (``centers_per_cam[ref_idx]``) ordered for bootstrap: best-supported first,
+    then nearest the rig centre.
 
     Support is the sum, over the other cameras, of the candidate's best epipolar score there: the capture
     subject stands inside the ring and every camera sees it, so its support is near the camera count. A
@@ -204,25 +204,27 @@ def order_bootstrap_candidates(
     p_ref: Float64[ndarray, "3 4"] = k_matrices[ref_idx] @ world_to_cams[ref_idx][:3, :]
     cam_centers: Float64[ndarray, "c 3"] = np.stack([-w2c[:3, :3].T @ w2c[:3, 3] for w2c in world_to_cams])
     rig_xy: Float64[ndarray, "2"] = cam_centers[:, :2].mean(axis=0)
+    # Fundamental matrix and projection of every other camera, once (not per candidate).
+    others: list[tuple[Float32[ndarray, "m 3"], Float64[ndarray, "3 3"], Float64[ndarray, "3 4"]]] = []
+    for cam_idx, centers in enumerate(centers_per_cam):
+        if cam_idx == ref_idx or len(centers) == 0:
+            continue
+        f_matrix: Float64[ndarray, "3 3"] | None = fundamental_matrix(
+            k_matrices[ref_idx], world_to_cams[ref_idx], k_matrices[cam_idx], world_to_cams[cam_idx]
+        )
+        if f_matrix is not None:
+            others.append((centers, f_matrix, k_matrices[cam_idx] @ world_to_cams[cam_idx][:3, :]))
     supports: list[float] = []
     distances: list[float] = []
-    for x_ref in np.asarray(ref_centers, dtype=np.float64):
+    for x_ref in np.asarray(centers_per_cam[ref_idx], dtype=np.float64):
         support: float = 0.0
         points: list[Float64[ndarray, "3"]] = []
-        for cam_idx, centers in enumerate(centers_per_cam):
-            if cam_idx == ref_idx or len(centers) == 0:
-                continue
-            f_matrix: Float64[ndarray, "3 3"] | None = fundamental_matrix(
-                k_matrices[ref_idx], world_to_cams[ref_idx], k_matrices[cam_idx], world_to_cams[cam_idx]
-            )
-            if f_matrix is None:
-                continue
+        for centers, f_matrix, p_tgt in others:
             scores: list[float] = [epipolar_score(f_matrix, x_ref, x_t, sigma_px, max_dist_px) for x_t in centers]
             best: int = int(np.argmax(scores))
             if scores[best] < min_score:
                 continue
             support += scores[best]
-            p_tgt: Float64[ndarray, "3 4"] = k_matrices[cam_idx] @ world_to_cams[cam_idx][:3, :]
             x_t: Float64[ndarray, "3"] = np.asarray(centers[best], dtype=np.float64)
             a: Float64[ndarray, "4 4"] = np.stack(
                 [

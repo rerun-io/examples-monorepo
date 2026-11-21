@@ -109,13 +109,13 @@ def _order(operator: Float64[ndarray, "3"], operator_in_all: bool, subject: Floa
     """Bootstrap order of [subject, operator] as seen by reference camera 2 (subject at the ring centre)."""
     k, w2cs = _ring_rig()
     sigma_px, max_dist_px = resolve_epipolar_px(1280, 720)
-    centers: list[Float32[ndarray, "m 3"]] = []
-    for w2c in w2cs:
-        people = [subject, operator] if operator_in_all else [subject]
-        centers.append(np.stack([_project(k, w2c, p) for p in people]).astype(np.float32))
-    centers[2] = np.stack([_project(k, w2cs[2], subject), _project(k, w2cs[2], operator)]).astype(np.float32)
+    # Camera 2 (the reference) always sees both; the others see the operator only when operator_in_all.
+    centers: list[Float32[ndarray, "m 3"]] = [
+        np.stack([_project(k, w2c, p) for p in ([subject, operator] if operator_in_all or cam == 2 else [subject])]).astype(np.float32)
+        for cam, w2c in enumerate(w2cs)
+    ]
     # The operator's YOLO score is lower; the rig distance must not depend on it.
-    return order_bootstrap_candidates(2, centers[2], np.array([0.9, 0.8], np.float32), centers, [k] * 4, w2cs, sigma_px, max_dist_px, 0.25)
+    return order_bootstrap_candidates(2, np.array([0.9, 0.8], np.float32), centers, [k] * 4, w2cs, sigma_px, max_dist_px, 0.25)
 
 
 # Off-centre subject, operator at the ring edge seen only by the reference camera. Over a 7448-layout sweep

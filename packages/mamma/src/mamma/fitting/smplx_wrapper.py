@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from jaxtyping import Float, Float32
+from jaxtyping import Float32
 from numpy import ndarray
 
 NUM_BETAS: int = 16
@@ -114,20 +114,20 @@ _RHAND = slice(120, 165)
 
 def forward_params_to_verts(
     model,
-    poses: Float[ndarray, "f 165"],
-    betas: Float[ndarray, "nb"],
-    trans: Float[ndarray, "f 3"],
+    poses: Float32[ndarray, "f 165"],
+    betas: Float32[ndarray, "nb"],
+    trans: Float32[ndarray, "f 3"],
     device: str,
     chunk: int = 64,
-) -> Float[ndarray, "f 10475 3"]:
+) -> Float32[ndarray, "f 10475 3"]:
     """Forward flat 165-dim SMPL-X params through the neutral model, chunked."""
     n_frames: int = poses.shape[0]
-    betas_t: Float[torch.Tensor, "1 nb"] = torch.as_tensor(betas.reshape(1, -1), dtype=torch.float32, device=device)
+    betas_t: Float32[torch.Tensor, "1 nb"] = torch.as_tensor(betas.reshape(1, -1), dtype=torch.float32, device=device)
     verts_out: list[ndarray] = []
     for start in range(0, n_frames, chunk):
         end: int = min(start + chunk, n_frames)
-        t_block: Float[torch.Tensor, "t 165"] = torch.as_tensor(poses[start:end].astype(np.float32), device=device)
-        trans_block: Float[torch.Tensor, "t 3"] = torch.as_tensor(trans[start:end].astype(np.float32), device=device)
+        t_block: Float32[torch.Tensor, "t 165"] = torch.as_tensor(poses[start:end], device=device)
+        trans_block: Float32[torch.Tensor, "t 3"] = torch.as_tensor(trans[start:end], device=device)
         with torch.inference_mode():
             out = smplx_forward_per_parts(
                 model,
