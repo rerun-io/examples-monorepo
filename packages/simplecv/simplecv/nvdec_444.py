@@ -103,7 +103,9 @@ class Nvdec444Decoder:
         Raises:
             ValueError: The stream does not decode to 8-bit planar 4:4:4, or ``color_space`` is not converted here.
         """
-        self.device: torch.device = torch.device(device)
+        # Resolve a bare "cuda" on the caller's thread: the decoder thread starts on device 0 and set_device needs an index.
+        requested: torch.device = torch.device(device)
+        self.device: torch.device = torch.device("cuda", torch.cuda.current_device()) if requested.type == "cuda" and requested.index is None else requested
         self._matrix: Float32[Tensor, "3 3"] = limited_range_yuv_to_rgb_matrix(color_space).to(self.device)
         self._source: Path = source
         self._thread: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nvdec-444")
@@ -122,11 +124,10 @@ class Nvdec444Decoder:
         return self._thread.submit(fn).result()
 
     def _start(self) -> None:
-        if self.device.type == "cuda":
-            torch.cuda.set_device(self.device)  # NVDEC needs the CUDA context current on the decode thread
+        torch.cuda.set_device(self.device)  # NVDEC needs the CUDA context current on the decode thread
         # PyNvVideoCodec binds its API from a compiled module at import time; type checkers see none of it.
         self._nvc: Any = importlib.import_module("PyNvVideoCodec")
-        self._gpu_id: int = self.device.index if self.device.index is not None else torch.cuda.current_device()
+        self._gpu_id: int = torch.cuda.current_device()
         self._open()
         self.width: int = int(self._demuxer.Width())
         self.height: int = int(self._demuxer.Height())
