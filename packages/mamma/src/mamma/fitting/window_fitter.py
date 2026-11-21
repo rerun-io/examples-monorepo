@@ -8,9 +8,11 @@ then a few warm-started Adam iterations per tick, emitting the newest frame.
 
 from __future__ import annotations
 
+import functools
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -202,6 +204,20 @@ def _initial_body_pose(device: str) -> Float32[torch.Tensor, "63"]:
     return body
 
 
+@functools.cache
+def load_body(smplx_model_dir: Path, downsampled_verts_pkl: Path, device: str) -> tuple[Any, Float32[torch.Tensor, "n v"], SampledSmplx]:
+    """The neutral SMPL-X model, the 512-landmark vertex sampling and the sampled model built from them, loaded once
+    per (model, sampling, device) and shared by every fitter: all three are read-only after construction, and
+    ``smplx.create`` plus the pickle take ~0.6 s, which a person appearing mid-stream would otherwise stall on."""
+    import pickle
+
+    model = build_smplx_neutral(smplx_model_dir, device=device)
+    with open(downsampled_verts_pkl, "rb") as f:
+        mat: Float32[torch.Tensor, "n v"] = pickle.load(f)
+    verts_to_landmarks: Float32[torch.Tensor, "n v"] = mat.float().to(device)
+    return model, verts_to_landmarks, SampledSmplx(model, verts_to_landmarks)
+
+
 class SlidingWindowFitter:
     """Causal SMPL-X fitter for one person."""
 
@@ -211,22 +227,16 @@ class SlidingWindowFitter:
         world_to_cam_per_cam: list[Float32[torch.Tensor, "4 4"]],
         config: FitterConfig,
     ) -> None:
-        import pickle
-
         self.config: FitterConfig = config
         self.device: str = config.device
         self.k_per_cam = [k.to(config.device) for k in k_per_cam]
         self.world_to_cam_per_cam = [e.to(config.device) for e in world_to_cam_per_cam]
-        self.model = build_smplx_neutral(config.smplx_model_dir, device=config.device)
-        with open(config.downsampled_verts_pkl, "rb") as f:
-            mat: Float32[torch.Tensor, "n v"] = pickle.load(f)
-        self.verts_to_landmarks: Float32[torch.Tensor, "n v"] = mat.float().to(config.device)
+        self.model, self.verts_to_landmarks, self.sampled_model = load_body(config.smplx_model_dir, config.downsampled_verts_pkl, config.device)
 
         self.betas: Float32[torch.Tensor, "1 nb"] = torch.zeros(1, NUM_BETAS, device=config.device, requires_grad=True)
         self.hand_pose_left: Float32[torch.Tensor, "45"] = torch.zeros(45, device=config.device)
         self.hand_pose_right: Float32[torch.Tensor, "45"] = torch.zeros(45, device=config.device)
         self.jaw_pose: Float32[torch.Tensor, "3"] = torch.zeros(3, device=config.device)
-        self.sampled_model: SampledSmplx = SampledSmplx(self.model, self.verts_to_landmarks)
         self._window: list[_WindowFrame] = []
         self._bootstrapped: bool = False
         self._has_emitted: bool = False
