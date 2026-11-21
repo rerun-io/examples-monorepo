@@ -95,6 +95,20 @@ def test_dilate_masks_matches_opencv_dilation() -> None:
         assert np.array_equal(grown, np.stack([dilate_mask(m, radius) for m in masks]))
 
 
+
+@pytest.mark.integration
+def test_dilate_masks_on_cuda_matches_opencv_dilation() -> None:
+    import torch
+
+    from posekit.ops.people_masks import dilate_mask, dilate_masks
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (the float16 conv path)")
+    masks: Bool[ndarray, "n h w"] = np.random.default_rng(1).random((2, 480, 512)) > 0.98
+    for radius in (1, 8, 30):
+        grown: Bool[ndarray, "n h w"] = dilate_masks(torch.from_numpy(masks).cuda(), radius).cpu().numpy()
+        assert np.array_equal(grown, np.stack([dilate_mask(m, radius) for m in masks]))
+
 def test_selection_windows_group_frames_that_share_a_decode_run() -> None:
     from posekit.ops.people_masks import selection_windows
 
