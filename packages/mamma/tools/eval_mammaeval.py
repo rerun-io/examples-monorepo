@@ -22,6 +22,7 @@ import gc
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import tyro
@@ -520,7 +521,7 @@ def main(config: EvalConfig) -> int:
             arrays[f"p{p_idx}_gt_joints"] = body.joints[frames_p - start]
             arrays[f"p{p_idx}_gt_vertices"] = body.vertices[frames_p - start]
         config.dump_npz.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(config.dump_npz, **arrays)
+        np.savez_compressed(config.dump_npz, **cast(dict[str, Any], arrays))
 
     report = EvalReport(
         sequence=gt.name,
