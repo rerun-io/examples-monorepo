@@ -13,9 +13,10 @@ in ``SAM2GenericVideoPredictorState``.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import torch
@@ -24,9 +25,8 @@ from numpy import ndarray
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
-from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
+from mamma.tracking.detection import PersonDetections, bbox_iou_xyxy
 from mamma.tracking.identity import (
-    ClipEncoder,
     FeatureBank,
     assign_hungarian,
     epipolar_score,
@@ -35,6 +35,10 @@ from mamma.tracking.identity import (
     resolve_epipolar_px,
 )
 from mamma.tracking.steady_graph import SteadyTickGraphs, SteadyTickOutputs, steady_structures
+
+if TYPE_CHECKING:
+    from posekit.models import IdentityEncoder, PersonDetector
+    from posekit.predictions import BoxDetections
 
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP+epipolar score to accept a cross-camera bootstrap match."""
@@ -78,8 +82,10 @@ class TrackerConfig:
     the golden gate passes with it (see implementation-notes)."""
     sam2_checkpoint: Path = Path("data/weights/efficienttam/efficienttam_ti.pt")
     """SAM2-family checkpoint path (EfficientTAM via build_sam2_generic*)."""
+    detector: Literal["yolo12-x", "yolox-m-humanart", "yolox-x-humanart", "rtdetr-v2-r50"] = "yolo12-x"
+    """posekit person detector (``posekit.models.PERSON_DETECTORS``) for the bootstrap and re-detects."""
     yolo_checkpoint: Path = Path("data/weights/yolo/yolo12x.pt")
-    """YOLO person detector checkpoint."""
+    """Checkpoint of the ``yolo12-x`` detector."""
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
     redetect_interval: int = 120
@@ -195,8 +201,13 @@ class MultiViewTracker:
             )
             with torch.inference_mode():
                 self._graphs.precapture(len(cameras), structures)
-        self.detector: PersonDetector = PersonDetector(config.yolo_checkpoint, device=config.device)
-        self.encoder: ClipEncoder = ClipEncoder(device=config.device)
+        from posekit.models import PERSON_DETECTORS, ClipIdentityConfig, YoloDetectorConfig
+
+        detector_config = PERSON_DETECTORS[config.detector]
+        if isinstance(detector_config, YoloDetectorConfig):
+            detector_config = dataclasses.replace(detector_config, weights=config.yolo_checkpoint, device=config.device)
+        self.detector: PersonDetector = detector_config.setup()
+        self.encoder: IdentityEncoder = ClipIdentityConfig(device=config.device).setup()
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False
         self._lost_ticks: list[dict[int, int]] = [{} for _ in cameras]
@@ -219,8 +230,23 @@ class MultiViewTracker:
 
     # ── Bootstrap ───────────────────────────────────────────────────────────
 
+    def _detect(self, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[PersonDetections]:
+        """Person boxes and CLIP features in every camera: one detector call and one CLIP call for all cameras."""
+        frames_rgb: UInt8[torch.Tensor, "c h w 3"] = torch.stack(frames).permute(0, 2, 3, 1).contiguous()
+        boxes: BoxDetections = self.detector(frames_rgb)
+        features: Float32[torch.Tensor, "n d"] = self.encoder(frames_rgb, boxes).cpu()
+        xyxy: Float32[ndarray, "n 4"] = boxes.xyxy_numpy()
+        scores: Float32[ndarray, "n"] = boxes.scores.cpu().numpy()
+        cams: ndarray = boxes.frame_indices.cpu().numpy()
+        detections: list[PersonDetections] = []
+        for cam_idx in range(len(frames)):
+            rows: ndarray = np.flatnonzero(cams == cam_idx)
+            rows = rows[np.argsort(-scores[rows], kind="stable")]
+            detections.append(PersonDetections(boxes_xyxy=xyxy[rows], scores=scores[rows], features=features[torch.as_tensor(rows, dtype=torch.long)]))
+        return detections
+
     def _try_bootstrap(self, frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
-        detections: list[PersonDetections] = [self.detector.detect(f) for f in frames]
+        detections: list[PersonDetections] = self._detect(frames)
         expected: int | None = self.config.expected_subjects
 
         def cam_quality(d: PersonDetections) -> float:
@@ -258,7 +284,7 @@ class MultiViewTracker:
             )[:n_subjects]
         obj_ids: list[int] = list(range(n_subjects))
 
-        ref_feats: Float32[torch.Tensor, "n 512"] = self.encoder.encode([ref.crops[i] for i in ref_order])
+        ref_feats: Float32[torch.Tensor, "n d"] = ref.features[ref_order]
         for obj_id, row in zip(obj_ids, range(len(ref_order)), strict=True):
             self.bank.append(obj_id, ref_feats[row])
         ref_centers: Float32[ndarray, "n 3"] = ref.centers_xy1[ref_order]
@@ -270,7 +296,7 @@ class MultiViewTracker:
         for cam_idx, dets in enumerate(detections):
             if cam_idx == ref_idx or len(dets) == 0:
                 continue
-            det_feats: Float32[torch.Tensor, "m 512"] = self.encoder.encode(dets.crops)
+            det_feats: Float32[torch.Tensor, "m d"] = dets.features
             s_clip: Float32[ndarray, "k m"] = self.bank.similarity(det_feats)
             f_matrix: Float64[ndarray, "3 3"] | None = self._fundamental(ref_idx, cam_idx)
             combined: Float32[ndarray, "k m"] = s_clip.copy()
@@ -364,14 +390,13 @@ class MultiViewTracker:
         ref_idx: int | None
         ref_points: dict[int, Float32[ndarray, "3"]]
         ref_idx, ref_points = self._reference_points()
-        for cam_idx, frame in enumerate(frames):
+        for cam_idx, dets in enumerate(self._detect(frames)):
             lost: list[int] = [
                 obj_id for obj_id, ticks in self._lost_ticks[cam_idx].items() if ticks >= LOST_TICKS_BEFORE_REPROMPT
             ]
-            dets: PersonDetections = self.detector.detect(frame)
             if len(dets) == 0:
                 continue
-            det_feats: Float32[torch.Tensor, "m 512"] = self.encoder.encode(dets.crops)
+            det_feats: Float32[torch.Tensor, "m d"] = dets.features
             s_clip: Float32[ndarray, "k m"] = self.bank.similarity(det_feats)
             combined: Float32[ndarray, "k m"] = s_clip.copy()
             # Cross-camera geometric tie: score detections in this camera against

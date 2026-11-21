@@ -27,7 +27,7 @@ from posekit.models.yolox import YOLOX_ONNX_ZIP_URLS
 
 ZooRole = Literal["detector", "hand-detector", "pose2d", "instance-pose2d", "pose3d", "hand-pose3d", "body-pose3d", "segmenter", "identity"]
 ZooParadigm = Literal["detector", "top-down", "one-stage", "query-based", "full-frame"]
-ZooSource = Literal["openmmlab-onnx", "transformers", "huggingface", "local"]
+ZooSource = Literal["openmmlab-onnx", "transformers", "huggingface", "ultralytics", "local"]
 ZooStatus = Literal["implemented", "planned"]
 
 
@@ -68,6 +68,11 @@ ZOO: dict[str, ZooModel] = {
             "yolox-x-humanart", "detector", "detector", "openmmlab-onnx",
             YOLOX_ONNX_ZIP_URLS["yolox-x-humanart"],
             (640, 640), None, "implemented", "",
+        ),
+        ZooModel(
+            "yolo12-x", "detector", "detector", "ultralytics",
+            "yolo12x.pt", (640, 640), None, "implemented",
+            "YoloDetectorConfig: Ultralytics pre/postprocessing per frame, person class, conf 0.5, IoU-0.75 dedup (mamma's tracker detector).",
         ),
         ZooModel(
             "rtdetr-v2-r50", "detector", "query-based", "transformers",
