@@ -14,7 +14,7 @@ from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.crops import box_geometry, gpu_crop_frame, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
-from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES
+from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, INPUT_NAMES, OUTPUT_NAMES
 
 
 @dataclass(slots=True)
@@ -124,11 +124,19 @@ class LandmarkEstimator:
             cam_crops.append(gpu_crop_frame(rgb_source[cam_idx], centers[lo:hi] * s, sizes[lo:hi] * s, self.config))
         img_crops: Float32[torch.Tensor, "n 3 ch cw"] = torch.cat(cam_crops, dim=0)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers_t, sizes_t, self.config)
-        if self.runner is not None and img_crops.shape[0] <= 4:
-            out: dict[str, torch.Tensor | None] = dict(self.runner({INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops}))
-        else:
+        out: dict[str, torch.Tensor | None]
+        if self.runner is None:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
                 out = self.model(img_crops, mask_crops)
+        else:
+            # The engine takes at most ENGINE_BATCH crops, so more people x cameras run in chunks (an eager batch of
+            # 28+ crops ran out of memory). Outputs live in the runner's buffers: keep a copy before the next call.
+            n_crops: int = img_crops.shape[0]
+            parts: list[dict[str, torch.Tensor | None]] = []
+            for lo in range(0, n_crops, ENGINE_BATCH):
+                part = dict(self.runner({INPUT_NAMES[0]: img_crops[lo : lo + ENGINE_BATCH], INPUT_NAMES[1]: mask_crops[lo : lo + ENGINE_BATCH]}))
+                parts.append(part if n_crops <= ENGINE_BATCH else {k: None if v is None else v.clone() for k, v in part.items()})
+            out = parts[0] if len(parts) == 1 else {k: torch.cat([p[k] for p in parts if p[k] is not None]) for k in OUTPUT_NAMES}
 
         joints2d_raw = out[OUTPUT_NAMES[0]]
         visibility_raw = out[OUTPUT_NAMES[1]]

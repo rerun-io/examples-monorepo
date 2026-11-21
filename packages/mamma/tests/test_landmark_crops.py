@@ -12,7 +12,7 @@ from mamma.engine.types import CameraTracks, TrackedObject
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG
 from mamma.landmarks.crops import box_geometry, gpu_crop_batch
 from mamma.landmarks.estimator import LandmarkEstimator
-from mamma.landmarks.tensorrt_backend import OUTPUT_NAMES
+from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, INPUT_NAMES, OUTPUT_NAMES
 
 _JOINTS: int = 8
 
@@ -86,7 +86,6 @@ def test_hires_crops_match_per_person_frame_copies(device: str, dtype: torch.dty
     assert [sorted(cam_results) for cam_results in results] == [[2, 7], [], [5]]
 
 
-
 def test_frame_crops_match_crops_from_the_whole_frame() -> None:
     """gpu_crop_frame (float only inside the crop window) gives the whole-frame crops, also over the frame
     border and for a box entirely outside the frame (whole-frame fallback)."""
@@ -101,3 +100,40 @@ def test_frame_crops_match_crops_from_the_whole_frame() -> None:
         full, _ = gpu_crop_batch(frame.float().unsqueeze(0).expand(len(centers), -1, -1, -1), centers, sizes, None, DEFAULT_MAMMANET_CONFIG)
         # Normalized units (pixel / ~58): 1e-3 is a few hundredths of a gray level, float rounding of the grid.
         assert float((gpu_crop_frame(frame, centers, sizes, DEFAULT_MAMMANET_CONFIG) - full).abs().max()) < 1e-3
+
+
+class _BufferedRunner:
+    """Stands in for the TRT runner: at most ENGINE_BATCH crops per call, outputs written into one reused buffer."""
+
+    def __init__(self) -> None:
+        self.batches: list[int] = []
+        self._visibility: torch.Tensor = torch.zeros(ENGINE_BATCH, _JOINTS, 1)
+
+    def __call__(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        n: int = inputs[INPUT_NAMES[0]].shape[0]
+        assert n <= ENGINE_BATCH
+        # Each row reports its global crop index as its visibility logit, overwriting the previous call's rows.
+        self._visibility[:n] = float(sum(self.batches)) + torch.arange(n, dtype=torch.float32)[:, None, None]
+        self.batches.append(n)
+        zeros: torch.Tensor = torch.zeros(n, _JOINTS, 1)
+        return {OUTPUT_NAMES[0]: torch.zeros(n, _JOINTS, 3), OUTPUT_NAMES[1]: self._visibility[:n], OUTPUT_NAMES[2]: zeros, OUTPUT_NAMES[3]: zeros}
+
+
+def test_more_crops_than_the_engine_batch_run_in_chunks() -> None:
+    """Seven crops (people x cameras) go through the engine in chunks of ENGINE_BATCH, each row keeping its own output."""
+    hw: tuple[int, int] = (36, 64)
+    frames: list[UInt8[torch.Tensor, "3 h w"]] = [torch.zeros(3, *hw, dtype=torch.uint8) for _ in range(4)]
+    box: list[float] = [2.0, 1.0, 20.0, 30.0]
+    people: list[int] = [2, 2, 2, 1]
+    tracks: list[CameraTracks] = [{obj: _track(obj, box, hw, "cpu") for obj in range(count)} for count in people]
+
+    estimator: LandmarkEstimator = LandmarkEstimator.__new__(LandmarkEstimator)
+    estimator.config = DEFAULT_MAMMANET_CONFIG
+    estimator.device = "cpu"
+    runner: _BufferedRunner = _BufferedRunner()
+    estimator.runner = runner  # type: ignore[assignment]
+    results = estimator.estimate(frames, tracks)
+
+    assert runner.batches == [ENGINE_BATCH, 7 - ENGINE_BATCH]
+    rows: list[float] = [float(torch.logit(results[cam][obj].visibility[0]).round()) for cam in range(4) for obj in sorted(results[cam])]
+    assert rows == [float(i) for i in range(7)]
