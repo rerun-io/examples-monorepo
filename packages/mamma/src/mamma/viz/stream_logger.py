@@ -347,9 +347,14 @@ class StreamLogger:
         fixed-lag fitter emits a mesh for an EARLIER frame (``fit.frame_idx``).
         Each is stamped at its own true frame so mesh and cloud coincide on the
         timeline (otherwise the cloud visibly leads the lagged mesh in motion).
-        The cloud tensors must be settled (the fitting stage syncs its stream).
+        Call it on the stream that produced the clouds: an event recorded there orders the worker's reads after
+        the writes (the fitting stage does not always sync its stream before returning).
         """
-        self._fit_worker.submit(self._log_tick_fit_now, frame_idx, dict(fits), dict(triangulated), faces)
+        ready: torch.cuda.Event | None = None
+        if any(points3d.is_cuda for points3d, _ in triangulated.values()):
+            ready = torch.cuda.Event()
+            ready.record()
+        self._fit_worker.submit(self._log_tick_fit_now, frame_idx, dict(fits), dict(triangulated), faces, ready)
 
     def _log_tick_fit_now(
         self,
@@ -357,7 +362,10 @@ class StreamLogger:
         fits: dict[int, FitResult],
         triangulated: dict[int, tuple[torch.Tensor, torch.Tensor]],
         faces: ndarray | None,
+        ready: torch.cuda.Event | None,
     ) -> None:
+        if ready is not None:
+            ready.synchronize()
         set_tick_time(frame_idx, self.fps)
         for obj_id, (points3d, valid) in triangulated.items():
             cloud: ndarray = points3d[valid].cpu().numpy()

@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import tyro
@@ -55,12 +56,15 @@ class ValidateDynamicConfig:
     """Window fitter settings (emit every frame — the comparison needs fresh meshes)."""
     data_dir: Path = Path("data/inputs/outdoors/running_jumping")
     """Dynamic capture inputs (MAMMA NPZ layout)."""
+    reference: Literal["pred", "dag"] = "pred"
+    """What the PVE is measured against, stated in every result line: ``pred`` = the dataset's own MAMMA prediction
+    (``<data_dir>/pred/params_00.npz`` forwarded through SMPL-X; 5.1 mm PVE from the original DAG on crossing_arms
+    60:90); ``dag`` = the frozen original-DAG output (``golden_npz``, missing from the data repo since 2026-11). A
+    missing reference fails; switching references needs its own baseline."""
     golden_npz: Path = Path("data/golden/ma_3d_dynamic/outdoors/running_jumping/verts_joints_body_id-00.npz")
-    """Frozen original-DAG verts/joints for this clip (ma_3d output). When absent, the
-    reference is the dataset's own MAMMA prediction (``<data_dir>/pred/params_00.npz``)
-    forwarded through SMPL-X."""
+    """Frozen original-DAG verts/joints for this clip (ma_3d output), for ``reference dag``."""
     model_dir: Path = Path("data/body_models")
-    """Body-model root containing ``smplx/SMPLX_NEUTRAL.npz`` (pred fallback only)."""
+    """Body-model root containing ``smplx/SMPLX_NEUTRAL.npz`` (``reference pred``)."""
     mammanet_weights: Path = Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors")
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
@@ -87,15 +91,20 @@ class ValidateDynamicConfig:
 def main(config: ValidateDynamicConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
     golden_verts: Float32[ndarray, "f v 3"]
-    reference: str = f"original DAG, {config.golden_npz.name}"
-    if config.golden_npz.exists():
+    if config.reference == "dag":
+        if not config.golden_npz.exists():
+            print(f"FAIL: reference dag selected but {config.golden_npz} is missing")
+            return 1
+        reference: str = f"original DAG, {config.golden_npz}"
         golden_verts = np.load(config.golden_npz, allow_pickle=True)["pred_vertices"]
     else:
         from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
         pred_npz: Path = config.data_dir / "pred" / "params_00.npz"
-        print(f"note: {config.golden_npz} absent; reference = dataset MAMMA prediction {pred_npz}")
-        reference = f"dataset MAMMA prediction, {pred_npz.name}"
+        if not pred_npz.exists():
+            print(f"FAIL: reference pred selected but {pred_npz} is missing")
+            return 1
+        reference = f"dataset MAMMA prediction, {pred_npz}"
         pp = np.load(pred_npz, allow_pickle=True)
         layer = SmplxLayerTorch(betas=pp["betas"].reshape(-1).astype(np.float32), model_root_dir=config.model_dir, flat_hand_mean=False)
         golden_verts = layer.to(config.device).forward_batched(pp["poses"].astype(np.float32), pp["trans"].astype(np.float32)).vertices
@@ -142,7 +151,7 @@ def main(config: ValidateDynamicConfig) -> int:
     p95: float = float(np.percentile(pve, 95))
     pmax: float = float(pve.max())
     worst: list[int] = [f for f, _ in sorted(pve_by_frame.items(), key=lambda kv: -kv[1])[:5]]
-    print(f"\nDYNAMIC GOLDEN GATE ({len(pve)} frames vs {reference}):")
+    print(f"\nDYNAMIC GOLDEN GATE ({len(pve)} frames {sorted(pve_by_frame)[0]}..{sorted(pve_by_frame)[-1]} vs {reference}):")
     print(f"  PVE mean {pve.mean():6.1f} mm   median {np.median(pve):6.1f} mm")
     print(f"  PVE p95  {p95:6.1f} mm  (tolerance {config.pve_p95_tolerance_mm} mm)  {'PASS' if p95 <= config.pve_p95_tolerance_mm else 'FAIL'}")
     print(f"  PVE max  {pmax:6.1f} mm  (tolerance {config.pve_max_tolerance_mm} mm)  {'PASS' if pmax <= config.pve_max_tolerance_mm else 'FAIL'}")

@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float32
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.fitting.triangulation import triangulate_gated, triangulate_points
-from mamma.fitting.window_fitter import FitResult, FitterConfig, SlidingWindowFitter, load_body
+from mamma.fitting.window_fitter import BodyModel, FitResult, FitterConfig, SlidingWindowFitter
 from mamma.landmarks.estimator import CameraLandmarks
 
 
@@ -40,14 +40,13 @@ class FittingStage:
         self._fitters: dict[int, SlidingWindowFitter] = {}
         self.faces = None
         """Triangle faces of the SMPL-X mesh (set after the first fitter exists)."""
+        # One body model for every person's fitter and the prewarm (smplx.create ~0.6 s, not mid-stream).
+        self._body: BodyModel = BodyModel.load(config.smplx_model_dir, config.downsampled_verts_pkl, config.device)
         self._stream: torch.cuda.Stream | None = (
             torch.cuda.Stream(device=config.device) if config.fit_stream and torch.device(config.device).type == "cuda" else None
         )
         if config.compile_iter and config.use_cuda_graph and torch.device(config.device).type == "cuda" and os.environ.get("PIXI_DEV_MODE") != "1":
             self._prewarm_compile()
-        # Load the shared body model now (smplx.create ~0.6 s), not when the first person appears mid-stream;
-        # every fitter then builds in milliseconds.
-        load_body(config.smplx_model_dir, config.downsampled_verts_pkl, config.device)
 
     def _prewarm_compile(self) -> None:
         """Compile the fitter's graphed iterations now, before streaming starts.
@@ -58,7 +57,7 @@ class FittingStage:
         observations runs both captures (bootstrap + steady state); later
         fitters reuse the compiled code (~0.15 s to re-capture).
         """
-        dummy: SlidingWindowFitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
+        dummy: SlidingWindowFitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config, self._body)
         n: int = dummy.verts_to_landmarks.shape[0]
         device: torch.device = self.k_per_cam[0].device
         n_cams: int = len(self.k_per_cam)
@@ -147,7 +146,7 @@ class FittingStage:
 
             fitter: SlidingWindowFitter | None = self._fitters.get(obj_id)
             if fitter is None:
-                fitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
+                fitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config, self._body)
                 self._fitters[obj_id] = fitter
                 if self.faces is None:
                     self.faces = fitter.model.faces
