@@ -28,7 +28,7 @@ def test_use_env_ptxas_sets_unset_paths_only(tmp_path: Path, monkeypatch: pytest
 
 
 def test_rotate_turns_fused_path_off_with_one_warning_when_the_kernel_cannot_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_ptxas(*args: torch.Tensor, **kwargs: torch.Tensor) -> torch.Tensor:
+    def no_ptxas(*_args: torch.Tensor, **_kwargs: torch.Tensor) -> torch.Tensor:
         raise RuntimeError("Cannot find ptxas-blackwell")
 
     monkeypatch.setattr(fused_rope, "ENABLED", True)
