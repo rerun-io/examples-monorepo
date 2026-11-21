@@ -41,6 +41,10 @@ from mamma.tracking.identity import (
     resolve_epipolar_px,
 )
 
+MAX_BOX_FRAME_FRACTION: float = 0.9
+"""Detections whose box covers this much of the frame are dropped: on a near-black frame RT-DETR returns a whole-frame
+"person" (score 0.5-0.7, MammaEval Solo_Dancing frame 0), and a bootstrap on it fits a ghost for seconds. A real
+person that fills a camera's frame gives that camera nothing to triangulate either."""
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP+epipolar score to accept a cross-camera bootstrap match."""
 BANK_UPDATE_MIN_SCORE: float = 0.35
@@ -272,9 +276,12 @@ class MultiViewTracker:
         xyxy: Float32[ndarray, "n 4"] = boxes.xyxy_numpy()
         scores: Float32[ndarray, "n"] = boxes.scores.cpu().numpy()
         cams: ndarray = boxes.frame_indices.cpu().numpy()
+        h, w = frames_rgb.shape[1:3]
+        covered: Float32[ndarray, "n"] = (np.clip(xyxy[:, 2], 0, w) - np.clip(xyxy[:, 0], 0, w)) * (np.clip(xyxy[:, 3], 0, h) - np.clip(xyxy[:, 1], 0, h))
+        plausible: ndarray = covered < MAX_BOX_FRAME_FRACTION * h * w
         detections: list[PersonDetections] = []
         for cam_idx in range(len(frames)):
-            rows: ndarray = np.flatnonzero(cams == cam_idx)
+            rows: ndarray = np.flatnonzero((cams == cam_idx) & plausible)
             rows = rows[np.argsort(-scores[rows], kind="stable")]
             detections.append(PersonDetections(boxes_xyxy=xyxy[rows], scores=scores[rows], features=features[torch.as_tensor(rows, dtype=torch.long)]))
         return detections
