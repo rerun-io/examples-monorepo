@@ -10,6 +10,16 @@ pytest.importorskip("sam2", reason="the streaming SAM 2 fork is in the posekit e
 pytestmark = pytest.mark.integration
 
 
+def _scene(step: int) -> torch.Tensor:
+    """Two lenses, 256 px: a square moving right on lens 0, a disc moving down and a fixed square on lens 1."""
+    frames: torch.Tensor = torch.full((2, 256, 256, 3), 40, dtype=torch.uint8)
+    frames[0, 80:150, 30 + 4 * step : 100 + 4 * step] = torch.tensor([220, 60, 60], dtype=torch.uint8)
+    yy, xx = torch.meshgrid(torch.arange(256), torch.arange(256), indexing="ij")
+    frames[1][(yy - 60 - 5 * step) ** 2 + (xx - 128) ** 2 < 35**2] = torch.tensor([60, 200, 90], dtype=torch.uint8)
+    frames[1, 180:230, 20:70] = torch.tensor([200, 200, 40], dtype=torch.uint8)
+    return frames
+
+
 def _needs_gpu() -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA graphs need a GPU")
@@ -45,7 +55,6 @@ def test_forward_batched_with_graphs_is_bit_identical(bf16: bool) -> None:
     from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
     from sam2.modeling.sam2_prompt import SAM2Prompt
     from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
-    from test_sam2_batched import _scene
 
     from posekit.models.sam2_video import cached_predictor
 
