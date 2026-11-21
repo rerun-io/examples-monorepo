@@ -335,9 +335,10 @@ python tools/apps/fullcircle_masks.py --dataset <dataset> --segment <segment> --
 # a base not registered yet: --rrd <base.rrd> instead of --dataset/--segment
 ```
 
-The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on every 5th frameset,
-already dilated. On FullCircle's room3 scene the masks match the masks FullCircle released with its dataset at a mean
-IoU of 0.945, median 0.957 (golden test `tests/test_fullcircle_golden.py`, asset `POSEKIT_FULLCIRCLE_SCENE`).
+The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on every 10th frameset (`--stride`), the tracker re-prompted once a second
+(`--reprompt-every-frames 30`, which follows the stride), already dilated. On FullCircle's room3 scene at half rate
+(179 frames, 3 Hz) the masks match the masks FullCircle released with its dataset at a mean
+IoU of 0.9402, median 0.9556 (357 frames at full rate with the defaults: 0.9350). Golden test: `tests/test_fullcircle_golden.py`, asset `POSEKIT_FULLCIRCLE_SCENE`.
 
 ## What runs today, and how well
 
@@ -352,7 +353,7 @@ Every implementation is parity-validated against its reference:
 | Sapiens2 pose | `TopDownPose2d` | trt (default); torch · onnx · trt (`bf16-1024`) | bf16-1024 (d31, 2026-10-31); pre-port goldens | PCK@0.01 body/hands 0.911/0.971 (NVFP4); port bit-identical |
 | SAM3 | `PromptableSegmenter` | torch | HF processor | mask IoU ≥ 0.997 |
 | SAM2/EfficientTAM | `VideoSegmenter` | torch | — | stable 30-frame track, IoU ≥ 0.97 |
-| FullCircle | 360 operator masks | YOLOX trt + EfficientTAM | FullCircle's released room3 masks | mean IoU 0.945 (median 0.957) |
+| FullCircle | 360 operator masks | YOLOX trt + EfficientTAM | FullCircle's released room3 masks | mean IoU 0.9402 (median 0.9556) at half rate |
 | CLIP ViT-B/32 | `IdentityEncoder` | torch | PIL pipeline | cosine ≥ 0.985 |
 | MammaNet (in mamma) | `TopDownDenseLandmarks2d` | torch | mamma estimator | bitwise-equal |
 | SAM 3D Body | `TopDownBodyPose3d` | torch | pre-port package | bitwise in its env; 3x run-to-run noise here |

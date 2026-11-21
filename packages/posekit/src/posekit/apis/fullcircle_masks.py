@@ -16,7 +16,7 @@ scene at infinity, as in a stitched panorama).
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -68,7 +68,11 @@ class FullCircleMasksConfig:
     """The two lens camera nodes (each has ``pinhole`` and ``pinhole/video``)."""
     stride: int = 10
     """Framesets between two tracked framesets: 10 at 30 fps = 3 Hz, the stamps of the people layer that the union
-    keeps (FullCircle captures at 5 fps; the tracker re-prompt cadence, ``masker.reprompt_every``, is set for 3 Hz)."""
+    keeps (FullCircle captures at 5 fps)."""
+    reprompt_every_frames: int = 30
+    """Frames of video between two re-prompts of the tracker (30 at 30 fps = once a second; 0: a single prompt). It sets
+    ``masker.reprompt_every`` to ``round(reprompt_every_frames / stride)`` tracked framesets, so ``--stride 5`` keeps a
+    re-prompt once a second (every 6th tracked frameset); at ``stride`` 10 that is every 3rd."""
     start: int = 0
     """First frameset index."""
     end: int | None = None
@@ -246,7 +250,9 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         config.gravity_window_s,
     )
     load_start: float = time.perf_counter()
-    masker: FullCircleMasker = FullCircleMasker(config.masker, sources)
+    masker: FullCircleMasker = FullCircleMasker(
+        replace(config.masker, reprompt_every=round(config.reprompt_every_frames / config.stride)), sources
+    )
     print(f"model load + static tables {time.perf_counter() - load_start:.1f} s")
     debug: rr.RecordingStream | None = None
     if config.debug_rrd is not None:
