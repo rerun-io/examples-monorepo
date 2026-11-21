@@ -91,19 +91,14 @@ def main(config: ValidateDynamicConfig) -> int:
     if config.golden_npz.exists():
         golden_verts = np.load(config.golden_npz, allow_pickle=True)["pred_vertices"]
     else:
-        from mamma.fitting.smplx_wrapper import build_smplx_neutral, forward_params_to_verts
+        from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
         pred_npz: Path = config.data_dir / "pred" / "params_00.npz"
         print(f"note: {config.golden_npz} absent; reference = dataset MAMMA prediction {pred_npz}")
         reference = f"dataset MAMMA prediction, {pred_npz.name}"
         pp = np.load(pred_npz, allow_pickle=True)
-        golden_verts = forward_params_to_verts(
-            build_smplx_neutral(config.model_dir, device=config.device),
-            pp["poses"].astype(np.float32),
-            pp["betas"].reshape(-1).astype(np.float32),
-            pp["trans"].astype(np.float32),
-            config.device,
-        )
+        layer = SmplxLayerTorch(betas=pp["betas"].reshape(-1).astype(np.float32), model_root_dir=config.model_dir, flat_hand_mean=False)
+        golden_verts = layer.to(config.device).forward_batched(pp["poses"].astype(np.float32), pp["trans"].astype(np.float32)).vertices
     print(f"sequence {sequence.name}: {sequence.frame_count} frames; golden verts {golden_verts.shape}")
 
     collector: ResultCollector = _FitsOnlyCollector()
