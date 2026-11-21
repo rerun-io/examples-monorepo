@@ -65,6 +65,28 @@ def box_geometry(box_xyxy: Float32[ndarray, "4"], config: MammaNetConfig) -> tup
     return center, bbox_size
 
 
+def _crop_grid(
+    centers: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
+    bbox_sizes: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
+    height: int,
+    width: int,
+    config: MammaNetConfig,
+    device: torch.device,
+) -> Float32[torch.Tensor, "n ph pw 2"]:
+    """Analytic ``grid_sample`` grid (align_corners, normalized to the ``height x width`` image) of each crop."""
+    c: Float32[torch.Tensor, "n 2"] = to_device_f32(centers, device)
+    bs: Float32[torch.Tensor, "n 2"] = to_device_f32(bbox_sizes, device)
+    n: int = c.shape[0]
+    pw: int = config.crop_width
+    ph: int = config.crop_height
+    ys: Float32[torch.Tensor, "ph"] = torch.arange(ph, dtype=torch.float32, device=device)
+    xs: Float32[torch.Tensor, "pw"] = torch.arange(pw, dtype=torch.float32, device=device)
+    gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+    src_x: Float32[torch.Tensor, "n ph pw"] = c[:, 0].view(n, 1, 1) + (gx.unsqueeze(0) - pw / 2.0) * (bs[:, 0].view(n, 1, 1) / pw)
+    src_y: Float32[torch.Tensor, "n ph pw"] = c[:, 1].view(n, 1, 1) + (gy.unsqueeze(0) - ph / 2.0) * (bs[:, 1].view(n, 1, 1) / ph)
+    return torch.stack([src_x / (width - 1) * 2.0 - 1.0, src_y / (height - 1) * 2.0 - 1.0], dim=-1)
+
+
 def gpu_crop_batch(
     frames: Float32[torch.Tensor, "n 3 h w"],
     centers: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],
@@ -84,35 +106,11 @@ def gpu_crop_batch(
     Returns:
         Normalized RGB crops ``(n, 3, 512, 384)`` and 0..1 mask crops (or None).
     """
-    n: int = frames.shape[0]
-    h_img: int = frames.shape[2]
-    w_img: int = frames.shape[3]
-    pw: int = config.crop_width
-    ph: int = config.crop_height
-    dev: torch.device = frames.device
-
-    c: Float32[torch.Tensor, "n 2"] = to_device_f32(centers, dev)
-    bs: Float32[torch.Tensor, "n 2"] = to_device_f32(bbox_sizes, dev)
-
-    ys: Float32[torch.Tensor, "ph"] = torch.arange(ph, dtype=torch.float32, device=dev)
-    xs: Float32[torch.Tensor, "pw"] = torch.arange(pw, dtype=torch.float32, device=dev)
-    gy, gx = torch.meshgrid(ys, xs, indexing="ij")
-
-    cx = c[:, 0].view(n, 1, 1)
-    cy = c[:, 1].view(n, 1, 1)
-    wbox = bs[:, 0].view(n, 1, 1)
-    hbox = bs[:, 1].view(n, 1, 1)
-    src_x: Float32[torch.Tensor, "n ph pw"] = cx + (gx.unsqueeze(0) - pw / 2.0) * (wbox / pw)
-    src_y: Float32[torch.Tensor, "n ph pw"] = cy + (gy.unsqueeze(0) - ph / 2.0) * (hbox / ph)
-
-    nx = src_x / (w_img - 1) * 2.0 - 1.0
-    ny = src_y / (h_img - 1) * 2.0 - 1.0
-    grid: Float32[torch.Tensor, "n ph pw 2"] = torch.stack([nx, ny], dim=-1)
-
+    grid: Float32[torch.Tensor, "n ph pw 2"] = _crop_grid(centers, bbox_sizes, frames.shape[2], frames.shape[3], config, frames.device)
     img_crops: Float32[torch.Tensor, "n 3 ph pw"] = F.grid_sample(
         frames, grid, mode="bilinear", padding_mode="zeros", align_corners=True
     )
-    mean_t, std_t = _normalization(dev)
+    mean_t, std_t = _normalization(frames.device)
     img_crops = (img_crops - mean_t) / std_t
 
     mask_crops: Float32[torch.Tensor, "n 1 ph pw"] | None = None
@@ -133,6 +131,7 @@ def gpu_crop_frame(
     is the union of the crop rectangles (``center +- size/2``) plus the two pixels bilinear reads on each
     side, clamped to the frame; sampling it at shifted centres reads the same pixels as sampling the whole
     frame (align_corners). A window clamped to nothing (boxes outside the frame) uses the whole frame.
+    (A gather-based uint8 sampler, posekit's, measured 0.9 s slower over crossing_arms on the 5090.)
     """
     height, width = int(frame.shape[1]), int(frame.shape[2])
     lo: Float64[ndarray, "2"] = np.floor((centers - bbox_sizes / 2.0).min(axis=0)) - 2.0
@@ -179,19 +178,5 @@ def gpu_mask_crop_batch(
     Used by the dual-resolution path where RGB crops sample a hi-res frame
     but masks come from the engine-resolution tracker output.
     """
-    n: int = masks.shape[0]
-    h_img: int = masks.shape[2]
-    w_img: int = masks.shape[3]
-    pw: int = config.crop_width
-    ph: int = config.crop_height
-    dev: torch.device = masks.device
-
-    c: Float32[torch.Tensor, "n 2"] = to_device_f32(centers, dev)
-    bs: Float32[torch.Tensor, "n 2"] = to_device_f32(bbox_sizes, dev)
-    ys: Float32[torch.Tensor, "ph"] = torch.arange(ph, dtype=torch.float32, device=dev)
-    xs: Float32[torch.Tensor, "pw"] = torch.arange(pw, dtype=torch.float32, device=dev)
-    gy, gx = torch.meshgrid(ys, xs, indexing="ij")
-    src_x: Float32[torch.Tensor, "n ph pw"] = c[:, 0].view(n, 1, 1) + (gx.unsqueeze(0) - pw / 2.0) * (bs[:, 0].view(n, 1, 1) / pw)
-    src_y: Float32[torch.Tensor, "n ph pw"] = c[:, 1].view(n, 1, 1) + (gy.unsqueeze(0) - ph / 2.0) * (bs[:, 1].view(n, 1, 1) / ph)
-    grid: Float32[torch.Tensor, "n ph pw 2"] = torch.stack([src_x / (w_img - 1) * 2.0 - 1.0, src_y / (h_img - 1) * 2.0 - 1.0], dim=-1)
+    grid: Float32[torch.Tensor, "n ph pw 2"] = _crop_grid(centers, bbox_sizes, masks.shape[2], masks.shape[3], config, masks.device)
     return F.grid_sample(masks, grid, mode="nearest", padding_mode="zeros", align_corners=True) / 255.0
