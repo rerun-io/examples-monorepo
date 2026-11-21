@@ -174,7 +174,7 @@ def _replay_layer(path: Path, pipeline: PipelineFactory, camera: CameraFactory, 
             stage.run(Frameset(t_ns=t_ns, images=[texture(step, 0), texture(step - 2, 0)], imu=ImuStream(t_ns=samples, gyro_rad_s=gyro, accel_m_s2=accel),
                                ground_truth=None))
         stage.flush()
-    return stage.logger.estimate_t_ns
+    return stage.logger.estimated().t_ns.tolist()
 
 
 def _colsfm_prior(dataset: DatasetEntry, segment: str) -> tuple[list[int], list[float]]:

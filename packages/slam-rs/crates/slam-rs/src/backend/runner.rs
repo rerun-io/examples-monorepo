@@ -29,7 +29,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 
 use super::{MapEvent, StepTiming};
@@ -354,6 +354,26 @@ impl<B: BackendWork> BackendRunner<B> {
         let mut latest: BackendView<B::View> = thread.board.posted().latest.clone();
         latest.counters.max_pending_stamps = thread.max_pending;
         latest
+    }
+
+    /// Read the work in place, for a tracking-side reader that needs less than
+    /// a whole [`Self::view`] (the map's changes since its last read). Offline
+    /// it runs at once. Unlike [`Self::read`], Realtime never waits for the
+    /// back-end thread: `None` while a step or query holds the work, and the
+    /// reader asks again later.
+    ///
+    /// # Panics
+    ///
+    /// Re-raises a panic of the back-end thread, as [`Self::view`] does.
+    pub fn try_read<R>(&self, f: impl FnOnce(&B) -> R) -> Option<R> {
+        if self.thread.is_none() {
+            return Some(f(&lock(&self.state).work));
+        }
+        match self.state.try_lock() {
+            Ok(state) => Some(f(&state.work)),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(_)) => panic!("the back-end thread panicked"),
+        }
     }
 
     /// What the back end has done so far; never waits for a step or query.

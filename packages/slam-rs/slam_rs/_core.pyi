@@ -352,6 +352,54 @@ class GbaRun:
 
     def __repr__(self) -> str: ...
 
+class MapDelta:
+    """What changed in the map since a revision (:meth:`Vio.map_delta`): every keyframe pose and the loops, which stay
+    small, and the points of only the keyframes a write touched. Arrays as in :class:`MapSnapshot`."""
+
+    @property
+    def revision(self) -> int:
+        """The map's revision when the delta was taken: the next read's ``since``."""
+
+    @property
+    def keyframe_t_ns(self) -> Int64[ndarray, " n_keyframes"]:
+        """Map keyframe timestamps, oldest first."""
+
+    @property
+    def keyframe_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """Keyframe poses ``T_w_i`` as the map holds them (PGO-corrected), ``[tx, ty, tz, qx, qy, qz, qw]``."""
+
+    @property
+    def keyframe_raw_poses(self) -> Float64[ndarray, "n_keyframes 7"]:
+        """The window's keyframe poses, before any correction."""
+
+    @property
+    def keyframe_active(self) -> Bool[ndarray, " n_keyframes"]:
+        """Whether each keyframe is still in the window."""
+
+    @property
+    def changed_hosts(self) -> Int64[ndarray, " n_changed"]:
+        """Keyframes whose hosted points changed since the read's revision, removed ones included."""
+
+    @property
+    def point_ids(self) -> Int64[ndarray, " n_points"]:
+        """The changed hosts' point ids, by host then id."""
+
+    @property
+    def point_hosts(self) -> Int64[ndarray, " n_points"]:
+        """Timestamp of the keyframe hosting each point."""
+
+    @property
+    def points_world(self) -> Float32[ndarray, "n_points 3"]:
+        """The changed hosts' points in the world frame, metres."""
+
+    @property
+    def loop_edges(self) -> Int64[ndarray, "n_loops 2"]:
+        """Verified loops whose keyframes are still in the map, oldest first, as ``[current, candidate]`` timestamps."""
+
+    @property
+    def loop_fused(self) -> Bool[ndarray, " n_loops"]:
+        """Whether each loop's landmarks were fused."""
+
 class MapSnapshot:
     """The persistent keyframe map and the back end's counters, copied out (PR a2).
 
@@ -763,6 +811,14 @@ class Vio:
         map keeps the GBA's poses. Call it after :meth:`flush`. A GBA that fails (a camera model it cannot project,
         the solver's refusal) is reported in :attr:`MapResult.gba_failure`, and the keyframes are then the map's after
         loops and PGO.
+        """
+
+    def map_delta(self, since: int) -> MapDelta | None:
+        """What changed in the map since revision ``since`` (0: everything): every keyframe pose and the loops, and the
+        points of only the keyframes a write touched since. Costs the changed points, not the whole map.
+
+        None with ``backend.enabled`` off, or in Realtime while the back-end thread holds the map: it never waits, and
+        the caller asks again later (the next read still gets every change since ``since``).
         """
 
     def map_snapshot(self) -> MapSnapshot | None:

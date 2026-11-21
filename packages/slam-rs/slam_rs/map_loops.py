@@ -71,7 +71,7 @@ def correction_segments(raw_poses: Float64[ndarray, "k 7"], corrected_poses: Flo
     return np.stack([raw_poses[moved, 0:3], corrected_poses[moved, 0:3]], axis=1)
 
 
-def log_loops(map_snapshot: _core.MapSnapshot) -> None:
+def log_loops(map_snapshot: _core.MapSnapshot | _core.MapDelta) -> None:
     """Draw the snapshot's loops and corrections at the current cursor (an empty set is logged too, which clears old ones)."""
     segments: Float64[ndarray, "l 2 3"] = loop_segments(map_snapshot.keyframe_t_ns, map_snapshot.keyframe_poses, map_snapshot.loop_edges)
     fused: Bool[ndarray, " l"] = map_snapshot.loop_fused

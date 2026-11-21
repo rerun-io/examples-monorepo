@@ -461,6 +461,15 @@ impl Vio {
         .map(Some)
     }
 
+    /// What changed in the map since revision ``since`` (``0``: everything):
+    /// every keyframe pose and the loops, and the points of only the keyframes
+    /// a write touched since. Costs the changed points, not the whole map.
+    /// ``None`` with ``backend.enabled`` off, or in Realtime while the back-end
+    /// thread holds the map (it never waits; ask again later).
+    fn map_delta(&self, py: Python<'_>, since: u64) -> Option<map::MapDelta> {
+        py.detach(|| self.inner.map_delta(since)).map(map::MapDelta::new)
+    }
+
     /// A copy of the persistent keyframe map and the back end's counters at the
     /// moment it was taken, or `None` when ``backend.enabled`` is off.
     ///
@@ -1687,6 +1696,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FlowFrame>()?;
     module.add_class::<VioSnapshot>()?;
     module.add_class::<map::MapSnapshot>()?;
+    module.add_class::<map::MapDelta>()?;
     module.add_class::<map::LoopCounts>()?;
     module.add_class::<gba::MapResult>()?;
     module.add_class::<gba::GbaRun>()?;

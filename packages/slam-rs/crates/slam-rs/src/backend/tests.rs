@@ -514,6 +514,50 @@ fn a_map_snapshot_copies_keyframes_world_points_and_edges() {
     assert_eq!(snapshot.culls, CullCounts::default());
 }
 
+/// A delta from revision 0 is the whole map's points; from a later revision it
+/// has every keyframe pose but only the points of the hosts a write touched,
+/// each where the snapshot puts it.
+#[test]
+fn a_map_delta_carries_every_pose_and_only_the_changed_hosts_points() {
+    let t_i_c: Vec<Se3<f64>> = vec![
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.1, 0.0)),
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.0, 0.2)),
+    ];
+    let mut backend = backend_with(config(100, 10), t_i_c);
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![
+            landmark(10, 1, &[(1, 0), (2, 0)]),
+            landmark(11, 2, &[(2, 1), (1, 1)]),
+        ],
+    ));
+    let first: MapDelta = backend.delta(0);
+    let whole: MapSnapshot = backend.snapshot();
+    assert_eq!(first.changed_hosts, vec![1, 2]);
+    assert_eq!(first.point_ids, whole.point_ids);
+    assert_eq!(first.points_world, whole.points_world);
+
+    let read: u64 = first.revision;
+    let quiet: MapDelta = backend.delta(read);
+    assert!(quiet.changed_hosts.is_empty() && quiet.point_ids.is_empty(), "nothing changed since the read");
+    assert_eq!(quiet.keyframe_t_ns, vec![1, 2]);
+
+    backend.step(marg(&[1], 1.5, vec![]));
+    let moved: MapDelta = backend.delta(read);
+    let now: MapSnapshot = backend.snapshot();
+    assert!(moved.changed_hosts.contains(&1), "the marginalization moved keyframe 1");
+    assert_eq!(moved.keyframe_poses, now.keyframe_poses);
+    assert_eq!(moved.keyframe_active, now.keyframe_active);
+    for ((id, host), point) in moved.point_ids.iter().zip(&moved.point_hosts).zip(&moved.points_world) {
+        assert!(moved.changed_hosts.contains(host));
+        let k: usize = now.point_ids.iter().position(|other| other == id).unwrap();
+        assert_eq!(&now.points_world[k], point);
+    }
+    assert!(moved.point_ids.contains(&LandmarkId(10)), "keyframe 1 hosts landmark 10");
+}
+
 /// A landmark whose host camera has no extrinsic is left out, not invented.
 #[test]
 fn a_map_snapshot_skips_points_it_cannot_place() {

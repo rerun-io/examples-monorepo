@@ -323,6 +323,14 @@ impl<S: Scalar> Vio<S> {
         self.map_runner.as_ref().map(|runner| runner.view())
     }
 
+    /// The map's changes since revision `since` ([`crate::backend::MapDelta`]):
+    /// every keyframe pose and only the changed hosts' points. `None` with the
+    /// back end off, or in Realtime while the back-end thread holds the map.
+    #[cfg(feature = "backend")]
+    pub fn map_delta(&self, since: u64) -> Option<crate::backend::MapDelta> {
+        self.map_runner.as_ref()?.try_read(|work| work.delta(since))
+    }
+
     /// The map of [`Self::map_view`].
     #[cfg(feature = "backend")]
     pub fn map_snapshot(&self) -> Option<std::sync::Arc<crate::backend::MapSnapshot>> {

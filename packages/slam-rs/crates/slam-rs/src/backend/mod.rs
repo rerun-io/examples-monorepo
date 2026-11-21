@@ -35,7 +35,7 @@ pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOu
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use pgo::{PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
-pub use snapshot::{MapSnapshot, SnapshotLoop};
+pub use snapshot::{MapDelta, MapSnapshot, SnapshotLoop};
 
 /// The map's knobs, read from [`VioConfig`].
 #[derive(Debug, Clone, PartialEq)]
