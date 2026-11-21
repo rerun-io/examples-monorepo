@@ -117,7 +117,8 @@ def create_database(database_path: Path, frames_meta: FramesMeta, *, overwrite: 
     keyframe_by_id: dict[int, KeyframeMeta] = frames_meta.keyframe_by_id()
     rig_frames: tuple[RigFrame, ...] = frames_meta.rig_frames()
 
-    with pycolmap.Database.open(database_path) as database:
+    # One transaction: on a network file system every commit is a round trip, and an interrupted import leaves no prefix behind.
+    with pycolmap.Database.open(database_path) as database, database_transaction(database):
         for camera in cameras.values():
             database.write_camera(camera, True)
         database.write_rig(build_rig(frames_meta), True)

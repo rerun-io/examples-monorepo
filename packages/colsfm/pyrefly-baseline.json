@@ -1619,6 +1619,13 @@
     },
     {
       "column": 1,
+      "path": "tests/test_database.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
       "path": "tests/test_frame_poses.py",
       "name": "missing-import",
       "concise_description": "Cannot find module `mapping_helpers`",
