@@ -100,9 +100,12 @@ def dilate_masks(masks: Bool[Tensor, "n h w"], radius_px: int) -> Bool[Tensor, "
     if radius_px <= 0:
         return masks
     kernel: UInt8[ndarray, "k k"] = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius_px + 1, 2 * radius_px + 1))
-    weights: Float32[Tensor, "1 1 k k"] = torch.from_numpy(kernel).to(masks.device, torch.float32)[None, None]
-    # Sums of 0/1 products stay exact integers in float32 (also with TF32 inputs), so > 0.5 is the binary dilation.
-    hits: Float32[Tensor, "n 1 h w"] = F.conv2d(masks[:, None].float(), weights, padding=radius_px)
+    # On CUDA the conv runs in float16: a single-channel float32 conv takes a slow cuDNN path (80 ms for two 1920 px masks
+    # on the 5090, 3.6 ms in float16). The disc sums are integers <= k*k, exact in float16 while k*k <= 2048 and in float32
+    # always, so > 0.5 is the binary dilation either way.
+    dtype: torch.dtype = torch.float16 if masks.is_cuda and kernel.size <= 2048 else torch.float32
+    weights: Tensor = torch.from_numpy(kernel).to(masks.device, dtype)[None, None]
+    hits: Tensor = F.conv2d(masks[:, None].to(dtype), weights, padding=radius_px)
     return hits[:, 0] > 0.5
 
 
