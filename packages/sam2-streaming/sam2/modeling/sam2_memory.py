@@ -81,8 +81,10 @@ class SAM2ObjectMemoryBank(ObjectMemoryBank):
         ret = []
 
         for i, obj_id in enumerate(obj_ids):
-            memory_embedding = memory_embeddings[[i]]
-            memory_pos_embedding = memory_pos_embeddings[[i]]
+            # Own copies of row i; a slice + clone, not `[[i]]`: list indexing copies the index from pageable host
+            # memory, which waits for all queued GPU work on every object.
+            memory_embedding = memory_embeddings[i : i + 1].clone()
+            memory_pos_embedding = memory_pos_embeddings[i : i + 1].clone()
             result = results[i]
             prompt = prompts[i]
             is_conditional = prompt is not None
