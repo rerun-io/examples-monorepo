@@ -12,7 +12,8 @@ class SAM2ForgetfulObjectMemoryBank(SAM2ObjectMemoryBank):
     - Non-conditional memories are pruned if their frame index is outside
       the range [current_frame_idx - memory_window_size, current_frame_idx + memory_window_size].
     - Conditional (prompted) memories are kept indefinitely with ``max_conditional_memories=-1``; bounded, the bank
-      keeps per object the ``max_conditional_memories`` most recent and those inside the window, and drops the rest.
+      keeps per object the ``max_conditional_memories`` most recent and those inside the selector's look-back
+      (``memory_window_size`` x ``memory_temporal_stride`` frames), and drops the rest.
 
     Bounded, pair it with the predictor's ``max_cond_frames_in_attn`` set to the same value: forward tracking attends
     to that many nearest prompted memories and uses an unselected one only as a non-prompted memory (SAM 2 takes
@@ -63,9 +64,12 @@ class SAM2ForgetfulObjectMemoryBank(SAM2ObjectMemoryBank):
                 continue
             cond_obj_memories = self.conditional_memories.get(obj_id, [])
             first_recent = len(cond_obj_memories) - self.max_conditional_memories
+            # An unselected prompted memory can still fill a non-prompted slot, and the selector reaches back
+            # (slots x temporal stride) frames: keep those inside window x stride.
+            lookback = self.memory_window_size * self.memory_temporal_stride
             kept_cond = []
             for index, m in enumerate(cond_obj_memories):
-                if index >= first_recent or m.frame_idx >= current_frame_idx - self.memory_window_size:
+                if index >= first_recent or m.frame_idx >= current_frame_idx - lookback:
                     kept_cond.append(m)
                 else:
                     removed_memories.setdefault(obj_id, []).append(m)
