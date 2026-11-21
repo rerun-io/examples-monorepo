@@ -66,3 +66,38 @@ def test_prefetched_chunks_match_the_sequential_decode() -> None:
 
     assert len(got) == len(chunks)
     assert all(torch.equal(g, e) for g, e in zip(got, expected, strict=True))
+
+
+def test_people_tracker_lookahead_gives_the_same_masks() -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    if BASE_RRD is None or not Path(BASE_RRD).exists():
+        pytest.skip(f"asset missing: Insta360 base .rrd (set POSEKIT_PEOPLE_MASKS_RRD; got {BASE_RRD})")
+    import rerun as rr
+    from simplecv.catalog_video import read_catalog_videos
+
+    from posekit.apis.people_masks import MaskOptions
+    from posekit.apis.people_tracks import PeopleTracker, StreamDecoder, TrackOptions
+
+    entities: list[str] = ["/world/rig_00/cam_00/pinhole/video", "/world/rig_00/cam_01/pinhole/video"]
+    with rr.server.Server(datasets={"base": [str(BASE_RRD)]}) as server:
+        dataset = server.client().get_dataset("base")
+        videos = read_catalog_videos(dataset, dataset.segment_ids()[0], entities, "video_time")
+    indices: list[int] = list(range(0, 70, 10))
+    decoders = [StreamDecoder(v, 0, 61, "cuda") for v in videos]
+    frames = torch.stack([d.frames(indices) for d in decoders])
+
+    def unions(lookahead: bool) -> list:
+        tracker = PeopleTracker(TrackOptions(redetect_every=2, lookahead=lookahead), MaskOptions(), "cuda")
+        ahead = [frames[:, i + 2] if i + 2 < len(indices) else None for i in range(len(indices))]
+        out = [tracker.step(frames[:, i], ahead[i]).cpu() for i in range(len(indices))]
+        tracker.close()
+        assert tracker.redetects == 4  # steps 0, 2, 4, 6
+        return out
+
+    inline = unions(lookahead=False)
+    overlapped = unions(lookahead=True)
+
+    assert all(torch.equal(a, b) for a, b in zip(inline, overlapped, strict=True))
+    assert any(bool(u.any()) for u in overlapped)
