@@ -65,6 +65,27 @@ def box_geometry(box_xyxy: Float32[ndarray, "4"], config: MammaNetConfig) -> tup
     return center, bbox_size
 
 
+def crop_window(
+    centers: Float64[ndarray, "k 2"], bbox_sizes: Float64[ndarray, "k 2"], width: int, height: int
+) -> tuple[int, int, int, int]:
+    """Pixel window ``(x0, y0, x1, y1)`` (exclusive ends) holding every pixel the crops of
+    :func:`gpu_crop_batch` read for these boxes, clamped to the frame.
+
+    A crop samples ``center +- size/2``; bilinear reads the two pixels around each sample, so the
+    window adds two pixels on each side. A window clamped to nothing (a box outside the frame)
+    falls back to the whole frame.
+    """
+    lo: Float64[ndarray, "2"] = np.floor((centers - bbox_sizes / 2.0).min(axis=0)) - 2.0
+    hi: Float64[ndarray, "2"] = np.ceil((centers + bbox_sizes / 2.0).max(axis=0)) + 3.0
+    x0: int = int(np.clip(lo[0], 0, width))
+    y0: int = int(np.clip(lo[1], 0, height))
+    x1: int = int(np.clip(hi[0], 0, width))
+    y1: int = int(np.clip(hi[1], 0, height))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return 0, 0, width, height
+    return x0, y0, x1, y1
+
+
 def gpu_crop_batch(
     frames: Float32[torch.Tensor, "n 3 h w"],
     centers: Float64[ndarray, "n 2"] | Float32[torch.Tensor, "n 2"],

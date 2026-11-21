@@ -78,5 +78,42 @@ def test_hires_crops_match_per_person_frame_copies(device: str) -> None:
     expected, _ = gpu_crop_batch(stacked, centers * hires_scale, sizes * hires_scale, None, DEFAULT_MAMMANET_CONFIG)
 
     assert len(model.img_crops) == 1
-    assert torch.equal(model.img_crops[0], expected)
+    # Crops sample each camera's crop window, not the whole frame: the same pixels, with the sampling
+    # grid rounded differently (1e-3 normalized units is a few hundredths of a gray level).
+    assert torch.allclose(model.img_crops[0], expected, atol=1e-3, rtol=0.0)
     assert [sorted(cam_results) for cam_results in results] == [[2, 7], [], [5]]
+
+
+def test_crops_from_the_sampled_window_match_crops_from_the_whole_frame() -> None:
+    """Sampling only crop_window's pixels (shifted centres) gives the whole-frame crops, also at the frame border."""
+    from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG
+    from mamma.landmarks.crops import crop_window, gpu_crop_batch
+
+    gen = torch.Generator().manual_seed(0)
+    frame: torch.Tensor = torch.randint(0, 256, (3, 216, 384), generator=gen, dtype=torch.uint8)
+    centers = np.array([[120.0, 100.0], [370.0, 30.0]])  # the second box runs off the right and top edges
+    sizes = np.array([[90.0, 120.0], [60.0, 80.0]])
+    full, _ = gpu_crop_batch(frame.float().unsqueeze(0).expand(2, -1, -1, -1), centers, sizes, None, DEFAULT_MAMMANET_CONFIG)
+    x0, y0, x1, y1 = crop_window(centers, sizes, 384, 216)
+    assert (x1 - x0) * (y1 - y0) < 384 * 216
+    window: torch.Tensor = frame[:, y0:y1, x0:x1].float().unsqueeze(0).expand(2, -1, -1, -1)
+    windowed, _ = gpu_crop_batch(window, centers - np.array([x0, y0]), sizes, None, DEFAULT_MAMMANET_CONFIG)
+    # Normalized units (pixel / ~58): 1e-3 is a few hundredths of a gray level, float rounding of the grid.
+    assert float((windowed - full).abs().max()) < 1e-3
+
+
+def test_crop_window_outside_the_frame_falls_back_to_the_whole_frame() -> None:
+    from mamma.landmarks.crops import crop_window
+
+    assert crop_window(np.array([[-500.0, -500.0]]), np.array([[10.0, 10.0]]), 384, 216) == (0, 0, 384, 216)
+
+
+def test_area_resize_integer_factor_matches_area_interpolation() -> None:
+    """3x area downscale through avg_pool2d equals interpolate(mode='area'); a non-integer factor keeps it."""
+    from mamma.engine.pipeline import area_resize
+
+    gen = torch.Generator().manual_seed(1)
+    frames: torch.Tensor = torch.randint(0, 256, (2, 3, 216, 384), generator=gen, dtype=torch.uint8)
+    for size in ((72, 128), (100, 150)):
+        expected = torch.nn.functional.interpolate(frames.float(), size=size, mode="area").round_().clamp_(0, 255).to(torch.uint8)
+        assert torch.equal(area_resize(frames, size), expected), size
