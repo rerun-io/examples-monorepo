@@ -67,6 +67,56 @@ def keypoints_outside_mask(keypoints_xy: Float32[ndarray, "n 2"], mask: Keypoint
     return ~mask[rows, columns]
 
 
+def pack_mask_table(table: pa.Table, timeline: str, entity: str) -> dict[int, tuple[int, int, UInt8[ndarray, " n"]]]:
+    """Bit-pack every mask of one `SegmentationImage` entity, keyed by its stamp; rows without a mask (null or cleared) are skipped.
+
+    Walks the table's record batches through the list offsets, so no mask byte is copied before `np.packbits`
+    (a `filter` first copies every mask in the segment).
+
+    Args:
+        table: The entity's rows on `timeline`, as the catalog reader returns them.
+        timeline: The index column.
+        entity: The mask entity path, without the leading slash.
+
+    Returns:
+        Stamp (ns) -> (mask width, mask height, `np.packbits` of the flat `!= 0` mask).
+
+    Raises:
+        ValueError: When a row holds more than one mask, a mask has no format, or a mask does not hold one byte per pixel.
+    """
+    packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = {}
+    for batch in table.to_batches():
+        buffers: pa.ListArray = batch.column(f"/{entity}:SegmentationImage:buffer")
+        valid: Bool[ndarray, " rows"] = buffers.is_valid().to_numpy(zero_copy_only=False)
+        if not valid.any():
+            continue
+        stamps: ndarray = batch.column(timeline).to_numpy(zero_copy_only=False).view(np.int64)
+        formats: list[list[dict[str, int]] | None] = batch.column(f"/{entity}:SegmentationImage:format").to_pylist()
+        # `offsets` and `values` both address the unsliced child arrays, so they compose for a sliced batch as well.
+        instance_offsets: ndarray = buffers.offsets.to_numpy()
+        instances: pa.ListArray = buffers.values
+        byte_offsets: ndarray = instances.offsets.to_numpy()
+        data: UInt8[ndarray, " n"] = instances.values.to_numpy(zero_copy_only=False)
+        for row in np.flatnonzero(valid):
+            stamp: int = int(stamps[row])
+            instance: int = int(instance_offsets[row])
+            # A cleared row (`[]`) is valid but empty: its start equals the next row's, so it has no mask of its own.
+            num_instances: int = int(instance_offsets[row + 1]) - instance
+            if num_instances == 0:
+                continue
+            if num_instances != 1:
+                raise ValueError(f"/{entity} at t_ns {stamp}: {num_instances} mask instances, expected 1")
+            mask_format: list[dict[str, int]] | None = formats[row]
+            if not mask_format or len(mask_format) != 1:
+                raise ValueError(f"/{entity} at t_ns {stamp}: a mask with no format (or {len(mask_format or [])}), expected 1")
+            pixels: UInt8[ndarray, " n"] = data[byte_offsets[instance] : byte_offsets[instance + 1]]
+            mask_width, mask_height = int(mask_format[0]["width"]), int(mask_format[0]["height"])
+            if len(pixels) != mask_width * mask_height:
+                raise ValueError(f"/{entity} at t_ns {stamp}: a {mask_width}x{mask_height} mask holds {len(pixels)} bytes, not one per pixel")
+            packed[stamp] = (mask_width, mask_height, np.packbits(pixels != 0))
+    return packed
+
+
 class CatalogMasks:
     """The masks a catalog manifest names, read from the catalog one stream at a time and held bit-packed."""
 
@@ -103,20 +153,9 @@ class CatalogMasks:
             logged: list[float] | None = first_valid_value(statics[scale_column], allow_none=True) if scale_column in statics.column_names else None
             self.scales[stream_index] = (1.0, 1.0) if logged is None else (float(logged[0]), float(logged[1]))
             table: pa.Table = layer.reader(index=self.manifest.timeline).to_arrow_table()
-            column: str = f"/{entity}:SegmentationImage:buffer"
-            if column not in table.column_names:
+            if f"/{entity}:SegmentationImage:buffer" not in table.column_names:
                 raise ValueError(f"{self.manifest.segment}: no SegmentationImage at /{entity}")
-            table = table.filter(table[column].is_valid())
-            t_ns: ndarray = table[self.manifest.timeline].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64)
-            buffers: pa.Array = table[column].combine_chunks().flatten()  # one instance per row -> list<uint8> per row
-            formats: list[dict[str, int]] = [row[0] for row in table[f"/{entity}:SegmentationImage:format"].to_pylist()]
-            packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = {}
-            for row, stamp in enumerate(t_ns):
-                pixels: UInt8[ndarray, " n"] = buffers[row].values.to_numpy(zero_copy_only=False)
-                mask_width, mask_height = formats[row]["width"], formats[row]["height"]
-                if len(pixels) != mask_width * mask_height:
-                    raise ValueError(f"/{entity} at t_ns {int(stamp)}: a {mask_width}x{mask_height} mask holds {len(pixels)} bytes, not one per pixel")
-                packed[int(stamp)] = (mask_width, mask_height, np.packbits(pixels != 0))
+            packed: dict[int, tuple[int, int, UInt8[ndarray, " n"]]] = pack_mask_table(table, self.manifest.timeline, entity)
             self.packed[stream_index] = packed
             print(f"[colsfm.masks] /{entity}: {len(self.packed[stream_index])} masks")
         return self.packed[stream_index]
