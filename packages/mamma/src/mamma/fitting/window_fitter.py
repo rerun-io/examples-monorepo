@@ -79,10 +79,8 @@ class FitterConfig:
     a zero-lag causal one are exactly the ones this recovers."""
     emit_stride: int = 2
     """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
-    pure read-out — fit quality is unchanged. CAUTION: on skipped ticks push()
-    returns the PREVIOUS FitResult, so ``FitResult.frame_idx`` lags the tick —
-    consumers indexing results by frame_idx (e.g. a ResultCollector) must set
-    1, as validate_golden does."""
+    pure read-out — fit quality is unchanged. On skipped ticks push() returns
+    None; consumers that need a fit for every frame (validate_golden) set 1."""
     lbfgs_polish: bool = True
     """Eager LBFGS refinement (lr 0.3, strong-wolfe — the original's actual
     optimizer; its YAML 'Adam' field is dead config) on HARD ticks only:
@@ -231,9 +229,10 @@ class SlidingWindowFitter:
         self.sampled_model: SampledSmplx = SampledSmplx(self.model, self.verts_to_landmarks)
         self._window: list[_WindowFrame] = []
         self._bootstrapped: bool = False
+        self._has_emitted: bool = False
+        """A stride-skipped tick returns None only once the first fit has been emitted (that one goes out at once)."""
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static: dict[str, torch.Tensor | list[torch.Tensor]] = {}
-        self._last_emit: FitResult | None = None
         self._head_fits: list[FitResult] = []
         self._valid_counts: list[float] = []
         self._rest_joints: Float32[ndarray, "55 3"] | None = None
@@ -255,8 +254,8 @@ class SlidingWindowFitter:
         floor_contact: Float32[torch.Tensor, "n"] | None = None,
         optimize: bool = True,
     ) -> FitResult | None:
-        """Add one tick's observations; returns the newest frame's fit (or None
-        before the first window fills)."""
+        """Add one tick's observations; returns the emitted frame's fit, or None before the first
+        window fills and on ticks ``emit_stride`` skips."""
         anchors_valid_f: Float32[torch.Tensor, "n"] = anchors_valid.float().detach()
         anchors3d_d: Float32[torch.Tensor, "n 3"] = anchors3d.detach()
         if self._window:
@@ -329,23 +328,25 @@ class SlidingWindowFitter:
             head_count: int = max(0, len(self._window) - 1 - self.config.emit_lag)
             self._head_fits = [self._emit(i) for i in range(head_count)]
         elif optimize:
+            # Read the anchor count before queueing the replays: read after them, the host would wait for
+            # all tick_iters replays before it could launch anything else. Same value, same decision.
+            count: float = float(anchors_valid_f.sum().item()) if self.config.lbfgs_polish else 0.0
             if self.config.use_cuda_graph:
                 self._optimize_graphed()
             else:
                 self._optimize(self.config.tick_iters, optimize_betas=False)
             if self.config.lbfgs_polish:
-                count: float = float(anchors_valid_f.sum().item())
                 self._valid_counts.append(count)
                 if len(self._valid_counts) > 60:
                     self._valid_counts.pop(0)
                 median: float = float(np.median(self._valid_counts))
                 if len(self._valid_counts) >= 20 and count < 0.75 * median:
                     self._lbfgs_polish()
-        if self.config.emit_stride > 1 and frame_idx % self.config.emit_stride != 0 and self._last_emit is not None:
-            return self._last_emit
+        if self.config.emit_stride > 1 and frame_idx % self.config.emit_stride != 0 and self._has_emitted:
+            return None
+        self._has_emitted = True
         emit_index: int = -1 - min(self.config.emit_lag, len(self._window) - 1)
-        self._last_emit = self._emit(emit_index)
-        return self._last_emit
+        return self._emit(emit_index)
 
     # ── CUDA-graph steady state ──────────────────────────────────────────────
 
@@ -618,17 +619,35 @@ class SlidingWindowFitter:
                 self.betas,
                 f.trans.unsqueeze(0),
             )
-        pose_full: Float32[ndarray, "165"] = (
-            torch.cat([f.global_orient, f.body_pose, self.jaw_pose, torch.zeros(6, device=self.device), self.hand_pose_left, self.hand_pose_right])
+        n_verts: int = out.vertices.shape[1]
+        n_joints: int = out.joints.shape[1]
+        n_betas: int = self.betas.shape[1]
+        # One device->host copy (one stream sync) for everything the result carries.
+        packed: Float32[ndarray, "k"] = (
+            torch.cat(
+                [
+                    out.vertices[0].reshape(-1),
+                    out.joints[0].reshape(-1),
+                    f.global_orient,
+                    f.body_pose,
+                    self.jaw_pose,
+                    torch.zeros(6, device=self.device),
+                    self.hand_pose_left,
+                    self.hand_pose_right,
+                    self.betas[0].detach(),
+                    f.trans,
+                ]
+            )
             .cpu()
             .numpy()
         )
+        verts_np, joints_np, pose_full, betas_np, trans_np = np.split(packed, np.cumsum([n_verts * 3, n_joints * 3, 165, n_betas]))
         return FitResult(
             frame_idx=f.frame_idx,
-            vertices=out.vertices[0].cpu().numpy(),
-            joints=out.joints[0].cpu().numpy(),
+            vertices=verts_np.reshape(n_verts, 3),
+            joints=joints_np.reshape(n_joints, 3),
             pose=pose_full,
-            betas=self.betas[0].detach().cpu().numpy(),
-            trans=f.trans.cpu().numpy(),
+            betas=betas_np,
+            trans=trans_np,
             rest_joints=self._rest_joints,
         )
