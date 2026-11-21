@@ -95,7 +95,9 @@ print(json.dumps({"built": built, "ious": ious, "equal": all(bool(torch.equal(a,
 def test_fused_rope_builds_without_env_activation_and_matches_unfused_masks(tmp_path: Path, efficienttam_ti_files: tuple[str, str]) -> None:
     """The pipeline driver runs ``<env>/bin/python`` with no ``CONDA_PREFIX``; Triton then misses ptxas-blackwell."""
     env_bin: str = str(Path(sys.prefix) / "bin")
-    env: dict[str, str] = {k: v for k, v in os.environ.items() if k != "CONDA_PREFIX" and k not in _PTXAS_KEYS}
+    # As the driver's process sees it: no activation, so neither the prefix nor the compiler names that activation sets
+    # (CC=x86_64-conda-linux-gnu-cc resolves only on the env's PATH; Triton builds its launcher with $CC).
+    env: dict[str, str] = {k: v for k, v in os.environ.items() if k not in ("CONDA_PREFIX", "CC", "CXX") and k not in _PTXAS_KEYS}
     env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if p != env_bin)
     env["TRITON_CACHE_DIR"] = str(tmp_path / "triton-cache")  # an empty cache, so the kernel compiles here
     child: list[str] = [sys.executable, "-c", _CHILD, *efficienttam_ti_files]
