@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
-from posekit.models import ClipIdentityConfig, DetectorConfig, RtDetrDetectorConfig
+from posekit.models import ClipIdentityConfig, DetectorConfig, YoloDetectorConfig
 from sam2.cuda_graphs import GraphCache
 from sam2.modeling.sam2_prompt import SAM2Prompt
 from sam2.modeling.sam2_result import SAM2Result
@@ -90,11 +90,12 @@ class TrackerConfig:
     the golden gate passes with it (see implementation-notes)."""
     sam2_checkpoint: Path = Path("data/weights/efficienttam/efficienttam_ti.pt")
     """SAM2-family checkpoint path (EfficientTAM via build_sam2_generic*)."""
-    detector: DetectorConfig = field(default_factory=RtDetrDetectorConfig)
-    """posekit person detector for the bootstrap and re-detects (``posekit.models.DetectorConfig``: ``rtdetr``,
-    ``yolox``, ``yolo`` with ``--tracker.detector.weights`` for YOLOv12-X). RT-DETRv2-R50 by default (Pablo,
-    2026-11-21): same golden/dynamic as YOLOv12-X, best on the bystander case (MammaEval CatchBall), re-detect
-    ~20 ms for 4 cameras vs ~45 ms. The detector config carries its own device."""
+    detector: DetectorConfig = field(default_factory=lambda: YoloDetectorConfig(weights=Path("data/weights/yolo/yolo12x.pt")))
+    """posekit person detector for the bootstrap and re-detects (``posekit.models.DetectorConfig``: ``yolo``,
+    ``rtdetr``, ``yolox``). YOLOv12-X by default (Pablo, 2026-11-21). RT-DETRv2-R50 re-detects faster (~20 vs ~45 ms
+    for 4 cameras) and matches it on single-person clips, but at its 0.5 score threshold its weak background boxes
+    join the bootstrap when the subject count is inferred, and the cross-camera matching scrambles people (MammaEval-D
+    WestCoastSwing 0:240 PVE 227/218 mm vs 30/21 mm with YOLOv12-X). The detector config carries its own device."""
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
     redetect_interval: int = 120

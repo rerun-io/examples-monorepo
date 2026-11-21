@@ -180,3 +180,15 @@ def test_whole_frame_boxes_are_not_people() -> None:
     assert [len(d) for d in detections] == [0, 1]
     assert detections[1].boxes_xyxy.tolist() == [[10.0, 5.0, 30.0, 55.0]]
     assert detections[1].features[:, 0].tolist() == [1.0]
+
+
+def test_default_detector_is_yolov12x() -> None:
+    """MAMMA's default person detector is YOLOv12-X from the package's weights (RT-DETR at 0.5 scrambled multi-person bootstraps)."""
+    from pathlib import Path
+
+    from posekit.models import YoloDetectorConfig
+
+    from mamma.tracking.tracker import TrackerConfig
+
+    detector = TrackerConfig().detector
+    assert isinstance(detector, YoloDetectorConfig) and Path(detector.weights) == Path("data/weights/yolo/yolo12x.pt")
