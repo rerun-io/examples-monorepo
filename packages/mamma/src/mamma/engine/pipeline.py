@@ -13,6 +13,7 @@ from pathlib import Path
 
 import torch
 from jaxtyping import UInt8
+from simplecv.ops.gpu_image import area_downscale_uint8
 from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.calibration.npz_contract import CameraCalibration
@@ -241,12 +242,7 @@ class StreamingPipeline:
                     if self.engine_hw is not None:
                         frames_hires = frames
                         with torch.profiler.record_function("stage::resize"):
-                            lo: UInt8[torch.Tensor, "c 3 h w"] = (
-                                torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
-                                .round_()
-                                .clamp_(0, 255)
-                                .to(torch.uint8)
-                            )
+                            lo: UInt8[torch.Tensor, "c 3 h w"] = area_downscale_uint8(torch.stack(frames), self.engine_hw)
                         frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None

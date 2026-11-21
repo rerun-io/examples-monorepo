@@ -25,6 +25,7 @@ from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
 from simplecv.nvdec_444 import Nvdec444Decoder, converts_color_space
+from simplecv.ops.gpu_image import area_downscale_uint8
 
 T = TypeVar("T")
 
@@ -665,10 +666,7 @@ class TorchCodecVideoReader:
             (frames.shape[0], 3, *self.resize_hw), dtype=torch.uint8, device=frames.device
         )
         for start in range(0, frames.shape[0], 8):
-            piece: torch.Tensor = frames[start : start + 8].float()
-            resized[start : start + 8] = (
-                torch.nn.functional.interpolate(piece, size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
-            )
+            resized[start : start + 8] = area_downscale_uint8(frames[start : start + 8], self.resize_hw)
         return resized
 
     def get_frames_in_range(self, start: int, stop: int) -> UInt8[torch.Tensor, "b 3 h w"]:
