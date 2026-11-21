@@ -380,31 +380,34 @@ def main(config: PeopleTracksConfig) -> None:
         for column, index in enumerate(chunk)
     )
     ahead: int = config.track.redetect_every
-    window: deque[tuple[int, Tensor, bool]] = deque(islice(steps, ahead))
-    while window:
-        index, frame, chunk_end = window.popleft()
-        window.extend(islice(steps, 1))  # now the steps after this one, up to redetect_every later
-        n_slots, height, width = int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
-        if height % factor or width % factor:
-            raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames")
-        union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
-        if index % config.output_every == 0:
-            dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
-            cells: Bool[Tensor, "s hm wm"] = dilated.view(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
-            masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
-            for slot, entity in enumerate(entities):
-                set_frame_time(config.timeline, videos[slot].times[index])
-                rr.log(targets[slot], rr.SegmentationImage(masks[slot]))
-                n_masks += 1
-                if config.overlay_dir is not None and index in config.overlay_frames:
-                    write_overlay(config.overlay_dir, entity, index, frame[slot].cpu().numpy(), dilated[slot].cpu().numpy())
-        if chunk_end:
-            live: list[int] = [len(t) for t in tracker.live]
-            elapsed: float = time.perf_counter() - run_start
-            print(
-                f"frame {index}: live tracks {live}, events {tracker.counts}, {tracker.steps * len(entities) / elapsed:.1f} images/s, "
-                f"SAM 3 {tracker.detect_seconds:.1f} (waited {tracker.wait_seconds:.1f}) of {elapsed:.1f} s"
-            )
+    # with lookahead the tracker runs on a high-priority stream: its small kernels go ahead of SAM 3's queued GEMM blocks
+    track_stream: torch.cuda.Stream = torch.cuda.Stream(device=config.device, priority=-1) if config.track.lookahead else torch.cuda.current_stream()
+    with torch.cuda.stream(track_stream):
+        window: deque[tuple[int, Tensor, bool]] = deque(islice(steps, ahead))
+        while window:
+            index, frame, chunk_end = window.popleft()
+            window.extend(islice(steps, 1))  # now the steps after this one, up to redetect_every later
+            n_slots, height, width = int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
+            if height % factor or width % factor:
+                raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames")
+            union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
+            if index % config.output_every == 0:
+                dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
+                cells: Bool[Tensor, "s hm wm"] = dilated.view(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+                masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
+                for slot, entity in enumerate(entities):
+                    set_frame_time(config.timeline, videos[slot].times[index])
+                    rr.log(targets[slot], rr.SegmentationImage(masks[slot]))
+                    n_masks += 1
+                    if config.overlay_dir is not None and index in config.overlay_frames:
+                        write_overlay(config.overlay_dir, entity, index, frame[slot].cpu().numpy(), dilated[slot].cpu().numpy())
+            if chunk_end:
+                live: list[int] = [len(t) for t in tracker.live]
+                elapsed: float = time.perf_counter() - run_start
+                print(
+                    f"frame {index}: live tracks {live}, events {tracker.counts}, {tracker.steps * len(entities) / elapsed:.1f} images/s, "
+                    f"SAM 3 {tracker.detect_seconds:.1f} (waited {tracker.wait_seconds:.1f}) of {elapsed:.1f} s"
+                )
     tracker.close()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
