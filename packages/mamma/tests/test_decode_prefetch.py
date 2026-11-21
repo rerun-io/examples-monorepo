@@ -21,7 +21,7 @@ import torch
 from jaxtyping import UInt8
 from simplecv.video_io import TorchCodecMultiVideoReader
 
-from mamma.engine.pipeline import decode_backend, iter_decoded_chunks
+from mamma.engine.pipeline import decode_backend, iter_decoded_chunks, ramped_chunk_ranges
 
 
 class _Metadata:
@@ -117,6 +117,21 @@ def test_decode_runs_on_the_given_pool_one_chunk_ahead() -> None:
         reader.close()
     # One submit per camera per chunk; the next chunk is queued before the current one is handed out.
     assert consumed_before_next == [[0, 0, 4, 4], [0, 0, 4, 4, 8, 8], [0, 0, 4, 4, 8, 8]]
+
+
+def test_ramped_chunks_start_short_and_cover_the_range() -> None:
+    """The first decode chunk is short (the first tick waits for all of it), then doubles up to chunk_size."""
+    assert ramped_chunk_ranges(10, 100, 32) == [(10, 14), (14, 22), (22, 38), (38, 70), (70, 100)]
+    assert ramped_chunk_ranges(0, 3, 32) == [(0, 3)]
+    assert ramped_chunk_ranges(0, 6, 2) == [(0, 2), (2, 4), (4, 6)]
+    assert ramped_chunk_ranges(5, 5, 32) == []
+
+
+@pytest.mark.parametrize(("chunk_size", "first"), [(0, 4), (-8, 4), (32, 0), (32, -1)])
+def test_ramped_chunks_reject_nonpositive_sizes(chunk_size: int, first: int) -> None:
+    """A zero or negative chunk never reaches stop (zero repeats one range forever): fail at once instead."""
+    with pytest.raises(ValueError):
+        ramped_chunk_ranges(0, 100, chunk_size, first=first)
 
 
 @pytest.mark.usefixtures("fake_decoder")

@@ -213,6 +213,15 @@ class VideoEncoder:
 
     # ── Lazy init ─────────────────────────────────────────────────────────
 
+    def open(self, width: int, height: int) -> None:
+        """Open the codec context now for ``width`` x ``height`` frames instead of on the first frame.
+
+        Opening an NVENC session takes ~0.1 s and holds the GIL; a realtime loop opens its encoders
+        before it starts. No-op when already open.
+        """
+        if self._ctx is None:
+            self._init_encoder(width, height)
+
     def _init_encoder(self, width: int, height: int) -> None:
         # Most codecs require even dimensions.
         width = width if width % 2 == 0 else width + 1

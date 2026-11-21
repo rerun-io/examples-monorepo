@@ -157,6 +157,10 @@ class StreamLogger:
         ``timing_doc`` selects the relog layout (a ``/timing_summary`` text view
         instead of the per-tick stage-timings graph).
         """
+        # Open the per-camera encoders now (NVENC session setup ~0.1 s each, GIL held), not on the
+        # first logged frame inside the loop.
+        for encoder in self._encoders.values():
+            encoder.open(self.resize_hw[1], self.resize_hw[0])
         rr.send_blueprint(default_blueprint(self.sequence.camera_names, timing_doc=timing_doc))
         rr.log(WORLD_TAG, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         # Ground plane at world z=0 (the plane the fitter's floor loss
