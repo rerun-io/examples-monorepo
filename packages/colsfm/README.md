@@ -26,6 +26,9 @@ pixi run -e colsfm colsfm-walkthrough        # Galileo stage by stage, as a Reru
 
 `python tools/run.py catalog --help` lists the catalog source options (dataset, segment, cameras, stereo pairs, the entity
 whose temporal `Transform3D` is the initial trajectory, stride, trim) and every pipeline knob.
+`--source.frame-stride` defaults to 2 (every second frame of the reference camera; on an Insta360 cube layer, whose
+framesets are every `cube_stride`-th video frame, every second frameset): half the run, Sim(3) ATE within 5 % of stride 1
+(MSD MGO05 -1.3 %, EuRoC V1_01 -0.9 %, KITTI 06 +1.7 %, TartanAir P004 cube +3.6 %). Pass `--source.frame-stride 1` for every frame.
 
 ## The default pipeline and its ablations
 

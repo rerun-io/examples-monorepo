@@ -95,8 +95,9 @@ class CatalogInputConfig:
     ground_truth_entity: str | None = None
     """Entity whose temporal `Transform3D` is the ground-truth `world_T_rig` (e.g. `/world/rig_00` from a `gt` layer);
     when set, it is written as `ground_truth.txt` (TUM, at each rig frame's reference timestamp) so the run is scored."""
-    frame_stride: int = 1
-    """Use every Nth frame of the reference camera."""
+    frame_stride: int = 2
+    """Use every Nth frame of the reference camera's video, before keyframe selection; the one default for every catalog
+    path (`run catalog`, `overview`). 2 halves the run at the same ATE (measurements: README); 1 keeps every frame."""
     trim_start_seconds: float = 0.0
     """Drop this much from the start of the reference camera's video."""
     trim_end_seconds: float = 0.0

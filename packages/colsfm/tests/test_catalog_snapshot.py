@@ -90,3 +90,11 @@ def test_metadata_naming_other_images_than_the_manifest_is_refused(tmp_path: Pat
     with pytest.raises(ValueError, match="same set"):
         write_snapshot(input_dir, CatalogSnapshot(spec="a", ground_truth=False), _manifest(["cam0/1"]), _meta(["cam0/2"]), None)
     assert not input_dir.exists()
+
+
+def test_the_default_keeps_every_second_frame(tmp_path: Path) -> None:
+    """`frame_stride` defaults to 2 for every catalog path (`run catalog`, `overview`)."""
+    config: CatalogInputConfig = CatalogInputConfig(dataset="msd-g2", segment="seg", output_root=tmp_path)
+    assert config.frame_stride == 2
+    assert config.input_dir.name.startswith("seg_s2_")
+    assert dataclasses.replace(config, frame_stride=1).input_dir.name.startswith("seg_s1_")
