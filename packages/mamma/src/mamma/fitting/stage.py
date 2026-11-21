@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float32
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.fitting.triangulation import triangulate_gated, triangulate_points
-from mamma.fitting.window_fitter import FitResult, FitterConfig, SlidingWindowFitter
+from mamma.fitting.window_fitter import FitResult, FitterConfig, SlidingWindowFitter, load_body
 from mamma.landmarks.estimator import CameraLandmarks
 
 
@@ -45,9 +45,9 @@ class FittingStage:
         )
         if config.compile_iter and config.use_cuda_graph and torch.device(config.device).type == "cuda" and os.environ.get("PIXI_DEV_MODE") != "1":
             self._prewarm_compile()
-        # The first person's fitter, built now: SlidingWindowFitter construction (smplx.create, ~0.6 s)
-        # would otherwise stall the first fit inside the streaming loop.
-        self._spare_fitter: SlidingWindowFitter | None = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
+        # Load the shared body model now (smplx.create ~0.6 s), not when the first person appears mid-stream;
+        # every fitter then builds in milliseconds.
+        load_body(config.smplx_model_dir, config.downsampled_verts_pkl, config.device)
 
     def _prewarm_compile(self) -> None:
         """Compile the fitter's graphed iterations now, before streaming starts.
@@ -147,8 +147,7 @@ class FittingStage:
 
             fitter: SlidingWindowFitter | None = self._fitters.get(obj_id)
             if fitter is None:
-                fitter = self._spare_fitter or SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
-                self._spare_fitter = None
+                fitter = SlidingWindowFitter(self.k_per_cam, self.world_to_cam_per_cam, self.config)
                 self._fitters[obj_id] = fitter
                 if self.faces is None:
                     self.faces = fitter.model.faces
