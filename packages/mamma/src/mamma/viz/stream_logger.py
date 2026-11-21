@@ -9,7 +9,9 @@ path never re-decodes source video.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +82,25 @@ TIMELINE: str = "time"
 """Shared timeline name; ticks are elapsed seconds (``frame_idx / fps``)."""
 
 
+class BoundedWorker:
+    """One logging thread with backpressure: ``submit`` first waits for the oldest task once ``depth`` are queued."""
+
+    def __init__(self, name: str, depth: int = 4) -> None:
+        self._pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=name)
+        self._pending: deque[Future[None]] = deque()
+        self._depth: int = depth
+
+    def submit(self, fn: Callable[..., None], *args: object) -> None:
+        if len(self._pending) >= self._depth:
+            self._pending.popleft().result()
+        self._pending.append(self._pool.submit(fn, *args))
+
+    def drain(self) -> None:
+        """Wait for every queued task (re-raising its error)."""
+        while self._pending:
+            self._pending.popleft().result()
+
+
 class StreamLogger:
     """Owns all Rerun logging for one streaming run."""
 
@@ -113,22 +134,15 @@ class StreamLogger:
         # NVENC submission cost ~13 ms/tick of CPU that otherwise serializes
         # with model enqueue. Rerun's clock is per-thread, so the worker sets
         # its own timeline position. Bounded queue gives backpressure.
-        from concurrent.futures import ThreadPoolExecutor
-
-        self._video_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-log")
-        self._video_pending: list = []
+        self._video_worker: BoundedWorker = BoundedWorker("video-log")
         # Boxes/masks/landmarks: the main thread only enqueues sync-free GPU
         # gathers; their D2H copies run here. A .cpu() on the main thread waits
         # for every kernel queued on the shared default stream (the fit
         # worker's included), which cost ~16 ms/tick of main-thread stall on GB10.
-        self._aux_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aux-log")
-        self._aux_pending: list = []
+        self._aux_worker: BoundedWorker = BoundedWorker("aux-log")
         # Meshes, clouds and skeleton transforms (~5 ms of CPU per emitted fit): their own worker, so the
         # pipeline's fit worker (the critical path) only enqueues them. Fed from the fit worker thread alone.
-        self._fit_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit-log")
-        self._fit_pending: list = []
-        self._last_fit_frame: dict[int, int] = {}
-        """Per person, the frame of the last mesh logged: a fitter re-returns its previous fit between emits."""
+        self._fit_worker: BoundedWorker = BoundedWorker("fit-log")
         rerun_codec_by_choice: dict[VideoCodecChoice, rr.VideoCodec] = {
             VideoCodecChoice.H264: rr.VideoCodec.H264,
             VideoCodecChoice.H265: rr.VideoCodec.H265,
@@ -243,16 +257,7 @@ class StreamLogger:
                 packets: list[tuple[int, bytes]] = self._encoders[cam_name].encode_yuv_planes(y_plane, u_plane, v_plane)
                 self._log_packets(cam_name, packets)
 
-        # Backpressure: never queue more than 4 ticks of frames.
-        if len(self._video_pending) >= 4:
-            self._video_pending.pop(0).result()
-        self._video_pending.append(self._video_worker.submit(encode_and_log, list(frames)))
-
-    def _submit_aux(self, fn: Callable[[], None]) -> None:
-        """Run ``fn`` on the aux-log worker, never queueing more than 4 ticks."""
-        if len(self._aux_pending) >= 4:
-            self._aux_pending.pop(0).result()
-        self._aux_pending.append(self._aux_worker.submit(fn))
+        self._video_worker.submit(encode_and_log, list(frames))
 
     def log_tick_tracks(self, frame_idx: int, tracks: list[CameraTracks], seg_stride: int | None = None) -> None:
         """Log per-camera person boxes every tick + segmentation ids at a stride.
@@ -298,7 +303,7 @@ class StreamLogger:
             for entity, seg in segs:
                 rr.log(f"{entity}/mask", rr.SegmentationImage(seg.cpu().numpy()))
 
-        self._submit_aux(log)
+        self._aux_worker.submit(log)
 
     def log_tick_landmarks(self, frame_idx: int, landmarks: list[CameraLandmarks]) -> None:
         """Log dense 2D landmarks per camera/person, colored by visibility.
@@ -323,7 +328,7 @@ class StreamLogger:
             for entity, row in zip(entities, host, strict=True):
                 rr.log(entity, Points2DWithConfidence(positions=row[:, :2], confidences=row[:, 2], radii=1.5))
 
-        self._submit_aux(log)
+        self._aux_worker.submit(log)
 
     def log_tick_fit(
         self,
@@ -338,18 +343,9 @@ class StreamLogger:
         fixed-lag fitter emits a mesh for an EARLIER frame (``fit.frame_idx``).
         Each is stamped at its own true frame so mesh and cloud coincide on the
         timeline (otherwise the cloud visibly leads the lagged mesh in motion).
-        A fit whose frame was already logged for that person (the fitter
-        re-returns its previous fit on ticks it does not emit) is skipped.
         The cloud tensors must be settled (the fitting stage syncs its stream).
         """
-        new_fits: dict[int, FitResult] = {}
-        for obj_id, fit in fits.items():
-            if self._last_fit_frame.get(obj_id) != fit.frame_idx:
-                self._last_fit_frame[obj_id] = fit.frame_idx
-                new_fits[obj_id] = fit
-        if len(self._fit_pending) >= 4:
-            self._fit_pending.pop(0).result()
-        self._fit_pending.append(self._fit_worker.submit(self._log_tick_fit_now, frame_idx, new_fits, dict(triangulated), faces))
+        self._fit_worker.submit(self._log_tick_fit_now, frame_idx, dict(fits), dict(triangulated), faces)
 
     def _log_tick_fit_now(
         self,
@@ -463,11 +459,8 @@ class StreamLogger:
         fresh encoders replace the drained ones; the per-camera PTS offset
         keeps the shared timeline monotonic across multiple ``run()`` calls.
         """
-        for pending in self._video_pending + self._aux_pending + self._fit_pending:
-            pending.result()
-        self._video_pending.clear()
-        self._aux_pending.clear()
-        self._fit_pending.clear()
+        for worker in (self._video_worker, self._aux_worker, self._fit_worker):
+            worker.drain()
         for cam_name, encoder in self._encoders.items():
             self._log_packets(cam_name, encoder.flush())
             self._pts_offset[cam_name] += encoder.next_pts
