@@ -68,9 +68,9 @@ class ValidateDynamicConfig:
     trt_engine: Path | None = None
     """Optional MammaNet TensorRT engine plan."""
     pve_p95_tolerance_mm: float = 30.0
-    """PASS bound on the 95th-percentile per-frame PVE vs the original DAG."""
+    """PASS bound on the 95th-percentile per-frame PVE vs the reference."""
     pve_max_tolerance_mm: float = 30.0
-    """PASS bound on the worst single frame's PVE vs the original DAG."""
+    """PASS bound on the worst single frame's PVE vs the reference."""
     skip_first_frames: int = 8
     """Frames excluded from the gate at clip start (window fill: no fit exists yet)."""
     hires_crops: bool = True
@@ -87,6 +87,7 @@ class ValidateDynamicConfig:
 def main(config: ValidateDynamicConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
     golden_verts: Float32[ndarray, "f v 3"]
+    reference: str = f"original DAG, {config.golden_npz.name}"
     if config.golden_npz.exists():
         golden_verts = np.load(config.golden_npz, allow_pickle=True)["pred_vertices"]
     else:
@@ -94,6 +95,7 @@ def main(config: ValidateDynamicConfig) -> int:
 
         pred_npz: Path = config.data_dir / "pred" / "params_00.npz"
         print(f"note: {config.golden_npz} absent; reference = dataset MAMMA prediction {pred_npz}")
+        reference = f"dataset MAMMA prediction, {pred_npz.name}"
         pp = np.load(pred_npz, allow_pickle=True)
         golden_verts = forward_params_to_verts(
             build_smplx_neutral(config.model_dir, device=config.device),
@@ -101,7 +103,7 @@ def main(config: ValidateDynamicConfig) -> int:
             pp["betas"].reshape(-1).astype(np.float32),
             pp["trans"].astype(np.float32),
             config.device,
-        ).astype(np.float32)
+        )
     print(f"sequence {sequence.name}: {sequence.frame_count} frames; golden verts {golden_verts.shape}")
 
     collector: ResultCollector = _FitsOnlyCollector()
@@ -145,7 +147,7 @@ def main(config: ValidateDynamicConfig) -> int:
     p95: float = float(np.percentile(pve, 95))
     pmax: float = float(pve.max())
     worst: list[int] = [f for f, _ in sorted(pve_by_frame.items(), key=lambda kv: -kv[1])[:5]]
-    print(f"\nDYNAMIC GOLDEN GATE ({len(pve)} frames vs original DAG, {config.golden_npz.name}):")
+    print(f"\nDYNAMIC GOLDEN GATE ({len(pve)} frames vs {reference}):")
     print(f"  PVE mean {pve.mean():6.1f} mm   median {np.median(pve):6.1f} mm")
     print(f"  PVE p95  {p95:6.1f} mm  (tolerance {config.pve_p95_tolerance_mm} mm)  {'PASS' if p95 <= config.pve_p95_tolerance_mm else 'FAIL'}")
     print(f"  PVE max  {pmax:6.1f} mm  (tolerance {config.pve_max_tolerance_mm} mm)  {'PASS' if pmax <= config.pve_max_tolerance_mm else 'FAIL'}")
