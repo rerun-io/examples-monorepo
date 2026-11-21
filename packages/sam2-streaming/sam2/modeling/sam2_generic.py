@@ -40,6 +40,14 @@ class SAM2Generic(SAM2Base):
 
         self.empty_prompt_embeddings = self.encode_prompts()
 
+    def _apply(self, fn, recurse=True):
+        # The empty prompt embeddings (built on the host above) follow the module's ``.to(device)``: one copy at
+        # set-up, not one per step (a CUDA graph cannot hold a host-to-device copy).
+        super()._apply(fn, recurse)
+        with torch.inference_mode():  # they are inference tensors (encode_prompts), views among them
+            self.empty_prompt_embeddings = tuple(fn(t) for t in self.empty_prompt_embeddings)
+        return self
+
     def _prepare_images(
         self, img: torch.Tensor | list[torch.Tensor], scale: bool = True
     ):
@@ -185,11 +193,14 @@ class SAM2Generic(SAM2Base):
         self,
         current_frame_idx: int,
         obj_ptrs: torch.Tensor,
-        obj_ptrs_frame_idx: list[int],
+        obj_ptrs_frame_idx: torch.Tensor | None,
         reverse_time: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Encode the object pointers into a memory.
+
+        ``obj_ptrs_frame_idx`` (ptr_seq_len, B) or (ptr_seq_len, 1), the frame of each pointer per batch element or for
+        all of them; read only with pointer temporal encodings, ``None`` without.
         """
         assert (
             obj_ptrs.ndim == 3
@@ -200,11 +211,7 @@ class SAM2Generic(SAM2Base):
         tpos_sign_mul = -1 if reverse_time else 1
 
         if self.add_tpos_enc_to_obj_ptrs:
-            # Only built when used: the host->device copy of the python frame
-            # indices is a sync point and blocks CUDA-graph capture.
-            # A (ptr_seq_len, B) nested list gives every batch element its own
-            # pointer frames (objects batched across different histories).
-            obj_ptrs_frame_idx = torch.tensor(obj_ptrs_frame_idx, device=obj_ptrs.device)
+            assert obj_ptrs_frame_idx is not None and obj_ptrs_frame_idx.ndim == 2
             obj_tpos_rel = (
                 (current_frame_idx - obj_ptrs_frame_idx) * tpos_sign_mul
                 if self.use_signed_tpos_enc_to_obj_ptrs
@@ -217,10 +224,9 @@ class SAM2Generic(SAM2Base):
 
             obj_tpos_rel = get_1d_sine_pe(obj_tpos_rel / t_diff_max, dim=tpos_dim)
             obj_tpos_rel = self.obj_ptr_tpos_proj.forward(obj_tpos_rel)
-            if obj_tpos_rel.ndim == 2:
-                obj_tpos_rel = obj_tpos_rel.unsqueeze(1).expand(-1, B, self.mem_dim)
+            obj_tpos_rel = obj_tpos_rel.expand(-1, B, self.mem_dim)
         else:
-            obj_tpos_rel = obj_ptrs.new_zeros(len(obj_ptrs_frame_idx), B, self.mem_dim)
+            obj_tpos_rel = obj_ptrs.new_zeros(obj_ptrs.shape[0], B, self.mem_dim)
 
         if self.mem_dim < self.hidden_dim:
             # Split a pointer into (self.hidden_dim // self.mem_dim) tokens for self.mem_dim < self.hidden_dim
@@ -286,43 +292,64 @@ class SAM2Generic(SAM2Base):
         Returns:
             list[torch.Tensor]: The conditioned image embeddings.
         """
+        spatial = conditional_memories + non_conditional_memories
+        conditioned = self.condition_on_memory_tensors(
+            frame_idx=frame_idx,
+            low_res_img_embeddings=img_embeddings[-1],
+            low_res_img_pos_embeddings=img_pos_embeddings[-1],
+            memory_embeddings=[m.memory_embeddings for m in spatial],
+            memory_pos_embeddings=[m.memory_pos_embeddings for m in spatial],
+            n_conditional=len(conditional_memories),
+            ptrs=[m.ptr for m in ptr_memories],
+            # Only built when read: the host->device copy of the frame indices is a sync point and blocks graph capture.
+            ptr_frame_idx=torch.tensor([m.frame_idx for m in ptr_memories], dtype=torch.long, device=self.device).view(-1, 1)
+            if self.add_tpos_enc_to_obj_ptrs
+            else None,
+            reverse_time=reverse_time,
+        )
+        if not spatial and not ptr_memories and self.directly_add_no_mem_embed:
+            return conditioned  # pyrefly: ignore[bad-return]  (upstream returns the low-resolution level alone here)
+        return img_embeddings[:-1] + [conditioned]
 
-        # Stack the pointer memories along a new sequence dimension (ptr_seq_len, B, C)
-        if len(ptr_memories) > 0:
-            obj_ptrs_seq = torch.stack([m.ptr for m in ptr_memories], dim=0)
-        else:
-            B = img_embeddings[0].shape[0]
-            obj_ptrs_seq = torch.zeros(
-                (
-                    0,
-                    B,
-                    self.mem_dim,
-                ),
-                device=self.device,
-            )
-        obj_ptrs_frame_indices = [m.frame_idx for m in ptr_memories]
+    @torch.inference_mode()
+    def condition_on_memory_tensors(
+        self,
+        frame_idx: int,
+        low_res_img_embeddings: torch.Tensor,
+        low_res_img_pos_embeddings: torch.Tensor,
+        memory_embeddings: list[torch.Tensor],
+        memory_pos_embeddings: list[torch.Tensor],
+        n_conditional: int,
+        ptrs: list[torch.Tensor],
+        ptr_frame_idx: torch.Tensor | None,
+        reverse_time: bool = False,
+    ) -> torch.Tensor:
+        """Memory attention of the low-resolution image embeddings (B, C, H, W) over tensors, not ``ObjectMemory``s.
+
+        Memory order: the first ``n_conditional`` spatial memories are conditional, the rest non-conditional (most
+        important first), then the pointers. Spatial memories are (B, C, H', W') each, pointers (B, C) each.
+        ``ptr_frame_idx`` is (n_ptrs, B) or (n_ptrs, 1) and read only with pointer temporal encodings (else ``None``):
+        without them, list positions alone set the memory encodings, so a CUDA graph can capture this call.
+
+        Returns:
+            The conditioned low-resolution image embeddings (B, C, H, W).
+        """
+        B, C, H, W = low_res_img_embeddings.shape
+        n_conditional_memories = n_conditional
+        n_non_conditional_memories = len(memory_embeddings) - n_conditional
+        n_ptrs_memories = len(ptrs)
 
         assert (
             self.max_cond_frames_in_attn == -1
-            or len(conditional_memories) <= self.max_cond_frames_in_attn
-        ), f"Expected at most {self.max_cond_frames_in_attn} conditional memories, got {len(conditional_memories)}"
+            or n_conditional_memories <= self.max_cond_frames_in_attn
+        ), f"Expected at most {self.max_cond_frames_in_attn} conditional memories, got {n_conditional_memories}"
         assert (
-            len(non_conditional_memories) <= self.num_maskmem - 1
-        ), f"Expected at most {self.num_maskmem - 1} non-conditional memories, got {len(non_conditional_memories)}"
+            n_non_conditional_memories <= self.num_maskmem - 1
+        ), f"Expected at most {self.num_maskmem - 1} non-conditional memories, got {n_non_conditional_memories}"
         assert (
             self.max_obj_ptrs_in_encoder == -1
-            or len(ptr_memories) <= self.max_obj_ptrs_in_encoder
-        ), f"Expected at most {self.max_obj_ptrs_in_encoder} object pointer memories, got {len(ptr_memories)}"
-
-        low_res_img_embeddings = img_embeddings[-1]
-        low_res_img_pos_embeddings = img_pos_embeddings[-1]
-        high_res_img_embeddings = img_embeddings[:-1]
-
-        B, C, H, W = low_res_img_embeddings.shape
-
-        n_conditional_memories = len(conditional_memories)
-        n_non_conditional_memories = len(non_conditional_memories)
-        n_ptrs_memories = len(obj_ptrs_seq)
+            or n_ptrs_memories <= self.max_obj_ptrs_in_encoder
+        ), f"Expected at most {self.max_obj_ptrs_in_encoder} object pointer memories, got {n_ptrs_memories}"
 
         if (
             n_conditional_memories == 0
@@ -351,33 +378,23 @@ class SAM2Generic(SAM2Base):
             memories = []
             memories_pos_embed = []
 
-            # Add conditional memories (prompt from the user)
-            for cond_mem in conditional_memories:
-                memory_embeddings, memory_tpos_embeddings = (
-                    self._prepare_memory_for_memory_conditioning(
-                        0, cond_mem.memory_embeddings, cond_mem.memory_pos_embeddings
-                    )
-                )
-                memories.append(memory_embeddings)
-                memories_pos_embed.append(memory_tpos_embeddings)
-
-            # Add non-conditional memories (memory from previous frames, or other depending on the memory strategy)
-            for i, non_cond_mem in enumerate(non_conditional_memories):
-                t_pos = i + 1
-                memory_embeddings, memory_tpos_embeddings = (
-                    self._prepare_memory_for_memory_conditioning(
-                        t_pos,
-                        non_cond_mem.memory_embeddings,
-                        non_cond_mem.memory_pos_embeddings,
-                    )
-                )
-                memories.append(memory_embeddings)
-                memories_pos_embed.append(memory_tpos_embeddings)
+            # Conditional memories (prompt from the user) take temporal position 0, non-conditional memories (memory
+            # from previous frames, or other depending on the memory strategy) 1, 2, ... in their order.
+            for k, (embeddings, pos_embeddings) in enumerate(zip(memory_embeddings, memory_pos_embeddings, strict=True)):
+                t_pos = 0 if k < n_conditional else k - n_conditional + 1
+                embeddings, tpos_embeddings = self._prepare_memory_for_memory_conditioning(t_pos, embeddings, pos_embeddings)
+                memories.append(embeddings)
+                memories_pos_embed.append(tpos_embeddings)
             if self.use_obj_ptrs_in_encoder:
-
+                # Stack the pointer memories along a new sequence dimension (ptr_seq_len, B, C)
+                obj_ptrs_seq = (
+                    torch.stack(ptrs, dim=0)
+                    if ptrs
+                    else torch.zeros((0, B, self.mem_dim), device=self.device)
+                )
                 obj_ptrs_enc, obj_pos_enc = (
                     self._prepare_obj_ptrs_for_memory_conditioning(
-                        frame_idx, obj_ptrs_seq, obj_ptrs_frame_indices, reverse_time
+                        frame_idx, obj_ptrs_seq, ptr_frame_idx, reverse_time
                     )
                 )
 
@@ -403,11 +420,7 @@ class SAM2Generic(SAM2Base):
             num_obj_ptr_tokens=num_obj_ptr_tokens,
         )
         # reshape the output (HW)BC => BCHW
-        low_res_img_embeddings_with_mem = low_res_img_embeddings_with_mem.permute(
-            1, 2, 0
-        ).view(B, C, H, W)
-
-        return high_res_img_embeddings + [low_res_img_embeddings_with_mem]
+        return low_res_img_embeddings_with_mem.permute(1, 2, 0).view(B, C, H, W)
 
     @torch.inference_mode()
     def encode_prompts(
