@@ -7,8 +7,12 @@ use std::sync::Arc;
 use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use slam_rs::backend::{BackendCounters, MapSnapshot as CoreMapSnapshot, PoseGraphEdgeKind};
+use slam_rs::backend::{
+    BackendCounters, MapDelta as CoreMapDelta, MapKeyframes as CoreMapKeyframes,
+    MapSnapshot as CoreMapSnapshot, PoseGraphEdgeKind,
+};
 use slam_rs::config::BackendMode;
+use slam_rs::types::LandmarkId;
 
 use crate::flat_poses;
 
@@ -137,17 +141,7 @@ impl MapSnapshot {
     /// outgrown `int64`, the refusal `VioSnapshot` makes for the same ids.
     #[getter]
     fn point_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
-        let ids: Vec<i64> = self
-            .inner
-            .point_ids
-            .iter()
-            .map(|id| {
-                i64::try_from(id.0).map_err(|_| {
-                    PyValueError::new_err(format!("landmark id {} does not fit in an int64", id.0))
-                })
-            })
-            .collect::<PyResult<_>>()?;
-        Ok(ids.to_pyarray(py))
+        Ok(landmark_ids(&self.inner.point_ids)?.to_pyarray(py))
     }
 
     /// Timestamp of the keyframe hosting each point: `int64[p]`.
@@ -342,6 +336,20 @@ impl MapSnapshot {
         self.counters.publish.total_ns / 1_000
     }
 
+    /// The keyframe half, as a [`MapDelta`] carries it.
+    #[getter]
+    fn map_keyframes(&self) -> MapKeyframes {
+        MapKeyframes {
+            inner: CoreMapKeyframes {
+                t_ns: self.inner.keyframe_t_ns.clone(),
+                poses: self.inner.keyframe_poses.clone(),
+                raw_poses: self.inner.keyframe_raw_poses.clone(),
+                active: self.inner.keyframe_active.clone(),
+                loops: self.inner.loops.clone(),
+            },
+        }
+    }
+
     /// Verified loops whose keyframes are still in the map, oldest first, as
     /// `[current, candidate]` keyframe timestamps: `int64[l, 2]`.
     #[getter]
@@ -403,6 +411,168 @@ impl MapSnapshot {
             self.inner.point_ids.len(),
             self.inner.covisibility_edges.len(),
             self.counters.queries_dropped
+        )
+    }
+}
+
+/// Landmark ids as `int64`; `ValueError` when one has outgrown it, the refusal
+/// `VioSnapshot` makes for the same ids.
+fn landmark_ids(ids: &[LandmarkId]) -> PyResult<Vec<i64>> {
+    ids.iter()
+        .map(|id| {
+            i64::try_from(id.0).map_err(|_| {
+                PyValueError::new_err(format!("landmark id {} does not fit in an int64", id.0))
+            })
+        })
+        .collect()
+}
+
+/// The map's keyframe half ([`slam_rs::backend::MapKeyframes`]): every
+/// keyframe's pose and window state, and the loops. A [`MapDelta`] carries it
+/// whole; [`MapSnapshot::map_keyframes`] gives the same view of a snapshot.
+#[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
+#[derive(Debug)]
+pub struct MapKeyframes {
+    inner: CoreMapKeyframes,
+}
+
+#[pymethods]
+impl MapKeyframes {
+    /// Map keyframe timestamps, oldest first: `int64[k]`.
+    #[getter]
+    fn t_ns<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.inner.t_ns.to_pyarray(py)
+    }
+
+    /// Keyframe poses `T_w_i` as the map holds them: `float64[k, 7]`.
+    #[getter]
+    fn poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        flat_poses(&self.inner.poses)
+            .to_pyarray(py)
+            .reshape((self.inner.poses.len(), 7))
+    }
+
+    /// The window's keyframe poses, before any correction: `float64[k, 7]`.
+    #[getter]
+    fn raw_poses<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        flat_poses(&self.inner.raw_poses)
+            .to_pyarray(py)
+            .reshape((self.inner.raw_poses.len(), 7))
+    }
+
+    /// Whether each keyframe is still in the window: `bool[k]`.
+    #[getter]
+    fn active<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        self.inner.active.to_pyarray(py)
+    }
+
+    /// Verified loops whose keyframes are still in the map, oldest first, as
+    /// `[current, candidate]` keyframe timestamps: `int64[l, 2]`.
+    #[getter]
+    fn loop_edges<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<i64>>> {
+        let edges: Vec<i64> = self
+            .inner
+            .loops
+            .iter()
+            .flat_map(|edge| [edge.current, edge.candidate])
+            .collect();
+        edges.to_pyarray(py).reshape((self.inner.loops.len(), 2))
+    }
+
+    /// Whether each loop's landmarks were fused: `bool[l]`.
+    #[getter]
+    fn loop_fused<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        let fused: Vec<bool> = self.inner.loops.iter().map(|edge| edge.fused).collect();
+        fused.to_pyarray(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MapKeyframes(keyframes={}, loops={})",
+            self.inner.t_ns.len(),
+            self.inner.loops.len()
+        )
+    }
+}
+
+/// The map's changes since a read ([`slam_rs::backend::MapDelta`]): the
+/// keyframe half, and the points of only the keyframes a write moved since.
+#[pyclass(module = "slam_rs._core", frozen, skip_from_py_object)]
+#[derive(Debug)]
+pub struct MapDelta {
+    inner: Arc<CoreMapDelta>,
+}
+
+impl MapDelta {
+    pub fn new(inner: Arc<CoreMapDelta>) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl MapDelta {
+    /// The map's revision when the delta was taken: the next read's `since`.
+    #[getter]
+    fn revision(&self) -> u64 {
+        self.inner.revision
+    }
+
+    /// Every keyframe's pose and window state, and the loops.
+    #[getter]
+    fn map_keyframes(&self) -> MapKeyframes {
+        MapKeyframes {
+            inner: self.inner.keyframes.clone(),
+        }
+    }
+
+    /// Keyframes in the map whose hosted points moved since the read's
+    /// revision, in id order: `int64[c]`. A keyframe the reader holds that is
+    /// missing from ``map_keyframes.t_ns`` was removed.
+    #[getter]
+    fn changed_hosts<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        self.inner.changed_hosts.to_pyarray(py)
+    }
+
+    /// How many of the points each changed host has, aligned with
+    /// `changed_hosts`: `int64[c]`.
+    #[getter]
+    fn point_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+        let counts: Vec<i64> = self
+            .inner
+            .point_counts
+            .iter()
+            .map(|&count| {
+                i64::try_from(count)
+                    .map_err(|_| PyValueError::new_err("a point count does not fit in an int64"))
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(counts.to_pyarray(py))
+    }
+
+    /// The changed hosts' point ids, host by host in `changed_hosts` order,
+    /// then by camera and id: `int64[p]`.
+    #[getter]
+    fn point_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i64>>> {
+        Ok(landmark_ids(&self.inner.point_ids)?.to_pyarray(py))
+    }
+
+    /// The changed hosts' points in the world frame, metres: `float32[p, 3]`.
+    #[getter]
+    fn points_world<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        self.inner
+            .points_world
+            .as_flattened()
+            .to_pyarray(py)
+            .reshape((self.inner.points_world.len(), 3))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "MapDelta(revision={}, keyframes={}, changed_hosts={}, points={})",
+            self.inner.revision,
+            self.inner.keyframes.t_ns.len(),
+            self.inner.changed_hosts.len(),
+            self.inner.point_ids.len()
         )
     }
 }

@@ -59,6 +59,7 @@ from slam_rs.vio_log import (
     LTKF_COLOR,
     MAP_KEYFRAMES_ENTITY,
     MAP_KEYFRAMES_EVERY_NS,
+    MAP_POINT_BLOCKS_ENTITY,
     MAP_POINTS_ENTITY,
     MAP_POINTS_EVERY_NS,
     MARGINALIZED_COLOR,
@@ -166,9 +167,7 @@ def drive(
         frame: _core.FlowFrame | None = vio.flow_frame()
         assert snapshot is not None
         assert frame is not None
-        # What `VioStage` does: read the map only when it is due (None with the back end off).
-        map_snapshot: _core.MapSnapshot | None = vio.map_snapshot() if logger.map_is_due(snapshot) else None
-        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_snapshot=map_snapshot, colors=colors)
+        logger.log(result, snapshot, frame, elapsed_ms=1.5, map_delta=logger.read_map(vio, snapshot), colors=colors)
         tracked.append(t_ns)
         newest_keyframes.append(int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else -1)
     # What `VioStage.flush` does: flush (which makes the map current), then draw the final map.
@@ -678,7 +677,8 @@ def test_the_map_is_drawn_under_the_run_as_keyframes_join_and_ends_on_the_final_
     """With the back end on, the map's keyframes and points land under the run (DESIGN §8) at their cadences, then once more after the flush.
 
     Keyframes with no cadence limit: one draw per keyframe join. Points at most once a second, longer than the run:
-    drawn at the first join and after the flush only. The last draws are the flushed map itself.
+    their blocks are drawn at the first join, and after the flush the blocks are cleared and the whole flushed map
+    lands on the points entity itself.
     """
     assert MAP_KEYFRAMES_ENTITY == "/world/runs/slam_rs/keyframes"
     assert MAP_POINTS_ENTITY == "/world/runs/slam_rs/map/points"
@@ -696,9 +696,12 @@ def test_the_map_is_drawn_under_the_run_as_keyframes_join_and_ends_on_the_final_
     assert joins, "the synthetic run never added a keyframe"
     keyframe_times: list[int] = [t for t, _ in logged.rows[MAP_KEYFRAMES_ENTITY]]
     assert keyframe_times == [*joins, logged.tracked[-1]]
-    point_times: list[int] = [t for t, _ in logged.rows[MAP_POINTS_ENTITY]]
     assert len(joins) >= 2, "the run must add keyframes after the first for the points' cadence to show"
-    assert point_times == [joins[0], logged.tracked[-1]]
+    block_rows: dict[str, list[int]] = {e: [t for t, _ in rows] for e, rows in logged.rows.items() if e.startswith(f"{MAP_POINT_BLOCKS_ENTITY}/")}
+    assert block_rows, "the run drew no map-point block"
+    assert {t for times in block_rows.values() for t in times} == {joins[0]}, "blocks are drawn at the points' cadence, not at the final draw"
+    assert [t for t, _ in logged.rows[MAP_POINTS_ENTITY]] == [logged.tracked[-1]], "the whole map is drawn on the entity itself only at the end"
+    assert [t for t, _ in logged.rows[MAP_POINT_BLOCKS_ENTITY]] == [logged.tracked[-1]], "the final draw clears the blocks"
 
     final: _core.MapSnapshot | None = vio.map_snapshot()
     assert final is not None
@@ -770,8 +773,12 @@ def test_the_default_cadence_draws_a_short_run_once_and_then_the_final_map(
     t_ns: Int64[ndarray, " n"] = np.arange(0, FRAMESETS * FRAME_PERIOD_NS, FRAME_PERIOD_NS, dtype=np.int64)
     logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "rt.rrd", read_rows)
     first_join: int = next(t for t, newest in zip(logged.tracked, logged.newest_keyframes, strict=True) if newest != -1)
+    # Realtime never waits for the back-end thread: the read hands out the newest delta it posted, so the draws keep
+    # their exact times whatever the thread is doing.
     assert [t for t, _ in logged.rows[MAP_KEYFRAMES_ENTITY]] == [first_join, logged.tracked[-1]]
-    assert [t for t, _ in logged.rows[MAP_POINTS_ENTITY]] == [first_join, logged.tracked[-1]]
+    block_times: set[int] = {t for e, rows in logged.rows.items() if e.startswith(f"{MAP_POINT_BLOCKS_ENTITY}/") for t, _ in rows}
+    assert block_times <= {first_join}, "blocks are drawn only at the points' cadence (a map with no points yet draws none)"
+    assert [t for t, _ in logged.rows[MAP_POINTS_ENTITY]] == [logged.tracked[-1]]
 
 
 def test_no_map_is_drawn_with_the_back_end_off(
@@ -782,7 +789,7 @@ def test_no_map_is_drawn_with_the_back_end_off(
     logged: Logged = drive(vio, (camera(0, 0.0), camera(1, 0.1)), straight_line(t_ns), texture, tmp_path / "off.rrd", read_rows)
     assert len(logged.tracked) >= FRAMESETS - 2
     assert MAP_KEYFRAMES_ENTITY not in logged.rows
-    assert MAP_POINTS_ENTITY not in logged.rows
+    assert not [e for e in logged.rows if e.startswith(MAP_POINTS_ENTITY)]
 
 
 def test_the_live_run_is_the_raw_vio_and_the_final_run_has_its_own_alignment(

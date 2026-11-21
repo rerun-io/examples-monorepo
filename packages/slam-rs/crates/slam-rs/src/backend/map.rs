@@ -79,12 +79,68 @@ pub struct KeyframeMap {
     landmarks: BTreeMap<LandmarkId, MapLandmark>,
     /// Landmarks each image observes or hosts (`keyframe_obs`).
     by_image: BTreeMap<TimeCamId, BTreeSet<LandmarkId>>,
+    /// Which hosts' points each write moved, for readers that draw the map's
+    /// changes ([`Self::hosts_changed_since`]).
+    revisions: MapRevisions,
+}
+
+/// The map's write history for readers: bookkeeping, not map content. Every
+/// public write that moves a hosted point (a pose, a landmark's geometry, an
+/// insertion or a removal) takes one revision and stamps each live host it
+/// moved with it; a removed keyframe's entry goes with it. Two maps with the
+/// same content compare equal whatever their histories, and `Debug` (part of
+/// `Vio`'s determinism fingerprint) leaves it out.
+#[derive(Clone, Default)]
+struct MapRevisions {
+    revision: u64,
+    of_host: BTreeMap<FrameId, u64>,
+}
+
+impl MapRevisions {
+    /// Take one revision for a write that moved the points of `hosts` (none
+    /// left: only a removal, which readers see in the keyframe list).
+    fn mark(&mut self, hosts: impl IntoIterator<Item = FrameId>) {
+        self.revision += 1;
+        for host in hosts {
+            self.of_host.insert(host, self.revision);
+        }
+    }
+}
+
+impl PartialEq for MapRevisions {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for MapRevisions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MapRevisions")
+    }
 }
 
 impl KeyframeMap {
     /// An empty map.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The map's revision: one more for every public write that moved a
+    /// hosted point or removed a keyframe.
+    pub fn revision(&self) -> u64 {
+        self.revisions.revision
+    }
+
+    /// Keyframes in the map whose hosted points a write moved after revision
+    /// `since`, in id order. Removed keyframes are not named: a reader finds
+    /// them missing from [`Self::keyframes`].
+    pub fn hosts_changed_since(&self, since: u64) -> Vec<FrameId> {
+        self.revisions
+            .of_host
+            .iter()
+            .filter(|&(_, &revision)| revision > since)
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// Every keyframe, in id order.
@@ -138,6 +194,23 @@ impl KeyframeMap {
         self.by_image.get(&image).into_iter().flatten().copied()
     }
 
+    /// The landmarks keyframe `id` hosts, by camera then id: a hosted landmark
+    /// is indexed under its one host image, so this walks the keyframe's
+    /// images and keeps those whose host is the image.
+    pub fn hosted_landmarks(
+        &self,
+        id: FrameId,
+    ) -> impl Iterator<Item = (LandmarkId, &MapLandmark)> + '_ {
+        self.by_image
+            .range(TimeCamId::new(id, 0)..=TimeCamId::new(id, CamId::MAX))
+            .flat_map(move |(image, landmarks)| {
+                landmarks.iter().filter_map(move |landmark_id| {
+                    let landmark: &MapLandmark = self.landmarks.get(landmark_id)?;
+                    (landmark.host == *image).then_some((*landmark_id, landmark))
+                })
+            })
+    }
+
     /// Landmarks keyframe `id` observes or hosts in any camera, each once.
     pub fn landmarks_of_keyframe(&self, id: FrameId) -> BTreeSet<LandmarkId> {
         self.by_image
@@ -149,6 +222,13 @@ impl KeyframeMap {
     /// Add keyframe `id`, or update the pose of the one already there. Keypoints
     /// replace the stored ones only when given.
     pub fn upsert_keyframe(&mut self, id: FrameId, pose: Se3<f64>, keypoints: Option<Keypoints>) {
+        if self
+            .keyframes
+            .get(&id)
+            .is_none_or(|keyframe| keyframe.pose != pose)
+        {
+            self.revisions.mark([id]);
+        }
         match self.keyframes.get_mut(&id) {
             Some(keyframe) => {
                 keyframe.pose = pose;
@@ -175,10 +255,12 @@ impl KeyframeMap {
     /// `removeReferencesToCulledKeyframes`). A landmark left with fewer than two
     /// observations is removed.
     pub fn merge_landmarks(&mut self, incoming: &[StampLandmark]) {
+        let mut moved: BTreeSet<FrameId> = BTreeSet::new();
         for stamped in incoming {
             if !self.keyframes.contains_key(&stamped.host.frame_id) {
                 continue;
             }
+            let new: bool = !self.landmarks.contains_key(&stamped.id);
             let landmark: &mut MapLandmark =
                 self.landmarks
                     .entry(stamped.id)
@@ -189,6 +271,14 @@ impl KeyframeMap {
                         obs: BTreeMap::new(),
                     });
             let old_host: TimeCamId = landmark.host;
+            if new
+                || old_host != stamped.host
+                || landmark.direction != stamped.direction
+                || landmark.inv_dist.to_bits() != stamped.inv_dist.to_bits()
+            {
+                moved.insert(old_host.frame_id);
+                moved.insert(stamped.host.frame_id);
+            }
             landmark.host = stamped.host;
             landmark.direction = stamped.direction;
             landmark.inv_dist = stamped.inv_dist;
@@ -207,9 +297,19 @@ impl KeyframeMap {
                 .entry(stamped.host)
                 .or_default()
                 .insert(stamped.id);
-            if landmark.obs.len() < MIN_OBSERVATIONS {
-                self.remove_landmark(stamped.id);
+            if landmark.obs.len() < MIN_OBSERVATIONS
+                && let Some(removed) = self.detach_landmark(stamped.id)
+            {
+                moved.insert(removed.host.frame_id);
             }
+        }
+        if !moved.is_empty() {
+            self.revisions.mark(
+                moved
+                    .into_iter()
+                    .filter(|host| self.keyframes.contains_key(host))
+                    .collect::<Vec<_>>(),
+            );
         }
     }
 
@@ -222,14 +322,27 @@ impl KeyframeMap {
         direction: Vector2<f64>,
         inv_dist: f64,
     ) {
-        if let Some(landmark) = self.landmarks.get_mut(&id) {
+        if let Some(landmark) = self.landmarks.get_mut(&id)
+            && (landmark.direction != direction
+                || landmark.inv_dist.to_bits() != inv_dist.to_bits())
+        {
             landmark.direction = direction;
             landmark.inv_dist = inv_dist;
+            let host: FrameId = landmark.host.frame_id;
+            self.revisions.mark([host]);
         }
     }
 
     /// Delete a landmark and its index entries; a missing id is a no-op.
     pub fn remove_landmark(&mut self, id: LandmarkId) -> Option<MapLandmark> {
+        let landmark: MapLandmark = self.detach_landmark(id)?;
+        self.revisions.mark([landmark.host.frame_id]);
+        Some(landmark)
+    }
+
+    /// [`Self::remove_landmark`] without the revision, for writes that take
+    /// one revision for all they change.
+    fn detach_landmark(&mut self, id: LandmarkId) -> Option<MapLandmark> {
         let landmark: MapLandmark = self.landmarks.remove(&id)?;
         for image in landmark.obs.keys().chain([&landmark.host]) {
             detach(&mut self.by_image, *image, id);
@@ -293,6 +406,16 @@ impl KeyframeMap {
     ) -> Option<nalgebra::Vector3<f64>> {
         let landmark = self.landmarks.get(&id)?;
         let host = self.keyframes.get(&landmark.host.frame_id)?;
+        Self::place(landmark, host, t_i_c)
+    }
+
+    /// [`Self::landmark_world`] of a landmark and its host keyframe, both
+    /// already looked up.
+    pub fn place(
+        landmark: &MapLandmark,
+        host: &MapKeyframe,
+        t_i_c: &[Se3<f64>],
+    ) -> Option<nalgebra::Vector3<f64>> {
         let extrinsic = t_i_c.get(landmark.host.cam_id)?;
         if landmark.inv_dist.is_nan() || landmark.inv_dist <= 0.0 {
             return None;
@@ -313,6 +436,7 @@ impl KeyframeMap {
     /// for the covisibility bookkeeping; `None` for an unknown keyframe.
     pub fn remove_keyframe(&mut self, id: FrameId) -> Option<Vec<(LandmarkId, MapLandmark)>> {
         self.keyframes.remove(&id)?;
+        self.revisions.of_host.remove(&id);
         let mut removed: Vec<(LandmarkId, MapLandmark)> = Vec::new();
         for landmark_id in self.landmarks_of_keyframe(id) {
             let Some(landmark) = self.landmarks.get_mut(&landmark_id) else {
@@ -322,7 +446,7 @@ impl KeyframeMap {
             if landmark.host.frame_id == id || remaining < MIN_OBSERVATIONS {
                 // Removed whole, as it was: its index entries in `id`'s images
                 // go with the `by_image` sweep below anyway.
-                if let Some(landmark) = self.remove_landmark(landmark_id) {
+                if let Some(landmark) = self.detach_landmark(landmark_id) {
                     removed.push((landmark_id, landmark));
                 }
                 continue;
@@ -330,6 +454,12 @@ impl KeyframeMap {
             landmark.obs.retain(|image, _| image.frame_id != id);
         }
         self.by_image.retain(|image, _| image.frame_id != id);
+        let moved: BTreeSet<FrameId> = removed
+            .iter()
+            .map(|(_, landmark)| landmark.host.frame_id)
+            .filter(|host| *host != id)
+            .collect();
+        self.revisions.mark(moved);
         Some(removed)
     }
 
@@ -419,7 +549,8 @@ impl KeyframeMap {
             .values()
             .map(|set| size_of::<TimeCamId>() + set.len() * size_of::<LandmarkId>())
             .sum();
-        keyframes + landmarks + index
+        let revisions: usize = self.revisions.of_host.len() * size_of::<(FrameId, u64)>();
+        keyframes + landmarks + index + revisions
     }
 }
 
@@ -485,6 +616,55 @@ mod tests {
             map.upsert_keyframe(id, Se3::identity(), None);
         }
         map
+    }
+
+    #[test]
+    fn the_hosts_changed_since_a_revision_are_the_ones_a_write_moved() {
+        let mut map = with_keyframes(&[1, 2, 3]);
+        assert_eq!(map.hosts_changed_since(0), vec![1, 2, 3]);
+        let read: u64 = map.revision();
+        assert!(
+            map.hosts_changed_since(read).is_empty(),
+            "nothing changed since the read"
+        );
+
+        // A pose write (window, PGO, GBA) moves every point the keyframe hosts;
+        // the same pose again moves nothing.
+        let moved: Se3<f64> = Se3::new(
+            crate::lie::So3::identity(),
+            nalgebra::Vector3::new(0.5, 0.0, 0.0),
+        );
+        map.upsert_keyframe(2, moved, None);
+        assert_eq!(map.hosts_changed_since(read), vec![2]);
+        let read: u64 = map.revision();
+        map.upsert_keyframe(2, moved, None);
+        assert_eq!(map.revision(), read, "an unchanged pose takes no revision");
+
+        // A landmark write changes its host's points, and only its host's.
+        map.merge_landmarks(&[landmark(7, (3, 0), &[(3, 0), (1, 1)])]);
+        assert_eq!(map.hosts_changed_since(read), vec![3]);
+        assert_eq!(map.revision(), read + 1, "one revision per write");
+        let read: u64 = map.revision();
+        map.set_landmark_position(LandmarkId(7), Vector2::new(0.2, 0.0), 0.75);
+        assert_eq!(map.hosts_changed_since(read), vec![3]);
+
+        // New observations of the same geometry move no point.
+        let read: u64 = map.revision();
+        let mut seen_again = landmark(7, (3, 0), &[(2, 0)]);
+        seen_again.direction = Vector2::new(0.2, 0.0);
+        seen_again.inv_dist = 0.75;
+        map.merge_landmarks(&[seen_again]);
+        assert_eq!(
+            map.revision(),
+            read,
+            "an observation-only merge takes no revision"
+        );
+
+        // A removed keyframe takes a revision and leaves the index: readers
+        // find it missing from the keyframes.
+        map.remove_keyframe(3);
+        assert!(map.revision() > read);
+        assert!(map.hosts_changed_since(0).iter().all(|host| *host != 3));
     }
 
     #[test]

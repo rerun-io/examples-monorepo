@@ -3,7 +3,9 @@
 //! snapshot stays valid while the back end goes on (D51).
 
 use super::pgo::PgoRun;
-use super::{CullCounts, LoopCounts, LoopOutcome, MapBackend, MapStats, PoseGraphEdge};
+use super::{
+    CullCounts, KeyframeMap, LoopCounts, LoopOutcome, MapBackend, MapStats, PoseGraphEdge,
+};
 use crate::lie::Se3;
 use crate::types::{FrameId, LandmarkId};
 
@@ -51,6 +53,46 @@ pub struct MapSnapshot {
     pub pgo_runs: Vec<PgoRun>,
 }
 
+/// The keyframe half of the map, which stays small: what a [`MapDelta`]
+/// carries whole and a [`MapSnapshot`] holds in its own fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapKeyframes {
+    /// Map keyframes, oldest first.
+    pub t_ns: Vec<FrameId>,
+    /// `T_w_i` of each keyframe as the map holds it ([`MapSnapshot::keyframe_poses`]).
+    pub poses: Vec<Se3<f64>>,
+    /// The window's pose of each keyframe, before any correction.
+    pub raw_poses: Vec<Se3<f64>>,
+    /// Whether each keyframe is still in the window.
+    pub active: Vec<bool>,
+    /// Verified loops whose two keyframes are still in the map, oldest first.
+    pub loops: Vec<SnapshotLoop>,
+}
+
+/// What a reader needs to redraw the map since its last read (D51's copy, minus
+/// what did not change): the keyframe half, and the points of only the
+/// keyframes a write moved after `since`. Reading it costs those keyframes'
+/// hosted points, not the whole map's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapDelta {
+    /// The map's revision when the delta was taken: the reader's next `since`.
+    pub revision: u64,
+    /// Every keyframe's pose and the loops.
+    pub keyframes: MapKeyframes,
+    /// Keyframes in the map whose hosted points moved after `since`, in id
+    /// order. A keyframe the reader holds that is missing from
+    /// [`MapKeyframes::t_ns`] was removed.
+    pub changed_hosts: Vec<FrameId>,
+    /// How many of the points below each changed host has, aligned with
+    /// `changed_hosts` (0: it hosts none the map can place).
+    pub point_counts: Vec<usize>,
+    /// The changed hosts' points, host by host in `changed_hosts` order, then
+    /// by camera and id.
+    pub point_ids: Vec<LandmarkId>,
+    /// Each point in the world frame, metres.
+    pub points_world: Vec<[f32; 3]>,
+}
+
 /// One verified loop in a [`MapSnapshot`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnapshotLoop {
@@ -68,44 +110,44 @@ pub struct SnapshotLoop {
     pub drift_deg: f64,
 }
 
+/// A world point as `f32`, or `None` when it overflows (kept out of the
+/// points, as RootSLAM's export keeps only finite positions).
+fn narrow(point_w: nalgebra::Vector3<f64>) -> Option<[f32; 3]> {
+    let point: [f32; 3] = [point_w.x as f32, point_w.y as f32, point_w.z as f32];
+    point.iter().all(|value| value.is_finite()).then_some(point)
+}
+
 impl MapBackend {
     /// Copy the map. A point is [`super::KeyframeMap::landmark_world`]; a
     /// landmark it cannot place, or whose position overflows `f32`, is left out
     /// of the points (it still counts in `stats`), as RootSLAM's map export
     /// keeps only finite positions.
     pub fn snapshot(&self) -> MapSnapshot {
-        let keyframes = self.map.keyframes();
         let mut point_ids: Vec<LandmarkId> = Vec::with_capacity(self.map.landmarks().len());
         let mut point_hosts: Vec<FrameId> = Vec::with_capacity(self.map.landmarks().len());
         let mut points_world: Vec<[f32; 3]> = Vec::with_capacity(self.map.landmarks().len());
         for (&id, landmark) in self.map.landmarks() {
-            let Some(point_w) = self.map.landmark_world(id, &self.rig.t_i_c) else {
+            let Some(point) = self.placed_point(id) else {
                 continue;
             };
-            let point: [f32; 3] = [point_w.x as f32, point_w.y as f32, point_w.z as f32];
-            if !point.iter().all(|value| value.is_finite()) {
-                continue;
-            }
             point_ids.push(id);
             point_hosts.push(landmark.host.frame_id);
             points_world.push(point);
         }
         let graph = self.graph();
         let pgo = self.loops.as_ref().map(|loops| loops.pgo());
+        let MapKeyframes {
+            t_ns,
+            poses,
+            raw_poses,
+            active,
+            loops,
+        } = self.map_keyframes();
         MapSnapshot {
-            keyframe_t_ns: keyframes.keys().copied().collect(),
-            keyframe_poses: keyframes.values().map(|keyframe| keyframe.pose).collect(),
-            keyframe_raw_poses: keyframes
-                .iter()
-                .map(|(id, keyframe)| {
-                    pgo.and_then(|pgo| pgo.raw.get(id).copied())
-                        .unwrap_or(keyframe.pose)
-                })
-                .collect(),
-            keyframe_active: keyframes
-                .keys()
-                .map(|id| self.active.contains(id))
-                .collect(),
+            keyframe_t_ns: t_ns,
+            keyframe_poses: poses,
+            keyframe_raw_poses: raw_poses,
+            keyframe_active: active,
             point_ids,
             point_hosts,
             points_world,
@@ -121,27 +163,99 @@ impl MapBackend {
                 .as_ref()
                 .map(|loops| loops.counts())
                 .unwrap_or_default(),
-            loops: self
-                .loops
-                .iter()
-                .flat_map(|loops| loops.events())
-                .filter(|event| {
-                    keyframes.contains_key(&event.detection.current)
-                        && keyframes.contains_key(&event.detection.candidate)
-                })
-                .map(|event| SnapshotLoop {
-                    current: event.detection.current,
-                    candidate: event.detection.candidate,
-                    fused: matches!(
-                        event.outcome,
-                        LoopOutcome::Fused { .. } | LoopOutcome::Optimized { .. }
-                    ),
-                    drift_m: event.drift_m,
-                    drift_deg: event.drift_deg,
-                })
-                .collect(),
+            loops,
             pgo_epoch: pgo.map_or(0, |pgo| pgo.epoch()),
             pgo_runs: pgo.map(|pgo| pgo.runs.clone()).unwrap_or_default(),
         }
+    }
+
+    /// What changed since revision `since` ([`MapDelta`]): the keyframe half,
+    /// and the points of the keyframes a write moved after it. `since = 0`
+    /// gives every point, as a first read.
+    pub fn delta(&self, since: u64) -> MapDelta {
+        let changed_hosts: Vec<FrameId> = self.map.hosts_changed_since(since);
+        let mut point_counts: Vec<usize> = Vec::with_capacity(changed_hosts.len());
+        let mut point_ids: Vec<LandmarkId> = Vec::new();
+        let mut points_world: Vec<[f32; 3]> = Vec::new();
+        for &host in &changed_hosts {
+            let before: usize = point_ids.len();
+            if let Some(keyframe) = self.map.keyframe(host) {
+                for (id, landmark) in self.map.hosted_landmarks(host) {
+                    if let Some(point) =
+                        KeyframeMap::place(landmark, keyframe, &self.rig.t_i_c).and_then(narrow)
+                    {
+                        point_ids.push(id);
+                        points_world.push(point);
+                    }
+                }
+            }
+            point_counts.push(point_ids.len() - before);
+        }
+        MapDelta {
+            revision: self.map.revision(),
+            keyframes: self.map_keyframes(),
+            changed_hosts,
+            point_counts,
+            point_ids,
+            points_world,
+        }
+    }
+
+    /// Every keyframe's pose, raw pose and window state, and the loops.
+    pub fn map_keyframes(&self) -> MapKeyframes {
+        let keyframes = self.map.keyframes();
+        MapKeyframes {
+            t_ns: keyframes.keys().copied().collect(),
+            poses: keyframes.values().map(|keyframe| keyframe.pose).collect(),
+            raw_poses: self.raw_poses(),
+            active: keyframes
+                .keys()
+                .map(|id| self.active.contains(id))
+                .collect(),
+            loops: self.snapshot_loops(),
+        }
+    }
+
+    /// A landmark in the world frame as `f32`, or `None` when the map cannot
+    /// place it or it overflows `f32` (kept out of the points, as RootSLAM's
+    /// export keeps only finite positions).
+    fn placed_point(&self, id: LandmarkId) -> Option<[f32; 3]> {
+        narrow(self.map.landmark_world(id, &self.rig.t_i_c)?)
+    }
+
+    /// The window's pose of each keyframe before any PGO correction.
+    fn raw_poses(&self) -> Vec<Se3<f64>> {
+        let pgo = self.loops.as_ref().map(|loops| loops.pgo());
+        self.map
+            .keyframes()
+            .iter()
+            .map(|(id, keyframe)| {
+                pgo.and_then(|pgo| pgo.raw.get(id).copied())
+                    .unwrap_or(keyframe.pose)
+            })
+            .collect()
+    }
+
+    /// Verified loops whose two keyframes are still in the map, oldest first.
+    fn snapshot_loops(&self) -> Vec<SnapshotLoop> {
+        let keyframes = self.map.keyframes();
+        self.loops
+            .iter()
+            .flat_map(|loops| loops.events())
+            .filter(|event| {
+                keyframes.contains_key(&event.detection.current)
+                    && keyframes.contains_key(&event.detection.candidate)
+            })
+            .map(|event| SnapshotLoop {
+                current: event.detection.current,
+                candidate: event.detection.candidate,
+                fused: matches!(
+                    event.outcome,
+                    LoopOutcome::Fused { .. } | LoopOutcome::Optimized { .. }
+                ),
+                drift_m: event.drift_m,
+                drift_deg: event.drift_deg,
+            })
+            .collect()
     }
 }

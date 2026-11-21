@@ -9,7 +9,7 @@ Timestamps remain integer nanoseconds. Quaternions stay w-first in memory
 and convert to XYZW only at the logging boundary.
 """
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +49,61 @@ class Trajectory:
     def xyzw(self) -> Float64[ndarray, "n 7"]:
         """The poses as ``[tx, ty, tz, qx, qy, qz, qw]`` rows, the layout the core takes."""
         return np.concatenate([self.position_m, np.roll(self.quaternion_wxyz, -1, axis=1)], axis=1)
+
+
+@dataclass(slots=True)
+class PoseLog:
+    """Every pose a run reported, in arrays that double when full: the whole estimate is a slice of them.
+
+    Lists of small arrays rebuilt into one array at every read grew with the run (every 30 framesets for the ATE and
+    the alignment: ~0.85 ms a frameset by the end of a 24-minute walk). A slice copies nothing, and later appends only
+    write past it, so an estimate taken earlier stays as it was.
+    """
+
+    capacity: InitVar[int] = 1024
+    """Rows the arrays start with."""
+    count: int = field(default=0, init=False)
+    """Poses appended."""
+    t_ns: Int64[ndarray, " c"] = field(init=False)
+    """Timestamps, the first ``count`` rows used."""
+    position_m: Float64[ndarray, "c 3"] = field(init=False)
+    """Positions, metres."""
+    quaternion_wxyz: Float64[ndarray, "c 4"] = field(init=False)
+    """Orientations, scalar first."""
+
+    def __post_init__(self, capacity: int) -> None:
+        self.t_ns = np.zeros(capacity, dtype=np.int64)
+        self.position_m = np.zeros((capacity, 3), dtype=np.float64)
+        self.quaternion_wxyz = np.zeros((capacity, 4), dtype=np.float64)
+
+    def __len__(self) -> int:
+        return self.count
+
+    def append(self, t_ns: int, position_m: Float64[ndarray, " 3"], quaternion_wxyz: Float64[ndarray, " 4"]) -> None:
+        """Add one pose; the arrays double (a copy) when full."""
+        if self.count == self.t_ns.shape[0]:
+            size: int = 2 * max(self.count, 1)
+            self.t_ns = np.concatenate([self.t_ns, np.zeros(size - self.count, dtype=np.int64)])
+            self.position_m = np.concatenate([self.position_m, np.zeros((size - self.count, 3), dtype=np.float64)])
+            self.quaternion_wxyz = np.concatenate([self.quaternion_wxyz, np.zeros((size - self.count, 4), dtype=np.float64)])
+        self.t_ns[self.count] = t_ns
+        self.position_m[self.count] = position_m
+        self.quaternion_wxyz[self.count] = quaternion_wxyz
+        self.count += 1
+
+    def trajectory(self) -> Trajectory:
+        """Every pose so far, as read-only slices of the arrays (no copy): a caller that edits an estimate in place gets
+        an error instead of rewriting the log."""
+        t_ns: Int64[ndarray, " n"] = self.t_ns[: self.count]
+        position_m: Float64[ndarray, "n 3"] = self.position_m[: self.count]
+        quaternion_wxyz: Float64[ndarray, "n 4"] = self.quaternion_wxyz[: self.count]
+        for view in (t_ns, position_m, quaternion_wxyz):
+            view.flags.writeable = False
+        return Trajectory(t_ns=t_ns, position_m=position_m, quaternion_wxyz=quaternion_wxyz)
+
+    def last_t_ns(self) -> int | None:
+        """The newest pose's timestamp; None before the first."""
+        return int(self.t_ns[self.count - 1]) if self.count else None
 
 
 @dataclass(slots=True, frozen=True)

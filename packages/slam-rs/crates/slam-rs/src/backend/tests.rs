@@ -514,6 +514,264 @@ fn a_map_snapshot_copies_keyframes_world_points_and_edges() {
     assert_eq!(snapshot.culls, CullCounts::default());
 }
 
+/// A delta from revision 0 is the whole map's points; from a later revision it
+/// has every keyframe pose but only the points of the hosts a write touched,
+/// each where the snapshot puts it.
+#[test]
+fn a_map_delta_carries_every_pose_and_only_the_changed_hosts_points() {
+    let mut backend = backend_with(config(100, 10), two_cameras());
+    backend.step(keyframe(1, &[1], vec![]));
+    backend.step(keyframe(
+        2,
+        &[1, 2],
+        vec![
+            landmark(10, 1, &[(1, 0), (2, 0)]),
+            landmark(11, 2, &[(2, 1), (1, 1)]),
+        ],
+    ));
+    let first: MapDelta = backend.delta(0);
+    assert_eq!(first.changed_hosts, vec![1, 2]);
+    assert_eq!(first.point_counts, vec![1, 1]);
+    assert_eq!(
+        hosted(
+            &first.changed_hosts,
+            &first.point_counts,
+            &first.point_ids,
+            &first.points_world
+        ),
+        by_host(&backend.snapshot())
+    );
+
+    let read: u64 = first.revision;
+    let quiet: MapDelta = backend.delta(read);
+    assert!(
+        quiet.changed_hosts.is_empty() && quiet.point_ids.is_empty(),
+        "nothing changed since the read"
+    );
+    assert_eq!(quiet.keyframes, backend.map_keyframes());
+
+    backend.step(marg(&[1], 1.5, vec![]));
+    let moved: MapDelta = backend.delta(read);
+    let now: MapSnapshot = backend.snapshot();
+    assert_eq!(
+        moved.changed_hosts,
+        vec![1],
+        "the marginalization moved keyframe 1 only"
+    );
+    assert_eq!(moved.keyframes.poses, now.keyframe_poses);
+    assert_eq!(moved.keyframes.active, now.keyframe_active);
+    assert_eq!(
+        moved.point_ids,
+        vec![LandmarkId(10)],
+        "keyframe 1 hosts landmark 10"
+    );
+}
+
+fn two_cameras() -> Vec<Se3<f64>> {
+    vec![
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.1, 0.0)),
+        Se3::new(So3::identity(), Vector3::new(0.0, 0.0, 0.2)),
+    ]
+}
+
+type HostedPoints = BTreeMap<FrameId, BTreeMap<LandmarkId, [f32; 3]>>;
+
+/// Delta points by host (hosts with none left out).
+fn hosted(
+    hosts: &[FrameId],
+    counts: &[usize],
+    ids: &[LandmarkId],
+    points: &[[f32; 3]],
+) -> HostedPoints {
+    let mut out = HostedPoints::new();
+    let mut start: usize = 0;
+    for (&host, &count) in hosts.iter().zip(counts) {
+        if count > 0 {
+            out.insert(
+                host,
+                ids[start..start + count]
+                    .iter()
+                    .copied()
+                    .zip(points[start..start + count].iter().copied())
+                    .collect(),
+            );
+        }
+        start += count;
+    }
+    out
+}
+
+/// A snapshot's points by host.
+fn by_host(snapshot: &MapSnapshot) -> HostedPoints {
+    let mut out = HostedPoints::new();
+    for ((id, host), point) in snapshot
+        .point_ids
+        .iter()
+        .zip(&snapshot.point_hosts)
+        .zip(&snapshot.points_world)
+    {
+        out.entry(*host).or_default().insert(*id, *point);
+    }
+    out
+}
+
+/// One write to the map, as the window, culling, loop fusion, the PGO and the
+/// global BA's write-back make them. Indices pick among what exists.
+#[derive(Debug, Clone)]
+enum MapWrite {
+    /// A keyframe stamp: a new keyframe and landmarks hosted in the window.
+    Keyframe(Vec<(u8, u8, u8)>),
+    /// A marginalization stamp moving one keyframe.
+    Marginalize(u8, i8),
+    /// A pose write (the PGO): `true` writes the pose it already has.
+    Pose(u8, i8, bool),
+    /// The global BA's write-back of one landmark.
+    Position(u8, u8),
+    /// An observation-only merge: the landmark again, same geometry, a new image.
+    Observe(u8, u8),
+    /// A landmark merged with new geometry from the window (a rehost when the host differs).
+    Rewrite(u8, u8, u8),
+    RemoveLandmark(u8),
+    /// A cull.
+    RemoveKeyframe(u8),
+    /// Loop fusion.
+    Fold(u8, u8),
+}
+
+fn map_write() -> impl Strategy<Value = MapWrite> {
+    prop_oneof![
+        3 => prop::collection::vec((any::<u8>(), 0u8..2, 1u8..8), 0..4).prop_map(MapWrite::Keyframe),
+        1 => (any::<u8>(), any::<i8>()).prop_map(|(k, x)| MapWrite::Marginalize(k, x)),
+        1 => (any::<u8>(), any::<i8>(), any::<bool>()).prop_map(|(k, x, same)| MapWrite::Pose(k, x, same)),
+        1 => (any::<u8>(), 1u8..8).prop_map(|(l, d)| MapWrite::Position(l, d)),
+        1 => (any::<u8>(), any::<u8>()).prop_map(|(l, k)| MapWrite::Observe(l, k)),
+        1 => (any::<u8>(), any::<u8>(), 1u8..8).prop_map(|(l, k, d)| MapWrite::Rewrite(l, k, d)),
+        1 => any::<u8>().prop_map(MapWrite::RemoveLandmark),
+        1 => any::<u8>().prop_map(MapWrite::RemoveKeyframe),
+        1 => (any::<u8>(), any::<u8>()).prop_map(|(a, b)| MapWrite::Fold(a, b)),
+    ]
+}
+
+fn pick<T: Copy>(items: &[T], index: u8) -> Option<T> {
+    (!items.is_empty()).then(|| items[usize::from(index) % items.len()])
+}
+
+proptest! {
+    /// The delta contract: a reader that folds each delta into what it holds
+    /// (dropping keyframes that left the map) holds exactly the snapshot's
+    /// points, and `delta(0)`'s, after every kind of write; every public write
+    /// takes at most one revision, and a read with nothing changed is empty.
+    #[test]
+    fn folded_deltas_hold_the_map(writes in prop::collection::vec(map_write(), 1..40)) {
+        let mut backend = backend_with(config(100, 10), two_cameras());
+        let mut next_keyframe: FrameId = 1;
+        let mut next_landmark: u64 = 1;
+        let mut held = HostedPoints::new();
+        let mut since: u64 = 0;
+        for write in writes {
+            let write: MapWrite = write;
+            let keyframes: Vec<FrameId> = backend.map.keyframes().keys().copied().collect();
+            let landmarks: Vec<LandmarkId> = backend.map.landmarks().keys().copied().collect();
+            let before: u64 = backend.map.revision();
+            match write.clone() {
+                MapWrite::Keyframe(hosted_landmarks) => {
+                    let id: FrameId = next_keyframe;
+                    next_keyframe += 1;
+                    let window: Vec<FrameId> = keyframes.iter().copied().chain([id]).collect();
+                    let stamped: Vec<StampLandmark> = hosted_landmarks
+                        .iter()
+                        .map(|&(host, cam, depth)| {
+                            let host: FrameId = pick(&window, host).unwrap_or(id);
+                            let other: FrameId = if host == id { window[0] } else { id };
+                            let mut stamped = landmark(next_landmark, host, &[(host, usize::from(cam)), (other, 1 - usize::from(cam))]);
+                            stamped.host = TimeCamId::new(host, usize::from(cam));
+                            stamped.inv_dist = f64::from(depth) / 8.0;
+                            stamped.direction = Vector2::new(0.05 * next_landmark as f64, 0.01);
+                            next_landmark += 1;
+                            stamped
+                        })
+                        .collect();
+                    // A stamp is several map writes (one pose per window keyframe, then the landmarks).
+                    backend.step(keyframe(id, &window, stamped));
+                }
+                MapWrite::Marginalize(k, x) => {
+                    let Some(k) = pick(&keyframes, k) else { continue };
+                    backend.step(marg(&[k], f64::from(x) / 10.0, vec![]));
+                }
+                MapWrite::Pose(k, x, same) => {
+                    let Some(k) = pick(&keyframes, k) else { continue };
+                    let pose_now: Se3<f64> = backend.map.keyframe(k).unwrap().pose;
+                    backend.map.upsert_keyframe(k, if same { pose_now } else { pose(f64::from(x) / 10.0) }, None);
+                    if same {
+                        prop_assert_eq!(backend.map.revision(), before, "an unchanged pose takes no revision");
+                    }
+                }
+                MapWrite::Position(l, depth) => {
+                    let Some(l) = pick(&landmarks, l) else { continue };
+                    backend.map.set_landmark_position(l, Vector2::new(0.03, -0.02), f64::from(depth) / 8.0);
+                }
+                MapWrite::Observe(l, k) => {
+                    let (Some(l), Some(k)) = (pick(&landmarks, l), pick(&keyframes, k)) else { continue };
+                    let current: MapLandmark = backend.map.landmark(l).unwrap().clone();
+                    let again = StampLandmark {
+                        id: l,
+                        host: current.host,
+                        direction: current.direction,
+                        inv_dist: current.inv_dist,
+                        obs: [(TimeCamId::new(k, 1), Vector2::new(4.0, 4.0))].into_iter().collect(),
+                    };
+                    backend.map.merge_landmarks(&[again]);
+                    prop_assert_eq!(backend.map.revision(), before, "an observation-only merge takes no revision");
+                }
+                MapWrite::Rewrite(l, k, depth) => {
+                    let (Some(l), Some(k)) = (pick(&landmarks, l), pick(&keyframes, k)) else { continue };
+                    let current: MapLandmark = backend.map.landmark(l).unwrap().clone();
+                    let rewritten = StampLandmark {
+                        id: l,
+                        host: TimeCamId::new(k, 0),
+                        direction: Vector2::new(-0.04, 0.02),
+                        inv_dist: f64::from(depth) / 8.0,
+                        obs: current.obs.clone(),
+                    };
+                    backend.map.merge_landmarks(&[rewritten]);
+                }
+                MapWrite::RemoveLandmark(l) => {
+                    let Some(l) = pick(&landmarks, l) else { continue };
+                    backend.map.remove_landmark(l);
+                }
+                MapWrite::RemoveKeyframe(k) => {
+                    let Some(k) = pick(&keyframes, k) else { continue };
+                    backend.map.remove_keyframe(k);
+                }
+                MapWrite::Fold(a, b) => {
+                    let (Some(a), Some(b)) = (pick(&landmarks, a), pick(&landmarks, b)) else { continue };
+                    backend.map.merge_landmark(a, b);
+                }
+            }
+            if !matches!(write, MapWrite::Keyframe(_) | MapWrite::Marginalize(..)) {
+                prop_assert!(backend.map.revision() <= before + 1, "one revision per public write");
+            }
+            let delta: MapDelta = backend.delta(since);
+            held.retain(|host, _| delta.keyframes.t_ns.contains(host));
+            for (host, points) in hosted(&delta.changed_hosts, &delta.point_counts, &delta.point_ids, &delta.points_world) {
+                held.insert(host, points);
+            }
+            for (host, count) in delta.changed_hosts.iter().zip(&delta.point_counts) {
+                if *count == 0 {
+                    held.remove(host);
+                }
+            }
+            since = delta.revision;
+            let whole: MapDelta = backend.delta(0);
+            let snapshot: MapSnapshot = backend.snapshot();
+            prop_assert_eq!(&held, &by_host(&snapshot));
+            prop_assert_eq!(&hosted(&whole.changed_hosts, &whole.point_counts, &whole.point_ids, &whole.points_world), &by_host(&snapshot));
+            prop_assert_eq!(&delta.keyframes, &backend.map_keyframes());
+            prop_assert!(backend.delta(since).changed_hosts.is_empty(), "a read with nothing changed is empty");
+        }
+    }
+}
+
 /// A landmark whose host camera has no extrinsic is left out, not invented.
 #[test]
 fn a_map_snapshot_skips_points_it_cannot_place() {

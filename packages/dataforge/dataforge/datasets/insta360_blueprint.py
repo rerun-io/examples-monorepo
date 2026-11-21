@@ -273,6 +273,8 @@ def comparison_overrides(*, close: bool) -> Overrides:
         f"{SLAM}/path": stroke(SLAM_COLOR, wide),
         f"{SLAM}/trajectory": stroke(SLAM_COLOR, wide),
         f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, narrow),
+        # The final map only: while the run goes on slam-rs draws its map as blocks under ``map/points/blocks``, which
+        # no override can reach (exact paths only), so they keep their image colours until the final draw replaces them.
         f"{SLAM}/map/points": cloud(1.5, shade(SLAM_COLOR, CLOUD_SHADE)),
         f"{COLSFM}/points": cloud(1.5, shade(COLSFM_COLOR, CLOUD_SHADE)),
         **hidden(f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes", f"{SLAM}/loops"),
@@ -422,7 +424,7 @@ def comparison_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
     ]
     return rrb.Vertical(
         rrb.Horizontal(
-            overview("Overview: slam-rs final (orange) and colsfm (blue), paths and clouds", scene, comparison_overrides(close=False), eye, schema.SLAM_RS_SOURCE),
+            overview("Overview: slam-rs (live map in image colours, orange once final) and colsfm (blue)", scene, comparison_overrides(close=False), eye, schema.SLAM_RS_SOURCE),
             follow("Follow: colsfm's rig on the final slam-rs path", scene, comparison_overrides(close=True), schema.SLAM_RS_SOURCE),
             column_shares=[3, 2],
         ),

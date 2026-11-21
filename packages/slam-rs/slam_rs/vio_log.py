@@ -27,8 +27,9 @@ from slam_rs.follow_frame import FloorGrid, FloorHeight, HeadingFilter, floor_en
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
 from slam_rs.landmark_colors import LandmarkColors
 from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
+from slam_rs.map_point_blocks import MapPointBlocks
 from slam_rs.tracking import DropReason, Lockstep
-from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, Trajectory, ate
+from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, PoseLog, Trajectory, ate
 
 FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
 """How a replay's input rung draws the frames it was fed.
@@ -55,11 +56,17 @@ MAP_POINTS_ENTITY: str = f"{RUN_ENTITY}/map/points"
 MAP_KEYFRAMES_EVERY_NS: int = 1_000_000_000
 """Least video time between two draws of the map keyframes (at most ``map_max_keyframes`` points, ~24 kB a draw)."""
 MAP_POINTS_EVERY_NS: int = 5_000_000_000
-"""Least video time between two draws of the map points (tens of thousands of points, ~0.5 MB a draw on MIPB08).
-
-Each draw is the whole map, so drawing at every new keyframe would grow the recording with keyframes x map size;
-at a fixed video-time cadence it grows linearly with the clip. The final map is drawn once more after the flush.
-"""
+"""Least video time between two draws of the map points' changed blocks (:class:`MapPointBlocks`). The final map is
+drawn whole once more after the flush."""
+MAP_POINT_BLOCKS_ENTITY: str = f"{MAP_POINTS_ENTITY}/blocks"
+"""Parent of the map-point blocks (:class:`slam_rs.map_point_blocks.MapPointBlocks`) the run draws while it goes on,
+``blocks/0000`` on, each with its own colours and :data:`MAP_POINT_BLOCK_RADIUS_UI`. Cleared at the final draw, which
+puts the whole map on :data:`MAP_POINTS_ENTITY` itself, where a layout's overrides find it."""
+MAP_POINT_RADIUS_M: float = 0.004
+"""Radius of the final map's points on :data:`MAP_POINTS_ENTITY`, metres (a layout may override it there)."""
+MAP_POINT_BLOCK_RADIUS_UI: float = 1.5
+"""Radius of the blocks' points, ui points, logged with the data: a layout's overrides cannot reach the block entities
+(no path patterns), and a view default would size every radius-less cloud in the view, not only these."""
 VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
@@ -262,12 +269,8 @@ class VioLogger:
     """The follow frame's heading so far: the direction of travel, low-passed."""
     floor_height: FloorHeight = field(default_factory=FloorHeight)
     """The rig's height over the floor so far, from the landmarks each window held around it."""
-    estimate_t_ns: list[int] = field(default_factory=list)
-    """Timestamps of the poses reported so far, in replay order."""
-    estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
-    """Positions of the poses reported so far."""
-    estimate_quaternion_wxyz: list[Float64[ndarray, " 4"]] = field(default_factory=list)
-    """Rotations of the poses reported so far, w-first as :mod:`slam_rs.trajectory` stores them."""
+    poses: PoseLog = field(default_factory=PoseLog)
+    """Every pose the run reported, for the CSV export, the ATE and the per-frameset path segment."""
     ground_truth_strip: Trajectory = field(init=False)
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
@@ -288,7 +291,8 @@ class VioLogger:
     framesets: int = 0
     """Framesets logged, which paces the ATE-so-far."""
     map_keyframe: int | None = None
-    """Newest window keyframe when the map was last read; None before the first."""
+    """Newest keyframe of the map as last read; None before the first. Until the map holds the window's newest
+    keyframe (Realtime: the back-end thread has yet to step its stamp), the map is read again at the cadence."""
     map_keyframes_t_ns: int | None = None
     """Video time of the last map-keyframes draw; None before the first."""
     map_points_t_ns: int | None = None
@@ -299,6 +303,8 @@ class VioLogger:
     """Least video time between two map-points draws (:data:`MAP_POINTS_EVERY_NS`)."""
     landmark_colors: LandmarkColors = field(default_factory=LandmarkColors)
     """The image's colour under each landmark's keypoint where it was first tracked."""
+    map_point_blocks: MapPointBlocks = field(default_factory=MapPointBlocks)
+    """The map's points by host as read, and the blocks to draw again; its revision is the next read's ``since``."""
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
@@ -324,7 +330,7 @@ class VioLogger:
         snapshot: _core.VioSnapshot,
         frame: _core.FlowFrame,
         elapsed_ms: float,
-        map_snapshot: _core.MapSnapshot | None = None,
+        map_delta: _core.MapDelta | None = None,
         colors: list[UInt8[ndarray, "ch cw 3"]] | None = None,
     ) -> None:
         """Log one tracked frameset: the keypoints, the estimated and ground-truth paths, the rig, the window, the landmarks and the counters.
@@ -334,15 +340,13 @@ class VioLogger:
             snapshot: The window and the frame's statistics behind that result.
             frame: The keypoints the estimator's own frontend tracked.
             elapsed_ms: Wall time the ``track`` call took.
-            map_snapshot: The back end's map, when the caller read it (see :meth:`map_is_due`); drawn under the run.
+            map_delta: The back end's map changes, when the caller read them (:meth:`read_map`); drawn under the run.
             colors: The frameset's frames in RGB (:attr:`Frameset.colors`), which colour the landmarks; None draws them grey.
         """
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
         self.framesets += 1
-        self.estimate_t_ns.append(result.t_ns)
-        self.estimate_position_m.append(pose[0:3].copy())
-        self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
+        self.poses.append(result.t_ns, pose[0:3], np.roll(pose[3:7], 1))
 
         rig_pose: rr.Transform3D = rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))
         rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
@@ -362,9 +366,10 @@ class VioLogger:
         self._log_paths()
         self._log_window(snapshot)
         self._log_landmarks(snapshot)
-        if map_snapshot is not None:
-            self._log_map(map_snapshot, snapshot.t_ns, final=False)
-            self.map_keyframe = int(snapshot.kf_ids[-1]) if len(snapshot.kf_ids) else None
+        if map_delta is not None:
+            self._log_map_delta(map_delta, snapshot.t_ns)
+            map_keyframes: Int64[ndarray, " k"] = map_delta.map_keyframes.t_ns
+            self.map_keyframe = int(map_keyframes[-1]) if len(map_keyframes) else None
         self._log_scalars(snapshot, elapsed_ms)
         if self.framesets % ATE_EVERY == 0:
             # The only two readers of the whole estimate, and the reason it is
@@ -383,11 +388,7 @@ class VioLogger:
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
-        return Trajectory(
-            t_ns=np.array(self.estimate_t_ns, dtype=np.int64),
-            position_m=np.array(self.estimate_position_m, dtype=np.float64).reshape(-1, 3),
-            quaternion_wxyz=np.array(self.estimate_quaternion_wxyz, dtype=np.float64).reshape(-1, 4),
-        )
+        return self.poses.trajectory()
 
     def log_complete_paths(self) -> None:
         """Log each whole path once, static, so all three are visible at every cursor.
@@ -449,9 +450,10 @@ class VioLogger:
         appended, not from :meth:`estimated`: a segment needs two poses, not the
         whole trajectory rebuilt behind them.
         """
-        t_ns: int = self.estimate_t_ns[-1]
-        if len(self.estimate_position_m) >= 2:
-            segment: Float64[ndarray, "2 3"] = np.array(self.estimate_position_m[-2:], dtype=np.float64)
+        last: int = len(self.poses) - 1
+        t_ns: int = int(self.poses.t_ns[last])
+        if last >= 1:
+            segment: Float64[ndarray, "2 3"] = self.poses.position_m[last - 1 : last + 1].copy()
             rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 2:
@@ -543,14 +545,21 @@ class VioLogger:
         )
 
     def map_is_due(self, snapshot: _core.VioSnapshot) -> bool:
-        """Whether to read the map now: a keyframe joined the window since the last read, and the keyframes are due.
+        """Whether to read the map now: the map does not hold the window's newest keyframe yet as last read, and the
+        keyframes are due (at most every :attr:`map_keyframes_every_ns` of video time).
 
-        The map changes only when a keyframe's stamp reaches the back end, and a long run's map holds tens of
-        thousands of points, so it is read (and drawn) at most every :attr:`map_keyframes_every_ns` of video time.
+        The map changes when a keyframe's stamp reaches the back end. Offline that is inside ``track``, so the map is
+        read once per keyframe join at the cadence. Realtime the back-end thread may not have stepped it yet: the read
+        returns the newest posted delta, and the map is read again at the cadence until it holds that keyframe.
         """
         if len(snapshot.kf_ids) == 0 or int(snapshot.kf_ids[-1]) == self.map_keyframe:
             return False
         return self.map_keyframes_t_ns is None or snapshot.t_ns - self.map_keyframes_t_ns >= self.map_keyframes_every_ns
+
+    def read_map(self, vio: _core.Vio, snapshot: _core.VioSnapshot) -> _core.MapDelta | None:
+        """The map's changes since what :attr:`map_point_blocks` holds, when they are due (:meth:`map_is_due`); None
+        otherwise or with the back end off. Never waits for the back end."""
+        return vio.map_delta(self.map_point_blocks.revision) if self.map_is_due(snapshot) else None
 
     def log_final_map(self, map_snapshot: _core.MapSnapshot, t_ns: int) -> None:
         """Draw the map once more after the run's flush, keyframes and points, so the recording ends on the final map.
@@ -559,7 +568,14 @@ class VioLogger:
             map_snapshot: The map after :meth:`slam_rs._core.Vio.flush` (current in both modes).
             t_ns: Video time of the cursor the caller set, usually the last frameset's.
         """
-        self._log_map(map_snapshot, t_ns, final=True)
+        self._log_map_keyframes(map_snapshot.map_keyframes, t_ns)
+        # The end of the run: one entity holds the whole map from here on, where a layout's overrides find it.
+        rr.log(MAP_POINT_BLOCKS_ENTITY, rr.Clear(recursive=True))
+        rr.log(
+            MAP_POINTS_ENTITY,
+            rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=MAP_POINT_RADIUS_M),
+        )
+        self.map_points_t_ns = t_ns
         log_pose_graph(map_snapshot)
 
     def log_final_run(self, final: Trajectory) -> None:
@@ -591,17 +607,32 @@ class VioLogger:
                 alignment = inverted(against_truth.alignment)
         log_alignment(RUN_ENTITY, alignment)
 
-    def _log_map(self, map_snapshot: _core.MapSnapshot, t_ns: int, *, final: bool) -> None:
-        """Draw the back end's keyframes (window ones in the window colour) at the cursor, and its points when due or final."""
+    def _log_map_keyframes(self, keyframes: _core.MapKeyframes, t_ns: int) -> None:
+        """Draw the back end's keyframes (window ones in the window colour) and its loops at the cursor."""
         colors: UInt8[ndarray, "k 4"] = np.where(
-            map_snapshot.keyframe_active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
+            keyframes.active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
         )
-        rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(map_snapshot.keyframe_poses[:, 0:3], colors=colors, radii=0.012))
-        log_loops(map_snapshot)
+        rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(keyframes.poses[:, 0:3], colors=colors, radii=0.012))
+        log_loops(keyframes)
         self.map_keyframes_t_ns = t_ns
-        if final or self.map_points_t_ns is None or t_ns - self.map_points_t_ns >= self.map_points_every_ns:
-            rr.log(MAP_POINTS_ENTITY, rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=0.004))
-            self.map_points_t_ns = t_ns
+
+    def _log_map_delta(self, map_delta: _core.MapDelta, t_ns: int) -> None:
+        """While the run goes on: the keyframes and loops, the delta into :attr:`map_point_blocks`, and when the points
+        are due the blocks it marked."""
+        self._log_map_keyframes(map_delta.map_keyframes, t_ns)
+        self.map_point_blocks.apply(
+            map_delta.revision, map_delta.map_keyframes.t_ns, map_delta.changed_hosts, map_delta.point_counts, map_delta.point_ids, map_delta.points_world
+        )
+        if self.map_points_t_ns is not None and t_ns - self.map_points_t_ns < self.map_points_every_ns:
+            return
+        for block, ids, positions in self.map_point_blocks.redraw():
+            path: str = f"{MAP_POINT_BLOCKS_ENTITY}/{block:04d}"
+            if ids.shape[0]:
+                radii = rr.Radius.ui_points(MAP_POINT_BLOCK_RADIUS_UI)
+                rr.log(path, rr.Points3D(positions, colors=self.landmark_colors.lookup(ids, MAP_POINT_COLOR), radii=radii))
+            else:
+                rr.log(path, rr.Clear(recursive=False))
+        self.map_points_t_ns = t_ns
 
     def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
         """Log the counters the time-series views plot.
@@ -732,8 +763,8 @@ class VioStage:
             self._log_result(held, result)
             last_t_ns = held.t_ns
         final: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot()
-        if last_t_ns is None and self.logger.estimate_t_ns:
-            last_t_ns = self.logger.estimate_t_ns[-1]
+        if last_t_ns is None:
+            last_t_ns = self.logger.poses.last_t_ns()
         if final is not None and last_t_ns is not None:
             set_video_time(last_t_ns, self.logger.cam_time_offset_ns)
             self.logger.log_final_map(final, last_t_ns)
@@ -745,9 +776,8 @@ class VioStage:
         frame: _core.FlowFrame = self.lockstep.flow_frame()
         assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
         assert frame.t_ns == result.t_ns
-        # None with the back end off; read only when a keyframe joined and the map is due (never waits for the back end).
-        map_snapshot: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot() if self.logger.map_is_due(snapshot) else None
-        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_snapshot, held.colors)
+        map_delta: _core.MapDelta | None = self.logger.read_map(self.lockstep.vio, snapshot)
+        self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_delta, held.colors)
 
     def refuse_lost_framesets(self) -> None:
         """Stop the run when a frameset never got the inertial samples that cover it.

@@ -23,7 +23,11 @@
 //! waiting and after a query that changed the work; it posts it on a board
 //! whose lock only guards an `Arc` swap. The work's own lock stays the thread's
 //! for a whole step or query (in b2 a loop query and PGO), and only
-//! [`BackendRunner::read`] (tests, diagnostics) takes it from outside. Offline
+//! [`BackendRunner::read`] (tests, diagnostics) takes it from outside. The
+//! map's changes reach readers the same way: [`BackendRunner::delta`] posts
+//! the reader's revision and returns the newest delta the thread posted
+//! ([`BackendWork::Delta`]), which the thread takes at the same moments as a
+//! view. Offline
 //! steps inside `submit`, so a view taken from the work there never waits.
 
 use std::collections::VecDeque;
@@ -42,6 +46,12 @@ pub trait BackendWork: Send + 'static {
     /// What readers get: a copy of the work that stays valid while it goes on.
     type View: Send + Sync + 'static;
 
+    /// What a reader that holds the work as of a revision needs to catch up:
+    /// a copy of only what changed after it. A delta taken for an older
+    /// revision than the reader's holds everything a newer one would, so a
+    /// reader may apply any delta it is handed.
+    type Delta: Send + Sync + 'static;
+
     /// Take one stamp. Every stamp reaches this, in order.
     fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent>;
 
@@ -54,6 +64,9 @@ pub trait BackendWork: Send + 'static {
 
     /// Copy the work for readers.
     fn view(&self) -> Self::View;
+
+    /// Copy what changed after revision `since` (0: everything).
+    fn delta(&self, since: u64) -> Self::Delta;
 }
 
 /// What the back end has done so far.
@@ -154,47 +167,65 @@ impl<B: BackendWork> State<B> {
 
 /// What the Realtime thread posts for readers. Its lock guards copies and an
 /// `Arc` swap, never a step.
-struct Board<V> {
-    posted: Mutex<Posted<V>>,
+struct Board<V, D> {
+    posted: Mutex<Posted<V, D>>,
     /// A reader has asked for a view since the last one posted: the next step
     /// or query that changes the work posts one (and clears it). Views are
     /// O(map), and readers take one a second at most, so the thread copies
     /// the map only when one was asked for.
     wanted: AtomicBool,
+    /// A reader has asked for a delta since the last one posted; the thread
+    /// posts one at the same moments as a view.
+    delta_wanted: AtomicBool,
+    /// The revision the delta reader holds: the next delta starts after it.
+    since: AtomicU64,
 }
 
-struct Posted<V> {
+struct Posted<V, D> {
     /// The newest view.
     latest: BackendView<V>,
+    /// The newest delta, from the reader's revision when it was taken.
+    delta: Arc<D>,
     /// The counters after the newest step or query (newer than `latest`'s).
     counters: BackendCounters,
 }
 
-impl<V> Board<V> {
-    fn posted(&self) -> MutexGuard<'_, Posted<V>> {
+impl<V, D> Board<V, D> {
+    fn posted(&self) -> MutexGuard<'_, Posted<V, D>> {
         match self.posted.lock() {
             Ok(guard) => guard,
             Err(_) => panic!("the back-end thread panicked"),
         }
     }
 
-    /// Post the counters and, on `force` or when `take_view` and a reader
-    /// asked, a new view.
-    fn post<B: BackendWork<View = V>>(&self, state: &mut State<B>, take_view: bool, force: bool) {
-        let mut latest: Option<BackendView<V>> = None;
-        if force || (take_view && self.wanted.swap(false, Ordering::AcqRel)) {
-            let started = std::time::Instant::now();
-            let view: B::View = state.work.view();
+    /// Post the counters and, on `force` or when `due` and a reader asked, a
+    /// new view or a new delta.
+    fn post<B: BackendWork<View = V, Delta = D>>(
+        &self,
+        state: &mut State<B>,
+        due: bool,
+        force: bool,
+    ) {
+        let take_view: bool = force || (due && self.wanted.swap(false, Ordering::AcqRel));
+        let take_delta: bool = force || (due && self.delta_wanted.swap(false, Ordering::AcqRel));
+        let started = std::time::Instant::now();
+        let view: Option<B::View> = take_view.then(|| state.work.view());
+        let delta: Option<Arc<D>> =
+            take_delta.then(|| Arc::new(state.work.delta(self.since.load(Ordering::Acquire))));
+        if take_view || take_delta {
             state.counters.publish.record(crate::duration_ns(started));
-            latest = Some(BackendView {
-                view: Arc::new(view),
-                counters: state.counters,
-            });
         }
+        let latest: Option<BackendView<V>> = view.map(|view| BackendView {
+            view: Arc::new(view),
+            counters: state.counters,
+        });
         let mut posted = self.posted();
         posted.counters = state.counters;
         if let Some(latest) = latest {
             posted.latest = latest;
+        }
+        if let Some(delta) = delta {
+            posted.delta = delta;
         }
     }
 }
@@ -225,7 +256,7 @@ struct Thread<B: BackendWork> {
     /// Stamps sent and not yet taken.
     pending: Arc<AtomicU64>,
     max_pending: u64,
-    board: Arc<Board<B::View>>,
+    board: Arc<Board<B::View, B::Delta>>,
 }
 
 /// The back end in one of its two modes.
@@ -253,13 +284,19 @@ impl<B: BackendWork> BackendRunner<B> {
         if mode == BackendMode::Realtime {
             let (sender, receiver) = mpsc::channel::<Message>();
             let pending = Arc::new(AtomicU64::new(0));
-            let first: BackendView<B::View> = lock(&state).view();
+            let (first, first_delta): (BackendView<B::View>, B::Delta) = {
+                let state = lock(&state);
+                (state.view(), state.work.delta(0))
+            };
             let board = Arc::new(Board {
                 posted: Mutex::new(Posted {
                     counters: first.counters,
                     latest: first,
+                    delta: Arc::new(first_delta),
                 }),
                 wanted: AtomicBool::new(false),
+                delta_wanted: AtomicBool::new(false),
+                since: AtomicU64::new(0),
             });
             let handle = std::thread::Builder::new()
                 .name("slam-rs-backend".into())
@@ -356,6 +393,21 @@ impl<B: BackendWork> BackendRunner<B> {
         latest
     }
 
+    /// What changed after revision `since`, the revision the reader holds;
+    /// never waits for a step or query. Offline it is taken now. Realtime it
+    /// is the newest delta the thread posted (from the reader's revision then,
+    /// or `delta(0)` from the start), and the call asks the thread to post a
+    /// new one from `since` at the next change, as [`Self::view`] does; after
+    /// [`Self::flush`] it is current.
+    pub fn delta(&self, since: u64) -> Arc<B::Delta> {
+        let Some(thread) = &self.thread else {
+            return Arc::new(lock(&self.state).work.delta(since));
+        };
+        thread.board.since.store(since, Ordering::Release);
+        thread.board.delta_wanted.store(true, Ordering::Release);
+        Arc::clone(&thread.board.posted().delta)
+    }
+
     /// What the back end has done so far; never waits for a step or query.
     pub fn counters(&self) -> BackendCounters {
         let Some(thread) = &self.thread else {
@@ -437,7 +489,7 @@ impl<B: BackendWork> Drop for BackendRunner<B> {
 /// (after a query only if it changed the work); a flush always posts one.
 fn run_realtime<B: BackendWork>(
     state: &Mutex<State<B>>,
-    board: &Board<B::View>,
+    board: &Board<B::View, B::Delta>,
     receiver: &Receiver<Message>,
     pending: &AtomicU64,
     max_queries: usize,
@@ -503,9 +555,19 @@ mod tests {
 
     impl BackendWork for Recorder {
         type View = Vec<i64>;
+        /// The steps after the first `since`.
+        type Delta = Vec<i64>;
 
         fn view(&self) -> Vec<i64> {
             self.steps.clone()
+        }
+
+        fn delta(&self, since: u64) -> Vec<i64> {
+            self.steps
+                .iter()
+                .skip(usize::try_from(since).unwrap())
+                .copied()
+                .collect()
         }
 
         fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {
@@ -655,6 +717,51 @@ mod tests {
         );
     }
 
+    /// A delta reader never waits for a held step, starts from `delta(0)`,
+    /// and gets the step's changes from its own revision once the step is done.
+    #[test]
+    fn a_realtime_delta_never_waits_and_catches_up_after_the_held_step() {
+        let gate = Arc::new(AtomicBool::new(true));
+        let work = Recorder {
+            gate: Some(Arc::clone(&gate)),
+            ..Recorder::default()
+        };
+        let mut runner = BackendRunner::new(work, BackendMode::Realtime, 4).unwrap();
+        assert!(runner.delta(0).is_empty(), "the delta posted at the start");
+        runner.submit(stamp(0));
+        runner.flush();
+        assert_eq!(*runner.delta(0), vec![0], "a flush posts a current delta");
+        gate.store(false, Ordering::Release);
+        runner.submit(stamp(1));
+        let started = std::time::Instant::now();
+        while runner.state.try_lock().is_ok() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the step never started"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let reading = std::time::Instant::now();
+        let held = runner.delta(1);
+        assert!(reading.elapsed() < Duration::from_millis(50));
+        assert!(runner.state.try_lock().is_err(), "the step is still held");
+        assert_eq!(
+            *held,
+            vec![0],
+            "the newest posted delta, from the older revision: a superset"
+        );
+        gate.store(true, Ordering::Release);
+        // The step posts a delta from the reader's revision without a flush.
+        let started = std::time::Instant::now();
+        while *runner.delta(1) != vec![1] {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "no delta was posted after the step"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// Realtime copies the map only when a reader asked: without a `view` call
     /// only the flush posts one.
     #[test]
@@ -711,8 +818,11 @@ mod tests {
 
     impl BackendWork for Panics {
         type View = ();
+        type Delta = ();
 
         fn view(&self) {}
+
+        fn delta(&self, _: u64) {}
 
         fn step(&mut self, _: MapStamp) -> Vec<MapEvent> {
             panic!("step failed");

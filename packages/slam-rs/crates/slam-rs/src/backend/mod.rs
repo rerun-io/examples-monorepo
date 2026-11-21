@@ -35,7 +35,7 @@ pub use loop_closing::{LoopClosing, LoopCounts, LoopDetection, LoopEvent, LoopOu
 pub use map::{KeyframeMap, MapKeyframe, MapLandmark, MapStats};
 pub use pgo::{PgoRun, PgoState};
 pub use runner::{BackendCounters, BackendRunner, BackendView, BackendWork};
-pub use snapshot::{MapSnapshot, SnapshotLoop};
+pub use snapshot::{MapDelta, MapKeyframes, MapSnapshot, SnapshotLoop};
 
 /// The map's knobs, read from [`VioConfig`].
 #[derive(Debug, Clone, PartialEq)]
@@ -538,10 +538,16 @@ impl EdgeChange {
 
 impl BackendWork for MapBackend {
     type View = MapSnapshot;
+    type Delta = MapDelta;
 
     /// [`MapBackend::snapshot`] with the rig's extrinsics.
     fn view(&self) -> MapSnapshot {
         self.snapshot()
+    }
+
+    /// [`MapBackend::delta`].
+    fn delta(&self, since: u64) -> MapDelta {
+        MapBackend::delta(self, since)
     }
 
     fn step(&mut self, stamp: MapStamp) -> Vec<MapEvent> {
