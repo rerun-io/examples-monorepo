@@ -68,3 +68,31 @@
   labels and areas are bit-exact against `cv2.connectedComponentsWithStats`
   (8-connectivity), the label being each component's smallest 2x2-block index + 1
   as in CUDA.
+- `sam2/sam2_generic_video_predictor.py` `forward_batched` (new; posekit's
+  `Sam2VideoSegmenter.step` uses it): `forward` for several video states at one
+  timestep, with one image-encoder call for all frames, prompted objects batched by
+  prompt layout, propagated objects batched by memory layout (numbers of conditional,
+  non-conditional and pointer memories) through memory attention and the mask
+  decoder, and one memory-encoder call. `forward` is unchanged. In
+  `sam2/modeling/sam2_generic.py`, `generate_masks(best_only=True)` upscales only the
+  highest-IoU hypothesis (the upscaling is per channel, so that mask is unchanged),
+  and `_prepare_obj_ptrs_for_memory_conditioning` accepts a pointer frame index per
+  batch element (a nested list). fp32 replay of clip B people tracking: masks of the
+  per-object loop and the batched pass agree to union IoU 0.9995 or more.
+- `sam2/cuda_graphs.py` `GraphCache` (new) and `forward_batched(graphs=...)`: CUDA-graph replay
+  of the batched step's modules (image encoder, memory attention per memory layout and object
+  count, mask decoder, memory encoder), one graph per input signature, captured on its second
+  call; the selection and batching glue stays eager. Static inputs and outputs are views into
+  buffers shared by all graphs, so memory follows the largest signature. The step's index
+  tensors go to the device from pinned memory without a host sync, the box labels are built on
+  the device and the empty prompt embeddings are copied once. Masks are bit-identical to the
+  eager pass (clip B and clip 007 replays of people tracking).
+- `index_tensor` is public (posekit's `Sam2VideoSegmenter` uses it), and `forward_batched` refuses
+  `non_overlap_masks` as well as `non_overlap_masks_for_mem_enc`: its batch rows belong to different
+  videos, so a non-overlap constraint across rows would let one video's object suppress another's.
+- Open (mask-speed thermo reviews, 2026-11-21): mamma keeps its own `batched_forward.py` and
+  `steady_graph.py` for this predictor (one object per camera, no prompts); moving mamma onto
+  `forward_batched` + `GraphCache` and deleting those 512 lines is a follow-up with the mamma gate and a
+  timing run. Also open: `forward_batched` as a tensor-level conditioning method with typed layouts
+  instead of closures and positional tuple keys; `fused_rope` enabled once at set-up per predictor
+  instead of the process-wide switch and the first-call fallback.

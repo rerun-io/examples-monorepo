@@ -1,7 +1,7 @@
 """FullCircle operator masks for a dual-fisheye base recording: a ``people_mask`` layer on both lenses.
 
 Reads the lens videos, their Mei calibrations and the accelerometer of a dataforge Insta360 base recording from its
-catalog segment (only the packets of the run window), runs
+catalog segment (both lenses in one read; the decoders get the packets of the run window), runs
 :class:`~posekit.models.fullcircle.FullCircleMasker` in FullCircle's two passes (detect the operator direction on
 every tracked frameset, fill the gaps from the nearest frameset, then track and map back) and writes the mask layer
 contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a ``SegmentationImage`` (uint8, 1 = operator)
@@ -15,26 +15,23 @@ scene at infinity, as in a stitched panorama).
 
 import time
 from collections.abc import Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
-from datafusion import col, lit
-from einops import rearrange
+from datafusion import col
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.camera_parameters import MeiParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
-from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
@@ -48,6 +45,9 @@ from posekit.models.fullcircle import (
     view_up,
 )
 from posekit.ops.sphere import MeiCamera
+
+DETECT_FRAMESETS: int = 8
+"""Framesets per detector call: 48 faces, the YOLOX engine's batch."""
 
 
 @dataclass
@@ -67,8 +67,14 @@ class FullCircleMasksConfig:
     """A base recording not on a catalog yet, instead of ``dataset``/``segment``: served by an in-process catalog."""
     cameras: tuple[str, str] = ("/world/rig_00/cam_00", "/world/rig_00/cam_01")
     """The two lens camera nodes (each has ``pinhole`` and ``pinhole/video``)."""
-    stride: int = 5
-    """Framesets between two tracked framesets (5 at 30 fps = 6 Hz, near FullCircle's 5 fps captures)."""
+    stride: int = 10
+    """Framesets between two tracked framesets: 10 at 30 fps = 3 Hz, the stamps of the people layer that the union
+    keeps (FullCircle captures at 5 fps)."""
+    reprompt_every_frames: int = 30
+    """Frames of video between two re-prompts of the tracker (30 at 30 fps = once a second; 0: a single prompt). It sets
+    ``masker.reprompt_every`` (which this tool therefore ignores) to ``round(reprompt_every_frames / stride)`` tracked
+    framesets, at least 1, so ``--stride 5`` keeps a re-prompt once a second (every 6th tracked frameset); at ``stride``
+    10 that is every 3rd."""
     start: int = 0
     """First frameset index."""
     end: int | None = None
@@ -88,7 +94,7 @@ class FullCircleMasksConfig:
     debug_every: int = 20
     """Tracked framesets between two evidence frames."""
     decode_chunk: int = 16
-    """Tracked framesets decoded per NVDEC call."""
+    """Tracked framesets decoded per NVDEC call (detected :data:`DETECT_FRAMESETS` at a time)."""
     fps: int = 30
     """Nominal frame rate of the wrapping MP4 track (decoding only)."""
 
@@ -115,39 +121,6 @@ def read_lens_sources(
         lens: MeiCamera = MeiCamera.from_calibration(mei.model, mei.gamma_x, mei.gamma_y, mei.cx, mei.cy, mei.sphere_coefficients())
         sources.append(SphereSource(lens, cam_R_rigs[0] @ cam_R_rig.T, (height, width), (height // mask_downscale, width // mask_downscale)))
     return sources, cam_R_rigs[0]
-
-
-def read_lens_index(dataset: DatasetEntry, segment: str, entity: str, timeline: str) -> tuple[ndarray, list[bool]]:
-    """One lens's frame stamps and keyframe flags, without its packets.
-
-    Raises:
-        ValueError: If the entity has no frames with strictly increasing stamps.
-    """
-    sample: str = f"{entity}:VideoStream:sample"
-    keyframe: str = f"{entity}:VideoStream:is_keyframe"
-    view = dataset.filter_segments(segment).filter_contents([entity]).reader(index=timeline)
-    table: pa.Table = view.filter(col(sample).is_not_null()).select(timeline, keyframe).to_arrow_table()
-    times: ndarray = table[timeline].combine_chunks().to_numpy(zero_copy_only=False)
-    if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
-        raise ValueError(f"{segment} {entity}: expected frames with strictly increasing timestamps")
-    return times, catalog_keyframes(table[keyframe])
-
-
-def read_lens_window(dataset: DatasetEntry, segment: str, entity: str, timeline: str, times: ndarray) -> CatalogVideo:
-    """One lens's packets at ``times``, a run of its index read with one range query.
-
-    Raises:
-        ValueError: If the catalog returns other frames than ``times``.
-    """
-    view = dataset.filter_segments(segment).filter_contents([entity]).reader(index=timeline)
-    in_window = (col(timeline) >= lit(pa.scalar(times[0]))) & (col(timeline) <= lit(pa.scalar(times[-1])))
-    columns: list[str] = [f"{entity}:VideoStream:{component}" for component in ("sample", "is_keyframe", "codec")]
-    video: CatalogVideo = catalog_video_from_table(
-        view.filter(in_window).select(timeline, *columns).to_arrow_table(), entity, timeline, f"{segment} {entity}"
-    )
-    if not np.array_equal(video.times, times):
-        raise ValueError(f"{segment} {entity}: the catalog returned {len(video.times)} frames for {len(times)} indexed ones")
-    return video
 
 
 def read_level_rotations(
@@ -212,24 +185,12 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     print(", ".join(f"lens {s.image_hw} -> mask {s.mask_hw}" for s in sources))
     device: torch.device = torch.device(config.masker.device)
     entities: list[str] = [f"{camera}/pinhole/video" for camera in config.cameras]
-    indexes: list[tuple[ndarray, list[bool]]] = [read_lens_index(dataset, segment_id, entity, config.timeline) for entity in entities]
-    times: list[ndarray] = [index[0] for index in indexes]
+    # Both lenses in one read (a 17.8 min clip: 12 s; the catalog sends whole chunks, so an index-only read costs as much).
+    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, entities, config.timeline)
+    times: list[ndarray] = [video.times for video in videos]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
     tracked: list[int] = list(range(config.start, end, config.stride))
-    # Each decoder holds the packets from the keyframe at or before ``start`` to ``end``.
-    firsts: list[int] = [max(i for i in range(config.start + 1) if keyframes[i]) for _, keyframes in indexes]
-    decoders: list[VideoDecoder] = []
-    for entity, lens_times, first in zip(entities, times, firsts, strict=True):
-        window: CatalogVideo = read_lens_window(dataset, segment_id, entity, config.timeline, lens_times[first:end])
-        decoders.append(
-            VideoDecoder(
-                wrap_mp4(window.samples, window.keyframes, config.fps, codec=window.codec),
-                device=str(device),
-                seek_mode="exact",
-                num_ffmpeg_threads=0,
-            )
-        )
     read_s: float = time.perf_counter() - process_start
     print(
         f"segment {segment_id}: {n_framesets} framesets, tracking {len(tracked)} (stride {config.stride}) over {config.start}..{end - 1}; read {read_s:.1f} s"
@@ -245,7 +206,9 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         config.gravity_window_s,
     )
     load_start: float = time.perf_counter()
-    masker: FullCircleMasker = FullCircleMasker(config.masker, sources)
+    masker: FullCircleMasker = FullCircleMasker(
+        replace(config.masker, reprompt_every=max(1, round(config.reprompt_every_frames / config.stride)) if config.reprompt_every_frames > 0 else 0), sources
+    )
     print(f"model load + static tables {time.perf_counter() - load_start:.1f} s")
     debug: rr.RecordingStream | None = None
     if config.debug_rrd is not None:
@@ -254,36 +217,28 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
 
     decode_wait_s: float = 0.0
 
-    # One thread for every decode: an NVDEC decoder fails on a thread other than the one it first decoded on.
-    decode_thread: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="decode")
-
-    def decode(chunk: list[int]) -> list[list[UInt8[Tensor, "h w 3"]]]:
-        batches: list[Tensor] = [
-            rearrange(decoder.get_frames_at([i - first for i in chunk]).data, "n c h w -> n h w c")
-            for decoder, first in zip(decoders, firsts, strict=True)
-        ]
-        torch.cuda.synchronize(device)
-        return [[batch[column] for batch in batches] for column in range(len(chunk))]
+    chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
 
     def decoded_chunks() -> Iterator[tuple[int, list[int], list[list[UInt8[Tensor, "h w 3"]]]]]:
         """The tracked framesets ``decode_chunk`` at a time: the position of the first, their indices, and per frameset the
-        lens frames. The next chunk decodes on the decode thread while the caller computes on this one."""
+        lens frames. The next chunk decodes on one thread per lens while the caller computes on this one."""
         nonlocal decode_wait_s
-        chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
-        pending: Future[list[list[Tensor]]] | None = decode_thread.submit(decode, chunks[0]) if chunks else None
-        for position, chunk in enumerate(chunks):
-            assert pending is not None
-            tick: float = time.perf_counter()
-            frames: list[list[Tensor]] = pending.result()
-            decode_wait_s += time.perf_counter() - tick
-            pending = decode_thread.submit(decode, chunks[position + 1]) if position + 1 < len(chunks) else None
-            yield position * config.decode_chunk, chunk, frames
+        prefetched = PrefetchedChunks(videos, chunks, config.start, end, str(device), config.fps)
+        for position, (chunk, batches) in enumerate(zip(chunks, prefetched, strict=True)):
+            yield position * config.decode_chunk, chunk, [[batch[column] for batch in batches] for column in range(len(chunk))]
+        decode_wait_s += prefetched.wait_s
 
     detect_start: float = time.perf_counter()
     directions: list[Float64[ndarray, "3"] | None] = []
     for begin, chunk, frames in decoded_chunks():
-        for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
-            evidence: OperatorEvidence = masker.detect(lens_frames, levels[position])
+        # Detector calls of DETECT_FRAMESETS framesets (6 faces each), whatever the decode chunk: the YOLOX engine's batch,
+        # and a bound on the eager SAM 3 detector's memory.
+        batch: list[OperatorEvidence] = [
+            evidence
+            for group in range(0, len(chunk), DETECT_FRAMESETS)
+            for evidence in masker.detect(frames[group : group + DETECT_FRAMESETS], levels[begin + group : begin + group + DETECT_FRAMESETS])
+        ]
+        for position, (index, evidence) in enumerate(zip(chunk, batch, strict=True), start=begin):
             directions.append(evidence.direction)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
@@ -308,21 +263,26 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
     track_start: float = time.perf_counter()
     for begin, chunk, frames in decoded_chunks():
+        chunk_masks: list[list[Tensor]] = [[] for _ in targets]
         for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
             result: OperatorMasks = masker.track(lens_frames, filled[position], levels[position] @ up_level)
-            for lens, target in enumerate(targets):
-                rr.set_time(config.timeline, duration=np.timedelta64(int(times[lens][index].view(np.int64)), "ns"))
-                rr.log(target, rr.SegmentationImage(result.source_masks[lens].to(torch.uint8).cpu().numpy() * MASKED_CLASS_ID))
+            for lens_masks, mask in zip(chunk_masks, result.source_masks, strict=True):
+                lens_masks.append(mask)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 debug.log("synthetic", rr.Image(result.synthetic_rgb.cpu().numpy()).compress(90))
                 debug.log("synthetic/mask", rr.SegmentationImage(result.synthetic_mask.to(torch.uint8).cpu().numpy()))
                 debug.log("operator_direction", rr.Arrows3D(vectors=[filled[position]], colors=(255, 0, 0)))
+        # One host copy per lens and chunk.
+        for lens, (target, lens_masks) in enumerate(zip(targets, chunk_masks, strict=True)):
+            host: UInt8[ndarray, "n mh mw"] = (torch.stack(lens_masks).to(torch.uint8) * MASKED_CLASS_ID).cpu().numpy()
+            for index, mask in zip(chunk, host, strict=True):
+                rr.set_time(config.timeline, duration=np.timedelta64(int(times[lens][index].view(np.int64)), "ns"))
+                rr.log(target, rr.SegmentationImage(mask))
         elapsed: float = time.perf_counter() - track_start
         if begin % (config.decode_chunk * 25) == 0:
             done: int = begin + len(chunk)
             print(f"frameset {chunk[-1]}: {done} tracked, {done / elapsed:.1f} framesets/s")
-    decode_thread.shutdown()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()
@@ -330,8 +290,8 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         debug.flush()
     track_wall: float = time.perf_counter() - track_start
     total: float = time.perf_counter() - process_start
-    steps: str = ", ".join(f"{k} {v:.1f} s" for k, v in masker.seconds.items())
+    steps: str = "".join(f"{k} {v:.1f} s, " for k, v in masker.seconds.items()) if config.masker.step_timing else "(--masker.step-timing), "
     print(
-        f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; waiting for decode (both passes) {decode_wait_s:.1f} s; steps: {steps}; "
+        f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; waiting for decode (both passes) {decode_wait_s:.1f} s; steps: {steps}"
         f"{masker.prompts} tracker prompts; peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks"
     )

@@ -61,6 +61,12 @@ class MaskOptions:
     dtype: Literal["float32", "bfloat16", "float16"] = "float16"
     """SAM 3's autocast dtype (:attr:`Sam3SegmenterConfig.dtype`). float16 keeps the clip B people layer within the band
     against FP32 (mean IoU 0.990, recall >= 0.98 per size) at 2.5x SAM 3's speed; bfloat16 drifted (IoU 0.978)."""
+    backend: Literal["torch", "tensorrt"] = "tensorrt"
+    """How SAM 3 runs (:attr:`Sam3SegmenterConfig.backend`). ``tensorrt`` (fp16 engines for the trunk and the heads, the
+    patch embedding, the ViT MLPs and the heads MatMuls accumulated in fp32) takes 78 ms per two-image call on the 5090
+    against 121 ms for torch fp16; against the torch layer the clip 007 window keeps mean IoU 0.998 / 0.989 per lens
+    (p5 0.997 / 0.958, no one-side-empty stamp; two engine builds give identical masks) and clip B 0.999 / 0.983. FP8 trunks (linears, or linears + attention) dropped the small-people lens to 0.94 / 0.93. ``torch`` is the
+    eager fallback, under ``dtype`` autocast."""
 
 
 @dataclass
@@ -138,8 +144,13 @@ class PeopleMasker:
         self.options: MaskOptions = options
         self.prompts: SegmentationPrompts = SegmentationPrompts(frame_indices=torch.zeros(0, dtype=torch.int64), text=options.prompt)
         self.segmenter: Sam3Segmenter = Sam3SegmenterConfig(
-            device=device, score_threshold=options.score_threshold, mask_threshold=options.mask_threshold, dtype=options.dtype
+            device=device,
+            score_threshold=options.score_threshold,
+            mask_threshold=options.mask_threshold,
+            dtype=options.dtype,
+            backend=options.backend,
         ).setup()
+        self.segmenter.prepare(options.prompt)
 
     def segment(self, images_rgb: UInt8[Tensor, "b h w 3"]) -> BoxDetections:
         """SAM 3 in chunks of ``batch_size``; instances under ``min_area_px`` are dropped."""

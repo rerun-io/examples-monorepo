@@ -6,11 +6,13 @@ fp32/TF32 until the graph itself says fp16.
 """
 
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
 import onnx
+import torch
 from onnx import TensorProto, helper, numpy_helper
 
 from trtkit.artifacts import build_once
@@ -106,6 +108,65 @@ def fp16_conv_trunk(source: onnx.ModelProto) -> onnx.ModelProto:
     return model
 
 
+def fp32_accumulate(model: onnx.ModelProto, select: Callable[[onnx.NodeProto, TensorProto | None], bool]) -> int:
+    """Make the selected fp16 MatMul / Gemm nodes accumulate in fp32, in place.
+
+    A strongly typed TensorRT build runs an fp16 matrix product with fp16 accumulation, which drifts at large inner
+    dimensions (one K=4096 MatMul: relative error 2.4e-3 against cuBLAS's 2.1e-4). Each selected node reads its fp16
+    operands through a Cast to fp32 placed directly before it and writes its fp32 result through a Cast back to fp16,
+    so the graph outside it keeps its types. TensorRT folds the Casts into an fp16 tensor-core kernel with fp32
+    accumulation; build with ``TrtBuildConfig(allow_tf32=False)`` so it does not pick a TF32 kernel instead.
+
+    Args:
+        model: Graph to rewrite; its weights may stay in external data (``load_external_data=False``).
+        select: Called with each fp16 MatMul / Gemm and the initializer its second operand reads (through Cast and
+            Transpose nodes), or ``None`` when that operand is an activation; True rewrites the node.
+
+    Returns:
+        The number of rewritten nodes.
+
+    Raises:
+        ValueError: If ``select`` matches no fp16 MatMul / Gemm.
+    """
+    graph = model.graph
+    inferred = onnx.shape_inference.infer_shapes(model).graph
+    elem_type: dict[str, int] = {v.name: v.type.tensor_type.elem_type for v in [*inferred.value_info, *inferred.input, *inferred.output]}
+    elem_type.update({tensor.name: tensor.data_type for tensor in graph.initializer})
+    elem_type.update({node.output[0]: _constant_tensor(node).data_type for node in graph.node if node.op_type == "Constant"})
+    initializers: dict[str, TensorProto] = {tensor.name: tensor for tensor in graph.initializer}
+    producer: dict[str, onnx.NodeProto] = {name: node for node in graph.node for name in node.output}
+
+    def weight(name: str) -> TensorProto | None:
+        while name in producer and producer[name].op_type in ("Cast", "Transpose"):
+            name = producer[name].input[0]
+        return initializers.get(name)
+
+    nodes: list[onnx.NodeProto] = []
+    widened: dict[str, str] = {}
+    rewritten: int = 0
+    for node in graph.node:
+        if node.op_type not in ("MatMul", "Gemm") or elem_type.get(node.output[0]) != TensorProto.FLOAT16 or not select(node, weight(node.input[1])):
+            nodes.append(node)
+            continue
+        for slot, name in enumerate(node.input):
+            if not name or elem_type.get(name) != TensorProto.FLOAT16:
+                continue
+            if name not in widened:
+                widened[name] = f"{name}__fp32"
+                nodes.append(helper.make_node("Cast", [name], [widened[name]], to=TensorProto.FLOAT, name=f"Cast_{name}__fp32"))
+            node.input[slot] = widened[name]
+        output: str = node.output[0]
+        node.output[0] = f"{output}__fp32acc"
+        nodes.append(node)
+        nodes.append(helper.make_node("Cast", [node.output[0]], [output], to=TensorProto.FLOAT16, name=f"Cast_{output}__fp16"))
+        rewritten += 1
+    if rewritten == 0:
+        raise ValueError("fp32_accumulate: the selection matched no fp16 MatMul / Gemm")
+    del graph.node[:]
+    graph.node.extend(nodes)
+    return rewritten
+
+
 def fp16_trunk(source: Path, cache_dir: Path) -> Path:
     """Cache the fp16 convolutional rewrite by source content and transform version; preserve the source."""
     directory = cache_dir.expanduser()
@@ -121,3 +182,24 @@ def fp16_trunk(source: Path, cache_dir: Path) -> Path:
 
     return build_once(dest, rewrite)
 
+
+
+class Fp32AccumulateConv2d(torch.nn.Module):
+    """A conv as torch fp16 autocast runs it (fp16 operands, fp32 accumulation, fp16 output), spelled in fp32 so an
+    exported graph keeps the accumulation in fp32: TensorRT accumulates fp16 convs in fp16. Swap it in for export only.
+    """
+
+    def __init__(self, conv: torch.nn.Conv2d) -> None:
+        super().__init__()
+        self.conv: torch.nn.Conv2d = conv
+
+    @property
+    def weight(self) -> torch.Tensor:
+        """The conv's weight (callers that cast their input to the weight's dtype keep working)."""
+        return self.conv.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        conv: torch.nn.Conv2d = self.conv
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            bias: torch.Tensor | None = None if conv.bias is None else conv.bias.half().float()
+            return torch.nn.functional.conv2d(x.half().float(), conv.weight.half().float(), bias, conv.stride, conv.padding).half()

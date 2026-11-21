@@ -47,18 +47,21 @@ def catalog_keyframes(column: pa.ChunkedArray) -> list[bool]:
 def packet_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, " n_bytes"]]:
     """One zero-copy view per encoded packet in a ``VideoStream:sample`` column.
 
-    Arrow has no ``list<u8>`` to binary cast, so the child buffer is sliced by the
-    list offsets. ``large_list`` keeps 64-bit offsets: one 1080p camera passes
-    ``int32``'s 2 GiB after roughly an hour. The cast has to happen chunk by chunk
-    *before* the chunks are combined: concatenating the original ``list<u8>`` chunks
-    first overflows their 32-bit offsets (seen on a 78-minute RoboCap session). The
-    views keep the column's storage alive while they live, and ``av.Packet`` copies
-    from them, so nothing is duplicated.
+    Arrow has no ``list<u8>`` to binary cast, so each chunk's child buffer is sliced
+    by its own list offsets. Chunk by chunk, nothing is copied and no offset
+    overflows: combining the chunks first copied every packet (27 s of a 9.9 GB
+    two-lens read) and, without a cast to ``large_list``, overflowed the 32-bit
+    offsets past 2 GiB (a 78-minute RoboCap session). The views keep the column's
+    storage alive while they live, and ``av.Packet`` copies from them.
     """
-    blobs: pa.LargeListArray = column.cast(pa.list_(pa.large_list(pa.uint8()))).combine_chunks().flatten()
-    data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
-    offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True)
-    return [data[start:stop] for start, stop in zip(offsets[:-1], offsets[1:], strict=True)]
+    views: list[UInt8[ndarray, " n_bytes"]] = []
+    for chunk in column.chunks:
+        blobs: pa.ListArray | pa.LargeListArray = chunk.flatten()
+        # ``values`` is the whole child buffer; ``offsets`` index into it, also for a sliced chunk.
+        data: UInt8[ndarray, " n_bytes"] = blobs.values.to_numpy(zero_copy_only=True)
+        offsets: Int64[ndarray, " n_offsets"] = blobs.offsets.to_numpy(zero_copy_only=True).astype(np.int64)
+        views += [data[start:stop] for start, stop in zip(offsets[:-1].tolist(), offsets[1:].tolist(), strict=True)]
+    return views
 
 
 def catalog_codec(column: pa.ChunkedArray, where: str) -> CatalogCodecName:

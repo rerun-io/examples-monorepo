@@ -185,6 +185,20 @@ def test_a_mask_face_is_cv2_s_nearest_remap_of_the_lens_mask_upsampled_by_contra
 
 
 @pytest.mark.integration
+def test_the_cuda_mask_join_is_the_host_join() -> None:
+    import torch
+
+    from dataforge.datasets.insta360_cube import MaskJoin, cube_faces, face_table
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    masks = np.random.default_rng(2).integers(0, 4, size=(2, LENS // 4, LENS // 4), dtype=np.uint8)
+    tables = [face_table(face, [camera(), camera()], LENS1_FROM_LENS0, (LENS, LENS)) for face in cube_faces(FACE)]
+    host: UInt8[ndarray, "f n n"] = MaskJoin(tables, (LENS, LENS)).faces(masks[0], masks[1])
+    np.testing.assert_array_equal(MaskJoin(tables, (LENS, LENS), torch.device("cuda")).faces(masks[0], masks[1]), host)
+
+
+@pytest.mark.integration
 def test_the_cuda_join_of_noise_is_cv2_s_remap_within_one_level() -> None:
     """Noise, so every interpolation weight shows: ``grid_sample`` against ``cv2.remap`` of the lens each pixel reads."""
     import cv2

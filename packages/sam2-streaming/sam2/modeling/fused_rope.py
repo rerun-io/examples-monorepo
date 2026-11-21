@@ -12,24 +12,54 @@ result in the input dtype (in place for keys). Results match
 ``apply_rotary_enc`` up to fp32 FMA contraction (at most one ulp before the
 cast back).
 
-Off by default; ``ENABLED`` is set by the caller (the mamma tracker config).
+Off by default; ``ENABLED`` is set by the caller (the mamma tracker and posekit
+segmenter configs). ``rotate_qk_`` is the entry point: its first call compiles the
+kernel, and if Triton cannot compile it in this process it warns once and turns
+the fused path off.
 """
 
 from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import warnings
+from pathlib import Path
 
 import torch
 
 try:
     import triton
     import triton.language as tl
+    from triton.errors import TritonError
 except ImportError:  # the fused path needs Triton; the eager path does not
     triton = None
+    TritonError = RuntimeError
+
+BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 ENABLED: bool = False
 """When True, ``RoPEAttention`` uses the fused kernel on CUDA tensors."""
 
 _cos_sin_cache: dict[tuple[int, tuple[int, ...]], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 """(data_ptr, shape) -> (freqs_cis kept alive so its address is not reused, cos, sin)."""
+
+_built: bool = False
+"""True once a launch has compiled the kernel; until then a build failure turns the fused path off."""
+
+
+def use_env_ptxas() -> None:
+    """Point Triton at the environment's own ``ptxas`` unless ``TRITON_PTXAS_PATH`` / ``TRITON_PTXAS_BLACKWELL_PATH`` are set.
+
+    conda-forge's Triton ships no ``ptxas``. It looks for ``ptxas-blackwell`` (sm_100 and newer) in
+    ``$CONDA_PREFIX/bin/ptxas`` and for ``ptxas`` on ``PATH``, so an environment's python run without activation
+    (``.pixi/envs/<env>/bin/python tool.py``, no ``CONDA_PREFIX``) cannot compile a kernel. The environment's
+    ``cuda-nvcc-tools`` puts a ``ptxas`` in ``sys.prefix/bin``, the binary that activation would find.
+    """
+    ptxas = Path(sys.prefix) / "bin" / "ptxas"
+    if ptxas.is_file():
+        os.environ.setdefault("TRITON_PTXAS_PATH", str(ptxas))
+        os.environ.setdefault("TRITON_PTXAS_BLACKWELL_PATH", str(ptxas))
 
 
 if triton is not None:
@@ -81,6 +111,35 @@ def _cos_sin(freqs_cis: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         cached = (freqs_cis, freqs_cis.real.contiguous().float(), freqs_cis.imag.contiguous().float())
         _cos_sin_cache[key] = cached
     return cached[1], cached[2]
+
+
+def rotate_qk_(q: torch.Tensor, k_rope: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor | None:
+    """Rotate ``q`` into a new tensor and ``k_rope`` in place; None when the kernel cannot be built.
+
+    The first call compiles the kernel (after ``use_env_ptxas``). If Triton cannot compile it (no ``ptxas``, no C
+    compiler, a compile error), this warns once, sets ``ENABLED`` to False and returns None with ``k_rope``
+    unchanged (a compile failure raises before the launch), so the caller takes the unfused path.
+    """
+    global ENABLED, _built
+    if _built:
+        q_rot = rope_(q, freqs_cis)
+        rope_(k_rope, freqs_cis, out=k_rope)
+        return q_rot
+    use_env_ptxas()
+    try:
+        q_rot = rope_(q, freqs_cis)
+        rope_(k_rope, freqs_cis, out=k_rope)
+    except BeartypeException:
+        raise
+    except torch.OutOfMemoryError:
+        raise
+    except (TritonError, RuntimeError, subprocess.CalledProcessError) as error:
+        # Missing ptxas or C compiler: RuntimeError; a failed launcher build: CalledProcessError.
+        ENABLED = False
+        warnings.warn(f"fused RoPE is off, Triton cannot build its kernel here ({error}); using the unfused rotation", RuntimeWarning, stacklevel=2)
+        return None
+    _built = True
+    return q_rot
 
 
 def rope_(x: torch.Tensor, freqs_cis: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:

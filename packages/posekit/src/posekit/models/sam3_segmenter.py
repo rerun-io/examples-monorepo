@@ -4,25 +4,45 @@ Loads ``facebook/sam3`` through transformers as a weights + ``nn.Module``
 source (docs/design.md §4) and replaces the CPU image processor with GPU
 preprocessing: SAM3's pipeline is a plain non-aspect-preserving bilinear
 resize to 1008x1008 plus 0.5/0.5 normalization, so CUDA frames go straight
-into the model without host copies. Only the tiny text tokenization runs on
-CPU, once per call.
+into the model without host copies. The text features of a prompt are computed
+once and reused.
+
+``backend="tensorrt"`` runs the model as two strongly typed fp16 TensorRT
+engines with fp32 I/O: the vision trunk (ViT + FPN neck, about three quarters
+of a call) and the heads (DETR encoder/decoder, scoring, mask decoder; one
+engine per prompt token count). Post-processing stays in torch, in FP32.
+TensorRT picks fp16-accumulating kernels for fp16 convolutions and GEMMs; the
+ViT's patch embedding is exported as an fp32 conv on fp16-rounded operands, and
+the ViT MLPs and every heads MatMul read their fp16 operands through Casts to
+fp32 (``trtkit.onnx_precision.fp32_accumulate``, TF32 off), so TensorRT
+accumulates them in fp32 like cuBLAS does.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int64, UInt8
-from torch import Tensor
+from torch import Tensor, nn
 
+from posekit.artifacts import DEFAULT_ONNX_CACHE_DIR
 from posekit.models.base import PromptableSegmenter, SegmentationPrompts
 from posekit.predictions import BoxDetections, validate_frames_rgb
+
+ENGINE_BATCH: int = 2
+"""Images per engine call: the two lenses of a 360 camera. Smaller calls are zero-padded, larger ones chunked."""
+EXPORT_VERSION: int = 3
+"""Bump when an exported graph changes; it names the cached ONNX files."""
+HEAD_OUTPUTS: tuple[str, ...] = ("pred_masks", "pred_boxes", "pred_logits", "presence_logits")
+"""The model outputs post-processing reads."""
 
 
 @dataclass(frozen=True, slots=True)
 class Sam3SegmenterConfig:
-    """SAM3 text-prompted instance segmentation configuration (torch backend)."""
+    """SAM3 text-prompted instance segmentation configuration."""
 
     checkpoint: str = "facebook/sam3"
     """HF checkpoint accepted by ``Sam3Model.from_pretrained``."""
@@ -33,13 +53,68 @@ class Sam3SegmenterConfig:
     mask_threshold: float = 0.5
     """Probability threshold binarizing the output masks."""
     dtype: Literal["float32", "bfloat16", "float16"] = "float32"
-    """Autocast dtype of the model (tensor cores); post-processing stays in FP32. On an RTX 5090 with clip B lens
+    """Autocast dtype of the torch backend (tensor cores); post-processing stays in FP32. On an RTX 5090 with clip B lens
     frames a two-image call takes 300 ms in float32, 120 ms in bfloat16 and 118 ms in float16, whose 10-bit mantissa
     keeps the masks closer to FP32 (union IoU 0.9993 against 0.9966)."""
+    backend: Literal["torch", "tensorrt"] = "torch"
+    """``torch``: the eager model under ``dtype`` autocast. ``tensorrt``: fp16 TensorRT engines for the trunk and the
+    heads (static batch :data:`ENGINE_BATCH`, exported and built once per machine; ``dtype`` is not used)."""
 
     def setup(self) -> "Sam3Segmenter":
         """Download weights and return a ready segmenter."""
         return Sam3Segmenter(self)
+
+
+class _VisionTrunk(nn.Module):
+    """The ViT and its FPN neck: the three levels SAM 3's heads read (``Sam3Model.forward`` drops the 0.5x level).
+
+    For the export the patch embedding runs as :class:`trtkit.onnx_precision.Fp32AccumulateConv2d`: TensorRT accumulates
+    fp16 convs and GEMMs in fp16, which in the SAM 3 trunk moved the FPN levels 4x further from the torch fp16 trunk than
+    torch fp16 is from FP32 (relative L2 0.050 against 0.011 on the coarsest level) and flipped person scores near the 0.5
+    threshold. The patch embedding caused most of it; in fp32 it costs nothing (trunk 54 ms) and brings the drift to
+    0.015. The MLPs cause most of the rest: the export makes them fp32-accumulating GEMMs (``fp32_accumulate``), which
+    reach 0.009 for +12 ms; spelled in torch like this conv they build as fp32 GEMMs (140 ms).
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model: Any = model
+
+    def forward(self, pixel_values: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        from trtkit.onnx_precision import Fp32AccumulateConv2d
+
+        patch: Any = self.model.vision_encoder.backbone.embeddings.patch_embeddings
+        conv: nn.Conv2d = patch.projection
+        patch.projection = Fp32AccumulateConv2d(conv)
+        try:
+            levels: tuple[Tensor, ...] = self.model.vision_encoder(pixel_values).fpn_hidden_states
+        finally:
+            patch.projection = conv
+        return levels[0], levels[1], levels[2]
+
+
+class _Heads(nn.Module):
+    """DETR encoder and decoder, scoring and mask decoder on the trunk's FPN levels and the prompt's text features."""
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model: Any = model
+
+    def forward(self, fpn0: Tensor, fpn1: Tensor, fpn2: Tensor, text: Tensor, text_mask: Tensor) -> tuple[Tensor, ...]:
+        from transformers.modeling_outputs import BaseModelOutputWithPooling
+        from transformers.models.sam3.modeling_sam3 import Sam3VisionEncoderOutput
+
+        neck: Any = self.model.vision_encoder.neck
+        # Sam3Model.forward never reads the 0.5x level; None stands in for it
+        hidden: Any = (fpn0, fpn1, fpn2, None)
+        position: Any = (*(neck.position_encoding(h.shape, h.device, h.dtype) for h in hidden[:3]), None)
+        pooled: Any = text
+        outputs: Any = self.model(
+            vision_embeds=Sam3VisionEncoderOutput(fpn_hidden_states=hidden, fpn_position_encoding=position),
+            text_embeds=BaseModelOutputWithPooling(pooler_output=pooled),
+            attention_mask=text_mask,
+        )
+        return tuple(outputs[key] for key in HEAD_OUTPUTS)
 
 
 class Sam3Segmenter(PromptableSegmenter):
@@ -51,10 +126,10 @@ class Sam3Segmenter(PromptableSegmenter):
     """
 
     def __init__(self, config: Sam3SegmenterConfig) -> None:
-        """Load the SAM3 model and tokenizer.
+        """Load the SAM3 model and tokenizer (and, for ``backend="tensorrt"``, the trunk engine).
 
         Args:
-            config: Checkpoint, device, and thresholds.
+            config: Checkpoint, device, thresholds and backend.
         """
         from transformers.models.sam3 import Sam3Model, Sam3Processor
 
@@ -63,6 +138,90 @@ class Sam3Segmenter(PromptableSegmenter):
         self.processor = Sam3Processor.from_pretrained(config.checkpoint)
         size = self.processor.image_processor.size
         self.input_hw: tuple[int, int] = (int(size["height"]), int(size["width"]))
+        self.text_features: dict[str, tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]] = {}
+        """Per prompt: the projected text features (computed once, in FP32) and their attention mask."""
+        self.engine_name: str = f"{config.checkpoint.replace('/', '--')}_{self.input_hw[0]}x{self.input_hw[1]}"
+        self.trunk: Any = None
+        """The vision trunk engine (``backend="tensorrt"``)."""
+        self.heads: dict[int, Any] = {}
+        """Heads engines by prompt token count (``backend="tensorrt"``)."""
+        if config.backend == "tensorrt":
+            example: dict[str, Tensor] = {"pixel_values": torch.zeros((ENGINE_BATCH, 3, *self.input_hw), device=config.device)}
+            mlp_width: int = self.model.config.vision_config.backbone_config.intermediate_size
+            self.trunk = self.engine(
+                _VisionTrunk(self.model),
+                f"{self.engine_name}_trunk",
+                example,
+                ["fpn0", "fpn1", "fpn2"],
+                lambda node, weight: weight is not None and mlp_width in weight.dims,
+            )
+            self.model.vision_encoder.backbone = None  # the engine replaces it; the heads keep the neck's position encoding
+
+    def engine(
+        self, module: nn.Module, name: str, example: dict[str, Tensor], output_names: list[str], fp32_matmuls: Callable[[Any, Any], bool]
+    ) -> Any:
+        """A TensorRT runtime for one SAM 3 part: exported once to an fp16-autocast ONNX graph with fp32 I/O at static batch
+        :data:`ENGINE_BATCH`, built once per machine (trtkit's engine cache) with TF32 off.
+
+        ``fp32_matmuls`` selects the MatMuls that accumulate in fp32 (``trtkit.onnx_precision.fp32_accumulate``)."""
+        from trtkit import TensorRtRuntime, TrtBuildConfig, ensure_engine, export_onnx
+        from trtkit.artifacts import build_once
+        from trtkit.onnx_precision import fp32_accumulate
+
+        onnx_path: Path = DEFAULT_ONNX_CACHE_DIR / f"{name}_b{ENGINE_BATCH}_fp16_v{EXPORT_VERSION}.onnx"
+
+        def export() -> None:
+            print(f"[posekit] exporting SAM 3 to ONNX (one-time): {onnx_path.name}")
+            export_onnx(
+                module.eval(),
+                tuple(example.values()),
+                onnx_path,
+                input_names=list(example),
+                output_names=output_names,
+                compute_dtype=torch.float16,
+                rewrite=lambda model: print(f"[posekit] {fp32_accumulate(model, fp32_matmuls)} MatMuls accumulate in fp32"),
+            )
+
+        # processes that start together take turns: the first exports, the rest reuse its file
+        build_once(onnx_path, export)
+        return TensorRtRuntime(ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH, allow_tf32=False)))
+
+    @torch.inference_mode()
+    def text(self, prompt: str) -> tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]:
+        """The prompt's projected text features and attention mask; the text encoder runs once per prompt."""
+        if prompt not in self.text_features:
+            tokens = self.processor.tokenizer([prompt], return_tensors="pt").to(self.config.device)
+            features: Tensor = self.model.get_text_features(input_ids=tokens["input_ids"], attention_mask=tokens["attention_mask"]).pooler_output
+            self.text_features[prompt] = (features.float(), tokens["attention_mask"])
+        return self.text_features[prompt]
+
+    def prepare(self, prompt: str) -> tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]:
+        """The prompt's text features and mask (:meth:`text`); for ``backend="tensorrt"`` also loads (exports and builds on
+        first use) its heads engine, so the first call does not pay for it. Calls prepare their prompt themselves."""
+        features, text_mask = self.text(prompt)
+        tokens: int = int(features.shape[1])
+        if self.config.backend != "tensorrt" or tokens in self.heads:
+            return features, text_mask
+        example: dict[str, Tensor] = {
+            spec.name: torch.zeros((ENGINE_BATCH, *spec.shape), device=self.config.device) for spec in self.trunk.spec.outputs
+        }
+        example["text"] = features.expand(ENGINE_BATCH, -1, -1).contiguous()
+        example["text_mask"] = text_mask.expand(ENGINE_BATCH, -1).contiguous()
+        self.heads[tokens] = self.engine(_Heads(self.model), f"{self.engine_name}_heads_t{tokens}", example, list(HEAD_OUTPUTS), lambda node, weight: True)
+        return features, text_mask
+
+    def run_engines(self, pixel_values: Float[Tensor, "b 3 in_h in_w"], text: Float[Tensor, "b t c"], text_mask: Int64[Tensor, "b t"]) -> Any:
+        """The trunk and the prompt's heads engine (:meth:`prepare` loaded it)."""
+        from transformers.models.sam3.modeling_sam3 import Sam3ImageSegmentationOutput
+        from trtkit import run_chunked
+
+        inputs: dict[str, Tensor] = {
+            **run_chunked(self.trunk, {"pixel_values": pixel_values}),
+            "text": text.contiguous(),
+            "text_mask": text_mask.contiguous(),
+        }
+        heads: dict[str, Any] = run_chunked(self.heads[int(text.shape[1])], inputs)
+        return Sam3ImageSegmentationOutput(**heads)
 
     @torch.inference_mode()
     def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"], prompts: SegmentationPrompts) -> BoxDetections:
@@ -94,16 +253,19 @@ class Sam3Segmenter(PromptableSegmenter):
         resized: Float[Tensor, "b 3 in_h in_w"] = F.interpolate(chw, size=self.input_hw, mode="bilinear", align_corners=False, antialias=True)
         pixel_values: Float[Tensor, "b 3 in_h in_w"] = (resized - 0.5) / 0.5
 
-        text_inputs = self.processor.tokenizer([prompts.text], return_tensors="pt").to(pixel_values.device)
-        input_ids: Int64[Tensor, "1 t"] = text_inputs["input_ids"]
-        attention_mask: Int64[Tensor, "1 t"] = text_inputs["attention_mask"]
-        dtype: torch.dtype = getattr(torch, self.config.dtype)
-        with torch.autocast(device_type=pixel_values.device.type, dtype=dtype, enabled=dtype != torch.float32):
-            outputs = self.model(
-                pixel_values=pixel_values,
-                input_ids=input_ids.expand(batch_size, -1),
-                attention_mask=attention_mask.expand(batch_size, -1),
-            )
+        features, text_mask = self.prepare(prompts.text)
+        text: Float[Tensor, "b t c"] = features.expand(batch_size, -1, -1)
+        attention_mask: Int64[Tensor, "b t"] = text_mask.expand(batch_size, -1)
+        if self.config.backend == "tensorrt":
+            outputs = self.run_engines(pixel_values, text, attention_mask)
+        else:
+            from transformers.modeling_outputs import BaseModelOutputWithPooling
+
+            dtype: torch.dtype = getattr(torch, self.config.dtype)
+            with torch.autocast(device_type=pixel_values.device.type, dtype=dtype, enabled=dtype != torch.float32):
+                outputs = self.model(
+                    pixel_values=pixel_values, text_embeds=BaseModelOutputWithPooling(pooler_output=text), attention_mask=attention_mask
+                )
         for key, value in outputs.items():
             if isinstance(value, Tensor) and value.is_floating_point():
                 outputs[key] = value.float()

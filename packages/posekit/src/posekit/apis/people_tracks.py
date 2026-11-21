@@ -1,27 +1,35 @@
 """Tracked people masks: SAM 3 detects people on sparse frames, EfficientTAM propagates their masks in between.
 
 The video streams (one tracker slot each, e.g. the two fisheye lenses of a 360 camera) are decoded in order with
-NVDEC. Every ``redetect_every`` tracker steps SAM 3 runs on all streams; its instances are matched to the live tracks
-by mask IoU (matched tracks are re-anchored on the SAM 3 box, unmatched instances start tracks, duplicate tracks are
-dropped). A track that stays empty for ``max_misses`` steps, or that SAM 3 does not confirm at ``max_unconfirmed``
-re-detects in a row, is dropped. On frames that are a multiple of
-``output_every`` the union of the track masks (and of the SAM 3 masks on a re-detect step) is logged as a
-``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask`` with the frame's own stamp.
+NVDEC, one thread per stream, a chunk ahead of the tracker. Every ``redetect_every`` tracker steps SAM 3 runs on all
+streams (with ``lookahead`` on its own thread and CUDA stream, started ``redetect_every`` steps early so it overlaps the
+tracker steps before it; SAM 3 reads only its frames, so the masks stay the same). Its instances are matched to the
+live tracks by mask IoU (matched tracks are re-anchored on the SAM 3 box, unmatched instances start tracks, duplicate
+tracks are dropped). A track that stays empty for ``max_misses`` steps, or
+that SAM 3 does not confirm at ``max_unconfirmed`` re-detects in a row, is dropped. On frames that are a multiple of
+``output_every`` the union of the track masks (and of the SAM 3 masks on a re-detect step) is dilated at full
+resolution and logged as a ``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask``
+with the frame's own stamp, in the mask layer contract (track 3, v2): ``mask_downscale`` times smaller than the frame
+(a cell is masked when any of its pixels is, the pooling ``mask_union`` would do), with one static
+``Transform3D(scale=[mask_downscale, mask_downscale, 1])`` to frame pixels.
 """
 
 import time
+from collections import deque
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 from jaxtyping import Bool, UInt8
 from numpy import ndarray
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
@@ -37,7 +45,7 @@ from posekit.apis.people_masks import (
 )
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
-from posekit.ops.people_masks import dilate_mask, selection_windows
+from posekit.ops.people_masks import dilate_masks
 from posekit.ops.people_tracks import RedetectPlan, count_misses, mask_iou, plan_redetect
 from posekit.predictions import BoxDetections
 
@@ -70,6 +78,10 @@ class TrackOptions:
     """Tracks per stream at most (new instances are ignored above it)."""
     mask_prompts: bool = True
     """Prompt the tracker with the SAM 3 mask as well as its box (keeps small people and the operator on shape)."""
+    lookahead: bool = True
+    """Run SAM 3 for the next re-detect step on a worker thread and its own CUDA stream while the tracker steps before it
+    run, the tracker on a high-priority stream (SAM 3 is GEMM-bound, the tracker launch-bound, so they overlap on the
+    GPU). Same masks as ``False``, which runs SAM 3 in line on the tracker's stream."""
 
 
 @dataclass
@@ -90,6 +102,9 @@ class PeopleTracksConfig:
     """Masks are written for the frame indices that are multiples of this."""
     timeline: str = "video_time"
     """Timeline of the video streams and of the masks."""
+    mask_downscale: int = 4
+    """Mask size = frame size / this (480 px for 1920 px lenses, FullCircle's grid); must divide the frame size. 1 = full
+    resolution."""
     mask: MaskOptions = field(default_factory=MaskOptions)
     """SAM 3 options (prompt, thresholds, tiles) and the output dilation."""
     track: TrackOptions = field(default_factory=TrackOptions)
@@ -102,23 +117,6 @@ class PeopleTracksConfig:
     """Tracker frames decoded per NVDEC call."""
     device: str = "cuda"
     """Inference and decode device."""
-
-
-class StreamDecoder:
-    """Sequential NVDEC decode of one stream from the keyframe before ``start``."""
-
-    def __init__(self, video: CatalogVideo, start: int, end: int, device: str) -> None:
-        """Mux the packets ``[keyframe before start, end)`` into an in-memory MP4 and open a decoder."""
-        from torchcodec.decoders import VideoDecoder
-
-        self.first: int = selection_windows(video.keyframes, [start])[0].first
-        data: bytes = wrap_mp4(video.samples[self.first : end], video.keyframes[self.first : end], 30, codec=video.codec)
-        self.decoder = VideoDecoder(data, device=device, seek_mode="exact")
-
-    def frames(self, indices: list[int]) -> UInt8[Tensor, "n h w 3"]:
-        """RGB frames at ascending stream indices."""
-        batch: UInt8[Tensor, "n 3 h w"] = self.decoder.get_frames_at([i - self.first for i in indices]).data
-        return rearrange(batch, "n c h w -> n h w c").contiguous()
 
 
 class PeopleTracker:
@@ -139,10 +137,65 @@ class PeopleTracker:
         self.counts: dict[str, int] = {"reanchored": 0, "started": 0, "duplicate": 0, "unconfirmed": 0, "empty": 0}
         """Track events since the start (for the progress log)."""
         self.detect_seconds: float = 0.0
-        """Wall time spent in SAM 3 (synchronised)."""
+        """Wall time spent in SAM 3 (synchronised; on the worker thread with ``lookahead``)."""
+        self.wait_seconds: float = 0.0
+        """Wall time the tracker waited for SAM 3 (equals ``detect_seconds`` without ``lookahead``)."""
+        self.detector: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3") if options.lookahead else None
+        self.detect_stream: torch.cuda.Stream | None = torch.cuda.Stream(device=device) if options.lookahead else None
+        self.pending: tuple[int, Future[tuple[BoxDetections, float]]] | None = None
+        """The tracker step a running SAM 3 call is for, and the call."""
 
-    def step(self, frames_rgb: UInt8[Tensor, "s h w 3"]) -> Bool[Tensor, "s h w"]:
-        """Advance all streams by one tracker step; returns the person mask of each stream."""
+    def detect_on_stream(self, frames_rgb: UInt8[Tensor, "s h w 3"]) -> tuple[BoxDetections, float]:
+        """SAM 3 on the detect stream (worker thread); returns the detections and the call's wall time."""
+        assert self.detect_stream is not None
+        start: float = time.perf_counter()
+        with torch.cuda.stream(self.detect_stream):
+            detections: BoxDetections = self.masker.detect(frames_rgb)
+        self.detect_stream.synchronize()
+        return detections, time.perf_counter() - start
+
+    def submit_detect(self, step: int, frames_rgb: UInt8[Tensor, "s h w 3"]) -> None:
+        """Start SAM 3 for tracker step ``step`` on the worker thread."""
+        assert self.detector is not None and self.detect_stream is not None
+        self.detect_stream.wait_stream(torch.cuda.current_stream())  # the frames are complete on the caller's stream
+        frames_rgb.record_stream(self.detect_stream)
+        self.pending = (step, self.detector.submit(self.detect_on_stream, frames_rgb))
+
+    def redetect(self, frames_rgb: UInt8[Tensor, "s h w 3"], upcoming: UInt8[Tensor, "s h w 3"] | None) -> BoxDetections:
+        """SAM 3 instances of this step's frames; with ``lookahead`` also starts SAM 3 on ``upcoming`` (the frames of the
+        next re-detect step)."""
+        wait_start: float = time.perf_counter()
+        if self.detector is None:
+            detections: BoxDetections = self.masker.detect(frames_rgb)
+            torch.cuda.synchronize()
+            self.detect_seconds += time.perf_counter() - wait_start
+        else:
+            if self.pending is None:
+                self.submit_detect(self.steps, frames_rgb)
+            assert self.pending is not None and self.pending[0] == self.steps, "SAM 3 ran ahead for another step"
+            detections, seconds = self.pending[1].result()
+            self.pending = None
+            self.detect_seconds += seconds
+            current: torch.cuda.Stream = torch.cuda.current_stream()
+            for tensor in (detections.xyxy, detections.scores, detections.frame_indices, detections.masks):
+                if tensor is not None:
+                    tensor.record_stream(current)  # made on the detect stream, used and freed on this one
+            if upcoming is not None:
+                self.submit_detect(self.steps + self.options.redetect_every, upcoming)
+        self.wait_seconds += time.perf_counter() - wait_start
+        return detections
+
+    def close(self) -> None:
+        """Stop the SAM 3 worker thread."""
+        if self.detector is not None:
+            self.detector.shutdown(cancel_futures=True)
+
+    def step(self, frames_rgb: UInt8[Tensor, "s h w 3"], upcoming: UInt8[Tensor, "s h w 3"] | None = None) -> Bool[Tensor, "s h w"]:
+        """Advance all streams by one tracker step; returns the person mask of each stream.
+
+        ``upcoming`` are the frames of the step ``redetect_every`` steps later (None at the end of the streams); with
+        ``lookahead`` SAM 3 starts on them at this step when this step is a re-detect.
+        """
         n_slots: int = int(frames_rgb.shape[0])
         if not self.live:
             self.live = [[] for _ in range(n_slots)]
@@ -154,10 +207,7 @@ class PeopleTracker:
         prompts: SegmentationPrompts | None = None
         if self.steps % self.options.redetect_every == 0:
             self.redetects += 1
-            detect_start: float = time.perf_counter()
-            detections: BoxDetections = self.masker.detect(frames_rgb)
-            torch.cuda.synchronize()
-            self.detect_seconds += time.perf_counter() - detect_start
+            detections: BoxDetections = self.redetect(frames_rgb, upcoming)
             assert detections.masks is not None
             rows: list[int] = []
             boxes: list[Tensor] = []
@@ -257,38 +307,57 @@ def main(config: PeopleTracksConfig) -> None:
     print(f"rrd read {time.perf_counter() - process_start:.1f} s")
 
     load_start: float = time.perf_counter()
+    chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
+    # decoding starts here, overlapping the model load
+    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = (torch.stack(batches) for batches in PrefetchedChunks(videos, chunks, config.start, end, config.device))
     tracker = PeopleTracker(config.track, config.mask, config.device)
-    decoders: list[StreamDecoder] = [StreamDecoder(v, config.start, end, config.device) for v in videos]
     targets: list[str] = [mask_entity(e) for e in entities]
+    factor: int = config.mask_downscale
     for target in targets:
         rr.log(target, PEOPLE_MASK_ANNOTATION, static=True)
+        rr.log(target, rr.Transform3D(scale=[float(factor), float(factor), 1.0]), static=True)
     if config.overlay_dir is not None:
         config.overlay_dir.mkdir(parents=True, exist_ok=True)
     torch.cuda.synchronize()
     run_start: float = time.perf_counter()
     print(f"model load + decoder setup {run_start - load_start:.1f} s")
     n_masks: int = 0
-    for begin in range(0, len(tracked), config.decode_chunk):
-        chunk: list[int] = tracked[begin : begin + config.decode_chunk]
-        frames: UInt8[Tensor, "s n h w 3"] = torch.stack([d.frames(chunk) for d in decoders])
-        for column, index in enumerate(chunk):
-            union: Bool[Tensor, "s h w"] = tracker.step(frames[:, column])
-            if index % config.output_every:
-                continue
-            masks: Bool[ndarray, "s h w"] = union.cpu().numpy()
-            for slot, entity in enumerate(entities):
-                mask: Bool[ndarray, "h w"] = dilate_mask(masks[slot], config.mask.dilate_px)
-                set_frame_time(config.timeline, videos[slot].times[index])
-                rr.log(targets[slot], rr.SegmentationImage(mask.astype(np.uint8) * PERSON_CLASS_ID))
-                n_masks += 1
-                if config.overlay_dir is not None and index in config.overlay_frames:
-                    write_overlay(config.overlay_dir, entity, index, frames[slot, column].cpu().numpy(), mask)
-        live: list[int] = [len(t) for t in tracker.live]
-        elapsed: float = time.perf_counter() - run_start
-        print(
-            f"frame {chunk[-1]}: live tracks {live}, events {tracker.counts}, {tracker.steps * len(entities) / elapsed:.1f} images/s, "
-            f"SAM 3 {tracker.detect_seconds:.1f} of {elapsed:.1f} s"
-        )
+    # each tracker step with the frames of the step redetect_every later, for SAM 3's lookahead
+    steps: Iterator[tuple[int, Tensor, bool]] = (
+        (index, frames[:, column], column == len(chunk) - 1)
+        for chunk, frames in zip(chunks, decoded, strict=True)
+        for column, index in enumerate(chunk)
+    )
+    ahead: int = config.track.redetect_every
+    # with lookahead the tracker runs on a high-priority stream: its small kernels go ahead of SAM 3's queued GEMM blocks
+    track_stream: torch.cuda.Stream = torch.cuda.Stream(device=config.device, priority=-1) if config.track.lookahead else torch.cuda.current_stream()
+    with torch.cuda.stream(track_stream):
+        window: deque[tuple[int, Tensor, bool]] = deque(islice(steps, ahead))
+        while window:
+            index, frame, chunk_end = window.popleft()
+            window.extend(islice(steps, 1))  # now the steps after this one, up to redetect_every later
+            n_slots, height, width = int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
+            if tracker.steps == 0 and (height % factor or width % factor):
+                raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
+            union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
+            if index % config.output_every == 0:
+                dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
+                cells: Bool[Tensor, "s hm wm"] = dilated.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+                masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
+                for slot, entity in enumerate(entities):
+                    set_frame_time(config.timeline, videos[slot].times[index])
+                    rr.log(targets[slot], rr.SegmentationImage(masks[slot]))
+                    n_masks += 1
+                    if config.overlay_dir is not None and index in config.overlay_frames:
+                        write_overlay(config.overlay_dir, entity, index, frame[slot].cpu().numpy(), dilated[slot].cpu().numpy())
+            if chunk_end:
+                live: list[int] = [len(t) for t in tracker.live]
+                elapsed: float = time.perf_counter() - run_start
+                print(
+                    f"frame {index}: live tracks {live}, events {tracker.counts}, {tracker.steps * len(entities) / elapsed:.1f} images/s, "
+                    f"SAM 3 {tracker.detect_seconds:.1f} (waited {tracker.wait_seconds:.1f}) of {elapsed:.1f} s"
+                )
+    tracker.close()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()
@@ -297,7 +366,8 @@ def main(config: PeopleTracksConfig) -> None:
     n_images: int = tracker.steps * len(entities)
     print(
         f"tracked {n_images} images ({tracker.redetects} SAM 3 re-detects), wrote {n_masks} masks in {wall:.1f} s "
-        f"(model load excluded; SAM 3 {tracker.detect_seconds:.1f} s): {n_images / wall:.1f} images/s, {wall / max(n_masks, 1):.3f} s/mask; "
+        f"(model load excluded; SAM 3 {tracker.detect_seconds:.1f} s, waited {tracker.wait_seconds:.1f} s): "
+        f"{n_images / wall:.1f} images/s, {wall / max(n_masks, 1):.3f} s/mask; "
         f"peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB, reserved {torch.cuda.max_memory_reserved() / 1e9:.1f} GB"
     )
     print(f"total incl. rrd read and model load {time.perf_counter() - process_start:.1f} s")
