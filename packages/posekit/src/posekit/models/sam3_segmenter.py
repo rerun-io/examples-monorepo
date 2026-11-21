@@ -11,6 +11,9 @@ once and reused.
 engines with fp32 I/O: the vision trunk (ViT + FPN neck, about three quarters
 of a call) and the heads (DETR encoder/decoder, scoring, mask decoder; one
 engine per prompt token count). Post-processing stays in torch, in FP32.
+TensorRT picks fp16-accumulating kernels for fp16 convolutions and GEMMs; the
+ViT's patch embedding is exported as an fp32 conv on fp16-rounded operands,
+which TensorRT accumulates in fp32 like cuDNN does.
 """
 
 from dataclasses import dataclass
@@ -28,7 +31,7 @@ from posekit.predictions import BoxDetections, validate_frames_rgb
 
 ENGINE_BATCH: int = 2
 """Images per engine call: the two lenses of a 360 camera. Smaller calls are zero-padded, larger ones chunked."""
-EXPORT_VERSION: int = 1
+EXPORT_VERSION: int = 2
 """Bump when an exported graph changes; it names the cached ONNX files."""
 HEAD_OUTPUTS: tuple[str, ...] = ("pred_masks", "pred_boxes", "pred_logits", "presence_logits")
 """The model outputs post-processing reads."""
@@ -59,15 +62,51 @@ class Sam3SegmenterConfig:
         return Sam3Segmenter(self)
 
 
+class _Fp32PatchConv(nn.Module):
+    """The ViT patch embedding as torch autocast runs it (fp16 operands, fp32 accumulation, fp16 output), spelled in
+    fp32 so the exported graph keeps the accumulation in fp32.
+
+    TensorRT accumulates fp16 convs and GEMMs in fp16. In the SAM 3 trunk that moved the FPN levels 4x further from the
+    torch fp16 trunk than torch fp16 is from FP32 (relative L2 0.050 against 0.011 on the coarsest level) and flipped
+    person scores near the 0.5 threshold. The patch embedding caused most of it; in fp32 it costs nothing (trunk 54 ms)
+    and brings the drift to 0.015. The MLPs cause most of the rest: as fp32-accumulating GEMMs they reach 0.009 but
+    cost +12 ms, and this torch spelling of them builds as fp32 GEMMs (140 ms), so they stay fp16.
+    """
+
+    def __init__(self, conv: nn.Conv2d) -> None:
+        super().__init__()
+        self.conv: nn.Conv2d = conv
+
+    @property
+    def weight(self) -> Tensor:
+        """The conv's weight (``Sam3ViTPatchEmbeddings`` casts its input to the weight's dtype)."""
+        return self.conv.weight
+
+    def forward(self, pixel_values: Tensor) -> Tensor:
+        conv: nn.Conv2d = self.conv
+        with torch.autocast(device_type=pixel_values.device.type, enabled=False):
+            bias: Tensor | None = None if conv.bias is None else conv.bias.half().float()
+            return F.conv2d(pixel_values.half().float(), conv.weight.half().float(), bias, conv.stride, conv.padding).half()
+
+
 class _VisionTrunk(nn.Module):
-    """The ViT and its FPN neck: the three levels SAM 3's heads read (``Sam3Model.forward`` drops the 0.5x level)."""
+    """The ViT and its FPN neck: the three levels SAM 3's heads read (``Sam3Model.forward`` drops the 0.5x level).
+
+    For the export the patch embedding runs as :class:`_Fp32PatchConv`.
+    """
 
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
         self.model: Any = model
 
     def forward(self, pixel_values: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        levels: tuple[Tensor, ...] = self.model.vision_encoder(pixel_values).fpn_hidden_states
+        patch: Any = self.model.vision_encoder.backbone.embeddings.patch_embeddings
+        conv: nn.Conv2d = patch.projection
+        patch.projection = _Fp32PatchConv(conv)
+        try:
+            levels: tuple[Tensor, ...] = self.model.vision_encoder(pixel_values).fpn_hidden_states
+        finally:
+            patch.projection = conv
         return levels[0], levels[1], levels[2]
 
 
@@ -149,8 +188,22 @@ class Sam3Segmenter(PromptableSegmenter):
             self.text_features[prompt] = (features.float(), tokens["attention_mask"])
         return self.text_features[prompt]
 
+    def prepare(self, prompt: str) -> None:
+        """Encode a prompt and, for ``backend="tensorrt"``, load (export and build on first use) its heads engine, so the
+        first call does not pay for it. Calls with an unprepared prompt prepare it themselves."""
+        features, text_mask = self.text(prompt)
+        tokens: int = int(features.shape[1])
+        if self.trunk is None or tokens in self.heads:
+            return
+        example: dict[str, Tensor] = {
+            spec.name: torch.zeros((ENGINE_BATCH, *spec.shape), device=self.config.device) for spec in self.trunk.spec.outputs
+        }
+        example["text"] = features.expand(ENGINE_BATCH, -1, -1).contiguous()
+        example["text_mask"] = text_mask.expand(ENGINE_BATCH, -1).contiguous()
+        self.heads[tokens] = self.engine(_Heads(self.model), f"{self.engine_name}_heads_t{tokens}", example, list(HEAD_OUTPUTS))
+
     def run_engines(self, pixel_values: Float[Tensor, "b 3 in_h in_w"], text: Float[Tensor, "b t c"], text_mask: Int64[Tensor, "b t"]) -> Any:
-        """The trunk and the heads engines; the heads engine of a prompt length is built on its first use."""
+        """The trunk and the prompt's heads engine (:meth:`prepare` loaded it)."""
         from transformers.models.sam3.modeling_sam3 import Sam3ImageSegmentationOutput
         from trtkit import run_chunked
 
@@ -159,11 +212,7 @@ class Sam3Segmenter(PromptableSegmenter):
             "text": text.contiguous(),
             "text_mask": text_mask.contiguous(),
         }
-        tokens: int = int(text.shape[1])
-        if tokens not in self.heads:
-            example: dict[str, Tensor] = {name: value[:1].expand(ENGINE_BATCH, *value.shape[1:]).contiguous() for name, value in inputs.items()}
-            self.heads[tokens] = self.engine(_Heads(self.model), f"{self.engine_name}_heads_t{tokens}", example, list(HEAD_OUTPUTS))
-        heads: dict[str, Any] = run_chunked(self.heads[tokens], inputs)
+        heads: dict[str, Any] = run_chunked(self.heads[int(text.shape[1])], inputs)
         return Sam3ImageSegmentationOutput(**heads)
 
     @torch.inference_mode()
@@ -196,6 +245,7 @@ class Sam3Segmenter(PromptableSegmenter):
         resized: Float[Tensor, "b 3 in_h in_w"] = F.interpolate(chw, size=self.input_hw, mode="bilinear", align_corners=False, antialias=True)
         pixel_values: Float[Tensor, "b 3 in_h in_w"] = (resized - 0.5) / 0.5
 
+        self.prepare(prompts.text)
         features, text_mask = self.text(prompts.text)
         text: Float[Tensor, "b t c"] = features.expand(batch_size, -1, -1)
         attention_mask: Int64[Tensor, "b t"] = text_mask.expand(batch_size, -1)
