@@ -127,7 +127,7 @@ def test_sam3_prepare_builds_one_heads_engine_per_prompt_length(monkeypatch: pyt
 
     segmenter, model, _ = fake_segmenter("float16")
     monkeypatch.setattr(sam3_segmenter, "_Heads", lambda model: model)  # the stand-in model is no nn.Module
-    segmenter.config = SimpleNamespace(device="cpu")
+    segmenter.config = SimpleNamespace(device="cpu", backend="tensorrt")
     segmenter.engine_name = "sam3"
     segmenter.heads = {}
     segmenter.trunk = SimpleNamespace(spec=SimpleNamespace(outputs=(SimpleNamespace(name="fpn0", shape=(4, 2, 2)),)))

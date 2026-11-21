@@ -185,10 +185,12 @@ class Sam3Segmenter(PromptableSegmenter):
 
         ``fp32_matmuls`` selects the MatMuls that accumulate in fp32 (``trtkit.onnx_precision.fp32_accumulate``)."""
         from trtkit import TensorRtRuntime, TrtBuildConfig, ensure_engine, export_onnx
+        from trtkit.artifacts import build_once
         from trtkit.onnx_precision import fp32_accumulate
 
         onnx_path: Path = DEFAULT_ONNX_CACHE_DIR / f"{name}_b{ENGINE_BATCH}_fp16_v{EXPORT_VERSION}.onnx"
-        if not onnx_path.exists():
+
+        def export() -> None:
             print(f"[posekit] exporting SAM 3 to ONNX (one-time): {onnx_path.name}")
             export_onnx(
                 module.eval(),
@@ -199,6 +201,9 @@ class Sam3Segmenter(PromptableSegmenter):
                 compute_dtype=torch.float16,
                 rewrite=lambda model: print(f"[posekit] {fp32_accumulate(model, fp32_matmuls)} MatMuls accumulate in fp32"),
             )
+
+        # processes that start together take turns: the first exports, the rest reuse its file
+        build_once(onnx_path, export)
         return TensorRtRuntime(ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH, allow_tf32=False)))
 
     def text(self, prompt: str) -> tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]:
@@ -209,19 +214,20 @@ class Sam3Segmenter(PromptableSegmenter):
             self.text_features[prompt] = (features.float(), tokens["attention_mask"])
         return self.text_features[prompt]
 
-    def prepare(self, prompt: str) -> None:
-        """Encode a prompt and, for ``backend="tensorrt"``, load (export and build on first use) its heads engine, so the
-        first call does not pay for it. Calls with an unprepared prompt prepare it themselves."""
+    def prepare(self, prompt: str) -> tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]:
+        """The prompt's text features and mask (:meth:`text`); for ``backend="tensorrt"`` also loads (exports and builds on
+        first use) its heads engine, so the first call does not pay for it. Calls prepare their prompt themselves."""
         features, text_mask = self.text(prompt)
         tokens: int = int(features.shape[1])
-        if self.trunk is None or tokens in self.heads:
-            return
+        if self.config.backend != "tensorrt" or tokens in self.heads:
+            return features, text_mask
         example: dict[str, Tensor] = {
             spec.name: torch.zeros((ENGINE_BATCH, *spec.shape), device=self.config.device) for spec in self.trunk.spec.outputs
         }
         example["text"] = features.expand(ENGINE_BATCH, -1, -1).contiguous()
         example["text_mask"] = text_mask.expand(ENGINE_BATCH, -1).contiguous()
         self.heads[tokens] = self.engine(_Heads(self.model), f"{self.engine_name}_heads_t{tokens}", example, list(HEAD_OUTPUTS), lambda node, weight: True)
+        return features, text_mask
 
     def run_engines(self, pixel_values: Float[Tensor, "b 3 in_h in_w"], text: Float[Tensor, "b t c"], text_mask: Int64[Tensor, "b t"]) -> Any:
         """The trunk and the prompt's heads engine (:meth:`prepare` loaded it)."""
@@ -266,11 +272,10 @@ class Sam3Segmenter(PromptableSegmenter):
         resized: Float[Tensor, "b 3 in_h in_w"] = F.interpolate(chw, size=self.input_hw, mode="bilinear", align_corners=False, antialias=True)
         pixel_values: Float[Tensor, "b 3 in_h in_w"] = (resized - 0.5) / 0.5
 
-        self.prepare(prompts.text)
-        features, text_mask = self.text(prompts.text)
+        features, text_mask = self.prepare(prompts.text)
         text: Float[Tensor, "b t c"] = features.expand(batch_size, -1, -1)
         attention_mask: Int64[Tensor, "b t"] = text_mask.expand(batch_size, -1)
-        if self.trunk is not None:
+        if self.config.backend == "tensorrt":
             outputs = self.run_engines(pixel_values, text, attention_mask)
         else:
             from transformers.modeling_outputs import BaseModelOutputWithPooling
