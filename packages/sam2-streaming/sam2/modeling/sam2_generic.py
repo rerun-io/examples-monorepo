@@ -497,8 +497,9 @@ class SAM2Generic(SAM2Base):
             box_points_coords = self._transforms.transform_coords(
                 box_points_coords, normalize=True, orig_hw=orig_hw
             )
-            box_points_labels = torch.tensor(
-                [2, 3], dtype=torch.int32, device=boxes.device
+            # Labels 2, 3 built on the device: a host-to-device copy would sync the host with the GPU.
+            box_points_labels = torch.arange(
+                2, 4, dtype=torch.int32, device=boxes.device
             ).repeat(batch_size, n_boxes)
 
             # Concatenate the box points with the existing points

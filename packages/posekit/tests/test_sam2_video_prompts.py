@@ -12,7 +12,7 @@ class _SpyPredictor:
     def __init__(self) -> None:
         self.multimask: list[bool] = []
 
-    def forward_batched(self, states, frame_idx: int, frames, prompts, multimask_output: list[bool]) -> list[dict]:
+    def forward_batched(self, states, frame_idx: int, frames, prompts, multimask_output: list[bool], graphs=None) -> list[dict]:
         self.multimask.extend(multimask_output)
         return [{} for _ in states]
 
@@ -25,6 +25,7 @@ def _multimask_flags(single_click_multimask: bool) -> list[bool]:
     segmenter.config = Sam2VideoSegmenterConfig(device="cpu", single_click_multimask=single_click_multimask)
     spy: _SpyPredictor = _SpyPredictor()
     segmenter.predictor = spy  # pyrefly: ignore[bad-assignment]
+    segmenter._graphs = None
     segmenter.reset()
     frame: torch.Tensor = torch.zeros((1, 8, 8, 3), dtype=torch.uint8)
     zero: torch.Tensor = torch.zeros(1, dtype=torch.long)
