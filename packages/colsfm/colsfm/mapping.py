@@ -137,7 +137,8 @@ loop — the per-round gate `g_k` filters at 25, 20, 15, 10, 5 px *before* each
 solve, and `filter_degenerate_points` / `filter_projection_failures` run after it.
 That is enough: an ablation on KITTI 06 — Ceres with `loss_type: TRIVIAL` — scores
 0.899 m Sim(3) ATE against the robust run's 0.895 m, so the loss is not what
-CASPAR's 1.299 m costs (NOTES.md "CASPAR backend"). Its float32 arithmetic is.
+CASPAR's 1.299 m cost (NOTES.md "CASPAR backend"). Its PCG was: a beta recurrence bug and a full-system solve
+stopped it short of the minimum, which recipes/colmap-src fixes (`patches/PROVENANCE.md`).
 
 Three more constraints, all from COLMAP 4.2.0's source and all handled here:
 observations from a camera model the build has no adapter for are *silently
@@ -393,6 +394,8 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
         ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
+        # The reduced camera system (recipes/colmap-src) is off in COLMAP's defaults; `--caspar-option` may turn it off.
+        ba_options.caspar.reduced_camera_system = True
         apply_caspar_options(ba_options.caspar, plan.caspar_options)
     return ba_options
 
@@ -400,8 +403,7 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
 def ceres_polish_options(ba_config: BundleAdjustmentConfig, options: MappingOptions) -> pycolmap.BundleAdjustmentOptions:
     """The same solve as the rounds, on Ceres: what polishes a finished CASPAR model.
 
-    One config, one builder, one difference — the backend. `docs/caspar-build.md`
-    § Ceres polish experiment measured the recovery with colsfm's own settings (the
+    One config, one builder, one difference — the backend. The polish was measured with colsfm's own settings (the
     config's Cauchy loss at scale 4, 200 iterations, SPARSE_SCHUR, extrinsics and
     intrinsics fixed), so the polish has to be that solve rather than a fresh set of
     pycolmap defaults.
@@ -611,9 +613,8 @@ def _polish_with_ceres(
     and every difference between them is the solve's. Only the numeric-sanity guards
     every round runs after its solve run here too: a converged polish can also walk a
     weakly constrained point behind a camera (MSD MGO07: 2 of 89,470 points at
-    1e154 px, which made the mean 1.9e149 px). `docs/caspar-build.md`
-    § Shipped: CASPAR + Ceres polish measured 22 iterations and 9.8 s on KITTI 06's
-    2156 images, which recovers the 0.4 m of trajectory CASPAR left on the table.
+    1e154 px, which made the mean 1.9e149 px). Off by default: CASPAR reaches its own least-squares minimum, and the
+    polish only trades it for the Cauchy minimum (`--caspar-ceres-polish`).
 
     Args:
         reconstruction: The model the rounds left behind, adjusted in place.
@@ -697,10 +698,8 @@ def run_mapping(
         gauge_frame_id: Frame held constant for gauge; the frame owning the
             lowest image id when None, which is cuSFM's own choice (§6.3).
 
-    The closing solve is the polish of `docs/caspar-build.md`
-    § Shipped: CASPAR + Ceres polish: CASPAR stops while a few percent of the cost is
-    still reachable, so a CASPAR run ends on one Ceres bundle adjustment over the
-    final model, with no filtering around it. It is skipped whenever the solves ran
+    With `--caspar-ceres-polish` a CASPAR run ends on one Ceres bundle adjustment over the final model, with no
+    filtering around it (off by default; see `_polish_with_ceres`). It is skipped whenever the solves ran
     on Ceres — every fallback included — because Ceres' own answer is a fixed point
     of it (one iteration, no cost change, 25 femtometres of rig motion, measured).
 

@@ -59,7 +59,7 @@ BUNDLE_ADJUSTMENT_BACKEND: Final[dict[BaBackend, pycolmap.BundleAdjustmentBacken
     "caspar": pycolmap.BundleAdjustmentBackend.CASPAR,
 }
 """The name to pycolmap's enum. The enum is bound unconditionally, so its presence proves
-nothing about the build — only a solve does (`docs/caspar-build.md`)."""
+nothing about the build — only a solve does."""
 
 CASPAR_STOCK_CAMERA_MODELS: Final[frozenset[str]] = frozenset({"PINHOLE", "SIMPLE_RADIAL"})
 """The two models stock CASPAR (COLMAP 4.2.0) projects, and the floor every build meets.
@@ -86,13 +86,14 @@ future adapter is picked up without editing this module."""
 CASPAR_DISABLED_MARKER: Final[str] = "CASPAR_ENABLED"
 """What COLMAP's "built without CASPAR_ENABLED" `ValueError` says; the capability test."""
 
-CasparOptions: TypeAlias = dict[str, float | int]
-"""Numeric overrides for `pycolmap.BundleAdjustmentOptions.caspar`, by attribute name.
+CasparOptions: TypeAlias = dict[str, float | int | bool]
+"""Overrides for `pycolmap.BundleAdjustmentOptions.caspar`, by attribute name.
 
 The stopping and damping knobs of CASPAR's Levenberg-Marquardt / PCG loop —
-`solver_iter_max`, `pcg_iter_max`, `pcg_rel_error_exit`, `pcg_rel_score_exit`,
-`pcg_rel_decrease_min`, `solver_rel_decrease_min`, `score_exit_value`, `diag_*`.
-Values are cast to the attribute's own type on the way in, so the integer counters
+`solver_iter_max`, `solver_rel_decrease_min`, `score_exit_value`, `diag_*`; the PCG mode
+`reduced_camera_system` (the one bool) with the reduced system's `reduced_pcg_iter_max` and
+`reduced_pcg_eta`, or the full system's `pcg_iter_max`, `pcg_rel_error_exit`, `pcg_rel_score_exit`
+and `pcg_rel_decrease_min` (`resolve_caspar_mode`). Values are cast to the attribute's own type on the way in, so the integer counters
 take integers whichever way they were written. `gpu_index` is a string and is not
 settable here; `MappingOptions.use_gpu` owns it."""
 
@@ -373,22 +374,67 @@ def backend_name(ba_options: pycolmap.BundleAdjustmentOptions) -> BaBackend:
 
 
 
-def caspar_option_types() -> dict[str, type[int | float]]:
-    """The Python type each numeric CASPAR option is bound as.
+CASPAR_BOOL_OPTIONS: Final[frozenset[str]] = frozenset({"reduced_camera_system"})
+"""The bool solver controls `--caspar-option` takes; the binding's other bools are not solver knobs."""
+
+FULL_SYSTEM_OPTIONS: Final[frozenset[str]] = frozenset({"pcg_iter_max", "pcg_rel_error_exit", "pcg_rel_score_exit", "pcg_rel_decrease_min"})
+"""Knobs of the full-system PCG (recipes/colmap-src `caspar-reduced-camera-system.patch`): ignored or refused by the
+reduced camera system."""
+
+REDUCED_SYSTEM_OPTIONS: Final[frozenset[str]] = frozenset({"reduced_pcg_iter_max", "reduced_pcg_eta"})
+"""Knobs of the reduced camera system's PCG."""
+
+
+def caspar_option_types() -> dict[str, type[int | float | bool]]:
+    """The Python type each settable CASPAR option is bound as.
 
     `CasparBundleAdjustmentOptions` binds `solver_iter_max` and `pcg_iter_max` as
     C++ ints, which pybind11 refuses to take a Python float for; the rest are
-    doubles. Validation needs the distinction before a run creates any artifact.
+    doubles, plus the bools in `CASPAR_BOOL_OPTIONS`. Validation needs the distinction
+    before a run creates any artifact.
 
     Returns:
-        Option name to `int` or `float`.
+        Option name to `int`, `float` or `bool`.
     """
     defaults: dict[str, object] = pycolmap.BundleAdjustmentOptions().caspar.todict()
     return {
         name: type(value)
         for name, value in defaults.items()
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)) or (isinstance(value, bool) and name in CASPAR_BOOL_OPTIONS)
     }
+
+
+def resolve_caspar_mode(options: CasparOptions) -> CasparOptions:
+    """Make the PCG mode explicit when the overrides imply it, and refuse overrides the chosen mode would ignore.
+
+    With no `reduced_camera_system` given, a full-system knob (`FULL_SYSTEM_OPTIONS`) selects the full system: the
+    reduced default would otherwise run while silently ignoring it. A mode given explicitly must not come with the other
+    mode's knobs, and the reduced knobs are range-checked here, before the run creates anything. `reduced_pcg_eta` is
+    checked as the f32 the solver uses, as the solver checks it (0.99999999 rounds to 1.0).
+
+    Args:
+        options: Parsed overrides.
+
+    Returns:
+        The overrides, with `reduced_camera_system=False` added when full-system knobs imply it.
+
+    Raises:
+        ValueError: On contradictory modes or an out-of-range reduced knob.
+    """
+    full: list[str] = sorted(FULL_SYSTEM_OPTIONS & options.keys())
+    reduced: list[str] = sorted(REDUCED_SYSTEM_OPTIONS & options.keys())
+    mode: float | int | bool | None = options.get("reduced_camera_system")
+    if mode is None and full and reduced:
+        raise ValueError(f"[colsfm] --caspar-option sets both the full-system {full} and the reduced {reduced} PCG knobs; pick one with reduced_camera_system")
+    if mode is True and full:
+        raise ValueError(f"[colsfm] --caspar-option {full} apply to the full-system PCG only; drop them or pass reduced_camera_system=false")
+    if mode is False and reduced:
+        raise ValueError(f"[colsfm] --caspar-option {reduced} apply to the reduced camera system only; drop them or pass reduced_camera_system=true")
+    if "reduced_pcg_iter_max" in options and options["reduced_pcg_iter_max"] < 1:
+        raise ValueError(f"[colsfm] --caspar-option reduced_pcg_iter_max must be at least 1, got {options['reduced_pcg_iter_max']}")
+    if "reduced_pcg_eta" in options and not 0.0 < np.float32(options["reduced_pcg_eta"]) < 1.0:
+        raise ValueError(f"[colsfm] --caspar-option reduced_pcg_eta must be in (0, 1) as an f32, got {options['reduced_pcg_eta']}")
+    return {**options, "reduced_camera_system": False} if mode is None and full else options
 
 
 def parse_caspar_options(items: tuple[str, ...]) -> CasparOptions:
@@ -414,18 +460,24 @@ def parse_caspar_options(items: tuple[str, ...]) -> CasparOptions:
             not a settable numeric CASPAR option, or an integer option is given a
             fractional value.
     """
-    types: dict[str, type[int | float]] = caspar_option_types()
+    types: dict[str, type[int | float | bool]] = caspar_option_types()
     options: CasparOptions = {}
     for item in items:
         name, separator, raw = item.partition("=")
         if not separator:
             raise ValueError(f"[colsfm] --caspar-option takes `name=value`, got `{item}`")
         key: str = name.strip()
+        expected: type[int | float | bool] | None = types.get(key)
+        if expected is bool:
+            flag: bool | None = {"true": True, "1": True, "false": False, "0": False}.get(raw.strip().lower())
+            if flag is None:
+                raise ValueError(f"[colsfm] --caspar-option `{key}` takes true or false (1 or 0), got `{raw}`")
+            options[key] = flag
+            continue
         try:
             value: float = float(raw)
         except ValueError as error:
             raise ValueError(f"[colsfm] --caspar-option `{key}` needs a number, got `{raw}`") from error
-        expected: type[int | float] | None = types.get(key)
         if expected is None:
             raise ValueError(
                 f"[colsfm] `{key}` is not a numeric CASPAR solver option; the settable ones are {sorted(types)}"
@@ -436,7 +488,7 @@ def parse_caspar_options(items: tuple[str, ...]) -> CasparOptions:
                 f"write {int(value)} if that is what you meant"
             )
         options[key] = int(value) if expected is int else value
-    return options
+    return resolve_caspar_mode(options)
 
 
 def apply_caspar_options(caspar: pycolmap.CasparBundleAdjustmentOptions, overrides: CasparOptions) -> None:
@@ -454,9 +506,9 @@ def apply_caspar_options(caspar: pycolmap.CasparBundleAdjustmentOptions, overrid
     Raises:
         KeyError: When a name is not a numeric CASPAR option.
     """
-    types: dict[str, type[int | float]] = caspar_option_types()
+    types: dict[str, type[int | float | bool]] = caspar_option_types()
     for name, value in overrides.items():
-        expected: type[int | float] | None = types.get(name)
+        expected: type[int | float | bool] | None = types.get(name)
         if expected is None:
             raise KeyError(
                 f"[colsfm] `{name}` is not a numeric CASPAR solver option; the settable ones are {sorted(types)}"

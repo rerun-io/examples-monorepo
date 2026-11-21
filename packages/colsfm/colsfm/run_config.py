@@ -107,7 +107,7 @@ class PipelineOptions:
 
     The defaults are the **fast full pipeline** (NOTES.md decision 17, 2026-09-06):
     `--features-backend raco --matching-backend raco --ba-backend caspar
-    --optimize-extrinsics --loop-closure`, with the closing Ceres polish and the
+    --optimize-extrinsics --loop-closure`, CASPAR alone (no closing Ceres solve) and the
     regularised refinement. Every field below says what its own ablation costs, and
     this class is also the CLI's help text, so the two cannot drift.
     """
@@ -178,8 +178,8 @@ class PipelineOptions:
     about `verify_chunks_in_flight` chunks whatever the run's length, on every machine."""
     ba_backend: BaBackend = "caspar"
     """Which implementation solves the bundle adjustments — Ceres on the CPU, or COLMAP's
-    CASPAR on the GPU. `caspar` by default (NOTES.md decision 17): with the closing Ceres
-    polish below it is a third of the Ceres mapping time at Ceres' accuracy, and where the
+    CASPAR on the GPU. `caspar` by default (NOTES.md decision 17): a fraction of the Ceres
+    mapping time at Ceres' accuracy (recipes/colmap-src `patches/PROVENANCE.md`), and where the
     build cannot honour it the run says so and solves on Ceres anyway, so the default costs
     a machine without CASPAR nothing but a message. It needs a CASPAR-enabled pycolmap — the
     the `colsfm` environment (recipes/colmap-src) — and falls back to `ceres`, loudly, when that is
@@ -193,19 +193,16 @@ class PipelineOptions:
     ba_num_threads: int | None = None
     """Ceres threads; None takes `bundle_adjustment_config.num_threads` (8) from the config,
     which is what the blob solves with. Set 1 for a bit-reproducible solve."""
-    caspar_ceres_polish: bool = True
-    """Finish a `--ba-backend caspar` run with one Ceres global bundle adjustment.
-
-    On by default: it is what makes the GPU backend shippable — KITTI 06 goes from
-    1.299 m to 0.904 m Sim(3) ATE for 9.8 s on top of 31.5 s of CASPAR rounds, against
-    the Ceres mapper's 0.895 m in 148.5 s (`docs/caspar-build.md` § Shipped: CASPAR +
-    Ceres polish). `--no-caspar-ceres-polish` is the ablation. Inert on `ceres`,
-    fallbacks included, which have already converged."""
+    caspar_ceres_polish: bool = False
+    """Finish a `--ba-backend caspar` run with one Ceres global bundle adjustment (Cauchy loss). Off by default:
+    CASPAR alone reaches its least-squares minimum (measurements: recipes/colmap-src `patches/PROVENANCE.md`).
+    Inert on `ceres`, fallbacks included, which have already converged."""
     caspar_option: tuple[str, ...] = ()
-    """CASPAR solver overrides as `name=value`, e.g. `--caspar-option solver_iter_max=1000
-    pcg_iter_max=80`. Read only when `--ba-backend caspar` actually runs; see
-    `colsfm.mapping.CasparOptions` for the names and `docs/caspar-build.md`
-    § Convergence sweep for what moving them buys."""
+    """CASPAR solver overrides as `name=value`, e.g. `--caspar-option solver_iter_max=1000 reduced_pcg_iter_max=200`.
+    Read only when `--ba-backend caspar` actually runs; names in `colsfm.ba_backend.CasparOptions`. The PCG runs on the
+    reduced camera system (`reduced_pcg_iter_max`, `reduced_pcg_eta`) unless `reduced_camera_system=false` or a
+    full-system knob (`pcg_iter_max`, `pcg_rel_error_exit`, `pcg_rel_score_exit`, `pcg_rel_decrease_min`) selects the
+    full system; mixing the two is refused before the run starts."""
     max_matches_per_pair: int | None = BLOB_MATCH_TOP_K
     """Verified matches kept per pair after the spatial subsample; None keeps every inlier.
     The blob's `match_top_k`; see `colsfm.matching.subsample_matches_by_coverage`."""

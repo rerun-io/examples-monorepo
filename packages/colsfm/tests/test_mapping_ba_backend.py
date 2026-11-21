@@ -82,6 +82,9 @@ def test_the_caspar_backend_reaches_the_options_the_solver_reads(
     assert ba_options.refine_sensor_from_rig is False
     assert ba_options.refine_extra_params == ba_options.refine_focal_length
     assert ba_options.caspar.gpu_index == "-1"
+    # COLMAP's default is the full-system PCG; colsfm solves the reduced camera system.
+    assert pycolmap.BundleAdjustmentOptions().caspar.reduced_camera_system is False
+    assert ba_options.caspar.reduced_camera_system is True
     on_gpu: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
         isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan, use_gpu=True)
     )
@@ -93,8 +96,7 @@ def test_caspar_solver_options_reach_the_options_object(
 ) -> None:
     """`BaExecutionPlan.caspar_options` lands on `BundleAdjustmentOptions.caspar`, cast.
 
-    The convergence sweep of `docs/caspar-build.md` moves CASPAR's stopping rules
-    from the command line, so the dict has to arrive at the solver intact — and the
+    `--caspar-option` moves CASPAR's stopping rules from the command line, so the dict has to arrive at the solver intact — and the
     two iteration counters are C++ ints, which pybind11 will not take a float for.
     """
     ba_options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
@@ -112,6 +114,7 @@ def test_caspar_solver_options_reach_the_options_object(
     assert ba_options.caspar.pcg_iter_max == 80
     assert isinstance(ba_options.caspar.pcg_iter_max, int)
     assert ba_options.caspar.pcg_rel_error_exit == pytest.approx(1e-6)
+    assert ba_options.caspar.reduced_camera_system is False, "a full-system knob selects the full system"
     # Untouched knobs keep COLMAP's defaults, and `use_gpu` still owns `gpu_index`.
     defaults: dict[str, object] = pycolmap.BundleAdjustmentOptions().caspar.todict()
     assert ba_options.caspar.diag_init == defaults["diag_init"]
@@ -444,8 +447,7 @@ def test_the_polish_option_set_is_the_ceres_one_built_from_the_same_config(
 ) -> None:
     """`ceres_polish_options` differs from the CASPAR round options in the backend only.
 
-    `docs/caspar-build.md` § Ceres polish experiment measured the recovery with
-    colsfm's own solve — the config's loss and scale, its iteration cap, SPARSE_SCHUR
+    The polish was measured with colsfm's own solve — the config's loss and scale, its iteration cap, SPARSE_SCHUR
     and the same frozen extrinsics — so the polish has to be that solve and not a
     fresh set of defaults.
     """
@@ -469,14 +471,14 @@ def test_the_polish_option_set_is_the_ceres_one_built_from_the_same_config(
     assert polish.refine_extra_params is False
 
 
-def test_the_polish_is_on_by_default_and_switches_off() -> None:
-    """The ablation switch reaches the plan, and the default is the shipped behaviour.
+def test_the_polish_is_off_by_default_and_switches_on() -> None:
+    """The switch reaches the plan, and the default is the shipped behaviour: CASPAR alone (reduced camera system).
 
     `ceres_polish` is only ever True on a plan that ended on CASPAR: a Ceres run has
     already converged, so the plan zeroes the request rather than leaving the mapper
     to test the backend a second time.
     """
-    assert PipelineOptions(input_dir=Path(), output_dir=Path()).caspar_ceres_polish is True
+    assert PipelineOptions(input_dir=Path(), output_dir=Path()).caspar_ceres_polish is False
     assert caspar_plan(supported_camera_models=CASPAR_STOCK_CAMERA_MODELS).ceres_polish is True
     assert not caspar_plan(
         ceres_polish=False, supported_camera_models=CASPAR_STOCK_CAMERA_MODELS

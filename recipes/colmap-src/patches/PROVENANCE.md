@@ -1,7 +1,8 @@
-# Provenance of the Caspar adapter patches
+# Provenance of the colmap-src patches
 
-Both patches apply, in this order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main, 2026-11-15, after
-FlexGlue #4908..#4969). `SHA256SUMS` hashes all 274 files they touch (verified by the recipe's Step 0 before the build).
+The five patches apply, in `recipe.yaml`'s order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main,
+2026-11-15, after FlexGlue #4908..#4969). `SHA256SUMS` hashes all 284 files they touch (verified by the recipe's Step 0
+before the build); re-hash with the `git diff --name-only` command below, all five patches committed.
 
 | Patch | Kind | Content |
 |---|---|---|
@@ -45,8 +46,56 @@ Cut and checked:
 git diff --full-index 137f2168 HEAD -- doc/faq.rst src/colmap/estimators/bundle_adjustment_caspar.cc \
   src/colmap/estimators/caspar/caspar_model_adapter.h src/thirdparty/Symforce-Caspar/caspar_generate.py   # hand-written
 git diff --full-index 137f2168 HEAD -- src/thirdparty/Symforce-Caspar/generated/f32                      # generated
-git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS
-# fresh checkout of 137f2168: git apply both patches; sha256sum -c SHA256SUMS -> 274/274
+git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS   # with all five patches committed
+# fresh checkout of 137f2168: git apply the five patches; sha256sum -c SHA256SUMS -> 284/284
 ```
 
 Drop an adapter when upstream CASPAR supports its model.
+
+## caspar-pcg-beta-recurrence.patch and caspar-reduced-camera-system.patch
+
+Hand-written patches, cut like the others. One part depends on the generated layout: the span helpers in `solver.cc`
+(`RcsReduceRhs`, `RcsMatvec`, `RcsBackSubstitute`, ...) name the node types before and after `Point`.
+`tools/caspar_rcs_helpers.py` reads that layout from the allocation code, refuses one the span copies would get wrong
+(an allocation between the blocks, a block size or alignment that differs from `r_k`'s), and checks that `solver.cc`
+holds the helper block it renders. On a checkout of the pin with the three patches above committed as `base`:
+
+```bash
+git -C <checkout> apply <recipe>/patches/caspar-pcg-beta-recurrence.patch && git -C <checkout> commit -qam beta
+git -C <checkout> apply <recipe>/patches/caspar-reduced-camera-system.patch      # then edit, if needed
+python <recipe>/tools/caspar_rcs_helpers.py <checkout>   # after a solver regeneration: paste the block it prints
+git -C <checkout> diff --full-index base beta > <recipe>/patches/caspar-pcg-beta-recurrence.patch
+git -C <checkout> diff --full-index beta      > <recipe>/patches/caspar-reduced-camera-system.patch
+```
+
+- **PCG beta** (`caspar-pcg-beta-recurrence.patch`, 2 files). Symforce 0.12's `solver.cc.jinja` calls
+  `BetaFromNumDenom(beta_numerator, alpha_numerator)`, and only `DoAlphaFirst` writes `alpha_numerator`, so every
+  iteration after the first divides by `rho_0`: the PCG loses conjugacy from its third iteration on.
+  `BetaFromNumDenom` now stores `rho_k` as the next denominator. colsfm `tests/test_caspar_solver.py` checks it: a
+  full-system PCG capped at 10 iterations per step ends 2.0e-5 above Ceres' minimum with the fix, 8.4e-5 without.
+- **Reduced camera system** (`caspar-reduced-camera-system.patch`, 9 files; `reduced_camera_system`, off by default
+  in Caspar's `SolverParams` and in COLMAP's `CasparBundleAdjustmentOptions`; colsfm turns it on): the Point nodes are
+  eliminated inside the PCG. The right-hand side becomes `g_c - H_cp H_pp^-1 g_p`; the matvec (chosen once per solve)
+  is the generated `DoJtjpDirect` run twice (point part of `p` zeroed, then `p = (0, -H_pp^-1 H_pc p)` accumulating
+  into `w`, which enters holding `M p`), with `PointNormalize` as the exact damped `H_pp^-1`; points are
+  back-substituted after the PCG; the PCG stops on the Ceres/rootba Q criterion (`reduced_pcg_eta` 0.1, at most
+  `reduced_pcg_iter_max` 500). The mode sets that policy even with no Point node, where only the elimination is
+  skipped (a direct solver caller; COLMAP's adapter keeps constant points as Point nodes).
+  `rho` and `alpha` must be finite and positive at every iteration: otherwise the PCG stops before the step update,
+  with a zero camera step at the first iteration (a zero reduced right-hand side: no camera gradient or no camera
+  block) and the last iterate after it. `reduced_pcg_iter_max >= 1`, `reduced_pcg_eta` in (0, 1) and no
+  per-iteration score exit are checked in COLMAP's adapter (double) and again in `solve()` on the f32 values the
+  solver uses (0.99999999 passes the first and rounds to 1.0f). The residual-norm readbacks only
+  feed the full system's stop rule, so the reduced PCG skips them. New helpers: `Scale` and `Subtract` in
+  solver_tools; `BundleAdjustmentCaspar.reduced_*` registered in the COLMAP CLI.
+- Measurements. KITTI 06 (colsfm mapping rounds, f32): CASPAR alone went from 1,184 mm Sim(3) ATE to 816 mm; beta alone
+  reaches 1,172 mm; the reduced system without the beta fix 1,086 mm; CASPAR + Ceres polish 776 mm, Ceres alone
+  782 mm. Ceres f64 with CASPAR's own algorithm (CGNR, 20 CG iterations per step) stalls the same way, so f32 was never
+  the cause. Full colsfm pipeline with the polish off vs main with it (Sim(3) ATE): KITTI 06 790.4 -> 774.7 mm, MSD
+  MGO05 6.29 -> 6.36, EuRoC V1_01 33.89 -> 33.84, TartanAir P004 cube median 9.02 -> 9.40 over 5 runs each. Clip 007:
+  the polish cost 467 s (146 iterations at 4 threads).
+- Not done: CASPAR applies no robust loss (its factors take no weight input; IRLS would regenerate every factor).
+
+Follow-up: move both edits into Symforce-Caspar's generator (`solver.cc.jinja` and `caspar_generate.py`), so the solver
+is emitted with them and `tools/caspar_rcs_helpers.py` goes away. The beta fix is a one-line upstream report (draft, not filed).
+

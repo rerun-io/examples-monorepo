@@ -18,6 +18,17 @@
 #       ROLLBACK TRANSACTION) and pycolmap's `with DatabaseTransaction(db):` rolling back when the block raises.
 #       Upstream commits on an exception, so colsfm's chunk writes (matches + verified geometries) could not be
 #       all-or-nothing, and a delete-based repair would bring back COLMAP's VACUUM.
+#   caspar-pcg-beta-recurrence.patch        hand-written, 2 files: Symforce 0.12's PCG
+#       computed beta as rho_k / rho_0 (its solver template never refreshes alpha_numerator), losing conjugacy from
+#       the third iteration on. BetaFromNumDenom now keeps rho_k as the next divisor.
+#   caspar-reduced-camera-system.patch       hand-written, 9 files (its span helpers rendered from the generated layout by
+#       tools/caspar_rcs_helpers.py): an option-gated
+#       reduced camera system (off by default; colsfm turns it on): points eliminated inside the PCG
+#       (implicit Schur product from the generated matvec and Point normalize kernels, back-substitution after it),
+#       PCG stopped on the Ceres/rootba Q criterion (reduced_pcg_eta 0.1, reduced_pcg_iter_max 500), guarded against
+#       exact convergence and breakdown, parameters validated. Camera buffer spans come from the generated layout.
+#       Without both patches CASPAR stopped short of its least-squares minimum (KITTI 06: 1,184 mm Sim(3) ATE alone,
+#       776 mm only after a Ceres polish; with them 816 mm alone). Details: patches/PROVENANCE.md.
 # How the patches were made, with the generator command and versions: patches/PROVENANCE.md.
 # This is the one recipe whose patch is larger than "a hook": the adapter is C++ inside COLMAP's Caspar backend,
 # so it cannot live in a Python package (recipes/README.md "Patch or package" names the exception). The generated
@@ -48,10 +59,12 @@ source:
     - patches/add-caspar-adapters.patch
     - patches/add-caspar-adapters-generated-f32.patch
     - patches/add-database-transaction-rollback.patch
+    - patches/caspar-pcg-beta-recurrence.patch
+    - patches/caspar-reduced-camera-system.patch
 
 build:
   # Bump with every patch or build-script edit: the build string hash does not follow them (recipes/README.md).
-  number: 2
+  number: 4
   string: main137f216_caspar_fisheye_fullopencv_cuda130_sm${{ cuda_arch }}_py312_${{ build_number }}
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
@@ -62,6 +75,8 @@ build:
     - grep -q "class FullOpenCVAdapter" src/colmap/estimators/caspar/caspar_model_adapter.h
     - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -ci full_\\?opencv)" -eq 42
     - grep -q "void RollbackTransaction() const override" src/colmap/scene/database_sqlite.cc
+    - grep -qF "*beta_denum = *beta_num;" src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
+    - grep -q "void GraphSolver::RcsReduceRhs()" src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
     # conda's onnxruntime-cpp nests its headers under include/onnxruntime/core/session/; COLMAP includes them flat.
     - export CPATH="$PREFIX/include/onnxruntime/core/session${CPATH:+:$CPATH}"
     # Step 1: libcolmap with CASPAR. FETCH_ONNX=OFF: the fetched prebuilt onnxruntime is CUDA 12. FETCH_FAISS and

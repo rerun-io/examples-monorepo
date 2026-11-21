@@ -79,7 +79,7 @@ class PolishStats:
     """The one Ceres bundle adjustment that finishes a CASPAR mapping run.
 
     Nothing is merged, completed or quality-filtered around it, so every number here
-    is the solve's alone (`docs/caspar-build.md` § Shipped: CASPAR + Ceres polish);
+    is the solve's alone;
     only the rounds' post-solve sanity guards run after it (`num_diverged`).
     """
 
@@ -145,7 +145,7 @@ class MappingResult:
     """The closing Ceres solve of a CASPAR run, or None when none ran.
 
     None means either `ba_plan.backend == "ceres"` — a fallback included, since a
-    Ceres run is already at its own fixed point — or `--no-caspar-ceres-polish`.
+    Ceres run is already at its own fixed point — or the polish is off (the default).
     Its seconds are part of `bundle_adjustment_seconds`."""
 
     @property

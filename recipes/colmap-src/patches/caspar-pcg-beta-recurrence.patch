@@ -1,0 +1,60 @@
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
+index 5954fb0490e3e1363a41fea4b08d2cbafdfc3d4b..6328e70c98f2bb390b343157c1e98dfe076021d7 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
+@@ -57,12 +57,13 @@ void AlphaFromNumDenom(const T* alpha_numerator, const T* alpha_denominator, T*
+ }
+ 
+ template <typename T>
+-__global__ void BetaFromNumDenomKernel(const T* beta_num, const T* beta_denum, T* beta) {
++__global__ void BetaFromNumDenomKernel(const T* beta_num, T* beta_denum, T* beta) {
+   *beta = *beta_num / *beta_denum;
++  *beta_denum = *beta_num;
+ }
+ 
+ template <typename T>
+-void BetaFromNumDenom(const T* beta_num, const T* beta_denum, T* beta) {
++void BetaFromNumDenom(const T* beta_num, T* beta_denum, T* beta) {
+   BetaFromNumDenomKernel<T><<<1, 1>>>(beta_num, beta_denum, beta);
+ }
+ 
+@@ -79,9 +80,8 @@ template void AlphaFromNumDenom<double>(const double* alpha_numerator,
+                                         const double* alpha_denominator, double* alpha,
+                                         double* neg_alpha);
+ 
+-template void BetaFromNumDenom<float>(const float* beta_num, const float* beta_denum, float* beta);
+-template void BetaFromNumDenom<double>(const double* beta_num, const double* beta_denum,
+-                                       double* beta);
++template void BetaFromNumDenom<float>(const float* beta_num, float* beta_denum, float* beta);
++template void BetaFromNumDenom<double>(const double* beta_num, double* beta_denum, double* beta);
+ 
+ template float Sum<float>(const float* start, const float* end, float* target_ptr,
+                           float* scratch_ptr, bool copy_to_host);
+diff --git a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h
+index 7a7a649e37c8f41b8b7c2d0539c2ef1d96e84436..069dbad141a6d7affb0f9c53ed5adf4e86f7cfc7 100644
+--- a/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h
++++ b/src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.h
+@@ -17,8 +17,9 @@ template <typename T>
+ void AlphaFromNumDenom(const T* alpha_numerator, const T* alpha_denominator, T* alpha,
+                        T* neg_alpha);
+ 
++// beta = beta_num / beta_denum, then beta_denum = beta_num: the next iteration divides by this one's r.z.
+ template <typename T>
+-void BetaFromNumDenom(const T* beta_num, const T* beta_denum, T* beta);
++void BetaFromNumDenom(const T* beta_num, T* beta_denum, T* beta);
+ 
+ template <typename T>
+ T Sum(const T* start, const T* end, T* target_ptr, T* scratch_ptr, bool copy_to_host = true);
+@@ -40,10 +41,8 @@ extern template void AlphaFromNumDenom<double>(const double* alpha_numerator,
+                                                const double* alpha_denominator, double* alpha,
+                                                double* neg_alpha);
+ 
+-extern template void BetaFromNumDenom<float>(const float* beta_num, const float* beta_denum,
+-                                             float* beta);
+-extern template void BetaFromNumDenom<double>(const double* beta_num, const double* beta_denum,
+-                                              double* beta);
++extern template void BetaFromNumDenom<float>(const float* beta_num, float* beta_denum, float* beta);
++extern template void BetaFromNumDenom<double>(const double* beta_num, double* beta_denum, double* beta);
+ 
+ extern template float Sum<float>(const float* start, const float* end, float* target_ptr,
+                                  float* scratch_ptr, bool copy_to_host);

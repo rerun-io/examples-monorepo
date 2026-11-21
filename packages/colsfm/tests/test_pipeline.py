@@ -237,23 +237,14 @@ def test_the_caspar_run_reconstructs_what_the_ceres_run_reconstructs(
     assert galileo_caspar_run.mapping.num_registered_images >= MIN_REGISTERED_IMAGES
 
 
-def test_the_caspar_run_records_its_ceres_polish_in_the_summary(
-    galileo_caspar_run: PipelineSummary, galileo_run: PipelineSummary
-) -> None:
-    """`summary.json` carries the polish the CASPAR run finished on; the Ceres run has none.
+def test_the_caspar_run_ends_on_caspar_alone_by_default(galileo_caspar_run: PipelineSummary, galileo_run: PipelineSummary) -> None:
+    """`summary.json` carries no polish: CASPAR's reduced camera system reaches its own least-squares minimum.
 
-    The polish solves inside `run_mapping`, so its seconds belong to the
-    `reconstruction` stage of `runtime.csv` and only `MappingStats` names them
-    separately (`docs/caspar-build.md` § Shipped: CASPAR + Ceres polish).
+    The polish (`--caspar-ceres-polish`) is off by default since recipes/colmap-src
+    `caspar-reduced-camera-system.patch`; the mapping-level tests still run it explicitly.
     """
-    polish_seconds: float | None = galileo_caspar_run.mapping.polish_seconds
-    assert polish_seconds is not None
-    assert galileo_caspar_run.mapping.polish_iterations is not None
-    print(
-        f"[colsfm] galileo smoke caspar polish | {galileo_caspar_run.mapping.polish_iterations} iterations "
-        f"in {polish_seconds:.2f} s of the {galileo_caspar_run.stage_seconds['reconstruction']:.2f} s stage"
-    )
-    assert 0.0 < polish_seconds < galileo_caspar_run.stage_seconds["reconstruction"]
+    assert galileo_caspar_run.mapping.polish_seconds is None
+    assert galileo_caspar_run.mapping.polish_iterations is None
     assert galileo_run.mapping.polish_seconds is None
     assert galileo_run.mapping.polish_iterations is None
 
@@ -467,7 +458,7 @@ def test_the_default_run_is_the_fast_full_pipeline() -> None:
     assert default.features_backend == "raco"
     assert default.matching_backend == "flexglue"
     assert default.ba_backend == "caspar"
-    assert default.caspar_ceres_polish is True
+    assert default.caspar_ceres_polish is False
     assert default.optimize_extrinsics is True
     assert default.regularised_extrinsics is True
     assert default.loop_closure is True
@@ -507,7 +498,7 @@ def test_the_default_maps_on_caspar_and_refines_the_extrinsics_afterwards(
         return
     assert resolved.ba_plan.backend == "caspar"
     assert resolved.ba_plan.fallback_reason is None
-    assert resolved.ba_plan.ceres_polish is True
+    assert resolved.ba_plan.ceres_polish is False, "CASPAR alone by default; --caspar-ceres-polish turns it on"
 
 
 def test_the_unregularised_refinement_is_the_one_that_takes_caspar_off_the_gpu(
