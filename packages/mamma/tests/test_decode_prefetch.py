@@ -127,6 +127,13 @@ def test_ramped_chunks_start_short_and_cover_the_range() -> None:
     assert ramped_chunk_ranges(5, 5, 32) == []
 
 
+@pytest.mark.parametrize(("chunk_size", "first"), [(0, 4), (-8, 4), (32, 0), (32, -1)])
+def test_ramped_chunks_reject_nonpositive_sizes(chunk_size: int, first: int) -> None:
+    """A zero or negative chunk never reaches stop (zero repeats one range forever): fail at once instead."""
+    with pytest.raises(ValueError):
+        ramped_chunk_ranges(0, 100, chunk_size, first=first)
+
+
 @pytest.mark.usefixtures("fake_decoder")
 def test_empty_range_list_yields_nothing() -> None:
     reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader([Path("a.mp4")], device="cpu", thread_owned=True)
