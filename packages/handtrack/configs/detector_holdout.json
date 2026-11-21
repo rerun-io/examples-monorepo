@@ -1,5 +1,5 @@
 {
- "note": "Frozen 2026-11-08 before any DetNet training (hand-detector decision 8): GSI every 10th episode of the sorted ids from index 5 (10 %), Gen-HumanEgo every 21st from index 10, first 40. Held out of training; eval scores a subset.",
+ "note": "Frozen 2026-11-08 before any DetNet training (hand-detector decision 8): GSI every 10th episode of the sorted ids from index 5 (10 %), Gen-HumanEgo every 21st from index 10, first 40. Held out of training; eval scores a subset. robocap-hands (2026-11-17, before NEW-1 saw RoboCap): every clip of the eval sessions Cap A s8, s11, s16, s21, s22, s27, s44 and Cap B s13, s15; never trained on.",
  "segments": {
   "gsi-six-view": [
    "gsi-six-view__ep_v1_003748da1531b3c6945d5cafcd2adb57",
@@ -212,6 +212,20 @@
    "gen-humanego__98d7650c5a1d4552bb6ab6ef58a1899f",
    "gen-humanego__c12cc76d24664fedbf64933036f4c7f2",
    "gen-humanego__e842285ae28f4d9c8b666907c7be774e"
+  ],
+  "robocap-hands": [
+   "robocap__f408193e6447b3b0__s00000008__t00026",
+   "robocap__f408193e6447b3b0__s00000008__t00088",
+   "robocap__f408193e6447b3b0__s00000011__t00020",
+   "robocap__f408193e6447b3b0__s00000011__t00268",
+   "robocap__f408193e6447b3b0__s00000016__t00002",
+   "robocap__f408193e6447b3b0__s00000021__t00060",
+   "robocap__f408193e6447b3b0__s00000022__t00060",
+   "robocap__f408193e6447b3b0__s00000027__t00016",
+   "robocap__f408193e6447b3b0__s00000044__t00002",
+   "robocap__fe6fede545c972fa__s00000013__t00015",
+   "robocap__fe6fede545c972fa__s00000015__t00020",
+   "robocap__fe6fede545c972fa__s00000015__t00277"
   ]
  }
 }

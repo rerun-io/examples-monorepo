@@ -6,13 +6,10 @@ to the net frame on the GPU and fed to the tracker one frame at a time. The same
 on every camera at once (the DetNet-alone evaluation), so one decode serves both.
 """
 
-import hashlib
-import io
 import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
@@ -21,7 +18,7 @@ from jaxtyping import Bool, Float32, Int8, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
-from torch import Tensor, nn
+from torch import Tensor
 
 from handtrack.data.catalog import (
     TIMELINE,
@@ -42,7 +39,6 @@ from handtrack.hand.pose import HandPose
 from handtrack.models.detnet import Detections
 from handtrack.results import BoxSource, SegmentTrack, TrackMetadata
 from handtrack.tracker import DetNetDetector, FrameResult, Tracker
-from handtrack.train.checkpoint import read_disk
 
 DECODE_CHUNK: int = 32
 """Timeline rows per decode call and camera."""
@@ -268,27 +264,3 @@ def detnet_alone_track(data: SegmentData, alone: DetNetAlone, meta: TrackMetadat
     )
 
 
-def read_state(path: Path) -> tuple[dict[str, torch.Tensor], str]:
-    """A model-only state_dict and its sha256, checked against the ``<file>.sha256`` sidecar (read once, O_DIRECT)."""
-    payload: bytes = read_disk(path)
-    digest: str = hashlib.sha256(payload).hexdigest()
-    expected: str = read_disk(Path(f"{path}.sha256")).decode("ascii").split()[0]
-    if digest != expected:
-        raise ValueError(f"{path}: sha256 {digest} does not match its sidecar {expected}")
-    return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True), digest
-
-
-def load_weights(model: nn.Module, path: Path) -> str:
-    """Load a model-only state_dict after checking its ``<file>.sha256`` sidecar (the checkpoint writer's and
-    ``promote.sh``'s convention); returns the digest.
-
-    Both files are read once through ``read_disk`` (O_DIRECT, as the checkpoint reader does) and the state_dict is
-    loaded from those bytes, so a checkpoint replaced during a run cannot mix two versions.
-    """
-    payload: bytes = read_disk(path)
-    digest: str = hashlib.sha256(payload).hexdigest()
-    expected: str = read_disk(Path(f"{path}.sha256")).decode("ascii").split()[0]
-    if digest != expected:
-        raise ValueError(f"{path}: sha256 {digest} does not match its sidecar {expected}")
-    model.load_state_dict(torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True))
-    return digest

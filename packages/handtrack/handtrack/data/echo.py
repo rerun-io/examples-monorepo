@@ -108,7 +108,7 @@ class _EchoPool:
 
 
 class EchoStream:
-    """``BatchSource`` for DetNet (or KeyNet, ``keynet=True``): equal per-dataset shares from echo pools fed by one producer thread per dataset."""
+    """``BatchSource`` for DetNet (or KeyNet, ``keynet=True``): per-dataset shares from echo pools fed by one producer thread per dataset."""
 
     def __init__(
         self,
@@ -125,19 +125,23 @@ class EchoStream:
         min_echo: int = 1,
         prefetch: int = 0,
         keynet: bool = False,
+        shares: Sequence[int] = (),
     ) -> None:
         """``epoch_steps`` set: an epoch is that many batches, and later epochs keep the running producers and their pools
         (producers then loop over their data themselves). None: an epoch ends when a dataset runs out, and each epoch restarts.
         ``min_echo``: draws an image must get before its producer may replace it. ``prefetch`` > 0: a thread assembles that many
         batches ahead, so drawing, merging and augmentation overlap the training step. ``keynet``: the pools hold ``KeyNetSamples`` and
-        the stream serves ``next_keynet_batch`` instead of ``next_detnet_batch``."""
+        the stream serves ``next_keynet_batch`` instead of ``next_detnet_batch``. ``shares``: images per batch from each dataset (summing
+to ``batch_size``); empty: equal shares."""
         if not 1 <= min_echo <= max_echo:
             raise ValueError("need 1 <= min_echo <= max_echo")
-        if batch_size % len(producers):
+        if shares and (len(shares) != len(producers) or sum(shares) != batch_size or min(shares) < 1):
+            raise ValueError(f"shares {tuple(shares)} need one positive count per dataset summing to the batch size {batch_size}")
+        if not shares and batch_size % len(producers):
             raise ValueError(f"batch size {batch_size} does not split evenly across {len(producers)} datasets")
         self.producers: list[Producer | KeyNetProducer] = list(producers)
-        self.share: int = batch_size // len(producers)
-        if not self.share <= min_fill <= pool_capacity:
+        self.shares: list[int] = list(shares) if shares else [batch_size // len(producers)] * len(producers)
+        if not max(self.shares) <= min_fill <= pool_capacity:
             raise ValueError("need share <= min_fill <= pool_capacity")
         self.min_fill: int = min_fill
         self.finish: Finish | KeyNetFinish = finish
@@ -214,8 +218,8 @@ class EchoStream:
             if not isinstance(item, DetNetBatch | KeyNetBatch):
                 return
 
-    def _ready(self, pool: _EchoPool) -> bool:
-        need: int = self.share if self.started else self.min_fill
+    def _ready(self, pool: _EchoPool, share: int) -> bool:
+        need: int = share if self.started else self.min_fill
         return self.error is not None or self.stop.is_set() or pool.drawable() >= need or pool.exhausted
 
     def next_detnet_batch(self) -> DetNetBatch | None:
@@ -250,14 +254,14 @@ class EchoStream:
 
     def _assemble(self) -> DetNetBatch | KeyNetBatch | None:
         parts: list[Samples] = []
-        for pool in self.pools:
+        for pool, share in zip(self.pools, self.shares, strict=True):
             with pool.lock:
-                pool.lock.wait_for(lambda pool=pool: self._ready(pool))
+                pool.lock.wait_for(lambda pool=pool, share=share: self._ready(pool, share))
                 if self.error is not None:
                     raise self.error
-                if self.stop.is_set() or pool.drawable() < self.share:
+                if self.stop.is_set() or pool.drawable() < share:
                     return None
-                parts.append(pool.draw(self.share))
+                parts.append(pool.draw(share))
                 pool.lock.notify_all()
         self.started = True
         merged: Samples = type(parts[0])(**{f.name: torch.cat([getattr(p, f.name) for p in parts]) for f in dataclasses.fields(parts[0])})

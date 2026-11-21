@@ -6,6 +6,7 @@ letterboxes are the training stream's (``handtrack.data.rerun_source``), unaugme
 (``DetectorEvalReport``) and ``misses.rrd``: hands the first model misses and its alarms on hand-free frames, with every
 model's boxes.
 """
+import dataclasses
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,11 +19,11 @@ from torch import Tensor
 
 from handtrack.apis.train import DetectorHoldout
 from handtrack.data.catalog import CATALOG_URL, SplitName, list_segments, select_split
-from handtrack.data.rerun_source import nvdec_producer, source_spec
+from handtrack.data.rerun_source import NVDEC_SLICE, SourceSpec, nvdec_producer, source_spec
 from handtrack.data.stream import DetNetSamples
 from handtrack.eval.boxes import MIN_IOU, NET_SCALE, PRESENCE_THRESHOLD, BoxCounts, box_counts, square_iou
 from handtrack.models.detnet import DetNetF
-from handtrack.pipeline import load_weights
+from handtrack.train.checkpoint import load_weights
 
 BASE_SPLITS: dict[str, SplitName] = {"dataforge-umetrack": "test", "dataforge-show3d": "val", "dataforge-hot3d-quest3": "test"}
 """Base datasets: the catalog split each one is scored on (none of them is trained on)."""
@@ -49,10 +50,17 @@ class DetectorEvalConfig:
     upright: bool = False
     """Score on upright frames (``catalog.UPRIGHT_TURNS``); False is the legacy input of repro-1 and the deployed DetNet-F. Each
     model is scored in the convention it was trained with, so a run compares models of one convention."""
+    quarter_turns: tuple[int, ...] | None = None
+    """Override every scored dataset's upright turns with these (one per camera), e.g. ``0 0 2 2 0 0`` for robocap-hands as
+    robocap-live's mix1-upright feeds the cap; needs ``upright`` and datasets with that many cameras."""
+    nvdec_frames_per_call: int = NVDEC_SLICE
+    """Frames per NVDEC call; lower it to fit beside other jobs on a shared GPU (8 keeps a robocap-hands run near 5 GB)."""
     catalog_url: str = CATALOG_URL
     device: str = "cuda:0"
 
     def __post_init__(self) -> None:
+        if self.quarter_turns is not None and not self.upright:
+            raise ValueError("quarter_turns overrides the upright turns: set upright")
         if not self.names or len(self.names) != len(self.weights) or len(set(self.names)) != len(self.names):
             raise ValueError("need one unique name per weights file")
 
@@ -181,7 +189,10 @@ def main(config: DetectorEvalConfig) -> DetectorEvalReport:
         totals: dict[str, SideCounts] = {name: SideCounts() for name in config.names}
         found: Examples = Examples()
         images: int = 0
-        for samples in nvdec_producer(source_spec(dataset, index, config.upright), segments, catalog_url=config.catalog_url, device=device)(0):
+        spec: SourceSpec = source_spec(dataset, index, config.upright)
+        if config.quarter_turns is not None:
+            spec = dataclasses.replace(spec, quarter_turns=config.quarter_turns)
+        for samples in nvdec_producer(spec, segments, catalog_url=config.catalog_url, device=device, frames_per_call=config.nvdec_frames_per_call)(0):
             images += int(samples.pooled.shape[0])
             frames: Float32[Tensor, "n 1 120 160"] = samples.pooled[:, None].float() / 255.0
             predicted: list[Tensor] = []

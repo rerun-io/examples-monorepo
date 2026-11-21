@@ -54,6 +54,21 @@ def test_every_batch_is_full_and_split_equally_across_the_datasets() -> None:
         assert Counter(batch.dataset.tolist()) == {0: 16, 1: 16, 2: 16, 3: 16}
 
 
+def test_shares_set_how_many_images_each_dataset_gives_every_batch() -> None:
+    producers = [lambda epoch, d=d: _chunks(d, 2000) for d in range(4)]
+    stream = EchoStream(producers, batch_size=64, pool_capacity=512, min_fill=64, max_echo=1, device=torch.device("cpu"), seed=0, shares=(28, 16, 10, 10))
+    batches = _drain(stream)
+    assert batches
+    for batch in batches:
+        assert Counter(batch.dataset.tolist()) == {0: 28, 1: 16, 2: 10, 3: 10}
+
+
+def test_shares_must_sum_to_the_batch_size() -> None:
+    producers = [lambda epoch, d=d: _chunks(d, 64) for d in range(4)]
+    with pytest.raises(ValueError, match="summing to the batch size"):
+        EchoStream(producers, batch_size=64, pool_capacity=512, min_fill=64, max_echo=1, device=torch.device("cpu"), seed=0, shares=(30, 16, 10, 10))
+
+
 def test_each_decoded_image_is_reused_up_to_the_echo_limit_and_never_twice_in_a_batch() -> None:
     batches = _drain(_stream(256, max_echo=3))
     uses: Counter[int] = Counter(i for batch in batches for i in _ids(batch))

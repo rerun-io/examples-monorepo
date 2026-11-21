@@ -116,13 +116,16 @@ UPRIGHT_TURNS: dict[str, tuple[int, ...]] = {
     "dataforge-hot3d-quest3": (0, 0),
     "gsi-six-view": (0, 0, 2, 2, 0, 0),
     "dataforge-gen-humanego-subset": (0, 0, 0, 0, 0, 0),
+    "robocap-hands": (0, 0, 0, 0, 0, 0),
 }
 """Clockwise quarter turns that make each stored camera image upright (image up = world up), per streamed camera in order.
 Measured 2026-11-08 from calibration alone (world up from the dataset's ViewCoordinates, confirmed as the axis most stable in the
 rig frame; up_cam = R_cam_rig R_rig_world up, over 4 segments; /tmp/hand-detector-scratch/orientation_table.py). UmeTrack ships
 raw sensor orientation; its release's source_camera_angle_deg (0, 90, 90, 180) agrees (cameras 0 and 3 sit ~40 degrees off any
 quarter turn). SHOW3D and HOT3D are stored upright portrait (the legacy letterbox turned them sideways). GSI's cameras 2-3 look
-down and are stored upside down; 4-5 lean about 33 degrees. Gen-HumanEgo is upright."""
+down and are stored upside down; 4-5 lean about 33 degrees. Gen-HumanEgo is upright. RoboCap is stored upright too
+(2026-11-17: cameras 2-3 show the wearer's lap at the bottom of the stored frame, and EgoHand finds more hands with consistent sides
+there than with the frames turned 180 degrees), although robocap-live's ``mix1-upright`` turns cameras 2-3 before DetNet."""
 
 
 def is_show3d(dataset: str) -> bool:

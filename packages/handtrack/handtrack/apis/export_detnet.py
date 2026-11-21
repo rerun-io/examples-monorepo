@@ -79,7 +79,7 @@ def sample_heldout(per_dataset: int, upright: bool, catalog_url: str, seed: int 
     for index, dataset in enumerate(defaults.datasets):
         segments: list[str] = eval_segments(dataset, holdout, url, 8, seed)  # a few segments are plenty for an export check
         kept: list[ndarray] = []
-        for samples in nvdec_producer(source_spec(dataset, index, upright), segments, catalog_url=url, device=torch.device("cuda"))(seed):
+        for samples in nvdec_producer(source_spec(dataset, index, upright), segments, catalog_url=url, device=torch.device("cuda"), frames_per_call=16)(seed):
             kept.append(samples.pooled.cpu().numpy())
             if sum(len(k) for k in kept) >= 8 * per_dataset:
                 break

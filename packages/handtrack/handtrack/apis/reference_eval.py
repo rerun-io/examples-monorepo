@@ -19,7 +19,7 @@ from serde.json import from_json, to_json
 from handtrack.data.catalog import CATALOG_URL, UMETRACK, SegmentInfo, list_segments, read_statics, read_timeline_table, select_split
 from handtrack.eval.segment import combine_positions
 from handtrack.models.detnet import DetNetF
-from handtrack.pipeline import SegmentData, load_weights, read_segment
+from handtrack.pipeline import SegmentData, read_segment
 from handtrack.reference.catalog import ReferenceLabels, reference_labels
 from handtrack.reference.results import (
     Calibration,
@@ -39,7 +39,7 @@ from handtrack.reference.run import LadderResult, run_ladder
 from handtrack.reference.state import TrackEnd
 from handtrack.reference.upstream import PoseStage, UmeTrack, load_umetrack
 from handtrack.tracker import DetNetDetector
-from handtrack.train.checkpoint import atomic_write
+from handtrack.train.checkpoint import atomic_write, load_weights
 
 
 @serde(deny_unknown_fields=True)
@@ -54,7 +54,7 @@ class Config:
     action: Literal["evaluate", "calibrate", "aggregate"] = "evaluate"
     """Calibration only reads validation labels; evaluation decodes shared NVDEC frames."""
     detnet_weights: Path | None = None
-    """Checkpoint verified by pipeline.load_weights against its .sha256 sidecar; required to evaluate and aggregate."""
+    """Checkpoint verified by train.checkpoint.load_weights against its .sha256 sidecar; required to evaluate and aggregate."""
     calibration: Path | None = None
     """Frozen validation Calibration JSON; required for every circle mode."""
     modes: tuple[Mode, ...] = ("gt_pose", "gt_circle", "detnet", "track")
