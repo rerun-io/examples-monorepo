@@ -8,6 +8,7 @@ then a few warm-started Adam iterations per tick, emitting the newest frame.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -402,7 +403,10 @@ class SlidingWindowFitter:
         # Inductor (default mode: no cudagraphs of its own) fuses the forward and
         # AOTAutograd's backward into a handful of triton kernels; the manual
         # graph below then captures those instead of hundreds of tiny eager ops.
-        loss_fn = torch.compile(window_loss, dynamic=False) if cfg.compile_iter else window_loss
+        # Eager while beartype runs (PIXI_DEV_MODE=1, set by tests/conftest.py): dynamo cannot trace
+        # beartype's wrapper around window_loss and raises a desynchronization error.
+        compile_iter: bool = cfg.compile_iter and os.environ.get("PIXI_DEV_MODE") != "1"
+        loss_fn = torch.compile(window_loss, dynamic=False) if compile_iter else window_loss
 
         def one_iter() -> None:
             optimizer.zero_grad(set_to_none=False)
