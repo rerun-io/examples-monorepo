@@ -14,7 +14,7 @@ from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.crops import box_geometry, gpu_crop_frame, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
-from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, INPUT_NAMES, OUTPUT_NAMES
+from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES
 
 
 @dataclass(slots=True)
@@ -50,7 +50,8 @@ class LandmarkEstimator:
     ) -> None:
         self.config: MammaNetConfig = config
         self.device: str = device
-        self.model: MammaNet = load_mammanet(weights_path, device=device, config=config)
+        # Eager MammaNet only without an engine: the engine runs every crop count (in chunks past its batch).
+        self.model: MammaNet | None = load_mammanet(weights_path, device=device, config=config) if engine_path is None else None
         self.runner = None
         if engine_path is not None:
             from trtkit.tensorrt_runtime import TensorRtRuntime
@@ -58,7 +59,7 @@ class LandmarkEstimator:
             # FP16 TRT engine: 3.88ms vs 15.8ms eager per 4-crop call; joints
             # p99 diff 0.008 normalized units vs eager fp16 (gate re-verified).
             self.runner = TensorRtRuntime(engine_path, use_cuda_graph=True)
-        if compile_model:
+        if compile_model and self.model is not None:
             import torch._dynamo
 
             # 15.8 -> 10.2 ms per 4-crop forward standalone, but inductor's
@@ -127,17 +128,17 @@ class LandmarkEstimator:
         mask_crops = gpu_mask_crop_batch(masks_batch, centers_t, sizes_t, self.config)
         out: dict[str, torch.Tensor | None]
         if self.runner is None:
+            assert self.model is not None, "eager MammaNet is loaded whenever no engine is"
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
                 out = self.model(img_crops, mask_crops)
         else:
-            # The engine takes at most ENGINE_BATCH crops, so more people x cameras run in chunks (an eager batch of
-            # 28+ crops ran out of memory). Outputs live in the runner's buffers: keep a copy before the next call.
-            n_crops: int = img_crops.shape[0]
-            parts: list[dict[str, torch.Tensor | None]] = []
-            for lo in range(0, n_crops, ENGINE_BATCH):
-                part = dict(self.runner({INPUT_NAMES[0]: img_crops[lo : lo + ENGINE_BATCH], INPUT_NAMES[1]: mask_crops[lo : lo + ENGINE_BATCH]}))
-                parts.append(part if n_crops <= ENGINE_BATCH else {k: None if v is None else v.clone() for k, v in part.items()})
-            out = parts[0] if len(parts) == 1 else {k: torch.cat([v for p in parts if (v := p[k]) is not None]) for k in OUTPUT_NAMES}
+            from trtkit.base import run_chunked
+
+            inputs: dict[str, torch.Tensor] = {INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops}
+            # Past the engine's batch, run_chunked runs every chunk and copies each out of the runner's buffers
+            # (an eager batch of 28+ crops ran out of memory); one batch is read straight from them.
+            within: bool = img_crops.shape[0] <= self.runner.spec.max_batch_size
+            out = dict(self.runner(inputs) if within else run_chunked(self.runner, inputs))
 
         joints2d_raw = out[OUTPUT_NAMES[0]]
         visibility_raw = out[OUTPUT_NAMES[1]]

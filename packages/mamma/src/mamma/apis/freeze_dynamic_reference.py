@@ -6,8 +6,38 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from jaxtyping import Float32
+from numpy import ndarray
+from serde import SerdeError, from_dict, serde
 
 from mamma.eval.dynamic_reference import write_reference
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class MammaPredParams:
+    """One subject's ``pred/params_NN.npz`` as the MAMMA release ships it (third-party format; other fields allowed)."""
+
+    betas: Float32[ndarray, "b"]
+    """SMPL-X v1.1 neutral shape coefficients."""
+    poses: Float32[ndarray, "f 165"]
+    """Per-frame axis-angle pose (root, body, jaw, eyes, hands)."""
+    trans: Float32[ndarray, "f 3"]
+    """Per-frame root translation, metres."""
+
+    def __post_init__(self) -> None:
+        if len(self.poses) != len(self.trans):
+            raise ValueError(f"{len(self.poses)} pose rows for {len(self.trans)} translation rows")
+
+
+def load_pred_params(path: Path) -> MammaPredParams:
+    """Typed ``pred/params_NN.npz``; a malformed file raises ``ValueError`` naming ``path``."""
+    with np.load(path, allow_pickle=False) as npz:
+        fields: dict[str, ndarray] = {name: npz[name] for name in ("betas", "poses", "trans") if name in npz.files}
+    try:
+        return from_dict(MammaPredParams, fields)
+    except (SerdeError, ValueError) as error:
+        raise ValueError(f"{path}: not a MAMMA prediction record ({error})") from error
 
 
 @dataclass
@@ -28,11 +58,12 @@ def main(config: Config) -> int:
     from simplecv.ops.smplx.smplx_torch import SmplxLayerTorch
 
     pred_npz: Path = config.data_dir / "pred" / "params_00.npz"
-    with np.load(pred_npz, allow_pickle=False) as pred:
-        betas, poses, trans = pred["betas"], pred["poses"], pred["trans"]
-    layer = SmplxLayerTorch(betas=betas.reshape(-1).astype(np.float32), model_root_dir=config.model_dir, flat_hand_mean=False)
-    vertices = np.asarray(layer.to(config.device).forward_batched(poses.astype(np.float32), trans.astype(np.float32)).vertices, dtype=np.float32)
+    pred: MammaPredParams = load_pred_params(pred_npz)
+    layer = SmplxLayerTorch(betas=pred.betas, model_root_dir=config.model_dir, flat_hand_mean=False)
+    vertices: Float32[ndarray, "f v 3"] = np.asarray(layer.to(config.device).forward_batched(pred.poses, pred.trans).vertices, dtype=np.float32)
     frames = np.arange(len(vertices), dtype=np.int64)
-    write_reference(config.out, frames, vertices, config.fps, f"dataset MAMMA prediction {pred_npz} via SMPL-X v1.1 neutral (16 betas), frozen 2026-11-21")
+    write_reference(
+        config.out, frames, vertices, config.fps, f"dataset MAMMA prediction {pred_npz} via SMPL-X v1.1 neutral (16 betas), frozen 2026-11-21"
+    )
     print(f"wrote {config.out}: {len(frames)} frames x {vertices.shape[1]} vertices")
     return 0

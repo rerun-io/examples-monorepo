@@ -50,7 +50,9 @@ def load_reference(path: Path) -> tuple[Int64[ndarray, "f"], Float32[ndarray, "f
     from rerun.chunk import RrdReader
 
     if not path.is_file():
-        raise FileNotFoundError(f"dynamic reference {path} is missing (hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'golden/**')")
+        raise FileNotFoundError(
+            f"dynamic reference {path} is missing (hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'golden/**')"
+        )
     frames: list[Int64[ndarray, "n"]] = []
     vertices: list[Float32[ndarray, "n v 3"]] = []
     source: str | None = None

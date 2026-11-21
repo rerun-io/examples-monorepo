@@ -91,8 +91,8 @@ def main(config: ValidateDynamicConfig) -> int:
     except (FileNotFoundError, ValueError) as error:
         print(f"FAIL: {error}")
         return 1
-    if reference_frames.tolist() != list(range(len(reference_frames))):
-        print(f"FAIL: {config.reference_rrd} does not hold frames 0..{len(reference_frames) - 1} in order")
+    if reference_frames.tolist() != list(range(sequence.frame_count)):
+        print(f"FAIL: {config.reference_rrd} must hold every frame 0..{sequence.frame_count - 1} of {sequence.name} in order")
         return 1
     print(f"sequence {sequence.name}: {sequence.frame_count} frames; golden verts {golden_verts.shape}")
 

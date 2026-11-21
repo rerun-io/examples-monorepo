@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -106,6 +108,7 @@ class _BufferedRunner:
     """Stands in for the TRT runner: at most ENGINE_BATCH crops per call, outputs written into one reused buffer."""
 
     def __init__(self) -> None:
+        self.spec: SimpleNamespace = SimpleNamespace(max_batch_size=ENGINE_BATCH)
         self.batches: list[int] = []
         self._visibility: torch.Tensor = torch.zeros(ENGINE_BATCH, _JOINTS, 1)
 

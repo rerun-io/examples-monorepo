@@ -30,3 +30,10 @@ def test_missing_reference_is_an_error(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="dynamic reference"):
         load_reference(tmp_path / "absent.rrd")
+
+
+def test_prediction_rows_must_agree() -> None:
+    from mamma.apis.freeze_dynamic_reference import MammaPredParams
+
+    with pytest.raises(ValueError, match="5 pose rows for 4 translation rows"):
+        MammaPredParams(betas=np.zeros(16, np.float32), poses=np.zeros((5, 165), np.float32), trans=np.zeros((4, 3), np.float32))
