@@ -149,13 +149,13 @@ def test_sam3_prepare_builds_one_heads_engine_per_prompt_length(monkeypatch: pyt
 
 
 def test_sam3_patch_conv_rounds_operands_to_fp16_and_sums_in_fp32() -> None:
-    from posekit.models.sam3_segmenter import _Fp32PatchConv
+    from trtkit.onnx_precision import Fp32AccumulateConv2d
 
     torch.manual_seed(0)
     conv: torch.nn.Conv2d = torch.nn.Conv2d(3, 8, kernel_size=14, stride=14, bias=False)
     x: Tensor = torch.randn(2, 3, 28, 28)
     with torch.autocast("cpu", dtype=torch.bfloat16):  # an enclosing autocast region must not reach the conv
-        got: Tensor = _Fp32PatchConv(conv)(x)
+        got: Tensor = Fp32AccumulateConv2d(conv)(x)
     exact: Tensor = torch.nn.functional.conv2d(x.half().double(), conv.weight.half().double(), stride=14)
 
     assert got.dtype == torch.float16

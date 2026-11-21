@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 import onnx
+import torch
 from onnx import TensorProto, helper, numpy_helper
 
 from trtkit.artifacts import build_once
@@ -181,3 +182,24 @@ def fp16_trunk(source: Path, cache_dir: Path) -> Path:
 
     return build_once(dest, rewrite)
 
+
+
+class Fp32AccumulateConv2d(torch.nn.Module):
+    """A conv as torch fp16 autocast runs it (fp16 operands, fp32 accumulation, fp16 output), spelled in fp32 so an
+    exported graph keeps the accumulation in fp32: TensorRT accumulates fp16 convs in fp16. Swap it in for export only.
+    """
+
+    def __init__(self, conv: torch.nn.Conv2d) -> None:
+        super().__init__()
+        self.conv: torch.nn.Conv2d = conv
+
+    @property
+    def weight(self) -> torch.Tensor:
+        """The conv's weight (callers that cast their input to the weight's dtype keep working)."""
+        return self.conv.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        conv: torch.nn.Conv2d = self.conv
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            bias: torch.Tensor | None = None if conv.bias is None else conv.bias.half().float()
+            return torch.nn.functional.conv2d(x.half().float(), conv.weight.half().float(), bias, conv.stride, conv.padding).half()

@@ -65,37 +65,15 @@ class Sam3SegmenterConfig:
         return Sam3Segmenter(self)
 
 
-class _Fp32PatchConv(nn.Module):
-    """The ViT patch embedding as torch autocast runs it (fp16 operands, fp32 accumulation, fp16 output), spelled in
-    fp32 so the exported graph keeps the accumulation in fp32.
-
-    TensorRT accumulates fp16 convs and GEMMs in fp16. In the SAM 3 trunk that moved the FPN levels 4x further from the
-    torch fp16 trunk than torch fp16 is from FP32 (relative L2 0.050 against 0.011 on the coarsest level) and flipped
-    person scores near the 0.5 threshold. The patch embedding caused most of it; in fp32 it costs nothing (trunk 54 ms)
-    and brings the drift to 0.015. The MLPs cause most of the rest: the export makes them fp32-accumulating GEMMs
-    (``fp32_accumulate``), which reach 0.009 for +12 ms; spelled in torch like this conv they build as fp32 GEMMs (140 ms).
-    """
-
-    def __init__(self, conv: nn.Conv2d) -> None:
-        super().__init__()
-        self.conv: nn.Conv2d = conv
-
-    @property
-    def weight(self) -> Tensor:
-        """The conv's weight (``Sam3ViTPatchEmbeddings`` casts its input to the weight's dtype)."""
-        return self.conv.weight
-
-    def forward(self, pixel_values: Tensor) -> Tensor:
-        conv: nn.Conv2d = self.conv
-        with torch.autocast(device_type=pixel_values.device.type, enabled=False):
-            bias: Tensor | None = None if conv.bias is None else conv.bias.half().float()
-            return F.conv2d(pixel_values.half().float(), conv.weight.half().float(), bias, conv.stride, conv.padding).half()
-
-
 class _VisionTrunk(nn.Module):
     """The ViT and its FPN neck: the three levels SAM 3's heads read (``Sam3Model.forward`` drops the 0.5x level).
 
-    For the export the patch embedding runs as :class:`_Fp32PatchConv`.
+    For the export the patch embedding runs as :class:`trtkit.onnx_precision.Fp32AccumulateConv2d`: TensorRT accumulates
+    fp16 convs and GEMMs in fp16, which in the SAM 3 trunk moved the FPN levels 4x further from the torch fp16 trunk than
+    torch fp16 is from FP32 (relative L2 0.050 against 0.011 on the coarsest level) and flipped person scores near the 0.5
+    threshold. The patch embedding caused most of it; in fp32 it costs nothing (trunk 54 ms) and brings the drift to
+    0.015. The MLPs cause most of the rest: the export makes them fp32-accumulating GEMMs (``fp32_accumulate``), which
+    reach 0.009 for +12 ms; spelled in torch like this conv they build as fp32 GEMMs (140 ms).
     """
 
     def __init__(self, model: nn.Module) -> None:
@@ -103,9 +81,11 @@ class _VisionTrunk(nn.Module):
         self.model: Any = model
 
     def forward(self, pixel_values: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        from trtkit.onnx_precision import Fp32AccumulateConv2d
+
         patch: Any = self.model.vision_encoder.backbone.embeddings.patch_embeddings
         conv: nn.Conv2d = patch.projection
-        patch.projection = _Fp32PatchConv(conv)
+        patch.projection = Fp32AccumulateConv2d(conv)
         try:
             levels: tuple[Tensor, ...] = self.model.vision_encoder(pixel_values).fpn_hidden_states
         finally:
@@ -206,6 +186,7 @@ class Sam3Segmenter(PromptableSegmenter):
         build_once(onnx_path, export)
         return TensorRtRuntime(ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH, allow_tf32=False)))
 
+    @torch.inference_mode()
     def text(self, prompt: str) -> tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]:
         """The prompt's projected text features and attention mask; the text encoder runs once per prompt."""
         if prompt not in self.text_features:
