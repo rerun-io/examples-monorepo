@@ -49,8 +49,10 @@ def limited_range_yuv_to_rgb_matrix(color_space: str | None) -> Float32[Tensor, 
 
 def yuv444_planes_to_rgb(planes: UInt8[Tensor, "3 h w"], matrix: Float32[Tensor, "3 3"]) -> UInt8[Tensor, "3 h w"]:
     """Convert one planar limited-range YUV444 frame to RGB (rounded, clamped to uint8)."""
-    offsets: Float32[Tensor, "3 1 1"] = torch.tensor([16.0, 128.0, 128.0], device=planes.device).view(3, 1, 1)
-    yuv: Float32[Tensor, "3 h w"] = planes.float() - offsets
+    # Scalar offsets in place: a tensor built from a Python list would be a blocking host->device copy per frame.
+    yuv: Float32[Tensor, "3 h w"] = planes.float()
+    yuv[0] -= 16.0
+    yuv[1:] -= 128.0
     rgb: Float32[Tensor, "3 h w"] = torch.einsum("ij,jhw->ihw", matrix, yuv)
     return rgb.round_().clamp_(0.0, 255.0).to(torch.uint8)
 
@@ -88,9 +90,9 @@ class Nvdec444Decoder:
         self.width: int = int(self._demuxer.Width())
         self.height: int = int(self._demuxer.Height())
         # The demuxer's ChromaFormat() reads 4:2:0 on 4:4:4 files; the first surface's shape is the check.
-        self._frame(0)
-        self.cpu_fallback: None = None
-        """Never falls back; mirrors torchcodec's attribute."""
+        # Frame 0 stays queued for the first read.
+        if not self._fill(0):
+            raise ValueError(f"{source}: no frames")
 
     def _open(self) -> None:
         nvc = self._nvc
@@ -103,33 +105,42 @@ class Nvdec444Decoder:
             usedevicememory=True,
         )
         self._packets = iter(self._demuxer)
-        self._ready: deque[UInt8[Tensor, "3 h w"]] = deque()
+        self._ready: deque[tuple[int, UInt8[Tensor, "3 h w"]]] = deque()
+        """Converted frames with their display index."""
+        self._decoded: int = 0
+        """Display index of the next frame the decoder outputs."""
         self._next_index: int = 0
-        """Display index of ``_ready[0]``."""
+        """Display index of the next frame a read can return without re-opening."""
 
-    def _fill(self) -> bool:
-        """Decode packets until a frame is ready; ``False`` at the end of the stream."""
+    def _fill(self, first_wanted: int) -> bool:
+        """Decode packets until a frame at or after ``first_wanted`` is ready; ``False`` at the end of the stream.
+
+        Earlier frames are dropped unconverted. Surfaces are recycled by the next Decode call, so the kept
+        frames are converted now.
+        """
         while not self._ready:
             packet = next(self._packets, None)
             if packet is None:
                 return False
-            # Surfaces are recycled by the next Decode call: convert each frame now.
             for frame in self._decoder.Decode(packet):
+                index: int = self._decoded
+                self._decoded += 1
                 surface: Tensor = torch.from_dlpack(frame)
                 if surface.shape != (3 * self.height, self.width) or surface.dtype != torch.uint8:
                     raise ValueError(f"NVDEC surface {tuple(surface.shape)} {surface.dtype} is not 8-bit planar 4:4:4")
-                self._ready.append(yuv444_planes_to_rgb(surface.view(3, self.height, self.width), self._matrix))
+                if index >= first_wanted:
+                    self._ready.append((index, yuv444_planes_to_rgb(surface.view(3, self.height, self.width), self._matrix)))
         return True
 
     def _frame(self, index: int) -> UInt8[Tensor, "3 h w"]:
         if index < self._next_index:
             self._open()
         while True:
-            if not self._fill():
-                raise IndexError(f"{self._source}: frame {index} is past the end ({self._next_index} frames)")
-            frame: UInt8[Tensor, "3 h w"] = self._ready.popleft()
-            self._next_index += 1
-            if self._next_index - 1 == index:
+            if not self._ready and not self._fill(index):
+                raise IndexError(f"{self._source}: frame {index} is past the end ({self._decoded} frames)")
+            ready_index, frame = self._ready.popleft()
+            self._next_index = ready_index + 1
+            if ready_index == index:
                 return frame
 
     def get_frames_at(self, indices: list[int]) -> DecodedFrames:

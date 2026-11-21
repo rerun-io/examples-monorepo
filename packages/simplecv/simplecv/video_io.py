@@ -24,6 +24,7 @@ from einops import rearrange
 from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
+from simplecv.nvdec_444 import Nvdec444Decoder
 
 T = TypeVar("T")
 
@@ -32,13 +33,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 # torchcodec loads its FFmpeg libraries at import; the functions that decode import it, annotations only name the class.
 if TYPE_CHECKING:
-    from torchcodec.decoders import VideoDecoder, VideoStreamMetadata
-
-    from simplecv.nvdec_444 import Nvdec444Decoder
+    from torchcodec.decoders import VideoDecoder
 else:
     VideoDecoder = object
-    VideoStreamMetadata = object
-    Nvdec444Decoder = object
+
+DecodeBackend = Literal["NVDEC", "NVDEC 4:4:4", "CPU", "CPU fallback"]
+"""Which decoder produces a reader's frames: torchcodec NVDEC, PyNvVideoCodec NVDEC for 8-bit 4:4:4,
+torchcodec on the CPU, or torchcodec's CPU fallback on a CUDA reader."""
 
 
 def validate_video_file_path(video_path: Path) -> Path:
@@ -447,9 +448,10 @@ class TorchCodecVideoReader:
                 gets the CUDA device bound first, so any thread may drive the
                 reader; with it, decodes from several threads also serialise.
 
-        Warns (``RuntimeWarning``) when NVDEC cannot decode the stream (for example
-        HEVC or H.264 4:4:4) and torchcodec falls back to CPU decoding; see
-        :attr:`cpu_fallback`.
+        torchcodec's NVDEC takes 4:2:0 only; an 8-bit 4:4:4 file (HEVC or H.264
+        ``yuv444p``) decodes on NVDEC through PyNvVideoCodec when it is installed
+        (``backend == "NVDEC 4:4:4"``). Warns (``RuntimeWarning``) when the stream
+        still falls back to CPU decoding; see :attr:`backend` and :attr:`cpu_fallback`.
         """
         from torchcodec.decoders import VideoDecoder
 
@@ -470,7 +472,7 @@ class TorchCodecVideoReader:
 
             decode_time_transforms = [_TorchCodecResize(size=list(resize_hw))]
 
-        self._decoder: VideoDecoder | Nvdec444Decoder = self._decode(
+        torchcodec_decoder: VideoDecoder = self._decode(
             lambda: VideoDecoder(
                 source,
                 device=self.device,
@@ -481,25 +483,25 @@ class TorchCodecVideoReader:
             )
         )
 
-        # NVDEC rejects some streams (4:4:4 chroma) and torchcodec then decodes them on
-        # the CPU and uploads every frame; say so instead of running silently slow.
+        self._decoder: VideoDecoder | Nvdec444Decoder = torchcodec_decoder
+        # torchcodec's NVDEC rejects 4:4:4 and then decodes on the CPU, uploading every frame: try
+        # PyNvVideoCodec for 8-bit 4:4:4, and say so when the CPU still decodes instead of running silently slow.
         fallback_reason: str | None = (
-            self._decode(lambda: str(self._decoder.cpu_fallback) if self._decoder.cpu_fallback else None)
+            self._decode(lambda: str(torchcodec_decoder.cpu_fallback) if torchcodec_decoder.cpu_fallback else None)
             if self.device.startswith("cuda")
             else None
         )
-        metadata = self._decode(lambda: self._decoder.metadata)
-        self.backend: str = "NVDEC" if self.device.startswith("cuda") else "CPU"
-        """Which decoder produces the frames: ``NVDEC``, ``NVDEC 4:4:4`` (PyNvVideoCodec), ``CPU``, or ``CPU fallback``."""
+        metadata = self._decode(lambda: torchcodec_decoder.metadata)
+        self.backend: DecodeBackend = "NVDEC" if self.device.startswith("cuda") else "CPU"
+        """Which decoder produces the frames."""
         if fallback_reason is not None:
-            nvdec_444 = self._open_nvdec_444(source, metadata)
+            nvdec_444: Nvdec444Decoder | None = self._open_nvdec_444(source, metadata.pixel_format, metadata.color_space)
             if nvdec_444 is not None:
                 self._decoder = nvdec_444
-                fallback_reason = None
                 self.backend = "NVDEC 4:4:4"
-        self._cpu_fallback: bool = fallback_reason is not None
-        if fallback_reason is not None:
-            self.backend = "CPU fallback"
+            else:
+                self.backend = "CPU fallback"
+        if self.backend == "CPU fallback":
             name: str = str(source) if isinstance(source, Path) else f"<{len(source)} bytes>"
             warnings.warn(f"NVDEC cannot decode {name}; torchcodec decodes it on the CPU ({fallback_reason})", RuntimeWarning, stacklevel=2)
 
@@ -522,18 +524,16 @@ class TorchCodecVideoReader:
         self._read_buffer_start: int = 0
         self._read_buffer_stop: int = 0
 
-    def _open_nvdec_444(self, source: Path | bytes, metadata: VideoStreamMetadata) -> Nvdec444Decoder | None:
+    def _open_nvdec_444(self, source: Path | bytes, pixel_format: str | None, color_space: str | None) -> Nvdec444Decoder | None:
         """A PyNvVideoCodec NVDEC decoder for an 8-bit 4:4:4 file torchcodec's NVDEC rejected, or ``None``.
 
         ``None`` when the stream is not ``yuv444p``, the source is bytes, PyNvVideoCodec is not installed, or
         NVDEC refuses the stream; the CPU fallback then stays. Frames match the CPU decode within 1 LSB.
         """
-        if metadata.pixel_format != "yuv444p" or not isinstance(source, Path) or importlib.util.find_spec("PyNvVideoCodec") is None:
+        if pixel_format != "yuv444p" or not isinstance(source, Path) or importlib.util.find_spec("PyNvVideoCodec") is None:
             return None
-        from simplecv.nvdec_444 import Nvdec444Decoder as _Nvdec444Decoder
-
         try:
-            return self._decode(lambda: _Nvdec444Decoder(source, self.device, metadata.color_space))
+            return self._decode(lambda: Nvdec444Decoder(source, self.device, color_space))
         except (RuntimeError, ValueError) as error:
             warnings.warn(f"PyNvVideoCodec cannot decode {source} on NVDEC: {error}", RuntimeWarning, stacklevel=3)
             return None
@@ -558,7 +558,7 @@ class TorchCodecVideoReader:
     @property
     def cpu_fallback(self) -> bool:
         """bool: ``True`` when a CUDA reader decodes on the CPU because NVDEC rejected the stream."""
-        return self._cpu_fallback
+        return self.backend == "CPU fallback"
 
     @property
     def width(self) -> int:
