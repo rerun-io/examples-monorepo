@@ -86,6 +86,7 @@ def triangulate_gated(
     reproj_thresh_px: float = 40.0,
     min_cams: int = 2,
     vis_thresh: float = 0.5,
+    prior: tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]] | None = None,
 ) -> tuple[list[Float32[torch.Tensor, "n"]], Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]:
     """Triangulate, then iteratively DROP the worst camera whose confident
     landmarks reproject with mean error > ``reproj_thresh_px``, re-triangulating,
@@ -99,25 +100,33 @@ def triangulate_gated(
     returned gated visibility zeros dropped cameras so they neither triangulate
     NOR pull the downstream fit's reprojection term. No-op when all cameras agree
     (the common case, incl. single-person), so single-person fits are unchanged.
+
+    ``prior`` (the person's points from the previous tick) seeds the camera set: a camera whose confident landmarks
+    reproject more than ``reproj_thresh_px`` from it is dropped before the first triangulation. When the masks of half
+    the cameras slide onto another person during contact, the all-camera start is already wrong and the greedy drop
+    then removes good cameras (MultiMama_3: 5-8 of 14 cameras on the other person). Ignored when fewer than
+    ``min_cams`` cameras would survive it.
     """
     n_cams: int = len(pts2d_per_cam)
     gated: list[Float32[torch.Tensor, "n"]] = [v.clone() for v in vis_per_cam]
     proj: Float32[torch.Tensor, "c 3 4"] = torch.stack([k_per_cam[c] @ world_to_cam_per_cam[c][:3, :] for c in range(n_cams)])
     pts2d: Float32[torch.Tensor, "c n 2"] = torch.stack(pts2d_per_cam)[..., :2]
     active: list[int] = list(range(n_cams))
+    if prior is not None:
+        prior_err: list[list[float]] = _camera_errors(prior[0], prior[1], proj, pts2d, gated, vis_thresh)
+        outliers: list[int] = [c for c in active if prior_err[0][c] >= 4 and prior_err[1][c] > reproj_thresh_px]
+        inliers: int = sum(1 for c in active if prior_err[0][c] >= 4 and c not in outliers)
+        if inliers >= min_cams:
+            for c in outliers:
+                active.remove(c)
+                gated[c] = torch.zeros_like(gated[c])
     points3d: Float32[torch.Tensor, "n 3"]
     valid: Bool[torch.Tensor, "n"]
     points3d, valid = triangulate_points(pts2d_per_cam, k_per_cam, world_to_cam_per_cam, gated, vis_thresh=vis_thresh)
     while len(active) > min_cams:
         # All cameras' confident-landmark counts + mean reprojection errors in
         # one batched pass and ONE host read per round (was 2 syncs/camera).
-        xh: Float32[torch.Tensor, "n 4"] = torch.cat([points3d, torch.ones_like(points3d[:, :1])], dim=-1)
-        uvw: Float32[torch.Tensor, "c n 3"] = xh @ proj.transpose(1, 2)
-        uv: Float32[torch.Tensor, "c n 2"] = uvw[..., :2] / (uvw[..., 2:3].abs() + 1e-6)
-        conf: Bool[torch.Tensor, "c n"] = (torch.stack(gated) > vis_thresh) & valid
-        err: Float32[torch.Tensor, "c n"] = torch.where(conf, (uv - pts2d).norm(dim=-1), torch.zeros_like(uv[..., 0]))
-        count: Float32[torch.Tensor, "c"] = conf.sum(dim=-1).float()
-        stats: list[list[float]] = torch.stack([count, err.sum(dim=-1) / count.clamp(min=1.0)]).tolist()
+        stats: list[list[float]] = _camera_errors(points3d, valid, proj, pts2d, gated, vis_thresh)
         worst_c: int = -1
         worst_err: float = reproj_thresh_px
         for c in active:
@@ -131,3 +140,22 @@ def triangulate_gated(
         gated[worst_c] = torch.zeros_like(gated[worst_c])
         points3d, valid = triangulate_points(pts2d_per_cam, k_per_cam, world_to_cam_per_cam, gated, vis_thresh=vis_thresh)
     return gated, points3d, valid
+
+
+def _camera_errors(
+    points3d: Float32[torch.Tensor, "n 3"],
+    valid: Bool[torch.Tensor, "n"],
+    proj: Float32[torch.Tensor, "c 3 4"],
+    pts2d: Float32[torch.Tensor, "c n 2"],
+    vis: list[Float32[torch.Tensor, "n"]],
+    vis_thresh: float,
+) -> list[list[float]]:
+    """``[counts, mean errors]`` per camera: confident landmarks and their mean reprojection error (px) against
+    ``points3d``, in one batched pass and ONE host read."""
+    xh: Float32[torch.Tensor, "n 4"] = torch.cat([points3d, torch.ones_like(points3d[:, :1])], dim=-1)
+    uvw: Float32[torch.Tensor, "c n 3"] = xh @ proj.transpose(1, 2)
+    uv: Float32[torch.Tensor, "c n 2"] = uvw[..., :2] / (uvw[..., 2:3].abs() + 1e-6)
+    conf: Bool[torch.Tensor, "c n"] = (torch.stack(vis) > vis_thresh) & valid
+    err: Float32[torch.Tensor, "c n"] = torch.where(conf, (uv - pts2d).norm(dim=-1), torch.zeros_like(uv[..., 0]))
+    count: Float32[torch.Tensor, "c"] = conf.sum(dim=-1).float()
+    return torch.stack([count, err.sum(dim=-1) / count.clamp(min=1.0)]).tolist()

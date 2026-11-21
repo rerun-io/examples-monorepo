@@ -38,6 +38,8 @@ class FittingStage:
             torch.as_tensor(cam.world_to_cam, dtype=torch.float32, device=config.device) for cam in cameras
         ]
         self._fitters: dict[int, SlidingWindowFitter] = {}
+        self._previous_points: dict[int, tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]] = {}
+        """Each person's gated triangulation from its last tick: the camera-selection prior of the next."""
         self.faces = None
         """Triangle faces of the SMPL-X mesh (set after the first fitter exists)."""
         # One body model for every person's fitter and the prewarm (smplx.create ~0.6 s, not mid-stream).
@@ -128,8 +130,14 @@ class FittingStage:
             # gated visibility used for BOTH the anchor and the fit reprojection.
             vis_gated: list[Float32[torch.Tensor, "n"]]
             vis_gated, points3d, valid = triangulate_gated(
-                pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all, reproj_thresh_px=self.config.reproj_gate_px
+                pts2d_all,
+                self.k_per_cam,
+                self.world_to_cam_per_cam,
+                vis_all,
+                reproj_thresh_px=self.config.reproj_gate_px,
+                prior=self._previous_points.get(obj_id),
             )
+            self._previous_points[obj_id] = (points3d, valid)
             # Dense cloud for visualization: triangulate every marker seen by
             # >= 2 cameras (sigma/log-variance-weighted, like the original DAG
             # which writes all 512), not just the confident vis>0.5 ones. The
