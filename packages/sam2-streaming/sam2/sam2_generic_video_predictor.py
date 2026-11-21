@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from dataclasses import dataclass, field
 
+from sam2.cuda_graphs import GraphCache
 from sam2.modeling.sam2_generic import SAM2Generic
 from sam2.modeling.sam2_prompt import SAM2Prompt
 from sam2.modeling.sam2_result import SAM2Result
@@ -211,6 +212,13 @@ class SAM2GenericVideoPredictor(SAM2Generic):
 
         return {obj_id: result for obj_id, result in zip(all_obj_ids, batched_results)}
 
+    def _index_tensor(self, values: list, dtype: torch.dtype = torch.long) -> torch.Tensor:
+        """``values`` on the device without a host sync: a copy from pageable host memory waits for all queued GPU work,
+        one from pinned memory with ``non_blocking`` does not."""
+        if self.device.type != "cuda":
+            return torch.tensor(values, dtype=dtype, device=self.device)
+        return torch.tensor(values, dtype=dtype, pin_memory=True).to(self.device, non_blocking=True)
+
     @torch.inference_mode()
     def forward_batched(
         self,
@@ -219,6 +227,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         frames: torch.Tensor,
         prompts: list[list[SAM2Prompt]],
         multimask_output: list[bool],
+        graphs: GraphCache | None = None,
     ) -> list[dict[int, SAM2Result]]:
         """``forward`` for several videos at the same timestep, each module run once per group instead of per object.
 
@@ -227,6 +236,8 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         memories); each group is one batch through memory attention and the mask decoder, and one memory-encoder call
         covers every object. Per object the operations are those of ``forward`` (each pointer memory keeps its own
         frame index); only batch-size-dependent kernel numerics differ. The masks carry the best hypothesis only.
+        With ``graphs``, the image encoder, memory attention, mask decoder and memory encoder replay CUDA graphs per
+        input signature (same kernels and layouts, so the same results); the selection and batching glue stays eager.
 
         Returns:
             Per state, the results by object id.
@@ -237,7 +248,21 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         assert not self.non_overlap_masks_for_mem_enc, "the memory encoder batch mixes videos"
         video_hw: tuple[int, int] = states[0].video_hw
         assert all(s.video_hw == video_hw for s in states) and tuple(frames.shape[-2:]) == video_hw
-        img_embeddings, img_pos_embeddings = self.encode_image(frames)
+        if graphs is not None:
+            assert not self.add_tpos_enc_to_obj_ptrs, "pointer temporal encodings copy frame indices to the device: no graph capture"
+
+        def run(key: tuple, fn, inputs: list[torch.Tensor]):
+            return fn(*inputs) if graphs is None else graphs(key, fn, inputs)
+
+        def decoded(result: SAM2Result) -> tuple[torch.Tensor, ...]:
+            return result.masks_logits, result.ious, result.obj_ptrs, result.obj_score_logits
+
+        if getattr(self, "_empty_prompts_on_device", None) is None:
+            # Built on the host at construction; one copy, not one per step (a graph cannot hold a host copy).
+            self._empty_prompts_on_device = tuple(t.to(self.device) for t in self.empty_prompt_embeddings)
+        empty_sparse, empty_dense = self._empty_prompts_on_device
+        img_embeddings, img_pos_embeddings = run(("encode_image",), self.encode_image, [frames])
+        n_levels: int = len(img_embeddings)
 
         # (slot, obj_id, prompt or None, memory selection or None) per object, in forward's per-state order.
         items: list[tuple[int, int, SAM2Prompt | None, object]] = []
@@ -279,7 +304,7 @@ class SAM2GenericVideoPredictor(SAM2Generic):
 
         results: list[SAM2Result | None] = [None] * len(items)
         for key, members in groups.items():
-            slots = torch.tensor([items[i][0] for i in members], device=self.device)
+            slots = self._index_tensor([items[i][0] for i in members])
             group_img = [level.index_select(0, slots) for level in img_embeddings]
             if key[0] == "prompt":
                 group_prompts: list[SAM2Prompt] = [items[i][2] for i in members]
@@ -289,9 +314,19 @@ class SAM2GenericVideoPredictor(SAM2Generic):
                     for name in ("points_coords", "points_labels", "boxes", "masks_logits")
                 }
                 prompt_embeddings = self.encode_prompts(orig_hw=video_hw, batch_size=len(members), **fields)
-                result = self.generate_masks(
-                    orig_hw=video_hw, img_embeddings=group_img, prompt_embeddings=prompt_embeddings, multimask_output=key[1], best_only=True
-                )
+
+                def decode_prompted(*tensors: torch.Tensor, multimask: bool = key[1]) -> tuple[torch.Tensor, ...]:
+                    return decoded(
+                        self.generate_masks(
+                            orig_hw=video_hw,
+                            img_embeddings=list(tensors[:n_levels]),
+                            prompt_embeddings=(tensors[n_levels], tensors[n_levels + 1]),
+                            multimask_output=multimask,
+                            best_only=True,
+                        )
+                    )
+
+                result = SAM2Result(*run(("prompted", video_hw, key[1]), decode_prompted, [*group_img, *prompt_embeddings]))
             else:
                 selections = [items[i][3] for i in members]
 
@@ -305,22 +340,55 @@ class SAM2GenericVideoPredictor(SAM2Generic):
                         ptr=torch.cat([m.ptr for m in per_object]),
                     )
 
-                conditioned = self.condition_image_embeddings_on_memories(
-                    frame_idx=frame_idx,
-                    img_embeddings=group_img,
-                    img_pos_embeddings=[level.index_select(0, slots) for level in img_pos_embeddings],
-                    conditional_memories=[stack_memories([s.conditional_memories[k] for s in selections]) for k in range(key[1])],
-                    non_conditional_memories=[stack_memories([s.non_conditional_memories[k] for s in selections]) for k in range(key[2])],
-                    ptr_memories=[stack_memories([s.ptr_memories[k] for s in selections]) for k in range(key[3])],
-                )
-                sparse, dense = self.empty_prompt_embeddings
-                result = self.generate_masks(
-                    orig_hw=video_hw,
-                    img_embeddings=conditioned,
-                    prompt_embeddings=(sparse.to(self.device).expand(len(members), -1, -1), dense.to(self.device).expand(len(members), -1, -1, -1)),
-                    multimask_output=True,
-                    best_only=True,
-                )
+                n_spatial: int = key[1] + key[2]
+                stacked = [stack_memories([s.conditional_memories[k] for s in selections]) for k in range(key[1])]
+                stacked += [stack_memories([s.non_conditional_memories[k] for s in selections]) for k in range(key[2])]
+                stacked += [stack_memories([s.ptr_memories[k] for s in selections]) for k in range(key[3])]
+
+                def condition(low: torch.Tensor, low_pos: torch.Tensor, *memories: torch.Tensor, n_cond: int = key[1], n_spatial: int = n_spatial) -> torch.Tensor:
+                    # Tensors only (graph inputs): spatial memories as (embeddings, positions) pairs, then pointers. Without
+                    # pointer temporal encodings the frame indices do not enter (list positions set the memory encodings).
+                    spatial = [ObjectMemory(-1, 0, memories[2 * k], memories[2 * k + 1], None) for k in range(n_spatial)]  # type: ignore[arg-type]
+                    ptrs = [ObjectMemory(-1, 0, None, None, ptr) for ptr in memories[2 * n_spatial :]]  # type: ignore[arg-type]
+                    return self.condition_image_embeddings_on_memories(
+                        frame_idx=frame_idx,
+                        img_embeddings=[low],
+                        img_pos_embeddings=[low_pos],
+                        conditional_memories=spatial[:n_cond],
+                        non_conditional_memories=spatial[n_cond:],
+                        ptr_memories=ptrs,
+                    )[-1]
+
+                if graphs is None:
+                    # Eager: the memories keep their frame indices (pointer temporal encodings may need them).
+                    conditioned_low = self.condition_image_embeddings_on_memories(
+                        frame_idx=frame_idx,
+                        img_embeddings=[group_img[-1]],
+                        img_pos_embeddings=[img_pos_embeddings[-1].index_select(0, slots)],
+                        conditional_memories=stacked[: key[1]],
+                        non_conditional_memories=stacked[key[1] : n_spatial],
+                        ptr_memories=stacked[n_spatial:],
+                    )[-1]
+                else:
+                    memory_tensors = [t for m in stacked[:n_spatial] for t in (m.memory_embeddings, m.memory_pos_embeddings)]
+                    memory_tensors += [m.ptr for m in stacked[n_spatial:]]
+                    conditioned_low = graphs(
+                        ("condition", *key), condition, [group_img[-1], img_pos_embeddings[-1].index_select(0, slots), *memory_tensors]
+                    )
+
+                def decode_propagated(*levels: torch.Tensor) -> tuple[torch.Tensor, ...]:
+                    n: int = levels[0].shape[0]
+                    return decoded(
+                        self.generate_masks(
+                            orig_hw=video_hw,
+                            img_embeddings=list(levels),
+                            prompt_embeddings=(empty_sparse.expand(n, -1, -1), empty_dense.expand(n, -1, -1, -1)),
+                            multimask_output=True,
+                            best_only=True,
+                        )
+                    )
+
+                result = SAM2Result(*run(("propagated", video_hw), decode_propagated, [*group_img[:-1], conditioned_low]))
             for row, index in enumerate(members):
                 results[index] = result[row]
 
@@ -328,19 +396,27 @@ class SAM2GenericVideoPredictor(SAM2Generic):
         if not items:
             return outputs
         all_results = SAM2Result.cat(results)
-        slots = torch.tensor([item[0] for item in items], device=self.device)
-        memory_embeddings, memory_pos_embeddings = self.encode_memory(
-            img_embeddings=[img_embeddings[-1].index_select(0, slots)],
-            masks_logits=all_results.masks_logits,
-            obj_score_logits=all_results.obj_score_logits,
-            is_prompt=torch.tensor([item[2] is not None for item in items], dtype=torch.bool, device=self.device),
+        slots = self._index_tensor([item[0] for item in items])
+
+        def encode(low: torch.Tensor, masks_logits: torch.Tensor, obj_score_logits: torch.Tensor, is_prompt: torch.Tensor):
+            return self.encode_memory(img_embeddings=[low], masks_logits=masks_logits, obj_score_logits=obj_score_logits, is_prompt=is_prompt)
+
+        memory_embeddings, memory_pos_embeddings = run(
+            ("encode_memory",),
+            encode,
+            [
+                img_embeddings[-1].index_select(0, slots),
+                all_results.masks_logits,
+                all_results.obj_score_logits,
+                self._index_tensor([item[2] is not None for item in items], torch.bool),
+            ],
         )
         for slot, state in enumerate(states):
             rows = [i for i, item in enumerate(items) if item[0] == slot]
             if not rows:
                 continue
             obj_ids = [items[i][1] for i in rows]
-            index = torch.tensor(rows, device=self.device)
+            index = self._index_tensor(rows)
             state.memory_bank.try_add_memories(
                 frame_idx=frame_idx,
                 obj_ids=obj_ids,

@@ -79,3 +79,11 @@
   and `_prepare_obj_ptrs_for_memory_conditioning` accepts a pointer frame index per
   batch element (a nested list). fp32 replay of clip B people tracking: masks of the
   per-object loop and the batched pass agree to union IoU 0.9995 or more.
+- `sam2/cuda_graphs.py` `GraphCache` (new) and `forward_batched(graphs=...)`: CUDA-graph replay
+  of the batched step's modules (image encoder, memory attention per memory layout and object
+  count, mask decoder, memory encoder), one graph per input signature, captured on its second
+  call; the selection and batching glue stays eager. Static inputs and outputs are views into
+  buffers shared by all graphs, so memory follows the largest signature. The step's index
+  tensors go to the device from pinned memory without a host sync, the box labels are built on
+  the device and the empty prompt embeddings are copied once. Masks are bit-identical to the
+  eager pass (clip B and clip 007 replays of people tracking).

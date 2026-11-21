@@ -10,6 +10,7 @@ detections with GPU masks and stable ``track_ids``.
 from __future__ import annotations
 
 import functools
+import os
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -63,6 +64,9 @@ class Sam2VideoSegmenterConfig:
 
     fused_rope: bool = True
     """Rotary encodings in one Triton kernel per tensor (sam2-streaming ``fused_rope``, same masks); needs Triton."""
+    cuda_graphs: bool = True
+    """Replay the step's modules as CUDA graphs, one per input signature (sam2-streaming ``GraphCache``, same masks):
+    the step is launch-bound. CUDA only; eager while beartype runs (``PIXI_DEV_MODE=1``)."""
 
     def setup(self) -> "Sam2VideoSegmenter":
         """Download the checkpoint, build the predictor, and return a ready segmenter."""
@@ -80,6 +84,7 @@ class Sam2VideoSegmenter(VideoSegmenter):
         """
         from huggingface_hub import hf_hub_download
         from sam2.build_sam import build_sam2_generic_video_predictor
+        from sam2.cuda_graphs import GraphCache
         from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
         self.config: Sam2VideoSegmenterConfig = config
@@ -94,6 +99,9 @@ class Sam2VideoSegmenter(VideoSegmenter):
             fused_rope.ENABLED = fused_rope.triton is not None
         self._states: list[SAM2GenericVideoPredictorState] | None = None
         self._frame_idx: int = 0
+        use_graphs: bool = config.cuda_graphs and torch.device(config.device).type == "cuda" and os.environ.get("PIXI_DEV_MODE") != "1"
+        # Graphs depend on shapes only, so they outlive reset(): a new video of the same layout replays them.
+        self._graphs: GraphCache | None = GraphCache() if use_graphs else None
 
     def reset(self) -> None:
         """Drop all tracked instances and memory state."""
@@ -170,8 +178,11 @@ class Sam2VideoSegmenter(VideoSegmenter):
             for sp in slot_prompts
         ]
         # One predictor pass for every slot and object (grouped batches per module, see forward_batched).
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.bf16):
-            per_slot = self.predictor.forward_batched(self._states, self._frame_idx, frames_rgb.permute(0, 3, 1, 2), slot_prompts, single_clicks)
+        # No autocast cast cache: a graph must not read a cached cast that the region's exit frees.
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=self.config.bf16, cache_enabled=self._graphs is None):
+            per_slot = self.predictor.forward_batched(
+                self._states, self._frame_idx, frames_rgb.permute(0, 3, 1, 2), slot_prompts, single_clicks, graphs=self._graphs
+            )
         self._frame_idx += 1
         rows_out: list[tuple[int, int, SAM2Result]] = [
             (slot, obj_id, result) for slot, results in enumerate(per_slot) for obj_id, result in results.items()
@@ -193,9 +204,9 @@ class Sam2VideoSegmenter(VideoSegmenter):
         return BoxDetections(
             xyxy=torch.where(cols.any(dim=1, keepdim=True), boxes, 0.0),
             scores=torch.cat([result.ious.max(dim=1).values for _, _, result in rows_out]).float(),
-            frame_indices=torch.tensor([slot for slot, _, _ in rows_out], dtype=torch.long, device=device),
+            frame_indices=self.predictor._index_tensor([slot for slot, _, _ in rows_out]),
             masks=masks,
-            track_ids=torch.tensor([obj_id for _, obj_id, _ in rows_out], dtype=torch.long, device=device),
+            track_ids=self.predictor._index_tensor([obj_id for _, obj_id, _ in rows_out]),
         )
 
     def _prompts_for_slot(self, prompts: SegmentationPrompts, slot: int) -> list:
