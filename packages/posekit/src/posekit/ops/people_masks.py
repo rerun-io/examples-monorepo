@@ -95,18 +95,25 @@ def dilate_mask(mask: Bool[ndarray, "h w"], radius_px: int) -> Bool[ndarray, "h 
     return grown.astype(bool)
 
 
+def dilate_by_footprint(masks: Bool[Tensor, "n h w"], footprint: Bool[Tensor, "k k"]) -> Bool[Tensor, "n h w"]:
+    """Binary dilation of a mask batch by an odd-sized ``footprint``, as one zero-padded convolution on the masks' device.
+
+    On CUDA the conv runs in float16: a single-channel float32 conv takes a slow cuDNN path (80 ms for two 1920 px masks
+    on the 5090, 3.6 ms in float16). The sums are integers <= k*k, exact in float16 while k*k <= 2048 and in float32
+    always, so > 0.5 is the binary dilation either way.
+    """
+    dtype: torch.dtype = torch.float16 if masks.is_cuda and footprint.numel() <= 2048 else torch.float32
+    weights: Tensor = footprint.to(masks.device, dtype)[None, None]
+    hits: Tensor = F.conv2d(masks[:, None].to(dtype), weights, padding=footprint.shape[0] // 2)
+    return hits[:, 0] > 0.5
+
+
 def dilate_masks(masks: Bool[Tensor, "n h w"], radius_px: int) -> Bool[Tensor, "n h w"]:
-    """``dilate_mask`` on the masks' device: the same OpenCV disc, as one convolution (0 returns the masks unchanged)."""
+    """``dilate_mask`` on the masks' device: the same OpenCV disc (0 returns the masks unchanged)."""
     if radius_px <= 0:
         return masks
     kernel: UInt8[ndarray, "k k"] = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius_px + 1, 2 * radius_px + 1))
-    # On CUDA the conv runs in float16: a single-channel float32 conv takes a slow cuDNN path (80 ms for two 1920 px masks
-    # on the 5090, 3.6 ms in float16). The disc sums are integers <= k*k, exact in float16 while k*k <= 2048 and in float32
-    # always, so > 0.5 is the binary dilation either way.
-    dtype: torch.dtype = torch.float16 if masks.is_cuda and kernel.size <= 2048 else torch.float32
-    weights: Tensor = torch.from_numpy(kernel).to(masks.device, dtype)[None, None]
-    hits: Tensor = F.conv2d(masks[:, None].to(dtype), weights, padding=radius_px)
-    return hits[:, 0] > 0.5
+    return dilate_by_footprint(masks, torch.from_numpy(kernel).bool())
 
 
 def selection_windows(keyframes: Sequence[bool], indices: Sequence[int]) -> list[DecodeWindow]:

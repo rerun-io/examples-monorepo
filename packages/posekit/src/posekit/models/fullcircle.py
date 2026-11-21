@@ -58,6 +58,7 @@ from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
 from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 from posekit.models.yolox import YoloxDetector, YoloxDetectorConfig, fp16_dynamic_yolox
+from posekit.ops.people_masks import dilate_by_footprint
 from posekit.ops.sphere import (
     Kb4Camera,
     PinholeCamera,
@@ -224,10 +225,9 @@ def disk_dilate(mask: Bool[Tensor, "h w"], radius: int) -> Bool[Tensor, "h w"]:
     """Binary dilation by a disk of ``radius`` pixels (0: unchanged)."""
     if radius <= 0:
         return mask
-    offsets: Float32[Tensor, " k"] = torch.arange(-radius, radius + 1, device=mask.device, dtype=torch.float32)
-    disk: Float32[Tensor, "k k"] = ((offsets[:, None] ** 2 + offsets[None, :] ** 2) <= radius * radius + 1e-6).float()
-    hits: Float32[Tensor, "1 1 h w"] = F.conv2d(mask[None, None].float(), disk[None, None], padding=radius)
-    return hits[0, 0] > 0.5
+    offsets: Float32[Tensor, " k"] = torch.arange(-radius, radius + 1, dtype=torch.float32)
+    disk: Bool[Tensor, "k k"] = (offsets[:, None] ** 2 + offsets[None, :] ** 2) <= radius * radius + 1e-6
+    return dilate_by_footprint(mask[None], disk)[0]
 
 
 class FullCircleMasker:
