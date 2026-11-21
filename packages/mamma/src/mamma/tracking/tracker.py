@@ -135,8 +135,9 @@ class TrackerConfig:
     captured at construction only (one object per camera); prompt and
     re-detect ticks, and signatures not captured then, stay eager."""
     cuda_graph_max_conditional: int = 4
-    """Graphs are captured at construction for 1..N conditional memories (one
-    per prompt tick: bootstrap + each re-prompt); later ticks run eagerly."""
+    """Prompted (conditional) memories each object attends to, the most recent (SAM 2 ``max_cond_frames_in_attn``;
+    the bank stores only those), and graphs are captured at construction for 1..N of them: one per prompt tick
+    (bootstrap + each re-prompt), so a long run keeps replaying graphs after any number of re-prompts."""
     fused_rope: bool = True
     """Rotary position encoding in one Triton kernel per q/k (memory attention
     12.3 -> 8.1 ms GPU per batched tick, identical output) instead of five
@@ -168,6 +169,10 @@ class MultiViewTracker:
             config.sam2_config, str(config.sam2_checkpoint), device=config.device
         )
         _disable_dead_hole_filling(self.predictor)
+        # Attend to the cuda_graph_max_conditional most recent prompted memories (the bank stores only those): each
+        # routine re-prompt adds one, and unbounded the steady step's signature grew past the captured graphs after
+        # ~4 re-prompts (~16 s single subject, ~2 s with several), every later tick eager and slower.
+        self.predictor.max_cond_frames_in_attn = config.cuda_graph_max_conditional
         if config.compile_image_encoder:
             encoder = self.predictor.image_encoder
             encoder.forward = torch.compile(encoder.forward, dynamic=False)
@@ -182,6 +187,7 @@ class MultiViewTracker:
                     memory_temporal_stride=1,
                     memory_window_size=config.memory_window_size,
                     storage_device=torch.device(config.device),
+                    max_conditional_memories=config.cuda_graph_max_conditional,
                 ),
             )
             for _ in cameras
