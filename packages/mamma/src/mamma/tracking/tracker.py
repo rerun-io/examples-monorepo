@@ -13,10 +13,9 @@ in ``SAM2GenericVideoPredictorState``.
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -35,10 +34,6 @@ from mamma.tracking.identity import (
     resolve_epipolar_px,
 )
 from mamma.tracking.steady_graph import SteadyTickGraphs, SteadyTickOutputs, steady_structures
-
-if TYPE_CHECKING:
-    from posekit.models import IdentityEncoder, PersonDetector
-    from posekit.predictions import BoxDetections
 
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP+epipolar score to accept a cross-camera bootstrap match."""
@@ -201,13 +196,15 @@ class MultiViewTracker:
             )
             with torch.inference_mode():
                 self._graphs.precapture(len(cameras), structures)
+        import dataclasses
+
         from posekit.models import PERSON_DETECTORS, ClipIdentityConfig, YoloDetectorConfig
 
         detector_config = PERSON_DETECTORS[config.detector]
         if isinstance(detector_config, YoloDetectorConfig):
             detector_config = dataclasses.replace(detector_config, weights=config.yolo_checkpoint, device=config.device)
-        self.detector: PersonDetector = detector_config.setup()
-        self.encoder: IdentityEncoder = ClipIdentityConfig(device=config.device).setup()
+        self.detector = detector_config.setup()
+        self.encoder = ClipIdentityConfig(device=config.device).setup()
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False
         self._lost_ticks: list[dict[int, int]] = [{} for _ in cameras]
@@ -233,7 +230,7 @@ class MultiViewTracker:
     def _detect(self, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[PersonDetections]:
         """Person boxes and CLIP features in every camera: one detector call and one CLIP call for all cameras."""
         frames_rgb: UInt8[torch.Tensor, "c h w 3"] = torch.stack(frames).permute(0, 2, 3, 1).contiguous()
-        boxes: BoxDetections = self.detector(frames_rgb)
+        boxes = self.detector(frames_rgb)
         features: Float32[torch.Tensor, "n d"] = self.encoder(frames_rgb, boxes).cpu()
         xyxy: Float32[ndarray, "n 4"] = boxes.xyxy_numpy()
         scores: Float32[ndarray, "n"] = boxes.scores.cpu().numpy()
