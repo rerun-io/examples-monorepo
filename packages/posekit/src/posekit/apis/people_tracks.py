@@ -1,10 +1,10 @@
 """Tracked people masks: SAM 3 detects people on sparse frames, EfficientTAM propagates their masks in between.
 
 The video streams (one tracker slot each, e.g. the two fisheye lenses of a 360 camera) are decoded in order with
-NVDEC. Every ``redetect_every`` tracker steps SAM 3 runs on all streams; its instances are matched to the live tracks
-by mask IoU (matched tracks are re-anchored on the SAM 3 box, unmatched instances start tracks, duplicate tracks are
-dropped). A track that stays empty for ``max_misses`` steps, or that SAM 3 does not confirm at ``max_unconfirmed``
-re-detects in a row, is dropped. On frames that are a multiple of
+NVDEC, one thread per stream, a chunk ahead of the tracker. Every ``redetect_every`` tracker steps SAM 3 runs on all
+streams; its instances are matched to the live tracks by mask IoU (matched tracks are re-anchored on the SAM 3 box,
+unmatched instances start tracks, duplicate tracks are dropped). A track that stays empty for ``max_misses`` steps, or
+that SAM 3 does not confirm at ``max_unconfirmed`` re-detects in a row, is dropped. On frames that are a multiple of
 ``output_every`` the union of the track masks (and of the SAM 3 masks on a re-detect step) is dilated at full
 resolution and logged as a ``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask``
 with the frame's own stamp, in the mask layer contract (track 3, v2): ``mask_downscale`` times smaller than the frame
@@ -13,6 +13,8 @@ with the frame's own stamp, in the mask layer contract (track 3, v2): ``mask_dow
 """
 
 import time
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -124,7 +126,41 @@ class StreamDecoder:
     def frames(self, indices: list[int]) -> UInt8[Tensor, "n h w 3"]:
         """RGB frames at ascending stream indices."""
         batch: UInt8[Tensor, "n 3 h w"] = self.decoder.get_frames_at([i - self.first for i in indices]).data
+        # NVDEC frames are NHWC in memory (NCHW is a view), so this is a view, not a copy
         return rearrange(batch, "n c h w -> n h w c").contiguous()
+
+
+def prefetched_chunks(
+    videos: tuple[CatalogVideo, ...], chunks: list[list[int]], start: int, end: int, device: str
+) -> Iterator[UInt8[Tensor, "s n h w 3"]]:
+    """The frames of each chunk, all streams stacked. Decoding starts at the call, and the next chunk decodes on one
+    thread per stream while the caller computes on the current one (two NVDEC threads decode twice the frames per
+    second of one on the 5090).
+
+    A torchcodec CUDA decoder fails on a thread other than the one that created it, so each decoder is made on its thread.
+    """
+    threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in range(len(videos))]
+    decoders: list[Future[StreamDecoder]] = [thread.submit(StreamDecoder, v, start, end, device) for thread, v in zip(threads, videos, strict=True)]
+
+    def decode(slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
+        frames: UInt8[Tensor, "n h w 3"] = decoders[slot].result().frames(chunk)
+        torch.cuda.synchronize(device)
+        return frames
+
+    def submit(chunk: list[int]) -> list[Future[Tensor]]:
+        return [thread.submit(decode, slot, chunk) for slot, thread in enumerate(threads)]
+
+    def stacked(pending: list[Future[Tensor]]) -> Iterator[UInt8[Tensor, "s n h w 3"]]:
+        try:
+            for position in range(len(chunks)):
+                batches: list[Tensor] = [future.result() for future in pending]
+                pending = submit(chunks[position + 1]) if position + 1 < len(chunks) else []
+                yield torch.stack(batches)
+        finally:
+            for thread in threads:
+                thread.shutdown(cancel_futures=True)
+
+    return stacked(submit(chunks[0]) if chunks else [])
 
 
 class PeopleTracker:
@@ -263,8 +299,9 @@ def main(config: PeopleTracksConfig) -> None:
     print(f"rrd read {time.perf_counter() - process_start:.1f} s")
 
     load_start: float = time.perf_counter()
+    chunks: list[list[int]] = [tracked[begin : begin + config.decode_chunk] for begin in range(0, len(tracked), config.decode_chunk)]
+    decoded: Iterator[UInt8[Tensor, "s n h w 3"]] = prefetched_chunks(videos, chunks, config.start, end, config.device)
     tracker = PeopleTracker(config.track, config.mask, config.device)
-    decoders: list[StreamDecoder] = [StreamDecoder(v, config.start, end, config.device) for v in videos]
     targets: list[str] = [mask_entity(e) for e in entities]
     factor: int = config.mask_downscale
     for target in targets:
@@ -276,9 +313,7 @@ def main(config: PeopleTracksConfig) -> None:
     run_start: float = time.perf_counter()
     print(f"model load + decoder setup {run_start - load_start:.1f} s")
     n_masks: int = 0
-    for begin in range(0, len(tracked), config.decode_chunk):
-        chunk: list[int] = tracked[begin : begin + config.decode_chunk]
-        frames: UInt8[Tensor, "s n h w 3"] = torch.stack([d.frames(chunk) for d in decoders])
+    for chunk, frames in zip(chunks, decoded, strict=True):
         n_slots, height, width = int(frames.shape[0]), int(frames.shape[2]), int(frames.shape[3])
         if height % factor or width % factor:
             raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames")
