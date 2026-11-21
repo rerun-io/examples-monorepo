@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 from jaxtyping import UInt8
-from simplecv.video_io import TorchCodecMultiVideoReader
+from simplecv.video_io import TorchCodecMultiVideoReader, area_downscale_uint8
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.capture_lock import GRAPH_CAPTURE_LOCK
@@ -94,23 +94,6 @@ def decode_backend(reader: TorchCodecMultiVideoReader) -> str:
     if nvdec_444_count > 0:
         return f"NVDEC (4:4:4 through PyNvVideoCodec on {nvdec_444_count}/{len(reader.video_readers)} cameras)"
     return "NVDEC" if reader.device.startswith("cuda") else "torchcodec CPU"
-
-
-def area_resize(frames: UInt8[torch.Tensor, "b 3 h w"], size_hw: tuple[int, int]) -> UInt8[torch.Tensor, "b 3 hh ww"]:
-    """Area (box-filter) downscale of uint8 frames, rounded back to uint8.
-
-    For an integer factor (3840x2160 -> 1280x720 is exactly 3x) area interpolation is the mean of
-    each factor x factor block, i.e. ``avg_pool2d`` with that kernel and stride; torch runs ``mode="area"``
-    as ``adaptive_avg_pool2d``, whose kernel fills a few percent of the GPU here (1.2 ms per tick for
-    4 cameras). Other sizes keep ``interpolate(mode="area")``.
-    """
-    h, w = int(frames.shape[2]), int(frames.shape[3])
-    factor_h, factor_w = h // size_hw[0], w // size_hw[1]
-    if factor_h >= 1 and factor_h == factor_w and h == size_hw[0] * factor_h and w == size_hw[1] * factor_w:
-        pooled: torch.Tensor = torch.nn.functional.avg_pool2d(frames.float(), kernel_size=factor_h, stride=factor_h)
-    else:
-        pooled = torch.nn.functional.interpolate(frames.float(), size=size_hw, mode="area")
-    return pooled.round_().clamp_(0, 255).to(torch.uint8)
 
 
 def ramped_chunk_ranges(start: int, stop: int, chunk_size: int, first: int = 4) -> list[tuple[int, int]]:
@@ -251,7 +234,7 @@ class StreamingPipeline:
                     if self.engine_hw is not None:
                         frames_hires = frames
                         with torch.profiler.record_function("stage::resize"):
-                            lo: UInt8[torch.Tensor, "c 3 h w"] = area_resize(torch.stack(frames), self.engine_hw)
+                            lo: UInt8[torch.Tensor, "c 3 h w"] = area_downscale_uint8(torch.stack(frames), self.engine_hw)
                         frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None

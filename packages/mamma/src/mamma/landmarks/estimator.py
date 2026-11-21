@@ -12,7 +12,7 @@ from numpy import ndarray
 
 from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
-from mamma.landmarks.crops import box_geometry, crop_window, gpu_crop_batch, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
+from mamma.landmarks.crops import box_geometry, gpu_crop_frame, gpu_mask_crop_batch, to_device_f32, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
 from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES
 
@@ -114,35 +114,14 @@ class LandmarkEstimator:
         # crops concatenate in entry order.
         rgb_source: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor] = frames_hires if frames_hires is not None else frames
         s: float = hires_scale if frames_hires is not None else 1.0
-        # One host->device upload of all crop geometry (engine-res and hi-res,
-        # scaled in float64 on the host as before); per-camera rows are
-        # contiguous slices because entries are camera-major.
-        # Only each camera's crop window goes to float (see crop_window): a native-4K float32 frame is
-        # ~100 MB, a person's window a few percent of it. The window offsets shift the hi-res centres
-        # here on the host, so the single geometry upload stays the only host->device copy.
-        cam_rows: dict[int, tuple[int, int]] = {}
-        for row, (cam, _) in enumerate(entries):
-            lo_row, _hi_row = cam_rows.get(cam, (row, row))
-            cam_rows[cam] = (lo_row, row + 1)
-        windows: dict[int, tuple[int, int, int, int]] = {}
-        window_centers: Float64[ndarray, "n 2"] = centers * s
-        for cam, (lo_row, hi_row) in cam_rows.items():
-            frame_hw: tuple[int, int] = (int(rgb_source[cam].shape[1]), int(rgb_source[cam].shape[2]))
-            windows[cam] = crop_window(centers[lo_row:hi_row] * s, sizes[lo_row:hi_row] * s, frame_hw[1], frame_hw[0])
-            window_centers[lo_row:hi_row] -= np.array(windows[cam][:2], dtype=np.float64)
-        geom: Float32[torch.Tensor, "n 8"] = to_device_f32(
-            np.concatenate([centers, sizes, window_centers, sizes * s], axis=1), masks_batch.device
-        )
+        geom: Float32[torch.Tensor, "n 4"] = to_device_f32(np.concatenate([centers, sizes], axis=1), masks_batch.device)
         centers_t, sizes_t = geom[:, 0:2], geom[:, 2:4]
+        # Entries are camera-major: each camera's rows are one contiguous slice.
         cam_crops: list[Float32[torch.Tensor, "k 3 ch cw"]] = []
-        for cam_idx in sorted(cam_rows):
-            lo, hi = cam_rows[cam_idx]
-            x0, y0, x1, y1 = windows[cam_idx]
-            # align_corners sampling of the window at shifted centres reads the same pixels as
-            # sampling the whole frame (unit-tested).
-            window: Float32[torch.Tensor, "k 3 hh ww"] = rgb_source[cam_idx][:, y0:y1, x0:x1].float().unsqueeze(0).expand(hi - lo, -1, -1, -1)
-            crops, _ = gpu_crop_batch(window, geom[lo:hi, 4:6], geom[lo:hi, 6:8], None, self.config)
-            cam_crops.append(crops)
+        for cam_idx in sorted({cam for cam, _ in entries}):
+            rows: list[int] = [row for row, (cam, _) in enumerate(entries) if cam == cam_idx]
+            lo, hi = rows[0], rows[-1] + 1
+            cam_crops.append(gpu_crop_frame(rgb_source[cam_idx], centers[lo:hi] * s, sizes[lo:hi] * s, self.config))
         img_crops: Float32[torch.Tensor, "n 3 ch cw"] = torch.cat(cam_crops, dim=0)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers_t, sizes_t, self.config)
         if self.runner is not None and img_crops.shape[0] <= 4:

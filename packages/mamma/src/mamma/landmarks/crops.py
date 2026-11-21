@@ -10,7 +10,7 @@ import functools
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float32, Float64
+from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 
 from mamma.landmarks.config import MammaNetConfig
@@ -63,27 +63,6 @@ def box_geometry(box_xyxy: Float32[ndarray, "4"], config: MammaNetConfig) -> tup
         wh * config.bedlam_scale, target_wh=(config.crop_width, config.crop_height)
     )
     return center, bbox_size
-
-
-def crop_window(
-    centers: Float64[ndarray, "k 2"], bbox_sizes: Float64[ndarray, "k 2"], width: int, height: int
-) -> tuple[int, int, int, int]:
-    """Pixel window ``(x0, y0, x1, y1)`` (exclusive ends) holding every pixel the crops of
-    :func:`gpu_crop_batch` read for these boxes, clamped to the frame.
-
-    A crop samples ``center +- size/2``; bilinear reads the two pixels around each sample, so the
-    window adds two pixels on each side. A window clamped to nothing (a box outside the frame)
-    falls back to the whole frame.
-    """
-    lo: Float64[ndarray, "2"] = np.floor((centers - bbox_sizes / 2.0).min(axis=0)) - 2.0
-    hi: Float64[ndarray, "2"] = np.ceil((centers + bbox_sizes / 2.0).max(axis=0)) + 3.0
-    x0: int = int(np.clip(lo[0], 0, width))
-    y0: int = int(np.clip(lo[1], 0, height))
-    x1: int = int(np.clip(hi[0], 0, width))
-    y1: int = int(np.clip(hi[1], 0, height))
-    if x1 - x0 < 2 or y1 - y0 < 2:
-        return 0, 0, width, height
-    return x0, y0, x1, y1
 
 
 def gpu_crop_batch(
@@ -140,6 +119,31 @@ def gpu_crop_batch(
     if masks is not None:
         mask_crops = F.grid_sample(masks, grid, mode="nearest", padding_mode="zeros", align_corners=True) / 255.0
     return img_crops, mask_crops
+
+
+def gpu_crop_frame(
+    frame: UInt8[torch.Tensor, "3 h w"],
+    centers: Float64[ndarray, "k 2"],
+    bbox_sizes: Float64[ndarray, "k 2"],
+    config: MammaNetConfig,
+) -> Float32[torch.Tensor, "k 3 ch cw"]:
+    """:func:`gpu_crop_batch` of ``k`` boxes in one uint8 frame, converting only the pixels the crops read.
+
+    A native-4K frame in float32 is ~100 MB; a person's crop window is a few percent of it. The window
+    is the union of the crop rectangles (``center +- size/2``) plus the two pixels bilinear reads on each
+    side, clamped to the frame; sampling it at shifted centres reads the same pixels as sampling the whole
+    frame (align_corners). A window clamped to nothing (boxes outside the frame) uses the whole frame.
+    """
+    height, width = int(frame.shape[1]), int(frame.shape[2])
+    lo: Float64[ndarray, "2"] = np.floor((centers - bbox_sizes / 2.0).min(axis=0)) - 2.0
+    hi: Float64[ndarray, "2"] = np.ceil((centers + bbox_sizes / 2.0).max(axis=0)) + 3.0
+    x0, x1 = int(np.clip(lo[0], 0, width)), int(np.clip(hi[0], 0, width))
+    y0, y1 = int(np.clip(lo[1], 0, height)), int(np.clip(hi[1], 0, height))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        x0, y0, x1, y1 = 0, 0, width, height
+    window: Float32[torch.Tensor, "k 3 hh ww"] = frame[:, y0:y1, x0:x1].float().unsqueeze(0).expand(centers.shape[0], -1, -1, -1)
+    crops, _ = gpu_crop_batch(window, centers - np.array([x0, y0], dtype=np.float64), bbox_sizes, None, config)
+    return crops
 
 
 def unproject_joints2d(
