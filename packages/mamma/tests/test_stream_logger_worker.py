@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from typing import Any
 
 import pytest
 
@@ -38,7 +39,7 @@ def test_fit_log_worker_reads_clouds_after_the_producing_stream_wrote_them(monke
     import mamma.viz.stream_logger as stream_logger
     from mamma.viz.stream_logger import BoundedWorker, StreamLogger
 
-    logged: dict[str, object] = {}
+    logged: dict[str, Any] = {}
     monkeypatch.setattr(stream_logger.rr, "log", lambda entity, value, **_: logged.setdefault(entity, value))
     monkeypatch.setattr(stream_logger.rr, "Points3D", lambda positions, **_: positions)
     monkeypatch.setattr(stream_logger, "set_tick_time", lambda *_: None)
