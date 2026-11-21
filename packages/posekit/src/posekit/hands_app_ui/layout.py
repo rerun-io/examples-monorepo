@@ -86,6 +86,7 @@ def run_hands(
 def build(
     stacks: Sequence[str] = STACKS, examples: list[list[str]] | None = None, stack_default: str | None = None,
     description: str = DESCRIPTION, run: Callable[..., Iterator[tuple[Any, str, Any, str, str]]] = run_hands,
+    example_url: str | None = None,
 ) -> gr.Blocks:
     """Input and Outputs tabs, Run, Stop and the status on the left; the streaming Rerun viewer on the right.
 
@@ -95,9 +96,12 @@ def build(
         stack_default: Stack selected at start; None selects ``default_stack()``.
         description: Markdown above the app.
         run: What the Run button calls, with ``run_hands``'s inputs and outputs (a host wraps ``run_hands`` to run it elsewhere).
+        example_url: The example's page on rerun.io (full walkthrough), linked at the header's right; None links nothing.
     """
     with gr.Blocks(title="Rerun × EgoHand", fill_height=True) as demo:
         gr.Markdown(description, elem_id="app-description")
+        if example_url is not None:
+            gr.HTML(f'<a href="{example_url}" target="_blank" rel="noopener">Full example and walkthrough on rerun.io →</a>', elem_id="example-link")
         with gr.Row(elem_id="main-row", equal_height=False, scale=1):
             with gr.Column(scale=1, min_width=360, elem_id="left-column"):
                 with gr.Tabs(selected="input") as tabs:

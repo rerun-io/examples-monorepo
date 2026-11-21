@@ -151,6 +151,12 @@ footer { display: none !important; }
 .dark #app-title img.logo-light { display: none; }
 #app-description p { margin: 0 0 0.4rem; max-width: 72rem; font-size: 0.95rem; line-height: 1.45; color: var(--header-text); }
 #app-description strong { color: var(--header-strong); }
+/* A host's link to its rerun.io example page (build(example_url=...)): top right and out of the flow, so the header keeps its height. */
+#example-link { position: absolute; top: 1.1rem; right: 0; width: auto !important; min-width: 0 !important; padding: 0 !important; z-index: 1; }
+:has(> #example-link) { position: relative; }
+#example-link .html-container { padding: 0 !important; }
+#example-link a { display: inline-block; font-size: 0.95rem; font-weight: 500; color: var(--header-strong); text-decoration: none; padding: 0.35em 0.75em; border: 1px solid var(--header-faint); border-radius: 8px; transition: background 0.15s; }
+#example-link a:hover { background: var(--header-hover); }
 #source-video video { max-height: 320px !important; }
 /* The examples side by side: four equal tiles in one row (clips of any shape are cropped to fill), with a pager. */
 /* Gradio also gives each tile's inner box the class "gallery", so the row is the one holding the tiles. */
