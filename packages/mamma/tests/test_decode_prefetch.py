@@ -227,3 +227,43 @@ def test_hevc_444_decodes_on_nvdec_through_pynvvideocodec(tmp_path: Path) -> Non
         assert int((decoded.cpu().int() - expected.int()).abs().max()) <= 1
     finally:
         reader.close()
+
+
+
+@pytest.mark.integration
+def test_hevc_444_decoder_runs_on_its_own_thread_for_any_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reader without thread ownership (the default) driven from two other threads: every native decode runs on the
+    4:4:4 decoder's own thread, and the frames still match the CPU decode within 1 LSB."""
+    pytest.importorskip("PyNvVideoCodec", reason="PyNvVideoCodec (mamma env) decodes 4:4:4 on NVDEC")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU (NVDEC)")
+    ffmpeg: str | None = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is not on PATH")
+    from simplecv.nvdec_444 import Nvdec444Decoder
+
+    clip: Path = tmp_path / "a.mp4"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x256:rate=30", "-frames:v", "60"]
+        + ["-c:v", "libx265", "-pix_fmt", "yuv444p", "-colorspace", "bt470bg", "-x265-params", "log-level=error:bframes=2:keyint=30", str(clip)],
+        check=True,
+    )
+    decode_threads: set[int] = set()
+    original_frame = Nvdec444Decoder._frame
+
+    def recording_frame(self: Nvdec444Decoder, index: int) -> torch.Tensor:
+        decode_threads.add(threading.get_ident())
+        return original_frame(self, index)
+
+    monkeypatch.setattr(Nvdec444Decoder, "_frame", recording_frame)
+    expected: UInt8[torch.Tensor, "b 3 h w"] = TorchCodecMultiVideoReader([clip], device="cpu").video_readers[0].get_frames_in_range(0, 60)
+    reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader([clip], device="cuda")
+    try:
+        camera = reader.video_readers[0]
+        assert camera.backend == "NVDEC 4:4:4"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            chunks = list(pool.map(lambda bounds: camera.get_frames_in_range(*bounds).cpu(), [(0, 30), (30, 60)]))
+        assert decode_threads == {camera._decoder._thread_ident}
+        assert int((torch.cat(chunks).int() - expected.int()).abs().max()) <= 1
+    finally:
+        reader.close()
