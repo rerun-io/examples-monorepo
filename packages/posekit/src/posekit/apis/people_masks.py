@@ -63,9 +63,9 @@ class MaskOptions:
     against FP32 (mean IoU 0.990, recall >= 0.98 per size) at 2.5x SAM 3's speed; bfloat16 drifted (IoU 0.978)."""
     backend: Literal["torch", "tensorrt"] = "tensorrt"
     """How SAM 3 runs (:attr:`Sam3SegmenterConfig.backend`). ``tensorrt`` (fp16 engines for the trunk and the heads, the
-    patch embedding accumulated in fp32) takes about half the time of a torch fp16 call on the 5090; against the torch
-    layer the clip 007 window keeps mean IoU 0.998-0.999 / 0.983-0.989 per lens (two engine builds) and clip B 0.997 /
-    0.981. FP8 trunks (linears, or linears + attention) dropped the small-people lens to 0.94 / 0.93. ``torch`` is the
+    patch embedding, the ViT MLPs and the heads MatMuls accumulated in fp32) takes 78 ms per two-image call on the 5090
+    against 121 ms for torch fp16; against the torch layer the clip 007 window keeps mean IoU 0.998 / 0.989 per lens
+    (p5 0.997 / 0.958, no one-side-empty stamp; two engine builds give identical masks) and clip B 0.999 / 0.983. FP8 trunks (linears, or linears + attention) dropped the small-people lens to 0.94 / 0.93. ``torch`` is the
     eager fallback, under ``dtype`` autocast."""
 
 

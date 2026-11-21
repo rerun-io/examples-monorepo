@@ -133,8 +133,9 @@ def test_sam3_prepare_builds_one_heads_engine_per_prompt_length(monkeypatch: pyt
     segmenter.trunk = SimpleNamespace(spec=SimpleNamespace(outputs=(SimpleNamespace(name="fpn0", shape=(4, 2, 2)),)))
     built: list[tuple[str, dict[str, tuple[int, ...]]]] = []
 
-    def engine(self: Sam3Segmenter, module: Any, name: str, example: dict[str, Tensor], output_names: list[str]) -> str:
+    def engine(self: Sam3Segmenter, module: Any, name: str, example: dict[str, Tensor], output_names: list[str], fp32_matmuls: Any) -> str:
         built.append((name, {key: tuple(value.shape) for key, value in example.items()}))
+        assert fp32_matmuls(None, None)  # every heads MatMul accumulates in fp32, weight or activation
         return name
 
     monkeypatch.setattr(Sam3Segmenter, "engine", engine)
