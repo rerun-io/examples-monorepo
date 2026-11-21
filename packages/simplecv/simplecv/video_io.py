@@ -24,7 +24,7 @@ from einops import rearrange
 from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
-from simplecv.nvdec_444 import Nvdec444Decoder
+from simplecv.nvdec_444 import Nvdec444Decoder, converts_color_space
 
 T = TypeVar("T")
 
@@ -527,10 +527,16 @@ class TorchCodecVideoReader:
     def _open_nvdec_444(self, source: Path | bytes, pixel_format: str | None, color_space: str | None) -> Nvdec444Decoder | None:
         """A PyNvVideoCodec NVDEC decoder for an 8-bit 4:4:4 file torchcodec's NVDEC rejected, or ``None``.
 
-        ``None`` when the stream is not ``yuv444p``, the source is bytes, PyNvVideoCodec is not installed, or
-        NVDEC refuses the stream; the CPU fallback then stays. Frames match the CPU decode within 1 LSB.
+        ``None`` when the stream is not ``yuv444p``, signals a colour matrix the conversion does not reproduce
+        (torchcodec's CPU decode does), the source is bytes, PyNvVideoCodec is not installed, or NVDEC refuses the
+        stream; the CPU fallback then stays. Frames match the CPU decode within 1 LSB.
         """
-        if pixel_format != "yuv444p" or not isinstance(source, Path) or importlib.util.find_spec("PyNvVideoCodec") is None:
+        if (
+            pixel_format != "yuv444p"
+            or not converts_color_space(color_space)
+            or not isinstance(source, Path)
+            or importlib.util.find_spec("PyNvVideoCodec") is None
+        ):
             return None
         try:
             return self._decode(lambda: Nvdec444Decoder(source, self.device, color_space))
@@ -550,7 +556,9 @@ class TorchCodecVideoReader:
         return self._decode_thread.submit(bound).result()
 
     def close(self) -> None:
-        """Stop the owned decoder thread. Safe to call more than once."""
+        """Stop the owned decoder thread (and a 4:4:4 decoder's own thread). Safe to call more than once."""
+        if isinstance(self._decoder, Nvdec444Decoder):
+            self._decoder.close()
         if self._decode_thread is not None:
             self._decode_thread.shutdown(wait=True, cancel_futures=True)
             self._decode_thread = None
