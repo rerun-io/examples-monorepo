@@ -275,6 +275,8 @@ def read_catalog_cameras(dataset: DatasetEntry, segment: str, names: Sequence[st
     for camera in layout_cameras:
         entity: str = camera.transform_entity
         name_values = _static_values(names_table, f"{entity}:name")
+        if names and (str(name_values[0]) if name_values else camera.camera) not in names:
+            continue  # an unrequested camera (e.g. a Mei lens beside the cube faces) is never projected
         model: CatalogCameraCalibration = models[entity]
         projection, distortion = projection_of(entity, model.distortion)
         cameras.append(
