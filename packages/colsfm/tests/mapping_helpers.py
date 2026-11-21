@@ -19,17 +19,20 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pycolmap
+import torch
 from conftest import project_and_mask
 from google.protobuf.message import Message
 from jaxtyping import Bool, Float64, Int, UInt32
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from torch import Tensor
 
 from colsfm.ba_backend import BaExecutionPlan, CasparCapability, resolve_ba_plan
 from colsfm.cameras import colmap_cameras
@@ -62,6 +65,25 @@ MULTIVIEW_OVERSAMPLING: int = 8
 
 VEHICLE_R_CAM: Float64[ndarray, "3 3"] = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
 """Rotation from the camera's RDF axes to the vehicle's FLU axes (docs/camera.md)."""
+
+
+class FixedFrames:
+    """A CPU frame source: per name, one RGB image of that name's (width, height), random (seeded) or all zeros."""
+
+    def __init__(self, sizes: dict[str, tuple[int, int]], *, random: bool) -> None:
+        self.frames_by_name: dict[str, Tensor] = {
+            name: torch.from_numpy(np.random.default_rng(index).integers(0, 256, (3, height, width), dtype=np.uint8))
+            if random
+            else torch.zeros((3, height, width), dtype=torch.uint8)
+            for index, (name, (width, height)) in enumerate(sorted(sizes.items()))
+        }
+
+    def frames(self, names: Sequence[str]) -> Iterator[tuple[str, Tensor]]:
+        for name in names:
+            yield name, self.frames_by_name[name]
+
+    def close(self) -> None:
+        """Nothing to release."""
 
 
 @dataclass(slots=True)
