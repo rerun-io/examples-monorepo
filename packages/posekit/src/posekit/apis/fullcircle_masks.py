@@ -28,6 +28,7 @@ from einops import rearrange
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.camera_parameters import MeiParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models
 from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
 from simplecv.catalog_video_codec import wrap_mp4
@@ -106,13 +107,12 @@ def read_lens_sources(
     sources: list[SphereSource] = []
     for camera, cam_R_rig in zip(cameras, cam_R_rigs, strict=True):
         model: CatalogCameraCalibration = models[camera]
-        if model.distortion is None:
-            raise ValueError(f"{camera}: no distortion model, so not a Mei camera")
-        k: Float64[ndarray, "3 3"] = np.asarray(model.pinhole.intrinsics.k_matrix, dtype=np.float64)
-        width, height = int(model.pinhole.intrinsics.width), int(model.pinhole.intrinsics.height)
-        lens: MeiCamera = MeiCamera.from_calibration(
-            model.distortion.model, float(k[0, 0]), float(k[1, 1]), float(k[0, 2]), float(k[1, 2]), model.distortion.coefficients.tolist()
-        )
+        # Either Mei name (exoego:v2 section 4): the typed model holds gamma whether the Pinhole states it or not.
+        mei: MeiParameters | None = model.mei
+        if mei is None:
+            raise ValueError(f"{camera}: no Mei distortion model, so not a Mei camera")
+        width, height = mei.width, mei.height
+        lens: MeiCamera = MeiCamera.from_calibration(mei.model, mei.gamma_x, mei.gamma_y, mei.cx, mei.cy, mei.sphere_coefficients())
         sources.append(SphereSource(lens, cam_R_rigs[0] @ cam_R_rig.T, (height, width), (height // mask_downscale, width // mask_downscale)))
     return sources, cam_R_rigs[0]
 

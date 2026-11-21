@@ -351,3 +351,30 @@ def test_a_zero_frame_limit_and_reads_outside_the_rig_raise_instead_of_panicking
             rig.read_packed(lens, start, stop)
     with pytest.raises(IndexError):
         rig.gops(2)
+
+
+@pytest.mark.golden
+def test_the_reader_logs_the_typed_mei_model_and_a_paraxial_pinhole(insv_clip: Path, tmp_path: Path) -> None:
+    """Each lens: ``DistortionModel`` ``mei_v6_unified`` with ``gamma_x, gamma_y, xi, half_field_rad, d0 .. d12``, and a
+    ``Pinhole`` at the paraxial ``gamma / (1 + xi)`` for the viewer (exoego:v2 section 4). Read back through simplecv, the
+    camera is the clip's own."""
+    import rerun.chunk as rrc
+    from simplecv.catalog_calibration import read_camera_models_from_store
+
+    reader = insta360_io.InsvReader(insv_clip, entity_path="/world/rig_00", frame_limit=2)
+    statics: list[Any] = [chunk for chunk in reader.static_chunks()]
+    path: Path = tmp_path / "statics.rrd"
+    rrc.ChunkStore.from_chunks(statics).stream().write_rrd(path, application_id="dataforge", recording_id="clip")
+    nodes: list[str] = ["/world/rig_00/cam_00", "/world/rig_00/cam_01"]
+    models = read_camera_models_from_store(rrc.RrdReader(path).store(), nodes, str(path))
+    for lens, node in enumerate(nodes):
+        camera = reader.rig.lenses[lens].camera
+        model = models[node]
+        assert model.distortion is not None and model.distortion.model == f"{camera.model}_unified"
+        np.testing.assert_allclose(model.distortion.coefficients, [camera.fx, camera.fy, *camera.coefficients], rtol=1e-6, atol=1e-7)
+        xi: float = camera.coefficients[0]
+        k = model.pinhole.intrinsics.k_matrix
+        assert k is not None
+        np.testing.assert_allclose(np.diag(k)[:2], [camera.fx / (1 + xi), camera.fy / (1 + xi)], rtol=1e-6)
+        assert model.mei is not None and model.mei.model == camera.model
+        np.testing.assert_allclose([model.mei.gamma_x, model.mei.gamma_y, model.mei.cx, model.mei.cy], [camera.fx, camera.fy, camera.cx, camera.cy], rtol=1e-6)

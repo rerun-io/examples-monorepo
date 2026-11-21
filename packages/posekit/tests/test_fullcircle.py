@@ -59,7 +59,10 @@ def test_disk_dilate_radius() -> None:
 
 
 @pytest.mark.integration
-def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
+@pytest.mark.parametrize("unified", [False, True])
+def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path, unified: bool) -> None:
+    """Either Mei name gives the same lens: ``mei_v6`` with gamma as the Pinhole focal, or ``mei_v6_unified`` with gamma
+    in the coefficients and the paraxial focal in the Pinhole (exoego:v2 section 4)."""
     import rerun as rr
     from scipy.spatial.transform import Rotation
     from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
@@ -77,8 +80,11 @@ def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
         recording.log(
             node, rr.Transform3D(mat3x3=cam_R_rig, translation=[0.0, 0.0, 0.01], relation=rr.TransformRelation.ChildFromParent), static=True
         )
-        pinhole: rr.Pinhole = rr.Pinhole(image_from_camera=[[1835.0, 0.0, 958.0], [0.0, 1834.0, 966.0], [0.0, 0.0, 1.0]], width=1920, height=1920)
-        recording.log(f"{node}/pinhole", PinholeWithDistortion(pinhole, CameraDistortion("mei_v6", np.asarray(coefficients))), static=True)
+        fx, fy = (1835.0 / 3.3, 1834.0 / 3.3) if unified else (1835.0, 1834.0)
+        pinhole: rr.Pinhole = rr.Pinhole(image_from_camera=[[fx, 0.0, 958.0], [0.0, fy, 966.0], [0.0, 0.0, 1.0]], width=1920, height=1920)
+        logged: list[float] = [1835.0, 1834.0, *coefficients] if unified else coefficients
+        name: str = "mei_v6_unified" if unified else "mei_v6"
+        recording.log(f"{node}/pinhole", PinholeWithDistortion(pinhole, CameraDistortion(name, np.asarray(logged))), static=True)
     recording.flush()
     recording.disconnect()  # closes the file sink, which writes the footer the lazy store reads
     with rr.server.Server(datasets={"base": [path]}) as server:
@@ -90,6 +96,7 @@ def test_read_lens_sources_puts_lens_1_in_lens_0_frame(tmp_path) -> None:
     lens = sources[0].camera
     assert isinstance(lens, MeiCamera)
     assert (lens.model, lens.cx, lens.cy) == ("mei_v6", 958.0, 966.0)
+    np.testing.assert_allclose([lens.fx, lens.fy], [1835.0, 1834.0], rtol=1e-6)
     np.testing.assert_allclose([lens.xi, lens.half_field_rad, *lens.distortion], coefficients, rtol=1e-6)
 
 

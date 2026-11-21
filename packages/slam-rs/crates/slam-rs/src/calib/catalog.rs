@@ -62,8 +62,13 @@ impl CameraParts<f64> {
             // xi, half_field_rad, then the factory distortion (CONTRACT.md order).
             "mei_v3" => ("mei_v3", 7),
             "mei_v6" => ("mei_v6", 15),
+            // gamma_x, gamma_y, then as above: the model's own focal rides in the coefficients, and the Pinhole
+            // holds the paraxial gamma / (1 + xi) as the viewer's approximation only (exoego:v2 section 4).
+            "mei_v3_unified" => ("mei_v3", 9),
+            "mei_v6_unified" => ("mei_v6", 17),
             other => return Err(invalid(format!("unsupported distortion model {other:?}"))),
         };
+        let unified = raw.distortion_model.ends_with("_unified");
         if raw.distortion_coefficients.len() < count {
             return Err(invalid(format!(
                 "{model} needs {count} coefficients, got {}",
@@ -96,15 +101,24 @@ impl CameraParts<f64> {
         pose[15] = 1.0;
         let d = downscale as f64;
         let k = raw.image_from_camera;
+        let (fx, fy, first) = if unified {
+            (
+                raw.distortion_coefficients[0],
+                raw.distortion_coefficients[1],
+                2,
+            )
+        } else {
+            (k[0], k[4], 0)
+        };
         Ok(Self {
             width: w / downscale as u32,
             height: h / downscale as u32,
-            fx: k[0] / d,
-            fy: k[4] / d,
+            fx: fx / d,
+            fy: fy / d,
             cx: (k[6] + 0.5) / d - 0.5,
             cy: (k[7] + 0.5) / d - 0.5,
             model: model.into(),
-            distortion: raw.distortion_coefficients[..count].to_vec(),
+            distortion: raw.distortion_coefficients[first..count].to_vec(),
             distortion_valid_radius: raw.distortion_valid_radius,
             readout_s: raw.rolling_shutter_readout_s,
             imu_t_cam_row_major: pose,
@@ -185,6 +199,63 @@ mod tests {
         let mut bad = raw;
         bad.distortion_coefficients[4] = 1.0;
         assert!(CameraParts::from_catalog_statics(0, &bad, 3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn both_mei_names_give_the_same_camera() -> Result<(), CatalogError> {
+        // The X4 Air's lens 0: gamma 1835.37 / 1835.01, xi 2.31494, half field 100 deg, mei_v6 factory terms.
+        let (gx, gy, xi) = (1835.37, 1835.01, 2.31494);
+        let sphere = vec![
+            xi,
+            1.745_329_2,
+            0.94,
+            -1.68,
+            2.19,
+            3.86,
+            0.0,
+            -0.005,
+            0.0016,
+            -0.0033,
+            0.004,
+            0.0083,
+            -0.0013,
+            0.024,
+            -0.0014,
+        ];
+        let statics = |model: &str, coefficients: Vec<f64>, fx: f64, fy: f64| CameraStatics {
+            distortion_model: model.into(),
+            distortion_coefficients: coefficients,
+            image_from_camera: [fx, 0.0, 0.0, 0.0, fy, 0.0, 958.29, 965.87, 1.0],
+            resolution_wh: [1920.0, 1920.0],
+            transform_mat3x3: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            transform_translation: [0.0; 3],
+            transform_relation: 2,
+            distortion_valid_radius: None,
+            rolling_shutter_readout_s: None,
+        };
+        let old = statics("mei_v6", sphere.clone(), gx, gy);
+        let mut unified_coefficients = vec![gx, gy];
+        unified_coefficients.extend(&sphere);
+        // The Pinhole states the paraxial focal; it must not reach the estimator.
+        let unified = statics(
+            "mei_v6_unified",
+            unified_coefficients,
+            gx / (1.0 + xi),
+            gy / (1.0 + xi),
+        );
+        for downscale in [1, 2] {
+            let a = CameraParts::from_catalog_statics(0, &old, downscale)?;
+            let b = CameraParts::from_catalog_statics(0, &unified, downscale)?;
+            assert_eq!((a.model.as_str(), b.model.as_str()), ("mei_v6", "mei_v6"));
+            assert_eq!((a.fx, a.fy, a.cx, a.cy), (b.fx, b.fy, b.cx, b.cy));
+            assert_eq!((b.fx, b.fy), (gx / downscale as f64, gy / downscale as f64));
+            assert_eq!(a.distortion, b.distortion);
+            assert_eq!(b.distortion, sphere);
+        }
+        let mut short = unified;
+        short.distortion_coefficients.pop();
+        assert!(CameraParts::from_catalog_statics(0, &short, 1).is_err());
         Ok(())
     }
 

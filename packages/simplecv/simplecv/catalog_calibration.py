@@ -22,7 +22,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 
-from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import MEI_CATALOG_MODELS, Extrinsics, Intrinsics, MeiParameters, PinholeParameters
 from simplecv.rerun_custom_types import _DISTORTION_COEFF_COMPONENT as DISTORTION_COEFFICIENTS_COMPONENT
 from simplecv.rerun_custom_types import _DISTORTION_MODEL_COMPONENT as DISTORTION_MODEL_COMPONENT
 from simplecv.rrd_query_utils import first_valid_value
@@ -46,6 +46,9 @@ class CatalogCameraCalibration:
     """Intrinsics (``Pinhole``) and ``cam_T_world`` (the node's ``Transform3D``)."""
     distortion: CatalogDistortion | None
     """None when the camera carries no distortion components."""
+    mei: MeiParameters | None = None
+    """The typed unified-sphere model when the distortion names one (``MEI_CATALOG_MODELS``), either name: read the
+    model's focal here, not off ``pinhole``, which a unified-name camera states as the viewer's paraxial pinhole."""
 
 
 def read_camera_calibration(dataset: DatasetEntry, segment_id: str, camera_entities: Sequence[str]) -> dict[str, PinholeParameters]:
@@ -143,5 +146,10 @@ def camera_models_from_static_table(
                 distortion = CatalogDistortion(
                     model=str(model).lower(), coefficients=static_value(f"{entity}/pinhole:{DISTORTION_COEFFICIENTS_COMPONENT}")
                 )
-        calibration[entity] = CatalogCameraCalibration(pinhole=pinhole, distortion=distortion)
+        mei: MeiParameters | None = None
+        if distortion is not None and distortion.model in MEI_CATALOG_MODELS:
+            mei = MeiParameters.from_catalog(
+                distortion.model, distortion.coefficients, image_from_camera, int(resolution_wh[0]), int(resolution_wh[1]), name=pinhole.name
+            )
+        calibration[entity] = CatalogCameraCalibration(pinhole=pinhole, distortion=distortion, mei=mei)
     return calibration

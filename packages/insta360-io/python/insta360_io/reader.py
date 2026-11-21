@@ -15,10 +15,13 @@ Beside the videos the reader states what the clip and its device profile say, as
 - ``cam_NN``: static ``Transform3D`` ``cam_from_rig`` (``ChildFromParent``) and ``AnyValues`` ``camera_model`` and
   ``rolling_shutter_readout_s`` (first row to last; row ``v`` of ``H`` is read ``readout * (v - (H - 1) / 2) / H``
   after the frame time; absent when neither the clip nor a profile states it).
-- ``cam_NN/pinhole``: static ``Pinhole`` (``fx, fy, cx, cy`` of the Mei camera, track pixels, RDF) and the camera
-  model as the monorepo's ``simplecv.components.DistortionModel`` (``mei_v6``, or ``mei_v3`` without a V6 lens string)
-  and ``simplecv.components.DistortionCoefficients`` (``xi, half_field_rad, d0 .. d12``; ``mei_v3``: ``xi,
-  half_field_rad, k1, k2, k3, p1, p2``), which slam-rs reads.
+- ``cam_NN/pinhole``: static ``Pinhole`` (the paraxial ``gamma / (1 + xi)``, ``cx, cy``, track pixels, RDF: a viewer's
+  pinhole approximation of the lens, no calibration) and the camera model as the monorepo's
+  ``simplecv.components.DistortionModel`` (``mei_v6_unified``, or ``mei_v3_unified`` without a V6 lens string) and
+  ``simplecv.components.DistortionCoefficients`` (``gamma_x, gamma_y, xi, half_field_rad, d0 .. d12``; ``mei_v3``:
+  ``... k1, k2, k3, p1, p2``): exoego:v2 section 4, simplecv's ``MeiParameters``, which slam-rs, dataforge and posekit
+  read. Bases written before the unified names (``mei_v6`` / ``mei_v3``: the coefficients without gamma, gamma as the
+  ``Pinhole`` focal) still read the same.
 - ``cam_NN/pinhole/video``: the lens video, as above.
 - ``cam_NN/exposure``: per-frame exposure time (s), record 4 for lens 0 and record 12 for lens 1.
 - ``imu_00``: static identity ``Transform3D`` (the IMU is the rig origin; absent without a device profile); ``imu_00/gyro`` (rad/s) and
@@ -193,15 +196,22 @@ class InsvReader:
                     rr.AnyValues(camera_model=camera.model, rolling_shutter_readout_s=rig.readout_s),
                 ),
             )
+            # exoego:v2 section 4: the Mei model's own focal (gamma) goes in the coefficients under the unified name; the
+            # Pinhole holds the paraxial gamma / (1 + xi), a viewer's pinhole approximation of the lens, no calibration.
+            xi: float = float(camera.coefficients[0])
             pinhole = rr.Pinhole(
-                image_from_camera=[[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]],
+                image_from_camera=[[camera.fx / (1.0 + xi), 0.0, camera.cx], [0.0, camera.fy / (1.0 + xi), camera.cy], [0.0, 0.0, 1.0]],
                 width=width,
                 height=height,
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=0.05,
             )
-            coefficients: pa.Array = pa.array([np.asarray(camera.coefficients, dtype=np.float32)], type=pa.list_(pa.float32()))
-            distortion: list[Described] = [Described(DISTORTION_MODEL, pa.array([camera.model])), Described(DISTORTION_COEFFICIENTS, coefficients)]
+            unified: list[float] = [camera.fx, camera.fy, *camera.coefficients]
+            coefficients: pa.Array = pa.array([np.asarray(unified, dtype=np.float32)], type=pa.list_(pa.float32()))
+            distortion: list[Described] = [
+                Described(DISTORTION_MODEL, pa.array([f"{camera.model}_unified"])),
+                Described(DISTORTION_COEFFICIENTS, coefficients),
+            ]
             yield static_chunk(f"{self.cam(lens)}/pinhole", described(pinhole) + distortion)
             yield static_chunk(self.video_entity(lens), described(rr.VideoStream(codec=CODECS[rig.codec])))
             yield static_chunk(f"{self.cam(lens)}/exposure", described(rr.SeriesLines(names=["exposure_s"])))

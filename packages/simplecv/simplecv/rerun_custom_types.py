@@ -14,6 +14,7 @@ from simplecv.camera_parameters import (
     BrownConradyDistortion,
     Fisheye62Parameters,
     KannalaBrandtDistortion,
+    MeiParameters,
     PinholeParameters,
 )
 
@@ -450,11 +451,25 @@ class PinholeWithDistortion(rr.AsComponents):
     @classmethod
     def from_camera(
         cls,
-        camera: PinholeParameters | Fisheye62Parameters,
+        camera: PinholeParameters | Fisheye62Parameters | MeiParameters,
         *,
         image_plane_distance: float | int = 0.5,
         include_distortion: bool = True,
     ) -> "PinholeWithDistortion":
+        if isinstance(camera, MeiParameters):
+            # The viewer gets the paraxial pinhole; the model's own intrinsics ride in the coefficients (exoego:v2 section 4).
+            intrinsics = camera.paraxial_intrinsics()
+            model, coefficients = camera.catalog_distortion()
+            return cls(
+                pinhole=rr.Pinhole(
+                    image_from_camera=intrinsics.k_matrix,
+                    height=intrinsics.height,
+                    width=intrinsics.width,
+                    camera_xyz=rr.ViewCoordinates.RDF,
+                    image_plane_distance=image_plane_distance,
+                ),
+                distortion=CameraDistortion(model=model, coefficients=coefficients) if include_distortion else None,
+            )
         if camera.intrinsics.camera_conventions == "RDF":
             view_coords = rr.ViewCoordinates.RDF
         elif camera.intrinsics.camera_conventions == "RUB":

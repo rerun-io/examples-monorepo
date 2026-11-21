@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 from einops import rearrange
@@ -282,6 +282,120 @@ class Fisheye624Parameters:
                 camera_conventions="RDF", fl_x=f, fl_y=f, cx=cx, cy=cy, width=self.width, height=self.height
             ),
             distortion=KannalaBrandtDistortion(k1=k1, k2=k2, k3=k3, k4=k4, k5=k5, k6=k6, p1=p1, p2=p2),
+        )
+
+
+MeiModel: TypeAlias = Literal["mei_v3", "mei_v6"]
+"""The Insta360 factory distortion on the unified sphere: ``mei_v3`` (``k1 k2 k3 p1 p2``) or ``mei_v6`` (``d0 .. d12``)."""
+MEI_DISTORTION_COUNT: dict[MeiModel, int] = {"mei_v3": 5, "mei_v6": 13}
+"""How many factory distortion coefficients each Mei model has."""
+MEI_CATALOG_MODELS: tuple[str, ...] = ("mei_v3", "mei_v6", "mei_v3_unified", "mei_v6_unified")
+"""The ``DistortionModel`` names a Mei camera is logged under (exoego:v2 section 4).
+
+``mei_v3`` / ``mei_v6``: coefficients ``xi, half_field_rad, distortion...``, and the ``Pinhole`` focal is gamma: what a
+base written before the unified names states. ``*_unified``: coefficients ``gamma_x, gamma_y, xi, half_field_rad,
+distortion...``, and the ``Pinhole`` focal is the paraxial ``gamma / (1 + xi)``, the viewer's pinhole approximation only."""
+
+
+@dataclass(frozen=True, slots=True)
+class MeiParameters:
+    """A unified-sphere (Mei) camera with the Insta360 factory distortion: the model's own intrinsics, typed.
+
+    The projection (kornia-staging ``camera::mei``, insta360-io ``MeiCamera``): a ray ``(x, y, z)`` goes to the sphere,
+    shifts by ``xi`` along the axis, is distorted, then ``u = gamma_x * x / (z + xi * r) + cx``. At the axis that is
+    ``gamma / (1 + xi)`` pixels per radian, so a plain pinhole with that focal (``paraxial_intrinsics``) is what a
+    viewer draws; ``gamma`` itself would draw the frustum ``1 + xi`` times too narrow.
+    """
+
+    name: str
+    """Sensor label, e.g. ``"cam_00"``."""
+    model: MeiModel
+    """The factory distortion it carries."""
+    width: int
+    """Image width in pixels."""
+    height: int
+    """Image height in pixels."""
+    gamma_x: float
+    """The model's focal along x, pixels (not a pinhole focal)."""
+    gamma_y: float
+    """The model's focal along y, pixels."""
+    cx: float
+    """Principal point x, pixels."""
+    cy: float
+    """Principal point y, pixels."""
+    xi: float
+    """The sphere's shift along the optical axis."""
+    half_field_rad: float
+    """Half the field of view the calibration holds over, radians."""
+    distortion: Float64[ndarray, " n"]
+    """The factory distortion in the model's order (``MEI_DISTORTION_COUNT``)."""
+
+    def __post_init__(self) -> None:
+        """Check the distortion length matches the model."""
+        if len(self.distortion) != MEI_DISTORTION_COUNT[self.model]:
+            raise ValueError(f"{self.model} takes {MEI_DISTORTION_COUNT[self.model]} distortion coefficients, got {len(self.distortion)}")
+
+    def __eq__(self, other: object) -> bool:
+        """Equal fields, the distortion compared by value."""
+        if not isinstance(other, MeiParameters):
+            return NotImplemented
+        scalars = ("name", "model", "width", "height", "gamma_x", "gamma_y", "cx", "cy", "xi", "half_field_rad")
+        return all(getattr(self, key) == getattr(other, key) for key in scalars) and bool(np.array_equal(self.distortion, other.distortion))
+
+    def paraxial_intrinsics(self) -> "Intrinsics":
+        """The pinhole a viewer draws this camera with: focal ``gamma / (1 + xi)``, the same principal point and size."""
+        return Intrinsics.from_focal_principal_point(
+            camera_conventions="RDF",
+            fl_x=self.gamma_x / (1.0 + self.xi),
+            fl_y=self.gamma_y / (1.0 + self.xi),
+            cx=self.cx,
+            cy=self.cy,
+            width=self.width,
+            height=self.height,
+        )
+
+    def sphere_coefficients(self) -> list[float]:
+        """``xi, half_field_rad, distortion...``: the coefficient list a Mei camera takes beside ``gamma_x gamma_y cx cy``
+        (insta360-io's ``MeiCamera``, posekit's ``MeiCamera.from_calibration``)."""
+        return [self.xi, self.half_field_rad, *(float(value) for value in self.distortion)]
+
+    def catalog_distortion(self) -> tuple[str, Float64[ndarray, " n"]]:
+        """The ``DistortionModel`` name and ``DistortionCoefficients`` this camera is logged with: the unified name."""
+        coefficients: Float64[ndarray, " n"] = np.array([self.gamma_x, self.gamma_y, self.xi, self.half_field_rad, *self.distortion], dtype=np.float64)
+        return f"{self.model}_unified", coefficients
+
+    @classmethod
+    def from_catalog(
+        cls, model: str, coefficients: Float64[ndarray, " n"], k_matrix: Float64[ndarray, "3 3"], width: int, height: int, name: str = ""
+    ) -> "MeiParameters":
+        """Read a Mei camera from its logged ``DistortionModel``, ``DistortionCoefficients`` and ``Pinhole`` (any name in
+        ``MEI_CATALOG_MODELS``).
+
+        Raises:
+            ValueError: If ``model`` is not a Mei name, or the coefficients are too few for it.
+        """
+        if model not in MEI_CATALOG_MODELS:
+            raise ValueError(f"{model!r} is not a Mei model ({', '.join(MEI_CATALOG_MODELS)})")
+        unified: bool = model.endswith("_unified")
+        base: MeiModel = "mei_v3" if model.startswith("mei_v3") else "mei_v6"
+        head: int = 4 if unified else 2
+        needed: int = head + MEI_DISTORTION_COUNT[base]
+        values: Float64[ndarray, " n"] = np.asarray(coefficients, dtype=np.float64).reshape(-1)
+        if len(values) < needed:
+            raise ValueError(f"{model} needs {needed} coefficients, got {len(values)}")
+        gamma_x, gamma_y = (float(values[0]), float(values[1])) if unified else (float(k_matrix[0, 0]), float(k_matrix[1, 1]))
+        return cls(
+            name=name,
+            model=base,
+            width=width,
+            height=height,
+            gamma_x=gamma_x,
+            gamma_y=gamma_y,
+            cx=float(k_matrix[0, 2]),
+            cy=float(k_matrix[1, 2]),
+            xi=float(values[head - 2]),
+            half_field_rad=float(values[head - 1]),
+            distortion=values[head:needed].copy(),
         )
 
 

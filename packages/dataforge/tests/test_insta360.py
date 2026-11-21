@@ -137,9 +137,12 @@ def test_the_clip_converts_into_mei_cameras_on_the_imu_with_their_readout_and_ex
         assert (node["name"], node["camera_model"], node["stream_id"]) == (f"lens{cam}", "mei_v6", f"track{clip.lens_track[cam]}")
         assert node["rolling_shutter_readout_s"] == pytest.approx(clip.rolling_shutter_ms * 1e-3)
         pinhole: dict[str, object] = static_values(store, schema.pinhole_path(0, cam))
-        assert pinhole["simplecv.components.DistortionModel"] == "mei_v6"
-        np.testing.assert_allclose(np.asarray(pinhole["simplecv.components.DistortionCoefficients"], dtype=np.float64), camera.coefficients, rtol=1e-7)  # stored as float32
-        np.testing.assert_allclose(np.asarray(pinhole["image_from_camera"], dtype=np.float64), [camera.fx, 0.0, 0.0, 0.0, camera.fy, 0.0, camera.cx, camera.cy, 1.0], rtol=1e-7)
+        # exoego:v2 section 4: gamma rides in the coefficients, the Pinhole is the paraxial gamma / (1 + xi).
+        assert pinhole["simplecv.components.DistortionModel"] == "mei_v6_unified"
+        coefficients: list[float] = [camera.fx, camera.fy, *camera.coefficients]
+        np.testing.assert_allclose(np.asarray(pinhole["simplecv.components.DistortionCoefficients"], dtype=np.float64), coefficients, rtol=1e-7)  # stored as float32
+        fx, fy = camera.fx / (1.0 + camera.coefficients[0]), camera.fy / (1.0 + camera.coefficients[0])
+        np.testing.assert_allclose(np.asarray(pinhole["image_from_camera"], dtype=np.float64), [fx, 0.0, 0.0, 0.0, fy, 0.0, camera.cx, camera.cy, 1.0], rtol=1e-7)
         np.testing.assert_array_equal(video_times(converted.targets[paths.BASE_LAYER], schema.video_path(0, cam)), frame_ns)
         exposure: pa.Table = store.reader(index=schema.TIMELINE, contents=f"{schema.cam_path(0, cam)}/exposure").to_arrow_table()
         assert exposure.num_rows == FRAMES
