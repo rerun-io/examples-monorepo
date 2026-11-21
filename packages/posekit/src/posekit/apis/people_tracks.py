@@ -152,7 +152,8 @@ def prefetched_chunks(
 
     def decode(slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
         frames: UInt8[Tensor, "n h w 3"] = decoders[slot].result().frames(chunk)
-        torch.cuda.synchronize(device)
+        # This thread's stream only: a device-wide synchronize invalidates a CUDA graph the tracker captures meanwhile.
+        torch.cuda.current_stream(device).synchronize()
         return frames
 
     def submit(chunk: list[int]) -> list[Future[Tensor]]:
@@ -388,12 +389,12 @@ def main(config: PeopleTracksConfig) -> None:
             index, frame, chunk_end = window.popleft()
             window.extend(islice(steps, 1))  # now the steps after this one, up to redetect_every later
             n_slots, height, width = int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
-            if height % factor or width % factor:
-                raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames")
+            if tracker.steps == 0 and (height % factor or width % factor):
+                raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
             union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
             if index % config.output_every == 0:
                 dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
-                cells: Bool[Tensor, "s hm wm"] = dilated.view(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+                cells: Bool[Tensor, "s hm wm"] = dilated.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
                 masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
                 for slot, entity in enumerate(entities):
                     set_frame_time(config.timeline, videos[slot].times[index])
