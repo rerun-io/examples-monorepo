@@ -1,4 +1,4 @@
-"""sam2-streaming fused RoPE: Triton finds the environment's ptxas without activation, and falls back if it cannot build."""
+"""Fused RoPE: Triton finds the environment's ptxas without activation, and falls back if it cannot build."""
 
 from __future__ import annotations
 
@@ -11,9 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 
-pytest.importorskip("sam2", reason="the streaming SAM 2 fork is in the posekit envs only")
-
-from sam2.modeling import fused_rope  # noqa: E402  (after the importorskip)
+from sam2.modeling import fused_rope
 
 _PTXAS_KEYS: tuple[str, str] = ("TRITON_PTXAS_PATH", "TRITON_PTXAS_BLACKWELL_PATH")
 
@@ -54,10 +52,11 @@ from sam2.modeling import fused_rope
 from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
 from sam2.modeling.sam2_prompt import SAM2Prompt
 from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
-from posekit.models.sam2_video import Sam2VideoSegmenterConfig
+from sam2.build_sam import build_sam2_generic_video_predictor
 
 warnings.simplefilter("always")
-predictor = Sam2VideoSegmenterConfig(variant="efficienttam-ti-512", fused_rope=True).setup().predictor
+predictor = build_sam2_generic_video_predictor(sys.argv[1], sys.argv[2], device="cuda")
+fused_rope.ENABLED = fused_rope.triton is not None  # as the posekit and mamma configs switch it on
 assert fused_rope.ENABLED
 device = torch.device("cuda")
 
@@ -93,15 +92,14 @@ print(json.dumps({"built": built, "ious": ious, "equal": all(bool(torch.equal(a,
 
 
 @pytest.mark.integration
-def test_fused_rope_builds_without_env_activation_and_matches_unfused_masks(tmp_path: Path) -> None:
+def test_fused_rope_builds_without_env_activation_and_matches_unfused_masks(tmp_path: Path, efficienttam_ti_files: tuple[str, str]) -> None:
     """The pipeline driver runs ``<env>/bin/python`` with no ``CONDA_PREFIX``; Triton then misses ptxas-blackwell."""
-    if not torch.cuda.is_available():
-        pytest.skip("needs a GPU (EfficientTAM-ti from the Hugging Face hub)")
     env_bin: str = str(Path(sys.prefix) / "bin")
     env: dict[str, str] = {k: v for k, v in os.environ.items() if k != "CONDA_PREFIX" and k not in _PTXAS_KEYS}
     env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if p != env_bin)
     env["TRITON_CACHE_DIR"] = str(tmp_path / "triton-cache")  # an empty cache, so the kernel compiles here
-    result = subprocess.run([sys.executable, "-c", _CHILD], env=env, capture_output=True, text=True, timeout=600, check=False)
+    child: list[str] = [sys.executable, "-c", _CHILD, *efficienttam_ti_files]
+    result = subprocess.run(child, env=env, capture_output=True, text=True, timeout=600, check=False)
     assert result.returncode == 0, result.stderr[-4000:]
     report: dict = json.loads(result.stdout.strip().splitlines()[-1])
     if (Path(env_bin) / "ptxas").is_file():
