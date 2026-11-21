@@ -144,7 +144,8 @@ def prefetched_chunks(
 
     def decode(slot: int, chunk: list[int]) -> UInt8[Tensor, "n h w 3"]:
         frames: UInt8[Tensor, "n h w 3"] = decoders[slot].result().frames(chunk)
-        torch.cuda.synchronize(device)
+        # This thread's stream only: a device-wide synchronize invalidates a CUDA graph the tracker captures meanwhile.
+        torch.cuda.current_stream(device).synchronize()
         return frames
 
     def submit(chunk: list[int]) -> list[Future[Tensor]]:
