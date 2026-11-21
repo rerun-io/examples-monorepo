@@ -2,8 +2,11 @@
 
 from collections.abc import Iterable
 
+import torch
 from sam2.modeling.memory import ObjectMemory
 from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
+
+HOST: torch.device = torch.device("cpu")
 
 
 class BoundedForgetfulMemoryBank(SAM2ForgetfulObjectMemoryBank):
@@ -16,12 +19,13 @@ class BoundedForgetfulMemoryBank(SAM2ForgetfulObjectMemoryBank):
     masks stay the same while storage stops growing with the number of prompts.
     """
 
-    def __init__(self, max_conditional_memories: int, memory_window_size: int = 7) -> None:
+    def __init__(self, max_conditional_memories: int, memory_window_size: int = 7, storage_device: torch.device = HOST) -> None:
         """Args:
         max_conditional_memories: Most recent prompted memories kept per object (the predictor's ``max_cond_frames_in_attn``).
         memory_window_size: Frames back that memories are kept regardless (at least ``num_maskmem - 1``).
+        storage_device: Where the memories are kept (host by default, the inference device saves the per-step copies).
         """
-        super().__init__(memory_window_size=memory_window_size)
+        super().__init__(memory_window_size=memory_window_size, storage_device=storage_device)
         self.max_conditional_memories: int = max_conditional_memories
 
     def prune_memories(self, obj_ids: Iterable[int], current_frame_idx: int) -> dict[int, list[ObjectMemory]]:
