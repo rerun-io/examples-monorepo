@@ -72,8 +72,12 @@ class GraphCache:
         )
         captured: _Captured | None = self._graphs.get(signature)
         if captured is None:
+            if not self.capture or len(self._graphs) >= self.max_graphs:
+                # Never captured: no layout bookkeeping, which would otherwise grow with every new signature.
+                self.eager += 1
+                return fn(*inputs)
             calls, layouts = self._seen.get(signature, (0, None))
-            if not self.capture or calls < self.capture_after or len(self._graphs) >= self.max_graphs:
+            if calls < self.capture_after:
                 outputs = fn(*inputs)
                 self._seen[signature] = (calls + 1, pytree.tree_map_only(torch.Tensor, lambda t: torch.empty_like(t, device="meta"), outputs))
                 self.eager += 1
