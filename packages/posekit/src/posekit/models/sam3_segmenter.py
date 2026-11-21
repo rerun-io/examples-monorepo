@@ -12,10 +12,13 @@ engines with fp32 I/O: the vision trunk (ViT + FPN neck, about three quarters
 of a call) and the heads (DETR encoder/decoder, scoring, mask decoder; one
 engine per prompt token count). Post-processing stays in torch, in FP32.
 TensorRT picks fp16-accumulating kernels for fp16 convolutions and GEMMs; the
-ViT's patch embedding is exported as an fp32 conv on fp16-rounded operands,
-which TensorRT accumulates in fp32 like cuDNN does.
+ViT's patch embedding is exported as an fp32 conv on fp16-rounded operands, and
+the ViT MLPs and every heads MatMul read their fp16 operands through Casts to
+fp32 (``trtkit.onnx_precision.fp32_accumulate``, TF32 off), so TensorRT
+accumulates them in fp32 like cuBLAS does.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -31,7 +34,7 @@ from posekit.predictions import BoxDetections, validate_frames_rgb
 
 ENGINE_BATCH: int = 2
 """Images per engine call: the two lenses of a 360 camera. Smaller calls are zero-padded, larger ones chunked."""
-EXPORT_VERSION: int = 2
+EXPORT_VERSION: int = 3
 """Bump when an exported graph changes; it names the cached ONNX files."""
 HEAD_OUTPUTS: tuple[str, ...] = ("pred_masks", "pred_boxes", "pred_logits", "presence_logits")
 """The model outputs post-processing reads."""
@@ -69,8 +72,8 @@ class _Fp32PatchConv(nn.Module):
     TensorRT accumulates fp16 convs and GEMMs in fp16. In the SAM 3 trunk that moved the FPN levels 4x further from the
     torch fp16 trunk than torch fp16 is from FP32 (relative L2 0.050 against 0.011 on the coarsest level) and flipped
     person scores near the 0.5 threshold. The patch embedding caused most of it; in fp32 it costs nothing (trunk 54 ms)
-    and brings the drift to 0.015. The MLPs cause most of the rest: as fp32-accumulating GEMMs they reach 0.009 but
-    cost +12 ms, and this torch spelling of them builds as fp32 GEMMs (140 ms), so they stay fp16.
+    and brings the drift to 0.015. The MLPs cause most of the rest: the export makes them fp32-accumulating GEMMs
+    (``fp32_accumulate``), which reach 0.009 for +12 ms; spelled in torch like this conv they build as fp32 GEMMs (140 ms).
     """
 
     def __init__(self, conv: nn.Conv2d) -> None:
@@ -164,21 +167,39 @@ class Sam3Segmenter(PromptableSegmenter):
         """Heads engines by prompt token count (``backend="tensorrt"``)."""
         if config.backend == "tensorrt":
             example: dict[str, Tensor] = {"pixel_values": torch.zeros((ENGINE_BATCH, 3, *self.input_hw), device=config.device)}
-            self.trunk = self.engine(_VisionTrunk(self.model), f"{self.engine_name}_trunk", example, ["fpn0", "fpn1", "fpn2"])
+            mlp_width: int = self.model.config.vision_config.backbone_config.intermediate_size
+            self.trunk = self.engine(
+                _VisionTrunk(self.model),
+                f"{self.engine_name}_trunk",
+                example,
+                ["fpn0", "fpn1", "fpn2"],
+                lambda node, weight: weight is not None and mlp_width in weight.dims,
+            )
             self.model.vision_encoder.backbone = None  # the engine replaces it; the heads keep the neck's position encoding
 
-    def engine(self, module: nn.Module, name: str, example: dict[str, Tensor], output_names: list[str]) -> Any:
+    def engine(
+        self, module: nn.Module, name: str, example: dict[str, Tensor], output_names: list[str], fp32_matmuls: Callable[[Any, Any], bool]
+    ) -> Any:
         """A TensorRT runtime for one SAM 3 part: exported once to an fp16-autocast ONNX graph with fp32 I/O at static batch
-        :data:`ENGINE_BATCH`, built once per machine (trtkit's engine cache)."""
+        :data:`ENGINE_BATCH`, built once per machine (trtkit's engine cache) with TF32 off.
+
+        ``fp32_matmuls`` selects the MatMuls that accumulate in fp32 (``trtkit.onnx_precision.fp32_accumulate``)."""
         from trtkit import TensorRtRuntime, TrtBuildConfig, ensure_engine, export_onnx
+        from trtkit.onnx_precision import fp32_accumulate
 
         onnx_path: Path = DEFAULT_ONNX_CACHE_DIR / f"{name}_b{ENGINE_BATCH}_fp16_v{EXPORT_VERSION}.onnx"
         if not onnx_path.exists():
             print(f"[posekit] exporting SAM 3 to ONNX (one-time): {onnx_path.name}")
             export_onnx(
-                module.eval(), tuple(example.values()), onnx_path, input_names=list(example), output_names=output_names, compute_dtype=torch.float16
+                module.eval(),
+                tuple(example.values()),
+                onnx_path,
+                input_names=list(example),
+                output_names=output_names,
+                compute_dtype=torch.float16,
+                rewrite=lambda model: print(f"[posekit] {fp32_accumulate(model, fp32_matmuls)} MatMuls accumulate in fp32"),
             )
-        return TensorRtRuntime(ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH)))
+        return TensorRtRuntime(ensure_engine(onnx_path, TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH, allow_tf32=False)))
 
     def text(self, prompt: str) -> tuple[Float[Tensor, "1 t c"], Int64[Tensor, "1 t"]]:
         """The prompt's projected text features and attention mask; the text encoder runs once per prompt."""
@@ -200,7 +221,7 @@ class Sam3Segmenter(PromptableSegmenter):
         }
         example["text"] = features.expand(ENGINE_BATCH, -1, -1).contiguous()
         example["text_mask"] = text_mask.expand(ENGINE_BATCH, -1).contiguous()
-        self.heads[tokens] = self.engine(_Heads(self.model), f"{self.engine_name}_heads_t{tokens}", example, list(HEAD_OUTPUTS))
+        self.heads[tokens] = self.engine(_Heads(self.model), f"{self.engine_name}_heads_t{tokens}", example, list(HEAD_OUTPUTS), lambda node, weight: True)
 
     def run_engines(self, pixel_values: Float[Tensor, "b 3 in_h in_w"], text: Float[Tensor, "b t c"], text_mask: Int64[Tensor, "b t"]) -> Any:
         """The trunk and the prompt's heads engine (:meth:`prepare` loaded it)."""

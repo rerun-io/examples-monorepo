@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import torch
 from torch.nn.modules.conv import _ConvTransposeNd
@@ -198,6 +198,7 @@ def export_onnx(
     dynamic_dims: DynamicDims | None = None,
     export_fn: ExportFn = torch.onnx.export,
     exporter: Literal["dynamo", "torchscript"] = "dynamo",
+    rewrite: Callable[[Any], object] | None = None,
 ) -> None:
     """Export a model to ONNX with the strongly-typed-TRT recipe.
 
@@ -226,6 +227,8 @@ def export_onnx(
             is the legacy tracer at opset 17, for graphs the dynamo exporter
             does not take, with ``dynamic_batch_max`` as ``dynamic_axes`` on
             every input and output and the weights inside the protobuf.
+        rewrite: In-place graph surgery on the exported ``onnx.ModelProto`` (its weights stay in the sidecar), applied
+            before the file is published, e.g. ``lambda model: fp32_accumulate(model, select)``.
 
     Raises:
         ValueError: If ``compute_dtype`` is not fp16/bf16/None, both
@@ -287,6 +290,12 @@ def export_onnx(
                 dynamo=exporter == "dynamo",
                 **kwargs,
             )
+        if rewrite is not None:
+            import onnx
+
+            exported: Any = onnx.load(str(tmp_path), load_external_data=False)
+            rewrite(exported)
+            onnx.save(exported, str(tmp_path))
         # Sidecar first: the protobuf must never be visible while the data it
         # references is missing.
         tmp_sidecar: Path = tmp_dir / f"{out_path.name}.data"
