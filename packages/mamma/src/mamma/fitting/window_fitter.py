@@ -329,12 +329,14 @@ class SlidingWindowFitter:
             head_count: int = max(0, len(self._window) - 1 - self.config.emit_lag)
             self._head_fits = [self._emit(i) for i in range(head_count)]
         elif optimize:
+            # Read the anchor count before queueing the replays: read after them, the host would wait for
+            # all 48 before it could launch anything else. Same value, same decision.
+            count: float = float(anchors_valid_f.sum().item()) if self.config.lbfgs_polish else 0.0
             if self.config.use_cuda_graph:
                 self._optimize_graphed()
             else:
                 self._optimize(self.config.tick_iters, optimize_betas=False)
             if self.config.lbfgs_polish:
-                count: float = float(anchors_valid_f.sum().item())
                 self._valid_counts.append(count)
                 if len(self._valid_counts) > 60:
                     self._valid_counts.pop(0)
@@ -618,17 +620,37 @@ class SlidingWindowFitter:
                 self.betas,
                 f.trans.unsqueeze(0),
             )
-        pose_full: Float32[ndarray, "165"] = (
-            torch.cat([f.global_orient, f.body_pose, self.jaw_pose, torch.zeros(6, device=self.device), self.hand_pose_left, self.hand_pose_right])
+        n_verts: int = out.vertices.shape[1]
+        n_joints: int = out.joints.shape[1]
+        n_betas: int = self.betas.shape[1]
+        # One device->host copy (one stream sync) for everything the result carries.
+        packed: Float32[ndarray, "k"] = (
+            torch.cat(
+                [
+                    out.vertices[0].reshape(-1),
+                    out.joints[0].reshape(-1),
+                    f.global_orient,
+                    f.body_pose,
+                    self.jaw_pose,
+                    torch.zeros(6, device=self.device),
+                    self.hand_pose_left,
+                    self.hand_pose_right,
+                    self.betas[0].detach(),
+                    f.trans,
+                ]
+            )
             .cpu()
             .numpy()
         )
+        sizes: list[int] = [n_verts * 3, n_joints * 3, 165, n_betas, 3]
+        offsets: ndarray = np.cumsum([0, *sizes])
+        verts_np, joints_np, pose_full, betas_np, trans_np = (packed[offsets[i] : offsets[i + 1]] for i in range(len(sizes)))
         return FitResult(
             frame_idx=f.frame_idx,
-            vertices=out.vertices[0].cpu().numpy(),
-            joints=out.joints[0].cpu().numpy(),
+            vertices=verts_np.reshape(n_verts, 3),
+            joints=joints_np.reshape(n_joints, 3),
             pose=pose_full,
-            betas=self.betas[0].detach().cpu().numpy(),
-            trans=f.trans.cpu().numpy(),
+            betas=betas_np,
+            trans=trans_np,
             rest_joints=self._rest_joints,
         )

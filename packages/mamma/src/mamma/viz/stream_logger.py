@@ -123,6 +123,12 @@ class StreamLogger:
         # worker's included), which cost ~16 ms/tick of main-thread stall on GB10.
         self._aux_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aux-log")
         self._aux_pending: list = []
+        # Meshes, clouds and skeleton transforms (~5 ms of CPU per emitted fit): their own worker, so the
+        # pipeline's fit worker (the critical path) only enqueues them. Fed from the fit worker thread alone.
+        self._fit_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit-log")
+        self._fit_pending: list = []
+        self._last_fit_frame: dict[int, int] = {}
+        """Per person, the frame of the last mesh logged: a fitter re-returns its previous fit between emits."""
         rerun_codec_by_choice: dict[VideoCodecChoice, rr.VideoCodec] = {
             VideoCodecChoice.H264: rr.VideoCodec.H264,
             VideoCodecChoice.H265: rr.VideoCodec.H265,
@@ -326,13 +332,32 @@ class StreamLogger:
         triangulated: dict[int, tuple[torch.Tensor, torch.Tensor]],
         faces: ndarray | None,
     ) -> None:
-        """Log SMPL-X meshes + triangulated landmark clouds for one tick.
+        """Log SMPL-X meshes + triangulated landmark clouds for one tick (on the fit-log worker).
 
         The triangulated cloud is for the current tick (``frame_idx``), but a
         fixed-lag fitter emits a mesh for an EARLIER frame (``fit.frame_idx``).
         Each is stamped at its own true frame so mesh and cloud coincide on the
         timeline (otherwise the cloud visibly leads the lagged mesh in motion).
+        A fit whose frame was already logged for that person (the fitter
+        re-returns its previous fit on ticks it does not emit) is skipped.
+        The cloud tensors must be settled (the fitting stage syncs its stream).
         """
+        new_fits: dict[int, FitResult] = {}
+        for obj_id, fit in fits.items():
+            if self._last_fit_frame.get(obj_id) != fit.frame_idx:
+                self._last_fit_frame[obj_id] = fit.frame_idx
+                new_fits[obj_id] = fit
+        if len(self._fit_pending) >= 4:
+            self._fit_pending.pop(0).result()
+        self._fit_pending.append(self._fit_worker.submit(self._log_tick_fit_now, frame_idx, new_fits, dict(triangulated), faces))
+
+    def _log_tick_fit_now(
+        self,
+        frame_idx: int,
+        fits: dict[int, FitResult],
+        triangulated: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        faces: ndarray | None,
+    ) -> None:
         set_tick_time(frame_idx, self.fps)
         for obj_id, (points3d, valid) in triangulated.items():
             cloud: ndarray = points3d[valid].cpu().numpy()
@@ -438,10 +463,11 @@ class StreamLogger:
         fresh encoders replace the drained ones; the per-camera PTS offset
         keeps the shared timeline monotonic across multiple ``run()`` calls.
         """
-        for pending in self._video_pending + self._aux_pending:
+        for pending in self._video_pending + self._aux_pending + self._fit_pending:
             pending.result()
         self._video_pending.clear()
         self._aux_pending.clear()
+        self._fit_pending.clear()
         for cam_name, encoder in self._encoders.items():
             self._log_packets(cam_name, encoder.flush())
             self._pts_offset[cam_name] += encoder.next_pts
