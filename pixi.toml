@@ -3138,7 +3138,7 @@ sam2 = { path = "packages/sam2-streaming", editable = true }
 # NVDEC decode of HEVC/H.264 4:4:4 (the MAMMA iPhone videos): torchcodec's CUDA decoders take 4:2:0 only
 # and fall back to the CPU, the pipeline's decode floor.
 pynvvideocodec = "==2.2.4"
-# posekit's yolo12-x person detector (the tracker's default bootstrap/re-detect detector).
+# posekit's yolo12-x person detector (TrackerConfig.detector='yolo12-x'; the default is rtdetr-v2-r50).
 ultralytics = ">=8.3"
 
 [feature.mamma.activation.env]

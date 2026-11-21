@@ -77,10 +77,12 @@ class TrackerConfig:
     the golden gate passes with it (see implementation-notes)."""
     sam2_checkpoint: Path = Path("data/weights/efficienttam/efficienttam_ti.pt")
     """SAM2-family checkpoint path (EfficientTAM via build_sam2_generic*)."""
-    detector: Literal["yolo12-x", "yolox-m-humanart", "yolox-x-humanart", "rtdetr-v2-r50"] = "yolo12-x"
-    """posekit person detector (``posekit.models.PERSON_DETECTORS``) for the bootstrap and re-detects."""
+    detector: Literal["yolo12-x", "yolox-m-humanart", "yolox-x-humanart", "rtdetr-v2-r50"] = "rtdetr-v2-r50"
+    """posekit person detector (``posekit.models.PERSON_DETECTORS``) for the bootstrap and re-detects. RT-DETRv2-R50
+    by default (Pablo, 2026-11-21): same golden/dynamic, best on the bystander case (MammaEval CatchBall), re-detect
+    ~20 ms for 4 cameras vs ~45 ms for yolo12-x."""
     yolo_checkpoint: Path = Path("data/weights/yolo/yolo12x.pt")
-    """Checkpoint of the ``yolo12-x`` detector."""
+    """Checkpoint of the ``yolo12-x`` detector (used only when ``detector`` is ``yolo12-x``)."""
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
     redetect_interval: int = 120
