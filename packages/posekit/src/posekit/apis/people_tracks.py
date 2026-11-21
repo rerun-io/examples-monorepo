@@ -314,10 +314,10 @@ def main(config: PeopleTracksConfig) -> None:
     run_start: float = time.perf_counter()
     print(f"model load + decoder setup {run_start - load_start:.1f} s")
     n_masks: int = 0
-    for chunk, frames in zip(chunks, decoded, strict=True):
+    for position, (chunk, frames) in enumerate(zip(chunks, decoded, strict=True)):
         n_slots, height, width = int(frames.shape[0]), int(frames.shape[2]), int(frames.shape[3])
-        if height % factor or width % factor:
-            raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames")
+        if position == 0 and (height % factor or width % factor):
+            raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
         for column, index in enumerate(chunk):
             union: Bool[Tensor, "s h w"] = tracker.step(frames[:, column])
             if index % config.output_every:
