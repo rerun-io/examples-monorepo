@@ -137,3 +137,21 @@ def test_more_crops_than_the_engine_batch_run_in_chunks() -> None:
     assert runner.batches == [ENGINE_BATCH, 7 - ENGINE_BATCH]
     rows: list[float] = [float(torch.logit(results[cam][obj].visibility[0]).round()) for cam in range(4) for obj in sorted(results[cam])]
     assert rows == [float(i) for i in range(7)]
+
+
+def test_zero_area_boxes_are_skipped() -> None:
+    """A one-pixel-wide mask sliver gives a zero-width box: it gets no crop and no landmarks, instead of dividing by zero."""
+    hw: tuple[int, int] = (36, 64)
+    frames: list[UInt8[torch.Tensor, "3 h w"]] = [torch.zeros(3, *hw, dtype=torch.uint8)]
+    tracks: list[CameraTracks] = [{0: _track(0, [10.0, 5.0, 10.0, 30.0], hw, "cpu"), 1: _track(1, [2.0, 1.0, 20.0, 30.0], hw, "cpu")}]
+
+    estimator: LandmarkEstimator = LandmarkEstimator.__new__(LandmarkEstimator)
+    estimator.config = DEFAULT_MAMMANET_CONFIG
+    estimator.device = "cpu"
+    estimator.runner = None
+    model: _RecordingModel = _RecordingModel()
+    estimator.model = model  # type: ignore[assignment]
+    results = estimator.estimate(frames, tracks)
+
+    assert [sorted(cam_results) for cam_results in results] == [[1]]
+    assert model.img_crops[0].shape[0] == 1

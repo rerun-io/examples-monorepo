@@ -91,7 +91,8 @@ class LandmarkEstimator:
         crop_masks: list[torch.Tensor] = []
         for cam_idx, cam_tracks in enumerate(tracks):
             for obj_id, track in sorted(cam_tracks.items()):
-                if track.bbox_xyxy is None:
+                # No box, or a degenerate one (a one-pixel-wide mask sliver): nothing to crop.
+                if track.bbox_xyxy is None or track.bbox_xyxy[2] <= track.bbox_xyxy[0] or track.bbox_xyxy[3] <= track.bbox_xyxy[1]:
                     continue
                 center, bbox_size = box_geometry(track.bbox_xyxy, self.config)
                 entries.append((cam_idx, obj_id))
