@@ -45,6 +45,9 @@ from posekit.models.fullcircle import (
 )
 from posekit.ops.sphere import MeiCamera
 
+DETECT_FRAMESETS: int = 8
+"""Framesets per detector call: 48 faces, the YOLOX engine's batch."""
+
 
 @dataclass
 class FullCircleMasksConfig:
@@ -68,8 +71,9 @@ class FullCircleMasksConfig:
     keeps (FullCircle captures at 5 fps)."""
     reprompt_every_frames: int = 30
     """Frames of video between two re-prompts of the tracker (30 at 30 fps = once a second; 0: a single prompt). It sets
-    ``masker.reprompt_every`` to ``round(reprompt_every_frames / stride)`` tracked framesets, so ``--stride 5`` keeps a
-    re-prompt once a second (every 6th tracked frameset); at ``stride`` 10 that is every 3rd."""
+    ``masker.reprompt_every`` (which this tool therefore ignores) to ``round(reprompt_every_frames / stride)`` tracked
+    framesets, at least 1, so ``--stride 5`` keeps a re-prompt once a second (every 6th tracked frameset); at ``stride``
+    10 that is every 3rd."""
     start: int = 0
     """First frameset index."""
     end: int | None = None
@@ -89,7 +93,7 @@ class FullCircleMasksConfig:
     debug_every: int = 20
     """Tracked framesets between two evidence frames."""
     decode_chunk: int = 16
-    """Tracked framesets decoded per NVDEC call, and detected per detector pass."""
+    """Tracked framesets decoded per NVDEC call (detected :data:`DETECT_FRAMESETS` at a time)."""
     fps: int = 30
     """Nominal frame rate of the wrapping MP4 track (decoding only)."""
 
@@ -203,7 +207,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     )
     load_start: float = time.perf_counter()
     masker: FullCircleMasker = FullCircleMasker(
-        replace(config.masker, reprompt_every=round(config.reprompt_every_frames / config.stride)), sources
+        replace(config.masker, reprompt_every=max(1, round(config.reprompt_every_frames / config.stride)) if config.reprompt_every_frames > 0 else 0), sources
     )
     print(f"model load + static tables {time.perf_counter() - load_start:.1f} s")
     debug: rr.RecordingStream | None = None
@@ -227,7 +231,13 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     detect_start: float = time.perf_counter()
     directions: list[Float64[ndarray, "3"] | None] = []
     for begin, chunk, frames in decoded_chunks():
-        batch: list[OperatorEvidence] = masker.detect(frames, levels[begin : begin + len(chunk)])
+        # Detector calls of DETECT_FRAMESETS framesets (6 faces each), whatever the decode chunk: the YOLOX engine's batch,
+        # and a bound on the eager SAM 3 detector's memory.
+        batch: list[OperatorEvidence] = [
+            evidence
+            for group in range(0, len(chunk), DETECT_FRAMESETS)
+            for evidence in masker.detect(frames[group : group + DETECT_FRAMESETS], levels[begin + group : begin + group + DETECT_FRAMESETS])
+        ]
         for position, (index, evidence) in enumerate(zip(chunk, batch, strict=True), start=begin):
             directions.append(evidence.direction)
             if debug is not None and position % config.debug_every == 0:
@@ -273,8 +283,6 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         if begin % (config.decode_chunk * 25) == 0:
             done: int = begin + len(chunk)
             print(f"frameset {chunk[-1]}: {done} tracked, {done / elapsed:.1f} framesets/s")
-    for thread in decode_threads:
-        thread.shutdown()
     recording: rr.RecordingStream | None = rr.get_data_recording()
     assert recording is not None
     recording.flush()
