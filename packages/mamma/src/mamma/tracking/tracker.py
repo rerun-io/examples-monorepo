@@ -14,14 +14,15 @@ in ``SAM2GenericVideoPredictorState``.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
+from posekit.models import ClipIdentityConfig, DetectorConfig, RtDetrDetectorConfig
 from sam2.cuda_graphs import GraphCache
 from sam2.modeling.sam2_result import SAM2Result
 
@@ -82,12 +83,11 @@ class TrackerConfig:
     the golden gate passes with it (see implementation-notes)."""
     sam2_checkpoint: Path = Path("data/weights/efficienttam/efficienttam_ti.pt")
     """SAM2-family checkpoint path (EfficientTAM via build_sam2_generic*)."""
-    detector: Literal["yolo12-x", "yolox-m-humanart", "yolox-x-humanart", "rtdetr-v2-r50"] = "rtdetr-v2-r50"
-    """posekit person detector (``posekit.models.PERSON_DETECTORS``) for the bootstrap and re-detects. RT-DETRv2-R50
-    by default (Pablo, 2026-11-21): same golden/dynamic, best on the bystander case (MammaEval CatchBall), re-detect
-    ~20 ms for 4 cameras vs ~45 ms for yolo12-x."""
-    yolo_checkpoint: Path = Path("data/weights/yolo/yolo12x.pt")
-    """Checkpoint of the ``yolo12-x`` detector (used only when ``detector`` is ``yolo12-x``)."""
+    detector: DetectorConfig = field(default_factory=RtDetrDetectorConfig)
+    """posekit person detector for the bootstrap and re-detects (``posekit.models.DetectorConfig``: ``rtdetr``,
+    ``yolox``, ``yolo`` with ``--tracker.detector.weights`` for YOLOv12-X). RT-DETRv2-R50 by default (Pablo,
+    2026-11-21): same golden/dynamic as YOLOv12-X, best on the bystander case (MammaEval CatchBall), re-detect
+    ~20 ms for 4 cameras vs ~45 ms. The detector config carries its own device."""
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
     redetect_interval: int = 120
@@ -195,14 +195,7 @@ class MultiViewTracker:
             self._graphs = GraphCache()
             self._capture_steady_graphs()
             self._graphs.capture = False
-        import dataclasses
-
-        from posekit.models import PERSON_DETECTORS, ClipIdentityConfig, YoloDetectorConfig
-
-        detector_config = PERSON_DETECTORS[config.detector]
-        if isinstance(detector_config, YoloDetectorConfig):
-            detector_config = dataclasses.replace(detector_config, weights=config.yolo_checkpoint, device=config.device)
-        self.detector = detector_config.setup()
+        self.detector = config.detector.setup()
         self.encoder = ClipIdentityConfig(device=config.device).setup()
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False

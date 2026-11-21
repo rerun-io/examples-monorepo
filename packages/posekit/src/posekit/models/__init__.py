@@ -81,7 +81,6 @@ __all__ = (
     "VitPoseConfig",
     "WilorHandDetectorConfig",
     "WilorHandPoseConfig",
-    "PERSON_DETECTORS",
     "YoloDetectorConfig",
     "YoloxDetectorConfig",
 )
@@ -96,13 +95,6 @@ HAND_POSES: dict[str, WilorHandPoseConfig | EgoHandConfig | EgoHandFastConfig] =
     "wilor": WilorHandPoseConfig(), "egohand": EgoHandConfig(), "egohand-fast": _fast_hand_pose, "egohand-fast-bf16": _bf16_hand_pose,
 }
 """3D hand model of every named hand stack; same names as ``HAND_DETECTORS``."""
-PERSON_DETECTORS: dict[str, YoloDetectorConfig | YoloxDetectorConfig | RtDetrDetectorConfig] = {
-    "yolo12-x": YoloDetectorConfig(),
-    "yolox-m-humanart": YoloxDetectorConfig(variant="yolox-m-humanart"),
-    "yolox-x-humanart": YoloxDetectorConfig(variant="yolox-x-humanart"),
-    "rtdetr-v2-r50": RtDetrDetectorConfig(),
-}
-"""Person detectors by zoo name (the ``detector`` role entries of ``posekit.zoo``)."""
 
 if TYPE_CHECKING:
     DetectorConfig = YoloxDetectorConfig | RtDetrDetectorConfig | YoloDetectorConfig

@@ -1,6 +1,6 @@
 """Per-camera person detections the tracker's identity logic consumes (boxes, scores, CLIP features).
 
-The detector and the CLIP encoder are posekit roles (``posekit.models.PERSON_DETECTORS``, ``ClipIdentity``);
+The detector and the CLIP encoder are posekit roles (``TrackerConfig.detector``, ``ClipIdentity``);
 see :meth:`mamma.tracking.tracker.MultiViewTracker._detect`.
 """
 

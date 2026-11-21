@@ -72,9 +72,10 @@ def test_existing_2d_configs_parse_on_the_cli() -> None:
     """The graph-transform hook is code-only; it must not break CLI parsing (posekit-video-pose --help)."""
     import tyro
 
-    from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, RtmPoseConfig, YoloxDetectorConfig
+    from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, RtmPoseConfig, YoloDetectorConfig, YoloxDetectorConfig
 
     assert isinstance(tyro.cli(AnnotatedDetectorConfig, args=["yolox"]), YoloxDetectorConfig)
+    assert isinstance(tyro.cli(AnnotatedDetectorConfig, args=["yolo"]), YoloDetectorConfig)
     assert isinstance(tyro.cli(AnnotatedPose2dConfig, args=["rtmpose"]), RtmPoseConfig)
 
 
@@ -116,12 +117,3 @@ def test_fast_body_cli_can_select_unquantized_backbone() -> None:
     assert isinstance(config, Sam3dBodyFastConfig)
     assert config.backbone_precision == "bf16"
 
-
-def test_person_detectors_are_implemented_zoo_detectors() -> None:
-    """Every PERSON_DETECTORS name is an implemented detector entry of the zoo (the names mamma's tracker accepts)."""
-    from posekit.models import PERSON_DETECTORS
-    from posekit.zoo import ZOO
-
-    for name, config in PERSON_DETECTORS.items():
-        assert ZOO[name].role == "detector" and ZOO[name].status == "implemented", name
-        assert callable(config.setup), name

@@ -1,9 +1,9 @@
-"""Ultralytics YOLO person detector (YOLOv12-X by default), the detector mamma's tracker used.
+"""Ultralytics YOLO person detector (YOLOv12-X by default).
 
 Runs Ultralytics' own pre/postprocessing per frame on a BGR host copy (its letterbox and NMS), keeps the person
-class above ``score_thr`` and suppresses boxes overlapping a higher-scored one at ``dedup_iou`` or more, as
-mamma's port of the original MAMMA segmentation stage did. Detection runs sparsely (bootstrap, periodic
-re-detects), so the per-frame host copy is acceptable; TensorRT is not wired.
+class above ``score_thr`` and suppresses boxes overlapping a higher-scored one at ``dedup_iou`` or more (the
+original MAMMA segmentation stage's rule). Meant for sparse detection (bootstrap, periodic re-detects), so the
+per-frame host copy is acceptable; TensorRT is not wired.
 """
 
 from dataclasses import dataclass
@@ -63,7 +63,7 @@ class YoloDetector(PersonDetector):
             keep: Tensor = (result.boxes.cls == 0) & (result.boxes.conf >= self.config.score_thr)
             xyxy: Tensor = result.boxes.xyxy[keep].float()
             conf: Tensor = result.boxes.conf[keep].float()
-            # torchvision's nms suppresses IoU > threshold; mamma's dedup dropped IoU >= threshold (equal only on exact ties).
+            # torchvision's nms suppresses IoU > threshold (the original rule dropped IoU >= threshold; equal except on exact ties).
             kept: Tensor = torchvision.ops.nms(xyxy, conf, self.config.dedup_iou)
             boxes.append(xyxy[kept].to(device))
             scores.append(conf[kept].to(device))

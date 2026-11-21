@@ -72,7 +72,7 @@ ZOO: dict[str, ZooModel] = {
         ZooModel(
             "yolo12-x", "detector", "detector", "ultralytics",
             "yolo12x.pt", (640, 640), None, "implemented",
-            "YoloDetectorConfig: Ultralytics pre/postprocessing per frame, person class, conf 0.5, IoU-0.75 dedup (mamma's tracker detector).",
+            "YoloDetectorConfig: Ultralytics pre/postprocessing per frame, person class, conf 0.5, IoU-0.75 dedup.",
         ),
         ZooModel(
             "rtdetr-v2-r50", "detector", "query-based", "transformers",
