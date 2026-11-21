@@ -102,15 +102,60 @@ def test_people_masks_ask_sam3_for_tensorrt_by_default(monkeypatch: pytest.Monke
     from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
 
     configs: list[Sam3SegmenterConfig] = []
+    prepared: list[str] = []
 
     def setup(config: Sam3SegmenterConfig) -> Sam3Segmenter:
         configs.append(config)
         return object.__new__(Sam3Segmenter)
 
     monkeypatch.setattr(Sam3SegmenterConfig, "setup", setup)
+    monkeypatch.setattr(Sam3Segmenter, "prepare", lambda self, prompt: prepared.append(prompt))
 
     PeopleMasker(MaskOptions(), "cpu")
     PeopleMasker(MaskOptions(dtype="float32", backend="torch"), "cpu")
 
     assert [(c.backend, c.dtype) for c in configs] == [("tensorrt", "float16"), ("torch", "float32")]
+    assert prepared == ["person", "person"]  # the heads engine is built at setup, not inside the first call
     assert (Sam3SegmenterConfig().backend, Sam3SegmenterConfig().dtype) == ("torch", "float32")  # other SAM 3 users keep eager FP32
+
+
+def test_sam3_prepare_builds_one_heads_engine_per_prompt_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from posekit.models import sam3_segmenter
+    from posekit.models.sam3_segmenter import ENGINE_BATCH, Sam3Segmenter
+
+    segmenter, model, _ = fake_segmenter("float16")
+    monkeypatch.setattr(sam3_segmenter, "_Heads", lambda model: model)  # the stand-in model is no nn.Module
+    segmenter.config = SimpleNamespace(device="cpu")
+    segmenter.engine_name = "sam3"
+    segmenter.heads = {}
+    segmenter.trunk = SimpleNamespace(spec=SimpleNamespace(outputs=(SimpleNamespace(name="fpn0", shape=(4, 2, 2)),)))
+    built: list[tuple[str, dict[str, tuple[int, ...]]]] = []
+
+    def engine(self: Sam3Segmenter, module: Any, name: str, example: dict[str, Tensor], output_names: list[str]) -> str:
+        built.append((name, {key: tuple(value.shape) for key, value in example.items()}))
+        return name
+
+    monkeypatch.setattr(Sam3Segmenter, "engine", engine)
+
+    segmenter.prepare("person")
+    segmenter.prepare("person")
+
+    assert model.text_calls == 1
+    assert built == [("sam3_heads_t3", {"fpn0": (ENGINE_BATCH, 4, 2, 2), "text": (ENGINE_BATCH, 3, 4), "text_mask": (ENGINE_BATCH, 3)})]
+    assert segmenter.heads == {3: "sam3_heads_t3"}
+
+
+def test_sam3_patch_conv_rounds_operands_to_fp16_and_sums_in_fp32() -> None:
+    from posekit.models.sam3_segmenter import _Fp32PatchConv
+
+    torch.manual_seed(0)
+    conv: torch.nn.Conv2d = torch.nn.Conv2d(3, 8, kernel_size=14, stride=14, bias=False)
+    x: Tensor = torch.randn(2, 3, 28, 28)
+    with torch.autocast("cpu", dtype=torch.bfloat16):  # an enclosing autocast region must not reach the conv
+        got: Tensor = _Fp32PatchConv(conv)(x)
+    exact: Tensor = torch.nn.functional.conv2d(x.half().double(), conv.weight.half().double(), stride=14)
+
+    assert got.dtype == torch.float16
+    assert torch.equal(got, exact.half())  # fp32 sums of the fp16 operands round to the exact fp16 result
