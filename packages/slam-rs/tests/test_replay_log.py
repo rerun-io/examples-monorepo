@@ -17,12 +17,16 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from fixture_types import IMU_PERIOD_NS, Rows, RowsReader
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, CameraFactory, PipelineFactory, Rows, RowsReader, TextureFactory, gravity_batch
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 
-from slam_rs.catalog_feed import IMU_ENTITY, TIMELINE, ImuStream
-from slam_rs.vio_log import log_imu
+from slam_rs import _core
+from slam_rs.catalog_feed import IMU_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
+from slam_rs.frontend_log import camera_entity
+from slam_rs.tracking import Lockstep
+from slam_rs.trajectory import empty_trajectory
+from slam_rs.vio_log import VIO_RUN_ENTITY, VIO_STATS_ENTITY, VioLogger, VioStage, log_frameset_inputs, log_imu
 
 SAMPLES: int = 33
 """One 30 Hz frameset's worth of samples."""
@@ -41,7 +45,7 @@ def written(output: Path, read_rows: RowsReader, columnar: bool) -> Rows:
     rr.init("slam-rs-replay-log-test", recording_id=f"replay-log-{output.stem}")
     rr.save(output)
     if columnar:
-        log_imu(imu)
+        log_imu(imu, 0)
     else:
         for sample in range(len(imu)):
             rr.set_time(TIMELINE, duration=np.timedelta64(int(imu.t_ns[sample]), "ns"))
@@ -67,7 +71,7 @@ def test_a_frameset_without_samples_logs_nothing(tmp_path: Path, read_rows: Rows
     output: Path = tmp_path / "empty.rrd"
     rr.init("slam-rs-replay-log-test", recording_id="replay-log-empty")
     rr.save(output)
-    log_imu(ImuStream(t_ns=np.zeros(0, dtype=np.int64), gyro_rad_s=np.zeros((0, 3)), accel_m_s2=np.zeros((0, 3))))
+    log_imu(ImuStream(t_ns=np.zeros(0, dtype=np.int64), gyro_rad_s=np.zeros((0, 3)), accel_m_s2=np.zeros((0, 3))), 0)
     rr.disconnect()
     assert read_rows(output) == {}
 
@@ -77,7 +81,6 @@ def test_the_masks_a_frameset_was_tracked_with_are_logged_with_their_scale(tmp_p
     image, logged once; a mask is logged again only when it changes, and every nonzero label draws as masked."""
     from rerun.chunk import RrdReader
 
-    from slam_rs.frontend_log import camera_entity
     from slam_rs.vio_log import FrameMaskLog
 
     output: Path = tmp_path / "masks.rrd"
@@ -102,3 +105,42 @@ def test_the_masks_a_frameset_was_tracked_with_are_logged_with_their_scale(tmp_p
     (context,) = [batch.column("AnnotationContext:context").to_pylist() for batch in statics]
     classes: dict[int, dict] = {entry["class_id"]: entry["class_description"]["info"] for entry in context[0][0]}  # one row, one instance
     assert classes[2]["label"] == classes[1]["label"] == "masked" and classes[2]["color"] == classes[1]["color"]
+
+
+def test_every_replay_row_sits_on_its_base_video_frame(
+    pipeline: PipelineFactory, camera: CameraFactory, texture: TextureFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """With a camera-to-IMU offset (RoboCap's 14.9 ms) the estimator's stamps are ``video_time`` + offset; the replay's
+    images, keypoints, run rig, counters and IMU samples still land on the base video's own stamps."""
+    offset_ns: int = 14_902_432
+    base_video_ns: Int64[ndarray, " n"] = np.arange(12, dtype=np.int64) * FRAME_PERIOD_NS
+    cameras: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
+    output: Path = tmp_path / "offset.rrd"
+    rr.init("slam-rs-replay-log-test", recording_id="replay-log-offset")
+    rr.save(output)
+    vio: _core.Vio = pipeline(2)
+    stage: VioStage = VioStage(
+        Lockstep(vio),
+        VioLogger(cameras=cameras, ground_truth=empty_trajectory(), frame_t_ns=base_video_ns + offset_ns,
+                  tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=offset_ns),
+    )
+    imu_ns: list[int] = []
+    for step, video_ns in enumerate(base_video_ns.tolist()):
+        t_ns: int = video_ns + offset_ns
+        samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
+        imu_ns.extend(samples.tolist())
+        gyro, accel = gravity_batch(samples)
+        frameset: Frameset = Frameset(t_ns=t_ns, images=[texture(step, 0), texture(step - 2, 0)],
+                                      imu=ImuStream(t_ns=samples, gyro_rad_s=gyro, accel_m_s2=accel), ground_truth=None)
+        log_frameset_inputs(cameras, offset_ns, frameset, "jpeg")
+        stage.run(frameset)
+    stage.flush()
+    rr.disconnect()
+    rows: Rows = read_rows(output)
+
+    base: set[int] = set(base_video_ns.tolist())
+    assert {row.t_ns for row in rows[f"{camera_entity(0)}/image"]} == base
+    for entity in (f"{camera_entity(0)}/keypoints", f"{VIO_RUN_ENTITY}/rig", f"{VIO_STATS_ENTITY}/track_ms"):
+        stamps: set[int] = {row.t_ns for row in rows[entity]}
+        assert stamps and stamps <= base, entity
+    assert [row.t_ns for row in rows[f"{IMU_ENTITY}/gyro"]] == [t_ns - offset_ns for t_ns in imu_ns]

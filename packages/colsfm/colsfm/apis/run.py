@@ -22,6 +22,7 @@ import tyro
 
 from colsfm import DATA_DIR
 from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input
+from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
 from colsfm.rerun_layer import LayerSummary, write_run_layer
 from colsfm.run_config import PipelineOptions, SelectionOptions
@@ -66,7 +67,9 @@ class CatalogCommand:
         summary: PipelineSummary = run_pipeline(options)
         print(f"[colsfm] summary written to {summary.options.output_dir / SUMMARY_NAME}")
         layer_path: Path = self.layer_path or DATA_DIR / "rrd" / f"{prepared.input_dir.name}.colsfm.rrd"
-        layer: LayerSummary = write_run_layer(output_dir, layer_path, segment=self.source.segment, timeline=self.source.timeline)
+        layer: LayerSummary = write_run_layer(
+            output_dir, layer_path, segment=self.source.segment, timeline=self.source.timeline, frames=read_manifest(prepared.input_dir / FRAME_SOURCE_FILE)
+        )
         print(
             f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points, "
             f"{layer.metrics.registered_images} registered images, {layer.metrics.mean_reprojection_error_px:.3f} px"

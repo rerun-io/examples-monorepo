@@ -80,28 +80,21 @@ from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets import insta360_panorama
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
+from dataforge.datasets.insta360_blueprint import FACE_CAMS, FIRST_FACE_CAM, PANO_ENTITY, RIG, segment_layout, segment_walk
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_camera_source, log_rig_node, log_video_stream
 from dataforge.video_encoding import NVENC_PRESET, nvenc_av1_options, nvenc_slot, work_dir
 
-RIG: int = 0
-"""One rig per clip."""
 PANORAMA_LAYER: str = "panorama"
 """The derived panorama, written only under ``--panorama``: an AV1 ``VideoStream`` at ``PANO_ENTITY`` on the frame times."""
-PANO_ENTITY: str = f"{schema.rig_path(RIG)}/pano"
-"""Where the panorama layer puts its video."""
 CUBE_LAYER: str = "cube"
 """The cubemap, written only under ``--cube``: six faces per sampled frameset, ``cam_02 .. cam_07``."""
-FIRST_FACE_CAM: int = 2
-"""Camera index of the first face; face ``k`` of ``insta360_cube.FACES`` is ``2 + k``."""
-FACE_CAMS: range = range(FIRST_FACE_CAM, FIRST_FACE_CAM + len(cube.FACES))
-"""``cam_02 .. cam_07``: the cube faces."""
 LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
-RUN_SOURCE: str = "slam_rs"
-"""The run layer the layouts show: slam-rs tracks these clips."""
+RUN_SOURCE: str = schema.SLAM_RS_SOURCE
+"""The run layer the segment-table card shows: slam-rs tracks these clips."""
 
 
 def _pictures(rig: insta360_io.InsvRig, lens: int, frames: int, *, threads: int) -> Iterator[av.VideoFrame]:
@@ -400,7 +393,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     PANORAMA_LAYER: lambda recording: self.write_panorama(recording, reader.rig, targets[paths.BASE_LAYER]),
                     CUBE_LAYER: lambda recording: self.write_cube(recording, reader.rig, targets[paths.BASE_LAYER]),
                 },
-                base_blueprint=self.segment_blueprint(panorama=PANORAMA_LAYER in pending),
+                base_blueprint=segment_layout(panorama=PANORAMA_LAYER in pending),
             )
         return targets[paths.BASE_LAYER]
 
@@ -558,24 +551,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
 
     def default_blueprint(self) -> rrb.Blueprint:
         """The base's layout: no panorama pane, since the panorama is an opt-in derived layer."""
-        return self.segment_blueprint(panorama=False)
+        return segment_layout(panorama=False)
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
-        """The segment layout shows the panorama pane when any registered segment holds the panorama layer."""
+        """The segment layout shows the panorama tab when any registered segment holds the panorama layer, and its
+        overviews frame the walk when the dataset holds one walked segment (``insta360_blueprint.segment_walk``)."""
         layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
-        return self.segment_blueprint(panorama=any(PANORAMA_LAYER in names for names in layer_names)), self.table_blueprint()
-
-    def segment_blueprint(self, *, panorama: bool) -> rrb.Blueprint:
-        """Both lenses (and with ``panorama`` the panorama) beside the rig in 3D, over the IMU plots."""
-        lenses: list[rrb.Spatial2DView] = [blueprints.camera_view(f"lens{cam}", RIG, cam, contents=[schema.video_path(RIG, cam)]) for cam in range(2)]
-        return blueprints.rig_blueprint(
-            lenses + ([rrb.Spatial2DView(name="panorama", origin=PANO_ENTITY)] if panorama else []),
-            rig=RIG,
-            run_source=RUN_SOURCE,
-            # Lens 0 looks along z_P = -y_imu; image up is -y_P = -x_imu.
-            eye_controls=blueprints.follow_eye_controls((0.0, -1.0, 0.0), (-1.0, 0.0, 0.0)),
-            plots=blueprints.imu_plots(RIG, 0),
-        )
+        return segment_layout(panorama=any(PANORAMA_LAYER in names for names in layer_names), walk=segment_walk(entry)), self.table_blueprint()
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Preview card: the rig beside lens 0."""

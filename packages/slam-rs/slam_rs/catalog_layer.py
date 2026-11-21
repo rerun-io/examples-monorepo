@@ -16,6 +16,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE
+from slam_rs.follow_frame import follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
 
@@ -47,6 +48,7 @@ def write_layer(
     losses, interior gaps and non-finite runs cannot replace an existing result.
     ``animate_base_rig`` also writes the final poses on ``/world/rig_00``; only
     for a dataset without a ``gt`` layer, where nothing else moves the rig.
+    Each run carries its level follow frame (:func:`slam_rs.follow_frame.follow_entity`).
     The caller decides from the catalog, so a dataset's ground truth must be
     registered as the layer named ``gt``: a base layer, or a layer by another
     name, that animates the rig would clash again without an error.
@@ -106,6 +108,8 @@ def _log_run(
     rig: str = f"{schema.run_path(source)}/rig"
     rec.send_columns(rig, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                      columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
+    rec.send_columns(follow_entity(schema.run_path(source)), indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
+                     columns=rr.Transform3D.columns(translation=positions, quaternion=yaw_quaternion_xyzw(follow_yaw(times, positions))))
     rec.log(rig, rr.TransformAxes3D(RIG_AXIS_LENGTH_M), static=True)
     indices: Int64[ndarray, " n_overview"] = np.unique(np.append(np.arange(0, len(positions), max(1, len(positions) // 4000)), len(positions) - 1))
     overview: Float64[ndarray, "n_overview 3"] = positions[indices]

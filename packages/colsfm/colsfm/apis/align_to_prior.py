@@ -41,5 +41,5 @@ def main(config: Config) -> None:
     input_dir: Path = from_json(PipelineSummary, (config.run_dir / SUMMARY_NAME).read_text()).options.input_dir
     if (input_dir / FRAME_SOURCE_FILE).is_file():
         manifest = read_manifest(input_dir / FRAME_SOURCE_FILE)
-        layer = write_run_layer(config.output_dir, config.output_dir / "colsfm.rrd", segment=manifest.segment, timeline=manifest.timeline)
+        layer = write_run_layer(config.output_dir, config.output_dir / "colsfm.rrd", segment=manifest.segment, timeline=manifest.timeline, frames=manifest)
         print(f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points")

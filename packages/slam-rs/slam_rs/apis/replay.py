@@ -29,10 +29,21 @@ from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
 from slam_rs.gba_log import keyframe_trajectory, log_map_result
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.rig import TIMELINE
 from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import RUN_ENTITY, FrameMaskLog, FrameMode, VioLogger, VioStage, log_calibration, log_frameset_inputs, vio_blueprint
+from slam_rs.vio_log import (
+    COLOR_DOWNSCALE,
+    RUN_ENTITY,
+    FrameMaskLog,
+    FrameMode,
+    VioLogger,
+    VioStage,
+    dataset_videos,
+    log_calibration,
+    log_frameset_inputs,
+    set_video_time,
+    vio_blueprint,
+)
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
@@ -123,6 +134,11 @@ class Config:
     ba_backend: GbaRequest = "follow"
     """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
     ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
+    animate_base_rig: bool = False
+    """``--stage vio`` on a segment without ground truth: also move the dataset's rig ``/world/rig_00`` with the raw VIO
+    pose, so views rooted at the rig follow it when this recording is viewed on its own (beside the base only). Leave it
+    off for a layer that goes beside the catalog ``slam_rs`` layer, which owns that transform and writes the final
+    poses there; two writers would give colsfm's pose prior two trajectories on one entity."""
 
 
 @dataclass(slots=True)
@@ -170,6 +186,8 @@ class BootstrapLog:
     the recording. Nothing is logged on the stereo start.
     """
 
+    cam_time_offset_ns: int
+    """The feed's :attr:`ImuCalib.cam_time_offset_ns`: the attempts' stamps are on the estimator's clock."""
     logged: int = 0
     """Attempts already in the recording."""
     accepted: bool = False
@@ -186,7 +204,7 @@ class BootstrapLog:
             return
         attempts: list[_core.BootstrapAttempt] = report.attempts
         for attempt in attempts[self.logged :]:
-            rr.set_time(TIMELINE, duration=np.timedelta64(attempt.last_t_ns, "ns"))
+            set_video_time(attempt.last_t_ns, self.cam_time_offset_ns)
             rr.log(
                 BOOTSTRAP_ENTITY,
                 rr.AnyValues(
@@ -287,7 +305,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
     source: Generator[Frameset, None, None] = feed.framesets(stop_ns)
     framesets: Iterator[Frameset] = blank(source, config.blank_cameras)
-    bootstrap: BootstrapLog = BootstrapLog()
+    bootstrap: BootstrapLog = BootstrapLog(feed.imu.cam_time_offset_ns)
     while config.max_framesets is None or replayed < config.max_framesets:
         waited: float = time.monotonic()
         frameset: Frameset | None = next(framesets, None)
@@ -297,7 +315,7 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
         log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
         replayed += 1
         logged: float = time.monotonic()
-        log_frameset_inputs(feed, frameset, mode if log_images else "off", mask_log)
+        log_frameset_inputs(feed.cameras, feed.imu.cam_time_offset_ns, frameset, mode if log_images else "off", mask_log)
         times.add("log_inputs", 1e3 * (time.monotonic() - logged))
         if isinstance(stage, VioStage):
             stage.run(frameset)
@@ -351,6 +369,8 @@ def main(config: Config) -> None:
         raise ValueError("--mask-rrd names a layer; --mask-entity names the masks in it")
     if config.mask_entity is not None and config.stage != "vio":
         raise ValueError("--mask-entity applies to --stage vio, the one stage that tracks with masks")
+    if config.animate_base_rig and config.stage != "vio":
+        raise ValueError("--animate-base-rig moves the rig with the VIO estimate, which only --stage vio produces")
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -382,7 +402,9 @@ def main(config: Config) -> None:
         )
         if not feed.has_ground_truth:
             print("ground truth absent, not scored")
-        log_calibration(feed.cameras)
+        elif config.animate_base_rig:
+            raise ValueError("--animate-base-rig: this segment has ground truth, and the gt layer owns /world/rig_00")
+        log_calibration(feed.cameras, gravity_world=not feed.has_ground_truth)
         stage: FrontendStage | VioStage | None = None
         if config.stage == "frontend":
             stage = FrontendStage(
@@ -410,10 +432,16 @@ def main(config: Config) -> None:
                     cameras=feed.cameras,
                     ground_truth=truth,
                     frame_t_ns=feed.frame_t_ns,
+                    tracked_resolution=tuple(vio.tracked_resolution),
+                    cam_time_offset_ns=feed.imu.cam_time_offset_ns,
+                    animate_base_rig=config.animate_base_rig,
+                    # The base's own lens videos: the run's frusta reference their frames, nothing is encoded again.
+                    video_entities=dataset_videos(feed.camera_positions),
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
-        _replay(feed, config, stage)
+        # The landmarks take their colour from the frames: the estimator's own stay gray, the logger gets an RGB copy.
+        _replay(dataclasses.replace(feed, color_downscale=COLOR_DOWNSCALE) if isinstance(stage, VioStage) else feed, config, stage)
         if not isinstance(stage, VioStage):
             return
         # The per-frameset segments show where the run had got to; these show

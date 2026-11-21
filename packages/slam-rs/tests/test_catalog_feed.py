@@ -470,12 +470,15 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Be
     ) as feed:
         truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
         assert len(truth)
+        vio: _core.Vio = _core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), resolved_flow_config(settings, segment)[0], backend="cpu")
         stage: VioStage = VioStage(
-            lockstep=Lockstep(vio=_core.Vio(_core.Calibration.from_catalog(feed.cameras, feed.imu), resolved_flow_config(settings, segment)[0], backend="cpu")),
+            lockstep=Lockstep(vio=vio),
             logger=VioLogger(
                 cameras=feed.cameras,
                 ground_truth=truth,
                 frame_t_ns=feed.frame_t_ns,
+                tracked_resolution=tuple(vio.tracked_resolution),
+                cam_time_offset_ns=feed.imu.cam_time_offset_ns,
             ),
         )
         replayed: int = _replay(feed, config, stage)

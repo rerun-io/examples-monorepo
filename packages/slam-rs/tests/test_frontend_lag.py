@@ -129,9 +129,10 @@ def test_lagged_viewer_layer_keeps_all_frame_timestamps(
     rr.send_blueprint(vio_blueprint(cameras))
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": True}}))
     timestamps: Int64[ndarray, "n"] = np.arange(0, 240_000_000, 20_000_000, dtype=np.int64)
+    vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
     stage: VioStage = VioStage(
-        Lockstep(_core.Vio(rig(2), config, backend="cpu")),
-        VioLogger(cameras=cameras, ground_truth=empty_trajectory(), frame_t_ns=timestamps),
+        Lockstep(vio),
+        VioLogger(cameras=cameras, ground_truth=empty_trajectory(), frame_t_ns=timestamps, tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=0),
     )
     for index, time in enumerate(timestamps):
         t_ns: int = int(time)

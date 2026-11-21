@@ -145,12 +145,15 @@ def test_a_run_that_never_tracked_still_reports_what_it_held(
     """
     rr.init("slam-rs-tracking-test", recording_id="never-tracked")
     rr.save(tmp_path / "never-tracked.rrd")
+    vio: _core.Vio = pipeline(2)
     stage: VioStage = VioStage(
-        lockstep=Lockstep(vio=pipeline(2)),
+        lockstep=Lockstep(vio=vio),
         logger=VioLogger(
             cameras=(camera(0, 0.0), camera(1, 0.1)),
             ground_truth=empty_trajectory(),
             frame_t_ns=np.zeros(1, dtype=np.int64),
+            tracked_resolution=tuple(vio.tracked_resolution),
+            cam_time_offset_ns=0,
         ),
     )
     stage.run(frameset(0, texture, np.zeros(0, dtype=np.int64)))

@@ -1,13 +1,9 @@
 """NVDEC must not hide a source/calibration resolution mismatch by resizing it."""
 
-from io import BytesIO
-
-import av
 import numpy as np
 import pytest
 import torch
-from av.container import OutputContainer
-from av.video.stream import VideoStream
+from fixture_types import Mp4Factory
 from jaxtyping import UInt8
 from numpy import ndarray
 
@@ -19,21 +15,10 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def video() -> bytes:
+def video(synthetic_mp4: Mp4Factory) -> bytes:
     if not torch.cuda.is_available():
         pytest.skip("CUDA decoder test requires an NVIDIA GPU")
-    pytest.importorskip("torchcodec")
-    buffer: BytesIO = BytesIO()
-    container: OutputContainer
-    with av.open(buffer, mode="w", format="mp4") as container:
-        stream: VideoStream = container.add_stream("libx264", rate=30)
-        stream.width, stream.height, stream.pix_fmt = 96, 64, "yuv420p"
-        frame: av.VideoFrame = av.VideoFrame.from_ndarray(np.full((64, 96, 3), 100, dtype=np.uint8), format="rgb24")
-        for packet in stream.encode(frame):
-            container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return buffer.getvalue()
+    return synthetic_mp4(np.full((64, 96, 3), 100, dtype=np.uint8), 1)
 
 
 def test_cuda_rejects_source_resolution_mismatch(video: bytes) -> None:
@@ -43,10 +28,27 @@ def test_cuda_rejects_source_resolution_mismatch(video: bytes) -> None:
 
 @pytest.mark.parametrize(("downscale", "height", "width"), [(1, 64, 96), (3, 21, 32)])
 def test_cuda_preserves_calibrated_integer_downscale(video: bytes, downscale: int, height: int, width: int) -> None:
-    frames: list[UInt8[ndarray, "h w"]] = list(decode_gray_cuda(video, (height, width), downscale))
-    assert len(frames) == 1
+    pairs = list(decode_gray_cuda(video, (height, width), downscale))
+    assert len(pairs) == 1 and all(color is None for _, color in pairs)
+    frames: list[UInt8[ndarray, "h w"]] = [gray for gray, _ in pairs]
     for frame in frames:
         assert frame.shape == (height, width)
         assert frame.dtype == np.uint8
         assert frame.flags.c_contiguous
         np.testing.assert_allclose(frame, 100, atol=2)
+
+
+def test_cuda_pairs_each_gray_frame_with_the_cpu_sized_colour_copy(synthetic_mp4: Mp4Factory) -> None:
+    """The NVDEC copy has the CPU copy's size (each side floored) and keeps each side's colour."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA decoder test requires an NVIDIA GPU")
+    picture: UInt8[ndarray, "h w 3"] = np.zeros((66, 98, 3), dtype=np.uint8)
+    picture[:, :48, 0] = 220
+    picture[:, 50:, 2] = 220
+    pairs = list(decode_gray_cuda(synthetic_mp4(picture, 1), (66, 98), 1, color_downscale=4))
+    assert len(pairs) == 1
+    gray, copy = pairs[0]
+    assert gray.shape == (66, 98) and copy is not None
+    rgb: UInt8[ndarray, "ch cw 3"] = copy()
+    assert rgb.shape == (16, 24, 3) and rgb.dtype == np.uint8
+    assert rgb[:, :10, 0].min() > 150 and rgb[:, 14:, 2].min() > 150

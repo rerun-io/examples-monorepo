@@ -18,16 +18,18 @@ right the moment a pose or ground-truth layer stacks onto the same segment.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from typing import TypeAlias
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.blueprint.api import VisualizerLike
 from rerun.encodings import EntityPathLike
 from simplecv.rerun_eye_controls import eye_controls_from_pose as eye_controls_from_pose
 from simplecv.rerun_eye_controls import follow_eye_controls as follow_eye_controls
 
 from dataforge import schema
 
-TRAIL_WINDOW_S: float = -10.0
+TRAIL_WINDOW_S: float = 10.0
 """How far back of the cursor the follow view's motion trail reaches, in seconds."""
 DIM_TRAJECTORY_COLOR: tuple[int, int, int] = (90, 110, 140)
 """Tint the follow view repaints the full path in: cool and desaturated, so it sits behind the trail."""
@@ -46,9 +48,12 @@ INSTRUCTION_SHARES: tuple[int, int] = (5, 1)
 EXO_PANES_PER_TAB: int = 9
 """Most exo panes one strip shows; a larger rig continues in further tabs, filled in order."""
 
+ViewOverride: TypeAlias = VisualizerLike | Iterable[VisualizerLike]
+"""One entity's override in a view: a time range, a visibility, archetype fields, or a list of them (rerun's own type)."""
+
 
 def camera_view(
-    name: str, rig: int, cam: int, *, contents: list[str] | None = None, overrides: Mapping[EntityPathLike, rrb.EntityBehavior] | None = None
+    name: str, rig: int, cam: int, *, contents: list[str] | None = None, overrides: Mapping[EntityPathLike, ViewOverride] | None = None
 ) -> rrb.Spatial2DView:
     """One camera's 2D pane.
 
@@ -120,10 +125,19 @@ def trail_window_range() -> rrb.VisibleTimeRanges:
     limits it to this window. A trail precomputed as a rolling window on every row (each row of GSI's
     ``/slam/trail`` holds the last 29 segments) stores every position again and again, and an unlimited one is the path.
     """
+    return cursor_window(TRAIL_WINDOW_S)
+
+
+def cursor_window(start_s: float | None) -> rrb.VisibleTimeRanges:
+    """A visible time range on ``video_time`` from ``start_s`` before the cursor (None: the start of the recording) to the cursor.
+
+    What makes data logged once at its own time accumulate in a 3D view: a path drawn a segment a pose, or a cloud logged
+    a keyframe at a time. A bounded start keeps the query small on a long clip.
+    """
     return rrb.VisibleTimeRanges(
         rrb.VisibleTimeRange(
             schema.TIMELINE,
-            start=rrb.TimeRangeBoundary.cursor_relative(seconds=TRAIL_WINDOW_S),
+            start=rrb.TimeRangeBoundary.infinite() if start_s is None else rrb.TimeRangeBoundary.cursor_relative(seconds=-start_s),
             end=rrb.TimeRangeBoundary.cursor_relative(),
         )
     )
@@ -171,6 +185,9 @@ def rig_blueprint(
     extra_run_sources: Sequence[str] = (),
     overview_exclude: Sequence[str] = (),
     path_colors: Mapping[str, tuple[int, int, int]] | None = None,
+    follow_exclude: Sequence[str] = (),
+    overview_overrides: Mapping[EntityPathLike, ViewOverride] | None = None,
+    follow_overrides: Mapping[EntityPathLike, ViewOverride] | None = None,
 ) -> rrb.Blueprint:
     """The default layout of a single-rig capture: 3D and cameras over the sensor plots.
 
@@ -196,6 +213,10 @@ def rig_blueprint(
         path_colors: Run source -> colour of its trajectory and trail in both views (a
             figure legend), overriding the layer's own colours; a source left out keeps
             the dim follow path and its layer's colours.
+        follow_exclude: Entity paths the follow view drops (with their subtrees).
+        overview_overrides: Further per-entity overrides of the overview, e.g. a time range on a layer's own entities;
+            they win over the shared ones.
+        follow_overrides: The same for the follow view.
 
     Returns:
         The blueprint embedded in the dataset's rrds and registered as the
@@ -211,7 +232,8 @@ def rig_blueprint(
                     rrb.Spatial3DView(
                         name="Rig",
                         origin="/",
-                        contents="\n".join(["$origin/**", *(f"- {path}/**" for path in overview_exclude)]),
+                        # One rule per item: a newline-joined string reaches the 0.42 viewer as a single entity path, which matches nothing.
+                        contents=["$origin/**", *(f"- {path}/**" for path in overview_exclude)],
                         line_grid=True,
                         overrides={
                             # The rig is centimetres on a path that can be kilometres, so the
@@ -224,12 +246,13 @@ def rig_blueprint(
                             ),
                             **{schema.trail_path(source): rrb.EntityBehavior(visible=False) for source in sources},
                             **{schema.trajectory_path(source): rr.LineStrips3D.from_fields(colors=color) for source, color in colors.items()},
+                            **(overview_overrides or {}),
                         },
                     ),
                     rrb.Spatial3DView(
                         name="Follow",
                         origin=schema.rig_path(rig),
-                        contents="/**",
+                        contents=["/**", *(f"- {path}/**" for path in follow_exclude)],
                         # No grid: LineGrid3D draws on the origin frame's z = 0 plane,
                         # and this view's origin is the rig, whose z axis is nowhere
                         # near vertical on a worn device — the grid stood as a wall
@@ -253,6 +276,7 @@ def rig_blueprint(
                                 )
                                 for source in sources
                             },
+                            **(follow_overrides or {}),
                         },
                         eye_controls=eye_controls,
                     ),

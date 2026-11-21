@@ -30,6 +30,13 @@ EXOEGO_SCHEMA_VERSION: str = "exoego:v2"
 DATAFORGE_SCHEMA_VERSION: str = "dataforge:v1"
 """Value of the ``property:capture:schema`` recording property."""
 
+SLAM_RS_SOURCE: str = "slam_rs"
+"""Run source of slam-rs's catalog result layer (its final, loop-closed poses) under ``/world/runs/``."""
+SLAM_RS_VIO_SOURCE: str = "slam_rs_vio"
+"""Run source of slam-rs's raw causal VIO replay, in the same layer."""
+COLSFM_SOURCE: str = "colsfm"
+"""Run source of the colsfm layer (``colsfm.rerun_layer.DEFAULT_SOURCE``): rig, frusta, ``points`` (static) and
+``points_growing`` (each point at its first observing rig frame). colsfm does not depend on dataforge; a test pins the names."""
 GT_RUN_SOURCE: str = "gt"
 """Run source of the ground-truth trajectory and trail under ``/world/runs/``.
 
@@ -145,6 +152,22 @@ def trajectory_path(source: str) -> str:
 def trail_path(source: str) -> str:
     """``.../runs/<source>/trail`` — the source's cursor-relative trajectory trail."""
     return f"{run_path(source)}/trail"
+
+
+def follow_path(source: str) -> str:
+    """``.../runs/<source>/follow`` — the source's level follow frame: its rig position, turned about the world's up axis only.
+
+    A viewer's follow view is rooted here, not at a rig, so its horizon stays level while the rig rolls and pitches.
+    Per source: a view of one run centres on that run's path (the causal VIO and the final path part by metres).
+    slam-rs writes one for each of its runs (``slam_rs.follow_frame``).
+    """
+    return f"{run_path(source)}/follow"
+
+
+def floor_path(source: str) -> str:
+    """``.../runs/<source>/floor_grid`` — one-metre cells on the floor under the source's walk, each edge on
+    ``video_time`` at the time the walk passed it (slam-rs: ``slam_rs.follow_frame``)."""
+    return f"{run_path(source)}/floor_grid"
 
 
 def capture_property(name: str) -> str:

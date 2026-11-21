@@ -34,6 +34,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
+import rerun.blueprint as rrb
 import rerun.chunk as rrc
 from jaxtyping import UInt8
 from numpy import ndarray
@@ -500,3 +501,12 @@ def show3d_scene_inputs(request: pytest.FixtureRequest) -> Show3dSceneInputs:
         read_hand_frames(SHOW3D_RAW / hand_pose_file(key), scene),
         read_hand_profile(SHOW3D_RAW / hand_profile_file(identity.parts[0])),
     )
+
+
+def content_rules(view: rrb.View) -> list[str]:
+    """A view's contents as its list of query rules (a layout that passes one string gets a one-rule list)."""
+    contents = view.contents
+    if isinstance(contents, str):
+        return [contents]
+    assert isinstance(contents, list) and all(isinstance(rule, str) for rule in contents), f"{view.name}: contents {contents!r}"
+    return [str(rule) for rule in contents]
