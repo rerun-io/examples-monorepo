@@ -23,7 +23,9 @@ import torch
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
 from sam2.cuda_graphs import GraphCache
+from sam2.modeling.sam2_prompt import SAM2Prompt
 from sam2.modeling.sam2_result import SAM2Result
+from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
@@ -218,8 +220,6 @@ class MultiViewTracker:
         stream visits. A layout seen twice is captured; the ramp after each prompt,
         seen once, is left to the eager path.
         """
-        from sam2.modeling.sam2_prompt import SAM2Prompt
-        from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
         h, w = self._video_hw
         states = [SAM2GenericVideoPredictorState.create(self._video_hw, copy.deepcopy(s.memory_bank)) for s in self._states]
@@ -234,7 +234,11 @@ class MultiViewTracker:
         torch.cuda.synchronize()
 
     def _forward_batched(
-        self, states: list, frame_idx: int, frames: UInt8[torch.Tensor, "c 3 h w"], prompts: list[list]
+        self,
+        states: list[SAM2GenericVideoPredictorState],
+        frame_idx: int,
+        frames: UInt8[torch.Tensor, "c 3 h w"],
+        prompts: list[list[SAM2Prompt]],
     ) -> list[dict[int, SAM2Result]]:
         """One ``forward_batched`` step over every camera, with every mask hypothesis (tracks read hypothesis 0); a
         steady step is one CUDA graph replay where captured."""
