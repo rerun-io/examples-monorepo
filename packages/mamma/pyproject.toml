@@ -6,8 +6,6 @@ dependencies = [
     # cuda: pytorch-gpu, torchvision
     # feature.mamma: torchcodec, einops, tyro (conda) + sam2 path dep
     "smplx>=0.1.28",
-    "ultralytics>=8.3",
-    "open-clip-torch>=2.24",
     "safetensors>=0.4",
 ]
 name = "mamma"

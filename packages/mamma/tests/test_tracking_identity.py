@@ -141,3 +141,42 @@ def test_bootstrap_order_scenario_fails_on_rig_distance_alone(monkeypatch: pytes
 def test_bootstrap_order_rig_distance_separates_well_seen_bystanders() -> None:
     """A bystander every camera sees well stays eligible; the rig-centre distance ranks the subject first."""
     assert _order(np.array([2.2, -1.8, 1.0]), operator_in_all=True)[0] == 0
+
+
+def test_detector_goes_to_the_tracker_device() -> None:
+    """The detector config's own default device ('cuda') must not override an indexed tracker device."""
+    from posekit.models import RtDetrDetectorConfig, YoloDetectorConfig, YoloxDetectorConfig
+    from trtkit.backends import OnnxBackendConfig
+
+    from mamma.tracking.tracker import place_detector
+
+    placed_rtdetr = place_detector(RtDetrDetectorConfig(), "cuda:1")
+    placed_yolo = place_detector(YoloDetectorConfig(), "cuda:1")
+    placed_yolox = place_detector(YoloxDetectorConfig(backend=OnnxBackendConfig()), "cuda:1")
+    assert isinstance(placed_rtdetr, RtDetrDetectorConfig) and placed_rtdetr.device == "cuda:1"
+    assert isinstance(placed_yolo, YoloDetectorConfig) and placed_yolo.device == "cuda:1"
+    assert isinstance(placed_yolox, YoloxDetectorConfig) and isinstance(placed_yolox.backend, OnnxBackendConfig)
+    assert placed_yolox.backend.device_id == 1
+
+
+def test_whole_frame_boxes_are_not_people() -> None:
+    """A box covering the whole frame (RT-DETR on a near-black frame) is dropped; a person box in the same batch is kept."""
+    import torch
+    from posekit.predictions import BoxDetections
+
+    from mamma.tracking.tracker import MultiViewTracker
+
+    h, w = 60, 80
+    boxes = BoxDetections(
+        xyxy=torch.tensor([[-1.0, -2.0, 81.0, 61.0], [10.0, 5.0, 30.0, 55.0], [0.0, 0.0, 80.0, 60.0]]),
+        scores=torch.tensor([0.7, 0.9, 0.5]),
+        frame_indices=torch.tensor([0, 1, 1]),
+    )
+    tracker: MultiViewTracker = MultiViewTracker.__new__(MultiViewTracker)
+    tracker.detector = lambda frames_rgb: boxes  # type: ignore[assignment]
+    tracker.encoder = lambda frames_rgb, b: torch.arange(b.num_detections, dtype=torch.float32)[:, None].expand(-1, 4)  # type: ignore[assignment]
+    detections = tracker._detect([torch.zeros(3, h, w, dtype=torch.uint8) for _ in range(2)])
+
+    assert [len(d) for d in detections] == [0, 1]
+    assert detections[1].boxes_xyxy.tolist() == [[10.0, 5.0, 30.0, 55.0]]
+    assert detections[1].features[:, 0].tolist() == [1.0]

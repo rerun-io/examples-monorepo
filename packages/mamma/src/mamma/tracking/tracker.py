@@ -14,13 +14,14 @@ in ``SAM2GenericVideoPredictorState``.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
+from posekit.models import ClipIdentityConfig, DetectorConfig, RtDetrDetectorConfig
 from sam2.cuda_graphs import GraphCache
 from sam2.modeling.sam2_prompt import SAM2Prompt
 from sam2.modeling.sam2_result import SAM2Result
@@ -28,11 +29,10 @@ from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
-from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
+from mamma.tracking.detection import PersonDetections, bbox_iou_xyxy
 from mamma.tracking.identity import (
     CLIP_WEIGHT,
     EPIPOLAR_WEIGHT,
-    ClipEncoder,
     FeatureBank,
     assign_hungarian,
     epipolar_score,
@@ -41,6 +41,10 @@ from mamma.tracking.identity import (
     resolve_epipolar_px,
 )
 
+MAX_BOX_FRAME_FRACTION: float = 0.9
+"""Detections whose box covers this much of the frame are dropped: on a near-black frame RT-DETR returns a whole-frame
+"person" (score 0.5-0.7, MammaEval Solo_Dancing frame 0), and a bootstrap on it fits a ghost for seconds. A real
+person that fills a camera's frame gives that camera nothing to triangulate either."""
 BOOTSTRAP_MIN_SCORE: float = 0.25
 """Minimum combined CLIP+epipolar score to accept a cross-camera bootstrap match."""
 BANK_UPDATE_MIN_SCORE: float = 0.35
@@ -86,8 +90,11 @@ class TrackerConfig:
     the golden gate passes with it (see implementation-notes)."""
     sam2_checkpoint: Path = Path("data/weights/efficienttam/efficienttam_ti.pt")
     """SAM2-family checkpoint path (EfficientTAM via build_sam2_generic*)."""
-    yolo_checkpoint: Path = Path("data/weights/yolo/yolo12x.pt")
-    """YOLO person detector checkpoint."""
+    detector: DetectorConfig = field(default_factory=RtDetrDetectorConfig)
+    """posekit person detector for the bootstrap and re-detects (``posekit.models.DetectorConfig``: ``rtdetr``,
+    ``yolox``, ``yolo`` with ``--tracker.detector.weights`` for YOLOv12-X). RT-DETRv2-R50 by default (Pablo,
+    2026-11-21): same golden/dynamic as YOLOv12-X, best on the bystander case (MammaEval CatchBall), re-detect
+    ~20 ms for 4 cameras vs ~45 ms. The detector config carries its own device."""
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
     redetect_interval: int = 120
@@ -201,8 +208,8 @@ class MultiViewTracker:
             self._graphs = GraphCache()
             self._capture_steady_graphs()
             self._graphs.capture = False
-        self.detector: PersonDetector = PersonDetector(config.yolo_checkpoint, device=config.device)
-        self.encoder: ClipEncoder = ClipEncoder(device=config.device)
+        self.detector = place_detector(config.detector, config.device).setup()
+        self.encoder = ClipIdentityConfig(device=config.device).setup()
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False
         self._lost_ticks: list[dict[int, int]] = [{} for _ in cameras]
@@ -261,8 +268,26 @@ class MultiViewTracker:
 
     # ── Bootstrap ───────────────────────────────────────────────────────────
 
+    def _detect(self, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[PersonDetections]:
+        """Person boxes and CLIP features in every camera: one detector call and one CLIP call for all cameras."""
+        frames_rgb: UInt8[torch.Tensor, "c h w 3"] = torch.stack(frames).permute(0, 2, 3, 1).contiguous()
+        boxes = self.detector(frames_rgb)
+        features: Float32[torch.Tensor, "n d"] = self.encoder(frames_rgb, boxes).cpu()
+        xyxy: Float32[ndarray, "n 4"] = boxes.xyxy_numpy()
+        scores: Float32[ndarray, "n"] = boxes.scores.cpu().numpy()
+        cams: ndarray = boxes.frame_indices.cpu().numpy()
+        h, w = frames_rgb.shape[1:3]
+        covered: Float32[ndarray, "n"] = (np.clip(xyxy[:, 2], 0, w) - np.clip(xyxy[:, 0], 0, w)) * (np.clip(xyxy[:, 3], 0, h) - np.clip(xyxy[:, 1], 0, h))
+        plausible: ndarray = covered < MAX_BOX_FRAME_FRACTION * h * w
+        detections: list[PersonDetections] = []
+        for cam_idx in range(len(frames)):
+            rows: ndarray = np.flatnonzero((cams == cam_idx) & plausible)
+            rows = rows[np.argsort(-scores[rows], kind="stable")]
+            detections.append(PersonDetections(boxes_xyxy=xyxy[rows], scores=scores[rows], features=features[torch.as_tensor(rows, dtype=torch.long)]))
+        return detections
+
     def _try_bootstrap(self, frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
-        detections: list[PersonDetections] = [self.detector.detect(f) for f in frames]
+        detections: list[PersonDetections] = self._detect(frames)
         expected: int | None = self.config.expected_subjects
 
         def cam_quality(d: PersonDetections) -> float:
@@ -300,7 +325,7 @@ class MultiViewTracker:
             )[:n_subjects]
         obj_ids: list[int] = list(range(n_subjects))
 
-        ref_feats: Float32[torch.Tensor, "n 512"] = self.encoder.encode([ref.crops[i] for i in ref_order])
+        ref_feats: Float32[torch.Tensor, "n d"] = ref.features[ref_order]
         for obj_id, row in zip(obj_ids, range(len(ref_order)), strict=True):
             self.bank.append(obj_id, ref_feats[row])
         ref_centers: Float32[ndarray, "n 3"] = ref.centers_xy1[ref_order]
@@ -312,7 +337,7 @@ class MultiViewTracker:
         for cam_idx, dets in enumerate(detections):
             if cam_idx == ref_idx or len(dets) == 0:
                 continue
-            det_feats: Float32[torch.Tensor, "m 512"] = self.encoder.encode(dets.crops)
+            det_feats: Float32[torch.Tensor, "m d"] = dets.features
             s_clip: Float32[ndarray, "k m"] = self.bank.similarity(det_feats)
             f_matrix: Float64[ndarray, "3 3"] | None = self._fundamental(ref_idx, cam_idx)
             combined: Float32[ndarray, "k m"] = s_clip.copy()
@@ -406,14 +431,13 @@ class MultiViewTracker:
         ref_idx: int | None
         ref_points: dict[int, Float32[ndarray, "3"]]
         ref_idx, ref_points = self._reference_points()
-        for cam_idx, frame in enumerate(frames):
+        for cam_idx, dets in enumerate(self._detect(frames)):
             lost: list[int] = [
                 obj_id for obj_id, ticks in self._lost_ticks[cam_idx].items() if ticks >= LOST_TICKS_BEFORE_REPROMPT
             ]
-            dets: PersonDetections = self.detector.detect(frame)
             if len(dets) == 0:
                 continue
-            det_feats: Float32[torch.Tensor, "m 512"] = self.encoder.encode(dets.crops)
+            det_feats: Float32[torch.Tensor, "m d"] = dets.features
             s_clip: Float32[ndarray, "k m"] = self.bank.similarity(det_feats)
             combined: Float32[ndarray, "k m"] = s_clip.copy()
             # Cross-camera geometric tie: score detections in this camera against
@@ -539,6 +563,23 @@ class MultiViewTracker:
             for cam_prompts in prompts_per_cam
         ]
         return self._tracks_from_results(self._forward_batched(self._states, frame_idx, torch.stack(frames, dim=0), prompts))
+
+
+def place_detector(detector: DetectorConfig, device: str) -> DetectorConfig:
+    """``detector`` on the tracker's ``device``: the torch detectors' ``device`` and the ONNX backend's ordinal (a TensorRT
+    backend runs on the current device). The detector config's own default is ``cuda``, which differs from an
+    indexed tracker device and would put weights and frames on different GPUs."""
+    import dataclasses
+
+    from posekit.models import RtDetrDetectorConfig, YoloDetectorConfig, YoloxDetectorConfig
+    from trtkit.backends import OnnxBackendConfig
+
+    if isinstance(detector, RtDetrDetectorConfig | YoloDetectorConfig):
+        return dataclasses.replace(detector, device=device)
+    target: torch.device = torch.device(device)
+    if isinstance(detector, YoloxDetectorConfig) and isinstance(detector.backend, OnnxBackendConfig) and target.type == "cuda":
+        return dataclasses.replace(detector, backend=dataclasses.replace(detector.backend, device_id=target.index or 0))
+    return detector
 
 
 def first_hypothesis_stats(masks_logits: torch.Tensor, ious: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

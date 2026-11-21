@@ -1149,9 +1149,25 @@ platforms = ["linux-64", "linux-aarch64"]
 scikit-image = "*"
 
 [feature.posekit-wilor.pypi-dependencies]
-ultralytics = "==8.4.52"
 roma = "*"
 timm = "*"
+
+# Ultralytics YOLO: posekit's yolo12-x person detector (posekit.models.yolo) and WiLoR's hand detector. Composed by
+# every environment that offers either.
+[feature.posekit-yolo]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.posekit-yolo.pypi-dependencies]
+ultralytics = "==8.4.52"
+
+# NVDEC decode of 8-bit 4:4:4 video (simplecv.nvdec_444 through PyNvVideoCodec): torchcodec's CUDA decoders take
+# 4:2:0 only. Opt-in: composed by environments that decode 4:4:4 (mamma's iPhone videos); without it simplecv's
+# reader keeps the CPU fallback.
+[feature.nvdec444]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.nvdec444.pypi-dependencies]
+pynvvideocodec = "==2.2.4"
 
 # These four existing Transformers wrappers have decorated .to() stubs that
 # pyrefly misbinds as unbound methods in this isolated dependency solve.
@@ -3135,9 +3151,6 @@ posekit = { path = "packages/posekit", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 # Vendored sam2 fork with static metadata — see packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
-# NVDEC decode of HEVC/H.264 4:4:4 (the MAMMA iPhone videos): torchcodec's CUDA decoders take 4:2:0 only
-# and fall back to the CPU, the pipeline's decode floor.
-pynvvideocodec = "==2.2.4"
 
 [feature.mamma.activation.env]
 PACKAGE_DIR = "packages/mamma"
@@ -4578,17 +4591,19 @@ posekit = { features = [
     "common",
     "cuda",
     "posekit",
+    "posekit-yolo",
     "torchcodec",
     "ffmpeg",
 ], solve-group = "posekit", no-default-feature = true }
-posekit-hands = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
-posekit-hands-dev = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "dev", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-hands = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-yolo", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
+posekit-hands-dev = { features = ["common", "cuda", "posekit-hands", "posekit", "soma-runtime", "posekit-egohand", "posekit-wilor", "posekit-yolo", "dev", "torchcodec", "ffmpeg"], solve-group = "posekit-hands", no-default-feature = true }
 posekit-body = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body", "torchcodec", "ffmpeg"], solve-group = "posekit-body", no-default-feature = true }
 posekit-body-dev = { features = ["common", "cuda", "posekit-body", "posekit", "posekit-sam3d-body", "dev", "torchcodec", "ffmpeg"], solve-group = "posekit-body", no-default-feature = true }
 posekit-dev = { features = [
     "common",
     "cuda",
     "posekit",
+    "posekit-yolo",
     "dev",
     "torchcodec",
     "ffmpeg",
@@ -4712,6 +4727,7 @@ mv-api = { features = [
     "cuda",
     "mv-api",
     "posekit-wilor",
+    "posekit-yolo",
     "torchcodec",
     "ffmpeg",
 ], solve-group = "mv-api", no-default-feature = true }
@@ -4720,6 +4736,7 @@ mv-api-dev = { features = [
     "cuda",
     "mv-api",
     "posekit-wilor",
+    "posekit-yolo",
     "dev",
     "torchcodec",
     "ffmpeg",
@@ -4730,6 +4747,7 @@ mv-api-catalog = { features = [
     "cuda",
     "mv-api",
     "posekit-wilor",
+    "posekit-yolo",
     "mv-api-catalog",
     "torchcodec",
     "ffmpeg",
@@ -4740,6 +4758,7 @@ mv-api-catalog-dev = { features = [
     "cuda",
     "mv-api",
     "posekit-wilor",
+    "posekit-yolo",
     "mv-api-catalog",
     "dev",
     "torchcodec",
@@ -4970,6 +4989,8 @@ mamma = { features = [
     "common",
     "cuda",
     "mamma",
+    "posekit-yolo",
+    "nvdec444",
     "torchcodec",
     "ffmpeg",
 ], solve-group = "mamma", no-default-feature = true }
@@ -4977,6 +4998,8 @@ mamma-dev = { features = [
     "common",
     "cuda",
     "mamma",
+    "posekit-yolo",
+    "nvdec444",
     "dev",
     "torchcodec",
     "ffmpeg",
