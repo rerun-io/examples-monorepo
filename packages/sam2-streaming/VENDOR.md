@@ -87,3 +87,12 @@
   tensors go to the device from pinned memory without a host sync, the box labels are built on
   the device and the empty prompt embeddings are copied once. Masks are bit-identical to the
   eager pass (clip B and clip 007 replays of people tracking).
+- `index_tensor` is public (posekit's `Sam2VideoSegmenter` uses it), and `forward_batched` refuses
+  `non_overlap_masks` as well as `non_overlap_masks_for_mem_enc`: its batch rows belong to different
+  videos, so a non-overlap constraint across rows would let one video's object suppress another's.
+- Open (mask-speed thermo reviews, 2026-11-21): mamma keeps its own `batched_forward.py` and
+  `steady_graph.py` for this predictor (one object per camera, no prompts); moving mamma onto
+  `forward_batched` + `GraphCache` and deleting those 512 lines is a follow-up with the mamma gate and a
+  timing run. Also open: `forward_batched` as a tensor-level conditioning method with typed layouts
+  instead of closures and positional tuple keys; `fused_rope` enabled once at set-up per predictor
+  instead of the process-wide switch and the first-call fallback.
