@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import importlib.util
 import logging
 import warnings
 from collections import OrderedDict
@@ -31,9 +32,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 # torchcodec loads its FFmpeg libraries at import; the functions that decode import it, annotations only name the class.
 if TYPE_CHECKING:
-    from torchcodec.decoders import VideoDecoder
+    from torchcodec.decoders import VideoDecoder, VideoStreamMetadata
+
+    from simplecv.nvdec_444 import Nvdec444Decoder
 else:
     VideoDecoder = object
+    VideoStreamMetadata = object
+    Nvdec444Decoder = object
 
 
 def validate_video_file_path(video_path: Path) -> Path:
@@ -465,7 +470,7 @@ class TorchCodecVideoReader:
 
             decode_time_transforms = [_TorchCodecResize(size=list(resize_hw))]
 
-        self._decoder: VideoDecoder = self._decode(
+        self._decoder: VideoDecoder | Nvdec444Decoder = self._decode(
             lambda: VideoDecoder(
                 source,
                 device=self.device,
@@ -483,12 +488,21 @@ class TorchCodecVideoReader:
             if self.device.startswith("cuda")
             else None
         )
+        metadata = self._decode(lambda: self._decoder.metadata)
+        self.backend: str = "NVDEC" if self.device.startswith("cuda") else "CPU"
+        """Which decoder produces the frames: ``NVDEC``, ``NVDEC 4:4:4`` (PyNvVideoCodec), ``CPU``, or ``CPU fallback``."""
+        if fallback_reason is not None:
+            nvdec_444 = self._open_nvdec_444(source, metadata)
+            if nvdec_444 is not None:
+                self._decoder = nvdec_444
+                fallback_reason = None
+                self.backend = "NVDEC 4:4:4"
         self._cpu_fallback: bool = fallback_reason is not None
         if fallback_reason is not None:
+            self.backend = "CPU fallback"
             name: str = str(source) if isinstance(source, Path) else f"<{len(source)} bytes>"
             warnings.warn(f"NVDEC cannot decode {name}; torchcodec decodes it on the CPU ({fallback_reason})", RuntimeWarning, stacklevel=2)
 
-        metadata = self._decode(lambda: self._decoder.metadata)
         self._source_width: int = required_torchcodec_int(metadata.width, "width")
         self._source_height: int = required_torchcodec_int(metadata.height, "height")
         self._width: int = self._source_width if resize_hw is None else int(resize_hw[1])
@@ -507,6 +521,22 @@ class TorchCodecVideoReader:
         self._read_buffer: UInt8[torch.Tensor, "b 3 h w"] | None = None
         self._read_buffer_start: int = 0
         self._read_buffer_stop: int = 0
+
+    def _open_nvdec_444(self, source: Path | bytes, metadata: VideoStreamMetadata) -> Nvdec444Decoder | None:
+        """A PyNvVideoCodec NVDEC decoder for an 8-bit 4:4:4 file torchcodec's NVDEC rejected, or ``None``.
+
+        ``None`` when the stream is not ``yuv444p``, the source is bytes, PyNvVideoCodec is not installed, or
+        NVDEC refuses the stream; the CPU fallback then stays. Frames match the CPU decode within 1 LSB.
+        """
+        if metadata.pixel_format != "yuv444p" or not isinstance(source, Path) or importlib.util.find_spec("PyNvVideoCodec") is None:
+            return None
+        from simplecv.nvdec_444 import Nvdec444Decoder as _Nvdec444Decoder
+
+        try:
+            return self._decode(lambda: _Nvdec444Decoder(source, self.device, metadata.color_space))
+        except (RuntimeError, ValueError) as error:
+            warnings.warn(f"PyNvVideoCodec cannot decode {source} on NVDEC: {error}", RuntimeWarning, stacklevel=3)
+            return None
 
     def _decode(self, callback: Callable[[], T]) -> T:
         """Run decoder work on the owned thread when one exists, else on the caller, with the CUDA device bound."""

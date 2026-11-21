@@ -82,13 +82,17 @@ class PipelineStats:
 def decode_backend(reader: TorchCodecMultiVideoReader) -> str:
     """Name the decoder behind ``reader`` for run summaries.
 
-    NVDEC rejects some streams (HEVC/H.264 4:4:4) and torchcodec then decodes
-    them on the CPU and uploads full frames, an order of magnitude slower; the
-    summary says so instead of the run being silently slow.
+    torchcodec's NVDEC rejects 4:4:4 streams (HEVC/H.264); the reader then decodes
+    8-bit 4:4:4 files through PyNvVideoCodec on NVDEC, and anything else on the CPU
+    (full-frame uploads, an order of magnitude slower). The summary names the path
+    instead of the run being silently slow.
     """
     fallback_count: int = sum(cam.cpu_fallback for cam in reader.video_readers)
     if fallback_count > 0:
         return f"torchcodec CPU fallback (NVDEC rejected {fallback_count}/{len(reader.video_readers)} cameras; slow path)"
+    nvdec_444_count: int = sum(cam.backend == "NVDEC 4:4:4" for cam in reader.video_readers)
+    if nvdec_444_count > 0:
+        return f"NVDEC (4:4:4 through PyNvVideoCodec on {nvdec_444_count}/{len(reader.video_readers)} cameras)"
     return "NVDEC" if reader.device.startswith("cuda") else "torchcodec CPU"
 
 
