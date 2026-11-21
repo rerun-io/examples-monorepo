@@ -12,9 +12,9 @@ class _SpyPredictor:
     def __init__(self) -> None:
         self.multimask: list[bool] = []
 
-    def forward(self, state, frame_idx: int, frame, prompts, multimask_output: bool) -> dict:
-        self.multimask.append(multimask_output)
-        return {}
+    def forward_batched(self, states, frame_idx: int, frames, prompts, multimask_output: list[bool]) -> list[dict]:
+        self.multimask.extend(multimask_output)
+        return [{} for _ in states]
 
 
 def _multimask_flags(single_click_multimask: bool) -> list[bool]:

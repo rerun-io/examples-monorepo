@@ -68,3 +68,14 @@
   labels and areas are bit-exact against `cv2.connectedComponentsWithStats`
   (8-connectivity), the label being each component's smallest 2x2-block index + 1
   as in CUDA.
+- `sam2/sam2_generic_video_predictor.py` `forward_batched` (new; posekit's
+  `Sam2VideoSegmenter.step` uses it): `forward` for several video states at one
+  timestep, with one image-encoder call for all frames, prompted objects batched by
+  prompt layout, propagated objects batched by memory layout (numbers of conditional,
+  non-conditional and pointer memories) through memory attention and the mask
+  decoder, and one memory-encoder call. `forward` is unchanged. In
+  `sam2/modeling/sam2_generic.py`, `generate_masks(best_only=True)` upscales only the
+  highest-IoU hypothesis (the upscaling is per channel, so that mask is unchanged),
+  and `_prepare_obj_ptrs_for_memory_conditioning` accepts a pointer frame index per
+  batch element (a nested list). fp32 replay of clip B people tracking: masks of the
+  per-object loop and the batched pass agree to union IoU 0.9995 or more.
