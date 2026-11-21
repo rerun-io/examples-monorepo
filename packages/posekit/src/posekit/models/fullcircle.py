@@ -132,7 +132,8 @@ class FullCircleConfig:
     fp16 autocast lost the operator on clip B frames."""
     reprompt_every: int = 3
     """Tracked framesets between two re-prompts of the tracker with the detector's box (0: FullCircle's single prompt);
-    3 at 3 Hz (every 10th frameset at 30 fps) is once a second."""
+    3 at 3 Hz (every 10th frameset at 30 fps) is once a second. The Insta360 stage sets it from
+    ``reprompt_every_frames`` and ``stride`` (:class:`~posekit.apis.fullcircle_masks.FullCircleMasksConfig`)."""
     reprompt_radius: float = 0.15
     """A re-prompt box that does not hold the view centre must have its centre within this fraction of the view size."""
     face_size: int = 640
