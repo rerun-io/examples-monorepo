@@ -37,9 +37,11 @@ class FittingStage:
         self.world_to_cam_per_cam: list[Float32[torch.Tensor, "4 4"]] = [
             torch.as_tensor(cam.world_to_cam, dtype=torch.float32, device=config.device) for cam in cameras
         ]
+        self._image_wh: list[tuple[int, int]] = [(cam.width, cam.height) for cam in cameras]
         self._fitters: dict[int, SlidingWindowFitter] = {}
         self._previous_points: dict[int, tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]] = {}
-        """Each person's gated triangulation from its last tick: the camera-selection prior of the next."""
+        """Each person's gated triangulation from the previous tick: the camera-selection prior of the next. A person not
+        fitted on a tick loses it, so a reacquired person starts without a stale prior."""
         self.faces = None
         """Triangle faces of the SMPL-X mesh (set after the first fitter exists)."""
         # One body model for every person's fitter and the prewarm (smplx.create ~0.6 s, not mid-stream).
@@ -91,6 +93,11 @@ class FittingStage:
         self._stream.synchronize()
         return out
 
+    def _expire_priors(self, landmarks: list[CameraLandmarks]) -> None:
+        """Forget the prior of every person who is not fitted this tick (seen by fewer than 2 cameras)."""
+        for obj_id in [o for o in self._previous_points if sum(o in cl for cl in landmarks) < 2]:
+            del self._previous_points[obj_id]
+
     def _step(self, frame_idx: int, landmarks: list[CameraLandmarks]) -> TickFitOutput:
         """:meth:`step` body on the current stream."""
         obj_ids: set[int] = set()
@@ -100,6 +107,7 @@ class FittingStage:
         fits: dict[int, FitResult] = {}
         triangulated: dict[int, tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]] = {}
         metrics: dict[str, float] = {}
+        self._expire_priors(landmarks)
         for obj_id in sorted(obj_ids):
             cam_indices: list[int] = [c for c, cl in enumerate(landmarks) if obj_id in cl]
             if len(cam_indices) < 2:
@@ -136,21 +144,21 @@ class FittingStage:
                 vis_all,
                 reproj_thresh_px=self.config.reproj_gate_px,
                 prior=self._previous_points.get(obj_id),
+                image_wh_per_cam=self._image_wh,
             )
             self._previous_points[obj_id] = (points3d, valid)
+            pts2d_fit: list[Float32[torch.Tensor, "n 3"]] = drop_rejected_observations(pts2d_all, vis_all, vis_gated)
             # Dense cloud for visualization: triangulate every marker seen by
             # >= 2 cameras (sigma/log-variance-weighted, like the original DAG
             # which writes all 512), not just the confident vis>0.5 ones. The
             # FIT still anchors only to points3d/valid (strict) below, so fit
             # quality is unchanged; this only enriches the logged cloud.
-            dense3d, dense_valid = triangulate_points(
-                pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all, vis_thresh=-1.0
-            )
+            dense3d, dense_valid = triangulate_points(pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all, vis_thresh=-1.0)
             triangulated[obj_id] = (dense3d, dense_valid)
             # Contact prediction alone fires mid-jump (feet visually near the
             # grass) — gate the pull by the triangulated height: only landmarks
             # the geometry also places near the ground get pulled to it.
-            floor_contact = floor_contact * valid.float() * torch.exp(-(points3d[:, 2] / 0.05) ** 2)
+            floor_contact = floor_contact * valid.float() * torch.exp(-((points3d[:, 2] / 0.05) ** 2))
 
             fitter: SlidingWindowFitter | None = self._fitters.get(obj_id)
             if fitter is None:
@@ -159,7 +167,7 @@ class FittingStage:
                 if self.faces is None:
                     self.faces = fitter.model.faces
             optimize: bool = self.config.fit_stride <= 1 or frame_idx % self.config.fit_stride == 0
-            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_gated, points3d, valid, floor_contact=floor_contact, optimize=optimize)
+            result: FitResult | None = fitter.push(frame_idx, pts2d_fit, vis_gated, points3d, valid, floor_contact=floor_contact, optimize=optimize)
             if result is not None:
                 fits[obj_id] = result
             if obj_id == 0:
@@ -185,3 +193,17 @@ class FittingStage:
             for result in fitter.drain():
                 outputs.append(TickFitOutput(fits={obj_id: result}, triangulated={}))
         return outputs
+
+
+def drop_rejected_observations(
+    pts2d_per_cam: list[Float32[torch.Tensor, "n 3"]],
+    vis_per_cam: list[Float32[torch.Tensor, "n"]],
+    vis_gated: list[Float32[torch.Tensor, "n"]],
+) -> list[Float32[torch.Tensor, "n 3"]]:
+    """Landmarks for the fit: a camera the gate rejected (observed, but zeroed by it) becomes a missing observation.
+
+    The reprojection loss floors zero visibility instead of ignoring it, so a rejected camera must also lose its 2D
+    (zeros: the loss's missing-observation convention) or it still pulls the body toward the other person. One host read.
+    """
+    rejected: list[bool] = ((torch.stack([v.abs().sum() for v in vis_per_cam]) > 0) & (torch.stack([v.abs().sum() for v in vis_gated]) == 0)).tolist()
+    return [torch.zeros_like(p) if rejected[c] else p for c, p in enumerate(pts2d_per_cam)]
