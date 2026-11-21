@@ -1,13 +1,10 @@
-"""BoundedForgetfulMemoryBank: the forgetful bank's selections, with bounded storage of prompted memories."""
+"""SAM2ForgetfulObjectMemoryBank(max_conditional_memories=N): the unbounded bank's selections, with bounded storage of prompted memories."""
 
 from __future__ import annotations
 
-import pytest
 import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
-
-pytest.importorskip("sam2", reason="the streaming SAM 2 fork is in the posekit envs only")
 
 NUM_MASKMEM: int = 7
 MAX_PTRS: int = 16
@@ -28,10 +25,8 @@ def test_bounded_bank_selects_what_the_forgetful_bank_selects(prompted: list[boo
     from sam2.modeling.memory import ObjectMemory
     from sam2.modeling.sam2_forgetful_memory import SAM2ForgetfulObjectMemoryBank
 
-    from posekit.models.sam2_memory_bank import BoundedForgetfulMemoryBank
-
     prompted[0] = True
-    banks = [SAM2ForgetfulObjectMemoryBank(memory_window_size=7), BoundedForgetfulMemoryBank(max_conditional, memory_window_size=7)]
+    banks = [SAM2ForgetfulObjectMemoryBank(memory_window_size=7), SAM2ForgetfulObjectMemoryBank(memory_window_size=7, max_conditional_memories=max_conditional)]
     for frame, is_prompt in enumerate(prompted):
         assert _selected(banks[0], frame, max_conditional) == _selected(banks[1], frame, max_conditional)
         for bank in banks:
