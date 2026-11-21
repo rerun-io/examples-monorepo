@@ -16,7 +16,6 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import torch
@@ -565,75 +564,15 @@ class MultiViewTracker:
         frames: list[UInt8[torch.Tensor, "3 h w"]],
         prompts_per_cam: list[dict[int, Float32[ndarray, "4"]]],
     ) -> list[CameraTracks]:
-        from sam2.modeling.sam2_prompt import SAM2Prompt
-
-        # Steady tick: every camera and object in one batched pass (memory attention, mask decode, memory
-        # encode batched per memory layout; CUDA graphs where captured).
-        if not any(prompts_per_cam):
-            return self._tracks_from_results(self._forward_batched(self._states, frame_idx, torch.stack(frames, dim=0), [[] for _ in frames]))
-
-        # Prompt tick: batch the (dominant) image-encoder cost across cameras, then run the per-camera
-        # memory/decoder via forward_embeddings. One autocast/inference_mode context for the whole tick
-        # (entering per camera costs measurable CPU at this rate).
-        autocast = torch.autocast("cuda", dtype=torch.bfloat16)
-        with torch.inference_mode(), autocast:
-            batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
-            # The fork annotates encode_image as Tensor pairs, but it returns
-            # multi-level lists (one tensor per FPN level) at runtime.
-            encoded = cast("tuple[list[torch.Tensor], list[torch.Tensor]]", self.predictor.encode_image(batch))
-            embeddings: list[torch.Tensor] = encoded[0]
-            pos_embeddings: list[torch.Tensor] = encoded[1]
-
-        results: list[CameraTracks] = []
-        for cam_idx in range(len(frames)):
-            prompts: list[SAM2Prompt] = [
-                SAM2Prompt(obj_id=obj_id, boxes=torch.as_tensor(box, device=self.device).reshape(1, 4))
-                for obj_id, box in prompts_per_cam[cam_idx].items()
-            ]
-            state = self._states[cam_idx]
-            if not prompts and not state.memory_bank.known_obj_ids:
-                results.append({})
-                continue
-            cam_embeddings = [level[cam_idx : cam_idx + 1] for level in embeddings]
-            cam_pos = [level[cam_idx : cam_idx + 1] for level in pos_embeddings]
-            with torch.inference_mode(), autocast:
-                # Single-mask output: with multimask the predicted-IoU argmax
-                # intermittently selects the whole-scene candidate during
-                # propagation (observed as full-frame masks on crossing_arms).
-                raw: dict = self.predictor.forward_embeddings(
-                    state, frame_idx, cam_embeddings, cam_pos, prompts=prompts, multimask_output=False
-                )
-            # Stay sync-free inside the loop: gather per-object stats on GPU and
-            # do ONE device->host copy per camera at the end (each .item()/
-            # .tolist() in the loop would stall the pipeline ~1-2 ms).
-            entries: list[tuple[int, Bool[torch.Tensor, "h w"]]] = []
-            stats_rows: list[torch.Tensor] = []
-            h: int = frames[cam_idx].shape[1]
-            w: int = frames[cam_idx].shape[2]
-            for obj_id, result in raw.items():
-                # multimask_output=False -> exactly one mask candidate.
-                mask: Bool[torch.Tensor, "h w"] = result.masks_logits[0, 0] > 0.0
-                rows: torch.Tensor = mask.any(dim=1).int()
-                cols: torch.Tensor = mask.any(dim=0).int()
-                stats: torch.Tensor = torch.stack(
-                    [
-                        rows.sum(),
-                        cols.argmax(),  # x_min (0 when empty)
-                        rows.argmax(),  # y_min
-                        (w - 1) - cols.flip(0).argmax(),  # x_max
-                        (h - 1) - rows.flip(0).argmax(),  # y_max
-                    ]
-                ).float()
-                stats = torch.cat([stats, result.ious[0, 0:1].float(), mask.sum().reshape(1).float()])
-                entries.append((obj_id, mask))
-                stats_rows.append(stats)
-            tracks: CameraTracks = {}
-            if entries:
-                all_stats: Float32[ndarray, "k 7"] = torch.stack(stats_rows).cpu().numpy()
-                for (obj_id, mask), row in zip(entries, all_stats, strict=True):
-                    tracks[obj_id] = self._resolve_track(cam_idx, obj_id, mask, row)
-            results.append(tracks)
-        return results
+        # Every tick, prompted or steady, is one batched pass over all cameras and objects (memory attention, mask
+        # decode, memory encode batched per memory layout; CUDA graphs where captured). Prompted objects decode a single
+        # mask (multimask off: with multimask the predicted-IoU argmax intermittently picks the whole-scene candidate);
+        # every object's track reads hypothesis 0.
+        prompts: list[list[SAM2Prompt]] = [
+            [SAM2Prompt(obj_id=obj_id, boxes=torch.as_tensor(box, device=self.device).reshape(1, 4)) for obj_id, box in cam_prompts.items()]
+            for cam_prompts in prompts_per_cam
+        ]
+        return self._tracks_from_results(self._forward_batched(self._states, frame_idx, torch.stack(frames, dim=0), prompts))
 
 
 def first_hypothesis_stats(masks_logits: torch.Tensor, ious: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
