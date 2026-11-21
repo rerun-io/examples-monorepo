@@ -136,7 +136,7 @@ class LandmarkEstimator:
             for lo in range(0, n_crops, ENGINE_BATCH):
                 part = dict(self.runner({INPUT_NAMES[0]: img_crops[lo : lo + ENGINE_BATCH], INPUT_NAMES[1]: mask_crops[lo : lo + ENGINE_BATCH]}))
                 parts.append(part if n_crops <= ENGINE_BATCH else {k: None if v is None else v.clone() for k, v in part.items()})
-            out = parts[0] if len(parts) == 1 else {k: torch.cat([p[k] for p in parts if p[k] is not None]) for k in OUTPUT_NAMES}
+            out = parts[0] if len(parts) == 1 else {k: torch.cat([v for p in parts if (v := p[k]) is not None]) for k in OUTPUT_NAMES}
 
         joints2d_raw = out[OUTPUT_NAMES[0]]
         visibility_raw = out[OUTPUT_NAMES[1]]
