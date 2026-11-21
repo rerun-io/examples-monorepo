@@ -245,7 +245,17 @@ class MultiViewTracker:
         n_subjects: int = min(len(ref), expected) if expected is not None else len(ref)
         ref_order: list[int] = [int(i) for i in np.argsort(-ref.scores)[:n_subjects]]
         if expected is not None and len(ref) > expected:
-            ref_order = self._rig_central_order(ref_idx, detections)[:n_subjects]
+            # The capture subject is the person every camera sees, inside the camera ring.
+            ref_order = order_bootstrap_candidates(
+                ref_idx,
+                ref.scores,
+                [d.centers_xy1 for d in detections],
+                [cam.k_matrix for cam in self.cameras],
+                [cam.world_to_cam for cam in self.cameras],
+                self._sigma_px,
+                self._max_dist_px,
+                BOOTSTRAP_MIN_SCORE,
+            )[:n_subjects]
         obj_ids: list[int] = list(range(n_subjects))
 
         ref_feats: Float32[torch.Tensor, "n 512"] = self.encoder.encode([ref.crops[i] for i in ref_order])
@@ -280,24 +290,6 @@ class MultiViewTracker:
 
         self.bootstrapped = True
         return self._forward_all(frame_idx, frames, prompts_per_cam)
-
-    def _rig_central_order(self, ref_idx: int, detections: list[PersonDetections]) -> list[int]:
-        """Reference detections ordered by cross-camera support, then 3D distance to the rig centre (XY).
-
-        See :func:`order_bootstrap_candidates`: the capture subject is the person every camera sees,
-        standing inside the camera ring; bystanders are at its edge or seen by one camera only.
-        """
-        return order_bootstrap_candidates(
-            ref_idx,
-            detections[ref_idx].centers_xy1,
-            detections[ref_idx].scores,
-            [d.centers_xy1 for d in detections],
-            [cam.k_matrix for cam in self.cameras],
-            [cam.world_to_cam for cam in self.cameras],
-            self._sigma_px,
-            self._max_dist_px,
-            BOOTSTRAP_MIN_SCORE,
-        )
 
     # ── Steady state ───────────────────────────────────────────────────────
 
