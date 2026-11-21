@@ -232,6 +232,59 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
 
 
 @dataclass(slots=True)
+class PoseLog:
+    """Every pose the run reported, in arrays that double when full: the whole estimate is a slice of them.
+
+    Lists of small arrays rebuilt into one array at every read grew with the run (every 30 framesets for the ATE and
+    the alignment: ~0.85 ms a frameset by the end of a 24-minute walk). A slice copies nothing, and later appends only
+    write past it, so an estimate taken earlier stays as it was.
+    """
+
+    capacity: int = 1024
+    """Rows the arrays start with."""
+    count: int = 0
+    """Poses appended."""
+    t_ns: Int64[ndarray, " c"] = field(init=False)
+    """Timestamps, the first ``count`` rows used."""
+    position_m: Float64[ndarray, "c 3"] = field(init=False)
+    """Positions, metres."""
+    quaternion_wxyz: Float64[ndarray, "c 4"] = field(init=False)
+    """Orientations, scalar first."""
+
+    def __post_init__(self) -> None:
+        self.t_ns = np.zeros(self.capacity, dtype=np.int64)
+        self.position_m = np.zeros((self.capacity, 3), dtype=np.float64)
+        self.quaternion_wxyz = np.zeros((self.capacity, 4), dtype=np.float64)
+
+    def __len__(self) -> int:
+        return self.count
+
+    def append(self, t_ns: int, position_m: Float64[ndarray, " 3"], quaternion_wxyz: Float64[ndarray, " 4"]) -> None:
+        """Add one pose; the arrays double (a copy) when full."""
+        if self.count == self.t_ns.shape[0]:
+            size: int = 2 * max(self.count, 1)
+            self.t_ns = np.concatenate([self.t_ns, np.zeros(size - self.count, dtype=np.int64)])
+            self.position_m = np.concatenate([self.position_m, np.zeros((size - self.count, 3), dtype=np.float64)])
+            self.quaternion_wxyz = np.concatenate([self.quaternion_wxyz, np.zeros((size - self.count, 4), dtype=np.float64)])
+        self.t_ns[self.count] = t_ns
+        self.position_m[self.count] = position_m
+        self.quaternion_wxyz[self.count] = quaternion_wxyz
+        self.count += 1
+
+    def trajectory(self) -> Trajectory:
+        """Every pose so far, as slices of the arrays (no copy)."""
+        return Trajectory(t_ns=self.t_ns[: self.count], position_m=self.position_m[: self.count], quaternion_wxyz=self.quaternion_wxyz[: self.count])
+
+    def last_t_ns(self) -> int | None:
+        """The newest pose's timestamp; None before the first."""
+        return int(self.t_ns[self.count - 1]) if self.count else None
+
+    def last_positions(self, n: int) -> Float64[ndarray, "m 3"]:
+        """The newest ``n`` positions (fewer at the start of a run)."""
+        return self.position_m[max(0, self.count - n) : self.count]
+
+
+@dataclass(slots=True)
 class MapPointBlocks:
     """Which map-point blocks to draw again: the map's points grouped by host keyframe, ``keyframes_per_block`` keyframes
     a block in the order they joined the map, each block remembered as last drawn.
@@ -319,12 +372,8 @@ class VioLogger:
     """The follow frame's heading so far: the direction of travel, low-passed."""
     floor_height: FloorHeight = field(default_factory=FloorHeight)
     """The rig's height over the floor so far, from the landmarks each window held around it."""
-    estimate_t_ns: list[int] = field(default_factory=list)
-    """Timestamps of the poses reported so far, in replay order."""
-    estimate_position_m: list[Float64[ndarray, " 3"]] = field(default_factory=list)
-    """Positions of the poses reported so far."""
-    estimate_quaternion_wxyz: list[Float64[ndarray, " 4"]] = field(default_factory=list)
-    """Rotations of the poses reported so far, w-first as :mod:`slam_rs.trajectory` stores them."""
+    poses: PoseLog = field(default_factory=PoseLog)
+    """Every pose the run reported, for the CSV export, the ATE and the per-frameset path segment."""
     ground_truth_strip: Trajectory = field(init=False)
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
@@ -399,9 +448,7 @@ class VioLogger:
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
         self.framesets += 1
-        self.estimate_t_ns.append(result.t_ns)
-        self.estimate_position_m.append(pose[0:3].copy())
-        self.estimate_quaternion_wxyz.append(np.roll(pose[3:7], 1).copy())
+        self.poses.append(result.t_ns, pose[0:3], np.roll(pose[3:7], 1))
 
         rig_pose: rr.Transform3D = rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))
         rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
@@ -442,11 +489,7 @@ class VioLogger:
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
-        return Trajectory(
-            t_ns=np.array(self.estimate_t_ns, dtype=np.int64),
-            position_m=np.array(self.estimate_position_m, dtype=np.float64).reshape(-1, 3),
-            quaternion_wxyz=np.array(self.estimate_quaternion_wxyz, dtype=np.float64).reshape(-1, 4),
-        )
+        return self.poses.trajectory()
 
     def log_complete_paths(self) -> None:
         """Log each whole path once, static, so all three are visible at every cursor.
@@ -508,9 +551,9 @@ class VioLogger:
         appended, not from :meth:`estimated`: a segment needs two poses, not the
         whole trajectory rebuilt behind them.
         """
-        t_ns: int = self.estimate_t_ns[-1]
-        if len(self.estimate_position_m) >= 2:
-            segment: Float64[ndarray, "2 3"] = np.array(self.estimate_position_m[-2:], dtype=np.float64)
+        t_ns: int = self.poses.last_t_ns() or 0
+        if len(self.poses) >= 2:
+            segment: Float64[ndarray, "2 3"] = self.poses.last_positions(2).copy()
             rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 2:
@@ -802,8 +845,8 @@ class VioStage:
             self._log_result(held, result)
             last_t_ns = held.t_ns
         final: _core.MapSnapshot | None = self.lockstep.vio.map_snapshot()
-        if last_t_ns is None and self.logger.estimate_t_ns:
-            last_t_ns = self.logger.estimate_t_ns[-1]
+        if last_t_ns is None:
+            last_t_ns = self.logger.poses.last_t_ns()
         if final is not None and last_t_ns is not None:
             set_video_time(last_t_ns, self.logger.cam_time_offset_ns)
             self.logger.log_final_map(final, last_t_ns)
