@@ -255,7 +255,9 @@ def test_hevc_444_decoder_runs_on_its_own_thread_for_any_caller(tmp_path: Path, 
         assert camera.backend == "NVDEC 4:4:4"
         with ThreadPoolExecutor(max_workers=2) as pool:
             chunks = list(pool.map(lambda bounds: camera.get_frames_in_range(*bounds).cpu(), [(0, 30), (30, 60)]))
-        assert decode_threads == {camera._decoder._thread_ident}
+        decoder = camera._decoder
+        assert isinstance(decoder, Nvdec444Decoder)
+        assert decode_threads == {decoder._thread_ident}
         assert int((torch.cat(chunks).int() - expected.int()).abs().max()) <= 1
     finally:
         reader.close()
