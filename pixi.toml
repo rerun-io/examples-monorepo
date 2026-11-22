@@ -2152,6 +2152,16 @@ xorg-libxi = "*"
 xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 
+# Web build of the custom gsplat viewer (crates/gsplat-viewer-web): wasm32 std for the pinned rust, wasm-bindgen-cli
+# pinned to Rerun 0.42's wasm-bindgen =0.2.129, wasm-opt from binaryen. clang (above) compiles the C deps for wasm32.
+[feature.gsplat-web]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.gsplat-web.dependencies]
+rust-std-wasm32-unknown-unknown = "1.98.1.*"
+wasm-bindgen-cli = "==0.2.129"
+binaryen = "*"
+
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"
@@ -4792,6 +4802,11 @@ gsplat-rust-renderer = { features = [
 gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
     "dev",
+    "ffmpeg",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+gsplat-rust-renderer-web = { features = [
+    "gsplat-rust-renderer",
+    "gsplat-web",
     "ffmpeg",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 depth-video-viewer = { features = [
