@@ -23,6 +23,8 @@ struct CachedView {
 pub(crate) enum Primitives<'a> {
     Splats(&'a NativeSplats<'a>),
     Hexels(&'a NativeHexels<'a>),
+    /// A compressed SOG payload, decoded once on upload.
+    Sog(&'a crate::sog::Payload<'a>),
 }
 
 impl Primitives<'_> {
@@ -36,15 +38,22 @@ impl Primitives<'_> {
             Self::Hexels(hexels) => {
                 core.check_hexel_capacity(hexels.centers.len(), hexels.variant())
             }
+            Self::Sog(payload) => core.check_capacity(payload.count(), payload.max_degree()),
         }
     }
 
     fn upload(
         self,
+        ctx: &re_renderer::RenderContext,
         core: &gsplat_core::Renderer,
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_scope!("upload");
         let (scene, count, kind) = match self {
+            Self::Sog(payload) => (
+                payload.upload(ctx, core, crate::sog::Dequantize::from_env())?,
+                payload.count(),
+                "SOG splats",
+            ),
             Self::Splats(cloud) => (
                 core.upload(&cloud.to_core())?,
                 cloud.centers.len(),
@@ -65,6 +74,7 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => cloud.centers.len(),
             Self::Hexels(hexels) => hexels.centers.len(),
+            Self::Sog(payload) => payload.count(),
         }
     }
 
@@ -72,6 +82,8 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => crate::bounds::from_splats(cloud),
             Self::Hexels(hexels) => crate::bounds::from_hexels(hexels),
+            // The preview is a uniform subsample of the same splats (file order is Morton order).
+            Self::Sog(payload) => crate::bounds::from_splats(payload.preview),
         }
     }
 }
@@ -276,7 +288,7 @@ impl GpuCache {
         let frame = self.frame;
         let shared = match self.scenes.entry(generation) {
             Entry::Vacant(entry) => {
-                let scene = primitives.upload(core)?;
+                let scene = primitives.upload(ctx, core)?;
                 entry.insert(CachedScene {
                     last_frame: frame,
                     bounds: primitives.bounds(),

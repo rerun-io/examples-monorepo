@@ -41,6 +41,7 @@ pub(crate) fn resolve_variant(name: &'static str, subgroups: bool) -> String {
             "scan_block.wgsl" => include_str!("../shader/scan_block.wgsl"),
             "scan_common.wgsl" => include_str!("../shader/scan_common.wgsl"),
             "scan_portable.wgsl" => include_str!("../shader/scan_portable.wgsl"),
+            "sog_dequant.wgsl" => include_str!("../shader/sog_dequant.wgsl"),
             "sort.wgsl" => include_str!("../shader/sort.wgsl"),
             "raster_common.wgsl" => include_str!("../shader/raster_common.wgsl"),
             "raster_outputs.wgsl" => include_str!("../shader/raster_outputs.wgsl"),
