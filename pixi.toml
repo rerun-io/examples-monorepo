@@ -2110,7 +2110,6 @@ brush-src = { path = "recipes/brush-src" }
 python = "3.12.*"
 # Pinned Rerun and Brush crates share this Rust toolchain.
 rust = "1.98.*"
-clang = "*"
 cmake = "*"
 pkg-config = "*"
 numpy = "*"
@@ -2132,6 +2131,9 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 pandas = ">=2.3.3"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
+# clang compiles the C deps, also for the wasm32 web build (linux-only). macOS uses Xcode's clang and linker: conda's
+# ld64 956 cannot link against the macOS 27 SDK, whose libSystem.tbd lists arm64e but no arm64 slice ("malformed file").
+clang = "*"
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"
@@ -2143,6 +2145,7 @@ xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 # Same viewer build dependencies for aarch64.
 [feature.gsplat-rust-renderer.target.linux-aarch64.dependencies]
+clang = "*"
 libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"
