@@ -54,6 +54,24 @@ impl Renderer {
         Ok(Arc::new(Scene::upload(&self.device, splats, self.limit)?))
     }
 
+    /// De-quantise SOG / ASOG texel planes on the GPU into a splat scene (one compute pass, submitted on `queue`).
+    /// The CPU path is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
+    pub fn upload_sog(
+        &self,
+        queue: &wgpu::Queue,
+        q: &crate::sog::Quantization,
+        planes: &crate::sog::Planes<'_>,
+    ) -> Result<Arc<Scene>, Error> {
+        Ok(Arc::new(crate::sog_gpu::upload_sog(
+            &self.device,
+            queue,
+            &self.kernels.sog_dequant,
+            q,
+            planes,
+            self.limit,
+        )?))
+    }
+
     /// Hexel scenes share views, targets and feedback with splats; they need a pinhole camera.
     pub fn upload_hexels(&self, hexels: &Hexels) -> Result<Arc<Scene>, Error> {
         Ok(Arc::new(Scene::upload_hexels(

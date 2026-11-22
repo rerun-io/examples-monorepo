@@ -16,7 +16,7 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
 /// Every module; `subgroups` selects the scan helpers (see `shader::resolve_variant`).
-pub(crate) fn sources(subgroups: bool) -> [String; 12] {
+pub(crate) fn sources(subgroups: bool) -> [String; 13] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -30,6 +30,7 @@ pub(crate) fn sources(subgroups: bool) -> [String; 12] {
         "image_project.wgsl",
         "image_map.wgsl",
         "image_raster.wgsl",
+        "sog_dequant.wgsl",
     ]
     .map(|name| crate::shader::resolve_variant(name, subgroups))
 }
@@ -128,6 +129,7 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
         "scan_counts" => &[(0, R), (4, W), (7, U)],
         "scatter" => &[(0, R), (1, R), (2, R), (3, W), (5, W), (6, W), (7, U)],
         "prepare" => &[(0, R), (1, R), (2, W)],
+        "sog_dequant" => &[(0, U), (1, R), (2, R), (3, W), (4, W), (5, W)],
         _ => unreachable!("unknown gsplat kernel: {entry}"),
     }
 }
@@ -165,6 +167,8 @@ pub(crate) struct Kernels {
     pub scan_add: Kernel,
     pub scatter: Kernel,
     pub prepare: Kernel,
+    /// SOG / ASOG de-quantisation at load (`sog_dequant.wgsl`).
+    pub sog_dequant: Kernel,
 }
 
 /// Raster entry points in `RasterKind` order; every primitive module declares all of them.
@@ -194,6 +198,7 @@ impl Kernels {
             image_projection,
             image_mapping,
             image_raster,
+            sog,
         ] = sources(subgroups).map(|s| module(device, &s));
         let kernel = |module: &wgpu::ShaderModule, entry: &str| {
             pipeline(device, module, entry, bindings(entry))
@@ -232,6 +237,7 @@ impl Kernels {
             scan_add: kernel(&sort, "scan_add"),
             scatter: kernel(&sort, "scatter"),
             prepare: kernel(&prepare, "prepare"),
+            sog_dequant: kernel(&sog, "sog_dequant"),
         }
     }
 
