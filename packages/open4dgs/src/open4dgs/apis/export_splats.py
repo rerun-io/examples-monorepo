@@ -13,6 +13,8 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
+from jaxtyping import Float64
+from numpy import ndarray
 from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
@@ -44,7 +46,7 @@ class Config:
     """Output path (default ``<run>/splats.rrd``)."""
 
 
-def _run_property(reader: RrdReader, name: str) -> int:
+def run_property(reader: RrdReader, name: str) -> int:
     for chunk in reader.stream().filter(content="/__properties/run").to_chunks():
         batch = chunk.to_record_batch()
         if name in batch.schema.names:
@@ -68,27 +70,15 @@ def _train_camera_poses(reader: RrdReader) -> np.ndarray:
     return np.stack(poses)
 
 
-def main(config: Config) -> dict[str, object]:
-    """Write ``<run>/splats.rrd``, register it as layer ``splats``; returns sizes and counts."""
-    run_name: str = config.run.name
-    out: Path = config.output or config.run / "splats.rrd"
-    reader: RrdReader = RrdReader(config.run / "run.rrd")
-    frame_start: int = _run_property(reader, "frame_start")
-    checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-    fps: float = float(checkpoint["fps"])
-    num_frames: int = int(checkpoint["num_frames"])
-    device: torch.device = torch.device(config.device)
-    params = decode_asog(config.asog, device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
-    trainer: TrigsTrainer = TrigsTrainer(device=str(device))
-    trigs_config: TrigsTrainingConfig = TrigsTrainingConfig(fps=fps)  # _deform reads only the TRiGS defaults (gauge, smooth cull)
-
+def run_recording(
+    reader: RrdReader, run_name: str, out: Path, target: Float64[ndarray, " 3"]
+) -> tuple[rr.RecordingStream, rr.components.ViewCoordinates, rrb.Spatial3DView]:
+    """A recording saved to ``out`` (application ``open4dgs-runs``, id = the run name) holding the run's cameras and SMPL-X
+    meshes, ``ViewCoordinates`` on ``/world`` (up = the mean camera up) and a 3D view from training camera 0 at ``target``."""
     poses: np.ndarray = _train_camera_poses(reader)
     view_coordinates: rr.components.ViewCoordinates = up_view_coordinates(poses.astype(np.float32))
     up: np.ndarray = -poses[:, :3, 1].mean(axis=0)
-    first = splats_at(params, 0.0, trainer, trigs_config)
-    target: np.ndarray = np.median(first.centers, axis=0).astype(np.float64)
     eye: np.ndarray = poses[0, :3, 3]
-
     recording: rr.RecordingStream = rr.RecordingStream("open4dgs-runs", recording_id=run_name)
     recording.save(out)
     recording.send_chunks(reader.stream().filter(content=["+ /world/cameras/**", "+ /world/people/**"]))
@@ -99,6 +89,25 @@ def main(config: Config) -> dict[str, object]:
         eye_controls=rrb.EyeControls3D(position=eye.tolist(), look_target=target.tolist(), eye_up=(up / np.linalg.norm(up)).tolist()),
     )
     recording.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
+    return recording, view_coordinates, view
+
+
+def main(config: Config) -> dict[str, object]:
+    """Write ``<run>/splats.rrd``, register it as layer ``splats``; returns sizes and counts."""
+    run_name: str = config.run.name
+    out: Path = config.output or config.run / "splats.rrd"
+    reader: RrdReader = RrdReader(config.run / "run.rrd")
+    frame_start: int = run_property(reader, "frame_start")
+    checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
+    fps: float = float(checkpoint["fps"])
+    num_frames: int = int(checkpoint["num_frames"])
+    device: torch.device = torch.device(config.device)
+    params = decode_asog(config.asog, device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
+    trainer: TrigsTrainer = TrigsTrainer(device=str(device))
+    trigs_config: TrigsTrainingConfig = TrigsTrainingConfig(fps=fps)  # _deform reads only the TRiGS defaults (gauge, smooth cull)
+
+    first = splats_at(params, 0.0, trainer, trigs_config)
+    recording, view_coordinates, view = run_recording(reader, run_name, out, np.median(first.centers, axis=0).astype(np.float64))
 
     t0: float = time.perf_counter()
     frames = range(0, num_frames, config.frame_step)
