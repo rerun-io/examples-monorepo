@@ -1,0 +1,48 @@
+# FastGraphCompute (jkiesele/FastGraphCompute) at 4044d7d, the exact binned kNN of arXiv 2511.10442, built for
+# sm_120 (RTX 5090) and sm_121 (DGX Spark) against the workspace's conda-forge torch 2.12 (cuda130). There is no
+# conda-forge or PyPI build; upstream's setup.py compiles the extensions with torch's cpp_extension.
+# packages/open4dgs's open4dgs.pytorch3d_ops.knn_points uses its binned_select_knn for self-queries when importable.
+package:
+  name: fastgraphcompute-src
+  version: "1.0.1.4044d7d"
+
+source:
+  url: https://github.com/jkiesele/FastGraphCompute/archive/4044d7d64821477103c1f54351af79de9d41400d.tar.gz
+  sha256: 687f86b0388242df6e0b1f7848d43fbd25a2831ebf0ce85f1c09414e78bb7d61
+  patches:
+    - patches/0001-serial-build-ext.patch
+
+build:
+  number: 0
+  script:
+    file: build.sh
+
+requirements:
+  build:
+    - cuda-compiler 13.0.*
+    - cuda-version 13.0.*
+    - ninja
+  host:
+    - python 3.12.*
+    - pip
+    - setuptools
+    - wheel
+    - numpy
+    - cuda-version 13.0.*
+    - pytorch-gpu 2.12.*
+    - cuda-cudart-dev
+    - cuda-driver-dev
+    - cuda-cccl
+    - cuda-nvrtc-dev
+    - libcublas-dev
+    - libcusparse-dev
+    - libcusolver-dev
+    - libcurand-dev
+  run:
+    - python 3.12.*
+    - pytorch >=2.12,<2.13
+    - cuda-version >=13.0,<14
+
+about:
+  homepage: https://github.com/jkiesele/FastGraphCompute
+  summary: FastGraphCompute (4044d7d) binned exact kNN CUDA kernels for sm_120 and sm_121
