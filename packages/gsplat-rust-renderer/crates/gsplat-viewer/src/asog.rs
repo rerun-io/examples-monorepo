@@ -39,49 +39,24 @@ pub(crate) struct Payload<'a> {
 
 impl Payload<'_> {
     /// Entropy decode (zlib) on the CPU; static and motion de-quantisation in `sog_dequant.wgsl` +
-    /// `asog_motion.wgsl` (or both on the CPU with `GSPLAT_SOG_DECODE=cpu`); the motion is then evaluated per view.
-    /// Logs the load-time split.
+    /// `asog_motion.wgsl`; the motion is then evaluated per view. Logs the load-time split.
     pub(crate) fn upload(
         &self,
         ctx: &re_renderer::RenderContext,
         core: &gsplat_core::Renderer,
-        path: crate::sog::Dequantize,
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_function!();
         let start = web_time::Instant::now();
         let parts = gsplat_core::asog::decode_parts(self.bytes, self.active_threshold)?;
         let entropy = start.elapsed();
         let start = web_time::Instant::now();
-        let (scene, cpu) = match path {
-            crate::sog::Dequantize::Gpu => (core.upload_asog(&ctx.queue, &parts)?, None),
-            crate::sog::Dequantize::Cpu => {
-                let splats = gsplat_core::sog::dequantize(&parts.quantization, &parts.planes())?;
-                let motion = parts.motion();
-                let cpu = start.elapsed();
-                (
-                    core.upload_animated(&splats, gsplat_core::Motion::Asog(&motion))?,
-                    Some(cpu),
-                )
-            }
-        };
+        let scene = core.upload_asog(&ctx.queue, &parts)?;
         #[cfg(not(target_arch = "wasm32"))]
         ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
-        let total = start.elapsed();
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-        let split = cpu.map_or_else(
-            || {
-                format!(
-                    "upload + static and motion de-quantise GPU {:.1} ms",
-                    ms(total)
-                )
-            },
-            |cpu| {
-                format!(
-                    "static and motion de-quantise CPU {:.1} ms, upload {:.1} ms",
-                    ms(cpu),
-                    ms(total.saturating_sub(cpu))
-                )
-            },
+        let split = format!(
+            "upload + static and motion de-quantise GPU {:.1} ms",
+            ms(start.elapsed())
         );
         re_log::info!(
             "ASOG decode: {} splats, SH degree {}, zlib CPU {:.1} ms, {split}; motion pass on the GPU",

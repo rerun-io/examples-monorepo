@@ -16,7 +16,7 @@
 //! the shared [`crate::sog::dequantize`]: means 16-bit lo/hi bytes, quats RGB + A = 252 + mode, scales RGB,
 //! sh0 RGB + A = opacity, shlabels R/G, shpalette row `n` -> centroid texels `n * C .. n * C + C`.
 use crate::sog::{self, Planes, Quantization, ShPlanes, Version};
-use crate::trigs::{AsogMotion, ClipWindow};
+use crate::trigs::ClipWindow;
 use serde::Deserialize;
 
 /// Decode failure, naming the part of the file at fault.
@@ -291,7 +291,7 @@ pub fn decode_stream(desc: &StreamDesc, data: &[u8]) -> Result<Vec<i64>, String>
 pub struct Asog {
     pub manifest: Manifest,
     pub canonical: crate::Splats,
-    pub motion: AsogMotion,
+    pub motion: crate::trigs::AsogMotion,
 }
 
 fn byte(name: &'static str, value: i64) -> Result<u8, Error> {
@@ -369,7 +369,8 @@ impl AsogParts {
 
     /// The motion de-quantised on the CPU (the oracle of `asog_motion.wgsl`; reference `asog.decode.read`, motion
     /// part): f64 arithmetic in its operation order, rounded to f32 once.
-    pub fn motion(&self) -> AsogMotion {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn motion(&self) -> crate::trigs::AsogMotion {
         let m = &self.manifest;
         let n = m.count;
         let mo = &m.motion;
@@ -380,7 +381,7 @@ impl AsogParts {
         let samples = mo.mref_samples.max(1);
         let levels = f64::from((1u32 << ls.bits.min(31)) - 1);
         let spans: [f64; 3] = std::array::from_fn(|k| m.means.maxs[k] - m.means.mins[k]);
-        let mut out = AsogMotion {
+        let mut out = crate::trigs::AsogMotion {
             opacities: Vec::with_capacity(n),
             times: Vec::with_capacity(n),
             sigmas: Vec::with_capacity(n),

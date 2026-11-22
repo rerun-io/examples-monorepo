@@ -67,7 +67,7 @@ impl Renderer {
     }
 
     /// De-quantise SOG texel planes on the GPU into a splat scene (one compute pass, submitted on `queue`).
-    /// The CPU path is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
+    /// The tests' CPU oracle is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
     pub fn upload_sog(
         &self,
         queue: &wgpu::Queue,

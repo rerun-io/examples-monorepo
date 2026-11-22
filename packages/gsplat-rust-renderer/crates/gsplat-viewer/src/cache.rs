@@ -58,11 +58,7 @@ impl Primitives<'_> {
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_scope!("upload");
         let (scene, count, kind) = match self {
-            Self::Sog(payload) => (
-                payload.upload(ctx, core, crate::sog::Dequantize::from_env())?,
-                payload.count(),
-                "SOG splats",
-            ),
+            Self::Sog(payload) => (payload.upload(ctx, core)?, payload.count(), "SOG splats"),
             Self::Splats(cloud) => (
                 core.upload(&cloud.to_core())?,
                 cloud.centers.len(),
@@ -74,7 +70,7 @@ impl Primitives<'_> {
                 "hexels",
             ),
             Self::Asog(payload) => (
-                payload.upload(ctx, core, crate::sog::Dequantize::from_env())?,
+                payload.upload(ctx, core)?,
                 payload.info.count,
                 "ASOG splats",
             ),

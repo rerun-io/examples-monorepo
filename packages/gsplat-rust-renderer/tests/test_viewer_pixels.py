@@ -52,7 +52,7 @@ def test_hexel_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
 
 @pytest.mark.integration
 def test_sog_viewer_pixels(binaries: Path, tmp_path: Path) -> None:
-    """skull.sog (v2, SH 3): the SogSplats3D payload, GPU and CPU de-quantised, matches gsplat render of the decode; stock draws the preview."""
+    """skull.sog (v2, SH 3): the SogSplats3D payload, de-quantised on the GPU, matches gsplat render of the decode; stock draws the preview."""
     from gsplat_rust_renderer.apis.log_sog import fetch_sample
 
     try:
@@ -61,7 +61,7 @@ def test_sog_viewer_pixels(binaries: Path, tmp_path: Path) -> None:
         pytest.skip(f"PlayCanvas skull.sog sample unavailable: {error}")
     result: subprocess.CompletedProcess[str] = run_check(binaries, tmp_path, "sog", Path("/dev/null"), "--sog", str(sog))
     # re_format groups thousands with a thin space.
-    assert len(re.findall(r"SOG decode: 246\D821 splats, SH degree 3", result.stderr)) == 2, "One payload decode per compute viewer (GPU, then CPU)"
+    assert len(re.findall(r"SOG decode: 246\D821 splats, SH degree 3", result.stderr)) == 1, "One payload decode in the compute viewer"
     assert "Gaussian compute fallback" not in result.stderr
 
 

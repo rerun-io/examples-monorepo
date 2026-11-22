@@ -1,4 +1,4 @@
-//! SOG (`PlayCanvas` "Spatially Ordered Gaussians") v2 and v3 decode into [`Splats`].
+//! SOG (`PlayCanvas` "Spatially Ordered Gaussians") v2 and v3 decode into [`crate::Splats`].
 //!
 //! Pure functions over bytes, no file or zip I/O: the writer unpacks a bundled `.sog` at log time and the viewer
 //! hands in component bytes.
@@ -11,7 +11,7 @@
 //! - meta: [`Meta::parse`] reads meta.json (unknown fields allowed; codebook entries may be JSON `null`; the SH band
 //!   count is inferred from the centroid width when `shN.bands` is absent, as the `PlayCanvas` engine does).
 //! - L1: [`decode_webp`]: lossless WebP (VP8L) -> [`Rgba8`] (exact bytes, never premultiplied).
-//! - L2: [`dequantize`]: integer texel planes + [`Quantization`] -> [`Splats`].
+//! - L2: [`dequantize`]: integer texel planes + [`Quantization`] -> [`crate::Splats`].
 //! - [`decode_planes`] = meta + L1 for SOG ([`DecodedSog`] keeps the RGBA planes for a GPU upload); [`decode`] = L1 + L2.
 //!
 //! # The shared de-quantiser ([`dequantize`])
@@ -32,12 +32,11 @@
 //!   the AC codebook. Entries at or beyond `palette_count` decode to zero SH (as splat-transform does).
 //!   For ASOG: shlabels -> labels R,G; shpalette row n (coefficient-major then RGB) -> texels `n*C..n*C+C`.
 //!
-//! # Output ([`Splats`], gsplat-core layout)
+//! # Output ([`crate::Splats`], gsplat-core layout)
 //! f32 means, quaternion wxyz (not renormalised; the projector normalises), log scales (the codebook value), raw
 //! logit opacity `ln(a / (1 - a))` with `a` clamped to `[1e-6, 1 - 1e-6]`, SH splat-major then coefficient-major RGB
 //! (DC first), `sh_degree` = bands (0 without SH). Arithmetic is f64, rounded to f32 once.
 //! Data stays in the file's frame (3DGS PLY: x right, y down, z forward): no flip here.
-use crate::Splats;
 use serde::Deserialize;
 use std::f64::consts::{FRAC_PI_2, SQRT_2};
 
@@ -286,6 +285,7 @@ pub fn logit(alpha: f64) -> f32 {
     ((a / (1.0 - a)).ln() as f32).clamp(-100.0, 100.0)
 }
 
+#[cfg(any(test, feature = "testing"))]
 fn texel(plane: &[u8], i: usize) -> [u8; 4] {
     [
         plane[4 * i],
@@ -327,13 +327,15 @@ pub fn check_planes(q: &Quantization, planes: &Planes<'_>) -> Result<usize, Erro
     })
 }
 
-/// L2: texel planes -> [`Splats`]. Shared by SOG (decoded WebP) and ASOG (packed zlib integers, [`Version::V2`]).
-pub fn dequantize(q: &Quantization, planes: &Planes<'_>) -> Result<Splats, Error> {
+/// L2 on the CPU: texel planes -> [`crate::Splats`], for SOG (decoded WebP) and ASOG (packed zlib integers, [`Version::V2`]).
+/// The oracle of `sog_dequant.wgsl` in the tests.
+#[cfg(any(test, feature = "testing"))]
+pub fn dequantize(q: &Quantization, planes: &Planes<'_>) -> Result<crate::Splats, Error> {
     let n = q.count;
     let palette_count = check_planes(q, planes)?;
     let sh = planes.sh;
     let rest = sh.map_or(0, |s| rest_coefficients(s.bands));
-    let mut splats = Splats {
+    let mut splats = crate::Splats {
         transforms: Vec::with_capacity(n),
         raw_opacities: Vec::with_capacity(n),
         sh_coefficients: Vec::with_capacity(n * (rest + 1)),
@@ -500,9 +502,9 @@ pub fn decode_planes(meta: &Meta, webp: &SogWebp<'_>) -> Result<DecodedSog, Erro
     })
 }
 
-/// meta.json + stored WebP planes -> [`Splats`] (CPU L1 + L2; the oracle tests' entry point).
+/// meta.json + stored WebP planes -> [`crate::Splats`] (CPU L1 + L2; the oracle tests' entry point).
 #[cfg(any(test, feature = "testing"))]
-pub fn decode(meta_json: &str, webp: &SogWebp<'_>) -> Result<Splats, Error> {
+pub fn decode(meta_json: &str, webp: &SogWebp<'_>) -> Result<crate::Splats, Error> {
     let meta = Meta::parse(meta_json)?;
     let decoded = decode_planes(&meta, webp)?;
     dequantize(&decoded.quantization, &decoded.planes())
