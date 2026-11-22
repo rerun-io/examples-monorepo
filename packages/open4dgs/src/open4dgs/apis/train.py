@@ -48,6 +48,8 @@ class Config:
     """Cameras to read (``rig_00/cam_00`` ...); None reads every camera."""
     num_holdout: int = 1
     holdout_seed: int = 0
+    holdout_cameras: tuple[str, ...] | None = None
+    """Explicit held-out cameras (e.g. evenly spaced); overrides ``num_holdout``/``holdout_seed``."""
     max_side: int | None = 640
     """Longer side of the training frames; None keeps the stored size."""
     mask_source: Literal["layer", "mesh"] = "layer"
@@ -106,7 +108,14 @@ def main(config: Config) -> dict[str, object]:
         config.catalog_url, config.dataset, config.segment_id, config.frame_start, config.num_frames, cameras=config.cameras, max_side=config.max_side
     )
     timings["read_clip_s"] = time.perf_counter() - t0
-    train_names, holdout_names = select_holdout(clip.camera_names, config.num_holdout, config.holdout_seed)
+    if config.holdout_cameras is not None:
+        missing: set[str] = set(config.holdout_cameras) - set(clip.camera_names)
+        if missing:
+            raise ValueError(f"holdout cameras {sorted(missing)} are not in the clip {clip.camera_names}")
+        holdout_names: tuple[str, ...] = config.holdout_cameras
+        train_names: tuple[str, ...] = tuple(sorted(set(clip.camera_names) - set(holdout_names)))
+    else:
+        train_names, holdout_names = select_holdout(clip.camera_names, config.num_holdout, config.holdout_seed)
     t0 = time.perf_counter()
     masks = _read_masks(config, clip)
     timings["masks_s"] = time.perf_counter() - t0
