@@ -11,7 +11,7 @@ import rerun.chunk as rrc
 def _look_from(yaw_deg: float, pitch_deg: float, distance: float = 2.5) -> np.ndarray:
     """world_T_cam of an OpenCV camera on a ring around the origin, looking at it (world Y up)."""
     yaw, pitch = math.radians(yaw_deg), math.radians(pitch_deg)
-    forward = np.array([-math.sin(yaw) * math.cos(pitch), -math.sin(pitch), -math.cos(yaw) * math.cos(pitch)])
+    forward = np.array([math.sin(yaw) * math.cos(pitch), -math.sin(pitch), -math.cos(yaw) * math.cos(pitch)])
     right = np.cross(forward, [0.0, 1.0, 0.0])
     right /= np.linalg.norm(right)
     down = np.cross(forward, right)

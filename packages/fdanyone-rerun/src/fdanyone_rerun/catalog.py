@@ -84,7 +84,8 @@ class ViewPose:
     """Where a generated view looks from, read off its pose."""
 
     yaw_deg: float
-    """Around the world Y axis, degrees in [0, 360); 0 looks along -Z (the view facing the person)."""
+    """Around the world Y axis, degrees in [0, 360); 0 looks along -Z (the view facing the person), increasing as
+    upstream's ``cameras.json`` ``yaw`` does."""
     pitch_deg: float
     """Degrees above the horizon the camera looks down from; positive is above the subject."""
 
@@ -92,7 +93,7 @@ class ViewPose:
 def view_pose(world_T_cam: Float64[ndarray, "4 4"]) -> ViewPose:
     """Yaw and pitch of a camera from its optical axis (OpenCV RDF: +Z forward)."""
     forward: Float64[ndarray, "3"] = world_T_cam[:3, 2]
-    yaw: float = math.degrees(math.atan2(-float(forward[0]), -float(forward[2]))) % 360.0
+    yaw: float = math.degrees(math.atan2(float(forward[0]), -float(forward[2]))) % 360.0
     pitch: float = math.degrees(math.asin(max(-1.0, min(1.0, -float(forward[1])))))
     return ViewPose(yaw_deg=round(yaw, 3) % 360.0, pitch_deg=round(pitch, 3))
 

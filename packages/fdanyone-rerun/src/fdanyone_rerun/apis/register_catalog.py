@@ -22,7 +22,7 @@ from fdanyone_rerun.catalog import (
     segment_stream,
     view_pose,
 )
-from fdanyone_rerun.outputs import read_run_metadata
+from fdanyone_rerun.outputs import read_camera_rig, read_run_metadata
 
 
 @dataclass
@@ -56,11 +56,18 @@ def main(config: Config) -> Path:
         if seed is not None and seed != metadata.generation.seed:
             raise ValueError(f"--seed {seed} disagrees with {config.run_dir}/metadata.json seed {metadata.generation.seed}")
         seed, source_video = metadata.generation.seed, metadata.input.filename
+    store: rrc.LazyStore = rrc.RrdReader(config.rrd).store()
+    cameras: list[RunCamera] = read_run_cameras(store)
+    if config.run_dir is not None:
+        # The rig as upstream wrote it must be the rig the recording carries (same views, same yaw / pitch).
+        rig = read_camera_rig(config.run_dir)
+        for camera, record in zip(cameras, rig.cameras, strict=True):
+            pose = view_pose(camera.world_T_cam)
+            if abs((pose.yaw_deg - record.yaw + 180.0) % 360.0 - 180.0) > 0.01 or abs(pose.pitch_deg - record.pitch) > 0.01:
+                raise ValueError(f"view {camera.view}: recording yaw/pitch {pose} != cameras.json {record.yaw}/{record.pitch}")
     if seed is None:
         raise ValueError("pass --seed or --run-dir: the run recording does not carry its seed")
 
-    store: rrc.LazyStore = rrc.RrdReader(config.rrd).store()
-    cameras: list[RunCamera] = read_run_cameras(store)
     clock: VideoClock = read_video_clock(store)
     segment: str = segment_id(config.clip, len(cameras), seed)
     properties = SegmentProperties(
