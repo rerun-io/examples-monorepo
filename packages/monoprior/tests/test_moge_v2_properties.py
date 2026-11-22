@@ -170,3 +170,50 @@ def test_postprocess_invariants_hold_for_arbitrary_graph_output(shift: float, ou
     non_positive_bhw: Bool[Tensor, "2 h w"] = prediction.depth_bhw <= 0.0
     assert (prediction.mask_bhw[non_positive_bhw] == 0.0).all()
     assert (prediction.mask_bhw >= 0.0).all() and (prediction.mask_bhw <= 1.0).all()
+
+
+@settings(max_examples=50, deadline=None)
+@given(
+    focal=st.floats(min_value=0.6, max_value=3.0, allow_nan=False, allow_infinity=False),
+    shift=st.floats(min_value=-0.5, max_value=0.5, allow_nan=False, allow_infinity=False),
+    slope_u=st.floats(min_value=-1.5, max_value=1.5, allow_nan=False, allow_infinity=False),
+)
+def test_postprocess_with_known_fov_keeps_that_focal_and_recovers_the_shift(focal: float, shift: float, slope_u: float) -> None:
+    """``fov_x`` fixes the focal: the intrinsics carry exactly that field of view and the shift still comes out right.
+
+    ``fov_x=None`` is the default call (MoGe recovers the focal), bit for bit.
+    """
+    network_hw: tuple[int, int] = (48, 64)
+    aspect_ratio: float = network_hw[1] / network_hw[0]
+    uv_hw2: Float32[Tensor, "48 64 2"] = normalized_view_plane_uv(network_hw[1], network_hw[0], dtype=torch.float32)
+    true_depth_hw: Float32[Tensor, "48 64"] = 2.0 + slope_u * uv_hw2[..., 0] + 0.5 * uv_hw2[..., 1]
+    assume(true_depth_hw.min().item() > 0.3)
+    rays_hw3: Float32[Tensor, "48 64 3"] = torch.cat((uv_hw2 / focal, torch.ones_like(uv_hw2[..., :1])), dim=-1)
+    affine_points_hw3: Float32[Tensor, "48 64 3"] = true_depth_hw[..., None] * rays_hw3
+    affine_points_hw3[..., 2] -= shift
+    assume(affine_points_hw3[..., 2].min().item() > 0.1)
+    graph_output: MoGeV2GeometryGraphOutput = MoGeV2GeometryGraphOutput(
+        points_bhw3=affine_points_hw3[None].contiguous(),
+        normals_bhw3=torch.nn.functional.normalize(torch.randn(1, *network_hw, 3), dim=-1),
+        mask_bhw=torch.full((1, *network_hw), 0.9),
+        metric_scale_b=torch.ones(1),
+    )
+    fx_normalized: float = focal / 2.0 * math.sqrt(1.0 + aspect_ratio**2) / aspect_ratio  # focal / image width
+    fov_x: float = math.degrees(2.0 * math.atan(0.5 / fx_normalized))
+
+    known: MoGeV2GeometryOutput = postprocess_moge_v2_geometry(graph_output, network_hw, fov_x=fov_x)
+    torch.testing.assert_close(known.intrinsics_b33[:, 0, 0], torch.full((1,), fx_normalized), rtol=1e-5, atol=0.0)
+    torch.testing.assert_close(known.shift_b, torch.full((1,), shift), rtol=0.0, atol=1e-2)
+    torch.testing.assert_close(known.depth_bhw, true_depth_hw[None], rtol=1e-2, atol=1e-3)
+
+    # The known fov belongs to the caller image: its aspect (here 120 / 96 = 1.25, the grid's is 4 / 3) sets the solve.
+    from monopriors.third_party.moge.model._inference import recover_shift_and_intrinsics
+
+    caller: MoGeV2GeometryOutput = postprocess_moge_v2_geometry(graph_output, (96, 120), fov_x=fov_x)
+    expected = recover_shift_and_intrinsics(graph_output.points_bhw3, graph_output.mask_bhw > 0.5, fov_x=fov_x, aspect_ratio=120 / 96)
+    assert torch.equal(caller.shift_b, expected.shift_b.float())
+
+    default: MoGeV2GeometryOutput = postprocess_moge_v2_geometry(graph_output, network_hw)
+    explicit_none: MoGeV2GeometryOutput = postprocess_moge_v2_geometry(graph_output, network_hw, fov_x=None)
+    for a, b in zip(default, explicit_none, strict=True):
+        assert torch.equal(a, b)
