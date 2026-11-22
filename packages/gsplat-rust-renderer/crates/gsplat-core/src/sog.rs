@@ -295,8 +295,18 @@ fn texel(plane: &[u8], i: usize) -> [u8; 4] {
     ]
 }
 
-/// L2: texel planes -> [`Splats`]. Shared by SOG (decoded WebP) and ASOG (packed zlib integers, [`Version::V2`]).
-pub fn dequantize(q: &Quantization, planes: &Planes<'_>) -> Result<Splats, Error> {
+/// The position of 16-bit code `code` on `axis` (f64 log map, rounded to f32 once).
+pub fn position(q: &Quantization, axis: usize, code: u16) -> f32 {
+    let span = q.means_max[axis] - q.means_min[axis];
+    let span = if span == 0.0 { 1.0 } else { span };
+    let v = q.means_min[axis] + span * (code as f64 / 65535.0);
+    let e = v.abs().exp_m1();
+    (if v < 0.0 { -e } else { e }) as f32
+}
+
+/// Check the plane sizes against `q.count`; returns the usable SH palette entries (0 without SH).
+/// Entries whose texels run past the centroid plane count as out of range.
+pub fn check_planes(q: &Quantization, planes: &Planes<'_>) -> Result<usize, Error> {
     let n = q.count;
     for (name, plane) in [
         ("means_l", planes.means_l),
@@ -307,17 +317,22 @@ pub fn dequantize(q: &Quantization, planes: &Planes<'_>) -> Result<Splats, Error
     ] {
         check_plane(name, plane, n)?;
     }
+    Ok(match planes.sh {
+        Some(s) => {
+            check_plane("shN_labels", s.labels, n)?;
+            s.palette_count
+                .min(s.centroids.len() / 4 / rest_coefficients(s.bands))
+        }
+        None => 0,
+    })
+}
+
+/// L2: texel planes -> [`Splats`]. Shared by SOG (decoded WebP) and ASOG (packed zlib integers, [`Version::V2`]).
+pub fn dequantize(q: &Quantization, planes: &Planes<'_>) -> Result<Splats, Error> {
+    let n = q.count;
+    let palette_count = check_planes(q, planes)?;
     let sh = planes.sh;
     let rest = sh.map_or(0, |s| rest_coefficients(s.bands));
-    // Entries whose texels run past the centroid plane count as out of range.
-    let palette_count = sh.map_or(0, |s| s.palette_count.min(s.centroids.len() / 4 / rest));
-    if let Some(s) = sh {
-        check_plane("shN_labels", s.labels, n)?;
-    }
-    let spans = [0, 1, 2].map(|a| {
-        let span = q.means_max[a] - q.means_min[a];
-        if span == 0.0 { 1.0 } else { span }
-    });
     let mut splats = Splats {
         transforms: Vec::with_capacity(n),
         raw_opacities: Vec::with_capacity(n),
@@ -327,12 +342,7 @@ pub fn dequantize(q: &Quantization, planes: &Planes<'_>) -> Result<Splats, Error
     };
     for i in 0..n {
         let (lo, hi) = (texel(planes.means_l, i), texel(planes.means_u, i));
-        let position = [0, 1, 2].map(|a| {
-            let code = lo[a] as u32 | ((hi[a] as u32) << 8);
-            let v = q.means_min[a] + spans[a] * (code as f64 / 65535.0);
-            let e = v.abs().exp_m1();
-            (if v < 0.0 { -e } else { e }) as f32
-        });
+        let position = [0, 1, 2].map(|a| position(q, a, u16::from_le_bytes([lo[a], hi[a]])));
         let rotation = match q.version {
             Version::V2 => quat_smallest_three(texel(planes.quats, i)),
             Version::V3 => quat_exp_map(texel(planes.quats, i)),

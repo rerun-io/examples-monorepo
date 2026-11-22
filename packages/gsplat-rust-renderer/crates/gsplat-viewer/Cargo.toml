@@ -26,6 +26,8 @@ re_tracing = "=0.42.0"
 re_format = "=0.42.0"
 re_math = "0.33"
 ahash = "0.8"
+# Load-time split of SOG decoding (std Instant panics on wasm32).
+web-time = "1.1"
 
 # Native-only: the binary's gRPC server, crash handler, headless harness and runtime. The web build links the lib.
 # Rerun 0.42 uses egui/eframe 0.37, so the headless kittest harness must stay on the same egui family as re_viewer.

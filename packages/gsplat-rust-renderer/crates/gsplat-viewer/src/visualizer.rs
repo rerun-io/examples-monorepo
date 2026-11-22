@@ -338,6 +338,15 @@ fn draw_splat_entity(
             }
         };
     }
+    // SOG payload fields (static, untyped Utf8 + u8): drawn instead of the preview rows when present.
+    let sog_ids = crate::sog::components();
+    let sog_query =
+        data.query_components_with_history(ctx, query, sog_ids.iter().copied(), instruction, None);
+    let sog_generation =
+        self::attribute_generation(instruction, &sog_query, sog_ids.iter().copied());
+    let sog_results = VisualizerInstructionQueryResults::new(instruction, &sog_query, output);
+    let sog_iters = sog_ids.map(|id| sog_results.iter_optional(id));
+    let payload = sog_webp(&sog_iters);
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -366,6 +375,37 @@ fn draw_splat_entity(
                 .and_then(|d| d.first().copied())
                 .unwrap_or(*fallback_degree.0),
         };
+        if let Some((meta, webp)) = &payload {
+            // The payload replaces the preview rows; it decodes once per payload (row ids), never per time.
+            let meta = match gsplat_core::sog::Meta::parse(meta) {
+                Ok(meta) => Some(meta),
+                Err(error) => {
+                    report(
+                        ViewerReportSeverity::Warning,
+                        format!("{error}; drawing the GaussianSplats3D preview rows"),
+                    );
+                    None
+                }
+            };
+            if let Some(meta) = meta {
+                let mut hasher = DefaultHasher::new();
+                (signature, sog_generation).hash(&mut hasher);
+                let sog = crate::sog::Payload {
+                    meta,
+                    webp: *webp,
+                    preview: &native,
+                };
+                retry |= draw_instances(
+                    entity,
+                    draw,
+                    row,
+                    re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                    Primitives::Sog(&sog),
+                    render_mode,
+                )?;
+                continue;
+            }
+        }
         if let Some((motion, t)) = motion
             .as_ref()
             .filter(|(m, _)| m.is_consistent(centers.len()))
@@ -398,6 +438,33 @@ fn draw_splat_entity(
         )?;
     }
     Ok(retry)
+}
+
+/// meta.json and the stored WebP planes of `SogSplats3D`, when meta and the five required planes are present.
+fn sog_webp<'a>(
+    iters: &'a [re_view::HybridResultsChunkIter<'a>; 8],
+) -> Option<(String, gsplat_core::sog::SogWebp<'a>)> {
+    let [
+        meta,
+        means_l,
+        means_u,
+        quats,
+        scales,
+        sh0,
+        centroids,
+        labels,
+    ] = iters;
+    let meta = meta.slice::<String>().last()?.1.first()?.to_string();
+    let webp = gsplat_core::sog::SogWebp {
+        means_l: last_slice::<u8>(means_l)?,
+        means_u: last_slice::<u8>(means_u)?,
+        quats: last_slice::<u8>(quats)?,
+        scales: last_slice::<u8>(scales)?,
+        sh0: last_slice::<u8>(sh0)?,
+        sh_centroids: last_slice::<u8>(centroids),
+        sh_labels: last_slice::<u8>(labels),
+    };
+    Some((meta, webp))
 }
 
 /// The values of the last row of a (static, one-row) optional component.
@@ -481,7 +548,10 @@ pub(crate) fn draw_instances(
             ) => {
                 // The pixel contracts use these machine-visible markers to distinguish fallback from compute.
                 draw.push(match primitives {
-                    Primitives::Splats(native) => {
+                    Primitives::Splats(native)
+                    | Primitives::Sog(&crate::sog::Payload {
+                        preview: native, ..
+                    }) => {
                         report(
                             ViewerReportSeverity::Warning,
                             format!("{error}; using the native Gaussian renderer"),
