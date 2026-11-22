@@ -195,8 +195,8 @@ def main(config: Config) -> dict[str, object]:
     recording.flush()
     if config.png_dir is not None:
         _save_pngs(config.png_dir, config.run_name, clip, holdout, orbit)
-    if config.register and config.rr_config.save is None:
-        rr.disconnect()
+    if config.rr_config.save is None:
+        rr.disconnect()  # closes run.rrd before chmod and registration
     # NAS rule: files 644, directories 775.
     run_dir.chmod(0o775)
     for path in run_dir.iterdir():
