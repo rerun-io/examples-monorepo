@@ -26,6 +26,7 @@ from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evalu
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, log_init_cloud
 from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
+from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip, untrained_clip
 
 LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
@@ -182,6 +183,9 @@ def main(config: Config) -> dict[str, object]:
         **timings,
     }
 
+    # The world's up axis from the mean camera up (the segments declare none): the person stands upright in the 3D view.
+    view_coordinates = up_view_coordinates(clip.world_T_cam.float().numpy())
+    recording.log("/world", view_coordinates, static=True)
     log_cameras(recording, clip, holdout_names)
     log_people(recording, clip)
     log_init_cloud(init, recording)
@@ -205,6 +209,7 @@ def main(config: Config) -> dict[str, object]:
         "max_side": config.max_side or 0,
         "roi": f"{config.roi}:{config.roi_pad}" if config.roi else "full",
         "init_method": init.method,
+        "view_coordinates": str(view_coordinates),
         "samples_per_person": config.samples_per_person,
         "keyframe_step": config.keyframe_step,
         "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
@@ -216,11 +221,24 @@ def main(config: Config) -> dict[str, object]:
         for name in holdout_names[:2]
         for kind in ("gt", "render", "error")
     ]
+    # Metric panels: PSNR / SSIM / LPIPS of crop_raw (the headline) with both floors (held-out cameras, else training ones).
+    scored: list[str] = [f"/eval/{'holdout' if holdout else 'train'}/{name.replace('/', '_')}" for name in (holdout_names or train_names)]
+
+    def metric_view(metric: str, extra: tuple[str, ...] = ()) -> rrb.TimeSeriesView:
+        contents: list[str] = [f"{base}/metrics/{name}" for base in scored for name in (metric, *extra)]
+        contents += [f"{base}/floor/{kind}/{metric}" for base in scored for kind in BASELINES]
+        return rrb.TimeSeriesView(origin="/eval", contents=contents, name=metric.replace("crop_raw_", "").upper())
+
     recording.send_blueprint(
         rrb.Blueprint(
             rrb.Vertical(
                 rrb.Horizontal(*eval_views, rrb.Spatial2DView(origin="/eval/orbit/render", name="orbit")),
-                rrb.Horizontal(rrb.Spatial3DView(origin="/world", name="scene"), rrb.TimeSeriesView(origin="/eval", name="metrics")),
+                rrb.Horizontal(
+                    rrb.Spatial3DView(origin="/world", name="scene"),
+                    metric_view(HEADLINE[0], ("fg_psnr",)),
+                    metric_view(HEADLINE[1]),
+                    metric_view(HEADLINE[2]),
+                ),
             ),
             collapse_panels=True,
         )
