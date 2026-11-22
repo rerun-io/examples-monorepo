@@ -1,0 +1,75 @@
+# TRiGS (ASU-NEM-Labs/open4dgs-trigs at ed7a84a), the Open4DGS trainer: temporally resolving 4D Gaussian splatting
+# with coupled SE(3) motion and Bezier residuals. Pure Python, import name `trigs`; for the workspace's conda-forge
+# torch 2.12 (cuda130).
+#
+# Nothing is compiled:
+#   - gsplat 1.5.3 (upstream's uv git pin) is the ai-demos prebuilt for CUDA 13 / torch 2.12 / py3.12 / sm_86 + sm_120
+#     (linux-64 only), the build [feature.vistadream] uses.
+#   - PyTorch3D is not built. TRiGS calls only pytorch3d.ops.knn_points and sample_farthest_points, each inside a
+#     function; patch 0001 imports them from packages/open4dgs's `open4dgs.pytorch3d_ops` (plain torch), which the
+#     consuming feature supplies (editable PyPI path package, like vipe-src's vipe_mojo).
+#   - fused-ssim is optional upstream (trigs.core.losses falls back to torchmetrics); not installed.
+# Left out of the run dependencies: pycolmap (only upstream's COLMAP-folder reader trigs.io.dataset imports it, inside
+# a try; it calls the pycolmap >= 3.12 `Image.cam_from_world()` method, so a consumer that wants that reader can add
+# pycolmap 4.x), viser and nerfview (only trigs.core.viewer, the interactive viewer, imports
+# them; the training and eval paths do not). gsply (PLY export, PyPI only) comes from the consuming feature's
+# pypi-dependencies.
+package:
+  name: open4dgs-trigs-src
+  version: "0.1.0.ed7a84a"
+
+source:
+  # GitHub archive of ed7a84aff1aeccd18dfb48d2806e521255ccf9ef.
+  url: https://github.com/ASU-NEM-Labs/open4dgs-trigs/archive/ed7a84aff1aeccd18dfb48d2806e521255ccf9ef.tar.gz
+  sha256: 81050ef8ced4708d59c09332a4d40a4d57e4fc058fdf94714bf173a3fe9b3dd2
+  patches:
+    # Dependency swap: every `from pytorch3d.ops import ...` (knn_points, sample_farthest_points) imports
+    # open4dgs.pytorch3d_ops instead. One-line changes only.
+    - patches/0001-pytorch3d-ops-from-open4dgs.patch
+    # Hook only: build_canonical_from_npz (trigs.init.from_colmap) takes a Mapping of the keyframes arrays as well as
+    # a path, so packages/open4dgs passes its init cloud in memory instead of writing keyframes.npz.
+    - patches/0002-init-cloud-from-mapping.patch
+
+build:
+  # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
+  # shared rattler package cache would otherwise hand an older build to the next install.
+  number: 0
+  noarch: python
+  script:
+    # pixi-build reuses the host prefix between rebuilds: clear the target first.
+    - rm -rf "$SP_DIR/trigs" "$SP_DIR"/trigs-*.dist-info
+    - python -m pip install . --no-deps --no-build-isolation -vv
+    - test -z "$(grep -rl 'from pytorch3d' "$SP_DIR/trigs")"
+
+requirements:
+  host:
+    - python 3.12.*
+    - pip
+    - setuptools >=61
+    - wheel
+  # What trigs.cli.train_from_colmap, trigs.cli.eval_colmap and trigs.cli.evaluate import (upstream pyproject minus
+  # pytorch3d, viser, nerfview and gsply, see above).
+  run:
+    - python 3.12.*
+    # TRiGS trains on the GPU: never resolve a CPU pytorch.
+    - pytorch >=2.12,<2.13 cuda*
+    - cuda-version >=13.0,<14
+    - gsplat ==1.5.3
+    - torchvision
+    - torchmetrics
+    - numpy
+    - scipy
+    - tqdm
+    - imageio
+    - tyro >=0.8.8,<1.0
+    - py-opencv
+    - pillow
+    - tensorboard
+    - matplotlib
+    - splines
+
+about:
+  homepage: https://github.com/ASU-NEM-Labs/open4dgs-trigs
+  license: AGPL-3.0-only
+  license_file: LICENSE
+  summary: TRiGS 4D Gaussian splatting trainer (open4dgs-trigs at ed7a84a), import name `trigs`; PyTorch3D ops from packages/open4dgs

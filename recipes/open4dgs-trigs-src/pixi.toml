@@ -1,0 +1,6 @@
+[package]
+name = "open4dgs-trigs-src"
+version = "0.1.0.ed7a84a"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
