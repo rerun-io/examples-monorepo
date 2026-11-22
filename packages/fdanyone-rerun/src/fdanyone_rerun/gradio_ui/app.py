@@ -25,7 +25,8 @@ from fdanyone_rerun.stream import RunStreamer
 
 APPLICATION_ID: str = "fdanyone-rerun"
 RUNS_DIR: Path = PACKAGE_ROOT / "data" / "app-runs"
-"""One run directory per click."""
+"""One run directory per click (upstream's outputs), and beside it ``<run>.rrd``: the recording the viewer showed,
+4D person (Animated SOG) included."""
 PUMP_SECONDS: float = 0.5
 """How often new recording bytes go to the viewer."""
 APP_PERSON: PersonConfig = PersonConfig(train=dataclasses.replace(PersonConfig().train, steps=5_000), prior=False)
@@ -127,15 +128,25 @@ def run_app(
         SLOT.lock.release()
         raise
     SLOT.worker = worker
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    saved: Path = RUNS_DIR / f"{run_id}.rrd"
     try:
-        while worker.is_alive():
-            worker.join(PUMP_SECONDS)
-            yield stream.read(), f"Running… {time.perf_counter() - started:.0f} s"
-        recording.flush()
-        if errors and not isinstance(errors[0], RunCancelled):
-            raise errors[0]
-        person_line: str = " and the 4D person" if person is not None else ""
-        yield stream.read(), f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line} in {config.output_dir}"
+        with saved.open("wb") as file:
+
+            def pump() -> bytes:
+                """New recording bytes, for the viewer and the saved recording."""
+                data: bytes = stream.read()
+                file.write(data)
+                return data
+
+            while worker.is_alive():
+                worker.join(PUMP_SECONDS)
+                yield pump(), f"Running… {time.perf_counter() - started:.0f} s"
+            recording.flush()
+            if errors and not isinstance(errors[0], RunCancelled):
+                raise errors[0]
+            person_line: str = " and the 4D person" if person is not None else ""
+            yield pump(), f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line}; recording {saved}"
     finally:
         # A Stop (or a closed page) ends this generator: the worker stops its subprocess at once, the rest at the next
         # stage or denoising step, and frees the slot when it has.
