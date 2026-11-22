@@ -57,6 +57,7 @@ pub(crate) struct RenderView {
     target: TargetImage,
     image: Image,
     last_good: Option<GpuBindGroup>,
+    profile: Option<crate::profile::ViewProfile>,
 }
 
 impl RenderView {
@@ -150,6 +151,10 @@ impl RenderView {
         re_tracing::profile_function!();
         self.last_good = self.completed();
         let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
+        let timed = self.profile.as_ref().and_then(|p| p.begin());
+        if self.profile.is_some() {
+            self.core.set_timestamp_queries(timed.clone())?;
+        }
         renderer.core()?.render(
             &ctx.queue,
             encoder.get(),
@@ -162,6 +167,13 @@ impl RenderView {
                 id: self.target.id.default_view.clone(),
             },
         )?;
+        if let (Some(profile), Some(_)) = (&mut self.profile, timed) {
+            profile.end(
+                encoder.get(),
+                ctx.queue.get_timestamp_period(),
+                options.time,
+            );
+        }
         self.image = Image::Pending {
             camera: *camera,
             options,
@@ -241,6 +253,7 @@ impl GaussianRenderer {
             target: self.target(ctx, size),
             image: Image::Dirty,
             last_good: None,
+            profile: crate::profile::ViewProfile::new(&ctx.device),
         })
     }
 

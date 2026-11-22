@@ -6,6 +6,7 @@ mod bounds;
 mod cache;
 mod fallback;
 mod hexels;
+pub mod profile;
 mod renderer;
 mod selection;
 pub mod setup;

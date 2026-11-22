@@ -14,7 +14,11 @@ pub fn install_gsplat_hooks() {
             if let re_viewer::external::eframe::egui_wgpu::WgpuSetup::CreateNew(setup) =
                 &mut options.wgpu_setup
             {
-                let force_no_subgroups = force_no_subgroups();
+                let force_no_subgroups = query_flag("force_no_subgroups");
+                if query_flag("profile") {
+                    gsplat_viewer::profile::ENABLED
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let compute =
                     gsplat_viewer::setup::compute_device_descriptor_with(!force_no_subgroups);
                 setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -27,10 +31,11 @@ pub fn install_gsplat_hooks() {
                         "stock Rerun splats (adapter lacks the compute limits)"
                     };
                     re_log::info!(
-                        "gsplat web viewer: adapter {:?} backend {:?}, subgroups offered: {}, force_no_subgroups: {force_no_subgroups}, active splat renderer: {renderer}",
+                        "gsplat web viewer: adapter {:?} backend {:?}, subgroups offered: {}, force_no_subgroups: {force_no_subgroups}, timestamp-query offered: {}, active splat renderer: {renderer}",
                         adapter.get_info().name,
                         adapter.get_info().backend,
                         adapter.features().contains(wgpu::Features::SUBGROUP),
+                        adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY),
                     );
                     descriptor
                 });
@@ -49,14 +54,16 @@ pub fn install_gsplat_hooks() {
         .ok();
 }
 
-/// `force_no_subgroups=1` in the page's query string: behave as if the adapter lacked "subgroups".
-fn force_no_subgroups() -> bool {
+/// `<name>=1` in the page's query string: `force_no_subgroups` behaves as if the adapter lacked "subgroups";
+/// `profile` logs GPU timestamps of the splat frame and motion pass every few seconds.
+fn query_flag(name: &str) -> bool {
+    let wanted = format!("{name}=1");
     web_sys::window()
         .and_then(|window| window.location().search().ok())
         .is_some_and(|search| {
             search
                 .trim_start_matches('?')
                 .split('&')
-                .any(|pair| pair == "force_no_subgroups=1")
+                .any(|pair| pair == wanted)
         })
 }
