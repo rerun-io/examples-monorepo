@@ -23,6 +23,7 @@ resize by ``s`` maps ``x -> (x + 0.5) s - 0.5`` (``scale_intrinsics``), the conv
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pyarrow as pa
@@ -39,6 +40,8 @@ from simplecv.catalog_video_codec import wrap_mp4
 from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
+
+from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera, virtual_to_source_pixels
 
 FRAME_TIMELINE: str = "frame_index"
 """The dataforge sequence timeline every layer is indexed on (also ``video_time``, a duration)."""
@@ -111,6 +114,19 @@ class ClipPeople:
 
 
 @dataclass(frozen=True, slots=True)
+class ClipRoi:
+    """How a clip's person-centred virtual cameras were made (``read_catalog_clip(..., roi="people")``: every person's
+    mesh vertices over the whole window stay in view)."""
+
+    pad: float
+    """Fraction of the points' box added on every side."""
+    max_side: int | None
+    """Cap on the longer side of the virtual images."""
+    cameras: tuple[VirtualCamera, ...]
+    """Per clip camera, the virtual camera its frames, ``valid``, ``K`` and ``world_T_cam`` belong to."""
+
+
+@dataclass(frozen=True, slots=True)
 class MultiViewClip:
     """A training clip: ``frames[c][t]`` is camera ``c`` at source frame ``frame_indices[t]``, undistorted to pinhole ``K[c]``.
 
@@ -139,6 +155,8 @@ class MultiViewClip:
     """Each camera's stored video ``(width, height)`` (the grid catalog layers such as ``masks`` are aligned with)."""
     lenses: tuple[ViconRadialLens | None, ...] = ()
     """Each camera's lens, None for a pinhole camera or when the clip was read with ``undistort=False``."""
+    roi: ClipRoi | None = None
+    """None: the real cameras. Otherwise frames, ``valid``, ``K`` and ``world_T_cam`` are those of these virtual cameras."""
 
     @property
     def sizes(self) -> tuple[tuple[int, int], ...]:
@@ -207,6 +225,26 @@ def undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device:
     grid: Float64[Tensor, "n 2"] = (distorted_stored + 0.5) / size * 2.0 - 1.0
     grid = torch.nan_to_num(grid, nan=-2.0)
     return grid.reshape(1, height, width, 2).to(torch.float32)
+
+
+def roi_grid(lens: ViconRadialLens | None, camera: VirtualCamera, device: torch.device) -> Float32[Tensor, "1 h w 2"]:
+    """``grid_sample`` grid from a stored (distorted) frame to ``camera``'s sampling grid: rotation, zoom and undistortion in one.
+
+    Each virtual pixel goes to the undistorted stored pixel that sees its ray (``virtual_to_source_pixels``), then through
+    the lens to the stored grid (as ``undistortion_grid``). Pixels with no source get a grid value outside ``[-1, 1]``.
+    """
+    width, height = camera.source_size
+    undistorted_stored: Float64[Tensor, "n 2"] = virtual_to_source_pixels(camera, device).reshape(-1, 2)
+    distorted_stored: Float64[Tensor, "n 2"] = undistorted_stored
+    if lens is not None:
+        scale_to_native: Float64[Tensor, "2"] = torch.tensor(
+            (lens.native_width / width, lens.native_height / height), dtype=torch.float64, device=device
+        )
+        distorted_native: Float64[Tensor, "n 2"] = lens.distort((undistorted_stored + 0.5) * scale_to_native - 0.5)
+        distorted_stored = (distorted_native + 0.5) / scale_to_native - 0.5
+    size: Float64[Tensor, "2"] = torch.tensor([width, height], dtype=torch.float64, device=device)
+    grid: Float64[Tensor, "n 2"] = torch.nan_to_num((distorted_stored + 0.5) / size * 2.0 - 1.0, nan=-2.0)
+    return grid.reshape(1, camera.sample_size[1], camera.sample_size[0], 2).to(torch.float32)
 
 
 def resample_images(
@@ -338,6 +376,8 @@ def read_catalog_clip(
     decode_device: torch.device | None = None,
     storage_device: torch.device | None = None,
     undistort: bool = True,
+    roi: Literal["people"] | None = None,
+    roi_pad: float = 0.15,
 ) -> MultiViewClip:
     """Read ``num_frames`` frames (every ``frame_step``-th from ``frame_start``) of a segment's cameras into a clip.
 
@@ -355,11 +395,20 @@ def read_catalog_clip(
         storage_device: Where ``frames`` live (default CPU: 32 cams x 120 frames at 1028x752 is 8.9 GB).
         undistort: False returns the stored (distorted) frames, e.g. to compute a layer aligned with the stored video;
             ``K`` is then only the pinhole approximation of a lensed camera.
+        roi: None returns the real cameras. ``people`` returns per camera a person-centred virtual camera
+            (``open4dgs.roi_cameras``): same optical centre, rotated to the people and sized so every person's mesh
+            over the window, padded by ``roi_pad``, fits at the source's pixel density; ``max_side`` caps it. Frames,
+            ``valid``, ``K`` (centred principal point), ``world_T_cam`` and sizes are then the virtual camera's, and
+            ``clip.roi`` records how they were made.
+        roi_pad: Fraction of the people's box added on every side (hair, clothes, props, off-stride frames).
 
     Raises:
         ValueError: If a camera is missing or uncalibrated, a frame is outside the segment,
-            or a camera's lens model has no undistortion here.
+            or a camera's lens model has no undistortion here; with ``roi``, if the segment has no meshes
+            or ``undistort`` is False.
     """
+    if roi is not None and not undistort:
+        raise ValueError("roi needs undistort=True (the virtual cameras are pinholes)")
     decode_on: torch.device = decode_device if decode_device is not None else torch.device("cuda")
     store_on: torch.device = storage_device if storage_device is not None else torch.device("cpu")
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
@@ -419,6 +468,13 @@ def read_catalog_clip(
     valid: list[Bool[Tensor, "h w"]] = []
     stored_sizes: list[tuple[int, int]] = []
     lenses: list[ViconRadialLens | None] = []
+    virtual: list[VirtualCamera] = []
+    roi_points: Float32[ndarray, "n 3"] | None = None
+    people: ClipPeople | None = _read_people(entry, segment_id, frames, body_source)
+    if roi is not None:
+        if people is None:
+            raise ValueError(f"roi={roi!r}: segment {segment_id} has no body meshes")
+        roi_points = people.vertices.reshape(-1, 3).numpy()
     K: Float32[Tensor, "c 3 3"] = torch.empty((len(chosen), 3, 3), dtype=torch.float32)
     world_T_cam: Float32[Tensor, "c 4 4"] = torch.empty((len(chosen), 4, 4), dtype=torch.float32)
     for index, (node, video) in enumerate(zip(nodes, videos, strict=True)):
@@ -442,7 +498,17 @@ def read_catalog_clip(
         lens: ViconRadialLens | None = _camera_lens(static, node) if undistort else None
         stored_sizes.append(stored_wh)
         lenses.append(lens)
-        grid: Float32[Tensor, "1 h w 2"] | None = None if lens is None else undistortion_grid(lens, stored_wh, decode_on)
+        k_matrix: Float64[ndarray, "3 3"] | None = models[node].pinhole.intrinsics.k_matrix
+        assert k_matrix is not None  # Intrinsics always derives it
+        pose: Float64[ndarray, "4 4"] = np.asarray(models[node].pinhole.extrinsics.world_T_cam, dtype=np.float64)
+        grid: Float32[Tensor, "1 h w 2"] | None
+        grid_wh: tuple[int, int] = stored_wh
+        if roi_points is not None:
+            camera: VirtualCamera = fit_virtual_camera(roi_points, k_matrix, pose, stored_wh, roi_pad, max_side)
+            virtual.append(camera)
+            grid, grid_wh, target_wh = roi_grid(lens, camera, decode_on), camera.sample_size, camera.size
+        else:
+            grid = None if lens is None else undistortion_grid(lens, stored_wh, decode_on)
         # Float resampling costs 24 bytes per stored pixel and frame: chunk it to bound the GPU peak.
         out_frames.append(
             torch.cat(
@@ -452,11 +518,13 @@ def read_catalog_clip(
                 ]
             )
         )
-        valid.append(valid_mask(grid, stored_wh, target_wh))
-        k_matrix: Float64[ndarray, "3 3"] | None = models[node].pinhole.intrinsics.k_matrix
-        assert k_matrix is not None  # Intrinsics always derives it
-        K[index] = torch.from_numpy(scale_intrinsics(k_matrix, stored_wh, target_wh).astype(np.float32))
-        world_T_cam[index] = torch.from_numpy(np.asarray(models[node].pinhole.extrinsics.world_T_cam, dtype=np.float32))
+        valid.append(valid_mask(grid, grid_wh, target_wh))
+        if roi_points is not None:
+            K[index] = torch.from_numpy(virtual[-1].K.astype(np.float32))
+            world_T_cam[index] = torch.from_numpy(virtual[-1].world_T_virtual(pose).astype(np.float32))
+        else:
+            K[index] = torch.from_numpy(scale_intrinsics(k_matrix, stored_wh, target_wh).astype(np.float32))
+            world_T_cam[index] = torch.from_numpy(np.asarray(models[node].pinhole.extrinsics.world_T_cam, dtype=np.float32))
         del decoder, decoded, grid
     return MultiViewClip(
         camera_names=tuple(camera.name for camera in chosen),
@@ -466,7 +534,8 @@ def read_catalog_clip(
         world_T_cam=world_T_cam,
         fps=fps,
         frame_indices=torch.from_numpy(frames),
-        people=_read_people(entry, segment_id, frames, body_source),
+        people=people,
         stored_sizes=tuple(stored_sizes),
         lenses=tuple(lenses),
+        roi=None if roi is None else ClipRoi(pad=roi_pad, max_side=max_side, cameras=tuple(virtual)),
     )

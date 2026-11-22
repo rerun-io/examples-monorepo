@@ -20,6 +20,10 @@ class KNN(NamedTuple):
     knn: Float[Tensor, "n p1 k d"] | None
 
 
+KNN_MEMORY_BUDGET: int = 1 << 30
+"""Bytes of one chunk's distance matrix in ``knn_points`` (1 GiB): rows per chunk = budget / (batch * p2 * 4 B)."""
+
+
 def knn_points(
     p1: Float[Tensor, "n p1 d"],
     p2: Float[Tensor, "n p2 d"],
@@ -28,13 +32,15 @@ def knn_points(
     norm: int = 2,
     K: int = 1,
     return_nn: bool = False,
-    chunk_size: int = 4096,
+    chunk_size: int | None = None,
+    memory_budget: int = KNN_MEMORY_BUDGET,
 ) -> KNN:
     """K nearest neighbours of each ``p1`` point among the valid ``p2`` points, sorted nearest first.
 
     Distances are squared L2 (``norm=2``) or L1 (``norm=1``), as in PyTorch3D. Rows of ``p1`` past ``lengths1``
-    and neighbour slots past ``lengths2`` get distance 0 and index -1. ``p1`` is processed in chunks of
-    ``chunk_size`` rows so memory stays ``chunk_size * p2`` per batch item.
+    and neighbour slots past ``lengths2`` get distance 0 and index -1. ``p1`` is processed in chunks so one
+    chunk's ``(n, chunk, p2)`` distance matrix stays within ``memory_budget`` bytes (``chunk_size`` overrides);
+    the square and the padding mask are applied in place, so no second copy of that matrix exists.
     """
     if norm not in (1, 2):
         raise ValueError(f"norm must be 1 or 2, got {norm}")
@@ -50,13 +56,17 @@ def knn_points(
     dists = torch.zeros((n, n_p1, K), dtype=p1.dtype, device=p1.device)
     idx = torch.full((n, n_p1, K), -1, dtype=torch.int64, device=p1.device)
     invalid_p2 = torch.arange(n_p2, device=p1.device)[None, :] >= lengths2[:, None]
-    for start in range(0, n_p1, chunk_size):
-        q = p1[:, start : start + chunk_size]
-        d = torch.cdist(q, p2).square() if norm == 2 else torch.cdist(q, p2, p=1.0)
-        d = d.masked_fill(invalid_p2[:, None, :], float("inf"))
+    any_invalid: bool = bool(invalid_p2.any())
+    rows: int = chunk_size if chunk_size is not None else max(1, memory_budget // max(1, n * n_p2 * p1.element_size()))
+    for start in range(0, n_p1, rows):
+        q = p1[:, start : start + rows]
+        d = torch.cdist(q, p2).square_() if norm == 2 else torch.cdist(q, p2, p=1.0)
+        if any_invalid:
+            d.masked_fill_(invalid_p2[:, None, :], float("inf"))
         chunk_d, chunk_i = d.topk(k_eff, dim=-1, largest=False, sorted=True)
-        dists[:, start : start + chunk_size, :k_eff] = chunk_d
-        idx[:, start : start + chunk_size, :k_eff] = chunk_i
+        del d
+        dists[:, start : start + rows, :k_eff] = chunk_d
+        idx[:, start : start + rows, :k_eff] = chunk_i
     # Slots past a batch item's valid p2 count (inf distance) and rows past lengths1 carry no neighbour.
     empty_slot = torch.isinf(dists) | (torch.arange(n_p1, device=p1.device)[None, :, None] >= lengths1[:, None, None])
     dists = dists.masked_fill(empty_slot, 0.0)
