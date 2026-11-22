@@ -1,0 +1,44 @@
+# RoMa v2 dense matcher (Parskatt/RoMaV2, tag v2.0.1 = 95c9968), installed as the `romav2` package without pip
+# (upstream builds with uv_build). Pure PyTorch: the Linux-only `fused-local-corr` CUDA extension is not built;
+# romav2.local_correlation falls back to its native torch path when `local_corr` is absent.
+# Consumer: Open4DGS's init (recipes/open4dgs-core-src).
+# Patches (dependency swaps only):
+#   0001 DINOv3 ViT-L/16 from recipes/dinov3-src (`dinov3.hub.backbones`) instead of a torch.hub fetch of
+#        facebookresearch/dinov3@adc2544 (its hub/backbones and models are identical at 5aa7e93); the weights come
+#        from the RoMa v2 checkpoint, as upstream.
+#   0002 ROMAV2_WEIGHTS names a local romav2.0.1.pt (the pixi download task); unset keeps upstream's URL download.
+package:
+  name: romav2-src
+  version: "2.0.1.95c9968"
+
+source:
+  url: https://github.com/Parskatt/RoMaV2/archive/95c9968145c8906b7b59383258e9f73b02853d89.tar.gz
+  sha256: 66e1539cec06a4c4a984068e82a6fb89ade5962a6f06f04475ae8fea911c0ed0
+  patches:
+    - patches/0001-dinov3-from-dinov3-src.patch
+    - patches/0002-weights-from-env.patch
+
+build:
+  number: 0
+  noarch: python
+  script:
+    # pixi-build reuses the host prefix between rebuilds: clear the target or cp nests a second copy.
+    - rm -rf "$SP_DIR/romav2"
+    - mkdir -p "$SP_DIR"
+    - cp -r src/romav2 "$SP_DIR/romav2"
+    # The benchmarks import eval-only deps (kornia, wandb, wxbs-benchmark); inference never imports them.
+    - rm -rf "$SP_DIR/romav2/benchmarks"
+
+requirements:
+  host:
+    - python 3.12.*
+  # Run deps follow the mast3r/asmk convention: python + sibling source packages. Imports torch, torchvision,
+  # einops, pillow, rich, tqdm, numpy; the consuming feature supplies them.
+  run:
+    - python >=3.11
+    - dinov3-src
+
+about:
+  homepage: https://github.com/Parskatt/RoMaV2
+  license_file: LICENSE
+  summary: RoMa v2 dense feature matcher (v2.0.1), import name `romav2`
