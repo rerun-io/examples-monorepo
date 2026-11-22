@@ -13,6 +13,7 @@ What the trainer gets:
 - init: ``InitCloud.to_trigs_mapping()`` through ``build_canonical_from_npz``.
 """
 
+import dataclasses
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from trigs.init.from_colmap import build_canonical_from_npz
 
 from open4dgs.catalog_clip import MultiViewClip
 from open4dgs.init_cloud import InitCloud
+from open4dgs.prior import MonoPriorLoss
 
 StepCallback = Callable[[str, float, int], None]
 """Called with (tag, value, step) for every scalar the trainer reports."""
@@ -117,6 +119,13 @@ class TrainedClip:
             rgb, alpha, _, _ = self.trainer._render(self.params, cameras, cam, frame / self.fps, self.sh_degree, self.trigs_config)
         return rgb[0].clamp(0.0, 1.0), alpha[0]
 
+    def render_depth(self, cameras: CameraConfig, cam: int, frame: int) -> tuple[Float32[Tensor, "h w"], Float32[Tensor, "h w"]]:
+        """Expected (alpha-normalised) camera z-depth (gsplat ``RGB+ED``, recipe patch 0003) and alpha at clip frame ``frame``."""
+        config: TrigsTrainingConfig = dataclasses.replace(self.trigs_config, render_depth=True)
+        with torch.no_grad():
+            _, alpha, _, info = self.trainer._render(self.params, cameras, cam, frame / self.fps, self.sh_degree, config)
+        return info["render_depth"][0, ..., 0], alpha[0, ..., 0]
+
     def save(self, path: Path) -> None:
         """Checkpoint (.pt): the parameters on the CPU plus the scalars needed to render them."""
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,14 +165,24 @@ def train_clip(
     holdout_names: tuple[str, ...],
     on_step: StepCallback | None = None,
     device: torch.device | None = None,
+    prior: MonoPriorLoss | None = None,
 ) -> TrainedClip:
-    """Train TRiGS on the clip's training cameras (every camera not in ``holdout_names``)."""
+    """Train TRiGS on the clip's training cameras (every camera not in ``holdout_names``).
+
+    ``prior`` (optional): the MoGe-2 prior loss holding maps of TRAINING cameras only; the trainer then renders
+    ``RGB+ED`` and adds the loss per camera (recipe patch 0003); its ``prior/*`` scalars join ``scalars``.
+    """
     dev: torch.device = device if device is not None else torch.device("cuda")
     num_frames: int = int(clip.frame_indices.shape[0])
     if len(masks) != len(clip.camera_names) or any(m.shape[0] != num_frames for m in masks):
         raise ValueError("masks must be one (frames, h, w) tensor per clip camera")
     holdout_positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in holdout_names)
     trigs_config: TrigsTrainingConfig = config.to_trigs(clip.fps, init.keyframe_step, holdout_positions)
+    if prior is not None:
+        leaked: set[int] = set(prior.positions) & set(holdout_positions)
+        if leaked:
+            raise ValueError(f"the prior holds maps of held-out cameras {sorted(clip.camera_names[c] for c in leaked)}")
+        trigs_config = dataclasses.replace(trigs_config, render_depth=True)
     torch.manual_seed(config.seed)
     params, sh_degree, scene_extent = init_params(init, config.sh_degree, dev)
     cameras: CameraConfig = camera_config(clip.world_T_cam, clip.K, clip.sizes, dev)
@@ -177,6 +196,7 @@ def train_clip(
     }
     writer: ScalarLog = ScalarLog(on_step=on_step)
     trainer: TrigsTrainer = TrigsTrainer(device=str(dev))
+    trainer.camera_loss_hook = prior
     torch.cuda.reset_peak_memory_stats(dev)
     torch.cuda.synchronize(dev)
     start: float = time.perf_counter()
@@ -192,6 +212,10 @@ def train_clip(
         writer=writer,
     )
     torch.cuda.synchronize(dev)
+    train_seconds: float = time.perf_counter() - start
+    if prior is not None:
+        prior.finish()
+        writer.rows.update(prior.rows)
     return TrainedClip(
         params=result.params,
         trainer=trainer,
@@ -201,7 +225,7 @@ def train_clip(
         fps=clip.fps,
         num_frames=num_frames,
         scalars=writer.rows,
-        train_seconds=time.perf_counter() - start,
+        train_seconds=train_seconds,
         peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)),
     )
 
