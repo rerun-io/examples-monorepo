@@ -16,7 +16,7 @@ import argparse
 from pathlib import Path
 
 import rerun as rr
-import torch
+import torch  # noqa: F401  # loads libtorch, which the fused_ssim_cuda extension links against
 from fused_ssim_cuda import fusedssim, fusedssim_backward  # pyrefly: ignore[missing-import]
 from hexels_references import REFERENCE_FILE, encode, load  # pyrefly: ignore[missing-import]
 
