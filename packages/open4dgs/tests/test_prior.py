@@ -237,3 +237,51 @@ def test_rasterized_plane_depth_and_geometry_metric() -> None:
     assert same.median_abs_cm < 0.01 and same.within_3cm == 1.0 and same.median_normal_deg < 0.5
     off = geometry_frame("c", 0, plane + 0.05, depth, ones, _K())
     assert off.median_abs_cm == pytest.approx(5.0, abs=0.01) and off.within_3cm == 0.0
+
+
+def _roi_clip(pad: float | None):
+    import numpy as np
+
+    from open4dgs.catalog_clip import ClipRoi, MultiViewClip
+    from open4dgs.roi_cameras import fit_virtual_camera
+
+    source_K = np.array([[500.0, 0.0, 319.5], [0.0, 500.0, 239.5], [0.0, 0.0, 1.0]])
+    world_T_cam = np.eye(4)
+    roi = None
+    K = torch.from_numpy(source_K).float()[None]
+    size = (640, 480)
+    if pad is not None:
+        points = np.array([[0.3, 0.1, 4.0], [0.6, 0.5, 4.2], [0.4, -0.2, 3.9]], dtype=np.float32)
+        camera = fit_virtual_camera(points, source_K, world_T_cam, size, pad=pad)
+        roi = ClipRoi(pad=pad, max_side=None, cameras=(camera,))
+        K = torch.from_numpy(camera.K).float()[None]
+        size = camera.size
+    return MultiViewClip(
+        camera_names=("rig_01/cam_00",),
+        frames=(torch.zeros(1, size[1], size[0], 3, dtype=torch.uint8),),
+        valid=(torch.ones(size[1], size[0], dtype=torch.bool),),
+        K=K,
+        world_T_cam=torch.from_numpy(world_T_cam).float()[None],
+        fps=30.0,
+        frame_indices=torch.tensor([0]),
+        people=None,
+        roi=roi,
+    )
+
+
+def test_prior_layer_roi_check_accepts_its_own_grid_and_refuses_another() -> None:
+    from open4dgs.prior import check_roi, roi_properties
+
+    full, roi, wider = _roi_clip(None), _roi_clip(0.15), _roi_clip(0.3)
+    names = ("rig_01/cam_00",)
+    check_roi(full, names, None, "old layer")  # a layer from before ROI cameras holds real cameras
+    check_roi(full, names, roi_properties(full)["roi_cameras"], "full")
+    check_roi(roi, names, roi_properties(roi)["roi_cameras"], "roi")
+    for clip, stored in (
+        (roi, None),
+        (roi, roi_properties(full)["roi_cameras"]),
+        (full, roi_properties(roi)["roi_cameras"]),
+        (wider, roi_properties(roi)["roi_cameras"]),
+    ):
+        with pytest.raises(ValueError, match="grid"):
+            check_roi(clip, names, stored, "mismatch")

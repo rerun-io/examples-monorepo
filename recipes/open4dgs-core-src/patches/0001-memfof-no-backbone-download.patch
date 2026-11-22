@@ -1,0 +1,14 @@
+diff --git a/prep/init/roma_backends.py b/prep/init/roma_backends.py
+index 7638fc3..6e51272 100644
+--- a/prep/init/roma_backends.py
++++ b/prep/init/roma_backends.py
+@@ -791,7 +791,8 @@ class MemfofTemporalBackend:
+         self.device = device
+         self.checkpoint = str(checkpoint)
+         self.max_side = int(max_side)
+-        self._model = MEMFOF.from_pretrained(self.checkpoint).eval().to(device)
++        # backbone_weights=None: the checkpoint holds every weight; skip the torchvision ResNet-34 download.
++        self._model = MEMFOF.from_pretrained(self.checkpoint, backbone_weights=None).eval().to(device)
+         self.name = f"memfof[{self.checkpoint.rsplit('/', 1)[-1]}]"
+ 
+     def triplet_flows(

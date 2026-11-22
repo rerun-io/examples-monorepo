@@ -367,6 +367,46 @@ def compute_clip_priors(
     return ClipPriors(camera_names=tuple(camera_names), frame_indices=clip.frame_indices.clone(), depth=tuple(depths), normals=tuple(normals))
 
 
+def roi_signature(clip: MultiViewClip, camera_names: Sequence[str]) -> dict[str, str]:
+    """Per camera, the grid a prior map belongs to: ``none`` for a real camera, else the ROI pad, cap, size, ``K`` and rotation.
+
+    Written into the layer's properties (``roi``, ``roi_cameras``); ``read_clip_priors`` compares it with the clip it reads into.
+    """
+    if clip.roi is None:
+        return dict.fromkeys(camera_names, "none")
+    signatures: dict[str, str] = {}
+    for name in camera_names:
+        c: int = clip.camera_names.index(name)
+        w, h = clip.sizes[c]
+        k: Float32[ndarray, "3 3"] = clip.K[c].numpy()
+        r: str = ",".join(f"{v:.4f}" for v in clip.roi.cameras[c].cam_R_virtual.ravel())
+        signatures[name] = (
+            f"pad={clip.roi.pad:g};max_side={clip.roi.max_side};{w}x{h};K={k[0, 0]:.2f},{k[1, 1]:.2f},{k[0, 2]:.2f},{k[1, 2]:.2f};R={r}"
+        )
+    return signatures
+
+
+def roi_properties(clip: MultiViewClip) -> dict[str, str]:
+    """Layer properties that pin the prior to the clip's camera grid (see ``roi_signature``)."""
+    signatures: dict[str, str] = roi_signature(clip, clip.camera_names)
+    roi: str = "none" if clip.roi is None else f"people pad={clip.roi.pad:g} max_side={clip.roi.max_side}"
+    return {"roi": roi, "roi_cameras": "|".join(f"{name}@{sig}" for name, sig in signatures.items())}
+
+
+def check_roi(clip: MultiViewClip, camera_names: Sequence[str], stored: str | None, source: str) -> None:
+    """Raise when the layer's ``roi_cameras`` property (None: a layer written before ROI cameras, real cameras) does not
+    describe ``clip``'s cameras ``camera_names``.
+
+    Raises:
+        ValueError: On a camera whose grid differs (an ROI clip read against a full-frame layer, another pad, cap or window).
+    """
+    stored_of: dict[str, str] = dict(item.split("@", 1) for item in stored.split("|")) if stored else {}
+    for name, expected in roi_signature(clip, camera_names).items():
+        got: str = stored_of.get(name, "none")
+        if got != expected:
+            raise ValueError(f"{source}: prior layer camera {name} was computed on grid {got!r}, the clip camera is {expected!r}")
+
+
 def prior_entity(camera_name: str, kind: Literal["depth", "normals"]) -> str:
     """``/world/rig_NN/cam_00/pinhole/moge2/depth`` or ``.../normals``."""
     return f"/world/{camera_name}/pinhole/moge2/{kind}"
@@ -437,13 +477,25 @@ def read_clip_priors(clip: MultiViewClip, catalog_url: str, dataset: str, segmen
             (the layer was computed for another ``max_side``).
     """
     names: list[str] = list(camera_names) if camera_names is not None else list(clip.camera_names)
-    entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
+    client = CatalogClient(catalog_url)  # held for the whole read: a dropped client ends the queries
+    entry: DatasetEntry = client.get_dataset(dataset)
     entities: list[str] = [prior_entity(name, kind) for name in names for kind in ("depth", "normals")]
     frames: list[int] = clip.frame_indices.tolist()
     columns: list[str] = [f"{prior_entity(name, 'depth')}:EncodedDepthImage:blob" for name in names] + [
         f"{prior_entity(name, 'normals')}:EncodedImage:blob" for name in names
     ]
     view = entry.filter_segments(segment_id).filter_contents(entities)
+    properties: pa.Table = entry.segment_table().to_arrow_table()
+    roi_column: str = f"property:{PRIOR_LAYER}:roi_cameras"
+    stored: str | None = None
+    if roi_column in properties.column_names:
+        segment_column: str = "rerun_segment_id"
+        rows: list[dict[str, object]] = [r for r in properties.select([segment_column, roi_column]).to_pylist() if r[segment_column] == segment_id]
+        cell: object = rows[0][roi_column] if rows else None
+        while isinstance(cell, list):
+            cell = cell[0] if cell else None
+        stored = None if cell is None else str(cell)
+    check_roi(clip, names, stored, f"{dataset}/{segment_id}")
     available: set[str] = {f"{c.entity_path}:{c.component}" for c in catalog_components(view.schema())}
     missing: list[str] = [c for c in columns if c not in available]
     if missing:

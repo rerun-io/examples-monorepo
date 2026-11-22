@@ -1,0 +1,6 @@
+[package]
+name = "memfof-src"
+version = "1.0.3.a51de9f"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

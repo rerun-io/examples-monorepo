@@ -94,7 +94,7 @@ class ScalarLog:
 
     def __getattr__(self, name: str) -> Callable[..., None]:
         # add_histogram, flush, ...: ignored.
-        return lambda *args, **kwargs: None
+        return lambda *_args, **_kwargs: None
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,6 @@ class TrainedClip:
     scalars: dict[str, list[tuple[int, float]]]
     train_seconds: float
     peak_gpu_bytes: int
-    num_init_rows: int
 
     def render(self, cameras: CameraConfig, cam: int, frame: int) -> tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w 1"]]:
         """RGB (premultiplied over black, clamped to [0, 1]) and alpha of camera ``cam`` of ``cameras`` at clip frame ``frame``."""
@@ -158,6 +157,27 @@ def init_params(init: InitCloud, sh_degree: int, device: torch.device) -> tuple[
     )
 
 
+def trainer_frames(
+    clip: MultiViewClip, masks: tuple[Float32[Tensor, "frames h w"], ...], holdout_names: tuple[str, ...]
+) -> tuple[dict[int, list[Tensor]], dict[int, list[Tensor]], tuple[int, ...]]:
+    """What the trainer sees: ``gt_images[f][c]``, ``gt_alphas[f][c]`` in clip camera order, and the held-out positions.
+
+    Held-out cameras get a black frame and an all-zero mask at every frame; their positions (indices into
+    ``clip.camera_names``, the trainer's camera order) go to ``TrigsTrainingConfig.holdout_views``.
+    """
+    holdout_positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in holdout_names)
+    black: dict[int, Tensor] = {c: torch.zeros_like(clip.frames[c][0]) for c in holdout_positions}
+    empty: dict[int, Tensor] = {c: torch.zeros_like(masks[c][0]) for c in holdout_positions}
+    num_frames: int = int(clip.frame_indices.shape[0])
+    gt_images: dict[int, list[Tensor]] = {
+        f: [black[c] if c in black else clip.frames[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)
+    }
+    gt_alphas: dict[int, list[Tensor]] = {
+        f: [empty[c] if c in empty else masks[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)
+    }
+    return gt_images, gt_alphas, holdout_positions
+
+
 def train_clip(
     clip: MultiViewClip,
     masks: tuple[Float32[Tensor, "frames h w"], ...],
@@ -177,7 +197,7 @@ def train_clip(
     num_frames: int = int(clip.frame_indices.shape[0])
     if len(masks) != len(clip.camera_names) or any(m.shape[0] != num_frames for m in masks):
         raise ValueError("masks must be one (frames, h, w) tensor per clip camera")
-    holdout_positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in holdout_names)
+    gt_images, gt_alphas, holdout_positions = trainer_frames(clip, masks, holdout_names)
     trigs_config: TrigsTrainingConfig = config.to_trigs(clip.fps, init.keyframe_step, holdout_positions)
     if prior is not None:
         leaked: set[int] = set(prior.positions) & set(holdout_positions)
@@ -187,14 +207,6 @@ def train_clip(
     torch.manual_seed(config.seed)
     params, sh_degree, scene_extent = init_params(init, config.sh_degree, dev)
     cameras: CameraConfig = camera_config(clip.world_T_cam, clip.K, clip.sizes, dev)
-    black: dict[int, Tensor] = {c: torch.zeros_like(clip.frames[c][0]) for c in holdout_positions}
-    empty: dict[int, Tensor] = {c: torch.zeros_like(masks[c][0]) for c in holdout_positions}
-    gt_images: dict[int, list[Tensor]] = {
-        f: [black[c] if c in black else clip.frames[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)
-    }
-    gt_alphas: dict[int, list[Tensor]] = {
-        f: [empty[c] if c in empty else masks[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)
-    }
     writer: ScalarLog = ScalarLog(on_step=on_step)
     trainer: TrigsTrainer = TrigsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
@@ -228,7 +240,6 @@ def train_clip(
         scalars=writer.rows,
         train_seconds=train_seconds,
         peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)),
-        num_init_rows=init.num_rows,
     )
 
 
@@ -253,5 +264,4 @@ def untrained_clip(
         scalars={},
         train_seconds=0.0,
         peak_gpu_bytes=0,
-        num_init_rows=init.num_rows,
     )

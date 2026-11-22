@@ -1,21 +1,26 @@
-"""Held-out (and training) camera metrics, and the 360-degree orbit.
+"""Held-out (and training) camera metrics, their floors, and the 360-degree orbit.
 
-Three settings, every one against the catalog frame and the ground-truth person mask (threshold 0.5 for boxes and
-pixel sets; the soft mask for compositing):
+Every setting is scored against the catalog frame and the ground-truth person mask (threshold 0.5 for boxes and pixel
+sets; the soft mask for compositing). The ground truth is always ``gt * mask`` (the person matted onto black). The
+render is the TRiGS render, premultiplied over black (gsplat with no background), clamped to [0, 1].
 
-- ``crop`` (headline): the mask's bounding box padded by 5 % of its size per side; ground truth and render are both
-  composited on black with the ground-truth mask (``image * mask``), then cropped. PSNR, SSIM, LPIPS (alex).
-- ``fg``: foreground-only PSNR, the squared error of the raw render against the raw frame averaged over the mask
-  pixels only (no compositing, so background never counts).
-- ``full``: the whole frame, both composited on black with the ground-truth mask. PSNR, SSIM, LPIPS. The black
-  background matches exactly in both images, so this number is inflated relative to the person-only quality; it is
-  here for comparison with papers that report full-frame numbers on a black or white background.
+- ``crop_raw`` (HEADLINE): the raw render against ``gt * mask`` inside the mask's bounding box padded by 5 % of its
+  size per side. Silhouette errors (splats outside the person, holes inside it) count. PSNR, SSIM, LPIPS (alex).
+- ``crop_masked``: as ``crop_raw`` but the render is also multiplied by the ground-truth mask, which hides every
+  splat outside the true silhouette (the pre-2026-11-21 ``crop``; kept for comparison, +1.0 dB on 4DAnyone run C).
+- ``fg``: foreground-only PSNR, the squared error of the raw render against the raw frame over the mask pixels only.
+- ``full``: the whole frame, raw render against ``gt * mask``. Mostly black background, so a black image already
+  scores high; for comparison with papers only.
+- ``alpha_iou``: IoU of the rendered alpha (> 0.5) with the ground-truth mask (> 0.5).
 
-The render is the TRiGS render, premultiplied over black (gsplat with no background), clamped to [0, 1].
+Floors (``baseline_scores``) are the same metrics for two trivial renders: ``black`` (all zero, alpha 0) and ``mean``
+(the mean ground-truth colour inside the mask, painted with the soft mask; alpha = mask). Every number in the run has its
+floor beside it.
 """
 
 import math
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -72,20 +77,89 @@ class FrameMetrics:
 
     camera: str
     frame_index: int
-    crop_psnr: float
-    crop_ssim: float
-    crop_lpips: float
+    crop_raw_psnr: float
+    crop_raw_ssim: float
+    crop_raw_lpips: float
+    crop_masked_psnr: float
+    crop_masked_ssim: float
+    crop_masked_lpips: float
     fg_psnr: float
     full_psnr: float
     full_ssim: float
     full_lpips: float
+    alpha_iou: float
 
 
-METRIC_NAMES: tuple[str, ...] = ("crop_psnr", "crop_ssim", "crop_lpips", "fg_psnr", "full_psnr", "full_ssim", "full_lpips")
+METRIC_NAMES: tuple[str, ...] = (
+    "crop_raw_psnr",
+    "crop_raw_ssim",
+    "crop_raw_lpips",
+    "crop_masked_psnr",
+    "crop_masked_ssim",
+    "crop_masked_lpips",
+    "fg_psnr",
+    "full_psnr",
+    "full_ssim",
+    "full_lpips",
+    "alpha_iou",
+)
+HEADLINE: tuple[str, str, str] = ("crop_raw_psnr", "crop_raw_ssim", "crop_raw_lpips")
+"""The headline metrics (PSNR / SSIM / LPIPS of ``crop_raw``)."""
+BASELINES: tuple[str, ...] = ("black", "mean")
+"""Floor renders scored beside every run (see the module docstring)."""
+
+LpipsFn = Callable[[Tensor, Tensor], float]
+
+
+def score_frame(
+    camera: str,
+    frame_index: int,
+    render: Float32[Tensor, "h w 3"],
+    alpha: Float32[Tensor, "h w"],
+    gt: Float32[Tensor, "h w 3"],
+    mask: Float32[Tensor, "h w"],
+    lpips: LpipsFn,
+) -> FrameMetrics:
+    """Every setting of the module docstring on one image pair."""
+    person: Bool[Tensor, "h w"] = mask > MASK_THRESHOLD
+    box = mask_box(person)
+    if box is None:
+        nan: float = math.nan
+        return FrameMetrics(camera, frame_index, *([nan] * (len(METRIC_NAMES))))
+    gt_c: Float32[Tensor, "h w 3"] = gt * mask[..., None]
+    render_m: Float32[Tensor, "h w 3"] = render * mask[..., None]
+    x0, y0, x1, y1 = box
+    raw, masked, target = render[y0:y1, x0:x1], render_m[y0:y1, x0:x1], gt_c[y0:y1, x0:x1]
+    drawn: Bool[Tensor, "h w"] = alpha > MASK_THRESHOLD
+    union: int = int((drawn | person).sum())
+    return FrameMetrics(
+        camera=camera,
+        frame_index=frame_index,
+        crop_raw_psnr=psnr(raw, target),
+        crop_raw_ssim=ssim(raw, target),
+        crop_raw_lpips=lpips(raw, target),
+        crop_masked_psnr=psnr(masked, target),
+        crop_masked_ssim=ssim(masked, target),
+        crop_masked_lpips=lpips(masked, target),
+        fg_psnr=masked_psnr(render, gt, person),
+        full_psnr=psnr(render, gt_c),
+        full_ssim=ssim(render, gt_c),
+        full_lpips=lpips(render, gt_c),
+        alpha_iou=float((drawn & person).sum()) / union,
+    )
+
+
+def baseline_renders(
+    gt: Float32[Tensor, "h w 3"], mask: Float32[Tensor, "h w"]
+) -> dict[str, tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w"]]]:
+    """The floor renders (render, alpha) by name: ``black`` and ``mean`` (mean gt colour inside the mask)."""
+    person: Bool[Tensor, "h w"] = mask > MASK_THRESHOLD
+    colour: Tensor = gt[person].mean(dim=0) if bool(person.any()) else torch.zeros(3, device=gt.device)
+    return {"black": (torch.zeros_like(gt), torch.zeros_like(mask)), "mean": (mask[..., None] * colour, mask.clone())}
 
 
 class Metrics:
-    """The three settings on one image pair; holds the LPIPS network."""
+    """Scores image pairs; holds the LPIPS network."""
 
     def __init__(self, device: torch.device) -> None:
         self.device: torch.device = device
@@ -96,28 +170,15 @@ class Metrics:
             return float(self.lpips_net(pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None]))
 
     def frame(
-        self, camera: str, frame_index: int, render: Float32[Tensor, "h w 3"], gt: Float32[Tensor, "h w 3"], mask: Float32[Tensor, "h w"]
+        self,
+        camera: str,
+        frame_index: int,
+        render: Float32[Tensor, "h w 3"],
+        alpha: Float32[Tensor, "h w"],
+        gt: Float32[Tensor, "h w 3"],
+        mask: Float32[Tensor, "h w"],
     ) -> FrameMetrics:
-        person: Bool[Tensor, "h w"] = mask > MASK_THRESHOLD
-        box = mask_box(person)
-        if box is None:
-            nan: float = math.nan
-            return FrameMetrics(camera, frame_index, nan, nan, nan, nan, nan, nan, nan)
-        render_c: Float32[Tensor, "h w 3"] = render * mask[..., None]
-        gt_c: Float32[Tensor, "h w 3"] = gt * mask[..., None]
-        x0, y0, x1, y1 = box
-        crop_r, crop_g = render_c[y0:y1, x0:x1], gt_c[y0:y1, x0:x1]
-        return FrameMetrics(
-            camera=camera,
-            frame_index=frame_index,
-            crop_psnr=psnr(crop_r, crop_g),
-            crop_ssim=ssim(crop_r, crop_g),
-            crop_lpips=self.lpips(crop_r, crop_g),
-            fg_psnr=masked_psnr(render, gt, person),
-            full_psnr=psnr(render_c, gt_c),
-            full_ssim=ssim(render_c, gt_c),
-            full_lpips=self.lpips(render_c, gt_c),
-        )
+        return score_frame(camera, frame_index, render, alpha, gt, mask, self.lpips)
 
 
 def mean_metrics(rows: list[FrameMetrics]) -> dict[str, float]:
@@ -137,6 +198,8 @@ class CameraRenders:
     render: torch.Tensor
     """UInt8 (frames, h, w, 3) on the CPU."""
     metrics: list[FrameMetrics]
+    baselines: dict[str, list[FrameMetrics]] = field(default_factory=dict)
+    """Floor metrics by baseline name (``black``, ``mean``); empty unless requested."""
 
 
 def evaluate_cameras(
@@ -146,20 +209,27 @@ def evaluate_cameras(
     camera_names: tuple[str, ...],
     metrics: Metrics,
     keep_renders: bool = True,
+    with_baselines: bool = False,
 ) -> list[CameraRenders]:
-    """Render ``camera_names`` at every clip frame and score them against the clip frames and masks."""
+    """Render ``camera_names`` at every clip frame and score them (and, optionally, the floors) against the clip frames and masks."""
     out: list[CameraRenders] = []
     for name in camera_names:
         cam: int = clip.camera_names.index(name)
         rows: list[FrameMetrics] = []
+        floors: dict[str, list[FrameMetrics]] = {kind: [] for kind in BASELINES} if with_baselines else {}
         renders: list[Tensor] = []
         for f in range(model.num_frames):
-            rgb, _ = model.render(model.cameras, cam, f)
+            rgb, alpha = model.render(model.cameras, cam, f)
             gt: Float32[Tensor, "h w 3"] = clip.frames[cam][f].to(metrics.device).float() / 255.0
-            rows.append(metrics.frame(name, int(clip.frame_indices[f]), rgb, gt, masks[cam][f].to(metrics.device).float()))
+            mask: Float32[Tensor, "h w"] = masks[cam][f].to(metrics.device).float()
+            frame_index: int = int(clip.frame_indices[f])
+            rows.append(metrics.frame(name, frame_index, rgb, alpha[..., 0], gt, mask))
+            if with_baselines:
+                for kind, (floor_rgb, floor_alpha) in baseline_renders(gt, mask).items():
+                    floors[kind].append(metrics.frame(name, frame_index, floor_rgb, floor_alpha, gt, mask))
             if keep_renders:
                 renders.append((rgb * 255.0).round().to(torch.uint8).cpu())
-        out.append(CameraRenders(name, torch.stack(renders) if renders else torch.empty(0, dtype=torch.uint8), rows))
+        out.append(CameraRenders(name, torch.stack(renders) if renders else torch.empty(0, dtype=torch.uint8), rows, floors))
     return out
 
 
