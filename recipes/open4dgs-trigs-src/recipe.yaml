@@ -33,27 +33,22 @@ source:
     # info["render_depth"]; TrigsTrainer.camera_loss_hook (default None) adds a per-camera loss term before backward().
     # packages/open4dgs (open4dgs.prior) owns the loss.
     - patches/0003-depth-render-and-camera-loss-hook.patch
-    # Performance fix, maths unchanged: fewer host syncs per train step. No explicit torch.cuda.synchronize() after
-    # each render; the per-camera loss sums stay float64 GPU tensors (read on log steps only); CameraConfig keeps
-    # Python ints for width_for/height_for; the time and background-colour scalars are built once per value
-    # (TrigsTrainer._const_tensor); the 0-255 mask check is a tensor op; one dynamic-row any() per step, not three.
-    - patches/0004-fewer-host-syncs-per-step.patch
-    # Performance fix, maths unchanged: when every camera of a train step renders at one time (no learned time offsets,
-    # no rolling shutter, one capture time per frame), the active-row query, the per-row gather and the deform run once
-    # per step instead of once per camera. Their outputs enter each camera's graph as detached leaves; each camera's
-    # backward accumulates into them and one backward after the camera loop carries the sum through deform and gather.
-    # Renders are bit-identical; parameter gradients differ only in summation order.
-    - patches/0005-one-deform-per-step-time.patch
-    # Performance fix, maths unchanged: with patch 0005's shared inputs, the step's cameras of one image size are rendered by
-    # ONE gsplat rasterization call (viewmats [C,4,4], Ks [C,3,3]); each camera's losses and the camera_loss_hook read its
-    # slice of the batched output; one backward over the summed camera losses, then the relocation's 2D cue per batch
-    # (accumulate_2d already sums over cameras). Rolling shutter / learned time offsets keep the per-camera path.
-    - patches/0006-batched-cameras.patch
+    # Fix, maths unchanged: host-sync removals inside train_step that no seam can lift (the 0-255 mask check as a
+    # tensor op; per-camera loss sums stay float64 GPU tensors, read on log steps; no torch.cuda.synchronize() per
+    # camera; one dynamic-row any() per step, not three) + the TrigsTrainer._const_tensor seam (plain torch.tensor here;
+    # packages/open4dgs's Open4dgsTrainer caches it).
+    - patches/0004-train-step-host-syncs.patch
+    # Hooks only: _render split into _render_inputs (active rows, gather, deform, activations) + _rasterize_inputs, and
+    # one camera-group seam in the train loop (TrigsTrainer._camera_group, default None = per-camera path).
+    # packages/open4dgs (open4dgs.trigs_trainer) owns the shared-time deform, batching and deferred backward.
+    - patches/0005-render-split-and-camera-group-seam.patch
+    # Hook only: _rasterize_inputs takes a list of same-size cameras (viewmats/Ks batched), for the batched group.
+    - patches/0006-rasterize-camera-list.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 4
+  number: 5
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.

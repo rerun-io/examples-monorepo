@@ -39,6 +39,8 @@ ignore_names = [
     "num_pixels", "camera_loss_hook",
     # BrightnessSplit fields, read through dataclasses.asdict
     "ratio", "alpha_part", "colour_part", "alpha_mean",
+    # open4dgs.trigs_trainer: called by the recipe's camera-group seam in the TRiGS train loop
+    "_camera_group", "add_loss",
 ]
 
 [tool.pytest.ini_options]

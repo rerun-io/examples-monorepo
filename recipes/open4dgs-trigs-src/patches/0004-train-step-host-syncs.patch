@@ -1,32 +1,5 @@
-diff --git a/src/trigs/core/camera.py b/src/trigs/core/camera.py
-index 3ea29c4..b072446 100644
---- a/src/trigs/core/camera.py
-+++ b/src/trigs/core/camera.py
-@@ -58,6 +58,9 @@ class CameraConfig:
-             self.heights = self.heights.to(torch.int64)
-         if torch.any(self.widths <= 0) or torch.any(self.heights <= 0):
-             raise ValueError("Camera widths/heights must be positive.")
-+        # Python ints for width_for/height_for: .item() on a CUDA tensor is a host sync per camera.
-+        self._width_ints = [int(w) for w in self.widths.tolist()]
-+        self._height_ints = [int(h) for h in self.heights.tolist()]
- 
-     def __len__(self) -> int:
-         """Return number of cameras."""
-@@ -82,10 +85,10 @@ class CameraConfig:
-         )
- 
-     def width_for(self, cam_idx: int) -> int:
--        return int(self.widths[cam_idx].item())
-+        return self._width_ints[cam_idx]
- 
-     def height_for(self, cam_idx: int) -> int:
--        return int(self.heights[cam_idx].item())
-+        return self._height_ints[cam_idx]
- 
-     def size_for(self, cam_idx: int) -> tuple[int, int]:
-         return self.width_for(cam_idx), self.height_for(cam_idx)
 diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
-index 42f01ad..3131dd2 100644
+index 42f01ad..35f784c 100644
 --- a/src/trigs/core/trainer.py
 +++ b/src/trigs/core/trainer.py
 @@ -3097,7 +3097,7 @@ class TrigsTrainer:
@@ -70,29 +43,18 @@ index 42f01ad..3131dd2 100644
                      ).reshape(1, 1, -1)
                  if bg.shape[-1] != pred_color.shape[-1]:
                      raise ValueError(
-@@ -4532,6 +4531,21 @@ class TrigsTrainer:
+@@ -4532,6 +4531,10 @@ class TrigsTrainer:
              return max(int(total.reshape(()).item()), 1)
          return max(int(params["means"].shape[0]), 1)
  
 +    def _const_tensor(self, value, device, dtype) -> Tensor:
-+        """``torch.tensor(value)`` on ``device``, built once per (value, device, dtype).
-+
-+        A fresh ``torch.tensor(..., device="cuda")`` is a blocking host-to-device copy; the
-+        per-camera times and the background colour repeat every step. Never modify the result in place.
-+        """
-+        cache = self.__dict__.setdefault("_const_tensors", {})
-+        key = (value, str(device), dtype)
-+        out = cache.get(key)
-+        if out is None:
-+            if len(cache) >= 4096:
-+                cache.clear()
-+            out = cache[key] = torch.tensor(value, device=device, dtype=dtype)
-+        return out
++        """``torch.tensor(value)`` on ``device``; a seam for a cached version (never modify the result in place)."""
++        return torch.tensor(value, device=device, dtype=dtype)
 +
      @staticmethod
      def _dynamic_rows(params: nn.ParameterDict) -> Tensor:
          N = int(params["means"].shape[0])
-@@ -5330,9 +5344,11 @@ class TrigsTrainer:
+@@ -5330,9 +5333,11 @@ class TrigsTrainer:
              # 1/B share of the photometric loss immediately, so peak memory
              # stays at one camera's graph. Regularizers are added once below.
              n_group = len(cam_group)
@@ -107,7 +69,7 @@ index 42f01ad..3131dd2 100644
              gamma = None
              active_parts: List[Tensor] = []
              for group_i, cam_idx in enumerate(cam_group):
-@@ -5355,8 +5371,6 @@ class TrigsTrainer:
+@@ -5355,8 +5360,6 @@ class TrigsTrainer:
                  render_colors, render_alphas, cam_gamma, cam_info = self._render(
                      params, cameras, cam_idx, t, sh_degree, config, step=step,
                  )
@@ -116,7 +78,7 @@ index 42f01ad..3131dd2 100644
  
                  self._cuda_probe(f"step={step} after render frame={frame_idx} cam={cam_idx}")
  
-@@ -5390,9 +5404,9 @@ class TrigsTrainer:
+@@ -5390,9 +5393,9 @@ class TrigsTrainer:
                  relocation_strategy.accumulate_2d(
                      reloc_state, cam_info, batch_size=n_group,
                  )
@@ -129,7 +91,7 @@ index 42f01ad..3131dd2 100644
                  gamma = cam_gamma if gamma is None else gamma + cam_gamma
                  active_parts.append(cam_info["active_idx"])
  
-@@ -5408,9 +5422,9 @@ class TrigsTrainer:
+@@ -5408,9 +5411,9 @@ class TrigsTrainer:
                  del render_colors, render_alphas, cam_info, cam_loss
  
              gamma = gamma / float(n_group)
@@ -142,7 +104,7 @@ index 42f01ad..3131dd2 100644
              photometric_total = (
                  config.lambda_render * rgb_loss
                  + config.lambda_alpha_outside_mask * alpha_outside_loss
-@@ -5426,9 +5440,17 @@ class TrigsTrainer:
+@@ -5426,9 +5429,17 @@ class TrigsTrainer:
              c1_full = torch.cat([params["zeta_c1_t"], params["zeta_c1_r"]], dim=-1)
              c2_full = torch.cat([params["zeta_c2_t"], params["zeta_c2_r"]], dim=-1)
  
@@ -162,7 +124,7 @@ index 42f01ad..3131dd2 100644
                      motion_loss = bezier_motion_loss(
                          c0_full[dyn_rows_for_motion], c1_full[dyn_rows_for_motion],
                          c2_full[dyn_rows_for_motion],
-@@ -5488,8 +5510,8 @@ class TrigsTrainer:
+@@ -5488,8 +5499,8 @@ class TrigsTrainer:
              if base_opa.dim() == 1:
                  base_opa = base_opa.unsqueeze(-1)
              if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
@@ -173,7 +135,7 @@ index 42f01ad..3131dd2 100644
                      reg_loss = (base_opa[dyn_rows_for_reg] * gamma[dyn_rows_for_reg].detach()).mean()
                  else:
                      reg_loss = params["means"].new_zeros(())
-@@ -5498,8 +5520,8 @@ class TrigsTrainer:
+@@ -5498,8 +5509,8 @@ class TrigsTrainer:
  
              sigma_t = torch.exp(params["log_durations"])
              if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
