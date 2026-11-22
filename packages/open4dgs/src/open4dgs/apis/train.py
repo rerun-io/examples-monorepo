@@ -468,7 +468,8 @@ def main(config: Config) -> dict[str, object]:
         "view_coordinates": str(view_coordinates),
         "samples_per_person": config.samples_per_person,
         "keyframe_step": init.keyframe_step,
-        "prior": config.prior,
+        "prior": config.prior != "off",  # a bool, as in every run already on open4dgs-runs (the schema must not change)
+        "prior_mode": config.prior,
         "prior_source": prior_source,
         **({f"prior_{k}": v for k, v in dataclasses.asdict(prior_config).items()} if config.prior != "off" else {}),
         "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
