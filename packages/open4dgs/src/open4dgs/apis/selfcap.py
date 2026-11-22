@@ -35,7 +35,7 @@ from open4dgs.masks import (
     write_mask_layer,
 )
 from open4dgs.prior import ClipPriors
-from open4dgs.prior_layer import read_clip_priors
+from open4dgs.prior_layer import compute_prior_layer, read_clip_priors
 from open4dgs.selfcap_clip import TimedClip, read_timed_clip
 from open4dgs.selfcap_init import capsule_init, joint_box_points, moge_lift_init
 
@@ -72,8 +72,8 @@ class Config:
     init_name: str = "moge"
     """``init``: file ``<output_root>/init/open4dgs-selfcap/<segment>__<init_name>.rrd``."""
     roi: bool = False
-    """``prior``/``init``: read the clip with person-centred virtual cameras (the prior must match the training grid; the layer file gets
-    a ``.roi`` suffix and replaces the registered ``moge2_prior`` layer)."""
+    """``prior``/``init``: read the clip with person-centred virtual cameras (the prior must match the training grid; the layer file is
+    named by a hash of that grid, ``prior_layer.compute_prior_layer``, and replaces the registered ``moge2_prior`` layer)."""
     png_dir: Path | None = Path("/mnt/nas/ssd-8tb/scratch/open4dgs/runs/s1")
 
 
@@ -130,36 +130,26 @@ def _masks(config: Config) -> None:
 
 
 def _prior(config: Config) -> None:
-    from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor
-
-    from open4dgs.prior_layer import compute_clip_priors, register_prior_layer, write_prior_layer
-
+    """MoGe-2 maps of every phone on the training grid, through the trainer's own path (``prior_layer.compute_prior_layer``):
+    the layer records the clip's camera grid (``roi`` / ``roi_cameras``), so ``read_clip_priors`` accepts it for this grid only."""
     timed: TimedClip = read_timed_clip(
         config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames, max_side=config.max_side, roi=config.roi
     )
     clip = timed.clip
-    predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=9)
-    started: float = time.perf_counter()
-    priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor, batch_size=2)
-    print(f"MoGe-2 {len(clip.camera_names) * config.num_frames} images in {time.perf_counter() - started:.1f} s")
-    path: Path = config.output_root / "prior" / config.register_dataset / f"{config.segment_id}.moge2_prior{'.roi' if config.roi else ''}.rrd"
-    write_prior_layer(
-        path,
+    _, path, timings = compute_prior_layer(
+        clip,
         config.segment_id,
-        priors,
-        {
-            "model": "moge2",
-            "fov_source": "calibrated fx",
-            "source": f"{config.catalog_url}/{config.dataset}",
-            "frame_start": int(clip.frame_indices[0]),
-            "num_frames": config.num_frames,
-            "max_side": config.max_side or 0,
-            "loader": f"open4dgs.selfcap_clip.read_timed_clip(roi={config.roi})",
-        },
+        source=f"{config.catalog_url}/{config.dataset}",
+        catalog_url=config.register_url,
+        dataset=config.register_dataset,
+        output_dir=config.output_root / "prior",
+        max_side=config.max_side,
+        register=config.register,
+        batch_size=2,
     )
+    print(f"MoGe-2 {timings['images']:.0f} images in {timings['moge_s']:.1f} s -> {path}")
     path.parent.chmod(0o775)
     if config.register:
-        register_prior_layer(config.register_url, config.register_dataset, path)
         print(f"registered moge2_prior on {config.register_dataset}/{config.segment_id}")
 
 
