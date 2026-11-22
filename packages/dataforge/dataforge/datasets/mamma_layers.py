@@ -158,7 +158,7 @@ def log_cameras(recording: rr.RecordingStream, cameras: list[MammaCamera], frust
         if camera.lens is not None:  # native pixels: u = c + d (1 + k1 r^2 + k2 r^4 + k3 r^6); simplecv.catalog_calibration.read_lens reads it
             rr.log(
                 schema.cam_path(rig, 0),
-                rr.AnyValues(**{VICON_RADIAL_MODEL: np.concatenate([camera.lens.centre, camera.lens.radial])}),
+                rr.AnyValues().with_component_from_data(VICON_RADIAL_MODEL, np.concatenate([camera.lens.centre, camera.lens.radial])),
                 static=True,
                 recording=recording,
             )

@@ -61,19 +61,21 @@ class ViconRadialLens:
     def distort(self, undistorted: Float64[Tensor, "n 2"]) -> Float64[Tensor, "n 2"]: ...
     def distort(self, undistorted: Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]) -> Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]:
         """Undistorted pixels to image pixels by fixed-point inversion, native grid; a point that does not converge is NaN."""
-        xp = torch if isinstance(undistorted, Tensor) else np
+        # Only operators and methods numpy and torch share, so one body serves both kinds.
         centre, radial = self._parameters_like(undistorted)
         target = undistorted - centre
         offset = target
         for _ in range(LENS_ITERATIONS):
             step = target / _radial_scale(offset, radial) - offset
             offset = offset + step
-            finite = xp.abs(step[xp.isfinite(step)])  # NaN points (behind the camera) stop no one
+            moved = abs(step)
+            finite = moved[moved < float("inf")]  # NaN points (behind the camera) stop no one
             if len(finite) == 0 or not finite.max() > LENS_TOLERANCE_PX:
                 break
         distorted = centre + offset
-        converged: Bool[ndarray, " n"] | Bool[Tensor, " n"] = xp.amax(xp.abs(self.undistort(distorted) - undistorted), -1) <= LENS_RESIDUAL_PX
-        return xp.where(converged[:, None], distorted, float("nan"))
+        converged = (abs(self.undistort(distorted) - undistorted) <= LENS_RESIDUAL_PX).all(-1)
+        distorted[~converged] = float("nan")
+        return distorted
 
     def _parameters_like(
         self, points: Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]
