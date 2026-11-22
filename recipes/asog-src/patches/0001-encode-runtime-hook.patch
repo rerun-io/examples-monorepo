@@ -1,0 +1,19 @@
+--- a/python/src/asog/encode.py
++++ b/python/src/asog/encode.py
+@@ -81,8 +81,15 @@
+     level:  zlib level
+     audio:  sound file to embed (mp3, ogg, ...), looped with the clip by players
+     """
++    return encode_runtime(trigs.read(src), dst, qp=qp, qa=qa, prune=prune, mbits=mbits, tbits=tbits, lsbits=lsbits,
++                          shk=shk, level=level, audio=audio)
++
++
++def encode_runtime(source: trigs.TrigsRuntime, dst: str | Path, *, qp: float = 2.0, qa: float = 8.0, prune: float = 0.3,
++                   mbits: int = 14, tbits: int = 11, lsbits: int = 8, shk: int = 65536, level: int = 9,
++                   audio: str | Path | None = None) -> EncodeStats:
++    """Encode an in-memory TRiGS runtime (what `trigs.read` returns) to the `.asog` file `dst`; options as `encode`."""
+     t0 = time.time()
+-    source = trigs.read(src)
+     n_dyn = int((~source.static).sum())
+     count = source.count - int(round(prune * n_dyn))
+     s = source.take(splat_order(source, count))
