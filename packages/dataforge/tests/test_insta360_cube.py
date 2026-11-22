@@ -366,3 +366,12 @@ def test_faces_encode_in_software_av1_with_the_nvenc_contract(tmp_path: Path) ->
         with av.open(str(video)) as container:
             means = [float(frame.to_ndarray(format="gray").mean()) for frame in container.decode(video=0)]
         np.testing.assert_allclose(means, [float(ramp.float().mean()) + 2 * k for k in range(25)], atol=2.0)
+
+
+@pytest.mark.parametrize(("nvenc_encodes_av1", "codec"), [(True, "av1_nvenc"), (False, "libsvtav1")])
+def test_the_face_encoder_is_nvenc_only_where_nvenc_encodes_av1(monkeypatch: pytest.MonkeyPatch, nvenc_encodes_av1: bool, codec: str) -> None:
+    """A CUDA GPU is not enough (the RTX 3060's NVENC has no AV1): the encoder follows the host probe alone."""
+    from dataforge.datasets import insta360
+
+    monkeypatch.setattr(insta360, "av1_nvenc_encodes", lambda: nvenc_encodes_av1)
+    assert insta360.av1_codec() == codec
