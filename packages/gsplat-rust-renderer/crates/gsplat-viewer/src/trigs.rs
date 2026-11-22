@@ -51,12 +51,14 @@ pub(crate) fn clip_seconds(
     seconds as f32
 }
 
-/// The visible rows at `t`, as owned native arrays (RGB from the canonical colours, alpha = evaluated opacity).
+/// The visible rows at `t`, as owned native arrays (RGB and SH from the canonical rows, alpha = evaluated opacity).
 pub(crate) struct Evaluated {
     pub centers: Vec<[f32; 3]>,
     pub scales: Vec<[f32; 3]>,
     pub quaternions: Vec<[f32; 4]>,
     pub colors: Vec<u32>,
+    /// SH degrees 1-3 of the visible rows; empty when the canonical rows carry none.
+    pub sh: Vec<[[half::f16; 3]; 15]>,
 }
 
 impl Evaluated {
@@ -74,6 +76,7 @@ impl Evaluated {
             scales: Vec::with_capacity(rows.len()),
             quaternions: Vec::with_capacity(rows.len()),
             colors: Vec::with_capacity(rows.len()),
+            sh: Vec::new(),
         };
         for (&row, value) in rows.iter().zip(&values) {
             let i = row as usize;
@@ -83,6 +86,10 @@ impl Evaluated {
             let rgb = at_or_last(canonical.colors, i, u32::MAX) & 0xFFFF_FF00;
             let alpha = (value.opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
             out.colors.push(rgb | alpha);
+            if !canonical.sh.is_empty() {
+                out.sh
+                    .push(at_or_last(canonical.sh, i, [[half::f16::ZERO; 3]; 15]));
+            }
         }
         out
     }
@@ -93,7 +100,7 @@ impl Evaluated {
             scales: &self.scales,
             quaternions: &self.quaternions,
             colors: &self.colors,
-            sh: &[],
+            sh: &self.sh,
             degree: canonical.degree,
         }
     }
