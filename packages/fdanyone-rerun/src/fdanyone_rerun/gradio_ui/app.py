@@ -95,6 +95,8 @@ class _RunSlot:
         """The worker of the latest run; Stop reports "Stopping…" while it is alive."""
         self.gpu_lock: Path | None = None
         """``Config.gpu_lock``."""
+        self.recording: Path | None = None
+        """The latest finished run's saved recording (offered for download)."""
         self.stop: threading.Event | None = None
         """The latest run's stop event. Stop sets it itself: cancelling the Gradio event does not close the run's
         generator, so the generator's ``finally`` cannot be relied on to stop the worker."""
@@ -172,11 +174,20 @@ def run_app(
         if errors and not isinstance(errors[0], RunCancelled):
             raise errors[0]
         person_line: str = " and the 4D person" if person is not None else ""
-        yield stream.read() or b"", f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line}; recording {saved}"
+        SLOT.recording = saved
+        yield (
+            stream.read() or b"",
+            f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line}; recording `{saved.name}`",
+        )
     finally:
         # A closed page ends this generator (a Stop sets the stop event in stop_status): the worker stops its subprocess
         # at once, the rest at the next stage, denoising step or training step, and frees the slot when it has.
         streamer.stop.set()
+
+
+def latest_recording() -> str | None:
+    """The latest finished run's recording, for the download box (None until a run has finished)."""
+    return str(SLOT.recording) if SLOT.recording is not None and SLOT.recording.is_file() else None
 
 
 def stop_status() -> Iterator[str]:
@@ -215,12 +226,14 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
                     run_button = gr.Button("Run", variant="primary")
                     stop = gr.Button("Stop", variant="stop")
                 status = gr.Markdown(READY, elem_id="run-status")
+                recording = gr.File(label="Recording (.rrd, 4D person included)", interactive=False, elem_id="recording")
             with gr.Column(scale=3, elem_id="viewer-column"):
                 viewer = Rerun(
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
 
         run_event = run_button.click(run_app, inputs=[video, views, seed, train, steps], outputs=[viewer, status])
+        run_event.then(latest_recording, outputs=[recording])
         stop.click(stop_status, outputs=[status], cancels=[run_event])
     return demo
 
@@ -233,7 +246,7 @@ def launch(demo: gr.Blocks, config: Config) -> None:
         server_name=config.server_name,
         server_port=config.server_port,
         ssr_mode=False,
-        allowed_paths=[str(EXAMPLE_VIDEO.parent)],
+        allowed_paths=[str(EXAMPLE_VIDEO.parent), str(RUNS_DIR)],
         css=APP_CSS,
         show_error=True,
     )

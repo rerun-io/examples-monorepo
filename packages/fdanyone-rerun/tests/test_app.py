@@ -87,3 +87,26 @@ def test_the_gpu_lock_is_held_around_a_run_only(tmp_path: Path, monkeypatch: pyt
     mine: int = os.open(lock, os.O_RDWR)
     fcntl.flock(mine, fcntl.LOCK_EX | fcntl.LOCK_NB)  # free again once the run has ended
     os.close(mine)
+
+
+def test_the_done_line_names_the_recording_and_offers_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The status shows the file name, never the machine path; the download box gets the finished run's recording."""
+
+    class QuickStreamer:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            import threading
+
+            self.stop = threading.Event()
+
+        def run(self) -> None:
+            pass
+
+    monkeypatch.setattr(app, "RunStreamer", QuickStreamer)
+    monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(app, "PUMP_SECONDS", 0.02)
+    monkeypatch.setattr(app.SLOT, "recording", None)
+    assert app.latest_recording() is None
+    done: str = [status for _, status in run_app(str(tmp_path / "clip.mp4"), 6, 42, True, 100)][-1]
+    (saved,) = tmp_path.glob("*.rrd")
+    assert done.endswith(f"recording `{saved.name}`") and str(tmp_path) not in done
+    assert app.latest_recording() == str(saved)
