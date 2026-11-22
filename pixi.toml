@@ -4463,6 +4463,17 @@ cmd = "python tools/apps/masks.py"
 cwd = "packages/open4dgs"
 description = "Foreground mattes (BiRefNet on the SMPL-X person crop) for a segment's frame window, registered as catalog layer masks"
 
+# The integration and golden lanes import the Mojo SSIM kernels: build them first (as mast3r-slam / sam2-streaming do).
+[feature.open4dgs.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["open4dgs-ssim-mojo-build"]
+description = "Build the Mojo SSIM kernels, then run the package integration tests"
+
+[feature.open4dgs.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["open4dgs-ssim-mojo-build"]
+description = "Build the Mojo SSIM kernels, then run the package golden reference tests"
+
 [feature.open4dgs.tasks.open4dgs-train]
 cmd = "python tools/apps/train.py"
 depends-on = ["open4dgs-ssim-mojo-build"]
