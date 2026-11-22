@@ -4413,8 +4413,19 @@ safetensors = "*"
 open4dgs = { path = "packages/open4dgs", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
+# The trainer's fused SSIM: hexels_mojo.fused_ssim (Mojo port of fused-ssim; recipe patch 0007 points TRiGS's loss at it).
+# Its kernels are built for the local GPU by the open4dgs-ssim-mojo-build task (without the build TRiGS falls back to torchmetrics).
+hexels-mojo = { path = "packages/hexels-mojo", editable = true }
 # trigs.io.ply / PLY export (PyPI only).
 gsply = ">=0.2.12"
+
+[feature.open4dgs.tasks.open4dgs-ssim-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I hexels_mojo/mojo -o hexels_mojo/_hexels_mojo.so hexels_mojo/mojo/_hexels_mojo.mojo"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/hexels-mojo"
+description = "Build hexels_mojo's Mojo kernels (fused SSIM) for the local GPU in the open4dgs envs"
+inputs = ["packages/hexels-mojo/hexels_mojo/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/hexels-mojo/hexels_mojo/_hexels_mojo.so"]
 
 [feature.open4dgs.pypi-options.dependency-overrides]
 # Resolve monopriors' sam3>=0.1.0 requirement to the repository implementation.
@@ -4428,16 +4439,20 @@ cmd = "python tools/apps/masks.py"
 cwd = "packages/open4dgs"
 description = "Foreground mattes (BiRefNet on the SMPL-X person crop) for a segment's frame window, registered as catalog layer people_matte"
 
+# The integration and golden lanes import the Mojo SSIM kernels: build them first (as mast3r-slam / sam2-streaming do).
 [feature.open4dgs.tasks.tests-integration]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["open4dgs-ssim-mojo-build"]
 description = "Build the Mojo SSIM kernels, then run the package integration tests"
 
 [feature.open4dgs.tasks.tests-golden]
 cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["open4dgs-ssim-mojo-build"]
 description = "Build the Mojo SSIM kernels, then run the package golden reference tests"
 
 [feature.open4dgs.tasks.open4dgs-train]
 cmd = "python tools/apps/train.py"
+depends-on = ["open4dgs-ssim-mojo-build"]
 cwd = "packages/open4dgs"
 description = "Train a person from a catalog clip with TRiGS (body-surface init, masked loss), score held-out cameras, write <runs-root>/<run-name>/run.rrd and register it on open4dgs-runs (run in the prod env, under flock -x /tmp/gpu-5090.lock)"
 
@@ -5113,6 +5128,7 @@ open4dgs = { features = [
     "rerun-prerelease",
     "cuda",
     "open4dgs",
+    "lietorch-mojo",
     "torchcodec",
     "ffmpeg",
 ], solve-group = "open4dgs", no-default-feature = true }
@@ -5121,6 +5137,7 @@ open4dgs-dev = { features = [
     "rerun-prerelease",
     "cuda",
     "open4dgs",
+    "lietorch-mojo",
     "dev",
     "torchcodec",
     "ffmpeg",
