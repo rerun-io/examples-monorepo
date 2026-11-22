@@ -355,6 +355,8 @@ def main(config: Config) -> dict[str, object]:
         odd: list[int] = list(range(1, trained.num_frames, 2))
         brightness[f"{fit.camera}:odd"] = camera_brightness(trained, clip, masks, fit.camera, odd)
         brightness[f"{fit.camera}:odd_fit"] = camera_brightness(trained, clip, masks, fit.camera, odd, fit.compensation)
+    # The same split on the training cameras is the control: what a camera the model was fitted to shows.
+    brightness_train: dict[str, BrightnessSplit] = {name: camera_brightness(trained, clip, masks, name, all_frames) for name in train_names}
     learned: list[CameraCompensation] = trained.learned()
     timings["compensation_eval_s"] = time.perf_counter() - t0
 
@@ -376,6 +378,7 @@ def main(config: Config) -> dict[str, object]:
             else {}
         ),
         "brightness": {name: dataclasses.asdict(split) for name, split in brightness.items()},
+        "brightness_train": {name: dataclasses.asdict(split) for name, split in brightness_train.items()},
         "learned": {name: dataclasses.asdict(comp) for name, comp in zip(clip.camera_names, learned, strict=True)},
         "holdout_fitted": {fit.camera: dataclasses.asdict(fit.compensation) for fit in fits},
         "it_per_s": config.train.steps / trained.train_seconds,
