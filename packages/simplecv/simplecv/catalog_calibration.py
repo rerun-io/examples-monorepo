@@ -9,7 +9,8 @@ logged with distortion (``PinholeWithDistortion``) also carries the simplecv
 ``DistortionModel`` / ``DistortionCoefficients`` components on its ``pinhole`` child;
 ``read_camera_models`` returns them alongside the pinhole. ``camera_models_from_static_table`` decodes the static
 columns whatever they come from: the catalog (``read_camera_models``) or a recording file
-(``read_camera_models_from_store``).
+(``read_camera_models_from_store``). ``read_lens`` reads MAMMA's Vicon radial lens, which dataforge logs as AnyValues
+cells on the camera node rather than as ``DistortionModel`` components.
 """
 
 from collections.abc import Sequence
@@ -26,6 +27,7 @@ from simplecv.camera_parameters import MEI_CATALOG_MODELS, Extrinsics, Intrinsic
 from simplecv.rerun_custom_types import _DISTORTION_COEFF_COMPONENT as DISTORTION_COEFFICIENTS_COMPONENT
 from simplecv.rerun_custom_types import _DISTORTION_MODEL_COMPONENT as DISTORTION_MODEL_COMPONENT
 from simplecv.rrd_query_utils import first_valid_value
+from simplecv.sensors.camera.vicon_radial import VICON_RADIAL_MODEL, ViconRadialLens
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,3 +155,42 @@ def camera_models_from_static_table(
             )
         calibration[entity] = CatalogCameraCalibration(pinhole=pinhole, distortion=distortion, mei=mei)
     return calibration
+
+
+def read_lens(table: pa.Table, entity: str) -> ViconRadialLens | None:
+    """The Vicon radial lens of camera node ``entity`` in a static table, from its AnyValues cells.
+
+    The cells are ``camera_model`` (``vicon_radial_2``), ``vicon_radial_2`` (``[cx, cy, k1, k2, k3]``) and the native grid
+    ``source_width`` / ``source_height`` (``simplecv.sensors.camera.vicon_radial``).
+
+    Returns:
+        The lens, or None when the node states no ``camera_model`` or ``pinhole``.
+
+    Raises:
+        ValueError: The node names another model, or its lens cells are missing or malformed.
+    """
+
+    def cell(name: str) -> object | None:
+        column_name: str = f"{entity}:{name}"
+        if column_name not in table.column_names:
+            return None
+        return first_valid_value(table.column(column_name), allow_none=True, component_name=column_name)
+
+    model: object | None = cell("camera_model")
+    if isinstance(model, list):
+        model = model[0] if model else None
+    if model is None or model == "pinhole":
+        return None
+    if model != VICON_RADIAL_MODEL:
+        raise ValueError(f"{entity}: camera_model {model!r} is not a lens read here ({VICON_RADIAL_MODEL} and pinhole only)")
+    values: object | None = cell(VICON_RADIAL_MODEL)
+    width: object | None = cell("source_width")
+    height: object | None = cell("source_height")
+    coefficients: Float64[ndarray, " n"] = np.asarray([] if values is None else values, dtype=np.float64).reshape(-1)
+    if len(coefficients) != 5 or width is None or height is None:
+        raise ValueError(f"{entity}: {VICON_RADIAL_MODEL} needs [cx, cy, k1, k2, k3] and source_width/source_height")
+    return ViconRadialLens(
+        centre=coefficients[:2],
+        radial=coefficients[2:],
+        native_wh=(int(np.asarray(width).reshape(-1)[0]), int(np.asarray(height).reshape(-1)[0])),
+    )

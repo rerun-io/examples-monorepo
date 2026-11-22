@@ -4,7 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import rerun as rr
+from conftest import read_back
+from simplecv.catalog_calibration import read_lens
 
+from dataforge import schema
+from dataforge.datasets.mamma_layers import log_cameras
 from dataforge.datasets.mamma_source import MammaCamera, SequenceLabels, discover_sequences, read_camera, read_eval_labels, read_pred_labels
 
 K: list[list[float]] = [[1000.0, 0.0, 100.0], [0.0, 1000.0, 50.0], [0.0, 0.0, 1.0]]
@@ -36,6 +41,7 @@ def test_read_camera_keeps_the_release_calibration(tmp_path: Path) -> None:
     np.testing.assert_array_equal(camera.K, np.array(K))
     np.testing.assert_array_equal(camera.cam_T_world[:3, 3], [0.5, -0.25, 3.0])
     assert camera.lens is not None
+    assert camera.lens.native_wh == (2056, 1504)
 
 
 def test_read_camera_converts_millimetre_extrinsics(tmp_path: Path) -> None:
@@ -191,3 +197,20 @@ def test_a_markerless_sequence_missing_a_person_is_skipped(tmp_path: Path) -> No
     found, skipped = discover_sequences(tmp_path, "markerless-dance")
     assert found == []
     assert skipped == [(directory, "predictions ['params_01'], the release ships ['params_00', 'params_01']")]
+
+
+def test_the_logged_lens_reads_back_through_simplecv(tmp_path: Path) -> None:
+    """``log_cameras`` writes the lens as AnyValues cells; ``simplecv.catalog_calibration.read_lens`` reads the same lens."""
+    lensed: MammaCamera = read_camera(write_camera(tmp_path / "IOI_03.npz"))
+    plain: MammaCamera = read_camera(write_camera(tmp_path / "A001.npz", lens=False))
+    path: Path = tmp_path / "base.rrd"
+    with rr.RecordingStream("mamma-lens", recording_id="lens") as recording:
+        recording.save(path)
+        log_cameras(recording, [lensed, plain], frustum_m=0.1)
+    table = read_back(path).reader(index=None).to_arrow_table()
+    lens = read_lens(table, schema.cam_path(1, 0))
+    assert lens is not None and lensed.lens is not None
+    np.testing.assert_array_equal(lens.centre, lensed.lens.centre)
+    np.testing.assert_array_equal(lens.radial, lensed.lens.radial)
+    assert lens.native_wh == lensed.lens.native_wh == (2056, 1504)
+    assert read_lens(table, schema.cam_path(2, 0)) is None

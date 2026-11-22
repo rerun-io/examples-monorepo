@@ -2,7 +2,7 @@
 
 Every sequence directory holds one calibration NPZ per camera (``gt/`` in the eval collections, ``meta/`` in the
 markerless ones) beside a ``global.npz``. Calibration is in native pixels and world metres: ``cam_int`` is K,
-``cam_ext`` is world-to-camera (OpenCV axes), and IOI cameras add ``vicon_radial_2``. See ``docs/mamma.md``.
+``cam_ext`` is world-to-camera (OpenCV axes), and IOI cameras add ``vicon_radial_2``, read as ``simplecv.sensors.camera.vicon_radial.ViconRadialLens``. See ``docs/mamma.md``.
 """
 
 import re
@@ -14,6 +14,7 @@ import numpy as np
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from serde import field, serde
+from simplecv.sensors.camera.vicon_radial import VICON_RADIAL_MODEL, ViconRadialLens
 
 from dataforge.records import decode_values
 
@@ -64,49 +65,6 @@ subject templates with zero betas, exact with v1.1 (``docs/mamma.md``)."""
 
 MILLIMETRE_THRESHOLD: float = 200.0
 """An extrinsic translation larger than this many units is in millimetres: no MAMMA camera stands 200 m away."""
-LENS_ITERATIONS: int = 50
-"""Fixed-point steps of the lens inversion; converged points stop moving after a few."""
-LENS_TOLERANCE_PX: float = 1e-9
-"""Largest step, in pixels, of a converged lens inversion."""
-LENS_RESIDUAL_PX: float = 1e-6
-"""Largest error, in pixels, of an inverted point mapped back; a point that misses it did not converge."""
-
-
-@serde
-@dataclass(frozen=True, slots=True)
-class ViconLens:
-    """The release's ``vicon_radial_2``: a radial polynomial about ``centre`` that maps distorted to undistorted pixels.
-
-    ``u = c + d (1 + k1 r^2 + k2 r^4 + k3 r^6)`` with ``d`` the distorted pixel's offset from ``c`` and ``r = |d|``, all in native
-    pixels. Projection is therefore a pinhole followed by the inverse of this map.
-    """
-
-    centre: Float64[ndarray, "2"]
-    """Distortion centre, native pixels."""
-    radial: Float64[ndarray, "3"]
-    """k1, k2, k3 per pixel^2, pixel^4, pixel^6."""
-
-    def scale(self, offset: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 1"]:
-        r2: Float64[ndarray, "n 1"] = (offset**2).sum(axis=-1, keepdims=True)
-        return 1.0 + self.radial[0] * r2 + self.radial[1] * r2**2 + self.radial[2] * r2**3
-
-    def undistort(self, distorted: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 2"]:
-        """Distorted (image) pixels to undistorted (pinhole) pixels: the release's map."""
-        offset: Float64[ndarray, "n 2"] = distorted - self.centre
-        return self.centre + offset * self.scale(offset)
-
-    def distort(self, undistorted: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 2"]:
-        """Undistorted pixels to image pixels by fixed-point inversion; a point that does not converge is NaN."""
-        target: Float64[ndarray, "n 2"] = undistorted - self.centre
-        offset: Float64[ndarray, "n 2"] = target.copy()
-        for _ in range(LENS_ITERATIONS):
-            step: Float64[ndarray, "n 2"] = target / self.scale(offset) - offset
-            offset = offset + step
-            if not np.abs(step[np.isfinite(step)]).max(initial=0.0) > LENS_TOLERANCE_PX:  # NaN points (behind the camera) stop no one
-                break
-        distorted: Float64[ndarray, "n 2"] = self.centre + offset
-        converged: Bool[ndarray, "n"] = np.abs(self.undistort(distorted) - undistorted).max(axis=-1) <= LENS_RESIDUAL_PX
-        return np.where(converged[:, None], distorted, np.nan)
 
 
 @serde
@@ -124,8 +82,8 @@ class MammaCamera:
     """Native image width, pixels."""
     height: int
     """Native image height, pixels (portrait cameras ship upright)."""
-    lens: ViconLens | None
-    """The Vicon radial lens; None for the iPhones, which ship none."""
+    lens: ViconRadialLens | None
+    """The Vicon radial lens (``native_wh`` is ``(width, height)``); None for the iPhones, which ship none."""
 
     @property
     def world_T_cam(self) -> Float64[ndarray, "4 4"]:
@@ -292,14 +250,14 @@ def read_camera(path: Path) -> MammaCamera:
         cam_T_world: Float64[ndarray, "..."] = npz["cam_ext"].astype(np.float64)
         if cam_T_world.shape == (4, 4) and np.abs(cam_T_world[:3, 3]).max() > MILLIMETRE_THRESHOLD:
             cam_T_world[:3, 3] /= 1000.0
-        lens: Float64[ndarray, "..."] | None = npz["vicon_radial_2"] if "vicon_radial_2" in npz.files else None
+        lens: Float64[ndarray, "..."] | None = npz[VICON_RADIAL_MODEL] if VICON_RADIAL_MODEL in npz.files else None
         values: dict[str, object] = {
             "name": str(npz["cam_name"]),
             "K": npz["cam_int"].astype(np.float64),
             "cam_T_world": cam_T_world,
             "width": int(npz["cam_img_w"]),
             "height": int(npz["cam_img_h"]),
-            "lens": None if lens is None else {"centre": lens[:2], "radial": lens[2:]},
+            "lens": None if lens is None else {"centre": lens[:2], "radial": lens[2:], "native_wh": (int(npz["cam_img_w"]), int(npz["cam_img_h"]))},
         }
     return decode_values(MammaCamera, values, source=path)
 
