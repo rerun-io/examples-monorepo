@@ -92,7 +92,7 @@ class ScalarLog:
 
     def __getattr__(self, name: str) -> Callable[..., None]:
         # add_histogram, flush, ...: ignored.
-        return lambda *args, **kwargs: None
+        return lambda *_args, **_kwargs: None
 
 
 @dataclass(frozen=True)
@@ -110,7 +110,6 @@ class TrainedClip:
     scalars: dict[str, list[tuple[int, float]]]
     train_seconds: float
     peak_gpu_bytes: int
-    num_init_rows: int
 
     def render(self, cameras: CameraConfig, cam: int, frame: int) -> tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w 1"]]:
         """RGB (premultiplied over black, clamped to [0, 1]) and alpha of camera ``cam`` of ``cameras`` at clip frame ``frame``."""
@@ -204,7 +203,6 @@ def train_clip(
         scalars=writer.rows,
         train_seconds=time.perf_counter() - start,
         peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)),
-        num_init_rows=init.num_rows,
     )
 
 
@@ -229,5 +227,4 @@ def untrained_clip(
         scalars={},
         train_seconds=0.0,
         peak_gpu_bytes=0,
-        num_init_rows=init.num_rows,
     )
