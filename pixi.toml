@@ -4407,6 +4407,11 @@ cmd = "python tools/apps/train.py"
 cwd = "packages/open4dgs"
 description = "Train a person from a catalog clip with TRiGS (body-surface init, masked loss), score held-out cameras, write <runs-root>/<run-name>/run.rrd and register it on open4dgs-runs (run in the prod env, under flock -x /tmp/gpu-5090.lock)"
 
+[feature.open4dgs.tasks.open4dgs-export-splats]
+cmd = "python tools/apps/export_splats.py"
+cwd = "packages/open4dgs"
+description = "Per-frame Gaussian splats of a trained run (--run <run dir>): <run>/splats.rrd with the run's cameras and meshes, registered as layer splats on open4dgs-runs (CPU; open in packages/gsplat-rust-renderer)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
