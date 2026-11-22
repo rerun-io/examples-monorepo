@@ -10,10 +10,8 @@ MAMMA's IOI cameras carry the Vicon lens as ``vicon_radial_2`` on the camera nod
 ``mamma_layers.log_cameras``): ``[cx, cy, k1, k2, k3]`` in the camera's NATIVE pixel grid (``source_width`` x
 ``source_height``), a polynomial that maps a distorted pixel ``d`` to its undistorted pinhole pixel
 ``u = c + (d - c) (1 + k1 r^2 + k2 r^4 + k3 r^6)``, ``r = |d - c|``. The logged ``Pinhole`` is the undistorted pinhole at
-the stored size. This module ports dataforge's ``ViconLens`` (``dataforge/datasets/mamma_source.py``: the same map and
-the same fixed-point inversion, iteration count and tolerances) to torch so the remap runs on the GPU;
-``tests/test_catalog_clip.py`` checks the port against ``ViconLens`` when dataforge is importable. dataforge itself is
-not imported here: ``dataforge.datasets`` imports every dataset module (3 s).
+the stored size. The lens is ``simplecv.sensors.camera.vicon_radial.ViconRadialLens`` (read by
+``simplecv.catalog_calibration.read_lens``; its torch path keeps the remap on the GPU).
 
 Pixel convention: pixel centres sit at integer coordinates and a ``w``-wide image spans ``[-0.5, w - 0.5]``, so a
 resize by ``s`` maps ``x -> (x + 0.5) s - 0.5`` (``scale_intrinsics``), the convention of ``grid_sample`` and
@@ -34,69 +32,24 @@ from datafusion import col
 from jaxtyping import Bool, Float32, Float64, Int64, UInt8, UInt32
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.catalog_calibration import CatalogCameraCalibration, camera_models_from_static_table
+from simplecv.catalog_calibration import CatalogCameraCalibration, camera_models_from_static_table, read_lens
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
 from simplecv.catalog_video_decode import StreamDecoder
 from simplecv.rrd_query_utils import first_valid_value
+from simplecv.sensors.camera.vicon_radial import ViconRadialLens
 from torch import Tensor
 
 from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera, virtual_to_source_pixels
 
 FRAME_TIMELINE: str = "frame_index"
 """The dataforge sequence timeline every layer is indexed on (also ``video_time``, a duration)."""
-LENS_ITERATIONS: int = 50
-"""Fixed-point steps of the lens inversion (dataforge ``mamma_source.LENS_ITERATIONS``)."""
-LENS_TOLERANCE_PX: float = 1e-9
-"""Largest step, in pixels, of a converged lens inversion (dataforge ``LENS_TOLERANCE_PX``)."""
-LENS_RESIDUAL_PX: float = 1e-6
-"""Largest error, in pixels, of an inverted point mapped back (dataforge ``LENS_RESIDUAL_PX``)."""
 RESAMPLE_CHUNK: int = 16
 """Frames undistorted and resized per call (16 x 2056x1504 is 0.6 GB as float32 per buffer)."""
 GRID_CACHE_BYTES: int = 2 << 30
 """Bytes of sampling grids kept for reuse (a 2056x1504 grid is 25 MB: a 32-camera MAMMA rig is 0.8 GB)."""
 _GRID_CACHE: OrderedDict[Hashable, Tensor] = OrderedDict()
 _MESH_PATH: re.Pattern[str] = re.compile(r"^/world/(?P<source>.+)/people/(?P<person>person_\d+)/body/mesh$")
-
-
-@dataclass(frozen=True, slots=True)
-class ViconRadialLens:
-    """MAMMA's ``vicon_radial_2`` lens in the camera's native pixel grid (see the module docstring)."""
-
-    centre: Float64[ndarray, "2"]
-    """Distortion centre, native pixels."""
-    radial: Float64[ndarray, "3"]
-    """k1, k2, k3 per pixel^2, pixel^4, pixel^6."""
-    native_width: int
-    """Width of the grid the lens is stated in (the camera node's ``source_width``)."""
-    native_height: int
-    """Height of that grid (``source_height``)."""
-
-    def _scale(self, offset: Float64[Tensor, "n 2"]) -> Float64[Tensor, "n 1"]:
-        radial: Float64[Tensor, "3"] = torch.as_tensor(self.radial, dtype=torch.float64, device=offset.device)
-        r2: Float64[Tensor, "n 1"] = (offset**2).sum(dim=-1, keepdim=True)
-        return 1.0 + radial[0] * r2 + radial[1] * r2**2 + radial[2] * r2**3
-
-    def undistort(self, distorted: Float64[Tensor, "n 2"]) -> Float64[Tensor, "n 2"]:
-        """Distorted (image) pixels to undistorted (pinhole) pixels, native grid: the release's map."""
-        centre: Float64[Tensor, "2"] = torch.as_tensor(self.centre, dtype=torch.float64, device=distorted.device)
-        offset: Float64[Tensor, "n 2"] = distorted - centre
-        return centre + offset * self._scale(offset)
-
-    def distort(self, undistorted: Float64[Tensor, "n 2"]) -> Float64[Tensor, "n 2"]:
-        """Undistorted pixels to image pixels by fixed-point inversion, native grid; a point that does not converge is NaN."""
-        centre: Float64[Tensor, "2"] = torch.as_tensor(self.centre, dtype=torch.float64, device=undistorted.device)
-        target: Float64[Tensor, "n 2"] = undistorted - centre
-        offset: Float64[Tensor, "n 2"] = target.clone()
-        for _ in range(LENS_ITERATIONS):
-            step: Float64[Tensor, "n 2"] = target / self._scale(offset) - offset
-            offset = offset + step
-            finite: Float64[Tensor, " k"] = step[torch.isfinite(step)].abs()
-            if finite.numel() == 0 or not bool(finite.max() > LENS_TOLERANCE_PX):
-                break
-        distorted: Float64[Tensor, "n 2"] = centre + offset
-        converged: Bool[Tensor, " n"] = (self.undistort(distorted) - undistorted).abs().amax(dim=-1) <= LENS_RESIDUAL_PX
-        return torch.where(converged[:, None], distorted, torch.full_like(distorted, float("nan")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +170,7 @@ def _device_key(device: torch.device) -> str:
 
 
 def _lens_key(lens: ViconRadialLens | None) -> Hashable:
-    return None if lens is None else (lens.centre.tobytes(), lens.radial.tobytes(), lens.native_width, lens.native_height)
+    return None if lens is None else (lens.centre.tobytes(), lens.radial.tobytes(), lens.native_wh)
 
 
 def _cached_grid(key: Hashable, build: Callable[[], Tensor]) -> Float32[Tensor, "1 h w 2"]:
@@ -250,7 +203,7 @@ def undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device:
 
 def _undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device: torch.device) -> Float32[Tensor, "1 h w 2"]:
     width, height = stored_wh
-    to_native: tuple[float, float] = (lens.native_width / width, lens.native_height / height)
+    to_native: tuple[float, float] = (lens.native_wh[0] / width, lens.native_wh[1] / height)
     ys, xs = torch.meshgrid(
         torch.arange(height, dtype=torch.float64, device=device), torch.arange(width, dtype=torch.float64, device=device), indexing="ij"
     )
@@ -287,7 +240,7 @@ def _roi_grid(lens: ViconRadialLens | None, camera: VirtualCamera, device: torch
     distorted_stored: Float64[Tensor, "n 2"] = undistorted_stored
     if lens is not None:
         scale_to_native: Float64[Tensor, "2"] = torch.tensor(
-            (lens.native_width / width, lens.native_height / height), dtype=torch.float64, device=device
+            (lens.native_wh[0] / width, lens.native_wh[1] / height), dtype=torch.float64, device=device
         )
         distorted_native: Float64[Tensor, "n 2"] = lens.distort((undistorted_stored + 0.5) * scale_to_native - 0.5)
         distorted_stored = (distorted_native + 0.5) / scale_to_native - 0.5
@@ -331,25 +284,6 @@ def _static_cell(table: pa.Table, column_name: str) -> object | None:
     if column_name not in table.column_names:
         return None
     return first_valid_value(table.column(column_name), allow_none=True, component_name=column_name)
-
-
-def _camera_lens(table: pa.Table, entity: str) -> ViconRadialLens | None:
-    """The camera node's lens: None for a pinhole camera; raises for a model this reader cannot undistort yet."""
-    model: object | None = _static_cell(table, f"{entity}:camera_model")
-    if isinstance(model, list):
-        model = model[0] if model else None
-    if model is None or model == "pinhole":
-        return None
-    if model != "vicon_radial_2":
-        raise ValueError(f"{entity}: camera_model {model!r} has no undistortion here yet (vicon_radial_2 and pinhole only)")
-    values: Float64[ndarray, " n"] = np.asarray(_static_cell(table, f"{entity}:vicon_radial_2"), dtype=np.float64).reshape(-1)
-    width: object | None = _static_cell(table, f"{entity}:source_width")
-    height: object | None = _static_cell(table, f"{entity}:source_height")
-    if len(values) != 5 or width is None or height is None:
-        raise ValueError(f"{entity}: vicon_radial_2 needs [cx, cy, k1, k2, k3] and source_width/height")
-    return ViconRadialLens(
-        centre=values[:2], radial=values[2:], native_width=int(np.asarray(width).reshape(-1)[0]), native_height=int(np.asarray(height).reshape(-1)[0])
-    )
 
 
 def _mesh_entities(dataset: DatasetEntry, segment_id: str, body_source: str | None) -> tuple[str, list[str]] | None:
@@ -553,7 +487,7 @@ def read_catalog_clip(
         decoded: UInt8[Tensor, "t 3 h w"] = decoder.frames([first + p for p in positions]).permute(0, 3, 1, 2)
         if (decoded.shape[3], decoded.shape[2]) != stored_wh:
             raise ValueError(f"{video}: decoded {decoded.shape[3]}x{decoded.shape[2]}, the pinhole says {stored_wh}")
-        lens: ViconRadialLens | None = _camera_lens(static, node) if undistort else None
+        lens: ViconRadialLens | None = read_lens(static, node) if undistort else None
         stored_sizes.append(stored_wh)
         lenses.append(lens)
         k_matrix: Float64[ndarray, "3 3"] | None = models[node].pinhole.intrinsics.k_matrix

@@ -1,12 +1,12 @@
-"""Unit tests for the pure parts of the catalog clip reader: frame selection, K scaling, the Vicon lens and its remap."""
+"""Unit tests for the pure parts of the catalog clip reader: frame selection, K scaling and the Vicon lens remap."""
 
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from simplecv.sensors.camera.vicon_radial import ViconRadialLens
 
 from open4dgs.catalog_clip import (
-    ViconRadialLens,
     fit_max_side,
     resample_frames,
     scale_intrinsics,
@@ -17,7 +17,7 @@ from open4dgs.catalog_clip import (
 
 # A lens of MAMMA's magnitude (IOI_01 of the breakdance segment, native 2056x1504).
 LENS: ViconRadialLens = ViconRadialLens(
-    centre=np.array([1033.76, 719.77]), radial=np.array([1.98e-8, -1.2e-14, -3.0e-22]), native_width=2056, native_height=1504
+    centre=np.array([1033.76, 719.77]), radial=np.array([1.98e-8, -1.2e-14, -3.0e-22]), native_wh=(2056, 1504)
 )
 
 
@@ -52,27 +52,10 @@ def test_scale_intrinsics_moves_projections_with_the_resize() -> None:
     np.testing.assert_allclose(scaled[0, 2], (1033.76 + 0.5) / 2 - 0.5)
 
 
-def test_lens_round_trip_on_a_grid() -> None:
-    ys, xs = torch.meshgrid(torch.linspace(0, 1503, 40, dtype=torch.float64), torch.linspace(0, 2055, 50, dtype=torch.float64), indexing="ij")
-    distorted = torch.stack([xs.reshape(-1), ys.reshape(-1)], dim=-1)
-    undistorted = LENS.undistort(distorted)
-    assert (undistorted - distorted).abs().max() > 5.0  # the lens is not the identity at the border
-    np.testing.assert_allclose(LENS.distort(undistorted).numpy(), distorted.numpy(), atol=1e-6)
-
-
-def test_lens_matches_dataforge_vicon_lens() -> None:
-    """The torch port gives dataforge's ``ViconLens`` answers (both directions)."""
-    mamma_source = pytest.importorskip("dataforge.datasets.mamma_source", reason="dataforge is not in this env")
-    reference = mamma_source.ViconLens(centre=LENS.centre, radial=LENS.radial)
-    points = np.random.default_rng(0).uniform([0.0, 0.0], [2056.0, 1504.0], size=(500, 2))
-    np.testing.assert_allclose(LENS.undistort(torch.from_numpy(points)).numpy(), reference.undistort(points), atol=1e-9)
-    np.testing.assert_allclose(LENS.distort(torch.from_numpy(points)).numpy(), reference.distort(points), atol=1e-9)
-
-
 def test_undistortion_grid_resamples_a_synthetic_distorted_image() -> None:
     """Render dots at known undistorted pixels into a distorted image; the remap puts them back where K says."""
     width, height = 2056, 1504
-    lens = ViconRadialLens(centre=LENS.centre, radial=LENS.radial * 3.0, native_width=width, native_height=height)
+    lens = ViconRadialLens(centre=LENS.centre, radial=LENS.radial * 3.0, native_wh=(width, height))
     targets = torch.tensor([[150.0, 120.0], [1900.0, 1400.0], [1030.0, 720.0], [120.0, 1380.0]], dtype=torch.float64)
     sources = lens.distort(targets)
     image = torch.zeros((1, 3, height, width), dtype=torch.uint8)
@@ -89,7 +72,7 @@ def test_undistortion_grid_resamples_a_synthetic_distorted_image() -> None:
 
 def test_undistortion_grid_with_a_half_size_store() -> None:
     """A video stored at half the lens grid: the stored-grid remap equals the native remap downsampled."""
-    lens = ViconRadialLens(centre=np.array([100.0, 80.0]), radial=np.array([2e-6, 0.0, 0.0]), native_width=200, native_height=160)
+    lens = ViconRadialLens(centre=np.array([100.0, 80.0]), radial=np.array([2e-6, 0.0, 0.0]), native_wh=(200, 160))
     native = undistortion_grid(lens, (200, 160), torch.device("cpu"))
     half = undistortion_grid(lens, (100, 80), torch.device("cpu"))
     pooled = F.avg_pool2d(native.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)
@@ -104,7 +87,7 @@ def test_pinhole_camera_keeps_every_pixel() -> None:
 
 
 def test_valid_mask_marks_the_lens_border() -> None:
-    lens = ViconRadialLens(centre=np.array([100.0, 80.0]), radial=np.array([-8e-6, 0.0, 0.0]), native_width=200, native_height=160)
+    lens = ViconRadialLens(centre=np.array([100.0, 80.0]), radial=np.array([-8e-6, 0.0, 0.0]), native_wh=(200, 160))
     mask = valid_mask(undistortion_grid(lens, (200, 160), torch.device("cpu")), (200, 160), (100, 80))
     assert mask.shape == (80, 100)
     assert bool(mask[40, 50]) and not bool(mask.all())

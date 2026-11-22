@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from simplecv.sensors.camera.vicon_radial import ViconRadialLens
 
-from open4dgs.catalog_clip import ViconRadialLens, roi_grid, undistortion_grid
+from open4dgs.catalog_clip import roi_grid, undistortion_grid
 from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera, minimal_rotation_to, virtual_to_source_pixels
 
 SOURCE_K: np.ndarray = np.array([[1800.0, 0.0, 1020.0], [0.0, 1790.0, 760.0], [0.0, 0.0, 1.0]])
@@ -116,7 +117,7 @@ def test_max_side_caps_with_even_sizes_and_centred_principal_point() -> None:
 
 
 def test_roi_grid_of_an_identity_camera_equals_the_undistortion_grid() -> None:
-    lens = ViconRadialLens(centre=np.array([1033.76, 719.77]), radial=np.array([1.98e-8, -1.2e-14, -3.0e-22]), native_width=2056, native_height=1504)
+    lens = ViconRadialLens(centre=np.array([1033.76, 719.77]), radial=np.array([1.98e-8, -1.2e-14, -3.0e-22]), native_wh=(2056, 1504))
     width, height = 96, 70  # a stored grid smaller than the native one exercises the native <-> stored mapping
     K = np.array([[80.0, 0.0, (width - 1) / 2.0], [0.0, 80.0, (height - 1) / 2.0], [0.0, 0.0, 1.0]])
     camera = VirtualCamera(

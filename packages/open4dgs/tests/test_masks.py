@@ -60,9 +60,11 @@ def test_fill_missing_boxes_takes_the_union_of_neighbours() -> None:
 
 def test_masks_and_frames_share_one_resampling() -> None:
     """A mask resampled with resample_images lands on the same pixels as the frame resampled with resample_frames."""
-    from open4dgs.catalog_clip import ViconRadialLens, resample_frames, resample_images, undistortion_grid
+    from simplecv.sensors.camera.vicon_radial import ViconRadialLens
 
-    lens = ViconRadialLens(centre=np.array([31.5, 23.5]), radial=np.array([2e-5, 0.0, 0.0]), native_width=64, native_height=48)
+    from open4dgs.catalog_clip import resample_frames, resample_images, undistortion_grid
+
+    lens = ViconRadialLens(centre=np.array([31.5, 23.5]), radial=np.array([2e-5, 0.0, 0.0]), native_wh=(64, 48))
     grid = undistortion_grid(lens, (64, 48), torch.device("cpu"))
     square = torch.zeros((1, 1, 48, 64))
     square[..., 10:30, 20:44] = 1.0
@@ -73,9 +75,9 @@ def test_masks_and_frames_share_one_resampling() -> None:
 
 
 def _lens() -> object:
-    from open4dgs.catalog_clip import ViconRadialLens
+    from simplecv.sensors.camera.vicon_radial import ViconRadialLens
 
-    return ViconRadialLens(centre=np.array([40.3, 29.1]), radial=np.array([3e-5, -2e-10, 1e-15]), native_width=80, native_height=60)
+    return ViconRadialLens(centre=np.array([40.3, 29.1]), radial=np.array([3e-5, -2e-10, 1e-15]), native_wh=(80, 60))
 
 
 def _soft_mattes(frames: int, height: int, width: int) -> torch.Tensor:
@@ -89,14 +91,16 @@ def _soft_mattes(frames: int, height: int, width: int) -> torch.Tensor:
 
 
 def test_grid_cache_returns_the_same_tensor() -> None:
-    from open4dgs.catalog_clip import ViconRadialLens, clear_grid_cache, undistortion_grid
+    from simplecv.sensors.camera.vicon_radial import ViconRadialLens
+
+    from open4dgs.catalog_clip import clear_grid_cache, undistortion_grid
 
     clear_grid_cache()
     lens = _lens()
     first = undistortion_grid(lens, (80, 60), torch.device("cpu"))
-    equal_lens = ViconRadialLens(centre=lens.centre.copy(), radial=lens.radial.copy(), native_width=80, native_height=60)
+    equal_lens = ViconRadialLens(centre=lens.centre.copy(), radial=lens.radial.copy(), native_wh=(80, 60))
     assert undistortion_grid(equal_lens, (80, 60), torch.device("cpu")) is first
-    other = ViconRadialLens(centre=lens.centre, radial=lens.radial * 2.0, native_width=80, native_height=60)
+    other = ViconRadialLens(centre=lens.centre, radial=lens.radial * 2.0, native_wh=(80, 60))
     assert undistortion_grid(other, (80, 60), torch.device("cpu")) is not first
     assert undistortion_grid(lens, (40, 30), torch.device("cpu")) is not first
     clear_grid_cache()
