@@ -1,0 +1,6 @@
+[package]
+name = "asog-src"
+version = "0.1.0.bc976cf"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
