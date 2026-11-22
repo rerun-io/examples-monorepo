@@ -197,6 +197,11 @@ def main(config: Config) -> dict[str, object]:
         _save_pngs(config.png_dir, config.run_name, clip, holdout, orbit)
     if config.register and config.rr_config.save is None:
         rr.disconnect()
+    # NAS rule: files 644, directories 775.
+    run_dir.chmod(0o775)
+    for path in run_dir.iterdir():
+        path.chmod(0o644)
+    if config.register and config.rr_config.save is None:
         register_run(config.runs_catalog_url, run_dir / "run.rrd", RUNS_DATASET)
     print(json.dumps(summary, indent=2, default=float))
     return summary

@@ -38,3 +38,33 @@ pycolmap inside a try and prints a notice when it is absent.
    cameras=..., n_frames=..., gt_images_per_frame=..., gt_alphas_per_frame=..., config=TrigsTrainingConfig(...),
    writer=...)`; held-out cameras are `config.holdout_views` (camera positions); `writer` receives the losses and the
    eval PSNR through `add_scalar`.
+
+## Train a person and report held-out numbers
+
+One command (prod env, under the shared GPU lock):
+
+```bash
+cd packages/open4dgs
+flock -x /tmp/gpu-5090.lock pixi run -e open4dgs --frozen open4dgs-train \
+  --dataset fdanyone-views --segment-id pexels-2785536__v06-seed42 \
+  --num-frames 30 --max-side 640 --num-holdout 1 --train.steps 1500 --run-name my-run
+```
+
+Steps (`open4dgs.apis.train`):
+
+1. `read_catalog_clip` reads the window; `select_holdout(camera_names, num_holdout, seed)` picks the held-out
+   cameras (`random.Random(seed).sample(sorted(names), k)`).
+2. Masks: the catalog `masks` layer (`--mask-source layer`, `--mask-catalog-url`/`--mask-dataset` for a companion
+   dataset such as `open4dgs-mamma`), or a dilated SMPL-X silhouette (`--mask-source mesh`, development only).
+3. `body_surface_init`: fixed area-weighted barycentric samples on each SMPL-X mesh (30k per person per keyframe),
+   velocity = central difference in world units per video frame, colours from the training cameras only.
+   The result is an `InitCloud` (`open4dgs.init_cloud`), the trainer's init contract, also logged to the run.
+4. `train_clip`: TRiGS in memory. Masked loss with the render composited on black against `gt * mask`, plus the
+   alpha-outside and alpha-to-mask terms. Held-out cameras get black frames and empty masks, so their pixels never
+   reach the trainer.
+5. `evaluate_cameras` scores held-out and training cameras in three settings: `crop` (headline: mask bounding box
+   +5 %, both composited on black with the GT mask), `fg` (PSNR over mask pixels only) and `full` (whole frame on
+   black, which inflates the number). It also renders a 360-degree orbit.
+6. The run recording `<runs-root>/<run-name>/run.rrd` (plus `trigs_ckpt.pt`) holds the cameras, held-out
+   gt/render/error videos, per-frame metrics, the orbit video, the init cloud, the body mesh, loss curves and the
+   `run`/`summary` properties. It is registered as a segment of `open4dgs-runs` on the local catalog.
