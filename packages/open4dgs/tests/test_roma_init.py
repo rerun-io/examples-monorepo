@@ -147,3 +147,11 @@ def test_run_upstream_captures_the_final_arrays_only(tmp_path) -> None:
     assert arrays["positions"].shape == (2, 3)
     assert written == [str(tmp_path / "cache" / "kf_000100.npz")]
     assert vars(module)["_atomic_savez"] is original and not output_path.exists()
+
+
+def test_upstream_argv_passes_the_clip_fps(tmp_path) -> None:
+    from open4dgs.roma_init import RomaInitConfig, upstream_argv
+
+    # Upstream defaults --fps to 60 and records it in the arrays; a 30 fps clip must say 30.
+    argv = upstream_argv(RomaInitConfig(frame_start=3, frame_end=9), tmp_path, tmp_path / "k.npz", False, 30.0)
+    assert argv[argv.index("--fps") + 1] == "30.0"

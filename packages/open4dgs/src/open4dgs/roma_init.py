@@ -156,8 +156,8 @@ def load_init_module(script: Path) -> ModuleType:
     return module
 
 
-def upstream_argv(config: RomaInitConfig, root: Path, output_path: Path, with_masks: bool) -> list[str]:
-    """Upstream's command line for a materialised ``root``."""
+def upstream_argv(config: RomaInitConfig, root: Path, output_path: Path, with_masks: bool, fps: float) -> list[str]:
+    """Upstream's command line for a materialised ``root``; ``fps`` is the clip's (upstream defaults to 60 and records it)."""
     argv: list[str] = [
         "prep-roma-trigs-memory.py",
         "--reference-json", str(root / "reference_export.json"),
@@ -166,6 +166,7 @@ def upstream_argv(config: RomaInitConfig, root: Path, output_path: Path, with_ma
         "--frame-start", str(config.frame_start),
         "--frame-end", str(config.frame_end),
         "--frame-step", str(config.keyframe_step),
+        "--fps", str(fps),
         "--camera-neighbors", str(config.camera_neighbors),
         "--wide-baseline-per-camera", str(config.wide_baseline_per_camera),
         "--roma-v2-setting", config.roma_v2_setting,
@@ -283,7 +284,7 @@ def run_roma_init(
     try:
         materialise(clip, masks, root, mask_frames)
         output_path: Path = root / "keyframes.npz"
-        arrays: dict[str, ndarray] = run_upstream(module, upstream_argv(config, root, output_path, masks is not None), output_path)
+        arrays: dict[str, ndarray] = run_upstream(module, upstream_argv(config, root, output_path, masks is not None, float(clip.fps)), output_path)
     finally:
         shutil.rmtree(root, ignore_errors=True)
         if saved_weights is None:
