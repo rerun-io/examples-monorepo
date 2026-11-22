@@ -167,3 +167,15 @@ def test_holdout_wiring_black_frames_zero_masks_positions_and_init_colours() -> 
 
     init = body_surface_init(clip, train_names, dataset="d", segment_id="s", samples_per_person=200, keyframe_step=1, device=torch.device("cpu"))
     assert float(init.colors[:, 0].max()) == 0.0 and float(init.colors[:, 2].min()) == 1.0  # only blue (training) pixels
+
+
+def test_layer_init_must_match_the_run_split_and_window() -> None:
+    from open4dgs.init_cloud import check_init_matches_run
+
+    cloud = _cloud(with_optional=False)
+    start, num = cloud.source_frame_start, cloud.frame_end + 1
+    check_init_matches_run(cloud, ("rig_25/cam_00", "rig_03/cam_00"), ("rig_03/cam_00", "rig_25/cam_00"), start, num)  # order-free
+    with pytest.raises(ValueError, match="would leak"):
+        check_init_matches_run(cloud, ("rig_25/cam_00",), ("rig_03/cam_00",), start, num)
+    with pytest.raises(ValueError, match="--num-frames"):
+        check_init_matches_run(cloud, ("rig_25/cam_00",), ("rig_25/cam_00",), start, num + 1)

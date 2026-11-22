@@ -24,7 +24,7 @@ from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evaluate_cameras, mean_metrics, render_orbit
 from open4dgs.holdout import select_holdout
-from open4dgs.init_cloud import InitCloud, log_init_cloud
+from open4dgs.init_cloud import check_init_matches_run, log_init_cloud, read_layer_init_cloud
 from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
 from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip, untrained_clip
@@ -63,6 +63,10 @@ class Config:
     """Catalog of the masks layer (default ``catalog_url``; MAMMA masks live on the local ``open4dgs-mamma``)."""
     mask_dataset: str | None = None
     """Dataset of the masks layer (default ``dataset``)."""
+    init: Literal["body", "layer"] = "body"
+    """``body``: body-surface samples on the SMPL-X meshes; ``layer``: the segment's init cloud layer ``init_layer`` on the mask catalog/dataset (its held-out cameras must equal the run's)."""
+    init_layer: str = "init_roma"
+    """Catalog layer of the init cloud for ``--init layer``."""
     samples_per_person: int = 30_000
     """Body-surface samples per person per keyframe."""
     keyframe_step: int = 3
@@ -145,14 +149,20 @@ def main(config: Config) -> dict[str, object]:
     masks = _read_masks(config, clip)
     timings["masks_s"] = time.perf_counter() - t0
     t0 = time.perf_counter()
-    init: InitCloud = body_surface_init(
-        clip,
-        train_names,
-        dataset=config.dataset,
-        segment_id=config.segment_id,
-        samples_per_person=config.samples_per_person,
-        keyframe_step=config.keyframe_step,
-    )
+    if config.init == "layer":
+        init, init_holdout = read_layer_init_cloud(
+            config.mask_catalog_url or config.catalog_url, config.mask_dataset or config.dataset, config.segment_id, config.init_layer
+        )
+        check_init_matches_run(init, init_holdout, holdout_names, int(clip.frame_indices[0]), len(clip.frame_indices))
+    else:
+        init = body_surface_init(
+            clip,
+            train_names,
+            dataset=config.dataset,
+            segment_id=config.segment_id,
+            samples_per_person=config.samples_per_person,
+            keyframe_step=config.keyframe_step,
+        )
     timings["init_s"] = time.perf_counter() - t0
     print(
         f"[open4dgs] clip {len(clip.camera_names)} cams x {len(clip.frame_indices)} frames, sizes {sorted(set(clip.sizes))}; held out {holdout_names}; init rows {init.num_rows:,}"
@@ -220,10 +230,10 @@ def main(config: Config) -> dict[str, object]:
         "holdout_seed": config.holdout_seed,
         "max_side": config.max_side or 0,
         "roi": f"{config.roi}:{config.roi_pad}" if config.roi else "full",
-        "init_method": init.method,
+        "init_method": init.method if config.init == "body" else f"layer:{config.init_layer}:{init.method}",
         "view_coordinates": str(view_coordinates),
         "samples_per_person": config.samples_per_person,
-        "keyframe_step": config.keyframe_step,
+        "keyframe_step": init.keyframe_step,
         "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
         **{f"train_{k}": v for k, v in dataclasses.asdict(config.train).items()},
     }
