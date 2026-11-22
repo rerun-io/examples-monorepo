@@ -60,7 +60,7 @@ class Config:
     evaluate: bool = False
     """Render the held-out cameras from both models and score them (needs the GPU and the catalog)."""
     mask_catalog_url: str = LOCAL_CATALOG
-    """Catalog of the run's masks layer (local for every run so far)."""
+    """Catalog of the run's ``people_matte`` layer (local for every run so far)."""
     png_dir: Path | None = None
     """With ``evaluate``: ground truth | uncompressed | decoded PNGs at two frames per held-out camera."""
     png_cameras: int = 2

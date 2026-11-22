@@ -54,7 +54,7 @@ Steps (`open4dgs.apis.train`):
 
 1. `read_catalog_clip` reads the window; `select_holdout(camera_names, num_holdout, seed)` picks the held-out
    cameras (`random.Random(seed).sample(sorted(names), k)`).
-2. Masks: the catalog `masks` layer (`--mask-source layer`, `--mask-catalog-url`/`--mask-dataset` for a companion
+2. Masks: the catalog `people_matte` layer (`--mask-source layer`, `--mask-catalog-url`/`--mask-dataset` for a companion
    dataset such as `open4dgs-mamma`), or a dilated SMPL-X silhouette (`--mask-source mesh`, development only).
 3. Init: `body_surface_init` (`--init body`, default): fixed area-weighted barycentric samples on each SMPL-X mesh
    (30k per person per keyframe), velocity = central difference in world units per video frame, colours from the
@@ -83,7 +83,7 @@ Steps (`open4dgs.apis.train`):
 ### What the held-out protocol shares with the held-out cameras
 
 No held-out pixel reaches the trainer or the body-surface init. Two priors are shared, though: the SMPL-X body is
-fitted by the dataset from ALL cameras (held-out ones included), and the mask model (BiRefNet, `masks` layer) runs
+fitted by the dataset from ALL cameras (held-out ones included), and the mask model (BiRefNet, `people_matte` layer) runs
 on every camera, and the held-out ground truth is `gt * mask`. So the held-out numbers measure novel-view quality
 given a body and silhouettes that saw those views: a shared prior, not a pixel leak. The `init_roma` layer is built
 without the held-out cameras (its `holdout` property) and `--init layer` checks that.

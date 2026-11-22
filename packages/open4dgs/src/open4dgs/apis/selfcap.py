@@ -3,7 +3,7 @@
 Layers go on the local companion dataset ``open4dgs-selfcap`` (same segment id as the read-only Spark segment), on the
 ``frame_index`` timeline whose values are the reference phone's packet numbers (``selfcap_clip.read_timed_clip``).
 
-- ``masks``: BiRefNet on the stored 1920x1080 frames, cropped by the projected joints box (``joint_box_points``) padded
+- ``masks`` stage: the ``people_matte`` layer, BiRefNet on the stored 1920x1080 frames, cropped by the projected joints box (``joint_box_points``) padded
   more than the SMPL-X box (joints are not a surface: hair, hands, clothes and the head under the headset).
 - ``prior``: MoGe-2 metric depth + normals on the training grid (``max_side``), every phone.
 - ``init``: ``moge_lift_init`` (or ``capsule_init``) from the training phones only; written as an init-cloud .rrd that
@@ -24,7 +24,7 @@ import torch
 from open4dgs.catalog_clip import LOCAL_CATALOG, SPARK_CATALOG
 from open4dgs.init_cloud import log_init_cloud
 from open4dgs.masks import (
-    MASKS_LAYER,
+    MATTE_LAYER,
     MODEL_NAME,
     fill_missing_boxes,
     load_birefnet,
@@ -93,7 +93,7 @@ def _masks(config: Config) -> None:
         mattes.append(matte)
         print(f"{name}: foreground fraction {matte.float().mean().item() / 255:.4f}")
     print(f"{len(mattes) * config.num_frames} masks in {time.perf_counter() - started:.1f} s")
-    path: Path = config.output_root / "masks" / config.register_dataset / f"{config.segment_id}.{MASKS_LAYER}.rrd"
+    path: Path = config.output_root / "masks" / config.register_dataset / f"{config.segment_id}.{MATTE_LAYER}.rrd"
     write_mask_layer(
         path,
         config.segment_id,

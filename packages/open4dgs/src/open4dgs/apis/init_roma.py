@@ -56,7 +56,7 @@ class Config:
     mesh_radius_m: float = 0.3
     """``masks="mesh"``: keep points within this distance of the nearest mesh vertex."""
     local_catalog_url: str = LOCAL_CATALOG
-    """Catalog that takes the layer (and holds the masks layer)."""
+    """Catalog that takes the layer (and holds the ``people_matte`` layer)."""
     companion_dataset: str | None = None
     """Dataset that takes the layer; None picks ``open4dgs-mamma`` for MAMMA segments, else ``dataset``."""
     output_dir: Path = Path("/mnt/nas/ssd-8tb/open4dgs/init")
@@ -182,7 +182,7 @@ def main(config: Config) -> Path:
     masks: tuple[Tensor, ...] | None = None
     mask_frames: list[int] | None = None
     if config.masks == "catalog":
-        # The masks layer covers the training window; the tracking margin frames go without masks.
+        # The people_matte layer covers the training window; the tracking margin frames go without masks.
         inside: Tensor = (clip.frame_indices >= config.frame_start) & (clip.frame_indices <= frame_end)
         window: MultiViewClip = dataclasses.replace(
             clip, frames=tuple(f[inside] for f in clip.frames), frame_indices=clip.frame_indices[inside], people=None

@@ -472,14 +472,12 @@ def render_orbit(
     the orbit poses (camera-to-world).
     """
     cams: list[int] = [clip.camera_names.index(name) for name in train_names]
-    if centre is not None:
-        pass
-    elif clip.people is not None and bool(torch.isfinite(clip.people.vertices).any()):
-        verts: Tensor = clip.people.vertices.reshape(-1, 3)
-        centre = verts[torch.isfinite(verts).all(dim=-1)].mean(dim=0)
-    else:
-        centre = clip.world_T_cam[cams, :3, 3].mean(dim=0)
-    assert centre is not None
+    if centre is None:
+        if clip.people is not None and bool(torch.isfinite(clip.people.vertices).any()):
+            verts: Tensor = clip.people.vertices.reshape(-1, 3)
+            centre = verts[torch.isfinite(verts).all(dim=-1)].mean(dim=0)
+        else:
+            centre = clip.world_T_cam[cams, :3, 3].mean(dim=0)
     poses: Tensor = orbit_poses(clip.world_T_cam[cams].float(), centre.float(), model.num_frames)
     size: tuple[int, int] = clip.sizes[cams[0]]
     orbit_cameras: CameraConfig = camera_config(poses, clip.K[cams[0]].expand(len(poses), 3, 3), [size] * len(poses), device)

@@ -38,7 +38,7 @@ from open4dgs.evaluate import (
 )
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, check_init_matches_run, log_init_cloud, read_init_cloud, read_layer_init_cloud
-from open4dgs.masks import MASKS_LAYER
+from open4dgs.masks import MATTE_LAYER
 from open4dgs.prior import (
     PRIOR_LAYER,
     ClipPriors,
@@ -82,9 +82,9 @@ class Config:
     mask_source: Literal["layer", "mesh"] = "layer"
     """``layer``: the catalog ``people_matte`` layer (open4dgs.masks); ``mesh``: dilated SMPL-X silhouette (stand-in, development only)."""
     mask_catalog_url: str | None = None
-    """Catalog of the masks layer (default ``catalog_url``; MAMMA masks live on the local ``open4dgs-mamma``)."""
+    """Catalog of the ``people_matte`` layer (default ``catalog_url``; MAMMA mattes live on the local ``open4dgs-mamma``)."""
     mask_dataset: str | None = None
-    """Dataset of the masks layer (default ``dataset``)."""
+    """Dataset of the ``people_matte`` layer (default ``dataset``)."""
     init: Literal["body", "layer"] = "body"
     """``body``: body-surface samples on the SMPL-X meshes; ``layer``: the segment's init cloud layer ``init_layer`` on the mask catalog/dataset (its held-out cameras must equal the run's)."""
     init_layer: str = "init_roma"
@@ -523,7 +523,7 @@ def main(config: Config) -> dict[str, object]:
         "prior_mode": config.prior,
         "prior_source": prior_source,
         **({f"prior_{k}": v for k, v in dataclasses.asdict(prior_config).items()} if config.prior != "off" else {}),
-        "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/{MASKS_LAYER}",
+        "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/{MATTE_LAYER}",
         **{f"train_{k}": ",".join(str(x) for x in v) if isinstance(v, tuple) else v for k, v in dataclasses.asdict(config.train).items() if v is not None},
         "train_time_offset_clamp_ms_resolved": float(trained.trigs_config.camera_time_offset_clamp_s) * 1e3,
         "rs_signs_per_camera": ",".join(f"{v:g}" for v in (config.train.rs_signs(len(clip.camera_names)) or ())),

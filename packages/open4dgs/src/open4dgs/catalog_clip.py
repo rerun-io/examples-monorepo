@@ -112,7 +112,7 @@ class MultiViewClip:
     people: ClipPeople | None
     """SMPL-X meshes; None when the segment has no ``body/mesh`` entity."""
     stored_sizes: tuple[tuple[int, int], ...] = ()
-    """Each camera's stored video ``(width, height)`` (the grid catalog layers such as ``masks`` are aligned with)."""
+    """Each camera's stored video ``(width, height)`` (the grid catalog layers such as ``people_matte`` are aligned with)."""
     lenses: tuple[ViconRadialLens | None, ...] = ()
     """Each camera's lens, None for a pinhole camera or when the clip was read with ``undistort=False``."""
     roi: ClipRoi | None = None
@@ -200,7 +200,7 @@ def undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device:
 
     Each output pixel is an undistorted stored pixel; it is mapped to the native grid, through ``lens.distort``, and
     back to the stored grid. Pixels whose inversion does not converge get a grid value outside ``[-1, 1]``.
-    The grid is cached per (lens, size, device): frames and ``masks`` of one clip share it; do not modify it in place.
+    The grid is cached per (lens, size, device): frames and mattes of one clip share it; do not modify it in place.
     """
     return _cached_grid(("undistortion", _lens_key(lens), stored_wh, _device_key(device)), lambda: _undistortion_grid(lens, stored_wh, device))
 
@@ -258,7 +258,7 @@ def resample_images(
 ) -> Float32[Tensor, "n c h3 w3"]:
     """Undistort (when ``grid`` is given) at the stored size, then resize to ``target_wh`` with antialiasing.
 
-    Frames and catalog layers aligned with the stored video (``masks``) go through this one function, so their pixels agree.
+    Frames and catalog layers aligned with the stored video (``people_matte``) go through this one function, so their pixels agree.
     """
     if grid is not None:
         images = F.grid_sample(images, grid.expand(len(images), -1, -1, -1), mode="bilinear", padding_mode="zeros", align_corners=False)
@@ -518,7 +518,7 @@ def read_catalog_clip(
             world_T_cam[index] = torch.from_numpy(virtual[-1].world_T_virtual(pose).astype(np.float32))
         else:
             K[index] = torch.from_numpy(scale_intrinsics(k_matrix, stored_wh, target_wh).astype(np.float32))
-            world_T_cam[index] = torch.from_numpy(np.asarray(models[node].pinhole.extrinsics.world_T_cam, dtype=np.float32))
+            world_T_cam[index] = torch.from_numpy(pose.astype(np.float32))
         del decoder, decoded, grid
     return MultiViewClip(
         camera_names=tuple(camera.name for camera in chosen),

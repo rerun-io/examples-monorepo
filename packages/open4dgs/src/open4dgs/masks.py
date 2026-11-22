@@ -38,7 +38,7 @@ from open4dgs.catalog_clip import FRAME_TIMELINE, RESAMPLE_CHUNK, MultiViewClip,
 MATTE_NAME: str = "people_matte"
 """Leaf entity of a camera's matte under ``<camera>/pinhole``: ``posekit.mask_layer.MATTE_NAME`` (posekit is not in the
 open4dgs envs; ``tests/test_masks.py`` pins the two equal where posekit imports)."""
-MASKS_LAYER: str = MATTE_NAME
+MATTE_LAYER: str = MATTE_NAME
 """Catalog layer name (and recording property) of the foreground mattes."""
 MODEL_NAME: str = "birefnet"
 """Recorded in the layer's properties."""
@@ -169,7 +169,7 @@ def write_mask_layer(
 ) -> None:
     """Write the ``people_matte`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame."""
     with atomic_recording(path, application_id="open4dgs-masks", recording_id=segment_id, send_properties=False) as rec:
-        rec.send_property(MASKS_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
+        rec.send_property(MATTE_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
         for camera, matte in zip(camera_names, mattes, strict=True):
             entity: str = mask_entity(camera)
             blobs: list[bytes] = []
@@ -188,7 +188,7 @@ def write_mask_layer(
 def register_mask_layer(catalog_url: str, dataset: str, path: Path) -> None:
     """Register ``path`` as layer ``people_matte`` of its segment (replacing an older ``people_matte`` layer of that segment)
     on ``dataset``, got or created (a companion dataset such as ``open4dgs-mamma``; ``simplecv.catalog_layers.ensure_dataset``)."""
-    register_layer(ensure_dataset(CatalogClient(catalog_url), dataset), [path], MASKS_LAYER)
+    register_layer(ensure_dataset(CatalogClient(catalog_url), dataset), [path], MATTE_LAYER)
 
 
 def decode_mask_pngs(blobs: Sequence[bytes], threads: int = DECODE_THREADS) -> list[np.ndarray | None]:
@@ -265,7 +265,7 @@ def read_clip_masks(
     for camera, entity in enumerate(entities):
         column: str = f"{entity}:EncodedImage:blob"
         if column not in table.column_names:
-            raise ValueError(f"{dataset}/{segment_id}: layer {MASKS_LAYER!r} has no {entity}")
+            raise ValueError(f"{dataset}/{segment_id}: layer {MATTE_LAYER!r} has no {entity}")
         cells: list[object | None] = table.column(column).to_pylist()
         stored_wh: tuple[int, int] = clip.stored_sizes[camera]
         blobs: list[bytes] = []

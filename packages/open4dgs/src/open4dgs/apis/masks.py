@@ -20,7 +20,7 @@ from torch import Tensor
 
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.masks import (
-    MASKS_LAYER,
+    MATTE_LAYER,
     MODEL_NAME,
     fill_missing_boxes,
     load_birefnet,
@@ -94,7 +94,7 @@ def main(config: Config) -> None:
     assert frame_indices is not None
     count: int = len(cameras) * len(frame_indices)
     print(f"{count} masks: {count / model_seconds:.1f} masks/s in the model, {count / (perf_counter() - started):.1f} masks/s with decode")
-    path: Path = config.output_dir / target / f"{config.segment_id}.{MASKS_LAYER}.rrd"
+    path: Path = config.output_dir / target / f"{config.segment_id}.{MATTE_LAYER}.rrd"
     write_mask_layer(
         path,
         config.segment_id,
@@ -115,4 +115,4 @@ def main(config: Config) -> None:
     print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")
     if config.register:
         register_mask_layer(config.register_url, target, path)
-        print(f"registered layer {MASKS_LAYER} of {target}/{config.segment_id} on {config.register_url}")
+        print(f"registered layer {MATTE_LAYER} of {target}/{config.segment_id} on {config.register_url}")
