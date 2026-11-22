@@ -17,6 +17,7 @@ from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
+from open4dgs.asog import decode_asog
 from open4dgs.run_log import RUNS_DATASET
 from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params, log_splat_frames, splats_at, up_view_coordinates
 
@@ -37,6 +38,10 @@ class Config:
     """Device for the motion-model evaluation (cpu keeps the GPU free; about 1 s per frame for 328k rows)."""
     register: bool = True
     runs_catalog_url: str = LOCAL_CATALOG
+    asog: Path | None = None
+    """Export this ``.asog`` export of the run (decoded, open4dgs.asog) instead of the checkpoint; never registered."""
+    output: Path | None = None
+    """Output path (default ``<run>/splats.rrd``)."""
 
 
 def _run_property(reader: RrdReader, name: str) -> int:
@@ -66,14 +71,14 @@ def _train_camera_poses(reader: RrdReader) -> np.ndarray:
 def main(config: Config) -> dict[str, object]:
     """Write ``<run>/splats.rrd``, register it as layer ``splats``; returns sizes and counts."""
     run_name: str = config.run.name
-    out: Path = config.run / "splats.rrd"
+    out: Path = config.output or config.run / "splats.rrd"
     reader: RrdReader = RrdReader(config.run / "run.rrd")
     frame_start: int = _run_property(reader, "frame_start")
     checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
     fps: float = float(checkpoint["fps"])
     num_frames: int = int(checkpoint["num_frames"])
     device: torch.device = torch.device(config.device)
-    params = checkpoint_params(checkpoint, device)
+    params = decode_asog(config.asog, device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
     trainer: TrigsTrainer = TrigsTrainer(device=str(device))
     trigs_config: TrigsTrainingConfig = TrigsTrainingConfig(fps=fps)  # _deform reads only the TRiGS defaults (gauge, smooth cull)
 
@@ -115,7 +120,7 @@ def main(config: Config) -> dict[str, object]:
         "view_coordinates": str(view_coordinates),
         "blueprint_view_id": str(view.id),
     }
-    if config.register:
+    if config.register and config.asog is None:
         client: CatalogClient = CatalogClient(config.runs_catalog_url)
         client.get_dataset(RUNS_DATASET).register([out.resolve().as_uri()], layer_name="splats", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
         summary["registered"] = f"{RUNS_DATASET}/{run_name}/splats"

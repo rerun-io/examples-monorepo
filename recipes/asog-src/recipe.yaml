@@ -1,0 +1,39 @@
+# Animated SOG (arrival-space/animated-sog at bc976cf): the `.asog` format for 4D Gaussian splat clips on the TRiGS
+# motion model. Installs the Python encoder / reference decoder `asog` (python/ subdirectory, pure Python, numpy only;
+# the SH palette k-means uses torch on CUDA when the environment has it). The JS decoder and players (js/) and the
+# flip-book pipeline's external TRiGS calls are not used: packages/open4dgs (open4dgs.asog) builds the encoder input
+# from a checkpoint in memory.
+package:
+  name: asog-src
+  version: "0.1.0.bc976cf"
+
+source:
+  # GitHub archive of bc976cf106363a4bad25a21405f9281622ce1a65.
+  url: https://github.com/arrival-space/animated-sog/archive/bc976cf106363a4bad25a21405f9281622ce1a65.tar.gz
+  sha256: 0beb3975141257ba5f32957e96b5c9ea1454b80fe1112c71fcba8a6b128b34eb
+  patches:
+    # Hook only: `encode` reads a .trigsbin file; `encode_runtime` takes the TrigsRuntime it reads (same options), so
+    # packages/open4dgs passes the checkpoint's arrays in memory instead of writing a .trigsbin.
+    - patches/0001-encode-runtime-hook.patch
+
+build:
+  # Bump with every patch or build script change (the build string hash does not follow recipe content).
+  number: 0
+  noarch: python
+  script:
+    - rm -rf "$SP_DIR/asog" "$SP_DIR"/animated_sog-*.dist-info
+    - cd python && python -m pip install . --no-deps --no-build-isolation -vv
+    - grep -q "def encode_runtime" "$SP_DIR/asog/encode.py"
+
+requirements:
+  host:
+    - python 3.12.*
+    - pip
+    - hatchling >=1.21
+  run:
+    - python >=3.10
+    - numpy >=1.24
+
+about:
+  homepage: https://github.com/arrival-space/animated-sog
+  summary: Animated SOG (.asog) encoder and reference decoder (animated-sog at bc976cf), import name `asog`

@@ -4368,6 +4368,8 @@ platforms = ["linux-64"]
 
 [feature.open4dgs.dependencies]
 open4dgs-trigs-src = { path = "recipes/open4dgs-trigs-src" }
+# Animated SOG (.asog) encoder + reference decoder (numpy only); open4dgs.asog feeds it a checkpoint in memory.
+asog-src = { path = "recipes/asog-src" }
 python = "3.12.*"
 # ai-demos prebuilt for CUDA 13, Python 3.12 and torch 2.12 (sm_86 + sm_120 + PTX); TRiGS's upstream pin.
 gsplat = "==1.5.3"
@@ -4411,6 +4413,11 @@ description = "Train a person from a catalog clip with TRiGS (body-surface init,
 cmd = "python tools/apps/export_splats.py"
 cwd = "packages/open4dgs"
 description = "Per-frame Gaussian splats of a trained run (--run <run dir>): <run>/splats.rrd with the run's cameras and meshes, registered as layer splats on open4dgs-runs (CPU; open in packages/gsplat-rust-renderer)"
+
+[feature.open4dgs.tasks.open4dgs-export-asog]
+cmd = "python tools/apps/export_asog.py"
+cwd = "packages/open4dgs"
+description = "Compress a trained run (--run <run dir>) to Animated SOG: /mnt/nas/ssd-8tb/open4dgs/asog/<run>.asog (third-party interchange export, 644); prints sizes and timings"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
