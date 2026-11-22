@@ -268,16 +268,24 @@ const STREAMS: [&str; 14] = [
 type Decoded = Result<Option<(Vec<i64>, usize)>, Error>;
 
 /// The streams of [`STREAMS`], each taken once by name.
-struct Streams([Option<Decoded>; STREAMS.len()]);
+struct Streams<'c, 'a> {
+    container: &'c Container<'a>,
+    /// Decoded ahead (parallel); `None` = decode on [`Self::optional`].
+    ahead: [Option<Decoded>; STREAMS.len()],
+}
 
-impl Streams {
-    /// Decode every stream: one scoped thread per stream when `parallel` (the zlib members are independent), in
-    /// order otherwise. Both give the same values.
-    fn decode(container: &Container<'_>, parallel: bool) -> Self {
+impl<'c, 'a> Streams<'c, 'a> {
+    /// With `parallel`, decode every stream now, one scoped thread per stream (the zlib members are independent).
+    /// Without it, each stream is decoded on the calling thread when it is taken, so at most the streams in use are
+    /// held (the web build's memory profile). Both give the same values.
+    fn decode(container: &'c Container<'a>, parallel: bool) -> Self {
         if !parallel {
-            return Self(STREAMS.map(|name| Some(container.stream(name))));
+            return Self {
+                container,
+                ahead: [const { None }; STREAMS.len()],
+            };
         }
-        Self(std::thread::scope(|scope| {
+        let ahead = std::thread::scope(|scope| {
             STREAMS
                 .map(|name| scope.spawn(move || container.stream(name)))
                 .map(|thread| {
@@ -287,7 +295,8 @@ impl Streams {
                             .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
                     )
                 })
-        }))
+        });
+        Self { container, ahead }
     }
 
     fn optional(&mut self, name: &'static str) -> Decoded {
@@ -295,7 +304,9 @@ impl Streams {
             .iter()
             .position(|&s| s == name)
             .expect("a listed stream");
-        self.0[index].take().expect("each stream is taken once")
+        self.ahead[index]
+            .take()
+            .unwrap_or_else(|| self.container.stream(name))
     }
 
     /// Stream `name`, required, with `want` channels over `rows` rows.
@@ -639,7 +650,11 @@ fn decode_parts_with(
 }
 
 /// The motion streams as [`MOTION_CODES`] i32 per row, with the clip index of every row checked.
-fn motion_codes(m: &Manifest, opacity: Vec<i64>, decoded: &mut Streams) -> Result<Vec<i32>, Error> {
+fn motion_codes(
+    m: &Manifest,
+    opacity: Vec<i64>,
+    decoded: &mut Streams<'_, '_>,
+) -> Result<Vec<i32>, Error> {
     let n = m.count;
     let streams: [(&'static str, Vec<i64>, usize); 7] = [
         ("opacity", opacity, 1),
