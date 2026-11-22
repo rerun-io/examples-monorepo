@@ -4,7 +4,7 @@
 //   1 = asog (animated-sog v1 O/g form + clips): CPU reference `gsplat_core::trigs::AsogMotion::row`.
 // Both share the temporal cut, the Bezier life parameter, the gauge fix and the SE(3) exponential. Scales are copied
 // from the canonical rows; rows with zero weight keep the canonical pose and get raw opacity -100.
-// No subgroup built-ins; 5 storage buffers.
+// No lane built-ins; 5 storage buffers.
 
 struct DeformParams {
     count: u32,

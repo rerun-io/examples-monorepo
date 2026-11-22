@@ -1,5 +1,5 @@
 // ASOG motion de-quantisation at load: the zlib integers of the motion streams -> the packed asog rows that
-// `trigs_deform.wgsl` reads (ASOG_STRIDE f32 per row). One thread per row, no subgroups, three storage buffers.
+// `trigs_deform.wgsl` reads (ASOG_STRIDE f32 per row). One thread per row, no lane built-ins, three storage buffers.
 // CPU oracle: `gsplat_core::asog::AsogParts::motion` (f64, the reference's operation order); this pass is f32, so the
 // rows agree within f32 rounding (E4, `motion_gpu::tests`). The position x is the de-quantised canonical centre that
 // `sog_dequant.wgsl` wrote before this pass.
