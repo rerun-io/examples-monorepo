@@ -55,6 +55,7 @@ disallowed-types = [
 # Allow-list of words for markdown in docstrings https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
 doc-valid-idents = [
   "COLMAP",
+  "TRiGS",
   "NeRF",
   "OpenCV",
   "WGSL",

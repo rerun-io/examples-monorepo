@@ -6210,6 +6210,8 @@ dependencies = [
  "re_crash_handler",
  "re_format 0.42.0",
  "re_grpc_server",
+ "re_log_encoding 0.42.0",
+ "re_log_msg",
  "re_math",
  "re_tracing 0.42.0",
  "re_viewer",

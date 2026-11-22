@@ -18,6 +18,7 @@ mod renderer;
 mod scene;
 mod shader;
 mod timing;
+pub mod trigs;
 mod types;
 mod view;
 /// The glam of every public math type here (the workspace glam the CLI shares with Brush cameras),

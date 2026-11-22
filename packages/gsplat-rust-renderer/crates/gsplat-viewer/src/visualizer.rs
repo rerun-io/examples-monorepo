@@ -205,6 +205,82 @@ fn draw_splat_entity(
             &query_ctx,
             GaussianSplats3D::descriptor_spherical_harmonics_degree().component,
         );
+    // TRiGS motion fields (static, untyped f32/f64): evaluated at the time cursor when all are present.
+    let motion_ids = crate::trigs::components();
+    let motion_query = data.query_components_with_history(
+        ctx,
+        query,
+        motion_ids.iter().copied(),
+        instruction,
+        None,
+    );
+    let motion_results = VisualizerInstructionQueryResults::new(instruction, &motion_query, output);
+    let [
+        m_op,
+        m_times,
+        m_logdur,
+        m_base,
+        m_c0,
+        m_c1,
+        m_c2,
+        m_anchors,
+        m_static,
+        m_fps,
+        m_origin,
+        m_threshold,
+    ] = motion_ids.map(|id| motion_results.iter_optional(id));
+    let motion = match (
+        last_slice::<f32>(&m_op),
+        last_slice::<f32>(&m_times),
+        last_slice::<f32>(&m_logdur),
+        last_slice::<[f32; 6]>(&m_base),
+        last_slice::<[f32; 6]>(&m_c0),
+        last_slice::<[f32; 6]>(&m_c1),
+        last_slice::<[f32; 6]>(&m_c2),
+        last_slice::<[f32; 3]>(&m_anchors),
+    ) {
+        (
+            Some(opacities),
+            Some(times),
+            Some(log_durations),
+            Some(base),
+            Some(c0),
+            Some(c1),
+            Some(c2),
+            Some(anchors),
+        ) => {
+            let fps = last_slice::<f64>(&m_fps)
+                .and_then(|v| v.first().copied())
+                .unwrap_or(1.0);
+            let origin = last_slice::<f64>(&m_origin)
+                .and_then(|v| v.first().copied())
+                .unwrap_or(0.0);
+            let t = crate::trigs::clip_seconds(
+                ctx.recording().timeline_type(&query.timeline),
+                query.latest_at,
+                fps,
+                origin,
+            );
+            Some((
+                gsplat_core::trigs::TrigsMotion {
+                    opacities,
+                    times,
+                    log_durations,
+                    twist_base: base,
+                    twist_c0: c0,
+                    twist_c1: c1,
+                    twist_c2: c2,
+                    anchors,
+                    is_static: last_slice::<f32>(&m_static).unwrap_or(&[]),
+                    active_threshold: last_slice::<f32>(&m_threshold)
+                        .and_then(|v| v.first().copied())
+                        .unwrap_or(0.0),
+                },
+                t,
+            ))
+        }
+        _ => None,
+    };
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -233,6 +309,28 @@ fn draw_splat_entity(
                 .and_then(|d| d.first().copied())
                 .unwrap_or(*fallback_degree.0),
         };
+        if let Some((motion, t)) = motion
+            .as_ref()
+            .filter(|(m, _)| m.is_consistent(centers.len()))
+        {
+            // One upload per evaluated time: the cache key carries the cursor, the signature the clip time.
+            let evaluated = crate::trigs::Evaluated::new(&native, motion, *t);
+            let deformed = evaluated.native(&native);
+            if deformed.centers.is_empty() {
+                continue;
+            }
+            let mut hasher = DefaultHasher::new();
+            (signature, t.to_bits()).hash(&mut hasher);
+            retry |= draw_instances(
+                entity,
+                draw,
+                (query.latest_at, row.1),
+                re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                Primitives::Splats(&deformed),
+                render_mode,
+            )?;
+            continue;
+        }
         retry |= draw_instances(
             entity,
             draw,
@@ -243,6 +341,14 @@ fn draw_splat_entity(
         )?;
     }
     Ok(retry)
+}
+
+/// The values of the last row of a (static, one-row) optional component.
+fn last_slice<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>) -> Option<&'a [T]>
+where
+    T: 'a + re_viewer::external::re_chunk::ChunkComponentSlicer<Item<'a> = &'a [T]>,
+{
+    iter.slice::<T>().last().map(|(_, values)| values)
 }
 
 /// Queue one compute batch per instance; capacity or capability failures draw the stock fallback.
