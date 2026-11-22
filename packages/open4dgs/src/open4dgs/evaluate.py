@@ -194,8 +194,10 @@ class Metrics:
         self.lpips_net: LearnedPerceptualImagePatchSimilarity = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
 
     def lpips(self, pred: Float32[Tensor, "h w 3"], target: Float32[Tensor, "h w 3"]) -> float:
+        """LPIPS of one pair. A crop is a strided view; made contiguous it has the memory layout of ``score_camera``'s
+        stacked crops, so cuDNN runs the same convolution algorithms on both paths."""
         with torch.no_grad(), ieee_fp32():
-            return float(self.lpips_net(pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None]))
+            return float(self.lpips_net(pred.contiguous().permute(2, 0, 1)[None], target.contiguous().permute(2, 0, 1)[None]))
 
     def frame(
         self,
