@@ -333,34 +333,6 @@ class MonoPriorLoss:
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-def moge_geometry(
-    predictor: object, frames: UInt8[Tensor, "b h w 3"], fx: float
-) -> tuple[Float32[Tensor, "b h w"], Float32[Tensor, "b h w 3"], Bool[Tensor, "b h w"]]:
-    """MoGe-2 metric depth, RDF normals and validity at the frames' size, with the calibrated focal ``fx`` (pixels).
-
-    ``monopriors`` ``postprocess_moge_v2_geometry`` passes ``fov_x=None`` (MoGe guesses the focal); here the shift
-    recovery gets ``fov_x = 2 atan(w / 2 fx)`` instead (metrictrail ``recover_metric_depth`` pattern). MoGe assumes a
-    centred principal point.
-    """
-    from monopriors.third_party.moge.model._inference import recover_shift_and_intrinsics
-
-    height, width = frames.shape[1], frames.shape[2]
-    graph = predictor.forward_geometry(frames)  # type: ignore[attr-defined]
-    points: Tensor = graph.points_bhw3.float()
-    scale: Tensor = graph.metric_scale_b.float()
-    mask_net: Tensor = graph.mask_bhw.float()
-    fov_x: float = math.degrees(2.0 * math.atan(width / (2.0 * fx)))
-    fov: Tensor = torch.tensor(fov_x, device=points.device)
-    camera = recover_shift_and_intrinsics(points, mask_net > 0.5, fov_x=fov, aspect_ratio=width / height)
-    z: Tensor = (points[..., 2] + camera.shift_b.float()[:, None, None]) * scale[:, None, None]
-    z_full: Tensor = F.interpolate(z[:, None], size=(height, width), mode="bilinear", align_corners=False)[:, 0]
-    mask_full: Tensor = F.interpolate(mask_net[:, None], size=(height, width), mode="bilinear", align_corners=False)[:, 0]
-    normals: Tensor = F.interpolate(graph.normals_bhw3.float().permute(0, 3, 1, 2), size=(height, width), mode="bilinear", align_corners=False)
-    normals = F.normalize(normals.permute(0, 2, 3, 1), dim=-1)
-    valid: Tensor = (mask_full > 0.5) & (z_full > 0)
-    return torch.where(valid, z_full, torch.zeros_like(z_full)), normals, valid
-
-
 def compute_clip_priors(
     clip: MultiViewClip, camera_names: Sequence[str], predictor: object, batch_size: int = 8, device: torch.device | None = None
 ) -> ClipPriors:
@@ -370,14 +342,17 @@ def compute_clip_priors(
     normals: list[Tensor] = []
     for name in camera_names:
         cam: int = clip.camera_names.index(name)
-        fx: float = float(clip.K[cam, 0, 0])
+        # The calibrated focal fixes MoGe's shift recovery (metrictrail ``recover_metric_depth`` pattern); MoGe assumes a
+        # centred principal point.
+        fov_x: float = math.degrees(2.0 * math.atan(clip.frames[cam].shape[2] / (2.0 * float(clip.K[cam, 0, 0]))))
         d_parts: list[Tensor] = []
         n_parts: list[Tensor] = []
         for start in range(0, clip.frames[cam].shape[0], batch_size):
             batch: Tensor = clip.frames[cam][start : start + batch_size].to(dev)
-            depth, normal, valid = moge_geometry(predictor, batch, fx)
-            d_parts.append(depth.half().cpu())
-            n_parts.append(encode_normals(normal, valid).cpu())
+            out = predictor.predict_geometry(batch, fov_x=fov_x)  # type: ignore[attr-defined]
+            valid: Tensor = (out.mask_bhw > 0.5) & (out.depth_bhw > 0)
+            d_parts.append(torch.where(valid, out.depth_bhw, 0.0).half().cpu())
+            n_parts.append(encode_normals(out.normals_bhw3, valid).cpu())
         depths.append(torch.cat(d_parts))
         normals.append(torch.cat(n_parts))
     return ClipPriors(camera_names=tuple(camera_names), frame_indices=clip.frame_indices.clone(), depth=tuple(depths), normals=tuple(normals))
