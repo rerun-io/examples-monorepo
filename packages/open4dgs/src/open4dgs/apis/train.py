@@ -23,7 +23,7 @@ from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import CameraGeometry, CameraRenders, Metrics, evaluate_cameras, evaluate_geometry, mean_geometry, mean_metrics, render_orbit
 from open4dgs.holdout import select_holdout
-from open4dgs.init_cloud import InitCloud, log_init_cloud
+from open4dgs.init_cloud import InitCloud, log_init_cloud, read_init_cloud
 from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals, read_clip_priors
 from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_people, log_scalars, log_video, register_run
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip, untrained_clip
@@ -79,6 +79,10 @@ class Config:
     prior_config: PriorConfig = field(default_factory=PriorConfig)
     geometry: bool = True
     """Score rendered depth against the SMPL-X mesh depth at the held-out cameras (mesh frames only)."""
+    selfcap_time_start_s: float | None = None
+    """Read a SelfCap segment (phones on ``video_time``, ``open4dgs.selfcap_clip``) from this time instead of ``frame_start``."""
+    init_rrd: Path | None = None
+    """Use this init-cloud recording (``open4dgs.apis.selfcap --stage init``) instead of the body-surface init."""
 
 
 def _read_masks(config: Config, clip: MultiViewClip) -> tuple[torch.Tensor, ...]:
@@ -176,9 +180,16 @@ def main(config: Config) -> dict[str, object]:
     recording: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
     timings: dict[str, float] = {}
     t0: float = time.perf_counter()
-    clip: MultiViewClip = read_catalog_clip(
-        config.catalog_url, config.dataset, config.segment_id, config.frame_start, config.num_frames, cameras=config.cameras, max_side=config.max_side
-    )
+    if config.selfcap_time_start_s is not None:
+        from open4dgs.selfcap_clip import read_timed_clip
+
+        clip: MultiViewClip = read_timed_clip(
+            config.catalog_url, config.dataset, config.segment_id, config.selfcap_time_start_s, config.num_frames, cameras=config.cameras, max_side=config.max_side
+        ).clip
+    else:
+        clip = read_catalog_clip(
+            config.catalog_url, config.dataset, config.segment_id, config.frame_start, config.num_frames, cameras=config.cameras, max_side=config.max_side
+        )
     timings["read_clip_s"] = time.perf_counter() - t0
     if config.holdout_cameras is not None:
         holdout_names: tuple[str, ...] = tuple(config.holdout_cameras)
@@ -189,14 +200,19 @@ def main(config: Config) -> dict[str, object]:
     masks = _read_masks(config, clip)
     timings["masks_s"] = time.perf_counter() - t0
     t0 = time.perf_counter()
-    init: InitCloud = body_surface_init(
-        clip,
-        train_names,
-        dataset=config.dataset,
-        segment_id=config.segment_id,
-        samples_per_person=config.samples_per_person,
-        keyframe_step=config.keyframe_step,
-    )
+    if config.init_rrd is not None:
+        init: InitCloud = read_init_cloud(config.init_rrd)
+        if init.frame_end != len(clip.frame_indices) - 1 or init.source_frame_start != int(clip.frame_indices[0]):
+            raise ValueError(f"{config.init_rrd}: init window {init.source_frame_start}+{init.frame_end + 1} does not match the clip")
+    else:
+        init = body_surface_init(
+            clip,
+            train_names,
+            dataset=config.dataset,
+            segment_id=config.segment_id,
+            samples_per_person=config.samples_per_person,
+            keyframe_step=config.keyframe_step,
+        )
     timings["init_s"] = time.perf_counter() - t0
     print(
         f"[open4dgs] clip {len(clip.camera_names)} cams x {len(clip.frame_indices)} frames, sizes {sorted(set(clip.sizes))}; held out {holdout_names}; init rows {init.num_rows:,}"
@@ -231,7 +247,8 @@ def main(config: Config) -> dict[str, object]:
     train_eval: list[CameraRenders] = (
         evaluate_cameras(trained, clip, masks, train_names, metrics, keep_renders=False) if config.eval_train_cameras else []
     )
-    orbit, _ = render_orbit(trained, clip, train_names, device)
+    orbit_centre: torch.Tensor | None = torch.from_numpy(np.median(init.positions, axis=0)) if clip.people is None else None
+    orbit, _ = render_orbit(trained, clip, train_names, device, centre=orbit_centre)
     geometry: list[CameraGeometry] = evaluate_geometry(trained, clip, masks, holdout_names, device) if config.geometry else []
     timings["eval_s"] = time.perf_counter() - t0
 
@@ -282,6 +299,8 @@ def main(config: Config) -> dict[str, object]:
         "holdout_seed": config.holdout_seed,
         "max_side": config.max_side or 0,
         "init_method": init.method,
+        "init_rrd": str(config.init_rrd or ""),
+        "selfcap_time_start_s": config.selfcap_time_start_s if config.selfcap_time_start_s is not None else -1.0,
         "samples_per_person": config.samples_per_person,
         "keyframe_step": config.keyframe_step,
         "prior": config.prior,
