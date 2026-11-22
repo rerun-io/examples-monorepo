@@ -169,6 +169,8 @@ PROGRESS: str = "log"
 """Stage and step messages (TextLog)."""
 PERSON: str = "world/person/splats"
 """The trained 4D person: ``AnimatedSogSplats3D`` + a one-pose ``GaussianSplats3D`` preview, static."""
+PERSON_EYE_DISTANCE: float = 0.9
+"""The 4D person view's eye: this many times the cameras' distance from the person's middle."""
 TRAIN_TIMELINE: str = "train_step"
 """Optimizer steps of the person's training."""
 TRAIN_PREVIEW: str = "train/preview"
@@ -262,13 +264,19 @@ def training_blueprint() -> rrb.Blueprint:
 
 
 def person_blueprint(rig: CameraRig) -> rrb.Blueprint:
-    """The trained 4D person in 3D, seen from the front view, beside the source camera, above the generated views."""
-    front: Float64[ndarray, "4 4"] = rig.cameras[0].world_T_cam
+    """The trained 4D person in 3D beside the source camera, above the generated views. The 3D view looks from between the
+    first two cameras at the ring's distance (no frustum in front of the person) and leaves out the body and every image
+    plane, which would cover the person."""
+    target: Float64[ndarray, " 3"] = np.array([0.0, 0.9, 0.0])
+    positions: list[Float64[ndarray, " 3"]] = [camera.world_T_cam[:3, 3] for camera in rig.cameras[:2]]
+    between: Float64[ndarray, " 3"] = np.mean(positions, axis=0) - target
+    distance: float = float(np.linalg.norm(positions[0] - target))
+    eye: Float64[ndarray, " 3"] = target + PERSON_EYE_DISTANCE * distance * between / max(float(np.linalg.norm(between)), 1e-6)
     person: rrb.Spatial3DView = rrb.Spatial3DView(
         origin="world",
-        contents=["+ $origin/**", f"- /{BODY}/**"],
+        contents=["+ $origin/**", f"- /{BODY}/**", f"- /{SOURCE}/video", *(f"- /{camera_entity(camera.camera_id)}/video" for camera in rig.cameras)],
         name="4D person",
-        eye_controls=rrb.EyeControls3D(position=front[:3, 3].tolist(), look_target=[0.0, 0.9, 0.0], eye_up=[0.0, 1.0, 0.0]),
+        eye_controls=rrb.EyeControls3D(position=eye.tolist(), look_target=target.tolist(), eye_up=[0.0, 1.0, 0.0]),
     )
     num_views: int = len(rig.cameras)
     top: rrb.Horizontal = rrb.Horizontal(
