@@ -2,15 +2,30 @@
 #![allow(dead_code)]
 use wgpu::util::DeviceExt as _;
 
+/// The test device; `GSPLAT_NO_SUBGROUPS=1` withholds `SUBGROUP`, so the whole GPU suite also
+/// checks the workgroup-memory scan and sort kernels.
 pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
+    let subgroups = std::env::var_os(crate::NO_SUBGROUPS_ENV).is_none_or(|v| v != "1");
+    gpu_with(subgroups)
+}
+
+/// The test device with or without `SUBGROUP` (which the adapter must offer when requested).
+pub fn gpu_with(subgroups: bool) -> (wgpu::Device, wgpu::Queue) {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
         .expect("request GPU test adapter");
-    println!("core test adapter: {:?}", adapter.get_info());
+    println!(
+        "core test adapter: {:?}, subgroups: {subgroups}",
+        adapter.get_info()
+    );
+    let subgroup = if subgroups {
+        wgpu::Features::SUBGROUP
+    } else {
+        wgpu::Features::empty()
+    };
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::SUBGROUP
-            | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
+        required_features: subgroup | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
         required_limits: adapter.limits(),
         ..Default::default()
     }))

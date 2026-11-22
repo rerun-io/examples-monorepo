@@ -10,13 +10,23 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
     use crate::gpu::{module, pipeline};
     let mut kernels = Kernels::new(device);
     let kernel = |module, entry| pipeline(device, module, entry, crate::kernels::bindings(entry));
-    let poison_scan = "
-        if lid < 64u { partials[lid] = 0xdeadbeefu; }
-        if lid == 0u { cube_total = 0xdeadbeefu; length = 0xdeadbeefu; }
-        for (var j = 0u; j < 4u; j++) { lds[j * 256u + lid] = 0xdeadbeefu; }
+    let subgroups = device.features().contains(wgpu::Features::SUBGROUP);
+    let resolve = |name| crate::shader::resolve_variant(name, subgroups);
+    let poison_lanes = if subgroups {
+        "if lid < 64u { partials[lid] = 0xdeadbeefu; }
+        if lid == 0u { cube_total = 0xdeadbeefu; }"
+    } else {
+        "scan_lanes[lid] = 0xdeadbeefu;"
+    };
+    let poison_scan = format!(
+        "
+        {poison_lanes}
+        if lid == 0u {{ length = 0xdeadbeefu; }}
+        for (var j = 0u; j < 4u; j++) {{ lds[j * 256u + lid] = 0xdeadbeefu; }}
         workgroupBarrier();
-    ";
-    let scan = crate::shader::resolve("scan.wgsl");
+    "
+    );
+    let scan = resolve("scan.wgsl");
     assert_eq!(
         scan.matches("    if lid == 0u {\n        length =").count(),
         1
@@ -26,11 +36,11 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
         &format!("{poison_scan}\n    if lid == 0u {{\n        length ="),
         1,
     );
-    assert_ne!(scan, crate::shader::resolve("scan.wgsl"));
+    assert_ne!(scan, resolve("scan.wgsl"));
     let scan = module(device, &scan);
     kernels.scan = kernel(&scan, "scan");
     kernels.add_offsets = kernel(&scan, "add_offsets");
-    let sort = crate::shader::resolve("sort.wgsl");
+    let sort = resolve("sort.wgsl");
     assert_eq!(sort.matches("    let n = sort_length(lid);").count(), 5);
     let sort = sort.replace(
         "    let n = sort_length(lid);",
@@ -47,7 +57,7 @@ fn poisoned_kernels(device: &wgpu::Device) -> Kernels {
             let n = sort_length(lid);"
         ),
     );
-    assert_ne!(sort, crate::shader::resolve("sort.wgsl"));
+    assert_ne!(sort, resolve("sort.wgsl"));
     let sort = module(device, &sort);
     kernels.count_keys = kernel(&sort, "count_keys");
     kernels.reduce_counts = kernel(&sort, "reduce_counts");
@@ -277,18 +287,43 @@ fn radix_sort_crosses_the_70m_reduced_histogram_boundary() {
 
 #[test]
 fn poison_injection_anchors_are_present() {
-    assert_eq!(
-        crate::shader::resolve("scan.wgsl")
-            .matches("    if lid == 0u {\n        length =")
-            .count(),
-        1
-    );
-    assert_eq!(
-        crate::shader::resolve("sort.wgsl")
-            .matches("    let n = sort_length(lid);")
-            .count(),
-        5
-    );
+    for subgroups in [true, false] {
+        assert_eq!(
+            crate::shader::resolve_variant("scan.wgsl", subgroups)
+                .matches("    if lid == 0u {\n        length =")
+                .count(),
+            1
+        );
+        assert_eq!(
+            crate::shader::resolve_variant("sort.wgsl", subgroups)
+                .matches("    let n = sort_length(lid);")
+                .count(),
+            5
+        );
+    }
+}
+
+/// The portable modules name no subgroup operation, so the web build adds no `enable subgroups;`
+/// (gpu.rs keys it on the word) and browsers without the feature accept them. The subgroup modules
+/// keep the kernels' own text.
+#[test]
+fn portable_modules_need_no_subgroup_extension() {
+    for source in crate::kernels::sources(false) {
+        assert!(!source.contains("subgroup"), "{source}");
+    }
+    for name in ["scan.wgsl", "sort.wgsl"] {
+        let with = crate::shader::resolve_variant(name, true);
+        assert!(with.contains("subgroupInclusiveAdd") && !with.contains("scan_lanes"));
+        assert!(crate::shader::resolve_variant(name, false).contains("scan_lanes"));
+    }
+    let entries = |name| {
+        crate::shader::resolve_variant(name, true)
+            .matches(
+                "@builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) width: u32)",
+            )
+            .count()
+    };
+    assert_eq!((entries("scan.wgsl"), entries("sort.wgsl")), (1, 4));
 }
 
 #[test]

@@ -39,17 +39,28 @@ pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
     })
 }
 
-/// Rerun's device descriptor plus the subgroup feature and limits the splat kernels need, when the adapter has them.
+/// Rerun's device descriptor plus the limits the splat kernels need, when the adapter has them,
+/// and the subgroup feature when the adapter offers it.
 pub fn compute_device_descriptor()
 -> Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync> {
-    Arc::new(|adapter| {
+    compute_device_descriptor_with(true)
+}
+
+/// [`compute_device_descriptor`]; `allow_subgroups = false` never requests `SUBGROUP`, so the
+/// splat kernels take their workgroup-memory variant (the web viewer's `?force_no_subgroups=1`).
+pub fn compute_device_descriptor_with(
+    allow_subgroups: bool,
+) -> Arc<dyn Fn(&wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> + Send + Sync> {
+    Arc::new(move |adapter| {
         let mut descriptor =
             re_renderer::device_caps::DeviceCaps::from_adapter_without_validation(adapter)
                 .device_descriptor();
         descriptor.label = Some("Gaussian compute viewer");
         let available = adapter.limits();
         if gsplat_core::check_adapter(adapter.features(), &available).is_ok() {
-            descriptor.required_features |= wgpu::Features::SUBGROUP;
+            if allow_subgroups {
+                descriptor.required_features |= adapter.features() & wgpu::Features::SUBGROUP;
+            }
             descriptor.required_limits =
                 gsplat_core::compute_limits(&available, descriptor.required_limits);
         }
