@@ -347,7 +347,7 @@ impl Deform {
 
 #[cfg(test)]
 mod tests {
-    //! E4: the motion pass read back against the CPU references of both forms.
+    //! The motion pass read back against the CPU references of both forms.
     use super::*;
     use crate::Splats;
     use crate::test_utils::{gpu, read};
@@ -499,7 +499,7 @@ mod tests {
 
     fn assert_within(worst: &Worst, form: &str) {
         println!("trigs_deform {form}: {worst:?}");
-        // Design E4: 1e-5 m, 1e-5 rad; opacity in linear units; scales are copies. The centre bound is relative to
+        // Bounds: 1e-5 m, 1e-5 rad; opacity in linear units; scales are copies. The centre bound is relative to
         // max(1 m, |centre|): both sides are f32, and a rotation rounding of ~3e-6 rad over a 3.5 m lever arm moves a
         // centre by ~1e-5 m (asog row 20871 at t = 2.42: f32 CPU 1.9e-5 m and GPU 8.1e-6 m from an f64 evaluation).
         assert!(
@@ -757,7 +757,7 @@ mod tests {
             }
         );
 
-        // The CPU path per time change: evaluate on the CPU + a scene upload (what the viewer did before).
+        // The CPU path per time change: evaluate on the CPU + a scene upload (the `GSPLAT_MOTION=cpu` oracle path).
         let mut out = Splats::default();
         let (mut evaluate, mut upload) = (Vec::new(), Vec::new());
         for &t in times.iter().step_by(4) {

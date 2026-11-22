@@ -1,5 +1,5 @@
-//! `gsplat_core::trigs` against the trainer: `tests/fixtures/trigs_motion_1000.rrd` holds 1,000 rows of the
-//! 4DAnyone run C checkpoint (50 forced static, 100 with zero or tiny rotation) and `TrigsTrainer._deform` at five
+//! `gsplat_core::trigs` against the trainer: `tests/fixtures/trigs_motion_1000.rrd` holds 1,000 rows of a
+//! 4DAnyone checkpoint (50 forced static, 100 with zero or tiny rotation) and `TrigsTrainer._deform` at five
 //! times (written by the open4dgs scratch script `k2/dump_fixture.py`, CPU torch f32).
 use gsplat_core::native::NativeSplats;
 use gsplat_core::trigs::{TrigsMotion, deform_visible};

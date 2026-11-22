@@ -1,10 +1,10 @@
 //! `gsplat_core::asog` + the `.asog` motion form against the asog reference decoder (`asog.decode.read` and
-//! `Asog.evaluate`, f64): `tests/fixtures/asog_reference.rrd` holds 2,048 rows of the run C band `.asog` (every row
+//! `Asog.evaluate`, f64): `tests/fixtures/asog_reference.rrd` holds 2,048 rows of a trained `.asog` clip (every row
 //! with near-zero omega and every rank-deficient / inexact pinv row, then random rows) as `AnimatedSogSplats3D`,
 //! and the reference decode under `/expected` (written by `tools/asog_reference_fixture.py` in the open4dgs env).
 //!
-//! E1: Rust decode + evaluate == reference (centre <= 1e-5 m, rotation <= 1e-5 rad, weight <= 1e-6, same visible
-//! set). E2: on well-conditioned rows the twist form fed the pinv translation equals the `.asog` form.
+//! Rust decode + evaluate == reference (centre <= 1e-5 m, rotation <= 1e-5 rad, weight <= 1e-6, same visible
+//! set). On well-conditioned rows the twist form fed the pinv translation equals the `.asog` form.
 use gsplat_core::asog::decode;
 use gsplat_core::trigs::{ASOG_ACTIVE_THRESHOLD, CULLED_RAW_OPACITY, TrigsMotion};
 mod common;
@@ -183,7 +183,7 @@ fn decode_matches_the_reference_read() {
 }
 
 #[test]
-fn e1_evaluate_matches_the_reference() {
+fn evaluate_matches_the_reference() {
     let f = fixture();
     let m = &f.asog.motion;
     let canonical = &f.asog.canonical;
@@ -234,7 +234,7 @@ fn e1_evaluate_matches_the_reference() {
             rotation = rotation.max(angle(r.quaternion, &rotations[4 * i..4 * i + 4]));
         }
         println!(
-            "E1 t={t}: {visible} visible, {mismatched} visibility mismatches, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
+            "evaluate t={t}: {visible} visible, {mismatched} visibility mismatches, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
         );
         assert_eq!(mismatched, 0, "t={t}");
         assert!(
@@ -244,12 +244,12 @@ fn e1_evaluate_matches_the_reference() {
     }
 }
 
-/// E4 (load path): the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
+/// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
 /// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
-/// rounding, and the evaluated rows match the asog reference itself within the E1 bounds.
+/// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
 #[test]
 #[ignore = "integration: GPU"]
-fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
+fn gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
     let f = fixture();
     let entity = &f.all["/asog"];
     let bytes = row(entity, "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
@@ -289,7 +289,7 @@ fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
         }
     }
     println!(
-        "E4 load: worst relative |gpu - cpu| per motion column (opacity, mu, sigma, flags, anchor, O, G): {:?}",
+        "GPU load: worst relative |gpu - cpu| per motion column (opacity, mu, sigma, flags, anchor, O, G): {:?}",
         worst.iter().map(|w| format!("{w:.1e}")).collect::<Vec<_>>()
     );
     assert!(worst.iter().all(|&w| w <= 1e-5), "motion de-quantisation");
@@ -327,7 +327,7 @@ fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
             ));
         }
         println!(
-            "E4 load t={t}: {visible} visible, {mismatched} visibility mismatches, GPU vs reference worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
+            "GPU load t={t}: {visible} visible, {mismatched} visibility mismatches, GPU vs reference worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
         );
         assert_eq!(mismatched, 0, "t={t}");
         assert!(
@@ -338,7 +338,7 @@ fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
 }
 
 #[test]
-fn e2_twist_form_with_pinv_translation_equals_the_asog_form() {
+fn twist_form_with_pinv_translation_equals_the_asog_form() {
     let f = fixture();
     let m = &f.asog.motion;
     let canonical = &f.asog.canonical;
@@ -398,7 +398,7 @@ fn e2_twist_form_with_pinv_translation_equals_the_asog_form() {
             opacity = opacity.max((m.opacities[i] * a.weight - b.opacity).abs());
         }
         println!(
-            "E2 t={t}: {checked} rows, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {opacity:.3e}"
+            "twist vs asog t={t}: {checked} rows, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {opacity:.3e}"
         );
         assert!(
             centre <= 1e-5 && rotation <= 1e-5 && opacity <= 1e-6,
