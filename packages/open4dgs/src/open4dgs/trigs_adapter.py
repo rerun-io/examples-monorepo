@@ -12,7 +12,11 @@ What the trainer gets:
   on a BLACK background: the trainer composites its (premultiplied) render over black and supervises the full frame
   against ``gt * mask`` (person matted onto black), plus two alpha terms normalised by the full frame:
   ``lambda_alpha_outside_mask`` (alpha outside the mask -> 0) and ``lambda_alpha_mask`` (BCE of alpha to the mask);
-- init: ``InitCloud.to_trigs_mapping()`` through ``build_canonical_from_npz``.
+- init: ``InitCloud.to_trigs_mapping()`` through ``build_canonical_from_npz``;
+- compensations (all off by default, as in TRiGS): a per-camera appearance affine, learned per-camera time offsets,
+  rolling-shutter readout (``CameraConfig.rs_signs`` carries each camera's direction and readout share), and the
+  dataset's own per-camera capture times (``gt_times_per_frame``). Held-out cameras get no learned value: their
+  affine stays the identity and their offset the gauge value (``TrainedClip.render``).
 """
 
 import dataclasses
@@ -20,9 +24,12 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
+import numpy as np
 import torch
-from jaxtyping import Float32
+from jaxtyping import Float32, Float64
+from numpy import ndarray
 from torch import Tensor, nn
 from trigs.core.camera import CameraConfig
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
@@ -61,9 +68,46 @@ class TrainConfig:
     resident_frames: bool = True
     """Keep the training frames and masks on the GPU for the run when they fit (``resident_device``); off = the CPU path
     (the trainer copies each camera's frame and mask every step)."""
+    learn_appearance: bool = False
+    """Per-camera exposure / white-balance affine (TRiGS ``learn_camera_appearance``): the loss sees ``render * gain + bias``
+    per channel; gain clamped to [0.5, 2], bias to [-0.25, 0.25]; L2 pull to the identity (weight 1e-2)."""
+    learn_time_offsets: bool = False
+    """Learned per-camera time offset added to each camera's capture time (TRiGS ``learn_camera_time_offsets``), from
+    ``time_offset_warmup_steps`` on; zero-mean over the cameras (gauge), clamped to ``time_offset_clamp_ms``."""
+    time_offset_warmup_steps: int = 8000
+    """First step at which the learned offsets enter the render time (TRiGS default 8,000)."""
+    time_offset_clamp_ms: float | None = None
+    """Bound of each offset, ms; None = half a frame period at the clip fps (TRiGS: 8.3 ms = half a frame at 60 fps)."""
+    rs_readout_ms: tuple[float, ...] = ()
+    """Rolling-shutter readout, ms over the image: empty = global shutter (off); one value for every camera, or one per
+    clip camera (clip order, held-out cameras included). A camera with 0 is global shutter."""
+    rs_axis: Literal["row", "column"] = "row"
+    """Readout axis in the delivered image: ``row`` (landscape, lines top to bottom) or ``column``."""
+    rs_sign: tuple[float, ...] = (1.0,)
+    """Readout direction per camera (one value for all, or one per clip camera): +1 = the first row / column is read
+    first, -1 = the last. Capture time of line s: t + sign * readout * (s / S - 0.5) (trigs.capture_timing)."""
+
+    def __post_init__(self) -> None:
+        if any(r < 0.0 for r in self.rs_readout_ms):
+            raise ValueError(f"rs_readout_ms must be >= 0, got {self.rs_readout_ms}")
+        if any(s not in (-1.0, 1.0) for s in self.rs_sign):
+            raise ValueError(f"rs_sign entries must be +1 or -1, got {self.rs_sign}")
+        if not self.rs_sign:
+            raise ValueError("rs_sign needs one value or one per camera")
+
+    def rs_signs(self, num_cameras: int) -> tuple[float, ...] | None:
+        """``CameraConfig.rs_signs``: sign * readout / max readout per camera (TRiGS takes one readout and scales it by
+        the per-camera sign); None when every camera is global shutter."""
+        if not self.rs_readout_ms or max(self.rs_readout_ms) == 0.0:
+            return None
+        readouts: tuple[float, ...] = _per_camera(self.rs_readout_ms, num_cameras, "rs_readout_ms")
+        signs: tuple[float, ...] = _per_camera(self.rs_sign, num_cameras, "rs_sign")
+        peak: float = max(readouts)
+        return tuple(sign * readout / peak for sign, readout in zip(signs, readouts, strict=True))
 
     def to_trigs(self, fps: float, keyframe_step: int, holdout_positions: tuple[int, ...]) -> TrigsTrainingConfig:
         """The TRiGS config for this run."""
+        clamp_ms: float = self.time_offset_clamp_ms if self.time_offset_clamp_ms is not None else 500.0 / fps
         return TrigsTrainingConfig(
             n_steps=self.steps,
             fps=fps,
@@ -82,7 +126,31 @@ class TrainConfig:
             tb_stats_every=0,
             viewer_snapshot_every=0,
             verbose=False,
+            learn_camera_appearance=self.learn_appearance,
+            learn_camera_time_offsets=self.learn_time_offsets,
+            camera_time_offset_warmup_steps=self.time_offset_warmup_steps,
+            camera_time_offset_clamp_s=clamp_ms / 1000.0,
+            rs_readout_ms=max(self.rs_readout_ms, default=0.0),
+            rs_axis=self.rs_axis,
         )
+
+
+def _per_camera(values: tuple[float, ...], num_cameras: int, name: str) -> tuple[float, ...]:
+    """One value broadcast to every camera, or exactly one per camera."""
+    if len(values) == 1:
+        return values * num_cameras
+    if len(values) != num_cameras:
+        raise ValueError(f"{name} has {len(values)} values for {num_cameras} cameras (give one, or one per camera)")
+    return values
+
+
+@dataclass(frozen=True, slots=True)
+class CameraCompensation:
+    """One camera's nuisance parameters: ``render * gain + bias`` per channel, rendered at ``capture time + offset_s``."""
+
+    gain: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    bias: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    offset_s: float = 0.0
 
 
 @dataclass
@@ -117,19 +185,55 @@ class TrainedClip:
     scalars: dict[str, list[tuple[int, float]]]
     train_seconds: float
     peak_gpu_bytes: int
+    capture_times: dict[int, list[float]] | None = None
+    """``gt_times_per_frame`` the trainer was given (seconds per frame and clip camera); None = frame / fps."""
 
-    def render(self, cameras: CameraConfig, cam: int, frame: int) -> tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w 1"]]:
-        """RGB (premultiplied over black, clamped to [0, 1]) and alpha of camera ``cam`` of ``cameras`` at clip frame ``frame``."""
+    def capture_time(self, cam: int, frame: int) -> float:
+        """Base capture time of clip camera ``cam`` at clip frame ``frame``: the dataset's time, else frame / fps (no offset)."""
+        return self.capture_times[frame][cam] if self.capture_times is not None else frame / self.fps
+
+    def render_time(self, cameras: CameraConfig, cam: int, frame: int) -> float:
+        """Time the trainer renders ``cam`` at: for the clip cameras the capture time plus the learned (gauge) offset, as
+        TRiGS' eval does (``_eval_render_time``); other cameras (orbit) render at frame / fps."""
+        if cameras is not self.cameras:
+            return frame / self.fps
+        return float(self.trainer._eval_render_time(self.params, frame, cam, self.capture_times, self.trigs_config))
+
+    def render(
+        self, cameras: CameraConfig, cam: int, frame: int, appearance: bool = False, compensation: CameraCompensation | None = None
+    ) -> tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w 1"]]:
+        """RGB (premultiplied over black, clamped to [0, 1]) and alpha of camera ``cam`` of ``cameras`` at clip frame ``frame``.
+
+        Raw by default (no appearance affine, as TRiGS evaluates). ``appearance``: apply the camera's learned affine (the
+        identity for held-out cameras). ``compensation``: render at capture time + ``offset_s`` with that affine instead
+        of the learned values (the held-out test-time fit).
+        """
+        t: float = self.capture_time(cam, frame) + compensation.offset_s if compensation is not None else self.render_time(cameras, cam, frame)
         with torch.no_grad():
-            rgb, alpha, _, _ = self.trainer._render(self.params, cameras, cam, frame / self.fps, self.sh_degree, self.trigs_config)
-        return rgb[0].clamp(0.0, 1.0), alpha[0]
+            rgb, alpha, _, _ = self.trainer._render(self.params, cameras, cam, t, self.sh_degree, self.trigs_config)
+        out: Tensor = rgb[0]
+        if compensation is not None:
+            out = out * out.new_tensor(compensation.gain) + out.new_tensor(compensation.bias)
+        elif appearance and "cam_gain" in self.params and cameras is self.cameras:
+            out = out * self.params["cam_gain"][cam] + self.params["cam_bias"][cam]
+        return out.clamp(0.0, 1.0), alpha[0]
 
     def render_depth(self, cameras: CameraConfig, cam: int, frame: int) -> tuple[Float32[Tensor, "h w"], Float32[Tensor, "h w"]]:
         """Expected (alpha-normalised) camera z-depth (gsplat ``RGB+ED``, recipe patch 0003) and alpha at clip frame ``frame``."""
         config: TrigsTrainingConfig = dataclasses.replace(self.trigs_config, render_depth=True)
         with torch.no_grad():
-            _, alpha, _, info = self.trainer._render(self.params, cameras, cam, frame / self.fps, self.sh_degree, config)
+            _, alpha, _, info = self.trainer._render(self.params, cameras, cam, self.render_time(cameras, cam, frame), self.sh_degree, config)
         return info["render_depth"][0, ..., 0], alpha[0, ..., 0]
+
+    def learned(self) -> list[CameraCompensation]:
+        """Each clip camera's learned compensation (identity where a switch is off); ``offset_s`` is the effective offset."""
+        n: int = len(self.cameras)
+        offsets: list[float] = [0.0] * n
+        if "camera_time_offsets" in self.params:
+            offsets = [float(self.trainer._eval_render_time(self.params, 0, c, None, self.trigs_config)) for c in range(n)]
+        gains: list[list[float]] = self.params["cam_gain"].detach().cpu().tolist() if "cam_gain" in self.params else [[1.0] * 3] * n
+        biases: list[list[float]] = self.params["cam_bias"].detach().cpu().tolist() if "cam_bias" in self.params else [[0.0] * 3] * n
+        return [CameraCompensation(gain=tuple(g), bias=tuple(b), offset_s=o) for g, b, o in zip(gains, biases, offsets, strict=True)]  # type: ignore[arg-type]
 
     def save(self, path: Path) -> None:
         """Checkpoint (.pt): the parameters on the CPU plus the scalars needed to render them."""
@@ -146,13 +250,27 @@ class TrainedClip:
 
 
 def camera_config(
-    world_T_cam: Float32[Tensor, "c 4 4"], K: Float32[Tensor, "c 3 3"], sizes: Sequence[tuple[int, int]], device: torch.device
+    world_T_cam: Float32[Tensor, "c 4 4"],
+    K: Float32[Tensor, "c 3 3"],
+    sizes: Sequence[tuple[int, int]],
+    device: torch.device,
+    rs_signs: tuple[float, ...] | None = None,
 ) -> CameraConfig:
-    """TRiGS cameras from camera-to-world poses (OpenCV RDF): viewmats are world -> camera."""
+    """TRiGS cameras from camera-to-world poses (OpenCV RDF): viewmats are world -> camera; ``rs_signs`` per camera (``TrainConfig.rs_signs``)."""
     viewmats: Float32[Tensor, "c 4 4"] = torch.linalg.inv(world_T_cam.double()).float().to(device)
     return CameraConfig.from_matrices(
-        viewmats=viewmats, Ks=K.float().to(device).contiguous(), widths=[w for w, _ in sizes], heights=[h for _, h in sizes]
+        viewmats=viewmats,
+        Ks=K.float().to(device).contiguous(),
+        widths=[w for w, _ in sizes],
+        heights=[h for _, h in sizes],
+        rs_signs=rs_signs,
     )
+
+
+def capture_times_per_frame(times_s: Float64[ndarray, "cams frames"]) -> dict[int, list[float]]:
+    """``gt_times_per_frame[f][c]`` from each camera's own frame times, relative to camera 0's first frame."""
+    rel: Float64[ndarray, "cams frames"] = np.asarray(times_s, dtype=np.float64) - float(times_s[0, 0])
+    return {f: [float(rel[c, f]) for c in range(rel.shape[0])] for f in range(rel.shape[1])}
 
 
 def init_params(init: InitCloud, sh_degree: int, device: torch.device) -> tuple[nn.ParameterDict, int, float]:
@@ -224,11 +342,14 @@ def train_clip(
     on_step: StepCallback | None = None,
     device: torch.device | None = None,
     prior: MonoPriorLoss | None = None,
+    capture_times: Float64[ndarray, "cams frames"] | None = None,
 ) -> TrainedClip:
     """Train TRiGS on the clip's training cameras (every camera not in ``holdout_names``).
 
     ``prior`` (optional): the MoGe-2 prior loss holding maps of TRAINING cameras only; the trainer then renders
     ``RGB+ED`` and adds the loss per camera (recipe patch 0003); its ``prior/*`` scalars join ``scalars``.
+    ``capture_times`` (optional): each clip camera's own frame times (seconds, clip order), given to the trainer as
+    ``gt_times_per_frame`` instead of frame / fps.
     """
     dev: torch.device = device if device is not None else torch.device("cuda")
     num_frames: int = int(clip.frame_indices.shape[0])
@@ -245,7 +366,12 @@ def train_clip(
         trigs_config = dataclasses.replace(trigs_config, render_depth=True)
     torch.manual_seed(config.seed)
     params, sh_degree, scene_extent = init_params(init, config.sh_degree, dev)
-    cameras: CameraConfig = camera_config(clip.world_T_cam, clip.K, clip.sizes, dev)
+    cameras: CameraConfig = camera_config(clip.world_T_cam, clip.K, clip.sizes, dev, config.rs_signs(len(clip.camera_names)))
+    gt_times: dict[int, list[float]] | None = None
+    if capture_times is not None:
+        if capture_times.shape != (len(clip.camera_names), num_frames):
+            raise ValueError(f"capture_times {capture_times.shape} must be (cameras, frames) = {(len(clip.camera_names), num_frames)}")
+        gt_times = capture_times_per_frame(capture_times)
     writer: ScalarLog = ScalarLog(on_step=on_step)
     trainer: TrigsTrainer = TrigsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
@@ -261,6 +387,7 @@ def train_clip(
         gt_images_per_frame=gt_images,
         gt_alphas_per_frame=gt_alphas,
         config=trigs_config,
+        gt_times_per_frame=gt_times,
         writer=writer,
     )
     torch.cuda.synchronize(dev)
@@ -279,6 +406,7 @@ def train_clip(
         scalars=writer.rows,
         train_seconds=train_seconds,
         peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)),
+        capture_times=gt_times,
     )
 
 
@@ -296,7 +424,7 @@ def untrained_clip(
         params=params,
         trainer=trainer,
         trigs_config=config.to_trigs(clip.fps, init.keyframe_step, holdout_positions),
-        cameras=camera_config(clip.world_T_cam, clip.K, clip.sizes, dev),
+        cameras=camera_config(clip.world_T_cam, clip.K, clip.sizes, dev, config.rs_signs(len(clip.camera_names))),
         sh_degree=sh_degree,
         fps=clip.fps,
         num_frames=num_frames,

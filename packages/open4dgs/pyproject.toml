@@ -37,6 +37,8 @@ ignore_names = [
     "has_velocity", "is_static", "dynamic_protect", "dynamic_allowed", "stage_keep",
     "add_scalar", "_sequence_t_max", "pytestmark", "trigs", "rr_config", "exc",
     "num_pixels", "camera_loss_hook",
+    # BrightnessSplit fields, read through dataclasses.asdict
+    "ratio", "alpha_part", "colour_part", "alpha_mean",
 ]
 
 [tool.pytest.ini_options]

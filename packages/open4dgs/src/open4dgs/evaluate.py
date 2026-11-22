@@ -373,8 +373,12 @@ def evaluate_cameras(
     metrics: Metrics,
     keep_renders: bool = True,
     with_baselines: bool = False,
+    appearance: bool = False,
 ) -> list[CameraRenders]:
-    """Render ``camera_names`` at every clip frame and score them (and, optionally, the floors) against the clip frames and masks."""
+    """Render ``camera_names`` at every clip frame and score them (and, optionally, the floors) against the clip frames and masks.
+
+    ``appearance``: apply each camera's learned appearance affine (``TrainedClip.render``); raw renders otherwise.
+    """
     frame_indices: list[int] = clip.frame_indices[: model.num_frames].tolist()
     out: list[CameraRenders] = []
     for name in camera_names:
@@ -383,7 +387,7 @@ def evaluate_cameras(
             score_camera(
                 name,
                 frame_indices,
-                lambda f, cam=cam: model.render(model.cameras, cam, f),
+                lambda f, cam=cam: model.render(model.cameras, cam, f, appearance=appearance),
                 clip.frames[cam][: model.num_frames],
                 masks[cam][: model.num_frames],
                 metrics,
