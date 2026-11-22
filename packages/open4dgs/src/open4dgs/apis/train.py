@@ -99,6 +99,18 @@ def _save_pngs(png_dir: Path, run_name: str, clip: MultiViewClip, pairs: list[Ca
         Image.fromarray(orbit[f].numpy()).save(png_dir / f"{run_name}-orbit-{f:03d}.png")
 
 
+def split_cameras(
+    camera_names: tuple[str, ...], holdout_cameras: tuple[str, ...] | None, num_holdout: int, seed: int
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(train names sorted, held-out names): the explicit ``holdout_cameras`` when given, else ``select_holdout``."""
+    if holdout_cameras is None:
+        return select_holdout(camera_names, num_holdout, seed)
+    missing: set[str] = set(holdout_cameras) - set(camera_names)
+    if missing:
+        raise ValueError(f"holdout cameras {sorted(missing)} are not in the clip {camera_names}")
+    return tuple(sorted(set(camera_names) - set(holdout_cameras))), holdout_cameras
+
+
 def main(config: Config) -> dict[str, object]:
     """Run the whole pipeline; returns the summary (also printed as JSON and stored as the ``summary`` property)."""
     device: torch.device = torch.device("cuda")
@@ -128,14 +140,7 @@ def main(config: Config) -> dict[str, object]:
         roi_pad=config.roi_pad,
     )
     timings["read_clip_s"] = time.perf_counter() - t0
-    if config.holdout_cameras is not None:
-        missing: set[str] = set(config.holdout_cameras) - set(clip.camera_names)
-        if missing:
-            raise ValueError(f"holdout cameras {sorted(missing)} are not in the clip {clip.camera_names}")
-        holdout_names: tuple[str, ...] = config.holdout_cameras
-        train_names: tuple[str, ...] = tuple(sorted(set(clip.camera_names) - set(holdout_names)))
-    else:
-        train_names, holdout_names = select_holdout(clip.camera_names, config.num_holdout, config.holdout_seed)
+    train_names, holdout_names = split_cameras(clip.camera_names, config.holdout_cameras, config.num_holdout, config.holdout_seed)
     t0 = time.perf_counter()
     masks = _read_masks(config, clip)
     timings["masks_s"] = time.perf_counter() - t0
