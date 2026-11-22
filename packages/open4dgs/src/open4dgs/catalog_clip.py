@@ -21,7 +21,8 @@ resize by ``s`` maps ``x -> (x + 0.5) s - 0.5`` (``scale_intrinsics``), the conv
 """
 
 import re
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -53,6 +54,9 @@ LENS_RESIDUAL_PX: float = 1e-6
 """Largest error, in pixels, of an inverted point mapped back (dataforge ``LENS_RESIDUAL_PX``)."""
 RESAMPLE_CHUNK: int = 16
 """Frames undistorted and resized per call (16 x 2056x1504 is 0.6 GB as float32 per buffer)."""
+GRID_CACHE_BYTES: int = 2 << 30
+"""Bytes of sampling grids kept for reuse (a 2056x1504 grid is 25 MB: a 32-camera MAMMA rig is 0.8 GB)."""
+_GRID_CACHE: OrderedDict[Hashable, Tensor] = OrderedDict()
 _MESH_PATH: re.Pattern[str] = re.compile(r"^/world/(?P<source>.+)/people/(?P<person>person_\d+)/body/mesh$")
 
 
@@ -206,12 +210,46 @@ def scale_intrinsics(K: Float64[ndarray, "3 3"], source_wh: tuple[int, int], tar
     return scaled
 
 
+def _device_key(device: torch.device) -> str:
+    """``cuda`` and ``cuda:<current>`` are one device for the grid cache."""
+    if device.type == "cuda" and device.index is None:
+        return f"cuda:{torch.cuda.current_device()}"
+    return str(device)
+
+
+def _lens_key(lens: ViconRadialLens | None) -> Hashable:
+    return None if lens is None else (lens.centre.tobytes(), lens.radial.tobytes(), lens.native_width, lens.native_height)
+
+
+def _cached_grid(key: Hashable, build: Callable[[], Tensor]) -> Float32[Tensor, "1 h w 2"]:
+    """The grid stored under ``key``, built by ``build`` on a miss; least recently used grids go past ``GRID_CACHE_BYTES``."""
+    grid: Tensor | None = _GRID_CACHE.get(key)
+    if grid is not None:
+        _GRID_CACHE.move_to_end(key)
+        return grid
+    grid = build()
+    _GRID_CACHE[key] = grid
+    while len(_GRID_CACHE) > 1 and sum(cached.nbytes for cached in _GRID_CACHE.values()) > GRID_CACHE_BYTES:
+        _GRID_CACHE.popitem(last=False)
+    return grid
+
+
+def clear_grid_cache() -> None:
+    """Drop every cached sampling grid (frees their device memory)."""
+    _GRID_CACHE.clear()
+
+
 def undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device: torch.device) -> Float32[Tensor, "1 h w 2"]:
     """``grid_sample`` grid that resamples a stored distorted frame onto its undistorted pinhole (same size, same K).
 
     Each output pixel is an undistorted stored pixel; it is mapped to the native grid, through ``lens.distort``, and
     back to the stored grid. Pixels whose inversion does not converge get a grid value outside ``[-1, 1]``.
+    The grid is cached per (lens, size, device): frames and ``masks`` of one clip share it; do not modify it in place.
     """
+    return _cached_grid(("undistortion", _lens_key(lens), stored_wh, _device_key(device)), lambda: _undistortion_grid(lens, stored_wh, device))
+
+
+def _undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device: torch.device) -> Float32[Tensor, "1 h w 2"]:
     width, height = stored_wh
     to_native: tuple[float, float] = (lens.native_width / width, lens.native_height / height)
     ys, xs = torch.meshgrid(
@@ -232,7 +270,19 @@ def roi_grid(lens: ViconRadialLens | None, camera: VirtualCamera, device: torch.
 
     Each virtual pixel goes to the undistorted stored pixel that sees its ray (``virtual_to_source_pixels``), then through
     the lens to the stored grid (as ``undistortion_grid``). Pixels with no source get a grid value outside ``[-1, 1]``.
+    Cached per (lens, virtual camera, device) like ``undistortion_grid``; do not modify it in place.
     """
+    camera_key: Hashable = (
+        camera.source_K.tobytes(),
+        camera.source_size,
+        camera.cam_R_virtual.tobytes(),
+        camera.sample_K.tobytes(),
+        camera.sample_size,
+    )
+    return _cached_grid(("roi", _lens_key(lens), camera_key, _device_key(device)), lambda: _roi_grid(lens, camera, device))
+
+
+def _roi_grid(lens: ViconRadialLens | None, camera: VirtualCamera, device: torch.device) -> Float32[Tensor, "1 h w 2"]:
     width, height = camera.source_size
     undistorted_stored: Float64[Tensor, "n 2"] = virtual_to_source_pixels(camera, device).reshape(-1, 2)
     distorted_stored: Float64[Tensor, "n 2"] = undistorted_stored
@@ -318,6 +368,25 @@ def _mesh_entities(dataset: DatasetEntry, segment_id: str, body_source: str | No
     return source, sorted(by_source[source])
 
 
+def mesh_vertices(column: pa.ChunkedArray, rows: Sequence[int | None], num_vertices: int) -> tuple[Float32[ndarray, "t v 3"], Bool[ndarray, " t"]]:
+    """Per slot, the mesh at table row ``rows[slot]`` of a ``Mesh3D:vertex_positions`` column, NaN and absent where the row
+    is None, null, or not ``num_vertices`` long.
+
+    The column is ``list<fixed_size_list<f32, 3>>``: rows are slices of the flat xyz buffer (no Python lists).
+    """
+    cells: pa.ListArray | pa.LargeListArray = column.combine_chunks()
+    offsets: Int64[ndarray, " r1"] = cells.offsets.to_numpy().astype(np.int64)
+    xyz: Float32[ndarray, "n 3"] = np.asarray(cells.values.flatten().to_numpy(zero_copy_only=False), dtype=np.float32).reshape(-1, 3)
+    is_valid: Bool[ndarray, " r"] = cells.is_valid().to_numpy(zero_copy_only=False)
+    vertices: Float32[ndarray, "t v 3"] = np.full((len(rows), num_vertices, 3), np.nan, dtype=np.float32)
+    present: Bool[ndarray, " t"] = np.zeros(len(rows), dtype=bool)
+    for slot, row in enumerate(rows):
+        if row is not None and is_valid[row] and offsets[row + 1] - offsets[row] == num_vertices:
+            vertices[slot] = xyz[offsets[row] : offsets[row + 1]]
+            present[slot] = True
+    return vertices, present
+
+
 def _read_people(dataset: DatasetEntry, segment_id: str, frames: Int64[ndarray, " t"], body_source: str | None) -> ClipPeople | None:
     found: tuple[str, list[str]] | None = _mesh_entities(dataset, segment_id, body_source)
     if found is None:
@@ -345,14 +414,9 @@ def _read_people(dataset: DatasetEntry, segment_id: str, frames: Int64[ndarray, 
     num_vertices: int = int(faces.max()) + 1
     vertices: Float32[ndarray, "t p v 3"] = np.full((len(frames), len(entities), num_vertices, 3), np.nan, dtype=np.float32)
     present: Bool[ndarray, "t p"] = np.zeros((len(frames), len(entities)), dtype=bool)
+    rows: list[int | None] = [row_of.get(frame) for frame in frames.tolist()]
     for person, column_name in enumerate(vertex_columns):
-        cells: list[object | None] = table.column(column_name).to_pylist()
-        for slot, frame in enumerate(frames.tolist()):
-            row: int | None = row_of.get(frame)
-            cell: object | None = None if row is None else cells[row]
-            if isinstance(cell, list) and len(cell) == num_vertices:
-                vertices[slot, person] = np.asarray(cell, dtype=np.float32)
-                present[slot, person] = True
+        vertices[:, person], present[:, person] = mesh_vertices(table.column(column_name), rows, num_vertices)
     return ClipPeople(
         source=source,
         names=tuple(entity.split("/")[-3] for entity in entities),
