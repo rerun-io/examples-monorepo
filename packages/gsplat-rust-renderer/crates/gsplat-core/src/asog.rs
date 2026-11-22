@@ -1,4 +1,4 @@
-//! `.asog` v1 (animated-sog, `docs/format.md` at the `asog-src` pin bc976cf) decode into canonical [`Splats`] and
+//! `.asog` v1 (animated-sog, `docs/format.md` at the `asog-src` pin bc976cf) decode into canonical [`crate::Splats`] and
 //! the `.asog` motion form ([`AsogMotion`], evaluated by `crate::trigs`).
 //!
 //! Pure functions over the file bytes. Reference: `asog.container` (container, streams) and `asog.decode.read`
@@ -15,7 +15,6 @@
 //! They use SOG v2 quantisation, so they are packed into SOG v2 texel planes (upstream `layout.js`) and decoded by
 //! the shared [`crate::sog::dequantize`]: means 16-bit lo/hi bytes, quats RGB + A = 252 + mode, scales RGB,
 //! sh0 RGB + A = opacity, shlabels R/G, shpalette row `n` -> centroid texels `n * C .. n * C + C`.
-use crate::Splats;
 use crate::sog::{self, Planes, Quantization, ShPlanes, Version};
 use crate::trigs::{AsogMotion, ClipWindow};
 use serde::Deserialize;
@@ -286,11 +285,12 @@ pub fn decode_stream(desc: &StreamDesc, data: &[u8]) -> Result<Vec<i64>, String>
     Ok(out)
 }
 
-/// A decoded `.asog`: canonical splats (static attributes, f32) and the motion.
+/// A decoded `.asog`: canonical splats (static attributes, f32) and the motion (the CPU oracle of the tests).
+#[cfg(any(test, feature = "testing"))]
 #[derive(Clone, Debug)]
 pub struct Asog {
     pub manifest: Manifest,
-    pub canonical: Splats,
+    pub canonical: crate::Splats,
     pub motion: AsogMotion,
 }
 
@@ -449,6 +449,7 @@ impl AsogParts {
 /// The whole file -> [`Asog`], with the static part de-quantised on the CPU.
 ///
 /// `active_threshold` is the temporal cut the motion is evaluated with ([`crate::trigs::ASOG_ACTIVE_THRESHOLD`] = the format's constant).
+#[cfg(any(test, feature = "testing"))]
 pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
     let parts = decode_parts(bytes, active_threshold)?;
     let canonical = sog::dequantize(&parts.quantization, &parts.planes())?;

@@ -70,20 +70,6 @@ pub(crate) fn from_splats(
     })
 }
 
-/// gsplat-core splats: same rule on the raw logit opacity (alpha >= 5/255).
-pub(crate) fn from_core(splats: &gsplat_core::Splats) -> re_renderer::RobustBounds {
-    let centers: Vec<[f32; 3]> = splats
-        .transforms
-        .iter()
-        .map(|t| [t[0], t[1], t[2]])
-        .collect();
-    // logit(5 / 255)
-    let threshold = (5.0f32 / 250.0).ln();
-    visible_bounds(&centers, |i| {
-        splats.raw_opacities.get(i).is_some_and(|&o| o >= threshold)
-    })
-}
-
 /// Hexels: same rule on the activated opacity.
 pub(crate) fn from_hexels(
     hexels: &gsplat_core::native::NativeHexels<'_>,

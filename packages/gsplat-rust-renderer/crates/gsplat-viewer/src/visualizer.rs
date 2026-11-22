@@ -281,11 +281,10 @@ fn draw_splat_entity(
         data.query_components_with_history(ctx, query, asog_ids.iter().copied(), instruction, None);
     let asog_results = VisualizerInstructionQueryResults::new(instruction, &asog_query, output);
     let [a_bytes, a_origin, a_threshold] = asog_ids.map(|id| asog_results.iter_optional(id));
-    let asog = a_bytes.slice::<u8>().last().map(|(payload_row, bytes)| {
+    let asog = last_slice::<u8>(&a_bytes).map(|bytes| {
         let threshold = last_scalar::<f32>(&a_threshold, gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
         let origin = last_scalar::<f64>(&a_origin, 0.0);
         (
-            payload_row,
             bytes,
             threshold,
             origin,
@@ -297,7 +296,6 @@ fn draw_splat_entity(
         )
     });
     let time_type = ctx.recording().timeline_type(&query.timeline);
-    let motion_path = crate::asog::MotionPath::from_env();
     let motion_generation =
         self::attribute_generation(instruction, &motion_query, motion_ids.iter().copied());
     // SOG payload fields (static, untyped Utf8 + u8): drawn instead of the preview rows when present.
@@ -369,42 +367,7 @@ fn draw_splat_entity(
                 continue;
             }
         }
-        if let Some((payload_row, bytes, threshold, origin, generation)) = asog {
-            if motion_path == crate::asog::MotionPath::Cpu {
-                // CPU oracle path: one evaluation + upload per clip time; the view (keyed by the payload row) swaps
-                // scenes.
-                let evaluated = ctx
-                    .viewer_ctx
-                    .store_context
-                    .memoizer::<crate::asog::AsogCache, _>(|cache| {
-                        cache.evaluate(
-                            generation,
-                            bytes,
-                            threshold,
-                            time_type,
-                            query.latest_at,
-                            origin,
-                        )
-                    });
-                match evaluated {
-                    Ok(evaluated) => {
-                        retry |= draw_instances(
-                            entity,
-                            draw,
-                            payload_row,
-                            hash64((generation, evaluated.t.to_bits())),
-                            Primitives::Core(&evaluated.splats),
-                            render_mode,
-                            0.0,
-                        )?;
-                    }
-                    Err(error) => report(
-                        ViewerReportSeverity::Error,
-                        format!("AnimatedSogSplats3D: {error}"),
-                    ),
-                }
-                continue;
-            }
+        if let Some((bytes, threshold, origin, generation)) = asog {
             let info = ctx
                 .viewer_ctx
                 .store_context
@@ -443,37 +406,18 @@ fn draw_splat_entity(
             .as_ref()
             .filter(|(m, _)| m.is_consistent(centers.len()))
         {
-            if motion_path == crate::asog::MotionPath::Gpu {
-                // Canonical rows + motion uploaded once; a time change is one motion dispatch in the view.
-                retry |= draw_instances(
-                    entity,
-                    draw,
-                    row,
-                    hash64((signature, motion_generation)),
-                    Primitives::Animated {
-                        splats: &native,
-                        motion,
-                    },
-                    render_mode,
-                    *t,
-                )?;
-                continue;
-            }
-            // CPU oracle path: one upload per evaluated time; the cache key carries the cursor, the signature the
-            // clip time.
-            let evaluated = crate::trigs::Evaluated::new(&native, motion, *t);
-            let deformed = evaluated.native(&native);
-            if deformed.centers.is_empty() {
-                continue;
-            }
+            // Canonical rows + motion uploaded once; a time change is one motion dispatch in the view.
             retry |= draw_instances(
                 entity,
                 draw,
-                (query.latest_at, row.1),
-                hash64((signature, t.to_bits())),
-                Primitives::Splats(&deformed),
+                row,
+                hash64((signature, motion_generation)),
+                Primitives::Animated {
+                    splats: &native,
+                    motion,
+                },
                 render_mode,
-                0.0,
+                *t,
             )?;
             continue;
         }
@@ -658,14 +602,6 @@ pub(crate) fn draw_instances(
                             masks,
                             object,
                         )?
-                    }
-                    Primitives::Core(_) => {
-                        report(
-                            ViewerReportSeverity::Warning,
-                            format!("{error}; the decoded payload is not drawn"),
-                        );
-                        re_log::warn_once!("Decoded payload compute fallback: {error:#}");
-                        continue;
                     }
                     Primitives::Hexels(hexels) => {
                         report(

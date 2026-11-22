@@ -757,7 +757,7 @@ mod tests {
             }
         );
 
-        // The CPU path per time change: evaluate on the CPU + a scene upload (the `GSPLAT_MOTION=cpu` oracle path).
+        // The CPU path per time change: evaluate on the CPU + a scene upload (what a CPU render path would cost).
         let mut out = Splats::default();
         let (mut evaluate, mut upload) = (Vec::new(), Vec::new());
         for &t in times.iter().step_by(4) {

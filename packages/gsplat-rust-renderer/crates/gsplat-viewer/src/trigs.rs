@@ -2,9 +2,9 @@
 //!
 //! The splat components hold the canonical rows (stock viewers draw them as they are). When the motion fields
 //! are present, the compute visualizer uploads the canonical rows and the motion once and each view evaluates the
-//! model at its time cursor in `trigs_deform.wgsl` (one dispatch per time change, no re-upload). `GSPLAT_MOTION=cpu`
-//! (and the capacity fallback) evaluates on the CPU instead (`gsplat_core::trigs`), drops rows at or below opacity
-//! 1/255 and uploads the result like a per-frame row.
+//! model at its time cursor in `trigs_deform.wgsl` (one dispatch per time change, no re-upload). The native
+//! capacity fallback evaluates on the CPU instead (`gsplat_core::trigs`), drops rows at or below opacity 1/255 and
+//! draws the result with the stock renderer.
 //! Time: `t [s] = (frame - frame_origin) / fps` on a sequence timeline; on a duration or timestamp timeline
 //! `t = seconds - frame_origin / fps`.
 use gsplat_core::native::{NativeSplats, at_or_last};
