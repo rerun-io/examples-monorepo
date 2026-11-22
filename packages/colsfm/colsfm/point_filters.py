@@ -1,7 +1,7 @@
 """The guards that run after a bundle adjustment, which cuSFM has no equivalent of.
 
-A converged solve can still leave a point outside the world or inside a camera:
-`filter_degenerate_points` removes what the depth and bounds tests reject,
+A converged solve can still leave a point implausibly far from every camera that
+observes it, or inside a camera: `filter_degenerate_points` removes the first,
 `filter_projection_failures` removes observations whose projection is not finite
 or lands absurdly far off the sensor, and `filter_past_rational_pole` removes
 observations at or past a `FULL_OPENCV` camera's rational distortion pole. The
@@ -35,8 +35,8 @@ class _FilterCounts:
     short_track: int = 0
     """Dropped for having fewer than `min_correspondences` observations."""
     degenerate: int = 0
-    """Dropped by the pre-solve guard: the world-Z cap, a non-finite coordinate or a
-    coordinate whose magnitude exceeds `depth_threshold`."""
+    """Dropped by the pre-solve guard: a non-finite coordinate, or a point farther than
+    `depth_threshold` from every camera that observes it."""
 
     def total(self) -> int:
         """Total observations removed.
@@ -52,15 +52,14 @@ def filter_degenerate_points(
     reconstruction: pycolmap.Reconstruction,
     depth_threshold: float,
 ) -> int:
-    """Delete every point whose world position is non-finite or out of bounds.
+    """Delete every point whose world position is non-finite or whose range (Euclidean distance to the camera centre)
+    exceeds `depth_threshold` for every registered camera that observes it.
 
-    A point goes when any coordinate is NaN or infinite, or when the largest
-    coordinate magnitude exceeds `depth_threshold`. That is deliberately stricter
-    than cuSFM, whose only spatial filter is a one-sided cap on the world Z axis
-    (keypoints_mapper_main.md §5.5); a bound on all three axes and both signs
-    subsumes it, and cuSFM's asymmetry looks like an oversight rather than a
-    design. On Galileo the difference is nothing — the guard removes 0 points in
-    all five rounds.
+    The bound is relative to the cameras, not a box around the world origin: cuSFM's only spatial filter is a one-sided
+    cap on world Z (keypoints_mapper_main.md §5.5), and a cap on the world coordinates deletes a whole walk once it
+    leaves the box (Casa Loma 006 left ±300 m after 210 s, and 84 % of its images lost every point). A point is
+    measured from its nearest observing camera centre, so what it bounds is the depth a camera could have measured it
+    at, wherever the walk goes. On Galileo the guard removes 0 points in all five rounds.
 
     Two things make the guard necessary, and neither is caught by COLMAP's own
     filters:
@@ -80,24 +79,51 @@ def filter_degenerate_points(
     Args:
         observation_manager: Bookkeeping bound to the reconstruction.
         reconstruction: The model to filter, edited in place.
-        depth_threshold: `vision_mapping_config.depth_threshold`, in metres.
+        depth_threshold: `vision_mapping_config.depth_threshold`, in metres: the largest range from a point to its
+            nearest observing camera centre (inclusive). Finite and positive (`VisionMappingConfig` checks it).
 
     Returns:
         Observations removed, i.e. the summed track length of the deleted points.
     """
-    # One walk of the map, not an id list and then a lookup per id: the map is
-    # 210 000 entries on RoboCap and the second pass bought nothing.
-    points: list[tuple[int, pycolmap.Point3D]] = list(reconstruction.points3D.items())
-    if not points:
-        return 0
-    point3D_ids: list[int] = [point3D_id for point3D_id, _ in points]
-    points_xyz: Float64[ndarray, "num_points 3"] = np.array([point.xyz for _, point in points], dtype=np.float64)
-    # `np.abs(nan) > threshold` is False, so the finiteness term has to carry the NaNs.
-    out_of_bounds: Bool[ndarray, "num_points"] = ~np.isfinite(points_xyz).all(axis=1) | (np.abs(points_xyz).max(axis=1) > depth_threshold)
+    # Registered cameras with a usable centre. A camera whose pose went non-finite observes nothing here: it must not
+    # take down the points its healthy neighbours see (a NaN distance would). Point ids stay Python ints (COLMAP's are
+    # unsigned 64-bit).
+    centres: dict[int, tuple[float, float, float]] = {}
+    registered: set[int] = set()
+    for image_id in reconstruction.reg_image_ids():
+        registered.add(image_id)
+        x, y, z = (float(v) for v in reconstruction.image(image_id).projection_center())
+        if np.isfinite((x, y, z)).all():
+            centres[image_id] = (x, y, z)
+    limit_sq: float = depth_threshold * depth_threshold
+    doomed: list[int] = []
+    unposed: list[int] = []
+    for point3D_id, point in reconstruction.points3D.items():
+        image_ids: list[int] = [element.image_id for element in point.track.elements]
+        if not any(image_id in registered for image_id in image_ids):
+            unposed.append(point3D_id)
+            continue
+        px, py, pz = (float(v) for v in point.xyz)
+        if not np.isfinite((px, py, pz)).all():
+            doomed.append(point3D_id)
+            continue
+        # One observer within range keeps the point.
+        for image_id in image_ids:
+            centre = centres.get(image_id)
+            if centre is not None and (px - centre[0]) ** 2 + (py - centre[1]) ** 2 + (pz - centre[2]) ** 2 <= limit_sq:
+                break
+        else:
+            doomed.append(point3D_id)
     removed: int = 0
-    for point3D_id in np.asarray(point3D_ids)[out_of_bounds].tolist():
+    for point3D_id in doomed:
         removed += reconstruction.point3D(point3D_id).track.length()
         observation_manager.delete_point3D(point3D_id)
+    # A track seen only by unposed images (an inconsistent or imported model; colsfm's own frames are all registered)
+    # has no camera to measure from. The observation manager refuses it (COLMAP checks `image.HasPose()` per
+    # observation), so it leaves through the reconstruction, which keeps no per-image bookkeeping for unposed images.
+    for point3D_id in unposed:
+        removed += reconstruction.point3D(point3D_id).track.length()
+        reconstruction.delete_point3D(point3D_id)
     return removed
 
 
@@ -254,10 +280,9 @@ def _filter_points(
     """Apply cuSFM's point filters for one round, before its bundle adjustment (§5.4-§5.5).
 
     The reprojection gate decays per round; the triangulation angle is the max
-    over observing pairs, matching cuSFM's `HasLargeEnoughTriangulateAngle`; the
-    depth test is a **world Z** cap, one axis and one-sided, not a camera depth.
-    `filter_degenerate_points` adds the non-finite and absurd-coordinate guard
-    cuSFM has no equivalent of; see its docstring.
+    over observing pairs, matching cuSFM's `HasLargeEnoughTriangulateAngle`.
+    `filter_degenerate_points` is the depth test: a bound on the distance to the
+    nearest observing camera, where cuSFM caps world Z; see its docstring.
 
     Args:
         observation_manager: Bookkeeping bound to the reconstruction.

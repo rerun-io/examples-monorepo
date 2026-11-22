@@ -13,6 +13,7 @@ themselves so the observation manager stays reachable afterwards.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,8 @@ def synthetic_database(synthetic_rig: SyntheticRig, tmp_path_factory: pytest.Tem
 
 
 DEPTH_THRESHOLD_M: float = 300.0
-"""`vision_mapping_config.depth_threshold`, the isaac profile's world-Z cap in metres."""
+"""`vision_mapping_config.depth_threshold`, the isaac profile's bound in metres on a point's distance to its nearest
+observing camera."""
 
 
 def _triangulated(rig: SyntheticRig, database_path: Path, config: CusfmConfig) -> tuple[pycolmap.Reconstruction, Correspondences]:
@@ -88,7 +90,7 @@ def _corrupt_point(reconstruction: pycolmap.Reconstruction, point3D_id: int, xyz
 
 
 def test_degeneracy_guard_drops_points_ceres_cannot_survive(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
-    """Non-finite, astronomically distant and beyond-cap points all go; sane ones stay.
+    """Non-finite, astronomically distant and out-of-range points all go; sane ones stay.
 
     Ceres reported ~1e152 px mean reprojection on the first RoboCap rounds, which
     is what a point at 1e30 m or a NaN does to a normal equation. This is the
@@ -104,7 +106,8 @@ def test_degeneracy_guard_drops_points_ceres_cannot_survive(synthetic_rig: Synth
     survivor_xyz: Float64[ndarray, "3"] = np.asarray(reconstruction.point3D(survivor).xyz, dtype=np.float64).copy()
     _corrupt_point(reconstruction, doomed[0], np.array([np.nan, 0.0, 0.0]))
     _corrupt_point(reconstruction, doomed[1], np.array([1e30, 0.0, 0.0]))
-    _corrupt_point(reconstruction, doomed[2], np.array([0.0, 0.0, 2.0 * DEPTH_THRESHOLD_M]))
+    far_xyz: Float64[ndarray, "3"] = np.asarray(reconstruction.point3D(doomed[2]).xyz, dtype=np.float64)
+    _corrupt_point(reconstruction, doomed[2], far_xyz + np.array([0.0, 0.0, 2.0 * DEPTH_THRESHOLD_M]))
 
     dropped: int = filter_degenerate_points(observation_manager, reconstruction, DEPTH_THRESHOLD_M)
 
@@ -116,13 +119,129 @@ def test_degeneracy_guard_drops_points_ceres_cannot_survive(synthetic_rig: Synth
 
 
 def test_degeneracy_guard_is_a_no_op_on_a_healthy_model(synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
-    """A model whose points all sit inside the cap loses nothing to the guard."""
+    """A model whose points all sit within `depth_threshold` of an observing camera loses nothing to the guard."""
     reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
     observation_manager: pycolmap.ObservationManager = correspondences.observation_manager
     num_points_before: int = reconstruction.num_points3D()
 
     assert filter_degenerate_points(observation_manager, reconstruction, DEPTH_THRESHOLD_M) == 0
     assert reconstruction.num_points3D() == num_points_before
+
+
+def test_degeneracy_guard_measures_from_the_cameras_not_the_world_origin(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """A walk far from the world origin keeps its points.
+
+    The bound used to be a box on the world coordinates, which deleted every point of Casa Loma 006 once the walk was
+    300 m from where it started.
+    """
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    reconstruction.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(), np.array([5.0 * DEPTH_THRESHOLD_M, -3.0 * DEPTH_THRESHOLD_M, 0.0])))
+    num_points_before: int = reconstruction.num_points3D()
+    assert filter_degenerate_points(correspondences.observation_manager, reconstruction, DEPTH_THRESHOLD_M) == 0
+    assert reconstruction.num_points3D() == num_points_before
+
+
+def test_degeneracy_guard_keeps_a_point_one_observer_sees_in_range(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """The rule is the NEAREST observer within range (inclusive): not every observer, and not any camera of the map.
+
+    At a limit between the points' nearest and farthest observer ranges, exactly the points whose nearest observer is
+    in range stay, with their whole tracks. A point moved next to a camera that does not observe it, and out of its
+    observers' range, goes.
+    """
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    centres: dict[int, Float64[ndarray, "3"]] = _centres(reconstruction)
+    # The point and non-observing camera with the widest gap between that camera and the point's observers.
+    gaps: list[tuple[float, int, int]] = []
+    for point3D_id, point in reconstruction.points3D.items():
+        observers: set[int] = {element.image_id for element in point.track.elements}
+        for image_id in centres.keys() - observers:
+            gaps.append((min(float(np.linalg.norm(centres[image_id] - centres[observer])) for observer in observers), int(point3D_id), image_id))
+    gap, lonely, stranger = max(gaps)
+    _corrupt_point(reconstruction, lonely, centres[stranger] + np.array([0.0, 0.0, 0.01]))
+    ranges: dict[int, list[float]] = _observer_ranges_m(reconstruction, centres)
+    limit: float = min(float(np.median([min(r) for r in ranges.values()])), 0.9 * gap)
+    nearest_rule: set[int] = {point3D_id for point3D_id, r in ranges.items() if min(r) <= limit}
+    assert nearest_rule != {point3D_id for point3D_id, r in ranges.items() if max(r) <= limit}, "the limit must tell the rules apart"
+    assert min(ranges[lonely]) > limit, "the moved point is out of its observers' range"
+    lengths: dict[int, int] = {point3D_id: point.track.length() for point3D_id, point in reconstruction.points3D.items()}
+
+    removed: int = filter_degenerate_points(correspondences.observation_manager, reconstruction, limit)
+
+    assert set(reconstruction.points3D) == nearest_rule
+    assert lonely not in reconstruction.points3D, "a camera that does not observe the point does not keep it"
+    assert removed == sum(length for point3D_id, length in lengths.items() if point3D_id not in nearest_rule)
+    assert all(reconstruction.point3D(point3D_id).track.length() == lengths[point3D_id] for point3D_id in nearest_rule)
+
+
+def test_degeneracy_guard_ignores_a_camera_whose_pose_went_non_finite(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """A NaN camera centre counts as not observing: the points healthy cameras see in range stay."""
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    broken_frame: int = sorted(reconstruction.reg_frame_ids())[0]
+    frame: pycolmap.Frame = reconstruction.frame(broken_frame)
+    frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(), np.full(3, np.nan))
+    centres: dict[int, Float64[ndarray, "3"]] = _centres(reconstruction)
+    assert any(not np.isfinite(centre).all() for centre in centres.values())
+    healthy: dict[int, Float64[ndarray, "3"]] = {image_id: centre for image_id, centre in centres.items() if np.isfinite(centre).all()}
+    expected: set[int] = {point3D_id for point3D_id, r in _observer_ranges_m(reconstruction, healthy).items() if r and min(r) <= DEPTH_THRESHOLD_M}
+    assert expected, "healthy cameras observe points"
+
+    filter_degenerate_points(correspondences.observation_manager, reconstruction, DEPTH_THRESHOLD_M)
+
+    assert set(reconstruction.points3D) == expected
+
+
+def test_degeneracy_guard_removes_a_track_only_unposed_images_see(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """A point whose every observation is on an unposed image has no camera to measure from, and goes.
+
+    The correspondence-graph manager refuses to delete it (COLMAP checks `image.HasPose()` per observation), so the
+    guard takes it out through the reconstruction; the rest of the model is untouched. colsfm registers every frame it
+    builds, so only an inconsistent or imported model has such a track.
+    """
+    reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
+    frame_id: int = sorted(reconstruction.reg_frame_ids())[-1]
+    image_ids: list[int] = [data_id.id for data_id in reconstruction.frame(frame_id).image_ids]
+    reconstruction.deregister_frame(frame_id)
+    elements: list[pycolmap.TrackElement] = []
+    for image_id in image_ids[:2]:
+        free: int = next(index for index, point2D in enumerate(reconstruction.image(image_id).points2D) if not point2D.has_point3D())
+        elements.append(pycolmap.TrackElement(image_id, free))
+    unposed: int = reconstruction.add_point3D(np.array([0.0, 0.0, 5.0]), pycolmap.Track(elements))
+    others: set[int] = set(reconstruction.points3D) - {unposed}
+
+    assert filter_degenerate_points(correspondences.observation_manager, reconstruction, DEPTH_THRESHOLD_M) == 2
+
+    assert set(reconstruction.points3D) == others
+
+
+def test_a_depth_threshold_that_is_not_finite_and_positive_is_refused(isaac_config: CusfmConfig) -> None:
+    """A NaN limit fails every range comparison and would empty the map, so the config refuses it at load."""
+    for bad in (float("nan"), float("inf"), 0.0, -1.0):
+        with pytest.raises(ValueError, match="depth_threshold"):
+            dataclasses.replace(isaac_config.vision_mapping, depth_threshold=bad)
+
+
+def _centres(reconstruction: pycolmap.Reconstruction) -> dict[int, Float64[ndarray, "3"]]:
+    """Each registered image's camera centre, world frame."""
+    return {image_id: np.asarray(reconstruction.image(image_id).projection_center(), dtype=np.float64) for image_id in reconstruction.reg_image_ids()}
+
+
+def _observer_ranges_m(reconstruction: pycolmap.Reconstruction, centres: dict[int, Float64[ndarray, "3"]]) -> dict[int, list[float]]:
+    """Each point's range to every observing camera in `centres`, metres."""
+    ranges: dict[int, list[float]] = {}
+    for point3D_id, point in reconstruction.points3D.items():
+        xyz: Float64[ndarray, "3"] = np.asarray(point.xyz, dtype=np.float64)
+        ranges[int(point3D_id)] = [
+            float(np.linalg.norm(xyz - centres[element.image_id])) for element in point.track.elements if element.image_id in centres
+        ]
+    return ranges
 
 
 def test_projection_failure_guard_drops_a_point_pushed_into_a_camera(
@@ -194,13 +313,24 @@ def test_the_solve_boundary_guards_the_points_it_returns(synthetic_rig: Syntheti
     boundary removes them after the solve and reports how many observations went.
     """
     reconstruction, correspondences = _triangulated(synthetic_rig, synthetic_database, isaac_config)
-    extent: float = float(np.median([np.abs(point.xyz).max() for point in reconstruction.points3D.values()]))
+    extent: float = float(np.median(list(_nearest_camera_m(reconstruction).values())))
     observations_before: int = reconstruction.compute_num_observations()
     solve: BundleAdjustmentSolve = _solve(reconstruction, correspondences, extent)
     assert solve.summary.is_solution_usable()
     assert solve.num_diverged > 0
     assert reconstruction.compute_num_observations() == observations_before - solve.num_diverged
-    assert all(np.abs(point.xyz).max() <= extent for point in reconstruction.points3D.values())
+    assert max(_nearest_camera_m(reconstruction).values()) <= extent
+
+
+def _nearest_camera_m(reconstruction: pycolmap.Reconstruction) -> dict[int, float]:
+    """Each point's distance to its nearest observing camera centre, metres (the degeneracy guard's measure)."""
+    nearest: dict[int, float] = {}
+    for point3D_id, point in reconstruction.points3D.items():
+        centres: list[Float64[ndarray, "3"]] = [
+            np.asarray(reconstruction.image(element.image_id).projection_center(), dtype=np.float64) for element in point.track.elements
+        ]
+        nearest[int(point3D_id)] = float(min(np.linalg.norm(np.asarray(point.xyz) - centre) for centre in centres))
+    return nearest
 
 
 def _off_axis_deg(reconstruction: pycolmap.Reconstruction, image_ids: list[int]) -> list[float]:
