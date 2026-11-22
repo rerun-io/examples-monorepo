@@ -6,8 +6,6 @@
 //! `gamma = exp(-0.5 (dt / sigma)^2)`, renormalised by the smooth cull threshold; static rows keep gamma = 1.
 //! The operation order follows the torch code in f32 so results match it to float rounding.
 
-use crate::Splats;
-
 /// Per-row motion parameters, borrowed from the `TrigsMotion3D` components (all slices have the row count).
 #[derive(Clone, Copy)]
 pub struct TrigsMotion<'a> {
@@ -447,8 +445,9 @@ impl AsogMotion {
 
     /// The splats at timeline time `t` into `out` (gsplat-core layout, f32): transforms and raw opacities are
     /// rewritten for every row (rows with weight 0 get [`CULLED_RAW_OPACITY`]); scales and SH come from `canonical`
-    /// and are copied only when `out` does not hold them yet.
-    pub fn evaluate_into(&self, canonical: &Splats, t: f32, out: &mut Splats) {
+    /// and are copied only when `out` does not hold them yet. The CPU oracle of the motion pass.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn evaluate_into(&self, canonical: &crate::Splats, t: f32, out: &mut crate::Splats) {
         let clips = self.clip_states(t);
         if out.sh_coefficients.len() != canonical.sh_coefficients.len()
             || out.sh_degree != canonical.sh_degree
@@ -484,8 +483,9 @@ impl AsogMotion {
     }
 
     /// [`Self::evaluate_into`] into a new [`Splats`].
-    pub fn evaluate(&self, canonical: &Splats, t: f32) -> Splats {
-        let mut out = Splats::default();
+    #[cfg(any(test, feature = "testing"))]
+    pub fn evaluate(&self, canonical: &crate::Splats, t: f32) -> crate::Splats {
+        let mut out = crate::Splats::default();
         self.evaluate_into(canonical, t, &mut out);
         out
     }

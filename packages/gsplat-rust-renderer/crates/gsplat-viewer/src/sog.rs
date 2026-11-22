@@ -3,7 +3,7 @@
 //!
 //! The compute visualizer draws the payload instead of the preview rows. It decodes once, when the payload's row ids
 //! first appear (the scene cache's vacant branch): WebP (L1) on the CPU, then de-quantisation (L2) in
-//! `sog_dequant.wgsl`, or on the CPU with `GSPLAT_SOG_DECODE=cpu` (A/B pixels, and the path without the GPU kernel).
+//! `sog_dequant.wgsl`. The CPU de-quantiser in `gsplat_core::sog` is the tests' oracle, not a render path.
 //! The preview rows draw only when the payload is unusable (bad meta.json, or the native capacity fallback).
 use gsplat_core::native::NativeSplats;
 use gsplat_core::sog::{Meta, SogWebp};
@@ -30,24 +30,6 @@ pub(crate) fn components() -> [re_sdk_types::ComponentIdentifier; 8] {
     })
 }
 
-/// Where L2 runs; the GPU kernel is the default.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Dequantize {
-    Gpu,
-    Cpu,
-}
-
-impl Dequantize {
-    /// `GSPLAT_SOG_DECODE=cpu` selects the CPU decoder (native only; the web build has no environment).
-    pub(crate) fn from_env() -> Self {
-        static PATH: std::sync::OnceLock<Dequantize> = std::sync::OnceLock::new();
-        *PATH.get_or_init(|| match std::env::var("GSPLAT_SOG_DECODE").as_deref() {
-            Ok("cpu") => Self::Cpu,
-            _ => Self::Gpu,
-        })
-    }
-}
-
 /// One entity's SOG payload plus the preview rows it replaces.
 pub(crate) struct Payload<'a> {
     pub meta: &'a Meta,
@@ -72,46 +54,23 @@ impl Payload<'_> {
         }
     }
 
-    /// L1 on the CPU, L2 on the GPU (default) or the CPU, then the scene. Logs the load-time split.
+    /// L1 on the CPU, L2 on the GPU (`sog_dequant.wgsl`), then the scene. Logs the load-time split.
     pub(crate) fn upload(
         &self,
         ctx: &re_renderer::RenderContext,
         core: &gsplat_core::Renderer,
-        path: Dequantize,
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_function!();
         let start = web_time::Instant::now();
         let decoded = gsplat_core::sog::decode_planes(self.meta, &self.webp)?;
         let webp = start.elapsed();
         let start = web_time::Instant::now();
-        let (scene, dequantize) = match path {
-            Dequantize::Gpu => {
-                let scene =
-                    core.upload_sog(&ctx.queue, &decoded.quantization, &decoded.planes())?;
-                (scene, None)
-            }
-            Dequantize::Cpu => {
-                let splats =
-                    gsplat_core::sog::dequantize(&decoded.quantization, &decoded.planes())?;
-                let dequantize = start.elapsed();
-                (core.upload(&splats)?, Some(dequantize))
-            }
-        };
+        let scene = core.upload_sog(&ctx.queue, &decoded.quantization, &decoded.planes())?;
         // Time the GPU work too (one wait at load; the web build cannot block).
         #[cfg(not(target_arch = "wasm32"))]
         ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
-        let total = start.elapsed();
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-        let split = dequantize.map_or_else(
-            || format!("upload + de-quantise GPU {:.1} ms", ms(total)),
-            |cpu| {
-                format!(
-                    "de-quantise CPU {:.1} ms, upload {:.1} ms",
-                    ms(cpu),
-                    ms(total.saturating_sub(cpu))
-                )
-            },
-        );
+        let split = format!("upload + de-quantise GPU {:.1} ms", ms(start.elapsed()));
         re_log::info!(
             "SOG decode: {} splats, SH degree {}, WebP {:.1} ms, {split}",
             re_format::format_uint(scene.len()),

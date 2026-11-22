@@ -23,8 +23,6 @@ struct CachedView {
 pub(crate) enum Primitives<'a> {
     Splats(&'a NativeSplats<'a>),
     Hexels(&'a NativeHexels<'a>),
-    /// Already in gsplat-core layout (f32, decoded payloads such as `.asog`): uploaded without conversion.
-    Core(&'a gsplat_core::Splats),
     /// A compressed SOG payload, decoded once on upload.
     Sog(&'a crate::sog::Payload<'a>),
     /// An `.asog` payload, decoded once on upload; its motion runs per view on the GPU.
@@ -47,7 +45,6 @@ impl Primitives<'_> {
             Self::Hexels(hexels) => {
                 core.check_hexel_capacity(hexels.centers.len(), hexels.variant())
             }
-            Self::Core(splats) => core.check_capacity(splats.transforms.len(), splats.sh_degree),
             Self::Sog(payload) => core.check_capacity(payload.count(), payload.max_degree()),
             Self::Asog(payload) => core.check_capacity(payload.info.count, payload.info.max_degree),
             Self::Animated { splats, .. } => Self::Splats(splats).check_capacity(core),
@@ -61,11 +58,7 @@ impl Primitives<'_> {
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_scope!("upload");
         let (scene, count, kind) = match self {
-            Self::Sog(payload) => (
-                payload.upload(ctx, core, crate::sog::Dequantize::from_env())?,
-                payload.count(),
-                "SOG splats",
-            ),
+            Self::Sog(payload) => (payload.upload(ctx, core)?, payload.count(), "SOG splats"),
             Self::Splats(cloud) => (
                 core.upload(&cloud.to_core())?,
                 cloud.centers.len(),
@@ -76,13 +69,8 @@ impl Primitives<'_> {
                 hexels.centers.len(),
                 "hexels",
             ),
-            Self::Core(splats) => (
-                core.upload(splats)?,
-                splats.transforms.len(),
-                "decoded Gaussian splats",
-            ),
             Self::Asog(payload) => (
-                payload.upload(ctx, core, crate::sog::Dequantize::from_env())?,
+                payload.upload(ctx, core)?,
                 payload.info.count,
                 "ASOG splats",
             ),
@@ -101,7 +89,6 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => cloud.centers.len(),
             Self::Hexels(hexels) => hexels.centers.len(),
-            Self::Core(splats) => splats.transforms.len(),
             Self::Sog(payload) => payload.count(),
             Self::Asog(payload) => payload.info.count,
             Self::Animated { splats, .. } => splats.centers.len(),
@@ -112,7 +99,6 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => crate::bounds::from_splats(cloud),
             Self::Hexels(hexels) => crate::bounds::from_hexels(hexels),
-            Self::Core(splats) => crate::bounds::from_core(splats),
             // The preview is a uniform subsample of the same splats (file order is Morton order).
             Self::Sog(payload) => crate::bounds::from_splats(payload.preview),
             // One mid-clip pose (the preview).
