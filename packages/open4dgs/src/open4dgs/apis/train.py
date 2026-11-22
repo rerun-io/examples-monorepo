@@ -15,6 +15,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
 from PIL import Image
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -62,7 +63,7 @@ class Config:
     run_name: str = "fdanyone-v06-smoke"
     runs_root: Path = Path("/mnt/nas/ssd-8tb/open4dgs/runs")
     png_dir: Path | None = None
-    """Also save a held-out gt|render pair and an orbit frame as PNGs here."""
+    """Also save held-out gt|render pairs (training cameras when none is held out) at three frames and four orbit frames as PNGs here."""
     eval_train_cameras: bool = True
     """Score the training cameras too (train/held-out gap)."""
     register: bool = True
@@ -77,14 +78,16 @@ def _read_masks(config: Config, clip: MultiViewClip) -> tuple[torch.Tensor, ...]
     return read_clip_masks(clip, config.mask_catalog_url or config.catalog_url, config.mask_dataset or config.dataset, config.segment_id)
 
 
-def _save_pngs(png_dir: Path, run_name: str, clip: MultiViewClip, holdout: list[CameraRenders], orbit: torch.Tensor) -> None:
+def _save_pngs(png_dir: Path, run_name: str, clip: MultiViewClip, pairs: list[CameraRenders], orbit: torch.Tensor, kind: str) -> None:
+    """gt | render pairs at three frames per camera, and four orbit frames."""
     png_dir.mkdir(parents=True, exist_ok=True)
-    mid: int = len(clip.frame_indices) // 2
-    for renders in holdout:
+    n: int = len(clip.frame_indices)
+    for renders in pairs:
         cam: int = clip.camera_names.index(renders.camera)
-        pair = np.concatenate([clip.frames[cam][mid].numpy(), renders.render[mid].numpy()], axis=1)
-        Image.fromarray(pair).save(png_dir / f"{run_name}-holdout-{renders.camera.replace('/', '_')}-f{int(clip.frame_indices[mid])}.png")
-    for f in (0, len(orbit) // 4, len(orbit) // 2):
+        for f in (n // 6, n // 2, (5 * n) // 6):
+            pair = np.concatenate([clip.frames[cam][f].numpy(), renders.render[f].numpy()], axis=1)
+            Image.fromarray(pair).save(png_dir / f"{run_name}-{kind}-{renders.camera.replace('/', '_')}-f{int(clip.frame_indices[f])}.png")
+    for f in (0, len(orbit) // 4, len(orbit) // 2, (3 * len(orbit)) // 4):
         Image.fromarray(orbit[f].numpy()).save(png_dir / f"{run_name}-orbit-{f:03d}.png")
 
 
@@ -134,7 +137,8 @@ def main(config: Config) -> dict[str, object]:
     t0 = time.perf_counter()
     holdout: list[CameraRenders] = evaluate_cameras(trained, clip, masks, holdout_names, metrics)
     train_eval: list[CameraRenders] = (
-        evaluate_cameras(trained, clip, masks, train_names, metrics, keep_renders=False) if config.eval_train_cameras else []
+        # With no held-out camera the training renders are kept for the gt | render PNGs.
+        evaluate_cameras(trained, clip, masks, train_names, metrics, keep_renders=not holdout_names) if config.eval_train_cameras else []
     )
     orbit, _ = render_orbit(trained, clip, train_names, device)
     timings["eval_s"] = time.perf_counter() - t0
@@ -188,13 +192,28 @@ def main(config: Config) -> dict[str, object]:
         "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
         **{f"train_{k}": v for k, v in dataclasses.asdict(config.train).items()},
     }
+    # Default layout: held-out gt / render / error (first two held-out cameras), the orbit, the 3D scene and the metrics.
+    eval_views: list[rrb.Spatial2DView] = [
+        rrb.Spatial2DView(origin=f"/eval/holdout/{name.replace('/', '_')}/{kind}", name=f"{name} {kind}")
+        for name in holdout_names[:2]
+        for kind in ("gt", "render", "error")
+    ]
+    recording.send_blueprint(
+        rrb.Blueprint(
+            rrb.Vertical(
+                rrb.Horizontal(*eval_views, rrb.Spatial2DView(origin="/eval/orbit/render", name="orbit")),
+                rrb.Horizontal(rrb.Spatial3DView(origin="/world", name="scene"), rrb.TimeSeriesView(origin="/eval", name="metrics")),
+            ),
+            collapse_panels=True,
+        )
+    )
     recording.send_property("run", rr.AnyValues(**run_properties))  # pyrefly: ignore[bad-argument-type]
     flat: dict[str, float] = {f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", "train") for k, v in summary[group].items()}  # type: ignore[union-attr]
     flat.update({k: float(v) for k, v in summary.items() if isinstance(v, int | float)})
     recording.send_property("summary", rr.AnyValues(**flat))  # pyrefly: ignore[bad-argument-type]
     recording.flush()
     if config.png_dir is not None:
-        _save_pngs(config.png_dir, config.run_name, clip, holdout, orbit)
+        _save_pngs(config.png_dir, config.run_name, clip, holdout or train_eval, orbit, "holdout" if holdout else "train")
     if config.rr_config.save is None:
         rr.disconnect()  # closes run.rrd before chmod and registration
     # NAS rule: files 644, directories 775.
