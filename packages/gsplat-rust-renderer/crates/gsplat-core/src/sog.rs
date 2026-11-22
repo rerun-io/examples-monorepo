@@ -500,7 +500,8 @@ pub fn decode_planes(meta: &Meta, webp: &SogWebp<'_>) -> Result<DecodedSog, Erro
     })
 }
 
-/// meta.json + stored WebP planes -> [`Splats`] (CPU L1 + L2).
+/// meta.json + stored WebP planes -> [`Splats`] (CPU L1 + L2; the oracle tests' entry point).
+#[cfg(any(test, feature = "testing"))]
 pub fn decode(meta_json: &str, webp: &SogWebp<'_>) -> Result<Splats, Error> {
     let meta = Meta::parse(meta_json)?;
     let decoded = decode_planes(&meta, webp)?;
