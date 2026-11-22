@@ -34,7 +34,7 @@ pub fn compute_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
                 surface,
             )
         })),
-        device_descriptor: compute_device_descriptor(true),
+        device_descriptor: compute_device_descriptor(gsplat_core::subgroups_allowed()),
         ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
     })
 }

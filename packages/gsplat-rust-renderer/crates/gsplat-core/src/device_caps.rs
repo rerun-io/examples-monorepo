@@ -26,16 +26,25 @@ pub fn check_adapter(limits: &wgpu::Limits) -> Result<(), Error> {
     Ok(())
 }
 
-/// Environment variable that withholds `SUBGROUP` from devices created through
-/// [`required_features`], to exercise the workgroup-memory kernels on a GPU that has subgroups.
+/// Environment variable that withholds `SUBGROUP` from gsplat devices (CLI, native viewer, test device) when
+/// set to `1`, to exercise the workgroup-memory kernels on a GPU that has subgroups.
 pub const NO_SUBGROUPS_ENV: &str = "GSPLAT_NO_SUBGROUPS";
 
-/// Subgroups and timing are enabled when the adapter supports them.
+/// Whether a gsplat device may request `SUBGROUP`: not when [`NO_SUBGROUPS_ENV`] is `1`.
+pub fn subgroups_allowed() -> bool {
+    !withholds_subgroups(std::env::var_os(NO_SUBGROUPS_ENV).as_deref())
+}
+
+fn withholds_subgroups(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v == "1")
+}
+
+/// Subgroups (unless [`subgroups_allowed`] says no) and timing are enabled when the adapter supports them.
 pub fn required_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    let subgroups = if std::env::var_os(NO_SUBGROUPS_ENV).is_some_and(|v| v == "1") {
-        wgpu::Features::empty()
-    } else {
+    let subgroups = if subgroups_allowed() {
         wgpu::Features::SUBGROUP
+    } else {
+        wgpu::Features::empty()
     };
     adapter.features() & (subgroups | wgpu::Features::TIMESTAMP_QUERY)
 }
@@ -56,6 +65,16 @@ pub fn compute_limits(available: &wgpu::Limits, mut requested: wgpu::Limits) -> 
 
 #[cfg(test)]
 mod capability_tests {
+    #[test]
+    fn only_no_subgroups_1_withholds_subgroups() {
+        let withholds = |v: Option<&str>| super::withholds_subgroups(v.map(std::ffi::OsStr::new));
+        assert!(withholds(Some("1")));
+        assert!(!withholds(None));
+        assert!(!withholds(Some("0")));
+        assert!(!withholds(Some("")));
+        assert!(!withholds(Some("true")));
+    }
+
     #[test]
     fn startup_accepts_missing_subgroups_and_reports_weak_limits() {
         assert!(super::check_adapter(&wgpu::Limits::default()).is_ok());

@@ -462,13 +462,24 @@ impl Renderer for GaussianRenderer {
             re_renderer::OutlineMaskProcessor::mask_default_msaa_state(ctx.device_caps().tier),
         );
 
+        let core = gsplat_core::Renderer::new(&ctx.device).ok();
+        if let Some(core) = &core {
+            re_log::info!(
+                "gsplat compute kernels: {}",
+                if core.uses_subgroups() {
+                    "subgroups"
+                } else {
+                    "workgroup memory (no subgroups)"
+                }
+            );
+        }
         Self {
             composite_bind_group_layout,
             draw_bind_group_layout,
             composite_pipeline,
             picking_pipeline,
             outline_pipeline,
-            core: gsplat_core::Renderer::new(&ctx.device).ok(),
+            core,
         }
     }
 

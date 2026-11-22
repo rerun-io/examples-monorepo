@@ -67,7 +67,7 @@ impl Renderer {
     }
 
     /// De-quantise SOG texel planes on the GPU into a splat scene (one compute pass, submitted on `queue`).
-    /// The CPU path is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
+    /// The tests' CPU oracle is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
     pub fn upload_sog(
         &self,
         queue: &wgpu::Queue,
@@ -85,7 +85,7 @@ impl Renderer {
     }
 
     /// An entropy-decoded `.asog` on the GPU: static part through `sog_dequant.wgsl`, motion through
-    /// `asog_motion.wgsl` (both submitted on `queue`), evaluated per view at `RenderOptions::time`. The CPU path is
+    /// `asog_motion.wgsl` (both submitted on `queue`), evaluated per view at `RenderOptions::time`. The tests' CPU oracle is
     /// `upload_animated(&sog::dequantize(..)?, Motion::Asog(&parts.motion()))`.
     pub fn upload_asog(
         &self,

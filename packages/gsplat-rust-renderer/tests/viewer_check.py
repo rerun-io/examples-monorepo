@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import os
 import socket
 import subprocess
 import sys
@@ -453,14 +452,8 @@ def write_splat_ply(path: Path, splats: CoreSplats) -> None:
     PlyData([PlyElement.describe(vertices, "vertex")]).write(str(path))
 
 
-def psnr(a: UInt8[np.ndarray, "h w 3"], b: UInt8[np.ndarray, "h w 3"]) -> float:
-    """PSNR of two equal-size captures; 120 dB stands for identical pixels."""
-    mse: float = float(np.mean(((a.astype(np.float64) - b.astype(np.float64)) / 255.0) ** 2))
-    return 120.0 if mse == 0.0 else -10.0 * math.log10(mse)
-
-
 def check_sog(config: Config) -> None:
-    """SogSplats3D payload: GPU and CPU de-quantisation vs `gsplat render` of the same decode; stock draws the preview.
+    """SogSplats3D payload: GPU de-quantisation vs `gsplat render` of the same decode; stock draws the preview.
 
     The reference is the numpy oracle's decode (bit-identical to `gsplat_core::sog`, tests/sog.rs) written as an f32
     PLY, so no u8 colour step sits between the two renders.
@@ -487,21 +480,14 @@ def check_sog(config: Config) -> None:
     assert recording is not None
     recording.flush(timeout_sec=30.0)
     rr.disconnect()
-    images: dict[str, UInt8[np.ndarray, "h w 3"]] = {}
-    for decode_path in ("gpu", "cpu"):
-        os.environ["GSPLAT_SOG_DECODE"] = decode_path
-        with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
-            viewer.open_url(str(recording_path.resolve()))
-            images[decode_path] = capture(viewer, view, config.out / f"sog-{decode_path}.png")
-            reports = [report.summary for item in viewer.viewer_state().views for report in item.reports]
-            assert not reports, f"view reports: {reports}"
-        score: float = pose_psnr(config, ply, images[decode_path], look_at(position, target, up), DEFAULT_FOV_Y, f"sog-{decode_path}")
-        print(f"SOG_PIXELS {decode_path} viewer/standalone {score:.3f} dB", flush=True)
-        assert score >= 45.0, f"SOG payload ({decode_path}) differs from gsplat render of the decode: {score} dB"
-    os.environ.pop("GSPLAT_SOG_DECODE")
-    ab: float = psnr(images["gpu"], images["cpu"])
-    print(f"SOG_PIXELS gpu/cpu {ab:.3f} dB", flush=True)
-    assert ab >= 45.0, f"GPU and CPU de-quantisation differ: {ab} dB"
+    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+        viewer.open_url(str(recording_path.resolve()))
+        image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-gpu.png")
+        reports = [report.summary for item in viewer.viewer_state().views for report in item.reports]
+        assert not reports, f"view reports: {reports}"
+    score: float = pose_psnr(config, ply, image, look_at(position, target, up), DEFAULT_FOV_Y, "sog-gpu")
+    print(f"SOG_PIXELS gpu viewer/standalone {score:.3f} dB", flush=True)
+    assert score >= 45.0, f"SOG payload differs from gsplat render of the decode: {score} dB"
     with spawn_viewer(STOCK_VIEWER) as viewer:
         viewer.open_url(str(recording_path.resolve()))
         stock: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-stock.png")
