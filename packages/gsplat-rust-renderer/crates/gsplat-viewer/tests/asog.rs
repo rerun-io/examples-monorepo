@@ -247,6 +247,67 @@ fn evaluate_matches_the_reference() {
 /// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
 /// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
 /// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
+/// Hash of every array `sog_dequant.wgsl` and `asog_motion.wgsl` read (texel planes, SH planes, motion codes,
+/// codebooks and bounds).
+fn parts_hash(p: &gsplat_core::asog::AsogParts) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::hash::DefaultHasher::new();
+    (
+        &p.means_l,
+        &p.means_u,
+        &p.quats,
+        &p.scales,
+        &p.sh0,
+        &p.sh,
+        &p.motion_codes,
+    )
+        .hash(&mut h);
+    let q = &p.quantization;
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    (
+        q.count,
+        q.means_min.map(f64::to_bits),
+        q.means_max.map(f64::to_bits),
+        bits(&q.scales),
+        bits(&q.sh0),
+        bits(&q.sh_rest),
+    )
+        .hash(&mut h);
+    h.finish()
+}
+
+/// The parallel inflate of `decode_parts` gives the serial result bit for bit: on the fixture, and on
+/// `GSPLAT_ASOG_FILE` when it is set (whole trained clips).
+#[test]
+fn parallel_inflate_gives_the_serial_parts() {
+    let all = chunks(FIXTURE);
+    let fixture =
+        row(&all["/asog"], "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
+    let mut files = vec![(
+        "fixture".to_owned(),
+        fixture.as_primitive::<UInt8Type>().values().to_vec(),
+    )];
+    if let Ok(path) = std::env::var("GSPLAT_ASOG_FILE") {
+        files.push((
+            path.clone(),
+            std::fs::read(&path).expect("GSPLAT_ASOG_FILE"),
+        ));
+    }
+    for (name, bytes) in files {
+        let parallel =
+            gsplat_core::asog::decode_parts(&bytes, ASOG_ACTIVE_THRESHOLD).expect("decode_parts");
+        let serial =
+            gsplat_core::asog::decode_parts_serial(&bytes, ASOG_ACTIVE_THRESHOLD).expect("serial");
+        let (a, b) = (parts_hash(&parallel), parts_hash(&serial));
+        println!(
+            "{name}: {} rows, parallel {a:016x}, serial {b:016x}",
+            parallel.quantization.count
+        );
+        assert_eq!(a, b, "{name}: parallel and serial inflate differ");
+        assert_eq!(parallel.motion_codes, serial.motion_codes);
+    }
+}
+
 #[test]
 #[ignore = "integration: GPU"]
 fn gpu_load_path_matches_the_cpu_oracle_and_the_reference() {

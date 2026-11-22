@@ -244,9 +244,68 @@ impl Container<'_> {
             desc.channels,
         )))
     }
+}
 
-    fn required(&self, name: &'static str) -> Result<(Vec<i64>, usize), Error> {
-        self.stream(name)?.ok_or(Error::MissingStream(name))
+/// Every stream [`decode_parts`] reads.
+const STREAMS: [&str; 14] = [
+    "means",
+    "quats",
+    "quatmode",
+    "scales",
+    "sh0",
+    "opacity",
+    "shlabels",
+    "shpalette",
+    "mu",
+    "logsigma",
+    "anchor",
+    "omega",
+    "g",
+    "flags",
+];
+
+/// One stream decoded by [`Container::stream`]: absent, or splat-major integers with their channel count.
+type Decoded = Result<Option<(Vec<i64>, usize)>, Error>;
+
+/// The streams of [`STREAMS`], each taken once by name.
+struct Streams([Option<Decoded>; STREAMS.len()]);
+
+impl Streams {
+    /// Decode every stream: one scoped thread per stream when `parallel` (the zlib members are independent), in
+    /// order otherwise. Both give the same values.
+    fn decode(container: &Container<'_>, parallel: bool) -> Self {
+        if !parallel {
+            return Self(STREAMS.map(|name| Some(container.stream(name))));
+        }
+        Self(std::thread::scope(|scope| {
+            STREAMS
+                .map(|name| scope.spawn(move || container.stream(name)))
+                .map(|thread| {
+                    Some(
+                        thread
+                            .join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    )
+                })
+        }))
+    }
+
+    fn optional(&mut self, name: &'static str) -> Decoded {
+        let index = STREAMS
+            .iter()
+            .position(|&s| s == name)
+            .expect("a listed stream");
+        self.0[index].take().expect("each stream is taken once")
+    }
+
+    /// Stream `name`, required, with `want` channels over `rows` rows.
+    fn shaped(&mut self, name: &'static str, rows: usize, want: usize) -> Result<Vec<i64>, Error> {
+        shaped(
+            name,
+            self.optional(name)?.ok_or(Error::MissingStream(name))?,
+            rows,
+            want,
+        )
     }
 }
 
@@ -466,18 +525,33 @@ pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
 ///
 /// Static integers packed as SOG v2 texels, motion
 /// integers as [`MOTION_CODES`] i32 per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
-/// `asog_motion.wgsl` do that.
+/// `asog_motion.wgsl` do that. Native builds inflate the streams in parallel (one thread each); the web build, which
+/// has no threads, inflates them in order.
 pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
+    decode_parts_with(bytes, active_threshold, cfg!(not(target_arch = "wasm32")))
+}
+
+/// [`decode_parts`] with every stream inflated in order on the calling thread (the reference of the parallel path).
+#[cfg(any(test, feature = "testing"))]
+pub fn decode_parts_serial(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
+    decode_parts_with(bytes, active_threshold, false)
+}
+
+fn decode_parts_with(
+    bytes: &[u8],
+    active_threshold: f32,
+    parallel: bool,
+) -> Result<AsogParts, Error> {
     let container = parse(bytes)?;
+    let mut streams = Streams::decode(&container, parallel);
     let m = &container.manifest;
     let n = m.count;
-    let get = |name: &'static str, want: usize| shaped(name, container.required(name)?, n, want);
-    let means = get("means", 3)?;
-    let quats = get("quats", 3)?;
-    let quatmode = get("quatmode", 1)?;
-    let scales = get("scales", 3)?;
-    let sh0 = get("sh0", 3)?;
-    let opacity = get("opacity", 1)?;
+    let means = streams.shaped("means", n, 3)?;
+    let quats = streams.shaped("quats", n, 3)?;
+    let quatmode = streams.shaped("quatmode", n, 1)?;
+    let scales = streams.shaped("scales", n, 3)?;
+    let sh0 = streams.shaped("sh0", n, 3)?;
+    let opacity = streams.shaped("opacity", n, 1)?;
 
     let mut planes = [(); 5].map(|()| vec![0u8; 4 * n]);
     let [means_l, means_u, quat_plane, scale_plane, sh0_plane] = &mut planes;
@@ -506,8 +580,8 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
 
     let sh_n = match (
         &m.sh_n,
-        container.stream("shlabels")?,
-        container.stream("shpalette")?,
+        streams.optional("shlabels")?,
+        streams.optional("shpalette")?,
     ) {
         (Some(sh_n), Some(labels), Some(palette)) => {
             let rest = sh_n.coeffs;
@@ -548,7 +622,7 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
             None => [0.0; 256],
         },
     };
-    let motion_codes = motion_codes(&container, &opacity)?;
+    let motion_codes = motion_codes(m, opacity, &mut streams)?;
     let [means_l, means_u, quats, scales, sh0] = planes;
     Ok(AsogParts {
         manifest: container.manifest,
@@ -565,18 +639,16 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
 }
 
 /// The motion streams as [`MOTION_CODES`] i32 per row, with the clip index of every row checked.
-fn motion_codes(container: &Container<'_>, opacity: &[i64]) -> Result<Vec<i32>, Error> {
-    let m = &container.manifest;
+fn motion_codes(m: &Manifest, opacity: Vec<i64>, decoded: &mut Streams) -> Result<Vec<i32>, Error> {
     let n = m.count;
-    let get = |name: &'static str, want: usize| shaped(name, container.required(name)?, n, want);
     let streams: [(&'static str, Vec<i64>, usize); 7] = [
-        ("opacity", opacity.to_vec(), 1),
-        ("mu", get("mu", 1)?, 1),
-        ("logsigma", get("logsigma", 1)?, 1),
-        ("anchor", get("anchor", 3)?, 3),
-        ("omega", get("omega", 9)?, 9),
-        ("g", get("g", 5)?, 5),
-        ("flags", get("flags", 1)?, 1),
+        ("opacity", opacity, 1),
+        ("mu", decoded.shaped("mu", n, 1)?, 1),
+        ("logsigma", decoded.shaped("logsigma", n, 1)?, 1),
+        ("anchor", decoded.shaped("anchor", n, 3)?, 3),
+        ("omega", decoded.shaped("omega", n, 9)?, 9),
+        ("g", decoded.shaped("g", n, 5)?, 5),
+        ("flags", decoded.shaped("flags", n, 1)?, 1),
     ];
     let clips = m.clips.len();
     let mut out = Vec::with_capacity(n * MOTION_CODES);
