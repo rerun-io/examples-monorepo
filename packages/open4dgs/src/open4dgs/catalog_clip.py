@@ -48,6 +48,8 @@ LENS_TOLERANCE_PX: float = 1e-9
 """Largest step, in pixels, of a converged lens inversion (dataforge ``LENS_TOLERANCE_PX``)."""
 LENS_RESIDUAL_PX: float = 1e-6
 """Largest error, in pixels, of an inverted point mapped back (dataforge ``LENS_RESIDUAL_PX``)."""
+RESAMPLE_CHUNK: int = 16
+"""Frames undistorted and resized per call (16 x 2056x1504 is 0.6 GB as float32 per buffer)."""
 _MESH_PATH: re.Pattern[str] = re.compile(r"^/world/(?P<source>.+)/people/(?P<person>person_\d+)/body/mesh$")
 
 
@@ -421,7 +423,15 @@ def read_catalog_clip(
             raise ValueError(f"{video}: decoded {decoded.shape[3]}x{decoded.shape[2]}, the pinhole says {stored_wh}")
         lens: ViconRadialLens | None = _camera_lens(static, node)
         grid: Float32[Tensor, "1 h w 2"] | None = None if lens is None else undistortion_grid(lens, stored_wh, decode_on)
-        out_frames.append(resample_frames(decoded, grid, target_wh).permute(0, 2, 3, 1).contiguous().to(store_on))
+        # Float resampling costs 24 bytes per stored pixel and frame: chunk it to bound the GPU peak.
+        out_frames.append(
+            torch.cat(
+                [
+                    resample_frames(decoded[start : start + RESAMPLE_CHUNK], grid, target_wh).permute(0, 2, 3, 1).to(store_on)
+                    for start in range(0, len(decoded), RESAMPLE_CHUNK)
+                ]
+            )
+        )
         valid.append(valid_mask(grid, stored_wh, target_wh))
         k_matrix: Float64[ndarray, "3 3"] | None = models[node].pinhole.intrinsics.k_matrix
         assert k_matrix is not None  # Intrinsics always derives it
