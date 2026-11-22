@@ -102,3 +102,54 @@ pub fn splat(pos: [f32; 3], log_scale: f32, raw_opacity: f32) -> crate::Splats {
         min_scale: None,
     }
 }
+
+/// What [`asog_gpu_load`] reads back.
+pub struct AsogGpuLoad {
+    pub gpu_rows: Vec<f32>,
+    pub cpu_rows: Vec<f32>,
+    /// Per time: (transforms, raw opacity).
+    pub evaluated: Vec<(Vec<f32>, Vec<f32>)>,
+}
+
+/// The GPU load path of an entropy-decoded `.asog`, read back next to the CPU oracle.
+///
+/// `Renderer::upload_asog` (`sog_dequant.wgsl` + `asog_motion.wgsl`) gives (GPU motion rows, CPU `AsogParts::motion` rows packed the
+/// same way, `ASOG_STRIDE` f32 each), then for each time in `times` the GPU motion pass on those rows as (transforms
+/// f32 x 10 per row, raw opacity per row).
+pub fn asog_gpu_load(parts: &crate::asog::AsogParts, times: &[f32]) -> AsogGpuLoad {
+    use crate::motion_gpu::{ASOG_STRIDE, Deform, Motion};
+    let (device, queue) = gpu();
+    let renderer = crate::Renderer::new(&device).expect("renderer");
+    let scene = renderer.upload_asog(&queue, parts).expect("upload_asog");
+    let n = scene.len() as usize;
+    let motion = scene.motion().expect("animated scene");
+    let gpu_rows = read(&device, &queue, &motion.params, n * ASOG_STRIDE);
+    let cpu_rows = Motion::Asog(&parts.motion()).pack().1;
+    let kernels = crate::kernels::Kernels::new(&device);
+    let mut deform = Deform::new(
+        &device,
+        &kernels.trigs_deform,
+        motion,
+        scene.transforms().expect("splat scene"),
+        scene.len(),
+        u64::MAX,
+    )
+    .expect("deform buffers");
+    let evaluated = times
+        .iter()
+        .map(|&t| {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            deform.encode(&mut encoder, &queue, &kernels.trigs_deform, 0, t, None);
+            queue.submit([encoder.finish()]);
+            (
+                read(&device, &queue, &deform.transforms, n * 10),
+                read(&device, &queue, &deform.opacity, n),
+            )
+        })
+        .collect();
+    AsogGpuLoad {
+        gpu_rows,
+        cpu_rows,
+        evaluated,
+    }
+}

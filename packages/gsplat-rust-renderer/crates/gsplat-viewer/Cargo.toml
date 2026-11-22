@@ -47,6 +47,8 @@ re_viewer = { version = "=0.42.0", default-features = false, features = ["defaul
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 re_log_encoding = "=0.42.0"
 re_log_msg = "=0.42.0"
+# E4: the GPU load path of the .asog fixture read back (gsplat_core::test_utils).
+gsplat-core = { path = "../gsplat-core", features = ["testing"] }
 
 [lints]
 workspace = true

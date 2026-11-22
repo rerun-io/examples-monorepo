@@ -219,6 +219,25 @@ impl ViewState {
                 })
         };
         encoder.clear_buffer(&scratch.counts, 0, None);
+        if let Some(deform) = &mut self.deform {
+            // One motion dispatch per time change; the projector then reads this view's evaluated rows.
+            deform.encode(
+                encoder,
+                queue,
+                &kernels.trigs_deform,
+                index,
+                options.time,
+                // Slots 10 and 11 of a profiling query set larger than the frame's ten time the motion pass.
+                self.timing
+                    .as_ref()
+                    .filter(|q| q.count() >= crate::QUERY_COUNT + 2)
+                    .map(|query_set| wgpu::ComputePassTimestampWrites {
+                        query_set,
+                        beginning_of_pass_write_index: Some(crate::QUERY_COUNT),
+                        end_of_pass_write_index: Some(crate::QUERY_COUNT + 1),
+                    }),
+            );
+        }
         dispatch_direct(
             encoder,
             &stages.forward,
