@@ -71,7 +71,7 @@ class Config:
     init_name: str = "moge"
     """``init``: file ``<output_root>/init/open4dgs-selfcap/<segment>__<init_name>.rrd``."""
     roi: bool = False
-    """``prior``: read the clip with person-centred virtual cameras (the prior must match the training grid; the layer file gets
+    """``prior``/``init``: read the clip with person-centred virtual cameras (the prior must match the training grid; the layer file gets
     a ``.roi`` suffix and replaces the registered ``moge2_prior`` layer)."""
     png_dir: Path | None = Path("/mnt/nas/ssd-8tb/scratch/open4dgs/runs/s1")
 
@@ -164,7 +164,7 @@ def _prior(config: Config) -> None:
 
 def _init(config: Config) -> None:
     timed: TimedClip = read_timed_clip(
-        config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames, max_side=config.max_side
+        config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames, max_side=config.max_side, roi=config.roi
     )
     clip = timed.clip
     assert timed.joints is not None
