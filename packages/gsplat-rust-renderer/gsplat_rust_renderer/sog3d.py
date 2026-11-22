@@ -11,6 +11,15 @@ Contract (one entity, every component static, no Rerun component type):
   SogSplats3D:means_l, :means_u, :quats, :scales, :sh0 [, :shN_centroids, :shN_labels]
                              UInt8 xN the stored WebP bytes of that plane (a flat batch, one instance per byte)
 v3 blind planes are not logged. Data stays in the file frame (3DGS PLY: x right, y down, z forward).
+
+`AnimatedSogSplats3D`: an animated-sog `.asog` v1 clip logged as its file bytes (`gsplat_core::asog` decodes it and
+evaluates the motion at the time cursor). The same entity's `GaussianSplats3D` preview is ONE pose, the clip middle
+(rows with weight > 0, opacity x weight, every k-th of them), never the canonical rows (a ghost trail).
+  AnimatedSogSplats3D:format            Utf8 x1    "asog/1"
+  AnimatedSogSplats3D:asog              UInt8 xN   the .asog file verbatim
+  AnimatedSogSplats3D:frame_origin      Float64 x1 timeline frame at clip time 0: t [s] = (frame - frame_origin) / frameRate,
+                                                   frameRate from the manifest (no fps component)
+  AnimatedSogSplats3D:active_threshold  Float32 x1 temporal cut the viewer applies (absent = 0.05, the format's constant)
 """
 
 from dataclasses import dataclass
@@ -21,6 +30,8 @@ import rerun as rr
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
+from gsplat_rust_renderer.asog_decode import TEMPORAL_THRESHOLD, AsogFile, AsogFrame, DecodedAsog, evaluate
+from gsplat_rust_renderer.asog_decode import decode as decode_asog
 from gsplat_rust_renderer.gaussians3d import SH_C0
 from gsplat_rust_renderer.sog_decode import DecodedSog, SogFile, decode
 
@@ -30,13 +41,16 @@ PLANES: tuple[str, ...] = ("means_l", "means_u", "quats", "scales", "sh0", "shN_
 PREVIEW_ROWS: int = 16_384
 
 
-def descriptor(field: str) -> rr.ComponentDescriptor:
-    """`SogSplats3D:<field>` without a component type."""
-    return rr.ComponentDescriptor(f"{ARCHETYPE}:{field}", archetype=ARCHETYPE, component_type=None)
+ANIMATED_ARCHETYPE: str = "AnimatedSogSplats3D"
 
 
-def batch(field: str, array: pa.Array) -> rr.DescribedComponentBatch:
-    field_descriptor: rr.ComponentDescriptor = descriptor(field)
+def descriptor(field: str, archetype: str = ARCHETYPE) -> rr.ComponentDescriptor:
+    """`<archetype>:<field>` without a component type."""
+    return rr.ComponentDescriptor(f"{archetype}:{field}", archetype=archetype, component_type=None)
+
+
+def batch(field: str, array: pa.Array, archetype: str = ARCHETYPE) -> rr.DescribedComponentBatch:
+    field_descriptor: rr.ComponentDescriptor = descriptor(field, archetype)
     return rr.DescribedComponentBatch(rr.AnyBatchValue(field_descriptor, array), field_descriptor)
 
 
@@ -85,6 +99,82 @@ def log_sog(entity: str, sog: SogFile, preview_rows: int = PREVIEW_ROWS, *, reco
     """Log the `SogSplats3D` payload and its preview (unless `preview_rows` is 0) on one static entity."""
     preview: rr.GaussianSplats3D | None = preview_splats(decode(sog), preview_rows)
     payload: SogSplats3D = SogSplats3D(sog)
+    if preview is None:
+        rr.log(entity, payload, static=True, recording=recording)
+    else:
+        rr.log(entity, preview, payload, static=True, recording=recording)
+
+
+@dataclass(frozen=True)
+class AnimatedSogSplats3D(rr.AsComponents):
+    """An `.asog` clip as stored, plus what the file lacks: the Rerun frame of clip time 0 and the temporal cut."""
+
+    asog: AsogFile
+    frame_origin: float = 0.0
+    active_threshold: float = TEMPORAL_THRESHOLD
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.active_threshold < 1.0:
+            raise ValueError(f"AnimatedSogSplats3D: active_threshold {self.active_threshold} is outside [0, 1)")
+
+    def as_component_batches(self) -> list[rr.DescribedComponentBatch]:
+        return [
+            batch("format", pa.array([f"asog/{self.asog.manifest.version}"], pa.utf8()), ANIMATED_ARCHETYPE),
+            batch("asog", pa.array(np.frombuffer(self.asog.data, np.uint8), pa.uint8()), ANIMATED_ARCHETYPE),
+            batch("frame_origin", pa.array([self.frame_origin], pa.float64()), ANIMATED_ARCHETYPE),
+            batch("active_threshold", pa.array([self.active_threshold], pa.float32()), ANIMATED_ARCHETYPE),
+        ]
+
+
+def asog_preview(
+    decoded: DecodedAsog, frame: AsogFrame, rows: int = PREVIEW_ROWS
+) -> rr.GaussianSplats3D | None:
+    """One evaluated pose as a typed preview: rows with weight > 0, opacity x weight, every k-th; None for rows = 0."""
+    if rows <= 0:
+        return None
+    alive: ndarray = np.nonzero(frame.weights > 0)[0]
+    alive = alive[:: max(1, -(-len(alive) // rows))]
+    quats: Float32[ndarray, "m 4"] = frame.rotations[alive].astype(np.float32)
+    rgba: Float32[ndarray, "m 4"] = np.clip(
+        np.concatenate(
+            [0.5 + SH_C0 * decoded.sh0[alive], (decoded.opacity[alive] * frame.weights[alive])[:, None]], axis=1
+        ).astype(np.float32),
+        0.0,
+        1.0,
+    )
+    colors: UInt8[ndarray, "m 4"] = (rgba * 255.0 + 0.5).astype(np.uint8)
+    return rr.GaussianSplats3D(
+        centers=frame.positions[alive].astype(np.float32),
+        quaternions=np.roll(quats, -1, axis=1),
+        scales=np.exp(decoded.log_scales[alive]).astype(np.float32),
+        colors=colors,
+    )
+
+
+def log_asog(
+    entity: str,
+    asog: AsogFile,
+    frame_origin: float = 0.0,
+    active_threshold: float = TEMPORAL_THRESHOLD,
+    preview_rows: int = PREVIEW_ROWS,
+    *,
+    fps: float | None = None,
+    recording: rr.RecordingStream | None = None,
+) -> None:
+    """Log the `AnimatedSogSplats3D` payload and its mid-clip preview on one static entity.
+
+    `fps` is the frame rate of the timeline the caller logs on; it must equal the manifest's frameRate, because the
+    viewer maps frames to clip seconds with the manifest's rate.
+    """
+    rate: float = asog.manifest.timeline.frame_rate
+    if fps is not None and fps != rate:
+        raise ValueError(f"log_asog: timeline fps {fps} differs from the .asog frameRate {rate}")
+    payload: AnimatedSogSplats3D = AnimatedSogSplats3D(asog, frame_origin, active_threshold)
+    preview: rr.GaussianSplats3D | None = None
+    if preview_rows > 0:
+        decoded: DecodedAsog = decode_asog(asog)
+        mid: AsogFrame = evaluate(decoded, asog.manifest, asog.manifest.duration / 2, active_threshold)
+        preview = asog_preview(decoded, mid, preview_rows)
     if preview is None:
         rr.log(entity, payload, static=True, recording=recording)
     else:

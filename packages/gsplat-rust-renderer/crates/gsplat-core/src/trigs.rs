@@ -6,6 +6,8 @@
 //! `gamma = exp(-0.5 (dt / sigma)^2)`, renormalised by the smooth cull threshold; static rows keep gamma = 1.
 //! The operation order follows the torch code in f32 so results match it to float rounding.
 
+use crate::Splats;
+
 /// Per-row motion parameters, borrowed from the `TrigsMotion3D` components (all slices have the row count).
 #[derive(Clone, Copy)]
 pub struct TrigsMotion<'a> {
@@ -116,6 +118,58 @@ fn exp_se3_quat(rho: [f32; 3], omega: [f32; 3]) -> ([f32; 4], [f32; 3]) {
     (q, p)
 }
 
+/// Renormalised temporal opacity `max((gamma - c) / (1 - c), 0)`, `gamma = exp(-0.5 (dt / sigma)^2)`, cut `c`
+/// clamped to [0, 0.999] (0 = off). Shared by both motion forms.
+fn temporal_gamma(dt: f32, sigma: f32, threshold: f32) -> f32 {
+    let ratio = dt / sigma;
+    let mut gamma = (-0.5 * (ratio * ratio)).exp();
+    let threshold = threshold.clamp(0.0, 0.999);
+    if threshold > 0.0 {
+        gamma = ((gamma - threshold) / (1.0 - threshold)).max(0.0);
+    }
+    gamma
+}
+
+/// Bezier parameter over the row's life `[mu - 2 sigma, mu + 2 sigma]`, clamped to [0, 1]. Beyond 2 sigma the
+/// curves freeze at their end points while `dt` keeps growing (a 0.05 cut sits at 2.4477 sigma).
+fn life_tau(t: f32, mu: f32, sigma: f32) -> f32 {
+    ((t - (mu - 2.0 * sigma)) / (4.0 * sigma)).clamp(0.0, 1.0)
+}
+
+/// Quadratic Bernstein weights at `tau`.
+fn bezier2_weights(tau: f32) -> [f32; 3] {
+    let one_minus = 1.0 - tau;
+    [one_minus * one_minus, 2.0 * one_minus * tau, tau * tau]
+}
+
+/// Gauge fix: the anchor without its component along omega (unchanged when `|omega|^2 < 1e-8`).
+fn perp_anchor(anchor: [f32; 3], omega: [f32; 3], omega_sq: f32) -> [f32; 3] {
+    if omega_sq < GAUGE_EPS {
+        return anchor;
+    }
+    let ka = dot(anchor, omega) / omega_sq.max(GAUGE_DENOM_CLAMP);
+    std::array::from_fn(|k| anchor[k] - ka * omega[k])
+}
+
+/// Screw motion of `center` about `a_perp` by the twist (`nu_par`, `omega`) over `dt` seconds: the moved centre and
+/// the relative rotation `q_rel` (unit wxyz) to pre-multiply onto the canonical rotation.
+fn screw(
+    center: [f32; 3],
+    a_perp: [f32; 3],
+    nu_par: [f32; 3],
+    omega: [f32; 3],
+    dt: f32,
+) -> ([f32; 3], [f32; 4]) {
+    let clamp = |v: f32| v.clamp(-1e4, 1e4);
+    let rho = nu_par.map(|v| clamp(v * dt));
+    let omega_dt = omega.map(|v| clamp(v * dt));
+    let (q_rel, p_par) = exp_se3_quat(rho, omega_dt);
+    let centered = std::array::from_fn(|k| center[k] - a_perp[k]);
+    let rotated = rotate(q_rel, centered);
+    let moved = std::array::from_fn(|k| finite(rotated[k] + a_perp[k] + p_par[k]));
+    (moved, q_rel)
+}
+
 impl TrigsMotion<'_> {
     pub fn len(&self) -> usize {
         self.times.len()
@@ -151,15 +205,11 @@ impl TrigsMotion<'_> {
         if self.row_static(i) {
             return 1.0;
         }
-        let dt = t - self.times[i];
-        let sigma = self.log_durations[i].exp().max(1e-6);
-        let ratio = dt / sigma;
-        let mut gamma = (-0.5 * (ratio * ratio)).exp();
-        let threshold = self.active_threshold.clamp(0.0, 0.999);
-        if threshold > 0.0 {
-            gamma = ((gamma - threshold) / (1.0 - threshold)).max(0.0);
-        }
-        gamma
+        temporal_gamma(
+            t - self.times[i],
+            self.log_durations[i].exp().max(1e-6),
+            self.active_threshold,
+        )
     }
 
     /// Row `i` at `t` seconds, from its canonical centre and xyzw rotation.
@@ -184,9 +234,7 @@ impl TrigsMotion<'_> {
         }
         let mu = self.times[i];
         let sigma = self.log_durations[i].exp();
-        let tau = ((t - (mu - 2.0 * sigma)) / (4.0 * sigma)).clamp(0.0, 1.0);
-        let one_minus = 1.0 - tau;
-        let (b0, b1, b2) = (one_minus * one_minus, 2.0 * one_minus * tau, tau * tau);
+        let [b0, b1, b2] = bezier2_weights(life_tau(t, mu, sigma));
         let twist: [f32; 6] = std::array::from_fn(|k| {
             let residual =
                 b0 * self.twist_c0[i][k] + b1 * self.twist_c1[i][k] + b2 * self.twist_c2[i][k];
@@ -196,25 +244,14 @@ impl TrigsMotion<'_> {
         let omega = [twist[3], twist[4], twist[5]];
         let anchor = self.anchors[i];
         let omega_sq = dot(omega, omega);
-        let (a_perp, nu_par) = if omega_sq < GAUGE_EPS {
-            (anchor, nu)
+        let a_perp = perp_anchor(anchor, omega, omega_sq);
+        let nu_par = if omega_sq < GAUGE_EPS {
+            nu
         } else {
-            let safe = omega_sq.max(GAUGE_DENOM_CLAMP);
-            let ka = dot(anchor, omega) / safe;
-            let kn = dot(nu, omega) / safe;
-            (
-                std::array::from_fn(|k| anchor[k] - ka * omega[k]),
-                omega.map(|w| kn * w),
-            )
+            let kn = dot(nu, omega) / omega_sq.max(GAUGE_DENOM_CLAMP);
+            omega.map(|w| kn * w)
         };
-        let dt = t - mu;
-        let clamp = |v: f32| v.clamp(-1e4, 1e4);
-        let rho = nu_par.map(|v| clamp(v * dt));
-        let omega_dt = omega.map(|v| clamp(v * dt));
-        let (q_rel, p_par) = exp_se3_quat(rho, omega_dt);
-        let centered = std::array::from_fn(|k| center[k] - a_perp[k]);
-        let rotated = rotate(q_rel, centered);
-        let moved: [f32; 3] = std::array::from_fn(|k| finite(rotated[k] + a_perp[k] + p_par[k]));
+        let (moved, q_rel) = screw(center, a_perp, nu_par, omega, t - mu);
         let [w, x, y, z] = finite_quat(quat_mul(q_rel, canonical));
         Deformed {
             center: moved,
@@ -260,4 +297,196 @@ pub fn deform_visible(
         values.push(motion.deform_row(i, center, q, t));
     }
     (rows, values)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The `.asog` form (animated-sog v1, format.md section 4; reference `asog.decode.Asog.evaluate` and `asog.motion`).
+//
+// Same model as the twist form, parameterised differently: the rotation twist is the quadratic Bezier of O0..O2
+// (the base folded in), the translation is carried only along omega as the quartic Bernstein `g` of G0..G4, so
+// `nu_par = g / max(|omega|^2, 1e-24) omega` (no 1e-8 switch for nu, unlike the twist form). Clips add a fade weight
+// and a clip-local time. Static rows keep their canonical pose with weight = the clip fade.
+
+/// One clip of the manifest's clip table, in seconds on the file's timeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipWindow {
+    /// Timeline time minus clip-local time: `(global.frameStart - local.frameStart) / frameRate`.
+    pub offset: f32,
+    pub active_start: f32,
+    pub active_end: f32,
+    pub core_start: f32,
+    pub core_end: f32,
+    /// Fade lengths (0 = none).
+    pub fade_in: f32,
+    pub fade_out: f32,
+}
+
+impl ClipWindow {
+    /// Fade weight at timeline time `t`: 0 outside `[active_start, active_end)`, smoothstep ramps before
+    /// `core_start` and from `core_end` on (reference `Asog.clip_weights`).
+    pub fn fade(&self, t: f32) -> f32 {
+        let smoothstep = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        if !(self.active_start <= t && t < self.active_end) {
+            0.0
+        } else if self.fade_in > 0.0 && t < self.core_start {
+            smoothstep((t - (self.core_start - self.fade_in)) / self.fade_in)
+        } else if self.fade_out > 0.0 && t >= self.core_end {
+            smoothstep((self.core_end + self.fade_out - t) / self.fade_out)
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Per-row `.asog` motion, de-quantised (owned: `crate::asog::decode` builds it). Static rows hold zeros.
+#[derive(Clone, Debug, Default)]
+pub struct AsogMotion {
+    /// Linear base opacity (q / 255).
+    pub opacities: Vec<f32>,
+    /// Clip-local centre time `mu` in seconds.
+    pub times: Vec<f32>,
+    /// Temporal width `sigma` in seconds.
+    pub sigmas: Vec<f32>,
+    pub anchors: Vec<[f32; 3]>,
+    /// Rotation-twist control points O0, O1, O2 (rad/s).
+    pub omega: Vec<[[f32; 3]; 3]>,
+    /// Quartic Bernstein control points G0..G4 of `g = nu . omega`.
+    pub g: Vec<[f32; 5]>,
+    pub is_static: Vec<bool>,
+    /// Index into `clips`.
+    pub clip: Vec<u32>,
+    pub clips: Vec<ClipWindow>,
+    /// The temporal cut (`AnimatedSogSplats3D:active_threshold`; the format's constant is 0.05).
+    pub active_threshold: f32,
+}
+
+/// One evaluated `.asog` row: centre, unit rotation wxyz (w >= 0) and the opacity factor (clip fade x temporal
+/// weight; 0 = not drawn, the row keeps its canonical pose).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AsogRow {
+    pub center: [f32; 3],
+    pub quaternion: [f32; 4],
+    pub weight: f32,
+}
+
+/// Default `.asog` temporal cut (animated-sog v1 `TEMPORAL_THRESHOLD`; no manifest field).
+pub const ASOG_ACTIVE_THRESHOLD: f32 = 0.05;
+
+/// Raw logit opacity of a row that is not drawn.
+pub const CULLED_RAW_OPACITY: f32 = -100.0;
+
+impl AsogMotion {
+    pub fn len(&self) -> usize {
+        self.times.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.times.is_empty()
+    }
+
+    /// (fade, clip-local time) of every clip at timeline time `t`.
+    pub fn clip_states(&self, t: f32) -> Vec<(f32, f32)> {
+        self.clips
+            .iter()
+            .map(|clip| (clip.fade(t), t - clip.offset))
+            .collect()
+    }
+
+    /// Row `i` from its canonical transform (gsplat-core layout: mean, quat wxyz, log scale) and the clip states.
+    pub fn row(&self, i: usize, canonical: &[f32; 10], clips: &[(f32, f32)]) -> AsogRow {
+        let center = [canonical[0], canonical[1], canonical[2]];
+        let quaternion = [canonical[3], canonical[4], canonical[5], canonical[6]];
+        let (fade, local_t) = clips
+            .get(self.clip[i] as usize)
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        let still = |weight| AsogRow {
+            center,
+            quaternion,
+            weight,
+        };
+        if self.is_static[i] {
+            return still(fade);
+        }
+        let (mu, sigma) = (self.times[i], self.sigmas[i]);
+        let dt = local_t - mu;
+        let weight = fade * temporal_gamma(dt, sigma, self.active_threshold);
+        if weight <= 0.0 {
+            return still(weight);
+        }
+        let tau = life_tau(local_t, mu, sigma);
+        let [b0, b1, b2] = bezier2_weights(tau);
+        let [o0, o1, o2] = self.omega[i];
+        let omega: [f32; 3] = std::array::from_fn(|k| b0 * o0[k] + b1 * o1[k] + b2 * o2[k]);
+        let u = 1.0 - tau;
+        let (uu, tt) = (u * u, tau * tau);
+        let quartic = [
+            uu * uu,
+            4.0 * uu * u * tau,
+            6.0 * uu * tt,
+            4.0 * u * tt * tau,
+            tt * tt,
+        ];
+        let g: f32 = quartic.iter().zip(&self.g[i]).map(|(b, c)| b * c).sum();
+        let omega_sq = dot(omega, omega);
+        let k = g / omega_sq.max(1e-24);
+        let nu_par = omega.map(|w| k * w);
+        let a_perp = perp_anchor(self.anchors[i], omega, omega_sq);
+        let (moved, q_rel) = screw(center, a_perp, nu_par, omega, dt);
+        let q = finite_quat(normalize4(quat_mul(q_rel, quaternion)));
+        let sign = if q[0] < 0.0 { -1.0 } else { 1.0 };
+        AsogRow {
+            center: moved,
+            quaternion: q.map(|v| v * sign),
+            weight,
+        }
+    }
+
+    /// The splats at timeline time `t` into `out` (gsplat-core layout, f32): transforms and raw opacities are
+    /// rewritten for every row (rows with weight 0 get [`CULLED_RAW_OPACITY`]); scales and SH come from `canonical`
+    /// and are copied only when `out` does not hold them yet.
+    pub fn evaluate_into(&self, canonical: &Splats, t: f32, out: &mut Splats) {
+        let clips = self.clip_states(t);
+        if out.sh_coefficients.len() != canonical.sh_coefficients.len()
+            || out.sh_degree != canonical.sh_degree
+        {
+            out.sh_coefficients.clone_from(&canonical.sh_coefficients);
+            out.sh_degree = canonical.sh_degree;
+        }
+        out.min_scale.clone_from(&canonical.min_scale);
+        out.transforms.clear();
+        out.raw_opacities.clear();
+        for (i, transform) in canonical.transforms.iter().enumerate() {
+            let row = self.row(i, transform, &clips);
+            let [x, y, z] = row.center;
+            let [qw, qx, qy, qz] = row.quaternion;
+            out.transforms.push([
+                x,
+                y,
+                z,
+                qw,
+                qx,
+                qy,
+                qz,
+                transform[7],
+                transform[8],
+                transform[9],
+            ]);
+            out.raw_opacities.push(if row.weight > 0.0 {
+                crate::sog::logit(f64::from(self.opacities[i] * row.weight))
+            } else {
+                CULLED_RAW_OPACITY
+            });
+        }
+    }
+
+    /// [`Self::evaluate_into`] into a new [`Splats`].
+    pub fn evaluate(&self, canonical: &Splats, t: f32) -> Splats {
+        let mut out = Splats::default();
+        self.evaluate_into(canonical, t, &mut out);
+        out
+    }
 }

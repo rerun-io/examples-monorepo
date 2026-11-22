@@ -20,6 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 # Lossless WebP (VP8L) decode of SOG planes, pure Rust on native and wasm (already in the native lock via image).
 image-webp = "0.2.4"
+# zlib streams of .asog (already in the native and web locks through flate2/png).
+miniz_oxide = "0.8.9"
 
 [dev-dependencies]
 pollster.workspace = true
