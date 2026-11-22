@@ -3970,10 +3970,12 @@ dependencies = [
 name = "gsplat-viewer-web"
 version = "0.1.0"
 dependencies = [
+ "gsplat-core",
  "gsplat-viewer",
  "re_log",
  "re_viewer",
  "wasm-bindgen",
+ "web-sys",
  "wgpu",
 ]
 

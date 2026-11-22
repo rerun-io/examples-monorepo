@@ -24,6 +24,12 @@ impl Renderer {
         })
     }
 
+    /// Whether the scan and sort kernels use subgroup operations (the device enabled `SUBGROUP`)
+    /// or their workgroup-memory variant.
+    pub fn uses_subgroups(&self) -> bool {
+        self.device.features().contains(wgpu::Features::SUBGROUP)
+    }
+
     /// Reject oversized wire dimensions before converting the CPU data.
     pub fn check_capacity(&self, count: usize, sh_degree: u32) -> Result<(), Error> {
         self.check_bytes(Splats::gpu_bytes(count, sh_degree))

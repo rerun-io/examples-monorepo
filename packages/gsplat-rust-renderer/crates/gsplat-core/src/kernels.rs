@@ -15,7 +15,8 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
-pub(crate) fn sources() -> [String; 12] {
+/// Every module; `subgroups` selects the scan helpers (see `shader::resolve_variant`).
+pub(crate) fn sources(subgroups: bool) -> [String; 12] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -30,7 +31,7 @@ pub(crate) fn sources() -> [String; 12] {
         "image_map.wgsl",
         "image_raster.wgsl",
     ]
-    .map(crate::shader::resolve)
+    .map(|name| crate::shader::resolve_variant(name, subgroups))
 }
 
 const U: wgpu::BindingType = wgpu::BindingType::Buffer {
@@ -176,7 +177,10 @@ const RASTERS: [&str; 5] = [
 ];
 
 impl Kernels {
+    /// Pipelines for the device: the subgroup scan and sort where `SUBGROUP` is enabled, the
+    /// workgroup-memory variant otherwise (same results; WebGPU without "subgroups").
     pub fn new(device: &wgpu::Device) -> Self {
+        let subgroups = device.features().contains(wgpu::Features::SUBGROUP);
         let [
             projection,
             mapping,
@@ -190,7 +194,7 @@ impl Kernels {
             image_projection,
             image_mapping,
             image_raster,
-        ] = sources().map(|s| module(device, &s));
+        ] = sources(subgroups).map(|s| module(device, &s));
         let kernel = |module: &wgpu::ShaderModule, entry: &str| {
             pipeline(device, module, entry, bindings(entry))
         };
@@ -248,7 +252,10 @@ impl Kernels {
 mod tests {
     #[test]
     fn every_native_shader_validates_with_naga() {
-        for source in super::sources() {
+        for source in super::sources(true)
+            .into_iter()
+            .chain(super::sources(false))
+        {
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
             let info = naga::valid::Validator::new(
