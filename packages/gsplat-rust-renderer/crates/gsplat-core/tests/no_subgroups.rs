@@ -8,8 +8,9 @@ use gsplat_core::{Camera, CameraModel, RenderOptions, Renderer, Splats, Target};
 const SIZE: u32 = 256;
 
 /// A dense pseudo-random cloud: millions of tile intersections through every sort and scan kernel.
-/// Centres are not snapped: equal depths would make the order of the visible compaction (an atomic
-/// counter, not deterministic) visible in the pixels, in either variant.
+/// Every splat has its own depth: with equal depths the order of the visible compaction (an atomic
+/// counter, not deterministic) shows in the pixels of either variant (random f32 depths tie by the
+/// thousand at 200k splats).
 fn cloud(count: usize) -> Splats {
     let mut state = 0x9e37_79b9u32;
     let mut next = move || {
@@ -19,8 +20,9 @@ fn cloud(count: usize) -> Splats {
     let mut transforms = Vec::with_capacity(count);
     let mut raw_opacities = Vec::with_capacity(count);
     let mut sh_coefficients = Vec::with_capacity(count);
-    for _ in 0..count {
-        let p = [next() * 2.0 - 1.0, next() * 2.0 - 1.0, next() * 2.0 - 1.0];
+    for i in 0..count {
+        let z = (i as f32 + 0.5) / count as f32 * 2.0 - 1.0;
+        let p = [next() * 2.0 - 1.0, next() * 2.0 - 1.0, z];
         let q = Quat::from_euler(
             glam::EulerRot::XYZ,
             next() * 6.3,
@@ -124,8 +126,11 @@ fn portable_scan_and_sort_render_the_subgroup_pixels() {
     println!(
         "differing pixels, max abs difference: subgroup repeat {repeat:?}, portable repeat {portable_repeat:?}, subgroup vs portable {variants:?}"
     );
+    // Distinct depths make the frame deterministic: both variants must match bit for bit.
     assert_eq!(
-        variants.0, 0,
-        "pixels differ between the two kernel variants"
+        repeat.0 + portable_repeat.0,
+        0,
+        "renders of one variant differ"
     );
+    assert_eq!(variants.0, 0, "pixels differ between the kernel variants");
 }
