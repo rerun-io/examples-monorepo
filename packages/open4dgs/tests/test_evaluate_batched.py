@@ -81,3 +81,57 @@ def test_score_camera_matches_score_frame(monkeypatch: pytest.MonkeyPatch, with_
     assert torch.equal(new.render, (renders * 255.0).round().to(torch.uint8))
     assert math.isnan(new.metrics[4].crop_raw_psnr) and math.isnan(new.metrics[4].alpha_iou)  # empty mask
     assert new.metrics[1].crop_raw_psnr == math.inf and new.metrics[0].crop_raw_lpips > 0.0
+
+
+def _fp32_flags() -> tuple[str, str, str]:
+    return (torch.backends.cudnn.conv.fp32_precision, torch.backends.cudnn.rnn.fp32_precision, torch.backends.cuda.matmul.fp32_precision)
+
+
+def test_ieee_fp32_sets_full_float32_and_restores_the_flags() -> None:
+    from open4dgs.evaluate import ieee_fp32
+
+    before = _fp32_flags()
+    try:
+        # A non-default state (TF32 everywhere, as torch.set_float32_matmul_precision("high") + cuDNN's default give).
+        torch.backends.cudnn.conv.fp32_precision = torch.backends.cudnn.rnn.fp32_precision = "tf32"
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        with ieee_fp32():
+            assert _fp32_flags() == ("ieee", "ieee", "ieee")
+        assert _fp32_flags() == ("tf32", "tf32", "tf32")
+        with pytest.raises(RuntimeError), ieee_fp32():
+            raise RuntimeError("scoring failed")
+        assert _fp32_flags() == ("tf32", "tf32", "tf32")
+    finally:
+        torch.backends.cudnn.conv.fp32_precision, torch.backends.cudnn.rnn.fp32_precision, torch.backends.cuda.matmul.fp32_precision = before
+
+
+def test_scoring_runs_without_tf32_and_leaves_the_training_flags_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both scoring paths see TF32 off inside; outside (where the trainer runs) the flags are exactly what they were."""
+    import torchmetrics.image.lpip as lpip_module
+
+    from open4dgs import evaluate
+
+    monkeypatch.setattr(lpip_module, "_NoTrainLpips", functools.partial(lpip_module._NoTrainLpips, pretrained=False, pnet_rand=True))
+    metrics = evaluate.Metrics(torch.device("cpu"))
+    seen: list[tuple[str, str, str]] = []
+    batch_lpips = evaluate._batch_lpips
+
+    def spy_batch(*args):  # noqa: ANN002, ANN202
+        seen.append(_fp32_flags())
+        return batch_lpips(*args)
+
+    monkeypatch.setattr(evaluate, "_batch_lpips", spy_batch)
+    training_flags = _fp32_flags()
+    assert training_flags[:2] == ("tf32", "tf32")  # PyTorch's default for cuDNN: what the trainer runs with
+    frames, masks, renders, alphas = _clip(3, 88, 96, seed=1)
+    evaluate.score_camera("cam", [0, 1, 2], lambda f: (renders[f], alphas[f]), frames, masks, metrics, with_baselines=True)
+    assert _fp32_flags() == training_flags
+
+    def spy_lpips(pred, target):  # noqa: ANN001, ANN202
+        seen.append(_fp32_flags())
+        return metrics.lpips(pred, target)
+
+    evaluate.score_frame("cam", 0, renders[0], alphas[0][..., 0], frames[0].float() / 255.0, masks[0], spy_lpips)
+    metrics.frame("cam", 0, renders[0], alphas[0][..., 0], frames[0].float() / 255.0, masks[0])
+    assert _fp32_flags() == training_flags
+    assert seen and all(flags == ("ieee", "ieee", "ieee") for flags in seen), seen

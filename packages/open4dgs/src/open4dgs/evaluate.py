@@ -16,10 +16,17 @@ render is the TRiGS render, premultiplied over black (gsplat with no background)
 Floors (``baseline_scores``) are the same metrics for two trivial renders: ``black`` (all zero, alpha 0) and ``mean``
 (the mean ground-truth colour inside the mask, painted with the soft mask; alpha = mask). Every number in the run has its
 floor beside it.
+
+Every score is computed in full float32 (``ieee_fp32``): PyTorch lets cuDNN run float32 convolutions in TF32 by default
+(10-bit mantissa), and the rounding then depends on the convolution algorithm cuDNN picks for the batch shape. LPIPS
+(AlexNet convolutions) moved by up to 2e-4 per frame between the batched ``score_camera`` and the per-frame
+``score_frame``, most on the all-black floor. The renders themselves and training are not affected: the flags are set
+only around the scoring and restored afterwards.
 """
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -111,6 +118,24 @@ BASELINES: tuple[str, ...] = ("black", "mean")
 LpipsFn = Callable[[Tensor, Tensor], float]
 
 
+@contextmanager
+def ieee_fp32() -> Iterator[None]:
+    """Run the block with TF32 off for cuDNN convolutions and CUDA matmuls (full float32); restores the previous flags.
+
+    Uses PyTorch's ``fp32_precision`` flags and puts back the exact previous values, also when the block raises. Inside
+    the block PyTorch 2.12's legacy getter ``torch.backends.cudnn.allow_tf32`` raises (it does not handle ``ieee``);
+    nothing in the scoring reads it.
+    """
+    conv, rnn, matmul = torch.backends.cudnn.conv, torch.backends.cudnn.rnn, torch.backends.cuda.matmul
+    saved: tuple[str, str, str] = (conv.fp32_precision, rnn.fp32_precision, matmul.fp32_precision)
+    conv.fp32_precision = rnn.fp32_precision = matmul.fp32_precision = "ieee"
+    try:
+        yield
+    finally:
+        conv.fp32_precision, rnn.fp32_precision, matmul.fp32_precision = saved
+
+
+@ieee_fp32()
 def score_frame(
     camera: str,
     frame_index: int,
@@ -120,7 +145,7 @@ def score_frame(
     mask: Float32[Tensor, "h w"],
     lpips: LpipsFn,
 ) -> FrameMetrics:
-    """Every setting of the module docstring on one image pair."""
+    """Every setting of the module docstring on one image pair (full float32, ``ieee_fp32``)."""
     person: Bool[Tensor, "h w"] = mask > MASK_THRESHOLD
     box = mask_box(person)
     if box is None:
@@ -166,7 +191,7 @@ class Metrics:
         self.lpips_net: LearnedPerceptualImagePatchSimilarity = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device)
 
     def lpips(self, pred: Float32[Tensor, "h w 3"], target: Float32[Tensor, "h w 3"]) -> float:
-        with torch.no_grad():
+        with torch.no_grad(), ieee_fp32():
             return float(self.lpips_net(pred.permute(2, 0, 1)[None], target.permute(2, 0, 1)[None]))
 
     def frame(
@@ -345,7 +370,9 @@ def score_camera(
                 colour: Tensor = (gt * person[..., None]).sum(dim=(1, 2)) / person.sum(dim=(1, 2)).clamp(min=1)[:, None]
                 sets["black"] = (torch.zeros_like(gt), torch.zeros_like(mask))
                 sets["mean"] = (mask[..., None] * colour[:, None, None, :], mask.clone())
-            for kind, values in _score_batch(sets, gt, mask, boxes[start:stop], metrics).items():
+            with ieee_fp32():
+                scores = _score_batch(sets, gt, mask, boxes[start:stop], metrics)
+            for kind, values in scores.items():
                 for name, value in values.items():
                     parts[kind][name].append(value)
             if keep_renders:
@@ -538,6 +565,7 @@ class GeometryMetrics:
 GEOMETRY_NAMES: tuple[str, ...] = ("median_abs_cm", "within_3cm", "median_normal_deg")
 
 
+@ieee_fp32()
 def geometry_frame(
     camera: str,
     frame_index: int,
@@ -546,7 +574,7 @@ def geometry_frame(
     mask: Float32[Tensor, "h w"],
     K: Float32[Tensor, "3 3"],
 ) -> GeometryMetrics:
-    """``GeometryMetrics`` of one rendered depth map against the mesh depth (nan when no pixel qualifies)."""
+    """``GeometryMetrics`` of one rendered depth map against the mesh depth (nan when no pixel qualifies; full float32)."""
     from open4dgs.prior import camera_normals, erode
 
     pixels: Tensor = (mask > MASK_THRESHOLD) & (mesh_depth > 0)
