@@ -31,6 +31,7 @@ from trigs.init.from_colmap import build_canonical_from_npz
 from open4dgs.catalog_clip import MultiViewClip
 from open4dgs.init_cloud import InitCloud
 from open4dgs.prior import MonoPriorLoss
+from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer
 
 StepCallback = Callable[[str, float, int], None]
 """Called with (tag, value, step) for every scalar the trainer reports."""
@@ -148,9 +149,9 @@ class TrainedClip:
 def camera_config(
     world_T_cam: Float32[Tensor, "c 4 4"], K: Float32[Tensor, "c 3 3"], sizes: Sequence[tuple[int, int]], device: torch.device
 ) -> CameraConfig:
-    """TRiGS cameras from camera-to-world poses (OpenCV RDF): viewmats are world -> camera."""
+    """TRiGS cameras from camera-to-world poses (OpenCV RDF): viewmats are world -> camera; sizes as Python ints."""
     viewmats: Float32[Tensor, "c 4 4"] = torch.linalg.inv(world_T_cam.double()).float().to(device)
-    return CameraConfig.from_matrices(
+    return HostSizedCameraConfig.from_matrices(
         viewmats=viewmats, Ks=K.float().to(device).contiguous(), widths=[w for w, _ in sizes], heights=[h for _, h in sizes]
     )
 
@@ -247,7 +248,7 @@ def train_clip(
     params, sh_degree, scene_extent = init_params(init, config.sh_degree, dev)
     cameras: CameraConfig = camera_config(clip.world_T_cam, clip.K, clip.sizes, dev)
     writer: ScalarLog = ScalarLog(on_step=on_step)
-    trainer: TrigsTrainer = TrigsTrainer(device=str(dev))
+    trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
     torch.cuda.reset_peak_memory_stats(dev)
     torch.cuda.synchronize(dev)

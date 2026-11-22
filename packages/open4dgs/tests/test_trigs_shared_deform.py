@@ -1,9 +1,8 @@
-"""recipes/open4dgs-trigs-src patches 0005 + 0006: cameras of a train step that share one time share one row gather and deform
-(0005) and one batched rasterization call per image size (0006).
+"""open4dgs.trigs_trainer.Open4dgsTrainer on the recipe's seams (patches 0005 + 0006): cameras of a train step that share one
+time share one row gather and deform (lever 2), and with batch_cameras one rasterization call per image size (lever 3).
 
-One train step on a small synthetic scene, with the shared path and with the per-camera path (forced by reporting rolling
-shutter on, which changes nothing else: the cameras carry no rolling-shutter signs). The renders must be bit-identical and
-every parameter gradient the same up to float summation order.
+One train step on a small synthetic scene with Open4dgsTrainer and with the stock TrigsTrainer, whose seams are no-ops
+(the per-camera path). The renders must be bit-identical and every parameter gradient the same up to float summation order.
 """
 
 import math
@@ -17,7 +16,7 @@ trigs = pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-t
 pytestmark = pytest.mark.integration
 
 
-def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], tuple[int, int]]:
+def _one_step(kind: str, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], tuple[int, int]]:
     from gsplat import rasterization
     from trigs.core.camera import CameraConfig
     from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
@@ -64,11 +63,11 @@ def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch
     params, sh_degree, scene_extent = build_canonical_from_npz(keyframes, fps=FPS, keyframe_stride=3, device=dev)
     config = TrigsTrainingConfig(n_steps=1, fps=FPS, keyframe_stride=3, holdout_views=(), psnr_eval_every=0, tb_log_every=1, tb_stats_every=0,
                                  viewer_snapshot_every=0, train_seed=0, batch_cameras=4)
-    if not shared:
-        monkeypatch.setattr(TrigsTrainingConfig, "rs_enabled", lambda self: True)
     renders: list[torch.Tensor] = []
     grads: dict[str, torch.Tensor] = {}
-    trainer = TrigsTrainer(device=dev)
+    from open4dgs.trigs_trainer import Open4dgsTrainer
+
+    trainer = TrigsTrainer(device=dev) if kind == "stock" else Open4dgsTrainer(device=dev, batch_cameras=kind == "batched")
     render_inputs, photometric, rasterize = trainer._render_inputs, trainer._photometric_losses, trainer._rasterize_inputs
     used = {"inputs": 0, "rasterize": 0}
 
@@ -108,20 +107,21 @@ def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch
     return renders, grads, (used["inputs"], used["rasterize"])
 
 
-def test_shared_deform_step_matches_per_camera_step(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("kind", "calls"), [("batched", (1, 1)), ("shared", (1, 4))])
+def test_open4dgs_trainer_step_matches_the_stock_per_camera_step(kind: str, calls: tuple[int, int], monkeypatch: pytest.MonkeyPatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
-    r_shared, g_shared, n_shared = _one_step(True, monkeypatch)
-    r_cam, g_cam, n_cam = _one_step(False, monkeypatch)
-    # Shared step: one active-row query + gather + deform and one rasterize call for the 4 same-size cameras; else 4 + 4.
-    assert len(r_shared) == len(r_cam) == 4
-    assert (n_shared, n_cam) == ((1, 1), (4, 4))
-    for a, b in zip(r_shared, r_cam, strict=True):
+    r_fast, g_fast, n_fast = _one_step(kind, monkeypatch)
+    r_cam, g_cam, n_cam = _one_step("stock", monkeypatch)
+    # (render-input calls, rasterize calls) for 4 same-size cameras: the stock trainer goes per camera through the seams.
+    assert len(r_fast) == len(r_cam) == 4
+    assert (n_fast, n_cam) == (calls, (4, 4))
+    for a, b in zip(r_fast, r_cam, strict=True):
         assert torch.equal(a, b)
-    assert g_shared.keys() == g_cam.keys() and "means" in g_shared
+    assert g_fast.keys() == g_cam.keys() and "means" in g_fast
     for name, g in g_cam.items():
         scale = float(g.abs().max())
         if scale == 0.0:
-            assert float(g_shared[name].abs().max()) == 0.0, name
+            assert float(g_fast[name].abs().max()) == 0.0, name
             continue
-        assert float((g_shared[name] - g).abs().max()) <= 1e-4 * scale, name
+        assert float((g_fast[name] - g).abs().max()) <= 1e-4 * scale, name

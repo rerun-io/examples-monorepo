@@ -1,6 +1,7 @@
-"""The train step never waits on the host: GPU-resident frames/masks (trigs_adapter) and recipe patch 0004.
+"""The train step never waits on the host: GPU-resident frames/masks (trigs_adapter), recipe patch 0004 (host-sync fixes
+inside train_step + the _const_tensor seam) and open4dgs.trigs_trainer (int camera sizes, the constant-tensor cache).
 
-Patch 0004 must keep the maths: the pieces it replaces are checked here against the expressions they replace.
+The maths must not change: the pieces replaced are checked here against the expressions they replace.
 """
 
 import pytest
@@ -66,20 +67,35 @@ def test_trainer_frames_on_cuda_equal_the_cpu_ones() -> None:
 
 
 def test_camera_width_height_are_python_ints_equal_to_the_tensors() -> None:
-    from trigs.core.camera import CameraConfig
+    from open4dgs.trigs_trainer import HostSizedCameraConfig
 
     widths, heights = torch.tensor([12, 1028, 7]), torch.tensor([8, 752, 5])
-    cams = CameraConfig(viewmats=torch.eye(4).expand(3, 4, 4).clone(), Ks=torch.eye(3).expand(3, 3, 3).clone(), widths=widths, heights=heights)
+    cams = HostSizedCameraConfig(viewmats=torch.eye(4).expand(3, 4, 4).clone(), Ks=torch.eye(3).expand(3, 3, 3).clone(), widths=widths, heights=heights)
     for c in range(3):
         assert type(cams.width_for(c)) is int and cams.width_for(c) == int(widths[c].item())
         assert type(cams.height_for(c)) is int and cams.height_for(c) == int(heights[c].item())
     assert cams.size_for(1) == (1028, 752)
 
 
-def test_const_tensor_equals_torch_tensor_and_is_built_once() -> None:
+def test_camera_config_from_matrices_builds_the_host_sized_subclass() -> None:
+    from open4dgs.trigs_adapter import camera_config
+    from open4dgs.trigs_trainer import HostSizedCameraConfig
+
+    cams = camera_config(torch.eye(4).expand(2, 4, 4).clone(), torch.eye(3).expand(2, 3, 3).clone(), [(12, 8), (7, 5)], torch.device("cpu"))
+    assert isinstance(cams, HostSizedCameraConfig) and cams.size_for(1) == (7, 5) and type(cams.width_for(0)) is int
+
+
+def test_stock_const_tensor_seam_is_torch_tensor() -> None:
     from trigs.core.trainer import TrigsTrainer
 
-    trainer = TrigsTrainer(device="cpu")
+    built = TrigsTrainer(device="cpu")._const_tensor((1.0, 0.5), torch.device("cpu"), torch.float32)
+    assert torch.equal(built, torch.tensor((1.0, 0.5)))
+
+
+def test_const_tensor_equals_torch_tensor_and_is_built_once() -> None:
+    from open4dgs.trigs_trainer import Open4dgsTrainer
+
+    trainer = Open4dgsTrainer(device="cpu")
     for value in (0.0, 1.0 / 30.0, 59.0 / 30.0, (0.0, 0.0, 0.0), (1.0, 0.5, 0.25)):
         for dtype in (torch.float32, torch.float64):
             built = trainer._const_tensor(value, torch.device("cpu"), dtype)

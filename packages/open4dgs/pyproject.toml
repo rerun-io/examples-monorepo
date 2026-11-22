@@ -37,6 +37,8 @@ ignore_names = [
     "has_velocity", "is_static", "dynamic_protect", "dynamic_allowed", "stage_keep",
     "add_scalar", "_sequence_t_max", "pytestmark", "trigs", "rr_config", "exc",
     "num_pixels", "camera_loss_hook",
+    # open4dgs.trigs_trainer: called by the recipe's camera-group seam in the TRiGS train loop
+    "_camera_group", "add_loss",
 ]
 
 [tool.pytest.ini_options]
