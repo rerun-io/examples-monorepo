@@ -281,6 +281,31 @@ fn draw_splat_entity(
         }
         _ => None,
     };
+    // `.asog` payload (static, untyped): drawn instead of the preview rows when present.
+    let asog_ids = crate::asog::components();
+    let asog_query =
+        data.query_components_with_history(ctx, query, asog_ids.iter().copied(), instruction, None);
+    let asog_results = VisualizerInstructionQueryResults::new(instruction, &asog_query, output);
+    let [a_bytes, a_origin, a_threshold] = asog_ids.map(|id| asog_results.iter_optional(id));
+    let asog = a_bytes.slice::<u8>().last().map(|(payload_row, bytes)| {
+        let threshold = last_slice::<f32>(&a_threshold)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
+        let origin = last_slice::<f64>(&a_origin)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(0.0);
+        let mut hasher = DefaultHasher::new();
+        (
+            self::attribute_generation(instruction, &asog_query, asog_ids.into_iter()),
+            threshold.to_bits(),
+        )
+            .hash(&mut hasher);
+        (payload_row, bytes, threshold, origin, hasher.finish())
+    });
+    let time_type = ctx.recording().timeline_type(&query.timeline);
+    let motion_path = crate::asog::MotionPath::from_env();
+    let motion_generation =
+        self::attribute_generation(instruction, &motion_query, motion_ids.iter().copied());
     // SOG payload fields (static, untyped Utf8 + u8): drawn instead of the preview rows when present.
     let sog_ids = crate::sog::components();
     let sog_query =
@@ -345,15 +370,109 @@ fn draw_splat_entity(
                     re_log_types::hash::Hash64::from_u64(hasher.finish()),
                     Primitives::Sog(&sog),
                     render_mode,
+                    0.0,
                 )?;
                 continue;
+            }
+        }
+        if let Some((payload_row, bytes, threshold, origin, generation)) = asog {
+            if motion_path == crate::asog::MotionPath::Cpu {
+                // CPU oracle path: one evaluation + upload per clip time; the view (keyed by the payload row) swaps
+                // scenes.
+                let evaluated = ctx
+                    .viewer_ctx
+                    .store_context
+                    .memoizer::<crate::asog::AsogCache, _>(|cache| {
+                        cache.evaluate(
+                            generation,
+                            bytes,
+                            threshold,
+                            time_type,
+                            query.latest_at,
+                            origin,
+                        )
+                    });
+                match evaluated {
+                    Ok(evaluated) => {
+                        let mut hasher = DefaultHasher::new();
+                        (generation, evaluated.t.to_bits()).hash(&mut hasher);
+                        retry |= draw_instances(
+                            entity,
+                            draw,
+                            payload_row,
+                            re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                            Primitives::Core(&evaluated.splats),
+                            render_mode,
+                            0.0,
+                        )?;
+                    }
+                    Err(error) => report(
+                        ViewerReportSeverity::Error,
+                        format!("AnimatedSogSplats3D: {error}"),
+                    ),
+                }
+                continue;
+            }
+            let info = ctx
+                .viewer_ctx
+                .store_context
+                .memoizer::<crate::asog::AsogCache, _>(|cache| cache.info(generation, bytes));
+            match info {
+                Ok(info) => {
+                    // Decoded once per payload; a time change is one motion dispatch in the view (time not in the key).
+                    let t =
+                        crate::trigs::clip_seconds(time_type, query.latest_at, info.fps, origin);
+                    let payload = crate::asog::Payload {
+                        bytes,
+                        active_threshold: threshold,
+                        info,
+                        preview: &native,
+                    };
+                    let mut hasher = DefaultHasher::new();
+                    (signature, generation).hash(&mut hasher);
+                    retry |= draw_instances(
+                        entity,
+                        draw,
+                        row,
+                        re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                        Primitives::Asog(&payload),
+                        render_mode,
+                        t,
+                    )?;
+                    continue;
+                }
+                Err(error) => report(
+                    ViewerReportSeverity::Warning,
+                    format!(
+                        "AnimatedSogSplats3D: {error}; drawing the GaussianSplats3D preview rows"
+                    ),
+                ),
             }
         }
         if let Some((motion, t)) = motion
             .as_ref()
             .filter(|(m, _)| m.is_consistent(centers.len()))
         {
-            // One upload per evaluated time: the cache key carries the cursor, the signature the clip time.
+            if motion_path == crate::asog::MotionPath::Gpu {
+                // Canonical rows + motion uploaded once; a time change is one motion dispatch in the view.
+                let mut hasher = DefaultHasher::new();
+                (signature, motion_generation).hash(&mut hasher);
+                retry |= draw_instances(
+                    entity,
+                    draw,
+                    row,
+                    re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                    Primitives::Animated {
+                        splats: &native,
+                        motion,
+                    },
+                    render_mode,
+                    *t,
+                )?;
+                continue;
+            }
+            // CPU oracle path: one upload per evaluated time; the cache key carries the cursor, the signature the
+            // clip time.
             let evaluated = crate::trigs::Evaluated::new(&native, motion, *t);
             let deformed = evaluated.native(&native);
             if deformed.centers.is_empty() {
@@ -368,6 +487,7 @@ fn draw_splat_entity(
                 re_log_types::hash::Hash64::from_u64(hasher.finish()),
                 Primitives::Splats(&deformed),
                 render_mode,
+                0.0,
             )?;
             continue;
         }
@@ -378,6 +498,7 @@ fn draw_splat_entity(
             signature,
             Primitives::Splats(&native),
             render_mode,
+            0.0,
         )?;
     }
     Ok(retry)
@@ -426,6 +547,7 @@ pub(crate) fn draw_instances(
     signature: re_log_types::hash::Hash64,
     primitives: Primitives<'_>,
     render_mode: RenderMode,
+    time: f32,
 ) -> Result<bool, ViewSystemExecutionError> {
     let &EntityDraw {
         ctx,
@@ -464,6 +586,7 @@ pub(crate) fn draw_instances(
         let options = RenderOptions {
             render_mode,
             world_from_local: to_core(world_from_local),
+            time,
             ..Default::default()
         };
         let prepared = ctx
@@ -491,8 +614,32 @@ pub(crate) fn draw_instances(
             ) => {
                 // The pixel contracts use these machine-visible markers to distinguish fallback from compute.
                 draw.push(match primitives {
+                    Primitives::Animated { splats, motion } => {
+                        // The rows evaluated on the CPU at this time (never the canonical rows: a ghost trail).
+                        report(
+                            ViewerReportSeverity::Warning,
+                            format!("{error}; using the native Gaussian renderer"),
+                        );
+                        re_log::warn_once!("Gaussian compute fallback: {error:#}");
+                        let evaluated = crate::trigs::Evaluated::new(splats, motion, time);
+                        let mut hasher = DefaultHasher::new();
+                        (signature, time.to_bits()).hash(&mut hasher);
+                        crate::fallback::native_fallback(
+                            ctx,
+                            query,
+                            key,
+                            &evaluated.native(splats),
+                            world_from_local,
+                            re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                            masks,
+                            object,
+                        )?
+                    }
                     Primitives::Splats(native)
                     | Primitives::Sog(&crate::sog::Payload {
+                        preview: native, ..
+                    })
+                    | Primitives::Asog(&crate::asog::Payload {
                         preview: native, ..
                     }) => {
                         report(
@@ -510,6 +657,14 @@ pub(crate) fn draw_instances(
                             masks,
                             object,
                         )?
+                    }
+                    Primitives::Core(_) => {
+                        report(
+                            ViewerReportSeverity::Warning,
+                            format!("{error}; the decoded payload is not drawn"),
+                        );
+                        re_log::warn_once!("Decoded payload compute fallback: {error:#}");
+                        continue;
                     }
                     Primitives::Hexels(hexels) => {
                         report(

@@ -122,6 +122,8 @@ pub struct ViewState {
     limit: u64,
     timing: Option<wgpu::QuerySet>,
     overflow_events: u32,
+    /// This view's evaluated transforms + opacity when the scene is animated.
+    deform: Option<crate::motion_gpu::Deform>,
 }
 
 const VISIBLE: u32 = 0;
@@ -166,6 +168,10 @@ impl ViewState {
                 .iter()
                 .map(|frame| frame.uniform.size() + frame.readback.size())
                 .sum::<u64>()
+            + self
+                .deform
+                .as_ref()
+                .map_or(0, crate::motion_gpu::Deform::gpu_byte_size)
     }
 
     pub(crate) fn new(
@@ -216,11 +222,32 @@ impl ViewState {
             bits: 1,
             counts,
         };
+        let deform = match (scene.motion(), scene.transforms()) {
+            (Some(motion), Some(canonical)) => Some(crate::motion_gpu::Deform::new(
+                device,
+                &kernels.trigs_deform,
+                motion,
+                canonical,
+                n,
+                limit,
+            )?),
+            _ => None,
+        };
         let stages = kernels.stages(scene);
         let frames = std::array::from_fn(|_| {
             let uniform = uniform(device, &[0; size_of::<Uniforms>() / 4]);
             let projection = |kernel: &crate::gpu::Kernel, visible: bool| {
                 let mut bindings = scene.bindings(visible);
+                if let Some(deform) = &deform {
+                    // The projector reads this view's evaluated rows instead of the canonical ones.
+                    for (binding, resource) in &mut bindings {
+                        match binding {
+                            1 => *resource = deform.transforms.as_entire_binding(),
+                            2 => *resource = deform.opacity.as_entire_binding(),
+                            _ => {}
+                        }
+                    }
+                }
                 bindings.extend([
                     (0, uniform.as_entire_binding()),
                     (4, ids.as_entire_binding()),
@@ -266,6 +293,7 @@ impl ViewState {
             limit,
             timing: None,
             overflow_events: 0,
+            deform,
         })
     }
 

@@ -54,22 +54,71 @@ impl Renderer {
         Ok(Arc::new(Scene::upload(&self.device, splats, self.limit)?))
     }
 
+    /// Canonical rows + per-row motion: every view evaluates the motion on the GPU at `RenderOptions::time`
+    /// (one dispatch per time change, no re-upload).
+    pub fn upload_animated(
+        &self,
+        splats: &Splats,
+        motion: crate::Motion<'_>,
+    ) -> Result<Arc<Scene>, Error> {
+        let mut scene = Scene::upload(&self.device, splats, self.limit)?;
+        scene.animate(&self.device, motion, self.limit)?;
+        Ok(Arc::new(scene))
+    }
+
     /// De-quantise SOG / ASOG texel planes on the GPU into a splat scene (one compute pass, submitted on `queue`).
     /// The CPU path is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
+    /// With `motion` (ASOG), the de-quantised rows are the canonical rows of an animated scene.
     pub fn upload_sog(
         &self,
         queue: &wgpu::Queue,
         q: &crate::sog::Quantization,
         planes: &crate::sog::Planes<'_>,
+        motion: Option<crate::Motion<'_>>,
     ) -> Result<Arc<Scene>, Error> {
-        Ok(Arc::new(crate::sog_gpu::upload_sog(
+        let mut scene = crate::sog_gpu::upload_sog(
             &self.device,
             queue,
             &self.kernels.sog_dequant,
             q,
             planes,
             self.limit,
-        )?))
+        )?;
+        if let Some(motion) = motion {
+            scene.animate(&self.device, motion, self.limit)?;
+        }
+        Ok(Arc::new(scene))
+    }
+
+    /// An entropy-decoded `.asog` on the GPU: static part through `sog_dequant.wgsl`, motion through
+    /// `asog_motion.wgsl` (both submitted on `queue`), evaluated per view at `RenderOptions::time`. The CPU path is
+    /// `upload_animated(&sog::dequantize(..)?, Motion::Asog(&parts.motion()))`.
+    pub fn upload_asog(
+        &self,
+        queue: &wgpu::Queue,
+        parts: &crate::asog::AsogParts,
+    ) -> Result<Arc<Scene>, Error> {
+        let mut scene = crate::sog_gpu::upload_sog(
+            &self.device,
+            queue,
+            &self.kernels.sog_dequant,
+            &parts.quantization,
+            &parts.planes(),
+            self.limit,
+        )?;
+        let canonical = scene
+            .transforms()
+            .ok_or(Error::Input("an asog scene holds splats"))?;
+        let motion = crate::motion_gpu::dequantize_asog(
+            &self.device,
+            queue,
+            &self.kernels.asog_motion,
+            parts,
+            canonical,
+            self.limit,
+        )?;
+        scene.attach_motion(motion)?;
+        Ok(Arc::new(scene))
     }
 
     /// Hexel scenes share views, targets and feedback with splats; they need a pinhole camera.

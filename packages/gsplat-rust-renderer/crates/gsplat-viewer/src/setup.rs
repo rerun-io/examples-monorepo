@@ -61,6 +61,10 @@ pub fn compute_device_descriptor_with(
             if allow_subgroups {
                 descriptor.required_features |= adapter.features() & wgpu::Features::SUBGROUP;
             }
+            if crate::profile::requested() {
+                descriptor.required_features |=
+                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+            }
             descriptor.required_limits =
                 gsplat_core::compute_limits(&available, descriptor.required_limits);
         }

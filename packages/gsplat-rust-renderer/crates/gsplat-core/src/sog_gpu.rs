@@ -152,6 +152,7 @@ pub(crate) fn upload_sog(
             ),
             has_min_scale: false,
             degree: bands,
+            motion: None,
         },
         n: count,
     })
