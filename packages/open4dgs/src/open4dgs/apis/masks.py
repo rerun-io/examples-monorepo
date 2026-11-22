@@ -18,7 +18,7 @@ from rerun.catalog import CatalogClient
 from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout
 from torch import Tensor
 
-from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.masks import (
     MASKS_LAYER,
     MODEL_NAME,
@@ -30,12 +30,10 @@ from open4dgs.masks import (
     write_mask_layer,
 )
 
-LOCAL_CATALOG_URL: str = "rerun+http://pablo-dl-server:51235"
-
 
 @dataclass
 class Config:
-    catalog_url: str = LOCAL_CATALOG_URL
+    catalog_url: str = LOCAL_CATALOG
     """Catalog that holds the segment's video."""
     dataset: str = "fdanyone-views"
     segment_id: str = "pexels-2785536__v06-seed42"
@@ -43,7 +41,7 @@ class Config:
     num_frames: int = 121
     cameras: list[str] | None = None
     """Camera names such as ``rig_01/cam_00``; default every camera."""
-    register_url: str = LOCAL_CATALOG_URL
+    register_url: str = LOCAL_CATALOG
     """Catalog the layer is registered on."""
     register_dataset: str | None = None
     """Dataset the layer goes on; default the source dataset when it is on ``register_url``, else ``open4dgs-mamma``."""

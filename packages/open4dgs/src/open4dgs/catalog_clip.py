@@ -42,6 +42,10 @@ from torch import Tensor
 
 from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera, virtual_to_source_pixels
 
+LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
+"""The local catalog: open4dgs's companion datasets, layers and runs are registered here."""
+SPARK_CATALOG: str = "rerun+http://dgx-spark:51235"
+"""The Spark catalog (read only): the dataforge source datasets."""
 FRAME_TIMELINE: str = "frame_index"
 """The dataforge sequence timeline every layer is indexed on (also ``video_time``, a duration)."""
 RESAMPLE_CHUNK: int = 16
@@ -280,7 +284,8 @@ def valid_mask(grid: Float32[Tensor, "1 h w 2"] | None, stored_wh: tuple[int, in
     return (inside[0, 0] > 0.999).cpu()
 
 
-def _static_cell(table: pa.Table, column_name: str) -> object | None:
+def static_cell(table: pa.Table, column_name: str) -> object | None:
+    """The first valid value of a static table's column; None when the column is absent or empty."""
     if column_name not in table.column_names:
         return None
     return first_valid_value(table.column(column_name), allow_none=True, component_name=column_name)
@@ -424,7 +429,7 @@ def read_catalog_clip(
         .to_arrow_table()
     )
     models: dict[str, CatalogCameraCalibration] = camera_models_from_static_table(static, nodes, f"segment {segment_id}", with_distortion=False)
-    fps_cell: object | None = _static_cell(static, "property:capture:fps")
+    fps_cell: object | None = static_cell(static, "property:capture:fps")
     if fps_cell is None:
         raise ValueError(f"segment {segment_id} has no property:capture:fps")
     fps: float = float(np.asarray(fps_cell).reshape(-1)[0])

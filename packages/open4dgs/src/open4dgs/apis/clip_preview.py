@@ -13,7 +13,7 @@ import rerun as rr
 import torch
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import SPARK_CATALOG, MultiViewClip, read_catalog_clip
 
 JPEG_QUALITY: int = 90
 """Quality of the logged frames (a 32-camera clip at 1028 px is 1.2 GB raw per 16 frames)."""
@@ -22,7 +22,7 @@ JPEG_QUALITY: int = 90
 @dataclass
 class Config:
     rr_config: RerunTyroConfig
-    catalog_url: str = "rerun+http://dgx-spark:51235"
+    catalog_url: str = SPARK_CATALOG
     dataset: str = "dataforge-mamma-markerless-dance"
     segment_id: str = "mamma-markerless-dance__140725_Breakdancemarkers_Improv_2_03686_1_1_1"
     frame_start: int = 0

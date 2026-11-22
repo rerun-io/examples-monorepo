@@ -9,15 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.prior import compute_prior_layer
-
-LOCAL_CATALOG_URL: str = "rerun+http://pablo-dl-server:51235"
 
 
 @dataclass
 class Config:
-    catalog_url: str = LOCAL_CATALOG_URL
+    catalog_url: str = LOCAL_CATALOG
     """Catalog that holds the segment's video and cameras."""
     dataset: str = "fdanyone-views"
     segment_id: str = "pexels-2785536__v06-seed42"
@@ -31,7 +29,7 @@ class Config:
     """Must equal the training run's ``roi`` (person-centred virtual cameras, ``open4dgs.roi_cameras``)."""
     roi_pad: float = 0.15
     """Must equal the training run's ``roi_pad``."""
-    register_url: str = LOCAL_CATALOG_URL
+    register_url: str = LOCAL_CATALOG
     register_dataset: str | None = None
     """Default: the source dataset when it is on ``register_url``, else ``open4dgs-mamma`` (Spark is read-only)."""
     register: bool = True

@@ -21,6 +21,7 @@ import numpy as np
 import rerun as rr
 import torch
 
+from open4dgs.catalog_clip import LOCAL_CATALOG, SPARK_CATALOG
 from open4dgs.init_cloud import log_init_cloud
 from open4dgs.masks import (
     MASKS_LAYER,
@@ -37,8 +38,6 @@ from open4dgs.prior import ClipPriors, read_clip_priors
 from open4dgs.selfcap_clip import TimedClip, read_timed_clip
 from open4dgs.selfcap_init import capsule_init, joint_box_points, moge_lift_init
 
-SPARK_CATALOG_URL: str = "rerun+http://dgx-spark:51235"
-LOCAL_CATALOG_URL: str = "rerun+http://pablo-dl-server:51235"
 COMPANION_DATASET: str = "open4dgs-selfcap"
 WORLD_UP: np.ndarray = np.array([0.0, 1.0, 0.0])
 """SelfCap world (Quest head_pose frame) is Y up."""
@@ -47,7 +46,7 @@ WORLD_UP: np.ndarray = np.array([0.0, 1.0, 0.0])
 @dataclass
 class Config:
     stage: Literal["masks", "prior", "init"] = "masks"
-    catalog_url: str = SPARK_CATALOG_URL
+    catalog_url: str = SPARK_CATALOG
     dataset: str = "selfcap-easy26-v4"
     segment_id: str = "selfcap__2025-12-02__91e9bbba__ep001"
     time_start_s: float = 39.0
@@ -55,7 +54,7 @@ class Config:
     num_frames: int = 60
     max_side: int | None = 960
     """Training grid (``prior`` and ``init``); ``masks`` always run on the stored frames."""
-    register_url: str = LOCAL_CATALOG_URL
+    register_url: str = LOCAL_CATALOG
     register_dataset: str = COMPANION_DATASET
     register: bool = True
     output_root: Path = Path("/mnt/nas/ssd-8tb/open4dgs")

@@ -25,7 +25,7 @@ from scipy.spatial import KDTree
 from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_layer
 from torch import Tensor
 
-from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, SPARK_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, log_init_cloud
 from open4dgs.masks import read_clip_masks
@@ -37,7 +37,7 @@ LAYER: str = "init_roma"
 
 @dataclass
 class Config:
-    catalog_url: str = "rerun+http://dgx-spark:51235"
+    catalog_url: str = SPARK_CATALOG
     """Catalog that holds the source segment (read only)."""
     dataset: str = "dataforge-mamma-markerless-dance"
     segment_id: str = "mamma-markerless-dance__140725_Breakdancemarkers_Improv_2_03686_1_1_1"
@@ -55,7 +55,7 @@ class Config:
     """Foreground: the companion dataset's ``people_matte`` layer, or keep only points near the SMPL-X mesh, or nothing."""
     mesh_radius_m: float = 0.3
     """``masks="mesh"``: keep points within this distance of the nearest mesh vertex."""
-    local_catalog_url: str = "rerun+http://pablo-dl-server:51235"
+    local_catalog_url: str = LOCAL_CATALOG
     """Catalog that takes the layer (and holds the masks layer)."""
     companion_dataset: str | None = None
     """Dataset that takes the layer; None picks ``open4dgs-mamma`` for MAMMA segments, else ``dataset``."""

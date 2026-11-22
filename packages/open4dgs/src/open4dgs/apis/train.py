@@ -22,7 +22,7 @@ from PIL import Image
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
-from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.compensation import BrightnessSplit, HoldoutFit, camera_brightness, evaluate_holdout_fit
 from open4dgs.evaluate import (
     BASELINES,
@@ -52,8 +52,6 @@ from open4dgs.prior import (
 from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
 from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import CameraCompensation, TrainConfig, TrainedClip, train_clip, untrained_clip
-
-LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
 
 
 @dataclass

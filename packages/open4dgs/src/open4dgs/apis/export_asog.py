@@ -34,14 +34,13 @@ from simplecv.catalog_layers import register_layer
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
 from open4dgs.asog import AsogSettings, decode_asog, encode_params, tiny_omega_fraction
-from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
 from open4dgs.run_log import RUNS_DATASET
 from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params, run_properties, run_property, run_recording
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, camera_config
 
-LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
 ASOG_CUT_FORMAT: float = 0.05
 """The ``.asog`` v1 temporal cut (no manifest field; what every other player applies)."""
 

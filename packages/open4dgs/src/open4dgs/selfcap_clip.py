@@ -33,10 +33,19 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
 from simplecv.catalog_video_decode import StreamDecoder
-from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 
-from open4dgs.catalog_clip import RESAMPLE_CHUNK, ClipRoi, MultiViewClip, fit_max_side, resample_frames, roi_grid, scale_intrinsics, valid_mask
+from open4dgs.catalog_clip import (
+    RESAMPLE_CHUNK,
+    ClipRoi,
+    MultiViewClip,
+    fit_max_side,
+    resample_frames,
+    roi_grid,
+    scale_intrinsics,
+    static_cell,
+    valid_mask,
+)
 from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera
 
 VIDEO_TIMELINE: str = "video_time"
@@ -98,14 +107,8 @@ def _seconds(column: pa.ChunkedArray) -> Float64[ndarray, " n"]:
     return column.combine_chunks().to_numpy(zero_copy_only=False).view(np.int64).astype(np.float64) / 1e9
 
 
-def _cell(table: pa.Table, name: str) -> object | None:
-    if name not in table.column_names:
-        return None
-    return first_valid_value(table.column(name), allow_none=True, component_name=name)
-
-
 def _floats(table: pa.Table, name: str) -> Float64[ndarray, " k"] | None:
-    value: object | None = _cell(table, name)
+    value: object | None = static_cell(table, name)
     return None if value is None else np.asarray(value, dtype=np.float64).reshape(-1)
 
 
@@ -129,7 +132,7 @@ def static_world_T_cam(table: pa.Table, node: str) -> Float64[ndarray, "4 4"]:
     if rotation is None or translation is None or len(rotation) != 9 or len(translation) != 3:
         raise ValueError(f"{node}: no static Transform3D mat3x3 + translation")
     parent_T_cam: Float64[ndarray, "4 4"] = rigid_from_columns(rotation, translation)
-    relation: object | None = _cell(table, f"{node}:Transform3D:relation")
+    relation: object | None = static_cell(table, f"{node}:Transform3D:relation")
     if isinstance(relation, list):
         relation = relation[0] if relation else None
     if relation is not None and relation not in (1, "ParentFromChild"):
@@ -226,12 +229,12 @@ def read_timed_clip(
         .to_arrow_table()
     )
     chosen: list[CatalogCamera] = (
-        candidates if cameras is not None else [c for c in candidates if _cell(static, f"{c.transform_entity}:calib_status") in ("ok", ["ok"])]
+        candidates if cameras is not None else [c for c in candidates if static_cell(static, f"{c.transform_entity}:calib_status") in ("ok", ["ok"])]
     )
     if not chosen:
         raise ValueError(f"{segment_id}: no camera with calib_status ok")
     for camera in chosen:
-        status: object | None = _cell(static, f"{camera.transform_entity}:calib_status")
+        status: object | None = static_cell(static, f"{camera.transform_entity}:calib_status")
         if status is not None and status not in ("ok", ["ok"]):
             raise ValueError(f"{segment_id} {camera.name}: calib_status {status!r}")
         distortion = _floats(static, f"{camera.transform_entity}/pinhole:simplecv.components.DistortionCoefficients")

@@ -23,10 +23,9 @@ from simplecv.catalog_layers import register_layer
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
 from open4dgs.asog import decode_asog
+from open4dgs.catalog_clip import LOCAL_CATALOG
 from open4dgs.run_log import RUNS_DATASET
 from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params, log_splat_frames, run_property, run_recording, splats_at, trigs_motion_params
-
-LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
 
 
 @dataclass(frozen=True, slots=True)
