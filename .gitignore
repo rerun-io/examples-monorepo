@@ -140,6 +140,7 @@ packages/depth-video-viewer/target/
 
 # gsplat-rust-renderer
 packages/gsplat-rust-renderer/target/
+packages/gsplat-rust-renderer/crates/gsplat-viewer-web/target/
 packages/gsplat-rust-renderer/.brush/
 packages/gsplat-rust-renderer/examples/*.ply
 

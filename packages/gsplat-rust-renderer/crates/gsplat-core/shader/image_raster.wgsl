@@ -58,7 +58,7 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
                     filled = min_slot;
                 } else {
                     filled = TOP_K;
-                    min_weight = 3.4028235e38;
+                    min_weight = 0x1.fffffep+127f;
                     for (var k = 0u; k < TOP_K; k++) {
                         if weights[k] < min_weight {
                             min_slot = k;
