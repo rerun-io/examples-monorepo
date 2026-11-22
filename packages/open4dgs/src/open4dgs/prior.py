@@ -104,16 +104,6 @@ class ClipPriors:
     normals: tuple[UInt8[Tensor, "frames h w 3"], ...]
     """Camera-frame (RDF) normals as ``127.5 + 127.5 n``; (0, 0, 0) where invalid."""
 
-    def subset(self, names: Sequence[str]) -> "ClipPriors":
-        """The maps of ``names`` only (e.g. the training cameras)."""
-        pick: list[int] = [self.camera_names.index(name) for name in names]
-        return ClipPriors(
-            camera_names=tuple(names),
-            frame_indices=self.frame_indices,
-            depth=tuple(self.depth[i] for i in pick),
-            normals=tuple(self.normals[i] for i in pick),
-        )
-
 
 def encode_normals(normals: Float32[Tensor, "... 3"], valid: Bool[Tensor, "..."]) -> UInt8[Tensor, "... 3"]:
     """Unit normals to ``127.5 + 127.5 n`` uint8 (rounded, clamped to 1..255 so a valid pixel is never black); black where invalid."""

@@ -36,6 +36,7 @@ ignore_names = [
     "fg_psnr", "full_psnr", "full_ssim", "full_lpips", "alpha_iou", "init_layer",
     "has_velocity", "is_static", "dynamic_protect", "dynamic_allowed", "stage_keep",
     "add_scalar", "_sequence_t_max", "pytestmark", "trigs", "rr_config", "exc",
+    "num_pixels", "camera_loss_hook",
 ]
 
 [tool.pytest.ini_options]
