@@ -122,6 +122,8 @@ def test_presets_band_safe_default_and_upstream() -> None:
 
     assert AsogSettings().options() == AsogOptions(qp=0.5, qa=2.0, prune=0.0, mbits=16, tbits=11, lsbits=8)
     assert AsogSettings(preset="upstream").options() == AsogOptions(qp=2.0, qa=8.0, prune=0.3, mbits=14, tbits=11, lsbits=8)
+    # ``small`` is the name for upstream's preset (web streaming); ``upstream`` stays as an alias
+    assert AsogSettings(preset="small").options() == AsogSettings(preset="upstream").options()
     # an override changes only its own option
     assert AsogSettings(preset="upstream", prune=0.0).options() == AsogOptions(qp=2.0, qa=8.0, prune=0.0, mbits=14, tbits=11, lsbits=8)
 

@@ -24,8 +24,11 @@ letting it guess the focal. Layer ``moge2_prior``: per camera and frame ``/world
 stored video's), with recording property ``moge2_prior`` (model, window, max_side, image sizes).
 """
 
+import dataclasses
+import hashlib
 import math
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +60,11 @@ MODEL_NAME: str = "moge-2-vitl-normal"
 
 @dataclass(frozen=True, slots=True)
 class PriorConfig:
-    """Weights, schedule and gates of the MoGe-2 prior (defaults: prior-design.md section 3)."""
+    """Weights, schedule and gates of the MoGe-2 prior (defaults: prior-design.md section 3, schedule from the p2 experiment).
+
+    With ``schedule="fraction"`` (default) ``at_steps(total)`` sets the three step fields from the ``*_fraction``
+    fields (15 % / 40 % / 75 % of the run); ``schedule="steps"`` keeps the step fields as given.
+    """
 
     lambda_depth: float = 0.05
     """Weight of the Pearson depth term."""
@@ -82,6 +89,25 @@ class PriorConfig:
     contradiction_start_step: int = 2000
     log_every: int = 25
     """Interval of the ``prior/*`` scalars."""
+    schedule: Literal["fraction", "steps"] = "fraction"
+    """``fraction``: the step fields follow the run length (``at_steps``); ``steps``: they are absolute."""
+    start_fraction: float = 0.15
+    """``start_step`` as a fraction of the run (``schedule="fraction"``)."""
+    ramp_end_fraction: float = 0.40
+    """``ramp_end_step`` as a fraction of the run."""
+    contradiction_start_fraction: float = 0.75
+    """``contradiction_start_step`` as a fraction of the run."""
+
+    def at_steps(self, total_steps: int) -> "PriorConfig":
+        """The config for a run of ``total_steps`` steps: the step fields from the fractions (unchanged for ``schedule="steps"``)."""
+        if self.schedule == "steps":
+            return self
+        return dataclasses.replace(
+            self,
+            start_step=round(self.start_fraction * total_steps),
+            ramp_end_step=round(self.ramp_end_fraction * total_steps),
+            contradiction_start_step=round(self.contradiction_start_fraction * total_steps),
+        )
 
     def ramp(self, step: int) -> float:
         """Weight multiplier in [0, 1] at ``step``."""
@@ -355,6 +381,85 @@ def compute_clip_priors(
         depths.append(torch.cat(d_parts))
         normals.append(torch.cat(n_parts))
     return ClipPriors(camera_names=tuple(camera_names), frame_indices=clip.frame_indices.clone(), depth=tuple(depths), normals=tuple(normals))
+
+
+def as_stored(priors: ClipPriors) -> ClipPriors:
+    """``priors`` as ``read_clip_priors`` hands them back from the layer: depth rounded to whole millimetres (the 16-bit
+    PNG), then float16; normals are stored losslessly. A run that computes its maps trains on the same values as the
+    next run that reads them."""
+    depth: tuple[Tensor, ...] = tuple(((d.float() * 1000.0).round().clamp(0, 65535) / 1000.0).half() for d in priors.depth)
+    return dataclasses.replace(priors, depth=depth)
+
+
+def layer_properties(clip: MultiViewClip, source: str, max_side: int | None, resolution_level: int) -> dict[str, str | int | float]:
+    """The ``moge2_prior`` recording property: model, source, window, sizes and the camera grid (``roi_properties``)."""
+    return {
+        "model": MODEL_NAME,
+        "predictor": "MoGeV2TorchPredictor fp16 autocast",
+        "resolution_level": resolution_level,
+        "fov_source": "calibrated fx (fov_x = 2 atan(w / 2 fx))",
+        "source": source,
+        "frame_start": int(clip.frame_indices[0]),
+        "frame_end": int(clip.frame_indices[-1]),
+        "num_frames": len(clip.frame_indices),
+        "max_side": max_side or 0,
+        "cameras": ",".join(clip.camera_names),
+        "image_sizes": ",".join(f"{w}x{h}" for w, h in clip.sizes),
+        "loader": "open4dgs.catalog_clip.read_catalog_clip (undistorted)",
+        **roi_properties(clip),
+    }
+
+
+def compute_prior_layer(
+    clip: MultiViewClip,
+    segment_id: str,
+    *,
+    source: str,
+    catalog_url: str,
+    dataset: str,
+    output_dir: Path,
+    max_side: int | None,
+    register: bool = True,
+    batch_size: int = 8,
+    resolution_level: int = 9,
+) -> tuple[ClipPriors, Path, dict[str, float]]:
+    """MoGe-2 (monopriors torch predictor, vitl) on every clip camera and frame, written as the ``moge2_prior`` layer
+    recording and registered on ``catalog_url``/``dataset`` (get-or-create; replaces the segment's previous layer).
+
+    The file is ``<output_dir>/<dataset>/<segment_id>.moge2_prior-<grid>.rrd``, ``<grid>`` a hash of the window, cameras,
+    sizes and ROI grid, so a layer of another grid is never overwritten on disk. Returns the maps as stored
+    (``as_stored``), the path and the timings (``moge_s``, ``images``, ``write_s``, ``register_s``). The predictor is
+    freed before returning.
+    """
+    from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor
+
+    predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=resolution_level)
+    torch.cuda.synchronize()
+    t0: float = time.perf_counter()
+    priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor, batch_size=batch_size)
+    torch.cuda.synchronize()
+    timings: dict[str, float] = {"moge_s": time.perf_counter() - t0, "images": float(len(clip.camera_names) * len(clip.frame_indices))}
+    del predictor
+    torch.cuda.empty_cache()
+    properties = layer_properties(clip, source, max_side, resolution_level)
+    grid: str = hashlib.sha1(
+        "|".join(str(properties[k]) for k in ("frame_start", "frame_end", "cameras", "image_sizes", "max_side", "roi", "roi_cameras")).encode()
+    ).hexdigest()[:10]
+    path: Path = output_dir / dataset / f"{segment_id}.{PRIOR_LAYER}-{grid}.rrd"
+    t0 = time.perf_counter()
+    write_prior_layer(path, segment_id, priors, properties)
+    timings["write_s"] = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    if register:
+        register_prior_layer(catalog_url, dataset, path)
+    timings["register_s"] = time.perf_counter() - t0
+    return as_stored(priors), path, timings
+
+
+def select_cameras(priors: ClipPriors, camera_names: Sequence[str]) -> ClipPriors:
+    """The maps of ``camera_names`` (each must be in ``priors``)."""
+    slots: list[int] = [priors.camera_names.index(name) for name in camera_names]
+    return ClipPriors(tuple(camera_names), priors.frame_indices, tuple(priors.depth[i] for i in slots), tuple(priors.normals[i] for i in slots))
 
 
 def roi_signature(clip: MultiViewClip, camera_names: Sequence[str]) -> dict[str, str]:

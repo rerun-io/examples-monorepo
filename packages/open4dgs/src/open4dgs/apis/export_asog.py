@@ -42,7 +42,7 @@ class Config:
     name: str | None = None
     """File stem (default: the run name)."""
     settings: AsogSettings = field(default_factory=AsogSettings)
-    """Encoder preset (``band-safe`` default; ``--settings.preset upstream`` for upstream's) and per-option overrides."""
+    """Encoder preset (``band-safe`` default; ``--settings.preset small``: smaller file for web streaming) and per-option overrides."""
     evaluate: bool = False
     """Render the held-out cameras from both models and score them (needs the GPU and the catalog)."""
     mask_catalog_url: str = LOCAL_CATALOG

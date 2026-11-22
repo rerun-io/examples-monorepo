@@ -65,7 +65,14 @@ Steps (`open4dgs.apis.train`):
    trainer's init contract, also logged to the run.
 4. `train_clip`: TRiGS in memory. Masked loss with the render composited on black against `gt * mask`, plus the
    alpha-outside and alpha-to-mask terms. Held-out cameras get black frames and empty masks, so their pixels never
-   reach the trainer.
+   reach the trainer. The MoGe-2 depth + normal prior (`open4dgs.prior`) is ON by default (`--prior auto`): the
+   segment's `moge2_prior` layer (masks' catalog/dataset; the local companion dataset when the source is the
+   read-only Spark) is used when it matches the clip (window, cameras, sizes, ROI grid); otherwise MoGe-2 runs at
+   start (monopriors torch predictor, about 16-22 images/s) and the maps are registered as that layer for the next run
+   (replacing a layer of another grid; the file of each grid is kept). `--prior layer` requires a matching layer,
+   `--prior off` trains without. Weights 0.05 / 0.05; the prior starts at 15 % of `--train.steps`, reaches full
+   weight at 40 % and its normal term drops contradicting pixels from 75 %. No body mesh is needed (SelfCap trains
+   with it); only the geometry metric uses the mesh. The run properties record `prior` (bool), `prior_mode` and `prior_source`.
 5. `evaluate_cameras` scores held-out and training cameras (definitions below), and the held-out cameras' two floors.
    It also renders a 360-degree orbit.
 6. The run recording `<runs-root>/<run-name>/run.rrd` (plus `trigs_ckpt.pt`) holds the cameras, held-out
@@ -94,3 +101,12 @@ TRiGS render premultiplied over black, clamped to [0, 1].
 | `full_{psnr,ssim,lpips}` | whole frame, raw render against `gt * mask`; mostly black background, for paper comparison only |
 | `alpha_iou` | IoU of rendered alpha > 0.5 with mask > 0.5 |
 | floors `black`, `mean` | every metric above for an all-black render and for the mean GT colour inside the mask (alpha = mask), per held-out camera and frame (`/eval/holdout/<cam>/floor/<kind>/<name>`, summary `holdout_floor_<kind>_<name>`) |
+
+Every score runs in full float32 (`evaluate.ieee_fp32`): PyTorch's default lets cuDNN convolutions use TF32, which
+made LPIPS depend on the batch shape at the 1e-4 level. Training keeps PyTorch's defaults.
+
+## Animated SOG export
+
+`open4dgs-export-asog` writes a run's checkpoint as an `.asog` file. The default preset `band-safe` keeps held-out
+PSNR within 1 % of the uncompressed clip (about 12 MB); `--settings.preset small` gives a smaller file for web
+streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).

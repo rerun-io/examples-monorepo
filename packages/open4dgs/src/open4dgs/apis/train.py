@@ -9,6 +9,7 @@ import dataclasses
 import json
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -36,7 +37,16 @@ from open4dgs.evaluate import (
 )
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, check_init_matches_run, log_init_cloud, read_init_cloud, read_layer_init_cloud
-from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals, read_clip_priors
+from open4dgs.prior import (
+    PRIOR_LAYER,
+    ClipPriors,
+    MonoPriorLoss,
+    PriorConfig,
+    compute_prior_layer,
+    decode_normals,
+    read_clip_priors,
+    select_cameras,
+)
 from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
 from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip, untrained_clip
@@ -92,13 +102,18 @@ class Config:
     register: bool = True
     """Register the saved run recording on ``runs_catalog_url`` / ``open4dgs-runs`` (the one switch; ``--no-register`` turns it off)."""
     runs_catalog_url: str = LOCAL_CATALOG
-    prior: bool = False
-    """Train with the MoGe-2 depth + normal prior (layer ``moge2_prior``, ``open4dgs-prior``) on the training cameras."""
+    prior: Literal["auto", "layer", "off"] = "auto"
+    """MoGe-2 depth + normal prior on the training cameras. ``auto`` (default): the segment's ``moge2_prior`` layer when it matches the clip (window, cameras, sizes, ROI grid), else MoGe-2 runs at start (16-22 images/s) and the maps are registered as that layer for the next run; ``layer``: the layer or an error; ``off``: no prior."""
     prior_catalog_url: str | None = None
-    """Catalog of the ``moge2_prior`` layer (default ``mask_catalog_url``, then ``catalog_url``)."""
+    """Catalog of the ``moge2_prior`` layer (default ``mask_catalog_url``, then ``catalog_url``; a source catalog other than the local one, i.e. the read-only Spark, is replaced by the local catalog)."""
     prior_dataset: str | None = None
-    """Dataset of the ``moge2_prior`` layer (default ``mask_dataset``, then ``dataset``)."""
+    """Dataset of the ``moge2_prior`` layer (default ``mask_dataset``, then ``dataset``; ``open4dgs-mamma`` when the catalog was replaced)."""
     prior_config: PriorConfig = field(default_factory=PriorConfig)
+    """Weights 0.05 / 0.05; schedule 15 % / 40 % / 75 % of ``train.steps`` (start, full weight, contradiction gate)."""
+    prior_output_dir: Path = Path("/mnt/nas/ssd-8tb/open4dgs/prior")
+    """Where ``--prior auto`` writes a computed layer (``<dir>/<dataset>/<segment>.moge2_prior-<grid>.rrd``)."""
+    prior_batch_size: int = 4
+    """MoGe-2 batch of ``--prior auto`` when it computes the maps."""
     geometry: bool = True
     """Score rendered depth against the SMPL-X mesh depth at the held-out cameras (mesh frames only)."""
     selfcap_time_start_s: float | None = None
@@ -195,6 +210,77 @@ def _save_geometry_pngs(png_dir: Path, run_name: str, clip: MultiViewClip, geome
         row = np.concatenate([rgb, *images.values()], axis=1)
         frame: int = int(clip.frame_indices[cam.frame_slots[slot]])
         Image.fromarray(row).save(png_dir / f"{run_name}-geometry-{cam.camera.replace('/', '_')}-f{frame}-{'_'.join(images)}.png")
+
+
+def prior_location(config: Config) -> tuple[str, str]:
+    """(catalog, dataset) of the run's ``moge2_prior`` layer: read there and, for ``--prior auto``, registered there.
+
+    Default: the masks' catalog and dataset. A source catalog that is not the local one (the read-only Spark) is never
+    written to, so it is replaced by the local catalog and the companion dataset, as ``open4dgs-prior`` does.
+    """
+    url: str = config.prior_catalog_url or config.mask_catalog_url or config.catalog_url
+    dataset: str = config.prior_dataset or config.mask_dataset or config.dataset
+    if config.prior_catalog_url is None and url != LOCAL_CATALOG:
+        return LOCAL_CATALOG, config.prior_dataset or "open4dgs-mamma"
+    return url, dataset
+
+
+ReadPriors = Callable[[MultiViewClip, str, str, str, tuple[str, ...]], ClipPriors]
+ComputePriors = Callable[[MultiViewClip, str, str], ClipPriors]
+
+
+def clip_priors(
+    config: Config,
+    clip: MultiViewClip,
+    train_names: tuple[str, ...],
+    holdout_names: tuple[str, ...],
+    read: ReadPriors = read_clip_priors,
+    compute: ComputePriors | None = None,
+) -> tuple[ClipPriors, ClipPriors | None, str]:
+    """The prior maps of the training cameras, those of the held-out cameras (recording only; None when absent) and
+    where they came from (``layer:<catalog>/<dataset>`` or ``computed:<catalog>/<dataset>``).
+
+    ``--prior layer`` reads the layer and raises when it does not match the clip. ``--prior auto`` falls back to
+    ``compute(clip, catalog, dataset)`` (every clip camera, registered as the layer) when the layer is missing or was
+    computed on another grid.
+    """
+    url, dataset = prior_location(config)
+    try:
+        train: ClipPriors = read(clip, url, dataset, config.segment_id, train_names)
+    except (ValueError, LookupError) as error:
+        if config.prior != "auto":
+            raise
+        print(f"[open4dgs] prior auto: no {PRIOR_LAYER} layer for this clip on {url}/{dataset} ({error}); computing it now")
+        computed: ClipPriors = (compute or _compute_priors(config))(clip, url, dataset)
+        return select_cameras(computed, train_names), select_cameras(computed, holdout_names), f"computed:{url}/{dataset}"
+    print(f"[open4dgs] prior: {PRIOR_LAYER} layer of {url}/{dataset}/{config.segment_id} matches the clip")
+    holdout: ClipPriors | None = None
+    try:  # held-out maps only for the side-by-side in the run recording; never handed to the trainer
+        holdout = read(clip, url, dataset, config.segment_id, holdout_names)
+    except ValueError as error:
+        print(f"[open4dgs] no held-out prior maps for the recording: {error}")
+    return train, holdout, f"layer:{url}/{dataset}"
+
+
+def _compute_priors(config: Config) -> ComputePriors:
+    def compute(clip: MultiViewClip, url: str, dataset: str) -> ClipPriors:
+        priors, path, timings = compute_prior_layer(
+            clip,
+            config.segment_id,
+            source=f"{config.catalog_url}/{config.dataset}",
+            catalog_url=url,
+            dataset=dataset,
+            output_dir=config.prior_output_dir,
+            max_side=config.max_side,
+            batch_size=config.prior_batch_size,
+        )
+        print(
+            f"[open4dgs] prior auto: MoGe-2 {timings['images']:.0f} images in {timings['moge_s']:.1f} s ({timings['images'] / timings['moge_s']:.1f} img/s), "
+            f"write {timings['write_s']:.1f} s, register {timings['register_s']:.1f} s -> {path}, registered as {PRIOR_LAYER} on {url}/{dataset}"
+        )
+        return priors
+
+    return compute
 
 
 def split_cameras(
@@ -297,18 +383,20 @@ def main(config: Config) -> dict[str, object]:
 
     prior_loss: MonoPriorLoss | None = None
     holdout_priors: ClipPriors | None = None
-    if config.prior:
-        prior_url: str = config.prior_catalog_url or config.mask_catalog_url or config.catalog_url
-        prior_dataset: str = config.prior_dataset or config.mask_dataset or config.dataset
+    prior_source: str = "off"
+    prior_config: PriorConfig = config.prior_config.at_steps(config.train.steps)
+    if config.prior != "off":
         t0 = time.perf_counter()
-        train_priors: ClipPriors = read_clip_priors(clip, prior_url, prior_dataset, config.segment_id, train_names)
-        try:  # held-out maps only for the side-by-side in the run recording; never handed to the trainer
-            holdout_priors = read_clip_priors(clip, prior_url, prior_dataset, config.segment_id, holdout_names)
-        except ValueError as error:
-            print(f"[open4dgs] no held-out prior maps for the recording: {error}")
-        timings["prior_read_s"] = time.perf_counter() - t0
+        train_priors, holdout_priors, prior_source = clip_priors(config, clip, train_names, holdout_names)
+        timings["prior_s"] = time.perf_counter() - t0
         positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in train_names)
-        prior_loss = MonoPriorLoss(config.prior_config, train_priors, tuple(masks[c] for c in positions), positions, clip.K)
+        prior_loss = MonoPriorLoss(prior_config, train_priors, tuple(masks[c] for c in positions), positions, clip.K)
+        print(
+            f"[open4dgs] prior on ({prior_source}): lambda {prior_config.lambda_depth}/{prior_config.lambda_normal}, start {prior_config.start_step}, "
+            f"full {prior_config.ramp_end_step}, gate {prior_config.contradiction_start_step} of {config.train.steps} steps"
+        )
+    else:
+        print("[open4dgs] prior off")
     trained: TrainedClip = train_clip(clip, masks, init, config.train, holdout_names, device=device, prior=prior_loss)
     trained.save(run_dir / "trigs_ckpt.pt")
     t0 = time.perf_counter()
@@ -380,8 +468,10 @@ def main(config: Config) -> dict[str, object]:
         "view_coordinates": str(view_coordinates),
         "samples_per_person": config.samples_per_person,
         "keyframe_step": init.keyframe_step,
-        "prior": config.prior,
-        **({f"prior_{k}": v for k, v in dataclasses.asdict(config.prior_config).items()} if config.prior else {}),
+        "prior": config.prior != "off",  # a bool, as in every run already on open4dgs-runs (the schema must not change)
+        "prior_mode": config.prior,
+        "prior_source": prior_source,
+        **({f"prior_{k}": v for k, v in dataclasses.asdict(prior_config).items()} if config.prior != "off" else {}),
         "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
         **{f"train_{k}": v for k, v in dataclasses.asdict(config.train).items()},
     }
