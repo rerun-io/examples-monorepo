@@ -52,6 +52,10 @@ class Config:
     """Explicit held-out cameras (e.g. evenly spaced); overrides ``num_holdout``/``holdout_seed``."""
     max_side: int | None = 640
     """Longer side of the training frames; None keeps the stored size."""
+    roi: Literal["people"] | None = None
+    """``people``: person-centred virtual cameras (roi_cameras.py) instead of the full frame; metrics are then on the ROI views."""
+    roi_pad: float = 0.15
+    """ROI margin around the people's angular box (fraction)."""
     mask_source: Literal["layer", "mesh"] = "layer"
     """``layer``: the catalog ``masks`` layer (open4dgs.masks); ``mesh``: dilated SMPL-X silhouette (stand-in, development only)."""
     mask_catalog_url: str | None = None
@@ -105,7 +109,15 @@ def main(config: Config) -> dict[str, object]:
     timings: dict[str, float] = {}
     t0: float = time.perf_counter()
     clip: MultiViewClip = read_catalog_clip(
-        config.catalog_url, config.dataset, config.segment_id, config.frame_start, config.num_frames, cameras=config.cameras, max_side=config.max_side
+        config.catalog_url,
+        config.dataset,
+        config.segment_id,
+        config.frame_start,
+        config.num_frames,
+        cameras=config.cameras,
+        max_side=config.max_side,
+        roi=config.roi,
+        roi_pad=config.roi_pad,
     )
     timings["read_clip_s"] = time.perf_counter() - t0
     if config.holdout_cameras is not None:
@@ -195,6 +207,7 @@ def main(config: Config) -> dict[str, object]:
         "holdout_cameras": list(holdout_names),
         "holdout_seed": config.holdout_seed,
         "max_side": config.max_side or 0,
+        "roi": f"{config.roi}:{config.roi_pad}" if config.roi else "full",
         "init_method": init.method,
         "samples_per_person": config.samples_per_person,
         "keyframe_step": config.keyframe_step,
