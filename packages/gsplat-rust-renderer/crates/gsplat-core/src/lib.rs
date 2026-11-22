@@ -17,6 +17,7 @@ mod primitives;
 mod renderer;
 mod scene;
 mod shader;
+pub mod sog;
 mod timing;
 pub mod trigs;
 mod types;
