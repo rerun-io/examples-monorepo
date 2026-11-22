@@ -13,6 +13,16 @@ folded in) and, for the translation, only ``g(tau) = nu(tau) . omega(tau)`` as a
 keeps only the component of ``nu`` along ``omega``, ``nu_par = (nu . omega / |omega|^2) omega``, so ``g`` is all that
 moves a splat. The way back picks the minimum-norm translation control points ``N_k`` whose product with the ``O_k`` is
 that quartic (``nu_control_points``); the TRiGS motion of the result equals the ``.asog`` reference decoder's motion.
+
+Axis anchor: the encoder quantises ``O_k`` with the step ``qp / |mean - anchor|`` (a rotation that moves the splat by
+``qp`` mm). A translation-dominant row has a small ``omega``, so its ``O_k`` round to a few steps or to zero, and the
+decoded translation ``g / |omega|^2 omega`` follows that coarse axis or vanishes (run C, band-safe: 13 % of the rows
+under 5 steps, 30-60 mm median position error; 1 % rounded to zero). ``axis_anchors`` moves the anchor of such rows onto
+their own mean rotation axis, far out: the rotation then barely moves the splat, and the long lever makes the step fine.
+It drops the row's small rotation about its old axis (under ``AXIS_ANCHOR_STEPS`` x qp) and costs nothing in bytes;
+measured on held-out crop_raw PSNR it cuts the band-safe loss from -0.42 % to -0.09 % (run C) and -0.47 % to -0.09 % (MAMMA).
+A row with ``omega = 0`` throughout (TRiGS: pure translation by the full ``nu``) has no axis and still loses its
+translation; none of our runs has one.
 """
 
 import dataclasses
@@ -27,7 +37,7 @@ import numpy as np
 import torch
 from asog import Asog
 from asog import read as read_asog
-from asog.encode import EncodeStats, encode_runtime
+from asog.encode import MID_O, R_MIN, SM, EncodeStats, encode_runtime
 from asog.trigs import TrigsRuntime
 from jaxtyping import Float64
 from numpy import ndarray
@@ -35,6 +45,12 @@ from torch import Tensor
 
 OPACITY_EPS: float = 1e-6
 """Decoded opacities (q / 255) are clamped to [eps, 1 - eps] before the logit."""
+AXIS_ANCHOR_STEPS: float = 8.0
+"""Rows whose twist control points span fewer omega steps than this over the visible life get the axis anchor."""
+AXIS_ANCHOR_TARGET: float = 16.0
+"""Omega steps the axis anchor gives such a row (more: finer axis, but a larger swing when the axis turns)."""
+AXIS_ANCHOR_MAX_M: float = 50.0
+"""Farthest axis anchor from the splat, file units."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,12 +163,30 @@ def trigs_runtime(params: Mapping[str, Tensor], fps: float, num_frames: int) -> 
     )
 
 
+def axis_anchors(runtime: TrigsRuntime, qp: float) -> Float64[ndarray, "n 3"]:
+    """Anchors for the encoder: translation-dominant rows' anchors moved onto their mean rotation axis (module docstring)."""
+    qpv: float = qp / 1000
+    life: ndarray = SM * np.exp(runtime.log_durations)
+    lever: ndarray = np.maximum(np.linalg.norm(runtime.means - runtime.anchors, axis=1), R_MIN)
+    mid: ndarray = np.array([1.0, MID_O, 1.0])[:, None]
+    steps: ndarray = (np.abs(runtime.omega).max(axis=2) * life * lever / qpv / mid).max(axis=0)
+    axis: ndarray = runtime.omega.sum(axis=0)
+    axis_norm: ndarray = np.linalg.norm(axis, axis=1)
+    distance: ndarray = np.clip(AXIS_ANCHOR_TARGET * qpv / np.maximum(np.abs(runtime.omega).max(axis=(0, 2)) * life, 1e-12), R_MIN, AXIS_ANCHOR_MAX_M)
+    move: ndarray = ~runtime.static & (steps < AXIS_ANCHOR_STEPS) & (axis_norm > 0)
+    anchors: ndarray = runtime.anchors.copy()
+    anchors[move] = runtime.means[move] + distance[move, None] * axis[move] / axis_norm[move, None]
+    return anchors
+
+
 def encode_params(params: Mapping[str, Tensor], fps: float, num_frames: int, dst: Path, settings: AsogSettings) -> EncodeStats:
     """Write the clip as ``.asog`` to ``dst`` (mode 644)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     options: AsogOptions = settings.options()
+    runtime: TrigsRuntime = trigs_runtime(params, fps, num_frames)
+    runtime.anchors = axis_anchors(runtime, options.qp)
     stats: EncodeStats = encode_runtime(
-        trigs_runtime(params, fps, num_frames),
+        runtime,
         dst,
         qp=options.qp,
         qa=options.qa,

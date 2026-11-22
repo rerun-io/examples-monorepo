@@ -90,7 +90,7 @@ def test_round_trip_positions_rotations_and_weights(tmp_path: Path) -> None:
         assert int(visible.sum()) > 200
         # positions within a few quantisation steps (qp 2 mm over the life, 14-bit log positions, 8 mm anchors)
         assert float((m1 - m0)[visible].norm(dim=-1).median()) < 2e-3
-        assert float((m1 - m0)[visible].norm(dim=-1).max()) < 2e-2
+        assert float((m1 - m0)[visible].norm(dim=-1).max()) < 2.5e-2  # axis-anchored rows drop a rotation of < 8 qp steps
         # rotations: 8-bit smallest-three, so a few degrees at most
         angle = 2 * torch.acos((q0 * q1).sum(-1).abs().clamp(max=1.0))
         assert float(angle[visible].max()) < np.radians(4.0)
@@ -165,13 +165,18 @@ def test_decode_keeps_trigs_timing_and_a_stock_player_cuts_at_0_05(tmp_path: Pat
     assert blanked > 0
 
 
-def test_encoder_drops_translation_without_a_quantisable_rotation(tmp_path: Path) -> None:
-    """K2 (b): ``.asog`` carries translation only as ``g = nu . omega``, along the quantised rotation axis. A pure-translation
-    row (omega = 0; TRiGS's gauge fix then moves it by the full nu) and a row whose omega rounds to zero steps
-    (|omega| = 1e-3 rad/s here, above TRiGS's 1e-8 threshold on |omega|^2) both come back without their translation."""
-    from asog import read as read_asog
+def test_translation_needs_a_rotation_axis_and_the_axis_anchor_keeps_it(tmp_path: Path) -> None:
+    """K2 (b): ``.asog`` carries translation only as ``g = nu . omega``, along the quantised rotation axis.
 
-    from open4dgs.asog import AsogSettings, decode_asog, encode_params
+    A pure-translation row (omega = 0; TRiGS's gauge fix then moves it by the full nu) comes back without its
+    translation. A row with a slow rotation (|omega| = 1e-3 rad/s, above TRiGS's 1e-8 threshold on |omega|^2) whose
+    omega would round to zero steps keeps it, because ``axis_anchors`` moves its anchor onto its axis; with the
+    original anchor the encoder zeroes its omega and drops the translation too.
+    """
+    from asog import read as read_asog
+    from asog.encode import encode_runtime
+
+    from open4dgs.asog import AsogSettings, decode_asog, encode_params, trigs_runtime
 
     src = synthetic_params()
     pure, slow = torch.arange(1, 512, 16), torch.arange(2, 512, 16)  # dynamic rows (row % 16 == 0 is static)
@@ -181,17 +186,23 @@ def test_encoder_drops_translation_without_a_quantisable_rotation(tmp_path: Path
         src[f"zeta_{k}_t"][pure] = 0.0 if k != "base" else torch.tensor([0.3, 0.0, 0.0])
         src[f"zeta_{k}_r"][slow] = 0.0 if k != "base" else 1e-3 * direction
         src[f"zeta_{k}_t"][slow] = 0.0 if k != "base" else 0.3 * direction  # 0.3 m/s along the axis
+    options = AsogSettings().options()
+    raw = tmp_path / "original-anchor.asog"
+    encode_runtime(trigs_runtime(src, FPS, NUM_FRAMES), raw, qp=options.qp, qa=options.qa, prune=options.prune, mbits=options.mbits)
     path = tmp_path / "clip.asog"
     encode_params(src, FPS, NUM_FRAMES, path, AsogSettings())
     decoded, _ = decode_asog(path, torch.device("cpu"))
     order = torch.cdist(src["means"].double(), decoded["means"].double()).argmin(dim=1)
+    assert np.all(np.abs(read_asog(raw).omega[:, order[slow].numpy()]).sum(axis=(0, 2)) == 0)  # original anchor: omega -> 0
     assert np.all(np.abs(read_asog(path).omega[:, order[pure].numpy()]).sum(axis=(0, 2)) == 0)
-    assert np.all(np.abs(read_asog(path).omega[:, order[slow].numpy()]).sum(axis=(0, 2)) == 0)
-    for rows in (pure, slow):
+    for rows, kept in ((pure, False), (slow, True)):
         t = float(src["times"][rows].mean()) + 0.1
         m0 = deform(src, t)[0][rows]
         m1 = deform(decoded, t)[0][order[rows]]
         dt = t - src["times"][rows].reshape(-1)
-        moved = (m0 - src["means"][rows]).norm(dim=-1)
-        np.testing.assert_allclose(moved.numpy(), (0.3 * dt.abs()).numpy(), rtol=1e-3)  # TRiGS: the full 0.3 m/s
-        assert float((m1 - decoded["means"][order[rows]]).norm(dim=-1).max()) < 1e-6  # .asog: not at all
+        np.testing.assert_allclose((m0 - src["means"][rows]).norm(dim=-1).numpy(), (0.3 * dt.abs()).numpy(), rtol=1e-3)  # TRiGS: full 0.3 m/s
+        moved = (m1 - decoded["means"][order[rows]]).norm(dim=-1)
+        if kept:
+            assert float((m1 - m0).norm(dim=-1).max()) < 1e-2  # direction within about 1 / AXIS_ANCHOR_TARGET rad
+        else:
+            assert float(moved.max()) < 1e-6  # not at all
