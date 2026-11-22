@@ -3,10 +3,12 @@
 What the trainer gets:
 - cameras: every clip camera, ``CameraConfig.from_matrices`` with viewmats = inverse of ``clip.world_T_cam`` (world ->
   camera, OpenCV RDF), per-camera K and sizes (MAMMA mixes sizes);
-- frames: ``gt_images_per_frame[f][c]``, uint8 HWC CPU views of the clip frames. The held-out cameras get a BLACK
+- frames: ``gt_images_per_frame[f][c]``, uint8 HWC views of the clip frames, on the GPU when the training cameras'
+  frames and masks fit ``RESIDENT_FREE_FRACTION`` of the free GPU memory (``trainer_frames``), else on the CPU (the
+  trainer then copies each camera per step). The held-out cameras get a BLACK
   placeholder frame and an all-zero mask, so their pixels never reach the trainer; they are also listed in
   ``config.holdout_views`` so the trainer never samples them, and its in-loop eval is off (tb_stats_every=0);
-- masks: ``gt_alphas_per_frame[f][c]`` float in [0, 1] with ``masked_rgb_loss=True`` and ``masked_rgb_composite=True``
+- masks: ``gt_alphas_per_frame[f][c]`` float32 in [0, 1] (on the same device as the frames) with ``masked_rgb_loss=True`` and ``masked_rgb_composite=True``
   on a BLACK background: the trainer composites its (premultiplied) render over black and supervises the full frame
   against ``gt * mask`` (person matted onto black), plus two alpha terms normalised by the full frame:
   ``lambda_alpha_outside_mask`` (alpha outside the mask -> 0) and ``lambda_alpha_mask`` (BCE of alpha to the mask);
@@ -56,6 +58,9 @@ class TrainConfig:
     """Trainer seed (camera/frame sampling)."""
     log_every: int = 25
     """Scalar logging interval (loss/*)."""
+    resident_frames: bool = True
+    """Keep the training frames and masks on the GPU for the run when they fit (``resident_device``); off = the CPU path
+    (the trainer copies each camera's frame and mask every step)."""
 
     def to_trigs(self, fps: float, keyframe_step: int, holdout_positions: tuple[int, ...]) -> TrigsTrainingConfig:
         """The TRiGS config for this run."""
@@ -157,25 +162,57 @@ def init_params(init: InitCloud, sh_degree: int, device: torch.device) -> tuple[
     )
 
 
+RESIDENT_FREE_FRACTION: float = 0.5
+"""Training frames and masks go to the GPU when they need at most this share of the free GPU memory at train start."""
+
+
 def trainer_frames(
-    clip: MultiViewClip, masks: tuple[Float32[Tensor, "frames h w"], ...], holdout_names: tuple[str, ...]
+    clip: MultiViewClip,
+    masks: tuple[Float32[Tensor, "frames h w"], ...],
+    holdout_names: tuple[str, ...],
+    device: torch.device | None = None,
 ) -> tuple[dict[int, list[Tensor]], dict[int, list[Tensor]], tuple[int, ...]]:
     """What the trainer sees: ``gt_images[f][c]``, ``gt_alphas[f][c]`` in clip camera order, and the held-out positions.
 
     Held-out cameras get a black frame and an all-zero mask at every frame; their positions (indices into
     ``clip.camera_names``, the trainer's camera order) go to ``TrigsTrainingConfig.holdout_views``.
+
+    ``device``: where the frames (uint8) and masks (float32, the values the trainer would copy) live. A CUDA device
+    keeps them resident for the whole run (one copy per camera here, none per step); ``None`` keeps them where they
+    are. Held-out data is never copied.
     """
     holdout_positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in holdout_names)
-    black: dict[int, Tensor] = {c: torch.zeros_like(clip.frames[c][0]) for c in holdout_positions}
-    empty: dict[int, Tensor] = {c: torch.zeros_like(masks[c][0]) for c in holdout_positions}
+    frames: dict[int, Tensor] = {}
+    alphas: dict[int, Tensor] = {}
+    for c in range(len(clip.camera_names)):
+        if c in holdout_positions:
+            frames[c] = torch.zeros_like(clip.frames[c][:1], device=device).expand_as(clip.frames[c])
+            alphas[c] = torch.zeros_like(masks[c][:1], dtype=torch.float32, device=device).expand_as(masks[c])
+        else:
+            frames[c] = clip.frames[c] if device is None else clip.frames[c].to(device)
+            alphas[c] = masks[c].to(device=device, dtype=torch.float32)
     num_frames: int = int(clip.frame_indices.shape[0])
-    gt_images: dict[int, list[Tensor]] = {
-        f: [black[c] if c in black else clip.frames[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)
-    }
-    gt_alphas: dict[int, list[Tensor]] = {
-        f: [empty[c] if c in empty else masks[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)
-    }
+    gt_images: dict[int, list[Tensor]] = {f: [frames[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)}
+    gt_alphas: dict[int, list[Tensor]] = {f: [alphas[c][f] for c in range(len(clip.camera_names))] for f in range(num_frames)}
     return gt_images, gt_alphas, holdout_positions
+
+
+def resident_device(
+    clip: MultiViewClip, masks: tuple[Tensor, ...], holdout_names: tuple[str, ...], device: torch.device
+) -> torch.device | None:
+    """``device`` when the training cameras' frames plus float32 masks fit ``RESIDENT_FREE_FRACTION`` of its free memory."""
+    if device.type != "cuda":
+        return None
+    train: list[int] = [c for c, name in enumerate(clip.camera_names) if name not in holdout_names]
+    need: int = sum(
+        (0 if clip.frames[c].device == device else clip.frames[c].nbytes) + (0 if masks[c].device == device else masks[c].numel() * 4)
+        for c in train
+    )
+    free, _ = torch.cuda.mem_get_info(device)
+    if need <= RESIDENT_FREE_FRACTION * free:
+        return device
+    print(f"[open4dgs] frames + masks {need / 1e9:.2f} GB > {RESIDENT_FREE_FRACTION} x {free / 1e9:.2f} GB free: kept on the CPU")
+    return None
 
 
 def train_clip(
@@ -197,7 +234,9 @@ def train_clip(
     num_frames: int = int(clip.frame_indices.shape[0])
     if len(masks) != len(clip.camera_names) or any(m.shape[0] != num_frames for m in masks):
         raise ValueError("masks must be one (frames, h, w) tensor per clip camera")
-    gt_images, gt_alphas, holdout_positions = trainer_frames(clip, masks, holdout_names)
+    gt_images, gt_alphas, holdout_positions = trainer_frames(
+        clip, masks, holdout_names, resident_device(clip, masks, holdout_names, dev) if config.resident_frames else None
+    )
     trigs_config: TrigsTrainingConfig = config.to_trigs(clip.fps, init.keyframe_step, holdout_positions)
     if prior is not None:
         leaked: set[int] = set(prior.positions) & set(holdout_positions)
