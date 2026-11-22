@@ -221,7 +221,7 @@ def test_hook_skips_cameras_without_maps_and_logs_terms() -> None:
 
 
 def test_rasterized_plane_depth_and_geometry_metric() -> None:
-    from open4dgs.evaluate import geometry_frame, rasterize_depth
+    from open4dgs.geometry_eval import geometry_frame, rasterize_depth
 
     # A tilted quad at z = 2 + 0.3 x, two triangles, covering the whole image: the z-buffer equals the analytic plane depth.
     a = math.atan(0.3)
@@ -270,7 +270,7 @@ def _roi_clip(pad: float | None):
 
 
 def test_prior_layer_roi_check_accepts_its_own_grid_and_refuses_another() -> None:
-    from open4dgs.prior import check_roi, roi_properties
+    from open4dgs.prior_layer import check_roi, roi_properties
 
     full, roi, wider = _roi_clip(None), _roi_clip(0.15), _roi_clip(0.3)
     names = ("rig_01/cam_00",)
@@ -302,7 +302,8 @@ def test_as_stored_equals_the_png_round_trip() -> None:
     import cv2
     import numpy as np
 
-    from open4dgs.prior import ClipPriors, as_stored, encode_normals
+    from open4dgs.prior import ClipPriors, encode_normals
+    from open4dgs.prior_layer import as_stored
 
     depth, normals, hit = _sphere(torch.tensor([0.0, 0.0, 3.0]), 0.8)
     priors = ClipPriors(("rig_00/cam_00",), torch.tensor([0]), ((depth * 1.2345).half()[None],), (encode_normals(normals, hit)[None],))

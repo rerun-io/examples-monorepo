@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
-from open4dgs.prior import compute_prior_layer
+from open4dgs.prior_layer import compute_prior_layer
 
 
 @dataclass
@@ -34,7 +34,7 @@ class Config:
     """Default: the source dataset when it is on ``register_url``, else ``open4dgs-mamma`` (Spark is read-only)."""
     register: bool = True
     output_dir: Path = Path("/mnt/nas/ssd-8tb/open4dgs/prior")
-    """The layer recording goes to ``<output_dir>/<register_dataset>/<segment_id>.moge2_prior-<grid>.rrd`` (``prior.compute_prior_layer``)."""
+    """The layer recording goes to ``<output_dir>/<register_dataset>/<segment_id>.moge2_prior-<grid>.rrd`` (``prior_layer.compute_prior_layer``)."""
     batch_size: int = 8
     resolution_level: int = 9
     """MoGe-2 detail level (0-9)."""

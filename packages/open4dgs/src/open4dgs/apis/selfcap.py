@@ -34,7 +34,8 @@ from open4dgs.masks import (
     register_mask_layer,
     write_mask_layer,
 )
-from open4dgs.prior import ClipPriors, read_clip_priors
+from open4dgs.prior import ClipPriors
+from open4dgs.prior_layer import read_clip_priors
 from open4dgs.selfcap_clip import TimedClip, read_timed_clip
 from open4dgs.selfcap_init import capsule_init, joint_box_points, moge_lift_init
 
@@ -131,7 +132,7 @@ def _masks(config: Config) -> None:
 def _prior(config: Config) -> None:
     from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor
 
-    from open4dgs.prior import compute_clip_priors, register_prior_layer, write_prior_layer
+    from open4dgs.prior_layer import compute_clip_priors, register_prior_layer, write_prior_layer
 
     timed: TimedClip = read_timed_clip(
         config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames, max_side=config.max_side, roi=config.roi

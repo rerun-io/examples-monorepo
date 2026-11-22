@@ -24,31 +24,13 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.compensation import BrightnessSplit, HoldoutFit, camera_brightness, evaluate_holdout_fit
-from open4dgs.evaluate import (
-    BASELINES,
-    HEADLINE,
-    CameraGeometry,
-    CameraRenders,
-    Metrics,
-    evaluate_cameras,
-    evaluate_geometry,
-    mean_geometry,
-    mean_metrics,
-    render_orbit,
-)
+from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evaluate_cameras, mean_metrics, render_orbit
+from open4dgs.geometry_eval import CameraGeometry, evaluate_geometry, mean_geometry
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, check_init_matches_run, log_init_cloud, read_init_cloud, read_layer_init_cloud
 from open4dgs.masks import MATTE_LAYER
-from open4dgs.prior import (
-    PRIOR_LAYER,
-    ClipPriors,
-    MonoPriorLoss,
-    PriorConfig,
-    compute_prior_layer,
-    decode_normals,
-    read_clip_priors,
-    select_cameras,
-)
+from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals
+from open4dgs.prior_layer import PRIOR_LAYER, compute_prior_layer, read_clip_priors, select_cameras
 from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
 from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import CameraCompensation, TrainConfig, TrainedClip, train_clip, untrained_clip
