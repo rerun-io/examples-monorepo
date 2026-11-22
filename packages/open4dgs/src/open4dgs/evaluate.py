@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jaxtyping import Bool, Float32
+from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 from torchmetrics.functional.image import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -202,6 +202,169 @@ class CameraRenders:
     """Floor metrics by baseline name (``black``, ``mean``); empty unless requested."""
 
 
+EVAL_BATCH_FRAMES: int = 8
+"""Frames rendered and scored together by ``score_camera`` (bounds the GPU memory of the batched full-frame metrics)."""
+
+
+def _psnr_from_mse(mse: Tensor) -> Tensor:
+    """``psnr`` on a batch of float32 MSEs: the log in float64 like ``math.log10``, inf where the MSE is 0."""
+    db: Tensor = -10.0 * torch.log10(mse.double())
+    return torch.where(mse == 0.0, torch.full_like(db, math.inf), db)
+
+
+def _batch_ssim(pred: Float32[Tensor, "n h w 3"], target: Float32[Tensor, "n h w 3"]) -> Tensor:
+    """``ssim`` of each image pair of the batch."""
+    value = structural_similarity_index_measure(pred.permute(0, 3, 1, 2), target.permute(0, 3, 1, 2), data_range=1.0, reduction="none")
+    return value if isinstance(value, Tensor) else value[0]
+
+
+def _batch_lpips(metrics: Metrics, pred: Float32[Tensor, "n h w 3"], target: Float32[Tensor, "n h w 3"]) -> Tensor:
+    """``Metrics.lpips`` of each image pair, through the metric's network (no torchmetrics state update, no range check)."""
+    return metrics.lpips_net.net(pred.permute(0, 3, 1, 2), target.permute(0, 3, 1, 2), normalize=True).reshape(-1)
+
+
+def _mask_boxes(person: Bool[Tensor, "n h w"], pad: float = CROP_PAD) -> list[tuple[int, int, int, int] | None]:
+    """``mask_box`` of every frame of ``person``, with one device-to-host read."""
+    height, width = person.shape[1:]
+    rows: Tensor = person.any(dim=2)
+    cols: Tensor = person.any(dim=1)
+    extents: Tensor = torch.stack(
+        [
+            rows.any(dim=1).long(),
+            cols.long().argmax(dim=1),
+            width - cols.flip(1).long().argmax(dim=1),
+            rows.long().argmax(dim=1),
+            height - rows.flip(1).long().argmax(dim=1),
+        ],
+        dim=1,
+    )
+    boxes: list[tuple[int, int, int, int] | None] = []
+    for present, x0, x1, y0, y1 in extents.tolist():
+        if not present:
+            boxes.append(None)
+            continue
+        px, py = round(pad * (x1 - x0)), round(pad * (y1 - y0))
+        boxes.append((max(0, x0 - px), max(0, y0 - py), min(width, x1 + px), min(height, y1 + py)))
+    return boxes
+
+
+def _score_batch(
+    renders: dict[str, tuple[Float32[Tensor, "n h w 3"], Float32[Tensor, "n h w"]]],
+    gt: Float32[Tensor, "n h w 3"],
+    mask: Float32[Tensor, "n h w"],
+    boxes: list[tuple[int, int, int, int] | None],
+    metrics: Metrics,
+) -> dict[str, dict[str, Tensor]]:
+    """``score_frame`` of every render set (model, floors) on a batch of frames: per set, per metric, an (n,) tensor on the device.
+
+    Values stay on the device (no host read). Crops of the same size are stacked; frames with an empty mask are nan.
+    """
+    n: int = gt.shape[0]
+    device: torch.device = gt.device
+    person: Tensor = mask > MASK_THRESHOLD
+    present: Tensor = torch.tensor([box is not None for box in boxes], device=device)
+    gt_c: Tensor = gt * mask[..., None]
+    count: Tensor = person.sum(dim=(1, 2))
+    out: dict[str, dict[str, Tensor]] = {}
+    for kind, (render, alpha) in renders.items():
+        drawn: Tensor = alpha > MASK_THRESHOLD
+        fg_mse: Tensor = (((render - gt) ** 2) * person[..., None]).sum(dim=(1, 2, 3)) / (count * 3)
+        values: dict[str, Tensor] = {
+            "fg_psnr": _psnr_from_mse(fg_mse),
+            "full_psnr": _psnr_from_mse(((render - gt_c) ** 2).mean(dim=(1, 2, 3))),
+            "full_ssim": _batch_ssim(render, gt_c).double(),
+            "full_lpips": _batch_lpips(metrics, render, gt_c).double(),
+            "alpha_iou": (drawn & person).sum(dim=(1, 2)).double() / (drawn | person).sum(dim=(1, 2)).double(),
+        }
+        out[kind] = {name: torch.where(present, value, torch.full_like(value, math.nan)) for name, value in values.items()}
+        for name in ("crop_raw_psnr", "crop_raw_ssim", "crop_raw_lpips", "crop_masked_psnr", "crop_masked_ssim", "crop_masked_lpips"):
+            out[kind][name] = torch.full((n,), math.nan, dtype=torch.float64, device=device)
+    by_size: dict[tuple[int, int], list[int]] = {}
+    for i, box in enumerate(boxes):
+        if box is not None:
+            by_size.setdefault((box[3] - box[1], box[2] - box[0]), []).append(i)
+    kinds: list[str] = list(renders)
+    for frames in by_size.values():
+        slices = [(i, slice(box[1], box[3]), slice(box[0], box[2])) for i in frames if (box := boxes[i]) is not None]
+        target: Tensor = torch.stack([gt_c[i, ys, xs] for i, ys, xs in slices])
+        crop_mask: Tensor = torch.stack([mask[i, ys, xs] for i, ys, xs in slices])[..., None]
+        preds: list[Tensor] = []
+        for kind in kinds:
+            raw: Tensor = torch.stack([renders[kind][0][i, ys, xs] for i, ys, xs in slices])
+            preds += [raw, raw * crop_mask]
+        pred_all: Tensor = torch.cat(preds)
+        target_all: Tensor = target.repeat(len(preds), 1, 1, 1)
+        scores: dict[str, Tensor] = {
+            "psnr": _psnr_from_mse(((pred_all - target_all) ** 2).mean(dim=(1, 2, 3))),
+            "ssim": _batch_ssim(pred_all, target_all).double(),
+            "lpips": _batch_lpips(metrics, pred_all, target_all).double(),
+        }
+        index: Tensor = torch.tensor(frames, device=device)
+        k: int = len(frames)
+        for s, kind in enumerate(kinds):
+            for v, variant in enumerate(("crop_raw", "crop_masked")):
+                start: int = (2 * s + v) * k
+                for metric, value in scores.items():
+                    out[kind][f"{variant}_{metric}"][index] = value[start : start + k]
+    return out
+
+
+def score_camera(
+    camera: str,
+    frame_indices: list[int],
+    render: Callable[[int], tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w 1"]]],
+    frames: UInt8[Tensor, "frames h w 3"],
+    masks: Float32[Tensor, "frames h w"],
+    metrics: Metrics,
+    keep_renders: bool = True,
+    with_baselines: bool = False,
+) -> CameraRenders:
+    """``score_frame`` (and the floors of ``baseline_renders``) of one camera at every clip frame, batched.
+
+    ``render(f)`` gives the render and alpha at clip frame ``f``; ``frames`` are the camera's UInt8 (frames, h, w, 3)
+    ground truth. Frames are rendered and scored ``EVAL_BATCH_FRAMES`` at a time; each metric is read to the host once.
+    Same definitions as the per-frame ``score_frame`` (equal to float32 rounding; ``test_score_camera_matches_score_frame``).
+    """
+    device: torch.device = metrics.device
+    num_frames: int = len(frame_indices)
+    boxes: list[tuple[int, int, int, int] | None] = _mask_boxes(masks.to(device) > MASK_THRESHOLD)
+    kinds: tuple[str, ...] = ("model", *BASELINES) if with_baselines else ("model",)
+    parts: dict[str, dict[str, list[Tensor]]] = {kind: {name: [] for name in METRIC_NAMES} for kind in kinds}
+    renders_cpu: list[Tensor] = []
+    with torch.no_grad():
+        for start in range(0, num_frames, EVAL_BATCH_FRAMES):
+            stop: int = min(num_frames, start + EVAL_BATCH_FRAMES)
+            outputs = [render(f) for f in range(start, stop)]
+            rgb: Tensor = torch.stack([o[0] for o in outputs])
+            alpha: Tensor = torch.stack([o[1][..., 0] for o in outputs])
+            gt: Tensor = frames[start:stop].to(device).float() / 255.0
+            mask: Tensor = masks[start:stop].to(device).float()
+            sets: dict[str, tuple[Tensor, Tensor]] = {"model": (rgb, alpha)}
+            if with_baselines:
+                person: Tensor = mask > MASK_THRESHOLD
+                colour: Tensor = (gt * person[..., None]).sum(dim=(1, 2)) / person.sum(dim=(1, 2)).clamp(min=1)[:, None]
+                sets["black"] = (torch.zeros_like(gt), torch.zeros_like(mask))
+                sets["mean"] = (mask[..., None] * colour[:, None, None, :], mask.clone())
+            for kind, values in _score_batch(sets, gt, mask, boxes[start:stop], metrics).items():
+                for name, value in values.items():
+                    parts[kind][name].append(value)
+            if keep_renders:
+                renders_cpu.append((rgb * 255.0).round().to(torch.uint8).cpu())
+    host: dict[str, dict[str, list[float]]] = {
+        kind: {name: torch.cat(parts[kind][name]).tolist() for name in METRIC_NAMES} for kind in kinds
+    }
+    rows: dict[str, list[FrameMetrics]] = {
+        kind: [FrameMetrics(camera, frame_indices[f], *(host[kind][name][f] for name in METRIC_NAMES)) for f in range(num_frames)]
+        for kind in kinds
+    }
+    return CameraRenders(
+        camera,
+        torch.cat(renders_cpu) if renders_cpu else torch.empty(0, dtype=torch.uint8),
+        rows["model"],
+        {kind: rows[kind] for kind in BASELINES} if with_baselines else {},
+    )
+
+
 def evaluate_cameras(
     model: TrainedClip,
     clip: MultiViewClip,
@@ -212,24 +375,22 @@ def evaluate_cameras(
     with_baselines: bool = False,
 ) -> list[CameraRenders]:
     """Render ``camera_names`` at every clip frame and score them (and, optionally, the floors) against the clip frames and masks."""
+    frame_indices: list[int] = clip.frame_indices[: model.num_frames].tolist()
     out: list[CameraRenders] = []
     for name in camera_names:
         cam: int = clip.camera_names.index(name)
-        rows: list[FrameMetrics] = []
-        floors: dict[str, list[FrameMetrics]] = {kind: [] for kind in BASELINES} if with_baselines else {}
-        renders: list[Tensor] = []
-        for f in range(model.num_frames):
-            rgb, alpha = model.render(model.cameras, cam, f)
-            gt: Float32[Tensor, "h w 3"] = clip.frames[cam][f].to(metrics.device).float() / 255.0
-            mask: Float32[Tensor, "h w"] = masks[cam][f].to(metrics.device).float()
-            frame_index: int = int(clip.frame_indices[f])
-            rows.append(metrics.frame(name, frame_index, rgb, alpha[..., 0], gt, mask))
-            if with_baselines:
-                for kind, (floor_rgb, floor_alpha) in baseline_renders(gt, mask).items():
-                    floors[kind].append(metrics.frame(name, frame_index, floor_rgb, floor_alpha, gt, mask))
-            if keep_renders:
-                renders.append((rgb * 255.0).round().to(torch.uint8).cpu())
-        out.append(CameraRenders(name, torch.stack(renders) if renders else torch.empty(0, dtype=torch.uint8), rows, floors))
+        out.append(
+            score_camera(
+                name,
+                frame_indices,
+                lambda f, cam=cam: model.render(model.cameras, cam, f),
+                clip.frames[cam][: model.num_frames],
+                masks[cam][: model.num_frames],
+                metrics,
+                keep_renders=keep_renders,
+                with_baselines=with_baselines,
+            )
+        )
     return out
 
 
