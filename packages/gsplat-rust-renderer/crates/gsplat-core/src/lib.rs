@@ -17,6 +17,8 @@ mod primitives;
 mod renderer;
 mod scene;
 mod shader;
+pub mod sog;
+mod sog_gpu;
 mod timing;
 pub mod trigs;
 mod types;
@@ -68,6 +70,9 @@ pub enum Error {
 
     #[error("invalid GPU stage timestamps: {0:?}")]
     InvalidTimestamps(Vec<u64>),
+
+    #[error(transparent)]
+    Sog(#[from] sog::Error),
 
     #[error("too many splats: {0}")]
     TooManySplats(#[from] std::num::TryFromIntError),

@@ -1,5 +1,6 @@
 """Public viewer and standalone pixel contracts; each capture has a process timeout."""
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,10 +50,25 @@ def test_hexel_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
             screenshot.verify()
 
 
-def run_check(binaries: Path, out: Path, mode: str, ply: Path) -> subprocess.CompletedProcess[str]:
+@pytest.mark.integration
+def test_sog_viewer_pixels(binaries: Path, tmp_path: Path) -> None:
+    """skull.sog (v2, SH 3): the SogSplats3D payload, GPU and CPU de-quantised, matches gsplat render of the decode; stock draws the preview."""
+    from gsplat_rust_renderer.apis.log_sog import fetch_sample
+
+    try:
+        sog: Path = fetch_sample("skull")
+    except OSError as error:
+        pytest.skip(f"PlayCanvas skull.sog sample unavailable: {error}")
+    result: subprocess.CompletedProcess[str] = run_check(binaries, tmp_path, "sog", Path("/dev/null"), "--sog", str(sog))
+    # re_format groups thousands with a thin space.
+    assert len(re.findall(r"SOG decode: 246\D821 splats, SH degree 3", result.stderr)) == 2, "One payload decode per compute viewer (GPU, then CPU)"
+    assert "Gaussian compute fallback" not in result.stderr
+
+
+def run_check(binaries: Path, out: Path, mode: str, ply: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     environment: dict[str, str] = {**os.environ, "RUST_LOG": "info,gsplat_viewer::cache=debug"}
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("viewer_check.py")), "--binaries", str(binaries), "--ply", str(ply), "--out", str(out), "--mode", mode],
+        [sys.executable, str(Path(__file__).with_name("viewer_check.py")), "--binaries", str(binaries), "--ply", str(ply), "--out", str(out), "--mode", mode, *extra],
         check=False, timeout=180, capture_output=True, text=True, env=environment,
     )
     print(result.stdout, result.stderr, sep="\n")

@@ -2247,6 +2247,11 @@ depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }]
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego PLY to the running viewer"
 
+[feature.gsplat-rust-renderer.tasks.gsplat-log-sog]
+cmd = "python tools/log_sog.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+cwd = "packages/gsplat-rust-renderer"
+description = "Log a SOG scene (default: the pinned PlayCanvas skull.sog; --path for another) as SogSplats3D + preview"
+
 [feature.gsplat-rust-renderer.tasks.gsplat-log-scene]
 cmd = "python tools/log_splats_with_cameras.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
 depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }, { task = "gsplat-download", args = ["data", "lego"] }]
