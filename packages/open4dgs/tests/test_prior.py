@@ -285,3 +285,92 @@ def test_prior_layer_roi_check_accepts_its_own_grid_and_refuses_another() -> Non
     ):
         with pytest.raises(ValueError, match="grid"):
             check_roi(clip, names, stored, "mismatch")
+
+
+def test_schedule_follows_the_run_length_by_default() -> None:
+    from open4dgs.prior import PriorConfig
+
+    config = PriorConfig().at_steps(2500)  # the p2 experiment's schedule: 375 / 1000 / 1875
+    assert (config.start_step, config.ramp_end_step, config.contradiction_start_step) == (375, 1000, 1875)
+    assert (config.lambda_depth, config.lambda_normal) == (0.05, 0.05)
+    assert PriorConfig().at_steps(5500).start_step == 825 and PriorConfig().at_steps(5500).ramp_end_step == 2200
+    fixed = PriorConfig(schedule="steps", start_step=10, ramp_end_step=20, contradiction_start_step=30)
+    assert fixed.at_steps(9000) == fixed
+
+
+def test_as_stored_equals_the_png_round_trip() -> None:
+    import cv2
+    import numpy as np
+
+    from open4dgs.prior import ClipPriors, as_stored, encode_normals
+
+    depth, normals, hit = _sphere(torch.tensor([0.0, 0.0, 3.0]), 0.8)
+    priors = ClipPriors(("rig_00/cam_00",), torch.tensor([0]), ((depth * 1.2345).half()[None],), (encode_normals(normals, hit)[None],))
+    # write_prior_layer's encode + read_clip_priors' decode, without the catalog
+    mm = (priors.depth[0].float() * 1000.0).round().clamp(0, 65535).numpy().astype(np.uint16)
+    _, png = cv2.imencode(".png", mm[0])
+    back = np.empty((1, H, W), dtype=np.float16)
+    back[0] = cv2.imdecode(png, cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
+    stored = as_stored(priors)
+    assert torch.equal(stored.depth[0], torch.from_numpy(back)) and torch.equal(stored.normals[0], priors.normals[0])
+
+
+def _train_config(**kwargs):  # noqa: ANN003, ANN202
+    from open4dgs.apis.train import Config
+
+    return Config(segment_id="seg", mask_catalog_url="rerun+http://pablo-dl-server:51235", mask_dataset="open4dgs-mamma", **kwargs)
+
+
+def _priors_for(names):  # noqa: ANN001, ANN202
+    from open4dgs.prior import ClipPriors
+
+    return ClipPriors(tuple(names), torch.tensor([0]), tuple(torch.full((1, 2, 2), float(i), dtype=torch.float16) for i in range(len(names))), tuple(torch.zeros(1, 2, 2, 3, dtype=torch.uint8) for _ in names))
+
+
+def test_prior_auto_uses_a_matching_layer_and_computes_otherwise() -> None:
+    from open4dgs.apis.train import clip_priors
+
+    clip = _roi_clip(None)
+    calls: list[str] = []
+
+    def read_ok(clip, url, dataset, segment, names):  # noqa: ANN001, ANN202
+        calls.append(f"read {url} {dataset} {segment} {names}")
+        return _priors_for(names)
+
+    def read_mismatch(clip, url, dataset, segment, names):  # noqa: ANN001, ANN202
+        calls.append("read")
+        raise ValueError("prior layer camera rig_01/cam_00 was computed on grid 'none'")
+
+    def read_no_dataset(clip, url, dataset, segment, names):  # noqa: ANN001, ANN202
+        raise LookupError("No dataset found")
+
+    def compute(clip, url, dataset):  # noqa: ANN001, ANN202
+        calls.append(f"compute {url} {dataset}")
+        return _priors_for(("a", "b", "c"))
+
+    train, holdout, source = clip_priors(_train_config(), clip, ("a", "b"), ("c",), read=read_ok, compute=compute)
+    assert source == "layer:rerun+http://pablo-dl-server:51235/open4dgs-mamma" and train.camera_names == ("a", "b")
+    assert holdout is not None and holdout.camera_names == ("c",)
+    assert not any(c.startswith("compute") for c in calls)
+
+    calls.clear()
+    train, holdout, source = clip_priors(_train_config(), clip, ("a", "b"), ("c",), read=read_mismatch, compute=compute)
+    assert source.startswith("computed:") and calls == ["read", "compute rerun+http://pablo-dl-server:51235 open4dgs-mamma"]
+    assert train.camera_names == ("a", "b") and float(train.depth[1][0, 0, 0]) == 1.0  # camera b of the computed maps
+    assert holdout is not None and holdout.camera_names == ("c",)
+    assert clip_priors(_train_config(), clip, ("a",), (), read=read_no_dataset, compute=compute)[2].startswith("computed:")
+
+    with pytest.raises(ValueError, match="grid"):  # --prior layer keeps the strict behaviour
+        clip_priors(_train_config(prior="layer"), clip, ("a", "b"), ("c",), read=read_mismatch, compute=compute)
+
+
+def test_prior_defaults_and_location() -> None:
+    from open4dgs.apis.train import Config, prior_location
+
+    assert Config().prior == "auto"
+    assert prior_location(_train_config()) == ("rerun+http://pablo-dl-server:51235", "open4dgs-mamma")
+    # A source catalog that is not the local one (the read-only Spark): the local catalog and companion dataset
+    spark = Config(catalog_url="rerun+http://dgx-spark:51235", dataset="dataforge-mamma-markerless-dance", segment_id="seg")
+    assert prior_location(spark) == ("rerun+http://pablo-dl-server:51235", "open4dgs-mamma")
+    explicit = Config(prior_catalog_url="rerun+http://elsewhere:1", prior_dataset="d")
+    assert prior_location(explicit) == ("rerun+http://elsewhere:1", "d")

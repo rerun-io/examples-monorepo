@@ -28,6 +28,7 @@ import math
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -126,7 +127,9 @@ def ieee_fp32() -> Iterator[None]:
     the block PyTorch 2.12's legacy getter ``torch.backends.cudnn.allow_tf32`` raises (it does not handle ``ieee``);
     nothing in the scoring reads it.
     """
-    conv, rnn, matmul = torch.backends.cudnn.conv, torch.backends.cudnn.rnn, torch.backends.cuda.matmul
+    # The stubs lack cuDNN's conv / rnn flag modules (set at runtime) and type matmul's flag as bool | str.
+    cudnn: Any = torch.backends.cudnn
+    conv, rnn, matmul = cudnn.conv, cudnn.rnn, cast(Any, torch.backends.cuda.matmul)
     saved: tuple[str, str, str] = (conv.fp32_precision, rnn.fp32_precision, matmul.fp32_precision)
     conv.fp32_precision = rnn.fp32_precision = matmul.fp32_precision = "ieee"
     try:

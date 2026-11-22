@@ -65,7 +65,14 @@ Steps (`open4dgs.apis.train`):
    trainer's init contract, also logged to the run.
 4. `train_clip`: TRiGS in memory. Masked loss with the render composited on black against `gt * mask`, plus the
    alpha-outside and alpha-to-mask terms. Held-out cameras get black frames and empty masks, so their pixels never
-   reach the trainer.
+   reach the trainer. The MoGe-2 depth + normal prior (`open4dgs.prior`) is ON by default (`--prior auto`): the
+   segment's `moge2_prior` layer (masks' catalog/dataset; the local companion dataset when the source is the
+   read-only Spark) is used when it matches the clip (window, cameras, sizes, ROI grid); otherwise MoGe-2 runs at
+   start (monopriors torch predictor, about 16-22 images/s) and the maps are registered as that layer for the next run
+   (replacing a layer of another grid; the file of each grid is kept). `--prior layer` requires a matching layer,
+   `--prior off` trains without. Weights 0.05 / 0.05; the prior starts at 15 % of `--train.steps`, reaches full
+   weight at 40 % and its normal term drops contradicting pixels from 75 %. No body mesh is needed (SelfCap trains
+   with it); only the geometry metric uses the mesh. The run properties record `prior` and `prior_source`.
 5. `evaluate_cameras` scores held-out and training cameras (definitions below), and the held-out cameras' two floors.
    It also renders a 360-degree orbit.
 6. The run recording `<runs-root>/<run-name>/run.rrd` (plus `trigs_ckpt.pt`) holds the cameras, held-out
