@@ -12,9 +12,11 @@ and resize (``catalog_clip.resample_images``), so mask and frame pixels agree.
 """
 
 import importlib.util
+import os
 import sys
 import types
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -24,12 +26,12 @@ import rerun as rr
 import torch
 import torch.nn.functional as F
 from datafusion import col
-from jaxtyping import Float32, Int64, UInt8
+from jaxtyping import Float16, Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from torch import Tensor
 
-from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip, resample_images, roi_grid, undistortion_grid
+from open4dgs.catalog_clip import FRAME_TIMELINE, RESAMPLE_CHUNK, MultiViewClip, resample_images, roi_grid, undistortion_grid
 
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
@@ -41,6 +43,8 @@ MODEL_SIZE: int = 1024
 """BiRefNet's input side (fdanyone ``FOREGROUND.image_size``)."""
 IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
+DECODE_THREADS: int = min(16, os.cpu_count() or 1)
+"""PNG decode threads of ``read_clip_masks`` (``cv2.imdecode`` releases the GIL)."""
 
 
 def mask_entity(camera_name: str) -> str:
@@ -202,18 +206,75 @@ def register_mask_layer(catalog_url: str, dataset: str, path: Path, *, create: b
     entry.register([path.resolve().as_uri()], layer_name=MASKS_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
 
 
-def read_clip_masks(clip: MultiViewClip, catalog_url: str, dataset: str, segment_id: str) -> tuple[Float32[Tensor, "frames h w"], ...]:
-    """The ``masks`` layer for ``clip``: per camera, soft foreground in [0, 1] on the CPU, on the clip's exact pixel grid.
+def decode_mask_pngs(blobs: Sequence[bytes], threads: int = DECODE_THREADS) -> list[np.ndarray | None]:
+    """``cv2.imdecode`` (grayscale) of each blob on a thread pool, in order; None where a blob does not decode."""
+
+    def decode(blob: bytes) -> np.ndarray | None:
+        return cv2.imdecode(np.frombuffer(blob, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)  # type: ignore[arg-type]
+
+    if threads <= 1:
+        return [decode(blob) for blob in blobs]
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        return list(pool.map(decode, blobs))
+
+
+def resample_masks(
+    stored: UInt8[Tensor, "t h w"],
+    grid: Float32[Tensor, "1 h2 w2 2"] | None,
+    target_wh: tuple[int, int],
+    compute_device: torch.device,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Float32[Tensor, "t h3 w3"] | Float16[Tensor, "t h3 w3"]:
+    """Stored-grid 8-bit mattes to [0, 1] on the clip grid (``resample_images``), ``RESAMPLE_CHUNK`` frames at a time on
+    ``compute_device``; the result lands on ``device`` as ``dtype``."""
+    return torch.cat(
+        [
+            resample_images(stored[start : start + RESAMPLE_CHUNK, None].to(compute_device).float() / 255.0, grid, target_wh)[:, 0]
+            .clamp(0.0, 1.0)
+            .to(device=device, dtype=dtype)
+            for start in range(0, len(stored), RESAMPLE_CHUNK)
+        ]
+    ).contiguous()
+
+
+def read_clip_masks(
+    clip: MultiViewClip,
+    catalog_url: str,
+    dataset: str,
+    segment_id: str,
+    *,
+    compute_device: torch.device | None = None,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[Float32[Tensor, "frames h w"] | Float16[Tensor, "frames h w"], ...]:
+    """The ``masks`` layer for ``clip``: per camera, soft foreground in [0, 1], on the clip's exact pixel grid.
 
     The stored-grid PNGs go through the clip's own undistortion grid and resize (``resample_images``), so mask pixel
     ``(y, x)`` covers the same ray as ``clip.frames[c][t, y, x]``. A clip read with ``roi`` uses the same combined
-    rotation + zoom + undistortion grid as its frames (``catalog_clip.roi_grid``).
+    rotation + zoom + undistortion grid as its frames (``catalog_clip.roi_grid``); the grid is the one the frame read
+    cached on ``compute_device`` (the reader's default ``decode_device`` is ``cuda`` too).
+
+    Args:
+        clip: The clip the masks align with (from ``read_catalog_clip``).
+        catalog_url: Catalog holding the ``masks`` layer.
+        dataset: Its dataset.
+        segment_id: The clip's segment.
+        compute_device: Where the grid is built and the masks are resampled, ``RESAMPLE_CHUNK`` frames at a time
+            (default ``cuda`` when available, else the CPU).
+        device: Where the returned masks live (default the CPU).
+        dtype: ``torch.float32`` (default) or ``torch.float16``.
 
     Raises:
-        ValueError: If the clip lacks ``stored_sizes``/``lenses``, or the layer misses a camera or a clip frame.
+        ValueError: If the clip lacks ``stored_sizes``/``lenses``, the layer misses a camera or a clip frame, or ``dtype``
+            is neither float32 nor float16.
     """
     if len(clip.stored_sizes) != len(clip.camera_names) or len(clip.lenses) != len(clip.camera_names):
         raise ValueError("clip has no stored_sizes/lenses: read it with open4dgs.catalog_clip.read_catalog_clip")
+    if dtype not in (torch.float32, torch.float16):
+        raise ValueError(f"dtype must be torch.float32 or torch.float16, got {dtype}")
+    compute_on: torch.device = compute_device if compute_device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    store_on: torch.device = device if device is not None else torch.device("cpu")
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
     entities: list[str] = [mask_entity(camera) for camera in clip.camera_names]
     frames: list[int] = clip.frame_indices.tolist()
@@ -226,31 +287,32 @@ def read_clip_masks(clip: MultiViewClip, catalog_url: str, dataset: str, segment
         .to_arrow_table()
     )
     row_of: dict[int, int] = {int(frame): row for row, frame in enumerate(table.column(FRAME_TIMELINE).to_numpy())}
-    out: list[Float32[Tensor, "t h w"]] = []
+    out: list[Tensor] = []
     for camera, entity in enumerate(entities):
         column: str = f"{entity}:EncodedImage:blob"
         if column not in table.column_names:
             raise ValueError(f"{dataset}/{segment_id}: layer {MASKS_LAYER!r} has no {entity}")
         cells: list[object | None] = table.column(column).to_pylist()
         stored_wh: tuple[int, int] = clip.stored_sizes[camera]
-        stack: UInt8[ndarray, "t h w"] = np.empty((len(frames), stored_wh[1], stored_wh[0]), dtype=np.uint8)
-        for slot, frame in enumerate(frames):
+        blobs: list[bytes] = []
+        for frame in frames:
             row: int | None = row_of.get(frame)
             cell: object | None = None if row is None else cells[row]
             if isinstance(cell, list):  # a list-of-blobs cell
                 cell = cell[0] if cell else None
             if cell is None:
                 raise ValueError(f"{dataset}/{segment_id}: {entity} has no mask at frame {frame} (window {frames[0]}..{frames[-1]} not covered)")
-            image: np.ndarray | None = cv2.imdecode(np.frombuffer(bytes(cell), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)  # type: ignore[arg-type]
+            blobs.append(bytes(cell))  # type: ignore[arg-type]
+        stack: UInt8[ndarray, "t h w"] = np.empty((len(frames), stored_wh[1], stored_wh[0]), dtype=np.uint8)
+        for slot, (frame, image) in enumerate(zip(frames, decode_mask_pngs(blobs), strict=True)):
             if image is None or (image.shape[1], image.shape[0]) != stored_wh:
                 raise ValueError(f"{entity} frame {frame}: mask is not a {stored_wh} PNG")
             stack[slot] = image
         lens = clip.lenses[camera]
         grid: Float32[Tensor, "1 h w 2"] | None
         if clip.roi is not None:
-            grid = roi_grid(lens, clip.roi.cameras[camera], torch.device("cpu"))
+            grid = roi_grid(lens, clip.roi.cameras[camera], compute_on)
         else:
-            grid = None if lens is None else undistortion_grid(lens, stored_wh, torch.device("cpu"))
-        mattes: Float32[Tensor, "t 1 h w"] = resample_images(torch.from_numpy(stack)[:, None].float() / 255.0, grid, clip.sizes[camera])
-        out.append(mattes[:, 0].clamp(0.0, 1.0).contiguous())
+            grid = None if lens is None else undistortion_grid(lens, stored_wh, compute_on)
+        out.append(resample_masks(torch.from_numpy(stack), grid, clip.sizes[camera], compute_on, store_on, dtype))
     return tuple(out)

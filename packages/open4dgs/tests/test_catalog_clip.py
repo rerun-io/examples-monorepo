@@ -108,3 +108,28 @@ def test_valid_mask_marks_the_lens_border() -> None:
     mask = valid_mask(undistortion_grid(lens, (200, 160), torch.device("cpu")), (200, 160), (100, 80))
     assert mask.shape == (80, 100)
     assert bool(mask[40, 50]) and not bool(mask.all())
+
+
+def test_mesh_vertices_equal_the_python_list_read() -> None:
+    """The buffer-sliced vertex read equals the old to_pylist read: chunked column, null row, short row, missing frame."""
+    import pyarrow as pa
+
+    from open4dgs.catalog_clip import mesh_vertices
+
+    rng = np.random.default_rng(1)
+    vec3 = pa.list_(pa.field("item", pa.float32(), nullable=False), 3)
+    meshes = [rng.normal(size=(5, 3)).astype(np.float32) for _ in range(4)]
+    rows_a = [meshes[0].tolist(), None]
+    rows_b = [meshes[1][:3].tolist(), meshes[2].tolist(), meshes[3].tolist()]
+    column = pa.chunked_array([pa.array(rows_a, type=pa.list_(vec3)), pa.array(rows_b, type=pa.list_(vec3)).slice(0, 3)])
+    rows = [3, None, 0, 1, 2, 4]
+    vertices, present = mesh_vertices(column, rows, 5)
+    cells = column.to_pylist()
+    for slot, row in enumerate(rows):
+        cell = None if row is None else cells[row]
+        if isinstance(cell, list) and len(cell) == 5:
+            assert present[slot]
+            np.testing.assert_array_equal(vertices[slot], np.asarray(cell, dtype=np.float32))
+        else:
+            assert not present[slot] and np.isnan(vertices[slot]).all()
+    assert present.tolist() == [True, False, True, False, False, True]
