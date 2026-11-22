@@ -6,6 +6,11 @@ dataset, segment, frames, cameras, size, ROI, mask layer) are re-read from the c
 renderer from the uncompressed and the decoded parameters, scored like ``open4dgs-train`` (person crop), and compared
 with each other (PSNR of decoded vs uncompressed renders). ``decoded_cut05`` renders the decoded clip with the ``.asog``
 v1 temporal cut (0.05) instead of the trainer's (0.01): what a stock ``.asog`` player shows.
+
+The ``.asog`` also goes into a Rerun recording, ``<run>/asog.rrd`` (``--rrd``): the file verbatim as the custom gsplat
+viewer's ``AnimatedSogSplats3D`` payload (``open4dgs.asog_rrd``) with ``frame_origin`` = the clip's first frame, a stock
+preview of the clip-middle pose on the same entity, and the run's cameras, SMPL-X meshes and ``ViewCoordinates`` as
+``open4dgs-export-splats`` logs them. It is registered as layer ``asog`` of the run on open4dgs-runs (``--no-register``).
 """
 
 import dataclasses
@@ -14,21 +19,30 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
+from asog import Asog
+from asog import read as read_asog
 from PIL import Image
+from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader
-from trigs.core.trainer import TrigsTrainer
+from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
+from open4dgs.apis.export_splats import run_property, run_recording
 from open4dgs.asog import AsogSettings, decode_asog, encode_params, tiny_omega_fraction
+from open4dgs.asog_rrd import PREVIEW_ROWS, log_asog
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
-from open4dgs.splat_export import checkpoint_params
+from open4dgs.run_log import RUNS_DATASET
+from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, camera_config
 
 LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
+ASOG_CUT_FORMAT: float = 0.05
+"""The ``.asog`` v1 temporal cut (no manifest field; what every other player applies)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +65,16 @@ class Config:
     """With ``evaluate``: ground truth | uncompressed | decoded PNGs at two frames per held-out camera."""
     png_cameras: int = 2
     """Held-out cameras that get PNGs."""
+    rrd: Path | None = None
+    """Recording with the ``.asog`` as the gsplat viewer's ``AnimatedSogSplats3D`` payload (default ``<run>/asog.rrd``)."""
+    asog_cut: Literal["format", "trained"] = "format"
+    """Temporal cut recorded for the viewer: ``format`` = the ``.asog`` v1 constant 0.05 (what other players show),
+    ``trained`` = the trainer's 0.01 (the trained look; the same file then plays differently elsewhere)."""
+    preview_rows: int = PREVIEW_ROWS
+    """Stock-viewer preview rows of the clip-middle pose (0 = none; the gsplat viewer then draws nothing)."""
+    register: bool = True
+    """Register the recording as layer ``asog`` of the run on open4dgs-runs."""
+    runs_catalog_url: str = LOCAL_CATALOG
 
 
 def _run_properties(reader: RrdReader) -> dict[str, list[object]]:
@@ -138,8 +162,41 @@ def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str
     }
 
 
+def write_rrd(config: Config, asog_path: Path, out: Path) -> dict[str, object]:
+    """Log ``asog_path`` with the run's cameras and meshes into ``out``; registers it unless ``--no-register``."""
+    run_name: str = config.run.name
+    reader: RrdReader = RrdReader(config.run / "run.rrd")
+    frame_start: int = run_property(reader, "frame_start")
+    cut: float = ASOG_CUT_FORMAT if config.asog_cut == "format" else TrigsTrainingConfig().temporal_active_threshold
+    data: bytes = asog_path.read_bytes()
+    clip: Asog = read_asog(asog_path)
+    target = np.median(clip.means, axis=0).astype(np.float64)
+    recording, view_coordinates, view = run_recording(reader, run_name, out, target)
+    t0: float = time.perf_counter()
+    rows: int = log_asog(recording, SPLAT_ENTITY, data, clip, float(frame_start), cut, config.preview_rows)
+    log_s: float = time.perf_counter() - t0
+    recording.flush()
+    recording.disconnect()
+    out.chmod(0o644)
+    summary: dict[str, object] = {
+        "asog_rrd": str(out),
+        "bytes_asog_rrd": out.stat().st_size,
+        "frame_origin": frame_start,
+        "active_threshold": cut,
+        "preview_rows": rows,
+        "log_s": log_s,
+        "view_coordinates": str(view_coordinates),
+        "blueprint_view_id": str(view.id),
+    }
+    if config.register:
+        client: CatalogClient = CatalogClient(config.runs_catalog_url)
+        client.get_dataset(RUNS_DATASET).register([out.resolve().as_uri()], layer_name="asog", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+        summary["registered"] = f"{RUNS_DATASET}/{run_name}/asog"
+    return summary
+
+
 def main(config: Config) -> dict[str, object]:
-    """Write ``<out_dir>/<name>.asog``, decode it back, optionally evaluate; prints and returns the summary."""
+    """Write ``<out_dir>/<name>.asog`` and ``<run>/asog.rrd``, decode it back, optionally evaluate; prints and returns the summary."""
     checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
     fps: float = float(checkpoint["fps"])
     num_frames: int = int(checkpoint["num_frames"])
@@ -165,6 +222,7 @@ def main(config: Config) -> dict[str, object]:
         "decode_s": decode_s,
         "tiny_omega_fraction": tiny_omega_fraction(params),
     }
+    summary.update(write_rrd(config, out, config.rrd or config.run / "asog.rrd"))
     if config.evaluate:
         summary.update(_evaluate(config, params, decoded, fps, num_frames))
     print(json.dumps(summary, indent=2, default=float))
