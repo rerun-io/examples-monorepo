@@ -7,11 +7,12 @@ so the maps sit on the trainer's pixel grid; ``read_clip_priors`` refuses a clip
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import torch
 
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
-from open4dgs.prior import MODEL_NAME, ClipPriors, compute_clip_priors, register_prior_layer, write_prior_layer
+from open4dgs.prior import MODEL_NAME, ClipPriors, compute_clip_priors, register_prior_layer, roi_properties, write_prior_layer
 
 LOCAL_CATALOG_URL: str = "rerun+http://pablo-dl-server:51235"
 
@@ -28,6 +29,10 @@ class Config:
     """Camera names such as ``rig_01/cam_00``; default every camera (the trainer reads only the training ones)."""
     max_side: int | None = 640
     """Must equal the training run's ``max_side``."""
+    roi: Literal["people"] | None = None
+    """Must equal the training run's ``roi`` (person-centred virtual cameras, ``open4dgs.roi_cameras``)."""
+    roi_pad: float = 0.15
+    """Must equal the training run's ``roi_pad``."""
     register_url: str = LOCAL_CATALOG_URL
     register_dataset: str | None = None
     """Default: the source dataset when it is on ``register_url``, else ``open4dgs-mamma`` (Spark is read-only)."""
@@ -45,7 +50,15 @@ def main(config: Config) -> None:
     target: str = config.register_dataset or (config.dataset if config.catalog_url == config.register_url else "open4dgs-mamma")
     t0: float = time.perf_counter()
     clip: MultiViewClip = read_catalog_clip(
-        config.catalog_url, config.dataset, config.segment_id, config.frame_start, config.num_frames, cameras=config.cameras, max_side=config.max_side
+        config.catalog_url,
+        config.dataset,
+        config.segment_id,
+        config.frame_start,
+        config.num_frames,
+        cameras=config.cameras,
+        max_side=config.max_side,
+        roi=config.roi,
+        roi_pad=config.roi_pad,
     )
     t_read: float = time.perf_counter() - t0
     predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=config.resolution_level)
@@ -69,6 +82,7 @@ def main(config: Config) -> None:
         "cameras": ",".join(clip.camera_names),
         "image_sizes": ",".join(f"{w}x{h}" for w, h in clip.sizes),
         "loader": "open4dgs.catalog_clip.read_catalog_clip (undistorted)",
+        **roi_properties(clip),
     }
     t0 = time.perf_counter()
     write_prior_layer(path, config.segment_id, priors, properties)

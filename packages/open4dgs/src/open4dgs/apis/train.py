@@ -53,6 +53,10 @@ class Config:
     """Explicit held-out cameras (e.g. a split chosen on the full rig while ``cameras`` reads a subset); overrides ``num_holdout``/``holdout_seed``."""
     max_side: int | None = 640
     """Longer side of the training frames; None keeps the stored size."""
+    roi: Literal["people"] | None = None
+    """``people``: train on person-centred virtual cameras (``open4dgs.roi_cameras``); held-out metrics are then on the ROI frames."""
+    roi_pad: float = 0.15
+    """Padding of the ROI box on every side (fraction)."""
     mask_source: Literal["layer", "mesh"] = "layer"
     """``layer``: the catalog ``masks`` layer (open4dgs.masks); ``mesh``: dilated SMPL-X silhouette (stand-in, development only)."""
     mask_catalog_url: str | None = None
@@ -135,7 +139,9 @@ def _geometry_images(clip: MultiViewClip, cam: CameraGeometry, slot: int, priors
         p: int = priors.camera_names.index(cam.camera)
         moge: np.ndarray = priors.depth[p][f].float().numpy()
         valid = moge[moge > 0]
-        out["moge2_depth"] = _depth_png(moge, float(np.percentile(valid, 1)), float(np.percentile(valid, 99))) if valid.size else np.zeros_like(out["mesh_depth"])
+        out["moge2_depth"] = (
+            _depth_png(moge, float(np.percentile(valid, 1)), float(np.percentile(valid, 99))) if valid.size else np.zeros_like(out["mesh_depth"])
+        )
         out["moge2_normals"] = _normal_png(decode_normals(priors.normals[p][f])[0].numpy())
     return out
 
@@ -180,7 +186,15 @@ def main(config: Config) -> dict[str, object]:
     timings: dict[str, float] = {}
     t0: float = time.perf_counter()
     clip: MultiViewClip = read_catalog_clip(
-        config.catalog_url, config.dataset, config.segment_id, config.frame_start, config.num_frames, cameras=config.cameras, max_side=config.max_side
+        config.catalog_url,
+        config.dataset,
+        config.segment_id,
+        config.frame_start,
+        config.num_frames,
+        cameras=config.cameras,
+        max_side=config.max_side,
+        roi=config.roi,
+        roi_pad=config.roi_pad,
     )
     timings["read_clip_s"] = time.perf_counter() - t0
     if config.holdout_cameras is not None:
@@ -257,7 +271,12 @@ def main(config: Config) -> dict[str, object]:
         "loss_rgb_first": losses[0][1] if losses else math.nan,
         "loss_rgb_last": losses[-1][1] if losses else math.nan,
         "geometry_holdout": mean_geometry([row for cam in geometry for row in cam.metrics]),
-        **{f"{tag.replace('/', '_')}_{edge}": rows[i][1] for tag in ("prior/depth", "prior/normal") if (rows := trained.scalars.get(tag)) for edge, i in (("first", 0), ("last", -1))},
+        **{
+            f"{tag.replace('/', '_')}_{edge}": rows[i][1]
+            for tag in ("prior/depth", "prior/normal")
+            if (rows := trained.scalars.get(tag))
+            for edge, i in (("first", 0), ("last", -1))
+        },
         **timings,
     }
 
@@ -283,6 +302,7 @@ def main(config: Config) -> dict[str, object]:
         "frame_start": int(clip.frame_indices[0]),
         "frame_end": int(clip.frame_indices[-1]),
         "num_frames": len(clip.frame_indices),
+        "roi": "none" if clip.roi is None else f"people pad={clip.roi.pad:g} max_side={clip.roi.max_side}",
         "cameras": list(clip.camera_names),
         "train_cameras": list(train_names),
         "holdout_cameras": list(holdout_names),
@@ -312,7 +332,9 @@ def main(config: Config) -> dict[str, object]:
         )
     )
     recording.send_property("run", rr.AnyValues(**run_properties))  # pyrefly: ignore[bad-argument-type]
-    flat: dict[str, float] = {f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", "train", "geometry_holdout") for k, v in summary[group].items()}  # type: ignore[union-attr]
+    flat: dict[str, float] = {
+        f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", "train", "geometry_holdout") for k, v in summary[group].items()  # type: ignore[union-attr]
+    }
     flat.update({k: float(v) for k, v in summary.items() if isinstance(v, int | float)})
     recording.send_property("summary", rr.AnyValues(**flat))  # pyrefly: ignore[bad-argument-type]
     recording.flush()
