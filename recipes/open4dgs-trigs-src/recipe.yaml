@@ -33,11 +33,16 @@ source:
     # info["render_depth"]; TrigsTrainer.camera_loss_hook (default None) adds a per-camera loss term before backward().
     # packages/open4dgs (open4dgs.prior) owns the loss.
     - patches/0003-depth-render-and-camera-loss-hook.patch
+    # Performance fix, maths unchanged: fewer host syncs per train step. No explicit torch.cuda.synchronize() after
+    # each render; the per-camera loss sums stay float64 GPU tensors (read on log steps only); CameraConfig keeps
+    # Python ints for width_for/height_for; the time and background-colour scalars are built once per value
+    # (TrigsTrainer._const_tensor); the 0-255 mask check is a tensor op; one dynamic-row any() per step, not three.
+    - patches/0004-fewer-host-syncs-per-step.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 1
+  number: 2
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.

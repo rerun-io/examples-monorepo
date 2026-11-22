@@ -1,4 +1,7 @@
-"""The train step never waits on the host: GPU-resident frames/masks (trigs_adapter)."""
+"""The train step never waits on the host: GPU-resident frames/masks (trigs_adapter) and recipe patch 0004.
+
+Patch 0004 must keep the maths: the pieces it replaces are checked here against the expressions they replace.
+"""
 
 import pytest
 import torch
@@ -60,3 +63,47 @@ def test_trainer_frames_on_cuda_equal_the_cpu_ones() -> None:
             # What the trainer computes from each (trainer.py: .to(device).float().div(255), .to(device).float()).
             assert torch.equal(gpu_images[f][c].to(dev).float().div(255.0).cpu(), cpu_images[f][c].to(dev).float().div(255.0).cpu())
             assert torch.equal(gpu_alphas[f][c].to(dev).float().cpu(), cpu_alphas[f][c].to(dev).float().cpu())
+
+
+def test_camera_width_height_are_python_ints_equal_to_the_tensors() -> None:
+    from trigs.core.camera import CameraConfig
+
+    widths, heights = torch.tensor([12, 1028, 7]), torch.tensor([8, 752, 5])
+    cams = CameraConfig(viewmats=torch.eye(4).expand(3, 4, 4).clone(), Ks=torch.eye(3).expand(3, 3, 3).clone(), widths=widths, heights=heights)
+    for c in range(3):
+        assert type(cams.width_for(c)) is int and cams.width_for(c) == int(widths[c].item())
+        assert type(cams.height_for(c)) is int and cams.height_for(c) == int(heights[c].item())
+    assert cams.size_for(1) == (1028, 752)
+
+
+def test_const_tensor_equals_torch_tensor_and_is_built_once() -> None:
+    from trigs.core.trainer import TrigsTrainer
+
+    trainer = TrigsTrainer(device="cpu")
+    for value in (0.0, 1.0 / 30.0, 59.0 / 30.0, (0.0, 0.0, 0.0), (1.0, 0.5, 0.25)):
+        for dtype in (torch.float32, torch.float64):
+            built = trainer._const_tensor(value, torch.device("cpu"), dtype)
+            assert torch.equal(built, torch.tensor(value, dtype=dtype)) and built.dtype == dtype
+            assert trainer._const_tensor(value, torch.device("cpu"), dtype) is built
+
+
+@pytest.mark.parametrize("scale", [1.0, 255.0])
+def test_mask_rescale_is_the_old_branch(scale: float) -> None:
+    gen = torch.Generator().manual_seed(1)
+    mask = torch.rand(16, 16, generator=gen) * scale
+    old = mask / 255.0 if mask.max() > 1.0 else mask
+    new = mask / torch.where(mask.amax() > 1.0, 255.0, 1.0)
+    assert torch.equal(old, new)
+
+
+def test_gpu_loss_sums_equal_the_python_float_sums() -> None:
+    """float64 tensor sums of float32 losses, divided and cast to float32, equal torch.tensor(python-float sum / n)."""
+    gen = torch.Generator().manual_seed(2)
+    for n_group in (1, 3, 8):
+        losses = [torch.rand((), generator=gen) * 0.05 for _ in range(n_group)]
+        py_sum = 0.0
+        t_sum = torch.zeros((), dtype=torch.float64)
+        for loss in losses:
+            py_sum += float(loss)
+            t_sum += loss.double()
+        assert torch.equal((t_sum / n_group).float(), torch.tensor(py_sum / n_group))
