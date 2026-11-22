@@ -4379,6 +4379,78 @@ cwd = "packages/fdanyone-rerun"
 description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
+# ═══════════════════════════════════════════════════════════════════════════
+# The trainer is recipes/open4dgs-trigs-src (pure Python); packages/open4dgs holds catalog input, Rerun output,
+# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. linux-64 only: the ai-demos gsplat 1.5.3
+# build (CUDA 13 / torch 2.12 / sm_86 + sm_120) exists only there.
+[feature.open4dgs]
+platforms = ["linux-64"]
+
+[feature.open4dgs.dependencies]
+python = "3.12.*"
+# ai-demos prebuilt for CUDA 13, Python 3.12 and torch 2.12 (sm_86 + sm_120 + PTX); TRiGS's upstream pin.
+gsplat = "==1.5.3"
+# No pycolmap: packages/open4dgs hands TRiGS cameras, frames and the init cloud in memory, so upstream's COLMAP
+# reader (trigs.io.dataset, which imports pycolmap inside a try) is never used. conda-forge's pycolmap 4.0 builds
+# need libfaiss 1.9, whose only solvable variant next to cuda-version 13 is absent.
+tyro = ">=0.9.1,<0.10"
+torchmetrics = "*"
+pillow = "*"
+# monopriors (MoGe-2 depth + normals prior) and what it imports at load (as [feature.monoprior]).
+einops = ">=0.8.0,<0.9"
+omegaconf = "*"
+timm = ">=1.0.15,<2"
+safetensors = "*"
+
+[feature.open4dgs.pypi-dependencies]
+open4dgs = { path = "packages/open4dgs", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+# trigs.io.ply / PLY export (PyPI only).
+gsply = ">=0.2.12"
+
+[feature.open4dgs.pypi-options.dependency-overrides]
+# Resolve monopriors' sam3>=0.1.0 requirement to the repository implementation.
+sam3 = { path = "packages/sam3", editable = true }
+
+[feature.open4dgs.activation.env]
+PACKAGE_DIR = "packages/open4dgs"
+
+[feature.open4dgs.tasks.open4dgs-masks]
+cmd = "python tools/apps/masks.py"
+cwd = "packages/open4dgs"
+description = "Foreground mattes (BiRefNet on the SMPL-X person crop) for a segment's frame window, registered as catalog layer people_matte"
+
+[feature.open4dgs.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+description = "Build the Mojo SSIM kernels, then run the package integration tests"
+
+[feature.open4dgs.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+description = "Build the Mojo SSIM kernels, then run the package golden reference tests"
+
+[feature.open4dgs.tasks.open4dgs-train]
+cmd = "python tools/apps/train.py"
+cwd = "packages/open4dgs"
+description = "Train a person from a catalog clip with TRiGS (body-surface init, masked loss), score held-out cameras, write <runs-root>/<run-name>/run.rrd and register it on open4dgs-runs (run in the prod env, under flock -x /tmp/gpu-5090.lock)"
+
+[feature.open4dgs.tasks.open4dgs-prior]
+cmd = "python tools/apps/prior.py"
+cwd = "packages/open4dgs"
+description = "MoGe-2 depth + normals on a clip's training frames (undistorted, max_side), registered as catalog layer moge2_prior"
+
+[feature.open4dgs.tasks.open4dgs-export-splats]
+cmd = "python tools/apps/export_splats.py"
+cwd = "packages/open4dgs"
+description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the run's .asog once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers) or trigs-motion (TrigsMotion3D, layer trigs_motion; gsplat viewer only)"
+
+[feature.open4dgs.tasks.open4dgs-export-asog]
+cmd = "python tools/apps/export_asog.py"
+cwd = "packages/open4dgs"
+description = "Compress a trained run (--run <run dir>) to Animated SOG: /mnt/nas/ssd-8tb/open4dgs/asog/<run>.asog (third-party interchange export, 644) and <run>/asog.rrd (--rrd; the file as the gsplat viewer's AnimatedSogSplats3D payload + a mid-clip stock preview + the run's cameras and meshes, --asog-cut format|trained), registered as layer asog on open4dgs-runs (--no-register); prints sizes and timings"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -5030,6 +5102,23 @@ mamma-dev = { features = [
     "torchcodec",
     "ffmpeg",
 ], solve-group = "mamma", no-default-feature = true }
+open4dgs = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "open4dgs",
+    "torchcodec",
+    "ffmpeg",
+], solve-group = "open4dgs", no-default-feature = true }
+open4dgs-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "open4dgs",
+    "dev",
+    "torchcodec",
+    "ffmpeg",
+], solve-group = "open4dgs", no-default-feature = true }
 gauss-surf = { features = [
     "catalog-common",
     "rerun-prerelease",

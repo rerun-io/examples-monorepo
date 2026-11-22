@@ -45,6 +45,7 @@ project-includes = [
     "packages/mamma/src/**/*",
     "packages/mvs/src/**/*",
     "packages/gauss-surf/src/**/*",
+    "packages/open4dgs/src/**/*",
     "packages/live-rerun/src/**/*",
     "packages/hexels/hexels_bench/**/*",
     "packages/hexels/tools/**/*",
@@ -130,6 +131,7 @@ search-path = [
     "packages/mamma/src",
     "packages/mvs/src",
     "packages/gauss-surf/src",
+    "packages/open4dgs/src",
     "packages/live-rerun/src",
     "packages/hexels",
     "packages/metrictrail",
@@ -191,6 +193,7 @@ site-package-path = [
     ".pixi/envs/mamma-dev/lib/python3.12/site-packages",
     ".pixi/envs/mvs-dev/lib/python3.12/site-packages",
     ".pixi/envs/gauss-surf-dev/lib/python3.12/site-packages",
+    ".pixi/envs/open4dgs-dev/lib/python3.12/site-packages",
     ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/hexels-dev/lib/python3.12/site-packages",
     # Upstream hexels/scripts are put on sys.path by a .pth file (recipes/hexels-src).
