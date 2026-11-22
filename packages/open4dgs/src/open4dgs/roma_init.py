@@ -142,6 +142,8 @@ def load_init_module(script: Path) -> ModuleType:
     if spec is None or spec.loader is None:
         raise FileNotFoundError(f"cannot import the upstream init script {script}")
     module: ModuleType = importlib.util.module_from_spec(spec)
+    # Registered before it runs: its dataclasses look their module up in sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -213,7 +215,9 @@ def init_cloud_from_upstream(arrays: Mapping[str, ndarray], *, dataset: str, seg
     source_frame_start: int = int(arrays.get("source_frame_start", 0))
     frames: Int32[ndarray, " n"] = (np.asarray(arrays["source_frames"]).reshape(-1) - source_frame_start).astype(np.int32)
     order: ndarray = np.argsort(frames, kind="stable")
-    durations: Float32[ndarray, "n 1"] | None = np.asarray(arrays["durations"], dtype=np.float32).reshape(-1, 1)[order] if "durations" in arrays else None
+    durations: Float32[ndarray, "n 1"] | None = (
+        np.asarray(arrays["durations"], dtype=np.float32).reshape(-1, 1)[order] if "durations" in arrays else None
+    )
     return InitCloud(
         positions=np.ascontiguousarray(np.asarray(arrays["positions"], dtype=np.float32)[order]),
         velocities=np.ascontiguousarray(np.asarray(arrays["velocities"], dtype=np.float32)[order]),

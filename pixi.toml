@@ -4397,6 +4397,11 @@ description = "Download the RoMa v2 and MEMFOF weights of the Open4DGS init into
 cmd = "python $OPEN4DGS_INIT_SCRIPT --help"
 description = "Print the upstream Open4DGS init CLI (prep-roma-trigs-memory.py)"
 
+[feature.open4dgs-init.tasks.open4dgs-init-roma]
+cmd = "python tools/apps/init_roma.py"
+cwd = "packages/open4dgs"
+description = "Upstream RoMa v2 + MEMFOF init of a catalog window on its training cameras -> init_roma layer (.rrd under /mnt/nas/ssd-8tb/open4dgs/init, registered on the local companion dataset)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
 # ═══════════════════════════════════════════════════════════════════════════
