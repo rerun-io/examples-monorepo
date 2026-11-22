@@ -4388,6 +4388,7 @@ description = "Log a finished 4DAnyone output directory (ours or upstream's) to 
 platforms = ["linux-64"]
 
 [feature.open4dgs.dependencies]
+open4dgs-trigs-src = { path = "recipes/open4dgs-trigs-src" }
 # Exact binned GPU kNN (sm_120 + sm_121); open4dgs.pytorch3d_ops.knn_points uses it for the trainer's rigid-neighbour
 # self-query (falls back to the chunked torch path without it).
 fastgraphcompute-src = { path = "recipes/fastgraphcompute-src" }
