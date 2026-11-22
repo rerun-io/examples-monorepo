@@ -4358,6 +4358,46 @@ cwd = "packages/fdanyone-rerun"
 description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
+# ═══════════════════════════════════════════════════════════════════════════
+# The trainer is recipes/open4dgs-trigs-src (pure Python); packages/open4dgs holds catalog input, Rerun output,
+# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. linux-64 only: the ai-demos gsplat 1.5.3
+# build (CUDA 13 / torch 2.12 / sm_86 + sm_120) exists only there.
+[feature.open4dgs]
+platforms = ["linux-64"]
+
+[feature.open4dgs.dependencies]
+open4dgs-trigs-src = { path = "recipes/open4dgs-trigs-src" }
+python = "3.12.*"
+# ai-demos prebuilt for CUDA 13, Python 3.12 and torch 2.12 (sm_86 + sm_120 + PTX); TRiGS's upstream pin.
+gsplat = "==1.5.3"
+# No pycolmap: packages/open4dgs hands TRiGS cameras, frames and the init cloud in memory, so upstream's COLMAP
+# reader (trigs.io.dataset, which imports pycolmap inside a try) is never used. conda-forge's pycolmap 4.0 builds
+# need libfaiss 1.9, whose only solvable variant next to cuda-version 13 is absent.
+tyro = ">=0.9.1,<0.10"
+torchmetrics = "*"
+pillow = "*"
+# monopriors (MoGe-2 depth + normals prior) and what it imports at load (as [feature.monoprior]).
+einops = ">=0.8.0,<0.9"
+omegaconf = "*"
+timm = ">=1.0.15,<2"
+safetensors = "*"
+
+[feature.open4dgs.pypi-dependencies]
+open4dgs = { path = "packages/open4dgs", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+# trigs.io.ply / PLY export (PyPI only).
+gsply = ">=0.2.12"
+
+[feature.open4dgs.pypi-options.dependency-overrides]
+# Resolve monopriors' sam3>=0.1.0 requirement to the repository implementation.
+sam3 = { path = "packages/sam3", editable = true }
+
+[feature.open4dgs.activation.env]
+PACKAGE_DIR = "packages/open4dgs"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -5004,6 +5044,23 @@ mamma-dev = { features = [
     "torchcodec",
     "ffmpeg",
 ], solve-group = "mamma", no-default-feature = true }
+open4dgs = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "open4dgs",
+    "torchcodec",
+    "ffmpeg",
+], solve-group = "open4dgs", no-default-feature = true }
+open4dgs-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "open4dgs",
+    "dev",
+    "torchcodec",
+    "ffmpeg",
+], solve-group = "open4dgs", no-default-feature = true }
 gauss-surf = { features = [
     "catalog-common",
     "rerun-prerelease",
