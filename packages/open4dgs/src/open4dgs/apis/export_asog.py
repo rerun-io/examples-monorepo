@@ -28,17 +28,17 @@ from asog import read as read_asog
 from gsplat_rust_renderer.asog_decode import parse_asog
 from gsplat_rust_renderer.sog3d import PREVIEW_ROWS, log_asog
 from PIL import Image
-from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
+from simplecv.catalog_layers import register_layer
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
-from open4dgs.apis.export_splats import run_property, run_recording
 from open4dgs.asog import AsogSettings, decode_asog, encode_params, tiny_omega_fraction
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
 from open4dgs.run_log import RUNS_DATASET
-from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params
+from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params, run_properties, run_property, run_recording
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, camera_config
 
 LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
@@ -78,17 +78,6 @@ class Config:
     runs_catalog_url: str = LOCAL_CATALOG
 
 
-def _run_properties(reader: RrdReader) -> dict[str, list[object]]:
-    out: dict[str, list[object]] = {}
-    for chunk in reader.stream().filter(content="/__properties/run").to_chunks():
-        batch = chunk.to_record_batch()
-        for name in batch.schema.names:
-            values = batch.column(name).to_pylist()[0]
-            if isinstance(values, list):
-                out[name.split(":")[-1]] = values
-    return out
-
-
 def _model(params: dict[str, torch.Tensor], clip: MultiViewClip, fps: float, num_frames: int, holdout: tuple[int, ...], cut: float) -> TrainedClip:
     trainer: TrigsTrainer = TrigsTrainer(device="cuda")
     trainer._sequence_t_max = (num_frames - 1) / fps
@@ -108,7 +97,7 @@ def _model(params: dict[str, torch.Tensor], clip: MultiViewClip, fps: float, num
 
 
 def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str, torch.Tensor], fps: float, num_frames: int) -> dict[str, object]:
-    props = _run_properties(RrdReader(config.run / "run.rrd"))
+    props = run_properties(RrdReader(config.run / "run.rrd"))
     roi: str = str(props.get("roi", ["full"])[0])  # runs before the ROI cameras have no roi property
     clip: MultiViewClip = read_catalog_clip(
         str(props["catalog_url"][0]),
@@ -189,8 +178,7 @@ def write_rrd(config: Config, asog_path: Path, out: Path) -> dict[str, object]:
         "blueprint_view_id": str(view.id),
     }
     if config.register:
-        client: CatalogClient = CatalogClient(config.runs_catalog_url)
-        client.get_dataset(RUNS_DATASET).register([out.resolve().as_uri()], layer_name="asog", on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+        register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out], "asog")
         summary["registered"] = f"{RUNS_DATASET}/{run_name}/asog"
     return summary
 

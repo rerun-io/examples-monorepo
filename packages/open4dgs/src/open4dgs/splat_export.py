@@ -7,16 +7,23 @@ world, which is the run recording's world (``open4dgs.trigs_adapter.camera_confi
 
 The custom viewer (packages/gsplat-rust-renderer) and the stock viewer both draw these rows; nothing here is
 viewer-specific.
+
+Also what every export of a run shares (``apis.export_splats``, ``apis.export_asog``): the run's ``run`` property, a
+recording with the run's cameras and meshes (``run_recording``) and the checkpoint as ``TrigsMotion3D`` parameters.
 """
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 import torch
-from jaxtyping import Float16, Float32, UInt8
+from gsplat_rust_renderer.trigs_motion3d import TrigsParams
+from jaxtyping import Float16, Float32, Float64, UInt8
 from numpy import ndarray
+from rerun.chunk import RrdReader
 from torch import Tensor
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
@@ -132,3 +139,82 @@ def up_view_coordinates(world_T_cam: Float32[ndarray, "c 4 4"]) -> rr.components
         (2, False): rr.ViewCoordinates.RIGHT_HAND_Z_DOWN,
     }
     return table[(axis, positive)]
+
+
+def run_properties(reader: RrdReader) -> dict[str, list[object]]:
+    """The run recording's ``run`` property (``apis.train``) by field name, each a list of values."""
+    out: dict[str, list[object]] = {}
+    for chunk in reader.stream().filter(content="/__properties/run").to_chunks():
+        batch = chunk.to_record_batch()
+        for name in batch.schema.names:
+            values = batch.column(name).to_pylist()[0]
+            if isinstance(values, list):
+                out[name.split(":")[-1]] = values
+    return out
+
+
+def run_property(reader: RrdReader, name: str) -> int:
+    """One integer field of the run's ``run`` property (``frame_start``, ...)."""
+    values: list[object] | None = run_properties(reader).get(name)
+    if not values:
+        raise ValueError(f"{reader.path} has no run property {name!r}")
+    return int(values[0])  # pyrefly: ignore[bad-argument-type]
+
+
+def _train_camera_poses(reader: RrdReader) -> np.ndarray:
+    """(c, 4, 4) world_T_cam of the training cameras, read back from the run's static Transform3D rows."""
+    poses: list[np.ndarray] = []
+    for chunk in reader.stream().filter(content="/world/cameras/train/**", is_static=True).to_chunks():
+        batch = chunk.to_record_batch()
+        if "Transform3D:translation" not in batch.schema.names:
+            continue
+        pose = np.eye(4)
+        pose[:3, :3] = np.asarray(batch.column("Transform3D:mat3x3").to_pylist()[0][0], dtype=np.float64).reshape(3, 3).T  # column-major
+        pose[:3, 3] = np.asarray(batch.column("Transform3D:translation").to_pylist()[0][0], dtype=np.float64)
+        poses.append(pose)
+    if not poses:
+        raise ValueError(f"{reader.path} has no training camera transforms")
+    return np.stack(poses)
+
+
+def run_recording(
+    reader: RrdReader, run_name: str, out: Path, target: Float64[ndarray, " 3"]
+) -> tuple[rr.RecordingStream, rr.components.ViewCoordinates, rrb.Spatial3DView]:
+    """A recording saved to ``out`` (application ``open4dgs-runs``, id = the run name) holding the run's cameras and SMPL-X
+    meshes, ``ViewCoordinates`` on ``/world`` (up = the mean camera up) and a 3D view from training camera 0 at ``target``."""
+    poses: np.ndarray = _train_camera_poses(reader)
+    view_coordinates: rr.components.ViewCoordinates = up_view_coordinates(poses.astype(np.float32))
+    up: np.ndarray = -poses[:, :3, 1].mean(axis=0)
+    eye: np.ndarray = poses[0, :3, 3]
+    recording: rr.RecordingStream = rr.RecordingStream("open4dgs-runs", recording_id=run_name)
+    recording.save(out)
+    recording.send_chunks(reader.stream().filter(content=["+ /world/cameras/**", "+ /world/people/**"]))
+    recording.log("/world", view_coordinates, static=True)
+    view = rrb.Spatial3DView(
+        origin="/world",
+        name="splats",
+        eye_controls=rrb.EyeControls3D(position=eye.tolist(), look_target=target.tolist(), eye_up=(up / np.linalg.norm(up)).tolist()),
+    )
+    recording.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
+    return recording, view_coordinates, view
+
+
+def trigs_motion_params(params: dict[str, torch.Tensor]) -> TrigsParams:
+    """The checkpoint's raw TRiGS parameters as the viewer contract's f32 arrays (per-row scalars flattened)."""
+
+    def f32(name: str, *shape: int) -> np.ndarray:
+        return params[name].detach().float().cpu().numpy().reshape(-1, *shape)  # no shape: one value per row
+
+    zetas: dict[str, np.ndarray] = {f"zeta_{part}_{kind}": f32(f"zeta_{part}_{kind}", 3) for part in ("base", "c0", "c1", "c2") for kind in ("t", "r")}
+    return TrigsParams(
+        means=f32("means", 3),
+        quats=f32("quats", 4),
+        scales=f32("scales", 3),
+        opacities=f32("opacities"),
+        sh0=f32("sh0", 3),
+        times=f32("times"),
+        log_durations=f32("log_durations"),
+        anchors=f32("anchors", 3),
+        is_static=f32("is_static") if "is_static" in params else None,
+        **zetas,
+    )
