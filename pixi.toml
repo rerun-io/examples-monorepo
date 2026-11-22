@@ -4378,6 +4378,49 @@ cmd = "python tools/log_run.py"
 cwd = "packages/fdanyone-rerun"
 description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
 
+# ─── Open4DGS upstream init (RoMa v2 + MEMFOF -> keyframes init cloud) ──────
+# recipes/open4dgs-core-src ships only prep/init of open4dgs-core @ 52750b9; its backends are recipes/romav2-src
+# (DINOv3 from recipes/dinov3-src) and recipes/memfof-src. Pure PyTorch: nothing compiles.
+[feature.open4dgs-init]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.open4dgs-init.dependencies]
+python = "3.12.*"
+# Run dependencies of open4dgs-core-src and romav2-src: a sibling recipe solves only when listed.
+romav2-src = { path = "recipes/romav2-src" }
+dinov3-src = { path = "recipes/dinov3-src" }
+# The imports of the init script, RoMa v2 and MEMFOF (torch, torchvision from cuda / rerun-prerelease).
+einops = ">=0.8.1"
+rich = ">=14"
+pillow = ">=12"
+tqdm = "*"
+scipy = "*"
+py-opencv = "*"
+safetensors = ">=0.6"
+huggingface_hub = ">=0.35"
+
+[feature.open4dgs-init.activation.env]
+OPEN4DGS_MODEL_DIR = "${OPEN4DGS_MODEL_DIR:-/mnt/nas/ssd-8tb/open4dgs/models}"
+# romav2-src patch 0002: the local checkpoint instead of a download at construction.
+ROMAV2_WEIGHTS = "${ROMAV2_WEIGHTS:-/mnt/nas/ssd-8tb/open4dgs/models/romav2/romav2.0.1.pt}"
+# Pass as --memfof-checkpoint (a local from_pretrained directory).
+OPEN4DGS_MEMFOF_CHECKPOINT = "${OPEN4DGS_MEMFOF_CHECKPOINT:-/mnt/nas/ssd-8tb/open4dgs/models/memfof/MEMFOF-Tartan-T-TSKH}"
+OPEN4DGS_INIT_SCRIPT = "$CONDA_PREFIX/share/open4dgs-core-src/prep/init/prep-roma-trigs-memory.py"
+
+# The RoMa v2 checkpoint (GitHub release asset v2.0.1, sha256-checked) and MEMFOF Tartan-T-TSKH (HF, pinned revision).
+[feature.open4dgs-init.tasks.open4dgs-init-download]
+cmd = "mkdir -p $OPEN4DGS_MODEL_DIR/romav2 && ( [ -f $ROMAV2_WEIGHTS ] || curl -fL -o $ROMAV2_WEIGHTS https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt ) && echo '1557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7  '$ROMAV2_WEIGHTS | sha256sum -c - && hf download egorchistov/optical-flow-MEMFOF-Tartan-T-TSKH config.json model.safetensors --revision 6c6c9aa3ad64f93aee8efbc2f7a6e4535814ee96 --local-dir $OPEN4DGS_MEMFOF_CHECKPOINT"
+description = "Download the RoMa v2 and MEMFOF weights of the Open4DGS init into $OPEN4DGS_MODEL_DIR"
+
+[feature.open4dgs-init.tasks.open4dgs-init-help]
+cmd = "python $OPEN4DGS_INIT_SCRIPT --help"
+description = "Print the upstream Open4DGS init CLI (prep-roma-trigs-memory.py)"
+
+[feature.open4dgs-init.tasks.open4dgs-init-roma]
+cmd = "python tools/apps/init_roma.py"
+cwd = "packages/open4dgs"
+description = "Upstream RoMa v2 + MEMFOF init of a catalog window on its training cameras -> init_roma layer (.rrd under /mnt/nas/ssd-8tb/open4dgs/init, registered on the local companion dataset)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -5132,6 +5175,7 @@ open4dgs = { features = [
     "cuda",
     "open4dgs",
     "lietorch-mojo",
+    "open4dgs-init",
     "torchcodec",
     "ffmpeg",
 ], solve-group = "open4dgs", no-default-feature = true }
@@ -5141,6 +5185,7 @@ open4dgs-dev = { features = [
     "cuda",
     "open4dgs",
     "lietorch-mojo",
+    "open4dgs-init",
     "dev",
     "torchcodec",
     "ffmpeg",
