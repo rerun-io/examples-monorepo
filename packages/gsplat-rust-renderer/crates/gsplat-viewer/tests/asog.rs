@@ -1,16 +1,17 @@
 //! `gsplat_core::asog` + the `.asog` motion form against the asog reference decoder (`asog.decode.read` and
-//! `Asog.evaluate`, f64): `tests/fixtures/asog_reference.rrd` holds 2,048 rows of the run C band `.asog` (every row
+//! `Asog.evaluate`, f64): `tests/fixtures/asog_reference.rrd` holds 2,048 rows of a trained `.asog` clip (every row
 //! with near-zero omega and every rank-deficient / inexact pinv row, then random rows) as `AnimatedSogSplats3D`,
 //! and the reference decode under `/expected` (written by `tools/asog_reference_fixture.py` in the open4dgs env).
 //!
-//! E1: Rust decode + evaluate == reference (centre <= 1e-5 m, rotation <= 1e-5 rad, weight <= 1e-6, same visible
-//! set). E2: on well-conditioned rows the twist form fed the pinv translation equals the `.asog` form.
+//! Rust decode + evaluate == reference (centre <= 1e-5 m, rotation <= 1e-5 rad, weight <= 1e-6, same visible
+//! set). On well-conditioned rows the twist form fed the pinv translation equals the `.asog` form.
 use gsplat_core::asog::decode;
 use gsplat_core::trigs::{ASOG_ACTIVE_THRESHOLD, CULLED_RAW_OPACITY, TrigsMotion};
-use re_viewer::external::re_chunk::{Chunk, ComponentIdentifier};
-use re_viewer::external::re_sdk_types::external::arrow::array::{
-    Array as _, ArrayRef, AsArray as _, FixedSizeListArray,
-};
+mod common;
+
+use common::{chunks, row};
+use re_viewer::external::re_chunk::Chunk;
+use re_viewer::external::re_sdk_types::external::arrow::array::AsArray as _;
 use re_viewer::external::re_sdk_types::external::arrow::datatypes::{
     Float32Type, Float64Type, UInt8Type,
 };
@@ -21,41 +22,10 @@ const FIXTURE: &str = concat!(
     "/tests/fixtures/asog_reference.rrd"
 );
 
-/// Every chunk of an .rrd by entity path.
-fn chunks(path: &str) -> BTreeMap<String, Vec<Chunk>> {
-    let file = std::io::BufReader::new(std::fs::File::open(path).expect("open rrd"));
-    let mut out: BTreeMap<String, Vec<Chunk>> = BTreeMap::new();
-    for msg in re_log_encoding::DecoderApp::decode_eager(file).expect("rrd header") {
-        if let re_log_msg::LogMsg::ArrowMsg(_, arrow) = msg.expect("rrd message") {
-            let chunk = Chunk::from_arrow_msg(&arrow).expect("chunk");
-            out.entry(chunk.entity_path().to_string())
-                .or_default()
-                .push(chunk);
-        }
-    }
-    out
-}
-
-/// Row 0 of `archetype:field` (fixed-size lists flattened).
-fn row(chunks: &[Chunk], archetype: &'static str, field: &str) -> ArrayRef {
-    let id = ComponentIdentifier::from_archetype_field(archetype.into(), field);
-    let array = chunks
-        .iter()
-        .find_map(|c| c.raw_component_array(id))
-        .unwrap_or_else(|| panic!("{archetype}:{field} missing"));
-    let row = match array.as_list_opt::<i32>() {
-        Some(list) => list.value(0),
-        None => array.clone(),
-    };
-    match row.as_any().downcast_ref::<FixedSizeListArray>() {
-        Some(fixed) => fixed.values().clone(),
-        None => row,
-    }
-}
-
 /// `Expected:<field>` as f64 (stored as f32 or f64).
 fn expected(all: &BTreeMap<String, Vec<Chunk>>, entity: &str, field: &str) -> Vec<f64> {
-    let values = row(&all[entity], "Expected", field);
+    let values =
+        row(&all[entity], "Expected", field).unwrap_or_else(|| panic!("Expected:{field} missing"));
     if let Some(f) = values.as_primitive_opt::<Float32Type>() {
         f.values().iter().map(|&v| f64::from(v)).collect()
     } else {
@@ -72,8 +42,9 @@ struct Fixture {
 fn fixture() -> Fixture {
     let all = chunks(FIXTURE);
     let entity = &all["/asog"];
-    let bytes = row(entity, "AnimatedSogSplats3D", "asog");
-    let threshold = row(entity, "AnimatedSogSplats3D", "active_threshold");
+    let bytes = row(entity, "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
+    let threshold = row(entity, "AnimatedSogSplats3D", "active_threshold")
+        .expect("AnimatedSogSplats3D:active_threshold");
     let threshold = threshold.as_primitive::<Float32Type>().value(0);
     assert_eq!(threshold, ASOG_ACTIVE_THRESHOLD);
     let asog = decode(bytes.as_primitive::<UInt8Type>().values(), threshold).expect("decode");
@@ -212,7 +183,7 @@ fn decode_matches_the_reference_read() {
 }
 
 #[test]
-fn e1_evaluate_matches_the_reference() {
+fn evaluate_matches_the_reference() {
     let f = fixture();
     let m = &f.asog.motion;
     let canonical = &f.asog.canonical;
@@ -263,7 +234,7 @@ fn e1_evaluate_matches_the_reference() {
             rotation = rotation.max(angle(r.quaternion, &rotations[4 * i..4 * i + 4]));
         }
         println!(
-            "E1 t={t}: {visible} visible, {mismatched} visibility mismatches, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
+            "evaluate t={t}: {visible} visible, {mismatched} visibility mismatches, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
         );
         assert_eq!(mismatched, 0, "t={t}");
         assert!(
@@ -273,15 +244,15 @@ fn e1_evaluate_matches_the_reference() {
     }
 }
 
-/// E4 (load path): the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
+/// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
 /// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
-/// rounding, and the evaluated rows match the asog reference itself within the E1 bounds.
+/// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
 #[test]
 #[ignore = "integration: GPU"]
-fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
+fn gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
     let f = fixture();
     let entity = &f.all["/asog"];
-    let bytes = row(entity, "AnimatedSogSplats3D", "asog");
+    let bytes = row(entity, "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
     let parts = gsplat_core::asog::decode_parts(
         bytes.as_primitive::<UInt8Type>().values(),
         ASOG_ACTIVE_THRESHOLD,
@@ -318,7 +289,7 @@ fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
         }
     }
     println!(
-        "E4 load: worst relative |gpu - cpu| per motion column (opacity, mu, sigma, flags, anchor, O, G): {:?}",
+        "GPU load: worst relative |gpu - cpu| per motion column (opacity, mu, sigma, flags, anchor, O, G): {:?}",
         worst.iter().map(|w| format!("{w:.1e}")).collect::<Vec<_>>()
     );
     assert!(worst.iter().all(|&w| w <= 1e-5), "motion de-quantisation");
@@ -356,7 +327,7 @@ fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
             ));
         }
         println!(
-            "E4 load t={t}: {visible} visible, {mismatched} visibility mismatches, GPU vs reference worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
+            "GPU load t={t}: {visible} visible, {mismatched} visibility mismatches, GPU vs reference worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
         );
         assert_eq!(mismatched, 0, "t={t}");
         assert!(
@@ -367,7 +338,7 @@ fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
 }
 
 #[test]
-fn e2_twist_form_with_pinv_translation_equals_the_asog_form() {
+fn twist_form_with_pinv_translation_equals_the_asog_form() {
     let f = fixture();
     let m = &f.asog.motion;
     let canonical = &f.asog.canonical;
@@ -427,7 +398,7 @@ fn e2_twist_form_with_pinv_translation_equals_the_asog_form() {
             opacity = opacity.max((m.opacities[i] * a.weight - b.opacity).abs());
         }
         println!(
-            "E2 t={t}: {checked} rows, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {opacity:.3e}"
+            "twist vs asog t={t}: {checked} rows, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {opacity:.3e}"
         );
         assert!(
             centre <= 1e-5 && rotation <= 1e-5 && opacity <= 1e-6,

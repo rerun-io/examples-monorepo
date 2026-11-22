@@ -208,7 +208,8 @@ impl Scene {
     }
 }
 
-fn upload(
+/// A storage buffer holding `bytes`; `Error::Capacity` when it exceeds one binding of `limit` bytes.
+pub(crate) fn upload(
     device: &wgpu::Device,
     label: &str,
     bytes: &[u8],

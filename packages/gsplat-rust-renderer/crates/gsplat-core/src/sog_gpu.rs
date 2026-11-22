@@ -45,7 +45,10 @@ pub(crate) fn upload_sog(
     let (bands, rest) = planes
         .sh
         .map_or((0, 0), |s| (s.bands, rest_coefficients(s.bands)));
-    let mut words: Vec<u8> = Vec::new();
+    let (labels, centroids) = planes.sh.map_or((&[][..], &[][..]), |s| {
+        (&s.labels[..4 * n], &s.centroids[..4 * palette_count * rest])
+    });
+    let mut words: Vec<u8> = Vec::with_capacity(5 * 4 * n + labels.len() + centroids.len());
     let mut offsets = Vec::new();
     let mut push = |bytes: &[u8]| {
         offsets.push(u32::try_from(words.len() / 4));
@@ -60,9 +63,6 @@ pub(crate) fn upload_sog(
     ] {
         push(&plane[..4 * n]);
     }
-    let (labels, centroids) = planes.sh.map_or((&[][..], &[][..]), |s| {
-        (&s.labels[..4 * n], &s.centroids[..4 * palette_count * rest])
-    });
     push(labels);
     push(centroids);
     let offsets = offsets.into_iter().collect::<Result<Vec<u32>, _>>()?;
@@ -95,18 +95,7 @@ pub(crate) fn upload_sog(
     let transforms = checked("raw transforms", n as u64 * 40)?;
     let opacity = checked("raw opacity", n as u64 * 4)?;
     let sh = checked("SH RGB coefficients", (n * (rest + 1) * 12) as u64)?;
-    if words.len() as u64 > limit {
-        return Err(Error::Capacity {
-            required: words.len() as u64,
-            limit,
-        });
-    }
-    let planes_buffer = upload(
-        device,
-        "SOG texel planes",
-        &words,
-        wgpu::BufferUsages::STORAGE,
-    );
+    let planes_buffer = crate::scene::upload(device, "SOG texel planes", &words, limit)?;
     let table_buffer = upload(
         device,
         "SOG tables",

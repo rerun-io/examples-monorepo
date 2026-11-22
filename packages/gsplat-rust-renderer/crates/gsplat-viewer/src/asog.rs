@@ -183,12 +183,8 @@ impl AsogCache {
                     Info {
                         fps: m.timeline.frame_rate,
                         count: m.count,
-                        max_degree: m.sh_n.as_ref().map_or(0, |sh| match sh.coeffs {
-                            0..=3 => 1,
-                            4..=8 => 2,
-                            9..=15 => 3,
-                            _ => 4,
-                        }),
+                        // An upper bound: a coefficient count of no degree fails in the decode.
+                        max_degree: m.sh_n.as_ref().map_or(0, |sh| sh.bands().unwrap_or(4)),
                     }
                 })
                 .map_err(|e| e.to_string());

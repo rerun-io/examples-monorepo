@@ -100,6 +100,13 @@ pub struct ShNMeta {
     pub coeffs: usize,
 }
 
+impl ShNMeta {
+    /// The SH degree whose AC coefficient count is `coeffs`, if any.
+    pub fn bands(&self) -> Option<u32> {
+        (1..=4u32).find(|&b| sog::rest_coefficients(b) == self.coeffs)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct MuMeta {
     pub scale: f64,
@@ -502,12 +509,10 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
     ) {
         (Some(sh_n), Some(labels), Some(palette)) => {
             let rest = sh_n.coeffs;
-            let bands = (1..=4u32)
-                .find(|&b| sog::rest_coefficients(b) == rest)
-                .ok_or_else(|| Error::Stream {
-                    name: "shpalette".into(),
-                    problem: format!("{rest} coefficients is not 3, 8, 15 or 24"),
-                })?;
+            let bands = sh_n.bands().ok_or_else(|| Error::Stream {
+                name: "shpalette".into(),
+                problem: format!("{rest} coefficients is not 3, 8, 15 or 24"),
+            })?;
             let labels = shaped("shlabels", labels, n, 1)?;
             let palette = shaped("shpalette", palette, sh_n.count, 3 * rest)?;
             let mut label_plane = vec![0u8; 4 * n];

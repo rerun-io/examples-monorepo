@@ -87,13 +87,27 @@ def seek(viewer: ViewerClient, timeline: str, frame: int) -> None:
     while True:
         try:
             viewer.set_time(timeline, sequence=frame)
-            if any(r.current_timeline == timeline and r.current_time == frame for r in viewer.get_state().recordings):
+            if cursor_at(viewer, timeline, frame):
                 return
         except ConnectionError:
             pass
         if time.monotonic() > deadline:
             raise RuntimeError(f"Viewer time cursor did not reach {timeline}={frame}")
         time.sleep(0.2)
+
+
+def cursor_at(viewer: ViewerClient, timeline: str, frame: int) -> bool:
+    """Whether the viewer's time cursor is on `timeline` at `frame`."""
+    return any(r.current_timeline == timeline and r.current_time == frame for r in viewer.get_state().recordings)
+
+
+def wait_for_view(viewer: ViewerClient, view: rrb.Spatial3DView) -> None:
+    """Wait until the viewer shows `view`, i.e. it has applied the blueprint that holds it."""
+    deadline: float = time.monotonic() + 30.0
+    while not any(v.view_id.replace("-", "") == str(view.id).replace("-", "") for v in viewer.viewer_state().views):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"Viewer never showed view {view.id}: the blueprint was not applied")
+        time.sleep(0.1)
 
 
 def yellow_fraction(pixels: UInt8[np.ndarray, "h w 3"]) -> float:
@@ -376,10 +390,16 @@ def check_hexels_tracked(config: Config, ply: Path) -> None:
         recording = rr.get_global_data_recording()
         assert recording is not None
         recording.flush(timeout_sec=30.0)
+        # The blueprint's TimePanel moves the time cursor when the viewer applies it, which can be after a seek
+        # that already reported its frame (the hexels-tracked flake: the cursor went back to the last frame and
+        # the capture showed that pose). Seek only once the blueprint's view is on screen, and capture only while
+        # the cursor still reports the frame.
+        wait_for_view(viewer, view)
         images: list[UInt8[np.ndarray, "h w 3"]] = []
         for frame, pose in enumerate(poses):
             seek(viewer, "frame", frame)
-            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png")
+            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png",
+                ready=lambda pixels, frame=frame: int(pixels.max()) - int(pixels.min()) > 20 and cursor_at(viewer, "frame", frame))
             score: float = pose_psnr(config, ply, image, pose, fov_y, f"tracked-{frame}")
             assert score >= 50.0, f"Tracked view differs from the pinhole pose and field of view: {score} dB"
             images.append(image)

@@ -36,11 +36,47 @@ pub(crate) fn uniform(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
     })
 }
 
+/// Whether WGSL code (comments ignored) names a subgroup built-in: a `subgroupXxx` function or the
+/// `subgroup_invocation_id` / `subgroup_size` built-in values. Decides the web-only `enable subgroups;`.
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn uses_subgroups(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut code = String::with_capacity(source.len());
+    let (mut i, mut depth) = (0, 0usize);
+    while i < bytes.len() {
+        let next = bytes.get(i + 1).copied();
+        if depth == 0 && bytes[i] == b'/' && next == Some(b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i] == b'/' && next == Some(b'*') {
+            depth += 1;
+            i += 2;
+        } else if depth > 0 && bytes[i] == b'*' && next == Some(b'/') {
+            depth -= 1;
+            i += 2;
+            code.push(' ');
+        } else {
+            if depth == 0 {
+                code.push(bytes[i] as char);
+            }
+            i += 1;
+        }
+    }
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|token| {
+            matches!(token, "subgroup_invocation_id" | "subgroup_size")
+                || token
+                    .strip_prefix("subgroup")
+                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+        })
+}
+
 pub(crate) fn module(device: &wgpu::Device, source: &str) -> wgpu::ShaderModule {
     // WebGPU passes WGSL to the browser, which requires the extension directive;
     // native naga 30 rejects it (gfx-rs/wgpu#5555), so it is added on the web only.
     #[cfg(target_arch = "wasm32")]
-    let source = &if source.contains("subgroup") {
+    let source = &if uses_subgroups(source) {
         format!("enable subgroups;\n{source}")
     } else {
         source.to_owned()
@@ -146,4 +182,35 @@ pub(crate) fn read_feedback(
     });
     buffer.unmap();
     Some(result)
+}
+
+#[cfg(test)]
+mod subgroup_detection_tests {
+    use super::uses_subgroups;
+
+    #[test]
+    fn comments_do_not_enable_subgroups_and_builtins_do() {
+        assert!(!uses_subgroups(
+            "// no subgroup built-ins here\n/* subgroupAdd /* nested subgroup_size */ still comment */ fn f() {}"
+        ));
+        assert!(!uses_subgroups("var<private> my_subgroup_count: u32;"));
+        assert!(uses_subgroups("let x = subgroupInclusiveAdd(v);"));
+        assert!(uses_subgroups(
+            "@compute fn f(@builtin(subgroup_size) width: u32) {} // comment"
+        ));
+        assert!(uses_subgroups(
+            "/* a */ let s = subgroupExclusiveAdd(1u); /* b */"
+        ));
+    }
+
+    #[test]
+    fn module_variants_get_the_extension_only_when_they_use_subgroups() {
+        assert!(
+            crate::kernels::sources(false)
+                .iter()
+                .all(|s| !uses_subgroups(s))
+        );
+        let with = crate::kernels::sources(true);
+        assert_eq!(with.iter().filter(|s| uses_subgroups(s)).count(), 2);
+    }
 }

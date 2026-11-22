@@ -249,12 +249,8 @@ fn draw_splat_entity(
             Some(c2),
             Some(anchors),
         ) => {
-            let fps = last_slice::<f64>(&m_fps)
-                .and_then(|v| v.first().copied())
-                .unwrap_or(1.0);
-            let origin = last_slice::<f64>(&m_origin)
-                .and_then(|v| v.first().copied())
-                .unwrap_or(0.0);
+            let fps = last_scalar::<f64>(&m_fps, 1.0);
+            let origin = last_scalar::<f64>(&m_origin, 0.0);
             let t = crate::trigs::clip_seconds(
                 ctx.recording().timeline_type(&query.timeline),
                 query.latest_at,
@@ -272,9 +268,7 @@ fn draw_splat_entity(
                     twist_c2: c2,
                     anchors,
                     is_static: last_slice::<f32>(&m_static).unwrap_or(&[]),
-                    active_threshold: last_slice::<f32>(&m_threshold)
-                        .and_then(|v| v.first().copied())
-                        .unwrap_or(0.0),
+                    active_threshold: last_scalar::<f32>(&m_threshold, 0.0),
                 },
                 t,
             ))
@@ -288,19 +282,19 @@ fn draw_splat_entity(
     let asog_results = VisualizerInstructionQueryResults::new(instruction, &asog_query, output);
     let [a_bytes, a_origin, a_threshold] = asog_ids.map(|id| asog_results.iter_optional(id));
     let asog = a_bytes.slice::<u8>().last().map(|(payload_row, bytes)| {
-        let threshold = last_slice::<f32>(&a_threshold)
-            .and_then(|v| v.first().copied())
-            .unwrap_or(gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
-        let origin = last_slice::<f64>(&a_origin)
-            .and_then(|v| v.first().copied())
-            .unwrap_or(0.0);
-        let mut hasher = DefaultHasher::new();
+        let threshold = last_scalar::<f32>(&a_threshold, gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
+        let origin = last_scalar::<f64>(&a_origin, 0.0);
         (
-            self::attribute_generation(instruction, &asog_query, asog_ids.into_iter()),
-            threshold.to_bits(),
+            payload_row,
+            bytes,
+            threshold,
+            origin,
+            hash64((
+                self::attribute_generation(instruction, &asog_query, asog_ids.into_iter()),
+                threshold.to_bits(),
+            ))
+            .hash64(),
         )
-            .hash(&mut hasher);
-        (payload_row, bytes, threshold, origin, hasher.finish())
     });
     let time_type = ctx.recording().timeline_type(&query.timeline);
     let motion_path = crate::asog::MotionPath::from_env();
@@ -314,7 +308,9 @@ fn draw_splat_entity(
         self::attribute_generation(instruction, &sog_query, sog_ids.iter().copied());
     let sog_results = VisualizerInstructionQueryResults::new(instruction, &sog_query, output);
     let sog_iters = sog_ids.map(|id| sog_results.iter_optional(id));
-    let payload = sog_webp(&sog_iters);
+    // meta.json is parsed once here, not once per row.
+    let payload =
+        sog_webp(&sog_iters).map(|(meta, webp)| (gsplat_core::sog::Meta::parse(&meta), webp));
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -345,7 +341,7 @@ fn draw_splat_entity(
         };
         if let Some((meta, webp)) = &payload {
             // The payload replaces the preview rows; it decodes once per payload (row ids), never per time.
-            let meta = match gsplat_core::sog::Meta::parse(meta) {
+            let meta = match meta {
                 Ok(meta) => Some(meta),
                 Err(error) => {
                     report(
@@ -356,8 +352,6 @@ fn draw_splat_entity(
                 }
             };
             if let Some(meta) = meta {
-                let mut hasher = DefaultHasher::new();
-                (signature, sog_generation).hash(&mut hasher);
                 let sog = crate::sog::Payload {
                     meta,
                     webp: *webp,
@@ -367,7 +361,7 @@ fn draw_splat_entity(
                     entity,
                     draw,
                     row,
-                    re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                    hash64((signature, sog_generation)),
                     Primitives::Sog(&sog),
                     render_mode,
                     0.0,
@@ -394,13 +388,11 @@ fn draw_splat_entity(
                     });
                 match evaluated {
                     Ok(evaluated) => {
-                        let mut hasher = DefaultHasher::new();
-                        (generation, evaluated.t.to_bits()).hash(&mut hasher);
                         retry |= draw_instances(
                             entity,
                             draw,
                             payload_row,
-                            re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                            hash64((generation, evaluated.t.to_bits())),
                             Primitives::Core(&evaluated.splats),
                             render_mode,
                             0.0,
@@ -428,13 +420,11 @@ fn draw_splat_entity(
                         info,
                         preview: &native,
                     };
-                    let mut hasher = DefaultHasher::new();
-                    (signature, generation).hash(&mut hasher);
                     retry |= draw_instances(
                         entity,
                         draw,
                         row,
-                        re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                        hash64((signature, generation)),
                         Primitives::Asog(&payload),
                         render_mode,
                         t,
@@ -455,13 +445,11 @@ fn draw_splat_entity(
         {
             if motion_path == crate::asog::MotionPath::Gpu {
                 // Canonical rows + motion uploaded once; a time change is one motion dispatch in the view.
-                let mut hasher = DefaultHasher::new();
-                (signature, motion_generation).hash(&mut hasher);
                 retry |= draw_instances(
                     entity,
                     draw,
                     row,
-                    re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                    hash64((signature, motion_generation)),
                     Primitives::Animated {
                         splats: &native,
                         motion,
@@ -478,13 +466,11 @@ fn draw_splat_entity(
             if deformed.centers.is_empty() {
                 continue;
             }
-            let mut hasher = DefaultHasher::new();
-            (signature, t.to_bits()).hash(&mut hasher);
             retry |= draw_instances(
                 entity,
                 draw,
                 (query.latest_at, row.1),
-                re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                hash64((signature, t.to_bits())),
                 Primitives::Splats(&deformed),
                 render_mode,
                 0.0,
@@ -529,6 +515,23 @@ fn sog_webp<'a>(
         sh_labels: last_slice::<u8>(labels),
     };
     Some((meta, webp))
+}
+
+/// A cache key from `value` (the std hasher, as `attribute_generation`).
+fn hash64(value: impl std::hash::Hash) -> re_log_types::hash::Hash64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    re_log_types::hash::Hash64::from_u64(hasher.finish())
+}
+
+/// The first value of the last row of a (static, one-value) optional component, or `default`.
+fn last_scalar<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>, default: T) -> T
+where
+    T: 'a + Copy + re_viewer::external::re_chunk::ChunkComponentSlicer<Item<'a> = &'a [T]>,
+{
+    last_slice(iter)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(default)
 }
 
 /// The values of the last row of a (static, one-row) optional component.
@@ -622,15 +625,13 @@ pub(crate) fn draw_instances(
                         );
                         re_log::warn_once!("Gaussian compute fallback: {error:#}");
                         let evaluated = crate::trigs::Evaluated::new(splats, motion, time);
-                        let mut hasher = DefaultHasher::new();
-                        (signature, time.to_bits()).hash(&mut hasher);
                         crate::fallback::native_fallback(
                             ctx,
                             query,
                             key,
                             &evaluated.native(splats),
                             world_from_local,
-                            re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                            hash64((signature, time.to_bits())),
                             masks,
                             object,
                         )?
