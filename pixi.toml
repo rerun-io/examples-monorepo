@@ -4407,6 +4407,11 @@ cmd = "python tools/apps/train.py"
 cwd = "packages/open4dgs"
 description = "Train a person from a catalog clip with TRiGS (body-surface init, masked loss), score held-out cameras, write <runs-root>/<run-name>/run.rrd and register it on open4dgs-runs (run in the prod env, under flock -x /tmp/gpu-5090.lock)"
 
+[feature.open4dgs.tasks.open4dgs-prior]
+cmd = "python tools/apps/prior.py"
+cwd = "packages/open4dgs"
+description = "MoGe-2 depth + normals on a clip's training frames (undistorted, max_side), registered as catalog layer moge2_prior"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
