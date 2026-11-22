@@ -4402,6 +4402,11 @@ cmd = "python tools/apps/masks.py"
 cwd = "packages/open4dgs"
 description = "Foreground mattes (BiRefNet on the SMPL-X person crop) for a segment's frame window, registered as catalog layer masks"
 
+[feature.open4dgs.tasks.open4dgs-train]
+cmd = "python tools/apps/train.py"
+cwd = "packages/open4dgs"
+description = "Train a person from a catalog clip with TRiGS (body-surface init, masked loss), score held-out cameras, write <runs-root>/<run-name>/run.rrd and register it on open4dgs-runs (run in the prod env, under flock -x /tmp/gpu-5090.lock)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
