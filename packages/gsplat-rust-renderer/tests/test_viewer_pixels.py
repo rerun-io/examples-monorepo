@@ -1,5 +1,6 @@
 """Public viewer and standalone pixel contracts; each capture has a process timeout."""
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -59,7 +60,8 @@ def test_sog_viewer_pixels(binaries: Path, tmp_path: Path) -> None:
     except OSError as error:
         pytest.skip(f"PlayCanvas skull.sog sample unavailable: {error}")
     result: subprocess.CompletedProcess[str] = run_check(binaries, tmp_path, "sog", Path("/dev/null"), "--sog", str(sog))
-    assert result.stderr.count("SOG decode: 246,821 splats, SH degree 3") == 2, "One payload decode per compute viewer (GPU, then CPU)"
+    # re_format groups thousands with a thin space.
+    assert len(re.findall(r"SOG decode: 246\D821 splats, SH degree 3", result.stderr)) == 2, "One payload decode per compute viewer (GPU, then CPU)"
     assert "Gaussian compute fallback" not in result.stderr
 
 

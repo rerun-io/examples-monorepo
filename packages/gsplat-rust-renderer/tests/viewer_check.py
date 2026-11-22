@@ -485,9 +485,9 @@ def check_sog(config: Config) -> None:
     with spawn_viewer(STOCK_VIEWER) as viewer:
         viewer.open_url(str(recording_path.resolve()))
         stock: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-stock.png")
+    # Stock 0.42 captures the whole window here (other size), so only the lit area is checked.
     lit: int = int(np.sum(np.max(stock, axis=2) > 20))
-    stock_score: float = psnr(stock, images["gpu"])
-    print(f"SOG_STOCK lit_pixels={lit} stock/payload {stock_score:.3f} dB", flush=True)
+    print(f"SOG_STOCK lit_pixels={lit} size={stock.shape[1]}x{stock.shape[0]}", flush=True)
     assert lit > 100, "Stock Rerun should draw the GaussianSplats3D preview"
 
 
