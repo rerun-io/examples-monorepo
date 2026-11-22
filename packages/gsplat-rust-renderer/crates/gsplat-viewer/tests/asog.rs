@@ -7,10 +7,11 @@
 //! set). E2: on well-conditioned rows the twist form fed the pinv translation equals the `.asog` form.
 use gsplat_core::asog::decode;
 use gsplat_core::trigs::{ASOG_ACTIVE_THRESHOLD, CULLED_RAW_OPACITY, TrigsMotion};
-use re_viewer::external::re_chunk::{Chunk, ComponentIdentifier};
-use re_viewer::external::re_sdk_types::external::arrow::array::{
-    Array as _, ArrayRef, AsArray as _, FixedSizeListArray,
-};
+mod common;
+
+use common::{chunks, row};
+use re_viewer::external::re_chunk::Chunk;
+use re_viewer::external::re_sdk_types::external::arrow::array::AsArray as _;
 use re_viewer::external::re_sdk_types::external::arrow::datatypes::{
     Float32Type, Float64Type, UInt8Type,
 };
@@ -21,41 +22,10 @@ const FIXTURE: &str = concat!(
     "/tests/fixtures/asog_reference.rrd"
 );
 
-/// Every chunk of an .rrd by entity path.
-fn chunks(path: &str) -> BTreeMap<String, Vec<Chunk>> {
-    let file = std::io::BufReader::new(std::fs::File::open(path).expect("open rrd"));
-    let mut out: BTreeMap<String, Vec<Chunk>> = BTreeMap::new();
-    for msg in re_log_encoding::DecoderApp::decode_eager(file).expect("rrd header") {
-        if let re_log_msg::LogMsg::ArrowMsg(_, arrow) = msg.expect("rrd message") {
-            let chunk = Chunk::from_arrow_msg(&arrow).expect("chunk");
-            out.entry(chunk.entity_path().to_string())
-                .or_default()
-                .push(chunk);
-        }
-    }
-    out
-}
-
-/// Row 0 of `archetype:field` (fixed-size lists flattened).
-fn row(chunks: &[Chunk], archetype: &'static str, field: &str) -> ArrayRef {
-    let id = ComponentIdentifier::from_archetype_field(archetype.into(), field);
-    let array = chunks
-        .iter()
-        .find_map(|c| c.raw_component_array(id))
-        .unwrap_or_else(|| panic!("{archetype}:{field} missing"));
-    let row = match array.as_list_opt::<i32>() {
-        Some(list) => list.value(0),
-        None => array.clone(),
-    };
-    match row.as_any().downcast_ref::<FixedSizeListArray>() {
-        Some(fixed) => fixed.values().clone(),
-        None => row,
-    }
-}
-
 /// `Expected:<field>` as f64 (stored as f32 or f64).
 fn expected(all: &BTreeMap<String, Vec<Chunk>>, entity: &str, field: &str) -> Vec<f64> {
-    let values = row(&all[entity], "Expected", field);
+    let values =
+        row(&all[entity], "Expected", field).unwrap_or_else(|| panic!("Expected:{field} missing"));
     if let Some(f) = values.as_primitive_opt::<Float32Type>() {
         f.values().iter().map(|&v| f64::from(v)).collect()
     } else {
@@ -72,8 +42,9 @@ struct Fixture {
 fn fixture() -> Fixture {
     let all = chunks(FIXTURE);
     let entity = &all["/asog"];
-    let bytes = row(entity, "AnimatedSogSplats3D", "asog");
-    let threshold = row(entity, "AnimatedSogSplats3D", "active_threshold");
+    let bytes = row(entity, "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
+    let threshold = row(entity, "AnimatedSogSplats3D", "active_threshold")
+        .expect("AnimatedSogSplats3D:active_threshold");
     let threshold = threshold.as_primitive::<Float32Type>().value(0);
     assert_eq!(threshold, ASOG_ACTIVE_THRESHOLD);
     let asog = decode(bytes.as_primitive::<UInt8Type>().values(), threshold).expect("decode");
@@ -281,7 +252,7 @@ fn e1_evaluate_matches_the_reference() {
 fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
     let f = fixture();
     let entity = &f.all["/asog"];
-    let bytes = row(entity, "AnimatedSogSplats3D", "asog");
+    let bytes = row(entity, "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
     let parts = gsplat_core::asog::decode_parts(
         bytes.as_primitive::<UInt8Type>().values(),
         ASOG_ACTIVE_THRESHOLD,

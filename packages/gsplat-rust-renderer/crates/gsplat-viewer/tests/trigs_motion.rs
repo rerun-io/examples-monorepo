@@ -3,55 +3,18 @@
 //! times (written by the open4dgs scratch script `k2/dump_fixture.py`, CPU torch f32).
 use gsplat_core::native::NativeSplats;
 use gsplat_core::trigs::{TrigsMotion, deform_visible};
-use re_viewer::external::re_chunk::{Chunk, ComponentIdentifier};
-use re_viewer::external::re_sdk_types::external::arrow::array::{
-    Array as _, ArrayRef, AsArray as _, FixedSizeListArray,
-};
+mod common;
+
+use common::{chunks, row};
+use re_viewer::external::re_chunk::Chunk;
+use re_viewer::external::re_sdk_types::external::arrow::array::AsArray as _;
 use re_viewer::external::re_sdk_types::external::arrow::datatypes::{
     Float32Type, Float64Type, UInt32Type,
 };
-use std::collections::BTreeMap;
-
-fn component(archetype: &'static str, field: &str) -> ComponentIdentifier {
-    ComponentIdentifier::from_archetype_field(archetype.into(), field)
-}
-
-/// Every chunk of an .rrd by entity path.
-fn chunks(path: &str) -> BTreeMap<String, Vec<Chunk>> {
-    let file = std::io::BufReader::new(std::fs::File::open(path).expect("open rrd"));
-    let mut out: BTreeMap<String, Vec<Chunk>> = BTreeMap::new();
-    for msg in re_log_encoding::DecoderApp::decode_eager(file).expect("rrd header") {
-        if let re_log_msg::LogMsg::ArrowMsg(_, arrow) = msg.expect("rrd message") {
-            let chunk = Chunk::from_arrow_msg(&arrow).expect("chunk");
-            out.entry(chunk.entity_path().to_string())
-                .or_default()
-                .push(chunk);
-        }
-    }
-    out
-}
-
-/// The values of the first row of `component` among `chunks` (fixed-size lists flattened).
-fn row_values(chunks: &[Chunk], archetype: &'static str, field: &str) -> ArrayRef {
-    let id = component(archetype, field);
-    let chunk = chunks
-        .iter()
-        .find(|c| c.raw_component_array(id).is_some())
-        .unwrap_or_else(|| panic!("{archetype}:{field} missing"));
-    // A static chunk with one row: either a list column (take row 0) or the row's values directly.
-    let array = chunk.raw_component_array(id).expect("component");
-    let row = match array.as_list_opt::<i32>() {
-        Some(list) => list.value(0),
-        None => array.clone(),
-    };
-    match row.as_any().downcast_ref::<FixedSizeListArray>() {
-        Some(fixed) => fixed.values().clone(),
-        None => row,
-    }
-}
 
 fn floats(chunks: &[Chunk], archetype: &'static str, field: &str) -> Vec<f32> {
-    let values = row_values(chunks, archetype, field);
+    let values =
+        row(chunks, archetype, field).unwrap_or_else(|| panic!("{archetype}:{field} missing"));
     if let Some(f) = values.as_primitive_opt::<Float32Type>() {
         f.values().to_vec()
     } else {
@@ -93,7 +56,8 @@ impl Model {
                 Vec::new()
             },
             colors: if with_appearance {
-                row_values(model, "GaussianSplats3D", "colors")
+                row(model, "GaussianSplats3D", "colors")
+                    .expect("GaussianSplats3D:colors")
                     .as_primitive::<UInt32Type>()
                     .values()
                     .to_vec()
