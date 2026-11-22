@@ -40,16 +40,17 @@ pub(crate) enum Dequantize {
 impl Dequantize {
     /// `GSPLAT_SOG_DECODE=cpu` selects the CPU decoder (native only; the web build has no environment).
     pub(crate) fn from_env() -> Self {
-        match std::env::var("GSPLAT_SOG_DECODE").as_deref() {
+        static PATH: std::sync::OnceLock<Dequantize> = std::sync::OnceLock::new();
+        *PATH.get_or_init(|| match std::env::var("GSPLAT_SOG_DECODE").as_deref() {
             Ok("cpu") => Self::Cpu,
             _ => Self::Gpu,
-        }
+        })
     }
 }
 
 /// One entity's SOG payload plus the preview rows it replaces.
 pub(crate) struct Payload<'a> {
-    pub meta: Meta,
+    pub meta: &'a Meta,
     pub webp: SogWebp<'a>,
     /// The same entity's `GaussianSplats3D` rows: bounds, and the native fallback.
     pub preview: &'a NativeSplats<'a>,
@@ -80,13 +81,13 @@ impl Payload<'_> {
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_function!();
         let start = web_time::Instant::now();
-        let decoded = gsplat_core::sog::decode_planes(&self.meta, &self.webp)?;
+        let decoded = gsplat_core::sog::decode_planes(self.meta, &self.webp)?;
         let webp = start.elapsed();
         let start = web_time::Instant::now();
         let (scene, dequantize) = match path {
             Dequantize::Gpu => {
                 let scene =
-                    core.upload_sog(&ctx.queue, &decoded.quantization, &decoded.planes(), None)?;
+                    core.upload_sog(&ctx.queue, &decoded.quantization, &decoded.planes())?;
                 (scene, None)
             }
             Dequantize::Cpu => {

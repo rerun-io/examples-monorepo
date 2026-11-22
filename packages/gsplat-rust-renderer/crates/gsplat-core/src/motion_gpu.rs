@@ -12,7 +12,7 @@ use crate::asog::{AsogParts, MOTION_CODES};
 use crate::gpu::{Kernel, bind, storage, uniform};
 use crate::trigs::{AsogMotion, ClipWindow, TrigsMotion};
 
-/// Per-row motion for [`crate::Renderer::upload_animated`] and [`crate::Renderer::upload_sog`].
+/// Per-row motion for [`crate::Renderer::upload_animated`].
 #[derive(Clone, Copy)]
 pub enum Motion<'a> {
     Twist(&'a TrigsMotion<'a>),
@@ -128,19 +128,7 @@ impl Motion<'_> {
         }
         let (form, params, clips, threshold) = self.pack();
         let upload = |label, values: &[f32]| {
-            let bytes: &[u8] = bytemuck::cast_slice(values);
-            if bytes.len() as u64 > limit {
-                return Err(Error::Capacity {
-                    required: bytes.len() as u64,
-                    limit,
-                });
-            }
-            Ok(crate::gpu::upload(
-                device,
-                label,
-                bytes,
-                wgpu::BufferUsages::STORAGE,
-            ))
+            crate::scene::upload(device, label, bytemuck::cast_slice(values), limit)
         };
         Ok(GpuMotion {
             form,
@@ -187,24 +175,20 @@ pub(crate) fn dequantize_asog(
     if parts.motion_codes.len() != n * MOTION_CODES || m.clips.is_empty() {
         return Err(Error::Input("asog motion codes differ from the splat rows"));
     }
-    let checked = |bytes: u64| {
-        if bytes > limit {
-            return Err(Error::Capacity {
-                required: bytes,
-                limit,
-            });
-        }
-        Ok(())
-    };
-    checked((parts.motion_codes.len() * 4) as u64)?;
-    checked((n * ASOG_STRIDE * 4) as u64)?;
-    let codes = crate::gpu::upload(
+    let row_bytes = (n * ASOG_STRIDE * 4) as u64;
+    if row_bytes > limit {
+        return Err(Error::Capacity {
+            required: row_bytes,
+            limit,
+        });
+    }
+    let codes = crate::scene::upload(
         device,
         "asog motion codes",
         bytemuck::cast_slice(&parts.motion_codes),
-        wgpu::BufferUsages::STORAGE,
-    );
-    let rows = storage(device, "motion parameters", (n * ASOG_STRIDE * 4) as u64);
+        limit,
+    )?;
+    let rows = storage(device, "motion parameters", row_bytes);
     let groups = count.div_ceil(WG).max(1);
     let x = groups.min(65535);
     let (mo, ls) = (&m.motion, &m.logsigma);
@@ -252,16 +236,10 @@ pub(crate) fn dequantize_asog(
     }
     queue.submit([encoder.finish()]);
     let clips = pack_clips(&m.clip_windows());
-    checked((clips.len() * 4) as u64)?;
     Ok(GpuMotion {
         form: ASOG,
         params: rows,
-        clips: crate::gpu::upload(
-            device,
-            "motion clips",
-            bytemuck::cast_slice(&clips),
-            wgpu::BufferUsages::STORAGE,
-        ),
+        clips: crate::scene::upload(device, "motion clips", bytemuck::cast_slice(&clips), limit)?,
         clip_count: u32::try_from(clips.len() / CLIP_STRIDE)?,
         threshold: parts.active_threshold.clamp(0.0, 0.999),
     })
@@ -273,7 +251,8 @@ pub(crate) struct Deform {
     pub opacity: wgpu::Buffer,
     slots: [(wgpu::Buffer, wgpu::BindGroup); 3],
     params: [u32; 8],
-    groups: u32,
+    /// Workgroups in x and y (x <= 65,535).
+    groups: [u32; 2],
     /// Time (bits) of the last encoded pass; another encode at the same time dispatches nothing.
     last: Option<u32>,
 }
@@ -329,7 +308,7 @@ impl Deform {
             opacity,
             slots,
             params,
-            groups,
+            groups: [x, groups.div_ceil(x)],
             last: None,
         })
     }
@@ -362,14 +341,13 @@ impl Deform {
         });
         pass.set_pipeline(&kernel.pipeline);
         pass.set_bind_group(0, group, &[]);
-        let x = self.groups.min(65535);
-        pass.dispatch_workgroups(x, self.groups.div_ceil(x), 1);
+        pass.dispatch_workgroups(self.groups[0], self.groups[1], 1);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! E4: the motion pass read back against the CPU references of both forms.
+    //! The motion pass read back against the CPU references of both forms.
     use super::*;
     use crate::Splats;
     use crate::test_utils::{gpu, read};
@@ -521,7 +499,7 @@ mod tests {
 
     fn assert_within(worst: &Worst, form: &str) {
         println!("trigs_deform {form}: {worst:?}");
-        // Design E4: 1e-5 m, 1e-5 rad; opacity in linear units; scales are copies. The centre bound is relative to
+        // Bounds: 1e-5 m, 1e-5 rad; opacity in linear units; scales are copies. The centre bound is relative to
         // max(1 m, |centre|): both sides are f32, and a rotation rounding of ~3e-6 rad over a 3.5 m lever arm moves a
         // centre by ~1e-5 m (asog row 20871 at t = 2.42: f32 CPU 1.9e-5 m and GPU 8.1e-6 m from an f64 evaluation).
         assert!(
@@ -779,7 +757,7 @@ mod tests {
             }
         );
 
-        // The CPU path per time change: evaluate on the CPU + a scene upload (what the viewer did before).
+        // The CPU path per time change: evaluate on the CPU + a scene upload (the `GSPLAT_MOTION=cpu` oracle path).
         let mut out = Splats::default();
         let (mut evaluate, mut upload) = (Vec::new(), Vec::new());
         for &t in times.iter().step_by(4) {

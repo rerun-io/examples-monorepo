@@ -18,9 +18,8 @@ fn required_limits() -> wgpu::Limits {
     }
 }
 
-/// Validate the enabled compute capabilities before creating pipelines. `SUBGROUP` is optional:
-/// without it the scan and sort kernels use their workgroup-memory variant.
-pub fn check_adapter(_features: wgpu::Features, limits: &wgpu::Limits) -> Result<(), Error> {
+/// Validate the compute limits before creating pipelines. `SUBGROUP` is optional: without it the scan and sort kernels use their workgroup-memory variant.
+pub fn check_adapter(limits: &wgpu::Limits) -> Result<(), Error> {
     if !required_limits().check_limits(limits) {
         return Err(Error::Capabilities);
     }
@@ -59,13 +58,8 @@ pub fn compute_limits(available: &wgpu::Limits, mut requested: wgpu::Limits) -> 
 mod capability_tests {
     #[test]
     fn startup_accepts_missing_subgroups_and_reports_weak_limits() {
-        assert!(super::check_adapter(wgpu::Features::empty(), &wgpu::Limits::default()).is_ok());
-        assert!(super::check_adapter(wgpu::Features::SUBGROUP, &wgpu::Limits::default()).is_ok());
-        let error = super::check_adapter(
-            wgpu::Features::empty(),
-            &wgpu::Limits::downlevel_webgl2_defaults(),
-        )
-        .unwrap_err();
+        assert!(super::check_adapter(&wgpu::Limits::default()).is_ok());
+        let error = super::check_adapter(&wgpu::Limits::downlevel_webgl2_defaults()).unwrap_err();
         assert!(error.to_string().contains("eight storage buffers"));
         let mut failures = 0;
         super::required_limits().check_limits_with_fail_fn(
@@ -82,7 +76,7 @@ mod capability_tests {
             max_storage_textures_per_shader_stage: 2,
             ..wgpu::Limits::default()
         };
-        assert!(super::check_adapter(wgpu::Features::SUBGROUP, &limits).is_err());
+        assert!(super::check_adapter(&limits).is_err());
     }
 
     #[test]
@@ -107,7 +101,7 @@ mod capability_tests {
         );
         assert_eq!(limits.max_storage_buffers_per_shader_stage, 8);
         assert_eq!(limits.max_storage_textures_per_shader_stage, 3);
-        super::check_adapter(wgpu::Features::SUBGROUP, &limits).unwrap();
+        super::check_adapter(&limits).unwrap();
         assert!(limits.check_limits(&available));
         let weak = wgpu::Limits::downlevel_webgl2_defaults();
         assert!(super::compute_limits(&weak, weak.clone()).check_limits(&weak));

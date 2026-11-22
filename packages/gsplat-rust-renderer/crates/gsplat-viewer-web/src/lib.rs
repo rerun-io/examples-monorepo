@@ -20,12 +20,12 @@ pub fn install_gsplat_hooks() {
                         .store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 let compute =
-                    gsplat_viewer::setup::compute_device_descriptor_with(!force_no_subgroups);
+                    gsplat_viewer::setup::compute_device_descriptor(!force_no_subgroups);
                 setup.device_descriptor = std::sync::Arc::new(move |adapter| {
                     let descriptor = compute(adapter);
                     let renderer = if descriptor.required_features.contains(wgpu::Features::SUBGROUP) {
                         "gsplat compute (subgroups on)"
-                    } else if gsplat_core::check_adapter(adapter.features(), &adapter.limits()).is_ok() {
+                    } else if gsplat_core::check_adapter(&adapter.limits()).is_ok() {
                         "gsplat compute (no subgroups)"
                     } else {
                         "stock Rerun splats (adapter lacks the compute limits)"

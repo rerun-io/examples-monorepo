@@ -13,7 +13,7 @@ pub struct Renderer {
 impl Renderer {
     pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
         let limits = device.limits();
-        crate::check_adapter(device.features(), &limits)?;
+        crate::check_adapter(&limits)?;
         let kernels = Kernels::new(device);
         Ok(Self {
             device: device.clone(),
@@ -66,28 +66,22 @@ impl Renderer {
         Ok(Arc::new(scene))
     }
 
-    /// De-quantise SOG / ASOG texel planes on the GPU into a splat scene (one compute pass, submitted on `queue`).
+    /// De-quantise SOG texel planes on the GPU into a splat scene (one compute pass, submitted on `queue`).
     /// The CPU path is `upload(&sog::dequantize(q, planes)?)`; both give the same scene within f32 quaternion rounding.
-    /// With `motion` (ASOG), the de-quantised rows are the canonical rows of an animated scene.
     pub fn upload_sog(
         &self,
         queue: &wgpu::Queue,
         q: &crate::sog::Quantization,
         planes: &crate::sog::Planes<'_>,
-        motion: Option<crate::Motion<'_>>,
     ) -> Result<Arc<Scene>, Error> {
-        let mut scene = crate::sog_gpu::upload_sog(
+        Ok(Arc::new(crate::sog_gpu::upload_sog(
             &self.device,
             queue,
             &self.kernels.sog_dequant,
             q,
             planes,
             self.limit,
-        )?;
-        if let Some(motion) = motion {
-            scene.animate(&self.device, motion, self.limit)?;
-        }
-        Ok(Arc::new(scene))
+        )?))
     }
 
     /// An entropy-decoded `.asog` on the GPU: static part through `sog_dequant.wgsl`, motion through
