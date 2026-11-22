@@ -1,6 +1,7 @@
 """The exporters' Rerun recordings on a tiny synthetic run: the viewer contracts come from gsplat_rust_renderer.
 
-``export_asog.write_rrd`` puts the ``.asog`` verbatim in ``AnimatedSogSplats3D`` with a one-pose stock preview.
+``export_asog.write_rrd`` puts the ``.asog`` verbatim in ``AnimatedSogSplats3D`` with a one-pose stock preview;
+``export_splats --format trigs-motion`` logs the checkpoint once as canonical ``GaussianSplats3D`` + ``TrigsMotion3D``.
 The contracts themselves are pinned in packages/gsplat-rust-renderer/tests.
 """
 
@@ -66,3 +67,20 @@ def test_asog_rrd_carries_the_file_and_a_one_pose_preview(tmp_path: Path) -> Non
     assert 0 < len(columns["GaussianSplats3D:centers"]) <= 64  # one pose, every k-th live row
     assert summary["frame_origin"] == FRAME_START
 
+
+def test_trigs_motion_export_logs_the_checkpoint_once(tmp_path: Path) -> None:
+    from open4dgs.apis.export_splats import Config, main
+    from open4dgs.splat_export import SPLAT_ENTITY
+
+    run: Path = tiny_run(tmp_path)
+    summary = main(Config(run=run, register=False, format="trigs-motion"))
+    out: Path = run / "trigs_motion.rrd"
+    columns = static_columns(out, SPLAT_ENTITY)
+    params = synthetic_params()
+
+    assert summary["rows"] == len(params["means"])
+    assert len(columns["GaussianSplats3D:centers"]) == len(params["means"])
+    np.testing.assert_allclose(np.asarray(columns["GaussianSplats3D:centers"]), params["means"].numpy())
+    np.testing.assert_allclose(np.asarray(columns["TrigsMotion3D:times"]), params["times"].numpy().reshape(-1))
+    assert columns["TrigsMotion3D:fps"] == [FPS] and columns["TrigsMotion3D:frame_origin"] == [float(FRAME_START)]
+    assert sorted(set(columns["TrigsMotion3D:is_static"])) == [0.0, 1.0]
