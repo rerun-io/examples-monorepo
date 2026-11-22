@@ -65,6 +65,8 @@ class Config:
     wide_baseline_per_camera: int = 1
     roma_v2_setting: str = "fast"
     memfof_max_side: int = 1920
+    subkeyframe_min_speed: float | None = None
+    """Upstream's speed-aware sub-keyframes: None keeps its default (on), 0 turns them off."""
     extra_args: list[str] = field(default_factory=list)
     """More upstream flags, verbatim."""
 
@@ -209,6 +211,7 @@ def main(config: Config) -> Path:
         wide_baseline_per_camera=config.wide_baseline_per_camera,
         roma_v2_setting=config.roma_v2_setting,
         memfof_max_side=config.memfof_max_side,
+        subkeyframe_min_speed=config.subkeyframe_min_speed,
         extra_args=tuple(config.extra_args),
     )
     torch.cuda.reset_peak_memory_stats()
@@ -245,6 +248,7 @@ def main(config: Config) -> Path:
             wide_baseline_per_camera=config.wide_baseline_per_camera,
             roma_v2_setting=config.roma_v2_setting,
             memfof_max_side=config.memfof_max_side,
+            subkeyframe_min_speed=-1.0 if config.subkeyframe_min_speed is None else config.subkeyframe_min_speed,
             extra_args=" ".join(config.extra_args),
             init_seconds=init_s,
         ),

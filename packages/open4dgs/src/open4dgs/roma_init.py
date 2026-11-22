@@ -65,6 +65,8 @@ class RomaInitConfig:
     """RoMa v2 inference setting (``turbo``, ``fast``, ``base``, ``precise``, ...)."""
     memfof_max_side: int = 1920
     """MEMFOF input longer side (``--memfof-max-side``)."""
+    subkeyframe_min_speed: float | None = None
+    """Speed-aware sub-keyframes (``--subkeyframe-min-speed``): None keeps upstream's default (on), 0 turns them off."""
     mask_min_fg_alpha: float = 0.5
     """Mask value at or above which a pixel is foreground (``--mask-min-fg-alpha``)."""
     seed: int = 42
@@ -172,6 +174,8 @@ def upstream_argv(config: RomaInitConfig, root: Path, output_path: Path, with_ma
         "--seed", str(config.seed),
         "--device", config.device,
     ]  # fmt: skip
+    if config.subkeyframe_min_speed is not None:
+        argv += ["--subkeyframe-min-speed", str(config.subkeyframe_min_speed)]
     if with_masks:
         argv += ["--masks-root", str(root / "masks"), "--mask-min-fg-alpha", str(config.mask_min_fg_alpha)]
     return argv + list(config.extra_args)
