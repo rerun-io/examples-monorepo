@@ -4388,6 +4388,7 @@ platforms = ["linux-64", "linux-aarch64"]
 python = "3.12.*"
 # Run dependencies of open4dgs-core-src and romav2-src: a sibling recipe solves only when listed.
 romav2-src = { path = "recipes/romav2-src" }
+memfof-src = { path = "recipes/memfof-src" }
 dinov3-src = { path = "recipes/dinov3-src" }
 # The imports of the init script, RoMa v2 and MEMFOF (torch, torchvision from cuda / rerun-prerelease).
 einops = ">=0.8.1"
