@@ -19,6 +19,7 @@ from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.sensors.camera.vicon_radial import VICON_RADIAL_MODEL
 
 from dataforge import hands, meshes, paths, schema, writing
 from dataforge.clocks import frame_times
@@ -152,12 +153,12 @@ def log_cameras(recording: rr.RecordingStream, cameras: list[MammaCamera], frust
             name=camera.name,
             kind="rgb",
             image_plane_distance=frustum_m,
-            camera_model="pinhole" if camera.lens is None else "vicon_radial_2",
+            camera_model="pinhole" if camera.lens is None else VICON_RADIAL_MODEL,
         )
-        if camera.lens is not None:  # native pixels: u = c + d (1 + k1 r^2 + k2 r^4 + k3 r^6), d the distorted offset from c
+        if camera.lens is not None:  # native pixels: u = c + d (1 + k1 r^2 + k2 r^4 + k3 r^6); simplecv.catalog_calibration.read_lens reads it
             rr.log(
                 schema.cam_path(rig, 0),
-                rr.AnyValues(vicon_radial_2=np.concatenate([camera.lens.centre, camera.lens.radial])),
+                rr.AnyValues(**{VICON_RADIAL_MODEL: np.concatenate([camera.lens.centre, camera.lens.radial])}),
                 static=True,
                 recording=recording,
             )
