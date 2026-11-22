@@ -115,8 +115,9 @@ impl Primitives<'_> {
             Self::Core(splats) => crate::bounds::from_core(splats),
             // The preview is a uniform subsample of the same splats (file order is Morton order).
             Self::Sog(payload) => crate::bounds::from_splats(payload.preview),
-            // One mid-clip pose (the preview); the canonical rows of a TrigsMotion3D entity.
+            // One mid-clip pose (the preview).
             Self::Asog(payload) => crate::bounds::from_splats(payload.preview),
+            // The canonical rows of a TrigsMotion3D entity.
             Self::Animated { splats, .. } => crate::bounds::from_splats(splats),
         }
     }
