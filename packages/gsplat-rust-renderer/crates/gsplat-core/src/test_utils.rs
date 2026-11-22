@@ -5,8 +5,7 @@ use wgpu::util::DeviceExt as _;
 /// The test device; `GSPLAT_NO_SUBGROUPS=1` withholds `SUBGROUP`, so the whole GPU suite also
 /// checks the workgroup-memory scan and sort kernels.
 pub fn gpu() -> (wgpu::Device, wgpu::Queue) {
-    let subgroups = std::env::var_os(crate::NO_SUBGROUPS_ENV).is_none_or(|v| v != "1");
-    gpu_with(subgroups)
+    gpu_with(crate::subgroups_allowed())
 }
 
 /// The test device with or without `SUBGROUP` (which the adapter must offer when requested).

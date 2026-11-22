@@ -7,7 +7,9 @@
 
 mod camera;
 mod device_caps;
-pub use device_caps::{NO_SUBGROUPS_ENV, check_adapter, compute_limits, required_features};
+pub use device_caps::{
+    NO_SUBGROUPS_ENV, check_adapter, compute_limits, required_features, subgroups_allowed,
+};
 pub mod asog;
 mod gpu;
 mod kernels;
