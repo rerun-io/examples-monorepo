@@ -133,12 +133,17 @@ def postprocess_moge_v2_normal(
 def postprocess_moge_v2_geometry(
     graph_output: MoGeV2GeometryGraphOutput,
     output_hw: tuple[int, int],
+    *,
+    fov_x: float | None = None,
 ) -> MoGeV2GeometryOutput:
     """Recover metric pinhole geometry and resize it to caller resolution.
 
     Args:
         graph_output: Float32 full-head outputs at network resolution.
         output_hw: Caller output height and width.
+        fov_x: Known horizontal field of view in degrees of the caller image (a calibrated camera, ``2 atan(w / 2 fx)``;
+            MoGe assumes a centred principal point), solved with the caller aspect ``output_hw``. None: MoGe recovers
+            the focal together with the shift on the network grid's aspect.
 
     Returns:
         Owning float32 depth, points, normals, mask, normalized intrinsics,
@@ -152,11 +157,13 @@ def postprocess_moge_v2_geometry(
     network_width: int = points_bnhw3.shape[2]
 
     recovery_mask_bnhw: Bool[Tensor, "b nh nw"] = mask_bnhw > 0.5
-    aspect_ratio: float = network_width / network_height
+    # A known focal belongs to the caller image, so its fov needs the caller aspect (upstream ``infer``); the recovered
+    # focal path keeps the network grid's aspect.
+    aspect_ratio: float = network_width / network_height if fov_x is None else output_hw[1] / output_hw[0]
     camera: CameraRecovery = recover_shift_and_intrinsics(
         graph_output.points_bhw3.float(),
         recovery_mask_bnhw,
-        fov_x=None,
+        fov_x=fov_x,  # pyrefly: ignore[bad-argument-type]  # a float is a numbers.Number at runtime
         aspect_ratio=aspect_ratio,
     )
     shift_b: Float32[Tensor, "b"] = camera.shift_b.float()
@@ -223,9 +230,12 @@ class _MoGeV2Predictor(ABC):
         """Predict owning unit normals and validity at caller resolution."""
         return postprocess_moge_v2_normal(self.forward_normals(rgb_bhw3), (rgb_bhw3.shape[1], rgb_bhw3.shape[2]))
 
-    def predict_geometry(self, rgb_bhw3: UInt8[Tensor, "b h w 3"]) -> MoGeV2GeometryOutput:
-        """Predict owning metric depth, points, normals, validity, and intrinsics at caller resolution."""
-        return postprocess_moge_v2_geometry(self.forward_geometry(rgb_bhw3), (rgb_bhw3.shape[1], rgb_bhw3.shape[2]))
+    def predict_geometry(self, rgb_bhw3: UInt8[Tensor, "b h w 3"], *, fov_x: float | None = None) -> MoGeV2GeometryOutput:
+        """Predict owning metric depth, points, normals, validity, and intrinsics at caller resolution.
+
+        ``fov_x``: known horizontal field of view in degrees (``postprocess_moge_v2_geometry``); None recovers it.
+        """
+        return postprocess_moge_v2_geometry(self.forward_geometry(rgb_bhw3), (rgb_bhw3.shape[1], rgb_bhw3.shape[2]), fov_x=fov_x)
 
 
 class MoGeV2TorchPredictor(_MoGeV2Predictor):
