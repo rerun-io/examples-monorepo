@@ -32,10 +32,9 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
 from simplecv.catalog_rig_layout import CatalogCamera, CatalogRigLayout, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, catalog_keyframes, catalog_video_from_table
-from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_decode import StreamDecoder
 from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from open4dgs.catalog_clip import RESAMPLE_CHUNK, ClipRoi, MultiViewClip, fit_max_side, resample_frames, roi_grid, scale_intrinsics, valid_mask
 from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera
@@ -314,13 +313,8 @@ def read_timed_clip(
         positions: list[int] = [int(np.argmin(np.abs(stream_times[start:] - t))) for t in times_s[index]]
         if np.abs(stream_times[start:][positions] - times_s[index]).max() > 1e-6:
             raise ValueError(f"{video}: some clip frames have no packet")
-        decoder: VideoDecoder = VideoDecoder(
-            wrap_mp4(stream.samples[start:], stream.keyframes[start:], max(1, round(fps)), codec=stream.codec),
-            device=decode_on,
-            seek_mode="exact",
-            num_ffmpeg_threads=0,
-        )
-        decoded: UInt8[Tensor, "t 3 h w"] = decoder.get_frames_at(positions).data
+        decoder = StreamDecoder(stream, start, len(stream.samples), str(decode_on), max(1, round(fps)))
+        decoded: UInt8[Tensor, "t 3 h w"] = decoder.frames([start + p for p in positions]).permute(0, 3, 1, 2)
         if (decoded.shape[3], decoded.shape[2]) != stored_wh:
             raise ValueError(f"{video}: decoded {decoded.shape[3]}x{decoded.shape[2]}, the pinhole says {stored_wh}")
         out_frames.append(
