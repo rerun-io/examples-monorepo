@@ -20,7 +20,6 @@ def test_fused_ssim_is_the_backend_and_equals_the_valid_map_mean() -> None:
     pytest.importorskip("fused_ssim", reason="fused-ssim comes from recipes/fused-ssim-src (open4dgs envs)")
     from torchmetrics.functional import structural_similarity_index_measure
 
-    losses._SSIM_BACKEND = None
     assert losses._get_ssim_backend() == "fused"
     gen = torch.Generator(device="cuda").manual_seed(0)
     # A smooth target and a noisy, shifted prediction: an (H, W, 3) render / ground-truth pair as the trainer passes it.
