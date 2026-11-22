@@ -135,7 +135,7 @@ def run_app(
 
             def pump() -> bytes:
                 """New recording bytes, for the viewer and the saved recording."""
-                data: bytes = stream.read()
+                data: bytes = stream.read() or b""
                 file.write(data)
                 return data
 

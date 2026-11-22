@@ -69,7 +69,7 @@ def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatc
     class BlockingStreamer:
         """A run that holds upstream's observers until it is stopped, then takes a while to clean up."""
 
-        def __init__(self, _config: RunConfig, _recording: object, previews: bool) -> None:
+        def __init__(self, _config: RunConfig, _recording: object, previews: bool, person: object = None) -> None:
             self.stop: threading.Event = threading.Event()
 
         def on_stage(self, *_args: object) -> None:
@@ -91,10 +91,10 @@ def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatc
     monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
     monkeypatch.setattr(app, "PUMP_SECONDS", 0.05)
     video: str = str(tmp_path / "clip.mp4")
-    first = app.run_app(video, 6, 42)
+    first = app.run_app(video, 6, 42, False, 100)
     assert next(first)[1].startswith("Running")
     first.close()  # Stop: the page cancels the request, which closes its generator
-    statuses: list[str] = [status for _, status in app.run_app(video, 6, 42)]
+    statuses: list[str] = [status for _, status in app.run_app(video, 6, 42, False, 100)]
     assert statuses[0] == "Waiting for the previous run to stop…"
     assert statuses[-1].startswith("Done")
     (_, first_end), (second_start, _) = runs
