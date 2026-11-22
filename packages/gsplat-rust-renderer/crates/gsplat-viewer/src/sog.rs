@@ -86,7 +86,7 @@ impl Payload<'_> {
         let (scene, dequantize) = match path {
             Dequantize::Gpu => {
                 let scene =
-                    core.upload_sog(&ctx.queue, &decoded.quantization, &decoded.planes(), None)?;
+                    core.upload_sog(&ctx.queue, &decoded.quantization, &decoded.planes())?;
                 (scene, None)
             }
             Dequantize::Cpu => {

@@ -12,7 +12,7 @@ use crate::asog::{AsogParts, MOTION_CODES};
 use crate::gpu::{Kernel, bind, storage, uniform};
 use crate::trigs::{AsogMotion, ClipWindow, TrigsMotion};
 
-/// Per-row motion for [`crate::Renderer::upload_animated`] and [`crate::Renderer::upload_sog`].
+/// Per-row motion for [`crate::Renderer::upload_animated`].
 #[derive(Clone, Copy)]
 pub enum Motion<'a> {
     Twist(&'a TrigsMotion<'a>),
