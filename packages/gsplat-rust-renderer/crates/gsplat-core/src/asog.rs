@@ -313,9 +313,60 @@ fn shaped(
     Ok(values)
 }
 
-/// The whole file -> [`Asog`]. `active_threshold` is the temporal cut the motion is evaluated with
-/// ([`crate::trigs::ASOG_ACTIVE_THRESHOLD`] = the format's constant).
+/// The entropy-decoded file before the static de-quantisation: SOG v2 texel planes (for `sog_dequant.wgsl` or the
+/// CPU [`crate::sog::dequantize`]) and the de-quantised motion.
+#[derive(Clone, Debug)]
+pub struct AsogParts {
+    pub manifest: Manifest,
+    pub quantization: Quantization,
+    pub means_l: Vec<u8>,
+    pub means_u: Vec<u8>,
+    pub quats: Vec<u8>,
+    pub scales: Vec<u8>,
+    pub sh0: Vec<u8>,
+    /// SH bands, palette entries, label plane, centroid plane.
+    pub sh: Option<(u32, usize, Vec<u8>, Vec<u8>)>,
+    pub motion: AsogMotion,
+}
+
+impl AsogParts {
+    /// The texel planes as [`Planes`] (borrowed).
+    pub fn planes(&self) -> Planes<'_> {
+        Planes {
+            means_l: &self.means_l,
+            means_u: &self.means_u,
+            quats: &self.quats,
+            scales: &self.scales,
+            sh0: &self.sh0,
+            sh: self
+                .sh
+                .as_ref()
+                .map(|(bands, count, labels, centroids)| ShPlanes {
+                    bands: *bands,
+                    palette_count: *count,
+                    labels,
+                    centroids,
+                }),
+        }
+    }
+}
+
+/// The whole file -> [`Asog`], with the static part de-quantised on the CPU.
+///
+/// `active_threshold` is the temporal cut the motion is evaluated with ([`crate::trigs::ASOG_ACTIVE_THRESHOLD`] = the format's constant).
 pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
+    let parts = decode_parts(bytes, active_threshold)?;
+    let canonical = sog::dequantize(&parts.quantization, &parts.planes())?;
+    Ok(Asog {
+        manifest: parts.manifest,
+        canonical,
+        motion: parts.motion,
+    })
+}
+
+/// Entropy decode (zlib streams, un-delta / un-zigzag), static integers packed as SOG v2 texels, motion
+/// de-quantised. No static de-quantisation: [`decode`] or `sog_dequant.wgsl` do that.
+pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
     let container = parse(bytes)?;
     let m = &container.manifest;
     let n = m.count;
@@ -398,28 +449,17 @@ pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
             None => [0.0; 256],
         },
     };
-    let canonical = sog::dequantize(
-        &quantization,
-        &Planes {
-            means_l,
-            means_u,
-            quats: quat_plane,
-            scales: scale_plane,
-            sh0: sh0_plane,
-            sh: sh_n
-                .as_ref()
-                .map(|(bands, count, labels, centroids)| ShPlanes {
-                    bands: *bands,
-                    palette_count: *count,
-                    labels,
-                    centroids,
-                }),
-        },
-    )?;
     let motion = decode_motion(&container, &means, &opacity, active_threshold)?;
-    Ok(Asog {
+    let [means_l, means_u, quats, scales, sh0] = planes;
+    Ok(AsogParts {
         manifest: container.manifest,
-        canonical,
+        quantization,
+        means_l,
+        means_u,
+        quats,
+        scales,
+        sh0,
+        sh: sh_n,
         motion,
     })
 }

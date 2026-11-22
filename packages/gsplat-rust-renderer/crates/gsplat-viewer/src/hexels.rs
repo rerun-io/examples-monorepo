@@ -150,6 +150,7 @@ fn draw_hexel_entity(
             re_log_types::hash::Hash64::from_u64(hasher.finish()),
             Primitives::Hexels(&hexels),
             RenderMode::Default,
+            0.0,
         )?;
     }
     Ok(retry)

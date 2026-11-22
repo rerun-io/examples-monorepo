@@ -1,14 +1,15 @@
 //! `AnimatedSogSplats3D`: an animated-sog `.asog` v1 clip logged as its file bytes beside a static
 //! `GaussianSplats3D` preview (one mid-clip pose) on the same entity.
 //!
-//! When the payload is present the compute visualizer draws it instead of the preview rows: the file is decoded once
-//! per payload row (`gsplat_core::asog`, CPU), the motion is evaluated on the CPU whenever the clip time changes
-//! (`gsplat_core::trigs::AsogMotion`, f32, straight into gsplat-core `Splats`: no 8-bit colour or opacity) and the
-//! result goes through the ordinary scene upload. Time: `t [s] = (frame - frame_origin) / frameRate` with the
-//! manifest's frameRate (see `crate::trigs::clip_seconds`).
+//! When the payload is present the compute visualizer draws it instead of the preview rows. Default (GPU) path: the
+//! file is entropy-decoded once per payload row on the CPU (zlib streams; the motion de-quantisation runs there too),
+//! the static part is de-quantised by `sog_dequant.wgsl` and the motion is evaluated per view by `trigs_deform.wgsl`
+//! whenever the time cursor moves: no CPU work and no upload on a time change. `GSPLAT_MOTION=cpu` selects the CPU
+//! oracle path (decode + `AsogMotion::evaluate_into` per time change + a scene upload), for A/B pixels.
+//! Time: `t [s] = (frame - frame_origin) / frameRate` with the manifest's frameRate (see `crate::trigs::clip_seconds`).
 use gsplat_core::Splats;
 use gsplat_core::asog::Asog;
-use re_viewer::external::{re_log, re_log_types, re_sdk_types, re_viewer_context};
+use re_viewer::external::{re_log, re_log_types, re_renderer, re_sdk_types, re_viewer_context};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,6 +21,95 @@ pub(crate) fn components() -> [re_sdk_types::ComponentIdentifier; 3] {
     FIELDS.map(|field| {
         re_sdk_types::ComponentIdentifier::from_archetype_field(ARCHETYPE.into(), field)
     })
+}
+
+/// Where the motion is evaluated; the GPU pass is the default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MotionPath {
+    Gpu,
+    Cpu,
+}
+
+impl MotionPath {
+    /// `GSPLAT_MOTION=cpu` selects the CPU oracle path (native only; the web build has no environment).
+    pub(crate) fn from_env() -> Self {
+        static PATH: std::sync::OnceLock<MotionPath> = std::sync::OnceLock::new();
+        *PATH.get_or_init(|| match std::env::var("GSPLAT_MOTION").as_deref() {
+            Ok("cpu") => Self::Cpu,
+            _ => Self::Gpu,
+        })
+    }
+}
+
+/// What the visualizer needs before the payload is decoded: the clip's frame rate and the capacity inputs.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Info {
+    pub fps: f64,
+    pub count: usize,
+    pub max_degree: u32,
+}
+
+/// One entity's `.asog` payload plus the preview rows (bounds, and the native fallback).
+pub(crate) struct Payload<'a> {
+    pub bytes: &'a [u8],
+    pub active_threshold: f32,
+    pub info: Info,
+    pub preview: &'a gsplat_core::native::NativeSplats<'a>,
+}
+
+impl Payload<'_> {
+    /// Entropy decode + motion de-quantisation on the CPU, static de-quantisation in `sog_dequant.wgsl` (or the CPU
+    /// with `GSPLAT_SOG_DECODE=cpu`), motion uploaded for the per-view pass. Logs the load-time split.
+    pub(crate) fn upload(
+        &self,
+        ctx: &re_renderer::RenderContext,
+        core: &gsplat_core::Renderer,
+        path: crate::sog::Dequantize,
+    ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
+        re_tracing::profile_function!();
+        let start = web_time::Instant::now();
+        let parts = gsplat_core::asog::decode_parts(self.bytes, self.active_threshold)?;
+        let entropy = start.elapsed();
+        let start = web_time::Instant::now();
+        let motion = gsplat_core::Motion::Asog(&parts.motion);
+        let (scene, cpu) = match path {
+            crate::sog::Dequantize::Gpu => (
+                core.upload_sog(
+                    &ctx.queue,
+                    &parts.quantization,
+                    &parts.planes(),
+                    Some(motion),
+                )?,
+                None,
+            ),
+            crate::sog::Dequantize::Cpu => {
+                let splats = gsplat_core::sog::dequantize(&parts.quantization, &parts.planes())?;
+                let cpu = start.elapsed();
+                (core.upload_animated(&splats, motion)?, Some(cpu))
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        let total = start.elapsed();
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let split = cpu.map_or_else(
+            || format!("upload + de-quantise GPU {:.1} ms", ms(total)),
+            |cpu| {
+                format!(
+                    "de-quantise CPU {:.1} ms, upload {:.1} ms",
+                    ms(cpu),
+                    ms(total.saturating_sub(cpu))
+                )
+            },
+        );
+        re_log::info!(
+            "ASOG decode: {} splats, SH degree {}, zlib + motion de-quantise CPU {:.1} ms, {split}; motion on the GPU",
+            re_format::format_uint(scene.len()),
+            parts.sh.as_ref().map_or(0, |s| s.0),
+            ms(entropy),
+        );
+        Ok(scene)
+    }
 }
 
 struct Entry {
@@ -34,6 +124,8 @@ struct Entry {
 pub(crate) struct AsogCache {
     frame: u64,
     entries: HashMap<u64, Entry>,
+    /// Manifest facts per payload generation (GPU path; nothing decoded).
+    infos: HashMap<u64, (Result<Info, String>, u64)>,
 }
 
 impl re_viewer_context::Cache for AsogCache {
@@ -44,6 +136,7 @@ impl re_viewer_context::Cache for AsogCache {
     fn begin_frame(&mut self) {
         self.entries
             .retain(|_, entry| entry.last_frame + 1 >= self.frame);
+        self.infos.retain(|_, (_, seen)| *seen + 1 >= self.frame);
         self.frame += 1;
     }
 
@@ -79,6 +172,31 @@ pub(crate) struct Evaluated {
 }
 
 impl AsogCache {
+    /// Header + manifest only, once per `generation`.
+    pub(crate) fn info(&mut self, generation: u64, bytes: &[u8]) -> Result<Info, String> {
+        let frame = self.frame;
+        let (info, seen) = self.infos.entry(generation).or_insert_with(|| {
+            let info = gsplat_core::asog::parse(bytes)
+                .map(|c| {
+                    let m = &c.manifest;
+                    Info {
+                        fps: m.timeline.frame_rate,
+                        count: m.count,
+                        max_degree: m.sh_n.as_ref().map_or(0, |sh| match sh.coeffs {
+                            0..=3 => 1,
+                            4..=8 => 2,
+                            9..=15 => 3,
+                            _ => 4,
+                        }),
+                    }
+                })
+                .map_err(|e| e.to_string());
+            (info, frame)
+        });
+        *seen = frame;
+        info.clone()
+    }
+
     /// Decode `bytes` once per `generation`; evaluate again only when the clip time changes.
     pub(crate) fn evaluate(
         &mut self,

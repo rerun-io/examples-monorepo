@@ -12,6 +12,8 @@ pub mod asog;
 mod gpu;
 mod kernels;
 mod lens;
+mod motion_gpu;
+pub use motion_gpu::Motion;
 pub mod native;
 mod output;
 mod primitives;
@@ -74,6 +76,9 @@ pub enum Error {
 
     #[error(transparent)]
     Sog(#[from] sog::Error),
+
+    #[error(transparent)]
+    Asog(#[from] asog::Error),
 
     #[error("too many splats: {0}")]
     TooManySplats(#[from] std::num::TryFromIntError),

@@ -219,6 +219,17 @@ impl ViewState {
                 })
         };
         encoder.clear_buffer(&scratch.counts, 0, None);
+        if let Some(deform) = &mut self.deform {
+            // One motion dispatch per time change; the projector then reads this view's evaluated rows.
+            deform.encode(
+                encoder,
+                queue,
+                &kernels.trigs_deform,
+                index,
+                options.time,
+                None,
+            );
+        }
         dispatch_direct(
             encoder,
             &stages.forward,
