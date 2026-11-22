@@ -261,6 +261,7 @@ def _compute_priors(config: Config) -> ComputePriors:
             dataset=dataset,
             output_dir=config.prior_output_dir,
             max_side=config.max_side,
+            reader="catalog" if config.selfcap_time_start_s is None else "selfcap",
             batch_size=config.prior_batch_size,
         )
         print(

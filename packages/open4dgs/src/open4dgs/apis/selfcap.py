@@ -144,6 +144,7 @@ def _prior(config: Config) -> None:
         dataset=config.register_dataset,
         output_dir=config.output_root / "prior",
         max_side=config.max_side,
+        reader="selfcap",
         register=config.register,
         batch_size=2,
     )

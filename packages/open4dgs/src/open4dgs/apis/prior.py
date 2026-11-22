@@ -63,6 +63,7 @@ def main(config: Config) -> None:
         dataset=target,
         output_dir=config.output_dir,
         max_side=config.max_side,
+        reader="catalog",
         register=config.register,
         batch_size=config.batch_size,
         resolution_level=config.resolution_level,

@@ -14,7 +14,7 @@ import math
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
@@ -32,6 +32,13 @@ from torch import Tensor
 from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip
 from open4dgs.prior import ClipPriors, encode_normals
 
+ClipReader: TypeAlias = Literal["catalog", "selfcap"]
+"""Which reader made the clip: ``catalog_clip.read_catalog_clip`` or ``selfcap_clip.read_timed_clip``."""
+LOADERS: dict[ClipReader, str] = {
+    "catalog": "open4dgs.catalog_clip.read_catalog_clip (undistorted)",
+    "selfcap": "open4dgs.selfcap_clip.read_timed_clip",
+}
+"""The ``loader`` the layer records for each reader."""
 PRIOR_LAYER: str = "moge2_prior"
 """Catalog layer name of the MoGe-2 prior maps."""
 MODEL_NAME: str = "moge-2-vitl-normal"
@@ -71,8 +78,11 @@ def as_stored(priors: ClipPriors) -> ClipPriors:
     return dataclasses.replace(priors, depth=depth)
 
 
-def layer_properties(clip: MultiViewClip, source: str, max_side: int | None, resolution_level: int) -> dict[str, str | int | float]:
-    """The ``moge2_prior`` recording property: model, source, window, sizes and the camera grid (``roi_properties``)."""
+def layer_properties(
+    clip: MultiViewClip, source: str, max_side: int | None, resolution_level: int, *, reader: ClipReader
+) -> dict[str, str | int | float]:
+    """The ``moge2_prior`` recording property: model, source, window, sizes, the reader that made ``clip`` and the camera
+    grid (``roi_properties``)."""
     return {
         "model": MODEL_NAME,
         "predictor": "MoGeV2TorchPredictor fp16 autocast",
@@ -85,7 +95,7 @@ def layer_properties(clip: MultiViewClip, source: str, max_side: int | None, res
         "max_side": max_side or 0,
         "cameras": ",".join(clip.camera_names),
         "image_sizes": ",".join(f"{w}x{h}" for w, h in clip.sizes),
-        "loader": "open4dgs.catalog_clip.read_catalog_clip (undistorted)",
+        "loader": LOADERS[reader],
         **roi_properties(clip),
     }
 
@@ -99,6 +109,7 @@ def compute_prior_layer(
     dataset: str,
     output_dir: Path,
     max_side: int | None,
+    reader: ClipReader,
     register: bool = True,
     batch_size: int = 8,
     resolution_level: int = 9,
@@ -121,7 +132,7 @@ def compute_prior_layer(
     timings: dict[str, float] = {"moge_s": time.perf_counter() - t0, "images": float(len(clip.camera_names) * len(clip.frame_indices))}
     del predictor
     torch.cuda.empty_cache()
-    properties = layer_properties(clip, source, max_side, resolution_level)
+    properties = layer_properties(clip, source, max_side, resolution_level, reader=reader)
     grid: str = hashlib.sha1(
         "|".join(str(properties[k]) for k in ("frame_start", "frame_end", "cameras", "image_sizes", "max_side", "roi", "roi_cameras")).encode()
     ).hexdigest()[:10]

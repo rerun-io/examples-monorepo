@@ -375,3 +375,13 @@ def test_prior_defaults_and_location() -> None:
     assert prior_location(spark) == ("rerun+http://pablo-dl-server:51235", "open4dgs-mamma")
     explicit = Config(prior_catalog_url="rerun+http://elsewhere:1", prior_dataset="d")
     assert prior_location(explicit) == ("rerun+http://elsewhere:1", "d")
+
+
+def test_prior_layer_records_the_reader_that_made_the_clip() -> None:
+    from open4dgs.prior_layer import layer_properties
+
+    clip = _roi_clip(None)
+    catalog = layer_properties(clip, "src", 640, 9, reader="catalog")
+    selfcap = layer_properties(clip, "src", 640, 9, reader="selfcap")
+    assert catalog["loader"] == "open4dgs.catalog_clip.read_catalog_clip (undistorted)"
+    assert selfcap["loader"] == "open4dgs.selfcap_clip.read_timed_clip"
