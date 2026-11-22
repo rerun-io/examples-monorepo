@@ -1,0 +1,6 @@
+[package]
+name = "romav2-src"
+version = "2.0.1.95c9968"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
