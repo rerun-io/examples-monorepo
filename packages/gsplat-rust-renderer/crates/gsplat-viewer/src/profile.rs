@@ -14,6 +14,19 @@ pub static ENABLED: AtomicBool = AtomicBool::new(false);
 const SLOTS: u32 = gsplat_core::QUERY_COUNT + 2;
 const LOG_EVERY_S: f64 = 3.0;
 
+/// Whether a browser with this user agent may write the splat frame's GPU timestamps.
+///
+/// Not on Apple GPUs (macOS, iPadOS, iOS: every browser there runs WebGPU on Metal). With the ten per-pass timestamp
+/// writes, Chrome 158 (Dawn) fails the frame's Metal command buffer with "Insufficient Memory
+/// (kIOGPUCommandBufferCallbackErrorOutOfMemory)" and Safari 27.2 loses the device the same way; the viewer then
+/// panics in `re_renderer`'s write belt ("getMappedRange failed"). Resolving in a later submit does not help. Native
+/// Metal stage times are off for a related reason (gsplat-cli `speed`: unreliable on Metal).
+pub fn timestamps_allowed(user_agent: &str) -> bool {
+    !["Macintosh", "iPhone", "iPad"]
+        .iter()
+        .any(|apple| user_agent.contains(apple))
+}
+
 pub(crate) fn requested() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -134,5 +147,29 @@ impl ViewProfile {
             }
             busy.store(false, Ordering::Release);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timestamps_allowed;
+
+    #[test]
+    fn apple_user_agents_get_no_timestamps() {
+        // Chrome 158 and Safari 27.2 on the Mac mini (M4), Safari on an iPad (it reports Macintosh) and an iPhone.
+        for apple in [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Safari/605.1.15",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 27_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (iPad; CPU OS 27_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/158.0 Mobile/15E148 Safari/604.1",
+        ] {
+            assert!(!timestamps_allowed(apple), "{apple}");
+        }
+        for other in [
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.8059.12 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+        ] {
+            assert!(timestamps_allowed(other), "{other}");
+        }
     }
 }

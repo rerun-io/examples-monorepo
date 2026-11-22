@@ -20,7 +20,7 @@ re_viewer = { version = "=0.42.0", default-features = false, features = ["defaul
 re_log = "=0.42.0"
 wasm-bindgen = "=0.2.129"
 # The page URL, for ?force_no_subgroups=1.
-web-sys = { version = "0.3", features = ["Location", "Window"] }
+web-sys = { version = "0.3", features = ["Location", "Navigator", "Window"] }
 wgpu = "=30.0.0"
 
 # Rerun 0.42 hooks (patches/re_viewer-0.42.0-web-hooks.patch) and the WebGPU "subgroups" feature mapping that
