@@ -1,0 +1,114 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+index 5835f14..2d52d2e 100644
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -3455,7 +3455,7 @@ class TrigsTrainer:
+     def _knn_mean_positions(src: Tensor, tgt: Tensor, k: int) -> Tensor:
+         k = max(1, min(k, tgt.shape[0]))
+         try:
+-            from pytorch3d.ops import knn_points
++            from open4dgs.pytorch3d_ops import knn_points
+             res = knn_points(src.unsqueeze(0), tgt.unsqueeze(0), K=k)
+             nn_idx = res.idx.squeeze(0)
+         except ImportError:
+@@ -3547,7 +3547,7 @@ class TrigsTrainer:
+             pts = means
+ 
+         try:
+-            from pytorch3d.ops import knn_points
++            from open4dgs.pytorch3d_ops import knn_points
+             pts_batched = pts.unsqueeze(0)
+             result = knn_points(pts_batched, pts_batched, K=k + 1)
+             idx = result.idx.squeeze(0)[:, 1:]
+diff --git a/src/trigs/core/trainer_ply_upstream.py b/src/trigs/core/trainer_ply_upstream.py
+index 5a31529..fdd6c29 100644
+--- a/src/trigs/core/trainer_ply_upstream.py
++++ b/src/trigs/core/trainer_ply_upstream.py
+@@ -666,7 +666,7 @@ class TrigsTrainer:
+                 [means, config.fps_time_weight * scene_extent * t_norm_fps],
+                 dim=-1,
+             ).unsqueeze(0)  # [1, N, 4]
+-            from pytorch3d.ops import sample_farthest_points
++            from open4dgs.pytorch3d_ops import sample_farthest_points
+             _, idx = sample_farthest_points(
+                 pts4d, K=config.target_count, random_start_point=False,
+             )
+@@ -971,7 +971,7 @@ class TrigsTrainer:
+         """
+         k = max(1, min(k, tgt.shape[0]))
+         try:
+-            from pytorch3d.ops import knn_points
++            from open4dgs.pytorch3d_ops import knn_points
+             res = knn_points(src.unsqueeze(0), tgt.unsqueeze(0), K=k)
+             nn_idx = res.idx.squeeze(0)                  # [Ns, k]
+         except ImportError:
+@@ -1120,7 +1120,7 @@ class TrigsTrainer:
+             pts = means
+ 
+         try:
+-            from pytorch3d.ops import knn_points
++            from open4dgs.pytorch3d_ops import knn_points
+             pts_batched = pts.unsqueeze(0)
+             result = knn_points(pts_batched, pts_batched, K=k + 1)
+             idx = result.idx.squeeze(0)[:, 1:]  # drop self
+diff --git a/src/trigs/init/from_colmap.py b/src/trigs/init/from_colmap.py
+index 869137e..cca7988 100644
+--- a/src/trigs/init/from_colmap.py
++++ b/src/trigs/init/from_colmap.py
+@@ -62,7 +62,7 @@ def _knn_distance(points: Tensor, k: int = 4) -> Tensor:
+     k_eff = max(1, min(k, n_points - 1))
+ 
+     try:
+-        from pytorch3d.ops import knn_points
++        from open4dgs.pytorch3d_ops import knn_points
+ 
+         res = knn_points(points.unsqueeze(0), points.unsqueeze(0), K=k_eff + 1)
+         dists = res.dists.squeeze(0).sqrt()[:, 1:]
+diff --git a/src/trigs/init/from_colmap_hybrid.py b/src/trigs/init/from_colmap_hybrid.py
+index f962620..a20ca8c 100644
+--- a/src/trigs/init/from_colmap_hybrid.py
++++ b/src/trigs/init/from_colmap_hybrid.py
+@@ -234,7 +234,7 @@ def _apply_selfcap_fps(
+     ]
+ 
+     try:
+-        from pytorch3d.ops import sample_farthest_points
++        from open4dgs.pytorch3d_ops import sample_farthest_points
+ 
+         chunk_size = max(int(fps_chunk_size), 1)
+         for chunk_start in range(0, len(all_means), chunk_size):
+diff --git a/src/trigs/init/from_selfcap.py b/src/trigs/init/from_selfcap.py
+index d2698c0..31be009 100644
+--- a/src/trigs/init/from_selfcap.py
++++ b/src/trigs/init/from_selfcap.py
+@@ -80,7 +80,7 @@ def _knn_mean_positions(src: Tensor, tgt: Tensor, k: int) -> Tensor:
+     """For each row of ``src``, mean 3-D position of its k nearest neighbors in tgt."""
+     k = max(1, min(k, tgt.shape[0]))
+     try:
+-        from pytorch3d.ops import knn_points
++        from open4dgs.pytorch3d_ops import knn_points
+         res = knn_points(src.unsqueeze(0), tgt.unsqueeze(0), K=k)
+         nn_idx = res.idx.squeeze(0)
+     except ImportError:
+@@ -336,7 +336,7 @@ def build_canonical_from_pcd_sequence(
+         chunk_size = max(int(fps_chunk_size), 1)
+ 
+         try:
+-            from pytorch3d.ops import sample_farthest_points
++            from open4dgs.pytorch3d_ops import sample_farthest_points
+ 
+             for chunk_start in range(0, len(all_means), chunk_size):
+                 chunk_ids = list(range(chunk_start, min(chunk_start + chunk_size, len(all_means))))
+diff --git a/src/trigs/math/twist_init.py b/src/trigs/math/twist_init.py
+index aa9e867..4f6a160 100644
+--- a/src/trigs/math/twist_init.py
++++ b/src/trigs/math/twist_init.py
+@@ -32,7 +32,7 @@ def local_knn_indices(points: Tensor, k: int) -> Tensor:
+ 
+     k_eff = max(1, min(int(k), N - 1))
+     try:
+-        from pytorch3d.ops import knn_points
++        from open4dgs.pytorch3d_ops import knn_points
+ 
+         res = knn_points(points.unsqueeze(0), points.unsqueeze(0), K=k_eff + 1)
+         return res.idx.squeeze(0)[:, 1:].contiguous()
