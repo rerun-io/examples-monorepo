@@ -37,7 +37,8 @@ from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
-from open4dgs.catalog_clip import RESAMPLE_CHUNK, MultiViewClip, fit_max_side, resample_frames, scale_intrinsics
+from open4dgs.catalog_clip import RESAMPLE_CHUNK, ClipRoi, MultiViewClip, fit_max_side, resample_frames, roi_grid, scale_intrinsics, valid_mask
+from open4dgs.roi_cameras import VirtualCamera, fit_virtual_camera
 
 VIDEO_TIMELINE: str = "video_time"
 """SelfCap's aligned clock (OAK-left video PTS as cut), a duration timeline."""
@@ -196,6 +197,8 @@ def read_timed_clip(
     joints_entity: str = JOINTS_ENTITY,
     decode_device: torch.device | None = None,
     storage_device: torch.device | None = None,
+    roi: bool = False,
+    roi_pad: float = 0.15,
 ) -> TimedClip:
     """Read ``num_frames`` consecutive frames from ``time_start_s`` (``video_time`` seconds) of a SelfCap segment's phones.
 
@@ -203,6 +206,8 @@ def read_timed_clip(
         cameras: Camera names (``rig_00/cam_00``); None reads every camera whose node has ``calib_status == "ok"``
             (the four exo phones; the OAK and Quest rigs carry no such column).
         max_side: Longer side of the returned frames; None keeps the stored size.
+        roi: Person-centred virtual cameras (``open4dgs.roi_cameras``) framing the joints over the window plus head
+            proxies (``selfcap_init.joint_box_points``), padded by ``roi_pad``; ``max_side`` caps their size.
 
     Raises:
         ValueError: If a camera is missing, uncalibrated or lensed, a camera has no frame near a reference time, or the
@@ -273,6 +278,17 @@ def read_timed_clip(
         .to_arrow_table()
     )
     fps: float = float(round(1.0 / period, 3))
+    joints: ClipJoints | None = read_joints(entry, segment_id, joints_entity, float(times_s.min()) - 0.2, float(times_s.max()) + 0.2)
+    roi_points: Float32[ndarray, "n 3"] | None = None
+    if roi:
+        from open4dgs.selfcap_init import joint_box_points
+
+        if joints is None:
+            raise ValueError(f"roi: segment {segment_id} has no joints at {joints_entity}")
+        window: Float32[ndarray, "t j 3"] = joints.at(np.unique(times_s))
+        roi_points = joint_box_points(window, np.array([0.0, 1.0, 0.0])).reshape(-1, 3)
+    virtual: list[VirtualCamera] = []
+    valid: list[Bool[Tensor, "h w"]] = []
     out_frames: list[UInt8[Tensor, "t h w 3"]] = []
     stored_sizes: list[tuple[int, int]] = []
     K: Float32[Tensor, "c 3 3"] = torch.empty((len(chosen), 3, 3), dtype=torch.float32)
@@ -285,6 +301,13 @@ def read_timed_clip(
             raise ValueError(f"{segment_id} {camera.name}: no static Pinhole")
         stored_wh: tuple[int, int] = (int(resolution[0]), int(resolution[1]))
         target_wh: tuple[int, int] = fit_max_side(*stored_wh, max_side)
+        source_K: Float64[ndarray, "3 3"] = matrix.reshape(3, 3).T
+        pose: Float64[ndarray, "4 4"] = static_world_T_cam(static, camera.transform_entity)
+        grid: Float32[Tensor, "1 h w 2"] | None = None
+        grid_wh: tuple[int, int] = stored_wh
+        if roi_points is not None:
+            virtual.append(fit_virtual_camera(roi_points, source_K, pose, stored_wh, roi_pad, max_side))
+            grid, grid_wh, target_wh = roi_grid(None, virtual[-1], decode_on), virtual[-1].sample_size, virtual[-1].size
         stream: CatalogVideo = catalog_video_from_table(packets, video, VIDEO_TIMELINE, f"{segment_id} {video}")
         stream_times: Float64[ndarray, " n"] = stream.t_ns.astype(np.float64) / 1e9
         start: int = int(np.flatnonzero(np.asarray(stream.keyframes))[0])
@@ -303,19 +326,24 @@ def read_timed_clip(
         out_frames.append(
             torch.cat(
                 [
-                    resample_frames(decoded[s : s + RESAMPLE_CHUNK], None, target_wh).permute(0, 2, 3, 1).to(store_on)
+                    resample_frames(decoded[s : s + RESAMPLE_CHUNK], grid, target_wh).permute(0, 2, 3, 1).to(store_on)
                     for s in range(0, len(decoded), RESAMPLE_CHUNK)
                 ]
             )
         )
         stored_sizes.append(stored_wh)
-        K[index] = torch.from_numpy(scale_intrinsics(matrix.reshape(3, 3).T, stored_wh, target_wh).astype(np.float32))
-        world_T_cam[index] = torch.from_numpy(static_world_T_cam(static, camera.transform_entity).astype(np.float32))
-        del decoder, decoded
+        valid.append(valid_mask(grid, grid_wh, target_wh))
+        if roi_points is not None:
+            K[index] = torch.from_numpy(virtual[-1].K.astype(np.float32))
+            world_T_cam[index] = torch.from_numpy(virtual[-1].world_T_virtual(pose).astype(np.float32))
+        else:
+            K[index] = torch.from_numpy(scale_intrinsics(source_K, stored_wh, target_wh).astype(np.float32))
+            world_T_cam[index] = torch.from_numpy(pose.astype(np.float32))
+        del decoder, decoded, grid
     clip = MultiViewClip(
         camera_names=tuple(camera.name for camera in chosen),
         frames=tuple(out_frames),
-        valid=tuple(torch.ones((f.shape[1], f.shape[2]), dtype=torch.bool) for f in out_frames),
+        valid=tuple(valid),
         K=K,
         world_T_cam=world_T_cam,
         fps=fps,
@@ -323,6 +351,6 @@ def read_timed_clip(
         people=None,
         stored_sizes=tuple(stored_sizes),
         lenses=tuple(None for _ in chosen),
+        roi=ClipRoi(pad=roi_pad, max_side=max_side, cameras=tuple(virtual)) if roi_points is not None else None,
     )
-    joints: ClipJoints | None = read_joints(entry, segment_id, joints_entity, float(times_s.min()) - 0.2, float(times_s.max()) + 0.2)
     return TimedClip(clip=clip, times_s=times_s, joints=joints)

@@ -70,6 +70,9 @@ class Config:
     """``init`` (moge): one depth fit per camera over the window, or one per camera and keyframe."""
     init_name: str = "moge"
     """``init``: file ``<output_root>/init/open4dgs-selfcap/<segment>__<init_name>.rrd``."""
+    roi: bool = False
+    """``prior``: read the clip with person-centred virtual cameras (the prior must match the training grid; the layer file gets
+    a ``.roi`` suffix and replaces the registered ``moge2_prior`` layer)."""
     png_dir: Path | None = Path("/mnt/nas/ssd-8tb/scratch/open4dgs/runs/s1")
 
 
@@ -131,14 +134,14 @@ def _prior(config: Config) -> None:
     from open4dgs.prior import compute_clip_priors, register_prior_layer, write_prior_layer
 
     timed: TimedClip = read_timed_clip(
-        config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames, max_side=config.max_side
+        config.catalog_url, config.dataset, config.segment_id, config.time_start_s, config.num_frames, max_side=config.max_side, roi=config.roi
     )
     clip = timed.clip
     predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=9)
     started: float = time.perf_counter()
     priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor, batch_size=2)
     print(f"MoGe-2 {len(clip.camera_names) * config.num_frames} images in {time.perf_counter() - started:.1f} s")
-    path: Path = config.output_root / "prior" / config.register_dataset / f"{config.segment_id}.moge2_prior.rrd"
+    path: Path = config.output_root / "prior" / config.register_dataset / f"{config.segment_id}.moge2_prior{'.roi' if config.roi else ''}.rrd"
     write_prior_layer(
         path,
         config.segment_id,
@@ -150,7 +153,7 @@ def _prior(config: Config) -> None:
             "frame_start": int(clip.frame_indices[0]),
             "num_frames": config.num_frames,
             "max_side": config.max_side or 0,
-            "loader": "open4dgs.selfcap_clip.read_timed_clip",
+            "loader": f"open4dgs.selfcap_clip.read_timed_clip(roi={config.roi})",
         },
     )
     path.parent.chmod(0o775)

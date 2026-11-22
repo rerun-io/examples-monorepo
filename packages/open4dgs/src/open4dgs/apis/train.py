@@ -81,6 +81,8 @@ class Config:
     """Score rendered depth against the SMPL-X mesh depth at the held-out cameras (mesh frames only)."""
     selfcap_time_start_s: float | None = None
     """Read a SelfCap segment (phones on ``video_time``, ``open4dgs.selfcap_clip``) from this time instead of ``frame_start``."""
+    selfcap_roi: bool = False
+    """With ``selfcap_time_start_s``: person-centred virtual cameras framing the joints (``read_timed_clip(roi=True)``)."""
     init_rrd: Path | None = None
     """Use this init-cloud recording (``open4dgs.apis.selfcap --stage init``) instead of the body-surface init."""
 
@@ -184,7 +186,7 @@ def main(config: Config) -> dict[str, object]:
         from open4dgs.selfcap_clip import read_timed_clip
 
         clip: MultiViewClip = read_timed_clip(
-            config.catalog_url, config.dataset, config.segment_id, config.selfcap_time_start_s, config.num_frames, cameras=config.cameras, max_side=config.max_side
+            config.catalog_url, config.dataset, config.segment_id, config.selfcap_time_start_s, config.num_frames, cameras=config.cameras, max_side=config.max_side, roi=config.selfcap_roi
         ).clip
     else:
         clip = read_catalog_clip(
@@ -300,6 +302,7 @@ def main(config: Config) -> dict[str, object]:
         "max_side": config.max_side or 0,
         "init_method": init.method,
         "init_rrd": str(config.init_rrd or ""),
+        "selfcap_roi": config.selfcap_roi,
         "selfcap_time_start_s": config.selfcap_time_start_s if config.selfcap_time_start_s is not None else -1.0,
         "samples_per_person": config.samples_per_person,
         "keyframe_step": config.keyframe_step,
