@@ -8,7 +8,7 @@ with each other (PSNR of decoded vs uncompressed renders). ``decoded_cut05`` ren
 v1 temporal cut (0.05) instead of the trainer's (0.01): what a stock ``.asog`` player shows.
 
 The ``.asog`` also goes into a Rerun recording, ``<run>/asog.rrd`` (``--rrd``): the file verbatim as the custom gsplat
-viewer's ``AnimatedSogSplats3D`` payload (``open4dgs.asog_rrd``) with ``frame_origin`` = the clip's first frame, a stock
+viewer's ``AnimatedSogSplats3D`` payload (``gsplat_rust_renderer.sog3d.log_asog``) with ``frame_origin`` = the clip's first frame, a stock
 preview of the clip-middle pose on the same entity, and the run's cameras, SMPL-X meshes and ``ViewCoordinates`` as
 ``open4dgs-export-splats`` logs them. It is registered as layer ``asog`` of the run on open4dgs-runs (``--no-register``).
 """
@@ -25,6 +25,8 @@ import numpy as np
 import torch
 from asog import Asog
 from asog import read as read_asog
+from gsplat_rust_renderer.asog_decode import parse_asog
+from gsplat_rust_renderer.sog3d import PREVIEW_ROWS, log_asog
 from PIL import Image
 from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 from rerun.chunk import RrdReader
@@ -32,7 +34,6 @@ from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
 from open4dgs.apis.export_splats import run_property, run_recording
 from open4dgs.asog import AsogSettings, decode_asog, encode_params, tiny_omega_fraction
-from open4dgs.asog_rrd import PREVIEW_ROWS, log_asog
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
@@ -168,12 +169,11 @@ def write_rrd(config: Config, asog_path: Path, out: Path) -> dict[str, object]:
     reader: RrdReader = RrdReader(config.run / "run.rrd")
     frame_start: int = run_property(reader, "frame_start")
     cut: float = ASOG_CUT_FORMAT if config.asog_cut == "format" else TrigsTrainingConfig().temporal_active_threshold
-    data: bytes = asog_path.read_bytes()
     clip: Asog = read_asog(asog_path)
     target = np.median(clip.means, axis=0).astype(np.float64)
     recording, view_coordinates, view = run_recording(reader, run_name, out, target)
     t0: float = time.perf_counter()
-    rows: int = log_asog(recording, SPLAT_ENTITY, data, clip, float(frame_start), cut, config.preview_rows)
+    log_asog(SPLAT_ENTITY, parse_asog(asog_path.read_bytes(), str(asog_path)), float(frame_start), cut, config.preview_rows, recording=recording)
     log_s: float = time.perf_counter() - t0
     recording.flush()
     recording.disconnect()
@@ -183,7 +183,7 @@ def write_rrd(config: Config, asog_path: Path, out: Path) -> dict[str, object]:
         "bytes_asog_rrd": out.stat().st_size,
         "frame_origin": frame_start,
         "active_threshold": cut,
-        "preview_rows": rows,
+        "preview_rows_max": config.preview_rows,
         "log_s": log_s,
         "view_coordinates": str(view_coordinates),
         "blueprint_view_id": str(view.id),

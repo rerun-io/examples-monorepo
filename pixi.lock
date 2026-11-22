@@ -58749,6 +58749,7 @@ environments:
       - conda_source: open4dgs-core-src[2ebe254b] @ recipes/open4dgs-core-src
       - conda_source: open4dgs-trigs-src[622d90ac] @ recipes/open4dgs-trigs-src
       - conda_source: romav2-src[fcdacc66] @ recipes/romav2-src
+      - pypi: ./packages/gsplat-rust-renderer
       - pypi: ./packages/hexels-mojo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/monoprior
@@ -59337,6 +59338,7 @@ environments:
       - conda_source: open4dgs-core-src[2ebe254b] @ recipes/open4dgs-core-src
       - conda_source: open4dgs-trigs-src[622d90ac] @ recipes/open4dgs-trigs-src
       - conda_source: romav2-src[fcdacc66] @ recipes/romav2-src
+      - pypi: ./packages/gsplat-rust-renderer
       - pypi: ./packages/hexels-mojo
       - pypi: ./packages/lietorch-mojo
       - pypi: ./packages/monoprior
@@ -188575,6 +188577,7 @@ packages:
   requires_dist:
   - simplecv @ ./packages/simplecv
   - monopriors @ ./packages/monoprior
+  - gsplat-rust-renderer @ ./packages/gsplat-rust-renderer
   requires_python: '>=3.12'
 - pypi: ./packages/posekit
   name: posekit
