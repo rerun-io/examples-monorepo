@@ -142,3 +142,27 @@ def test_crop_raw_counts_silhouette_errors_that_crop_masked_hides() -> None:
 
     empty = score_frame("cam", 0, render, alpha, gt, torch.zeros(40, 40), lpips=lambda _p, _t: 0.0)
     assert math.isnan(empty.crop_raw_psnr) and math.isnan(empty.alpha_iou)
+
+
+def test_window_keyframes_cover_the_last_frame() -> None:
+    from open4dgs.body_init import central_velocity, sample_surface, surface_points, window_keyframes
+
+    vertices, faces = _tetra()
+    shift = torch.tensor([0.01, 0.0, 0.0])
+    track = torch.stack([vertices + shift * float(f) for f in range(60)])  # 60 frames, 0.01 per video frame
+    # MAMMA-like: meshes every 3rd frame, the window ends 2 frames past the last mesh (57) -> 59 is extrapolated.
+    present = torch.zeros(60, dtype=torch.bool)
+    present[::3] = True
+    keyframes, verts, extrapolated = window_keyframes(track, present, 3)
+    assert extrapolated and keyframes.tolist() == [*range(0, 58, 3), 59]
+    assert torch.allclose(verts[-1], track[59], atol=1e-6)  # linear motion: extrapolation is exact
+    samples = sample_surface(vertices, faces, 50, seed=0)
+    positions = torch.stack([surface_points(v, faces, samples) for v in verts])
+    velocity = central_velocity(positions, keyframes)
+    assert torch.allclose(velocity[..., 0], torch.full(velocity.shape[:2], 0.01), atol=1e-5)  # irregular last interval of 2
+    # 4DAnyone-like: a mesh on every frame, 30 frames, grid 0..27 -> frame 29 comes from its own mesh.
+    keyframes, verts, extrapolated = window_keyframes(track[:30], torch.ones(30, dtype=torch.bool), 3)
+    assert not extrapolated and keyframes.tolist() == [*range(0, 28, 3), 29] and torch.equal(verts[-1], track[29])
+    # On the grid (31 frames): unchanged.
+    keyframes, _, extrapolated = window_keyframes(track[:31], torch.ones(31, dtype=torch.bool), 3)
+    assert not extrapolated and keyframes.tolist() == list(range(0, 31, 3))

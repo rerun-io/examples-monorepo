@@ -5,6 +5,13 @@ sample is the same body point at every keyframe. Keyframes are the clip frames t
 ``keyframe_step`` frames (MAMMA stores meshes every 3rd frame, 4DAnyone every frame). Velocity is the central
 difference of the sample's position between neighbouring mesh frames, in world units per VIDEO frame.
 
+The window's last frame is always a keyframe (``window_keyframes``): when it is off the grid it is added, from its own
+mesh when it has one, else extrapolated linearly from the last two mesh keyframes (MAMMA: meshes every 3rd frame, so a
+60-frame window from 99 ends 2 frames past the last mesh). Without it, frames past the last keyframe lose their
+Gaussians to the temporal falloff (MAMMA held-out crop PSNR f156 33.8 -> f158 28.5 dB). TRiGS takes the irregular
+last interval as is: our init goes in without ``source_frame_start``, so no row is dropped by the stride filter, and
+every row keeps its own normalised time and per-video-frame velocity.
+
 Colours come from the TRAINING cameras only: a point is seen by a camera when its face normal faces the camera and
 its depth passes a z-buffer built from all samples of that keyframe (quarter resolution, 2 cm tolerance); the colour
 is the mean over the cameras that see it. Points no camera sees take the mean colour of their person.
@@ -63,6 +70,31 @@ def mesh_keyframes(present: Bool[Tensor, " frames"], keyframe_step: int) -> Int6
     if frames.numel() == 0:
         return frames
     return frames[(frames - frames[0]) % keyframe_step == 0]
+
+
+def window_keyframes(
+    vertices: Float32[Tensor, "frames v 3"], present: Bool[Tensor, " frames"], keyframe_step: int
+) -> tuple[Int64[Tensor, " k"], Float32[Tensor, "k v 3"], bool]:
+    """Keyframes of one person over the window, their vertices, and whether the last one is extrapolated.
+
+    The grid of ``mesh_keyframes`` plus the window's last frame when it is off the grid: its own mesh when present,
+    else the last mesh keyframe moved on by the backward-difference vertex velocity (held when there is only one).
+    """
+    keyframes: Int64[Tensor, " k"] = mesh_keyframes(present, keyframe_step)
+    if keyframes.numel() == 0:
+        return keyframes, vertices[:0], False
+    last: int = int(vertices.shape[0]) - 1
+    if int(keyframes[-1]) == last:
+        return keyframes, vertices[keyframes], False
+    if bool(present[last]):
+        keyframes = torch.cat([keyframes, torch.tensor([last])])
+        return keyframes, vertices[keyframes], False
+    verts: Float32[Tensor, "k v 3"] = vertices[keyframes]
+    end: Float32[Tensor, "v 3"] = verts[-1]
+    if keyframes.numel() >= 2:
+        step: float = float(keyframes[-1] - keyframes[-2])
+        end = verts[-1] + (verts[-1] - verts[-2]) * ((last - int(keyframes[-1])) / step)
+    return torch.cat([keyframes, torch.tensor([last])]), torch.cat([verts, end[None]]), True
 
 
 def central_velocity(positions: Float32[Tensor, "k n 3"], frames: Int64[Tensor, " k"]) -> Float32[Tensor, "k n 3"]:
@@ -142,10 +174,12 @@ def body_surface_init(
     num_frames: int = int(clip.frame_indices.shape[0])
     rows: dict[int, list[tuple[Tensor, Tensor, Tensor]]] = {}
     for person in range(len(people.names)):
-        keyframes: Int64[Tensor, " k"] = mesh_keyframes(people.present[:, person], keyframe_step)
+        keyframes, verts, extrapolated = window_keyframes(people.vertices[:, person], people.present[:, person], keyframe_step)
         if keyframes.numel() == 0:
             raise ValueError(f"{segment_id}: {people.names[person]} has no mesh in the window")
-        verts: Float32[Tensor, "k v 3"] = people.vertices[keyframes, person].to(dev)
+        if extrapolated:
+            print(f"[open4dgs] {people.names[person]}: last frame {num_frames - 1} has no mesh; its keyframe is extrapolated from frame {int(keyframes[-2])}")
+        verts = verts.to(dev)
         samples: SurfaceSamples = sample_surface(verts[0], faces, samples_per_person, seed + person)
         positions: Float32[Tensor, "k n 3"] = torch.stack([surface_points(verts[k], faces, samples) for k in range(len(keyframes))])
         velocities: Float32[Tensor, "k n 3"] = central_velocity(positions, keyframes)
