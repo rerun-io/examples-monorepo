@@ -10,14 +10,16 @@ camera-source keys ``source_width`` / ``source_height``. ``simplecv.catalog_cali
 """
 
 from dataclasses import dataclass
-from typing import overload
+from typing import TypeAlias, overload
 
-import numpy as np
 import torch
 from jaxtyping import Bool, Float64
 from numpy import ndarray
 from serde import serde
 from torch import Tensor
+
+Pixels: TypeAlias = Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]
+"""Float64 pixels as either kind the lens takes."""
 
 VICON_RADIAL_MODEL: str = "vicon_radial_2"
 """The ``camera_model`` value of a Vicon radial camera, and the name of the cell that holds ``[cx, cy, k1, k2, k3]``."""
@@ -49,36 +51,36 @@ class ViconRadialLens:
     def undistort(self, distorted: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 2"]: ...
     @overload
     def undistort(self, distorted: Float64[Tensor, "n 2"]) -> Float64[Tensor, "n 2"]: ...
-    def undistort(self, distorted: Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]) -> Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]:
+    def undistort(self, distorted: Pixels) -> Pixels:
         """Distorted (image) pixels to undistorted (pinhole) pixels, native grid: the release's map."""
         centre, radial = self._parameters_like(distorted)
-        offset = distorted - centre
+        offset: Pixels = distorted - centre
         return centre + offset * _radial_scale(offset, radial)
 
     @overload
     def distort(self, undistorted: Float64[ndarray, "n 2"]) -> Float64[ndarray, "n 2"]: ...
     @overload
     def distort(self, undistorted: Float64[Tensor, "n 2"]) -> Float64[Tensor, "n 2"]: ...
-    def distort(self, undistorted: Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]) -> Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]:
+    def distort(self, undistorted: Pixels) -> Pixels:
         """Undistorted pixels to image pixels by fixed-point inversion, native grid; a point that does not converge is NaN."""
         # Only operators and methods numpy and torch share, so one body serves both kinds.
         centre, radial = self._parameters_like(undistorted)
-        target = undistorted - centre
-        offset = target
+        target: Pixels = undistorted - centre
+        offset: Pixels = target
         for _ in range(LENS_ITERATIONS):
-            step = target / _radial_scale(offset, radial) - offset
+            step: Pixels = target / _radial_scale(offset, radial) - offset
             offset = offset + step
-            moved = abs(step)
-            finite = moved[moved < float("inf")]  # NaN points (behind the camera) stop no one
+            moved: Pixels = abs(step)
+            finite: Float64[ndarray, " k"] | Float64[Tensor, " k"] = moved[moved < float("inf")]  # NaN points (behind the camera) stop no one
             if len(finite) == 0 or not finite.max() > LENS_TOLERANCE_PX:
                 break
-        distorted = centre + offset
-        converged = (abs(self.undistort(distorted) - undistorted) <= LENS_RESIDUAL_PX).all(-1)
+        distorted: Pixels = centre + offset
+        converged: Bool[ndarray, " n"] | Bool[Tensor, " n"] = (abs(self.undistort(distorted) - undistorted) <= LENS_RESIDUAL_PX).all(-1)
         distorted[~converged] = float("nan")
         return distorted
 
     def _parameters_like(
-        self, points: Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"]
+        self, points: Pixels
     ) -> tuple[Float64[ndarray, "2"], Float64[ndarray, "3"]] | tuple[Float64[Tensor, "2"], Float64[Tensor, "3"]]:
         """``centre`` and ``radial`` as the kind of ``points`` (a tensor on their device)."""
         if isinstance(points, Tensor):
@@ -89,9 +91,7 @@ class ViconRadialLens:
         return self.centre, self.radial
 
 
-def _radial_scale(
-    offset: Float64[ndarray, "n 2"] | Float64[Tensor, "n 2"], radial: Float64[ndarray, "3"] | Float64[Tensor, "3"]
-) -> Float64[ndarray, "n 1"] | Float64[Tensor, "n 1"]:
+def _radial_scale(offset: Pixels, radial: Float64[ndarray, "3"] | Float64[Tensor, "3"]) -> Float64[ndarray, "n 1"] | Float64[Tensor, "n 1"]:
     """``1 + k1 r^2 + k2 r^4 + k3 r^6`` of each offset from the centre: the lens, for numpy and torch alike."""
-    r2 = (offset**2).sum(-1)[..., None]
+    r2: Float64[ndarray, "n 1"] | Float64[Tensor, "n 1"] = (offset**2).sum(-1)[..., None]
     return 1.0 + radial[0] * r2 + radial[1] * r2**2 + radial[2] * r2**3
