@@ -21,7 +21,7 @@
 //! - `means_l` / `means_u` RGB: low / high byte of the 16-bit position code `q` per axis (A unused);
 //!   `n = min + (max - min) * q / 65535` (a zero span counts as 1, as splat-transform does),
 //!   position `= sign(n) (exp|n| - 1)` (evaluated as `exp_m1`).
-//! - `quats`: v2 RGB = the three smaller components `c` as `(c / sqrt2 + 0.5) * 255`, in wxyz order without the
+//! - `quats`: v2 RGB = the three smaller components `c` as `(c sqrt2 + 1) / 2 * 255`, in wxyz order without the
 //!   largest, A = 252 + index (wxyz) of the largest (positive, `sqrt(1 - sum c^2)`); A < 252 decodes to identity.
 //!   v3 RGB = exp map `p = (b - 128) / 127`, `q = (cos(pi/2 |p|), p sin(pi/2 |p|) / |p|)` (A unused).
 //! - `scales` RGB: index into the log-scale codebook (A unused).
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(quat_smallest_three([7, 9, 11, 251]), [1.0, 0.0, 0.0, 0.0]);
         // An encoded rotation: 90 degrees about y, wxyz (0.7071, 0, 0.7071, 0): largest = w (index 0, positive),
         // stored x, y, z.
-        let enc = |c: f64| ((c / SQRT_2 + 0.5) * 255.0).round() as u8;
+        let enc = |c: f64| ((c * SQRT_2 + 1.0) * 127.5).round() as u8;
         let h = 0.5f64.sqrt();
         let q = quat_smallest_three([enc(0.0), enc(h), enc(0.0), 252]);
         assert!((q[0] - h).abs() < 5e-3 && (q[2] - h).abs() < 5e-3);
