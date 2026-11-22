@@ -71,15 +71,17 @@ class AsogOptions:
     """Log-sigma bits."""
 
 
-AsogPreset = Literal["band-safe", "upstream"]
+AsogPreset = Literal["band-safe", "small", "upstream"]
 
+_UPSTREAM: AsogOptions = AsogOptions(qp=2.0, qa=8.0, prune=0.3, mbits=14, tbits=11, lsbits=8)
 PRESETS: dict[AsogPreset, AsogOptions] = {
     "band-safe": AsogOptions(qp=0.5, qa=2.0, prune=0.0, mbits=16, tbits=11, lsbits=8),
-    "upstream": AsogOptions(qp=2.0, qa=8.0, prune=0.3, mbits=14, tbits=11, lsbits=8),
+    "small": _UPSTREAM,
+    "upstream": _UPSTREAM,
 }
 """``band-safe`` (our default) keeps held-out PSNR within 1 % of the uncompressed clip on 4DAnyone and MAMMA at
-about 12 MB; ``upstream`` (arrival-space/animated-sog's defaults) halves the file but costs 2.3 % on 4DAnyone run C,
-with dark holes where pruned splats were."""
+about 12 MB (11.9 MB, -0.09 % on 4DAnyone run C); ``small`` = arrival-space/animated-sog's encoder defaults (alias
+``upstream``), a smaller file for web streaming (7.3 MB, -0.39 % on run C with the axis anchor)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +89,7 @@ class AsogSettings:
     """A preset, with any option overridden (``None`` = the preset's value)."""
 
     preset: AsogPreset = "band-safe"
+    """``band-safe``: our default (held-out PSNR within 1 % of the uncompressed clip); ``small``: smaller file for web streaming (``upstream`` is an alias)."""
     qp: float | None = None
     """Motion step: displacement over a splat's visible life, file units x 1e-3 (mm for metres)."""
     qa: float | None = None

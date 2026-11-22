@@ -94,3 +94,12 @@ TRiGS render premultiplied over black, clamped to [0, 1].
 | `full_{psnr,ssim,lpips}` | whole frame, raw render against `gt * mask`; mostly black background, for paper comparison only |
 | `alpha_iou` | IoU of rendered alpha > 0.5 with mask > 0.5 |
 | floors `black`, `mean` | every metric above for an all-black render and for the mean GT colour inside the mask (alpha = mask), per held-out camera and frame (`/eval/holdout/<cam>/floor/<kind>/<name>`, summary `holdout_floor_<kind>_<name>`) |
+
+Every score runs in full float32 (`evaluate.ieee_fp32`): PyTorch's default lets cuDNN convolutions use TF32, which
+made LPIPS depend on the batch shape at the 1e-4 level. Training keeps PyTorch's defaults.
+
+## Animated SOG export
+
+`open4dgs-export-asog` writes a run's checkpoint as an `.asog` file. The default preset `band-safe` keeps held-out
+PSNR within 1 % of the uncompressed clip (about 12 MB); `--settings.preset small` gives a smaller file for web
+streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).
