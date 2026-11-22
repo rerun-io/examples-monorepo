@@ -5,9 +5,10 @@ Layout (timeline ``frame_index`` = the source segment's frame index; ``step`` = 
 - ``/world/cameras/{train|holdout}/rig_NN/cam_00``: static Transform3D (world_T_cam) + ``pinhole`` Pinhole;
 - ``/world/init_cloud``: the init cloud (``open4dgs.init_cloud``);
 - ``/world/people/person_NN/mesh``: the SMPL-X mesh at its frames;
-- ``/eval/{holdout|train}/rig_NN_cam_00/{gt,render,error}``: H.264 VideoStreams (error = |render - gt| of both images
-  composited on black with the ground-truth mask, times 4, clipped);
-- ``/eval/{holdout|train}/rig_NN_cam_00/metrics/<name>``: per-frame Scalars;
+- ``/eval/{holdout|train}/rig_NN_cam_00/{gt,render,error}``: H.264 VideoStreams (error = |raw render - gt * mask|,
+  the ``crop_raw`` comparison, times 4, clipped);
+- ``/eval/{holdout|train}/rig_NN_cam_00/metrics/<name>``: per-frame Scalars (``open4dgs.evaluate.METRIC_NAMES``);
+- ``/eval/holdout/rig_NN_cam_00/floor/{black|mean}/<name>``: the same metrics of the floor renders;
 - ``/eval/orbit/render``: the 360-degree orbit video;
 - ``/train/<tag>``: loss curves on ``step``;
 - recording properties ``run`` (configuration) and ``summary`` (mean metrics, speed).
@@ -25,7 +26,7 @@ from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip
-from open4dgs.evaluate import METRIC_NAMES, CameraRenders
+from open4dgs.evaluate import METRIC_NAMES, CameraRenders, FrameMetrics
 
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 RUNS_DATASET: str = "open4dgs-runs"
@@ -96,16 +97,22 @@ def log_camera_eval(recording: rr.RecordingStream, clip: MultiViewClip, masks: S
     frame_indices: list[int] = clip.frame_indices.tolist()
     gt: Tensor = clip.frames[cam]
     mask: Tensor = masks[cam].float()[..., None]
-    error: Tensor = ((renders.render.float() * mask - gt.float() * mask).abs() * ERROR_GAIN).clamp(0, 255).to(torch.uint8)
+    error: Tensor = ((renders.render.float() - gt.float() * mask).abs() * ERROR_GAIN).clamp(0, 255).to(torch.uint8)
     log_video(recording, f"{base}/gt", gt, frame_indices, clip.fps)
     log_video(recording, f"{base}/render", renders.render, frame_indices, clip.fps)
     log_video(recording, f"{base}/error", error, frame_indices, clip.fps)
-    for name in METRIC_NAMES:
-        values: np.ndarray = np.asarray([getattr(row, name) for row in renders.metrics], dtype=np.float64)
+    log_metric_rows(recording, f"{base}/metrics", renders.metrics)
+    for kind, rows in renders.baselines.items():
+        log_metric_rows(recording, f"{base}/floor/{kind}", rows)
+
+
+def log_metric_rows(recording: rr.RecordingStream, base: str, rows: Sequence[FrameMetrics], names: Sequence[str] = METRIC_NAMES) -> None:
+    """Per-frame Scalars ``<base>/<name>`` on ``frame_index``."""
+    for name in names:
         recording.send_columns(
-            f"{base}/metrics/{name}",
-            indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=[row.frame_index for row in renders.metrics])],
-            columns=rr.Scalars.columns(scalars=values),
+            f"{base}/{name}",
+            indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=[row.frame_index for row in rows])],
+            columns=rr.Scalars.columns(scalars=np.asarray([getattr(row, name) for row in rows], dtype=np.float64)),
         )
 
 

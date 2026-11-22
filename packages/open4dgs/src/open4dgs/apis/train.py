@@ -22,10 +22,10 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
-from open4dgs.evaluate import CameraRenders, Metrics, evaluate_cameras, mean_metrics, render_orbit
+from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evaluate_cameras, mean_metrics, render_orbit
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, log_init_cloud
-from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_people, log_scalars, log_video, register_run
+from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip, untrained_clip
 
 LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
@@ -156,7 +156,7 @@ def main(config: Config) -> dict[str, object]:
     trained: TrainedClip = train_clip(clip, masks, init, config.train, holdout_names, device=device)
     trained.save(run_dir / "trigs_ckpt.pt")
     t0 = time.perf_counter()
-    holdout: list[CameraRenders] = evaluate_cameras(trained, clip, masks, holdout_names, metrics)
+    holdout: list[CameraRenders] = evaluate_cameras(trained, clip, masks, holdout_names, metrics, with_baselines=True)
     train_eval: list[CameraRenders] = (
         # With no held-out camera the training renders are kept for the gt | render PNGs.
         evaluate_cameras(trained, clip, masks, train_names, metrics, keep_renders=not holdout_names) if config.eval_train_cameras else []
@@ -170,6 +170,7 @@ def main(config: Config) -> dict[str, object]:
     summary: dict[str, object] = {
         "holdout": holdout_mean,
         "holdout_init": init_holdout,
+        **{f"holdout_floor_{kind}": mean_metrics([row for cam in holdout for row in cam.baselines[kind]]) for kind in BASELINES},
         "train": train_mean,
         "it_per_s": config.train.steps / trained.train_seconds,
         "train_s": trained.train_seconds,
@@ -187,12 +188,7 @@ def main(config: Config) -> dict[str, object]:
     for renders in holdout:
         log_camera_eval(recording, clip, masks, renders, held_out=True)
     for renders in train_eval:
-        for row_name in ("crop_psnr", "fg_psnr", "full_psnr"):
-            recording.send_columns(
-                f"/eval/train/{renders.camera.replace('/', '_')}/metrics/{row_name}",
-                indexes=[rr.TimeColumn("frame_index", sequence=[row.frame_index for row in renders.metrics])],
-                columns=rr.Scalars.columns(scalars=np.asarray([getattr(row, row_name) for row in renders.metrics], dtype=np.float64)),
-            )
+        log_metric_rows(recording, f"/eval/train/{renders.camera.replace('/', '_')}/metrics", renders.metrics, (*HEADLINE, "fg_psnr", "alpha_iou"))
     log_video(recording, "/eval/orbit/render", orbit, clip.frame_indices.tolist(), clip.fps)
     log_scalars(recording, trained.scalars)
     run_properties = {
@@ -230,7 +226,7 @@ def main(config: Config) -> dict[str, object]:
         )
     )
     recording.send_property("run", rr.AnyValues(**run_properties))  # pyrefly: ignore[bad-argument-type]
-    flat: dict[str, float] = {f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", "train") for k, v in summary[group].items()}  # type: ignore[union-attr]
+    flat: dict[str, float] = {f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train") for k, v in summary[group].items()}  # type: ignore[union-attr]
     flat.update({k: float(v) for k, v in summary.items() if isinstance(v, int | float)})
     recording.send_property("summary", rr.AnyValues(**flat))  # pyrefly: ignore[bad-argument-type]
     recording.flush()
@@ -245,4 +241,18 @@ def main(config: Config) -> dict[str, object]:
     if config.register and config.rr_config.save is None:
         register_run(config.runs_catalog_url, run_dir / "run.rrd", RUNS_DATASET)
     print(json.dumps(summary, indent=2, default=float))
+    print(headline_line(summary))
     return summary
+
+
+def headline_line(summary: dict[str, object]) -> str:
+    """One line: held-out crop_raw PSNR/SSIM/LPIPS, with the init and both floors beside it, plus fg PSNR and alpha IoU."""
+
+    def triple(group: str) -> str:
+        values = summary.get(group)
+        if not isinstance(values, dict) or not values:
+            return "n/a"
+        return "/".join(f"{values[name]:.3f}" if name != HEADLINE[0] else f"{values[name]:.2f}" for name in HEADLINE) + f" fg {values['fg_psnr']:.2f} iou {values['alpha_iou']:.3f}"
+
+    groups = ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train")
+    return "[open4dgs] crop_raw PSNR/SSIM/LPIPS " + "; ".join(f"{group} {triple(group)}" for group in groups)
