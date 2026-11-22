@@ -29,12 +29,11 @@ import torch.nn.functional as F
 from datafusion import col
 from jaxtyping import Float16, Float32, Int64, UInt8
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_layer
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, RESAMPLE_CHUNK, MultiViewClip, resample_images, roi_grid, undistortion_grid
-
-BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 MATTE_NAME: str = "people_matte"
 """Leaf entity of a camera's matte under ``<camera>/pinhole``: ``posekit.mask_layer.MATTE_NAME`` (posekit is not in the
@@ -169,46 +168,32 @@ def write_mask_layer(
     properties: dict[str, str | int | float],
 ) -> None:
     """Write the ``people_matte`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # A derived layer carries no RecordingInfo: on the catalog the last-registered layer would win the segment's start_time.
-    rec = rr.RecordingStream("open4dgs-masks", recording_id=segment_id, send_properties=False)
-    rec.save(path)
-    rec.send_property(MASKS_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
-    for camera, matte in zip(camera_names, mattes, strict=True):
-        entity: str = mask_entity(camera)
-        blobs: list[bytes] = []
-        for frame in matte.numpy():
-            ok, png = cv2.imencode(".png", frame)
-            if not ok:
-                raise RuntimeError(f"PNG encode failed for {entity}")
-            blobs.append(png.tobytes())
-        rec.send_columns(
-            entity,
-            indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=frame_indices)],
-            columns=rr.EncodedImage.columns(blob=blobs, media_type=["image/png"] * len(blobs)),
-        )
-    rec.flush()
-    path.chmod(0o644)
+    with atomic_recording(path, application_id="open4dgs-masks", recording_id=segment_id, send_properties=False) as rec:
+        rec.send_property(MASKS_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
+        for camera, matte in zip(camera_names, mattes, strict=True):
+            entity: str = mask_entity(camera)
+            blobs: list[bytes] = []
+            for frame in matte.numpy():
+                ok, png = cv2.imencode(".png", frame)
+                if not ok:
+                    raise RuntimeError(f"PNG encode failed for {entity}")
+                blobs.append(png.tobytes())
+            rec.send_columns(
+                entity,
+                indexes=[rr.TimeColumn(FRAME_TIMELINE, sequence=frame_indices)],
+                columns=rr.EncodedImage.columns(blob=blobs, media_type=["image/png"] * len(blobs)),
+            )
 
 
 def register_mask_layer(catalog_url: str, dataset: str, path: Path, *, create: bool) -> None:
     """Register ``path`` as layer ``people_matte`` of its segment (replacing an older ``people_matte`` layer of that segment).
 
     ``create`` gets or creates the dataset (a companion dataset such as ``open4dgs-mamma``), retrying once when another
-    worker creates it at the same time.
+    worker creates it at the same time (``simplecv.catalog_layers.ensure_dataset``).
     """
     client = CatalogClient(catalog_url)
-    for attempt in range(2 if create else 0):
-        try:
-            client.create_dataset(dataset, exist_ok=True)
-            break
-        except BeartypeException:
-            raise
-        except Exception:
-            if attempt == 1:  # the first failure may be another worker creating the same dataset
-                raise
-    entry: DatasetEntry = client.get_dataset(dataset)
-    entry.register([path.resolve().as_uri()], layer_name=MASKS_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    entry: DatasetEntry = ensure_dataset(client, dataset) if create else client.get_dataset(dataset)
+    register_layer(entry, [path], MASKS_LAYER)
 
 
 def decode_mask_pngs(blobs: Sequence[bytes], threads: int = DECODE_THREADS) -> list[np.ndarray | None]:

@@ -27,7 +27,6 @@ stored video's), with recording property ``moge2_prior`` (model, window, max_sid
 import dataclasses
 import hashlib
 import math
-import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -44,13 +43,12 @@ from datafusion import col
 from gsplat.utils import depth_to_normal
 from jaxtyping import Bool, Float16, Float32, Int64, UInt8
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_layer
 from simplecv.catalog_rig_layout import catalog_components
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip
-
-BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
 PRIOR_LAYER: str = "moge2_prior"
 """Catalog layer name of the MoGe-2 prior maps."""
@@ -484,53 +482,38 @@ def prior_entity(camera_name: str, kind: Literal["depth", "normals"]) -> str:
 
 def write_prior_layer(path: Path, segment_id: str, priors: ClipPriors, properties: dict[str, str | int | float]) -> None:
     """Write the ``moge2_prior`` layer recording (recording id = ``segment_id``)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rec = rr.RecordingStream("open4dgs-moge2-prior", recording_id=segment_id)
-    rec.save(path)
-    rec.send_property(PRIOR_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
-    frames: Int64[ndarray, " t"] = priors.frame_indices.numpy()
-    for camera, depth, normals in zip(priors.camera_names, priors.depth, priors.normals, strict=True):
-        depth_mm: np.ndarray = (depth.float() * 1000.0).round().clamp(0, 65535).numpy().astype(np.uint16)
-        valid_mm: np.ndarray = depth_mm[depth_mm > 0]
-        lo, hi = (float(np.percentile(valid_mm, 1)), float(np.percentile(valid_mm, 99))) if valid_mm.size else (0.0, 1.0)
-        depth_blobs: list[bytes] = []
-        normal_blobs: list[bytes] = []
-        for f in range(len(frames)):
-            ok_d, png_d = cv2.imencode(".png", depth_mm[f])
-            ok_n, png_n = cv2.imencode(".png", np.ascontiguousarray(normals[f].numpy()[..., ::-1]))  # cv2 writes BGR
-            if not (ok_d and ok_n):
-                raise RuntimeError(f"PNG encode failed for {camera} frame {int(frames[f])}")
-            depth_blobs.append(png_d.tobytes())
-            normal_blobs.append(png_n.tobytes())
-        index = [rr.TimeColumn(FRAME_TIMELINE, sequence=frames)]
-        rec.send_columns(
-            prior_entity(camera, "depth"),
-            indexes=index,
-            columns=rr.EncodedDepthImage.columns(
-                blob=depth_blobs, media_type=["image/png"] * len(frames), meter=[1000.0] * len(frames), depth_range=[[lo, hi]] * len(frames)
-            ),
-        )
-        rec.send_columns(
-            prior_entity(camera, "normals"), indexes=index, columns=rr.EncodedImage.columns(blob=normal_blobs, media_type=["image/png"] * len(frames))
-        )
-    rec.flush()
-    path.chmod(0o644)
+    with atomic_recording(path, application_id="open4dgs-moge2-prior", recording_id=segment_id, send_properties=False) as rec:
+        rec.send_property(PRIOR_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
+        frames: Int64[ndarray, " t"] = priors.frame_indices.numpy()
+        for camera, depth, normals in zip(priors.camera_names, priors.depth, priors.normals, strict=True):
+            depth_mm: np.ndarray = (depth.float() * 1000.0).round().clamp(0, 65535).numpy().astype(np.uint16)
+            valid_mm: np.ndarray = depth_mm[depth_mm > 0]
+            lo, hi = (float(np.percentile(valid_mm, 1)), float(np.percentile(valid_mm, 99))) if valid_mm.size else (0.0, 1.0)
+            depth_blobs: list[bytes] = []
+            normal_blobs: list[bytes] = []
+            for f in range(len(frames)):
+                ok_d, png_d = cv2.imencode(".png", depth_mm[f])
+                ok_n, png_n = cv2.imencode(".png", np.ascontiguousarray(normals[f].numpy()[..., ::-1]))  # cv2 writes BGR
+                if not (ok_d and ok_n):
+                    raise RuntimeError(f"PNG encode failed for {camera} frame {int(frames[f])}")
+                depth_blobs.append(png_d.tobytes())
+                normal_blobs.append(png_n.tobytes())
+            index = [rr.TimeColumn(FRAME_TIMELINE, sequence=frames)]
+            rec.send_columns(
+                prior_entity(camera, "depth"),
+                indexes=index,
+                columns=rr.EncodedDepthImage.columns(
+                    blob=depth_blobs, media_type=["image/png"] * len(frames), meter=[1000.0] * len(frames), depth_range=[[lo, hi]] * len(frames)
+                ),
+            )
+            rec.send_columns(
+                prior_entity(camera, "normals"), indexes=index, columns=rr.EncodedImage.columns(blob=normal_blobs, media_type=["image/png"] * len(frames))
+            )
 
 
 def register_prior_layer(catalog_url: str, dataset: str, path: Path) -> None:
-    """Register ``path`` as layer ``moge2_prior`` of its segment on ``dataset`` (get-or-create with one retry; replaces)."""
-    client = CatalogClient(catalog_url)
-    for attempt in range(2):
-        try:
-            client.create_dataset(dataset, exist_ok=True)
-            break
-        except BeartypeException:
-            raise
-        except Exception:
-            if attempt == 1:  # the first failure may be another worker creating the same dataset
-                raise
-    entry: DatasetEntry = client.get_dataset(dataset)
-    entry.register([path.resolve().as_uri()], layer_name=PRIOR_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    """Register ``path`` as layer ``moge2_prior`` of its segment on ``dataset`` (``ensure_dataset``: get-or-create with one retry; replaces)."""
+    register_layer(ensure_dataset(CatalogClient(catalog_url), dataset), [path], PRIOR_LAYER)
 
 
 def _cell_bytes(cell: object | None) -> bytes | None:

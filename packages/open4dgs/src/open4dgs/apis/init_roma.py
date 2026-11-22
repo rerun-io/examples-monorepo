@@ -20,8 +20,9 @@ import rerun as rr
 import torch
 from jaxtyping import Float32
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient
 from scipy.spatial import KDTree
+from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_layer
 from torch import Tensor
 
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
@@ -130,19 +131,6 @@ def keep_near_mesh(cloud: InitCloud, clip: MultiViewClip, radius_m: float) -> In
     )
 
 
-def get_or_create_dataset(catalog_url: str, name: str, attempts: int = 5) -> DatasetEntry:
-    """The dataset ``name``, created if absent (retried: another worker may create it at the same time)."""
-    client: CatalogClient = CatalogClient(catalog_url)
-    for attempt in range(attempts):
-        try:
-            return client.create_dataset(name, exist_ok=True)
-        except (ConnectionError, RuntimeError, ValueError):
-            if attempt == attempts - 1:
-                raise
-            time.sleep(1.0 + attempt)
-    raise AssertionError("unreachable")
-
-
 class _VramSampler:
     """Peak GPU memory used on the device (nvidia-smi, every 0.5 s): the whole-device figure, other processes included."""
 
@@ -232,34 +220,29 @@ def main(config: Config) -> Path:
     config.output_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(config.output_dir, 0o775)
     rrd_path: Path = config.output_dir / f"{config.segment_id}__roma__f{config.frame_start}-{config.num_frames}.rrd"
-    recording: rr.RecordingStream = rr.RecordingStream(application_id=companion_dataset(config), recording_id=config.segment_id)
-    recording.save(rrd_path)
-    log_init_cloud(cloud, recording)
-    recording.send_property(
-        "init_roma",
-        rr.AnyValues(
-            holdout=list(holdout),
-            init_cameras=list(init_names),
-            num_holdout=config.num_holdout,
-            holdout_seed=config.holdout_seed,
-            max_side=config.max_side or 0,
-            masks=config.masks,
-            camera_neighbors=config.camera_neighbors,
-            wide_baseline_per_camera=config.wide_baseline_per_camera,
-            roma_v2_setting=config.roma_v2_setting,
-            memfof_max_side=config.memfof_max_side,
-            subkeyframe_min_speed=-1.0 if config.subkeyframe_min_speed is None else config.subkeyframe_min_speed,
-            extra_args=" ".join(config.extra_args),
-            init_seconds=init_s,
-        ),
-    )
-    recording.flush()
-    recording.disconnect()
-    os.chmod(rrd_path, 0o644)
+    with atomic_recording(rrd_path, application_id=companion_dataset(config), recording_id=config.segment_id, send_properties=False) as recording:
+        log_init_cloud(cloud, recording)
+        recording.send_property(
+            "init_roma",
+            rr.AnyValues(
+                holdout=list(holdout),
+                init_cameras=list(init_names),
+                num_holdout=config.num_holdout,
+                holdout_seed=config.holdout_seed,
+                max_side=config.max_side or 0,
+                masks=config.masks,
+                camera_neighbors=config.camera_neighbors,
+                wide_baseline_per_camera=config.wide_baseline_per_camera,
+                roma_v2_setting=config.roma_v2_setting,
+                memfof_max_side=config.memfof_max_side,
+                subkeyframe_min_speed=-1.0 if config.subkeyframe_min_speed is None else config.subkeyframe_min_speed,
+                extra_args=" ".join(config.extra_args),
+                init_seconds=init_s,
+            ),
+        )
     print(f"[init-roma] wrote {rrd_path}", flush=True)
 
     if config.register:
-        dataset: DatasetEntry = get_or_create_dataset(config.local_catalog_url, companion_dataset(config))
-        dataset.register([rrd_path.resolve().as_uri()], layer_name=LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+        register_layer(ensure_dataset(CatalogClient(config.local_catalog_url), companion_dataset(config)), [rrd_path], LAYER)
         print(f"[init-roma] registered layer {LAYER} of {config.segment_id} on {config.local_catalog_url} / {companion_dataset(config)}", flush=True)
     return rrd_path

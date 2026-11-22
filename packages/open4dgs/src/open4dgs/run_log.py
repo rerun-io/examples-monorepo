@@ -14,21 +14,20 @@ Layout (timeline ``frame_index`` = the source segment's frame index; ``step`` = 
 - recording properties ``run`` (configuration) and ``summary`` (mean metrics, speed).
 """
 
-import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
 import torch
-from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient
+from simplecv.catalog_layers import ensure_dataset, register_layer
 from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip
 from open4dgs.evaluate import METRIC_NAMES, CameraRenders, FrameMetrics
 
-BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 RUNS_DATASET: str = "open4dgs-runs"
 """Local catalog dataset of training runs (one segment per run)."""
 ERROR_GAIN: float = 4.0
@@ -129,15 +128,5 @@ def log_scalars(recording: rr.RecordingStream, scalars: Mapping[str, list[tuple[
 
 
 def register_run(catalog_url: str, rrd_path: Path, dataset: str = RUNS_DATASET) -> None:
-    """Register ``rrd_path`` as a segment of ``dataset`` (get-or-create with one retry; replaces a same-id segment)."""
-    client: CatalogClient = CatalogClient(catalog_url)
-    for attempt in range(2):
-        try:
-            client.create_dataset(dataset, exist_ok=True)
-            break
-        except BeartypeException:
-            raise
-        except Exception:
-            if attempt == 1:  # the first failure may be another worker creating the same dataset
-                raise
-    client.get_dataset(dataset).register([rrd_path.resolve().as_uri()], on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    """Register ``rrd_path`` as a segment of ``dataset`` (``ensure_dataset``: get-or-create with one retry; replaces a same-id segment)."""
+    register_layer(ensure_dataset(CatalogClient(catalog_url), dataset), [rrd_path], None)
