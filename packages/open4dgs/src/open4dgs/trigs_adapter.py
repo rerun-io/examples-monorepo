@@ -39,6 +39,7 @@ from trigs.init.from_colmap import build_canonical_from_npz
 from open4dgs.catalog_clip import MultiViewClip
 from open4dgs.init_cloud import InitCloud
 from open4dgs.prior import MonoPriorLoss
+from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,10 +252,10 @@ def camera_config(
     device: torch.device,
     rs_signs: tuple[float, ...] | None = None,
 ) -> CameraConfig:
-    """TRiGS cameras from camera-to-world poses (OpenCV RDF): viewmats are world -> camera;
+    """TRiGS cameras from camera-to-world poses (OpenCV RDF): viewmats are world -> camera; sizes as Python ints;
     ``rs_signs`` per camera (``TrainConfig.rs_signs``)."""
     viewmats: Float32[Tensor, "c 4 4"] = torch.linalg.inv(world_T_cam.double()).float().to(device)
-    return CameraConfig.from_matrices(
+    return HostSizedCameraConfig.from_matrices(
         viewmats=viewmats,
         Ks=K.float().to(device).contiguous(),
         widths=[w for w, _ in sizes],
@@ -371,7 +372,7 @@ def train_clip(
             raise ValueError(f"capture_times {capture_times.shape} must be (cameras, frames) = {(len(clip.camera_names), num_frames)}")
         gt_times = capture_times_per_frame(capture_times)
     writer: ScalarLog = ScalarLog()
-    trainer: TrigsTrainer = TrigsTrainer(device=str(dev))
+    trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
     torch.cuda.reset_peak_memory_stats(dev)
     torch.cuda.synchronize(dev)
