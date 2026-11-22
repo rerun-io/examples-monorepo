@@ -73,6 +73,11 @@ the run through four layouts:
    progress (step, it/s, ETA), then the person in 3D, playing with the views.
 
 The page fits the window. One run at a time; Stop ends the run at the next stage, denoising step or training step.
+Each run saves what the viewer showed as `data/app-runs/<run_id>.rrd` beside its run directory.
+
+On a GPU shared with other jobs, pass `--gpu-lock <file>` (e.g. `/tmp/gpu-5090.lock`): the app holds that flock only
+while a run is on the GPU and says "Waiting for the GPU" until it gets it. Do not wrap the whole app in `flock`: an app
+idles most of its life, and that would block every other job for as long as it is up.
 
 ## Speed
 

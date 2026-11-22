@@ -6,6 +6,8 @@ module only adds the widgets, a worker thread, the byte pump into the viewer and
 """
 
 import dataclasses
+import fcntl
+import os
 import threading
 import time
 import uuid
@@ -77,6 +79,9 @@ class Config:
     """Interface on which Gradio listens."""
     server_port: int = 7873
     """Gradio HTTP port."""
+    gpu_lock: Path | None = None
+    """On a shared GPU host: a lock file held exclusively (flock) around each run, never while the app idles. Wrapping
+    the whole app in ``flock`` would hold the GPU for the app's lifetime and block every other job."""
 
 
 class _RunSlot:
@@ -88,6 +93,8 @@ class _RunSlot:
         self.lock: threading.Lock = threading.Lock()
         self.worker: threading.Thread | None = None
         """The worker of the latest run; Stop reports "Stopping…" while it is alive."""
+        self.gpu_lock: Path | None = None
+        """``Config.gpu_lock``."""
         self.stop: threading.Event | None = None
         """The latest run's stop event. Stop sets it itself: cancelling the Gradio event does not close the run's
         generator, so the generator's ``finally`` cannot be relied on to stop the worker."""
@@ -117,6 +124,8 @@ def run_app(
     streamer: RunStreamer = RunStreamer(config, recording, previews=True, person=person)
     errors: list[BaseException] = []
 
+    gpu_lock: int | None = None
+
     def work() -> None:
         try:
             streamer.run()
@@ -124,15 +133,34 @@ def run_app(
             errors.append(error)
         finally:
             recording.disconnect()  # closes the saved .rrd, stopped runs included; the stream keeps its unread bytes
+            if gpu_lock is not None:
+                os.close(gpu_lock)  # releases the flock
             SLOT.lock.release()
 
     while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
         yield b"", "Waiting for the previous run to stop…"
+    if SLOT.gpu_lock is not None:
+        try:
+            gpu_lock = os.open(SLOT.gpu_lock, os.O_RDWR | os.O_CREAT, 0o664)
+            while True:
+                try:
+                    fcntl.flock(gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    yield b"", "Waiting for the GPU (another job holds it)…"
+                    time.sleep(PUMP_SECONDS)
+        except BaseException:
+            if gpu_lock is not None:
+                os.close(gpu_lock)
+            SLOT.lock.release()
+            raise
     worker: threading.Thread = threading.Thread(target=work, name=f"fdanyone-{run_id}", daemon=True)
     started: float = time.perf_counter()
     try:
         worker.start()
     except BaseException:
+        if gpu_lock is not None:
+            os.close(gpu_lock)
         SLOT.lock.release()
         raise
     SLOT.worker = worker
@@ -199,6 +227,7 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
 
 def launch(demo: gr.Blocks, config: Config) -> None:
     """Serve ``demo``, one run at a time (the GPU holds one pipeline)."""
+    SLOT.gpu_lock = config.gpu_lock
     demo.queue(max_size=1, default_concurrency_limit=1)
     demo.launch(
         server_name=config.server_name,

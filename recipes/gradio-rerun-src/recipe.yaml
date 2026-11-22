@@ -8,7 +8,7 @@
 #
 # Consumed by the fdanyone-rerun envs only (the PyPI wheel in [feature.common] stays for the other apps; the fdanyone
 # envs do not compose it). Cold build on the 5090 box: about 11.5 min (cargo 10 min, wasm-opt 41 s, pnpm 3 s, gradio cc
-# build 34 s) and 3.8 GB of scratch; pixi rebuilds it whenever a file in the filtered gsplat source changes.
+# build 34 s) and 3.8 GB of scratch; pixi rebuilds it whenever one of the gsplat source files listed below changes.
 context:
   commit: c456457a4ec58faabd0f2aaab5054e3e84814286
 
@@ -22,22 +22,33 @@ source:
     target_directory: gradio-rerun-viewer
     patches:
       - patches/0001-web-viewer-gsplat-build.patch
-  # Only what the web build reads: the three crates it links, the crates.io patches and the build script.
-  - path: ../../packages/gsplat-rust-renderer
+  # Only what the web build reads, one path source each: pixi fingerprints every file under a path source (the
+  # rattler-build filter does not narrow that), so the whole package directory would rebuild this on every ruff cache,
+  # __pycache__ or cargo target/ write. The root Cargo.toml carries the workspace the three crates inherit from.
+  - path: ../../packages/gsplat-rust-renderer/Cargo.toml
     target_directory: gsplat-rust-renderer
     use_gitignore: false
-    filter:
-      include:
-        - Cargo.toml
-        - patches/**
-        - crates/gsplat-core/**
-        - crates/gsplat-viewer/**
-        - crates/gsplat-viewer-web/**
-        - gsplat_rust_renderer/__init__.py
-        - gsplat_rust_renderer/apis/__init__.py
-        - gsplat_rust_renderer/apis/build_web_viewer.py
-      exclude:
-        - "**/target/**"
+  - path: ../../packages/gsplat-rust-renderer/patches
+    target_directory: gsplat-rust-renderer/patches
+    use_gitignore: false
+  - path: ../../packages/gsplat-rust-renderer/crates/gsplat-core
+    target_directory: gsplat-rust-renderer/crates/gsplat-core
+    use_gitignore: false
+  - path: ../../packages/gsplat-rust-renderer/crates/gsplat-viewer
+    target_directory: gsplat-rust-renderer/crates/gsplat-viewer
+    use_gitignore: false
+  - path: ../../packages/gsplat-rust-renderer/crates/gsplat-viewer-web/src
+    target_directory: gsplat-rust-renderer/crates/gsplat-viewer-web/src
+    use_gitignore: false
+  - path: ../../packages/gsplat-rust-renderer/crates/gsplat-viewer-web/Cargo.toml
+    target_directory: gsplat-rust-renderer/crates/gsplat-viewer-web
+    use_gitignore: false
+  - path: ../../packages/gsplat-rust-renderer/crates/gsplat-viewer-web/Cargo.lock
+    target_directory: gsplat-rust-renderer/crates/gsplat-viewer-web
+    use_gitignore: false
+  - path: ../../packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py
+    target_directory: gsplat-rust-renderer/gsplat_rust_renderer/apis
+    use_gitignore: false
   # The stock @rerun-io/web-viewer 0.42.0 package: the shell around our re_viewer.js / re_viewer_bg.wasm.
   - url: https://registry.npmjs.org/@rerun-io/web-viewer/-/web-viewer-0.42.0.tgz
     sha256: 3cafc3d643d63c2d4d16da11e2be6e89532afe790fc2fa1146947be360227348
@@ -45,7 +56,7 @@ source:
 
 build:
   # Bump with every patch or build script change (the build string hash does not follow the recipe content).
-  number: 0
+  number: 1
   noarch: python
   script:
     file: build.sh
