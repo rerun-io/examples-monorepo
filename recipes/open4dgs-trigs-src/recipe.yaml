@@ -38,11 +38,17 @@ source:
     # Python ints for width_for/height_for; the time and background-colour scalars are built once per value
     # (TrigsTrainer._const_tensor); the 0-255 mask check is a tensor op; one dynamic-row any() per step, not three.
     - patches/0004-fewer-host-syncs-per-step.patch
+    # Performance fix, maths unchanged: when every camera of a train step renders at one time (no learned time offsets,
+    # no rolling shutter, one capture time per frame), the active-row query, the per-row gather and the deform run once
+    # per step instead of once per camera. Their outputs enter each camera's graph as detached leaves; each camera's
+    # backward accumulates into them and one backward after the camera loop carries the sum through deform and gather.
+    # Renders are bit-identical; parameter gradients differ only in summation order.
+    - patches/0005-one-deform-per-step-time.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 2
+  number: 3
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.
