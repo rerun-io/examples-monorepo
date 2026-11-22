@@ -1,9 +1,8 @@
 """The Gradio app builds without a GPU and refuses a run without a video."""
 
-import gradio as gr
-
 from pathlib import Path
 
+import gradio as gr
 import pytest
 
 from fdanyone_rerun.gradio_ui import app

@@ -88,6 +88,9 @@ class _RunSlot:
         self.lock: threading.Lock = threading.Lock()
         self.worker: threading.Thread | None = None
         """The worker of the latest run; Stop reports "Stopping…" while it is alive."""
+        self.stop: threading.Event | None = None
+        """The latest run's stop event. Stop sets it itself: cancelling the Gradio event does not close the run's
+        generator, so the generator's ``finally`` cannot be relied on to stop the worker."""
 
 
 SLOT: _RunSlot = _RunSlot()
@@ -128,6 +131,7 @@ def run_app(
         SLOT.lock.release()
         raise
     SLOT.worker = worker
+    SLOT.stop = streamer.stop
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     saved: Path = RUNS_DIR / f"{run_id}.rrd"
     try:
@@ -154,7 +158,10 @@ def run_app(
 
 
 def stop_status() -> Iterator[str]:
-    """Stop's status line: "Stopping…" until the stopped run's worker has exited."""
+    """Stop the latest run (its worker stops the subprocess at once, the rest at the next stage, denoising step or
+    training step); the status line says "Stopping…" until the worker has exited."""
+    if SLOT.stop is not None:
+        SLOT.stop.set()
     worker: threading.Thread | None = SLOT.worker
     while worker is not None and worker.is_alive():
         yield "Stopping…"
