@@ -56,3 +56,15 @@ def test_sample_farthest_points_per_item_k_and_lengths_pad_with_minus_one() -> N
             torch.testing.assert_close(sampled[b, k], pts[b, idx[b, k]])
         else:
             assert (sampled[b, k] == 0).all()
+
+
+def test_knn_points_adaptive_chunks_equal_fixed_chunks() -> None:
+    gen = torch.Generator().manual_seed(4)
+    p1 = torch.rand((1, 3000, 3), generator=gen)
+    p2 = torch.rand((1, 2500, 3), generator=gen)
+    fixed = knn_points(p1, p2, K=5, chunk_size=4096)  # one chunk: the pre-2026-11-21 behaviour at this size
+    tiny_budget = knn_points(p1, p2, K=5, memory_budget=64 * 2500 * 4)  # 64 rows per chunk
+    torch.testing.assert_close(tiny_budget.dists, fixed.dists, rtol=0, atol=0)
+    assert torch.equal(tiny_budget.idx, fixed.idx)
+    padded = knn_points(p1, p2, lengths2=torch.tensor([2000]), K=5, memory_budget=100 * 2500 * 4)
+    assert int(padded.idx.max()) < 2000
