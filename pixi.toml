@@ -4412,6 +4412,11 @@ cmd = "python tools/apps/prior.py"
 cwd = "packages/open4dgs"
 description = "MoGe-2 depth + normals on a clip's training frames (undistorted, max_side), registered as catalog layer moge2_prior"
 
+[feature.open4dgs.tasks.open4dgs-export-splats]
+cmd = "python tools/apps/export_splats.py"
+cwd = "packages/open4dgs"
+description = "Per-frame Gaussian splats of a trained run (--run <run dir>): <run>/splats.rrd with the run's cameras and meshes, registered as layer splats on open4dgs-runs (CPU; open in packages/gsplat-rust-renderer)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════

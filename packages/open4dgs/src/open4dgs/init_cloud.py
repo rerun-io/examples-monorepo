@@ -210,3 +210,53 @@ def read_init_cloud(rrd_path: Path, entity: str = INIT_CLOUD_ENTITY) -> InitClou
         durations=durations.reshape(-1, 1) if durations is not None else None,
         **flags,
     )
+
+
+def read_layer_init_cloud(catalog_url: str, dataset: str, segment_id: str, layer: str) -> tuple[InitCloud, tuple[str, ...]]:
+    """The init cloud of ``segment_id``'s catalog layer ``layer`` and the held-out cameras it was built without.
+
+    The held-out cameras are the layer's ``<layer>:holdout`` property (``open4dgs-init-roma`` writes it).
+
+    Raises:
+        ValueError: When the segment has no such layer, the layer is not a local file, or it records no held-out cameras.
+    """
+    from urllib.parse import unquote, urlparse
+
+    from rerun.catalog import CatalogClient
+
+    client: CatalogClient = CatalogClient(catalog_url)  # keep the client alive while the table is read (DataFusion FFI)
+    table = client.get_dataset(dataset).segment_table().to_arrow_table()
+    rows: list[dict[str, object]] = [row for row in table.to_pylist() if row["rerun_segment_id"] == segment_id]
+    if not rows:
+        raise ValueError(f"{dataset}: no segment {segment_id}")
+    names: list[str] = list(rows[0]["rerun_layer_names"])  # type: ignore[arg-type]
+    if layer not in names:
+        raise ValueError(f"{dataset}/{segment_id}: no layer {layer!r} (layers {names})")
+    url = urlparse(list(rows[0]["rerun_storage_urls"])[names.index(layer)])  # type: ignore[arg-type]
+    if url.scheme != "file":
+        raise ValueError(f"{dataset}/{segment_id}: layer {layer!r} is not a local file ({url.geturl()})")
+    holdout = rows[0].get(f"property:{layer}:holdout")
+    if not holdout:
+        raise ValueError(f"{dataset}/{segment_id}: layer {layer!r} records no held-out cameras (property {layer}:holdout)")
+    return read_init_cloud(Path(unquote(url.path))), tuple(str(name) for name in holdout)  # type: ignore[union-attr]
+
+
+def check_init_matches_run(
+    init: InitCloud, init_holdout: tuple[str, ...], holdout_names: tuple[str, ...], frame_start: int, num_frames: int
+) -> None:
+    """Refuse an init built for another split or window.
+
+    Raises:
+        ValueError: When the init's held-out cameras differ from the run's (as sets), or its window
+            (``source_frame_start``, ``frame_end``) differs from the run's.
+    """
+    if set(init_holdout) != set(holdout_names):
+        raise ValueError(
+            f"the init held out {sorted(init_holdout)} but the run holds out {sorted(holdout_names)}: "
+            "an init that saw a held-out camera would leak it; pass --holdout-cameras " + " ".join(init_holdout)
+        )
+    if init.source_frame_start != frame_start or init.frame_end != num_frames - 1:
+        raise ValueError(
+            f"the init covers frames {init.source_frame_start}..{init.source_frame_start + init.frame_end}, the run "
+            f"{frame_start}..{frame_start + num_frames - 1}: use --frame-start {init.source_frame_start} --num-frames {init.frame_end + 1}"
+        )

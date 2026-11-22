@@ -22,11 +22,23 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
-from open4dgs.evaluate import CameraGeometry, CameraRenders, Metrics, evaluate_cameras, evaluate_geometry, mean_geometry, mean_metrics, render_orbit
+from open4dgs.evaluate import (
+    BASELINES,
+    HEADLINE,
+    CameraGeometry,
+    CameraRenders,
+    Metrics,
+    evaluate_cameras,
+    evaluate_geometry,
+    mean_geometry,
+    mean_metrics,
+    render_orbit,
+)
 from open4dgs.holdout import select_holdout
-from open4dgs.init_cloud import InitCloud, log_init_cloud
+from open4dgs.init_cloud import check_init_matches_run, log_init_cloud, read_layer_init_cloud
 from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals, read_clip_priors
-from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_people, log_scalars, log_video, register_run
+from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
+from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip, untrained_clip
 
 LOCAL_CATALOG: str = "rerun+http://pablo-dl-server:51235"
@@ -37,7 +49,7 @@ class Config:
     """One training run."""
 
     rr_config: RerunTyroConfig = field(default_factory=lambda: RerunTyroConfig(headless=True))
-    """Rerun sinks; with no ``save`` the run writes ``<runs_root>/<run_name>/run.rrd`` (recording id = run name)."""
+    """Rerun sinks. ``save`` defaults to ``<runs_root>/<run_name>/run.rrd`` and ``recording_id`` to the run name; the saved file is always registered (``--no-register`` turns that off)."""
     catalog_url: str = LOCAL_CATALOG
     """Catalog that holds the segment's frames, cameras and meshes."""
     dataset: str = "fdanyone-views"
@@ -54,15 +66,19 @@ class Config:
     max_side: int | None = 640
     """Longer side of the training frames; None keeps the stored size."""
     roi: Literal["people"] | None = None
-    """``people``: train on person-centred virtual cameras (``open4dgs.roi_cameras``); held-out metrics are then on the ROI frames."""
+    """``people``: person-centred virtual cameras (roi_cameras.py) instead of the full frame; metrics are then on the ROI views."""
     roi_pad: float = 0.15
-    """Padding of the ROI box on every side (fraction)."""
+    """ROI margin around the people's angular box (fraction)."""
     mask_source: Literal["layer", "mesh"] = "layer"
     """``layer``: the catalog ``masks`` layer (open4dgs.masks); ``mesh``: dilated SMPL-X silhouette (stand-in, development only)."""
     mask_catalog_url: str | None = None
     """Catalog of the masks layer (default ``catalog_url``; MAMMA masks live on the local ``open4dgs-mamma``)."""
     mask_dataset: str | None = None
     """Dataset of the masks layer (default ``dataset``)."""
+    init: Literal["body", "layer"] = "body"
+    """``body``: body-surface samples on the SMPL-X meshes; ``layer``: the segment's init cloud layer ``init_layer`` on the mask catalog/dataset (its held-out cameras must equal the run's)."""
+    init_layer: str = "init_roma"
+    """Catalog layer of the init cloud for ``--init layer``."""
     samples_per_person: int = 30_000
     """Body-surface samples per person per keyframe."""
     keyframe_step: int = 3
@@ -74,6 +90,7 @@ class Config:
     eval_train_cameras: bool = True
     """Score the training cameras too (train/held-out gap)."""
     register: bool = True
+    """Register the saved run recording on ``runs_catalog_url`` / ``open4dgs-runs`` (the one switch; ``--no-register`` turns it off)."""
     runs_catalog_url: str = LOCAL_CATALOG
     prior: bool = False
     """Train with the MoGe-2 depth + normal prior (layer ``moge2_prior``, ``open4dgs-prior``) on the training cameras."""
@@ -174,15 +191,33 @@ def _save_geometry_pngs(png_dir: Path, run_name: str, clip: MultiViewClip, geome
         Image.fromarray(row).save(png_dir / f"{run_name}-geometry-{cam.camera.replace('/', '_')}-f{frame}-{'_'.join(images)}.png")
 
 
+def split_cameras(
+    camera_names: tuple[str, ...], holdout_cameras: tuple[str, ...] | None, num_holdout: int, seed: int
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(train names sorted, held-out names): the explicit ``holdout_cameras`` when given, else ``select_holdout``."""
+    if holdout_cameras is None:
+        return select_holdout(camera_names, num_holdout, seed)
+    missing: set[str] = set(holdout_cameras) - set(camera_names)
+    if missing:
+        raise ValueError(f"holdout cameras {sorted(missing)} are not in the clip {camera_names}")
+    return tuple(sorted(set(camera_names) - set(holdout_cameras))), holdout_cameras
+
+
 def main(config: Config) -> dict[str, object]:
     """Run the whole pipeline; returns the summary (also printed as JSON and stored as the ``summary`` property)."""
     device: torch.device = torch.device("cuda")
     run_dir: Path = config.runs_root / config.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    if config.rr_config.save is None:
-        rr.init("open4dgs-runs", recording_id=config.run_name, default_enabled=True, strict=True)
-        rr.save(run_dir / "run.rrd")
-    recording: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
+    # The run recording always goes through RerunTyroConfig: its save target defaults to <run_dir>/run.rrd and its
+    # recording id (= the catalog segment id) to the run name. Rebuilding it re-runs __post_init__ (rr.init + sinks).
+    rr_config: RerunTyroConfig = dataclasses.replace(
+        config.rr_config,
+        application_id=RUNS_DATASET,
+        recording_id=config.rr_config.recording_id or config.run_name,
+        save=config.rr_config.save or run_dir / "run.rrd",
+    )
+    rrd_path: Path = rr_config.save  # type: ignore[assignment]
+    recording: rr.RecordingStream = rr_config.rec_stream
     timings: dict[str, float] = {}
     t0: float = time.perf_counter()
     clip: MultiViewClip = read_catalog_clip(
@@ -197,26 +232,31 @@ def main(config: Config) -> dict[str, object]:
         roi_pad=config.roi_pad,
     )
     timings["read_clip_s"] = time.perf_counter() - t0
-    if config.holdout_cameras is not None:
-        missing: set[str] = set(config.holdout_cameras) - set(clip.camera_names)
-        if missing:
-            raise ValueError(f"holdout cameras {sorted(missing)} are not in the clip {clip.camera_names}")
-        holdout_names: tuple[str, ...] = config.holdout_cameras
-        train_names: tuple[str, ...] = tuple(sorted(name for name in clip.camera_names if name not in holdout_names))
-    else:
-        train_names, holdout_names = select_holdout(clip.camera_names, config.num_holdout, config.holdout_seed)
+    train_names, holdout_names = split_cameras(clip.camera_names, config.holdout_cameras, config.num_holdout, config.holdout_seed)
     t0 = time.perf_counter()
     masks = _read_masks(config, clip)
     timings["masks_s"] = time.perf_counter() - t0
     t0 = time.perf_counter()
-    init: InitCloud = body_surface_init(
-        clip,
-        train_names,
-        dataset=config.dataset,
-        segment_id=config.segment_id,
-        samples_per_person=config.samples_per_person,
-        keyframe_step=config.keyframe_step,
-    )
+    if config.init == "layer":
+        init, init_holdout = read_layer_init_cloud(
+            config.mask_catalog_url or config.catalog_url, config.mask_dataset or config.dataset, config.segment_id, config.init_layer
+        )
+        check_init_matches_run(init, init_holdout, holdout_names, int(clip.frame_indices[0]), len(clip.frame_indices))
+        if init.fps != clip.fps:
+            # Layer times are normalised over the window and velocities are per video frame, so fps only maps time to
+            # seconds; it must be the clip's, which the trainer renders with (frame / clip.fps). The MAMMA init_roma
+            # layer records 60 while the segment's capture fps is 30: without this, frames past 0.95 s have no Gaussians.
+            print(f"[open4dgs] init layer fps {init.fps} != clip fps {clip.fps}: using the clip fps")
+            init = dataclasses.replace(init, fps=float(clip.fps))
+    else:
+        init = body_surface_init(
+            clip,
+            train_names,
+            dataset=config.dataset,
+            segment_id=config.segment_id,
+            samples_per_person=config.samples_per_person,
+            keyframe_step=config.keyframe_step,
+        )
     timings["init_s"] = time.perf_counter() - t0
     print(
         f"[open4dgs] clip {len(clip.camera_names)} cams x {len(clip.frame_indices)} frames, sizes {sorted(set(clip.sizes))}; held out {holdout_names}; init rows {init.num_rows:,}"
@@ -247,7 +287,7 @@ def main(config: Config) -> dict[str, object]:
     trained: TrainedClip = train_clip(clip, masks, init, config.train, holdout_names, device=device, prior=prior_loss)
     trained.save(run_dir / "trigs_ckpt.pt")
     t0 = time.perf_counter()
-    holdout: list[CameraRenders] = evaluate_cameras(trained, clip, masks, holdout_names, metrics)
+    holdout: list[CameraRenders] = evaluate_cameras(trained, clip, masks, holdout_names, metrics, with_baselines=True)
     train_eval: list[CameraRenders] = (
         # With no held-out camera the training renders are kept for the gt | render PNGs.
         evaluate_cameras(trained, clip, masks, train_names, metrics, keep_renders=not holdout_names) if config.eval_train_cameras else []
@@ -262,6 +302,7 @@ def main(config: Config) -> dict[str, object]:
     summary: dict[str, object] = {
         "holdout": holdout_mean,
         "holdout_init": init_holdout,
+        **{f"holdout_floor_{kind}": mean_metrics([row for cam in holdout for row in cam.baselines[kind]]) for kind in BASELINES},
         "train": train_mean,
         "it_per_s": config.train.steps / trained.train_seconds,
         "train_s": trained.train_seconds,
@@ -280,18 +321,16 @@ def main(config: Config) -> dict[str, object]:
         **timings,
     }
 
+    # The world's up axis from the mean camera up (the segments declare none): the person stands upright in the 3D view.
+    view_coordinates = up_view_coordinates(clip.world_T_cam.float().numpy())
+    recording.log("/world", view_coordinates, static=True)
     log_cameras(recording, clip, holdout_names)
     log_people(recording, clip)
     log_init_cloud(init, recording)
     for renders in holdout:
         log_camera_eval(recording, clip, masks, renders, held_out=True)
     for renders in train_eval:
-        for row_name in ("crop_psnr", "fg_psnr", "full_psnr"):
-            recording.send_columns(
-                f"/eval/train/{renders.camera.replace('/', '_')}/metrics/{row_name}",
-                indexes=[rr.TimeColumn("frame_index", sequence=[row.frame_index for row in renders.metrics])],
-                columns=rr.Scalars.columns(scalars=np.asarray([getattr(row, row_name) for row in renders.metrics], dtype=np.float64)),
-            )
+        log_metric_rows(recording, f"/eval/train/{renders.camera.replace('/', '_')}/metrics", renders.metrics, (*HEADLINE, "fg_psnr", "alpha_iou"))
     log_video(recording, "/eval/orbit/render", orbit, clip.frame_indices.tolist(), clip.fps)
     _log_geometry(recording, clip, geometry, holdout_priors)
     log_scalars(recording, trained.scalars)
@@ -308,9 +347,11 @@ def main(config: Config) -> dict[str, object]:
         "holdout_cameras": list(holdout_names),
         "holdout_seed": config.holdout_seed,
         "max_side": config.max_side or 0,
-        "init_method": init.method,
+        "roi": f"{config.roi}:{config.roi_pad}" if config.roi else "full",
+        "init_method": init.method if config.init == "body" else f"layer:{config.init_layer}:{init.method}",
+        "view_coordinates": str(view_coordinates),
         "samples_per_person": config.samples_per_person,
-        "keyframe_step": config.keyframe_step,
+        "keyframe_step": init.keyframe_step,
         "prior": config.prior,
         **({f"prior_{k}": v for k, v in dataclasses.asdict(config.prior_config).items()} if config.prior else {}),
         "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
@@ -322,32 +363,56 @@ def main(config: Config) -> dict[str, object]:
         for name in holdout_names[:2]
         for kind in ("gt", "render", "error")
     ]
+    # Metric panels: PSNR / SSIM / LPIPS of crop_raw (the headline) with both floors (held-out cameras, else training ones).
+    scored: list[str] = [f"/eval/{'holdout' if holdout else 'train'}/{name.replace('/', '_')}" for name in (holdout_names or train_names)]
+
+    def metric_view(metric: str, extra: tuple[str, ...] = ()) -> rrb.TimeSeriesView:
+        contents: list[str] = [f"{base}/metrics/{name}" for base in scored for name in (metric, *extra)]
+        contents += [f"{base}/floor/{kind}/{metric}" for base in scored for kind in BASELINES]
+        return rrb.TimeSeriesView(origin="/eval", contents=contents, name=metric.replace("crop_raw_", "").upper())
+
     recording.send_blueprint(
         rrb.Blueprint(
             rrb.Vertical(
                 rrb.Horizontal(*eval_views, rrb.Spatial2DView(origin="/eval/orbit/render", name="orbit")),
-                rrb.Horizontal(rrb.Spatial3DView(origin="/world", name="scene"), rrb.TimeSeriesView(origin="/eval", name="metrics")),
+                rrb.Horizontal(
+                    rrb.Spatial3DView(origin="/world", name="scene"),
+                    metric_view(HEADLINE[0], ("fg_psnr",)),
+                    metric_view(HEADLINE[1]),
+                    metric_view(HEADLINE[2]),
+                ),
             ),
             collapse_panels=True,
         )
     )
     recording.send_property("run", rr.AnyValues(**run_properties))  # pyrefly: ignore[bad-argument-type]
-    flat: dict[str, float] = {
-        f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", "train", "geometry_holdout") for k, v in summary[group].items()  # type: ignore[union-attr]
-    }
+    flat: dict[str, float] = {f"{group}_{k}": float(v) for group in ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train", "geometry_holdout") for k, v in summary[group].items()}  # type: ignore[union-attr]
     flat.update({k: float(v) for k, v in summary.items() if isinstance(v, int | float)})
     recording.send_property("summary", rr.AnyValues(**flat))  # pyrefly: ignore[bad-argument-type]
     recording.flush()
     if config.png_dir is not None:
         _save_pngs(config.png_dir, config.run_name, clip, holdout or train_eval, orbit, "holdout" if holdout else "train")
         _save_geometry_pngs(config.png_dir, config.run_name, clip, geometry, holdout_priors)
-    if config.rr_config.save is None:
-        rr.disconnect()  # closes run.rrd before chmod and registration
+    rr.disconnect()  # closes the .rrd before chmod and registration
     # NAS rule: files 644, directories 775.
     run_dir.chmod(0o775)
-    for path in run_dir.iterdir():
+    for path in (*run_dir.iterdir(), rrd_path):
         path.chmod(0o644)
-    if config.register and config.rr_config.save is None:
-        register_run(config.runs_catalog_url, run_dir / "run.rrd", RUNS_DATASET)
+    if config.register:
+        register_run(config.runs_catalog_url, rrd_path, RUNS_DATASET)
     print(json.dumps(summary, indent=2, default=float))
+    print(headline_line(summary))
     return summary
+
+
+def headline_line(summary: dict[str, object]) -> str:
+    """One line: held-out crop_raw PSNR/SSIM/LPIPS, with the init and both floors beside it, plus fg PSNR and alpha IoU."""
+
+    def triple(group: str) -> str:
+        values = summary.get(group)
+        if not isinstance(values, dict) or not values:
+            return "n/a"
+        return "/".join(f"{values[name]:.3f}" if name != HEADLINE[0] else f"{values[name]:.2f}" for name in HEADLINE) + f" fg {values['fg_psnr']:.2f} iou {values['alpha_iou']:.3f}"
+
+    groups = ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train")
+    return "[open4dgs] crop_raw PSNR/SSIM/LPIPS " + "; ".join(f"{group} {triple(group)}" for group in groups)

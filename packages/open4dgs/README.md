@@ -56,15 +56,41 @@ Steps (`open4dgs.apis.train`):
    cameras (`random.Random(seed).sample(sorted(names), k)`).
 2. Masks: the catalog `masks` layer (`--mask-source layer`, `--mask-catalog-url`/`--mask-dataset` for a companion
    dataset such as `open4dgs-mamma`), or a dilated SMPL-X silhouette (`--mask-source mesh`, development only).
-3. `body_surface_init`: fixed area-weighted barycentric samples on each SMPL-X mesh (30k per person per keyframe),
-   velocity = central difference in world units per video frame, colours from the training cameras only.
-   The result is an `InitCloud` (`open4dgs.init_cloud`), the trainer's init contract, also logged to the run.
+3. Init: `body_surface_init` (`--init body`, default): fixed area-weighted barycentric samples on each SMPL-X mesh
+   (30k per person per keyframe), velocity = central difference in world units per video frame, colours from the
+   training cameras only. The window's last frame is always a keyframe (its own mesh, else extrapolated from the last
+   two mesh keyframes), so frames past the grid keep their Gaussians. `--init layer --init-layer init_roma` reads the
+   segment's init cloud layer from the mask catalog/dataset instead; the run refuses when that layer's held-out
+   cameras or window differ from the run's. Either way the result is an `InitCloud` (`open4dgs.init_cloud`), the
+   trainer's init contract, also logged to the run.
 4. `train_clip`: TRiGS in memory. Masked loss with the render composited on black against `gt * mask`, plus the
    alpha-outside and alpha-to-mask terms. Held-out cameras get black frames and empty masks, so their pixels never
    reach the trainer.
-5. `evaluate_cameras` scores held-out and training cameras in three settings: `crop` (headline: mask bounding box
-   +5 %, both composited on black with the GT mask), `fg` (PSNR over mask pixels only) and `full` (whole frame on
-   black, which inflates the number). It also renders a 360-degree orbit.
+5. `evaluate_cameras` scores held-out and training cameras (definitions below), and the held-out cameras' two floors.
+   It also renders a 360-degree orbit.
 6. The run recording `<runs-root>/<run-name>/run.rrd` (plus `trigs_ckpt.pt`) holds the cameras, held-out
    gt/render/error videos, per-frame metrics, the orbit video, the init cloud, the body mesh, loss curves and the
    `run`/`summary` properties. It is registered as a segment of `open4dgs-runs` on the local catalog.
+   `/world` carries `ViewCoordinates` from the mean camera up. `--no-register` is the one switch that skips registration.
+
+### What the held-out protocol shares with the held-out cameras
+
+No held-out pixel reaches the trainer or the body-surface init. Two priors are shared, though: the SMPL-X body is
+fitted by the dataset from ALL cameras (held-out ones included), and the mask model (BiRefNet, `masks` layer) runs
+on every camera, and the held-out ground truth is `gt * mask`. So the held-out numbers measure novel-view quality
+given a body and silhouettes that saw those views: a shared prior, not a pixel leak. The `init_roma` layer is built
+without the held-out cameras (its `holdout` property) and `--init layer` checks that.
+
+### Metric definitions (`open4dgs.evaluate`)
+
+The ground truth is always `gt * mask` (soft mask; person boxes and pixel sets use mask > 0.5). The render is the
+TRiGS render premultiplied over black, clamped to [0, 1].
+
+| name | what |
+|---|---|
+| `crop_raw_{psnr,ssim,lpips}` | **headline**: the raw render against `gt * mask` inside the mask box padded 5 % per side; splats outside the true silhouette count |
+| `crop_masked_{psnr,ssim,lpips}` | the same box, render also multiplied by the GT mask (hides silhouette errors; the old `crop`, +1.0 dB on 4DAnyone) |
+| `fg_psnr` | PSNR of the raw render against the raw frame over the mask pixels only |
+| `full_{psnr,ssim,lpips}` | whole frame, raw render against `gt * mask`; mostly black background, for paper comparison only |
+| `alpha_iou` | IoU of rendered alpha > 0.5 with mask > 0.5 |
+| floors `black`, `mean` | every metric above for an all-black render and for the mean GT colour inside the mask (alpha = mask), per held-out camera and frame (`/eval/holdout/<cam>/floor/<kind>/<name>`, summary `holdout_floor_<kind>_<name>`) |

@@ -110,3 +110,59 @@ def test_camera_config_viewmats_are_world_to_camera() -> None:
     p = cameras.viewmats[0] @ torch.tensor([0.0, 0.0, 0.0, 1.0])
     uv = (cameras.Ks[0] @ p[:3]) / p[2]
     assert torch.allclose(uv[:2], torch.tensor([50.0, 40.0]), atol=1e-4)
+
+
+def test_crop_raw_counts_silhouette_errors_that_crop_masked_hides() -> None:
+    from open4dgs.evaluate import baseline_renders, score_frame
+
+    gt = torch.full((40, 40, 3), 0.8)  # background 0.8 everywhere; the person is the 20x20 square at rows/cols 10..29
+    mask = torch.zeros(40, 40)
+    mask[10:30, 10:30] = 1.0
+    gt[10:30, 10:30] = 0.5
+    # The render is the person exactly plus a stray 2x20 strip (value 0.4) just outside it, inside the padded box.
+    render = gt * mask[..., None]
+    render[30:31, 10:30] = 0.4
+    alpha = mask.clone()
+    alpha[30:31, 10:30] = 1.0
+    row = score_frame("cam", 7, render, alpha, gt, mask, lpips=lambda _p, _t: 0.0)
+    # Box = 20x20 padded by round(0.05 * 20) = 1 px per side -> 22x22 = 484 px; the strip is 20 px of error 0.4 on 3 channels.
+    assert row.crop_masked_psnr == math.inf
+    assert row.crop_raw_psnr == pytest.approx(-10.0 * math.log10(20 * 0.16 / 484))
+    assert row.full_psnr == pytest.approx(-10.0 * math.log10(20 * 0.16 / 1600))
+    assert row.fg_psnr == math.inf  # the person's own pixels are exact
+    assert row.alpha_iou == pytest.approx(400 / 420)
+    assert row.crop_raw_lpips == 0.0 and row.frame_index == 7
+
+    floors = baseline_renders(gt, mask)
+    black = score_frame("cam", 7, *floors["black"], gt, mask, lpips=lambda _p, _t: 0.0)
+    assert black.crop_raw_psnr == pytest.approx(-10.0 * math.log10(400 * 0.25 / 484))
+    assert black.alpha_iou == 0.0
+    mean = score_frame("cam", 7, *floors["mean"], gt, mask, lpips=lambda _p, _t: 0.0)
+    assert mean.crop_raw_psnr == math.inf and mean.alpha_iou == 1.0  # a flat person: its mean colour is exact
+
+    empty = score_frame("cam", 0, render, alpha, gt, torch.zeros(40, 40), lpips=lambda _p, _t: 0.0)
+    assert math.isnan(empty.crop_raw_psnr) and math.isnan(empty.alpha_iou)
+
+
+def test_window_keyframes_cover_the_last_frame() -> None:
+    from open4dgs.body_init import central_velocity, sample_surface, surface_points, window_keyframes
+
+    vertices, faces = _tetra()
+    shift = torch.tensor([0.01, 0.0, 0.0])
+    track = torch.stack([vertices + shift * float(f) for f in range(60)])  # 60 frames, 0.01 per video frame
+    # MAMMA-like: meshes every 3rd frame, the window ends 2 frames past the last mesh (57) -> 59 is extrapolated.
+    present = torch.zeros(60, dtype=torch.bool)
+    present[::3] = True
+    keyframes, verts, extrapolated = window_keyframes(track, present, 3)
+    assert extrapolated and keyframes.tolist() == [*range(0, 58, 3), 59]
+    assert torch.allclose(verts[-1], track[59], atol=1e-6)  # linear motion: extrapolation is exact
+    samples = sample_surface(vertices, faces, 50, seed=0)
+    positions = torch.stack([surface_points(v, faces, samples) for v in verts])
+    velocity = central_velocity(positions, keyframes)
+    assert torch.allclose(velocity[..., 0], torch.full(velocity.shape[:2], 0.01), atol=1e-5)  # irregular last interval of 2
+    # 4DAnyone-like: a mesh on every frame, 30 frames, grid 0..27 -> frame 29 comes from its own mesh.
+    keyframes, verts, extrapolated = window_keyframes(track[:30], torch.ones(30, dtype=torch.bool), 3)
+    assert not extrapolated and keyframes.tolist() == [*range(0, 28, 3), 29] and torch.equal(verts[-1], track[29])
+    # On the grid (31 frames): unchanged.
+    keyframes, _, extrapolated = window_keyframes(track[:31], torch.ones(31, dtype=torch.bool), 3)
+    assert not extrapolated and keyframes.tolist() == list(range(0, 31, 3))
