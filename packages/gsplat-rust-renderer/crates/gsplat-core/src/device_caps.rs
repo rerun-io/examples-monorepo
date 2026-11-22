@@ -18,17 +18,27 @@ fn required_limits() -> wgpu::Limits {
     }
 }
 
-/// Validate the enabled compute capabilities before creating pipelines.
-pub fn check_adapter(features: wgpu::Features, limits: &wgpu::Limits) -> Result<(), Error> {
-    if !features.contains(wgpu::Features::SUBGROUP) || !required_limits().check_limits(limits) {
+/// Validate the enabled compute capabilities before creating pipelines. `SUBGROUP` is optional:
+/// without it the scan and sort kernels use their workgroup-memory variant.
+pub fn check_adapter(_features: wgpu::Features, limits: &wgpu::Limits) -> Result<(), Error> {
+    if !required_limits().check_limits(limits) {
         return Err(Error::Capabilities);
     }
     Ok(())
 }
 
-/// Subgroups are mandatory; timing is enabled only when supported.
+/// Environment variable that withholds `SUBGROUP` from devices created through
+/// [`required_features`], to exercise the workgroup-memory kernels on a GPU that has subgroups.
+pub const NO_SUBGROUPS_ENV: &str = "GSPLAT_NO_SUBGROUPS";
+
+/// Subgroups and timing are enabled when the adapter supports them.
 pub fn required_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    wgpu::Features::SUBGROUP | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY)
+    let subgroups = if std::env::var_os(NO_SUBGROUPS_ENV).is_some_and(|v| v == "1") {
+        wgpu::Features::empty()
+    } else {
+        wgpu::Features::SUBGROUP
+    };
+    adapter.features() & (subgroups | wgpu::Features::TIMESTAMP_QUERY)
 }
 
 /// Add only the core's compute requirements to a caller's renderer limits.
@@ -48,11 +58,15 @@ pub fn compute_limits(available: &wgpu::Limits, mut requested: wgpu::Limits) -> 
 #[cfg(test)]
 mod capability_tests {
     #[test]
-    fn startup_reports_missing_subgroups() {
-        let error =
-            super::check_adapter(wgpu::Features::empty(), &wgpu::Limits::default()).unwrap_err();
-        assert!(error.to_string().contains("SUBGROUP"));
+    fn startup_accepts_missing_subgroups_and_reports_weak_limits() {
+        assert!(super::check_adapter(wgpu::Features::empty(), &wgpu::Limits::default()).is_ok());
         assert!(super::check_adapter(wgpu::Features::SUBGROUP, &wgpu::Limits::default()).is_ok());
+        let error = super::check_adapter(
+            wgpu::Features::empty(),
+            &wgpu::Limits::downlevel_webgl2_defaults(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("eight storage buffers"));
         let mut failures = 0;
         super::required_limits().check_limits_with_fail_fn(
             &wgpu::Limits::downlevel_webgl2_defaults(),

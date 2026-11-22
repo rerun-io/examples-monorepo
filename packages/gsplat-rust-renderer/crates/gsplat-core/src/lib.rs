@@ -1,13 +1,13 @@
 //! GPU-resident Gaussian splat rendering. Algorithms follow Brush 1388f74c.
 //!
-//! Native devices must enable `wgpu::Features::SUBGROUP` and WebGPU compute limits.
-//! A future web build needs the WebGPU SUBGROUP mapping from at least Brush's wgpu
-//! fork commit `4db81837f`, and `enable subgroups;` prepended on WebGPU only.
-//! Naga 30 rejects that directive; no browser path is implemented here.
+//! Devices need the WebGPU compute limits in `device_caps`. `wgpu::Features::SUBGROUP` is optional:
+//! where the device enables it, the scan and sort kernels use subgroup operations; otherwise they
+//! use a workgroup-memory variant with the same results (`shader/scan_portable.wgsl`).
+//! On the web the subgroup modules get `enable subgroups;` prepended (naga 30 rejects it natively).
 
 mod camera;
 mod device_caps;
-pub use device_caps::{check_adapter, compute_limits, required_features};
+pub use device_caps::{NO_SUBGROUPS_ENV, check_adapter, compute_limits, required_features};
 mod gpu;
 mod kernels;
 mod lens;
@@ -36,7 +36,7 @@ pub use view::ViewState;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "gsplat-core requires SUBGROUP, eight storage buffers, three storage textures, 256 threads and 10 KiB workgroup memory"
+        "gsplat-core requires eight storage buffers, three storage textures, 256 threads and 10 KiB workgroup memory"
     )]
     Capabilities,
 
