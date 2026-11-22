@@ -44,11 +44,16 @@ source:
     # backward accumulates into them and one backward after the camera loop carries the sum through deform and gather.
     # Renders are bit-identical; parameter gradients differ only in summation order.
     - patches/0005-one-deform-per-step-time.patch
+    # Performance fix, maths unchanged: with patch 0005's shared inputs, the step's cameras of one image size are rendered by
+    # ONE gsplat rasterization call (viewmats [C,4,4], Ks [C,3,3]); each camera's losses and the camera_loss_hook read its
+    # slice of the batched output; one backward over the summed camera losses, then the relocation's 2D cue per batch
+    # (accumulate_2d already sums over cameras). Rolling shutter / learned time offsets keep the per-camera path.
+    - patches/0006-batched-cameras.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 3
+  number: 4
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.

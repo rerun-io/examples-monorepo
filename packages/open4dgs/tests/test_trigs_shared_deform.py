@@ -1,4 +1,5 @@
-"""recipes/open4dgs-trigs-src patch 0005: cameras of a train step that share one time share one row gather and deform.
+"""recipes/open4dgs-trigs-src patches 0005 + 0006: cameras of a train step that share one time share one row gather and deform
+(0005) and one batched rasterization call per image size (0006).
 
 One train step on a small synthetic scene, with the shared path and with the per-camera path (forced by reporting rolling
 shutter on, which changes nothing else: the cameras carry no rolling-shutter signs). The renders must be bit-identical and
@@ -16,7 +17,7 @@ trigs = pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-t
 pytestmark = pytest.mark.integration
 
 
-def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], int]:
+def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch.Tensor], dict[str, torch.Tensor], tuple[int, int]]:
     from gsplat import rasterization
     from trigs.core.camera import CameraConfig
     from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
@@ -68,8 +69,12 @@ def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch
     renders: list[torch.Tensor] = []
     grads: dict[str, torch.Tensor] = {}
     trainer = TrigsTrainer(device=dev)
-    render_inputs, photometric = trainer._render_inputs, trainer._photometric_losses
-    used = {"inputs": 0}
+    render_inputs, photometric, rasterize = trainer._render_inputs, trainer._photometric_losses, trainer._rasterize_inputs
+    used = {"inputs": 0, "rasterize": 0}
+
+    def count_rasterize(*x, **k):
+        used["rasterize"] += 1
+        return rasterize(*x, **k)
 
     def count(*x, **k):
         used["inputs"] += 1
@@ -81,6 +86,7 @@ def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch
 
     monkeypatch.setattr(trainer, "_photometric_losses", keep)
     monkeypatch.setattr(trainer, "_render_inputs", count)
+    monkeypatch.setattr(trainer, "_rasterize_inputs", count_rasterize)
     adam_step = torch.optim.Adam.step
 
     def step(self, *x, **k):
@@ -99,7 +105,7 @@ def _one_step(shared: bool, monkeypatch: pytest.MonkeyPatch) -> tuple[list[torch
     trainer.train_from_params(params=params, sh_degree=sh_degree, scene_extent=scene_extent, cameras=cameras, n_frames=F,
                               gt_images_per_frame=gt_images, gt_alphas_per_frame=gt_masks, config=config, writer=Scalars())
     monkeypatch.undo()
-    return renders, grads, used["inputs"]
+    return renders, grads, (used["inputs"], used["rasterize"])
 
 
 def test_shared_deform_step_matches_per_camera_step(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,9 +113,9 @@ def test_shared_deform_step_matches_per_camera_step(monkeypatch: pytest.MonkeyPa
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
     r_shared, g_shared, n_shared = _one_step(True, monkeypatch)
     r_cam, g_cam, n_cam = _one_step(False, monkeypatch)
-    # One active-row query + gather + deform for the shared step, one per camera otherwise.
+    # Shared step: one active-row query + gather + deform and one rasterize call for the 4 same-size cameras; else 4 + 4.
     assert len(r_shared) == len(r_cam) == 4
-    assert (n_shared, n_cam) == (1, 4)
+    assert (n_shared, n_cam) == ((1, 1), (4, 4))
     for a, b in zip(r_shared, r_cam, strict=True):
         assert torch.equal(a, b)
     assert g_shared.keys() == g_cam.keys() and "means" in g_shared
