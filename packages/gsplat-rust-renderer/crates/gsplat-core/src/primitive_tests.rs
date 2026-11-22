@@ -303,13 +303,13 @@ fn poison_injection_anchors_are_present() {
     }
 }
 
-/// The portable modules name no subgroup operation, so the web build adds no `enable subgroups;`
-/// (gpu.rs keys it on the word) and browsers without the feature accept them. The subgroup modules
-/// keep the kernels' own text.
+/// The portable modules call no subgroup built-in (comments may name them; see `gpu::uses_subgroups`),
+/// so the web build adds no `enable subgroups;` and browsers without the feature accept them. The
+/// subgroup modules keep the kernels' own text.
 #[test]
 fn portable_modules_need_no_subgroup_extension() {
     for source in crate::kernels::sources(false) {
-        assert!(!source.contains("subgroup"), "{source}");
+        assert!(!crate::gpu::uses_subgroups(&source), "{source}");
     }
     for name in ["scan.wgsl", "sort.wgsl"] {
         let with = crate::shader::resolve_variant(name, true);
