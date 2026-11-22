@@ -128,19 +128,7 @@ impl Motion<'_> {
         }
         let (form, params, clips, threshold) = self.pack();
         let upload = |label, values: &[f32]| {
-            let bytes: &[u8] = bytemuck::cast_slice(values);
-            if bytes.len() as u64 > limit {
-                return Err(Error::Capacity {
-                    required: bytes.len() as u64,
-                    limit,
-                });
-            }
-            Ok(crate::gpu::upload(
-                device,
-                label,
-                bytes,
-                wgpu::BufferUsages::STORAGE,
-            ))
+            crate::scene::upload(device, label, bytemuck::cast_slice(values), limit)
         };
         Ok(GpuMotion {
             form,
@@ -187,24 +175,20 @@ pub(crate) fn dequantize_asog(
     if parts.motion_codes.len() != n * MOTION_CODES || m.clips.is_empty() {
         return Err(Error::Input("asog motion codes differ from the splat rows"));
     }
-    let checked = |bytes: u64| {
-        if bytes > limit {
-            return Err(Error::Capacity {
-                required: bytes,
-                limit,
-            });
-        }
-        Ok(())
-    };
-    checked((parts.motion_codes.len() * 4) as u64)?;
-    checked((n * ASOG_STRIDE * 4) as u64)?;
-    let codes = crate::gpu::upload(
+    let row_bytes = (n * ASOG_STRIDE * 4) as u64;
+    if row_bytes > limit {
+        return Err(Error::Capacity {
+            required: row_bytes,
+            limit,
+        });
+    }
+    let codes = crate::scene::upload(
         device,
         "asog motion codes",
         bytemuck::cast_slice(&parts.motion_codes),
-        wgpu::BufferUsages::STORAGE,
-    );
-    let rows = storage(device, "motion parameters", (n * ASOG_STRIDE * 4) as u64);
+        limit,
+    )?;
+    let rows = storage(device, "motion parameters", row_bytes);
     let groups = count.div_ceil(WG).max(1);
     let x = groups.min(65535);
     let (mo, ls) = (&m.motion, &m.logsigma);
@@ -252,16 +236,10 @@ pub(crate) fn dequantize_asog(
     }
     queue.submit([encoder.finish()]);
     let clips = pack_clips(&m.clip_windows());
-    checked((clips.len() * 4) as u64)?;
     Ok(GpuMotion {
         form: ASOG,
         params: rows,
-        clips: crate::gpu::upload(
-            device,
-            "motion clips",
-            bytemuck::cast_slice(&clips),
-            wgpu::BufferUsages::STORAGE,
-        ),
+        clips: crate::scene::upload(device, "motion clips", bytemuck::cast_slice(&clips), limit)?,
         clip_count: u32::try_from(clips.len() / CLIP_STRIDE)?,
         threshold: parts.active_threshold.clamp(0.0, 0.999),
     })
@@ -273,7 +251,8 @@ pub(crate) struct Deform {
     pub opacity: wgpu::Buffer,
     slots: [(wgpu::Buffer, wgpu::BindGroup); 3],
     params: [u32; 8],
-    groups: u32,
+    /// Workgroups in x and y (x <= 65,535).
+    groups: [u32; 2],
     /// Time (bits) of the last encoded pass; another encode at the same time dispatches nothing.
     last: Option<u32>,
 }
@@ -329,7 +308,7 @@ impl Deform {
             opacity,
             slots,
             params,
-            groups,
+            groups: [x, groups.div_ceil(x)],
             last: None,
         })
     }
@@ -362,8 +341,7 @@ impl Deform {
         });
         pass.set_pipeline(&kernel.pipeline);
         pass.set_bind_group(0, group, &[]);
-        let x = self.groups.min(65535);
-        pass.dispatch_workgroups(x, self.groups.div_ceil(x), 1);
+        pass.dispatch_workgroups(self.groups[0], self.groups[1], 1);
     }
 }
 
