@@ -3,7 +3,7 @@
 The recording holds the run's cameras and SMPL-X meshes (copied from ``run.rrd``), ``ViewCoordinates`` on ``/world``
 (up = the mean camera up), a default 3D view from a training camera, and the splats at ``/world/person/splats``:
 
-- ``--format asog`` (default): the run's ``.asog`` (written by ``open4dgs-export-asog``) stored once as the gsplat
+- ``--format asog`` (default): the checkpoint encoded as ASOG (``open4dgs.asog.encode_asog``, band-safe; or ``--asog``) stored once as the gsplat
   viewer's ``AnimatedSogSplats3D`` payload plus a one-pose stock preview, exactly what ``open4dgs-export-asog --rrd``
   writes (one writer: ``splat_export.write_asog_rrd``). Default output ``<run>/asog.rrd``, layer ``asog``. A stock
   Rerun viewer shows one still pose.
@@ -28,12 +28,11 @@ from rerun.chunk import RrdReader
 from simplecv.catalog_layers import register_layer
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
-from open4dgs.asog import decode_asog
+from open4dgs.asog import AsogSettings, decode_asog, encode_asog
 from open4dgs.catalog_clip import LOCAL_CATALOG
 from open4dgs.run_log import RUNS_DATASET
 from open4dgs.splat_export import (
     ASOG_CUT_FORMAT,
-    ASOG_DIR,
     SPLAT_ENTITY,
     STOCK_VIEWER_NOTE,
     checkpoint_params,
@@ -61,8 +60,8 @@ class Config:
     register: bool = True
     runs_catalog_url: str = LOCAL_CATALOG
     asog: Path | None = None
-    """The run's ``.asog`` file: ``asog`` stores it (default ``<asog dir>/<run>.asog``, where ``open4dgs-export-asog`` writes
-    it); ``per-frame`` exports it decoded instead of the checkpoint and never registers."""
+    """An ``.asog`` file of the run (e.g. from another encoder): ``asog`` stores it instead of encoding the checkpoint;
+    ``per-frame`` exports it decoded instead of the checkpoint and never registers."""
     output: Path | None = None
     """Output path (default ``<run>/asog.rrd``, ``<run>/splats.rrd`` for ``per-frame``, ``<run>/trigs_motion.rrd`` for ``trigs-motion``)."""
     format: Literal["asog", "per-frame", "trigs-motion"] = "asog"
@@ -76,11 +75,13 @@ def main(config: Config) -> dict[str, object]:
     ``trigs_motion``); returns sizes and counts."""
     run_name: str = config.run.name
     if config.format == "asog":
-        asog_path: Path = config.asog or ASOG_DIR / f"{run_name}.asog"
-        if not asog_path.exists():
-            raise ValueError(f"{asog_path} does not exist: write it with open4dgs-export-asog --run {config.run}, or pass --asog")
+        if config.asog is not None:
+            asog: bytes = config.asog.read_bytes()
+        else:
+            checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
+            asog = encode_asog(checkpoint_params(checkpoint, torch.device("cpu")), float(checkpoint["fps"]), int(checkpoint["num_frames"]), AsogSettings())[0]
         out_asog: Path = config.output or config.run / "asog.rrd"
-        summary_asog: dict[str, object] = write_asog_rrd(config.run, asog_path, out_asog, ASOG_CUT_FORMAT, PREVIEW_ROWS)
+        summary_asog: dict[str, object] = write_asog_rrd(config.run, asog, out_asog, ASOG_CUT_FORMAT, PREVIEW_ROWS)
         if config.register:
             register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out_asog], "asog")
             summary_asog["registered"] = f"{RUNS_DATASET}/{run_name}/asog"
@@ -123,7 +124,7 @@ def main(config: Config) -> dict[str, object]:
         print(summary)
         return summary
     device: torch.device = torch.device(config.device)
-    params = decode_asog(config.asog, device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
+    params = decode_asog(config.asog.read_bytes(), device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
     trainer: TrigsTrainer = TrigsTrainer(device=str(device))
     trigs_config: TrigsTrainingConfig = TrigsTrainingConfig(fps=fps)  # _deform reads only the TRiGS defaults (gauge, smooth cull)
 

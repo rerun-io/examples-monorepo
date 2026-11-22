@@ -53,14 +53,14 @@ def tiny_run(root: Path) -> Path:
 
 def test_asog_rrd_carries_the_file_and_a_one_pose_preview(tmp_path: Path) -> None:
     from open4dgs.apis.export_asog import Config, write_rrd
-    from open4dgs.asog import AsogSettings, encode_params
+    from open4dgs.asog import AsogSettings, encode_asog
     from open4dgs.splat_export import SPLAT_ENTITY
 
     run: Path = tiny_run(tmp_path)
     asog_path: Path = tmp_path / "clip.asog"
-    encode_params(synthetic_params(), FPS, NUM_FRAMES, asog_path, AsogSettings(preset="upstream", prune=0.0))
+    asog_path.write_bytes(encode_asog(synthetic_params(), FPS, NUM_FRAMES, AsogSettings(preset="upstream", prune=0.0))[0])
     out: Path = tmp_path / "asog.rrd"
-    summary = write_rrd(Config(run=run, register=False, preview_rows=64), asog_path, out)
+    summary = write_rrd(Config(run=run, register=False, preview_rows=64), asog_path.read_bytes(), out)
     columns = static_columns(out, SPLAT_ENTITY)
 
     assert bytes(columns["AnimatedSogSplats3D:asog"]) == asog_path.read_bytes()
@@ -104,12 +104,12 @@ def entity_rows(path: Path) -> dict[str, int]:
 
 def test_default_export_is_the_asog_payload_with_a_preview(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     from open4dgs.apis.export_splats import Config, main
-    from open4dgs.asog import AsogSettings, encode_params
+    from open4dgs.asog import AsogSettings, encode_asog
     from open4dgs.splat_export import SPLAT_ENTITY
 
     run: Path = tiny_run(tmp_path)
     asog_path: Path = tmp_path / "clip.asog"
-    encode_params(synthetic_params(), FPS, NUM_FRAMES, asog_path, AsogSettings(preset="upstream", prune=0.0))
+    asog_path.write_bytes(encode_asog(synthetic_params(), FPS, NUM_FRAMES, AsogSettings(preset="upstream", prune=0.0))[0])
     summary = main(Config(run=run, register=False, asog=asog_path))
     columns = static_columns(run / "asog.rrd", SPLAT_ENTITY)
 
@@ -119,6 +119,24 @@ def test_default_export_is_the_asog_payload_with_a_preview(tmp_path: Path, capsy
     assert len(columns["GaussianSplats3D:centers"]) > 0  # the one-pose stock preview
     assert summary["asog_rrd"] == str(run / "asog.rrd")
     assert STOCK_VIEWER_LINE in capsys.readouterr().out
+
+
+def test_default_export_encodes_the_checkpoint_into_the_recording_only(tmp_path: Path) -> None:
+    """Without ``--asog`` the checkpoint is encoded in memory: the recording carries the ASOG and no ``.asog`` file is written."""
+    from gsplat_rust_renderer.asog_decode import parse_asog
+
+    from open4dgs.apis.export_splats import Config, main
+    from open4dgs.asog import AsogSettings, encode_asog
+    from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params
+
+    run: Path = tiny_run(tmp_path)
+    main(Config(run=run, register=False))
+    checkpoint = torch.load(run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
+    expected = encode_asog(checkpoint_params(checkpoint, torch.device("cpu")), FPS, NUM_FRAMES, AsogSettings())[1]
+    payload: bytes = bytes(static_columns(run / "asog.rrd", SPLAT_ENTITY)["AnimatedSogSplats3D:asog"])
+
+    assert parse_asog(payload, "asog.rrd").manifest.count == expected.count  # the band-safe encode of the checkpoint
+    assert not list(tmp_path.rglob("*.asog"))
 
 
 def test_per_frame_export_is_the_old_default(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
