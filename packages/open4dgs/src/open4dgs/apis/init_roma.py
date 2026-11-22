@@ -6,6 +6,7 @@ layer ``init_roma`` on the local companion dataset (``open4dgs-mamma`` for MAMMA
 4DAnyone segments). The trainer reads it back with ``open4dgs.init_cloud.read_init_cloud(<rrd>)``.
 """
 
+import dataclasses
 import os
 import subprocess
 import threading
@@ -26,6 +27,7 @@ from torch import Tensor
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, log_init_cloud
+from open4dgs.masks import read_clip_masks
 from open4dgs.roma_init import RomaInitConfig, run_roma_init
 
 LAYER: str = "init_roma"
@@ -188,10 +190,15 @@ def main(config: Config) -> Path:
         max_side=config.max_side,
     )
     masks: tuple[Tensor, ...] | None = None
+    mask_frames: list[int] | None = None
     if config.masks == "catalog":
-        from open4dgs.catalog_clip import read_clip_masks
-
-        masks = read_clip_masks(clip, config.local_catalog_url, companion_dataset(config), config.segment_id)
+        # The masks layer covers the training window; the tracking margin frames go without masks.
+        inside: Tensor = (clip.frame_indices >= config.frame_start) & (clip.frame_indices <= frame_end)
+        window: MultiViewClip = dataclasses.replace(
+            clip, frames=tuple(f[inside] for f in clip.frames), frame_indices=clip.frame_indices[inside], people=None
+        )
+        masks = read_clip_masks(window, config.local_catalog_url, companion_dataset(config), config.segment_id)
+        mask_frames = window.frame_indices.tolist()
     read_s: float = time.perf_counter() - started
 
     roma_config: RomaInitConfig = RomaInitConfig(
@@ -207,7 +214,7 @@ def main(config: Config) -> Path:
     torch.cuda.reset_peak_memory_stats()
     init_started: float = time.perf_counter()
     with _VramSampler() as vram:
-        cloud: InitCloud = run_roma_init(clip, masks, roma_config, dataset=config.dataset, segment_id=config.segment_id)
+        cloud: InitCloud = run_roma_init(clip, masks, roma_config, dataset=config.dataset, segment_id=config.segment_id, mask_frames=mask_frames)
     init_s: float = time.perf_counter() - init_started
     if config.masks == "mesh":
         cloud = keep_near_mesh(cloud, clip, config.mesh_radius_m)

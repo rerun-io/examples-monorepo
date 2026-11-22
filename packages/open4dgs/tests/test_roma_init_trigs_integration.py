@@ -10,9 +10,7 @@ pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src
 
 pytestmark = pytest.mark.integration
 
-REAL_INIT: Path = Path(
-    "/mnt/nas/ssd-8tb/open4dgs/init/mamma-markerless-dance__140725_Breakdancemarkers_Improv_2_03686_1_1_1__roma__f99-60.rrd"
-)
+REAL_INIT: Path = Path("/mnt/nas/ssd-8tb/open4dgs/init/mamma-markerless-dance__140725_Breakdancemarkers_Improv_2_03686_1_1_1__roma__f99-60.rrd")
 """The MAMMA 1-person init_roma layer (``open4dgs-init-roma`` defaults)."""
 
 
@@ -54,7 +52,9 @@ def test_build_canonical_accepts_converted_upstream_arrays() -> None:
     from open4dgs.roma_init import init_cloud_from_upstream
 
     cloud = init_cloud_from_upstream(_upstream_like_arrays(), dataset="d", segment_id="s")
-    params, sh_degree, scene_extent = build_canonical_from_npz(cloud.to_trigs_mapping(), fps=cloud.fps, keyframe_stride=cloud.keyframe_step, device=_device())
+    params, sh_degree, scene_extent = build_canonical_from_npz(
+        cloud.to_trigs_mapping(), fps=cloud.fps, keyframe_stride=cloud.keyframe_step, device=_device()
+    )
     assert params["means"].shape[0] == cloud.num_rows
     assert sh_degree == 3 and np.isfinite(scene_extent) and scene_extent > 0
     assert all(torch.isfinite(value).all() for value in params.values())
@@ -68,5 +68,7 @@ def test_build_canonical_accepts_the_mamma_init_roma_layer() -> None:
     from open4dgs.init_cloud import read_init_cloud
 
     cloud = read_init_cloud(REAL_INIT)
-    params, _sh_degree, scene_extent = build_canonical_from_npz(cloud.to_trigs_mapping(), fps=cloud.fps, keyframe_stride=cloud.keyframe_step, device=_device())
+    params, _sh_degree, scene_extent = build_canonical_from_npz(
+        cloud.to_trigs_mapping(), fps=cloud.fps, keyframe_stride=cloud.keyframe_step, device=_device()
+    )
     assert params["means"].shape[0] == cloud.num_rows and scene_extent > 0

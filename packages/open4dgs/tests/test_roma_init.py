@@ -138,12 +138,12 @@ def test_run_upstream_captures_the_final_arrays_only(tmp_path) -> None:
         import sys
 
         assert sys.argv[-1] == "--flag"
-        module._atomic_savez(tmp_path / "cache" / "kf_000100.npz", positions=np.zeros((1, 3)))
-        module._atomic_savez(output_path, compressed=True, positions=np.ones((2, 3)))
+        vars(module)["_atomic_savez"](tmp_path / "cache" / "kf_000100.npz", positions=np.zeros((1, 3)))
+        vars(module)["_atomic_savez"](output_path, compressed=True, positions=np.ones((2, 3)))
 
-    module._atomic_savez = original
-    module.main = main
+    vars(module)["_atomic_savez"] = original
+    vars(module)["main"] = main
     arrays = run_upstream(module, ["prog", "--flag"], output_path)
     assert arrays["positions"].shape == (2, 3)
     assert written == [str(tmp_path / "cache" / "kf_000100.npz")]
-    assert module._atomic_savez is original and not output_path.exists()
+    assert vars(module)["_atomic_savez"] is original and not output_path.exists()

@@ -111,8 +111,11 @@ def reference_cameras(clip: MultiViewClip) -> list[dict[str, object]]:
     return cameras
 
 
-def materialise(clip: MultiViewClip, masks: Sequence[Tensor] | None, root: Path) -> None:
-    """Write ``reference_export.json``, ``images/<folder>/<frame:06d>.jpg`` and ``masks/<folder>/<frame:06d>.png`` (0/255)."""
+def materialise(clip: MultiViewClip, masks: Sequence[Tensor] | None, root: Path, mask_frames: Sequence[int] | None = None) -> None:
+    """Write ``reference_export.json``, ``images/<folder>/<frame:06d>.jpg`` and ``masks/<folder>/<frame:06d>.png`` (0-255).
+
+    ``mask_frames`` are the source frames of the masks (default: the clip's frames); frames without a mask get no mask
+    file, which upstream reads as "no mask" (it only needs them at keyframes, not at the tracking neighbours)."""
     (root / "reference_export.json").write_text(json.dumps({"cameras": reference_cameras(clip)}))
     frame_indices: list[int] = clip.frame_indices.tolist()
     for index, name in enumerate(clip.camera_names):
@@ -126,11 +129,14 @@ def materialise(clip: MultiViewClip, masks: Sequence[Tensor] | None, root: Path)
         mask_dir: Path = root / "masks" / camera_folder(name)
         mask_dir.mkdir(parents=True)
         camera_masks: Tensor = masks[index]
-        if camera_masks.shape != clip.frames[index].shape[:3]:
-            raise ValueError(f"{name}: masks {tuple(camera_masks.shape)} do not match frames {tuple(clip.frames[index].shape[:3])}")
+        masked_frames: list[int] = list(mask_frames) if mask_frames is not None else frame_indices
+        if camera_masks.shape != (len(masked_frames), *clip.frames[index].shape[1:3]):
+            raise ValueError(
+                f"{name}: masks {tuple(camera_masks.shape)} do not match {len(masked_frames)} frames of {tuple(clip.frames[index].shape[1:3])}"
+            )
         scale: float = 255.0 if camera_masks.dtype in (torch.bool, torch.float16, torch.float32, torch.float64) else 1.0
         mask_u8: ndarray = (camera_masks.float() * scale).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
-        for slot, frame in enumerate(frame_indices):
+        for slot, frame in enumerate(masked_frames):
             cv2.imwrite(str(mask_dir / f"{frame:06d}.png"), mask_u8[slot])
 
 
@@ -174,7 +180,7 @@ def upstream_argv(config: RomaInitConfig, root: Path, output_path: Path, with_ma
 def run_upstream(module: ModuleType, argv: list[str], output_path: Path) -> dict[str, ndarray]:
     """Run upstream ``main()`` with ``argv`` and return the arrays it would have written to ``output_path``."""
     captured: dict[str, ndarray] = {}
-    original: Callable[..., None] = module._atomic_savez
+    original: Callable[..., None] = vars(module)["_atomic_savez"]
 
     def capture(path: Path, *, compressed: bool = False, **arrays: ndarray) -> None:
         if Path(path) == output_path:
@@ -183,13 +189,13 @@ def run_upstream(module: ModuleType, argv: list[str], output_path: Path) -> dict
             original(path, compressed=compressed, **arrays)
 
     saved_argv: list[str] = sys.argv
-    module._atomic_savez = capture
+    vars(module)["_atomic_savez"] = capture
     sys.argv = argv
     try:
         module.main()
     finally:
         sys.argv = saved_argv
-        module._atomic_savez = original
+        vars(module)["_atomic_savez"] = original
     if not captured:
         raise RuntimeError("the upstream init returned without writing its keyframes arrays")
     return captured
@@ -237,7 +243,15 @@ def init_cloud_from_upstream(arrays: Mapping[str, ndarray], *, dataset: str, seg
     )
 
 
-def run_roma_init(clip: MultiViewClip, masks: Sequence[Tensor] | None, config: RomaInitConfig, *, dataset: str, segment_id: str) -> InitCloud:
+def run_roma_init(
+    clip: MultiViewClip,
+    masks: Sequence[Tensor] | None,
+    config: RomaInitConfig,
+    *,
+    dataset: str,
+    segment_id: str,
+    mask_frames: Sequence[int] | None = None,
+) -> InitCloud:
     """Run the upstream RoMa v2 + MEMFOF init on every camera of ``clip`` and return its cloud.
 
     Args:
@@ -245,6 +259,8 @@ def run_roma_init(clip: MultiViewClip, masks: Sequence[Tensor] | None, config: R
             (``frame_step=1``) and cover ``config.frame_start - keyframe_step .. config.frame_end + keyframe_step``.
         masks: Per camera, foreground masks ``[frames, h, w]`` aligned with ``clip.frames`` (bool / float in [0, 1] /
             uint8 0-255); None runs without masks (upstream then keeps the background too).
+        mask_frames: Source frames of ``masks`` when they cover only part of the clip (e.g. the training window
+            without the tracking margin); default the clip's frames.
         config: Upstream settings.
         dataset: Catalog dataset of the segment (recorded in the cloud).
         segment_id: Segment id (recorded in the cloud).
@@ -261,7 +277,7 @@ def run_roma_init(clip: MultiViewClip, masks: Sequence[Tensor] | None, config: R
     saved_weights: str | None = os.environ.get("ROMAV2_WEIGHTS")
     os.environ["ROMAV2_WEIGHTS"] = str(config.romav2_weights)
     try:
-        materialise(clip, masks, root)
+        materialise(clip, masks, root, mask_frames)
         output_path: Path = root / "keyframes.npz"
         arrays: dict[str, ndarray] = run_upstream(module, upstream_argv(config, root, output_path, masks is not None), output_path)
     finally:
