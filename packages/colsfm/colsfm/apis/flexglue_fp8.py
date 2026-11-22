@@ -37,7 +37,7 @@ from colsfm.flexglue_trt import (
     prepare_matcher_graph,
 )
 from colsfm.frames import ImageFolderFrames
-from colsfm.matching import FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions
+from colsfm.matching import FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions, gpu_has_fp8
 from colsfm.tensorrt_runtime import resolve_engine
 
 IMAGE_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg")
@@ -68,12 +68,15 @@ def main(config: Config) -> Path:
         config: Sequences and model directory.
 
     Returns:
-        The FP8 graph.
+        The FP8 graph, or the prepared matcher graph on a GPU without FP8 (`gpu_has_fp8`), where matching runs it.
     """
     started: float = time.perf_counter()
     models: Path = config.model_dir
     options: FlexGlueOptions = FlexGlueOptions(min_covisibility=config.min_covisibility)
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", options)
+    if not gpu_has_fp8():
+        print(f"[colsfm] flexglue fp8: this GPU has no FP8 (below sm_89); matching runs {matcher_graph.name}, nothing to calibrate")
+        return matcher_graph
     destination: Path = models / options.fp8_file()
     if fp8_source(destination) == matcher_graph.name:
         print(f"[colsfm] flexglue fp8: {destination.name} present, calibrated from {matcher_graph.name}")
