@@ -6218,6 +6218,7 @@ dependencies = [
  "re_tracing 0.42.0",
  "re_viewer",
  "tokio",
+ "web-time",
  "wgpu",
 ]
 
