@@ -1,0 +1,51 @@
+# Open4DGS-Core (ASU-NEM-Labs/open4dgs-core @ 52750b9): ONLY the memory init (prep/init/prep-roma-trigs-memory.py:
+# RoMa v2 cross-view matches + MEMFOF temporal tracks -> the trainer's keyframes init cloud) and the modules it
+# imports. The extract/align/mask/deliver/audit scripts are not shipped.
+#
+# Upstream's layout is kept under $PREFIX/share/open4dgs-core-src, so its sibling imports and its trainer-helper
+# lookup work unpatched:
+#   prep/trigs_source.py
+#   prep/init/{prep-roma-trigs-memory.py, roma_backends.py, rigid_motion.py, motion_budget.py, capture_timing_shim.py}
+#   train/trigs/src/trigs/capture_timing.py   (raw file from open4dgs-trigs @ ed7a84a: trigs_source.py's first
+#                                              in-tree candidate, so the init does not depend on the trainer recipe)
+# Run: python "$CONDA_PREFIX/share/open4dgs-core-src/prep/init/prep-roma-trigs-memory.py" --help
+# Patches: 0001 MEMFOF.from_pretrained(..., backbone_weights=None): no torchvision ResNet-34 download at construction
+# (the MEMFOF checkpoint carries every backbone weight).
+package:
+  name: open4dgs-core-src
+  version: "0.1.0.52750b9"
+
+source:
+  - url: https://github.com/ASU-NEM-Labs/open4dgs-core/archive/52750b91778d413cc7ddc47a65e12f2ffcd667b1.tar.gz
+    sha256: 2162b13fbf386b62156895f70c6e39d9e85cecedac471a1f4859a4c7b777aa11
+    target_directory: core
+    patches:
+      - patches/0001-memfof-no-backbone-download.patch
+  - url: https://raw.githubusercontent.com/ASU-NEM-Labs/open4dgs-trigs/ed7a84aff1aeccd18dfb48d2806e521255ccf9ef/src/trigs/capture_timing.py
+    sha256: fbef0ba2e27f28af993e5c7e16b13d1ff4200aabfae6ce13a92249d8dcecd2bc
+    file_name: capture_timing.py
+
+build:
+  number: 1
+  noarch: python
+  script:
+    # pixi-build reuses the host prefix between rebuilds: clear the target or cp nests a second copy.
+    - rm -rf "$PREFIX/share/open4dgs-core-src"
+    - mkdir -p "$PREFIX/share/open4dgs-core-src/prep/init" "$PREFIX/share/open4dgs-core-src/train/trigs/src/trigs"
+    - cp core/prep/trigs_source.py "$PREFIX/share/open4dgs-core-src/prep/"
+    - cp core/prep/init/prep-roma-trigs-memory.py core/prep/init/roma_backends.py core/prep/init/rigid_motion.py core/prep/init/motion_budget.py core/prep/init/capture_timing_shim.py "$PREFIX/share/open4dgs-core-src/prep/init/"
+    - cp capture_timing.py "$PREFIX/share/open4dgs-core-src/train/trigs/src/trigs/"
+
+requirements:
+  host:
+    - python 3.12.*
+  # Imports numpy, scipy, pillow, opencv, torch and tqdm (the consuming feature supplies them) and the two backends.
+  run:
+    - python >=3.11
+    - romav2-src
+    - memfof-src
+
+about:
+  homepage: https://github.com/ASU-NEM-Labs/open4dgs-core
+  license_file: core/LICENSE
+  summary: Open4DGS-Core memory init (RoMa v2 + MEMFOF) at 52750b9, scripts under share/open4dgs-core-src

@@ -4386,6 +4386,7 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.open4dgs-init.dependencies]
 python = "3.12.*"
+open4dgs-core-src = { path = "recipes/open4dgs-core-src" }
 # Run dependencies of open4dgs-core-src and romav2-src: a sibling recipe solves only when listed.
 romav2-src = { path = "recipes/romav2-src" }
 memfof-src = { path = "recipes/memfof-src" }
