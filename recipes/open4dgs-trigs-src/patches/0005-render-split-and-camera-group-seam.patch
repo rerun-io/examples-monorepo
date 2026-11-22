@@ -1,0 +1,134 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+index 35f784c..a684904 100644
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -3266,6 +3266,30 @@ class TrigsTrainer:
+         config: TrigsTrainingConfig,
+         step: int | None = None,
+     ) -> tuple[Tensor, Tensor, Tensor, Dict]:
++        inputs = self._render_inputs(params, cameras, cam_idx, t, sh_degree, config, step=step)
++        return self._rasterize_inputs(params, inputs, cameras, cam_idx, config)
++
++    def _camera_group(self, params, cameras, cam_group, frame_idx, gt_times_per_frame, offset_active, sh_degree, config, step):
++        """Seam for rendering the step's cameras together: an object with ``render(group_i)`` (what ``_render``
++        returns, for camera ``cam_group[group_i]``), ``add_loss(loss, relocation_strategy, reloc_state, n_group)``
++        (instead of the camera's backward and relocation cue) and ``finish(relocation_strategy, reloc_state, n_group)``
++        (after the camera loop). None = per-camera path."""
++        return None
++
++    def _render_inputs(
++        self,
++        params: nn.ParameterDict,
++        cameras: "CameraConfig",
++        cam_idx: int,
++        t: float | Tensor,
++        sh_degree: int,
++        config: TrigsTrainingConfig,
++        step: int | None = None,
++    ) -> Dict:
++        """Active rows at time t, their gathered parameters deformed to t, and the rasterizer inputs.
++
++        Depends on the camera only through the rolling-shutter times.
++        """
+         active_idx = self._active_idx_for_time(params, t, config, step=step)
+         if active_idx.numel() == 0:
+             # gsplat 1.5.3 divides means.numel() by N * 3 in its native
+@@ -3322,18 +3346,33 @@ class TrigsTrainer:
+         else:
+             colors = sh0.unsqueeze(1)
+             sh_degree = 0
++        return {
++            "active_idx": active_idx, "gamma": gamma, "sh_degree": sh_degree,
++            "means": means_t, "quats": quats_t, "scales": scales, "opacities": effective_opa, "colors": colors,
++        }
+ 
++    def _rasterize_inputs(
++        self,
++        params: nn.ParameterDict,
++        inputs: Dict,
++        cameras: "CameraConfig",
++        cam_idx: int,
++        config: TrigsTrainingConfig,
++    ) -> tuple[Tensor, Tensor, Tensor, Dict]:
++        """Rasterize _render_inputs' rows for one camera; returns what _render returns."""
++        active_idx = inputs["active_idx"]
++        gamma = inputs["gamma"]
+         render_colors, render_alphas, info = rasterization(
+-            means=means_t,
+-            quats=quats_t,
+-            scales=scales,
+-            opacities=effective_opa,
+-            colors=colors,
++            means=inputs["means"],
++            quats=inputs["quats"],
++            scales=inputs["scales"],
++            opacities=inputs["opacities"],
++            colors=inputs["colors"],
+             viewmats=cameras.viewmats[cam_idx:cam_idx + 1],
+             Ks=cameras.Ks[cam_idx:cam_idx + 1],
+             width=cameras.width_for(cam_idx),
+             height=cameras.height_for(cam_idx),
+-            sh_degree=sh_degree,
++            sh_degree=inputs["sh_degree"],
+             packed=False,
+             render_mode="RGB+ED" if config.render_depth else "RGB",
+         )
+@@ -5340,6 +5379,10 @@ class TrigsTrainer:
+             alpha_mask_sum = torch.zeros((), device=self.device, dtype=torch.float64)
+             gamma = None
+             active_parts: List[Tensor] = []
++            # Seam: a trainer subclass may render the step's cameras as one group (None: the per-camera path below).
++            group = self._camera_group(
++                params, cameras, cam_group, frame_idx, gt_times_per_frame, offset_active, sh_degree, config, step,
++            )
+             for group_i, cam_idx in enumerate(cam_group):
+                 if gt_times_per_frame is not None and gt_times_per_frame[frame_idx][cam_idx] is not None:
+                     t_base = gt_times_per_frame[frame_idx][cam_idx]
+@@ -5357,9 +5400,12 @@ class TrigsTrainer:
+ 
+                 self._cuda_probe(f"step={step} before render frame={frame_idx} cam={cam_idx}")
+ 
+-                render_colors, render_alphas, cam_gamma, cam_info = self._render(
+-                    params, cameras, cam_idx, t, sh_degree, config, step=step,
+-                )
++                if group is not None:
++                    render_colors, render_alphas, cam_gamma, cam_info = group.render(group_i)
++                else:
++                    render_colors, render_alphas, cam_gamma, cam_info = self._render(
++                        params, cameras, cam_idx, t, sh_degree, config, step=step,
++                    )
+ 
+                 self._cuda_probe(f"step={step} after render frame={frame_idx} cam={cam_idx}")
+ 
+@@ -5387,12 +5433,14 @@ class TrigsTrainer:
+                         step=step, frame_idx=frame_idx, cam_idx=cam_idx, colors=render_colors,
+                         alphas=render_alphas, info=cam_info, cameras=cameras,
+                     )
+-                if cam_loss.requires_grad:
+-                    (cam_loss / n_group).backward()
+-
+-                relocation_strategy.accumulate_2d(
+-                    reloc_state, cam_info, batch_size=n_group,
+-                )
++                if group is not None:
++                    group.add_loss(cam_loss / n_group, relocation_strategy, reloc_state, n_group)
++                else:
++                    if cam_loss.requires_grad:
++                        (cam_loss / n_group).backward()
++                    relocation_strategy.accumulate_2d(
++                        reloc_state, cam_info, batch_size=n_group,
++                    )
+                 rgb_loss_sum += cam_rgb.detach().double()
+                 alpha_outside_sum += cam_alpha_out.detach().double()
+                 alpha_mask_sum += cam_alpha_mask.detach().double()
+@@ -5410,6 +5458,10 @@ class TrigsTrainer:
+                     }
+                 del render_colors, render_alphas, cam_info, cam_loss
+ 
++            if group is not None:
++                group.finish(relocation_strategy, reloc_state, n_group)
++                del group
++
+             gamma = gamma / float(n_group)
+             rgb_loss = (rgb_loss_sum / n_group).float()
+             alpha_outside_loss = (alpha_outside_sum / n_group).float()
