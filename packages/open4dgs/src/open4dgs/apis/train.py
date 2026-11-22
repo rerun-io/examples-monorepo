@@ -37,7 +37,7 @@ class Config:
     """One training run."""
 
     rr_config: RerunTyroConfig = field(default_factory=lambda: RerunTyroConfig(headless=True))
-    """Rerun sinks; with no ``save`` the run writes ``<runs_root>/<run_name>/run.rrd`` (recording id = run name)."""
+    """Rerun sinks. ``save`` defaults to ``<runs_root>/<run_name>/run.rrd`` and ``recording_id`` to the run name; the saved file is always registered (``--no-register`` turns that off)."""
     catalog_url: str = LOCAL_CATALOG
     """Catalog that holds the segment's frames, cameras and meshes."""
     dataset: str = "fdanyone-views"
@@ -74,6 +74,7 @@ class Config:
     eval_train_cameras: bool = True
     """Score the training cameras too (train/held-out gap)."""
     register: bool = True
+    """Register the saved run recording on ``runs_catalog_url`` / ``open4dgs-runs`` (the one switch; ``--no-register`` turns it off)."""
     runs_catalog_url: str = LOCAL_CATALOG
 
 
@@ -103,10 +104,16 @@ def main(config: Config) -> dict[str, object]:
     device: torch.device = torch.device("cuda")
     run_dir: Path = config.runs_root / config.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    if config.rr_config.save is None:
-        rr.init("open4dgs-runs", recording_id=config.run_name, default_enabled=True, strict=True)
-        rr.save(run_dir / "run.rrd")
-    recording: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
+    # The run recording always goes through RerunTyroConfig: its save target defaults to <run_dir>/run.rrd and its
+    # recording id (= the catalog segment id) to the run name. Rebuilding it re-runs __post_init__ (rr.init + sinks).
+    rr_config: RerunTyroConfig = dataclasses.replace(
+        config.rr_config,
+        application_id=RUNS_DATASET,
+        recording_id=config.rr_config.recording_id or config.run_name,
+        save=config.rr_config.save or run_dir / "run.rrd",
+    )
+    rrd_path: Path = rr_config.save  # type: ignore[assignment]
+    recording: rr.RecordingStream = rr_config.rec_stream
     timings: dict[str, float] = {}
     t0: float = time.perf_counter()
     clip: MultiViewClip = read_catalog_clip(
@@ -250,14 +257,13 @@ def main(config: Config) -> dict[str, object]:
     recording.flush()
     if config.png_dir is not None:
         _save_pngs(config.png_dir, config.run_name, clip, holdout or train_eval, orbit, "holdout" if holdout else "train")
-    if config.rr_config.save is None:
-        rr.disconnect()  # closes run.rrd before chmod and registration
+    rr.disconnect()  # closes the .rrd before chmod and registration
     # NAS rule: files 644, directories 775.
     run_dir.chmod(0o775)
-    for path in run_dir.iterdir():
+    for path in (*run_dir.iterdir(), rrd_path):
         path.chmod(0o644)
-    if config.register and config.rr_config.save is None:
-        register_run(config.runs_catalog_url, run_dir / "run.rrd", RUNS_DATASET)
+    if config.register:
+        register_run(config.runs_catalog_url, rrd_path, RUNS_DATASET)
     print(json.dumps(summary, indent=2, default=float))
     print(headline_line(summary))
     return summary
