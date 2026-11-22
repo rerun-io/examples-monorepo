@@ -1,0 +1,112 @@
+"""Body-surface sampling and velocity, metric functions and camera conversion on synthetic inputs (CPU)."""
+
+import math
+
+import pytest
+import torch
+
+
+def _tetra() -> tuple[torch.Tensor, torch.Tensor]:
+    vertices = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    faces = torch.tensor([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]])
+    return vertices, faces
+
+
+def test_samples_are_fixed_body_points_and_velocity_is_per_video_frame() -> None:
+    from open4dgs.body_init import central_velocity, mesh_keyframes, sample_surface, surface_points
+
+    vertices, faces = _tetra()
+    samples = sample_surface(vertices, faces, 500, seed=7)
+    again = sample_surface(vertices, faces, 500, seed=7)
+    assert torch.equal(samples.faces, again.faces) and torch.equal(samples.barycentric, again.barycentric)
+    assert torch.all(samples.barycentric >= 0) and torch.allclose(samples.barycentric.sum(-1), torch.ones(500))
+
+    # The mesh translates by (0.01, 0, 0) per video frame and rotates 90 degrees about z over 12 frames; meshes on every 3rd frame.
+    present = torch.zeros(13, dtype=torch.bool)
+    present[::3] = True
+    keyframes = mesh_keyframes(present, keyframe_step=3)
+    assert keyframes.tolist() == [0, 3, 6, 9, 12]
+    shift = torch.tensor([0.01, 0.0, 0.0])
+    positions = torch.stack([surface_points(vertices + shift * float(f), faces, samples) for f in keyframes.tolist()])
+    velocity = central_velocity(positions, keyframes)
+    assert torch.allclose(velocity, shift.expand_as(velocity), atol=1e-6)
+    # Same body point at every keyframe: offsets from the moved mesh equal the frame-0 offsets.
+    assert torch.allclose(positions[4] - shift * 12.0, positions[0], atol=1e-6)
+
+    angle = torch.tensor(math.pi / 2 / 12)
+    rot = torch.tensor([[torch.cos(angle), -torch.sin(angle), 0.0], [torch.sin(angle), torch.cos(angle), 0.0], [0.0, 0.0, 1.0]])
+    spun = torch.stack([surface_points(vertices @ torch.linalg.matrix_power(rot, f).T, faces, samples) for f in keyframes.tolist()])
+    v = central_velocity(spun, keyframes)
+    expected = (spun[2] - spun[0]) / 6.0
+    assert torch.allclose(v[1], expected, atol=1e-6)
+
+
+def test_mesh_keyframes_starts_at_first_mesh() -> None:
+    from open4dgs.body_init import mesh_keyframes
+
+    present = torch.zeros(10, dtype=torch.bool)
+    present[1::3] = True
+    assert mesh_keyframes(present, 3).tolist() == [1, 4, 7]
+    full = torch.ones(10, dtype=torch.bool)
+    assert mesh_keyframes(full, 3).tolist() == [0, 3, 6, 9]
+
+
+def test_interpolate_meshes_fills_off_stride_frames() -> None:
+    from open4dgs.body_init import interpolate_meshes
+
+    verts = torch.zeros(7, 2, 3)
+    present = torch.zeros(7, dtype=torch.bool)
+    present[[0, 3, 6]] = True
+    verts[3] = 3.0
+    verts[6] = 6.0
+    out = interpolate_meshes(verts, present)
+    assert torch.allclose(out[:, 0, 0], torch.arange(7.0))
+
+
+def test_psnr_and_masked_psnr_known_values() -> None:
+    from open4dgs.evaluate import mask_box, masked_psnr, psnr, ssim
+
+    target = torch.zeros(20, 30, 3)
+    pred = torch.full((20, 30, 3), 0.1)
+    assert psnr(pred, target) == pytest.approx(20.0)
+    mask = torch.zeros(20, 30, dtype=torch.bool)
+    mask[5:10, 10:20] = True
+    pred2 = target.clone()
+    pred2[mask] = 0.01
+    assert masked_psnr(pred2, target, mask) == pytest.approx(40.0)
+    assert psnr(target, target) == math.inf
+    assert ssim(target + 0.5, target + 0.5) == pytest.approx(1.0, abs=1e-5)
+    assert mask_box(mask, pad=0.1) == (9, 5, 21, 10)  # x pad 1 px, y pad round(0.5) = 0 px
+    assert mask_box(torch.zeros(4, 4, dtype=torch.bool)) is None
+
+
+def test_orbit_poses_ring_and_look_at() -> None:
+    from open4dgs.evaluate import look_at, orbit_poses
+
+    up = torch.tensor([0.0, 0.0, 1.0])
+    centre = torch.tensor([1.0, 2.0, 0.0])
+    poses = torch.stack([look_at(centre + torch.tensor([3.0 * math.cos(a), 3.0 * math.sin(a), 1.5]), centre, up) for a in (0.0, 2.0, 4.0)])
+    ring = orbit_poses(poses, centre, 8)
+    offsets = ring[:, :3, 3] - centre
+    assert torch.allclose(offsets[:, 2], torch.full((8,), 1.5), atol=1e-5)
+    assert torch.allclose(offsets[:, :2].norm(dim=-1), torch.full((8,), 3.0), atol=1e-5)
+    # z axis (forward) points at the centre; -y (up in image) has a positive world-up component.
+    forward = ring[:, :3, 2]
+    assert torch.allclose(forward, -offsets / offsets.norm(dim=-1, keepdim=True), atol=1e-5)
+    assert torch.all(-ring[:, 2, 1] > 0)
+
+
+def test_camera_config_viewmats_are_world_to_camera() -> None:
+    pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src (open4dgs envs)")
+    from open4dgs.evaluate import look_at
+    from open4dgs.trigs_adapter import camera_config
+
+    world_T_cam = torch.stack([look_at(torch.tensor([2.0, 0.0, 1.0]), torch.zeros(3), torch.tensor([0.0, 0.0, 1.0])), torch.eye(4)])
+    K = torch.tensor([[100.0, 0.0, 50.0], [0.0, 100.0, 40.0], [0.0, 0.0, 1.0]]).expand(2, 3, 3)
+    cameras = camera_config(world_T_cam, K, [(100, 80), (60, 120)], torch.device("cpu"))
+    assert torch.allclose(cameras.viewmats @ world_T_cam, torch.eye(4).expand(2, 4, 4), atol=1e-6)
+    assert cameras.widths.tolist() == [100, 60]
+    # The look-at target projects to the principal point of camera 0.
+    p = cameras.viewmats[0] @ torch.tensor([0.0, 0.0, 0.0, 1.0])
+    uv = (cameras.Ks[0] @ p[:3]) / p[2]
+    assert torch.allclose(uv[:2], torch.tensor([50.0, 40.0]), atol=1e-4)
