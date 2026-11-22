@@ -1,4 +1,6 @@
-"""TRiGS's reconstruction loss takes fused-ssim (recipes/fused-ssim-src) when it is installed, as upstream intends.
+"""TRiGS's reconstruction loss takes the fused SSIM of packages/hexels-mojo (hexels_mojo.fused_ssim, the Mojo port of fused-ssim;
+recipe patch 0007 points trigs.core.losses at it). Without its built kernels (open4dgs-ssim-mojo-build) TRiGS would fall back to
+torchmetrics silently, so this test fails instead.
 
 Its SSIM term is fused_ssim(..., padding="valid"): the mean of the 11x11 sigma-1.5 SSIM map without its 5-pixel border.
 That is NOT the torchmetrics fallback's number: torchmetrics 1.9 averages the full map of a reflect-padded image. The test
@@ -17,7 +19,7 @@ pytestmark = pytest.mark.integration
 def test_fused_ssim_is_the_backend_and_equals_the_valid_map_mean() -> None:
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (fused-ssim kernels)")
-    pytest.importorskip("fused_ssim", reason="fused-ssim comes from recipes/fused-ssim-src (open4dgs envs)")
+    import hexels_mojo.fused_ssim  # noqa: F401  # fails when the Mojo kernels are not built: run open4dgs-ssim-mojo-build
     from torchmetrics.functional import structural_similarity_index_measure
 
     assert losses._get_ssim_backend() == "fused"

@@ -1,0 +1,31 @@
+diff --git a/src/trigs/core/losses.py b/src/trigs/core/losses.py
+index 6c723d9..cb4c558 100644
+--- a/src/trigs/core/losses.py
++++ b/src/trigs/core/losses.py
+@@ -21,7 +21,7 @@ def _get_ssim_backend():
+ 
+     # Try fused_ssim first (fastest)
+     try:
+-        from fused_ssim import fused_ssim  # noqa: F401
++        from hexels_mojo.fused_ssim import fused_ssim  # noqa: F401
+         _SSIM_BACKEND = "fused"
+         return _SSIM_BACKEND
+     except ImportError:
+@@ -140,7 +140,7 @@ def reconstruction_loss(
+     target_bchw = target.permute(0, 3, 1, 2)
+ 
+     if backend == "fused":
+-        from fused_ssim import fused_ssim
++        from hexels_mojo.fused_ssim import fused_ssim
+         ssim_val = fused_ssim(pred_bchw, target_bchw, padding="valid")
+     elif backend == "torchmetrics":
+         try:
+@@ -204,7 +204,7 @@ def compute_ssim_metric(pred: Tensor, target: Tensor) -> float:
+         target_bchw = target.permute(0, 3, 1, 2)
+ 
+         if backend == "fused":
+-            from fused_ssim import fused_ssim
++            from hexels_mojo.fused_ssim import fused_ssim
+             ssim_val = fused_ssim(pred_bchw, target_bchw, padding="valid")
+         elif backend == "torchmetrics":
+             try:

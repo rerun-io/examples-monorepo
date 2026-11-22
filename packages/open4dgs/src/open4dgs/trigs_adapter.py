@@ -31,6 +31,7 @@ import torch
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 from torch import Tensor, nn
+from trigs.core import losses as trigs_losses
 from trigs.core.camera import CameraConfig
 from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 from trigs.init.from_colmap import build_canonical_from_npz
@@ -354,6 +355,9 @@ def train_clip(
     ``gt_times_per_frame`` instead of frame / fps.
     """
     dev: torch.device = device if device is not None else torch.device("cuda")
+    # TRiGS's loss falls back to torchmetrics SSIM (another number, ~10x slower) when hexels_mojo.fused_ssim does not import.
+    if trigs_losses._get_ssim_backend() != "fused":
+        raise RuntimeError("hexels_mojo.fused_ssim does not import (Mojo kernels not built?): run `pixi run -e open4dgs open4dgs-ssim-mojo-build`")
     num_frames: int = int(clip.frame_indices.shape[0])
     if len(masks) != len(clip.camera_names) or any(m.shape[0] != num_frames for m in masks):
         raise ValueError("masks must be one (frames, h, w) tensor per clip camera")
