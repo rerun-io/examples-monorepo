@@ -9,20 +9,20 @@ A writer that must never replace a file publishes with a hard link instead (``at
 
 from __future__ import annotations
 
-import os
-import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import rerun as rr
 import rerun.blueprint as rrb
-import rerun.chunk as rrc
 from rerun import bindings
-from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import DatasetEntry
 from rerun.recording_stream import RecordingStream
+from simplecv import catalog_layers
+from simplecv.catalog_layers import atomic_write
 
 from dataforge import schema
 from dataforge.identity import SequenceIdentity
@@ -174,37 +174,6 @@ def should_skip(target: Path, *, force: bool) -> bool:
 
 
 @contextmanager
-def atomic_write(target: Path, *, exclusive: bool = False) -> Iterator[Path]:
-    """Yield a temp path beside ``target`` that replaces it only on clean exit.
-
-    Args:
-        target: Final location; its parent directory is created if missing.
-        exclusive: Never overwrite: ``target`` must not exist, at entry or when the temp file is published.
-
-    Yields:
-        A temp path in ``target.parent`` for the caller to write into.
-
-    Raises:
-        FileExistsError: If ``exclusive`` and ``target`` exists.
-    """
-    if exclusive and (target.exists() or target.is_symlink()):
-        raise FileExistsError(f"refusing to write {target}: it exists")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(dir=target.parent, suffix=f"{target.suffix}.tmp")
-    os.close(descriptor)
-    temp_path: Path = Path(temp_name)
-    try:
-        yield temp_path
-        temp_path.chmod(0o644)  # mkstemp temps are 0600; NFS mounts and the catalog server need world-readable files
-        if exclusive:
-            os.link(temp_path, target)  # unlike os.replace, refuses a target that appeared since entry
-        else:
-            os.replace(temp_path, target)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-@contextmanager
 def recording_to(
     path: Path,
     *,
@@ -237,52 +206,8 @@ def recording_to(
         yield recording
 
 
-@contextmanager
-def atomic_recording(
-    target: Path,
-    *,
-    application_id: str = APPLICATION_ID,
-    recording_id: str,
-    default_blueprint: rrb.Blueprint | None = None,
-    send_properties: bool = True,
-    optimize: bool = False,
-) -> Iterator[rr.RecordingStream]:
-    """Yield a recording saved to a temp file that replaces ``target`` on success.
-
-    Args:
-        target: Final location, replaced atomically on a clean exit.
-        application_id: Rerun application id; one per package.
-        recording_id: Shared across a sequence's layers — it is what stacks them.
-        default_blueprint: Layout embedded in the file, if any.
-        send_properties: Whether Rerun adds its own ``RecordingInfo``. A **base**
-            layer wants it: its wall-clock ``start_time`` is when the capture was
-            converted, and the viewer shows it. A **derived** layer passes
-            ``False`` — it is the same recording as the base it stacks onto, so a
-            second name and a second start time are duplicate, and its own
-            ``start_time`` would be whenever it was last rebuilt. Explicit
-            ``send_property``/``send_recording_name`` calls still land either way
-            (verified on rerun 0.37.0), so a layer's own property group is
-            unaffected.
-        optimize: Compact column batches for object-store publication. Only use on layers
-            whose full payload fits in memory; mesh layers keep their lazy-loading boundaries.
-    """
-    # The recording stream is the inner context on purpose: it flushes and closes
-    # before atomic_write reaches its os.replace.
-    with atomic_write(target) as temp_path:
-        with recording_to(
-            temp_path,
-            application_id=application_id,
-            recording_id=recording_id,
-            default_blueprint=default_blueprint,
-            send_properties=send_properties,
-        ) as recording:
-            yield recording
-        if optimize:
-            # Work on the unpublished artifact; a failed optimization must leave the old target intact.
-            with atomic_write(temp_path) as optimized:
-                rrc.RrdReader(temp_path).stream().collect(optimize=rrc.OptimizationProfile.OBJECT_STORE).write_rrd(
-                    optimized, application_id=application_id, recording_id=recording_id,
-                )
+atomic_recording = partial(catalog_layers.atomic_recording, application_id=APPLICATION_ID)
+"""``simplecv.catalog_layers.atomic_recording`` with this package's application id (a caller may still pass another)."""
 
 
 def select_segments(entry: DatasetEntry, requested: Sequence[str]) -> list[str]:
@@ -328,8 +253,8 @@ def write_segment_layer(
         with atomic_recording(output, application_id=application_id, recording_id=segment, send_properties=False) as recording:
             log(segment, recording)
         outputs.append(output.as_uri())
-    if register and outputs:
-        entry.register(outputs, layer_name=layer, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+    if register:
+        catalog_layers.register_layer(entry, [output_dir.resolve() / f"{segment}.rrd" for segment in segments], layer)
     return outputs
 
 
