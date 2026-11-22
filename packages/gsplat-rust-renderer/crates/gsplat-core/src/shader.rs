@@ -26,6 +26,7 @@ pub(crate) fn resolve(name: &'static str) -> String {
             "raster.wgsl" => include_str!("../shader/raster.wgsl"),
             "scan.wgsl" => include_str!("../shader/scan.wgsl"),
             "scan_common.wgsl" => include_str!("../shader/scan_common.wgsl"),
+            "asog_motion.wgsl" => include_str!("../shader/asog_motion.wgsl"),
             "sog_dequant.wgsl" => include_str!("../shader/sog_dequant.wgsl"),
             "sort.wgsl" => include_str!("../shader/sort.wgsl"),
             "trigs_deform.wgsl" => include_str!("../shader/trigs_deform.wgsl"),

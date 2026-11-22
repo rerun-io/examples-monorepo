@@ -8,8 +8,9 @@
 //! The scene keeps the canonical transforms, SH and the packed motion (uploaded once). Each view owns its evaluated
 //! transforms + raw opacity, so views at different times do not race. Rows with zero weight get raw opacity -100.
 use crate::Error;
+use crate::asog::{AsogParts, MOTION_CODES};
 use crate::gpu::{Kernel, bind, storage, uniform};
-use crate::trigs::{AsogMotion, TrigsMotion};
+use crate::trigs::{AsogMotion, ClipWindow, TrigsMotion};
 
 /// Per-row motion for [`crate::Renderer::upload_animated`] and [`crate::Renderer::upload_sog`].
 #[derive(Clone, Copy)]
@@ -32,7 +33,7 @@ const ASOG: u32 = 1;
 /// The packed motion of a scene (immutable, shared by its views).
 pub(crate) struct GpuMotion {
     form: u32,
-    params: wgpu::Buffer,
+    pub(crate) params: wgpu::Buffer,
     clips: wgpu::Buffer,
     clip_count: u32,
     threshold: f32,
@@ -87,23 +88,7 @@ impl Motion<'_> {
                     }
                     out.extend_from_slice(&m.g[i]);
                 }
-                let clips = m
-                    .clips
-                    .iter()
-                    .flat_map(|c| {
-                        [
-                            c.offset,
-                            c.active_start,
-                            c.active_end,
-                            c.core_start,
-                            c.core_end,
-                            c.fade_in,
-                            c.fade_out,
-                            0.0,
-                        ]
-                    })
-                    .collect();
-                (ASOG, out, clips, m.active_threshold)
+                (ASOG, out, pack_clips(&m.clips), m.active_threshold)
             }
         }
     }
@@ -165,6 +150,121 @@ impl Motion<'_> {
             threshold: threshold.clamp(0.0, 0.999),
         })
     }
+}
+
+/// The clip table as `CLIP_STRIDE` f32 per clip.
+fn pack_clips(clips: &[ClipWindow]) -> Vec<f32> {
+    clips
+        .iter()
+        .flat_map(|c| {
+            [
+                c.offset,
+                c.active_start,
+                c.active_end,
+                c.core_start,
+                c.core_end,
+                c.fade_in,
+                c.fade_out,
+                0.0,
+            ]
+        })
+        .collect()
+}
+
+/// De-quantise the `.asog` motion integers on the GPU (`asog_motion.wgsl`, one pass submitted on `queue`) into the
+/// packed asog rows of a scene whose canonical transforms `canonical` already holds (written by `sog_dequant.wgsl`).
+pub(crate) fn dequantize_asog(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    kernel: &Kernel,
+    parts: &AsogParts,
+    canonical: &wgpu::Buffer,
+    limit: u64,
+) -> Result<GpuMotion, Error> {
+    let m = &parts.manifest;
+    let n = m.count;
+    let count = u32::try_from(n)?;
+    if parts.motion_codes.len() != n * MOTION_CODES || m.clips.is_empty() {
+        return Err(Error::Input("asog motion codes differ from the splat rows"));
+    }
+    let checked = |bytes: u64| {
+        if bytes > limit {
+            return Err(Error::Capacity {
+                required: bytes,
+                limit,
+            });
+        }
+        Ok(())
+    };
+    checked((parts.motion_codes.len() * 4) as u64)?;
+    checked((n * ASOG_STRIDE * 4) as u64)?;
+    let codes = crate::gpu::upload(
+        device,
+        "asog motion codes",
+        bytemuck::cast_slice(&parts.motion_codes),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let rows = storage(device, "motion parameters", (n * ASOG_STRIDE * 4) as u64);
+    let groups = count.div_ceil(WG).max(1);
+    let x = groups.min(65535);
+    let (mo, ls) = (&m.motion, &m.logsigma);
+    let f = |v: f64| (v as f32).to_bits();
+    let words = [
+        count,
+        x * WG,
+        u32::try_from(mo.mref_samples.max(1))?,
+        0,
+        f(ls.min),
+        f(ls.max - ls.min),
+        f(f64::from((1u32 << ls.bits.min(31)) - 1)),
+        f(mo.qa / 1000.0),
+        f(mo.qp / 1000.0),
+        f(mo.r_min),
+        f(mo.mid_o),
+        f(mo.mid_g),
+        f(mo.sm),
+        f(m.mu.scale),
+        0,
+        0,
+    ];
+    let params = uniform(device, &words);
+    let group = bind(
+        device,
+        &kernel.layout,
+        &[
+            (0, params.as_entire_binding()),
+            (1, codes.as_entire_binding()),
+            (2, canonical.as_entire_binding()),
+            (3, rows.as_entire_binding()),
+        ],
+    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("ASOG motion de-quantisation"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("asog_motion_dequant"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&kernel.pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(x, groups.div_ceil(x), 1);
+    }
+    queue.submit([encoder.finish()]);
+    let clips = pack_clips(&m.clip_windows());
+    checked((clips.len() * 4) as u64)?;
+    Ok(GpuMotion {
+        form: ASOG,
+        params: rows,
+        clips: crate::gpu::upload(
+            device,
+            "motion clips",
+            bytemuck::cast_slice(&clips),
+            wgpu::BufferUsages::STORAGE,
+        ),
+        clip_count: u32::try_from(clips.len() / CLIP_STRIDE)?,
+        threshold: parts.active_threshold.clamp(0.0, 0.999),
+    })
 }
 
 /// A view's evaluated transforms + raw opacity and the per-frame-slot uniforms of the motion pass.
@@ -368,6 +468,10 @@ mod tests {
     #[derive(Debug, Default)]
     struct Worst {
         center: f32,
+        /// |centre| (m) of the row with the worst centre error.
+        center_at: f32,
+        /// Worst centre error relative to max(1 m, |centre|): f32 keeps ~6e-8 of the magnitude.
+        center_relative: f32,
         rotation: f32,
         opacity: f32,
         scale: f32,
@@ -384,8 +488,14 @@ mod tests {
         let mut worst = Worst::default();
         for (i, (center, quat, raw)) in expected.iter().enumerate() {
             let t = &gpu.0[i * 10..i * 10 + 10];
+            let magnitude = center.iter().map(|v| v * v).sum::<f32>().sqrt();
             for k in 0..3 {
-                worst.center = worst.center.max((t[k] - center[k]).abs());
+                let error = (t[k] - center[k]).abs();
+                if error > worst.center {
+                    worst.center = error;
+                    worst.center_at = magnitude;
+                }
+                worst.center_relative = worst.center_relative.max(error / magnitude.max(1.0));
                 worst.scale = worst
                     .scale
                     .max((t[7 + k] - canonical.transforms[i][7 + k]).abs());
@@ -411,8 +521,16 @@ mod tests {
 
     fn assert_within(worst: &Worst, form: &str) {
         println!("trigs_deform {form}: {worst:?}");
-        // Design E4: 1e-5 m, 1e-5 rad; opacity in linear units; scales are copies.
-        assert!(worst.center <= 1e-5, "{form} centre {}", worst.center);
+        // Design E4: 1e-5 m, 1e-5 rad; opacity in linear units; scales are copies. The centre bound is relative to
+        // max(1 m, |centre|): both sides are f32, and a rotation rounding of ~3e-6 rad over a 3.5 m lever arm moves a
+        // centre by ~1e-5 m (asog row 20871 at t = 2.42: f32 CPU 1.9e-5 m and GPU 8.1e-6 m from an f64 evaluation).
+        assert!(
+            worst.center_relative <= 1e-5,
+            "{form} centre {} m at |centre| {} m (relative {})",
+            worst.center,
+            worst.center_at,
+            worst.center_relative
+        );
         assert!(worst.rotation <= 1e-5, "{form} rotation {}", worst.rotation);
         assert!(worst.opacity <= 1e-5, "{form} opacity {}", worst.opacity);
         assert_eq!(worst.scale, 0.0, "{form} scales");
@@ -540,10 +658,8 @@ mod tests {
                 .zip(&evaluated.raw_opacities)
                 .map(|(t, raw)| ([t[0], t[1], t[2]], [t[3], t[4], t[5], t[6]], *raw))
                 .collect();
-            assert_within(
-                &compare(readback, &expected, &canonical),
-                &format!("asog t={time}"),
-            );
+            let w = compare(readback, &expected, &canonical);
+            assert_within(&w, &format!("asog t={time}"));
         }
     }
 
@@ -576,26 +692,20 @@ mod tests {
         let parts = crate::asog::decode_parts(&bytes, crate::trigs::ASOG_ACTIVE_THRESHOLD).unwrap();
         let entropy = ms(start);
         let start = std::time::Instant::now();
-        let scene = renderer
-            .upload_sog(
-                &queue,
-                &parts.quantization,
-                &parts.planes(),
-                Some(Motion::Asog(&parts.motion)),
-            )
-            .unwrap();
+        let scene = renderer.upload_asog(&queue, &parts).unwrap();
         wait();
         let gpu_load = ms(start);
         let start = std::time::Instant::now();
         let canonical = crate::sog::dequantize(&parts.quantization, &parts.planes()).unwrap();
+        let motion = parts.motion();
         let cpu_dequant = ms(start);
         let n = scene.len();
         let fps = parts.manifest.timeline.frame_rate;
         let frames = parts.manifest.timeline.total_frames.unwrap_or(120).max(2);
         let times: Vec<f32> = (0..frames).map(|f| (f as f64 / fps) as f32).collect();
         println!(
-            "{path}: {n} splats, SH degree {}, load: zlib + motion de-quantise CPU {entropy:.1} ms, static de-quantise + \
-             upload GPU {gpu_load:.1} ms (CPU de-quantise alone {cpu_dequant:.1} ms), scene {} B",
+            "{path}: {n} splats, SH degree {}, load: entropy (zlib) CPU {entropy:.1} ms, upload + static and motion \
+             de-quantise GPU {gpu_load:.1} ms (CPU static + motion de-quantise alone {cpu_dequant:.1} ms), scene {} B",
             canonical.sh_degree,
             scene.gpu_byte_size()
         );
@@ -621,7 +731,12 @@ mod tests {
                     count: 2,
                 })
             });
-        let resolve = crate::test_utils::upload(&device, &[0u64; 2]);
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("timestamp resolve"),
+            size: 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let (mut wall, mut kernel) = (Vec::new(), Vec::new());
         for &t in times.iter().chain(&times) {
             let start = std::time::Instant::now();
@@ -669,7 +784,7 @@ mod tests {
         let (mut evaluate, mut upload) = (Vec::new(), Vec::new());
         for &t in times.iter().step_by(4) {
             let start = std::time::Instant::now();
-            parts.motion.evaluate_into(&canonical, t, &mut out);
+            motion.evaluate_into(&canonical, t, &mut out);
             evaluate.push(ms(start));
             let start = std::time::Instant::now();
             drop(renderer.upload(&out).unwrap());

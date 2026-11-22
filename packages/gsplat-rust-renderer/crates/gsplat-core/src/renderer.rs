@@ -84,6 +84,37 @@ impl Renderer {
         Ok(Arc::new(scene))
     }
 
+    /// An entropy-decoded `.asog` on the GPU: static part through `sog_dequant.wgsl`, motion through
+    /// `asog_motion.wgsl` (both submitted on `queue`), evaluated per view at `RenderOptions::time`. The CPU path is
+    /// `upload_animated(&sog::dequantize(..)?, Motion::Asog(&parts.motion()))`.
+    pub fn upload_asog(
+        &self,
+        queue: &wgpu::Queue,
+        parts: &crate::asog::AsogParts,
+    ) -> Result<Arc<Scene>, Error> {
+        let mut scene = crate::sog_gpu::upload_sog(
+            &self.device,
+            queue,
+            &self.kernels.sog_dequant,
+            &parts.quantization,
+            &parts.planes(),
+            self.limit,
+        )?;
+        let canonical = scene
+            .transforms()
+            .ok_or(Error::Input("an asog scene holds splats"))?;
+        let motion = crate::motion_gpu::dequantize_asog(
+            &self.device,
+            queue,
+            &self.kernels.asog_motion,
+            parts,
+            canonical,
+            self.limit,
+        )?;
+        scene.attach_motion(motion)?;
+        Ok(Arc::new(scene))
+    }
+
     /// Hexel scenes share views, targets and feedback with splats; they need a pinhole camera.
     pub fn upload_hexels(&self, hexels: &Hexels) -> Result<Arc<Scene>, Error> {
         Ok(Arc::new(Scene::upload_hexels(

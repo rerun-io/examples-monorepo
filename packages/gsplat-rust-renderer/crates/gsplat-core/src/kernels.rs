@@ -15,7 +15,7 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
-pub(crate) fn sources() -> [String; 14] {
+pub(crate) fn sources() -> [String; 15] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -31,6 +31,7 @@ pub(crate) fn sources() -> [String; 14] {
         "image_raster.wgsl",
         "sog_dequant.wgsl",
         "trigs_deform.wgsl",
+        "asog_motion.wgsl",
     ]
     .map(crate::shader::resolve)
 }
@@ -131,6 +132,7 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
         "prepare" => &[(0, R), (1, R), (2, W)],
         "sog_dequant" => &[(0, U), (1, R), (2, R), (3, W), (4, W), (5, W)],
         "trigs_deform" => &[(0, U), (1, R), (2, R), (3, R), (4, W), (5, W)],
+        "asog_motion_dequant" => &[(0, U), (1, R), (2, R), (3, W)],
         _ => unreachable!("unknown gsplat kernel: {entry}"),
     }
 }
@@ -172,6 +174,8 @@ pub(crate) struct Kernels {
     pub sog_dequant: Kernel,
     /// Motion pre-pass per time change, both forms (`trigs_deform.wgsl`).
     pub trigs_deform: Kernel,
+    /// ASOG motion de-quantisation at load (`asog_motion.wgsl`).
+    pub asog_motion: Kernel,
 }
 
 /// Raster entry points in `RasterKind` order; every primitive module declares all of them.
@@ -200,6 +204,7 @@ impl Kernels {
             image_raster,
             sog,
             deform,
+            asog_motion,
         ] = sources().map(|s| module(device, &s));
         let kernel = |module: &wgpu::ShaderModule, entry: &str| {
             pipeline(device, module, entry, bindings(entry))
@@ -240,6 +245,7 @@ impl Kernels {
             prepare: kernel(&prepare, "prepare"),
             sog_dequant: kernel(&sog, "sog_dequant"),
             trigs_deform: kernel(&deform, "trigs_deform"),
+            asog_motion: kernel(&asog_motion, "asog_motion_dequant"),
         }
     }
 

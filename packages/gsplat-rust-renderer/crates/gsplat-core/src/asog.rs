@@ -313,8 +313,16 @@ fn shaped(
     Ok(values)
 }
 
-/// The entropy-decoded file before the static de-quantisation: SOG v2 texel planes (for `sog_dequant.wgsl` or the
-/// CPU [`crate::sog::dequantize`]) and the de-quantised motion.
+/// i32 codes per row of the motion streams in [`AsogParts::motion_codes`].
+///
+/// Order: opacity, mu, logsigma, anchor (3), omega (9: O0, O1, O2), g (5), flags (static | clip << 1).
+/// `asog_motion.wgsl` reads the same layout.
+pub const MOTION_CODES: usize = 21;
+
+/// The entropy-decoded file before any de-quantisation.
+///
+/// SOG v2 texel planes (for `sog_dequant.wgsl` or the CPU [`crate::sog::dequantize`]) and the motion stream integers (for `asog_motion.wgsl` or the CPU
+/// [`AsogParts::motion`]).
 #[derive(Clone, Debug)]
 pub struct AsogParts {
     pub manifest: Manifest,
@@ -326,7 +334,9 @@ pub struct AsogParts {
     pub sh0: Vec<u8>,
     /// SH bands, palette entries, label plane, centroid plane.
     pub sh: Option<(u32, usize, Vec<u8>, Vec<u8>)>,
-    pub motion: AsogMotion,
+    /// [`MOTION_CODES`] per row; clip indices are checked against the manifest.
+    pub motion_codes: Vec<i32>,
+    pub active_threshold: f32,
 }
 
 impl AsogParts {
@@ -349,6 +359,84 @@ impl AsogParts {
                 }),
         }
     }
+
+    /// The motion de-quantised on the CPU (the oracle of `asog_motion.wgsl`; reference `asog.decode.read`, motion
+    /// part): f64 arithmetic in its operation order, rounded to f32 once.
+    pub fn motion(&self) -> AsogMotion {
+        let m = &self.manifest;
+        let n = m.count;
+        let mo = &m.motion;
+        let ls = &m.logsigma;
+        let qpv = mo.qp / 1000.0;
+        let w_o = [1.0, mo.mid_o, 1.0];
+        let w_g = [1.0, mo.mid_g, mo.mid_g, mo.mid_g, 1.0];
+        let samples = mo.mref_samples.max(1);
+        let levels = f64::from((1u32 << ls.bits.min(31)) - 1);
+        let spans: [f64; 3] = std::array::from_fn(|k| m.means.maxs[k] - m.means.mins[k]);
+        let mut out = AsogMotion {
+            opacities: Vec::with_capacity(n),
+            times: Vec::with_capacity(n),
+            sigmas: Vec::with_capacity(n),
+            anchors: Vec::with_capacity(n),
+            omega: Vec::with_capacity(n),
+            g: Vec::with_capacity(n),
+            is_static: Vec::with_capacity(n),
+            clip: Vec::with_capacity(n),
+            clips: m.clip_windows(),
+            active_threshold: self.active_threshold,
+        };
+        for (i, row) in self
+            .motion_codes
+            .as_chunks::<MOTION_CODES>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            let code = |k: usize| f64::from(row[k]);
+            let sigma = (ls.min + code(2) / levels * (ls.max - ls.min)).exp();
+            let life = mo.sm * sigma;
+            let a: [f64; 3] = std::array::from_fn(|k| code(3 + k) * mo.qa / 1000.0);
+            // The decoded position in f64 (as the reference; the f32 copy loses ~1e-6 of omega when |x - a| ~ r_min).
+            let x: [f64; 3] = std::array::from_fn(|k| {
+                let mean =
+                    u16::from(self.means_l[4 * i + k]) | (u16::from(self.means_u[4 * i + k]) << 8);
+                let v = m.means.mins[k] + f64::from(mean) / 65535.0 * spans[k];
+                v.signum() * v.abs().exp_m1()
+            });
+            let r = (0..3).map(|k| (x[k] - a[k]).powi(2)).sum::<f64>().sqrt();
+            let step_o = qpv / r.max(mo.r_min);
+            let o_life: [[f64; 3]; 3] = std::array::from_fn(|k| {
+                std::array::from_fn(|c| code(6 + 3 * k + c) * step_o * w_o[k])
+            });
+            let mut min_norm = f64::INFINITY;
+            for s in 0..samples {
+                let t = if samples > 1 {
+                    s as f64 / (samples - 1) as f64
+                } else {
+                    0.0
+                };
+                let u = 1.0 - t;
+                let (b0, b1, b2) = (u * u, 2.0 * u * t, t * t);
+                let norm = (0..3)
+                    .map(|c| (b0 * o_life[0][c] + b1 * o_life[1][c] + b2 * o_life[2][c]).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                min_norm = min_norm.min(norm);
+            }
+            let mref = min_norm.max(1e-9) * qpv;
+            out.opacities.push((code(0) / 255.0) as f32);
+            out.times.push((code(1) / m.mu.scale) as f32);
+            out.sigmas.push(sigma as f32);
+            out.anchors.push(a.map(|v| v as f32));
+            out.omega.push(o_life.map(|o| o.map(|v| (v / life) as f32)));
+            out.g.push(std::array::from_fn(|j| {
+                (code(15 + j) * mref * w_g[j] / (life * life)) as f32
+            }));
+            out.is_static.push(row[20] & 1 == 1);
+            out.clip.push((row[20] >> 1) as u32);
+        }
+        out
+    }
 }
 
 /// The whole file -> [`Asog`], with the static part de-quantised on the CPU.
@@ -357,15 +445,19 @@ impl AsogParts {
 pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
     let parts = decode_parts(bytes, active_threshold)?;
     let canonical = sog::dequantize(&parts.quantization, &parts.planes())?;
+    let motion = parts.motion();
     Ok(Asog {
         manifest: parts.manifest,
         canonical,
-        motion: parts.motion,
+        motion,
     })
 }
 
-/// Entropy decode (zlib streams, un-delta / un-zigzag), static integers packed as SOG v2 texels, motion
-/// de-quantised. No static de-quantisation: [`decode`] or `sog_dequant.wgsl` do that.
+/// Entropy decode only (zlib streams, un-delta / un-zigzag).
+///
+/// Static integers packed as SOG v2 texels, motion
+/// integers as [`MOTION_CODES`] i32 per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
+/// `asog_motion.wgsl` do that.
 pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
     let container = parse(bytes)?;
     let m = &container.manifest;
@@ -449,7 +541,7 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
             None => [0.0; 256],
         },
     };
-    let motion = decode_motion(&container, &means, &opacity, active_threshold)?;
+    let motion_codes = motion_codes(&container, &opacity)?;
     let [means_l, means_u, quats, scales, sh0] = planes;
     Ok(AsogParts {
         manifest: container.manifest,
@@ -460,96 +552,45 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
         scales,
         sh0,
         sh: sh_n,
-        motion,
+        motion_codes,
+        active_threshold,
     })
 }
 
-/// Reference `asog.decode.read`, motion part: f64 arithmetic in its operation order, rounded to f32 once.
-fn decode_motion(
-    container: &Container<'_>,
-    means: &[i64],
-    opacity: &[i64],
-    active_threshold: f32,
-) -> Result<AsogMotion, Error> {
+/// The motion streams as [`MOTION_CODES`] i32 per row, with the clip index of every row checked.
+fn motion_codes(container: &Container<'_>, opacity: &[i64]) -> Result<Vec<i32>, Error> {
     let m = &container.manifest;
     let n = m.count;
     let get = |name: &'static str, want: usize| shaped(name, container.required(name)?, n, want);
-    let mu = get("mu", 1)?;
-    let logsigma = get("logsigma", 1)?;
-    let anchor = get("anchor", 3)?;
-    let omega = get("omega", 9)?;
-    let g = get("g", 5)?;
-    let flags = get("flags", 1)?;
-    let mo = &m.motion;
-    let ls = &m.logsigma;
-    let qpv = mo.qp / 1000.0;
-    let w_o = [1.0, mo.mid_o, 1.0];
-    let w_g = [1.0, mo.mid_g, mo.mid_g, mo.mid_g, 1.0];
-    let samples = mo.mref_samples.max(1);
-    let levels = f64::from((1u32 << ls.bits.min(31)) - 1);
-    let clips = m.clip_windows();
-    let spans: [f64; 3] = std::array::from_fn(|k| m.means.maxs[k] - m.means.mins[k]);
-    let mut out = AsogMotion {
-        opacities: Vec::with_capacity(n),
-        times: Vec::with_capacity(n),
-        sigmas: Vec::with_capacity(n),
-        anchors: Vec::with_capacity(n),
-        omega: Vec::with_capacity(n),
-        g: Vec::with_capacity(n),
-        is_static: Vec::with_capacity(n),
-        clip: Vec::with_capacity(n),
-        clips,
-        active_threshold,
-    };
+    let streams: [(&'static str, Vec<i64>, usize); 7] = [
+        ("opacity", opacity.to_vec(), 1),
+        ("mu", get("mu", 1)?, 1),
+        ("logsigma", get("logsigma", 1)?, 1),
+        ("anchor", get("anchor", 3)?, 3),
+        ("omega", get("omega", 9)?, 9),
+        ("g", get("g", 5)?, 5),
+        ("flags", get("flags", 1)?, 1),
+    ];
+    let clips = m.clips.len();
+    let mut out = Vec::with_capacity(n * MOTION_CODES);
     for i in 0..n {
-        let flag = flags[i];
+        for (name, values, width) in &streams {
+            for &v in &values[i * width..(i + 1) * width] {
+                out.push(i32::try_from(v).map_err(|_range| Error::Stream {
+                    name: (*name).into(),
+                    problem: format!("value {v} does not fit 32 bits"),
+                })?);
+            }
+        }
+        let flag = out[out.len() - 1];
         let clip = u32::try_from(flag >> 1).unwrap_or(u32::MAX);
-        if clip as usize >= out.clips.len() {
+        if flag < 0 || clip as usize >= clips {
             return Err(Error::Clip {
                 row: i,
                 clip,
-                clips: out.clips.len(),
+                clips,
             });
         }
-        let sigma = (ls.min + logsigma[i] as f64 / levels * (ls.max - ls.min)).exp();
-        let life = mo.sm * sigma;
-        let a: [f64; 3] = std::array::from_fn(|k| anchor[3 * i + k] as f64 * mo.qa / 1000.0);
-        // The decoded position in f64 (as the reference; the f32 copy loses ~1e-6 of omega when |x - a| ~ r_min).
-        let x: [f64; 3] = std::array::from_fn(|k| {
-            let v = m.means.mins[k] + means[3 * i + k] as f64 / 65535.0 * spans[k];
-            v.signum() * v.abs().exp_m1()
-        });
-        let r = (0..3).map(|k| (x[k] - a[k]).powi(2)).sum::<f64>().sqrt();
-        let step_o = qpv / r.max(mo.r_min);
-        let o_life: [[f64; 3]; 3] = std::array::from_fn(|k| {
-            std::array::from_fn(|c| omega[9 * i + 3 * k + c] as f64 * step_o * w_o[k])
-        });
-        let mut min_norm = f64::INFINITY;
-        for s in 0..samples {
-            let t = if samples > 1 {
-                s as f64 / (samples - 1) as f64
-            } else {
-                0.0
-            };
-            let u = 1.0 - t;
-            let (b0, b1, b2) = (u * u, 2.0 * u * t, t * t);
-            let norm = (0..3)
-                .map(|c| (b0 * o_life[0][c] + b1 * o_life[1][c] + b2 * o_life[2][c]).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            min_norm = min_norm.min(norm);
-        }
-        let mref = min_norm.max(1e-9) * qpv;
-        out.opacities.push((opacity[i] as f64 / 255.0) as f32);
-        out.times.push((mu[i] as f64 / m.mu.scale) as f32);
-        out.sigmas.push(sigma as f32);
-        out.anchors.push(a.map(|v| v as f32));
-        out.omega.push(o_life.map(|o| o.map(|v| (v / life) as f32)));
-        out.g.push(std::array::from_fn(|j| {
-            (g[5 * i + j] as f64 * mref * w_g[j] / (life * life)) as f32
-        }));
-        out.is_static.push(flag & 1 == 1);
-        out.clip.push(clip);
     }
     Ok(out)
 }

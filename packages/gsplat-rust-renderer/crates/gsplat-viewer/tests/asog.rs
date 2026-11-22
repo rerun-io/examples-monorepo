@@ -263,11 +263,104 @@ fn e1_evaluate_matches_the_reference() {
             rotation = rotation.max(angle(r.quaternion, &rotations[4 * i..4 * i + 4]));
         }
         println!(
-            "E1 t={t}: {visible} visible, {mismatched} visibility mismatches, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, weight {weight:.3e}"
+            "E1 t={t}: {visible} visible, {mismatched} visibility mismatches, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
         );
         assert_eq!(mismatched, 0, "t={t}");
         assert!(
             centre <= 1e-5 && rotation <= 1e-5 && weight <= 1e-6,
+            "t={t}"
+        );
+    }
+}
+
+/// E4 (load path): the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
+/// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
+/// rounding, and the evaluated rows match the asog reference itself within the E1 bounds.
+#[test]
+#[ignore = "integration: GPU"]
+fn e4_gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
+    let f = fixture();
+    let entity = &f.all["/asog"];
+    let bytes = row(entity, "AnimatedSogSplats3D", "asog");
+    let parts = gsplat_core::asog::decode_parts(
+        bytes.as_primitive::<UInt8Type>().values(),
+        ASOG_ACTIVE_THRESHOLD,
+    )
+    .expect("decode_parts");
+    let times: Vec<f32> = f.times.iter().map(|&t| t as f32).collect();
+    let load = gsplat_core::test_utils::asog_gpu_load(&parts, &times);
+    let (gpu, cpu, evaluated) = (load.gpu_rows, load.cpu_rows, load.evaluated);
+    assert_eq!(gpu.len(), cpu.len());
+    // Per column of the packed row: worst |gpu - cpu| / max(|cpu|, 1e-3 x the column's largest |cpu|).
+    let stride = gpu.len() / parts.manifest.count;
+    let mut worst = vec![0.0f64; stride];
+    for (col, worst_col) in worst.iter_mut().enumerate() {
+        let values = |v: &[f32]| {
+            v.iter()
+                .skip(col)
+                .step_by(stride)
+                .copied()
+                .collect::<Vec<f32>>()
+        };
+        let (g, c) = (values(&gpu), values(&cpu));
+        if col == 3 {
+            assert!(
+                g.iter().zip(&c).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "flags bits"
+            );
+            continue;
+        }
+        let floor = 1e-3 * c.iter().fold(0.0f64, |m, v| m.max(f64::from(v.abs())));
+        for (a, b) in g.iter().zip(&c) {
+            let d =
+                (f64::from(*a) - f64::from(*b)).abs() / f64::from(b.abs()).max(floor).max(1e-30);
+            *worst_col = worst_col.max(d);
+        }
+    }
+    println!(
+        "E4 load: worst relative |gpu - cpu| per motion column (opacity, mu, sigma, flags, anchor, O, G): {:?}",
+        worst.iter().map(|w| format!("{w:.1e}")).collect::<Vec<_>>()
+    );
+    assert!(worst.iter().all(|&w| w <= 1e-5), "motion de-quantisation");
+    let opacities = &parts.motion().opacities;
+    for (k, (t, (transforms, raw))) in f.times.iter().zip(&evaluated).enumerate() {
+        let entity = format!("/expected/t{k}");
+        let positions = expected(&f.all, &entity, "positions");
+        let rotations = expected(&f.all, &entity, "rotations");
+        let weights = expected(&f.all, &entity, "weights");
+        let (mut centre, mut rotation, mut weight, mut mismatched, mut visible) =
+            (0.0f64, 0.0f64, 0.0f64, 0, 0);
+        for i in 0..parts.manifest.count {
+            let culled = raw[i] <= CULLED_RAW_OPACITY;
+            if culled != (weights[i] <= 0.0) {
+                mismatched += 1;
+                continue;
+            }
+            if culled {
+                continue;
+            }
+            visible += 1;
+            // Linear opacity: sigmoid(raw) against the reference opacity x weight (clamped as the kernel does).
+            let alpha = 1.0 / (1.0 + (-f64::from(raw[i])).exp());
+            let expected_alpha = (f64::from(opacities[i]) * weights[i]).clamp(1e-6, 1.0 - 1e-6);
+            weight = weight.max((alpha - expected_alpha).abs());
+            let r = &transforms[10 * i..10 * i + 10];
+            let d = (0..3)
+                .map(|a| (f64::from(r[a]) - positions[3 * i + a]).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            centre = centre.max(d);
+            rotation = rotation.max(angle(
+                [r[3], r[4], r[5], r[6]],
+                &rotations[4 * i..4 * i + 4],
+            ));
+        }
+        println!(
+            "E4 load t={t}: {visible} visible, {mismatched} visibility mismatches, GPU vs reference worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {weight:.3e}"
+        );
+        assert_eq!(mismatched, 0, "t={t}");
+        assert!(
+            centre <= 1e-5 && rotation <= 1e-5 && weight <= 1e-5,
             "t={t}"
         );
     }
@@ -347,7 +440,11 @@ fn e2_twist_form_with_pinv_translation_equals_the_asog_form() {
 #[test]
 #[ignore = "needs GSPLAT_ASOG_FILE; timing"]
 fn full_file_timing() {
-    let path = std::env::var("GSPLAT_ASOG_FILE").expect("GSPLAT_ASOG_FILE");
+    // Not a contract: the GPU lane (`--ignored`) runs this target too, so it passes without its file.
+    let Ok(path) = std::env::var("GSPLAT_ASOG_FILE") else {
+        println!("full_file_timing: GSPLAT_ASOG_FILE is unset; nothing timed");
+        return;
+    };
     let bytes = std::fs::read(&path).expect("read .asog");
     let start = std::time::Instant::now();
     let asog = decode(&bytes, ASOG_ACTIVE_THRESHOLD).expect("decode");

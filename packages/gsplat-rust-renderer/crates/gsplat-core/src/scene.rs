@@ -73,6 +73,20 @@ impl Scene {
         }
     }
 
+    /// Attach motion that is already on the GPU (before the scene is shared).
+    pub(crate) fn attach_motion(
+        &mut self,
+        uploaded: crate::motion_gpu::GpuMotion,
+    ) -> Result<(), Error> {
+        match &mut self.inputs {
+            Inputs::Splats { motion, .. } => {
+                *motion = Some(uploaded);
+                Ok(())
+            }
+            Inputs::Hexels { .. } => Err(Error::Input("hexel scenes have no motion")),
+        }
+    }
+
     /// Attach per-row motion (before the scene is shared).
     pub(crate) fn animate(
         &mut self,
@@ -81,13 +95,7 @@ impl Scene {
         limit: u64,
     ) -> Result<(), Error> {
         let uploaded = motion.upload(device, self.n as usize, limit)?;
-        match &mut self.inputs {
-            Inputs::Splats { motion, .. } => {
-                *motion = Some(uploaded);
-                Ok(())
-            }
-            Inputs::Hexels { .. } => Err(Error::Input("hexel scenes have no motion")),
-        }
+        self.attach_motion(uploaded)
     }
 
     pub(crate) fn hexels(&self) -> bool {

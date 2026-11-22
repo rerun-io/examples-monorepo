@@ -2,8 +2,8 @@
 //! `GaussianSplats3D` preview (one mid-clip pose) on the same entity.
 //!
 //! When the payload is present the compute visualizer draws it instead of the preview rows. Default (GPU) path: the
-//! file is entropy-decoded once per payload row on the CPU (zlib streams; the motion de-quantisation runs there too),
-//! the static part is de-quantised by `sog_dequant.wgsl` and the motion is evaluated per view by `trigs_deform.wgsl`
+//! file is entropy-decoded once per payload row on the CPU (zlib streams only), the static part is de-quantised by
+//! `sog_dequant.wgsl`, the motion by `asog_motion.wgsl`, and the motion is evaluated per view by `trigs_deform.wgsl`
 //! whenever the time cursor moves: no CPU work and no upload on a time change. `GSPLAT_MOTION=cpu` selects the CPU
 //! oracle path (decode + `AsogMotion::evaluate_into` per time change + a scene upload), for A/B pixels.
 //! Time: `t [s] = (frame - frame_origin) / frameRate` with the manifest's frameRate (see `crate::trigs::clip_seconds`).
@@ -58,8 +58,9 @@ pub(crate) struct Payload<'a> {
 }
 
 impl Payload<'_> {
-    /// Entropy decode + motion de-quantisation on the CPU, static de-quantisation in `sog_dequant.wgsl` (or the CPU
-    /// with `GSPLAT_SOG_DECODE=cpu`), motion uploaded for the per-view pass. Logs the load-time split.
+    /// Entropy decode (zlib) on the CPU; static and motion de-quantisation in `sog_dequant.wgsl` +
+    /// `asog_motion.wgsl` (or both on the CPU with `GSPLAT_SOG_DECODE=cpu`); the motion is then evaluated per view.
+    /// Logs the load-time split.
     pub(crate) fn upload(
         &self,
         ctx: &re_renderer::RenderContext,
@@ -71,21 +72,16 @@ impl Payload<'_> {
         let parts = gsplat_core::asog::decode_parts(self.bytes, self.active_threshold)?;
         let entropy = start.elapsed();
         let start = web_time::Instant::now();
-        let motion = gsplat_core::Motion::Asog(&parts.motion);
         let (scene, cpu) = match path {
-            crate::sog::Dequantize::Gpu => (
-                core.upload_sog(
-                    &ctx.queue,
-                    &parts.quantization,
-                    &parts.planes(),
-                    Some(motion),
-                )?,
-                None,
-            ),
+            crate::sog::Dequantize::Gpu => (core.upload_asog(&ctx.queue, &parts)?, None),
             crate::sog::Dequantize::Cpu => {
                 let splats = gsplat_core::sog::dequantize(&parts.quantization, &parts.planes())?;
+                let motion = parts.motion();
                 let cpu = start.elapsed();
-                (core.upload_animated(&splats, motion)?, Some(cpu))
+                (
+                    core.upload_animated(&splats, gsplat_core::Motion::Asog(&motion))?,
+                    Some(cpu),
+                )
             }
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -93,17 +89,22 @@ impl Payload<'_> {
         let total = start.elapsed();
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         let split = cpu.map_or_else(
-            || format!("upload + de-quantise GPU {:.1} ms", ms(total)),
+            || {
+                format!(
+                    "upload + static and motion de-quantise GPU {:.1} ms",
+                    ms(total)
+                )
+            },
             |cpu| {
                 format!(
-                    "de-quantise CPU {:.1} ms, upload {:.1} ms",
+                    "static and motion de-quantise CPU {:.1} ms, upload {:.1} ms",
                     ms(cpu),
                     ms(total.saturating_sub(cpu))
                 )
             },
         );
         re_log::info!(
-            "ASOG decode: {} splats, SH degree {}, zlib + motion de-quantise CPU {:.1} ms, {split}; motion on the GPU",
+            "ASOG decode: {} splats, SH degree {}, zlib CPU {:.1} ms, {split}; motion pass on the GPU",
             re_format::format_uint(scene.len()),
             parts.sh.as_ref().map_or(0, |s| s.0),
             ms(entropy),
