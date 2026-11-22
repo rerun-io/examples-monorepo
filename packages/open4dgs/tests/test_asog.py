@@ -75,7 +75,7 @@ def test_round_trip_positions_rotations_and_weights(tmp_path: Path) -> None:
 
     src = synthetic_params()
     path = tmp_path / "clip.asog"
-    stats = encode_params(src, FPS, NUM_FRAMES, path, AsogSettings(prune=0.0))
+    stats = encode_params(src, FPS, NUM_FRAMES, path, AsogSettings(preset="upstream", prune=0.0))
     assert stats.count == 512 and path.stat().st_size == stats.bytes
     decoded, _ = decode_asog(path, torch.device("cpu"))
     # the encoder reorders the splats: match them by canonical centre (grid spacing 10 cm >> quantisation)
@@ -115,3 +115,83 @@ def test_trigs_runtime_folds_the_base_twist_and_zeroes_statics() -> None:
     assert np.all(rt.omega[:, static.numpy()] == 0) and np.all(rt.nu[:, static.numpy()] == 0)
     np.testing.assert_allclose(rt.opacity, torch.sigmoid(src["opacities"]).double().numpy(), rtol=1e-6)
     assert rt.manifest["timeline"] == {"frameRate": FPS, "totalFrames": NUM_FRAMES, "durationSeconds": NUM_FRAMES / FPS}
+
+
+def test_presets_band_safe_default_and_upstream() -> None:
+    from open4dgs.asog import AsogOptions, AsogSettings
+
+    assert AsogSettings().options() == AsogOptions(qp=0.5, qa=2.0, prune=0.0, mbits=16, tbits=11, lsbits=8)
+    assert AsogSettings(preset="upstream").options() == AsogOptions(qp=2.0, qa=8.0, prune=0.3, mbits=14, tbits=11, lsbits=8)
+    # an override changes only its own option
+    assert AsogSettings(preset="upstream", prune=0.0).options() == AsogOptions(qp=2.0, qa=8.0, prune=0.0, mbits=14, tbits=11, lsbits=8)
+
+
+def test_upstream_preset_matches_the_encoder_defaults() -> None:
+    import dataclasses
+    import inspect
+
+    from asog.encode import encode_runtime
+
+    from open4dgs.asog import AsogSettings
+
+    defaults = {name: p.default for name, p in inspect.signature(encode_runtime).parameters.items() if p.default is not inspect.Parameter.empty}
+    options = dataclasses.asdict(AsogSettings(preset="upstream").options())
+    assert {name: defaults[name] for name in options} == options
+
+
+def test_decode_keeps_trigs_timing_and_a_stock_player_cuts_at_0_05(tmp_path: Path) -> None:
+    """K2 (a): ``decode_asog`` hands back mu / sigma, not a cut; the cut is the renderer's. The trainer path renders the
+    decoded clip with TRiGS's 0.01, a stock ``.asog`` player with the format's fixed 0.05: never more opaque, at most
+    0.0404 less (at gamma = 0.05), and blank once gamma < 0.05 (|dt| > 2.45 sigma instead of 3.03 sigma)."""
+    from asog import read as read_asog
+
+    from open4dgs.asog import AsogSettings, decode_asog, encode_params
+
+    src = synthetic_params()
+    path = tmp_path / "clip.asog"
+    encode_params(src, FPS, NUM_FRAMES, path, AsogSettings())
+    decoded, _ = decode_asog(path, torch.device("cpu"))
+    reference = read_asog(path)
+    np.testing.assert_allclose(decoded["log_durations"].reshape(-1).double().numpy(), np.log(reference.sigma), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(decoded["times"].reshape(-1).double().numpy(), reference.mu, atol=1e-6)
+    dynamic = ~torch.from_numpy(reference.static)
+    blanked = 0
+    for t in np.linspace(0.0, (NUM_FRAMES - 1) / FPS, 15):
+        trainer_w = deform(decoded, float(t), threshold=0.01)[2].double()
+        player_w = torch.from_numpy(reference.evaluate(float(t)).weights)
+        diff = (trainer_w - player_w)[dynamic]
+        assert float(diff.min()) > -1e-6 and float(diff.max()) < 0.0405
+        blanked += int(((player_w == 0) & (trainer_w > 0))[dynamic].sum())
+    assert blanked > 0
+
+
+def test_encoder_drops_translation_without_a_quantisable_rotation(tmp_path: Path) -> None:
+    """K2 (b): ``.asog`` carries translation only as ``g = nu . omega``, along the quantised rotation axis. A pure-translation
+    row (omega = 0; TRiGS's gauge fix then moves it by the full nu) and a row whose omega rounds to zero steps
+    (|omega| = 1e-3 rad/s here, above TRiGS's 1e-8 threshold on |omega|^2) both come back without their translation."""
+    from asog import read as read_asog
+
+    from open4dgs.asog import AsogSettings, decode_asog, encode_params
+
+    src = synthetic_params()
+    pure, slow = torch.arange(1, 512, 16), torch.arange(2, 512, 16)  # dynamic rows (row % 16 == 0 is static)
+    direction = torch.nn.functional.normalize(torch.randn(len(slow), 3, generator=torch.Generator().manual_seed(3)), dim=-1)
+    for k in ("base", "c0", "c1", "c2"):
+        src[f"zeta_{k}_r"][pure] = 0.0
+        src[f"zeta_{k}_t"][pure] = 0.0 if k != "base" else torch.tensor([0.3, 0.0, 0.0])
+        src[f"zeta_{k}_r"][slow] = 0.0 if k != "base" else 1e-3 * direction
+        src[f"zeta_{k}_t"][slow] = 0.0 if k != "base" else 0.3 * direction  # 0.3 m/s along the axis
+    path = tmp_path / "clip.asog"
+    encode_params(src, FPS, NUM_FRAMES, path, AsogSettings())
+    decoded, _ = decode_asog(path, torch.device("cpu"))
+    order = torch.cdist(src["means"].double(), decoded["means"].double()).argmin(dim=1)
+    assert np.all(np.abs(read_asog(path).omega[:, order[pure].numpy()]).sum(axis=(0, 2)) == 0)
+    assert np.all(np.abs(read_asog(path).omega[:, order[slow].numpy()]).sum(axis=(0, 2)) == 0)
+    for rows in (pure, slow):
+        t = float(src["times"][rows].mean()) + 0.1
+        m0 = deform(src, t)[0][rows]
+        m1 = deform(decoded, t)[0][order[rows]]
+        dt = t - src["times"][rows].reshape(-1)
+        moved = (m0 - src["means"][rows]).norm(dim=-1)
+        np.testing.assert_allclose(moved.numpy(), (0.3 * dt.abs()).numpy(), rtol=1e-3)  # TRiGS: the full 0.3 m/s
+        assert float((m1 - decoded["means"][order[rows]]).norm(dim=-1).max()) < 1e-6  # .asog: not at all

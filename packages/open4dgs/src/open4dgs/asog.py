@@ -15,11 +15,13 @@ moves a splat. The way back picks the minimum-norm translation control points ``
 that quartic (``nu_control_points``); the TRiGS motion of the result equals the ``.asog`` reference decoder's motion.
 """
 
+import dataclasses
 import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -36,21 +38,56 @@ OPACITY_EPS: float = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
-class AsogSettings:
-    """Encoder options (upstream defaults)."""
+class AsogOptions:
+    """Encoder options, all set (what ``encode_runtime`` takes)."""
 
-    qp: float = 2.0
+    qp: float
     """Motion step: displacement over a splat's visible life, file units x 1e-3 (mm for metres)."""
-    qa: float = 8.0
+    qa: float
     """Anchor step, file units x 1e-3."""
-    prune: float = 0.3
+    prune: float
     """Fraction of the dynamic splats dropped, least important first (opacity x area x sigma)."""
-    mbits: int = 14
+    mbits: int
     """Position bits per axis (of 16, log-mapped)."""
-    tbits: int = 11
+    tbits: int
     """Centre-time resolution 2^-tbits s."""
-    lsbits: int = 8
+    lsbits: int
     """Log-sigma bits."""
+
+
+AsogPreset = Literal["band-safe", "upstream"]
+
+PRESETS: dict[AsogPreset, AsogOptions] = {
+    "band-safe": AsogOptions(qp=0.5, qa=2.0, prune=0.0, mbits=16, tbits=11, lsbits=8),
+    "upstream": AsogOptions(qp=2.0, qa=8.0, prune=0.3, mbits=14, tbits=11, lsbits=8),
+}
+"""``band-safe`` (our default) keeps held-out PSNR within 1 % of the uncompressed clip on 4DAnyone and MAMMA at
+about 12 MB; ``upstream`` (arrival-space/animated-sog's defaults) halves the file but costs 2.3 % on 4DAnyone run C,
+with dark holes where pruned splats were."""
+
+
+@dataclass(frozen=True, slots=True)
+class AsogSettings:
+    """A preset, with any option overridden (``None`` = the preset's value)."""
+
+    preset: AsogPreset = "band-safe"
+    qp: float | None = None
+    """Motion step: displacement over a splat's visible life, file units x 1e-3 (mm for metres)."""
+    qa: float | None = None
+    """Anchor step, file units x 1e-3."""
+    prune: float | None = None
+    """Fraction of the dynamic splats dropped, least important first (opacity x area x sigma)."""
+    mbits: int | None = None
+    """Position bits per axis (of 16, log-mapped)."""
+    tbits: int | None = None
+    """Centre-time resolution 2^-tbits s."""
+    lsbits: int | None = None
+    """Log-sigma bits."""
+
+    def options(self) -> AsogOptions:
+        """The preset's options with the overrides applied."""
+        overrides = {name: getattr(self, name) for name in ("qp", "qa", "prune", "mbits", "tbits", "lsbits") if getattr(self, name) is not None}
+        return dataclasses.replace(PRESETS[self.preset], **overrides)
 
 
 def clip_manifest(fps: float, num_frames: int) -> dict[str, object]:
@@ -113,15 +150,16 @@ def trigs_runtime(params: Mapping[str, Tensor], fps: float, num_frames: int) -> 
 def encode_params(params: Mapping[str, Tensor], fps: float, num_frames: int, dst: Path, settings: AsogSettings) -> EncodeStats:
     """Write the clip as ``.asog`` to ``dst`` (mode 644)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
+    options: AsogOptions = settings.options()
     stats: EncodeStats = encode_runtime(
         trigs_runtime(params, fps, num_frames),
         dst,
-        qp=settings.qp,
-        qa=settings.qa,
-        prune=settings.prune,
-        mbits=settings.mbits,
-        tbits=settings.tbits,
-        lsbits=settings.lsbits,
+        qp=options.qp,
+        qa=options.qa,
+        prune=options.prune,
+        mbits=options.mbits,
+        tbits=options.tbits,
+        lsbits=options.lsbits,
     )
     dst.chmod(0o644)
     return stats
