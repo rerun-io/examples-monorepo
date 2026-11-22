@@ -37,6 +37,14 @@ pub(crate) fn uniform(device: &wgpu::Device, words: &[u32]) -> wgpu::Buffer {
 }
 
 pub(crate) fn module(device: &wgpu::Device, source: &str) -> wgpu::ShaderModule {
+    // WebGPU passes WGSL to the browser, which requires the extension directive;
+    // native naga 30 rejects it (gfx-rs/wgpu#5555), so it is added on the web only.
+    #[cfg(target_arch = "wasm32")]
+    let source = &if source.contains("subgroup") {
+        format!("enable subgroups;\n{source}")
+    } else {
+        source.to_owned()
+    };
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("gsplat shader"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
