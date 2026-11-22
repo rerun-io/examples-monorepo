@@ -16,8 +16,17 @@ pub fn install_gsplat_hooks() {
             {
                 let force_no_subgroups = query_flag("force_no_subgroups");
                 if query_flag("profile") {
-                    gsplat_viewer::profile::ENABLED
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    let user_agent = web_sys::window()
+                        .and_then(|window| window.navigator().user_agent().ok())
+                        .unwrap_or_default();
+                    if gsplat_viewer::profile::timestamps_allowed(&user_agent) {
+                        gsplat_viewer::profile::ENABLED
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        re_log::info!(
+                            "gsplat profile: GPU timestamps off on Apple GPUs (they fail the browser's Metal command buffer); load and decode lines only"
+                        );
+                    }
                 }
                 let compute =
                     gsplat_viewer::setup::compute_device_descriptor(!force_no_subgroups);
