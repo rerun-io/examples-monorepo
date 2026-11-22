@@ -33,11 +33,14 @@ source:
     # info["render_depth"]; TrigsTrainer.camera_loss_hook (default None) adds a per-camera loss term before backward().
     # packages/open4dgs (open4dgs.prior) owns the loss.
     - patches/0003-depth-render-and-camera-loss-hook.patch
+    # Dependency swap: trigs.core.losses imports fused_ssim from packages/hexels-mojo (hexels_mojo.fused_ssim, the Mojo port of
+    # rahul-goel/fused-ssim) instead of the fused-ssim CUDA package. Three import lines.
+    - patches/0007-fused-ssim-from-hexels-mojo.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 2
+  number: 3
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.
