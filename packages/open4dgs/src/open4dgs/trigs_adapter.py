@@ -41,9 +41,6 @@ from open4dgs.init_cloud import InitCloud
 from open4dgs.prior import MonoPriorLoss
 from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer
 
-StepCallback = Callable[[str, float, int], None]
-"""Called with (tag, value, step) for every scalar the trainer reports."""
-
 
 @dataclass(frozen=True, slots=True)
 class TrainConfig:
@@ -157,15 +154,12 @@ class CameraCompensation:
 
 @dataclass
 class ScalarLog:
-    """Duck-typed SummaryWriter: keeps every ``add_scalar`` and forwards it to ``on_step``."""
+    """Duck-typed SummaryWriter: keeps every ``add_scalar``."""
 
-    on_step: StepCallback | None = None
     rows: dict[str, list[tuple[int, float]]] = field(default_factory=dict)
 
     def add_scalar(self, tag: str, value: float, step: int) -> None:
         self.rows.setdefault(tag, []).append((int(step), float(value)))
-        if self.on_step is not None:
-            self.on_step(tag, float(value), int(step))
 
     def __getattr__(self, name: str) -> Callable[..., None]:
         # add_histogram, flush, ...: ignored.
@@ -342,7 +336,6 @@ def train_clip(
     init: InitCloud,
     config: TrainConfig,
     holdout_names: tuple[str, ...],
-    on_step: StepCallback | None = None,
     device: torch.device | None = None,
     prior: MonoPriorLoss | None = None,
     capture_times: Float64[ndarray, "cams frames"] | None = None,
@@ -378,7 +371,7 @@ def train_clip(
         if capture_times.shape != (len(clip.camera_names), num_frames):
             raise ValueError(f"capture_times {capture_times.shape} must be (cameras, frames) = {(len(clip.camera_names), num_frames)}")
         gt_times = capture_times_per_frame(capture_times)
-    writer: ScalarLog = ScalarLog(on_step=on_step)
+    writer: ScalarLog = ScalarLog()
     trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
     torch.cuda.reset_peak_memory_stats(dev)

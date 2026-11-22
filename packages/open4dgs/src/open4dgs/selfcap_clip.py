@@ -195,7 +195,6 @@ def read_timed_clip(
     *,
     joints_entity: str = JOINTS_ENTITY,
     decode_device: torch.device | None = None,
-    storage_device: torch.device | None = None,
     roi: bool = False,
     roi_pad: float = 0.15,
 ) -> TimedClip:
@@ -213,7 +212,6 @@ def read_timed_clip(
             window runs past the segment.
     """
     decode_on: torch.device = decode_device if decode_device is not None else torch.device("cuda")
-    store_on: torch.device = storage_device if storage_device is not None else torch.device("cpu")
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
     layout: CatalogRigLayout = parse_rig_layout(catalog_components(entry.filter_segments(segment_id).schema()))
     by_name: dict[str, CatalogCamera] = {camera.name: camera for camera in layout.cameras}
@@ -320,7 +318,7 @@ def read_timed_clip(
         out_frames.append(
             torch.cat(
                 [
-                    resample_frames(decoded[s : s + RESAMPLE_CHUNK], grid, target_wh).permute(0, 2, 3, 1).to(store_on)
+                    resample_frames(decoded[s : s + RESAMPLE_CHUNK], grid, target_wh).permute(0, 2, 3, 1).cpu()
                     for s in range(0, len(decoded), RESAMPLE_CHUNK)
                 ]
             )

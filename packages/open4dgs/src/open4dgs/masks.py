@@ -185,15 +185,10 @@ def write_mask_layer(
             )
 
 
-def register_mask_layer(catalog_url: str, dataset: str, path: Path, *, create: bool) -> None:
-    """Register ``path`` as layer ``people_matte`` of its segment (replacing an older ``people_matte`` layer of that segment).
-
-    ``create`` gets or creates the dataset (a companion dataset such as ``open4dgs-mamma``), retrying once when another
-    worker creates it at the same time (``simplecv.catalog_layers.ensure_dataset``).
-    """
-    client = CatalogClient(catalog_url)
-    entry: DatasetEntry = ensure_dataset(client, dataset) if create else client.get_dataset(dataset)
-    register_layer(entry, [path], MASKS_LAYER)
+def register_mask_layer(catalog_url: str, dataset: str, path: Path) -> None:
+    """Register ``path`` as layer ``people_matte`` of its segment (replacing an older ``people_matte`` layer of that segment)
+    on ``dataset``, got or created (a companion dataset such as ``open4dgs-mamma``; ``simplecv.catalog_layers.ensure_dataset``)."""
+    register_layer(ensure_dataset(CatalogClient(catalog_url), dataset), [path], MASKS_LAYER)
 
 
 def decode_mask_pngs(blobs: Sequence[bytes], threads: int = DECODE_THREADS) -> list[np.ndarray | None]:
@@ -233,38 +228,27 @@ def read_clip_masks(
     catalog_url: str,
     dataset: str,
     segment_id: str,
-    *,
-    compute_device: torch.device | None = None,
-    device: torch.device | None = None,
-    dtype: torch.dtype = torch.float32,
-) -> tuple[Float32[Tensor, "frames h w"] | Float16[Tensor, "frames h w"], ...]:
+) -> tuple[Float32[Tensor, "frames h w"], ...]:
     """The ``people_matte`` layer for ``clip``: per camera, soft foreground in [0, 1], on the clip's exact pixel grid.
 
     The stored-grid PNGs go through the clip's own undistortion grid and resize (``resample_images``), so mask pixel
     ``(y, x)`` covers the same ray as ``clip.frames[c][t, y, x]``. A clip read with ``roi`` uses the same combined
     rotation + zoom + undistortion grid as its frames (``catalog_clip.roi_grid``); the grid is the one the frame read
-    cached on ``compute_device`` (the reader's default ``decode_device`` is ``cuda`` too).
+    cached on ``cuda`` (the reader's default ``decode_device``). The grid is built and the masks are resampled on
+    ``cuda`` when available (else the CPU), ``RESAMPLE_CHUNK`` frames at a time; the float32 masks land on the CPU.
 
     Args:
         clip: The clip the masks align with (from ``read_catalog_clip``).
         catalog_url: Catalog holding the ``people_matte`` layer.
         dataset: Its dataset.
         segment_id: The clip's segment.
-        compute_device: Where the grid is built and the masks are resampled, ``RESAMPLE_CHUNK`` frames at a time
-            (default ``cuda`` when available, else the CPU).
-        device: Where the returned masks live (default the CPU).
-        dtype: ``torch.float32`` (default) or ``torch.float16``.
 
     Raises:
-        ValueError: If the clip lacks ``stored_sizes``/``lenses``, the layer misses a camera or a clip frame, or ``dtype``
-            is neither float32 nor float16.
+        ValueError: If the clip lacks ``stored_sizes``/``lenses``, or the layer misses a camera or a clip frame.
     """
     if len(clip.stored_sizes) != len(clip.camera_names) or len(clip.lenses) != len(clip.camera_names):
         raise ValueError("clip has no stored_sizes/lenses: read it with open4dgs.catalog_clip.read_catalog_clip")
-    if dtype not in (torch.float32, torch.float16):
-        raise ValueError(f"dtype must be torch.float32 or torch.float16, got {dtype}")
-    compute_on: torch.device = compute_device if compute_device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    store_on: torch.device = device if device is not None else torch.device("cpu")
+    compute_on: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
     entities: list[str] = [mask_entity(camera) for camera in clip.camera_names]
     frames: list[int] = clip.frame_indices.tolist()
@@ -304,5 +288,5 @@ def read_clip_masks(
             grid = roi_grid(lens, clip.roi.cameras[camera], compute_on)
         else:
             grid = None if lens is None else undistortion_grid(lens, stored_wh, compute_on)
-        out.append(resample_masks(torch.from_numpy(stack), grid, clip.sizes[camera], compute_on, store_on, dtype))
+        out.append(resample_masks(torch.from_numpy(stack), grid, clip.sizes[camera], compute_on, torch.device("cpu"), torch.float32))
     return tuple(out)

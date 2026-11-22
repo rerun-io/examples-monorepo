@@ -140,9 +140,8 @@ class SharedTimeGroup:
 class Open4dgsTrainer(TrigsTrainer):
     """``TrigsTrainer`` with the three speed levers on the recipe's seams (all on by default)."""
 
-    def __init__(self, *args: object, shared_time: bool = True, batch_cameras: bool = True, **kwargs: object) -> None:
+    def __init__(self, *args: object, batch_cameras: bool = True, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
-        self.shared_time = shared_time
         self.batch_cameras = batch_cameras
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
 
@@ -169,7 +168,7 @@ class Open4dgsTrainer(TrigsTrainer):
         step: int,
     ) -> SharedTimeGroup | None:
         """Levers 2 + 3: a ``SharedTimeGroup`` when the step's cameras share one time, else None (per-camera path)."""
-        if not self.shared_time or len(cam_group) < 2 or offset_active or config.rs_enabled():
+        if len(cam_group) < 2 or offset_active or config.rs_enabled():
             return None
         default_t = float(frame_idx) / max(config.fps, 1e-6)
         times: set[float] = set()

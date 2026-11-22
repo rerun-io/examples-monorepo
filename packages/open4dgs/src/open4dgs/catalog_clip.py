@@ -93,7 +93,7 @@ class MultiViewClip:
     camera_names: tuple[str, ...]
     """Camera names under ``/world``, e.g. ``rig_01/cam_00``, in rig order."""
     frames: tuple[UInt8[Tensor, "frames h w 3"], ...]
-    """Per camera, RGB frames undistorted and resized; on the ``storage_device`` the reader was given (CPU by default)."""
+    """Per camera, RGB frames undistorted and resized, on the CPU."""
     valid: tuple[Bool[Tensor, "h w"], ...]
     """Per camera, pixels whose undistorted ray lands inside the source image; outside pixels are black in ``frames``."""
     K: Float32[Tensor, "cams 3 3"]
@@ -371,7 +371,6 @@ def read_catalog_clip(
     *,
     body_source: str | None = None,
     decode_device: torch.device | None = None,
-    storage_device: torch.device | None = None,
     undistort: bool = True,
     roi: Literal["people"] | None = None,
     roi_pad: float = 0.15,
@@ -389,7 +388,6 @@ def read_catalog_clip(
         max_side: Longer side of the returned frames (after undistortion); None keeps the stored size.
         body_source: Body source under ``/world`` (``gt``, ``pred/mamma``); None prefers ``gt``.
         decode_device: Where NVDEC decodes and the undistortion runs (default ``cuda``).
-        storage_device: Where ``frames`` live (default CPU: 32 cams x 120 frames at 1028x752 is 8.9 GB).
         undistort: False returns the stored (distorted) frames, e.g. to compute a layer aligned with the stored video;
             ``K`` is then only the pinhole approximation of a lensed camera.
         roi: None returns the real cameras. ``people`` returns per camera a person-centred virtual camera
@@ -407,7 +405,6 @@ def read_catalog_clip(
     if roi is not None and not undistort:
         raise ValueError("roi needs undistort=True (the virtual cameras are pinholes)")
     decode_on: torch.device = decode_device if decode_device is not None else torch.device("cuda")
-    store_on: torch.device = storage_device if storage_device is not None else torch.device("cpu")
     entry: DatasetEntry = CatalogClient(catalog_url).get_dataset(dataset)
     layout: CatalogRigLayout = parse_rig_layout(catalog_components(entry.filter_segments(segment_id).schema()))
     by_name: dict[str, CatalogCamera] = {camera.name: camera for camera in layout.cameras}
@@ -505,7 +502,7 @@ def read_catalog_clip(
         out_frames.append(
             torch.cat(
                 [
-                    resample_frames(decoded[start : start + RESAMPLE_CHUNK], grid, target_wh).permute(0, 2, 3, 1).to(store_on)
+                    resample_frames(decoded[start : start + RESAMPLE_CHUNK], grid, target_wh).permute(0, 2, 3, 1).cpu()
                     for start in range(0, len(decoded), RESAMPLE_CHUNK)
                 ]
             )

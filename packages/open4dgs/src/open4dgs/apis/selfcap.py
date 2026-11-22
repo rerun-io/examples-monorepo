@@ -125,7 +125,7 @@ def _masks(config: Config) -> None:
             rows.append(np.concatenate(tiles, axis=1))
         cv2.imwrite(str(config.png_dir / f"s1-masks-contact-{config.segment_id[-17:]}.jpg"), np.concatenate(rows)[..., ::-1])
     if config.register:
-        register_mask_layer(config.register_url, config.register_dataset, path, create=True)
+        register_mask_layer(config.register_url, config.register_dataset, path)
         print(f"registered masks on {config.register_dataset}/{config.segment_id}")
 
 

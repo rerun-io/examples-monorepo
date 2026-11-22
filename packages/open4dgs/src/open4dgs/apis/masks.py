@@ -116,5 +116,5 @@ def main(config: Config) -> None:
     path.parent.chmod(0o775)
     print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")
     if config.register:
-        register_mask_layer(config.register_url, target, path, create=target != config.dataset)
+        register_mask_layer(config.register_url, target, path)
         print(f"registered layer {MASKS_LAYER} of {target}/{config.segment_id} on {config.register_url}")
