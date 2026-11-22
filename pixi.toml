@@ -4418,6 +4418,8 @@ asog-src = { path = "recipes/asog-src" }
 # Exact binned GPU kNN (sm_120 + sm_121); open4dgs.pytorch3d_ops.knn_points uses it for the trainer's rigid-neighbour
 # self-query (falls back to the chunked torch path without it).
 fastgraphcompute-src = { path = "recipes/fastgraphcompute-src" }
+# Fused SSIM (sm_120 + sm_121); TRiGS's reconstruction loss (trigs.core.losses) uses it instead of torchmetrics when importable.
+fused-ssim-src = { path = "recipes/fused-ssim-src" }
 python = "3.12.*"
 # ai-demos prebuilt for CUDA 13, Python 3.12 and torch 2.12 (sm_86 + sm_120 + PTX); TRiGS's upstream pin.
 gsplat = "==1.5.3"

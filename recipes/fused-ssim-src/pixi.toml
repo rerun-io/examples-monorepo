@@ -1,0 +1,6 @@
+[package]
+name = "fused-ssim-src"
+version = "1.0.0.a7c48d6"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
