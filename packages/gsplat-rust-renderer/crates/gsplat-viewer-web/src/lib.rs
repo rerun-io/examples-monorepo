@@ -33,9 +33,13 @@ pub fn install_gsplat_hooks() {
         })
         .ok();
     re_viewer::web_hooks::SETUP_APP
-        .set(|app| match gsplat_viewer::setup::register_compute_splats(app) {
-            Ok(()) => re_log::info!("gsplat web viewer: compute splat renderer registered"),
-            Err(err) => re_log::error!("gsplat web viewer: compute splat registration failed: {err}"),
-        })
+        .set(
+            |app| match gsplat_viewer::setup::register_compute_splats(app) {
+                Ok(()) => re_log::info!("gsplat web viewer: compute splat renderer registered"),
+                Err(err) => {
+                    re_log::error!("gsplat web viewer: compute splat registration failed: {err}")
+                }
+            },
+        )
         .ok();
 }

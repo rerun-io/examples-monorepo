@@ -2162,6 +2162,12 @@ rust-std-wasm32-unknown-unknown = "1.98.1.*"
 wasm-bindgen-cli = "==0.2.129"
 binaryen = "*"
 
+[feature.gsplat-web.tasks.gsplat-web-build]
+args = ["stock_dir", "out_dir"]
+cmd = "python tools/build_web_viewer.py --stock-dir {{ stock_dir }} --out-dir {{ out_dir }}"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build the custom gsplat viewer for the web (wasm32) into a copy of a stock Rerun 0.42.0 web viewer directory"
+
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"

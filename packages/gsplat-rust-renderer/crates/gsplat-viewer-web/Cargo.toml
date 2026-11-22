@@ -27,8 +27,8 @@ re_viewer = { path = "target/patch/re_viewer-0.42.0" }
 wgpu = { path = "target/patch/wgpu-30.0.0" }
 
 [profile.release]
-# Same as Rerun's web viewer build: small and fast.
+# Full LTO and one codegen unit keep the wasm close to the stock viewer's size.
 opt-level = 2
-lto = "thin"
-codegen-units = 16
+lto = "fat"
+codegen-units = 1
 debug = false
