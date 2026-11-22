@@ -341,7 +341,6 @@ def main(config: Config) -> dict[str, object]:
         "frame_start": int(clip.frame_indices[0]),
         "frame_end": int(clip.frame_indices[-1]),
         "num_frames": len(clip.frame_indices),
-        "roi": "none" if clip.roi is None else f"people pad={clip.roi.pad:g} max_side={clip.roi.max_side}",
         "cameras": list(clip.camera_names),
         "train_cameras": list(train_names),
         "holdout_cameras": list(holdout_names),
