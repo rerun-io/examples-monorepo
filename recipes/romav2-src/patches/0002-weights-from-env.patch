@@ -1,0 +1,32 @@
+diff --git a/src/romav2/romav2.py b/src/romav2/romav2.py
+index 65a1a3c..8038f0d 100644
+--- a/src/romav2/romav2.py
++++ b/src/romav2/romav2.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ from dataclasses import dataclass
+ from pathlib import Path
+ from collections import OrderedDict
++import os
+ 
+ 
+ import numpy as np
+@@ -95,10 +96,15 @@ class RoMaV2(nn.Module):
+             # default
+             cfg = RoMaV2.Cfg()
+             
+-        weights = torch.hub.load_state_dict_from_url(
+-            "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt",
+-            map_location=device
+-        )
++        # ROMAV2_WEIGHTS names a local romav2.0.1.pt (the pixi download task); no download at construction.
++        weights_path = os.environ.get("ROMAV2_WEIGHTS")
++        if weights_path:
++            weights = torch.load(weights_path, map_location=device, weights_only=True)
++        else:
++            weights = torch.hub.load_state_dict_from_url(
++                "https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt",
++                map_location=device
++            )
+         self.f = Descriptor(cfg.descriptor)
+         self.matcher = Matcher(cfg.matcher)
+         self.cfg = cfg
