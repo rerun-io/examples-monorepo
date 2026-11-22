@@ -2,6 +2,7 @@
 
 import itertools
 
+import pytest
 import torch
 
 from open4dgs.pytorch3d_ops import knn_points, sample_farthest_points
@@ -68,3 +69,52 @@ def test_knn_points_adaptive_chunks_equal_fixed_chunks() -> None:
     assert torch.equal(tiny_budget.idx, fixed.idx)
     padded = knn_points(p1, p2, lengths2=torch.tensor([2000]), K=5, memory_budget=100 * 2500 * 4)
     assert int(padded.idx.max()) < 2000
+
+
+def _assert_valid_self_knn(result_d: torch.Tensor, result_i: torch.Tensor, pts: torch.Tensor, want_d: torch.Tensor) -> None:
+    """``result`` is a K-NN of ``pts`` with ``want_d``'s sorted distances: same distances, and each pick at its distance."""
+    torch.testing.assert_close(result_d, want_d, rtol=1e-5, atol=1e-6)
+    picked = (pts[result_i.clamp(min=0)] - pts[:, None]).square().sum(-1)
+    torch.testing.assert_close(picked, want_d, rtol=1e-5, atol=1e-6)
+    assert all(len(set(row)) == len(row) for row in result_i.tolist())
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("k", [1, 4, 33, 200])
+def test_knn_points_binned_self_query_equals_torch_path(k: int) -> None:
+    """The FastGraphCompute path (CUDA self-query) gives the torch path's neighbours, with exact duplicates included."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    pytest.importorskip("fastgraphcompute", reason="the FastGraphCompute path needs recipes/fastgraphcompute-src")
+    from open4dgs import pytorch3d_ops
+
+    gen = torch.Generator().manual_seed(5)
+    pts = torch.rand((5000, 3), generator=gen)
+    pts[100:110] = pts[7]  # 11 coincident points: ties at distance 0
+    pts[200] = pts[201]
+    pts = pts.cuda()
+    assert pytorch3d_ops._binned_select_knn() is not None
+    binned = knn_points(pts[None], pts[None], K=k)  # self-query: FastGraphCompute
+    reference = knn_points(pts[None], pts[None].clone(), K=k)  # p2 another tensor: the torch path
+    assert binned.idx.shape == reference.idx.shape == (1, 5000, k) and binned.idx.dtype == torch.int64
+    assert torch.equal(binned.idx[0, :, 0], torch.arange(5000, device="cuda"))  # the point itself first, duplicates too
+    exact = (pts[:, None, :] - pts[None, :, :]).square().sum(-1).sort(dim=1).values  # direct differences, no matmul
+    _assert_valid_self_knn(binned.dists[0], binned.idx[0], pts, exact[:, :k])
+    # Where the K-th and (K+1)-th distances differ the neighbour set is unique: both paths must return it.
+    unique_set = exact[:, k] > exact[:, k - 1] + 1e-5  # beyond the torch path's cdist rounding (matmul form)
+    same = (binned.idx[0].sort(dim=1).values == reference.idx[0].sort(dim=1).values).all(1)
+    assert bool(same[unique_set].all())
+
+
+@pytest.mark.integration
+def test_knn_points_binned_k_above_point_count_pads_like_torch() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    pytest.importorskip("fastgraphcompute", reason="the FastGraphCompute path needs recipes/fastgraphcompute-src")
+    pts = torch.rand((1, 6, 3), generator=torch.Generator().manual_seed(6)).cuda()
+    binned = knn_points(pts, pts, K=9, return_nn=True)
+    reference = knn_points(pts, pts.clone(), K=9, return_nn=True)
+    assert torch.equal(binned.idx, reference.idx)  # 6 distinct points, no ties: identical including the -1 padding
+    torch.testing.assert_close(binned.dists, reference.dists, rtol=1e-5, atol=1e-6)
+    assert binned.knn is not None and reference.knn is not None
+    torch.testing.assert_close(binned.knn, reference.knn)
