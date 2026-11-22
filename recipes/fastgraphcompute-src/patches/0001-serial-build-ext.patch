@@ -1,0 +1,13 @@
+Build fix: build the extensions one after another. With parallel=True setuptools runs the five extensions' ninja builds at once in one shared temp directory, and they overwrite each other's build.ninja (the linker then cannot find objects such as oc_helper_cpu.o). ninja still compiles each extension's sources in parallel (MAX_JOBS).
+
+--- a/setup.py
++++ b/setup.py
+@@ -201,7 +201,7 @@
+     cmdclass={
+         'build_ext': BuildExtension.with_options(no_python_abi_suffix=True,
+                                                  use_ninja=True,
+-                                                 parallel=True,
++                                                 parallel=False,
+                                                  make_args=MAKE_ARGS,
+                                                  cmake_process_args=[f"-DCMAKE_BUILD_PARALLEL_LEVEL={NUM_JOBS}"])
+     },
