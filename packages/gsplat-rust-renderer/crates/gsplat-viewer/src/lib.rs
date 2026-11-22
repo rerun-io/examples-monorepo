@@ -8,6 +8,7 @@ mod hexels;
 mod renderer;
 mod selection;
 pub mod setup;
+mod trigs;
 mod visualizer;
 
 pub use cache::compute_gpu_bytes;
