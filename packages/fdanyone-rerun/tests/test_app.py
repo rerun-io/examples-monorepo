@@ -25,43 +25,34 @@ def test_the_app_preset_is_short_and_runs_no_extra_estimator() -> None:
     assert APP_PERSON.max_side == PersonConfig().max_side and APP_PERSON.asog == PersonConfig().asog
 
 
-def test_the_pump_saves_what_the_viewer_gets_and_survives_empty_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``BinaryStream.read()`` returns None when nothing new was logged (Pablo's first run failed on that)."""
-    reads: list[bytes | None] = [None, b"RRF2-a", None, b"-b"]
+def test_a_run_saves_a_valid_recording_and_survives_empty_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The viewer's bytes and the saved ``<run>.rrd`` hold the same recording; the saved file reads back as one .rrd.
 
-    class FakeStream(app.rr.BinaryStream):
-        def __init__(self) -> None:  # no native stream behind it
-            pass
+    ``BinaryStream.read()`` returns None when nothing new was logged (Pablo's first run failed on that).
+    """
+    from rerun.chunk import RrdReader
 
-        def read(self, *, flush: bool = True) -> bytes | None:
-            return reads.pop(0) if reads else None
-
-    class FakeRecording:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def binary_stream(self) -> FakeStream:
-            return FakeStream()
-
-        def flush(self) -> None:
-            pass
-
-    class QuickStreamer:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
+    class LoggingStreamer:
+        def __init__(self, _config: object, recording: app.rr.RecordingStream, **_kwargs: object) -> None:
             import threading
 
+            self.recording = recording
             self.stop = threading.Event()
 
         def run(self) -> None:
             import time
 
-            time.sleep(0.2)
+            time.sleep(0.1)  # a few empty reads first
+            for k in range(3):
+                self.recording.log(f"world/p{k}", app.rr.Points3D([[float(k), 0.0, 0.0]]))
+                time.sleep(0.05)
 
-    monkeypatch.setattr(app.rr, "RecordingStream", FakeRecording)
-    monkeypatch.setattr(app, "RunStreamer", QuickStreamer)
+    monkeypatch.setattr(app, "RunStreamer", LoggingStreamer)
     monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
     monkeypatch.setattr(app, "PUMP_SECONDS", 0.02)
-    sent: list[bytes] = [data for data, _ in run_app(str(tmp_path / "clip.mp4"), 6, 42, True, 100) if data is not None]
+    sent: bytes = b"".join(data for data, _ in run_app(str(tmp_path / "clip.mp4"), 6, 42, True, 100) if data is not None)
 
-    saved: list[Path] = list(tmp_path.glob("*.rrd"))
-    assert len(saved) == 1 and saved[0].read_bytes() == b"".join(sent) == b"RRF2-a-b"
+    (saved,) = tmp_path.glob("*.rrd")
+    entities: set[str] = {str(chunk.entity_path) for chunk in RrdReader(saved).stream().to_chunks()}
+    assert {"/world/p0", "/world/p1", "/world/p2"} <= entities
+    assert len(sent) > 0

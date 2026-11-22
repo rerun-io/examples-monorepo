@@ -108,8 +108,12 @@ def run_app(
         video=Path(video), output_dir=RUNS_DIR / run_id, layout=ViewLayout(views_per_layer=int(views_per_layer)), seed=int(seed)
     )
     person: PersonConfig | None = dataclasses.replace(APP_PERSON, train=dataclasses.replace(APP_PERSON.train, steps=int(steps))) if train else None
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    saved: Path = RUNS_DIR / f"{run_id}.rrd"
     recording: rr.RecordingStream = rr.RecordingStream(APPLICATION_ID, recording_id=run_id)
+    # Two sinks: the bytes the viewer gets, and the SDK's own file (appending stream reads would not be one valid .rrd).
     stream: rr.BinaryStream = recording.binary_stream()
+    recording.set_sinks(rr.FileSink(str(saved)), stream)
     streamer: RunStreamer = RunStreamer(config, recording, previews=True, person=person)
     errors: list[BaseException] = []
 
@@ -119,6 +123,7 @@ def run_app(
         except BaseException as error:  # re-raised by the generator below, beartype violations included
             errors.append(error)
         finally:
+            recording.disconnect()  # closes the saved .rrd, stopped runs included; the stream keeps its unread bytes
             SLOT.lock.release()
 
     while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
@@ -132,28 +137,17 @@ def run_app(
         raise
     SLOT.worker = worker
     SLOT.stop = streamer.stop
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    saved: Path = RUNS_DIR / f"{run_id}.rrd"
     try:
-        with saved.open("wb") as file:
-
-            def pump() -> bytes:
-                """New recording bytes, for the viewer and the saved recording."""
-                data: bytes = stream.read() or b""
-                file.write(data)
-                return data
-
-            while worker.is_alive():
-                worker.join(PUMP_SECONDS)
-                yield pump(), f"Running… {time.perf_counter() - started:.0f} s"
-            recording.flush()
-            if errors and not isinstance(errors[0], RunCancelled):
-                raise errors[0]
-            person_line: str = " and the 4D person" if person is not None else ""
-            yield pump(), f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line}; recording {saved}"
+        while worker.is_alive():
+            worker.join(PUMP_SECONDS)
+            yield stream.read() or b"", f"Running… {time.perf_counter() - started:.0f} s"
+        if errors and not isinstance(errors[0], RunCancelled):
+            raise errors[0]
+        person_line: str = " and the 4D person" if person is not None else ""
+        yield stream.read() or b"", f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line}; recording {saved}"
     finally:
-        # A Stop (or a closed page) ends this generator: the worker stops its subprocess at once, the rest at the next
-        # stage or denoising step, and frees the slot when it has.
+        # A closed page ends this generator (a Stop sets the stop event in stop_status): the worker stops its subprocess
+        # at once, the rest at the next stage, denoising step or training step, and frees the slot when it has.
         streamer.stop.set()
 
 
