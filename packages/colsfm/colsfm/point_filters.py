@@ -1,7 +1,7 @@
 """The guards that run after a bundle adjustment, which cuSFM has no equivalent of.
 
-A converged solve can still leave a point outside the world or inside a camera:
-`filter_degenerate_points` removes what the depth and bounds tests reject,
+A converged solve can still leave a point implausibly far from every camera that
+observes it, or inside a camera: `filter_degenerate_points` removes the first,
 `filter_projection_failures` removes observations whose projection is not finite
 or lands absurdly far off the sensor, and `filter_past_rational_pole` removes
 observations at or past a `FULL_OPENCV` camera's rational distortion pole. The
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pycolmap
-from jaxtyping import Bool, Float64, Int64
+from jaxtyping import Bool, Float64
 from numpy import ndarray
 
 from colsfm.config import VisionMappingConfig
@@ -52,8 +52,8 @@ def filter_degenerate_points(
     reconstruction: pycolmap.Reconstruction,
     depth_threshold: float,
 ) -> int:
-    """Delete every point whose world position is non-finite or farther than `depth_threshold` from every camera that
-    observes it.
+    """Delete every point whose world position is non-finite or whose range (Euclidean distance to the camera centre)
+    exceeds `depth_threshold` for every registered camera that observes it.
 
     The bound is relative to the cameras, not a box around the world origin: cuSFM's only spatial filter is a one-sided
     cap on world Z (keypoints_mapper_main.md §5.5), and a cap on the world coordinates deletes a whole walk once it
@@ -79,35 +79,51 @@ def filter_degenerate_points(
     Args:
         observation_manager: Bookkeeping bound to the reconstruction.
         reconstruction: The model to filter, edited in place.
-        depth_threshold: `vision_mapping_config.depth_threshold`, in metres: the largest distance from a point to its
-            nearest observing camera centre.
+        depth_threshold: `vision_mapping_config.depth_threshold`, in metres: the largest range from a point to its
+            nearest observing camera centre (inclusive). Finite and positive (`VisionMappingConfig` checks it).
 
     Returns:
         Observations removed, i.e. the summed track length of the deleted points.
     """
-    # One walk of the map, then each registered image's observation list (as `filter_past_rational_pole` does):
-    # `reconstruction.point3D(id)` copies the point and its whole track.
-    points: list[tuple[int, pycolmap.Point3D]] = list(reconstruction.points3D.items())
-    if not points:
-        return 0
-    point3D_ids: Int64[ndarray, " num_points"] = np.asarray([point3D_id for point3D_id, _ in points], dtype=np.int64)
-    points_xyz: Float64[ndarray, "num_points 3"] = np.array([point.xyz for _, point in points], dtype=np.float64)
-    row_of: dict[int, int] = {int(point3D_id): row for row, point3D_id in enumerate(point3D_ids.tolist())}
-    # A point no registered camera observes keeps +inf and goes.
-    nearest_m: Float64[ndarray, " num_points"] = np.full(len(points), np.inf, dtype=np.float64)
+    # Registered cameras with a usable centre. A camera whose pose went non-finite observes nothing here: it must not
+    # take down the points its healthy neighbours see (a NaN distance would). Point ids stay Python ints (COLMAP's are
+    # unsigned 64-bit).
+    centres: dict[int, tuple[float, float, float]] = {}
+    registered: set[int] = set()
     for image_id in reconstruction.reg_image_ids():
-        image: pycolmap.Image = reconstruction.image(image_id)
-        rows: Int64[ndarray, " n"] = np.fromiter((row_of[int(point2D.point3D_id)] for point2D in image.get_observation_points2D()), dtype=np.int64)
-        if not rows.size:
+        registered.add(image_id)
+        x, y, z = (float(v) for v in reconstruction.image(image_id).projection_center())
+        if np.isfinite((x, y, z)).all():
+            centres[image_id] = (x, y, z)
+    limit_sq: float = depth_threshold * depth_threshold
+    doomed: list[int] = []
+    unposed: list[int] = []
+    for point3D_id, point in reconstruction.points3D.items():
+        image_ids: list[int] = [element.image_id for element in point.track.elements]
+        if not any(image_id in registered for image_id in image_ids):
+            unposed.append(point3D_id)
             continue
-        offset: Float64[ndarray, "n 3"] = points_xyz[rows] - np.asarray(image.projection_center(), dtype=np.float64)
-        np.minimum.at(nearest_m, rows, np.sqrt(np.einsum("ni,ni->n", offset, offset)))
-    # `nan <= threshold` is False, so a non-finite point or centre goes too.
-    out_of_bounds: Bool[ndarray, " num_points"] = ~np.isfinite(points_xyz).all(axis=1) | ~(nearest_m <= depth_threshold)
+        px, py, pz = (float(v) for v in point.xyz)
+        if not np.isfinite((px, py, pz)).all():
+            doomed.append(point3D_id)
+            continue
+        # One observer within range keeps the point.
+        for image_id in image_ids:
+            centre = centres.get(image_id)
+            if centre is not None and (px - centre[0]) ** 2 + (py - centre[1]) ** 2 + (pz - centre[2]) ** 2 <= limit_sq:
+                break
+        else:
+            doomed.append(point3D_id)
     removed: int = 0
-    for point3D_id in point3D_ids[out_of_bounds].tolist():
+    for point3D_id in doomed:
         removed += reconstruction.point3D(point3D_id).track.length()
         observation_manager.delete_point3D(point3D_id)
+    # A track seen only by unposed images (an inconsistent or imported model; colsfm's own frames are all registered)
+    # has no camera to measure from. The observation manager refuses it (COLMAP checks `image.HasPose()` per
+    # observation), so it leaves through the reconstruction, which keeps no per-image bookkeeping for unposed images.
+    for point3D_id in unposed:
+        removed += reconstruction.point3D(point3D_id).track.length()
+        reconstruction.delete_point3D(point3D_id)
     return removed
 
 

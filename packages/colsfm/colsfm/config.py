@@ -30,6 +30,7 @@ Field documentation follows `docs/spec/keypoints_mapper_main.md` §3 and
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
@@ -380,6 +381,11 @@ class VisionMappingConfig:
     """Refine stage drops the robust loss."""
     bundle_adjustment: BundleAdjustmentConfig
     """Ceres settings for the mapping BA."""
+
+    def __post_init__(self) -> None:
+        # Every range comparison with a NaN limit is False, so a NaN here would empty the map; a non-positive one too.
+        if not (math.isfinite(self.depth_threshold) and self.depth_threshold > 0.0):
+            raise ValueError(f"vision_mapping_config.depth_threshold must be finite and positive, got {self.depth_threshold}")
 
 
 @dataclass(frozen=True, slots=True)
