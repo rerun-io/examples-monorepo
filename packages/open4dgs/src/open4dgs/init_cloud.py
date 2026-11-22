@@ -168,10 +168,13 @@ def read_init_cloud(rrd_path: Path, entity: str = INIT_CLOUD_ENTITY) -> InitClou
     """Read the init cloud that ``log_init_cloud`` wrote to ``rrd_path`` (the arrays come back bit-exact)."""
     with rr.server.Server(datasets={"init": [str(rrd_path)]}) as server:
         dataset = server.client().get_dataset("init")
-        properties: Mapping[str, list[list[object]]] = dataset.segment_table().to_arrow_table().to_pydict()
+        segments: Mapping[str, list[object]] = dataset.segment_table().to_arrow_table().to_pydict()
         table = dataset.reader(index=FRAME_TIMELINE).to_arrow_table().sort_by(FRAME_TIMELINE)
+    # Property cells come back as one list per segment holding one value: [[value]].
     prop: dict[str, object] = {
-        name.removeprefix(f"property:{_PROPERTY}:"): cell[0][0] for name, cell in properties.items() if name.startswith(f"property:{_PROPERTY}:")
+        name.removeprefix(f"property:{_PROPERTY}:"): np.asarray(cells[0], dtype=object).reshape(-1)[0]
+        for name, cells in segments.items()
+        if name.startswith(f"property:{_PROPERTY}:")
     }
     if prop.get("entity") != entity:
         raise ValueError(f"{rrd_path} holds no init cloud at {entity} (property init_cloud: {prop})")
