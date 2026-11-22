@@ -1,6 +1,6 @@
 """Train a person from a catalog clip and report held-out numbers in one command.
 
-catalog clip -> seeded held-out split -> masks (catalog ``masks`` layer, or the SMPL-X stand-in) -> body-surface
+catalog clip -> seeded held-out split -> masks (catalog ``people_matte`` layer, or the SMPL-X stand-in) -> body-surface
 init (training cameras only) -> TRiGS in memory -> held-out + training-camera metrics, orbit -> run recording
 ``<runs_root>/<run_name>/run.rrd`` (+ ``trigs_ckpt.pt``) -> segment of the local dataset ``open4dgs-runs``.
 """
@@ -38,6 +38,7 @@ from open4dgs.evaluate import (
 )
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, check_init_matches_run, log_init_cloud, read_init_cloud, read_layer_init_cloud
+from open4dgs.masks import MASKS_LAYER
 from open4dgs.prior import (
     PRIOR_LAYER,
     ClipPriors,
@@ -81,7 +82,7 @@ class Config:
     roi_pad: float = 0.15
     """ROI margin around the people's angular box (fraction)."""
     mask_source: Literal["layer", "mesh"] = "layer"
-    """``layer``: the catalog ``masks`` layer (open4dgs.masks); ``mesh``: dilated SMPL-X silhouette (stand-in, development only)."""
+    """``layer``: the catalog ``people_matte`` layer (open4dgs.masks); ``mesh``: dilated SMPL-X silhouette (stand-in, development only)."""
     mask_catalog_url: str | None = None
     """Catalog of the masks layer (default ``catalog_url``; MAMMA masks live on the local ``open4dgs-mamma``)."""
     mask_dataset: str | None = None
@@ -524,7 +525,7 @@ def main(config: Config) -> dict[str, object]:
         "prior_mode": config.prior,
         "prior_source": prior_source,
         **({f"prior_{k}": v for k, v in dataclasses.asdict(prior_config).items()} if config.prior != "off" else {}),
-        "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/masks",
+        "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/{MASKS_LAYER}",
         **{f"train_{k}": ",".join(str(x) for x in v) if isinstance(v, tuple) else v for k, v in dataclasses.asdict(config.train).items() if v is not None},
         "train_time_offset_clamp_ms_resolved": float(trained.trigs_config.camera_time_offset_clamp_s) * 1e3,
         "rs_signs_per_camera": ",".join(f"{v:g}" for v in (config.train.rs_signs(len(clip.camera_names)) or ())),

@@ -1,4 +1,4 @@
-"""SelfCap (4 exo phones, no body mesh) preparation: ``masks`` layer, ``moge2_prior`` layer and an init cloud .rrd.
+"""SelfCap (4 exo phones, no body mesh) preparation: ``people_matte`` layer, ``moge2_prior`` layer and an init cloud .rrd.
 
 Layers go on the local companion dataset ``open4dgs-selfcap`` (same segment id as the read-only Spark segment), on the
 ``frame_index`` timeline whose values are the reference phone's packet numbers (``selfcap_clip.read_timed_clip``).
@@ -23,6 +23,7 @@ import torch
 
 from open4dgs.init_cloud import log_init_cloud
 from open4dgs.masks import (
+    MASKS_LAYER,
     MODEL_NAME,
     fill_missing_boxes,
     load_birefnet,
@@ -93,7 +94,7 @@ def _masks(config: Config) -> None:
         mattes.append(matte)
         print(f"{name}: foreground fraction {matte.float().mean().item() / 255:.4f}")
     print(f"{len(mattes) * config.num_frames} masks in {time.perf_counter() - started:.1f} s")
-    path: Path = config.output_root / "masks" / config.register_dataset / f"{config.segment_id}.masks.rrd"
+    path: Path = config.output_root / "masks" / config.register_dataset / f"{config.segment_id}.{MASKS_LAYER}.rrd"
     write_mask_layer(
         path,
         config.segment_id,

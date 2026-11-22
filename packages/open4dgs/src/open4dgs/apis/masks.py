@@ -1,4 +1,4 @@
-"""Compute foreground mattes for a catalog segment's frame window once and register them as the ``masks`` layer.
+"""Compute foreground mattes for a catalog segment's frame window once and register them as the ``people_matte`` layer.
 
 Frames are the STORED frames (no undistortion), so the layer overlays the stored video; ``open4dgs.masks.read_clip_masks``
 maps it onto a clip's undistorted grid. Layers of a segment on a read-only catalog (Spark MAMMA) go on a companion
@@ -19,7 +19,16 @@ from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout
 from torch import Tensor
 
 from open4dgs.catalog_clip import MultiViewClip, read_catalog_clip
-from open4dgs.masks import MODEL_NAME, fill_missing_boxes, load_birefnet, person_boxes, predict_mattes, register_mask_layer, write_mask_layer
+from open4dgs.masks import (
+    MASKS_LAYER,
+    MODEL_NAME,
+    fill_missing_boxes,
+    load_birefnet,
+    person_boxes,
+    predict_mattes,
+    register_mask_layer,
+    write_mask_layer,
+)
 
 LOCAL_CATALOG_URL: str = "rerun+http://pablo-dl-server:51235"
 
@@ -40,7 +49,7 @@ class Config:
     """Dataset the layer goes on; default the source dataset when it is on ``register_url``, else ``open4dgs-mamma``."""
     register: bool = True
     output_dir: Path = Path("/mnt/nas/ssd-8tb/open4dgs/masks")
-    """The layer recording goes to ``<output_dir>/<register_dataset>/<segment_id>.masks.rrd``."""
+    """The layer recording goes to ``<output_dir>/<register_dataset>/<segment_id>.people_matte.rrd``."""
     model_dir: Path = Path(os.environ.get("FDANYONE_MODEL_DIR", "/mnt/nas/ssd-8tb/fdanyone-rerun/models")) / "birefnet"
     camera_group: int = 4
     """Cameras decoded at a time (stored MAMMA frames are 9 MB each)."""
@@ -87,7 +96,7 @@ def main(config: Config) -> None:
     assert frame_indices is not None
     count: int = len(cameras) * len(frame_indices)
     print(f"{count} masks: {count / model_seconds:.1f} masks/s in the model, {count / (perf_counter() - started):.1f} masks/s with decode")
-    path: Path = config.output_dir / target / f"{config.segment_id}.masks.rrd"
+    path: Path = config.output_dir / target / f"{config.segment_id}.{MASKS_LAYER}.rrd"
     write_mask_layer(
         path,
         config.segment_id,
@@ -108,4 +117,4 @@ def main(config: Config) -> None:
     print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")
     if config.register:
         register_mask_layer(config.register_url, target, path, create=target != config.dataset)
-        print(f"registered layer masks of {target}/{config.segment_id} on {config.register_url}")
+        print(f"registered layer {MASKS_LAYER} of {target}/{config.segment_id} on {config.register_url}")

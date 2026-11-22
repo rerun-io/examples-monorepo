@@ -9,7 +9,16 @@ torch = pytest.importorskip("torch")
 def test_mask_entity_sits_under_the_pinhole() -> None:
     from open4dgs.masks import mask_entity
 
-    assert mask_entity("rig_03/cam_00") == "/world/rig_03/cam_00/pinhole/masks/foreground"
+    assert mask_entity("rig_03/cam_00") == "/world/rig_03/cam_00/pinhole/people_matte"
+
+
+def test_matte_leaf_is_posekits() -> None:
+    """open4dgs keeps a copy of posekit's leaf name (posekit is not in the open4dgs envs); where posekit imports, they match."""
+    from open4dgs.masks import MATTE_NAME
+
+    assert MATTE_NAME == "people_matte"
+    mask_layer = pytest.importorskip("posekit.mask_layer", reason="posekit is not in this env")
+    assert mask_layer.MATTE_NAME == MATTE_NAME
 
 
 def _camera() -> tuple[np.ndarray, np.ndarray]:

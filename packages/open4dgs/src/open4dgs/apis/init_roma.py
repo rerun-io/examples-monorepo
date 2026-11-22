@@ -51,7 +51,7 @@ class Config:
     max_side: int | None = 1028
     """Longer side of the frames the init sees (``read_catalog_clip``)."""
     masks: Literal["catalog", "mesh", "none"] = "catalog"
-    """Foreground: the companion dataset's ``masks`` layer, or keep only points near the SMPL-X mesh, or nothing."""
+    """Foreground: the companion dataset's ``people_matte`` layer, or keep only points near the SMPL-X mesh, or nothing."""
     mesh_radius_m: float = 0.3
     """``masks="mesh"``: keep points within this distance of the nearest mesh vertex."""
     local_catalog_url: str = "rerun+http://pablo-dl-server:51235"

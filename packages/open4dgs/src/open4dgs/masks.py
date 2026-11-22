@@ -1,4 +1,4 @@
-"""Foreground (union of people) mattes: BiRefNet on a person crop of the stored frames, a ``masks`` catalog layer, and its reader.
+"""Foreground (union of people) mattes: BiRefNet on a person crop of the stored frames, a ``people_matte`` catalog layer, and its reader.
 
 The matte model is BiRefNet (``ZhengPeng7/BiRefNet``, the weights fdanyone already pins under
 ``$FDANYONE_MODEL_DIR/birefnet``), run in fp16 at 1024x1024 on a crop around the people: the crop is the box of the
@@ -6,7 +6,8 @@ segment's SMPL-X vertices projected with the camera's pinhole, padded so hair, h
 The crop keeps the studio hardware and other cameras out of the matte and gives a small person the full model resolution.
 
 Layer: one ``EncodedImage`` (8-bit grayscale PNG, soft matte, 255 = person) per camera and frame at
-``/world/rig_NN/cam_00/pinhole/masks/foreground`` on the ``frame_index`` timeline, at the STORED video size and grid
+``/world/rig_NN/cam_00/pinhole/people_matte`` (posekit's mask layer contract, ``posekit.mask_layer.MATTE_NAME``) on the
+``frame_index`` timeline, at the STORED video size and grid
 (no undistortion), so it overlays the stored video in the viewer. ``read_clip_masks`` applies the clip's undistortion
 and resize (``catalog_clip.resample_images``), so mask and frame pixels agree.
 """
@@ -35,8 +36,11 @@ from open4dgs.catalog_clip import FRAME_TIMELINE, RESAMPLE_CHUNK, MultiViewClip,
 
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
-MASKS_LAYER: str = "masks"
-"""Catalog layer name of the foreground mattes."""
+MATTE_NAME: str = "people_matte"
+"""Leaf entity of a camera's matte under ``<camera>/pinhole``: ``posekit.mask_layer.MATTE_NAME`` (posekit is not in the
+open4dgs envs; ``tests/test_masks.py`` pins the two equal where posekit imports)."""
+MASKS_LAYER: str = MATTE_NAME
+"""Catalog layer name (and recording property) of the foreground mattes."""
 MODEL_NAME: str = "birefnet"
 """Recorded in the layer's properties."""
 MODEL_SIZE: int = 1024
@@ -48,8 +52,8 @@ DECODE_THREADS: int = min(16, os.cpu_count() or 1)
 
 
 def mask_entity(camera_name: str) -> str:
-    """The layer entity of a camera's foreground matte, e.g. ``/world/rig_01/cam_00/pinhole/masks/foreground``."""
-    return f"/world/{camera_name}/pinhole/masks/foreground"
+    """The layer entity of a camera's foreground matte, e.g. ``/world/rig_01/cam_00/pinhole/people_matte``."""
+    return f"/world/{camera_name}/pinhole/{MATTE_NAME}"
 
 
 def load_birefnet(model_dir: Path, device: torch.device) -> torch.nn.Module:
@@ -164,11 +168,12 @@ def write_mask_layer(
     mattes: Sequence[UInt8[Tensor, "t h w"]],
     properties: dict[str, str | int | float],
 ) -> None:
-    """Write the ``masks`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame."""
+    """Write the ``people_matte`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    rec = rr.RecordingStream("open4dgs-masks", recording_id=segment_id)
+    # A derived layer carries no RecordingInfo: on the catalog the last-registered layer would win the segment's start_time.
+    rec = rr.RecordingStream("open4dgs-masks", recording_id=segment_id, send_properties=False)
     rec.save(path)
-    rec.send_property("masks", rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
+    rec.send_property(MASKS_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
     for camera, matte in zip(camera_names, mattes, strict=True):
         entity: str = mask_entity(camera)
         blobs: list[bytes] = []
@@ -187,7 +192,7 @@ def write_mask_layer(
 
 
 def register_mask_layer(catalog_url: str, dataset: str, path: Path, *, create: bool) -> None:
-    """Register ``path`` as layer ``masks`` of its segment (replacing an older ``masks`` layer of that segment).
+    """Register ``path`` as layer ``people_matte`` of its segment (replacing an older ``people_matte`` layer of that segment).
 
     ``create`` gets or creates the dataset (a companion dataset such as ``open4dgs-mamma``), retrying once when another
     worker creates it at the same time.
@@ -248,7 +253,7 @@ def read_clip_masks(
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> tuple[Float32[Tensor, "frames h w"] | Float16[Tensor, "frames h w"], ...]:
-    """The ``masks`` layer for ``clip``: per camera, soft foreground in [0, 1], on the clip's exact pixel grid.
+    """The ``people_matte`` layer for ``clip``: per camera, soft foreground in [0, 1], on the clip's exact pixel grid.
 
     The stored-grid PNGs go through the clip's own undistortion grid and resize (``resample_images``), so mask pixel
     ``(y, x)`` covers the same ray as ``clip.frames[c][t, y, x]``. A clip read with ``roi`` uses the same combined
@@ -257,7 +262,7 @@ def read_clip_masks(
 
     Args:
         clip: The clip the masks align with (from ``read_catalog_clip``).
-        catalog_url: Catalog holding the ``masks`` layer.
+        catalog_url: Catalog holding the ``people_matte`` layer.
         dataset: Its dataset.
         segment_id: The clip's segment.
         compute_device: Where the grid is built and the masks are resampled, ``RESAMPLE_CHUNK`` frames at a time

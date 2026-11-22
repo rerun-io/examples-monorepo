@@ -120,7 +120,7 @@ def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str
         roi="people" if roi.startswith("people") else None,
         roi_pad=float(roi.split(":")[1]) if roi.startswith("people") else 0.15,
     )
-    mask_dataset: str = str(props["mask_source"][0]).removeprefix("layer:").removesuffix("/masks")
+    mask_dataset: str = str(props["mask_source"][0]).removeprefix("layer:").rsplit("/", 1)[0]  # ".../masks" (older runs) or ".../people_matte"
     masks = read_clip_masks(clip, config.mask_catalog_url, mask_dataset, str(props["segment_id"][0]))
     holdout_names: tuple[str, ...] = tuple(str(c) for c in props["holdout_cameras"])
     holdout: tuple[int, ...] = tuple(clip.camera_names.index(n) for n in holdout_names)
