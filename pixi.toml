@@ -4380,6 +4380,11 @@ depends-on = ["fdanyone-download"]
 cwd = "packages/fdanyone-rerun"
 description = "Launch the 4DAnyone Gradio app: pick a clip, watch the run stream into an embedded Rerun viewer (needs the GPU)"
 
+[feature.fdanyone-rerun.tasks.fdanyone-register-catalog]
+cmd = "python tools/register_catalog.py"
+cwd = "packages/fdanyone-rerun"
+description = "Move a finished run recording into the shared rig layout and register it on a Rerun catalog (dataset fdanyone-views); no GPU"
+
 [feature.fdanyone-rerun.tasks.fdanyone-log-run]
 cmd = "python tools/log_run.py"
 cwd = "packages/fdanyone-rerun"
