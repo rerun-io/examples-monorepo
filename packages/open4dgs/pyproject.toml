@@ -31,7 +31,8 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modu
 sort_by_size = true
 min_confidence = 60
 ignore_names = [
-    "random_start_point", "lengths1", "lengths2", "norm", "return_nn",
+    # set_postfix: TRiGS calls it on train_clip's progress_bar (open4dgs.trigs_adapter._StepTicks).
+    "set_postfix", "random_start_point", "lengths1", "lengths2", "norm", "return_nn",
     # read through getattr / by the trainer / by pytest and tyro
     "crop_raw_psnr", "crop_raw_ssim", "crop_raw_lpips", "crop_masked_psnr", "crop_masked_ssim", "crop_masked_lpips",
     "fg_psnr", "full_psnr", "full_ssim", "full_lpips", "alpha_iou", "init_layer",
