@@ -1,13 +1,14 @@
-"""``fdanyone-log-run``: log a finished 4DAnyone run directory to Rerun (no GPU)."""
+"""``fdanyone-log-run``: log a finished 4DAnyone run directory to Rerun (no GPU), and with ``--train`` its 4D person."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from fdanyone_rerun.assets import model_dir
-from fdanyone_rerun.outputs import RunMetadata
-from fdanyone_rerun.rerun_log import log_run
+from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
+from fdanyone_rerun.person4d import PersonConfig, train_person
+from fdanyone_rerun.rerun_log import log_run, person_blueprint
 
 
 @dataclass
@@ -22,8 +23,18 @@ class Config:
     """The run directory (videos/, cameras.json, metadata.json, gvhmr/)."""
     video: Path | None = None
     """The input video: the run's canonical clip is cut from it again (from the run's start time) for the source camera."""
+    train: bool = False
+    """Also train the run's 4D person and log it as Animated SOG (``world/person/splats``; needs the GPU)."""
+    person: PersonConfig = field(default_factory=PersonConfig)
+    """The person's training, with ``--train``."""
 
 
 def main(config: Config) -> RunMetadata:
-    """Log the run."""
-    return log_run(config.output_dir.expanduser().resolve(), config.video, model_dir(), config.rr_config.rec_stream)
+    """Log the run (and, with ``--train``, its 4D person)."""
+    output_dir: Path = config.output_dir.expanduser().resolve()
+    recording = config.rr_config.rec_stream
+    metadata: RunMetadata = log_run(output_dir, config.video, model_dir(), recording)
+    if config.train:
+        train_person(output_dir, config.person, recording)
+        recording.send_blueprint(person_blueprint(read_camera_rig(output_dir)))
+    return metadata

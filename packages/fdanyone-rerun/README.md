@@ -17,6 +17,8 @@ pixi run -e fdanyone-rerun fdanyone-example          # six views of the example 
 pixi run -e fdanyone-rerun fdanyone-orbit24          # the README's 24-view full orbit (dense coverage for 4DGS)
 pixi run -e fdanyone-rerun fdanyone-run --run.video my.mp4 --run.output-dir data/runs/mine --run.overwrite
 pixi run -e fdanyone-rerun fdanyone-log-run --output-dir data/runs/example --video data/source/pexels/2785536-uhd_2160_3840_25fps.mp4
+pixi run -e fdanyone-rerun fdanyone-run --train ...             # then train the 4D person on the views (below)
+pixi run -e fdanyone-rerun fdanyone-log-run --output-dir data/runs/example --train   # train the person of a finished run
 ```
 
 The first task downloads ~21 GB of weights (`fdanyone-download`) into `$FDANYONE_MODEL_DIR` (default `data/models`;
@@ -36,6 +38,18 @@ Timelines `time` (seconds) and `frame`. `world` is the canonical human world (Y 
 | `world/body/{mesh,keypoints,skeleton}` | SMPL-X body and the MHR70 keypoints the views are conditioned on |
 | `world/source`, `world/source/video` | the source camera fitted to the body, and the input clip (`VideoStream`) |
 | `world/cameras/<NN>`, `.../video` | each generated view's camera (hue by yaw) and its video (`VideoStream`) |
+| `world/person/splats` | with `--train`: the trained 4D person as Animated SOG (`AnimatedSogSplats3D`) + a one-pose stock preview, static |
+| `train/preview`, `train/loss_rgb` | with `--train`: the front view rendered every 500 steps and the RGB loss, on `train_step` |
+
+## The 4D person
+
+`--train` (and the app's second step) trains a 4D Gaussian model of the person on the generated views
+(`fdanyone_rerun.person4d`, Open4DGS / TRiGS from `packages/open4dgs`): every view at 704x1280 with the GVHMR SMPL-X body
+as the person, BiRefNet mattes in a crop around the projected body, a body-surface init, optionally the MoGe-2 prior,
+then TRiGS. The model is encoded as Animated SOG and logged into the run's recording; there is no other output file.
+The custom gsplat viewer (`packages/gsplat-rust-renderer`) plays it on `time`; a stock viewer shows one still pose. The
+app embeds that viewer: its gradio-rerun comes from `recipes/gradio-rerun-src` (the fdanyone envs do not take the PyPI
+wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app's preset: 5,000 steps, prior off.
 
 The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
 
@@ -54,9 +68,11 @@ the run through four layouts:
 1. motion recovery (source clip and progress log);
 2. the recovered body in 3D and over the source;
 3. a TAEW2.2 preview of every view at each denoising step (`previews/<NN>` on `diffusion_step`);
-4. the camera rig and the generated videos.
+4. the camera rig and the generated videos;
+5. with "Then train the 4D person" (on by default; steps under Settings): the front view as it trains, the loss and the
+   progress (step, it/s, ETA), then the person in 3D, playing with the views.
 
-The page fits the window. One run at a time.
+The page fits the window. One run at a time; Stop ends the run at the next stage, denoising step or training step.
 
 ## Speed
 

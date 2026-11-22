@@ -6,6 +6,8 @@ Entity layout (one recording per run, timelines ``time`` (seconds) and ``frame``
 - ``world/body/{mesh,keypoints,skeleton}``: the recovered SMPL-X body and its MHR70 conditioning keypoints.
 - ``world/source`` (+ ``/video``): the moving source camera, fitted to the body, and the run's canonical clip.
 - ``world/cameras/<NN>`` (+ ``/video``): each generated view's camera and its video.
+- ``world/person/splats``: the trained 4D person (``fdanyone_rerun.person4d``), Animated SOG, static.
+- ``train/preview``, ``train/loss_rgb``: the person's training, on the ``train_step`` timeline.
 
 Videos are ``rr.VideoStream`` samples (simplecv ``log_video``).
 """
@@ -165,6 +167,14 @@ def log_camera(camera: CameraRecord, output_dir: Path, recording: rr.RecordingSt
 
 PROGRESS: str = "log"
 """Stage and step messages (TextLog)."""
+PERSON: str = "world/person/splats"
+"""The trained 4D person: ``AnimatedSogSplats3D`` + a one-pose ``GaussianSplats3D`` preview, static."""
+TRAIN_TIMELINE: str = "train_step"
+"""Optimizer steps of the person's training."""
+TRAIN_PREVIEW: str = "train/preview"
+"""The front view rendered from the model as it trains."""
+TRAIN_LOSS: str = "train/loss_rgb"
+"""TRiGS' RGB loss."""
 PREVIEWS: str = "previews"
 """``previews/<NN>``: each view's x_0 estimate per denoising step, on ``diffusion_step``."""
 DIFFUSION_TIMELINE: str = "diffusion_step"
@@ -229,6 +239,40 @@ def result_blueprint(num_views: int) -> rrb.Blueprint:
         rrb.Spatial3DView(origin="world", name="Canonical world"),
         rrb.Spatial2DView(origin=SOURCE, contents=["$origin/**", f"/{BODY}/**"], name="Source"),
         column_shares=[3.0, 1.0],
+    )
+    rows: float = float(-(-num_views // min(num_views, 6)))
+    return rrb.Blueprint(
+        rrb.Vertical(top, _grid(num_views, camera_entity), row_shares=[2.0, max(1.0, rows / 2.0)]),
+        _time_panel(TIMELINE, playing=True),
+        collapse_panels=True,
+    )
+
+
+def training_blueprint() -> rrb.Blueprint:
+    """Phase 5 (the 4D person trains): the front view rendered every few hundred steps, the loss and the progress log."""
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial2DView(origin=TRAIN_PREVIEW, name="Front view, as it trains"),
+            rrb.Vertical(rrb.TimeSeriesView(origin=TRAIN_LOSS, name="RGB loss"), rrb.TextLogView(origin=PROGRESS, name="Progress")),
+            column_shares=[2.0, 1.0],
+        ),
+        _time_panel(TRAIN_TIMELINE, playing=False),
+        collapse_panels=True,
+    )
+
+
+def person_blueprint(rig: CameraRig) -> rrb.Blueprint:
+    """The trained 4D person in 3D, seen from the front view, beside the source camera, above the generated views."""
+    front: Float64[ndarray, "4 4"] = rig.cameras[0].world_T_cam
+    person: rrb.Spatial3DView = rrb.Spatial3DView(
+        origin="world",
+        contents=["+ $origin/**", f"- /{BODY}/**"],
+        name="4D person",
+        eye_controls=rrb.EyeControls3D(position=front[:3, 3].tolist(), look_target=[0.0, 0.9, 0.0], eye_up=[0.0, 1.0, 0.0]),
+    )
+    num_views: int = len(rig.cameras)
+    top: rrb.Horizontal = rrb.Horizontal(
+        person, rrb.Spatial2DView(origin=SOURCE, contents=["$origin/**", f"/{BODY}/**"], name="Source"), column_shares=[3.0, 1.0]
     )
     rows: float = float(-(-num_views // min(num_views, 6)))
     return rrb.Blueprint(

@@ -1,9 +1,11 @@
-"""The 4DAnyone app: pick a clip, press Run, watch the four phases stream into the embedded Rerun viewer.
+"""The 4DAnyone app: pick a clip, press Run, watch the phases stream into the embedded Rerun viewer.
 
-The run is :class:`fdanyone_rerun.stream.RunStreamer`, the same core and defaults as ``fdanyone-run``; this module only
-adds the widgets, a worker thread and the byte pump into the viewer.
+The run is :class:`fdanyone_rerun.stream.RunStreamer`, the same core and defaults as ``fdanyone-run --train``; this
+module only adds the widgets, a worker thread, the byte pump into the viewer and the app's training preset
+(:data:`APP_PERSON`: a short run and no MoGe-2 prior).
 """
 
+import dataclasses
 import threading
 import time
 import uuid
@@ -18,6 +20,7 @@ from gradio_rerun import Rerun
 from fdanyone.errors import RunCancelled
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, PACKAGE_ROOT
 from fdanyone_rerun.core import RunConfig, ViewLayout
+from fdanyone_rerun.person4d import PersonConfig
 from fdanyone_rerun.stream import RunStreamer
 
 APPLICATION_ID: str = "fdanyone-rerun"
@@ -25,12 +28,16 @@ RUNS_DIR: Path = PACKAGE_ROOT / "data" / "app-runs"
 """One run directory per click."""
 PUMP_SECONDS: float = 0.5
 """How often new recording bytes go to the viewer."""
+APP_PERSON: PersonConfig = PersonConfig(train=dataclasses.replace(PersonConfig().train, steps=5_000), prior=False)
+"""The app's preset: 5,000 steps (about 2 min on the 5090) and no MoGe-2 prior (the demo runs no extra estimator model)."""
 READY: str = "Pick the example or upload a clip of one person (at least 121 frames), then press Run."
 DESCRIPTION: str = (
     "# 4DAnyone × Rerun\n"
     "One casual video of a person becomes synchronized videos from new cameras around them "
     "([4DAnyone](https://github.com/ant-research/4DAnyone), 4DAnyone-Turbo, four denoising steps). The viewer follows the run: "
-    "motion recovery, the recovered body, a preview of every view at each denoising step, then the camera rig and the views."
+    "motion recovery, the recovered body, a preview of every view at each denoising step, then the camera rig and the views. "
+    "Then a 4D Gaussian model of the person trains on the views ([Open4DGS](https://github.com/ASU-NEM-Labs/open4dgs-trigs) TRiGS) "
+    "and plays in 3D as Animated SOG, inside the recording."
 )
 # The page fits the window (posekit #594): Blocks(fill_height) + Row(scale=1) give the main row the height the header leaves,
 # the viewer takes its column's height, and the footer stays hidden (Gradio adds its height to the size it posts to an iframe).
@@ -85,8 +92,10 @@ class _RunSlot:
 SLOT: _RunSlot = _RunSlot()
 
 
-def run_app(video: str | None, views_per_layer: int | float, seed: int | float) -> Generator[tuple[bytes | None, str], None, None]:
-    """Run 4DAnyone on ``video`` in a worker thread and pump the recording into the viewer until it ends."""
+def run_app(
+    video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float
+) -> Generator[tuple[bytes | None, str], None, None]:
+    """Run 4DAnyone on ``video`` (then train its 4D person) in a worker thread and pump the recording into the viewer until it ends."""
     if video is None:
         yield None, "Choose a video first."
         return
@@ -94,9 +103,10 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float) 
     config: RunConfig = RunConfig(
         video=Path(video), output_dir=RUNS_DIR / run_id, layout=ViewLayout(views_per_layer=int(views_per_layer)), seed=int(seed)
     )
+    person: PersonConfig | None = dataclasses.replace(APP_PERSON, train=dataclasses.replace(APP_PERSON.train, steps=int(steps))) if train else None
     recording: rr.RecordingStream = rr.RecordingStream(APPLICATION_ID, recording_id=run_id)
     stream: rr.BinaryStream = recording.binary_stream()
-    streamer: RunStreamer = RunStreamer(config, recording, previews=True)
+    streamer: RunStreamer = RunStreamer(config, recording, previews=True, person=person)
     errors: list[BaseException] = []
 
     def work() -> None:
@@ -124,7 +134,8 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float) 
         recording.flush()
         if errors and not isinstance(errors[0], RunCancelled):
             raise errors[0]
-        yield stream.read(), f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views in {config.output_dir}"
+        person_line: str = " and the 4D person" if person is not None else ""
+        yield stream.read(), f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line} in {config.output_dir}"
     finally:
         # A Stop (or a closed page) ends this generator: the worker stops its subprocess at once, the rest at the next
         # stage or denoising step, and frees the slot when it has.
@@ -156,6 +167,10 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
                         label="Views (one ring, 15° above the subject)", minimum=6, maximum=24, step=6, value=ViewLayout().views_per_layer
                     )
                     seed = gr.Number(label="Seed", value=RunConfig().seed, precision=0)
+                    train = gr.Checkbox(label="Then train the 4D person on the views", value=True)
+                    steps = gr.Number(
+                        label="Training steps (5,000 take about 2 min on an RTX 5090)", value=APP_PERSON.train.steps, precision=0, minimum=100
+                    )
                 with gr.Row():
                     run_button = gr.Button("Run", variant="primary")
                     stop = gr.Button("Stop", variant="stop")
@@ -165,7 +180,7 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
 
-        run_event = run_button.click(run_app, inputs=[video, views, seed], outputs=[viewer, status])
+        run_event = run_button.click(run_app, inputs=[video, views, seed, train, steps], outputs=[viewer, status])
         stop.click(stop_status, outputs=[status], cancels=[run_event])
     return demo
 

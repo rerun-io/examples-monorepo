@@ -7,8 +7,9 @@ import rerun as rr
 import torch
 
 from fdanyone_rerun.core import RunConfig, ViewLayout
+from fdanyone_rerun.outputs import CameraRecord, CameraRig
 from fdanyone_rerun.previews import preview_latent_index
-from fdanyone_rerun.rerun_log import body_blueprint, diffusion_blueprint, motion_blueprint, result_blueprint
+from fdanyone_rerun.rerun_log import body_blueprint, diffusion_blueprint, motion_blueprint, person_blueprint, result_blueprint, training_blueprint
 from fdanyone_rerun.stream import GENERATION_STAGE, RunCancelled, RunStreamer
 
 
@@ -21,7 +22,31 @@ def _streamer(tmp_path: Path) -> tuple[RunStreamer, rr.MemoryRecording]:
 
 @pytest.mark.parametrize("num_views", [6, 12, 24])
 def test_layouts_build_for_every_rig(num_views: int) -> None:
-    for blueprint in (motion_blueprint(), body_blueprint(), diffusion_blueprint(num_views), result_blueprint(num_views)):
+    cameras: list[CameraRecord] = [
+        CameraRecord(
+            camera_id=view,
+            layer_index=0,
+            pitch=15,
+            yaw=360.0 * view / num_views,
+            K=[[900.0, 0.0, 352.0], [0.0, 900.0, 640.0], [0.0, 0.0, 1.0]],
+            camera_to_world=[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 2.5], [0.0, 0.0, 0.0, 1.0]],
+            image_width=704,
+            image_height=1280,
+            video=f"videos/{view:02d}.mp4",
+            skeleton_video=f"skeletons/{view:02d}.mp4",
+        )
+        for view in range(num_views)
+    ]
+    rig: CameraRig = CameraRig(camera_model="OPENCV", cameras=cameras, front_camera_ids=[0])
+    layouts = (
+        motion_blueprint(),
+        body_blueprint(),
+        diffusion_blueprint(num_views),
+        result_blueprint(num_views),
+        training_blueprint(),
+        person_blueprint(rig),
+    )
+    for blueprint in layouts:
         assert isinstance(blueprint, rr.blueprint.Blueprint)
 
 

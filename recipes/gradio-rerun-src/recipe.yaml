@@ -1,0 +1,89 @@
+# gradio-rerun (rerun-io/gradio-rerun-viewer at c456457, the commit of the ai-demos 0.42.0.post2 wheel: Rerun 0.42.0,
+# streamed segments in order, gradio_rerun.commands.set_time) with its embedded viewer swapped for OUR web viewer:
+# packages/gsplat-rust-renderer's crates/gsplat-viewer-web (the stock re_viewer WebHandle plus the compute splat
+# renderer and the Animated SOG / TRiGS motion passes, portable no-subgroups kernels included), built for wasm32 from
+# this repository at the same commit. The one patch swaps the frontend dependency @rerun-io/web-viewer 0.42.0 for the
+# directory build.sh fills with that build (package.json + pnpm-lock.yaml); the package shell (index.js, typings)
+# is the stock npm tarball's, as gsplat-web-build lays it out. Nothing is vendored.
+#
+# Consumed by the fdanyone-rerun envs only (the PyPI wheel in [feature.common] stays for the other apps; the fdanyone
+# envs do not compose it). Cold build on the 5090 box: about 11.5 min (cargo 10 min, wasm-opt 41 s, pnpm 3 s, gradio cc
+# build 34 s) and 3.8 GB of scratch; pixi rebuilds it whenever a file in the filtered gsplat source changes.
+context:
+  commit: c456457a4ec58faabd0f2aaab5054e3e84814286
+
+package:
+  name: gradio-rerun-src
+  version: "0.43.0a1.c456457"
+
+source:
+  - url: https://github.com/rerun-io/gradio-rerun-viewer/archive/${{ commit }}.tar.gz
+    sha256: c007d48fd2e75d1e7434b71fd4b14a19006821e212b24a708c3e20be652fde93
+    target_directory: gradio-rerun-viewer
+    patches:
+      - patches/0001-web-viewer-gsplat-build.patch
+  # Only what the web build reads: the three crates it links, the crates.io patches and the build script.
+  - path: ../../packages/gsplat-rust-renderer
+    target_directory: gsplat-rust-renderer
+    use_gitignore: false
+    filter:
+      include:
+        - Cargo.toml
+        - patches/**
+        - crates/gsplat-core/**
+        - crates/gsplat-viewer/**
+        - crates/gsplat-viewer-web/**
+        - gsplat_rust_renderer/__init__.py
+        - gsplat_rust_renderer/apis/__init__.py
+        - gsplat_rust_renderer/apis/build_web_viewer.py
+      exclude:
+        - "**/target/**"
+  # The stock @rerun-io/web-viewer 0.42.0 package: the shell around our re_viewer.js / re_viewer_bg.wasm.
+  - url: https://registry.npmjs.org/@rerun-io/web-viewer/-/web-viewer-0.42.0.tgz
+    sha256: 3cafc3d643d63c2d4d16da11e2be6e89532afe790fc2fa1146947be360227348
+    target_directory: web-viewer-npm
+
+build:
+  # Bump with every patch or build script change (the build string hash does not follow the recipe content).
+  number: 0
+  noarch: python
+  script:
+    file: build.sh
+
+requirements:
+  build:
+    # The gsplat-web toolchain ([feature.gsplat-rust-renderer] + [feature.gsplat-web]).
+    - rust 1.98.*
+    - rust-std-wasm32-unknown-unknown 1.98.1.*
+    - wasm-bindgen-cli ==0.2.129
+    - binaryen
+    - clang
+    - git
+    # The gradio-rerun frontend (upstream: Node 22, pnpm 10.17.1).
+    - nodejs 22.*
+    - pnpm 10.*
+  host:
+    - python 3.12.*
+    - pip
+    # upstream's [build-system] (hatchling and two plugins); gradio cc build packages without isolation (build.sh).
+    - hatchling
+    - hatch-fancy-pypi-readme >=24.1.0
+    - hatch-requirements-txt
+    - python-build
+    # gradio cc build imports gradio_rerun (which imports gradio and rerun).
+    - gradio ==6.32.0
+    - rerun-sdk ==0.42.0
+  run:
+    - python >=3.10
+    - gradio >=6.0.0
+    - rerun-sdk ==0.42.0
+
+tests:
+  - python:
+      imports:
+        - gradio_rerun
+      pip_check: false
+
+about:
+  homepage: https://github.com/rerun-io/gradio-rerun-viewer
+  summary: gradio-rerun (c456457) with the custom gsplat web viewer (packages/gsplat-rust-renderer) as its embedded viewer

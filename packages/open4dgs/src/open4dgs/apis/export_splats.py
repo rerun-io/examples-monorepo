@@ -79,7 +79,9 @@ def main(config: Config) -> dict[str, object]:
             asog: bytes = config.asog.read_bytes()
         else:
             checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-            asog = encode_asog(checkpoint_params(checkpoint, torch.device("cpu")), float(checkpoint["fps"]), int(checkpoint["num_frames"]), AsogSettings())[0]
+            asog = encode_asog(
+                checkpoint_params(checkpoint, torch.device("cpu")), float(checkpoint["fps"]), int(checkpoint["num_frames"]), AsogSettings()
+            )[0]
         out_asog: Path = config.output or config.run / "asog.rrd"
         summary_asog: dict[str, object] = write_asog_rrd(config.run, asog, out_asog, ASOG_CUT_FORMAT, PREVIEW_ROWS)
         if config.register:

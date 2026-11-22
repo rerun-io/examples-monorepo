@@ -4294,6 +4294,10 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.fdanyone-rerun.dependencies]
 python = "3.12.*"
+# The app's viewer: gradio-rerun built with our gsplat web viewer (recipes/gradio-rerun-src), so the 4D person plays
+# in the app. gradio restates [feature.common]'s pin, which these envs do not compose.
+gradio-rerun-src = { path = "recipes/gradio-rerun-src" }
+gradio = "==6.32.0"  # pin-bump: hold
 gvhmr-src = { path = "recipes/gvhmr-src" }
 # SageAttention's CUDA kernels (sm_120, sm_121); 4DAnyone's DiT selects it automatically when importable.
 sageattention-src = { path = "recipes/sageattention-src" }
@@ -4379,7 +4383,7 @@ description = "Launch the 4DAnyone Gradio app: pick a clip, watch the run stream
 [feature.fdanyone-rerun.tasks.fdanyone-log-run]
 cmd = "python tools/log_run.py"
 cwd = "packages/fdanyone-rerun"
-description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
+description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout (no GPU); --train also trains its 4D person"
 
 # ─── Open4DGS upstream init (RoMa v2 + MEMFOF -> keyframes init cloud) ──────
 # recipes/open4dgs-core-src ships only prep/init of open4dgs-core @ 52750b9; its backends are recipes/romav2-src
@@ -4433,7 +4437,7 @@ description = "Upstream RoMa v2 + MEMFOF init of a catalog window on its trainin
 # priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. linux-64 only: the ai-demos gsplat 1.5.3
 # build (CUDA 13 / torch 2.12 / sm_86 + sm_120) exists only there.
 [feature.open4dgs]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.open4dgs.dependencies]
 open4dgs-trigs-src = { path = "recipes/open4dgs-trigs-src" }
@@ -4456,6 +4460,12 @@ einops = ">=0.8.0,<0.9"
 omegaconf = "*"
 timm = ">=1.0.15,<2"
 safetensors = "*"
+
+# No 1.5.3 build for torch 2.12 / CUDA 13 exists on linux-aarch64 (ai-demos carries 1.6.0; conda-forge's aarch64 1.5.3
+# needs torch 2.14), so the Spark (GB10) runs TRiGS on 1.6.0; the trigs recipe allows >=1.5.3,<1.7. Checked on the Spark:
+# trigs smoke training, fused SSIM and ASOG tests pass, and a held-out 5k-step run (see the PR adding this lane).
+[feature.open4dgs.target.linux-aarch64.dependencies]
+gsplat = "==1.6.0"
 
 [feature.open4dgs.pypi-dependencies]
 open4dgs = { path = "packages/open4dgs", editable = true }
@@ -4993,15 +5003,27 @@ metrictrail-dev = { features = [
     "ffmpeg",
 ], solve-group = "metrictrail", no-default-feature = true }
 fdanyone-rerun = { features = [
-    "common",
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    "catalog-common",
+    "rerun-prerelease",
     "cuda",
     "fdanyone-rerun",
+    # The 4D person (Open4DGS / TRiGS on the generated views, saved as Animated SOG in the run's recording).
+    "open4dgs",
+    "lietorch-mojo",
+    "torchcodec",
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }
 fdanyone-rerun-dev = { features = [
-    "common",
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    "catalog-common",
+    "rerun-prerelease",
     "cuda",
     "fdanyone-rerun",
+    # The 4D person (Open4DGS / TRiGS on the generated views, saved as Animated SOG in the run's recording).
+    "open4dgs",
+    "lietorch-mojo",
+    "torchcodec",
     "dev",
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }
