@@ -154,6 +154,12 @@ def main(config: Config) -> dict[str, object]:
             config.mask_catalog_url or config.catalog_url, config.mask_dataset or config.dataset, config.segment_id, config.init_layer
         )
         check_init_matches_run(init, init_holdout, holdout_names, int(clip.frame_indices[0]), len(clip.frame_indices))
+        if init.fps != clip.fps:
+            # Layer times are normalised over the window and velocities are per video frame, so fps only maps time to
+            # seconds; it must be the clip's, which the trainer renders with (frame / clip.fps). The MAMMA init_roma
+            # layer records 60 while the segment's capture fps is 30: without this, frames past 0.95 s have no Gaussians.
+            print(f"[open4dgs] init layer fps {init.fps} != clip fps {clip.fps}: using the clip fps")
+            init = dataclasses.replace(init, fps=float(clip.fps))
     else:
         init = body_surface_init(
             clip,
