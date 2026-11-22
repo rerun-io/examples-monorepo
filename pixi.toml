@@ -4397,6 +4397,11 @@ sam3 = { path = "packages/sam3", editable = true }
 [feature.open4dgs.activation.env]
 PACKAGE_DIR = "packages/open4dgs"
 
+[feature.open4dgs.tasks.open4dgs-masks]
+cmd = "python tools/apps/masks.py"
+cwd = "packages/open4dgs"
+description = "Foreground mattes (BiRefNet on the SMPL-X person crop) for a segment's frame window, registered as catalog layer masks"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════

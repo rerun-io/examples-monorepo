@@ -135,6 +135,10 @@ class MultiViewClip:
     """Source ``frame_index`` values of the clip's frames."""
     people: ClipPeople | None
     """SMPL-X meshes; None when the segment has no ``body/mesh`` entity."""
+    stored_sizes: tuple[tuple[int, int], ...] = ()
+    """Each camera's stored video ``(width, height)`` (the grid catalog layers such as ``masks`` are aligned with)."""
+    lenses: tuple[ViconRadialLens | None, ...] = ()
+    """Each camera's lens, None for a pinhole camera or when the clip was read with ``undistort=False``."""
 
     @property
     def sizes(self) -> tuple[tuple[int, int], ...]:
@@ -205,16 +209,25 @@ def undistortion_grid(lens: ViconRadialLens, stored_wh: tuple[int, int], device:
     return grid.reshape(1, height, width, 2).to(torch.float32)
 
 
-def resample_frames(
-    frames_nchw: UInt8[Tensor, "n 3 h w"], grid: Float32[Tensor, "1 h2 w2 2"] | None, target_wh: tuple[int, int]
-) -> UInt8[Tensor, "n 3 h3 w3"]:
-    """Undistort (when ``grid`` is given) at the stored size, then resize to ``target_wh`` with antialiasing."""
-    images: Float32[Tensor, "n 3 h w"] = frames_nchw.float()
+def resample_images(
+    images: Float32[Tensor, "n c h w"], grid: Float32[Tensor, "1 h2 w2 2"] | None, target_wh: tuple[int, int]
+) -> Float32[Tensor, "n c h3 w3"]:
+    """Undistort (when ``grid`` is given) at the stored size, then resize to ``target_wh`` with antialiasing.
+
+    Frames and catalog layers aligned with the stored video (``masks``) go through this one function, so their pixels agree.
+    """
     if grid is not None:
         images = F.grid_sample(images, grid.expand(len(images), -1, -1, -1), mode="bilinear", padding_mode="zeros", align_corners=False)
     if (images.shape[3], images.shape[2]) != target_wh:
         images = F.interpolate(images, size=(target_wh[1], target_wh[0]), mode="bilinear", antialias=True, align_corners=False)
-    return images.round().clamp(0, 255).to(torch.uint8)
+    return images
+
+
+def resample_frames(
+    frames_nchw: UInt8[Tensor, "n 3 h w"], grid: Float32[Tensor, "1 h2 w2 2"] | None, target_wh: tuple[int, int]
+) -> UInt8[Tensor, "n 3 h3 w3"]:
+    """``resample_images`` for uint8 RGB frames."""
+    return resample_images(frames_nchw.float(), grid, target_wh).round().clamp(0, 255).to(torch.uint8)
 
 
 def valid_mask(grid: Float32[Tensor, "1 h w 2"] | None, stored_wh: tuple[int, int], target_wh: tuple[int, int]) -> Bool[Tensor, "h2 w2"]:
@@ -324,6 +337,7 @@ def read_catalog_clip(
     body_source: str | None = None,
     decode_device: torch.device | None = None,
     storage_device: torch.device | None = None,
+    undistort: bool = True,
 ) -> MultiViewClip:
     """Read ``num_frames`` frames (every ``frame_step``-th from ``frame_start``) of a segment's cameras into a clip.
 
@@ -339,6 +353,8 @@ def read_catalog_clip(
         body_source: Body source under ``/world`` (``gt``, ``pred/mamma``); None prefers ``gt``.
         decode_device: Where NVDEC decodes and the undistortion runs (default ``cuda``).
         storage_device: Where ``frames`` live (default CPU: 32 cams x 120 frames at 1028x752 is 8.9 GB).
+        undistort: False returns the stored (distorted) frames, e.g. to compute a layer aligned with the stored video;
+            ``K`` is then only the pinhole approximation of a lensed camera.
 
     Raises:
         ValueError: If a camera is missing or uncalibrated, a frame is outside the segment,
@@ -401,6 +417,8 @@ def read_catalog_clip(
 
     out_frames: list[UInt8[Tensor, "t h w 3"]] = []
     valid: list[Bool[Tensor, "h w"]] = []
+    stored_sizes: list[tuple[int, int]] = []
+    lenses: list[ViconRadialLens | None] = []
     K: Float32[Tensor, "c 3 3"] = torch.empty((len(chosen), 3, 3), dtype=torch.float32)
     world_T_cam: Float32[Tensor, "c 4 4"] = torch.empty((len(chosen), 4, 4), dtype=torch.float32)
     for index, (node, video) in enumerate(zip(nodes, videos, strict=True)):
@@ -421,7 +439,9 @@ def read_catalog_clip(
         decoded: UInt8[Tensor, "t 3 h w"] = decoder.get_frames_at(positions).data
         if (decoded.shape[3], decoded.shape[2]) != stored_wh:
             raise ValueError(f"{video}: decoded {decoded.shape[3]}x{decoded.shape[2]}, the pinhole says {stored_wh}")
-        lens: ViconRadialLens | None = _camera_lens(static, node)
+        lens: ViconRadialLens | None = _camera_lens(static, node) if undistort else None
+        stored_sizes.append(stored_wh)
+        lenses.append(lens)
         grid: Float32[Tensor, "1 h w 2"] | None = None if lens is None else undistortion_grid(lens, stored_wh, decode_on)
         # Float resampling costs 24 bytes per stored pixel and frame: chunk it to bound the GPU peak.
         out_frames.append(
@@ -447,4 +467,6 @@ def read_catalog_clip(
         fps=fps,
         frame_indices=torch.from_numpy(frames),
         people=_read_people(entry, segment_id, frames, body_source),
+        stored_sizes=tuple(stored_sizes),
+        lenses=tuple(lenses),
     )
