@@ -9,6 +9,9 @@ in ``_rasterize_inputs``). The logic lives here, one section per lever:
 2. Shared-time deform: when every camera of a step renders at one time (no learned time offsets, no rolling shutter, one
    capture time per frame), ``SharedTimeGroup`` runs the active-row query, the row gather and the deform once; each camera
    rasterizes detached leaves of those inputs and ``finish`` carries the summed leaf gradients through deform and gather.
+3. Batched cameras: with ``batch_cameras``, the group renders its cameras of one image size in ONE rasterization call,
+   sums the camera losses for ONE backward, and adds the relocation's image-space cue per batch (``accumulate_2d`` sums
+   over the camera axis). Each camera's losses and the camera-loss hook (the MoGe-2 prior) read its slice of the output.
 
 Renders equal the per-camera path bit for bit; parameter gradients differ only in float summation order.
 """
@@ -52,7 +55,7 @@ class HostSizedCameraConfig(CameraConfig):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Lever 2: shared-time deform
+# Levers 2 and 3: shared-time deform, batched cameras
 # ---------------------------------------------------------------------------------------------------------------------
 
 RenderOut = tuple[Tensor, Tensor, Tensor, dict]
@@ -60,7 +63,7 @@ RenderOut = tuple[Tensor, Tensor, Tensor, dict]
 
 
 class SharedTimeGroup:
-    """The cameras of one train step that render at one time: shared inputs once, one rasterize call per camera.
+    """The cameras of one train step that render at one time: shared inputs once, per-camera or per-size batched rasterize.
 
     The trainer's camera loop calls ``render(group_i)`` for each camera, ``add_loss(loss)`` with that camera's loss / n,
     and ``finish(...)`` after the loop (recipe patch 0005's seam).
@@ -76,42 +79,70 @@ class SharedTimeGroup:
         sh_degree: int,
         config: TrigsTrainingConfig,
         step: int,
+        batch_cameras: bool,
     ) -> None:
         self._trainer, self._params, self._cameras, self._config = trainer, params, cameras, config
         self._cam_group = list(cam_group)
+        self._batch_cameras = batch_cameras
         self._outputs: dict = trainer._render_inputs(params, cameras, self._cam_group[0], t, sh_degree, config, step=step)
         self._leaves: dict = dict(self._outputs)
         for key in RENDER_INPUT_KEYS:
             self._leaves[key] = self._outputs[key].detach().requires_grad_(self._outputs[key].requires_grad)
         self._last_info: dict | None = None
+        self._loss: Tensor | None = None
+        self._batches: list[RenderOut] = []
+        self._batch_of: dict[int, tuple[int, int]] = {}
+        if batch_cameras:
+            by_size: dict[tuple[int, int], list[int]] = {}
+            for group_i, cam in enumerate(self._cam_group):
+                by_size.setdefault((cameras.width_for(cam), cameras.height_for(cam)), []).append(group_i)
+            for members in by_size.values():
+                for j, group_i in enumerate(members):
+                    self._batch_of[group_i] = (len(self._batches), j)
+                cams = [self._cam_group[g] for g in members]
+                self._batches.append(trainer._rasterize_inputs(params, self._leaves, cameras, cams, config))
 
     def render(self, group_i: int) -> RenderOut:
-        """Camera ``cam_group[group_i]``'s render: its own rasterize call on the shared leaves."""
-        out = self._trainer._rasterize_inputs(self._params, self._leaves, self._cameras, self._cam_group[group_i], self._config)
-        self._last_info = out[3]
-        return out
+        """Camera ``cam_group[group_i]``'s render: its slice of the size batch, or its own rasterize call."""
+        if not self._batch_cameras:
+            out = self._trainer._rasterize_inputs(self._params, self._leaves, self._cameras, self._cam_group[group_i], self._config)
+            self._last_info = out[3]
+            return out
+        b, j = self._batch_of[group_i]
+        colors, alphas, gamma, info = self._batches[b]
+        cam_info = dict(info)
+        if "render_depth" in info:
+            cam_info["render_depth"] = info["render_depth"][j : j + 1]
+        return colors[j : j + 1], alphas[j : j + 1], gamma, cam_info
 
     def add_loss(self, loss: Tensor, relocation: MotionGuidedRelocationStrategy, reloc_state: dict, n_group: int) -> None:
-        """Per camera: backward now (into the leaves) and the relocation cue."""
+        """Per camera: backward now (into the leaves) and the relocation cue; batched: keep the sum for one backward."""
+        if self._batch_cameras:
+            self._loss = loss if self._loss is None else self._loss + loss
+            return
         if loss.requires_grad:
             loss.backward()
         relocation.accumulate_2d(reloc_state, self._last_info, batch_size=n_group)
 
     def finish(self, relocation: MotionGuidedRelocationStrategy, reloc_state: dict, n_group: int) -> None:
-        """The leaves' gradients through deform + gather."""
-        del relocation, reloc_state, n_group
+        """The deferred camera backward and per-batch relocation cues, then the leaves' gradients through deform + gather."""
+        if self._loss is not None and self._loss.requires_grad:
+            self._loss.backward()
+        for batch in self._batches:
+            relocation.accumulate_2d(reloc_state, batch[3], batch_size=n_group)
         outs = [self._outputs[k] for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         grads = [self._leaves[k].grad for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         if outs:
             torch.autograd.backward(outs, grads)
-        self._outputs, self._leaves = {}, {}
+        self._batches, self._loss, self._outputs, self._leaves = [], None, {}, {}
 
 
 class Open4dgsTrainer(TrigsTrainer):
-    """``TrigsTrainer`` with the host-sync and shared-time levers on the recipe's seams."""
+    """``TrigsTrainer`` with the three speed levers on the recipe's seams (all on by default)."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(self, *args: object, batch_cameras: bool = True, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
+        self.batch_cameras = batch_cameras
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
 
     def _const_tensor(self, value: object, device: torch.device | str, dtype: torch.dtype) -> Tensor:
@@ -136,7 +167,7 @@ class Open4dgsTrainer(TrigsTrainer):
         config: TrigsTrainingConfig,
         step: int,
     ) -> SharedTimeGroup | None:
-        """Lever 2: a ``SharedTimeGroup`` when the step's cameras share one time, else None (per-camera path)."""
+        """Levers 2 + 3: a ``SharedTimeGroup`` when the step's cameras share one time, else None (per-camera path)."""
         if len(cam_group) < 2 or offset_active or config.rs_enabled():
             return None
         default_t = float(frame_idx) / max(config.fps, 1e-6)
@@ -146,5 +177,5 @@ class Open4dgsTrainer(TrigsTrainer):
             times.add(default_t if capture is None else float(capture))
         if len(times) != 1:
             return None
-        return SharedTimeGroup(self, params, cameras, cam_group, times.pop(), sh_degree, config, step)
+        return SharedTimeGroup(self, params, cameras, cam_group, times.pop(), sh_degree, config, step, self.batch_cameras)
 
