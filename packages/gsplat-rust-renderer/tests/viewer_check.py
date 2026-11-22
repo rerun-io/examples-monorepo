@@ -1,5 +1,4 @@
 """Subprocess harness for the native viewer integration and golden pixel tests."""
-
 from __future__ import annotations
 
 import math
@@ -41,13 +40,7 @@ class Config:
     """sog mode: a bundled .sog, a meta.json or its directory."""
 
 
-def capture(
-    viewer: ViewerClient,
-    view: rrb.Spatial3DView,
-    path: Path,
-    allow_blank: bool = False,
-    ready: Callable[[UInt8[np.ndarray, "h w 3"]], bool] | None = None,
-) -> UInt8[np.ndarray, "h w 3"]:
+def capture(viewer: ViewerClient, view: rrb.Spatial3DView, path: Path, allow_blank: bool = False, ready: Callable[[UInt8[np.ndarray, "h w 3"]], bool] | None = None) -> UInt8[np.ndarray, "h w 3"]:
     """Poll fresh screenshots until visible pixels settle, with a bounded deadline."""
     recording = rr.get_global_data_recording()
     if recording is not None:
@@ -127,23 +120,10 @@ def has_lego_color(pixels: UInt8[np.ndarray, "h w 3"]) -> bool:
     return yellow_fraction(pixels) > 0.01
 
 
-def splat_view(
-    background: tuple[int, int, int],
-    eye: rrb.EyeControls3D | None,
-    overrides: dict[EntityPathLike, rrb.Visualizer] | None = None,
-    contents: list[str] | str = "$origin/**",
-    name: str | None = None,
-) -> rrb.Spatial3DView:
+def splat_view(background: tuple[int, int, int], eye: rrb.EyeControls3D | None, overrides: dict[EntityPathLike, rrb.Visualizer] | None = None, contents: list[str] | str = "$origin/**", name: str | None = None) -> rrb.Spatial3DView:
     """Build a solid-background splat view, retaining automatic eye and content defaults."""
-    return rrb.Spatial3DView(
-        origin="/",
-        name=name,
-        contents=contents,
-        overrides=overrides,
-        background=rrb.Background(color=background, kind="SolidColor"),
-        line_grid=False,
-        eye_controls=eye,
-    )
+    return rrb.Spatial3DView(origin="/", name=name, contents=contents, overrides=overrides,
+        background=rrb.Background(color=background, kind="SolidColor"), line_grid=False, eye_controls=eye)
 
 
 # The stock viewer of this environment's rerun-sdk; PATH may hold another release.
@@ -175,13 +155,9 @@ def check_portable_recording(config: Config) -> None:
     assert rr.__version__ == "0.42.0"
     for choice in (None, "GaussianSplats3D", "ComputeGaussianSplats3D"):
         label = {None: "portable", "GaussianSplats3D": "explicit-native", "ComputeGaussianSplats3D": "explicit-compute"}[choice]
-        view = splat_view(
-            (0, 0, 0),
+        view = splat_view((0, 0, 0),
             rrb.EyeControls3D(position=(2.0, -2.0, 1.2), look_target=(0.0, 0.0, 0.25), eye_up=(0.0, 0.0, 1.0)),
-            {"world/splats": rrb.Visualizer(choice)} if choice is not None else {},
-            ["world/splats"],
-            name=label,
-        )
+            {"world/splats": rrb.Visualizer(choice)} if choice is not None else {}, ["world/splats"], name=label)
         recording_path = config.out / f"{label}.rrd"
         rr.init(label, strict=True)
         rr.save(recording_path)
@@ -197,9 +173,7 @@ def check_portable_recording(config: Config) -> None:
             with spawn_viewer(executable) as viewer:
                 viewer.open_url(str(recording_path.resolve()))
                 unsupported = choice == "ComputeGaussianSplats3D" and name == "stock"
-                pixels = capture(
-                    viewer, view, config.out / f"{label}-{name}.png", allow_blank=unsupported, ready=None if unsupported else has_lego_color
-                )
+                pixels = capture(viewer, view, config.out / f"{label}-{name}.png", allow_blank=unsupported, ready=None if unsupported else has_lego_color)
                 yellow: float = yellow_fraction(pixels)
                 reports = [report.summary for item in viewer.viewer_state().views for report in item.reports]
                 print(f"PORTABLE_PIXELS {label} {name} yellow={yellow:.6f} reports={reports}", flush=True)
@@ -227,20 +201,14 @@ def check_depth_and_framing(config: Config) -> None:
         rr.log("world/splats", rr.GaussianSplats3D(centers=[[0, 0, 0]], scales=[0.7, 0.7, 0.05], colors=[255, 0, 0, 255]), static=True)
         # Large green plane behind, small blue plane in front.
         for name, x0, x1, z, color in [("rear", -2.0, 2.0, -1.0, [0, 255, 0]), ("front", -0.7, -0.2, 1.0, [0, 0, 255])]:
-            rr.log(
-                f"world/{name}",
-                rr.Mesh3D(
-                    vertex_positions=[[x0, -0.3, z], [x1, -0.3, z], [x1, 0.3, z], [x0, 0.3, z]],
-                    triangle_indices=[[0, 1, 2], [0, 2, 3]],
-                    albedo_factor=color,
-                ),
-                static=True,
-            )
+            rr.log(f"world/{name}", rr.Mesh3D(vertex_positions=[[x0, -0.3, z], [x1, -0.3, z], [x1, 0.3, z], [x0, 0.3, z]],
+                                             triangle_indices=[[0, 1, 2], [0, 2, 3]], albedo_factor=color), static=True)
         # Same Pinhole + image-plane primitives as log-scene, placed behind the splat.
         rr.log("world/camera", rr.Transform3D(translation=[0, 0, -2]), static=True)
         rr.log("world/camera/pinhole", rr.Pinhole(focal_length=80, width=64, height=64, image_plane_distance=0.5), static=True)
         rr.log("world/camera/pinhole/image", rr.Image(np.full((64, 64, 3), [255, 0, 255], dtype=np.uint8)), static=True)
-        view = splat_view((255, 255, 255), rrb.EyeControls3D(position=(0.0, 0.0, 5.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, 1.0, 0.0)))
+        view = splat_view((255, 255, 255),
+            rrb.EyeControls3D(position=(0.0, 0.0, 5.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, 1.0, 0.0)))
         rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
         pixels = capture(viewer, view, config.out / "depth.png")
         h, w = pixels.shape[:2]
@@ -259,26 +227,16 @@ def check_depth_and_framing(config: Config) -> None:
 
 def check_views(viewer: ViewerClient, config: Config) -> None:
     """Check shared uploads and independent blueprint modes."""
-    rr.log(
-        "world/splats",
-        rr.GaussianSplats3D(centers=[[0.0, 0.0, 0.0]], scales=[0.0001] * 3, colors=[255, 0, 0, 255], spherical_harmonics_degree=0),
-        static=True,
-    )
-    views: list[rrb.Spatial3DView] = [
-        splat_view(
-            (0, 0, 0),
-            rrb.EyeControls3D(position=(0.0, 0.0, 2.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, 1.0, 0.0)),
-            {"world/splats": compute_visualizer(mode)},
-            ["world/splats"],
-        )
-        for mode in ("default", "mip")
-    ]
+    rr.log("world/splats", rr.GaussianSplats3D(centers=[[0.0, 0.0, 0.0]], scales=[0.0001] * 3, colors=[255, 0, 0, 255], spherical_harmonics_degree=0), static=True)
+    views: list[rrb.Spatial3DView] = [splat_view((0, 0, 0),
+        rrb.EyeControls3D(position=(0.0, 0.0, 2.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, 1.0, 0.0)),
+        {"world/splats": compute_visualizer(mode)}, ["world/splats"]) for mode in ("default", "mip")]
     rr.send_blueprint(rrb.Blueprint(rrb.Horizontal(*views), collapse_panels=True))
     peaks: list[int] = []
     for index, mode_view in enumerate(views):
         pixels: UInt8[np.ndarray, "h w 3"] = capture(viewer, mode_view, config.out / f"mode-{index}.png", allow_blank=index == 1)
         h, w = pixels.shape[:2]
-        peaks.append(int(pixels[h // 2 - 20 : h // 2 + 20, w // 2 - 20 : w // 2 + 20, 0].max()))
+        peaks.append(int(pixels[h // 2 - 20:h // 2 + 20, w // 2 - 20:w // 2 + 20, 0].max()))
     print(f"default/mip central red peaks: {peaks}", flush=True)
     # One u8 alpha step becomes ~13 display levels when blended in linear light.
     assert peaks[0] > 80 and peaks[1] < 16, "Blueprint mode override did not reach the shared core"
@@ -286,9 +244,8 @@ def check_views(viewer: ViewerClient, config: Config) -> None:
 
 def check_relog(viewer: ViewerClient, config: Config) -> None:
     """Check replacement after optional-field and count updates."""
-    view = splat_view(
-        (0, 0, 0), rrb.EyeControls3D(position=(0.0, 0.0, 5.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, 1.0, 0.0)), contents=["world/splats"]
-    )
+    view = splat_view((0, 0, 0),
+        rrb.EyeControls3D(position=(0.0, 0.0, 5.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, 1.0, 0.0)), contents=["world/splats"])
     rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
     for channel, side in enumerate([8, 8, 16]):
         axis: Float32[np.ndarray, "side"] = np.linspace(-1.2, 1.2, side, dtype=np.float32)
@@ -303,7 +260,7 @@ def check_relog(viewer: ViewerClient, config: Config) -> None:
             rr.log("world/splats", rr.GaussianSplats3D(centers=centers, scales=[0.18] * 3, colors=rgba, spherical_harmonics_degree=0), static=True)
         image = capture(viewer, view, config.out / f"relog-{'rgb'[channel]}-{side * side}.png")
         h, w = image.shape[:2]
-        mean: Float64[np.ndarray, "3"] = image[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4].mean(axis=(0, 1)) / 255.0
+        mean: Float64[np.ndarray, "3"] = image[h // 4:3 * h // 4, w // 4:3 * w // 4].mean(axis=(0, 1)) / 255.0
         print(f"relog {side * side}: {mean}", flush=True)
         assert int(np.argmax(mean)) == channel and mean[channel] > 0.2, "Stale or blank relog"
         assert np.delete(mean, channel).max() < 0.1, "Previous cloud color remains"
@@ -328,13 +285,7 @@ def look_at_c2w(
     return c2w
 
 
-def check_pair(
-    config: Config,
-    image: UInt8[np.ndarray, "h w 3"],
-    position: Float64[np.ndarray, "3"],
-    target: Float64[np.ndarray, "3"],
-    up: Float64[np.ndarray, "3"],
-) -> None:
+def check_pair(config: Config, image: UInt8[np.ndarray, "h w 3"], position: Float64[np.ndarray, "3"], target: Float64[np.ndarray, "3"], up: Float64[np.ndarray, "3"]) -> None:
     """Compare a captured viewport with the matching standalone camera."""
     # At 1 px/point, Rerun 0.42.0 crops 2 pixels at top/left and 3 at bottom/right.
     h, w = image.shape[:2]
@@ -345,24 +296,8 @@ def check_pair(
     camera_path.write_text(to_json(camera))
     reference_path: Path = config.out / "standalone.png"
     subprocess.run(
-        [
-            str(config.binaries / "gsplat"),
-            "render",
-            "--ply",
-            str(config.ply),
-            "--camera",
-            str(camera_path),
-            "--width",
-            str(w),
-            "--height",
-            str(h),
-            "--background",
-            "1,1,1" if config.mode == "pair-white" else "0,0,0",
-            "--output",
-            str(reference_path),
-        ],
-        check=True,
-        timeout=120,
+        [str(config.binaries / "gsplat"), "render", "--ply", str(config.ply), "--camera", str(camera_path), "--width", str(w), "--height", str(h), "--background", "1,1,1" if config.mode == "pair-white" else "0,0,0", "--output", str(reference_path)],
+        check=True, timeout=120,
     )
     reference: UInt8[np.ndarray, "h w 3"] = np.asarray(Image.open(reference_path).convert("RGB"), dtype=np.uint8)[2:-3, 2:-3]
     error: Float64[np.ndarray, "h w 3"] = (image.astype(np.float64) - reference.astype(np.float64)) / 255.0
@@ -381,8 +316,7 @@ def synthetic_hexels() -> Hexels3D:
     count: int = 25
     rng: np.random.Generator = np.random.default_rng(7)
     color_field: Float32[np.ndarray, "n 9"] = np.concatenate(
-        [rng.uniform(0.15, 0.95, (count, 3)), rng.uniform(-0.25, 0.25, (count, 6))], axis=1
-    ).astype(np.float32)
+        [rng.uniform(0.15, 0.95, (count, 3)), rng.uniform(-0.25, 0.25, (count, 6))], axis=1).astype(np.float32)
     return Hexels3D(
         centers=np.stack([gx.ravel(), gy.ravel(), np.zeros(count, dtype=np.float32)], axis=1),
         quaternions_xyzw=np.tile(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32), (count, 1)),
@@ -399,22 +333,8 @@ def render_reference(config: Config, ply: Path, spec: CameraSpec, name: str) -> 
     camera_path: Path = config.out / f"{name}.json"
     write_orbit_json(camera_path, [spec])
     reference_path: Path = config.out / f"{name}.png"
-    subprocess.run(
-        [
-            str(config.binaries / "gsplat"),
-            "render",
-            "--ply",
-            str(ply),
-            "--camera",
-            str(camera_path),
-            "--background",
-            "0,0,0",
-            "--output",
-            str(reference_path),
-        ],
-        check=True,
-        timeout=120,
-    )
+    subprocess.run([str(config.binaries / "gsplat"), "render", "--ply", str(ply), "--camera", str(camera_path), "--background", "0,0,0", "--output", str(reference_path)],
+                   check=True, timeout=120)
     return np.asarray(Image.open(reference_path).convert("RGB"), dtype=np.uint8)[2:-3, 2:-3]
 
 
@@ -432,11 +352,7 @@ def pose_psnr(config: Config, ply: Path, image: UInt8[np.ndarray, "h w 3"], pose
     return score
 
 
-HEXEL_EYE: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] = (
-    (1.2, -2.5, 3.0),
-    (0.0, 0.0, 0.0),
-    (0.0, 0.0, 1.0),
-)
+HEXEL_EYE: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] = ((1.2, -2.5, 3.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
 # The default 3D view field of view, as Rerun 0.42.0 computes it in f32.
 DEFAULT_FOV_Y: float = float(np.float32(55.0) * np.float32(math.tau) / np.float32(360.0))
 
@@ -459,27 +375,13 @@ def check_hexels(config: Config, ply: Path) -> None:
 def check_hexels_tracked(config: Config, ply: Path) -> None:
     """A view tracking a logged pinhole renders the compute hexels from that pose and field of view."""
     fov_y: float = 0.8
-    poses: list[Float64[np.ndarray, "4 4"]] = [
-        look_at(np.array([np.cos(a) * 2.5, np.sin(a) * 2.5, 2.0]), np.zeros(3), np.array([0.0, 0.0, 1.0])) for a in (-1.2, -0.4)
-    ]
+    poses: list[Float64[np.ndarray, "4 4"]] = [look_at(np.array([np.cos(a) * 2.5, np.sin(a) * 2.5, 2.0]), np.zeros(3), np.array([0.0, 0.0, 1.0])) for a in (-1.2, -0.4)]
     with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
         rr.init("hexels-tracked-check", strict=True)
         rr.connect_grpc(viewer.url)
         log_hexels(synthetic_hexels())
         focal: float = 540.0 / math.tan(fov_y / 2.0)
-        rr.log(
-            "/world/orbit_cam",
-            rr.Pinhole(
-                focal_length=[focal, focal],
-                width=1920,
-                height=1080,
-                camera_xyz=rr.ViewCoordinates.RDF,
-                image_plane_distance=0.05,
-                color=[0, 0, 0, 0],
-                line_width=0.0,
-            ),
-            static=True,
-        )
+        rr.log("/world/orbit_cam", rr.Pinhole(focal_length=[focal, focal], width=1920, height=1080, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.05, color=[0, 0, 0, 0], line_width=0.0), static=True)
         for frame, pose in enumerate(poses):
             rr.set_time("frame", sequence=frame)
             rr.log("/world/orbit_cam", rr.Transform3D(translation=pose[:3, 3], mat3x3=pose[:3, :3]))
@@ -496,12 +398,8 @@ def check_hexels_tracked(config: Config, ply: Path) -> None:
         images: list[UInt8[np.ndarray, "h w 3"]] = []
         for frame, pose in enumerate(poses):
             seek(viewer, "frame", frame)
-            image: UInt8[np.ndarray, "h w 3"] = capture(
-                viewer,
-                view,
-                config.out / f"tracked-{frame}.png",
-                ready=lambda pixels, frame=frame: int(pixels.max()) - int(pixels.min()) > 20 and cursor_at(viewer, "frame", frame),
-            )
+            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png",
+                ready=lambda pixels, frame=frame: int(pixels.max()) - int(pixels.min()) > 20 and cursor_at(viewer, "frame", frame))
             score: float = pose_psnr(config, ply, image, pose, fov_y, f"tracked-{frame}")
             assert score >= 50.0, f"Tracked view differs from the pinhole pose and field of view: {score} dB"
             images.append(image)
@@ -542,23 +440,8 @@ def write_splat_ply(path: Path, splats: CoreSplats) -> None:
 
     n: int = len(splats.raw_opacities)
     rest: int = splats.sh.shape[1] - 1
-    names: list[str] = [
-        "x",
-        "y",
-        "z",
-        "f_dc_0",
-        "f_dc_1",
-        "f_dc_2",
-        *[f"f_rest_{i}" for i in range(3 * rest)],
-        "opacity",
-        "scale_0",
-        "scale_1",
-        "scale_2",
-        "rot_0",
-        "rot_1",
-        "rot_2",
-        "rot_3",
-    ]
+    names: list[str] = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", *[f"f_rest_{i}" for i in range(3 * rest)], "opacity",
+                        "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
     columns: list[Float32[np.ndarray, "n"]] = [splats.transforms[:, i] for i in range(3)]
     columns += [splats.sh[:, 0, c] for c in range(3)]
     columns += [splats.sh[:, 1 + k, c] for c in range(3) for k in range(rest)]
@@ -648,11 +531,8 @@ def main(config: Config) -> None:
         try:
             rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
             log_ply(config.ply)
-            view: rrb.Spatial3DView = splat_view(
-                (255, 255, 255) if config.mode == "pair-white" else (0, 0, 0),
-                rrb.EyeControls3D(position=position, look_target=target, eye_up=up),
-                contents=["world/splats"],
-            )
+            view: rrb.Spatial3DView = splat_view((255, 255, 255) if config.mode == "pair-white" else (0, 0, 0),
+                rrb.EyeControls3D(position=position, look_target=target, eye_up=up), contents=["world/splats"])
             rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
             image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "lego.png", ready=has_lego_color)
             assert float(np.mean(np.max(image, axis=2) > 20)) > 0.05, "Lego render is blank"
