@@ -281,6 +281,63 @@ fn draw_splat_entity(
         }
         _ => None,
     };
+    // `.asog` payload (static, untyped): drawn instead of the preview rows when present.
+    let asog_ids = crate::asog::components();
+    let asog_query =
+        data.query_components_with_history(ctx, query, asog_ids.iter().copied(), instruction, None);
+    let asog_results = VisualizerInstructionQueryResults::new(instruction, &asog_query, output);
+    let [a_bytes, a_origin, a_threshold] = asog_ids.map(|id| asog_results.iter_optional(id));
+    if let Some((payload_row, bytes)) = a_bytes.slice::<u8>().last() {
+        let threshold = last_slice::<f32>(&a_threshold)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
+        let origin = last_slice::<f64>(&a_origin)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(0.0);
+        let mut hasher = DefaultHasher::new();
+        (
+            self::attribute_generation(instruction, &asog_query, asog_ids.into_iter()),
+            threshold.to_bits(),
+        )
+            .hash(&mut hasher);
+        let generation = hasher.finish();
+        let time_type = ctx.recording().timeline_type(&query.timeline);
+        let evaluated = ctx
+            .viewer_ctx
+            .store_context
+            .memoizer::<crate::asog::AsogCache, _>(|cache| {
+                cache.evaluate(
+                    generation,
+                    bytes,
+                    threshold,
+                    time_type,
+                    query.latest_at,
+                    origin,
+                )
+            });
+        return match evaluated {
+            Ok(evaluated) => {
+                // One upload per evaluated time; the view (keyed by the payload row) swaps scenes.
+                let mut hasher = DefaultHasher::new();
+                (generation, evaluated.t.to_bits()).hash(&mut hasher);
+                draw_instances(
+                    entity,
+                    draw,
+                    payload_row,
+                    re_log_types::hash::Hash64::from_u64(hasher.finish()),
+                    Primitives::Core(&evaluated.splats),
+                    render_mode,
+                )
+            }
+            Err(error) => {
+                report(
+                    ViewerReportSeverity::Error,
+                    format!("AnimatedSogSplats3D: {error}"),
+                );
+                Ok(false)
+            }
+        };
+    }
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -440,6 +497,14 @@ pub(crate) fn draw_instances(
                             masks,
                             object,
                         )?
+                    }
+                    Primitives::Core(_) => {
+                        report(
+                            ViewerReportSeverity::Warning,
+                            format!("{error}; the decoded payload is not drawn"),
+                        );
+                        re_log::warn_once!("Decoded payload compute fallback: {error:#}");
+                        continue;
                     }
                     Primitives::Hexels(hexels) => {
                         report(

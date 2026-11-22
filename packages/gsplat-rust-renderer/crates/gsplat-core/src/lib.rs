@@ -8,6 +8,7 @@
 mod camera;
 mod device_caps;
 pub use device_caps::{check_adapter, compute_limits, required_features};
+pub mod asog;
 mod gpu;
 mod kernels;
 mod lens;

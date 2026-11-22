@@ -6163,6 +6163,7 @@ dependencies = [
  "glam 0.30.10",
  "half",
  "image-webp",
+ "miniz_oxide",
  "naga",
  "pollster 0.4.0",
  "serde",

@@ -23,6 +23,8 @@ struct CachedView {
 pub(crate) enum Primitives<'a> {
     Splats(&'a NativeSplats<'a>),
     Hexels(&'a NativeHexels<'a>),
+    /// Already in gsplat-core layout (f32, decoded payloads such as `.asog`): uploaded without conversion.
+    Core(&'a gsplat_core::Splats),
 }
 
 impl Primitives<'_> {
@@ -36,6 +38,7 @@ impl Primitives<'_> {
             Self::Hexels(hexels) => {
                 core.check_hexel_capacity(hexels.centers.len(), hexels.variant())
             }
+            Self::Core(splats) => core.check_capacity(splats.transforms.len(), splats.sh_degree),
         }
     }
 
@@ -55,6 +58,11 @@ impl Primitives<'_> {
                 hexels.centers.len(),
                 "hexels",
             ),
+            Self::Core(splats) => (
+                core.upload(splats)?,
+                splats.transforms.len(),
+                "decoded Gaussian splats",
+            ),
         };
         re_log::debug!("Uploaded {} {kind}", re_format::format_uint(count));
         Ok(scene)
@@ -65,6 +73,7 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => cloud.centers.len(),
             Self::Hexels(hexels) => hexels.centers.len(),
+            Self::Core(splats) => splats.transforms.len(),
         }
     }
 
@@ -72,6 +81,7 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => crate::bounds::from_splats(cloud),
             Self::Hexels(hexels) => crate::bounds::from_hexels(hexels),
+            Self::Core(splats) => crate::bounds::from_core(splats),
         }
     }
 }
