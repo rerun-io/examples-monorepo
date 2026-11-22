@@ -113,9 +113,10 @@ def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str
         for f in range(num_frames):
             gt = clip.frames[cam][f].cuda().float() / 255.0
             mask = masks[cam][f].cuda().float()
-            renders = {key: model.render(model.cameras, cam, f)[0] for key, model in models.items()}
-            for key, rgb in renders.items():
-                rows[key].append(metrics.frame(name, int(clip.frame_indices[f]), rgb, gt, mask))
+            outputs = {key: model.render(model.cameras, cam, f) for key, model in models.items()}
+            renders = {key: rgb for key, (rgb, _) in outputs.items()}
+            for key, (rgb, alpha) in outputs.items():
+                rows[key].append(metrics.frame(name, int(clip.frame_indices[f]), rgb, alpha[..., 0], gt, mask))
             vs_full.append(psnr(renders["decoded"], renders["uncompressed"]))
             box = mask_box(mask > 0.5)
             if box is not None:

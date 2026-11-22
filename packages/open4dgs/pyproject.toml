@@ -32,9 +32,11 @@ min_confidence = 60
 ignore_names = [
     "random_start_point", "lengths1", "lengths2", "norm", "return_nn",
     # read through getattr / by the trainer / by pytest and tyro
-    "crop_psnr", "crop_ssim", "crop_lpips", "fg_psnr", "full_psnr", "full_ssim", "full_lpips",
+    "crop_raw_psnr", "crop_raw_ssim", "crop_raw_lpips", "crop_masked_psnr", "crop_masked_ssim", "crop_masked_lpips",
+    "fg_psnr", "full_psnr", "full_ssim", "full_lpips", "alpha_iou", "init_layer",
     "has_velocity", "is_static", "dynamic_protect", "dynamic_allowed", "stage_keep",
-    "add_scalar", "_sequence_t_max", "pytestmark", "trigs", "rr_config",
+    "add_scalar", "_sequence_t_max", "pytestmark", "trigs", "rr_config", "exc",
+    "num_pixels", "camera_loss_hook",
 ]
 
 [tool.pytest.ini_options]

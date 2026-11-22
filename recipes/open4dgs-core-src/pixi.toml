@@ -1,0 +1,6 @@
+[package]
+name = "open4dgs-core-src"
+version = "0.1.0.52750b9"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

@@ -29,11 +29,15 @@ source:
     # Hook only: build_canonical_from_npz (trigs.init.from_colmap) takes a Mapping of the keyframes arrays as well as
     # a path, so packages/open4dgs passes its init cloud in memory instead of writing keyframes.npz.
     - patches/0002-init-cloud-from-mapping.patch
+    # Hook only: TrigsTrainingConfig.render_depth rasterizes RGB+ED and hands the depth channel over in
+    # info["render_depth"]; TrigsTrainer.camera_loss_hook (default None) adds a per-camera loss term before backward().
+    # packages/open4dgs (open4dgs.prior) owns the loss.
+    - patches/0003-depth-render-and-camera-loss-hook.patch
 
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 0
+  number: 1
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.

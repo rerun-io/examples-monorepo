@@ -1,0 +1,21 @@
+diff --git a/src/romav2/features.py b/src/romav2/features.py
+index 6836eaa..ab4982d 100644
+--- a/src/romav2/features.py
++++ b/src/romav2/features.py
+@@ -100,12 +100,12 @@ class Descriptor:
+             case "dinov3_vitl16":
+                 normalizer = imagenet
+                 # TODO: this will break in distributed if not available locally
+-                dinov3_vitl16: nn.Module = torch.hub.load(
+-                    repo_or_dir="facebookresearch/dinov3:adc254450203739c8149213a7a69d8d905b4fcfa",
+-                    model="dinov3_vitl16",
++                # The dinov3-src package (same backbone code as the hub commit adc2544), no torch.hub fetch.
++                from dinov3.hub.backbones import dinov3_vitl16 as _dinov3_vitl16
++
++                dinov3_vitl16: nn.Module = _dinov3_vitl16(
+                     pretrained=cfg.weights_path is not None,
+                     weights=cfg.weights_path,
+-                    skip_validation=True,
+                 ).to(device)
+                 layers = _get_layers(cfg.layer_idx, dinov3_vitl16)
+                 return partial_wrap(
