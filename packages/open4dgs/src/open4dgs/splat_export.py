@@ -12,6 +12,7 @@ Also what every export of a run shares (``apis.export_splats``, ``apis.export_as
 recording with the run's cameras and meshes (``run_recording``) and the checkpoint as ``TrigsMotion3D`` parameters.
 """
 
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,9 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
+from asog import read as read_asog
+from gsplat_rust_renderer.asog_decode import parse_asog
+from gsplat_rust_renderer.sog3d import log_asog
 from gsplat_rust_renderer.trigs_motion3d import TrigsParams
 from jaxtyping import Float16, Float32, Float64, UInt8
 from numpy import ndarray
@@ -34,6 +38,12 @@ SH_C0: float = 0.28209479177387814
 MIN_OPACITY: float = 1.0 / 255.0
 """Rows at or below this opacity are dropped (they round to alpha 0)."""
 SPLAT_ENTITY: str = "/world/person/splats"
+ASOG_DIR: Path = Path("/mnt/nas/ssd-8tb/open4dgs/asog")
+"""Where ``open4dgs-export-asog`` writes ``<run>.asog`` by default (and ``open4dgs-export-splats --format asog`` looks)."""
+ASOG_CUT_FORMAT: float = 0.05
+"""The ``.asog`` v1 temporal cut (no manifest field; what every other player applies)."""
+STOCK_VIEWER_NOTE: str = "a stock Rerun viewer shows one still pose; use --format per-frame for playback in stock viewers"
+"""Printed by ``open4dgs-export-splats --format asog``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,3 +228,32 @@ def trigs_motion_params(params: dict[str, torch.Tensor]) -> TrigsParams:
         is_static=f32("is_static") if "is_static" in params else None,
         **zetas,
     )
+
+
+def write_asog_rrd(run_dir: Path, asog_path: Path, out: Path, cut: float, preview_rows: int) -> dict[str, object]:
+    """``out``: the run's cameras and meshes (``run_recording``) and ``asog_path`` verbatim as the gsplat viewer's
+    ``AnimatedSogSplats3D`` payload (``gsplat_rust_renderer.sog3d.log_asog``, ``frame_origin`` = the clip's first frame,
+    temporal cut ``cut``) with a stock preview of the clip-middle pose (at most ``preview_rows`` rows); mode 644.
+
+    The one writer of ``open4dgs-export-asog --rrd`` and ``open4dgs-export-splats --format asog``; neither registers here.
+    """
+    reader: RrdReader = RrdReader(run_dir / "run.rrd")
+    frame_start: int = run_property(reader, "frame_start")
+    target: Float64[ndarray, " 3"] = np.median(read_asog(asog_path).means, axis=0).astype(np.float64)
+    recording, view_coordinates, view = run_recording(reader, run_dir.name, out, target)
+    t0: float = time.perf_counter()
+    log_asog(SPLAT_ENTITY, parse_asog(asog_path.read_bytes(), str(asog_path)), float(frame_start), cut, preview_rows, recording=recording)
+    log_s: float = time.perf_counter() - t0
+    recording.flush()
+    recording.disconnect()
+    out.chmod(0o644)
+    return {
+        "asog_rrd": str(out),
+        "bytes_asog_rrd": out.stat().st_size,
+        "frame_origin": frame_start,
+        "active_threshold": cut,
+        "preview_rows_max": preview_rows,
+        "log_s": log_s,
+        "view_coordinates": str(view_coordinates),
+        "blueprint_view_id": str(view.id),
+    }

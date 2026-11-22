@@ -110,3 +110,12 @@ made LPIPS depend on the batch shape at the 1e-4 level. Training keeps PyTorch's
 `open4dgs-export-asog` writes a run's checkpoint as an `.asog` file. The default preset `band-safe` keeps held-out
 PSNR within 1 % of the uncompressed clip (about 12 MB); `--settings.preset small` gives a smaller file for web
 streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).
+
+`open4dgs-export-splats` turns a run into a recording, layer of the run on `open4dgs-runs`. One `--format` flag:
+
+- `asog` (default): the run's `.asog` (from `open4dgs-export-asog`) stored once as `AnimatedSogSplats3D` plus a
+  one-pose preview, `<run>/asog.rrd`, layer `asog`; the same recording `open4dgs-export-asog` writes (`--rrd`). The
+  gsplat viewer plays it; a stock Rerun viewer shows one still pose.
+- `per-frame`: one `GaussianSplats3D` per frame, `<run>/splats.rrd`, layer `splats`; plays in stock viewers.
+- `trigs-motion`: the checkpoint once as `TrigsMotion3D`, `<run>/trigs_motion.rrd`, layer `trigs_motion`; the gsplat
+  viewer only.

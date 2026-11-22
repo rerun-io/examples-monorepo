@@ -23,10 +23,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-from asog import Asog
-from asog import read as read_asog
-from gsplat_rust_renderer.asog_decode import parse_asog
-from gsplat_rust_renderer.sog3d import PREVIEW_ROWS, log_asog
+from gsplat_rust_renderer.sog3d import PREVIEW_ROWS
 from PIL import Image
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
@@ -38,11 +35,8 @@ from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_cli
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
 from open4dgs.run_log import RUNS_DATASET
-from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params, run_properties, run_property, run_recording
+from open4dgs.splat_export import ASOG_CUT_FORMAT, ASOG_DIR, checkpoint_params, run_properties, write_asog_rrd
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, camera_config
-
-ASOG_CUT_FORMAT: float = 0.05
-"""The ``.asog`` v1 temporal cut (no manifest field; what every other player applies)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +45,7 @@ class Config:
 
     run: Path
     """Run directory (``run.rrd`` + ``trigs_ckpt.pt``)."""
-    out_dir: Path = Path("/mnt/nas/ssd-8tb/open4dgs/asog")
+    out_dir: Path = ASOG_DIR
     """Where ``<run>.asog`` goes."""
     name: str | None = None
     """File stem (default: the run name)."""
@@ -66,7 +60,8 @@ class Config:
     png_cameras: int = 2
     """Held-out cameras that get PNGs."""
     rrd: Path | None = None
-    """Recording with the ``.asog`` as the gsplat viewer's ``AnimatedSogSplats3D`` payload (default ``<run>/asog.rrd``)."""
+    """Recording with the ``.asog`` as the gsplat viewer's ``AnimatedSogSplats3D`` payload (default ``<run>/asog.rrd``;
+    always written; ``open4dgs-export-splats`` writes the same recording from an existing ``.asog``, its default format)."""
     asog_cut: Literal["format", "trained"] = "format"
     """Temporal cut recorded for the viewer: ``format`` = the ``.asog`` v1 constant 0.05 (what other players show),
     ``trained`` = the trainer's 0.01 (the trained look; the same file then plays differently elsewhere)."""
@@ -152,33 +147,13 @@ def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str
 
 
 def write_rrd(config: Config, asog_path: Path, out: Path) -> dict[str, object]:
-    """Log ``asog_path`` with the run's cameras and meshes into ``out``; registers it unless ``--no-register``."""
-    run_name: str = config.run.name
-    reader: RrdReader = RrdReader(config.run / "run.rrd")
-    frame_start: int = run_property(reader, "frame_start")
+    """Log ``asog_path`` with the run's cameras and meshes into ``out`` (``splat_export.write_asog_rrd``, the writer
+    ``open4dgs-export-splats --format asog`` uses too); registers it as layer ``asog`` unless ``--no-register``."""
     cut: float = ASOG_CUT_FORMAT if config.asog_cut == "format" else TrigsTrainingConfig().temporal_active_threshold
-    clip: Asog = read_asog(asog_path)
-    target = np.median(clip.means, axis=0).astype(np.float64)
-    recording, view_coordinates, view = run_recording(reader, run_name, out, target)
-    t0: float = time.perf_counter()
-    log_asog(SPLAT_ENTITY, parse_asog(asog_path.read_bytes(), str(asog_path)), float(frame_start), cut, config.preview_rows, recording=recording)
-    log_s: float = time.perf_counter() - t0
-    recording.flush()
-    recording.disconnect()
-    out.chmod(0o644)
-    summary: dict[str, object] = {
-        "asog_rrd": str(out),
-        "bytes_asog_rrd": out.stat().st_size,
-        "frame_origin": frame_start,
-        "active_threshold": cut,
-        "preview_rows_max": config.preview_rows,
-        "log_s": log_s,
-        "view_coordinates": str(view_coordinates),
-        "blueprint_view_id": str(view.id),
-    }
+    summary: dict[str, object] = write_asog_rrd(config.run, asog_path, out, cut, config.preview_rows)
     if config.register:
         register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out], "asog")
-        summary["registered"] = f"{RUNS_DATASET}/{run_name}/asog"
+        summary["registered"] = f"{RUNS_DATASET}/{config.run.name}/asog"
     return summary
 
 
