@@ -29,7 +29,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from torch import Tensor
 
-from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip, resample_images, undistortion_grid
+from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip, resample_images, roi_grid, undistortion_grid
 
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
 
@@ -206,7 +206,8 @@ def read_clip_masks(clip: MultiViewClip, catalog_url: str, dataset: str, segment
     """The ``masks`` layer for ``clip``: per camera, soft foreground in [0, 1] on the CPU, on the clip's exact pixel grid.
 
     The stored-grid PNGs go through the clip's own undistortion grid and resize (``resample_images``), so mask pixel
-    ``(y, x)`` covers the same ray as ``clip.frames[c][t, y, x]``.
+    ``(y, x)`` covers the same ray as ``clip.frames[c][t, y, x]``. A clip read with ``roi`` uses the same combined
+    rotation + zoom + undistortion grid as its frames (``catalog_clip.roi_grid``).
 
     Raises:
         ValueError: If the clip lacks ``stored_sizes``/``lenses``, or the layer misses a camera or a clip frame.
@@ -245,7 +246,11 @@ def read_clip_masks(clip: MultiViewClip, catalog_url: str, dataset: str, segment
                 raise ValueError(f"{entity} frame {frame}: mask is not a {stored_wh} PNG")
             stack[slot] = image
         lens = clip.lenses[camera]
-        grid: Float32[Tensor, "1 h w 2"] | None = None if lens is None else undistortion_grid(lens, stored_wh, torch.device("cpu"))
+        grid: Float32[Tensor, "1 h w 2"] | None
+        if clip.roi is not None:
+            grid = roi_grid(lens, clip.roi.cameras[camera], torch.device("cpu"))
+        else:
+            grid = None if lens is None else undistortion_grid(lens, stored_wh, torch.device("cpu"))
         mattes: Float32[Tensor, "t 1 h w"] = resample_images(torch.from_numpy(stack)[:, None].float() / 255.0, grid, clip.sizes[camera])
         out.append(mattes[:, 0].clamp(0.0, 1.0).contiguous())
     return tuple(out)
