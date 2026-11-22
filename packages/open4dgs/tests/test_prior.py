@@ -90,9 +90,10 @@ def test_pearson_is_invariant_to_scale_and_shift() -> None:
 
 
 def _terms(depth: torch.Tensor, prior_depth: torch.Tensor, prior_normals: torch.Tensor, hit: torch.Tensor, step: int = 10_000):
-    from open4dgs.prior import PriorConfig, prior_terms
+    from open4dgs.prior import PriorConfig, prior_terms, static_valid
 
-    return prior_terms(depth, hit.float(), hit.float(), prior_depth, prior_normals, _K(), step, PriorConfig(depth_edge_max=1.0))
+    config = PriorConfig(depth_edge_max=1.0)
+    return prior_terms(depth, hit.float(), static_valid(hit.float(), prior_depth, config), prior_depth, prior_normals, _K(), step, config)
 
 
 def test_loss_is_zero_for_true_geometry_and_grows_with_tilt() -> None:
@@ -119,7 +120,7 @@ def test_loss_is_zero_for_true_geometry_and_grows_with_tilt() -> None:
 
 
 def test_terms_are_differentiable_and_empty_set_gives_zero() -> None:
-    from open4dgs.prior import PriorConfig, prior_terms
+    from open4dgs.prior import PriorConfig, prior_terms, static_valid
 
     depth, normals, hit = _sphere(torch.tensor([0.0, 0.0, 3.0]), 0.8)
     rendered = (depth + 0.05 * _rays()[..., 0]).requires_grad_(True)
@@ -128,9 +129,55 @@ def test_terms_are_differentiable_and_empty_set_gives_zero() -> None:
     assert rendered.grad is not None and float(rendered.grad.abs().sum()) > 0.0
 
     empty = torch.zeros(H, W, requires_grad=True)
-    out = prior_terms(empty, torch.zeros(H, W), torch.zeros(H, W), depth, normals, _K(), 0, PriorConfig())
-    assert out.valid_fraction == 0.0 and float(out.depth) == 0.0
+    out = prior_terms(empty, torch.zeros(H, W), static_valid(torch.zeros(H, W), depth, PriorConfig()), depth, normals, _K(), 0, PriorConfig())
+    assert float(out.valid_fraction) == 0.0 and float(out.depth) == 0.0
     out.depth.backward()  # differentiable zero
+
+
+def _reference_terms(depth, alpha, mask, prior_depth, prior_normals, K, step, config):
+    """The P1 implementation (boolean indexing, Python-side skip), kept to pin the sync-free one to it."""
+    from open4dgs.prior import camera_normals, depth_edges, erode, pearson_loss
+
+    valid = erode(mask > 0.5, config.erode_px) & (prior_depth > 0) & (alpha.detach() > config.alpha_min)
+    valid = valid & ~depth_edges(prior_depth, config.depth_edge_max)
+    valid[0, :] = valid[-1, :] = valid[:, 0] = valid[:, -1] = False
+    fraction = float(valid.float().mean())
+    if fraction < config.min_valid_fraction:
+        return 0.0, 0.0, 0.0
+    l_depth = pearson_loss(depth[valid], prior_depth[valid])
+    rendered = camera_normals(depth, K)
+    normal_valid = valid
+    if step >= config.contradiction_start_step:
+        cos = (rendered.detach() * prior_normals).sum(dim=-1)
+        normal_valid = valid & (cos >= math.cos(math.radians(config.contradiction_deg)))
+    if not bool(normal_valid.any()):
+        return float(l_depth), 0.0, fraction
+    one_minus_cos = (1.0 - (rendered[normal_valid] * prior_normals[normal_valid]).sum(dim=-1)).clamp(min=0.0)
+    if config.normal_form == "spirula":
+        half = one_minus_cos / 2.0
+        one_minus_cos = half + (half + 1e-8).sqrt()
+    return float(l_depth), float(one_minus_cos.mean()), fraction
+
+
+@pytest.mark.parametrize("form", ["cos", "spirula"])
+@pytest.mark.parametrize("step", [0, 10_000])
+@pytest.mark.parametrize("min_valid_fraction", [0.005, 0.5])
+def test_sync_free_terms_equal_the_reference(form: str, step: int, min_valid_fraction: float) -> None:
+    from open4dgs.prior import PriorConfig, prior_terms, static_valid
+
+    depth, normals, hit = _sphere(torch.tensor([0.0, 0.0, 3.0]), 0.8)
+    g = torch.Generator().manual_seed(1)
+    rendered = depth + 0.05 * _rays()[..., 0] + 0.01 * torch.rand(H, W, generator=g)
+    prior_depth = torch.where(hit, 1.3 * depth + 0.2, torch.zeros_like(depth))
+    alpha = hit.float() * torch.rand(H, W, generator=g)
+    config = PriorConfig(depth_edge_max=1.0, normal_form=form, min_valid_fraction=min_valid_fraction, contradiction_deg=5.0)  # type: ignore[arg-type]
+    ref = _reference_terms(rendered, alpha, hit.float(), prior_depth, normals, _K(), step, config)
+    new = prior_terms(rendered, alpha, static_valid(hit.float(), prior_depth, config), prior_depth, normals, _K(), step, config)
+    assert (float(new.depth), float(new.normal), float(new.valid_fraction)) == pytest.approx(ref, abs=1e-6)
+    if min_valid_fraction == 0.5:
+        assert ref == (0.0, 0.0, 0.0)  # the skip branch is covered too
+    else:
+        assert ref[0] > 0.0 and ref[1] > 0.0
 
 
 def test_gates_drop_low_alpha_mask_border_and_depth_steps() -> None:

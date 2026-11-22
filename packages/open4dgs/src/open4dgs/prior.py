@@ -9,7 +9,8 @@ no MoGe depth edge (|grad log Dm| <= depth_edge_max per px)``.
 - normals: ``L_n = mean_P (1 - <Nd, Nm>)`` with ``Nd = depth_to_normal(D)`` (gsplat, camera frame); from
   ``contradiction_start_step`` pixels with ``angle(Nd, Nm) > contradiction_deg`` leave P for this term (NeuRIS gate);
 - total: ``ramp(step) * (lambda_depth L_d + lambda_normal L_n)``, ramp linear from ``start_step`` to ``ramp_end_step``.
-  A camera/frame with fewer than ``min_valid_fraction`` of its pixels in P adds a differentiable zero.
+  A camera/frame with fewer than ``min_valid_fraction`` of its pixels in P adds a differentiable zero (default 0.005:
+  the person covers 2-4 % of a 514 px MAMMA frame, so 0.02 skipped many camera/frames).
 
 Sign conventions (pinned by tests/test_prior.py): camera frame is OpenCV RDF; ``depth_to_normal`` crosses the row
 difference (down) with the column difference (right), so a surface facing the camera has normal ``(0, 0, -1)``, the
@@ -72,7 +73,7 @@ class PriorConfig:
     """Rendered alpha (detached) a pixel needs."""
     depth_edge_max: float = 0.05
     """Largest |grad log Dm| per pixel (MoGe depth steps, e.g. an arm over the torso, leave P)."""
-    min_valid_fraction: float = 0.02
+    min_valid_fraction: float = 0.005
     """Below this share of the image in P the camera adds nothing."""
     normal_form: Literal["cos", "spirula"] = "cos"
     """``cos``: 1 - cos; ``spirula``: (1 - cos)/2 + sqrt((1 - cos)/2) (steeper near agreement)."""
@@ -141,15 +142,6 @@ def pearson_loss(depth: Float32[Tensor, " n"], prior: Float32[Tensor, " n"]) -> 
     return 1.0 - corr
 
 
-def normal_loss(rendered: Float32[Tensor, "n 3"], prior: Float32[Tensor, "n 3"], form: Literal["cos", "spirula"]) -> Float32[Tensor, ""]:
-    """Mean angular disagreement of unit normals."""
-    one_minus_cos: Tensor = (1.0 - (rendered * prior).sum(dim=-1)).clamp(min=0.0)
-    if form == "cos":
-        return one_minus_cos.mean()
-    half: Tensor = one_minus_cos / 2.0
-    return (half + (half + 1e-8).sqrt()).mean()
-
-
 def depth_edges(prior_depth: Float32[Tensor, "h w"], max_step: float) -> Bool[Tensor, "h w"]:
     """Pixels next to a MoGe depth step: |grad log Dm| > ``max_step`` in x or y, dilated by one pixel; invalid depth counts as a step."""
     log_d: Tensor = torch.log(prior_depth.clamp(min=1e-6))
@@ -176,46 +168,63 @@ def erode(mask: Bool[Tensor, "h w"], px: int) -> Bool[Tensor, "h w"]:
     return mask & ~outside & ~border
 
 
+def static_valid(mask: Float32[Tensor, "h w"], prior_depth: Float32[Tensor, "h w"], config: PriorConfig) -> Bool[Tensor, "h w"]:
+    """The render-independent part of P: eroded person mask, valid MoGe depth, no MoGe depth edge, no 1-px border."""
+    valid: Tensor = erode(mask > 0.5, config.erode_px) & (prior_depth > 0)
+    valid = valid & ~depth_edges(prior_depth, config.depth_edge_max)
+    valid[0, :] = valid[-1, :] = valid[:, 0] = valid[:, -1] = False  # depth_to_normal border
+    return valid
+
+
+def _masked_mean(values: Tensor, weight: Tensor, count: Tensor) -> Tensor:
+    return (values * weight).sum() / count.clamp(min=1.0)
+
+
 @dataclass(frozen=True, slots=True)
 class PriorTerms:
-    """Unweighted terms of one camera at one frame."""
+    """Unweighted terms of one camera at one frame; 0-d tensors, so nothing here waits for the GPU."""
 
     depth: Float32[Tensor, ""]
     normal: Float32[Tensor, ""]
-    valid_fraction: float
+    valid_fraction: Float32[Tensor, ""]
     """Share of the image in P (0 when the camera was skipped)."""
 
 
 def prior_terms(
     depth: Float32[Tensor, "h w"],
     alpha: Float32[Tensor, "h w"],
-    mask: Float32[Tensor, "h w"],
+    static: Bool[Tensor, "h w"],
     prior_depth: Float32[Tensor, "h w"],
     prior_normals: Float32[Tensor, "h w 3"],
     K: Float32[Tensor, "3 3"],
     step: int,
     config: PriorConfig,
 ) -> PriorTerms:
-    """Both prior terms of one rendered camera (differentiable in ``depth``)."""
-    valid: Tensor = erode(mask > 0.5, config.erode_px) & (prior_depth > 0) & (alpha.detach() > config.alpha_min)
-    valid = valid & ~depth_edges(prior_depth, config.depth_edge_max)
-    valid[0, :] = valid[-1, :] = valid[:, 0] = valid[:, -1] = False  # depth_to_normal border
-    fraction: float = float(valid.float().mean())
-    if fraction < config.min_valid_fraction:
-        zero: Tensor = depth.sum() * 0.0
-        return PriorTerms(depth=zero, normal=zero, valid_fraction=0.0)
-    l_depth: Tensor = pearson_loss(depth[valid], prior_depth[valid])
+    """Both prior terms of one rendered camera (differentiable in ``depth``), ``static`` from ``static_valid``.
+
+    Masked means over P instead of boolean indexing and a tensor skip flag instead of ``if``: no GPU->CPU sync. A
+    skipped camera (P below ``min_valid_fraction``) or an empty normal set gives a differentiable zero.
+    """
+    weight: Tensor = (static & (alpha.detach() > config.alpha_min)).float()
+    count: Tensor = weight.sum()
+    fraction: Tensor = count / weight.numel()
+    keep: Tensor = (fraction >= config.min_valid_fraction).float()
+    d: Tensor = depth - _masked_mean(depth, weight, count)
+    p: Tensor = prior_depth - _masked_mean(prior_depth, weight, count)
+    cov: Tensor = _masked_mean(d * p, weight, count)
+    var: Tensor = (_masked_mean(d.pow(2), weight, count) * _masked_mean(p.pow(2), weight, count)).clamp(min=1e-12).sqrt()
+    l_depth: Tensor = 1.0 - cov / var
     rendered_normals: Tensor = camera_normals(depth, K)
-    normal_valid: Tensor = valid
+    normal_weight: Tensor = weight
     if step >= config.contradiction_start_step:
         cos: Tensor = (rendered_normals.detach() * prior_normals).sum(dim=-1)
-        normal_valid = valid & (cos >= math.cos(math.radians(config.contradiction_deg)))
-    l_normal: Tensor = (
-        normal_loss(rendered_normals[normal_valid], prior_normals[normal_valid], config.normal_form)
-        if bool(normal_valid.any())
-        else depth.sum() * 0.0
-    )
-    return PriorTerms(depth=l_depth, normal=l_normal, valid_fraction=fraction)
+        normal_weight = weight * (cos >= math.cos(math.radians(config.contradiction_deg))).float()
+    one_minus_cos: Tensor = (1.0 - (rendered_normals * prior_normals).sum(dim=-1)).clamp(min=0.0)
+    if config.normal_form == "spirula":
+        half: Tensor = one_minus_cos / 2.0
+        one_minus_cos = half + (half + 1e-8).sqrt()
+    l_normal: Tensor = _masked_mean(one_minus_cos, normal_weight, normal_weight.sum())
+    return PriorTerms(depth=l_depth * keep, normal=l_normal * keep, valid_fraction=fraction * keep)
 
 
 @dataclass
@@ -224,7 +233,11 @@ class MonoPriorLoss:
 
     ``priors`` must hold TRAINING cameras only (train_clip checks it); ``positions[i]`` is the clip camera position
     of ``priors.camera_names[i]``. ``rows`` collects ``prior/{depth,normal,valid_fraction,weight}`` (the unweighted
-    terms averaged over the cameras of a step, every ``config.log_every`` steps).
+    terms averaged over the non-skipped cameras of a step, every ``config.log_every`` steps).
+
+    On the first call the maps move to the render's device and stay there for the run: prior depth (fp16), coded
+    normals (uint8) and the render-independent gate (``static_valid``, bool), 6 bytes per pixel per camera and frame;
+    the masks are not kept. Scalars accumulate as GPU tensors and are read once per logged step.
     """
 
     config: PriorConfig
@@ -236,15 +249,31 @@ class MonoPriorLoss:
     """Intrinsics of every clip camera (indexed by position)."""
     rows: dict[str, list[tuple[int, float]]] = field(default_factory=dict)
     _step: int = -1
-    _sums: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
+    _sums: Tensor | None = None
+    _device: torch.device | None = None
+    _depth: tuple[Tensor, ...] = ()
+    _normals: tuple[Tensor, ...] = ()
+    _static: tuple[Tensor, ...] = ()
+    _K: Tensor | None = None
+
+    def _to_device(self, device: torch.device) -> None:
+        self._device = device
+        self._depth = tuple(d.to(device) for d in self.priors.depth)
+        self._normals = tuple(n.to(device) for n in self.priors.normals)
+        self._static = tuple(
+            torch.stack([static_valid(m[f].to(device).float(), d[f].float(), self.config) for f in range(d.shape[0])])
+            for m, d in zip(self.masks, self._depth, strict=True)
+        )
+        self._K = self.K.to(device)
 
     def _flush(self) -> None:
-        if self._step >= 0 and self._sums[3] > 0 and self._step % self.config.log_every == 0:
-            n: float = self._sums[3]
-            for name, value in zip(("depth", "normal", "valid_fraction"), self._sums[:3], strict=True):
-                self.rows.setdefault(f"prior/{name}", []).append((self._step, value / n))
-            self.rows.setdefault("prior/weight", []).append((self._step, self.config.ramp(self._step)))
-        self._sums = [0.0, 0.0, 0.0, 0.0]
+        if self._step >= 0 and self._sums is not None:
+            depth, normal, fraction, n = self._sums.tolist()
+            if n > 0:
+                for name, value in (("depth", depth), ("normal", normal), ("valid_fraction", fraction)):
+                    self.rows.setdefault(f"prior/{name}", []).append((self._step, value / n))
+                self.rows.setdefault("prior/weight", []).append((self._step, self.config.ramp(self._step)))
+        self._sums = None
 
     def finish(self) -> None:
         """Flush the last step's scalars."""
@@ -257,22 +286,29 @@ class MonoPriorLoss:
             self._flush()
             self._step = step
         depth_rendered: Tensor = info["render_depth"][0, ..., 0]
-        if cam_idx not in self.positions:
-            return depth_rendered.sum() * 0.0
-        slot: int = self.positions.index(cam_idx)
-        device: torch.device = depth_rendered.device
-        prior_depth: Tensor = self.priors.depth[slot][frame_idx].to(device, non_blocking=True).float()
-        prior_normals, _ = decode_normals(self.priors.normals[slot][frame_idx].to(device, non_blocking=True))
-        mask: Tensor = self.masks[slot][frame_idx].to(device, non_blocking=True).float()
-        terms: PriorTerms = prior_terms(
-            depth_rendered, alphas[0, ..., 0], mask, prior_depth, prior_normals, self.K[cam_idx].to(device), step, self.config
-        )
-        if terms.valid_fraction > 0.0:
-            self._sums[0] += float(terms.depth.detach())
-            self._sums[1] += float(terms.normal.detach())
-            self._sums[2] += terms.valid_fraction
-            self._sums[3] += 1.0
         weight: float = self.config.ramp(step)
+        logged: bool = step % self.config.log_every == 0
+        if cam_idx not in self.positions or (weight == 0.0 and not logged):
+            return depth_rendered.sum() * 0.0
+        if self._device != depth_rendered.device:
+            self._to_device(depth_rendered.device)
+        assert self._K is not None
+        slot: int = self.positions.index(cam_idx)
+        prior_normals, _ = decode_normals(self._normals[slot][frame_idx])
+        terms: PriorTerms = prior_terms(
+            depth_rendered,
+            alphas[0, ..., 0],
+            self._static[slot][frame_idx],
+            self._depth[slot][frame_idx].float(),
+            prior_normals,
+            self._K[cam_idx],
+            step,
+            self.config,
+        )
+        if logged:
+            kept: Tensor = (terms.valid_fraction > 0).float()
+            row: Tensor = torch.stack([terms.depth.detach(), terms.normal.detach(), terms.valid_fraction, kept])
+            self._sums = row if self._sums is None else self._sums + row
         return weight * (self.config.lambda_depth * terms.depth + self.config.lambda_normal * terms.normal)
 
 
