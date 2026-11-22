@@ -39,6 +39,21 @@ one-view recording that `gsplat probe` measures.
 
 ![Pretrained Lego in the custom viewer](docs/media/pretrained-lego.png)
 
+### Web viewer
+
+`gsplat-rust-renderer-web` builds the custom viewer for the browser in the layout of a stock
+Rerun web viewer directory (app files plus `npm/`), so it can be served beside it as
+`/rerun-viewer/0.42.0-gsplat/`:
+
+```bash
+pixi run -e gsplat-rust-renderer-web gsplat-web-build <stock 0.42.0 viewer dir> <out dir>
+```
+
+The compute renderer needs WebGPU subgroups (Chrome or Edge 134+); without them the
+viewer falls back to Rerun's splat renderer. In headless Chromium on an RTX 5090 a
+spinning 325k-splat Lego takes 2.7 ms per frame against 28.9 ms in the stock 0.42.0 web
+viewer, and 2.9M splats take 2.7 ms against 326 ms.
+
 ## Train
 
 ```bash
