@@ -164,7 +164,7 @@ FP8_MIN_COMPUTE_CAPABILITY: Final[tuple[int, int]] = (8, 9)
 
 
 def gpu_has_fp8() -> bool:
-    """Whether this host's CUDA device 0 runs FP8 (`FP8_MIN_COMPUTE_CAPABILITY`). Without it (an Ampere RTX 3060, sm_86)
+    """Whether the current CUDA device runs FP8 (`FP8_MIN_COMPUTE_CAPABILITY`). Without it (an Ampere RTX 3060, sm_86)
     the FlexGlue matcher runs its prepared bf16/fp32 graph, the matcher before the FP8 calibration, and needs no FP8 file.
 
     Returns:
@@ -172,7 +172,8 @@ def gpu_has_fp8() -> bool:
     """
     import torch
 
-    return torch.cuda.is_available() and torch.cuda.get_device_capability(0) >= FP8_MIN_COMPUTE_CAPABILITY
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= FP8_MIN_COMPUTE_CAPABILITY
+
 
 MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 """The ALIKED matchers COLMAP 4.2 offers; the pipeline uses LightGlue."""
