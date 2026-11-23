@@ -244,9 +244,6 @@ fn evaluate_matches_the_reference() {
     }
 }
 
-/// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
-/// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
-/// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
 /// The parallel inflate of `decode_parts` and the outside-inflate entry (`zlib_members` + `decode_parts_inflated`, the
 /// web viewer's `DecompressionStream` path) give the serial result bit for bit: on the fixture, and on
 /// `GSPLAT_ASOG_FILE` when it is set (whole trained clips). `AsogParts::content_hash` is the hash the web viewer logs.
@@ -295,6 +292,9 @@ fn parallel_and_outside_inflate_give_the_serial_parts() {
     }
 }
 
+/// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
+/// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
+/// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
 #[test]
 #[ignore = "integration: GPU"]
 fn gpu_load_path_matches_the_cpu_oracle_and_the_reference() {

@@ -221,12 +221,12 @@ pub fn parse(bytes: &[u8]) -> Result<Container<'_>, Error> {
 }
 
 impl<'a> Container<'a> {
-    fn desc(&self, name: &'static str) -> Option<&StreamDesc> {
+    fn desc(&self, name: &str) -> Option<&StreamDesc> {
         self.manifest.streams.iter().find(|s| s.name == name)
     }
 
     /// The zlib member of stream `name`, if the file has the stream.
-    fn member(&self, name: &'static str) -> Result<Option<(&StreamDesc, &'a [u8])>, Error> {
+    fn member(&self, name: &str) -> Result<Option<(&StreamDesc, &'a [u8])>, Error> {
         let Some(desc) = self.desc(name) else {
             return Ok(None);
         };
@@ -242,7 +242,7 @@ impl<'a> Container<'a> {
     }
 
     /// Stream `name` as splat-major integers (`out[i * channels + c]`), with its channel count.
-    pub fn stream(&self, name: &'static str) -> Result<Option<(Vec<i64>, usize)>, Error> {
+    pub fn stream(&self, name: &str) -> Decoded {
         let Some((desc, data)) = self.member(name)? else {
             return Ok(None);
         };
@@ -256,7 +256,7 @@ impl<'a> Container<'a> {
 
 /// One stream's zlib member, for an inflate outside this crate.
 pub struct ZlibMember<'a> {
-    pub name: &'static str,
+    pub name: String,
     pub data: &'a [u8],
     pub inflated_len: usize,
 }
@@ -270,16 +270,16 @@ impl ZlibMember<'_> {
     }
 }
 
-/// The zlib members of the streams [`decode_parts`] reads, in the order [`decode_parts_inflated`] takes them.
+/// The zlib member of every stream in the manifest, in manifest order (the order [`decode_parts_inflated`] takes).
 ///
 /// The web viewer hands them to the browser's `DecompressionStream("deflate")` (the zlib wrapper).
 pub fn zlib_members(bytes: &[u8]) -> Result<Vec<ZlibMember<'_>>, Error> {
     let container = parse(bytes)?;
     let mut out = Vec::new();
-    for name in STREAMS {
-        if let Some((desc, data)) = container.member(name)? {
+    for desc in &container.manifest.streams {
+        if let Some((_, data)) = container.member(&desc.name)? {
             out.push(ZlibMember {
-                name,
+                name: desc.name.clone(),
                 data,
                 inflated_len: desc.count * desc.channels * desc.planes,
             });
@@ -297,92 +297,84 @@ pub fn decode_parts_inflated(
 ) -> Result<AsogParts, Error> {
     let container = parse(bytes)?;
     let mut streams = Streams::decode(&container, false);
-    let mut inflated = inflated.into_iter();
-    for (index, name) in STREAMS.into_iter().enumerate() {
-        let Some((desc, _)) = container.member(name)? else {
-            continue;
-        };
-        let raw = inflated.next().ok_or(Error::MissingStream(name))?;
+    if inflated.len() != container.manifest.streams.len() {
+        return Err(Error::Header("one inflated buffer per manifest stream"));
+    }
+    for ((ahead, desc), raw) in streams
+        .ahead
+        .iter_mut()
+        .zip(&container.manifest.streams)
+        .zip(inflated)
+    {
         let values = undo_stream(desc, &raw).map_err(|problem| Error::Stream {
-            name: name.into(),
+            name: desc.name.clone(),
             problem,
         });
-        streams.ahead[index] = Some(values.map(|values| Some((values, desc.channels))));
+        *ahead = Some(values.map(|values| Some((values, desc.channels))));
     }
     assemble(&container, &mut streams, active_threshold)
 }
 
-/// Every stream [`decode_parts`] reads.
-const STREAMS: [&str; 14] = [
-    "means",
-    "quats",
-    "quatmode",
-    "scales",
-    "sh0",
-    "opacity",
-    "shlabels",
-    "shpalette",
-    "mu",
-    "logsigma",
-    "anchor",
-    "omega",
-    "g",
-    "flags",
-];
-
 /// One stream decoded by [`Container::stream`]: absent, or splat-major integers with their channel count.
-type Decoded = Result<Option<(Vec<i64>, usize)>, Error>;
+pub type Decoded = Result<Option<(Vec<i64>, usize)>, Error>;
 
-/// The streams of [`STREAMS`], each taken once by name.
-struct Streams<'c, 'a> {
-    container: &'c Container<'a>,
-    /// Decoded ahead (parallel); `None` = decode on [`Self::optional`].
-    ahead: [Option<Decoded>; STREAMS.len()],
+/// The container's streams, each taken once by name.
+struct Streams<'c> {
+    container: &'c Container<'c>,
+    /// Decoded ahead, one per manifest stream (parallel); `None` = decode when taken.
+    ahead: Vec<Option<Decoded>>,
 }
 
-impl<'c, 'a> Streams<'c, 'a> {
-    /// With `parallel`, decode every stream now, one scoped thread per stream (the zlib members are independent).
-    /// Without it, each stream is decoded on the calling thread when it is taken, so at most the streams in use are
-    /// held (the web build's memory profile). Both give the same values.
-    fn decode(container: &'c Container<'a>, parallel: bool) -> Self {
+impl<'c> Streams<'c> {
+    /// With `parallel`, decode every stream of the manifest now, one scoped thread per stream (the zlib members are
+    /// independent; a stream whose thread cannot start is decoded when taken). Without it, each stream is decoded on
+    /// the calling thread when it is taken, in the order and with the memory profile of a plain serial decode. Both
+    /// give the same values.
+    fn decode(container: &'c Container<'c>, parallel: bool) -> Self {
+        let descs = &container.manifest.streams;
         if !parallel {
             return Self {
                 container,
-                ahead: [const { None }; STREAMS.len()],
+                ahead: descs.iter().map(|_| None).collect(),
             };
         }
         let ahead = std::thread::scope(|scope| {
-            STREAMS
-                .map(|name| scope.spawn(move || container.stream(name)))
-                .map(|thread| {
-                    Some(
-                        thread
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                    )
+            let threads: Vec<_> = descs
+                .iter()
+                .map(|desc| {
+                    std::thread::Builder::new()
+                        .spawn_scoped(scope, move || container.stream(&desc.name))
+                        .ok()
                 })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| {
+                    thread.map(|t| {
+                        t.join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    })
+                })
+                .collect()
         });
         Self { container, ahead }
     }
 
     fn optional(&mut self, name: &'static str) -> Decoded {
-        let index = STREAMS
+        let decoded = self
+            .container
+            .manifest
+            .streams
             .iter()
-            .position(|&s| s == name)
-            .expect("a listed stream");
-        self.ahead[index]
-            .take()
-            .unwrap_or_else(|| self.container.stream(name))
+            .position(|desc| desc.name == name)
+            .and_then(|index| self.ahead[index].take());
+        decoded.unwrap_or_else(|| self.container.stream(name))
     }
 
-    /// Stream `name`, required, with `want` channels over `rows` rows.
-    fn shaped(&mut self, name: &'static str, rows: usize, want: usize) -> Result<Vec<i64>, Error> {
-        shaped(
-            name,
-            self.optional(name)?.ok_or(Error::MissingStream(name))?,
-            rows,
-            want,
-        )
+    /// Stream `name`, required, with `want` channels per splat.
+    fn shaped(&mut self, name: &'static str, want: usize) -> Result<Vec<i64>, Error> {
+        let stream = self.optional(name)?.ok_or(Error::MissingStream(name))?;
+        shaped(name, stream, self.container.manifest.count, want)
     }
 }
 
@@ -673,17 +665,17 @@ fn decode_parts_with(
 /// The texel planes, SH planes and motion codes from the decoded streams.
 fn assemble(
     container: &Container<'_>,
-    streams: &mut Streams<'_, '_>,
+    streams: &mut Streams<'_>,
     active_threshold: f32,
 ) -> Result<AsogParts, Error> {
     let m = &container.manifest;
     let n = m.count;
-    let means = streams.shaped("means", n, 3)?;
-    let quats = streams.shaped("quats", n, 3)?;
-    let quatmode = streams.shaped("quatmode", n, 1)?;
-    let scales = streams.shaped("scales", n, 3)?;
-    let sh0 = streams.shaped("sh0", n, 3)?;
-    let opacity = streams.shaped("opacity", n, 1)?;
+    let means = streams.shaped("means", 3)?;
+    let quats = streams.shaped("quats", 3)?;
+    let quatmode = streams.shaped("quatmode", 1)?;
+    let scales = streams.shaped("scales", 3)?;
+    let sh0 = streams.shaped("sh0", 3)?;
+    let opacity = streams.shaped("opacity", 1)?;
 
     let mut planes = [(); 5].map(|()| vec![0u8; 4 * n]);
     let [means_l, means_u, quat_plane, scale_plane, sh0_plane] = &mut planes;
@@ -774,22 +766,24 @@ fn assemble(
 fn motion_codes(
     m: &Manifest,
     opacity: Vec<i64>,
-    decoded: &mut Streams<'_, '_>,
+    streams: &mut Streams<'_>,
 ) -> Result<Vec<i32>, Error> {
     let n = m.count;
-    let streams: [(&'static str, Vec<i64>, usize); 7] = [
-        ("opacity", opacity, 1),
-        ("mu", decoded.shaped("mu", n, 1)?, 1),
-        ("logsigma", decoded.shaped("logsigma", n, 1)?, 1),
-        ("anchor", decoded.shaped("anchor", n, 3)?, 3),
-        ("omega", decoded.shaped("omega", n, 9)?, 9),
-        ("g", decoded.shaped("g", n, 5)?, 5),
-        ("flags", decoded.shaped("flags", n, 1)?, 1),
-    ];
+    let mut columns = vec![("opacity", opacity, 1)];
+    for (name, width) in [
+        ("mu", 1),
+        ("logsigma", 1),
+        ("anchor", 3),
+        ("omega", 9),
+        ("g", 5),
+        ("flags", 1),
+    ] {
+        columns.push((name, streams.shaped(name, width)?, width));
+    }
     let clips = m.clips.len();
     let mut out = Vec::with_capacity(n * MOTION_CODES);
     for i in 0..n {
-        for (name, values, width) in &streams {
+        for (name, values, width) in &columns {
             for &v in &values[i * width..(i + 1) * width] {
                 out.push(i32::try_from(v).map_err(|_range| Error::Stream {
                     name: (*name).into(),
