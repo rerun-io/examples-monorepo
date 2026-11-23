@@ -387,11 +387,8 @@ fn draw_splat_entity(
                             })
                         });
                     let inflated = match browser {
-                        crate::asog::Browser::Pending => {
-                            ctx.egui_ctx()
-                                .request_repaint_after(std::time::Duration::from_millis(10));
-                            continue;
-                        }
+                        // The inflate's continuation asks for the frame that uploads it.
+                        crate::asog::Browser::Pending => continue,
                         crate::asog::Browser::Ready(inflated) => Some(inflated),
                         crate::asog::Browser::Unused => None,
                     };

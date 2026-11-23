@@ -7,8 +7,9 @@
 //! whenever the time cursor moves: no CPU work and no upload on a time change. The CPU decoder in `gsplat_core::asog`
 //! is the tests' oracle, not a render path.
 //! Web: when the page installs [`BROWSER_INFLATE`] (the browser has `DecompressionStream`), the zlib streams are
-//! inflated by the browser, all at once, while the frame thread goes on: the entity draws nothing from our renderer
-//! until the inflated streams arrive, then the undo + assembly run on the frame thread and the scene uploads.
+//! inflated by the browser, all at once, while the frame loop goes on: the entity draws nothing from our renderer
+//! until then; the inflate's continuation runs the undo + assembly (main thread, outside a frame) and asks for the
+//! frame that uploads the scene.
 //! Time: `t [s] = (frame - frame_origin) / frameRate` with the manifest's frameRate (see `crate::trigs::clip_seconds`).
 use re_viewer::external::{
     parking_lot::Mutex, re_log, re_renderer, re_sdk_types, re_viewer_context,
@@ -48,11 +49,11 @@ pub static BROWSER_INFLATE: std::sync::OnceLock<BrowserInflate> = std::sync::Onc
 /// Streams inflated outside the frame thread and assembled: what [`Payload::upload`] then uploads.
 pub(crate) struct Inflated {
     pub parts: gsplat_core::asog::AsogParts,
-    /// Payload seen -> inflated streams back; back -> the next frame that took them; the undo + assembly (frame
-    /// thread).
+    /// Payload seen -> inflated streams back; the undo + assembly in the continuation (main thread, outside a frame);
+    /// assembled -> the frame that uploads them.
     pub inflate: std::time::Duration,
-    pub wait: std::time::Duration,
     pub assemble: std::time::Duration,
+    pub wait: std::time::Duration,
 }
 
 /// One entity's `.asog` payload plus the preview rows (bounds, and the native fallback).
@@ -79,13 +80,13 @@ impl Payload<'_> {
             let scene = core.upload_asog(&ctx.queue, &inflated.parts)?;
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
             re_log::info!(
-                "ASOG decode: {} splats, SH degree {}, browser inflate {:.1} ms (concurrent, off the frame), next \
-                 frame {:.1} ms later, undo + assembly {:.1} ms (frame thread), upload + static and motion de-quantise GPU {:.1} ms (submit only)",
+                "ASOG decode: {} splats, SH degree {}, browser inflate {:.1} ms (concurrent, off the frame), undo + \
+                 assembly {:.1} ms (main thread, in the inflate's continuation), uploaded {:.1} ms later, upload + static and motion de-quantise GPU {:.1} ms (submit only)",
                 re_format::format_uint(scene.len()),
                 inflated.parts.sh.as_ref().map_or(0, |s| s.0),
                 ms(inflated.inflate),
-                ms(inflated.wait),
                 ms(inflated.assemble),
+                ms(inflated.wait),
                 ms(start.elapsed()),
             );
             if crate::profile::requested() {
@@ -115,11 +116,12 @@ impl Payload<'_> {
     }
 }
 
-/// A browser inflate in flight: the result slot the callback fills (with the time it was filled).
-type Slot = Arc<Mutex<Option<(Result<Vec<Vec<u8>>, String>, web_time::Instant)>>>;
+/// A browser inflate in flight: the slot its continuation fills with the assembled streams (or the error), and the
+/// time it filled it.
+type Slot = Arc<Mutex<Option<(Result<Inflated, String>, web_time::Instant)>>>;
 
 enum Load {
-    Pending(Slot, web_time::Instant),
+    Pending(Slot),
     Ready(Arc<Inflated>),
     /// Uploaded (or failed): later uploads of this payload decode in [`Payload::upload`].
     Done,
@@ -187,8 +189,8 @@ impl AsogCache {
         info.clone()
     }
 
-    /// The browser inflate of `bytes`: started on the first call (the callback calls `repaint`), then polled. When the
-    /// streams arrive they are assembled here; an inflate error falls back to [`Browser::Unused`], so the upload's own
+    /// The browser inflate of `bytes`: started on the first call; its continuation assembles the streams and calls
+    /// `repaint`; later calls take the result. An inflate error falls back to [`Browser::Unused`], so the upload's own
     /// decode reports it as without the browser inflate.
     pub(crate) fn browser(
         &mut self,
@@ -207,32 +209,40 @@ impl AsogCache {
             };
             let slot = Slot::default();
             let filled = slot.clone();
+            let started = web_time::Instant::now();
+            // The continuation owns a copy of the file: it assembles the streams itself and asks for the frame that
+            // uploads them, so nothing waits for a frame to come by.
+            let file = bytes.to_vec();
             inflate(
                 members.iter().map(|m| m.data.to_vec()).collect(),
                 Box::new(move |result| {
-                    *filled.lock() = Some((result, web_time::Instant::now()));
+                    let inflate = started.elapsed();
+                    let start = web_time::Instant::now();
+                    let assembled = result.and_then(|inflated| {
+                        gsplat_core::asog::decode_parts_inflated(&file, active_threshold, inflated)
+                            .map_err(|e| e.to_string())
+                    });
+                    let assembled = assembled.map(|parts| Inflated {
+                        parts,
+                        inflate,
+                        assemble: start.elapsed(),
+                        wait: std::time::Duration::ZERO,
+                    });
+                    *filled.lock() = Some((assembled, web_time::Instant::now()));
                     repaint();
                 }),
             );
-            (Load::Pending(slot, web_time::Instant::now()), frame)
+            (Load::Pending(slot), frame)
         });
         *seen = frame;
-        if let Load::Pending(slot, started) = load {
-            let Some((result, back)) = slot.lock().take() else {
+        if let Load::Pending(slot) = load {
+            let Some((assembled, back)) = slot.lock().take() else {
                 return Browser::Pending;
             };
-            let inflate = back.duration_since(*started);
-            let wait = back.elapsed();
-            let start = web_time::Instant::now();
-            *load = match result.and_then(|inflated| {
-                gsplat_core::asog::decode_parts_inflated(bytes, active_threshold, inflated)
-                    .map_err(|e| e.to_string())
-            }) {
-                Ok(parts) => Load::Ready(Arc::new(Inflated {
-                    parts,
-                    inflate,
-                    wait,
-                    assemble: start.elapsed(),
+            *load = match assembled {
+                Ok(inflated) => Load::Ready(Arc::new(Inflated {
+                    wait: back.elapsed(),
+                    ..inflated
                 })),
                 Err(error) => {
                     re_log::warn!("ASOG browser inflate failed ({error}); decoding in wasm");
