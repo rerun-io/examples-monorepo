@@ -9,9 +9,6 @@ The recording holds the run's cameras and SMPL-X meshes (copied from ``run.rrd``
   Rerun viewer shows one still pose.
 - ``--format per-frame``: one ``GaussianSplats3D`` row per frame on ``frame_index``; the stock viewer plays it.
   Default output ``<run>/splats.rrd``, layer ``splats``.
-- ``--format trigs-motion``: the checkpoint once, static: canonical ``GaussianSplats3D`` + ``TrigsMotion3D``
-  (``gsplat_rust_renderer.trigs_motion3d``), which the custom viewer (packages/gsplat-rust-renderer) evaluates at the
-  time cursor; stock viewers draw the canonical rows only. Default output ``<run>/trigs_motion.rrd``, layer ``trigs_motion``.
 """
 
 import time
@@ -22,7 +19,6 @@ from typing import Literal
 import numpy as np
 import torch
 from gsplat_rust_renderer.sog3d import PREVIEW_ROWS
-from gsplat_rust_renderer.trigs_motion3d import TrigsParams, log_trigs_motion
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
 from simplecv.catalog_layers import register_layer
@@ -40,7 +36,6 @@ from open4dgs.splat_export import (
     run_property,
     run_recording,
     splats_at,
-    trigs_motion_params,
     write_asog_rrd,
 )
 
@@ -63,16 +58,14 @@ class Config:
     """An ``.asog`` file of the run (e.g. from another encoder): ``asog`` stores it instead of encoding the checkpoint;
     ``per-frame`` exports it decoded instead of the checkpoint and never registers."""
     output: Path | None = None
-    """Output path (default ``<run>/asog.rrd``, ``<run>/splats.rrd`` for ``per-frame``, ``<run>/trigs_motion.rrd`` for ``trigs-motion``)."""
-    format: Literal["asog", "per-frame", "trigs-motion"] = "asog"
+    """Output path (default ``<run>/asog.rrd``, ``<run>/splats.rrd`` for ``per-frame``)."""
+    format: Literal["asog", "per-frame"] = "asog"
     """``asog`` (default): the ``.asog`` once as ``AnimatedSogSplats3D`` + a one-pose stock preview (stock viewers show one
-    still pose); ``per-frame``: one ``GaussianSplats3D`` row per frame (plays in stock viewers); ``trigs-motion``: the
-    checkpoint once as ``TrigsMotion3D`` (the gsplat viewer only)."""
+    still pose); ``per-frame``: one ``GaussianSplats3D`` row per frame (plays in stock viewers)."""
 
 
 def main(config: Config) -> dict[str, object]:
-    """Write ``<run>/asog.rrd`` (or ``splats.rrd``, ``trigs_motion.rrd``), register it as layer ``asog`` (``splats``,
-    ``trigs_motion``); returns sizes and counts."""
+    """Write ``<run>/asog.rrd`` (or ``splats.rrd``), register it as layer ``asog`` (``splats``); returns sizes and counts."""
     run_name: str = config.run.name
     checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
     fps: float = float(checkpoint["fps"])
@@ -90,38 +83,9 @@ def main(config: Config) -> dict[str, object]:
         print(summary_asog)
         print(f"[open4dgs-export-splats] {STOCK_VIEWER_NOTE}")
         return summary_asog
-    motion: bool = config.format == "trigs-motion"
-    if motion and config.asog is not None:
-        raise ValueError("--format trigs-motion exports the checkpoint; --asog exports per frame only")
-    out: Path = config.output or config.run / ("trigs_motion.rrd" if motion else "splats.rrd")
-    layer: str = "trigs_motion" if motion else "splats"
+    out: Path = config.output or config.run / "splats.rrd"
     reader: RrdReader = RrdReader(config.run / "run.rrd")
     frame_start: int = run_property(reader, "frame_start")
-    if motion:
-        compact: TrigsParams = trigs_motion_params(checkpoint_params(checkpoint, torch.device("cpu")))
-        recording, view_coordinates, view = run_recording(reader, run_name, out, np.median(compact.means, axis=0).astype(np.float64))
-        t0 = time.perf_counter()
-        cut: float = TrigsTrainingConfig().temporal_active_threshold
-        log_trigs_motion(SPLAT_ENTITY, compact, fps, float(frame_start), cut, recording=recording)
-        recording.flush()
-        recording.disconnect()
-        out.chmod(0o644)
-        summary: dict[str, object] = {
-            "trigs_motion_rrd": str(out),
-            "bytes": out.stat().st_size,
-            "rows": len(compact.means),
-            "fps": fps,
-            "frame_origin": frame_start,
-            "active_threshold": cut,
-            "export_s": time.perf_counter() - t0,
-            "view_coordinates": str(view_coordinates),
-            "blueprint_view_id": str(view.id),
-        }
-        if config.register:
-            register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out], layer)
-            summary["registered"] = f"{RUNS_DATASET}/{run_name}/{layer}"
-        print(summary)
-        return summary
     device: torch.device = torch.device(config.device)
     params = decode_asog(config.asog.read_bytes(), device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
     trainer: TrigsTrainer = TrigsTrainer(device=str(device))
@@ -138,7 +102,7 @@ def main(config: Config) -> dict[str, object]:
     recording.flush()
     recording.disconnect()
     out.chmod(0o644)
-    summary = {
+    summary: dict[str, object] = {
         "splats_rrd": str(out),
         "bytes": out.stat().st_size,
         "frames": len(counts),
@@ -151,7 +115,7 @@ def main(config: Config) -> dict[str, object]:
         "blueprint_view_id": str(view.id),
     }
     if config.register and config.asog is None:
-        register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out], layer)
-        summary["registered"] = f"{RUNS_DATASET}/{run_name}/{layer}"
+        register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out], "splats")
+        summary["registered"] = f"{RUNS_DATASET}/{run_name}/splats"
     print(summary)
     return summary

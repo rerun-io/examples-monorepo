@@ -4530,7 +4530,7 @@ description = "MoGe-2 depth + normals on a clip's training frames (undistorted, 
 [feature.open4dgs.tasks.open4dgs-export-splats]
 cmd = "python tools/apps/export_splats.py"
 cwd = "packages/open4dgs"
-description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the checkpoint encoded to Animated SOG, or --asog <file>, once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers) or trigs-motion (TrigsMotion3D, layer trigs_motion; gsplat viewer only)"
+description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the checkpoint encoded to Animated SOG, or --asog <file>, once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), or per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers)"
 
 [feature.open4dgs.tasks.open4dgs-export-asog]
 cmd = "python tools/apps/export_asog.py"

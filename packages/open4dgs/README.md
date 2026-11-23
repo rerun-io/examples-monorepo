@@ -121,5 +121,3 @@ streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).
   `open4dgs-export-asog` writes (`--rrd`). The
   gsplat viewer plays it; a stock Rerun viewer shows one still pose.
 - `per-frame`: one `GaussianSplats3D` per frame, `<run>/splats.rrd`, layer `splats`; plays in stock viewers.
-- `trigs-motion`: the checkpoint once as `TrigsMotion3D`, `<run>/trigs_motion.rrd`, layer `trigs_motion`; the gsplat
-  viewer only.

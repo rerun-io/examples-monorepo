@@ -9,7 +9,7 @@ The custom viewer (packages/gsplat-rust-renderer) and the stock viewer both draw
 viewer-specific.
 
 Also what every export of a run shares (``apis.export_splats``, ``apis.export_asog``): the run's ``run`` property, a
-recording with the run's cameras and meshes (``run_recording``) and the checkpoint as ``TrigsMotion3D`` parameters.
+recording with the run's cameras and meshes (``run_recording``) and the checkpoint's parameter tensors.
 """
 
 import time
@@ -23,7 +23,6 @@ import rerun.blueprint as rrb
 import torch
 from gsplat_rust_renderer import asog_decode
 from gsplat_rust_renderer.sog3d import log_asog
-from gsplat_rust_renderer.trigs_motion3d import TrigsParams
 from jaxtyping import Float16, Float32, Float64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
@@ -204,27 +203,6 @@ def run_recording(
     )
     recording.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
     return recording, view_coordinates, view
-
-
-def trigs_motion_params(params: dict[str, torch.Tensor]) -> TrigsParams:
-    """The checkpoint's raw TRiGS parameters as the viewer contract's f32 arrays (per-row scalars flattened)."""
-
-    def f32(name: str, *shape: int) -> np.ndarray:
-        return params[name].detach().float().cpu().numpy().reshape(-1, *shape)  # no shape: one value per row
-
-    zetas: dict[str, np.ndarray] = {f"zeta_{part}_{kind}": f32(f"zeta_{part}_{kind}", 3) for part in ("base", "c0", "c1", "c2") for kind in ("t", "r")}
-    return TrigsParams(
-        means=f32("means", 3),
-        quats=f32("quats", 4),
-        scales=f32("scales", 3),
-        opacities=f32("opacities"),
-        sh0=f32("sh0", 3),
-        times=f32("times"),
-        log_durations=f32("log_durations"),
-        anchors=f32("anchors", 3),
-        is_static=f32("is_static") if "is_static" in params else None,
-        **zetas,
-    )
 
 
 def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_rows: int) -> dict[str, object]:
