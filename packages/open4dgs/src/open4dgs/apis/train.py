@@ -7,7 +7,6 @@ init (training cameras only) -> TRiGS in memory -> held-out + training-camera me
 
 import dataclasses
 import json
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,16 +20,15 @@ import torch
 from PIL import Image
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from open4dgs.body_init import body_surface_init, mesh_silhouette_masks
-from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
+from open4dgs.body_init import mesh_silhouette_masks
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip
 from open4dgs.compensation import BrightnessSplit, HoldoutFit, camera_brightness, evaluate_holdout_fit
 from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evaluate_cameras, mean_metrics, render_orbit
 from open4dgs.geometry_eval import CameraGeometry, evaluate_geometry, mean_geometry
-from open4dgs.holdout import select_holdout
-from open4dgs.init_cloud import InitCloud, check_init_matches_run, log_init_cloud, read_init_cloud, read_layer_init_cloud
+from open4dgs.init_cloud import InitCloud, log_init_cloud
 from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals
-from open4dgs.prior_layer import PRIOR_LAYER, compute_prior_layer, read_clip_priors, select_cameras
 from open4dgs.properties import any_values
+from open4dgs.run_inputs import BodyInit, CatalogWindow, ClipSource, InitSource, LayerInit, PriorSource, RrdInit, SelfCapWindow, split_cameras
 from open4dgs.run_log import (
     RUNS_DATASET,
     RunProperties,
@@ -42,6 +40,7 @@ from open4dgs.run_log import (
     log_video,
     register_run,
 )
+from open4dgs.run_report import RunReport
 from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import CameraCompensation, TrainConfig, TrainedClip, train_clip, untrained_clip
 
@@ -121,6 +120,64 @@ class Config:
     """Held-out test-time fit of the compensations the run learned (``open4dgs.compensation``): steps per held-out camera
     on its even frames, both protocols scored on its odd frames; 0 = off. Runs only with ``train.learn_appearance`` or
     ``train.learn_time_offsets``."""
+
+
+    def __post_init__(self) -> None:
+        if self.selfcap_time_start_s is None and (self.selfcap_capture_times or self.selfcap_roi):
+            raise ValueError("--selfcap-capture-times and --selfcap-roi need --selfcap-time-start-s")
+
+    def clip_source(self) -> ClipSource:
+        """Where the clip comes from: a SelfCap ``video_time`` window when ``selfcap_time_start_s`` is set, else the
+        catalog ``frame_index`` window."""
+        if self.selfcap_time_start_s is not None:
+            return SelfCapWindow(
+                self.catalog_url,
+                self.dataset,
+                self.segment_id,
+                self.selfcap_time_start_s,
+                self.num_frames,
+                self.cameras,
+                self.max_side,
+                roi=self.selfcap_roi,
+                capture_times=self.selfcap_capture_times,
+            )
+        return CatalogWindow(
+            self.catalog_url, self.dataset, self.segment_id, self.frame_start, self.num_frames, self.cameras, self.max_side, self.roi_pad if self.roi else None
+        )
+
+    def init_source(self) -> InitSource:
+        """``init_rrd`` when given, else ``init`` (the layer lives on the masks' catalog and dataset)."""
+        if self.init_rrd is not None:
+            return RrdInit(self.init_rrd)
+        if self.init == "layer":
+            return LayerInit(self.mask_catalog_url or self.catalog_url, self.mask_dataset or self.dataset, self.segment_id, self.init_layer)
+        return BodyInit(self.dataset, self.segment_id, self.samples_per_person, self.keyframe_step)
+
+    def prior_source(self) -> PriorSource | None:
+        """The ``moge2_prior`` layer's location (None with ``--prior off``).
+
+        Default: the masks' catalog and dataset. A source catalog that is not the local one (the read-only Spark) is never
+        written to, so it is replaced by the local catalog and the companion dataset, as ``open4dgs-prior`` does.
+        """
+        if self.prior == "off":
+            return None
+        url: str = self.prior_catalog_url or self.mask_catalog_url or self.catalog_url
+        dataset: str = self.prior_dataset or self.mask_dataset or self.dataset
+        if self.prior_catalog_url is None and url != LOCAL_CATALOG:
+            url, dataset = LOCAL_CATALOG, self.prior_dataset or "open4dgs-mamma"
+        source: ClipSource = self.clip_source()
+        return PriorSource(
+            catalog_url=url,
+            dataset=dataset,
+            segment_id=self.segment_id,
+            compute_missing=self.prior == "auto",
+            config=self.prior_config.at_steps(self.train.steps),
+            output_dir=self.prior_output_dir,
+            batch_size=self.prior_batch_size,
+            clip_source=f"{self.catalog_url}/{self.dataset}",
+            max_side=self.max_side,
+            reader=source.reader,
+        )
 
 
 def _read_masks(config: Config, clip: MultiViewClip) -> tuple[torch.Tensor, ...]:
@@ -211,202 +268,35 @@ def _save_geometry_pngs(png_dir: Path, run_name: str, clip: MultiViewClip, geome
         Image.fromarray(row).save(png_dir / f"{run_name}-geometry-{cam.camera.replace('/', '_')}-f{frame}-{'_'.join(images)}.png")
 
 
-def prior_location(config: Config) -> tuple[str, str]:
-    """(catalog, dataset) of the run's ``moge2_prior`` layer: read there and, for ``--prior auto``, registered there.
+@dataclass(frozen=True)
+class RunEvaluation:
+    """What the trained model is scored and logged with (``evaluate_run``)."""
 
-    Default: the masks' catalog and dataset. A source catalog that is not the local one (the read-only Spark) is never
-    written to, so it is replaced by the local catalog and the companion dataset, as ``open4dgs-prior`` does.
-    """
-    url: str = config.prior_catalog_url or config.mask_catalog_url or config.catalog_url
-    dataset: str = config.prior_dataset or config.mask_dataset or config.dataset
-    if config.prior_catalog_url is None and url != LOCAL_CATALOG:
-        return LOCAL_CATALOG, config.prior_dataset or "open4dgs-mamma"
-    return url, dataset
-
-
-ReadPriors = Callable[[MultiViewClip, str, str, str, tuple[str, ...]], ClipPriors]
-ComputePriors = Callable[[MultiViewClip, str, str], ClipPriors]
+    holdout: list[CameraRenders]
+    train: list[CameraRenders]
+    """Training cameras (empty without ``eval_train_cameras``; renders kept only when nothing is held out)."""
+    orbit: torch.Tensor
+    geometry: list[CameraGeometry]
+    fits: list[HoldoutFit]
+    learned: list[CameraCompensation]
+    report: RunReport
 
 
-def clip_priors(
+def evaluate_run(
     config: Config,
+    trained: TrainedClip,
     clip: MultiViewClip,
-    train_names: tuple[str, ...],
-    holdout_names: tuple[str, ...],
-    read: ReadPriors = read_clip_priors,
-    compute: ComputePriors | None = None,
-) -> tuple[ClipPriors, ClipPriors | None, str]:
-    """The prior maps of the training cameras, those of the held-out cameras (recording only; None when absent) and
-    where they came from (``layer:<catalog>/<dataset>`` or ``computed:<catalog>/<dataset>``).
-
-    ``--prior layer`` reads the layer and raises when it does not match the clip. ``--prior auto`` falls back to
-    ``compute(clip, catalog, dataset)`` (every clip camera, registered as the layer) when the layer is missing or was
-    computed on another grid.
-    """
-    url, dataset = prior_location(config)
-    try:
-        train: ClipPriors = read(clip, url, dataset, config.segment_id, train_names)
-    except (ValueError, LookupError) as error:
-        if config.prior != "auto":
-            raise
-        print(f"[open4dgs] prior auto: no {PRIOR_LAYER} layer for this clip on {url}/{dataset} ({error}); computing it now")
-        computed: ClipPriors = (compute or _compute_priors(config))(clip, url, dataset)
-        return select_cameras(computed, train_names), select_cameras(computed, holdout_names), f"computed:{url}/{dataset}"
-    print(f"[open4dgs] prior: {PRIOR_LAYER} layer of {url}/{dataset}/{config.segment_id} matches the clip")
-    holdout: ClipPriors | None = None
-    try:  # held-out maps only for the side-by-side in the run recording; never handed to the trainer
-        holdout = read(clip, url, dataset, config.segment_id, holdout_names)
-    except ValueError as error:
-        print(f"[open4dgs] no held-out prior maps for the recording: {error}")
-    return train, holdout, f"layer:{url}/{dataset}"
-
-
-def _compute_priors(config: Config) -> ComputePriors:
-    def compute(clip: MultiViewClip, url: str, dataset: str) -> ClipPriors:
-        priors, path, timings = compute_prior_layer(
-            clip,
-            config.segment_id,
-            source=f"{config.catalog_url}/{config.dataset}",
-            catalog_url=url,
-            dataset=dataset,
-            output_dir=config.prior_output_dir,
-            max_side=config.max_side,
-            reader="catalog" if config.selfcap_time_start_s is None else "selfcap",
-            batch_size=config.prior_batch_size,
-        )
-        print(
-            f"[open4dgs] prior auto: MoGe-2 {timings['images']:.0f} images in {timings['moge_s']:.1f} s ({timings['images'] / timings['moge_s']:.1f} img/s), "
-            f"write {timings['write_s']:.1f} s, register {timings['register_s']:.1f} s -> {path}, registered as {PRIOR_LAYER} on {url}/{dataset}"
-        )
-        return priors
-
-    return compute
-
-
-def split_cameras(
-    camera_names: tuple[str, ...], holdout_cameras: tuple[str, ...] | None, num_holdout: int, seed: int
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """(train names sorted, held-out names): the explicit ``holdout_cameras`` when given, else ``select_holdout``."""
-    if holdout_cameras is None:
-        return select_holdout(camera_names, num_holdout, seed)
-    missing: set[str] = set(holdout_cameras) - set(camera_names)
-    if missing:
-        raise ValueError(f"holdout cameras {sorted(missing)} are not in the clip {camera_names}")
-    return tuple(sorted(set(camera_names) - set(holdout_cameras))), holdout_cameras
-
-
-def main(config: Config) -> dict[str, object]:
-    """Run the whole pipeline; returns the summary (also printed as JSON and stored as the ``summary`` property)."""
-    device: torch.device = torch.device("cuda")
-    run_dir: Path = config.runs_root / config.run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    # The run recording always goes through RerunTyroConfig: its save target defaults to <run_dir>/run.rrd and its
-    # recording id (= the catalog segment id) to the run name. Rebuilding it re-runs __post_init__ (rr.init + sinks).
-    rr_config: RerunTyroConfig = dataclasses.replace(
-        config.rr_config,
-        application_id=RUNS_DATASET,
-        recording_id=config.rr_config.recording_id or config.run_name,
-        save=config.rr_config.save or run_dir / "run.rrd",
-    )
-    rrd_path: Path = rr_config.save  # type: ignore[assignment]
-    recording: rr.RecordingStream = rr_config.rec_stream
-    timings: dict[str, float] = {}
+    masks: tuple[torch.Tensor, ...],
+    init: InitCloud,
+    names: tuple[tuple[str, ...], tuple[str, ...]],
+    init_holdout: dict[str, float],
+    metrics: Metrics,
+    timings: dict[str, float],
+) -> RunEvaluation:
+    """Score the trained model: held-out and training cameras, orbit, geometry, the compensations and the brightness split."""
+    train_names, holdout_names = names
+    device: torch.device = trained.params["means"].device
     t0: float = time.perf_counter()
-    capture_times: np.ndarray | None = None
-    if config.selfcap_time_start_s is not None:
-        from open4dgs.selfcap_clip import read_timed_clip
-
-        timed = read_timed_clip(
-            config.catalog_url,
-            config.dataset,
-            config.segment_id,
-            config.selfcap_time_start_s,
-            config.num_frames,
-            cameras=config.cameras,
-            max_side=config.max_side,
-            roi=config.selfcap_roi,
-        )
-        clip: MultiViewClip = timed.clip
-        if config.selfcap_capture_times:
-            capture_times = timed.times_s
-            print(f"[open4dgs] capture times: offset to the reference grid (ms) {np.round((timed.times_s - timed.times_s[0]) * 1e3, 1).max(axis=1).tolist()}")
-    else:
-        if config.selfcap_capture_times:
-            raise ValueError("--selfcap-capture-times needs --selfcap-time-start-s")
-        clip = read_catalog_clip(
-            config.catalog_url,
-            config.dataset,
-            config.segment_id,
-            config.frame_start,
-            config.num_frames,
-            cameras=config.cameras,
-            max_side=config.max_side,
-            roi=config.roi,
-            roi_pad=config.roi_pad,
-        )
-    timings["read_clip_s"] = time.perf_counter() - t0
-    train_names, holdout_names = split_cameras(clip.camera_names, config.holdout_cameras, config.num_holdout, config.holdout_seed)
-    t0 = time.perf_counter()
-    masks = _read_masks(config, clip)
-    timings["masks_s"] = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    init: InitCloud
-    if config.init_rrd is not None:
-        init = read_init_cloud(config.init_rrd)
-        if init.frame_end != len(clip.frame_indices) - 1 or init.source_frame_start != int(clip.frame_indices[0]):
-            raise ValueError(f"{config.init_rrd}: init window {init.source_frame_start}+{init.frame_end + 1} does not match the clip")
-    elif config.init == "layer":
-        init, init_holdout = read_layer_init_cloud(
-            config.mask_catalog_url or config.catalog_url, config.mask_dataset or config.dataset, config.segment_id, config.init_layer
-        )
-        check_init_matches_run(init, init_holdout, holdout_names, int(clip.frame_indices[0]), len(clip.frame_indices))
-        if init.fps != clip.fps:
-            # Layer times are normalised over the window and velocities are per video frame, so fps only maps time to
-            # seconds; it must be the clip's, which the trainer renders with (frame / clip.fps). The MAMMA init_roma
-            # layer records 60 while the segment's capture fps is 30: without this, frames past 0.95 s have no Gaussians.
-            print(f"[open4dgs] init layer fps {init.fps} != clip fps {clip.fps}: using the clip fps")
-            init = dataclasses.replace(init, fps=float(clip.fps))
-    else:
-        init = body_surface_init(
-            clip,
-            train_names,
-            dataset=config.dataset,
-            segment_id=config.segment_id,
-            samples_per_person=config.samples_per_person,
-            keyframe_step=config.keyframe_step,
-        )
-    timings["init_s"] = time.perf_counter() - t0
-    print(
-        f"[open4dgs] clip {len(clip.camera_names)} cams x {len(clip.frame_indices)} frames, sizes {sorted(set(clip.sizes))}; held out {holdout_names}; init rows {init.num_rows:,}"
-    )
-
-    metrics: Metrics = Metrics(device)
-    baseline: TrainedClip = untrained_clip(clip, init, config.train, holdout_names, device)
-    init_holdout = mean_metrics(
-        [row for cam in evaluate_cameras(baseline, clip, masks, holdout_names, metrics, keep_renders=False) for row in cam.metrics]
-    )
-    del baseline
-    torch.cuda.empty_cache()
-
-    prior_loss: MonoPriorLoss | None = None
-    holdout_priors: ClipPriors | None = None
-    prior_source: str = "off"
-    prior_config: PriorConfig = config.prior_config.at_steps(config.train.steps)
-    if config.prior != "off":
-        t0 = time.perf_counter()
-        train_priors, holdout_priors, prior_source = clip_priors(config, clip, train_names, holdout_names)
-        timings["prior_s"] = time.perf_counter() - t0
-        positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in train_names)
-        prior_loss = MonoPriorLoss(prior_config, train_priors, tuple(masks[c] for c in positions), positions, clip.K)
-        print(
-            f"[open4dgs] prior on ({prior_source}): lambda {prior_config.lambda_depth}/{prior_config.lambda_normal}, start {prior_config.start_step}, "
-            f"full {prior_config.ramp_end_step}, gate {prior_config.contradiction_start_step} of {config.train.steps} steps"
-        )
-    else:
-        print("[open4dgs] prior off")
-    trained: TrainedClip = train_clip(clip, masks, init, config.train, holdout_names, device=device, prior=prior_loss, capture_times=capture_times)
-    trained.save(run_dir / "trigs_ckpt.pt")
-    t0 = time.perf_counter()
     holdout: list[CameraRenders] = evaluate_cameras(trained, clip, masks, holdout_names, metrics, with_baselines=True)
     train_eval: list[CameraRenders] = (
         # With no held-out camera the training renders are kept for the gt | render PNGs.
@@ -417,6 +307,7 @@ def main(config: Config) -> dict[str, object]:
     geometry: list[CameraGeometry] = evaluate_geometry(trained, clip, masks, holdout_names, device) if config.geometry else []
     timings["eval_s"] = time.perf_counter() - t0
     t0 = time.perf_counter()
+    learns: bool = config.train.learn_appearance or config.train.learn_time_offsets
     train_appearance: list[CameraRenders] = (
         evaluate_cameras(trained, clip, masks, train_names, metrics, keep_renders=False, appearance=True)
         if config.train.learn_appearance and config.eval_train_cameras
@@ -426,13 +317,13 @@ def main(config: Config) -> dict[str, object]:
         evaluate_holdout_fit(
             trained, clip, masks, holdout_names, metrics, config.holdout_fit_steps, config.train.learn_appearance, config.train.learn_time_offsets
         )
-        if config.holdout_fit_steps > 0 and (config.train.learn_appearance or config.train.learn_time_offsets)
+        if config.holdout_fit_steps > 0 and learns
         else []
     )
     all_frames: list[int] = list(range(trained.num_frames))
+    odd: list[int] = list(range(1, trained.num_frames, 2))
     brightness: dict[str, BrightnessSplit] = {name: camera_brightness(trained, clip, masks, name, all_frames) for name in holdout_names}
     for fit in fits:
-        odd: list[int] = list(range(1, trained.num_frames, 2))
         brightness[f"{fit.camera}:odd"] = camera_brightness(trained, clip, masks, fit.camera, odd)
         brightness[f"{fit.camera}:odd_fit"] = camera_brightness(trained, clip, masks, fit.camera, odd, fit.compensation)
     # The same split on the training cameras is the control: what a camera the model was fitted to shows.
@@ -440,58 +331,97 @@ def main(config: Config) -> dict[str, object]:
     learned: list[CameraCompensation] = trained.learned()
     timings["compensation_eval_s"] = time.perf_counter() - t0
 
-    holdout_mean = mean_metrics([row for cam in holdout for row in cam.metrics])
-    train_mean = mean_metrics([row for cam in train_eval for row in cam.metrics]) if train_eval else {}
     losses = trained.scalars.get("loss/rgb", [])
-    summary: dict[str, object] = {
-        "holdout": holdout_mean,
-        "holdout_init": init_holdout,
-        **{f"holdout_floor_{kind}": mean_metrics([row for cam in holdout for row in cam.baselines[kind]]) for kind in BASELINES},
-        "train": train_mean,
-        **({"train_appearance": mean_metrics([row for cam in train_appearance for row in cam.metrics])} if train_appearance else {}),
-        **(
-            {
-                "holdout_odd_identity": mean_metrics([row for fit in fits for row in fit.identity.metrics]),
-                "holdout_odd_fit": mean_metrics([row for fit in fits for row in fit.fitted.metrics]),
-            }
-            if fits
-            else {}
-        ),
-        "brightness": {name: dataclasses.asdict(split) for name, split in brightness.items()},
-        "brightness_train": {name: dataclasses.asdict(split) for name, split in brightness_train.items()},
-        "learned": {name: dataclasses.asdict(comp) for name, comp in zip(clip.camera_names, learned, strict=True)},
-        "holdout_fitted": {fit.camera: dataclasses.asdict(fit.compensation) for fit in fits},
-        "it_per_s": config.train.steps / trained.train_seconds,
-        "train_s": trained.train_seconds,
-        "peak_gpu_gb": trained.peak_gpu_bytes / 1e9,
-        "init_rows": init.num_rows,
-        "final_gaussians": int(trained.params["means"].shape[0]),
-        "loss_rgb_first": losses[0][1] if losses else math.nan,
-        "loss_rgb_last": losses[-1][1] if losses else math.nan,
-        "geometry_holdout": mean_geometry([row for cam in geometry for row in cam.metrics]),
-        **{
+    report: RunReport = RunReport(
+        holdout=mean_metrics([row for cam in holdout for row in cam.metrics]),
+        holdout_init=init_holdout,
+        holdout_floors={kind: mean_metrics([row for cam in holdout for row in cam.baselines[kind]]) for kind in BASELINES},
+        train=mean_metrics([row for cam in train_eval for row in cam.metrics]) if train_eval else {},
+        geometry_holdout=mean_geometry([row for cam in geometry for row in cam.metrics]),
+        brightness=brightness,
+        brightness_train=brightness_train,
+        learned=dict(zip(clip.camera_names, learned, strict=True)),
+        holdout_fitted={fit.camera: fit.compensation for fit in fits},
+        it_per_s=config.train.steps / trained.train_seconds,
+        train_s=trained.train_seconds,
+        peak_gpu_gb=trained.peak_gpu_bytes / 1e9,
+        init_rows=init.num_rows,
+        final_gaussians=int(trained.params["means"].shape[0]),
+        loss_rgb_first=losses[0][1] if losses else None,
+        loss_rgb_last=losses[-1][1] if losses else None,
+        prior_scalars={
             f"{tag.replace('/', '_')}_{edge}": rows[i][1]
             for tag in ("prior/depth", "prior/normal")
             if (rows := trained.scalars.get(tag))
             for edge, i in (("first", 0), ("last", -1))
         },
-        **timings,
-    }
+        timings=dict(timings),
+        train_appearance=mean_metrics([row for cam in train_appearance for row in cam.metrics]) if train_appearance else None,
+        holdout_odd_identity=mean_metrics([row for fit in fits for row in fit.identity.metrics]) if fits else None,
+        holdout_odd_fit=mean_metrics([row for fit in fits for row in fit.fitted.metrics]) if fits else None,
+    )
+    return RunEvaluation(holdout, train_eval, orbit, geometry, fits, learned, report)
 
+
+def _run_blueprint(holdout_names: tuple[str, ...], train_names: tuple[str, ...]) -> rrb.Blueprint:
+    """Held-out gt / render / error (first two held-out cameras), the orbit, the 3D scene and the metrics."""
+    eval_views: list[rrb.Spatial2DView] = [
+        rrb.Spatial2DView(origin=f"/eval/holdout/{name.replace('/', '_')}/{kind}", name=f"{name} {kind}")
+        for name in holdout_names[:2]
+        for kind in ("gt", "render", "error")
+    ]
+    # Metric panels: PSNR / SSIM / LPIPS of crop_raw (the headline) with both floors (held-out cameras, else training ones).
+    scored: list[str] = [f"/eval/{'holdout' if holdout_names else 'train'}/{name.replace('/', '_')}" for name in (holdout_names or train_names)]
+
+    def metric_view(metric: str, extra: tuple[str, ...] = ()) -> rrb.TimeSeriesView:
+        contents: list[str] = [f"{base}/metrics/{name}" for base in scored for name in (metric, *extra)]
+        contents += [f"{base}/floor/{kind}/{metric}" for base in scored for kind in BASELINES]
+        return rrb.TimeSeriesView(origin="/eval", contents=contents, name=metric.replace("crop_raw_", "").upper())
+
+    return rrb.Blueprint(
+        rrb.Vertical(
+            rrb.Horizontal(*eval_views, rrb.Spatial2DView(origin="/eval/orbit/render", name="orbit")),
+            rrb.Horizontal(
+                rrb.Spatial3DView(origin="/world", name="scene"),
+                metric_view(HEADLINE[0], ("fg_psnr",)),
+                metric_view(HEADLINE[1]),
+                metric_view(HEADLINE[2]),
+            ),
+        ),
+        collapse_panels=True,
+    )
+
+
+def log_run(
+    recording: rr.RecordingStream,
+    config: Config,
+    clip: MultiViewClip,
+    masks: tuple[torch.Tensor, ...],
+    init: InitCloud,
+    init_label: str,
+    trained: TrainedClip,
+    names: tuple[tuple[str, ...], tuple[str, ...]],
+    prior: tuple[PriorSource | None, ClipPriors | None, str],
+    evaluation: RunEvaluation,
+) -> None:
+    """The run recording: scene, evaluation, scalars, compensations, the blueprint and the ``run`` / ``summary`` properties."""
+    train_names, holdout_names = names
+    prior_source, holdout_priors, prior_label = prior
     # The world's up axis from the mean camera up (the segments declare none): the person stands upright in the 3D view.
     view_coordinates = up_view_coordinates(clip.world_T_cam.float().numpy())
     recording.log("/world", view_coordinates, static=True)
     log_cameras(recording, clip, holdout_names)
     log_people(recording, clip)
     log_init_cloud(init, recording)
-    for renders in holdout:
+    for renders in evaluation.holdout:
         log_camera_eval(recording, clip, masks, renders, held_out=True)
-    for renders in train_eval:
+    for renders in evaluation.train:
         log_metric_rows(recording, f"/eval/train/{renders.camera.replace('/', '_')}/metrics", renders.metrics, (*HEADLINE, "fg_psnr", "alpha_iou"))
-    log_video(recording, "/eval/orbit/render", orbit, clip.frame_indices.tolist(), clip.fps)
-    _log_geometry(recording, clip, geometry, holdout_priors)
+    log_video(recording, "/eval/orbit/render", evaluation.orbit, clip.frame_indices.tolist(), clip.fps)
+    _log_geometry(recording, clip, evaluation.geometry, holdout_priors)
     log_scalars(recording, trained.scalars)
-    _log_compensation(recording, clip.camera_names, holdout_names, learned, fits, config.train)
+    _log_compensation(recording, clip.camera_names, holdout_names, evaluation.learned, evaluation.fits, config.train)
+    source: ClipSource = config.clip_source()
     run_properties: RunProperties = RunProperties(
         dataset=config.dataset,
         segment_id=config.segment_id,
@@ -504,72 +434,107 @@ def main(config: Config) -> dict[str, object]:
         holdout_cameras=holdout_names,
         holdout_seed=config.holdout_seed,
         max_side=config.max_side,
-        roi_pad=config.roi_pad if config.roi else None,
+        roi_pad=source.roi_pad if isinstance(source, CatalogWindow) else None,
         mask_dataset=None if config.mask_source == "mesh" else config.mask_dataset or config.dataset,
-        init_method=f"rrd:{init.method}" if config.init_rrd is not None else init.method if config.init == "body" else f"layer:{config.init_layer}:{init.method}",
+        init_method=init_label,
         init_rrd=str(config.init_rrd or ""),
-        selfcap_roi=config.selfcap_roi,
-        selfcap_time_start_s=config.selfcap_time_start_s,
+        selfcap_roi=isinstance(source, SelfCapWindow) and source.roi,
+        selfcap_time_start_s=source.time_start_s if isinstance(source, SelfCapWindow) else None,
         view_coordinates=str(view_coordinates),
         samples_per_person=config.samples_per_person,
         keyframe_step=init.keyframe_step,
         prior_mode=config.prior,
-        prior_source=prior_source,
-        prior_config=prior_config if config.prior != "off" else None,
+        prior_source=prior_label,
+        prior_config=prior_source.config if prior_source is not None else None,
         train=config.train,
         train_time_offset_clamp_ms_resolved=float(trained.trigs_config.camera_time_offset_clamp_s) * 1e3,
         rs_signs_per_camera=config.train.rs_signs(len(clip.camera_names)) or (),
-        selfcap_capture_times=config.selfcap_capture_times,
-        holdout_fit_steps=config.holdout_fit_steps if fits else 0,
+        selfcap_capture_times=isinstance(source, SelfCapWindow) and source.capture_times,
+        holdout_fit_steps=config.holdout_fit_steps if evaluation.fits else 0,
         holdout_protocol="identity (gain 1, bias 0, gauge offset) on all frames; test-time fit on even frames scored on odd frames"
-        if fits
+        if evaluation.fits
         else "identity (gain 1, bias 0, gauge offset)",
     )
-    # Default layout: held-out gt / render / error (first two held-out cameras), the orbit, the 3D scene and the metrics.
-    eval_views: list[rrb.Spatial2DView] = [
-        rrb.Spatial2DView(origin=f"/eval/holdout/{name.replace('/', '_')}/{kind}", name=f"{name} {kind}")
-        for name in holdout_names[:2]
-        for kind in ("gt", "render", "error")
-    ]
-    # Metric panels: PSNR / SSIM / LPIPS of crop_raw (the headline) with both floors (held-out cameras, else training ones).
-    scored: list[str] = [f"/eval/{'holdout' if holdout else 'train'}/{name.replace('/', '_')}" for name in (holdout_names or train_names)]
-
-    def metric_view(metric: str, extra: tuple[str, ...] = ()) -> rrb.TimeSeriesView:
-        contents: list[str] = [f"{base}/metrics/{name}" for base in scored for name in (metric, *extra)]
-        contents += [f"{base}/floor/{kind}/{metric}" for base in scored for kind in BASELINES]
-        return rrb.TimeSeriesView(origin="/eval", contents=contents, name=metric.replace("crop_raw_", "").upper())
-
-    recording.send_blueprint(
-        rrb.Blueprint(
-            rrb.Vertical(
-                rrb.Horizontal(*eval_views, rrb.Spatial2DView(origin="/eval/orbit/render", name="orbit")),
-                rrb.Horizontal(
-                    rrb.Spatial3DView(origin="/world", name="scene"),
-                    metric_view(HEADLINE[0], ("fg_psnr",)),
-                    metric_view(HEADLINE[1]),
-                    metric_view(HEADLINE[2]),
-                ),
-            ),
-            collapse_panels=True,
-        )
-    )
+    recording.send_blueprint(_run_blueprint(holdout_names, train_names))
     recording.send_property("run", any_values(run_properties.to_properties()))
-    groups: tuple[str, ...] = ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train", "geometry_holdout")
-    groups += tuple(g for g in ("train_appearance", "holdout_odd_identity", "holdout_odd_fit") if g in summary)
-    flat: dict[str, float] = {f"{group}_{k}": float(v) for group in groups for k, v in summary[group].items()}  # type: ignore[union-attr]
-    flat.update({f"brightness_{name.replace('/', '_')}_{k}": float(v) for name, split in brightness.items() for k, v in dataclasses.asdict(split).items()})
-    flat.update({k: float(v) for k, v in summary.items() if isinstance(v, int | float)})
-    recording.send_property("summary", rr.AnyValues(**flat))  # pyrefly: ignore[bad-argument-type]
+    recording.send_property("summary", any_values(evaluation.report.summary_properties()))
     recording.flush()
-    if config.png_dir is not None:
-        _save_pngs(config.png_dir, config.run_name, clip, holdout or train_eval, orbit, "holdout" if holdout else "train")
-        for fit in fits:  # gt | identity | fitted at the middle odd frame
-            j: int = len(fit.fitted.metrics) // 2
-            f_clip: int = 2 * j + 1
-            cam_index: int = clip.camera_names.index(fit.camera)
-            strip = np.concatenate([clip.frames[cam_index][f_clip].numpy(), fit.identity.render[j].numpy(), fit.fitted.render[j].numpy()], axis=1)
-            Image.fromarray(strip).save(config.png_dir / f"{config.run_name}-holdoutfit-{fit.camera.replace('/', '_')}-f{int(clip.frame_indices[f_clip])}.png")
-        _save_geometry_pngs(config.png_dir, config.run_name, clip, geometry, holdout_priors)
+
+
+def _save_run_pngs(config: Config, clip: MultiViewClip, evaluation: RunEvaluation, holdout_priors: ClipPriors | None) -> None:
+    """gt | render pairs, the held-out fit strips (gt | identity | fitted at the middle odd frame) and the geometry rows."""
+    if config.png_dir is None:
+        return
+    pairs: list[CameraRenders] = evaluation.holdout or evaluation.train
+    _save_pngs(config.png_dir, config.run_name, clip, pairs, evaluation.orbit, "holdout" if evaluation.holdout else "train")
+    for fit in evaluation.fits:
+        j: int = len(fit.fitted.metrics) // 2
+        f_clip: int = 2 * j + 1
+        cam_index: int = clip.camera_names.index(fit.camera)
+        strip = np.concatenate([clip.frames[cam_index][f_clip].numpy(), fit.identity.render[j].numpy(), fit.fitted.render[j].numpy()], axis=1)
+        Image.fromarray(strip).save(config.png_dir / f"{config.run_name}-holdoutfit-{fit.camera.replace('/', '_')}-f{int(clip.frame_indices[f_clip])}.png")
+    _save_geometry_pngs(config.png_dir, config.run_name, clip, evaluation.geometry, holdout_priors)
+
+
+def _prior_loss(
+    source: PriorSource | None,
+    clip: MultiViewClip,
+    masks: tuple[torch.Tensor, ...],
+    names: tuple[tuple[str, ...], tuple[str, ...]],
+    steps: int,
+    timings: dict[str, float],
+) -> tuple[MonoPriorLoss | None, ClipPriors | None, str]:
+    """The prior loss on the training cameras, the held-out maps (recording only) and where the maps came from."""
+    if source is None:
+        print("[open4dgs] prior off")
+        return None, None, "off"
+    train_names, holdout_names = names
+    t0: float = time.perf_counter()
+    train_priors, holdout_priors, label = source.priors(clip, train_names, holdout_names)
+    timings["prior_s"] = time.perf_counter() - t0
+    positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in train_names)
+    config: PriorConfig = source.config
+    print(
+        f"[open4dgs] prior on ({label}): lambda {config.lambda_depth}/{config.lambda_normal}, start {config.start_step}, "
+        f"full {config.ramp_end_step}, gate {config.contradiction_start_step} of {steps} steps"
+    )
+    return MonoPriorLoss(config, train_priors, tuple(masks[c] for c in positions), positions, clip.K), holdout_priors, label
+
+
+def main(config: Config) -> RunReport:
+    """Run the whole pipeline; returns the report (also printed as JSON and stored as the ``summary`` property)."""
+    device: torch.device = torch.device("cuda")
+    run_dir: Path = config.runs_root / config.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # The run recording always goes through RerunTyroConfig: its save target defaults to <run_dir>/run.rrd and its
+    # recording id (= the catalog segment id) to the run name. Rebuilding it re-runs __post_init__ (rr.init + sinks).
+    rr_config: RerunTyroConfig = dataclasses.replace(
+        config.rr_config, application_id=RUNS_DATASET, recording_id=config.rr_config.recording_id or config.run_name, save=config.rr_config.save or run_dir / "run.rrd"
+    )
+    rrd_path: Path = rr_config.save  # type: ignore[assignment]
+    timings: dict[str, float] = {}
+    clip, capture_times = _timed(timings, "read_clip_s", config.clip_source().read)
+    names = split_cameras(clip.camera_names, config.holdout_cameras, config.num_holdout, config.holdout_seed)
+    train_names, holdout_names = names
+    masks = _timed(timings, "masks_s", lambda: _read_masks(config, clip))
+    init_source: InitSource = config.init_source()
+    init: InitCloud = _timed(timings, "init_s", lambda: init_source.build(clip, train_names, holdout_names))
+    print(
+        f"[open4dgs] clip {len(clip.camera_names)} cams x {len(clip.frame_indices)} frames, sizes {sorted(set(clip.sizes))}; held out {holdout_names}; init rows {init.num_rows:,}"
+    )
+    metrics: Metrics = Metrics(device)
+    baseline: TrainedClip = untrained_clip(clip, init, config.train, holdout_names, device)
+    init_holdout = mean_metrics([row for cam in evaluate_cameras(baseline, clip, masks, holdout_names, metrics, keep_renders=False) for row in cam.metrics])
+    del baseline
+    torch.cuda.empty_cache()
+    prior_source: PriorSource | None = config.prior_source()
+    prior_loss, holdout_priors, prior_label = _prior_loss(prior_source, clip, masks, names, config.train.steps, timings)
+    trained: TrainedClip = train_clip(clip, masks, init, config.train, holdout_names, device=device, prior=prior_loss, capture_times=capture_times)
+    trained.save(run_dir / "trigs_ckpt.pt")
+    evaluation: RunEvaluation = evaluate_run(config, trained, clip, masks, init, names, init_holdout, metrics, timings)
+    prior = (prior_source, holdout_priors, prior_label)
+    log_run(rr_config.rec_stream, config, clip, masks, init, init_source.label(init), trained, names, prior, evaluation)
+    _save_run_pngs(config, clip, evaluation, holdout_priors)
     rr.disconnect()  # closes the .rrd before chmod and registration
     # NAS rule: files 644, directories 775.
     run_dir.chmod(0o775)
@@ -577,9 +542,17 @@ def main(config: Config) -> dict[str, object]:
         path.chmod(0o644)
     if config.register:
         register_run(config.runs_catalog_url, rrd_path, RUNS_DATASET)
-    print(json.dumps(summary, indent=2, default=float))
-    print(headline_line(summary))
-    return summary
+    print(json.dumps(evaluation.report.summary(), indent=2, default=float))
+    print(evaluation.report.headline())
+    return evaluation.report
+
+
+def _timed[T](timings: dict[str, float], name: str, step: Callable[[], T]) -> T:
+    """``step()``, its wall time stored as ``timings[name]``."""
+    t0: float = time.perf_counter()
+    out: T = step()
+    timings[name] = time.perf_counter() - t0
+    return out
 
 
 def _log_compensation(
@@ -621,16 +594,3 @@ def _log_compensation(
         **{f"bias_{ch}": [c.bias[i] for c in learned] for i, ch in enumerate("rgb")},
     }
     recording.send_property("compensation", rr.AnyValues(**values))  # pyrefly: ignore[bad-argument-type]
-
-
-def headline_line(summary: dict[str, object]) -> str:
-    """One line: held-out crop_raw PSNR/SSIM/LPIPS, with the init and both floors beside it, plus fg PSNR and alpha IoU."""
-
-    def triple(group: str) -> str:
-        values = summary.get(group)
-        if not isinstance(values, dict) or not values:
-            return "n/a"
-        return "/".join(f"{values[name]:.3f}" if name != HEADLINE[0] else f"{values[name]:.2f}" for name in HEADLINE) + f" fg {values['fg_psnr']:.2f} iou {values['alpha_iou']:.3f}"
-
-    groups = ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train")
-    return "[open4dgs] crop_raw PSNR/SSIM/LPIPS " + "; ".join(f"{group} {triple(group)}" for group in groups)

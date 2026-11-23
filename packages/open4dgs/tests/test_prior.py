@@ -331,7 +331,6 @@ def _priors_for(names):  # noqa: ANN001, ANN202
 
 
 def test_prior_auto_uses_a_matching_layer_and_computes_otherwise() -> None:
-    from open4dgs.apis.train import clip_priors
 
     clip = _roi_clip(None)
     calls: list[str] = []
@@ -351,26 +350,32 @@ def test_prior_auto_uses_a_matching_layer_and_computes_otherwise() -> None:
         calls.append(f"compute {url} {dataset}")
         return _priors_for(("a", "b", "c"))
 
-    train, holdout, source = clip_priors(_train_config(), clip, ("a", "b"), ("c",), read=read_ok, compute=compute)
+    train, holdout, source = _train_config().prior_source().priors(clip, ("a", "b"), ("c",), read=read_ok, compute=compute)
     assert source == "layer:rerun+http://pablo-dl-server:51235/open4dgs-mamma" and train.camera_names == ("a", "b")
     assert holdout is not None and holdout.camera_names == ("c",)
     assert not any(c.startswith("compute") for c in calls)
 
     calls.clear()
-    train, holdout, source = clip_priors(_train_config(), clip, ("a", "b"), ("c",), read=read_mismatch, compute=compute)
+    train, holdout, source = _train_config().prior_source().priors(clip, ("a", "b"), ("c",), read=read_mismatch, compute=compute)
     assert source.startswith("computed:") and calls == ["read", "compute rerun+http://pablo-dl-server:51235 open4dgs-mamma"]
     assert train.camera_names == ("a", "b") and float(train.depth[1][0, 0, 0]) == 1.0  # camera b of the computed maps
     assert holdout is not None and holdout.camera_names == ("c",)
-    assert clip_priors(_train_config(), clip, ("a",), (), read=read_no_dataset, compute=compute)[2].startswith("computed:")
+    assert _train_config().prior_source().priors(clip, ("a",), (), read=read_no_dataset, compute=compute)[2].startswith("computed:")
 
     with pytest.raises(ValueError, match="grid"):  # --prior layer keeps the strict behaviour
-        clip_priors(_train_config(prior="layer"), clip, ("a", "b"), ("c",), read=read_mismatch, compute=compute)
+        _train_config(prior="layer").prior_source().priors(clip, ("a", "b"), ("c",), read=read_mismatch, compute=compute)
 
 
 def test_prior_defaults_and_location() -> None:
-    from open4dgs.apis.train import Config, prior_location
+    from open4dgs.apis.train import Config
 
-    assert Config().prior == "auto"
+    def prior_location(config: Config) -> tuple[str, str]:
+        source = config.prior_source()
+        assert source is not None
+        return source.catalog_url, source.dataset
+
+    assert Config().prior == "auto" and Config(prior="off").prior_source() is None
+    assert _train_config(prior="layer").prior_source().compute_missing is False
     assert prior_location(_train_config()) == ("rerun+http://pablo-dl-server:51235", "open4dgs-mamma")
     # A source catalog that is not the local one (the read-only Spark): the local catalog and companion dataset
     spark = Config(catalog_url="rerun+http://dgx-spark:51235", dataset="dataforge-mamma-markerless-dance", segment_id="seg")
