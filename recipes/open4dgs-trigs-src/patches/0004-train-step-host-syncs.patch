@@ -1,0 +1,148 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+index 42f01ad..35f784c 100644
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -3097,7 +3097,7 @@ class TrigsTrainer:
+         if isinstance(t, Tensor):
+             t_scalar = t.to(dtype=mu_t.dtype)
+         else:
+-            t_scalar = torch.tensor(t, device=device, dtype=mu_t.dtype)
++            t_scalar = self._const_tensor(t, device, mu_t.dtype)
+ 
+         # Official TRiGS evaluates the Bézier window with μ_t / σ_t detached:
+         # otherwise the temporal params can "retime" the motion curve (shift
+@@ -3249,7 +3249,7 @@ class TrigsTrainer:
+         if isinstance(t, Tensor):
+             t_base = t.to(device=means_t.device, dtype=means_t.dtype).reshape(())
+         else:
+-            t_base = torch.tensor(t, device=means_t.device, dtype=means_t.dtype)
++            t_base = self._const_tensor(t, means_t.device, means_t.dtype)
+         return (t_base + delta.to(means_t.dtype)).unsqueeze(-1)
+ 
+     # -------------------------------------------------------------------------
+@@ -3656,8 +3656,8 @@ class TrigsTrainer:
+                     f"Got {type(mask_obj)}."
+                 )
+             gt_mask = mask_obj.to(self.device).float()
+-            if gt_mask.max() > 1.0:
+-                gt_mask = gt_mask / 255.0
++            # 0-255 masks are rescaled; dividing by 1.0 is exact, and reading max() on the host would stall.
++            gt_mask = gt_mask / torch.where(gt_mask.amax() > 1.0, 255.0, 1.0)
+             if gt_mask.ndim == 2:
+                 gt_mask = gt_mask[..., None]
+             elif gt_mask.ndim == 3 and gt_mask.shape[-1] != 1:
+@@ -3701,9 +3701,8 @@ class TrigsTrainer:
+                         dtype=pred_color.dtype,
+                     )
+                 else:
+-                    bg = torch.tensor(
+-                        config.masked_rgb_bg_color,
+-                        device=pred_color.device, dtype=pred_color.dtype,
++                    bg = self._const_tensor(
++                        tuple(config.masked_rgb_bg_color), pred_color.device, pred_color.dtype,
+                     ).reshape(1, 1, -1)
+                 if bg.shape[-1] != pred_color.shape[-1]:
+                     raise ValueError(
+@@ -4532,6 +4531,10 @@ class TrigsTrainer:
+             return max(int(total.reshape(()).item()), 1)
+         return max(int(params["means"].shape[0]), 1)
+ 
++    def _const_tensor(self, value, device, dtype) -> Tensor:
++        """``torch.tensor(value)`` on ``device``; a seam for a cached version (never modify the result in place)."""
++        return torch.tensor(value, device=device, dtype=dtype)
++
+     @staticmethod
+     def _dynamic_rows(params: nn.ParameterDict) -> Tensor:
+         N = int(params["means"].shape[0])
+@@ -5330,9 +5333,11 @@ class TrigsTrainer:
+             # 1/B share of the photometric loss immediately, so peak memory
+             # stays at one camera's graph. Regularizers are added once below.
+             n_group = len(cam_group)
+-            rgb_loss_sum = 0.0
+-            alpha_outside_sum = 0.0
+-            alpha_mask_sum = 0.0
++            # Per-camera loss sums stay on the GPU (float64, as the Python floats they replace):
++            # reading them every camera would stall the host; only the log steps read them.
++            rgb_loss_sum = torch.zeros((), device=self.device, dtype=torch.float64)
++            alpha_outside_sum = torch.zeros((), device=self.device, dtype=torch.float64)
++            alpha_mask_sum = torch.zeros((), device=self.device, dtype=torch.float64)
+             gamma = None
+             active_parts: List[Tensor] = []
+             for group_i, cam_idx in enumerate(cam_group):
+@@ -5355,8 +5360,6 @@ class TrigsTrainer:
+                 render_colors, render_alphas, cam_gamma, cam_info = self._render(
+                     params, cameras, cam_idx, t, sh_degree, config, step=step,
+                 )
+-                if torch.cuda.is_available():
+-                    torch.cuda.synchronize()
+ 
+                 self._cuda_probe(f"step={step} after render frame={frame_idx} cam={cam_idx}")
+ 
+@@ -5390,9 +5393,9 @@ class TrigsTrainer:
+                 relocation_strategy.accumulate_2d(
+                     reloc_state, cam_info, batch_size=n_group,
+                 )
+-                rgb_loss_sum += float(cam_rgb.detach())
+-                alpha_outside_sum += float(cam_alpha_out.detach())
+-                alpha_mask_sum += float(cam_alpha_mask.detach())
++                rgb_loss_sum += cam_rgb.detach().double()
++                alpha_outside_sum += cam_alpha_out.detach().double()
++                alpha_mask_sum += cam_alpha_mask.detach().double()
+                 gamma = cam_gamma if gamma is None else gamma + cam_gamma
+                 active_parts.append(cam_info["active_idx"])
+ 
+@@ -5408,9 +5411,9 @@ class TrigsTrainer:
+                 del render_colors, render_alphas, cam_info, cam_loss
+ 
+             gamma = gamma / float(n_group)
+-            rgb_loss = torch.tensor(rgb_loss_sum / n_group)
+-            alpha_outside_loss = torch.tensor(alpha_outside_sum / n_group)
+-            alpha_mask_loss = torch.tensor(alpha_mask_sum / n_group)
++            rgb_loss = (rgb_loss_sum / n_group).float()
++            alpha_outside_loss = (alpha_outside_sum / n_group).float()
++            alpha_mask_loss = (alpha_mask_sum / n_group).float()
+             photometric_total = (
+                 config.lambda_render * rgb_loss
+                 + config.lambda_alpha_outside_mask * alpha_outside_loss
+@@ -5426,9 +5429,17 @@ class TrigsTrainer:
+             c1_full = torch.cat([params["zeta_c1_t"], params["zeta_c1_r"]], dim=-1)
+             c2_full = torch.cat([params["zeta_c2_t"], params["zeta_c2_r"]], dim=-1)
+ 
++            # One dynamic-row mask and one host read of any() per step for the three
++            # regularisers below (is_static does not change between them).
++            if "is_static" in params and (
++                getattr(config, "static_exclude_from_motion_losses", True)
++                or getattr(config, "static_exclude_from_temporal_reg", True)
++            ):
++                dyn_rows_step = self._dynamic_rows(params)
++                dyn_rows_step_any = bool(dyn_rows_step.any())
+             if getattr(config, "static_exclude_from_motion_losses", True) and "is_static" in params:
+-                dyn_rows_for_motion = self._dynamic_rows(params)
+-                if bool(dyn_rows_for_motion.any()):
++                dyn_rows_for_motion = dyn_rows_step
++                if dyn_rows_step_any:
+                     motion_loss = bezier_motion_loss(
+                         c0_full[dyn_rows_for_motion], c1_full[dyn_rows_for_motion],
+                         c2_full[dyn_rows_for_motion],
+@@ -5488,8 +5499,8 @@ class TrigsTrainer:
+             if base_opa.dim() == 1:
+                 base_opa = base_opa.unsqueeze(-1)
+             if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
+-                dyn_rows_for_reg = self._dynamic_rows(params)
+-                if bool(dyn_rows_for_reg.any()):
++                dyn_rows_for_reg = dyn_rows_step
++                if dyn_rows_step_any:
+                     reg_loss = (base_opa[dyn_rows_for_reg] * gamma[dyn_rows_for_reg].detach()).mean()
+                 else:
+                     reg_loss = params["means"].new_zeros(())
+@@ -5498,8 +5509,8 @@ class TrigsTrainer:
+ 
+             sigma_t = torch.exp(params["log_durations"])
+             if getattr(config, "static_exclude_from_temporal_reg", True) and "is_static" in params:
+-                dyn_rows_for_sigma = self._dynamic_rows(params)
+-                if bool(dyn_rows_for_sigma.any()):
++                dyn_rows_for_sigma = dyn_rows_step
++                if dyn_rows_step_any:
+                     sigma_floor_loss = torch.clamp(
+                         sigma_floor_target - sigma_t[dyn_rows_for_sigma], min=0.0,
+                     ).pow(2).mean()

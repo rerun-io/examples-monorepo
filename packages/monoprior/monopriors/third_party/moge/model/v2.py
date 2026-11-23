@@ -453,6 +453,7 @@ class MoGeModel(nn.Module):
         num_tokens: int | Int[Tensor, ""],
         *,
         output_heads: Collection[OutputHead] | None = None,
+        token_grid_from_shape: bool = False,
     ) -> ForwardOutput:
         """Run the shared encoder, neck, and selected prediction heads.
 
@@ -460,6 +461,9 @@ class MoGeModel(nn.Module):
             image_b3hw: Float RGB image tensor shaped ``b 3 h w`` in the range ``[0, 1]``.
             num_tokens: Approximate token count as an integer or scalar integer tensor.
             output_heads: Optional subset of points, normals, mask, and scale heads. ``None`` runs every checkpoint head.
+            token_grid_from_shape: Take the token grid as ``h // 14 x w // 14`` instead of deriving it from
+                ``num_tokens`` and the aspect (our hook, for a dynamic-shape export: the square root does not trace
+                symbolically). Equal to the derived grid when the image already is its token grid (``token_grid_hw``).
 
         Returns:
             Float tensor dictionary containing the requested raw head outputs.
@@ -477,16 +481,24 @@ class MoGeModel(nn.Module):
         image_width: int = image_b3hw.shape[3]
         device: torch.device = image_b3hw.device
         dtype: torch.dtype = image_b3hw.dtype
-        aspect_ratio: float = image_width / image_height
-        base_height: float | Float[Tensor, ""] | Int[Tensor, ""] = (num_tokens / aspect_ratio) ** 0.5
-        base_width: float | Float[Tensor, ""] | Int[Tensor, ""] = (num_tokens * aspect_ratio) ** 0.5
-        if isinstance(base_height, Tensor):
-            base_height = base_height.round().long()
-            base_width_tensor: Float[Tensor, ""] = cast(Float[Tensor, ""], base_width)
-            base_width = base_width_tensor.round().long()
+        aspect_ratio: float | Float[Tensor, ""]
+        base_height: float | Float[Tensor, ""] | Int[Tensor, ""]
+        base_width: float | Float[Tensor, ""] | Int[Tensor, ""]
+        if token_grid_from_shape:
+            # A 0-d tensor: a Python ratio of two symbolic sizes is a float symbol torch.export cannot assert on.
+            aspect_ratio = torch.ones((), dtype=torch.float32, device=device) * image_width / image_height
+            base_height, base_width = image_height // 14, image_width // 14
         else:
-            base_height = round(base_height)
-            base_width = round(cast(float, base_width))
+            aspect_ratio = image_width / image_height
+            base_height = (num_tokens / aspect_ratio) ** 0.5
+            base_width = (num_tokens * aspect_ratio) ** 0.5
+            if isinstance(base_height, Tensor):
+                base_height = base_height.round().long()
+                base_width_tensor: Float[Tensor, ""] = cast(Float[Tensor, ""], base_width)
+                base_width = base_width_tensor.round().long()
+            else:
+                base_height = round(base_height)
+                base_width = round(cast(float, base_width))
 
         encoder_output: tuple[Float[Tensor, "b c token_h token_w"], Float[Tensor, "b c"]] = self.encoder(
             image_b3hw,

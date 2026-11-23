@@ -6,6 +6,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 from fdanyone_rerun.core import RunConfig
 from fdanyone_rerun.outputs import RunMetadata
+from fdanyone_rerun.person4d import PersonConfig
 from fdanyone_rerun.stream import RunStreamer
 
 
@@ -21,8 +22,12 @@ class Config:
     """What to generate."""
     previews: bool = True
     """Decode each denoising step's x_0 estimate with TAEW2.2 and log it (``previews/<NN>``)."""
+    train: bool = False
+    """Then train the 4D person on the views and log it as Animated SOG (``world/person/splats``)."""
+    person: PersonConfig = field(default_factory=PersonConfig)
+    """The person's training, with ``--train``."""
 
 
 def main(config: Config) -> RunMetadata:
-    """Run and stream all four phases."""
-    return RunStreamer(config.run, config.rr_config.rec_stream, config.previews).run()
+    """Run and stream all phases."""
+    return RunStreamer(config.run, config.rr_config.rec_stream, config.previews, config.person if config.train else None).run()

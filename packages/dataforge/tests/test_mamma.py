@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from conftest import column_rows, raw_asset, read_back, read_chunks, recording_properties, static_values
 from PIL import Image
+from simplecv.catalog_calibration import read_lens
 
 from dataforge import paths, schema
 from dataforge.datasets.mamma import MammaConfig, MammaDataset
@@ -157,6 +158,11 @@ def test_convert_writes_every_layer_on_the_sequence_clock(staged: tuple[MammaDat
         values = static_values(base, schema.cam_path(rig, 0))
         assert (values["name"], values["source_width"], values["source_height"]) == (name, width, height)
         assert (values.get("stored_width", width), values.get("stored_height", height)) == stored
+        # The writer's AnyValues cells read back as the release's lens.
+        lens = read_lens(base.reader(index=None, contents=f"{schema.cam_path(rig, 0)}/**").to_arrow_table(), schema.cam_path(rig, 0))
+        release = read_camera(directory / f"gt/{name}.npz").lens
+        assert lens is not None and release is not None and lens.native_wh == release.native_wh == (width, height)
+        np.testing.assert_array_equal(np.concatenate([lens.centre, lens.radial]), np.concatenate([release.centre, release.radial]))
     assert recording_properties(base, "capture")["num_frames"] == FRAMES
     episode = base.reader(index=None, contents="/__properties/**").to_arrow_table()
     assert episode["property:episode:keywords"].to_pylist()[0] == ["Whip", "Basic"]

@@ -15,7 +15,8 @@ pub(crate) const BIN_COUNT: u32 = 1 << BITS_PER_PASS;
 
 pub(crate) const CHECKS_PER_ITER: u32 = 8;
 
-pub(crate) fn sources() -> [String; 12] {
+/// Every module; `subgroups` selects the scan helpers (see `shader::resolve_variant`).
+pub(crate) fn sources(subgroups: bool) -> [String; 15] {
     [
         "project.wgsl",
         "map.wgsl",
@@ -29,8 +30,11 @@ pub(crate) fn sources() -> [String; 12] {
         "image_project.wgsl",
         "image_map.wgsl",
         "image_raster.wgsl",
+        "sog_dequant.wgsl",
+        "trigs_deform.wgsl",
+        "asog_motion.wgsl",
     ]
-    .map(crate::shader::resolve)
+    .map(|name| crate::shader::resolve_variant(name, subgroups))
 }
 
 const U: wgpu::BindingType = wgpu::BindingType::Buffer {
@@ -127,6 +131,9 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
         "scan_counts" => &[(0, R), (4, W), (7, U)],
         "scatter" => &[(0, R), (1, R), (2, R), (3, W), (5, W), (6, W), (7, U)],
         "prepare" => &[(0, R), (1, R), (2, W)],
+        "sog_dequant" => &[(0, U), (1, R), (2, R), (3, W), (4, W), (5, W)],
+        "trigs_deform" => &[(0, U), (1, R), (2, R), (3, R), (4, W), (5, W)],
+        "asog_motion_dequant" => &[(0, U), (1, R), (2, R), (3, W)],
         _ => unreachable!("unknown gsplat kernel: {entry}"),
     }
 }
@@ -164,6 +171,12 @@ pub(crate) struct Kernels {
     pub scan_add: Kernel,
     pub scatter: Kernel,
     pub prepare: Kernel,
+    /// SOG / ASOG de-quantisation at load (`sog_dequant.wgsl`).
+    pub sog_dequant: Kernel,
+    /// Motion pre-pass per time change, both forms (`trigs_deform.wgsl`).
+    pub trigs_deform: Kernel,
+    /// ASOG motion de-quantisation at load (`asog_motion.wgsl`).
+    pub asog_motion: Kernel,
 }
 
 /// Raster entry points in `RasterKind` order; every primitive module declares all of them.
@@ -176,7 +189,10 @@ const RASTERS: [&str; 5] = [
 ];
 
 impl Kernels {
+    /// Pipelines for the device: the subgroup scan and sort where `SUBGROUP` is enabled, the
+    /// workgroup-memory variant otherwise (same results; WebGPU without "subgroups").
     pub fn new(device: &wgpu::Device) -> Self {
+        let subgroups = device.features().contains(wgpu::Features::SUBGROUP);
         let [
             projection,
             mapping,
@@ -190,7 +206,10 @@ impl Kernels {
             image_projection,
             image_mapping,
             image_raster,
-        ] = sources().map(|s| module(device, &s));
+            sog,
+            deform,
+            asog_motion,
+        ] = sources(subgroups).map(|s| module(device, &s));
         let kernel = |module: &wgpu::ShaderModule, entry: &str| {
             pipeline(device, module, entry, bindings(entry))
         };
@@ -228,6 +247,9 @@ impl Kernels {
             scan_add: kernel(&sort, "scan_add"),
             scatter: kernel(&sort, "scatter"),
             prepare: kernel(&prepare, "prepare"),
+            sog_dequant: kernel(&sog, "sog_dequant"),
+            trigs_deform: kernel(&deform, "trigs_deform"),
+            asog_motion: kernel(&asog_motion, "asog_motion_dequant"),
         }
     }
 
@@ -248,7 +270,10 @@ impl Kernels {
 mod tests {
     #[test]
     fn every_native_shader_validates_with_naga() {
-        for source in super::sources() {
+        for source in super::sources(true)
+            .into_iter()
+            .chain(super::sources(false))
+        {
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
             let info = naga::valid::Validator::new(

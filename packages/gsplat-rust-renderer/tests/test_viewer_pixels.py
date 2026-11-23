@@ -1,5 +1,6 @@
 """Public viewer and standalone pixel contracts; each capture has a process timeout."""
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,10 +50,32 @@ def test_hexel_viewer_pixels(binaries: Path, tmp_path: Path, mode: str) -> None:
             screenshot.verify()
 
 
-def run_check(binaries: Path, out: Path, mode: str, ply: Path) -> subprocess.CompletedProcess[str]:
-    environment: dict[str, str] = {**os.environ, "RUST_LOG": "info,gsplat_viewer::cache=debug"}
+@pytest.mark.integration
+@pytest.mark.parametrize("subgroups", [True, False], ids=["subgroups", "no-subgroups"])
+def test_sog_viewer_pixels(binaries: Path, tmp_path: Path, subgroups: bool) -> None:
+    """skull.sog (v2, SH 3): the SogSplats3D payload, de-quantised on the GPU, matches gsplat render of the decode; stock draws the preview.
+
+    `no-subgroups` runs the viewer and `gsplat render` with `GSPLAT_NO_SUBGROUPS=1` (the workgroup-memory scan and sort).
+    """
+    from gsplat_rust_renderer.apis.log_sog import fetch_sample
+
+    try:
+        sog: Path = fetch_sample("skull")
+    except OSError as error:
+        pytest.skip(f"PlayCanvas skull.sog sample unavailable: {error}")
+    env: dict[str, str] = {} if subgroups else {"GSPLAT_NO_SUBGROUPS": "1"}
+    result: subprocess.CompletedProcess[str] = run_check(binaries, tmp_path, "sog", Path("/dev/null"), "--sog", str(sog), env=env)
+    if not subgroups:
+        assert "gsplat compute kernels: workgroup memory" in result.stderr, "GSPLAT_NO_SUBGROUPS=1 did not reach the viewer device"
+    # re_format groups thousands with a thin space.
+    assert len(re.findall(r"SOG decode: 246\D821 splats, SH degree 3", result.stderr)) == 1, "One payload decode in the compute viewer"
+    assert "Gaussian compute fallback" not in result.stderr
+
+
+def run_check(binaries: Path, out: Path, mode: str, ply: Path, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    environment: dict[str, str] = {**os.environ, "RUST_LOG": "info,gsplat_viewer::cache=debug", **(env or {})}
     result: subprocess.CompletedProcess[str] = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("viewer_check.py")), "--binaries", str(binaries), "--ply", str(ply), "--out", str(out), "--mode", mode],
+        [sys.executable, str(Path(__file__).with_name("viewer_check.py")), "--binaries", str(binaries), "--ply", str(ply), "--out", str(out), "--mode", mode, *extra],
         check=False, timeout=180, capture_output=True, text=True, env=environment,
     )
     print(result.stdout, result.stderr, sep="\n")

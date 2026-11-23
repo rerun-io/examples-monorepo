@@ -1,8 +1,21 @@
 //! Local equivalent of `re_renderer`'s import-once `FileResolver`; shader bytes need no rewriting.
 use std::collections::HashSet;
 
+/// The subgroup variant (tests).
+#[cfg(test)]
 pub(crate) fn resolve(name: &'static str) -> String {
-    fn append(name: &str, seen: &mut HashSet<String>, out: &mut String) {
+    resolve_variant(name, true)
+}
+
+/// `name` with its imports. With `subgroups` the text is the kernels as written; without, the scan
+/// helpers come from `scan_portable.wgsl` (workgroup memory only) and the module names no subgroup
+/// built-in, so it needs no WGSL extension (checked by `portable_modules_need_no_subgroup_extension`).
+pub(crate) fn resolve_variant(name: &'static str, subgroups: bool) -> String {
+    fn append(name: &str, subgroups: bool, seen: &mut HashSet<String>, out: &mut String) {
+        let name = match name {
+            "scan_common.wgsl" if !subgroups => "scan_portable.wgsl",
+            name => name,
+        };
         if !seen.insert(name.to_owned()) {
             return;
         }
@@ -25,8 +38,13 @@ pub(crate) fn resolve(name: &'static str) -> String {
             "project.wgsl" => include_str!("../shader/project.wgsl"),
             "raster.wgsl" => include_str!("../shader/raster.wgsl"),
             "scan.wgsl" => include_str!("../shader/scan.wgsl"),
+            "scan_block.wgsl" => include_str!("../shader/scan_block.wgsl"),
             "scan_common.wgsl" => include_str!("../shader/scan_common.wgsl"),
+            "scan_portable.wgsl" => include_str!("../shader/scan_portable.wgsl"),
+            "asog_motion.wgsl" => include_str!("../shader/asog_motion.wgsl"),
+            "sog_dequant.wgsl" => include_str!("../shader/sog_dequant.wgsl"),
             "sort.wgsl" => include_str!("../shader/sort.wgsl"),
+            "trigs_deform.wgsl" => include_str!("../shader/trigs_deform.wgsl"),
             "raster_common.wgsl" => include_str!("../shader/raster_common.wgsl"),
             "raster_outputs.wgsl" => include_str!("../shader/raster_outputs.wgsl"),
             "rect_map.wgsl" => include_str!("../shader/rect_map.wgsl"),
@@ -37,7 +55,7 @@ pub(crate) fn resolve(name: &'static str) -> String {
                 .strip_prefix("#import <./")
                 .and_then(|s| s.strip_suffix('>'))
             {
-                append(import, seen, out);
+                append(import, subgroups, seen, out);
             } else {
                 out.push_str(line);
                 out.push('\n');
@@ -45,6 +63,16 @@ pub(crate) fn resolve(name: &'static str) -> String {
         }
     }
     let mut out = String::new();
-    append(name, &mut HashSet::new(), &mut out);
-    out
+    append(name, subgroups, &mut HashSet::new(), &mut out);
+    if subgroups {
+        return out;
+    }
+    // The portable variant has no lane built-ins: scan_portable.wgsl defines `lane` and `width` as
+    // constants, so the entry points drop those parameters, and the scatter kernel's lane-wide bin
+    // prefix (dead code with `width` 1) loses its subgroup call.
+    out.replace(
+        ",\n    @builtin(subgroup_invocation_id) lane: u32, @builtin(subgroup_size) width: u32)",
+        ")",
+    )
+    .replace("subgroupInclusiveAdd(v)", "v")
 }

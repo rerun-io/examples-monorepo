@@ -59,8 +59,8 @@ fn hexagon_tiles(m: Plane, apothem_in: f32) -> vec4u {
     let r = HEX_RADIUS * apothem;
     var corners = array<vec2f, 6>(vec2f(r, 0.0), vec2f(0.5 * r, apothem), vec2f(-0.5 * r, apothem),
         vec2f(-r, 0.0), vec2f(-0.5 * r, -apothem), vec2f(0.5 * r, -apothem));
-    var lower = vec2f(3.4028235e38);
-    var upper = vec2f(-3.4028235e38);
+    var lower = vec2f(0x1.fffffep+127f);
+    var upper = vec2f(-0x1.fffffep+127f);
     for (var i = 0u; i < 6u; i++) {
         let a = vec3f(corners[i], 1.0);
         let b = vec3f(corners[(i + 1u) % 6u], 1.0);
@@ -165,7 +165,7 @@ fn row_span(o: Outline, rect: vec4u, row: u32, margin: f32) -> vec2u {
     }
     let ya = f32(row * TILE_WIDTH) - margin;
     let yb = f32(row * TILE_WIDTH + TILE_WIDTH - 1u) + margin;
-    var span = vec2f(3.4028235e38, -3.4028235e38);
+    var span = vec2f(0x1.fffffep+127f, -0x1.fffffep+127f);
     span = clip_edge(o.v0, o.v1, ya, yb, span);
     span = clip_edge(o.v1, o.v2, ya, yb, span);
     span = clip_edge(o.v2, o.v3, ya, yb, span);

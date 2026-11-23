@@ -9,13 +9,13 @@ import pytest
 from gsplat_rust_renderer.nerfbaselines import scene_data_dir, scene_ply_path
 
 
-def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None:
+def run_rust_contract(package: str, suite: str, assets: tuple[str, ...], env: dict[str, str] | None = None) -> None:
     """Missing external assets are pytest skips; Rust failures remain failures.
 
     `--all-features` matches gsplat-rust-check and enables the `testing` feature that gates gsplat-core's integration tests.
     """
     root: Path = Path(__file__).resolve().parents[1]
-    environment: dict[str, str] = dict(os.environ)
+    environment: dict[str, str] = {**os.environ, **(env or {})}
     defaults: dict[str, Path] = {
         "GSPLAT_LEGO": Path(environment.get("GSPLAT_NERF_INIT_ROOT", str(root / "data/nerf-synthetic-init"))) / "lego",
         "GSPLAT_TEST_PLY": scene_ply_path("lego"),
@@ -57,11 +57,20 @@ def run_rust_contract(package: str, suite: str, assets: tuple[str, ...]) -> None
         ("gsplat-core", "render", ()),
         ("gsplat-core", "views", ()),
         ("gsplat-core", "indirect", ()),
+        ("gsplat-core", "no_subgroups", ()),
+        ("gsplat-viewer", "asog", ()),
     ],
 )
 def test_rust_gpu_contract(package: str, suite: str, assets: tuple[str, ...]) -> None:
     """Every ignored test in a selected target runs, including newly added tests."""
     run_rust_contract(package, suite, assets)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("suite", ["lib", "render", "views", "indirect"])
+def test_rust_gpu_contract_without_subgroups(suite: str) -> None:
+    """The gsplat-core GPU suites again with `GSPLAT_NO_SUBGROUPS=1`: the workgroup-memory scan and sort kernels."""
+    run_rust_contract("gsplat-core", suite, (), {"GSPLAT_NO_SUBGROUPS": "1"})
 
 
 @pytest.mark.golden

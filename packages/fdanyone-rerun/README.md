@@ -17,6 +17,8 @@ pixi run -e fdanyone-rerun fdanyone-example          # six views of the example 
 pixi run -e fdanyone-rerun fdanyone-orbit24          # the README's 24-view full orbit (dense coverage for 4DGS)
 pixi run -e fdanyone-rerun fdanyone-run --run.video my.mp4 --run.output-dir data/runs/mine --run.overwrite
 pixi run -e fdanyone-rerun fdanyone-log-run --output-dir data/runs/example --video data/source/pexels/2785536-uhd_2160_3840_25fps.mp4
+pixi run -e fdanyone-rerun fdanyone-run --train ...             # then train the 4D person on the views (below)
+pixi run -e fdanyone-rerun fdanyone-log-run --output-dir data/runs/example --train   # train the person of a finished run
 ```
 
 The first task downloads ~21 GB of weights (`fdanyone-download`) into `$FDANYONE_MODEL_DIR` (default `data/models`;
@@ -36,6 +38,21 @@ Timelines `time` (seconds) and `frame`. `world` is the canonical human world (Y 
 | `world/body/{mesh,keypoints,skeleton}` | SMPL-X body and the MHR70 keypoints the views are conditioned on |
 | `world/source`, `world/source/video` | the source camera fitted to the body, and the input clip (`VideoStream`) |
 | `world/cameras/<NN>`, `.../video` | each generated view's camera (hue by yaw) and its video (`VideoStream`) |
+| `world/person/splats` | with `--train`: the trained 4D person as Animated SOG (`AnimatedSogSplats3D`) + a one-pose stock preview, static |
+| `train/preview`, `train/loss_rgb` | with `--train`: the front view rendered every 500 steps and the RGB loss, on `train_step` |
+
+## The 4D person
+
+`--train` (and the app's second step) trains a 4D Gaussian model of the person on the generated views
+(`fdanyone_rerun.person4d`, Open4DGS / TRiGS from `packages/open4dgs`): every view at 704x1280 with the GVHMR SMPL-X body
+as the person, BiRefNet mattes in a crop around the projected body, a body-surface init, optionally the MoGe-2 prior,
+then TRiGS. The model is encoded as Animated SOG and logged into the run's recording; there is no other output file.
+The custom gsplat viewer (`packages/gsplat-rust-renderer`) plays it on `time`; a stock viewer shows one still pose. The
+app embeds that viewer: its gradio-rerun comes from `recipes/gradio-rerun-src` (the fdanyone envs do not take the PyPI
+wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app starts at 5,000 steps, prior off ("Depth + normal prior
+(MoGe-2)" under Advanced settings turns it on: about 70 s more for 6 views on an RTX 5090, held-out normal error 30° -> 16°).
+MoGe-2 runs through TensorRT when monopriors' engine cache already holds an engine for the frames' size on this machine
+(built by an earlier `MoGeV2TrtPredictor` run), else through torch.
 
 The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
 
@@ -49,14 +66,26 @@ with the banked reference recording (below).
 
 `pixi run -e fdanyone-rerun fdanyone-app` serves a Gradio app on the same core as `fdanyone-run`
 (`fdanyone_rerun.stream.RunStreamer`). Pick the example or upload a clip, press Run, and the embedded viewer follows
-the run through four layouts:
+the run through five layouts:
 
 1. motion recovery (source clip and progress log);
 2. the recovered body in 3D and over the source;
 3. a TAEW2.2 preview of every view at each denoising step (`previews/<NN>` on `diffusion_step`);
-4. the camera rig and the generated videos.
+4. the camera rig and the generated videos;
+5. with "Train the 4D person after the views" (on by default; steps under Advanced settings): the front view as it trains, the loss and the
+   progress (step, it/s, ETA), then the person in 3D, playing with the views.
 
-The page fits the window. One run at a time.
+The page fits the window. One run at a time; Stop ends the run at the next stage, denoising step or training step.
+Each run saves what the viewer showed as `data/app-runs/<run_id>.rrd` beside its run directory, and the
+page offers it for download when the run has finished.
+
+The gsplat renderer in the embedded viewer needs WebGPU. A browser without it (Linux Chrome until
+`chrome://flags/#enable-vulkan` is enabled) gets Rerun's basic splats, and the page says so above the viewer; the saved
+recording plays in the native gsplat viewer (`packages/gsplat-rust-renderer`).
+
+On a GPU shared with other jobs, pass `--gpu-lock <file>` (e.g. `/tmp/gpu-5090.lock`): the app holds that flock only
+while a run is on the GPU and says "Waiting for the GPU" until it gets it. Do not wrap the whole app in `flock`: an app
+idles most of its life, and that would block every other job for as long as it is up.
 
 ## Speed
 

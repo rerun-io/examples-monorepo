@@ -5,6 +5,7 @@ denoising group step through ``fdanyone.model.denoise.STEP_HOOKS``. :func:`run_v
 step callback for one run and always detaches them.
 """
 
+import gc
 import logging
 import shutil
 import threading
@@ -30,6 +31,13 @@ StageCallback: TypeAlias = Callable[[str, float, Path | None], None]
 it lives in upstream's scratch directory, so read it inside the callback (it is deleted when the run ends)."""
 StepCallback: TypeAlias = Callable[[int, tuple[int, ...] | None, torch.Tensor], None]
 """``on_step(step_index, view_indices, clean_estimate)``: one group finished a denoising step (STEP_HOOKS)."""
+
+
+def free_gpu() -> tuple[float, float]:
+    """Collect garbage and return cached CUDA blocks; returns (allocated, reserved) GB after."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    return torch.cuda.memory_allocated() / 1e9, torch.cuda.memory_reserved() / 1e9
 
 @dataclass(frozen=True, slots=True)
 class ViewLayout:

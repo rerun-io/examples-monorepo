@@ -23,6 +23,15 @@ struct CachedView {
 pub(crate) enum Primitives<'a> {
     Splats(&'a NativeSplats<'a>),
     Hexels(&'a NativeHexels<'a>),
+    /// A compressed SOG payload, decoded once on upload.
+    Sog(&'a crate::sog::Payload<'a>),
+    /// An `.asog` payload, decoded once on upload; its motion runs per view on the GPU.
+    Asog(&'a crate::asog::Payload<'a>),
+    /// Canonical `GaussianSplats3D` rows + `TrigsMotion3D`, uploaded once; the motion runs per view on the GPU.
+    Animated {
+        splats: &'a NativeSplats<'a>,
+        motion: &'a gsplat_core::trigs::TrigsMotion<'a>,
+    },
 }
 
 impl Primitives<'_> {
@@ -36,15 +45,20 @@ impl Primitives<'_> {
             Self::Hexels(hexels) => {
                 core.check_hexel_capacity(hexels.centers.len(), hexels.variant())
             }
+            Self::Sog(payload) => core.check_capacity(payload.count(), payload.max_degree()),
+            Self::Asog(payload) => core.check_capacity(payload.info.count, payload.info.max_degree),
+            Self::Animated { splats, .. } => Self::Splats(splats).check_capacity(core),
         }
     }
 
     fn upload(
         self,
+        ctx: &re_renderer::RenderContext,
         core: &gsplat_core::Renderer,
     ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
         re_tracing::profile_scope!("upload");
         let (scene, count, kind) = match self {
+            Self::Sog(payload) => (payload.upload(ctx, core)?, payload.count(), "SOG splats"),
             Self::Splats(cloud) => (
                 core.upload(&cloud.to_core())?,
                 cloud.centers.len(),
@@ -54,6 +68,16 @@ impl Primitives<'_> {
                 core.upload_hexels(&hexels.to_core())?,
                 hexels.centers.len(),
                 "hexels",
+            ),
+            Self::Asog(payload) => (
+                payload.upload(ctx, core)?,
+                payload.info.count,
+                "ASOG splats",
+            ),
+            Self::Animated { splats, motion } => (
+                core.upload_animated(&splats.to_core(), gsplat_core::Motion::Twist(motion))?,
+                splats.centers.len(),
+                "TrigsMotion3D splats",
             ),
         };
         re_log::debug!("Uploaded {} {kind}", re_format::format_uint(count));
@@ -65,6 +89,9 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => cloud.centers.len(),
             Self::Hexels(hexels) => hexels.centers.len(),
+            Self::Sog(payload) => payload.count(),
+            Self::Asog(payload) => payload.info.count,
+            Self::Animated { splats, .. } => splats.centers.len(),
         }
     }
 
@@ -72,6 +99,12 @@ impl Primitives<'_> {
         match self {
             Self::Splats(cloud) => crate::bounds::from_splats(cloud),
             Self::Hexels(hexels) => crate::bounds::from_hexels(hexels),
+            // The preview is a uniform subsample of the same splats (file order is Morton order).
+            Self::Sog(payload) => crate::bounds::from_splats(payload.preview),
+            // One mid-clip pose (the preview).
+            Self::Asog(payload) => crate::bounds::from_splats(payload.preview),
+            // The canonical rows of a TrigsMotion3D entity.
+            Self::Animated { splats, .. } => crate::bounds::from_splats(splats),
         }
     }
 }
@@ -276,7 +309,7 @@ impl GpuCache {
         let frame = self.frame;
         let shared = match self.scenes.entry(generation) {
             Entry::Vacant(entry) => {
-                let scene = primitives.upload(core)?;
+                let scene = primitives.upload(ctx, core)?;
                 entry.insert(CachedScene {
                     last_frame: frame,
                     bounds: primitives.bounds(),

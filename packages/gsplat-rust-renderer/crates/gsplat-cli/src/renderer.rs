@@ -227,7 +227,7 @@ impl StandaloneRenderer {
                 ..Default::default()
             })
             .await?;
-        gsplat_core::check_adapter(adapter.features(), &adapter.limits())?;
+        gsplat_core::check_adapter(&adapter.limits())?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: gsplat_core::required_features(&adapter),

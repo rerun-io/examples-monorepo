@@ -205,6 +205,110 @@ fn draw_splat_entity(
             &query_ctx,
             GaussianSplats3D::descriptor_spherical_harmonics_degree().component,
         );
+    // TRiGS motion fields (static, untyped f32/f64): evaluated at the time cursor when all are present.
+    let motion_ids = crate::trigs::components();
+    let motion_query = data.query_components_with_history(
+        ctx,
+        query,
+        motion_ids.iter().copied(),
+        instruction,
+        None,
+    );
+    let motion_results = VisualizerInstructionQueryResults::new(instruction, &motion_query, output);
+    let [
+        m_op,
+        m_times,
+        m_logdur,
+        m_base,
+        m_c0,
+        m_c1,
+        m_c2,
+        m_anchors,
+        m_static,
+        m_fps,
+        m_origin,
+        m_threshold,
+    ] = motion_ids.map(|id| motion_results.iter_optional(id));
+    let motion = match (
+        last_slice::<f32>(&m_op),
+        last_slice::<f32>(&m_times),
+        last_slice::<f32>(&m_logdur),
+        last_slice::<[f32; 6]>(&m_base),
+        last_slice::<[f32; 6]>(&m_c0),
+        last_slice::<[f32; 6]>(&m_c1),
+        last_slice::<[f32; 6]>(&m_c2),
+        last_slice::<[f32; 3]>(&m_anchors),
+    ) {
+        (
+            Some(opacities),
+            Some(times),
+            Some(log_durations),
+            Some(base),
+            Some(c0),
+            Some(c1),
+            Some(c2),
+            Some(anchors),
+        ) => {
+            let fps = last_scalar::<f64>(&m_fps, 1.0);
+            let origin = last_scalar::<f64>(&m_origin, 0.0);
+            let t = crate::trigs::clip_seconds(
+                ctx.recording().timeline_type(&query.timeline),
+                query.latest_at,
+                fps,
+                origin,
+            );
+            Some((
+                gsplat_core::trigs::TrigsMotion {
+                    opacities,
+                    times,
+                    log_durations,
+                    twist_base: base,
+                    twist_c0: c0,
+                    twist_c1: c1,
+                    twist_c2: c2,
+                    anchors,
+                    is_static: last_slice::<f32>(&m_static).unwrap_or(&[]),
+                    active_threshold: last_scalar::<f32>(&m_threshold, 0.0),
+                },
+                t,
+            ))
+        }
+        _ => None,
+    };
+    // `.asog` payload (static, untyped): drawn instead of the preview rows when present.
+    let asog_ids = crate::asog::components();
+    let asog_query =
+        data.query_components_with_history(ctx, query, asog_ids.iter().copied(), instruction, None);
+    let asog_results = VisualizerInstructionQueryResults::new(instruction, &asog_query, output);
+    let [a_bytes, a_origin, a_threshold] = asog_ids.map(|id| asog_results.iter_optional(id));
+    let asog = last_slice::<u8>(&a_bytes).map(|bytes| {
+        let threshold = last_scalar::<f32>(&a_threshold, gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
+        let origin = last_scalar::<f64>(&a_origin, 0.0);
+        (
+            bytes,
+            threshold,
+            origin,
+            hash64((
+                self::attribute_generation(instruction, &asog_query, asog_ids.into_iter()),
+                threshold.to_bits(),
+            ))
+            .hash64(),
+        )
+    });
+    let time_type = ctx.recording().timeline_type(&query.timeline);
+    let motion_generation =
+        self::attribute_generation(instruction, &motion_query, motion_ids.iter().copied());
+    // SOG payload fields (static, untyped Utf8 + u8): drawn instead of the preview rows when present.
+    let sog_ids = crate::sog::components();
+    let sog_query =
+        data.query_components_with_history(ctx, query, sog_ids.iter().copied(), instruction, None);
+    let sog_generation =
+        self::attribute_generation(instruction, &sog_query, sog_ids.iter().copied());
+    let sog_results = VisualizerInstructionQueryResults::new(instruction, &sog_query, output);
+    let sog_iters = sog_ids.map(|id| sog_results.iter_optional(id));
+    // meta.json is parsed once here, not once per row.
+    let payload =
+        sog_webp(&sog_iters).map(|(meta, webp)| (gsplat_core::sog::Meta::parse(&meta), webp));
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -233,6 +337,90 @@ fn draw_splat_entity(
                 .and_then(|d| d.first().copied())
                 .unwrap_or(*fallback_degree.0),
         };
+        if let Some((meta, webp)) = &payload {
+            // The payload replaces the preview rows; it decodes once per payload (row ids), never per time.
+            let meta = match meta {
+                Ok(meta) => Some(meta),
+                Err(error) => {
+                    report(
+                        ViewerReportSeverity::Warning,
+                        format!("{error}; drawing the GaussianSplats3D preview rows"),
+                    );
+                    None
+                }
+            };
+            if let Some(meta) = meta {
+                let sog = crate::sog::Payload {
+                    meta,
+                    webp: *webp,
+                    preview: &native,
+                };
+                retry |= draw_instances(
+                    entity,
+                    draw,
+                    row,
+                    hash64((signature, sog_generation)),
+                    Primitives::Sog(&sog),
+                    render_mode,
+                    0.0,
+                )?;
+                continue;
+            }
+        }
+        if let Some((bytes, threshold, origin, generation)) = asog {
+            let info = ctx
+                .viewer_ctx
+                .store_context
+                .memoizer::<crate::asog::AsogCache, _>(|cache| cache.info(generation, bytes));
+            match info {
+                Ok(info) => {
+                    // Decoded once per payload; a time change is one motion dispatch in the view (time not in the key).
+                    let t =
+                        crate::trigs::clip_seconds(time_type, query.latest_at, info.fps, origin);
+                    let payload = crate::asog::Payload {
+                        bytes,
+                        active_threshold: threshold,
+                        info,
+                        preview: &native,
+                    };
+                    retry |= draw_instances(
+                        entity,
+                        draw,
+                        row,
+                        hash64((signature, generation)),
+                        Primitives::Asog(&payload),
+                        render_mode,
+                        t,
+                    )?;
+                    continue;
+                }
+                Err(error) => report(
+                    ViewerReportSeverity::Warning,
+                    format!(
+                        "AnimatedSogSplats3D: {error}; drawing the GaussianSplats3D preview rows"
+                    ),
+                ),
+            }
+        }
+        if let Some((motion, t)) = motion
+            .as_ref()
+            .filter(|(m, _)| m.is_consistent(centers.len()))
+        {
+            // Canonical rows + motion uploaded once; a time change is one motion dispatch in the view.
+            retry |= draw_instances(
+                entity,
+                draw,
+                row,
+                hash64((signature, motion_generation)),
+                Primitives::Animated {
+                    splats: &native,
+                    motion,
+                },
+                render_mode,
+                *t,
+            )?;
+            continue;
+        }
         retry |= draw_instances(
             entity,
             draw,
@@ -240,9 +428,62 @@ fn draw_splat_entity(
             signature,
             Primitives::Splats(&native),
             render_mode,
+            0.0,
         )?;
     }
     Ok(retry)
+}
+
+/// meta.json and the stored WebP planes of `SogSplats3D`, when meta and the five required planes are present.
+fn sog_webp<'a>(
+    iters: &'a [re_view::HybridResultsChunkIter<'a>; 8],
+) -> Option<(String, gsplat_core::sog::SogWebp<'a>)> {
+    let [
+        meta,
+        means_l,
+        means_u,
+        quats,
+        scales,
+        sh0,
+        centroids,
+        labels,
+    ] = iters;
+    let meta = meta.slice::<String>().last()?.1.first()?.to_string();
+    let webp = gsplat_core::sog::SogWebp {
+        means_l: last_slice::<u8>(means_l)?,
+        means_u: last_slice::<u8>(means_u)?,
+        quats: last_slice::<u8>(quats)?,
+        scales: last_slice::<u8>(scales)?,
+        sh0: last_slice::<u8>(sh0)?,
+        sh_centroids: last_slice::<u8>(centroids),
+        sh_labels: last_slice::<u8>(labels),
+    };
+    Some((meta, webp))
+}
+
+/// A cache key from `value` (the std hasher, as `attribute_generation`).
+fn hash64(value: impl std::hash::Hash) -> re_log_types::hash::Hash64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    re_log_types::hash::Hash64::from_u64(hasher.finish())
+}
+
+/// The first value of the last row of a (static, one-value) optional component, or `default`.
+fn last_scalar<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>, default: T) -> T
+where
+    T: 'a + Copy + re_viewer::external::re_chunk::ChunkComponentSlicer<Item<'a> = &'a [T]>,
+{
+    last_slice(iter)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(default)
+}
+
+/// The values of the last row of a (static, one-row) optional component.
+fn last_slice<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>) -> Option<&'a [T]>
+where
+    T: 'a + re_viewer::external::re_chunk::ChunkComponentSlicer<Item<'a> = &'a [T]>,
+{
+    iter.slice::<T>().last().map(|(_, values)| values)
 }
 
 /// Queue one compute batch per instance; capacity or capability failures draw the stock fallback.
@@ -253,6 +494,7 @@ pub(crate) fn draw_instances(
     signature: re_log_types::hash::Hash64,
     primitives: Primitives<'_>,
     render_mode: RenderMode,
+    time: f32,
 ) -> Result<bool, ViewSystemExecutionError> {
     let &EntityDraw {
         ctx,
@@ -291,6 +533,7 @@ pub(crate) fn draw_instances(
         let options = RenderOptions {
             render_mode,
             world_from_local: to_core(world_from_local),
+            time,
             ..Default::default()
         };
         let prepared = ctx
@@ -318,7 +561,32 @@ pub(crate) fn draw_instances(
             ) => {
                 // The pixel contracts use these machine-visible markers to distinguish fallback from compute.
                 draw.push(match primitives {
-                    Primitives::Splats(native) => {
+                    Primitives::Animated { splats, motion } => {
+                        // The rows evaluated on the CPU at this time (never the canonical rows: a ghost trail).
+                        report(
+                            ViewerReportSeverity::Warning,
+                            format!("{error}; using the native Gaussian renderer"),
+                        );
+                        re_log::warn_once!("Gaussian compute fallback: {error:#}");
+                        let evaluated = crate::trigs::Evaluated::new(splats, motion, time);
+                        crate::fallback::native_fallback(
+                            ctx,
+                            query,
+                            key,
+                            &evaluated.native(splats),
+                            world_from_local,
+                            hash64((signature, time.to_bits())),
+                            masks,
+                            object,
+                        )?
+                    }
+                    Primitives::Splats(native)
+                    | Primitives::Sog(&crate::sog::Payload {
+                        preview: native, ..
+                    })
+                    | Primitives::Asog(&crate::asog::Payload {
+                        preview: native, ..
+                    }) => {
                         report(
                             ViewerReportSeverity::Warning,
                             format!("{error}; using the native Gaussian renderer"),

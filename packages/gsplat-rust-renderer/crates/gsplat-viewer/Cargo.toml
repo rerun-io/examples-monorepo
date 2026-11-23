@@ -16,22 +16,39 @@ clap.workspace = true
 glam = "0.33"
 wgpu.workspace = true
 # Published Rerun 0.42.0 crates from crates.io — reproducible from a clean
-# checkout on any machine. Rerun 0.42 uses egui/eframe 0.37, so the headless
-# kittest harness must stay on the same egui family as re_viewer.
-egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
+# checkout on any machine.
 # `half::f16` decode for the `SphericalHarmonics3` wire component (viewer only).
 # `bytemuck` feature makes `f16: Pod` so `[f16; 45]` slices out of Arrow.
 half = { workspace = true, features = ["bytemuck"] }
 re_build_info = "=0.42.0"
 re_byte_size = { version = "=0.42.0" }
-re_crash_handler = { version = "=0.42.0" }
-re_grpc_server = { version = "=0.42.0" }
-re_viewer = { version = "=0.42.0" }
-tokio = { workspace = true }
 re_tracing = "=0.42.0"
 re_format = "=0.42.0"
 re_math = "0.33"
 ahash = "0.8"
+# Load-time split of SOG decoding (std Instant panics on wasm32).
+web-time = "1.1"
+
+# Native-only: the binary's gRPC server, crash handler, headless harness and runtime. The web build links the lib.
+# Rerun 0.42 uses egui/eframe 0.37, so the headless kittest harness must stay on the same egui family as re_viewer.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu", "eframe"] }
+re_crash_handler = { version = "=0.42.0" }
+re_grpc_server = { version = "=0.42.0" }
+tokio = { workspace = true }
+re_viewer = { version = "=0.42.0" }
+
+# The web build drops analytics and the agent panel (its reqwest pulls a second wasm-streams,
+# whose exported JS classes collide in wasm-bindgen).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+re_viewer = { version = "=0.42.0", default-features = false, features = ["default_web"] }
+
+# The TRiGS motion reference test reads its .rrd fixture (both crates are already in the graph via re_viewer).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+re_log_encoding = "=0.42.0"
+re_log_msg = "=0.42.0"
+# E4: the GPU load path of the .asog fixture read back (gsplat_core::test_utils).
+gsplat-core = { path = "../gsplat-core", features = ["testing"] }
 
 [lints]
 workspace = true

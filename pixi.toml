@@ -2110,7 +2110,6 @@ brush-src = { path = "recipes/brush-src" }
 python = "3.12.*"
 # Pinned Rerun and Brush crates share this Rust toolchain.
 rust = "1.98.*"
-clang = "*"
 cmake = "*"
 pkg-config = "*"
 numpy = "*"
@@ -2132,6 +2131,9 @@ python-dateutil = "<3"  # conda rerun-sdk (ipykernel -> jupyter_client) and pand
 pandas = ">=2.3.3"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
+# clang compiles the C deps, also for the wasm32 web build (linux-only). macOS uses Xcode's clang and linker: conda's
+# ld64 956 cannot link against the macOS 27 SDK, whose libSystem.tbd lists arm64e but no arm64 slice ("malformed file").
+clang = "*"
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"
@@ -2143,6 +2145,7 @@ xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 # Same viewer build dependencies for aarch64.
 [feature.gsplat-rust-renderer.target.linux-aarch64.dependencies]
+clang = "*"
 libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"
@@ -2151,6 +2154,22 @@ xorg-libxcursor = "*"
 xorg-libxi = "*"
 xorg-libxinerama = "*"
 xorg-libxrandr = "*"
+
+# Web build of the custom gsplat viewer (crates/gsplat-viewer-web): wasm32 std for the pinned rust, wasm-bindgen-cli
+# pinned to Rerun 0.42's wasm-bindgen =0.2.129, wasm-opt from binaryen. clang (above) compiles the C deps for wasm32.
+[feature.gsplat-web]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.gsplat-web.dependencies]
+rust-std-wasm32-unknown-unknown = "1.98.1.*"
+wasm-bindgen-cli = "==0.2.129"
+binaryen = "*"
+
+[feature.gsplat-web.tasks.gsplat-web-build]
+args = ["stock_dir", "out_dir"]
+cmd = "python tools/build_web_viewer.py --stock-dir {{ stock_dir }} --out-dir {{ out_dir }}"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build the custom gsplat viewer for the web (wasm32) into a copy of a stock Rerun 0.42.0 web viewer directory"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
@@ -2230,6 +2249,11 @@ cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.applicat
 depends-on = [{ task = "gsplat-download", args = ["pretrained", "lego"] }]
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained Lego PLY to the running viewer"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-log-sog]
+cmd = "python tools/log_sog.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+cwd = "packages/gsplat-rust-renderer"
+description = "Log a SOG scene (default: the pinned PlayCanvas skull.sog; --path for another) as SogSplats3D + preview"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-log-scene]
 cmd = "python tools/log_splats_with_cameras.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
@@ -4270,6 +4294,10 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.fdanyone-rerun.dependencies]
 python = "3.12.*"
+# The app's viewer: gradio-rerun built with our gsplat web viewer (recipes/gradio-rerun-src), so the 4D person plays
+# in the app. gradio restates [feature.common]'s pin, which these envs do not compose.
+gradio-rerun-src = { path = "recipes/gradio-rerun-src" }
+gradio = "==6.32.0"  # pin-bump: hold
 gvhmr-src = { path = "recipes/gvhmr-src" }
 # SageAttention's CUDA kernels (sm_120, sm_121); 4DAnyone's DiT selects it automatically when importable.
 sageattention-src = { path = "recipes/sageattention-src" }
@@ -4355,7 +4383,154 @@ description = "Launch the 4DAnyone Gradio app: pick a clip, watch the run stream
 [feature.fdanyone-rerun.tasks.fdanyone-log-run]
 cmd = "python tools/log_run.py"
 cwd = "packages/fdanyone-rerun"
-description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
+description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout (no GPU); --train also trains its 4D person"
+
+# ─── Open4DGS upstream init (RoMa v2 + MEMFOF -> keyframes init cloud) ──────
+# recipes/open4dgs-core-src ships only prep/init of open4dgs-core @ 52750b9; its backends are recipes/romav2-src
+# (DINOv3 from recipes/dinov3-src) and recipes/memfof-src. Pure PyTorch: nothing compiles.
+[feature.open4dgs-init]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.open4dgs-init.dependencies]
+python = "3.12.*"
+open4dgs-core-src = { path = "recipes/open4dgs-core-src" }
+# Run dependencies of open4dgs-core-src and romav2-src: a sibling recipe solves only when listed.
+romav2-src = { path = "recipes/romav2-src" }
+memfof-src = { path = "recipes/memfof-src" }
+dinov3-src = { path = "recipes/dinov3-src" }
+# The imports of the init script, RoMa v2 and MEMFOF (torch, torchvision from cuda / rerun-prerelease).
+einops = ">=0.8.1"
+rich = ">=14"
+pillow = ">=12"
+tqdm = "*"
+scipy = "*"
+py-opencv = "*"
+safetensors = ">=0.6"
+huggingface_hub = ">=0.35"
+
+[feature.open4dgs-init.activation.env]
+OPEN4DGS_MODEL_DIR = "${OPEN4DGS_MODEL_DIR:-/mnt/nas/ssd-8tb/open4dgs/models}"
+# romav2-src patch 0002: the local checkpoint instead of a download at construction.
+ROMAV2_WEIGHTS = "${ROMAV2_WEIGHTS:-/mnt/nas/ssd-8tb/open4dgs/models/romav2/romav2.0.1.pt}"
+# Pass as --memfof-checkpoint (a local from_pretrained directory).
+OPEN4DGS_MEMFOF_CHECKPOINT = "${OPEN4DGS_MEMFOF_CHECKPOINT:-/mnt/nas/ssd-8tb/open4dgs/models/memfof/MEMFOF-Tartan-T-TSKH}"
+OPEN4DGS_INIT_SCRIPT = "$CONDA_PREFIX/share/open4dgs-core-src/prep/init/prep-roma-trigs-memory.py"
+
+# The RoMa v2 checkpoint (GitHub release asset v2.0.1, sha256-checked) and MEMFOF Tartan-T-TSKH (HF, pinned revision).
+[feature.open4dgs-init.tasks.open4dgs-init-download]
+cmd = "mkdir -p $OPEN4DGS_MODEL_DIR/romav2 && ( [ -f $ROMAV2_WEIGHTS ] || curl -fL -o $ROMAV2_WEIGHTS https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt ) && echo '1557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7  '$ROMAV2_WEIGHTS | sha256sum -c - && hf download egorchistov/optical-flow-MEMFOF-Tartan-T-TSKH config.json model.safetensors --revision 6c6c9aa3ad64f93aee8efbc2f7a6e4535814ee96 --local-dir $OPEN4DGS_MEMFOF_CHECKPOINT"
+description = "Download the RoMa v2 and MEMFOF weights of the Open4DGS init into $OPEN4DGS_MODEL_DIR"
+
+[feature.open4dgs-init.tasks.open4dgs-init-help]
+cmd = "python $OPEN4DGS_INIT_SCRIPT --help"
+description = "Print the upstream Open4DGS init CLI (prep-roma-trigs-memory.py)"
+
+[feature.open4dgs-init.tasks.open4dgs-init-roma]
+cmd = "python tools/apps/init_roma.py"
+cwd = "packages/open4dgs"
+description = "Upstream RoMa v2 + MEMFOF init of a catalog window on its training cameras -> init_roma layer (.rrd under /mnt/nas/ssd-8tb/open4dgs/init, registered on the local companion dataset)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
+# ═══════════════════════════════════════════════════════════════════════════
+# The trainer is recipes/open4dgs-trigs-src (pure Python); packages/open4dgs holds catalog input, Rerun output,
+# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. gsplat: the ai-demos 1.5.3 build (CUDA 13 /
+# torch 2.12 / sm_86 + sm_120) on linux-64, 1.6.0 on linux-aarch64 (see the target table below).
+[feature.open4dgs]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.open4dgs.dependencies]
+open4dgs-trigs-src = { path = "recipes/open4dgs-trigs-src" }
+# Animated SOG (.asog) encoder + reference decoder (numpy only); open4dgs.asog feeds it a checkpoint in memory.
+asog-src = { path = "recipes/asog-src" }
+# Exact binned GPU kNN (sm_120 + sm_121); open4dgs.pytorch3d_ops.knn_points uses it for the trainer's rigid-neighbour
+# self-query (falls back to the chunked torch path without it).
+fastgraphcompute-src = { path = "recipes/fastgraphcompute-src" }
+python = "3.12.*"
+# ai-demos prebuilt for CUDA 13, Python 3.12 and torch 2.12 (sm_86 + sm_120 + PTX); TRiGS's upstream pin.
+gsplat = "==1.5.3"
+# No pycolmap: packages/open4dgs hands TRiGS cameras, frames and the init cloud in memory, so upstream's COLMAP
+# reader (trigs.io.dataset, which imports pycolmap inside a try) is never used. conda-forge's pycolmap 4.0 builds
+# need libfaiss 1.9, whose only solvable variant next to cuda-version 13 is absent.
+tyro = ">=0.9.1,<0.10"
+torchmetrics = "*"
+pillow = "*"
+# monopriors (MoGe-2 depth + normals prior) and what it imports at load (as [feature.monoprior]).
+einops = ">=0.8.0,<0.9"
+omegaconf = "*"
+timm = ">=1.0.15,<2"
+safetensors = "*"
+
+# No 1.5.3 build for torch 2.12 / CUDA 13 exists on linux-aarch64 (ai-demos carries 1.6.0; conda-forge's aarch64 1.5.3
+# needs torch 2.14), so the Spark (GB10) runs TRiGS on 1.6.0; the trigs recipe allows >=1.5.3,<1.7. Checked on the Spark:
+# trigs smoke training, fused SSIM and ASOG tests pass, and a held-out 5k-step run (see the PR adding this lane).
+[feature.open4dgs.target.linux-aarch64.dependencies]
+gsplat = "==1.6.0"
+
+[feature.open4dgs.pypi-dependencies]
+open4dgs = { path = "packages/open4dgs", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+# The trainer's fused SSIM: hexels_mojo.fused_ssim (Mojo port of fused-ssim; recipe patch 0007 points TRiGS's loss at it).
+# Its kernels are built for the local GPU by the open4dgs-ssim-mojo-build task (without the build TRiGS falls back to torchmetrics).
+hexels-mojo = { path = "packages/hexels-mojo", editable = true }
+# The gsplat viewer's Python Rerun contracts (sog3d, asog_decode, trigs_motion3d): pure Python, dependencies = []; its Rust
+# crates build only through the gsplat tasks.
+gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
+# trigs.io.ply / PLY export (PyPI only).
+gsply = ">=0.2.12"
+
+[feature.open4dgs.tasks.open4dgs-ssim-mojo-build]
+cmd = "mojo build --emit shared-lib -I ../lietorch-mojo/lietorch_mojo/mojo -I hexels_mojo/mojo -o hexels_mojo/_hexels_mojo.so hexels_mojo/mojo/_hexels_mojo.mojo"
+depends-on = ["lietorch-mojo-build"]
+cwd = "packages/hexels-mojo"
+description = "Build hexels_mojo's Mojo kernels (fused SSIM) for the local GPU in the open4dgs envs"
+inputs = ["packages/hexels-mojo/hexels_mojo/mojo/*.mojo", "packages/lietorch-mojo/lietorch_mojo/mojo/*.mojo"]
+outputs = ["packages/hexels-mojo/hexels_mojo/_hexels_mojo.so"]
+
+[feature.open4dgs.pypi-options.dependency-overrides]
+# Resolve monopriors' sam3>=0.1.0 requirement to the repository implementation.
+sam3 = { path = "packages/sam3", editable = true }
+
+[feature.open4dgs.activation.env]
+PACKAGE_DIR = "packages/open4dgs"
+
+[feature.open4dgs.tasks.open4dgs-masks]
+cmd = "python tools/apps/masks.py"
+cwd = "packages/open4dgs"
+description = "Foreground mattes (BiRefNet on the SMPL-X person crop) for a segment's frame window, registered as catalog layer people_matte"
+
+# The integration and golden lanes import the Mojo SSIM kernels: build them first (as mast3r-slam / sam2-streaming do).
+[feature.open4dgs.tasks.tests-integration]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m integration \"$@\" || test $? -eq 5' _"
+depends-on = ["open4dgs-ssim-mojo-build"]
+description = "Build the Mojo SSIM kernels, then run the package integration tests"
+
+[feature.open4dgs.tasks.tests-golden]
+cmd = "cd $PACKAGE_DIR && sh -c 'pytest -q -m golden \"$@\" || test $? -eq 5' _"
+depends-on = ["open4dgs-ssim-mojo-build"]
+description = "Build the Mojo SSIM kernels, then run the package golden reference tests"
+
+[feature.open4dgs.tasks.open4dgs-train]
+cmd = "python tools/apps/train.py"
+depends-on = ["open4dgs-ssim-mojo-build"]
+cwd = "packages/open4dgs"
+description = "Train a person from a catalog clip with TRiGS (body-surface init, masked loss), score held-out cameras, write <runs-root>/<run-name>/run.rrd and register it on open4dgs-runs (run in the prod env, under flock -x /tmp/gpu-5090.lock)"
+
+[feature.open4dgs.tasks.open4dgs-prior]
+cmd = "python tools/apps/prior.py"
+cwd = "packages/open4dgs"
+description = "MoGe-2 depth + normals on a clip's training frames (undistorted, max_side), registered as catalog layer moge2_prior"
+
+[feature.open4dgs.tasks.open4dgs-export-splats]
+cmd = "python tools/apps/export_splats.py"
+cwd = "packages/open4dgs"
+description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the checkpoint encoded to Animated SOG, or --asog <file>, once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers) or trigs-motion (TrigsMotion3D, layer trigs_motion; gsplat viewer only)"
+
+[feature.open4dgs.tasks.open4dgs-export-asog]
+cmd = "python tools/apps/export_asog.py"
+cwd = "packages/open4dgs"
+description = "Compress a trained run (--run <run dir>) to Animated SOG in <run>/asog.rrd (--rrd; the gsplat viewer's AnimatedSogSplats3D payload + a mid-clip stock preview + the run's cameras and meshes, --asog-cut format|trained), registered as layer asog on open4dgs-runs (--no-register); --asog-file <path> also writes the .asog file (interchange with other players); prints sizes and timings"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
@@ -4794,6 +4969,11 @@ gsplat-rust-renderer-dev = { features = [
     "dev",
     "ffmpeg",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+gsplat-rust-renderer-web = { features = [
+    "gsplat-rust-renderer",
+    "gsplat-web",
+    "ffmpeg",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 depth-video-viewer = { features = [
     "depth-video-viewer",
     "ffmpeg",
@@ -4823,15 +5003,27 @@ metrictrail-dev = { features = [
     "ffmpeg",
 ], solve-group = "metrictrail", no-default-feature = true }
 fdanyone-rerun = { features = [
-    "common",
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    "catalog-common",
+    "rerun-prerelease",
     "cuda",
     "fdanyone-rerun",
+    # The 4D person (Open4DGS / TRiGS on the generated views, saved as Animated SOG in the run's recording).
+    "open4dgs",
+    "lietorch-mojo",
+    "torchcodec",
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }
 fdanyone-rerun-dev = { features = [
-    "common",
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    "catalog-common",
+    "rerun-prerelease",
     "cuda",
     "fdanyone-rerun",
+    # The 4D person (Open4DGS / TRiGS on the generated views, saved as Animated SOG in the run's recording).
+    "open4dgs",
+    "lietorch-mojo",
+    "torchcodec",
     "dev",
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }
@@ -5004,6 +5196,27 @@ mamma-dev = { features = [
     "torchcodec",
     "ffmpeg",
 ], solve-group = "mamma", no-default-feature = true }
+open4dgs = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "open4dgs",
+    "lietorch-mojo",
+    "open4dgs-init",
+    "torchcodec",
+    "ffmpeg",
+], solve-group = "open4dgs", no-default-feature = true }
+open4dgs-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "open4dgs",
+    "lietorch-mojo",
+    "open4dgs-init",
+    "dev",
+    "torchcodec",
+    "ffmpeg",
+], solve-group = "open4dgs", no-default-feature = true }
 gauss-surf = { features = [
     "catalog-common",
     "rerun-prerelease",

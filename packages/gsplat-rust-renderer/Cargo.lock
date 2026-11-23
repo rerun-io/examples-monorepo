@@ -6162,9 +6162,12 @@ dependencies = [
  "bytemuck",
  "glam 0.30.10",
  "half",
+ "image-webp",
+ "miniz_oxide",
  "naga",
  "pollster 0.4.0",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "wgpu",
 ]
@@ -6210,10 +6213,13 @@ dependencies = [
  "re_crash_handler",
  "re_format 0.42.0",
  "re_grpc_server",
+ "re_log_encoding 0.42.0",
+ "re_log_msg",
  "re_math",
  "re_tracing 0.42.0",
  "re_viewer",
  "tokio",
+ "web-time",
  "wgpu",
 ]
 

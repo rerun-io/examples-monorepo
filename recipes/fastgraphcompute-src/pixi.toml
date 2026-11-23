@@ -1,0 +1,6 @@
+[package]
+name = "fastgraphcompute-src"
+version = "1.0.1.4044d7d"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

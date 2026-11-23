@@ -31,6 +31,20 @@ def test_one_torchcodec_and_one_ffmpeg() -> None:
     assert not missing, "Environments without the ffmpeg feature:\n" + "\n".join(missing)
 
 
+def test_osx_features_leave_the_linker_to_xcode() -> None:
+    """No feature that solves osx-arm64 installs conda clang there: its ld64 956 cannot link against the macOS 27 SDK.
+
+    That SDK's libSystem.tbd lists arm64e but no arm64 slice, so conda's ld64 skips it as a "malformed file" and every
+    Rust build script fails with undefined _NSGetEnviron / _Unwind_* (gsplat-rust-renderer on the Mac mini, macOS 27.2).
+    Xcode's /usr/bin/cc links it; a linux-only clang belongs under target.linux-*.
+    """
+    offending: list[str] = sorted(
+        name for name, feature in MANIFEST["feature"].items()
+        if "osx-arm64" in feature.get("platforms", []) and ("clang" in feature.get("dependencies", {}) or "clang" in feature.get("target", {}).get("osx-arm64", {}).get("dependencies", {}))
+    )
+    assert not offending, f"Features that put conda clang (and its ld64) on osx-arm64: {offending}"
+
+
 @pytest.fixture(scope="module")
 def pyrefly() -> tuple[dict, set[Path]]:
     """pyrefly.toml plus its expanded project-includes, read once for all package cases."""

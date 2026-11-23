@@ -103,6 +103,9 @@ pub struct RenderOptions {
 
     /// Positive multiplier, applied as a log-scale offset before the 3D floor.
     pub splat_scale: f32,
+
+    /// Timeline time in seconds for animated scenes (the motion pass runs when it changes); ignored otherwise.
+    pub time: f32,
 }
 
 impl Default for RenderOptions {
@@ -112,6 +115,7 @@ impl Default for RenderOptions {
             world_from_local: glam::Affine3A::IDENTITY,
             background: Vec3::ZERO,
             splat_scale: 1.0,
+            time: 0.0,
         }
     }
 }
@@ -167,6 +171,7 @@ impl RenderOptions {
             || !self.background.is_finite()
             || !self.splat_scale.is_finite()
             || self.splat_scale <= 0.0
+            || !self.time.is_finite()
         {
             return Err(crate::Error::Input("invalid render options"));
         }

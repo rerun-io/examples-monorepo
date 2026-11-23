@@ -1,0 +1,47 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -394,6 +394,8 @@
+     # reconstruction -- it exists to stop background mass, not to drive the fit.
+     lambda_alpha_outside_mask: float = 0.1
+     lambda_alpha_mask: float = 0.5
++    # Hook (open4dgs): rasterize RGB+ED and put the expected depth [1, H, W, 1] in info["render_depth"].
++    render_depth: bool = False
+     alpha_loss_eps: float = 1e-4
+     psnr_eval_every: int = 1000
+     psnr_eval_num_samples: int = 48
+@@ -1308,6 +1310,10 @@
+     pruning. Wasted capacity is recycled by motion-guided relocation.
+     """
+ 
++    # Hook (open4dgs): called per training camera as hook(step=, frame_idx=, cam_idx=, colors=, alphas=, info=,
++    # cameras=); the returned scalar tensor is added to that camera's loss before backward().
++    camera_loss_hook = None
++
+     def __init__(self, device: str = "cuda"):
+         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+         self.temporal_hierarchy = None
+@@ -3329,7 +3335,11 @@
+             height=cameras.height_for(cam_idx),
+             sh_degree=sh_degree,
+             packed=False,
++            render_mode="RGB+ED" if config.render_depth else "RGB",
+         )
++        if config.render_depth:
++            info["render_depth"] = render_colors[..., 3:4]
++            render_colors = render_colors[..., :3]
+ 
+         if info.get("means2d") is not None and info["means2d"].requires_grad:
+             info["means2d"].retain_grad()
+@@ -5369,6 +5379,11 @@
+                     + config.lambda_alpha_outside_mask * cam_alpha_out
+                     + config.lambda_alpha_mask * cam_alpha_mask
+                 )
++                if self.camera_loss_hook is not None:
++                    cam_loss = cam_loss + self.camera_loss_hook(
++                        step=step, frame_idx=frame_idx, cam_idx=cam_idx, colors=render_colors,
++                        alphas=render_alphas, info=cam_info, cameras=cameras,
++                    )
+                 if cam_loss.requires_grad:
+                     (cam_loss / n_group).backward()
+ 

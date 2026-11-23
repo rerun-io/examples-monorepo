@@ -106,6 +106,7 @@ packages/fdanyone-rerun/data/
 packages/simplecv/data/
 packages/mvs/data/
 packages/gauss-surf/data/
+packages/open4dgs/data/
 packages/dataforge/data/
 packages/handtrack/data/
 packages/handfit/data/
@@ -140,6 +141,7 @@ packages/depth-video-viewer/target/
 
 # gsplat-rust-renderer
 packages/gsplat-rust-renderer/target/
+packages/gsplat-rust-renderer/crates/gsplat-viewer-web/target/
 packages/gsplat-rust-renderer/.brush/
 packages/gsplat-rust-renderer/examples/*.ply
 

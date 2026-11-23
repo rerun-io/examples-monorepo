@@ -25,6 +25,8 @@ from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
 from gsplat_rust_renderer.hexels3d import HEXELS_ENTITY, Hexels3D, log_hexels, write_hexel_ply
 from gsplat_rust_renderer.orbit import CameraSpec, look_at, write_orbit_json
 from gsplat_rust_renderer.scene_io import NerfFrame, NerfTransforms
+from gsplat_rust_renderer.sog3d import log_sog
+from gsplat_rust_renderer.sog_decode import CoreSplats, core_layout, decode, read_sog
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,9 @@ class Config:
     binaries: Path
     ply: Path
     out: Path
-    mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth", "hexels", "hexels-tracked", "hexels-portable"] = "relog"
+    mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth", "hexels", "hexels-tracked", "hexels-portable", "sog"] = "relog"
+    sog: Path | None = None
+    """sog mode: a bundled .sog, a meta.json or its directory."""
 
 
 def capture(viewer: ViewerClient, view: rrb.Spatial3DView, path: Path, allow_blank: bool = False, ready: Callable[[UInt8[np.ndarray, "h w 3"]], bool] | None = None) -> UInt8[np.ndarray, "h w 3"]:
@@ -70,6 +74,39 @@ def capture(viewer: ViewerClient, view: rrb.Spatial3DView, path: Path, allow_bla
             previous = pixels
         time.sleep(0.1)
     raise RuntimeError(f"Viewer pixels did not settle: {path}")
+
+
+def seek(viewer: ViewerClient, timeline: str, frame: int) -> None:
+    """Move the time cursor and wait until the viewer state reports it, so the next capture shows that frame.
+
+    `set_time` returns before the cursor lands: a capture right after it can settle on two equal frames of the
+    previous time (the hexels-tracked flake).
+    """
+    deadline: float = time.monotonic() + 30.0
+    while True:
+        try:
+            viewer.set_time(timeline, sequence=frame)
+            if cursor_at(viewer, timeline, frame):
+                return
+        except ConnectionError:
+            pass
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"Viewer time cursor did not reach {timeline}={frame}")
+        time.sleep(0.2)
+
+
+def cursor_at(viewer: ViewerClient, timeline: str, frame: int) -> bool:
+    """Whether the viewer's time cursor is on `timeline` at `frame`."""
+    return any(r.current_timeline == timeline and r.current_time == frame for r in viewer.get_state().recordings)
+
+
+def wait_for_view(viewer: ViewerClient, view: rrb.Spatial3DView) -> None:
+    """Wait until the viewer shows `view`, i.e. it has applied the blueprint that holds it."""
+    deadline: float = time.monotonic() + 30.0
+    while not any(v.view_id.replace("-", "") == str(view.id).replace("-", "") for v in viewer.viewer_state().views):
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"Viewer never showed view {view.id}: the blueprint was not applied")
+        time.sleep(0.1)
 
 
 def yellow_fraction(pixels: UInt8[np.ndarray, "h w 3"]) -> float:
@@ -352,18 +389,16 @@ def check_hexels_tracked(config: Config, ply: Path) -> None:
         recording = rr.get_global_data_recording()
         assert recording is not None
         recording.flush(timeout_sec=30.0)
+        # The blueprint's TimePanel moves the time cursor when the viewer applies it, which can be after a seek
+        # that already reported its frame (the hexels-tracked flake: the cursor went back to the last frame and
+        # the capture showed that pose). Seek only once the blueprint's view is on screen, and capture only while
+        # the cursor still reports the frame.
+        wait_for_view(viewer, view)
         images: list[UInt8[np.ndarray, "h w 3"]] = []
         for frame, pose in enumerate(poses):
-            deadline: float = time.monotonic() + 30.0
-            while True:
-                try:
-                    viewer.set_time("frame", sequence=frame)
-                    break
-                except ConnectionError:
-                    if time.monotonic() > deadline:
-                        raise
-                    time.sleep(0.2)
-            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png")
+            seek(viewer, "frame", frame)
+            image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png",
+                ready=lambda pixels, frame=frame: int(pixels.max()) - int(pixels.min()) > 20 and cursor_at(viewer, "frame", frame))
             score: float = pose_psnr(config, ply, image, pose, fov_y, f"tracked-{frame}")
             assert score >= 50.0, f"Tracked view differs from the pinhole pose and field of view: {score} dB"
             images.append(image)
@@ -398,10 +433,74 @@ def check_hexels_portable(config: Config, ply: Path) -> None:
             assert lit > 25 * 4 and score < 30.0, "Stock Rerun should draw the Points3D fallback centres, not hexagons"
 
 
+def write_splat_ply(path: Path, splats: CoreSplats) -> None:
+    """A 3DGS PLY (f32: log scales, raw logit opacity, wxyz, channel-major f_rest) of gsplat-core's layout."""
+    from plyfile import PlyData, PlyElement
+
+    n: int = len(splats.raw_opacities)
+    rest: int = splats.sh.shape[1] - 1
+    names: list[str] = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", *[f"f_rest_{i}" for i in range(3 * rest)], "opacity",
+                        "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
+    columns: list[Float32[np.ndarray, "n"]] = [splats.transforms[:, i] for i in range(3)]
+    columns += [splats.sh[:, 0, c] for c in range(3)]
+    columns += [splats.sh[:, 1 + k, c] for c in range(3) for k in range(rest)]
+    columns += [splats.raw_opacities]
+    columns += [splats.transforms[:, 7 + i] for i in range(3)] + [splats.transforms[:, 3 + i] for i in range(4)]
+    vertices = np.empty(n, dtype=[(name, "f4") for name in names])
+    for name, column in zip(names, columns, strict=True):
+        vertices[name] = column
+    PlyData([PlyElement.describe(vertices, "vertex")]).write(str(path))
+
+
+def check_sog(config: Config) -> None:
+    """SogSplats3D payload: GPU de-quantisation vs `gsplat render` of the same decode; stock draws the preview.
+
+    The reference is the numpy oracle's decode (bit-identical to `gsplat_core::sog`, tests/sog.rs) written as an f32
+    PLY, so no u8 colour step sits between the two renders.
+    """
+    assert config.sog is not None, "sog mode needs --sog"
+    sog = read_sog(config.sog)
+    splats: CoreSplats = core_layout(decode(sog))
+    ply: Path = config.out / "sog-reference.ply"
+    write_splat_ply(ply, splats)
+    means: Float32[np.ndarray, "n 3"] = splats.transforms[:, :3]
+    target: Float64[np.ndarray, "3"] = np.median(means, axis=0).astype(np.float64)
+    radius: float = float(np.percentile(np.linalg.norm(means - target, axis=1), 90))
+    # SOG keeps the 3DGS PLY frame (y down, z forward): look along +z from the front, y up = -y.
+    position: Float64[np.ndarray, "3"] = target + np.array([0.6 * radius, -0.4 * radius, -2.6 * radius])
+    up: Float64[np.ndarray, "3"] = np.array([0.0, -1.0, 0.0])
+    view = splat_view((0, 0, 0), rrb.EyeControls3D(position=position, look_target=target, eye_up=up), contents=["world/splats"], name="sog")
+    recording_path: Path = config.out / "sog.rrd"
+    rr.init("sog-viewer-check", strict=True)
+    rr.save(recording_path)
+    rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
+    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+    log_sog("/world/splats", sog)
+    recording = rr.get_global_data_recording()
+    assert recording is not None
+    recording.flush(timeout_sec=30.0)
+    rr.disconnect()
+    with spawn_viewer(str(config.binaries / "gsplat-rust-renderer")) as viewer:
+        viewer.open_url(str(recording_path.resolve()))
+        image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-gpu.png")
+        reports = [report.summary for item in viewer.viewer_state().views for report in item.reports]
+        assert not reports, f"view reports: {reports}"
+    score: float = pose_psnr(config, ply, image, look_at(position, target, up), DEFAULT_FOV_Y, "sog-gpu")
+    print(f"SOG_PIXELS gpu viewer/standalone {score:.3f} dB", flush=True)
+    assert score >= 45.0, f"SOG payload differs from gsplat render of the decode: {score} dB"
+    with spawn_viewer(STOCK_VIEWER) as viewer:
+        viewer.open_url(str(recording_path.resolve()))
+        stock: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-stock.png")
+    # Stock 0.42 captures the whole window here (other size), so only the lit area is checked.
+    lit: int = int(np.sum(np.max(stock, axis=2) > 20))
+    print(f"SOG_STOCK lit_pixels={lit} size={stock.shape[1]}x{stock.shape[0]}", flush=True)
+    assert lit > 100, "Stock Rerun should draw the GaussianSplats3D preview"
+
+
 def main(config: Config) -> None:
     """Assert pixels through a real viewer; the calling test sets a process timeout."""
     config.out.mkdir(parents=True, exist_ok=True)
-    if check := {"depth": check_depth_and_framing, "portable": check_portable_recording}.get(config.mode):
+    if check := {"depth": check_depth_and_framing, "portable": check_portable_recording, "sog": check_sog}.get(config.mode):
         check(config)
         return
     if hexel_check := {"hexels": check_hexels, "hexels-tracked": check_hexels_tracked, "hexels-portable": check_hexels_portable}.get(config.mode):

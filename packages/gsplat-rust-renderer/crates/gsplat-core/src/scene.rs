@@ -9,6 +9,8 @@ pub(crate) enum Inputs {
         min_scale: wgpu::Buffer,
         has_min_scale: bool,
         degree: u32,
+        /// Per-row motion: views evaluate it into their own transforms and opacity (`trigs_deform.wgsl`).
+        motion: Option<crate::motion_gpu::GpuMotion>,
     },
     Hexels {
         params: wgpu::Buffer,
@@ -40,13 +42,60 @@ impl Scene {
                 opacity,
                 sh,
                 min_scale,
+                motion,
                 ..
-            } => [transforms, opacity, sh, min_scale]
-                .into_iter()
-                .map(wgpu::Buffer::size)
-                .sum(),
+            } => {
+                [transforms, opacity, sh, min_scale]
+                    .into_iter()
+                    .map(wgpu::Buffer::size)
+                    .sum::<u64>()
+                    + motion
+                        .as_ref()
+                        .map_or(0, crate::motion_gpu::GpuMotion::gpu_byte_size)
+            }
             Inputs::Hexels { params, .. } => params.size(),
         }
+    }
+
+    /// The scene's motion, if it is animated.
+    pub(crate) fn motion(&self) -> Option<&crate::motion_gpu::GpuMotion> {
+        match &self.inputs {
+            Inputs::Splats { motion, .. } => motion.as_ref(),
+            Inputs::Hexels { .. } => None,
+        }
+    }
+
+    /// The canonical transforms of a splat scene.
+    pub(crate) fn transforms(&self) -> Option<&wgpu::Buffer> {
+        match &self.inputs {
+            Inputs::Splats { transforms, .. } => Some(transforms),
+            Inputs::Hexels { .. } => None,
+        }
+    }
+
+    /// Attach motion that is already on the GPU (before the scene is shared).
+    pub(crate) fn attach_motion(
+        &mut self,
+        uploaded: crate::motion_gpu::GpuMotion,
+    ) -> Result<(), Error> {
+        match &mut self.inputs {
+            Inputs::Splats { motion, .. } => {
+                *motion = Some(uploaded);
+                Ok(())
+            }
+            Inputs::Hexels { .. } => Err(Error::Input("hexel scenes have no motion")),
+        }
+    }
+
+    /// Attach per-row motion (before the scene is shared).
+    pub(crate) fn animate(
+        &mut self,
+        device: &wgpu::Device,
+        motion: crate::motion_gpu::Motion<'_>,
+        limit: u64,
+    ) -> Result<(), Error> {
+        let uploaded = motion.upload(device, self.n as usize, limit)?;
+        self.attach_motion(uploaded)
     }
 
     pub(crate) fn hexels(&self) -> bool {
@@ -128,6 +177,7 @@ impl Scene {
                 )?,
                 has_min_scale: splats.min_scale.is_some(),
                 degree: splats.sh_degree,
+                motion: None,
             },
             n,
         })
@@ -158,7 +208,8 @@ impl Scene {
     }
 }
 
-fn upload(
+/// A storage buffer holding `bytes`; `Error::Capacity` when it exceeds one binding of `limit` bytes.
+pub(crate) fn upload(
     device: &wgpu::Device,
     label: &str,
     bytes: &[u8],

@@ -379,9 +379,12 @@ ai-demos `0.42.0.post1` wheel (the pin's comment says why; rebuild inputs in ai-
 
 To bump, in one change:
 1. every conda `rerun-sdk` pin in `pixi.toml` (`grep -n 'rerun-sdk = ' pixi.toml`) and the
-   `rerun-sdk` run dependencies in `packages/slam-rs/recipe.yaml` and `packages/insta360-io/recipe.yaml`;
+   `rerun-sdk` run dependencies in `packages/slam-rs/recipe.yaml`, `packages/insta360-io/recipe.yaml` and
+   `recipes/gradio-rerun-src/recipe.yaml`;
 2. `gradio-rerun` in `[feature.common.pypi-dependencies]` to the same version — never separately
-   (while it is the ai-demos wheel, rebuild that with the fix for the new version, or return to PyPI if upstream has it);
+   (while it is the ai-demos wheel, rebuild that with the fix for the new version, or return to PyPI if upstream has it),
+   and `recipes/gradio-rerun-src` (the fdanyone envs' gradio-rerun with the gsplat web viewer) to the matching
+   gradio-rerun-viewer commit, regenerating its one patch (`package.json` + `pnpm-lock.yaml`);
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
    `packages/robocap-live`, `packages/slam-rs`, the gsplat custom viewer
    (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`) and the depth-video viewer
@@ -395,7 +398,8 @@ and `[feature.hexels.dependencies]` (hexels logs recordings for that viewer). It
 the viewer's Rust port. Brush stays on its own glam; the viewer converts at the gsplat-core boundary.
 
 Several lanes restate the exact pin rather than composing `common`:
-`[feature.mv-api-catalog-register-mac]` and `[feature.slam-rs-osx]` (macOS),
+`[feature.mv-api-catalog-register-mac]` and `[feature.slam-rs-osx]` (macOS), `[feature.fdanyone-rerun]` (gradio only:
+its envs take gradio-rerun from `recipes/gradio-rerun-src`, not `common`),
 `[feature.agent-traces]` (torch-free), `[feature.selfcap-soma]` and `[feature.depth-video-viewer]`
 (moves with its viewer's `re_*` crates). They are tagged
 `# pin-bump: hold`; a bump that misses one leaves that lane a release behind, and for

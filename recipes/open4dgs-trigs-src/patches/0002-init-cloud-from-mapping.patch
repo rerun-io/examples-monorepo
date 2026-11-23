@@ -1,0 +1,31 @@
+diff --git a/src/trigs/init/from_colmap.py b/src/trigs/init/from_colmap.py
+index cca7988..8195365 100644
+--- a/src/trigs/init/from_colmap.py
++++ b/src/trigs/init/from_colmap.py
+@@ -27,6 +27,7 @@ from __future__ import annotations
+ 
+ import logging
+ import math
++from collections.abc import Mapping
+ from pathlib import Path
+ from typing import Tuple
+ 
+@@ -172,7 +173,7 @@ def _npz_durations_seconds(npz, durations: np.ndarray, fps: float) -> np.ndarray
+ 
+ 
+ def build_canonical_from_npz(
+-    npz_path: str | Path,
++    npz_path: str | Path | Mapping[str, np.ndarray],
+     *,
+     fps: float = 30.0,
+     init_opacity: float = 0.1,
+@@ -220,7 +221,8 @@ def build_canonical_from_npz(
+     if keep_static_when_filtering is not None:
+         keep_global_static_when_filtering = bool(keep_static_when_filtering)
+ 
+-    npz = np.load(str(npz_path), allow_pickle=True)
++    # Hook: a Mapping of arrays (the NPZ's keys) is used as is, so callers can pass the init cloud in memory.
++    npz = npz_path if isinstance(npz_path, Mapping) else np.load(str(npz_path), allow_pickle=True)
+     dev = torch.device(device if torch.cuda.is_available() else "cpu")
+     cdev = torch.device(
+         compute_device if compute_device is not None and torch.cuda.is_available()
