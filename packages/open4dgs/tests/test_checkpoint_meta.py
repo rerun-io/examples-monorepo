@@ -1,5 +1,5 @@
 """A saved checkpoint rebuilds the model it was trained as (``CheckpointMeta``): the settings, cameras and capture times
-come back, and ``open4dgs-export-asog --evaluate`` scores that model, not one rebuilt from defaults."""
+come back, and ``open4dgs-eval-asog`` scores that model, not one rebuilt from defaults."""
 
 import dataclasses
 from pathlib import Path
@@ -12,7 +12,7 @@ pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src
 
 from test_asog import FPS, NUM_FRAMES, synthetic_params  # noqa: E402
 
-from open4dgs.apis.export_asog import evaluation_models  # noqa: E402
+from open4dgs.apis.eval_asog import evaluation_models  # noqa: E402
 from open4dgs.splat_export import ASOG_CUT_FORMAT  # noqa: E402
 from open4dgs.trigs_adapter import LEGACY_KEYFRAME_STEP, CheckpointMeta, TrainConfig, TrainedClip  # noqa: E402
 
@@ -67,8 +67,8 @@ def test_checkpoint_round_trips_every_training_setting(tmp_path: Path) -> None:
     assert all(torch.equal(model.params[k], loaded.params[k]) for k in model.params)
 
 
-def test_export_asog_evaluates_the_trained_model(tmp_path: Path) -> None:
-    """The three models ``--evaluate`` scores carry the checkpoint's settings; only the cut05 variant changes the cut."""
+def test_eval_asog_scores_the_trained_model(tmp_path: Path) -> None:
+    """The three models ``open4dgs-eval-asog`` scores carry the checkpoint's settings; only the cut05 variant changes the cut."""
     model, path = saved_model(tmp_path, torch.device("cpu"))
     decoded = {k: v.detach() + 1.0 for k, v in model.params.items()}
     models = evaluation_models(path, decoded, clip=None, holdout=(), device=torch.device("cpu"))

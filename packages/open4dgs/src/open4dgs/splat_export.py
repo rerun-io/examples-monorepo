@@ -8,7 +8,7 @@ world, which is the run recording's world (``open4dgs.trigs_adapter.camera_confi
 The custom viewer (packages/gsplat-rust-renderer) and the stock viewer both draw these rows; nothing here is
 viewer-specific.
 
-Also what every export of a run shares (``apis.export_splats``, ``apis.export_asog``): the run's ``run`` property, a
+Also what every export of a run shares (``apis.export``, ``apis.eval_asog``): the run's ``run`` property, a
 recording with the run's cameras and meshes (``run_recording``) and the checkpoint's parameter tensors.
 """
 
@@ -41,7 +41,7 @@ SPLAT_ENTITY: str = "/world/person/splats"
 ASOG_CUT_FORMAT: float = 0.05
 """The ``.asog`` v1 temporal cut (no manifest field; what every other player applies)."""
 STOCK_VIEWER_NOTE: str = "a stock Rerun viewer shows one still pose; use --format per-frame for playback in stock viewers"
-"""Printed by ``open4dgs-export-splats --format asog``."""
+"""Printed by ``open4dgs-export --format asog``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +185,7 @@ def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_ro
     ``AnimatedSogSplats3D`` payload (``gsplat_rust_renderer.sog3d.log_asog``, ``frame_origin`` = the clip's first frame,
     temporal cut ``cut``) with a stock preview of the clip-middle pose (at most ``preview_rows`` rows); mode 644.
 
-    The one writer of ``open4dgs-export-asog`` and ``open4dgs-export-splats --format asog``; neither registers here.
+    The ASOG writer of ``open4dgs-export`` (which registers).
     """
     reader: RrdReader = RrdReader(run_dir / "run.rrd")
     frame_start: int = RunProperties.from_cells(rrd_cells(reader, "run")).frame_start
