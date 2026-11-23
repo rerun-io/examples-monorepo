@@ -26,8 +26,8 @@ the node, a static face-from-IMU ``Transform3D`` (``ChildFromParent``), a plain 
 ``VideoStream`` on the source frameset's stamp. The tables come from the base recording's two cameras through
 ``MeiCamera.project``, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (the default when torch sees a GPU) the
 stage stays on the GPU (the dataforge-cuda env): NVDEC decode, one remap per face, NVENC from device memory (SVT-AV1 from
-host memory where NVENC does not encode AV1, e.g. Ampere); ``cpu``
-decodes with PyAV and remaps with OpenCV behind the same API, and encodes on NVENC when the host has it, else SVT-AV1.
+host memory where NVENC does not encode AV1, e.g. Ampere); ``cpu`` decodes with PyAV and remaps with OpenCV behind the
+same API, and encodes on NVENC when the host has it, else SVT-AV1.
 
 Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)`` of a
 ``W``-wide panorama (pixel centres at integers) looks along longitude ``lon = (u + 0.5) 2 pi / W - pi / 2``,
@@ -352,8 +352,7 @@ class Insta360Config(FrameLimitedConfig):
     """Face keyframe interval in sampled framesets."""
     cube_device: Literal["cuda", "cpu"] | None = None
     """Where the faces are decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory, or SVT-AV1 where NVENC
-    does not encode AV1; the dataforge-cuda
-    env) or ``cpu`` (PyAV, OpenCV remap; NVENC when the host has it, else software AV1). None: ``cuda`` when torch sees a GPU."""
+    does not encode AV1; the dataforge-cuda env) or ``cpu`` (PyAV, OpenCV remap; NVENC when the host has it, else software AV1). None: ``cuda`` when torch sees a GPU."""
 
 
 class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):

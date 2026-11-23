@@ -49,7 +49,7 @@ def decode_gray_cuda(
             rgb_float: Float32[Tensor, "b 3 h w"] = rgb.float()
             gray: UInt8[Tensor, "b h w"] = (rgb_float * weights).sum(dim=1).round().clamp(0, 255).to(dtype=torch.uint8)
             # One host copy per frame: a view into one batch array would leave its last holder (the consumer, behind
-            # the feed's prefetch) to unmap a whole batch (32 frames) at once, 118 MB on a 1920 px lens, every 32 framesets.
+            # the feed's prefetch) to unmap a whole batch at once (118 MB for 32 frames of a 1920 px lens).
             if color_wh is None:
                 for frame in gray:
                     yield frame.cpu().numpy(), None
