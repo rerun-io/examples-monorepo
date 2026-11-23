@@ -112,6 +112,9 @@ ASPECT_BUCKETS: tuple[tuple[int, int], ...] = aspect_buckets(3600)
 DYNAMIC_MAX_ASPECT: float = 2.0
 """The dynamic engine serves token grids of aspects (width / height) from 1/2 through 2: 9:16 portrait to 16:9 and wider."""
 
+DYNAMIC_OPT_ASPECT: float = 4.0 / 3.0
+"""Aspect whose token grid the dynamic graph is traced at and its TensorRT profile tunes kernels for (inside the range on both axes)."""
+
 DYNAMIC_ONNX_MAX_BATCH: int = 64
 """Batch bound of the dynamic ONNX graph; the TensorRT profile sets the batch a given engine accepts."""
 
@@ -259,7 +262,11 @@ def dynamic_pos_encoding(pos_embed_1nc: Float[Tensor, "1 n c"], grid_hw: tuple[i
 
 
 class _MoGeV2Heads(nn.Module):
-    """Fixed-token adapter exposing one ordered ONNX head set."""
+    """Fixed-token adapter exposing one ordered ONNX head set.
+
+    With ``token_grid_from_shape`` it also replaces the given model's DINOv2 positional resize with
+    :func:`dynamic_pos_encoding`, so pass it a model loaded for the export only.
+    """
 
     def __init__(self, model: MoGeModel, num_tokens: int, heads: HeadSet, *, token_grid_from_shape: bool = False) -> None:
         super().__init__()
@@ -268,13 +275,15 @@ class _MoGeV2Heads(nn.Module):
         self.heads: HeadSet = heads
         self.token_grid_from_shape: bool = token_grid_from_shape
         if token_grid_from_shape:
-            # The export's own model instance: DINOv2 positional resize at the symbolic grid (dynamic_pos_encoding).
             backbone: DinoVisionTransformer = model.encoder.backbone
+            pos_embed: Tensor = backbone.pos_embed
             offset: float = backbone.interpolate_offset
             patch: int = backbone.patch_size
 
+            # Captures the table, not the backbone: a backbone -> function -> backbone cycle would keep the model on
+            # the GPU through the engine build until the cyclic GC ran.
             def pos_encoding(x_bnc: Tensor, height: int, width: int) -> Tensor:
-                return dynamic_pos_encoding(backbone.pos_embed, (height // patch, width // patch), offset).to(x_bnc.dtype)
+                return dynamic_pos_encoding(pos_embed, (height // patch, width // patch), offset).to(x_bnc.dtype)
 
             backbone.interpolate_pos_encoding = pos_encoding  # pyrefly: ignore[bad-assignment]
 
@@ -296,20 +305,23 @@ class _MoGeV2Heads(nn.Module):
         return tuple(output[name] for name in ONNX_OUTPUT_NAMES[self.heads])
 
 
-def moge_v2_onnx_path(
-    heads: HeadSet, encoder: Encoder, image_hw: tuple[int, int] | None, resolution_level: int = 9, cache_dir: Path = DEFAULT_CACHE_DIR
-) -> Path:
-    """Where :func:`export_moge_v2_onnx` caches the ONNX file of one head set, encoder, network size (None: the dynamic
-    graph) and detail level."""
-    num_tokens: int = resolve_num_tokens(resolution_level)
-    checkpoint_revision: str = MOGE_V2_CHECKPOINTS[encoder][1][:8]
-    export_version: int = _ONNX_EXPORT_VERSIONS[heads]
+def _onnx_signature(heads: HeadSet, encoder: Encoder, image_hw: tuple[int, int] | None, num_tokens: int) -> str:
+    """File-name prefix shared by every export version and checkpoint of one graph (the stale-export sweep key)."""
     if image_hw is None:
         low, high = dynamic_patch_range(num_tokens)
         size: str = f"dyn{14 * low}-{14 * high}"
     else:
         size = f"{image_hw[0]}x{image_hw[1]}"
-    return cache_dir / "onnx" / f"moge-v2-{encoder}-{heads}_{size}_t{num_tokens}_v{export_version}_{checkpoint_revision}.onnx"
+    return f"moge-v2-{encoder}-{heads}_{size}_t{num_tokens}_"
+
+
+def moge_v2_onnx_path(
+    heads: HeadSet, encoder: Encoder, image_hw: tuple[int, int] | None, resolution_level: int = 9, cache_dir: Path = DEFAULT_CACHE_DIR
+) -> Path:
+    """Where :func:`export_moge_v2_onnx` caches the ONNX file of one head set, encoder, network size (None: the dynamic
+    graph) and detail level."""
+    signature: str = _onnx_signature(heads, encoder, image_hw, resolve_num_tokens(resolution_level))
+    return cache_dir / "onnx" / f"{signature}v{_ONNX_EXPORT_VERSIONS[heads]}_{MOGE_V2_CHECKPOINTS[encoder][1][:8]}.onnx"
 
 
 def export_moge_v2_onnx(
@@ -387,7 +399,7 @@ def export_moge_v2_onnx(
     model: MoGeModel = loaded[0]
     wrapper: _MoGeV2Heads = _MoGeV2Heads(model, loaded[1], heads, token_grid_from_shape=image_hw is None).eval()
     # The dynamic graph traces at the 4:3 grid, inside the range on both axes.
-    example_hw: tuple[int, int] = token_grid_hw(4.0 / 3.0, num_tokens) if image_hw is None else image_hw
+    example_hw: tuple[int, int] = token_grid_hw(DYNAMIC_OPT_ASPECT, num_tokens) if image_hw is None else image_hw
     example_batch_size: int = min(2, max_batch_size)
     dummy_image_b3hw: Float32[Tensor, "b 3 h w"] = torch.zeros(
         (example_batch_size, 3, example_hw[0], example_hw[1]),
@@ -397,38 +409,32 @@ def export_moge_v2_onnx(
 
     from trtkit import DynamicDim, export_onnx, sweep_stale_onnx_exports
 
-    if image_hw is None:
-        low, high = dynamic_patch_range(num_tokens)
-        dynamic_dims: dict[str, dict[int, DynamicDim]] = {
+    low, high = dynamic_patch_range(num_tokens)
+    # Static graphs keep the batch-only path (dynamic_batch_max), so their exports are unchanged.
+    dynamic_dims: dict[str, dict[int, DynamicDim]] | None = (
+        {
             "image": {
                 0: DynamicDim("batch", 1, max_batch_size),
                 2: DynamicDim("patch_rows", low, high, multiple=14),
                 3: DynamicDim("patch_cols", low, high, multiple=14),
             }
         }
-        export_onnx(
-            wrapper,
-            (dummy_image_b3hw,),
-            onnx_path,
-            input_names=["image"],
-            output_names=list(ONNX_OUTPUT_NAMES[heads]),
-            compute_dtype=torch.float16,
-            dynamic_dims=dynamic_dims,
-        )
-    else:
-        export_onnx(
-            wrapper,
-            (dummy_image_b3hw,),
-            onnx_path,
-            input_names=["image"],
-            output_names=list(ONNX_OUTPUT_NAMES[heads]),
-            compute_dtype=torch.float16,
-            dynamic_batch_max=max_batch_size,
-        )
+        if image_hw is None
+        else None
+    )
+    export_onnx(
+        wrapper,
+        (dummy_image_b3hw,),
+        onnx_path,
+        input_names=["image"],
+        output_names=list(ONNX_OUTPUT_NAMES[heads]),
+        compute_dtype=torch.float16,
+        dynamic_batch_max=None if image_hw is None else max_batch_size,
+        dynamic_dims=dynamic_dims,
+    )
     del dummy_image_b3hw, wrapper, model
     torch.cuda.empty_cache()
 
     current_sidecar: Path = onnx_path.with_name(f"{onnx_path.name}.data")
-    stale_prefix: str = onnx_path.name.split(f"_t{num_tokens}_")[0] + f"_t{num_tokens}_"
-    sweep_stale_onnx_exports(onnx_path.parent, stale_prefix, keep_paths={onnx_path, current_sidecar})
+    sweep_stale_onnx_exports(onnx_path.parent, _onnx_signature(heads, encoder, image_hw, num_tokens), keep_paths={onnx_path, current_sidecar})
     return onnx_path

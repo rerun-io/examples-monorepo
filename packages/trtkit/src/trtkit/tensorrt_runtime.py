@@ -283,9 +283,10 @@ class TensorRtDynamicRuntime(_TrtEngine):
     CUDA graphs need fixed addresses, so ``direct_binding`` and ``use_cuda_graph``
     exclude each other.
 
-    ``per_shape_activation_memory=True`` (needs ``direct_binding``) sizes the context's activation memory to each
-    call's shapes instead of the profile's max: for engines built with ``TrtBuildConfig.runtime_activation_resize``,
-    whose max corner can need several times the memory of the shapes callers send. The buffer grows, never shrinks.
+    ``per_shape_activation_memory=True`` sizes the context's activation memory to each call's shapes instead of the
+    profile's max: for engines built with ``TrtBuildConfig.runtime_activation_resize``, whose max corner can need
+    several times the memory of the shapes callers send. The buffer grows, never shrinks, and is re-sized only when
+    the input shapes change. It moves when it grows, so it excludes CUDA graphs.
     """
 
     def __init__(
@@ -302,17 +303,18 @@ class TensorRtDynamicRuntime(_TrtEngine):
 
         Raises:
             RuntimeError: If CUDA is unavailable or the engine cannot be deserialized.
-            ValueError: If ``direct_binding`` and ``use_cuda_graph`` are both set, or ``per_shape_activation_memory``
-                lacks ``direct_binding``.
+            ValueError: If ``use_cuda_graph`` is set together with ``direct_binding`` or ``per_shape_activation_memory``.
         """
         if direct_binding and use_cuda_graph:
             raise ValueError("direct_binding binds a new address per call; CUDA graph replay needs fixed addresses.")
-        if per_shape_activation_memory and not direct_binding:
-            raise ValueError("per_shape_activation_memory regrows memory between calls; it needs direct_binding.")
+        if per_shape_activation_memory and use_cuda_graph:
+            raise ValueError("per_shape_activation_memory moves activation memory when it grows; CUDA graph replay needs fixed addresses.")
         super().__init__(engine_path, use_cuda_graph=use_cuda_graph, user_managed_memory=per_shape_activation_memory)
         self.direct_binding: bool = direct_binding
         self.per_shape_activation_memory: bool = per_shape_activation_memory
         self._activation_memory: Tensor | None = None
+        self._activation_shapes: tuple[tuple[str, tuple[int, ...]], ...] | None = None
+        """Input shapes the bound activation memory was sized for."""
         self.device_index: int = torch.cuda.current_device()
         """The CUDA device the context and stream were created on; direct-binding inputs must live there."""
         trt: Any = self._trt
@@ -425,18 +427,19 @@ class TensorRtDynamicRuntime(_TrtEngine):
                 if buffer is None or buffer.numel() < needed:
                     self._output_buffers[name] = torch.empty(needed, dtype=dtype, device=self._device)
                 self._context.set_tensor_address(name, int(self._output_buffers[name].data_ptr()))
-        if self.per_shape_activation_memory:
+        active_shapes: tuple[tuple[str, tuple[int, ...]], ...] = tuple(sorted(self._active_shapes.items()))
+        if self.per_shape_activation_memory and active_shapes != self._activation_shapes:
             needed_bytes: int = max(int(self._context.update_device_memory_size_for_shapes()), 1)
             if self._activation_memory is None or self._activation_memory.numel() < needed_bytes:
                 self._stream.synchronize()  # the previous call may still read the old buffer
                 self._activation_memory = None
                 self._activation_memory = torch.empty(needed_bytes, dtype=torch.uint8, device=self._device)
             self._context.set_device_memory(int(self._activation_memory.data_ptr()), int(self._activation_memory.numel()))
+            self._activation_shapes = active_shapes
         if self._use_cuda_graph:
-            key: tuple[tuple[str, tuple[int, ...]], ...] = tuple(sorted(self._active_shapes.items()))
-            if key not in self._graphs:
-                self._graphs[key] = self._capture_graph()
-            self._graphs[key].replay()
+            if active_shapes not in self._graphs:
+                self._graphs[active_shapes] = self._capture_graph()
+            self._graphs[active_shapes].replay()
         else:
             self._execute()
         return {name: buffer[: math.prod(output_shapes[name])].view(output_shapes[name]) for name, buffer in self._output_buffers.items()}

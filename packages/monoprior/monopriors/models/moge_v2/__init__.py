@@ -22,7 +22,7 @@ from monopriors.models.moge_v2.export import (
     token_grid_hw,
 )
 from monopriors.models.moge_v2.predictor import (
-    EngineProfile,
+    MoGeV2EngineProfile,
     MoGeV2GeometryGraphOutput,
     MoGeV2GeometryOutput,
     MoGeV2NormalGraphOutput,
@@ -42,7 +42,7 @@ __all__: list[str] = [
     "MOGE_V2_NUM_TOKENS_RANGE",
     "ONNX_OUTPUT_NAMES",
     "Encoder",
-    "EngineProfile",
+    "MoGeV2EngineProfile",
     "HardwareCompatibility",
     "HeadSet",
     "MoGeV2GeometryGraphOutput",

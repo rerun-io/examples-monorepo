@@ -13,6 +13,7 @@ from torch import Tensor
 from monopriors.models.moge_v2.export import (
     DEFAULT_CACHE_DIR,
     DYNAMIC_ONNX_MAX_BATCH,
+    DYNAMIC_OPT_ASPECT,
     FORWARD_HEADS,
     ONNX_OUTPUT_NAMES,
     Encoder,
@@ -40,7 +41,7 @@ else:
     TrtBuildConfig = object
 
 
-EngineProfile: TypeAlias = Literal["dynamic", "static"]
+MoGeV2EngineProfile: TypeAlias = Literal["dynamic", "static"]
 """``dynamic`` (default): one engine over a range of token grids; ``static``: one engine per network size."""
 
 
@@ -318,7 +319,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         hardware_compatibility: HardwareCompatibility = "none",
         use_cuda_graph: bool = False,
         builder_optimization_level: int = 5,
-        profile: EngineProfile = "dynamic",
+        profile: MoGeV2EngineProfile = "dynamic",
     ) -> None:
         """Configure the TensorRT runtime(s); one supplied network size builds (or loads) the engine eagerly.
 
@@ -350,7 +351,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         self.num_tokens: int = resolve_num_tokens(resolution_level)
         self.encoder: Encoder = encoder
         self.heads: HeadSet = heads
-        self.profile: EngineProfile = profile
+        self.profile: MoGeV2EngineProfile = profile
         self.network_hw_options: tuple[tuple[int, int], ...] | None = (
             aspect_buckets(self.num_tokens) if network_hw_options is None and profile == "static" else network_hw_options
         )
@@ -388,7 +389,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
             )
         return grid_hw
 
-    def _engine_paths(self, network_hw: tuple[int, int]) -> tuple[Path, TrtBuildConfig]:
+    def _engine_spec(self, network_hw: tuple[int, int]) -> tuple[Path, TrtBuildConfig]:
         """ONNX path and build settings (the engine cache key) of the engine that serves ``network_hw``."""
         from trtkit import InputShapeProfile, TrtBuildConfig
 
@@ -398,7 +399,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         else:
             onnx_path = moge_v2_onnx_path(self.heads, self.encoder, None, self.resolution_level, self.cache_dir)
             low, high = self.patch_range
-            opt_hw: tuple[int, int] = token_grid_hw(4.0 / 3.0, self.num_tokens)
+            opt_hw: tuple[int, int] = token_grid_hw(DYNAMIC_OPT_ASPECT, self.num_tokens)
             shape_profiles = (
                 InputShapeProfile(
                     name="image",
@@ -431,7 +432,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
             network_hw: tuple[int, int] = self.network_hw(input_hw)
         except ValueError:
             return False
-        onnx_path, config = self._engine_paths(network_hw)
+        onnx_path, config = self._engine_spec(network_hw)
         if not onnx_path.exists():
             return False
         trt_dir: Path = self.cache_dir / "trt"
@@ -448,7 +449,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
 
         from trtkit import ensure_engine
 
-        onnx_path, config = self._engine_paths(network_hw)
+        onnx_path, config = self._engine_spec(network_hw)
         export_moge_v2_onnx(
             heads=self.heads,
             encoder=self.encoder,
@@ -468,9 +469,9 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
             from trtkit import TensorRtDynamicRuntime as DynamicRuntime
 
             # Direct binding: no copy into max-shape buffers; outputs are views valid until the next call, the
-            # contract forward_* already states. Activation memory sized per shape: the profile's max corner
-            # (1190x1190) needs twice what a real token grid does (10.5 vs 5.2 GiB at batch 8). CUDA graphs need
-            # fixed addresses, so they take the copying path with max-shape memory.
+            # contract forward_* already states. Activation memory sized per shape: the profile's max corner needs
+            # about twice what a real token grid does (ViT-L, level 9, batch 8 on a 5090: 10.5 vs 5.2 GiB). CUDA
+            # graphs need fixed addresses, so they take the copying path with max-shape memory.
             runtime = DynamicRuntime(
                 engine_path,
                 use_cuda_graph=self.use_cuda_graph,

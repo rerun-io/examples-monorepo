@@ -13,7 +13,7 @@ from conftest import integration, requires_cuda, synthetic_rgb_batch
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
-from monopriors.models.moge_v2 import Encoder, MoGeV2GeometryOutput
+from monopriors.models.moge_v2 import Encoder, MoGeV2EngineProfile, MoGeV2GeometryOutput
 
 
 class GeometryCloseBars(NamedTuple):
@@ -130,14 +130,15 @@ def test_select_aspect_bucket_uses_nearest_log_aspect(
 
 
 @pytest.mark.parametrize("profile", ("static", "dynamic"))
-def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str) -> None:
+def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: MoGeV2EngineProfile) -> None:
     """A single network option eagerly creates its runtime: keyed by that size (static) or the one engine (dynamic)."""
     import monopriors.models.moge_v2.predictor as moge_v2_predictor
 
     class FakeRuntime:
-        def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False, **_kwargs: object) -> None:
+        def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False, **kwargs: bool) -> None:
             self.engine_path: Path = engine_path
             self.use_cuda_graph: bool = use_cuda_graph
+            self.kwargs: dict[str, bool] = kwargs
 
         def __call__(self, inputs: dict[str, Tensor]) -> dict[str, Tensor]:
             return inputs
@@ -170,13 +171,16 @@ def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.Monke
         heads="geometry",
         network_hw_options=(network_hw,),
         use_cuda_graph=True,
-        profile="static" if profile == "static" else "dynamic",
+        profile=profile,
     )
 
     key: tuple[int, int] | None = network_hw if profile == "static" else None
     assert set(predictor.runtimes) == {key}
     assert predictor.runtimes[key].engine_path == engine_path
     assert predictor.runtimes[key].use_cuda_graph
+    # CUDA graphs replay fixed addresses: the dynamic runtime then copies into max-shape buffers and memory.
+    expected_kwargs: dict[str, bool] = {} if profile == "static" else {"direct_binding": False, "per_shape_activation_memory": False}
+    assert predictor.runtimes[key].kwargs == expected_kwargs
 
 
 def test_torch_typed_entry_points_reject_wrong_heads() -> None:
@@ -260,15 +264,13 @@ def test_torch_predictor_returns_batched_metric_geometry() -> None:
     (("dynamic", (756, 1008)), ("dynamic", (1280, 704)), ("static", (756, 1008))),
     ids=("dynamic-4:3", "dynamic-portrait", "static-4:3"),
 )
-def test_trt_matches_torch_twin_at_caller_resolution(profile: str, caller_hw: tuple[int, int]) -> None:
+def test_trt_matches_torch_twin_at_caller_resolution(profile: MoGeV2EngineProfile, caller_hw: tuple[int, int]) -> None:
     """ViT-L TensorRT and torch geometry meet the caller-resolution parity bounds; the portrait case is the 4DAnyone views."""
     from monopriors.models.moge_v2 import ASPECT_BUCKETS, MoGeV2TorchPredictor, MoGeV2TrtPredictor
 
     rgb_bhw3: UInt8[Tensor, "2 h w 3"] = synthetic_rgb_batch(2, caller_hw)
     rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
-    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
-        encoder="vitl", heads="geometry", batch_size=8, profile="static" if profile == "static" else "dynamic"
-    )
+    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", batch_size=8, profile=profile)
     # The twin runs at the same network size: the image's own token grid (dynamic) or its aspect bucket (static).
     torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(
         encoder="vitl", heads="geometry", network_hw_options=ASPECT_BUCKETS if profile == "static" else None
@@ -491,16 +493,16 @@ def test_dynamic_engine_profile_spans_the_range_and_resizes_activations(tmp_path
     from monopriors.models.moge_v2 import MoGeV2TrtPredictor
 
     predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path, batch_size=6)
-    onnx_path, config = predictor._engine_paths((1134, 616))
+    onnx_path, config = predictor._engine_spec((1134, 616))
     assert onnx_path.name.startswith("moge-v2-vitl-geometry_dyn588-1190_t3600_")
-    assert predictor._engine_paths((728, 966))[0] == onnx_path  # every grid shares the one graph
+    assert predictor._engine_spec((728, 966))[0] == onnx_path  # every grid shares the one graph
     assert config.runtime_activation_resize
     (image_profile,) = config.shape_profiles
     assert image_profile.name == "image"
     assert image_profile.min_shape == (1, 3, 588, 588)
     assert image_profile.opt_shape == (6, 3, 728, 966)
     assert image_profile.max_shape == (6, 3, 1190, 1190)
-    static_onnx, static_config = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path, profile="static")._engine_paths((728, 966))
+    static_onnx, static_config = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path, profile="static")._engine_spec((728, 966))
     assert static_onnx.name.startswith("moge-v2-vitl-geometry_728x966_") and static_config.shape_profiles == ()
 
 

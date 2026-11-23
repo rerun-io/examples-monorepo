@@ -119,7 +119,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
         else ""
     )
     hardware_key: str = "_hcsamecc" if config.hardware_compatibility == "same_compute_capability" else ""
-    hardware_key += "_rar" if config.runtime_activation_resize else ""
+    activation_key: str = "_rar" if config.runtime_activation_resize else ""
     profiles_key: str = (
         f"_s{hashlib.sha256(repr([asdict(profile) for profile in config.shape_profiles]).encode()).hexdigest()[:8]}"
         if config.shape_profiles
@@ -127,7 +127,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     )
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
-        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{hardware_key}{extra_outputs_key}{profiles_key}"
+        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{hardware_key}{activation_key}{extra_outputs_key}{profiles_key}"
         f"_trt{trt.__version__}_sm{capability[0]}{capability[1]}_{onnx_hash}.engine"
     )
     return cache_dir / name

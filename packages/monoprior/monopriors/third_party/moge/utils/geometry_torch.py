@@ -67,7 +67,7 @@ def normalized_view_plane_uv(
     resolved_aspect_ratio: float | Float[Tensor, ""] = width / height if aspect_ratio is None else aspect_ratio
     span_x: float | Float[Tensor, ""] = resolved_aspect_ratio / (1 + resolved_aspect_ratio**2) ** 0.5
     span_y: float | Float[Tensor, ""] = 1 / (1 + resolved_aspect_ratio**2) ** 0.5
-    if isinstance(span_x, Tensor) and isinstance(span_y, Tensor):
+    if isinstance(span_x, Tensor) and isinstance(span_y, Tensor):  # a 0-d tensor aspect (both spans follow it)
         # linspace(-s (n - 1) / n, s (n - 1) / n, n)[i] = s (2 i + 1 - n) / n
         u_w_dynamic: Float[Tensor, "w"] = span_x * (2 * torch.arange(width, device=device, dtype=torch.float32) + 1 - width) / width
         v_h_dynamic: Float[Tensor, "h"] = span_y * (2 * torch.arange(height, device=device, dtype=torch.float32) + 1 - height) / height
