@@ -1,0 +1,14 @@
+PARKED (2026-11-22, base main b2483cfbd): web async load of .asog payloads. Not a speed-up; kept for a later worker version.
+What it does: the web viewer inflates every .asog zlib stream with the browser's DecompressionStream("deflate") (the zlib
+wrapper), all at once; AsogCache keeps a pending state per payload, the entity draws nothing from our renderer meanwhile; the
+inflate's continuation runs the undo + assembly (gsplat-core decode_parts_inflated) and asks for a repaint; the next frame
+uploads the scene. Without DecompressionStream the serial wasm decode runs as before (one log line says which path).
+Real Chrome 154 on the 5090 box (WebGPU/Vulkan, headed, temp profile), navigation -> scene uploaded, median:
+  run C 951 -> 1064 ms (n=5); MAMMA 1004 -> 1077 ms (n=4). Longest main-thread task around the decode ~180 -> ~85 ms;
+  browser inflate 75-89 ms off the main thread; undo + assembly 79-86 ms stay one main-thread task.
+The ~9 s frame stall seen earlier is headless Chromium only (both builds, also without this change); real Chrome has none.
+Same data: AsogParts::content_hash of the browser path = native (run C 564b7f145212b06f, MAMMA 10ecc217ad45236a).
+Open risk: that the continuation's repaint request wakes an idle, PAUSED viewer is not shown (the clips were playing).
+Not done: Mac mini real Chrome / Safari and ?profile=1, pixels at two frames, GPU tests in both variants, the gsplat gate.
+Follow-up that could make it worth landing: run the undo + assembly in a worker as well, so the main thread keeps ~0 ms.
+Numbers and method: /mnt/nas/ssd-8tb/scratch/open4dgs/notes/INFLATE.txt ("WEB ASYNC LOAD").
