@@ -27,7 +27,7 @@ from typing import Final
 
 from colsfm import DATA_DIR
 from colsfm.features import FeatureBackend
-from colsfm.matching import FLEXGLUE_FP8_COMMAND, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions, MatchingBackend
+from colsfm.matching import FLEXGLUE_FP8_COMMAND, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions, MatchingBackend, gpu_has_fp8
 
 RACO_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco-aliked-b1-16.onnx"
 """The batch-dynamic RaCo-ALIKED graph; its engine is cached beside it.
@@ -82,7 +82,7 @@ def required_raco_graphs(features_backend: FeatureBackend, matching_backend: Mat
         graphs.append(RACO_LIGHTGLUE_ONNX_PATH)
     if matching_backend in ("flexglue", "flexglue_ort"):
         graphs.extend(FLEXGLUE_MODEL_DIR / name for name in FLEXGLUE_MODEL_FILES.values())
-    if matching_backend == "flexglue":
+    if matching_backend == "flexglue" and gpu_has_fp8():  # below sm_89 the matcher runs its prepared graph, no FP8 file
         graphs.append(FLEXGLUE_MODEL_DIR / FlexGlueOptions().fp8_file())  # a run keeps FlexGlue's default thresholds
     return tuple(graphs)
 

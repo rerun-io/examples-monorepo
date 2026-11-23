@@ -53,6 +53,7 @@ from colsfm.matching import (
     MatchingOptions,
     MatchReport,
     PairMatchStats,
+    gpu_has_fp8,
     require_no_geometries,
     spatial_cap,
     verification_options,
@@ -584,10 +585,11 @@ def match_pairs_flexglue(database_path: Path, pairs: Sequence[ImagePair], option
     flexglue_options: FlexGlueOptions = FlexGlueOptions(min_covisibility=options.flexglue_min_covisibility)
     models: Path = options.flexglue_model_dir
     matcher_graph: Path = prepare_matcher_graph(models / FLEXGLUE_MODEL_FILES["matcher_model_path_fp16"], models / "trt", flexglue_options)
-    fp8_graph: Path = check_fp8_graph(models, matcher_graph, flexglue_options)
+    # FP8 from Ada (sm_89) on; an older GPU runs the prepared graph, the matcher before the FP8 calibration.
+    matcher_source: Path = check_fp8_graph(models, matcher_graph, flexglue_options) if gpu_has_fp8() else matcher_graph
     descriptor_graph: Path = prepare_descriptor_graph(models / FLEXGLUE_MODEL_FILES["descriptor_model_path"], models / "trt")
     descriptor_engine: Path = resolve_engine(descriptor_graph, descriptor_profile(), precision="fp16-trunk")
-    matcher_engine: Path = resolve_engine(fp8_graph, matcher_profile(), precision="fp32")
+    matcher_engine: Path = resolve_engine(matcher_source, matcher_profile(), precision="fp32")
     owned: bool = frames is None
     source: FrameSource = open_frame_source(options.image_dir) if frames is None else frames
     try:

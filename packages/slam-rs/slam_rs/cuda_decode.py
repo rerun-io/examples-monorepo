@@ -13,6 +13,15 @@ from torch import Tensor
 
 from slam_rs.catalog_feed import ColorCopy, color_copy_size
 
+DECODE_BATCH_PIXELS: int = 32 * 1920 * 1920
+"""Pixels per NVDEC batch: 32 frames of a 1920 px lens (the float RGB of one batch is 12 bytes per pixel)."""
+
+
+def decode_batch_frames(resize_hw: tuple[int, int]) -> int:
+    """Frames per NVDEC batch: 32 up to 1920 x 1920, fewer for larger frames (8 at 3840 x 3840, where 32 frames of float
+    RGB alone are 5.7 GB and a 12 GB card runs out), at least one."""
+    return max(1, min(32, DECODE_BATCH_PIXELS // (resize_hw[0] * resize_hw[1])))
+
 
 def decode_gray_cuda(
     payload: bytes, resize_hw: tuple[int, int], downscale: int = 1, color_downscale: int | None = None
@@ -33,12 +42,13 @@ def decode_gray_cuda(
             raise ValueError(f"video resolution after downscale {downscale} is {source_resize_hw}, calibration says {resize_hw}")
         weights: Float32[Tensor, "1 3 1 1"] = rearrange(torch.tensor([0.299, 0.587, 0.114], device="cuda"), "c -> 1 c 1 1")
         color_wh: tuple[int, int] | None = None if color_downscale is None else color_copy_size(resize_hw[1], resize_hw[0], color_downscale)
-        for start in range(0, len(reader), 32):
-            rgb: UInt8[Tensor, "b 3 h w"] = reader.get_frames_in_range(start, min(start + 32, len(reader)))
+        batch: int = decode_batch_frames(resize_hw)
+        for start in range(0, len(reader), batch):
+            rgb: UInt8[Tensor, "b 3 h w"] = reader.get_frames_in_range(start, min(start + batch, len(reader)))
             rgb_float: Float32[Tensor, "b 3 h w"] = rgb.float()
             gray: UInt8[Tensor, "b h w"] = (rgb_float * weights).sum(dim=1).round().clamp(0, 255).to(dtype=torch.uint8)
             # One host copy per frame: a view into one batch array would leave its last holder (the consumer, behind
-            # the feed's prefetch) to unmap 32 frames at once, 118 MB on a 1920 px lens, every 32 framesets.
+            # the feed's prefetch) to unmap a whole batch at once (118 MB for 32 frames of a 1920 px lens).
             if color_wh is None:
                 for frame in gray:
                     yield frame.cpu().numpy(), None

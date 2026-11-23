@@ -159,6 +159,22 @@ class FlexGlueOptions:
 FLEXGLUE_FP8_COMMAND: Final[str] = "pixi run -e colsfm colsfm-flexglue-fp8"
 """Calibrates `FlexGlueOptions.fp8_file` on the Galileo frames (`tools/flexglue_fp8.py --image-dirs` for other frames)."""
 
+FP8_MIN_COMPUTE_CAPABILITY: Final[tuple[int, int]] = (8, 9)
+"""The first CUDA compute capability with FP8 tensor cores (Ada, sm_89); TensorRT refuses FP8 Q/DQ graphs below it."""
+
+
+def gpu_has_fp8() -> bool:
+    """Whether the current CUDA device runs FP8 (`FP8_MIN_COMPUTE_CAPABILITY`). Without it (an Ampere RTX 3060, sm_86)
+    the FlexGlue matcher runs its prepared bf16/fp32 graph, the matcher before the FP8 calibration, and needs no FP8 file.
+
+    Returns:
+        True on Ada and later; False on older GPUs and on hosts without CUDA.
+    """
+    import torch
+
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= FP8_MIN_COMPUTE_CAPABILITY
+
+
 MatcherVariant: TypeAlias = Literal["ALIKED_LIGHTGLUE", "ALIKED_BRUTEFORCE"]
 """The ALIKED matchers COLMAP 4.2 offers; the pipeline uses LightGlue."""
 

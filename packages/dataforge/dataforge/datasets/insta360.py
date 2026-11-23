@@ -25,8 +25,9 @@ Cube layer (``--cube``; off by default). ``cube`` holds the six-face cubemap of 
 the node, a static face-from-IMU ``Transform3D`` (``ChildFromParent``), a plain ``Pinhole`` (RDF) and an RGB AV1
 ``VideoStream`` on the source frameset's stamp. The tables come from the base recording's two cameras through
 ``MeiCamera.project``, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (the default when torch sees a GPU) the
-stage stays on the GPU (the dataforge-cuda env): NVDEC decode, one remap per face, NVENC from device memory; ``cpu``
-decodes with PyAV and remaps with OpenCV behind the same API, and encodes on NVENC when the host has it, else SVT-AV1.
+stage stays on the GPU (the dataforge-cuda env): NVDEC decode, one remap per face, NVENC from device memory (SVT-AV1 from
+host memory where NVENC does not encode AV1, e.g. Ampere); ``cpu`` decodes with PyAV and remaps with OpenCV behind the
+same API, and encodes on NVENC when the host has it, else SVT-AV1.
 
 Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)`` of a
 ``W``-wide panorama (pixel centres at integers) looks along longitude ``lon = (u + 0.5) 2 pi / W - pi / 2``,
@@ -249,9 +250,11 @@ def av1_nvenc_encodes() -> bool:
     return True
 
 
-def av1_codec(device: torch.device) -> Literal["av1_nvenc", "libsvtav1"]:
-    """The AV1 encoder of a layer joined on ``device``: NVENC on ``cuda`` or where the host's NVENC encodes AV1, else SVT-AV1."""
-    return "av1_nvenc" if device.type == "cuda" or av1_nvenc_encodes() else "libsvtav1"
+def av1_codec() -> Literal["av1_nvenc", "libsvtav1"]:
+    """The AV1 encoder of a layer: NVENC where the host's NVENC encodes AV1, else SVT-AV1. A CUDA GPU is not enough:
+    NVENC encodes AV1 from Ada (RTX 40xx) on, so an Ampere card such as the RTX 3060 joins on ``cuda`` and encodes in
+    software (``encode_videos`` then feeds the encoder from host memory)."""
+    return "av1_nvenc" if av1_nvenc_encodes() else "libsvtav1"
 
 
 def encode_videos(
@@ -270,7 +273,8 @@ def encode_videos(
 
     ``av1_nvenc``: one NVENC session per stream (preset p4, vbr at ``cq``), every encoder slot reserved before the first
     encoder opens, so a busy host waits for all of them at once instead of opening some and stalling the rest.
-    ``libsvtav1``: the software encoder at CRF ``cq``, for a host without NVENC.
+    ``libsvtav1``: the software encoder at CRF ``cq``, for a host whose NVENC does not encode AV1; pictures on a CUDA
+    ``device`` are copied to host memory for it.
 
     Returns:
         Frames each encoder took.
@@ -283,16 +287,17 @@ def encode_videos(
     settings: dict[str, object] = (
         {"preset": NVENC_PRESET, "extra_options": nvenc_av1_options(gop=gop, cq=cq)} if codec == "av1_nvenc" else {"preset": SVTAV1_PRESET, "crf": cq, "extra_options": {"g": gop}}
     )
+    feed: torch.device = device if codec == "av1_nvenc" else torch.device("cpu")
     fed: int = 0
     with nvenc_slot(len(videos)) if codec == "av1_nvenc" else contextlib.nullcontext(), contextlib.ExitStack() as opened:
         video_streams = []
         for video in videos:
             encoder = Encoder()
-            video_streams.append(encoder.add_video(height=height, width=width, frame_rate=LENS_FPS, device=device, codec=codec, **settings))  # pyrefly: ignore[bad-argument-type]
+            video_streams.append(encoder.add_video(height=height, width=width, frame_rate=LENS_FPS, device=feed, codec=codec, **settings))  # pyrefly: ignore[bad-argument-type]
             opened.enter_context(encoder.open_file(video))
         for batch in batches:
             for video_stream, pictures in zip(video_streams, batch, strict=True):
-                video_stream.add_frames(pictures)
+                video_stream.add_frames(pictures.to(feed))
             fed += batch.shape[1]
     return fed
 
@@ -346,8 +351,8 @@ class Insta360Config(FrameLimitedConfig):
     cube_gop: int = 10
     """Face keyframe interval in sampled framesets."""
     cube_device: Literal["cuda", "cpu"] | None = None
-    """Where the faces are decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory; the dataforge-cuda
-    env) or ``cpu`` (PyAV, OpenCV remap; NVENC when the host has it, else software AV1). None: ``cuda`` when torch sees a GPU."""
+    """Where the faces are decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory, or SVT-AV1 where NVENC
+    does not encode AV1; the dataforge-cuda env) or ``cpu`` (PyAV, OpenCV remap; NVENC when the host has it, else software AV1). None: ``cuda`` when torch sees a GPU."""
 
 
 class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
@@ -480,7 +485,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     gop=self.config.pano_gop,
                     cq=self.config.pano_cq,
                     device=device,
-                    codec=av1_codec(device),
+                    codec=av1_codec(),
                 )
             if fed != rig.num_frames:
                 raise ValueError(f"the panorama encoder took {fed} frames for {rig.num_frames} framesets")
@@ -540,7 +545,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     gop=self.config.cube_gop,
                     cq=self.config.cube_cq,
                     device=device,
-                    codec=av1_codec(device),
+                    codec=av1_codec(),
                 )
             if fed != indices.size:
                 raise ValueError(f"the face encoders took {fed} frames for {indices.size} framesets")
