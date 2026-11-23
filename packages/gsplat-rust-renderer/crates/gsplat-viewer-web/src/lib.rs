@@ -52,15 +52,55 @@ pub fn install_gsplat_hooks() {
         })
         .ok();
     re_viewer::web_hooks::SETUP_APP
-        .set(
-            |app| match gsplat_viewer::setup::register_compute_splats(app) {
+        .set(|app| {
+            match gsplat_viewer::setup::register_compute_splats(app) {
                 Ok(()) => re_log::info!("gsplat web viewer: compute splat renderer registered"),
                 Err(err) => {
                     re_log::error!("gsplat web viewer: compute splat registration failed: {err}")
                 }
-            },
-        )
+            }
+            let browser = js_sys::Reflect::has(&js_sys::global(), &"DecompressionStream".into())
+                .unwrap_or(false);
+            if browser {
+                gsplat_viewer::asog::BROWSER_INFLATE.set(browser_inflate).ok();
+            }
+            re_log::info!(
+                "gsplat web viewer: ASOG inflate {}",
+                if browser {
+                    "in the browser (DecompressionStream, all streams at once, the frame thread does not wait)"
+                } else {
+                    "in wasm on the frame thread (no DecompressionStream)"
+                }
+            );
+        })
         .ok();
+}
+
+/// Inflate zlib members with the browser's `DecompressionStream("deflate")` (the zlib wrapper; "deflate-raw" is
+/// raw deflate), all at once; `done` runs from the event loop when every member is back.
+fn browser_inflate(members: Vec<Vec<u8>>, done: gsplat_viewer::asog::InflateDone) {
+    wasm_bindgen_futures::spawn_local(async move {
+        done(inflate_all(&members).await.map_err(|e| format!("{e:?}")));
+    });
+}
+
+async fn inflate_all(members: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, wasm_bindgen::JsValue> {
+    let pending = js_sys::Array::new();
+    for member in members {
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(member.as_slice()));
+        let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)?;
+        let inflate = web_sys::DecompressionStream::new(web_sys::CompressionFormat::Deflate)?;
+        let pair = web_sys::ReadableWritablePair::new(&inflate.readable(), &inflate.writable());
+        let response = web_sys::Response::new_with_opt_readable_stream(Some(
+            &blob.stream().pipe_through(&pair),
+        ))?;
+        pending.push(&wasm_bindgen::JsValue::from(response.array_buffer()?));
+    }
+    let buffers = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&pending)).await?;
+    Ok(js_sys::Array::from(&buffers)
+        .iter()
+        .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
+        .collect())
 }
 
 /// `<name>=1` in the page's query string: `force_no_subgroups` behaves as if the adapter lacked "subgroups";

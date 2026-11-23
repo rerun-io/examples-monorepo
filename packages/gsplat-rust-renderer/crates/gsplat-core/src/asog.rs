@@ -220,30 +220,96 @@ pub fn parse(bytes: &[u8]) -> Result<Container<'_>, Error> {
     Ok(Container { manifest, payload })
 }
 
-impl Container<'_> {
+impl<'a> Container<'a> {
     fn desc(&self, name: &'static str) -> Option<&StreamDesc> {
         self.manifest.streams.iter().find(|s| s.name == name)
     }
 
-    /// Stream `name` as splat-major integers (`out[i * channels + c]`), with its channel count.
-    pub fn stream(&self, name: &'static str) -> Result<Option<(Vec<i64>, usize)>, Error> {
+    /// The zlib member of stream `name`, if the file has the stream.
+    fn member(&self, name: &'static str) -> Result<Option<(&StreamDesc, &'a [u8])>, Error> {
         let Some(desc) = self.desc(name) else {
             return Ok(None);
-        };
-        let problem = |problem: String| Error::Stream {
-            name: name.into(),
-            problem,
         };
         let data = desc
             .byte_offset
             .checked_add(desc.byte_length)
             .and_then(|end| self.payload.get(desc.byte_offset..end))
-            .ok_or_else(|| problem("runs past the payload".into()))?;
-        Ok(Some((
-            decode_stream(desc, data).map_err(problem)?,
-            desc.channels,
-        )))
+            .ok_or_else(|| Error::Stream {
+                name: name.into(),
+                problem: "runs past the payload".into(),
+            })?;
+        Ok(Some((desc, data)))
     }
+
+    /// Stream `name` as splat-major integers (`out[i * channels + c]`), with its channel count.
+    pub fn stream(&self, name: &'static str) -> Result<Option<(Vec<i64>, usize)>, Error> {
+        let Some((desc, data)) = self.member(name)? else {
+            return Ok(None);
+        };
+        let values = decode_stream(desc, data).map_err(|problem| Error::Stream {
+            name: name.into(),
+            problem,
+        })?;
+        Ok(Some((values, desc.channels)))
+    }
+}
+
+/// One stream's zlib member, for an inflate outside this crate.
+pub struct ZlibMember<'a> {
+    pub name: &'static str,
+    pub data: &'a [u8],
+    pub inflated_len: usize,
+}
+
+impl ZlibMember<'_> {
+    /// The member inflated here (miniz), as the tests' stand-in for the browser's inflate.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn inflate(&self) -> Result<Vec<u8>, String> {
+        miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(self.data, self.inflated_len)
+            .map_err(|e| format!("{}: zlib: {e:?}", self.name))
+    }
+}
+
+/// The zlib members of the streams [`decode_parts`] reads, in the order [`decode_parts_inflated`] takes them.
+///
+/// The web viewer hands them to the browser's `DecompressionStream("deflate")` (the zlib wrapper).
+pub fn zlib_members(bytes: &[u8]) -> Result<Vec<ZlibMember<'_>>, Error> {
+    let container = parse(bytes)?;
+    let mut out = Vec::new();
+    for name in STREAMS {
+        if let Some((desc, data)) = container.member(name)? {
+            out.push(ZlibMember {
+                name,
+                data,
+                inflated_len: desc.count * desc.channels * desc.planes,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// [`decode_parts`] from streams inflated elsewhere, in [`zlib_members`] order: the byte-plane merge, zigzag /
+/// delta undo and the texel and motion-code assembly run here, on the calling thread.
+pub fn decode_parts_inflated(
+    bytes: &[u8],
+    active_threshold: f32,
+    inflated: Vec<Vec<u8>>,
+) -> Result<AsogParts, Error> {
+    let container = parse(bytes)?;
+    let mut streams = Streams::decode(&container, false);
+    let mut inflated = inflated.into_iter();
+    for (index, name) in STREAMS.into_iter().enumerate() {
+        let Some((desc, _)) = container.member(name)? else {
+            continue;
+        };
+        let raw = inflated.next().ok_or(Error::MissingStream(name))?;
+        let values = undo_stream(desc, &raw).map_err(|problem| Error::Stream {
+            name: name.into(),
+            problem,
+        });
+        streams.ahead[index] = Some(values.map(|values| Some((values, desc.channels))));
+    }
+    assemble(&container, &mut streams, active_threshold)
 }
 
 /// Every stream [`decode_parts`] reads.
@@ -329,6 +395,16 @@ pub fn decode_stream(desc: &StreamDesc, data: &[u8]) -> Result<Vec<i64>, String>
     let expected = count * channels * planes;
     let raw = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, expected)
         .map_err(|e| format!("zlib: {e:?}"))?;
+    undo_stream(desc, &raw)
+}
+
+/// One stream's inflated bytes (byte planes) -> splat-major integers: plane merge, zigzag and delta undone.
+fn undo_stream(desc: &StreamDesc, raw: &[u8]) -> Result<Vec<i64>, String> {
+    let (count, channels, planes) = (desc.count, desc.channels, desc.planes);
+    if planes == 0 || planes > 8 {
+        return Err(format!("{planes} byte planes"));
+    }
+    let expected = count * channels * planes;
     if raw.len() != expected {
         return Err(format!("inflated {} bytes, expected {expected}", raw.len()));
     }
@@ -417,6 +493,42 @@ pub struct AsogParts {
 }
 
 impl AsogParts {
+    /// A hash of every array the de-quantisers read (texel planes, SH planes, motion codes, codebooks, bounds), the
+    /// same on 32- and 64-bit targets (lengths are hashed as u64), so the web and native decodes can be compared.
+    pub fn content_hash(&self) -> u64 {
+        use std::hash::Hasher as _;
+        let mut h = std::hash::DefaultHasher::new();
+        let mut bytes = |b: &[u8]| {
+            h.write_u64(b.len() as u64);
+            h.write(b);
+        };
+        for plane in [
+            &self.means_l,
+            &self.means_u,
+            &self.quats,
+            &self.scales,
+            &self.sh0,
+        ] {
+            bytes(plane);
+        }
+        if let Some((bands, count, labels, centroids)) = &self.sh {
+            bytes(&u64::from(*bands).to_le_bytes());
+            bytes(&(*count as u64).to_le_bytes());
+            bytes(labels);
+            bytes(centroids);
+        }
+        bytes(bytemuck::cast_slice(&self.motion_codes));
+        let q = &self.quantization;
+        bytes(&(q.count as u64).to_le_bytes());
+        for v in q.means_min.iter().chain(&q.means_max) {
+            bytes(&v.to_le_bytes());
+        }
+        for table in [&q.scales, &q.sh0, &q.sh_rest] {
+            bytes(bytemuck::cast_slice(table.as_slice()));
+        }
+        h.finish()
+    }
+
     /// The texel planes as [`Planes`] (borrowed).
     pub fn planes(&self) -> Planes<'_> {
         Planes {
@@ -555,6 +667,15 @@ fn decode_parts_with(
 ) -> Result<AsogParts, Error> {
     let container = parse(bytes)?;
     let mut streams = Streams::decode(&container, parallel);
+    assemble(&container, &mut streams, active_threshold)
+}
+
+/// The texel planes, SH planes and motion codes from the decoded streams.
+fn assemble(
+    container: &Container<'_>,
+    streams: &mut Streams<'_, '_>,
+    active_threshold: f32,
+) -> Result<AsogParts, Error> {
     let m = &container.manifest;
     let n = m.count;
     let means = streams.shaped("means", n, 3)?;
@@ -633,10 +754,10 @@ fn decode_parts_with(
             None => [0.0; 256],
         },
     };
-    let motion_codes = motion_codes(m, opacity, &mut streams)?;
+    let motion_codes = motion_codes(m, opacity, streams)?;
     let [means_l, means_u, quats, scales, sh0] = planes;
     Ok(AsogParts {
-        manifest: container.manifest,
+        manifest: container.manifest.clone(),
         quantization,
         means_l,
         means_u,

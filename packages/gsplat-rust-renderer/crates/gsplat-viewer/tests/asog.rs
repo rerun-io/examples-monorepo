@@ -247,39 +247,14 @@ fn evaluate_matches_the_reference() {
 /// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
 /// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
 /// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
-/// Hash of every array `sog_dequant.wgsl` and `asog_motion.wgsl` read (texel planes, SH planes, motion codes,
-/// codebooks and bounds).
-fn parts_hash(p: &gsplat_core::asog::AsogParts) -> u64 {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut h = std::hash::DefaultHasher::new();
-    (
-        &p.means_l,
-        &p.means_u,
-        &p.quats,
-        &p.scales,
-        &p.sh0,
-        &p.sh,
-        &p.motion_codes,
-    )
-        .hash(&mut h);
-    let q = &p.quantization;
-    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
-    (
-        q.count,
-        q.means_min.map(f64::to_bits),
-        q.means_max.map(f64::to_bits),
-        bits(&q.scales),
-        bits(&q.sh0),
-        bits(&q.sh_rest),
-    )
-        .hash(&mut h);
-    h.finish()
-}
-
-/// The parallel inflate of `decode_parts` gives the serial result bit for bit: on the fixture, and on
-/// `GSPLAT_ASOG_FILE` when it is set (whole trained clips).
+/// The parallel inflate of `decode_parts` and the outside-inflate entry (`zlib_members` + `decode_parts_inflated`, the
+/// web viewer's `DecompressionStream` path) give the serial result bit for bit: on the fixture, and on
+/// `GSPLAT_ASOG_FILE` when it is set (whole trained clips). `AsogParts::content_hash` is the hash the web viewer logs.
 #[test]
-fn parallel_inflate_gives_the_serial_parts() {
+fn parallel_and_outside_inflate_give_the_serial_parts() {
+    use gsplat_core::asog::{
+        decode_parts, decode_parts_inflated, decode_parts_serial, zlib_members,
+    };
     let all = chunks(FIXTURE);
     let fixture =
         row(&all["/asog"], "AnimatedSogSplats3D", "asog").expect("AnimatedSogSplats3D:asog");
@@ -294,17 +269,29 @@ fn parallel_inflate_gives_the_serial_parts() {
         ));
     }
     for (name, bytes) in files {
-        let parallel =
-            gsplat_core::asog::decode_parts(&bytes, ASOG_ACTIVE_THRESHOLD).expect("decode_parts");
-        let serial =
-            gsplat_core::asog::decode_parts_serial(&bytes, ASOG_ACTIVE_THRESHOLD).expect("serial");
-        let (a, b) = (parts_hash(&parallel), parts_hash(&serial));
+        let t = ASOG_ACTIVE_THRESHOLD;
+        let serial = decode_parts_serial(&bytes, t)
+            .expect("serial")
+            .content_hash();
+        let parallel = decode_parts(&bytes, t)
+            .expect("decode_parts")
+            .content_hash();
+        let inflated = zlib_members(&bytes)
+            .expect("zlib_members")
+            .iter()
+            .map(|m| m.inflate().expect("zlib"))
+            .collect();
+        let outside = decode_parts_inflated(&bytes, t, inflated)
+            .expect("decode_parts_inflated")
+            .content_hash();
         println!(
-            "{name}: {} rows, parallel {a:016x}, serial {b:016x}",
-            parallel.quantization.count
+            "{name}: content hash serial {serial:016x}, parallel {parallel:016x}, outside inflate {outside:016x}"
         );
-        assert_eq!(a, b, "{name}: parallel and serial inflate differ");
-        assert_eq!(parallel.motion_codes, serial.motion_codes);
+        assert_eq!(
+            parallel, serial,
+            "{name}: parallel and serial inflate differ"
+        );
+        assert_eq!(outside, serial, "{name}: outside inflate and serial differ");
     }
 }
 

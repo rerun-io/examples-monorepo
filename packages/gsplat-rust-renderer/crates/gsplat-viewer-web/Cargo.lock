@@ -3977,9 +3977,11 @@ version = "0.1.0"
 dependencies = [
  "gsplat-core",
  "gsplat-viewer",
+ "js-sys",
  "re_log",
  "re_viewer",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
 ]

@@ -374,6 +374,21 @@ fn draw_splat_entity(
                 .memoizer::<crate::asog::AsogCache, _>(|cache| cache.info(generation, bytes));
             match info {
                 Ok(info) => {
+                    // Web: the browser inflates the streams first; nothing of ours draws until they arrive.
+                    let egui = ctx.egui_ctx().clone();
+                    let browser = ctx
+                        .viewer_ctx
+                        .store_context
+                        .memoizer::<crate::asog::AsogCache, _>(|cache| {
+                            cache.browser(generation, bytes, threshold, move || {
+                                egui.request_repaint();
+                            })
+                        });
+                    let inflated = match browser {
+                        crate::asog::Browser::Pending => continue,
+                        crate::asog::Browser::Ready(inflated) => Some(inflated),
+                        crate::asog::Browser::Unused => None,
+                    };
                     // Decoded once per payload; a time change is one motion dispatch in the view (time not in the key).
                     let t =
                         crate::trigs::clip_seconds(time_type, query.latest_at, info.fps, origin);
@@ -382,6 +397,7 @@ fn draw_splat_entity(
                         active_threshold: threshold,
                         info,
                         preview: &native,
+                        inflated: inflated.as_deref(),
                     };
                     retry |= draw_instances(
                         entity,
@@ -392,6 +408,13 @@ fn draw_splat_entity(
                         render_mode,
                         t,
                     )?;
+                    if inflated.is_some() {
+                        ctx.viewer_ctx
+                            .store_context
+                            .memoizer::<crate::asog::AsogCache, _>(|cache| {
+                                cache.uploaded(generation);
+                            });
+                    }
                     continue;
                 }
                 Err(error) => report(
