@@ -1,4 +1,4 @@
-"""Uninstrumented subprocess entry point for dynamic-batch MoGe ONNX export."""
+"""Uninstrumented subprocess entry point for MoGe ONNX export (dynamic batch, optionally dynamic size)."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,16 +16,16 @@ class Config:
     """Head set to export in the clean interpreter."""
     encoder: Encoder
     """DINOv2 encoder size."""
-    height: int
-    """Static network height."""
-    width: int
-    """Static network width."""
     resolution_level: int
     """Detail level from 0 through 9."""
     max_batch_size: int
     """Largest batch encoded in the dynamic ONNX constraint."""
     cache_dir: Path
     """Cache root; the graph lands in ``cache_dir / "onnx"``."""
+    height: int | None = None
+    """Static network height; None with ``width`` None exports the dynamic graph."""
+    width: int | None = None
+    """Static network width."""
 
 
 def main(config: Config) -> None:
@@ -33,7 +33,7 @@ def main(config: Config) -> None:
     export_moge_v2_onnx(
         heads=config.heads,
         encoder=config.encoder,
-        image_hw=(config.height, config.width),
+        image_hw=None if config.height is None or config.width is None else (config.height, config.width),
         resolution_level=config.resolution_level,
         max_batch_size=config.max_batch_size,
         cache_dir=config.cache_dir,

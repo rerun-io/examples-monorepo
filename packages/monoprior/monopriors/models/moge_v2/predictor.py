@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias
 
 import torch
 import torch.nn.functional as F
@@ -12,12 +12,15 @@ from torch import Tensor
 
 from monopriors.models.moge_v2.export import (
     DEFAULT_CACHE_DIR,
+    DYNAMIC_ONNX_MAX_BATCH,
+    DYNAMIC_OPT_ASPECT,
     FORWARD_HEADS,
     ONNX_OUTPUT_NAMES,
     Encoder,
     HardwareCompatibility,
     HeadSet,
     aspect_buckets,
+    dynamic_patch_range,
     export_moge_v2_onnx,
     load_pinned_moge_v2,
     moge_v2_onnx_path,
@@ -30,11 +33,19 @@ from monopriors.third_party.moge.model._inference import CameraRecovery, recover
 from monopriors.third_party.moge.model.v2 import ForwardOutput, MoGeModel
 
 if TYPE_CHECKING:
-    from trtkit import TrtBuildConfig
+    from trtkit import TensorRtDynamicRuntime, TrtBuildConfig
     from trtkit.base import TensorRuntime
 else:
     TensorRuntime = object
+    TensorRtDynamicRuntime = object
     TrtBuildConfig = object
+
+
+_Runtime: TypeAlias = TensorRuntime | TensorRtDynamicRuntime
+"""A static engine's batch-only runtime or the dynamic engine's runtime."""
+
+MoGeV2EngineProfile: TypeAlias = Literal["dynamic", "static"]
+"""``dynamic`` (default): one engine over a range of token grids; ``static``: one engine per network size."""
 
 
 class MoGeV2NormalOutput(NamedTuple):
@@ -293,7 +304,12 @@ class MoGeV2TorchPredictor(_MoGeV2Predictor):
 
 
 class MoGeV2TrtPredictor(_MoGeV2Predictor):
-    """One cached TensorRT sibling for normal-only or full geometry heads."""
+    """One cached TensorRT sibling for normal-only or full geometry heads.
+
+    ``profile="dynamic"`` (default): one engine per GPU, encoder, head set and detail level serves every token grid of
+    aspect 1:2 through 2:1 (``dynamic_patch_range``); each image runs at its own token grid, as the torch twin does.
+    ``profile="static"``: one engine per network size, the size baked into the graph.
+    """
 
     def __init__(
         self,
@@ -306,23 +322,27 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         hardware_compatibility: HardwareCompatibility = "none",
         use_cuda_graph: bool = False,
         builder_optimization_level: int = 5,
+        profile: MoGeV2EngineProfile = "dynamic",
     ) -> None:
-        """Configure eager fixed-size or lazy bucketed TensorRT runtimes.
+        """Configure the TensorRT runtime(s); one supplied network size builds (or loads) the engine eagerly.
 
         Args:
             encoder: DINOv2 encoder size.
             heads: Normal-only or full-geometry head set.
-            network_hw_options: Candidate static sizes. ``None`` derives five
-                aspect buckets; one supplied size builds eagerly.
+            network_hw_options: Candidate network sizes; each image takes the one nearest its aspect. ``None``: the
+                image's own token grid (dynamic) or five aspect buckets (static). The dynamic profile runs the token
+                grid of the chosen size's aspect, which is the grid MoGe itself derives from that size.
             resolution_level: Detail level from 0 through 9.
             batch_size: Engine profile maximum and optimization batch.
             cache_dir: Cache root for ONNX and TensorRT artifacts.
             hardware_compatibility: TensorRT plan portability level.
-            use_cuda_graph: Whether runtimes capture launches in CUDA graphs.
+            use_cuda_graph: Whether runtimes capture launches in CUDA graphs (dynamic: one graph per input shape).
             builder_optimization_level: TensorRT builder optimization level.
+            profile: ``dynamic`` (one engine over a range of token grids) or ``static`` (one engine per network size).
 
         Raises:
-            ValueError: If batch size or supplied network sizes are invalid.
+            ValueError: If batch size or supplied network sizes are invalid, or a supplied size is outside the
+                dynamic profile.
         """
         if batch_size < 1:
             raise ValueError(f"batch_size must be positive, got {batch_size}.")
@@ -331,77 +351,142 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
                 raise ValueError("network_hw_options must contain at least one size when provided.")
             if any(height < 1 or width < 1 for height, width in network_hw_options):
                 raise ValueError(f"MoGe v2 network dimensions must be positive, got {network_hw_options}.")
-        num_tokens: int = resolve_num_tokens(resolution_level)
+        self.num_tokens: int = resolve_num_tokens(resolution_level)
         self.encoder: Encoder = encoder
         self.heads: HeadSet = heads
-        self.network_hw_options: tuple[tuple[int, int], ...] = aspect_buckets(num_tokens) if network_hw_options is None else network_hw_options
+        self.profile: MoGeV2EngineProfile = profile
+        self.network_hw_options: tuple[tuple[int, int], ...] | None = (
+            aspect_buckets(self.num_tokens) if network_hw_options is None and profile == "static" else network_hw_options
+        )
         self.resolution_level: int = resolution_level
         self.batch_size: int = batch_size
         self.cache_dir: Path = cache_dir
         self.hardware_compatibility: HardwareCompatibility = hardware_compatibility
         self.use_cuda_graph: bool = use_cuda_graph
         self.builder_optimization_level: int = builder_optimization_level
-        self.runtimes: dict[tuple[int, int], TensorRuntime] = {}
-        if len(self.network_hw_options) == 1:
-            self._ensure_runtime(self.network_hw_options[0])
+        self.patch_range: tuple[int, int] = dynamic_patch_range(self.num_tokens)
+        """Per-axis token-grid range of the dynamic engine, in patches."""
+        self.runtimes: dict[tuple[int, int] | None, _Runtime] = {}
+        """Built runtimes by network size; the dynamic engine's key is None."""
+        if network_hw_options is not None:
+            for option_hw in network_hw_options:
+                self.network_hw(option_hw)  # fail at construction on a size the dynamic engine cannot serve
+            if len(network_hw_options) == 1:
+                self._ensure_runtime(self.network_hw(network_hw_options[0]))
 
-    def _build_config(self) -> TrtBuildConfig:
-        """The TensorRT build settings every engine of this predictor uses (part of the engine cache key)."""
-        from trtkit import TrtBuildConfig
+    def network_hw(self, input_hw: tuple[int, int]) -> tuple[int, int]:
+        """The network size an ``input_hw`` image runs at.
 
-        return TrtBuildConfig(
+        Raises:
+            ValueError: If the dynamic engine's range does not hold that token grid (an aspect beyond 1:2 or 2:1).
+        """
+        selected_hw: tuple[int, int] = input_hw if self.network_hw_options is None else select_aspect_bucket(input_hw, self.network_hw_options)
+        if self.profile == "static":
+            return selected_hw
+        grid_hw: tuple[int, int] = token_grid_hw(selected_hw[1] / selected_hw[0], self.num_tokens)
+        low, high = self.patch_range
+        if not (low <= grid_hw[0] // 14 <= high and low <= grid_hw[1] // 14 <= high):
+            raise ValueError(
+                f"MoGe v2 token grid {grid_hw[0]}x{grid_hw[1]} of a {input_hw[0]}x{input_hw[1]} image is outside the dynamic engine "
+                f"({14 * low}-{14 * high} px per side, aspects 1:2 to 2:1); use profile='static' for it."
+            )
+        return grid_hw
+
+    def _engine_spec(self, network_hw: tuple[int, int]) -> tuple[Path, TrtBuildConfig]:
+        """ONNX path and build settings (the engine cache key) of the engine that serves ``network_hw``."""
+        from trtkit import InputShapeProfile, TrtBuildConfig
+
+        if self.profile == "static":
+            onnx_path: Path = moge_v2_onnx_path(self.heads, self.encoder, network_hw, self.resolution_level, self.cache_dir)
+            shape_profiles: tuple[InputShapeProfile, ...] = ()
+        else:
+            onnx_path = moge_v2_onnx_path(self.heads, self.encoder, None, self.resolution_level, self.cache_dir)
+            low, high = self.patch_range
+            opt_hw: tuple[int, int] = token_grid_hw(DYNAMIC_OPT_ASPECT, self.num_tokens)
+            shape_profiles = (
+                InputShapeProfile(
+                    name="image",
+                    min_shape=(1, 3, 14 * low, 14 * low),
+                    opt_shape=(self.batch_size, 3, *opt_hw),
+                    max_shape=(self.batch_size, 3, 14 * high, 14 * high),
+                ),
+            )
+        config: TrtBuildConfig = TrtBuildConfig(
             max_batch_size=self.batch_size,
             opt_batch_size=self.batch_size,
             builder_optimization_level=self.builder_optimization_level,
             hardware_compatibility=self.hardware_compatibility,
+            runtime_activation_resize=self.profile == "dynamic",
+            shape_profiles=shape_profiles,
         )
+        return onnx_path, config
 
     def has_engine(self, input_hw: tuple[int, int]) -> bool:
-        """Whether the engine for the network size an ``input_hw`` image uses is already built on this machine; checks
-        the caches only (no export, no build), so a caller can fall back to the torch predictor instead of waiting for a
-        build. False in an environment without trtkit."""
+        """Whether the engine for an ``input_hw`` image is already built on this machine; checks the caches only (no
+        export, no build), so a caller can fall back to the torch predictor instead of waiting for a build. Dynamic:
+        true for every in-range size once the one engine exists; an out-of-range size is false. False in an
+        environment without trtkit."""
         try:
             from trtkit.trt_builder import cached_engine_path, onnx_content_hash
         except ImportError:
             return False
 
-        network_hw: tuple[int, int] = select_aspect_bucket(input_hw, self.network_hw_options)
-        onnx_path: Path = moge_v2_onnx_path(self.heads, self.encoder, network_hw, self.resolution_level, self.cache_dir)
+        try:
+            network_hw: tuple[int, int] = self.network_hw(input_hw)
+        except ValueError:
+            return False
+        onnx_path, config = self._engine_spec(network_hw)
         if not onnx_path.exists():
             return False
         trt_dir: Path = self.cache_dir / "trt"
         # The digest record lives in this predictor's cache, as ensure_engine keeps it (else the whole ONNX is hashed again).
         digest: str = onnx_content_hash(onnx_path, cache_dir=trt_dir)
-        return cached_engine_path(onnx_path, self._build_config(), cache_dir=trt_dir, onnx_sha256=digest).exists()
+        return cached_engine_path(onnx_path, config, cache_dir=trt_dir, onnx_sha256=digest).exists()
 
-    def _ensure_runtime(self, image_hw: tuple[int, int]) -> TensorRuntime:
-        """Build or load the runtime for one static network size."""
-        existing_runtime: TensorRuntime | None = self.runtimes.get(image_hw)
+    def _ensure_runtime(self, network_hw: tuple[int, int]) -> _Runtime:
+        """Build or load the runtime that serves one network size."""
+        key: tuple[int, int] | None = network_hw if self.profile == "static" else None
+        existing_runtime: _Runtime | None = self.runtimes.get(key)
         if existing_runtime is not None:
             return existing_runtime
 
         from trtkit import ensure_engine
 
-        onnx_path: Path = export_moge_v2_onnx(
+        onnx_path, config = self._engine_spec(network_hw)
+        export_moge_v2_onnx(
             heads=self.heads,
             encoder=self.encoder,
-            image_hw=image_hw,
+            image_hw=key,
             resolution_level=self.resolution_level,
-            max_batch_size=self.batch_size,
+            max_batch_size=self.batch_size if self.profile == "static" else DYNAMIC_ONNX_MAX_BATCH,
             cache_dir=self.cache_dir,
         )
-        engine_path: Path = ensure_engine(onnx_path, self._build_config(), cache_dir=self.cache_dir / "trt")
+        engine_path: Path = ensure_engine(onnx_path, config, cache_dir=self.cache_dir / "trt")
 
-        from trtkit.tensorrt_runtime import TensorRtRuntime
+        runtime: _Runtime
+        if self.profile == "static":
+            from trtkit.tensorrt_runtime import TensorRtRuntime
 
-        runtime: TensorRuntime = TensorRtRuntime(engine_path, use_cuda_graph=self.use_cuda_graph)
-        self.runtimes[image_hw] = runtime
+            runtime = TensorRtRuntime(engine_path, use_cuda_graph=self.use_cuda_graph)
+        else:
+            from trtkit import TensorRtDynamicRuntime as DynamicRuntime
+
+            # Direct binding: no copy into max-shape buffers; outputs are views valid until the next call, the
+            # contract forward_* already states. Activation memory sized per shape: the profile's max corner needs
+            # about twice what a real token grid does (ViT-L, level 9, batch 8 on a 5090: 10.5 vs 5.2 GiB). CUDA
+            # graphs need fixed addresses, so they take the copying path with max-shape memory.
+            runtime = DynamicRuntime(
+                engine_path,
+                use_cuda_graph=self.use_cuda_graph,
+                direct_binding=not self.use_cuda_graph,
+                per_shape_activation_memory=not self.use_cuda_graph,
+            )
+        self.runtimes[key] = runtime
         return runtime
 
     def _run_graph(self, rgb_bhw3: UInt8[Tensor, "b h w 3"]) -> dict[str, Tensor]:
-        input_hw: tuple[int, int] = (rgb_bhw3.shape[1], rgb_bhw3.shape[2])
-        network_hw: tuple[int, int] = select_aspect_bucket(input_hw, self.network_hw_options)
-        runtime: TensorRuntime = self._ensure_runtime(network_hw)
-        image_b3hw: Float32[Tensor, "b 3 nh nw"] = preprocess_rgb(rgb_bhw3, network_hw)
+        network_hw: tuple[int, int] = self.network_hw((rgb_bhw3.shape[1], rgb_bhw3.shape[2]))
+        runtime: _Runtime = self._ensure_runtime(network_hw)
+        image_b3hw: Float32[Tensor, "b 3 nh nw"] = preprocess_rgb(rgb_bhw3, network_hw).contiguous()
         runtime_output: dict[str, Tensor] = runtime({"image": image_b3hw})
         return {name: runtime_output[name].float() for name in ONNX_OUTPUT_NAMES[self.heads]}

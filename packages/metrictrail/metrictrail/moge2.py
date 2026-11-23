@@ -196,8 +196,8 @@ class MoGe2Engine:
     """MoGe-2 (normal checkpoint) forwards with a per-source-frame cache of the raw outputs.
 
     ``predictor_factory(network_hw)`` returns an object with monoprior's ``forward_geometry(rgb_u8_bhw3)``; the
-    default builds, per token grid, a TensorRT engine (batch 1) or shares one torch FP16-autocast model. Tests inject
-    fakes.
+    default shares one predictor across token grids: monoprior's dynamic TensorRT engine (batch 1) or one torch
+    FP16-autocast model. Tests inject fakes.
     """
 
     def __init__(
@@ -219,7 +219,7 @@ class MoGe2Engine:
         self.cache_frames: int = int(cache_frames)
         self._factory: Callable[[tuple[int, int]], Any] = predictor_factory if predictor_factory is not None else self._default_predictor
         self._predictors: dict[tuple[int, int], Any] = {}
-        self._torch_predictor: Any = None
+        self._shared_predictor: Any = None
         self._cache: OrderedDict[ImageKey, MoGe2Forward] = OrderedDict()
         self.forward_count: int = 0
         self.postprocess_count: int = 0
@@ -233,25 +233,18 @@ class MoGe2Engine:
         return token_grid_hw(image_hw[1] / image_hw[0], resolve_num_tokens(resolution_level))
 
     def _default_predictor(self, network_hw: tuple[int, int]) -> Any:
+        """One predictor for every grid; network_hw_options=None runs each input at its own token grid (``network_hw``)."""
+        del network_hw
         from monopriors.models.moge_v2 import MoGeV2TorchPredictor, MoGeV2TrtPredictor
 
-        if self.backend == "tensorrt":
-            from monopriors.models.moge_v2 import export_moge_v2_onnx
-
-            # The ONNX (cached per grid, batch-dynamic) is exported for batches up to 8 as monoprior's default
-            # predictor does: a batch-1 export fails (torch.export rejects Dim(min=1, max=1)); the engine is batch 1.
-            export_moge_v2_onnx(
-                heads="geometry", encoder=self.encoder, image_hw=network_hw, resolution_level=self.resolution_level, max_batch_size=8
+        if self._shared_predictor is None:
+            self._shared_predictor = (
+                # monoprior's dynamic engine: one ONNX + one batch-1 engine per GPU, built at the first forward.
+                MoGeV2TrtPredictor(encoder=self.encoder, heads="geometry", network_hw_options=None, resolution_level=self.resolution_level, batch_size=1)
+                if self.backend == "tensorrt"
+                else MoGeV2TorchPredictor(encoder=self.encoder, heads="geometry", network_hw_options=None, resolution_level=self.resolution_level)
             )
-            return MoGeV2TrtPredictor(
-                encoder=self.encoder, heads="geometry", network_hw_options=(network_hw,), resolution_level=self.resolution_level, batch_size=1
-            )
-        if self._torch_predictor is None:
-            # network_hw_options=None: the exact token grid of each input, like the engines.
-            self._torch_predictor = MoGeV2TorchPredictor(
-                encoder=self.encoder, heads="geometry", network_hw_options=None, resolution_level=self.resolution_level
-            )
-        return self._torch_predictor
+        return self._shared_predictor
 
     def forward(self, rgb_u8_hw3: UInt8[Tensor, "h w 3"]) -> MoGe2Forward:
         """The raw outputs of one image: from the cache, or one network forward."""

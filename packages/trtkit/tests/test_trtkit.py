@@ -523,6 +523,56 @@ def test_an_unresolved_output_shape_is_refused_before_anything_is_bound_or_launc
     assert runtime._output_buffers == ({} if direct_binding else {"y": runtime._output_buffers["y"]})
 
 
+@pytest.mark.integration
+@cuda_only
+def test_runtime_activation_resize_sizes_activation_memory_to_each_call(tmp_path: Path) -> None:
+    """A `runtime_activation_resize` engine run with `per_shape_activation_memory` binds memory for the call's shapes,
+    below the profile max for a small call, grown for a larger one; the flag is part of the engine identity."""
+    from trtkit import DynamicDim, InputShapeProfile, TensorRtDynamicRuntime, ensure_engine
+
+    model = _ToyDynamic().eval().cuda()
+    onnx_path: Path = tmp_path / "toy.onnx"
+    export_onnx(
+        model,
+        (torch.zeros(2, 3, 28, 42, device="cuda"), torch.zeros(1, 4, device="cuda")),
+        onnx_path,
+        input_names=["images", "bias"],
+        output_names=["y"],
+        compute_dtype=torch.float16,
+        dynamic_dims={"images": {0: DynamicDim("batch", 1, 8), 2: DynamicDim("rows", 2, 40, multiple=14), 3: DynamicDim("cols", 2, 40, multiple=14)}},
+    )
+    profiles = (
+        InputShapeProfile(name="images", min_shape=(1, 3, 28, 28), opt_shape=(1, 3, 56, 56), max_shape=(8, 3, 560, 560)),
+        InputShapeProfile(name="bias", min_shape=(1, 4), opt_shape=(1, 4), max_shape=(1, 4)),
+    )
+    config = TrtBuildConfig(max_batch_size=8, opt_batch_size=1, workspace_gib=1.0, runtime_activation_resize=True, shape_profiles=profiles)
+    plain_path: Path = cached_engine_path(onnx_path, TrtBuildConfig(max_batch_size=8, opt_batch_size=1, workspace_gib=1.0, shape_profiles=profiles), cache_dir=tmp_path)
+    engine_path: Path = ensure_engine(onnx_path, config, cache_dir=tmp_path)
+    assert "_rar" in engine_path.name and "_rar" not in plain_path.name
+    bias = torch.randn(1, 4, device="cuda")
+    for direct_binding in (True, False):
+        runtime = TensorRtDynamicRuntime(engine_path, direct_binding=direct_binding, per_shape_activation_memory=True)
+        sizes: list[int] = []
+        for shape in ((1, 3, 28, 28), (8, 3, 560, 560), (1, 3, 28, 28)):
+            images = torch.randn(*shape, device="cuda", dtype=runtime._input_dtypes["images"])
+            with torch.inference_mode():
+                expected = model(images.float(), bias)
+            outputs = runtime({"images": images, "bias": bias.to(runtime._input_dtypes["bias"])})
+            torch.testing.assert_close(outputs["y"].float(), expected, rtol=2e-2, atol=2e-2)
+            assert runtime._activation_memory is not None
+            sizes.append(runtime._activation_memory.numel())
+        assert sizes[0] < sizes[1] == sizes[2] <= runtime.device_memory_bytes, f"activation bytes per call {sizes}, max {runtime.device_memory_bytes}"
+        runtime.close()
+
+
+def test_per_shape_activation_memory_refuses_cuda_graphs(tmp_path: Path) -> None:
+    """Regrown activation memory moves between calls; a graph replays fixed addresses."""
+    from trtkit import TensorRtDynamicRuntime
+
+    with pytest.raises(ValueError, match="CUDA graph"):
+        TensorRtDynamicRuntime(tmp_path / "unused.engine", use_cuda_graph=True, per_shape_activation_memory=True)
+
+
 def test_direct_binding_refuses_cuda_graphs(tmp_path: Path) -> None:
     """A graph replays fixed addresses; direct binding binds new ones per call."""
     from trtkit import TensorRtDynamicRuntime
