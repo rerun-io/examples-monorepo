@@ -47,7 +47,7 @@ def _solve_focal_shift(
 def normalized_view_plane_uv(
     width: int | Int[Tensor, ""],
     height: int | Int[Tensor, ""],
-    aspect_ratio: float | None = None,
+    aspect_ratio: float | Float[Tensor, ""] | None = None,
     dtype: torch.dtype | None = None,
     device: torch.device | None = None,
 ) -> Float[Tensor, "h w 2"]:
@@ -56,7 +56,8 @@ def normalized_view_plane_uv(
     Args:
         width: Image width as an integer or scalar integer tensor.
         height: Image height as an integer or scalar integer tensor.
-        aspect_ratio: Image width divided by height, or ``None`` to derive it.
+        aspect_ratio: Image width divided by height, or ``None`` to derive it. A 0-d tensor (our dynamic-shape export)
+            builds the same coordinates from ``arange``, since ``linspace`` needs scalar end points.
         dtype: Output floating-point dtype.
         device: Output Torch device.
 
@@ -66,6 +67,12 @@ def normalized_view_plane_uv(
     resolved_aspect_ratio: float | Float[Tensor, ""] = width / height if aspect_ratio is None else aspect_ratio
     span_x: float | Float[Tensor, ""] = resolved_aspect_ratio / (1 + resolved_aspect_ratio**2) ** 0.5
     span_y: float | Float[Tensor, ""] = 1 / (1 + resolved_aspect_ratio**2) ** 0.5
+    if isinstance(span_x, Tensor) and isinstance(span_y, Tensor):
+        # linspace(-s (n - 1) / n, s (n - 1) / n, n)[i] = s (2 i + 1 - n) / n
+        u_w_dynamic: Float[Tensor, "w"] = span_x * (2 * torch.arange(width, device=device, dtype=torch.float32) + 1 - width) / width
+        v_h_dynamic: Float[Tensor, "h"] = span_y * (2 * torch.arange(height, device=device, dtype=torch.float32) + 1 - height) / height
+        grid: tuple[Float[Tensor, "h w"], Float[Tensor, "h w"]] = torch.meshgrid(u_w_dynamic.to(dtype), v_h_dynamic.to(dtype), indexing="xy")
+        return torch.stack([grid[0], grid[1]], dim=-1)
     u_w: Float[Tensor, "w"] = torch.linspace(
         -span_x * (width - 1) / width,
         span_x * (width - 1) / width,

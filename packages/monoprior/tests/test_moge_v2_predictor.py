@@ -129,12 +129,13 @@ def test_select_aspect_bucket_uses_nearest_log_aspect(
     assert selected_bucket == expected_bucket
 
 
-def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A single network option eagerly creates exactly that runtime key."""
+@pytest.mark.parametrize("profile", ("static", "dynamic"))
+def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str) -> None:
+    """A single network option eagerly creates its runtime: keyed by that size (static) or the one engine (dynamic)."""
     import monopriors.models.moge_v2.predictor as moge_v2_predictor
 
     class FakeRuntime:
-        def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False) -> None:
+        def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False, **_kwargs: object) -> None:
             self.engine_path: Path = engine_path
             self.use_cuda_graph: bool = use_cuda_graph
 
@@ -155,7 +156,12 @@ def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.Monke
     monkeypatch.setitem(
         sys.modules,
         "trtkit",
-        SimpleNamespace(TrtBuildConfig=FakeTrtBuildConfig, ensure_engine=fake_ensure_engine),
+        SimpleNamespace(
+            TrtBuildConfig=FakeTrtBuildConfig,
+            InputShapeProfile=FakeTrtBuildConfig,
+            TensorRtDynamicRuntime=FakeRuntime,
+            ensure_engine=fake_ensure_engine,
+        ),
     )
     monkeypatch.setitem(sys.modules, "trtkit.tensorrt_runtime", SimpleNamespace(TensorRtRuntime=FakeRuntime))
 
@@ -164,11 +170,13 @@ def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.Monke
         heads="geometry",
         network_hw_options=(network_hw,),
         use_cuda_graph=True,
+        profile="static" if profile == "static" else "dynamic",
     )
 
-    assert set(predictor.runtimes) == {network_hw}
-    assert predictor.runtimes[network_hw].engine_path == engine_path
-    assert predictor.runtimes[network_hw].use_cuda_graph
+    key: tuple[int, int] | None = network_hw if profile == "static" else None
+    assert set(predictor.runtimes) == {key}
+    assert predictor.runtimes[key].engine_path == engine_path
+    assert predictor.runtimes[key].use_cuda_graph
 
 
 def test_torch_typed_entry_points_reject_wrong_heads() -> None:
@@ -247,14 +255,24 @@ def test_torch_predictor_returns_batched_metric_geometry() -> None:
 
 @integration
 @requires_cuda
-def test_trt_matches_torch_twin_at_caller_resolution() -> None:
-    """ViT-L TensorRT and torch geometry meet the caller-resolution parity bounds."""
-    from monopriors.models.moge_v2 import ASPECT_BUCKETS, DEFAULT_IMAGE_HW, MoGeV2TorchPredictor, MoGeV2TrtPredictor
+@pytest.mark.parametrize(
+    ("profile", "caller_hw"),
+    (("dynamic", (756, 1008)), ("dynamic", (1280, 704)), ("static", (756, 1008))),
+    ids=("dynamic-4:3", "dynamic-portrait", "static-4:3"),
+)
+def test_trt_matches_torch_twin_at_caller_resolution(profile: str, caller_hw: tuple[int, int]) -> None:
+    """ViT-L TensorRT and torch geometry meet the caller-resolution parity bounds; the portrait case is the 4DAnyone views."""
+    from monopriors.models.moge_v2 import ASPECT_BUCKETS, MoGeV2TorchPredictor, MoGeV2TrtPredictor
 
-    rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
+    rgb_bhw3: UInt8[Tensor, "2 h w 3"] = synthetic_rgb_batch(2, caller_hw)
     rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
-    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", batch_size=8)
-    torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", network_hw_options=ASPECT_BUCKETS)
+    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
+        encoder="vitl", heads="geometry", batch_size=8, profile="static" if profile == "static" else "dynamic"
+    )
+    # The twin runs at the same network size: the image's own token grid (dynamic) or its aspect bucket (static).
+    torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(
+        encoder="vitl", heads="geometry", network_hw_options=ASPECT_BUCKETS if profile == "static" else None
+    )
 
     trt_prediction: MoGeV2GeometryOutput = trt_predictor.predict_geometry(rgb_bhw3)
     torch_prediction: MoGeV2GeometryOutput = torch_predictor.predict_geometry(rgb_bhw3)
@@ -272,6 +290,7 @@ def test_trt_matches_torch_twin_at_caller_resolution() -> None:
     torch.testing.assert_close(trt_prediction.metric_scale_b, torch_prediction.metric_scale_b, rtol=0.01, atol=1e-5)
     torch.testing.assert_close(trt_prediction.shift_b, torch_prediction.shift_b, rtol=0.0, atol=0.01)
     torch.testing.assert_close(trt_prediction.points_bhw3[..., 2], trt_prediction.depth_bhw, atol=0.0, rtol=0.0)
+    assert trt_predictor.has_engine(caller_hw)
 
     held_prediction: MoGeV2GeometryOutput = trt_predictor.predict_geometry(rgb_bhw3[:1])
     held_copies: tuple[Float32[Tensor, "*shape"], ...] = tuple(output_tensor.clone() for output_tensor in held_prediction)
@@ -393,10 +412,8 @@ def test_trt_normal_heads_match_torch_twin_and_return_owning_outputs() -> None:
         network_hw_options=(DEFAULT_IMAGE_HW,),
         batch_size=8,
     )
-    torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(
-        heads="normal",
-        network_hw_options=(DEFAULT_IMAGE_HW,),
-    )
+    # The dynamic engine runs the option's token grid (728x966), which the twin derives for this aspect.
+    torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(heads="normal", network_hw_options=None)
 
     trt_prediction: MoGeV2NormalOutput = trt_predictor.predict_normals(rgb_bhw3)
     torch_prediction: MoGeV2NormalOutput = torch_predictor.predict_normals(rgb_bhw3)
@@ -407,7 +424,9 @@ def test_trt_normal_heads_match_torch_twin_and_return_owning_outputs() -> None:
         dim=-1,
     ).clamp(-1.0, 1.0)
     angular_error_bhw: Float32[Tensor, "2 756 1008"] = torch.rad2deg(torch.acos(cosine_bhw))
-    assert angular_error_bhw.mean().item() < 0.1
+    # The dynamic engine's fp16 tactics sit 0.15 deg (mean) from the twin, the static 728x966 engine ~0.1; the
+    # geometry twin test's bar.
+    assert angular_error_bhw.mean().item() < 0.2
     assert torch.quantile(angular_error_bhw, 0.99).item() < 0.5
 
     held_prediction: MoGeV2NormalOutput = trt_predictor.predict_normals(rgb_bhw3[:1])
@@ -432,3 +451,85 @@ def test_has_engine_checks_the_caches_only(tmp_path: Path) -> None:
     predictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", cache_dir=tmp_path)
     assert predictor.has_engine((1280, 704)) is False
     assert not any(tmp_path.rglob("*"))
+
+
+def test_dynamic_patch_range_holds_the_callers_token_grids() -> None:
+    """At detail level 9 the dynamic engine spans 588-1190 px per side: every caller's grid is inside, a 3:1 pano is not."""
+    from monopriors.models.moge_v2 import dynamic_patch_range, resolve_num_tokens, token_grid_hw
+
+    num_tokens: int = resolve_num_tokens(9)
+    low, high = dynamic_patch_range(num_tokens)
+    assert (14 * low, 14 * high) == (588, 1190)
+    # 4DAnyone portrait 704x1280 and its landscape twin, 4:3 (ARKitScenes, zipdepth, gauss-surf), the Insta360 cube
+    # faces (1:1), 16:9 and 9:16 phones, the 1:2 and 2:1 ends.
+    for input_hw in ((1280, 704), (704, 1280), (756, 1008), (480, 640), (1600, 1600), (1080, 1920), (1920, 1080), (1000, 500), (500, 1000)):
+        grid_hw: tuple[int, int] = token_grid_hw(input_hw[1] / input_hw[0], num_tokens)
+        assert low <= grid_hw[0] // 14 <= high and low <= grid_hw[1] // 14 <= high, input_hw
+    wide_hw: tuple[int, int] = token_grid_hw(3.0, num_tokens)
+    assert not low <= wide_hw[1] // 14 <= high
+
+
+def test_dynamic_network_size_is_the_token_grid_of_the_chosen_aspect(tmp_path: Path) -> None:
+    """Dynamic: an image runs at its own token grid, or at the grid of the option nearest its aspect; outside the range
+    it is rejected and ``has_engine`` is false. Static keeps the option itself."""
+    from monopriors.models.moge_v2 import MoGeV2TrtPredictor
+
+    dynamic: MoGeV2TrtPredictor = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path)
+    assert dynamic.network_hw((1280, 704)) == (1134, 616)
+    assert dynamic.network_hw((704, 1280)) == (616, 1134)
+    assert dynamic.network_hw((1600, 1600)) == (840, 840)
+    with pytest.raises(ValueError, match="outside the dynamic engine"):
+        dynamic.network_hw((400, 1400))
+    assert dynamic.has_engine((400, 1400)) is False
+    assert dynamic.runtimes == {}
+    static: MoGeV2TrtPredictor = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path, profile="static")
+    assert static.network_hw((1280, 704)) == (1120, 630)  # nearest of the five aspect buckets
+
+
+def test_dynamic_engine_profile_spans_the_range_and_resizes_activations(tmp_path: Path) -> None:
+    """One profile: batch 1..batch_size, sides 588..1190 px, tuned at batch_size x the 4:3 grid; per-shape activation memory."""
+    from monopriors.models.moge_v2 import MoGeV2TrtPredictor
+
+    predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path, batch_size=6)
+    onnx_path, config = predictor._engine_paths((1134, 616))
+    assert onnx_path.name.startswith("moge-v2-vitl-geometry_dyn588-1190_t3600_")
+    assert predictor._engine_paths((728, 966))[0] == onnx_path  # every grid shares the one graph
+    assert config.runtime_activation_resize
+    (image_profile,) = config.shape_profiles
+    assert image_profile.name == "image"
+    assert image_profile.min_shape == (1, 3, 588, 588)
+    assert image_profile.opt_shape == (6, 3, 728, 966)
+    assert image_profile.max_shape == (6, 3, 1190, 1190)
+    static_onnx, static_config = MoGeV2TrtPredictor(heads="geometry", cache_dir=tmp_path, profile="static")._engine_paths((728, 966))
+    assert static_onnx.name.startswith("moge-v2-vitl-geometry_728x966_") and static_config.shape_profiles == ()
+
+
+@pytest.mark.parametrize("grid_hw", ((52, 69), (81, 44), (42, 85), (60, 60), (1, 7)))
+def test_dynamic_pos_encoding_matches_dinov2_bicubic_resize(grid_hw: tuple[int, int]) -> None:
+    """The traceable positional resize equals DINOv2's ``F.interpolate(scale_factor=(g + 0.1) / 37, mode="bicubic")``."""
+    import torch.nn.functional as F
+
+    from monopriors.models.moge_v2.export import dynamic_pos_encoding
+
+    generator: torch.Generator = torch.Generator().manual_seed(0)
+    pos_embed_1nc: Float32[Tensor, "1 n c"] = torch.randn((1, 1 + 37 * 37, 8), generator=generator)
+    expected_1chw: Float32[Tensor, "1 c h w"] = F.interpolate(
+        pos_embed_1nc[:, 1:].reshape(1, 37, 37, 8).permute(0, 3, 1, 2),
+        scale_factor=((grid_hw[0] + 0.1) / 37, (grid_hw[1] + 0.1) / 37),
+        mode="bicubic",
+        antialias=False,
+    )
+    expected_1nc: Float32[Tensor, "1 n c"] = torch.cat([pos_embed_1nc[:, :1], expected_1chw.permute(0, 2, 3, 1).flatten(1, 2)], dim=1)
+    # Float32 source coordinates (PyTorch computes the scale in double first): ~1e-5 of unit-scale values.
+    torch.testing.assert_close(dynamic_pos_encoding(pos_embed_1nc, grid_hw, 0.1), expected_1nc, atol=1e-4, rtol=1e-4)
+
+
+def test_view_plane_uv_tensor_aspect_matches_linspace() -> None:
+    """The ``arange`` path (a 0-d tensor aspect, as the dynamic export passes) equals the ``linspace`` path."""
+    from monopriors.third_party.moge.utils.geometry_torch import normalized_view_plane_uv
+
+    for width, height in ((69, 52), (44, 81), (7, 3)):
+        expected_hw2: Float32[Tensor, "h w 2"] = normalized_view_plane_uv(width, height, aspect_ratio=width / height, dtype=torch.float32)
+        tensor_aspect: Float32[Tensor, ""] = torch.tensor(width / height, dtype=torch.float32)
+        actual_hw2: Float32[Tensor, "h w 2"] = normalized_view_plane_uv(width, height, aspect_ratio=tensor_aspect, dtype=torch.float32)
+        torch.testing.assert_close(actual_hw2, expected_hw2, atol=1e-6, rtol=1e-6)
