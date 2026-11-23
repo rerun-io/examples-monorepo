@@ -1,5 +1,7 @@
 """Project-specific errors with actionable user-facing messages."""
 
+import threading
+
 
 class FourDAnyoneError(RuntimeError):
     """Base class for expected pipeline failures."""
@@ -19,3 +21,9 @@ class VideoContractError(FourDAnyoneError):
 
 class RunCancelled(FourDAnyoneError):
     """The run's cancel event was set; raised where the run notices it (a worker subprocess is reaped first)."""
+
+
+def raise_if_stopped(cancel: threading.Event | None) -> None:
+    """``RunCancelled`` once ``cancel`` is set (a Stop)."""
+    if cancel is not None and cancel.is_set():
+        raise RunCancelled("stopped")

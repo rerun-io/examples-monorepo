@@ -14,7 +14,6 @@ on ``train_step``), trains, logs the person and switches to the 4D person layout
 """
 
 import dataclasses
-import gc
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -38,9 +37,10 @@ from open4dgs.splat_export import ASOG_CUT_FORMAT
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip
 from torch import Tensor
 
-from fdanyone.errors import RunCancelled
+from fdanyone.errors import raise_if_stopped
 from fdanyone.video import read_rgb_video
 from fdanyone_rerun.assets import model_dir
+from fdanyone_rerun.core import free_gpu
 from fdanyone_rerun.outputs import CameraRig, RunMetadata, read_camera_rig, read_run_metadata
 from fdanyone_rerun.rerun_log import (
     PERSON,
@@ -80,6 +80,10 @@ class PersonConfig:
     report_every: int = 100
     """Steps between progress lines and loss points; the trainer records its scalars as often (``train.log_every``)."""
 
+    def __post_init__(self) -> None:
+        if self.report_every < 1:
+            raise ValueError(f"report_every must be at least 1 (it is also the trainer's log_every), got {self.report_every}")
+
     def with_steps(self, steps: int) -> "PersonConfig":
         """This config with ``train.steps`` replaced."""
         return dataclasses.replace(self, train=dataclasses.replace(self.train, steps=steps))
@@ -100,19 +104,6 @@ class PersonSummary:
     """Peak CUDA memory allocated while training."""
     seconds: dict[str, float]
     """Wall time per stage: read_and_masks, init, prior (when on), train, encode, log."""
-
-
-def raise_if_stopped(cancel: threading.Event | None) -> None:
-    """``RunCancelled`` once ``cancel`` is set (a Stop)."""
-    if cancel is not None and cancel.is_set():
-        raise RunCancelled("stopped")
-
-
-def free_gpu() -> tuple[float, float]:
-    """Collect garbage and return cached CUDA blocks; returns (allocated, reserved) GB after."""
-    gc.collect()
-    torch.cuda.empty_cache()
-    return torch.cuda.memory_allocated() / 1e9, torch.cuda.memory_reserved() / 1e9
 
 
 def read_run_clip(

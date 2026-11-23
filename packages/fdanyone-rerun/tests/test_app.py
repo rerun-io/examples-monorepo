@@ -148,3 +148,9 @@ def test_the_settings_map_onto_the_shared_person_config(runs: Path, monkeypatch:
     list(run_app(str(runs / "clip.mp4"), 6, 42, train, 1234, prior))
     expected: PersonConfig | None = PersonConfig(prior=prior).with_steps(1234) if train else None
     assert seen == [expected]
+
+
+def test_a_person_config_needs_a_report_interval() -> None:
+    # report_every is the progress interval and the trainer's log_every; 0 would divide by zero mid-run.
+    with pytest.raises(ValueError, match="report_every"):
+        PersonConfig(report_every=0)

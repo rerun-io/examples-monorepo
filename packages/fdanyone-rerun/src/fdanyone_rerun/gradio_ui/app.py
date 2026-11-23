@@ -30,8 +30,8 @@ from simplecv.app_theme import APP_CSS, DARK_HEAD, EXAMPLES_PER_PAGE, app_title,
 
 from fdanyone.errors import RunCancelled
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, PACKAGE_ROOT
-from fdanyone_rerun.core import RunConfig, ViewLayout
-from fdanyone_rerun.person4d import PersonConfig, PersonSummary, free_gpu
+from fdanyone_rerun.core import RunConfig, ViewLayout, free_gpu
+from fdanyone_rerun.person4d import PersonConfig, PersonSummary
 from fdanyone_rerun.stream import RunStreamer
 
 APPLICATION_ID: str = "fdanyone-rerun"

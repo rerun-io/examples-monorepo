@@ -16,11 +16,12 @@ import torch
 from taehv import TAEHV
 
 from fdanyone.assets import TAEW2_2
+from fdanyone.errors import raise_if_stopped
 from fdanyone.model.vae import load_tiny_decoder
 from fdanyone_rerun.assets import model_dir
 from fdanyone_rerun.core import RunConfig, run_views
 from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
-from fdanyone_rerun.person4d import PersonConfig, PersonSummary, raise_if_stopped, train_person
+from fdanyone_rerun.person4d import PersonConfig, PersonSummary, train_person
 from fdanyone_rerun.previews import decode_previews
 from fdanyone_rerun.rerun_log import (
     DIFFUSION_TIMELINE,
