@@ -173,7 +173,7 @@ pub(crate) struct Kernels {
     pub prepare: Kernel,
     /// SOG / ASOG de-quantisation at load (`sog_dequant.wgsl`).
     pub sog_dequant: Kernel,
-    /// Motion pre-pass per time change, both forms (`trigs_deform.wgsl`).
+    /// Motion pre-pass per time change (`trigs_deform.wgsl`).
     pub trigs_deform: Kernel,
     /// ASOG motion de-quantisation at load (`asog_motion.wgsl`).
     pub asog_motion: Kernel,

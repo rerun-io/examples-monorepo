@@ -205,76 +205,6 @@ fn draw_splat_entity(
             &query_ctx,
             GaussianSplats3D::descriptor_spherical_harmonics_degree().component,
         );
-    // TRiGS motion fields (static, untyped f32/f64): evaluated at the time cursor when all are present.
-    let motion_ids = crate::trigs::components();
-    let motion_query = data.query_components_with_history(
-        ctx,
-        query,
-        motion_ids.iter().copied(),
-        instruction,
-        None,
-    );
-    let motion_results = VisualizerInstructionQueryResults::new(instruction, &motion_query, output);
-    let [
-        m_op,
-        m_times,
-        m_logdur,
-        m_base,
-        m_c0,
-        m_c1,
-        m_c2,
-        m_anchors,
-        m_static,
-        m_fps,
-        m_origin,
-        m_threshold,
-    ] = motion_ids.map(|id| motion_results.iter_optional(id));
-    let motion = match (
-        last_slice::<f32>(&m_op),
-        last_slice::<f32>(&m_times),
-        last_slice::<f32>(&m_logdur),
-        last_slice::<[f32; 6]>(&m_base),
-        last_slice::<[f32; 6]>(&m_c0),
-        last_slice::<[f32; 6]>(&m_c1),
-        last_slice::<[f32; 6]>(&m_c2),
-        last_slice::<[f32; 3]>(&m_anchors),
-    ) {
-        (
-            Some(opacities),
-            Some(times),
-            Some(log_durations),
-            Some(base),
-            Some(c0),
-            Some(c1),
-            Some(c2),
-            Some(anchors),
-        ) => {
-            let fps = last_scalar::<f64>(&m_fps, 1.0);
-            let origin = last_scalar::<f64>(&m_origin, 0.0);
-            let t = crate::trigs::clip_seconds(
-                ctx.recording().timeline_type(&query.timeline),
-                query.latest_at,
-                fps,
-                origin,
-            );
-            Some((
-                gsplat_core::trigs::TrigsMotion {
-                    opacities,
-                    times,
-                    log_durations,
-                    twist_base: base,
-                    twist_c0: c0,
-                    twist_c1: c1,
-                    twist_c2: c2,
-                    anchors,
-                    is_static: last_slice::<f32>(&m_static).unwrap_or(&[]),
-                    active_threshold: last_scalar::<f32>(&m_threshold, 0.0),
-                },
-                t,
-            ))
-        }
-        _ => None,
-    };
     // `.asog` payload (static, untyped): drawn instead of the preview rows when present.
     let asog_ids = crate::asog::components();
     let asog_query =
@@ -296,8 +226,6 @@ fn draw_splat_entity(
         )
     });
     let time_type = ctx.recording().timeline_type(&query.timeline);
-    let motion_generation =
-        self::attribute_generation(instruction, &motion_query, motion_ids.iter().copied());
     // SOG payload fields (static, untyped Utf8 + u8): drawn instead of the preview rows when present.
     let sog_ids = crate::sog::components();
     let sog_query =
@@ -375,8 +303,7 @@ fn draw_splat_entity(
             match info {
                 Ok(info) => {
                     // Decoded once per payload; a time change is one motion dispatch in the view (time not in the key).
-                    let t =
-                        crate::trigs::clip_seconds(time_type, query.latest_at, info.fps, origin);
+                    let t = crate::asog::clip_seconds(time_type, query.latest_at, info.fps, origin);
                     let payload = crate::asog::Payload {
                         bytes,
                         active_threshold: threshold,
@@ -401,25 +328,6 @@ fn draw_splat_entity(
                     ),
                 ),
             }
-        }
-        if let Some((motion, t)) = motion
-            .as_ref()
-            .filter(|(m, _)| m.is_consistent(centers.len()))
-        {
-            // Canonical rows + motion uploaded once; a time change is one motion dispatch in the view.
-            retry |= draw_instances(
-                entity,
-                draw,
-                row,
-                hash64((signature, motion_generation)),
-                Primitives::Animated {
-                    splats: &native,
-                    motion,
-                },
-                render_mode,
-                *t,
-            )?;
-            continue;
         }
         retry |= draw_instances(
             entity,
@@ -561,25 +469,6 @@ pub(crate) fn draw_instances(
             ) => {
                 // The pixel contracts use these machine-visible markers to distinguish fallback from compute.
                 draw.push(match primitives {
-                    Primitives::Animated { splats, motion } => {
-                        // The rows evaluated on the CPU at this time (never the canonical rows: a ghost trail).
-                        report(
-                            ViewerReportSeverity::Warning,
-                            format!("{error}; using the native Gaussian renderer"),
-                        );
-                        re_log::warn_once!("Gaussian compute fallback: {error:#}");
-                        let evaluated = crate::trigs::Evaluated::new(splats, motion, time);
-                        crate::fallback::native_fallback(
-                            ctx,
-                            query,
-                            key,
-                            &evaluated.native(splats),
-                            world_from_local,
-                            hash64((signature, time.to_bits())),
-                            masks,
-                            object,
-                        )?
-                    }
                     Primitives::Splats(native)
                     | Primitives::Sog(&crate::sog::Payload {
                         preview: native, ..

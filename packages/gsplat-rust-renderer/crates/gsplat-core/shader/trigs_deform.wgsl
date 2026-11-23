@@ -1,14 +1,11 @@
 // Motion pre-pass, one dispatch per time change: canonical transforms + per-row motion -> this view's transforms and
-// raw opacity (read by the projector at bindings 1 and 2). Two forms behind `params.form`:
-//   0 = twist (TrigsMotion3D rows): CPU reference `gsplat_core::trigs::TrigsMotion::deform_row`;
-//   1 = asog (animated-sog v1 O/g form + clips): CPU reference `gsplat_core::trigs::AsogMotion::row`.
-// Both share the temporal cut, the Bezier life parameter, the gauge fix and the SE(3) exponential. Scales are copied
-// from the canonical rows; rows with zero weight keep the canonical pose and get raw opacity -100.
+// raw opacity (read by the projector at bindings 1 and 2), in the animated-sog v1 O/g form with its clips (CPU
+// reference `gsplat_core::trigs::AsogMotion::row`). Scales are copied from the canonical rows; rows with zero weight
+// keep the canonical pose and get raw opacity -100.
 // No lane built-ins; 5 storage buffers.
 
 struct DeformParams {
     count: u32,
-    form: u32,
     // Threads per dispatch row (2D dispatch beyond 65535 workgroups).
     row_threads: u32,
     clip_count: u32,
@@ -16,20 +13,21 @@ struct DeformParams {
     time: f32,
     // Temporal cut, clamped to [0, 0.999] on the host (0 = off).
     threshold: f32,
-    padding: vec2u,
+    padding0: u32,
+    padding1: u32,
+    padding2: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: DeformParams;
 // Canonical rows: mean xyz, quat wxyz, log scale xyz (10 f32 each).
 @group(0) @binding(1) var<storage, read> canonical: array<f32>;
-// Per-row motion, `TWIST_STRIDE` or `ASOG_STRIDE` f32 each (layouts in `motion_gpu.rs`).
+// Per-row motion, `ASOG_STRIDE` f32 each (layout in `motion_gpu.rs`).
 @group(0) @binding(2) var<storage, read> motion: array<f32>;
 // Asog clips, 8 f32 each: offset, active start, active end, core start, core end, fade in, fade out, unused.
 @group(0) @binding(3) var<storage, read> clips: array<f32>;
 @group(0) @binding(4) var<storage, read_write> transforms: array<f32>;
 @group(0) @binding(5) var<storage, read_write> raw_opacity: array<f32>;
 
-const TWIST_STRIDE: u32 = 31u;
 const ASOG_STRIDE: u32 = 21u;
 const GAUGE_EPS: f32 = 1e-8;
 const GAUGE_DENOM_CLAMP: f32 = 1e-10;
@@ -161,35 +159,6 @@ struct Row {
     weight: f32,
 }
 
-fn twist_row(i: u32, center: vec3f, quat: vec4f) -> Row {
-    let m = i * TWIST_STRIDE;
-    let canonical = normalize4(quat);
-    let opacity = motion[m];
-    let mu = motion[m + 1u];
-    let log_duration = motion[m + 2u];
-    if motion[m + 3u] > 0.5 {
-        return Row(finite3(center), finite_quat(canonical), opacity, 1.0);
-    }
-    let weight = temporal_gamma(params.time - mu, max(exp(log_duration), 1e-6));
-    let sigma = exp(log_duration);
-    let b = bezier2(life_tau(params.time, mu, sigma));
-    var twist: array<f32, 6>;
-    for (var k = 0u; k < 6u; k++) {
-        let residual = b.x * motion[m + 10u + k] + b.y * motion[m + 16u + k] + b.z * motion[m + 22u + k];
-        twist[k] = motion[m + 4u + k] + residual;
-    }
-    let nu = vec3f(twist[0], twist[1], twist[2]);
-    let omega = vec3f(twist[3], twist[4], twist[5]);
-    let omega_sq = dot(omega, omega);
-    let a_perp = perp_anchor(m3(m + 28u), omega, omega_sq);
-    var nu_par = nu;
-    if omega_sq >= GAUGE_EPS {
-        nu_par = (dot(nu, omega) / max(omega_sq, GAUGE_DENOM_CLAMP)) * omega;
-    }
-    let s = screw(center, a_perp, nu_par, omega, params.time - mu);
-    return Row(s.center, finite_quat(quat_mul(s.q_rel, canonical)), opacity, weight);
-}
-
 fn asog_row(i: u32, center: vec3f, quat: vec4f) -> Row {
     let m = i * ASOG_STRIDE;
     let opacity = motion[m];
@@ -255,12 +224,7 @@ fn trigs_deform(@builtin(global_invocation_id) gid: vec3u) {
     let t = i * 10u;
     let center = vec3f(canonical[t], canonical[t + 1u], canonical[t + 2u]);
     let quat = vec4f(canonical[t + 3u], canonical[t + 4u], canonical[t + 5u], canonical[t + 6u]);
-    var row: Row;
-    if params.form == 1u {
-        row = asog_row(i, center, quat);
-    } else {
-        row = twist_row(i, center, quat);
-    }
+    let row = asog_row(i, center, quat);
     transforms[t] = row.center.x;
     transforms[t + 1u] = row.center.y;
     transforms[t + 2u] = row.center.z;

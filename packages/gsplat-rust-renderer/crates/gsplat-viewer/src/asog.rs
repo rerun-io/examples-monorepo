@@ -6,8 +6,9 @@
 //! `sog_dequant.wgsl`, the motion by `asog_motion.wgsl`, and the motion is evaluated per view by `trigs_deform.wgsl`
 //! whenever the time cursor moves: no CPU work and no upload on a time change. The CPU decoder in `gsplat_core::asog`
 //! is the tests' oracle, not a render path.
-//! Time: `t [s] = (frame - frame_origin) / frameRate` with the manifest's frameRate (see `crate::trigs::clip_seconds`).
-use re_viewer::external::{re_log, re_renderer, re_sdk_types, re_viewer_context};
+//! Time: `t [s] = (frame - frame_origin) / frameRate` with the manifest's frameRate on a sequence timeline; on a
+//! duration or timestamp timeline `t = seconds - frame_origin / frameRate` ([`clip_seconds`]).
+use re_viewer::external::{re_log, re_log_types, re_renderer, re_sdk_types, re_viewer_context};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,6 +20,21 @@ pub(crate) fn components() -> [re_sdk_types::ComponentIdentifier; 3] {
     FIELDS.map(|field| {
         re_sdk_types::ComponentIdentifier::from_archetype_field(ARCHETYPE.into(), field)
     })
+}
+
+/// Clip time in seconds at the view's time cursor.
+pub(crate) fn clip_seconds(
+    time_type: re_log_types::TimeType,
+    cursor: re_log_types::TimeInt,
+    fps: f64,
+    frame_origin: f64,
+) -> f32 {
+    let value = cursor.as_i64() as f64;
+    let seconds = match time_type {
+        re_log_types::TimeType::Sequence => (value - frame_origin) / fps,
+        _ => value * 1e-9 - frame_origin / fps,
+    };
+    seconds as f32
 }
 
 /// What the visualizer needs before the payload is decoded: the clip's frame rate and the capacity inputs.

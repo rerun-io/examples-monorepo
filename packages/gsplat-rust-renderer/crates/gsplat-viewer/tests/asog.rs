@@ -4,9 +4,9 @@
 //! and the reference decode under `/expected` (written by `tools/asog_reference_fixture.py` in the open4dgs env).
 //!
 //! Rust decode + evaluate == reference (centre <= 1e-5 m, rotation <= 1e-5 rad, weight <= 1e-6, same visible
-//! set). On well-conditioned rows the twist form fed the pinv translation equals the `.asog` form.
+//! set).
 use gsplat_core::asog::decode;
-use gsplat_core::trigs::{ASOG_ACTIVE_THRESHOLD, CULLED_RAW_OPACITY, TrigsMotion};
+use gsplat_core::trigs::{ASOG_ACTIVE_THRESHOLD, CULLED_RAW_OPACITY};
 mod common;
 
 use common::{chunks, row};
@@ -392,76 +392,6 @@ fn gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
         assert_eq!(mismatched, 0, "t={t}");
         assert!(
             centre <= 1e-5 && rotation <= 1e-5 && weight <= 1e-5,
-            "t={t}"
-        );
-    }
-}
-
-#[test]
-fn twist_form_with_pinv_translation_equals_the_asog_form() {
-    let f = fixture();
-    let m = &f.asog.motion;
-    let canonical = &f.asog.canonical;
-    let nu = expected(&f.all, "/expected/twist", "nu");
-    let well = expected(&f.all, "/expected/twist", "well_conditioned");
-    let n = m.len();
-    let control = |k: usize| -> Vec<[f32; 6]> {
-        (0..n)
-            .map(|i| {
-                let v = &nu[9 * i + 3 * k..9 * i + 3 * k + 3];
-                let o = m.omega[i][k];
-                [v[0] as f32, v[1] as f32, v[2] as f32, o[0], o[1], o[2]]
-            })
-            .collect()
-    };
-    let (c0, c1, c2) = (control(0), control(1), control(2));
-    let log_durations: Vec<f32> = m.sigmas.iter().map(|s| s.ln()).collect();
-    let base = vec![[0.0f32; 6]; n];
-    let is_static: Vec<f32> = m
-        .is_static
-        .iter()
-        .map(|&s| if s { 1.0 } else { 0.0 })
-        .collect();
-    let twist = TrigsMotion {
-        opacities: &m.opacities,
-        times: &m.times,
-        log_durations: &log_durations,
-        twist_base: &base,
-        twist_c0: &c0,
-        twist_c1: &c1,
-        twist_c2: &c2,
-        anchors: &m.anchors,
-        is_static: &is_static,
-        active_threshold: m.active_threshold,
-    };
-    let rows: Vec<usize> = (0..n).filter(|&i| well[i] > 0.5).collect();
-    assert!(rows.len() > 1000);
-    for &t in &f.times {
-        let t = t as f32;
-        let clips = m.clip_states(t);
-        let (mut centre, mut rotation, mut opacity, mut checked) = (0.0f64, 0.0f64, 0.0f32, 0);
-        for &i in &rows {
-            let tr = &canonical.transforms[i];
-            let a = m.row(i, tr, &clips);
-            if a.weight <= 0.0 {
-                continue;
-            }
-            checked += 1;
-            let b = twist.deform_row(i, [tr[0], tr[1], tr[2]], [tr[4], tr[5], tr[6], tr[3]], t);
-            let d = (0..3)
-                .map(|k| f64::from(a.center[k] - b.center[k]).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            centre = centre.max(d);
-            let [x, y, z, w] = b.quaternion.map(f64::from);
-            rotation = rotation.max(angle(a.quaternion, &[w, x, y, z]));
-            opacity = opacity.max((m.opacities[i] * a.weight - b.opacity).abs());
-        }
-        println!(
-            "twist vs asog t={t}: {checked} rows, worst centre {centre:.3e} m, rotation {rotation:.3e} rad, opacity {opacity:.3e}"
-        );
-        assert!(
-            centre <= 1e-5 && rotation <= 1e-5 && opacity <= 1e-6,
             "t={t}"
         );
     }

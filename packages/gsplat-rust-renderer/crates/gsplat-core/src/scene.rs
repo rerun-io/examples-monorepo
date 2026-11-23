@@ -87,17 +87,6 @@ impl Scene {
         }
     }
 
-    /// Attach per-row motion (before the scene is shared).
-    pub(crate) fn animate(
-        &mut self,
-        device: &wgpu::Device,
-        motion: crate::motion_gpu::Motion<'_>,
-        limit: u64,
-    ) -> Result<(), Error> {
-        let uploaded = motion.upload(device, self.n as usize, limit)?;
-        self.attach_motion(uploaded)
-    }
-
     pub(crate) fn hexels(&self) -> bool {
         matches!(self.inputs, Inputs::Hexels { .. })
     }

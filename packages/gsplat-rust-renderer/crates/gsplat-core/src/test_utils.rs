@@ -116,14 +116,14 @@ pub struct AsogGpuLoad {
 /// same way, `ASOG_STRIDE` f32 each), then for each time in `times` the GPU motion pass on those rows as (transforms
 /// f32 x 10 per row, raw opacity per row).
 pub fn asog_gpu_load(parts: &crate::asog::AsogParts, times: &[f32]) -> AsogGpuLoad {
-    use crate::motion_gpu::{ASOG_STRIDE, Deform, Motion};
+    use crate::motion_gpu::{ASOG_STRIDE, Deform};
     let (device, queue) = gpu();
     let renderer = crate::Renderer::new(&device).expect("renderer");
     let scene = renderer.upload_asog(&queue, parts).expect("upload_asog");
     let n = scene.len() as usize;
     let motion = scene.motion().expect("animated scene");
     let gpu_rows = read(&device, &queue, &motion.params, n * ASOG_STRIDE);
-    let cpu_rows = Motion::Asog(&parts.motion()).pack().1;
+    let cpu_rows = crate::motion_gpu::pack(&parts.motion());
     let kernels = crate::kernels::Kernels::new(&device);
     let mut deform = Deform::new(
         &device,

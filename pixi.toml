@@ -4479,7 +4479,7 @@ trtkit = { path = "packages/trtkit", editable = true }
 # The trainer's fused SSIM: hexels_mojo.fused_ssim (Mojo port of fused-ssim; recipe patch 0007 points TRiGS's loss at it).
 # Its kernels are built for the local GPU by the open4dgs-ssim-mojo-build task (without the build TRiGS falls back to torchmetrics).
 hexels-mojo = { path = "packages/hexels-mojo", editable = true }
-# The gsplat viewer's Python Rerun contracts (sog3d, asog_decode, trigs_motion3d): pure Python, dependencies = []; its Rust
+# The gsplat viewer's Python Rerun contracts (sog3d, asog_decode): pure Python, dependencies = []; its Rust
 # crates build only through the gsplat tasks.
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 # trigs.io.ply / PLY export (PyPI only).

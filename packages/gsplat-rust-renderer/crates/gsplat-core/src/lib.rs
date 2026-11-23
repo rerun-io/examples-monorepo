@@ -15,7 +15,6 @@ mod gpu;
 mod kernels;
 mod lens;
 mod motion_gpu;
-pub use motion_gpu::Motion;
 pub mod native;
 mod output;
 mod primitives;
