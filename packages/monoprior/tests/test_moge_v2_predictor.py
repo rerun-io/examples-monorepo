@@ -415,3 +415,20 @@ def test_trt_normal_heads_match_torch_twin_and_return_owning_outputs() -> None:
     reused_prediction: MoGeV2NormalOutput = trt_predictor.predict_normals(torch.flip(rgb_bhw3[:1], dims=(2,)))
     assert reused_prediction.normals_bhw3.data_ptr() != held_prediction.normals_bhw3.data_ptr()
     torch.testing.assert_close(held_prediction.normals_bhw3, held_normals_copy_bhw3)
+
+
+def test_onnx_path_names_the_head_set_size_and_detail_level(tmp_path: Path) -> None:
+    from monopriors.models.moge_v2 import moge_v2_onnx_path
+
+    path: Path = moge_v2_onnx_path("geometry", "vitl", (364, 644), resolution_level=9, cache_dir=tmp_path)
+    assert path.parent == tmp_path / "onnx"
+    assert path.name.startswith("moge-v2-vitl-geometry_364x644_t") and path.suffix == ".onnx"
+
+
+def test_has_engine_checks_the_caches_only(tmp_path: Path) -> None:
+    """An empty cache has no engine: the check neither exports nor builds (a caller then uses the torch predictor)."""
+    from monopriors.models.moge_v2 import MoGeV2TrtPredictor
+
+    predictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", cache_dir=tmp_path)
+    assert predictor.has_engine((1280, 704)) is False
+    assert not any(tmp_path.rglob("*"))
