@@ -14,7 +14,7 @@ import rerun as rr
 from rerun.chunk import RrdReader
 
 from fdanyone_rerun.gradio_ui import app
-from fdanyone_rerun.gradio_ui.app import APP_PRIOR, APP_STEPS, build, run_app
+from fdanyone_rerun.gradio_ui.app import APP_STEPS, build, run_app
 from fdanyone_rerun.person4d import PersonConfig
 
 
@@ -63,13 +63,14 @@ def test_app_builds() -> None:
 
 
 def test_run_without_a_video_asks_for_one() -> None:
-    (step,) = list(run_app(None, 6, 42, True, APP_STEPS, APP_PRIOR))
+    (step,) = list(run_app(None, 6, 42, True, APP_STEPS, True))
     assert step[:2] == (None, "Choose a video first.")
 
 
-def test_the_app_starts_shorter_than_the_cli_and_without_the_prior() -> None:
-    # A demo click stays short and runs no extra estimator model (MoGe-2); the settings map onto the CLI's config (below).
-    assert APP_PRIOR is False
+def test_the_app_starts_shorter_than_the_cli_with_the_cli_prior() -> None:
+    # A demo click stays short; the prior checkbox starts at the CLI's default (on); the settings map onto the CLI's config (below).
+    prior = next(block for block in build(examples=[]).blocks.values() if isinstance(block, gr.Checkbox) and "prior" in str(block.label))
+    assert prior.value is True and PersonConfig().prior is True
     assert PersonConfig().train.steps > APP_STEPS
 
 

@@ -1,8 +1,8 @@
 """The 4DAnyone app: pick a clip, press Run, watch the phases stream into the embedded Rerun viewer.
 
 The run is :class:`fdanyone_rerun.stream.RunStreamer`, the same core as ``fdanyone-run --train``; this module only adds
-the widgets, a worker thread and the byte pump into the viewer. The widgets start at a short training run with no MoGe-2
-prior (:data:`APP_STEPS`, :data:`APP_PRIOR`); everything else is the CLI's default.
+the widgets, a worker thread and the byte pump into the viewer. The widgets start at a short training run
+(:data:`APP_STEPS`); everything else, the MoGe-2 prior included, is the CLI's default.
 
 The page has our apps' shared look and layout (:mod:`simplecv.app_theme`): Input and Outputs tabs, Run, Stop and the status
 on the left, the viewer filling the rest of the window. When the browser has no WebGPU, a notice above the viewer says so
@@ -44,11 +44,9 @@ RUN_LOG_LINES: int = 100
 """Lines the run log keeps."""
 APP_STEPS: int = 5_000
 """The steps setting's start value: a short training run (the CLI's default is :class:`PersonConfig`'s)."""
-APP_PRIOR: bool = False
-"""The prior setting's start value: off, so a click runs no extra estimator model (MoGe-2)."""
 PRIOR_INFO: str = (
     "MoGe-2 depth and normals on every view shape the person's surface: on the 18-view example the held-out normal error "
-    "falls from 30° to 16° at the same PSNR. Costs about 70 s more for 6 views on an RTX 5090 and up to 11 GB of GPU memory."
+    "falls from 30° to 16° at the same PSNR. Uses up to 11 GB of GPU memory; turn it off for a faster run."
 )
 """The prior setting's hint: what it adds and what it costs."""
 VIEW_CHOICES: tuple[int, ...] = (6, 12, 18, 24)
@@ -59,7 +57,7 @@ DESCRIPTION: str = (
     "One casual video of a person becomes synchronized videos from new cameras around them "
     "([4DAnyone](https://github.com/ant-research/4DAnyone)-Turbo), then a 4D Gaussian model of the person trains on those views "
     "([Open4DGS](https://github.com/ASU-NEM-Labs/open4dgs-trigs) TRiGS) and plays in 3D. **Pick an example or upload a clip, then "
-    "press Run:** motion recovery, the views as they denoise, the camera rig, then the person training (about 6 min on an RTX 5090)."
+    "press Run:** motion recovery, the views as they denoise, the camera rig, then the person training (about 7.5 min on an RTX 5090)."
 )
 """Markdown above the app: Rerun's wordmark, then two short lines."""
 NO_WEBGPU: str = (
@@ -295,9 +293,9 @@ def build(examples: list[Path] | None = None) -> gr.Blocks:
                             seed: gr.Number = gr.Number(label="Seed", value=RunConfig().seed, precision=0)
                             train: gr.Checkbox = gr.Checkbox(label="Train the 4D person after the views", value=True)
                             steps: gr.Number = gr.Number(
-                                label=f"Training steps ({APP_STEPS:,} take about 90 s on an RTX 5090)", value=APP_STEPS, precision=0, minimum=100
+                                label=f"Training steps ({APP_STEPS:,} take about 3 to 3.5 min on an RTX 5090 with the prior)", value=APP_STEPS, precision=0, minimum=100
                             )
-                            prior: gr.Checkbox = gr.Checkbox(label="Depth + normal prior (MoGe-2)", value=APP_PRIOR, info=PRIOR_INFO)
+                            prior: gr.Checkbox = gr.Checkbox(label="Depth + normal prior (MoGe-2)", value=PersonConfig().prior, info=PRIOR_INFO)
                         gr.Examples(
                             examples=[[str(path)] for path in clips], inputs=[video], examples_per_page=EXAMPLES_PER_PAGE, cache_examples=False, elem_id="examples"
                         )
