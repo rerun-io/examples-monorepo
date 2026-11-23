@@ -13,7 +13,6 @@ from torch import Tensor
 
 from slam_rs.catalog_feed import ColorCopy, color_copy_size
 
-
 DECODE_BATCH_PIXELS: int = 32 * 1920 * 1920
 """Pixels per NVDEC batch: 32 frames of a 1920 px lens (the float RGB of one batch is 12 bytes per pixel)."""
 
