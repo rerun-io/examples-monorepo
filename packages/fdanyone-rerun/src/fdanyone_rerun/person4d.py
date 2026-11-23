@@ -17,7 +17,8 @@ import dataclasses
 import gc
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -208,33 +209,36 @@ def train_person(
     recording.send_blueprint(training_blueprint())
     device: torch.device = torch.device("cuda")
     seconds: dict[str, float] = {}
+
+    @contextmanager
+    def stage(name: str) -> Iterator[None]:
+        """One stage of the run: a Stop is honoured before it starts; its wall time goes to ``seconds[name]``."""
+        raise_if_stopped(cancel)
+        started: float = time.perf_counter()
+        yield
+        seconds[name] = time.perf_counter() - started
+
     allocated, reserved = free_gpu()
     report(f"training the 4D person: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved before it starts")
-
-    started: float = time.perf_counter()
-    clip, masks = read_run_clip(output_dir, config.max_side, device, cancel)
-    seconds["read_and_masks"] = time.perf_counter() - started
+    with stage("read_and_masks"):
+        clip, masks = read_run_clip(output_dir, config.max_side, device, cancel)
     report(
         f"{len(clip.camera_names)} views x {len(clip.frame_indices)} frames at {clip.sizes[0][0]}x{clip.sizes[0][1]}, mattes in {seconds['read_and_masks']:.0f} s"
     )
-    started = time.perf_counter()
-    init: InitCloud = body_surface_init(
-        clip,
-        clip.camera_names,
-        dataset="fdanyone",
-        segment_id=output_dir.name,
-        samples_per_person=config.samples_per_person,
-        keyframe_step=config.keyframe_step,
-    )
-    seconds["init"] = time.perf_counter() - started
+    with stage("init"):
+        init: InitCloud = body_surface_init(
+            clip,
+            clip.camera_names,
+            dataset="fdanyone",
+            segment_id=output_dir.name,
+            samples_per_person=config.samples_per_person,
+            keyframe_step=config.keyframe_step,
+        )
     prior: MonoPriorLoss | None = None
     if config.prior:
-        raise_if_stopped(cancel)
-        started = time.perf_counter()
         report("MoGe-2 depth + normal prior on every view")
-        prior = _prior_loss(clip, masks, config)
-        seconds["prior"] = time.perf_counter() - started
-    raise_if_stopped(cancel)
+        with stage("prior"):
+            prior = _prior_loss(clip, masks, config)
 
     steps: int = config.train.steps
     middle: int = len(clip.frame_indices) // 2
@@ -260,9 +264,8 @@ def train_person(
             recording.log(TRAIN_PREVIEW, rr.Image((rgb * 255).round().byte().cpu().numpy()).compress(jpeg_quality=85))
             recording.reset_time()
 
-    started = time.perf_counter()
-    trained: TrainedClip = train_clip(clip, masks, init, config.train, (), device=device, prior=prior, on_step=on_step)
-    seconds["train"] = time.perf_counter() - started
+    with stage("train"):
+        trained: TrainedClip = train_clip(clip, masks, init, config.train, (), device=device, prior=prior, on_step=on_step)
     rows: int = int(trained.params["means"].shape[0])
     params: dict[str, Tensor] = {name: value.detach().cpu() for name, value in trained.params.items()}
     it_per_s: float = steps / trained.train_seconds
@@ -271,13 +274,10 @@ def train_person(
     del trained, prior, masks, clip, init
     free_gpu()
 
-    raise_if_stopped(cancel)
-    started = time.perf_counter()
-    asog, stats = encode_asog(params, fps, num_frames, config.asog)
-    seconds["encode"] = time.perf_counter() - started
-    started = time.perf_counter()
-    log_asog(PERSON, parse_asog(asog, f"{output_dir.name} person"), 0.0, ASOG_CUT_FORMAT, PREVIEW_ROWS, fps=fps, recording=recording)
-    seconds["log"] = time.perf_counter() - started
+    with stage("encode"):
+        asog, stats = encode_asog(params, fps, num_frames, config.asog)
+    with stage("log"):
+        log_asog(PERSON, parse_asog(asog, f"{output_dir.name} person"), 0.0, ASOG_CUT_FORMAT, PREVIEW_ROWS, fps=fps, recording=recording)
     recording.send_blueprint(person_blueprint(read_camera_rig(output_dir)))
     report(
         f"4D person: {steps:,} steps at {it_per_s:.0f} it/s, {rows:,} Gaussians -> ASOG {stats.count:,} rows, {len(asog) / 1e6:.1f} MB; "

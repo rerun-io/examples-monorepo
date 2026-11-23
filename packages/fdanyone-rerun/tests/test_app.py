@@ -67,7 +67,7 @@ def test_the_app_preset_differs_from_the_cli_only_in_length_and_prior() -> None:
 def test_a_run_saves_a_valid_recording_and_offers_it_by_name(runs: Path) -> None:
     """The viewer's bytes and the saved ``<run>.rrd`` hold the same recording; the status names the file, not its path;
     the download box gets it. ``BinaryStream.read()`` returns None while nothing new was logged."""
-    assert app.latest_recording() is None
+    assert app.latest_recording().visible is False
     pumped: list[tuple[bytes | None, str]] = list(start(runs))
 
     (saved,) = runs.glob("*.rrd")
@@ -75,7 +75,8 @@ def test_a_run_saves_a_valid_recording_and_offers_it_by_name(runs: Path) -> None
     assert sum(len(data or b"") for data, _ in pumped) > 0
     done: str = pumped[-1][1]
     assert done.endswith(f"recording `{saved.name}`") and str(runs) not in done
-    assert app.latest_recording() == str(saved)
+    offered = app.latest_recording()
+    assert offered.visible and saved.name in str(offered.value)
 
 
 def test_a_stopped_run_says_so_and_offers_nothing(runs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,7 +85,7 @@ def test_a_stopped_run_says_so_and_offers_nothing(runs: Path, monkeypatch: pytes
     assert next(run)[1].startswith("Running")
     assert list(app.stop_status())[-1] == "Stopped."
     assert [status for _, status in run][-1].startswith("Stopped after")
-    assert app.latest_recording() is None
+    assert app.latest_recording().visible is False
 
 
 def _hold_gpu_lock(path: Path) -> Callable[[], None]:

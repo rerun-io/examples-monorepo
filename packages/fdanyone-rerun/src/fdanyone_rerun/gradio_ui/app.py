@@ -7,6 +7,7 @@ module only adds the widgets, a worker thread, the byte pump into the viewer and
 
 import dataclasses
 import fcntl
+import json
 import os
 import threading
 import time
@@ -47,8 +48,23 @@ DESCRIPTION: str = (
 # Below 900 px (iPad portrait, ~744 px) the two columns stack: the controls shrink to their content above the viewer, which
 # takes the rest of the window. Windows under 800 px tall get a smaller clip preview. Below 600 px (a phone) the page may scroll, and the viewer keeps 70% of the window height.
 # Touch targets are at least 44 px.
+NO_WEBGPU: str = (
+    "<b>This browser has no WebGPU</b>, so the viewer cannot run the gsplat renderer: the 4D person is drawn with "
+    "Rerun's basic splats and looks blurry. On Linux Chrome: enable <code>chrome://flags/#enable-vulkan</code> and "
+    "relaunch. Or download the run's recording and open it in the native gsplat viewer "
+    "(<code>packages/gsplat-rust-renderer/target/release/gsplat-rust-renderer &lt;run&gt;.rrd</code>)."
+)
+"""Shown above the viewer when the page finds no WebGPU adapter (the gsplat renderer needs WebGPU's compute limits)."""
+WEBGPU_CHECK_JS: str = (
+    "async () => { const adapter = navigator.gpu ? await navigator.gpu.requestAdapter().catch(() => null) : null;"
+    " if (adapter) return; const notice = document.getElementById('webgpu-notice'); if (!notice) return;"
+    f" notice.innerHTML = {json.dumps(NO_WEBGPU)}; notice.style.display = 'block'; }}"
+)
+"""Runs once when the page loads: fills ``#webgpu-notice`` when ``navigator.gpu`` gives no adapter."""
 APP_CSS: str = """
 footer { display: none !important; }
+#webgpu-notice { display: none; padding: 0.6rem 0.8rem; margin-bottom: 0.4rem; border: 1px solid #b45309; border-radius: 6px;
+    background: #2a1a05; color: #fde68a; font-size: 0.9rem; }
 #main-row { min-height: 30rem; }
 #viewer-column { display: flex; flex-direction: column; min-height: 0; }
 #viewer { flex: 1 1 0; min-height: 0; }
@@ -193,9 +209,10 @@ def run_app(
         streamer.stop.set()
 
 
-def latest_recording() -> str | None:
-    """The latest finished run's recording, for the download box (None until a run has finished)."""
-    return str(SLOT.recording) if SLOT.recording is not None and SLOT.recording.is_file() else None
+def latest_recording() -> gr.File:
+    """The download box: shown with the latest finished run's recording, hidden until there is one."""
+    path: Path | None = SLOT.recording if SLOT.recording is not None and SLOT.recording.is_file() else None
+    return gr.File(value=str(path) if path is not None else None, visible=path is not None)
 
 
 def stop_status() -> Iterator[str]:
@@ -234,8 +251,9 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
                     run_button = gr.Button("Run", variant="primary")
                     stop = gr.Button("Stop", variant="stop")
                 status = gr.Markdown(READY, elem_id="run-status")
-                recording = gr.File(label="Recording (.rrd, 4D person included)", interactive=False, elem_id="recording")
+                recording = gr.File(label="Recording (.rrd, 4D person included)", interactive=False, visible=False, elem_id="recording")
             with gr.Column(scale=3, elem_id="viewer-column"):
+                gr.HTML('<div id="webgpu-notice"></div>', padding=False)
                 viewer = Rerun(
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
@@ -256,5 +274,6 @@ def launch(demo: gr.Blocks, config: Config) -> None:
         ssr_mode=False,
         allowed_paths=[str(EXAMPLE_VIDEO.parent), str(RUNS_DIR)],
         css=APP_CSS,
+        js=WEBGPU_CHECK_JS,
         show_error=True,
     )

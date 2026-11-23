@@ -10,17 +10,11 @@ mkdir -p "$SRC_DIR/stock"
 cp -r "$SRC_DIR/web-viewer-npm" "$SRC_DIR/stock/npm"
 export CARGO_HOME="$SRC_DIR/.cargo"
 export CARGO_BUILD_JOBS="${CPU_COUNT:-8}"
-# The build script is loaded by path (its package's __init__ files are not among the sources); clang and ar come from
-# the build prefix.
-python -c "
-import importlib.util
-import sys
+# gsplat-web-build's script, with clang and ar from the build prefix.
+PYTHONPATH="$GS" python -c "
 from pathlib import Path
-spec = importlib.util.spec_from_file_location('build_web_viewer', '$GS/gsplat_rust_renderer/apis/build_web_viewer.py')
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module  # dataclasses look the module up while it executes
-spec.loader.exec_module(module)
-module.main(module.BuildWebViewerConfig(stock_dir=Path('$SRC_DIR/stock'), out_dir=Path('$SRC_DIR/web-out'), cargo_home=Path('$CARGO_HOME'), toolchain_prefix=Path('$BUILD_PREFIX')))
+from gsplat_rust_renderer.apis.build_web_viewer import BuildWebViewerConfig, main
+main(BuildWebViewerConfig(stock_dir=Path('$SRC_DIR/stock'), out_dir=Path('$SRC_DIR/web-out'), cargo_home=Path('$CARGO_HOME'), toolchain_prefix=Path('$BUILD_PREFIX')))
 "
 
 rm -rf "$GRV/frontend/gsplat-web-viewer"

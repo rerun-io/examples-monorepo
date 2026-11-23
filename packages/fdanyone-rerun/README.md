@@ -73,7 +73,12 @@ the run through five layouts:
    progress (step, it/s, ETA), then the person in 3D, playing with the views.
 
 The page fits the window. One run at a time; Stop ends the run at the next stage, denoising step or training step.
-Each run saves what the viewer showed as `data/app-runs/<run_id>.rrd` beside its run directory.
+Each run saves what the viewer showed as `data/app-runs/<run_id>.rrd` beside its run directory, and the
+page offers it for download when the run has finished.
+
+The gsplat renderer in the embedded viewer needs WebGPU. A browser without it (Linux Chrome until
+`chrome://flags/#enable-vulkan` is enabled) gets Rerun's basic splats, and the page says so above the viewer; the saved
+recording plays in the native gsplat viewer (`packages/gsplat-rust-renderer`).
 
 On a GPU shared with other jobs, pass `--gpu-lock <file>` (e.g. `/tmp/gpu-5090.lock`): the app holds that flock only
 while a run is on the GPU and says "Waiting for the GPU" until it gets it. Do not wrap the whole app in `flock`: an app
