@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from trtkit.base import TensorRuntime
 else:
     TensorRuntime = object
+    TrtBuildConfig = object
 
 
 class MoGeV2NormalOutput(NamedTuple):
@@ -344,7 +345,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         if len(self.network_hw_options) == 1:
             self._ensure_runtime(self.network_hw_options[0])
 
-    def _build_config(self) -> "TrtBuildConfig":
+    def _build_config(self) -> TrtBuildConfig:
         """The TensorRT build settings every engine of this predictor uses (part of the engine cache key)."""
         from trtkit import TrtBuildConfig
 
