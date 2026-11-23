@@ -107,17 +107,16 @@ TRiGS render premultiplied over black, clamped to [0, 1].
 Every score runs in full float32 (`evaluate.ieee_fp32`): PyTorch's default lets cuDNN convolutions use TF32, which
 made LPIPS depend on the batch shape at the 1e-4 level. Training keeps PyTorch's defaults.
 
-## Animated SOG export
+## Export
 
-`open4dgs-export-asog` encodes a run's checkpoint as Animated SOG into the recording `<run>/asog.rrd`
-(`--asog-file` also writes an `.asog` for other players). The default preset `band-safe` keeps held-out
-PSNR within 1 % of the uncompressed clip (about 12 MB); `--settings.preset small` gives a smaller file for web
-streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).
+`open4dgs-export` turns a run into a recording, a layer of the run on `open4dgs-runs`. One `--format` flag:
 
-`open4dgs-export-splats` turns a run into a recording, layer of the run on `open4dgs-runs`. One `--format` flag:
-
-- `asog` (default): the checkpoint encoded as Animated SOG (band-safe; or an `.asog` file given with `--asog`) stored
-  once as `AnimatedSogSplats3D` plus a one-pose preview, `<run>/asog.rrd`, layer `asog`; the same recording
-  `open4dgs-export-asog` writes (`--rrd`). The
-  gsplat viewer plays it; a stock Rerun viewer shows one still pose.
+- `asog` (default): the checkpoint encoded as Animated SOG (or an `.asog` file given with `--asog`) stored once as
+  `AnimatedSogSplats3D` plus a one-pose preview, `<run>/asog.rrd`, layer `asog` (`--asog-file` also writes the `.asog`
+  for other players). The gsplat viewer plays it; a stock Rerun viewer shows one still pose. The default preset
+  `band-safe` keeps held-out PSNR within 1 % of the uncompressed clip (about 12 MB); `--settings.preset small` gives a
+  smaller file for web streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).
 - `per-frame`: one `GaussianSplats3D` per frame, `<run>/splats.rrd`, layer `splats`; plays in stock viewers.
+
+`open4dgs-eval-asog` measures what the compression costs: the held-out cameras rendered from the checkpoint as trained
+and from the decoded ASOG (and at the `.asog` cut 0.05), scored like `open4dgs-train`.

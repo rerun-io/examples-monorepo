@@ -1,6 +1,6 @@
 """The exporters' Rerun recordings on a tiny synthetic run: the viewer contracts come from gsplat_rust_renderer.
 
-``export_asog.write_rrd`` and ``export_splats`` (default ``--format asog``) put the ``.asog`` verbatim in
+``open4dgs-export`` (``apis.export``, default ``--format asog``) puts the ``.asog`` verbatim in
 ``AnimatedSogSplats3D`` with a one-pose stock preview (one shared writer, ``splat_export.write_asog_rrd``);
 ``--format per-frame`` logs one ``GaussianSplats3D`` row per frame.
 The contracts themselves are pinned in packages/gsplat-rust-renderer/tests.
@@ -58,7 +58,7 @@ def tiny_run(root: Path) -> Path:
 
 
 def test_asog_rrd_carries_the_file_and_a_one_pose_preview(tmp_path: Path) -> None:
-    from open4dgs.apis.export_asog import Config, write_rrd
+    from open4dgs.apis.export import Config, main
     from open4dgs.asog import AsogSettings, encode_asog
     from open4dgs.splat_export import SPLAT_ENTITY
 
@@ -66,7 +66,7 @@ def test_asog_rrd_carries_the_file_and_a_one_pose_preview(tmp_path: Path) -> Non
     asog_path: Path = tmp_path / "clip.asog"
     asog_path.write_bytes(encode_asog(synthetic_params(), FPS, NUM_FRAMES, AsogSettings(preset="upstream", prune=0.0))[0])
     out: Path = tmp_path / "asog.rrd"
-    summary = write_rrd(Config(run=run, register=False, preview_rows=64), asog_path.read_bytes(), out)
+    summary = main(Config(run=run, register=False, preview_rows=64, asog=asog_path, output=out))
     columns = static_columns(out, SPLAT_ENTITY)
 
     assert bytes(columns["AnimatedSogSplats3D:asog"]) == asog_path.read_bytes()
@@ -90,7 +90,7 @@ def entity_rows(path: Path) -> dict[str, int]:
 
 
 def test_default_export_is_the_asog_payload_with_a_preview(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from open4dgs.apis.export_splats import Config, main
+    from open4dgs.apis.export import Config, main
     from open4dgs.asog import AsogSettings, encode_asog
     from open4dgs.splat_export import SPLAT_ENTITY
 
@@ -112,7 +112,7 @@ def test_default_export_encodes_the_checkpoint_into_the_recording_only(tmp_path:
     """Without ``--asog`` the checkpoint is encoded in memory: the recording carries the ASOG and no ``.asog`` file is written."""
     from gsplat_rust_renderer.asog_decode import parse_asog
 
-    from open4dgs.apis.export_splats import Config, main
+    from open4dgs.apis.export import Config, main
     from open4dgs.asog import AsogSettings, encode_asog
     from open4dgs.splat_export import SPLAT_ENTITY
 
@@ -127,7 +127,7 @@ def test_default_export_encodes_the_checkpoint_into_the_recording_only(tmp_path:
 
 
 def test_per_frame_export_is_the_old_default(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from open4dgs.apis.export_splats import Config, main
+    from open4dgs.apis.export import Config, main
 
     run: Path = tiny_run(tmp_path)
     summary = main(Config(run=run, register=False, format="per-frame"))

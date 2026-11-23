@@ -1,16 +1,11 @@
-"""Compress a trained run to Animated SOG (ASOG) in a Rerun recording and, optionally, measure what the compression costs.
+"""What compressing a trained run to Animated SOG (ASOG) costs: ``open4dgs-eval-asog``.
 
-``<run>/trigs_ckpt.pt`` -> ASOG bytes -> ``<run>/asog.rrd`` (the one output; ``--asog-file`` also writes the ``.asog`` for
-other players) -> decoded back to TRiGS parameters. With ``--evaluate`` the held-out cameras of the run (its ``run`` property:
-dataset, segment, frames, cameras, size, ROI, mask layer) are re-read from the catalog and rendered with the trainer's
-renderer from the uncompressed and the decoded parameters, scored like ``open4dgs-train`` (person crop), and compared
-with each other (PSNR of decoded vs uncompressed renders). ``decoded_cut05`` renders the decoded clip with the ``.asog``
-v1 temporal cut (0.05) instead of the trainer's (0.01): what a stock ``.asog`` player shows.
-
-The recording, ``<run>/asog.rrd`` (``--rrd``), holds the ASOG bytes verbatim as the custom gsplat viewer's
-``AnimatedSogSplats3D`` payload (``gsplat_rust_renderer.sog3d.log_asog``) with ``frame_origin`` = the clip's first frame, a stock
-preview of the clip-middle pose on the same entity, and the run's cameras, SMPL-X meshes and ``ViewCoordinates`` as
-``open4dgs-export-splats`` logs them. It is registered as layer ``asog`` of the run on open4dgs-runs (``--no-register``).
+``<run>/trigs_ckpt.pt`` -> ASOG bytes (``--settings``) -> decoded back to TRiGS parameters. The held-out cameras of the run
+(its ``run`` property: dataset, segment, frames, cameras, size, ROI, mask layer) are re-read from the catalog and rendered
+with the trainer's renderer from the checkpoint as trained (``TrainedClip.load``) and from the decoded parameters, scored
+like ``open4dgs-train`` (person crop), and compared with each other (PSNR of decoded vs uncompressed renders).
+``decoded_cut05`` renders the decoded clip with the ``.asog`` v1 temporal cut (0.05) instead of the trainer's (0.01):
+what a stock ``.asog`` player shows. Writes nothing but ``--png-dir``; the recording is ``open4dgs-export``'s.
 """
 
 import dataclasses
@@ -19,56 +14,36 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
-from gsplat_rust_renderer.sog3d import PREVIEW_ROWS
 from PIL import Image
-from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
-from simplecv.catalog_layers import register_layer
-from trigs.core.trainer import TrigsTrainingConfig
 
-from open4dgs.asog import AsogSettings, decode_asog, encode_asog, tiny_omega_fraction
+from open4dgs.asog import AsogSettings, decode_asog, encode_asog
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
 from open4dgs.properties import rrd_cells
-from open4dgs.run_log import RUNS_DATASET, RunProperties
-from open4dgs.splat_export import ASOG_CUT_FORMAT, write_asog_rrd
+from open4dgs.run_log import RunProperties
+from open4dgs.splat_export import ASOG_CUT_FORMAT
 from open4dgs.trigs_adapter import TrainedClip
 
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """One export (and optional evaluation)."""
+    """One evaluation (needs the GPU and the catalog)."""
 
     run: Path
     """Run directory (``run.rrd`` + ``trigs_ckpt.pt``)."""
-    asog_file: Path | None = None
-    """Also write the ASOG as an ``.asog`` file here (interchange with other players); by default the recording is the only output."""
     settings: AsogSettings = field(default_factory=AsogSettings)
-    """Encoder preset (``band-safe`` default; ``--settings.preset small``: smaller file for web streaming) and per-option overrides."""
-    evaluate: bool = False
-    """Render the held-out cameras from both models and score them (needs the GPU and the catalog)."""
+    """Encoder preset (``band-safe`` default; ``--settings.preset small``) and per-option overrides."""
     mask_catalog_url: str = LOCAL_CATALOG
     """Catalog of the run's ``people_matte`` layer (local for every run so far)."""
     png_dir: Path | None = None
-    """With ``evaluate``: ground truth | uncompressed | decoded PNGs at two frames per held-out camera."""
+    """Ground truth | uncompressed | decoded PNGs at two frames per held-out camera."""
     png_cameras: int = 2
     """Held-out cameras that get PNGs."""
-    rrd: Path | None = None
-    """Recording with the ASOG as the gsplat viewer's ``AnimatedSogSplats3D`` payload (default ``<run>/asog.rrd``;
-    always written; ``open4dgs-export-splats --format asog`` writes the same recording)."""
-    asog_cut: Literal["format", "trained"] = "format"
-    """Temporal cut recorded for the viewer: ``format`` = the ``.asog`` v1 constant 0.05 (what other players show),
-    ``trained`` = the trainer's 0.01 (the trained look; the same file then plays differently elsewhere)."""
-    preview_rows: int = PREVIEW_ROWS
-    """Stock-viewer preview rows of the clip-middle pose (0 = none; the gsplat viewer then draws nothing)."""
-    register: bool = True
-    """Register the recording as layer ``asog`` of the run on open4dgs-runs."""
-    runs_catalog_url: str = LOCAL_CATALOG
 
 
 def evaluation_models(path: Path, decoded: dict[str, torch.Tensor], clip: MultiViewClip | None, holdout: tuple[int, ...], device: torch.device) -> dict[str, TrainedClip]:
@@ -139,47 +114,23 @@ def _evaluate(config: Config, decoded: dict[str, torch.Tensor]) -> dict[str, obj
     }
 
 
-def write_rrd(config: Config, asog: bytes, out: Path) -> dict[str, object]:
-    """Log the ``asog`` bytes with the run's cameras and meshes into ``out`` (``splat_export.write_asog_rrd``, the writer
-    ``open4dgs-export-splats --format asog`` uses too); registers it as layer ``asog`` unless ``--no-register``."""
-    cut: float = ASOG_CUT_FORMAT if config.asog_cut == "format" else TrigsTrainingConfig().temporal_active_threshold
-    summary: dict[str, object] = write_asog_rrd(config.run, asog, out, cut, config.preview_rows)
-    if config.register:
-        register_layer(CatalogClient(config.runs_catalog_url).get_dataset(RUNS_DATASET), [out], "asog")
-        summary["registered"] = f"{RUNS_DATASET}/{config.run.name}/asog"
-    return summary
-
-
 def main(config: Config) -> dict[str, object]:
-    """Write ``<run>/asog.rrd`` (and ``--asog-file``), decode the ASOG back, optionally evaluate; prints and returns the summary."""
+    """Encode the checkpoint, decode it back, score both models on the held-out cameras; prints and returns the summary."""
     trained: TrainedClip = TrainedClip.load(config.run / "trigs_ckpt.pt", torch.device("cpu"))
     params: dict[str, torch.Tensor] = dict(trained.params)
     t0: float = time.perf_counter()
     asog, stats = encode_asog(params, trained.fps, trained.num_frames, config.settings)
     encode_s: float = time.perf_counter() - t0
-    if config.asog_file is not None:
-        config.asog_file.parent.mkdir(parents=True, exist_ok=True)
-        config.asog_file.write_bytes(asog)
-        config.asog_file.chmod(0o644)
     decoded, decode_s = decode_asog(asog, torch.device("cpu"))
-    splats_rrd: Path = config.run / "splats.rrd"
     summary: dict[str, object] = {
-        "asog_file": str(config.asog_file) if config.asog_file is not None else None,
         "preset": config.settings.preset,
         "settings": asdict(config.settings.options()),
         "rows_checkpoint": int(params["means"].shape[0]),
         "rows_asog": stats.count,
-        "bytes_checkpoint": (config.run / "trigs_ckpt.pt").stat().st_size,
         "bytes_asog": len(asog),
-        "bytes_splats_rrd": splats_rrd.stat().st_size if splats_rrd.exists() else None,
-        "bytes_per_splat": len(asog) / stats.count,
-        "stream_bytes": stats.stream_bytes,
         "encode_s": encode_s,
         "decode_s": decode_s,
-        "tiny_omega_fraction": tiny_omega_fraction(params),
+        **_evaluate(config, decoded),
     }
-    summary.update(write_rrd(config, asog, config.rrd or config.run / "asog.rrd"))
-    if config.evaluate:
-        summary.update(_evaluate(config, decoded))
     print(json.dumps(summary, indent=2, default=float))
     return summary

@@ -4527,15 +4527,15 @@ cmd = "python tools/apps/prior.py"
 cwd = "packages/open4dgs"
 description = "MoGe-2 depth + normals on a clip's training frames (undistorted, max_side), registered as catalog layer moge2_prior"
 
-[feature.open4dgs.tasks.open4dgs-export-splats]
-cmd = "python tools/apps/export_splats.py"
+[feature.open4dgs.tasks.open4dgs-export]
+cmd = "python tools/apps/export.py"
 cwd = "packages/open4dgs"
-description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the checkpoint encoded to Animated SOG, or --asog <file>, once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), or per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers)"
+description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the checkpoint encoded to Animated SOG with --settings, or --asog <file>, once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog; --asog-file also writes the .asog) or per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers)"
 
-[feature.open4dgs.tasks.open4dgs-export-asog]
-cmd = "python tools/apps/export_asog.py"
+[feature.open4dgs.tasks.open4dgs-eval-asog]
+cmd = "python tools/apps/eval_asog.py"
 cwd = "packages/open4dgs"
-description = "Compress a trained run (--run <run dir>) to Animated SOG in <run>/asog.rrd (--rrd; the gsplat viewer's AnimatedSogSplats3D payload + a mid-clip stock preview + the run's cameras and meshes, --asog-cut format|trained), registered as layer asog on open4dgs-runs (--no-register); --asog-file <path> also writes the .asog file (interchange with other players); prints sizes and timings"
+description = "What Animated SOG costs a trained run (--run <run dir>, --settings): the held-out cameras rendered from the checkpoint as trained and from the decoded ASOG (and at the .asog cut 0.05), scored and compared; needs the GPU and the catalog; writes nothing but --png-dir"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
