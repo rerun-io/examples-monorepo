@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -330,6 +330,26 @@ def resident_device(
     return None
 
 
+StepCallback: TypeAlias = Callable[[int, "TrainedClip"], None]
+"""``on_step(steps_done, live)``: after every optimizer step. ``live`` renders the model as trained so far (it holds the
+trainer's own parameters, which TRiGS updates in place; ``train_seconds`` and ``peak_gpu_bytes`` are 0 until the end).
+The trainer avoids host syncs, so a callback that renders or reads a tensor should do so only every few hundred steps.
+An exception raised here ends the run and propagates out of ``train_clip`` (a Stop)."""
+
+
+class _StepTicks:
+    """TRiGS' ``progress_bar`` (a duck-typed tqdm: ``update`` after each step; ``set_postfix`` is optional) that calls ``on_step``."""
+
+    def __init__(self, on_step: StepCallback, live: "TrainedClip") -> None:
+        self.on_step: StepCallback = on_step
+        self.live: TrainedClip = live
+        self.steps: int = 0
+
+    def update(self, n: int = 1) -> None:
+        self.steps += n
+        self.on_step(self.steps, self.live)
+
+
 def train_clip(
     clip: MultiViewClip,
     masks: tuple[Float32[Tensor, "frames h w"], ...],
@@ -339,6 +359,7 @@ def train_clip(
     device: torch.device | None = None,
     prior: MonoPriorLoss | None = None,
     capture_times: Float64[ndarray, "cams frames"] | None = None,
+    on_step: StepCallback | None = None,
 ) -> TrainedClip:
     """Train TRiGS on the clip's training cameras (every camera not in ``holdout_names``).
 
@@ -346,6 +367,7 @@ def train_clip(
     ``RGB+ED`` and adds the loss per camera (recipe patch 0003); its ``prior/*`` scalars join ``scalars``.
     ``capture_times`` (optional): each clip camera's own frame times (seconds, clip order), given to the trainer as
     ``gt_times_per_frame`` instead of frame / fps.
+    ``on_step`` (optional): progress, previews and Stop (``StepCallback``).
     """
     dev: torch.device = device if device is not None else torch.device("cuda")
     # TRiGS's loss falls back to torchmetrics SSIM (another number, ~10x slower) when hexels_mojo.fused_ssim does not import.
@@ -374,6 +396,20 @@ def train_clip(
     writer: ScalarLog = ScalarLog()
     trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
+    # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
+    live: TrainedClip = TrainedClip(
+        params=params,
+        trainer=trainer,
+        trigs_config=trigs_config,
+        cameras=cameras,
+        sh_degree=sh_degree,
+        fps=clip.fps,
+        num_frames=num_frames,
+        scalars=writer.rows,
+        train_seconds=0.0,
+        peak_gpu_bytes=0,
+        capture_times=gt_times,
+    )
     torch.cuda.reset_peak_memory_stats(dev)
     torch.cuda.synchronize(dev)
     start: float = time.perf_counter()
@@ -388,25 +424,14 @@ def train_clip(
         config=trigs_config,
         gt_times_per_frame=gt_times,
         writer=writer,
+        progress_bar=_StepTicks(on_step, live) if on_step is not None else None,
     )
     torch.cuda.synchronize(dev)
     train_seconds: float = time.perf_counter() - start
     if prior is not None:
         prior.finish()
         writer.rows.update(prior.rows)
-    return TrainedClip(
-        params=result.params,
-        trainer=trainer,
-        trigs_config=trigs_config,
-        cameras=cameras,
-        sh_degree=sh_degree,
-        fps=clip.fps,
-        num_frames=num_frames,
-        scalars=writer.rows,
-        train_seconds=train_seconds,
-        peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)),
-        capture_times=gt_times,
-    )
+    return dataclasses.replace(live, params=result.params, train_seconds=train_seconds, peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)))
 
 
 def untrained_clip(

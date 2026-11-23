@@ -221,12 +221,12 @@ pub fn parse(bytes: &[u8]) -> Result<Container<'_>, Error> {
 }
 
 impl Container<'_> {
-    fn desc(&self, name: &'static str) -> Option<&StreamDesc> {
+    fn desc(&self, name: &str) -> Option<&StreamDesc> {
         self.manifest.streams.iter().find(|s| s.name == name)
     }
 
     /// Stream `name` as splat-major integers (`out[i * channels + c]`), with its channel count.
-    pub fn stream(&self, name: &'static str) -> Result<Option<(Vec<i64>, usize)>, Error> {
+    pub fn stream(&self, name: &str) -> Decoded {
         let Some(desc) = self.desc(name) else {
             return Ok(None);
         };
@@ -244,9 +244,68 @@ impl Container<'_> {
             desc.channels,
         )))
     }
+}
 
-    fn required(&self, name: &'static str) -> Result<(Vec<i64>, usize), Error> {
-        self.stream(name)?.ok_or(Error::MissingStream(name))
+/// One stream decoded by [`Container::stream`]: absent, or splat-major integers with their channel count.
+pub type Decoded = Result<Option<(Vec<i64>, usize)>, Error>;
+
+/// The container's streams, each taken once by name.
+struct Streams<'c> {
+    container: &'c Container<'c>,
+    /// Decoded ahead, one per manifest stream (parallel); `None` = decode when taken.
+    ahead: Vec<Option<Decoded>>,
+}
+
+impl<'c> Streams<'c> {
+    /// With `parallel`, decode every stream of the manifest now, one scoped thread per stream (the zlib members are
+    /// independent; a stream whose thread cannot start is decoded when taken). Without it, each stream is decoded on
+    /// the calling thread when it is taken, in the order and with the memory profile of a plain serial decode. Both
+    /// give the same values.
+    fn decode(container: &'c Container<'c>, parallel: bool) -> Self {
+        let descs = &container.manifest.streams;
+        if !parallel {
+            return Self {
+                container,
+                ahead: descs.iter().map(|_| None).collect(),
+            };
+        }
+        let ahead = std::thread::scope(|scope| {
+            let threads: Vec<_> = descs
+                .iter()
+                .map(|desc| {
+                    std::thread::Builder::new()
+                        .spawn_scoped(scope, move || container.stream(&desc.name))
+                        .ok()
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| {
+                    thread.map(|t| {
+                        t.join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    })
+                })
+                .collect()
+        });
+        Self { container, ahead }
+    }
+
+    fn optional(&mut self, name: &'static str) -> Decoded {
+        let decoded = self
+            .container
+            .manifest
+            .streams
+            .iter()
+            .position(|desc| desc.name == name)
+            .and_then(|index| self.ahead[index].take());
+        decoded.unwrap_or_else(|| self.container.stream(name))
+    }
+
+    /// Stream `name`, required, with `want` channels per splat.
+    fn shaped(&mut self, name: &'static str, want: usize) -> Result<Vec<i64>, Error> {
+        let stream = self.optional(name)?.ok_or(Error::MissingStream(name))?;
+        shaped(name, stream, self.container.manifest.count, want)
     }
 }
 
@@ -466,18 +525,33 @@ pub fn decode(bytes: &[u8], active_threshold: f32) -> Result<Asog, Error> {
 ///
 /// Static integers packed as SOG v2 texels, motion
 /// integers as [`MOTION_CODES`] i32 per row. No de-quantisation: [`decode`] (CPU) or `sog_dequant.wgsl` +
-/// `asog_motion.wgsl` do that.
+/// `asog_motion.wgsl` do that. Native builds inflate the streams in parallel (one thread each); the web build, which
+/// has no threads, inflates them in order.
 pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
+    decode_parts_with(bytes, active_threshold, cfg!(not(target_arch = "wasm32")))
+}
+
+/// [`decode_parts`] with every stream inflated in order on the calling thread (the reference of the parallel path).
+#[cfg(any(test, feature = "testing"))]
+pub fn decode_parts_serial(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Error> {
+    decode_parts_with(bytes, active_threshold, false)
+}
+
+fn decode_parts_with(
+    bytes: &[u8],
+    active_threshold: f32,
+    parallel: bool,
+) -> Result<AsogParts, Error> {
     let container = parse(bytes)?;
+    let mut streams = Streams::decode(&container, parallel);
     let m = &container.manifest;
     let n = m.count;
-    let get = |name: &'static str, want: usize| shaped(name, container.required(name)?, n, want);
-    let means = get("means", 3)?;
-    let quats = get("quats", 3)?;
-    let quatmode = get("quatmode", 1)?;
-    let scales = get("scales", 3)?;
-    let sh0 = get("sh0", 3)?;
-    let opacity = get("opacity", 1)?;
+    let means = streams.shaped("means", 3)?;
+    let quats = streams.shaped("quats", 3)?;
+    let quatmode = streams.shaped("quatmode", 1)?;
+    let scales = streams.shaped("scales", 3)?;
+    let sh0 = streams.shaped("sh0", 3)?;
+    let opacity = streams.shaped("opacity", 1)?;
 
     let mut planes = [(); 5].map(|()| vec![0u8; 4 * n]);
     let [means_l, means_u, quat_plane, scale_plane, sh0_plane] = &mut planes;
@@ -506,8 +580,8 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
 
     let sh_n = match (
         &m.sh_n,
-        container.stream("shlabels")?,
-        container.stream("shpalette")?,
+        streams.optional("shlabels")?,
+        streams.optional("shpalette")?,
     ) {
         (Some(sh_n), Some(labels), Some(palette)) => {
             let rest = sh_n.coeffs;
@@ -548,7 +622,7 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
             None => [0.0; 256],
         },
     };
-    let motion_codes = motion_codes(&container, &opacity)?;
+    let motion_codes = motion_codes(m, opacity, &mut streams)?;
     let [means_l, means_u, quats, scales, sh0] = planes;
     Ok(AsogParts {
         manifest: container.manifest,
@@ -565,23 +639,27 @@ pub fn decode_parts(bytes: &[u8], active_threshold: f32) -> Result<AsogParts, Er
 }
 
 /// The motion streams as [`MOTION_CODES`] i32 per row, with the clip index of every row checked.
-fn motion_codes(container: &Container<'_>, opacity: &[i64]) -> Result<Vec<i32>, Error> {
-    let m = &container.manifest;
+fn motion_codes(
+    m: &Manifest,
+    opacity: Vec<i64>,
+    streams: &mut Streams<'_>,
+) -> Result<Vec<i32>, Error> {
     let n = m.count;
-    let get = |name: &'static str, want: usize| shaped(name, container.required(name)?, n, want);
-    let streams: [(&'static str, Vec<i64>, usize); 7] = [
-        ("opacity", opacity.to_vec(), 1),
-        ("mu", get("mu", 1)?, 1),
-        ("logsigma", get("logsigma", 1)?, 1),
-        ("anchor", get("anchor", 3)?, 3),
-        ("omega", get("omega", 9)?, 9),
-        ("g", get("g", 5)?, 5),
-        ("flags", get("flags", 1)?, 1),
-    ];
+    let mut columns = vec![("opacity", opacity, 1)];
+    for (name, width) in [
+        ("mu", 1),
+        ("logsigma", 1),
+        ("anchor", 3),
+        ("omega", 9),
+        ("g", 5),
+        ("flags", 1),
+    ] {
+        columns.push((name, streams.shaped(name, width)?, width));
+    }
     let clips = m.clips.len();
     let mut out = Vec::with_capacity(n * MOTION_CODES);
     for i in 0..n {
-        for (name, values, width) in &streams {
+        for (name, values, width) in &columns {
             for &v in &values[i * width..(i + 1) * width] {
                 out.push(i32::try_from(v).map_err(|_range| Error::Stream {
                     name: (*name).into(),

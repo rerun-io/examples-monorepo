@@ -420,15 +420,24 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
     def has_engine(self, input_hw: tuple[int, int]) -> bool:
         """Whether the engine for an ``input_hw`` image is already built on this machine; checks the caches only (no
         export, no build), so a caller can fall back to the torch predictor instead of waiting for a build. Dynamic:
-        true for every in-range size once the one engine exists; an out-of-range size is false."""
-        from trtkit.trt_builder import cached_engine_path
+        true for every in-range size once the one engine exists; an out-of-range size is false. False in an
+        environment without trtkit."""
+        try:
+            from trtkit.trt_builder import cached_engine_path, onnx_content_hash
+        except ImportError:
+            return False
 
         try:
             network_hw: tuple[int, int] = self.network_hw(input_hw)
         except ValueError:
             return False
         onnx_path, config = self._engine_paths(network_hw)
-        return onnx_path.exists() and cached_engine_path(onnx_path, config, cache_dir=self.cache_dir / "trt").exists()
+        if not onnx_path.exists():
+            return False
+        trt_dir: Path = self.cache_dir / "trt"
+        # The digest record lives in this predictor's cache, as ensure_engine keeps it (else the whole ONNX is hashed again).
+        digest: str = onnx_content_hash(onnx_path, cache_dir=trt_dir)
+        return cached_engine_path(onnx_path, config, cache_dir=trt_dir, onnx_sha256=digest).exists()
 
     def _ensure_runtime(self, network_hw: tuple[int, int]) -> TensorRuntime | TensorRtDynamicRuntime:
         """Build or load the runtime that serves one network size."""

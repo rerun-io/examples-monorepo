@@ -4294,6 +4294,10 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.fdanyone-rerun.dependencies]
 python = "3.12.*"
+# The app's viewer: gradio-rerun built with our gsplat web viewer (recipes/gradio-rerun-src), so the 4D person plays
+# in the app. gradio restates [feature.common]'s pin, which these envs do not compose.
+gradio-rerun-src = { path = "recipes/gradio-rerun-src" }
+gradio = "==6.32.0"  # pin-bump: hold
 gvhmr-src = { path = "recipes/gvhmr-src" }
 # SageAttention's CUDA kernels (sm_120, sm_121); 4DAnyone's DiT selects it automatically when importable.
 sageattention-src = { path = "recipes/sageattention-src" }
@@ -4379,7 +4383,7 @@ description = "Launch the 4DAnyone Gradio app: pick a clip, watch the run stream
 [feature.fdanyone-rerun.tasks.fdanyone-log-run]
 cmd = "python tools/log_run.py"
 cwd = "packages/fdanyone-rerun"
-description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout; no GPU"
+description = "Log a finished 4DAnyone output directory (ours or upstream's) to Rerun with the default layout (no GPU); --train also trains its 4D person"
 
 # ─── Open4DGS upstream init (RoMa v2 + MEMFOF -> keyframes init cloud) ──────
 # recipes/open4dgs-core-src ships only prep/init of open4dgs-core @ 52750b9; its backends are recipes/romav2-src
@@ -4430,10 +4434,10 @@ description = "Upstream RoMa v2 + MEMFOF init of a catalog window on its trainin
 # open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
 # ═══════════════════════════════════════════════════════════════════════════
 # The trainer is recipes/open4dgs-trigs-src (pure Python); packages/open4dgs holds catalog input, Rerun output,
-# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. linux-64 only: the ai-demos gsplat 1.5.3
-# build (CUDA 13 / torch 2.12 / sm_86 + sm_120) exists only there.
+# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. gsplat: the ai-demos 1.5.3 build (CUDA 13 /
+# torch 2.12 / sm_86 + sm_120) on linux-64, 1.6.0 on linux-aarch64 (see the target table below).
 [feature.open4dgs]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.open4dgs.dependencies]
 open4dgs-trigs-src = { path = "recipes/open4dgs-trigs-src" }
@@ -4456,6 +4460,12 @@ einops = ">=0.8.0,<0.9"
 omegaconf = "*"
 timm = ">=1.0.15,<2"
 safetensors = "*"
+
+# No 1.5.3 build for torch 2.12 / CUDA 13 exists on linux-aarch64 (ai-demos carries 1.6.0; conda-forge's aarch64 1.5.3
+# needs torch 2.14), so the Spark (GB10) runs TRiGS on 1.6.0; the trigs recipe allows >=1.5.3,<1.7. Checked on the Spark:
+# trigs smoke training, fused SSIM and ASOG tests pass, and a held-out 5k-step run (see the PR adding this lane).
+[feature.open4dgs.target.linux-aarch64.dependencies]
+gsplat = "==1.6.0"
 
 [feature.open4dgs.pypi-dependencies]
 open4dgs = { path = "packages/open4dgs", editable = true }
@@ -4515,12 +4525,12 @@ description = "MoGe-2 depth + normals on a clip's training frames (undistorted, 
 [feature.open4dgs.tasks.open4dgs-export-splats]
 cmd = "python tools/apps/export_splats.py"
 cwd = "packages/open4dgs"
-description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the run's .asog once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers) or trigs-motion (TrigsMotion3D, layer trigs_motion; gsplat viewer only)"
+description = "A trained run (--run <run dir>) as a recording with the run's cameras and meshes, registered on open4dgs-runs: --format asog (default; the checkpoint encoded to Animated SOG, or --asog <file>, once as AnimatedSogSplats3D + a one-pose stock preview, <run>/asog.rrd, layer asog), per-frame (GaussianSplats3D per frame, <run>/splats.rrd, layer splats; plays in stock viewers) or trigs-motion (TrigsMotion3D, layer trigs_motion; gsplat viewer only)"
 
 [feature.open4dgs.tasks.open4dgs-export-asog]
 cmd = "python tools/apps/export_asog.py"
 cwd = "packages/open4dgs"
-description = "Compress a trained run (--run <run dir>) to Animated SOG: /mnt/nas/ssd-8tb/open4dgs/asog/<run>.asog (third-party interchange export, 644) and <run>/asog.rrd (--rrd; the file as the gsplat viewer's AnimatedSogSplats3D payload + a mid-clip stock preview + the run's cameras and meshes, --asog-cut format|trained), registered as layer asog on open4dgs-runs (--no-register); prints sizes and timings"
+description = "Compress a trained run (--run <run dir>) to Animated SOG in <run>/asog.rrd (--rrd; the gsplat viewer's AnimatedSogSplats3D payload + a mid-clip stock preview + the run's cameras and meshes, --asog-cut format|trained), registered as layer asog on open4dgs-runs (--no-register); --asog-file <path> also writes the .asog file (interchange with other players); prints sizes and timings"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
@@ -4993,15 +5003,27 @@ metrictrail-dev = { features = [
     "ffmpeg",
 ], solve-group = "metrictrail", no-default-feature = true }
 fdanyone-rerun = { features = [
-    "common",
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    "catalog-common",
+    "rerun-prerelease",
     "cuda",
     "fdanyone-rerun",
+    # The 4D person (Open4DGS / TRiGS on the generated views, saved as Animated SOG in the run's recording).
+    "open4dgs",
+    "lietorch-mojo",
+    "torchcodec",
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }
 fdanyone-rerun-dev = { features = [
-    "common",
+    # Not "common": its PyPI gradio-rerun wheel would install beside gradio-rerun-src (the viewer with our gsplat web build).
+    "catalog-common",
+    "rerun-prerelease",
     "cuda",
     "fdanyone-rerun",
+    # The 4D person (Open4DGS / TRiGS on the generated views, saved as Animated SOG in the run's recording).
+    "open4dgs",
+    "lietorch-mojo",
+    "torchcodec",
     "dev",
     "ffmpeg",
 ], solve-group = "fdanyone-rerun", no-default-feature = true }

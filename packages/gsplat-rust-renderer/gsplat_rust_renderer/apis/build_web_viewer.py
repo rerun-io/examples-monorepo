@@ -112,15 +112,20 @@ class BuildWebViewerConfig:
     """Cargo home with the crates.io archive cache."""
     wasm_opt: bool = True
     """Run wasm-opt -O2 (strips debug info and names; about a minute)."""
+    toolchain_prefix: Path | None = None
+    """Prefix whose ``bin/clang`` and ``bin/ar`` compile the C deps for wasm32 (default ``$CONDA_PREFIX``; a rattler-build
+    recipe passes its build prefix)."""
 
 
 def main(config: BuildWebViewerConfig) -> None:
     """Prepare patches, build, bind, optimise and lay out the web viewer."""
     for crate in PATCHED_CRATES:
         prepare(crate, config.cargo_home)
-    prefix: str = os.environ["CONDA_PREFIX"]
-    env: dict[str, str] = dict(
-        os.environ,
+    prefix: Path = config.toolchain_prefix or Path(os.environ["CONDA_PREFIX"])
+    # Without CONDA_BUILD: re_build_tools (re_viewer's build script) treats a conda build as Rerun's own packaging and
+    # runs `cargo metadata` on the patched crate, which fails outside Rerun's workspace.
+    env: dict[str, str] = {name: value for name, value in os.environ.items() if name != "CONDA_BUILD"}
+    env.update(
         CC_wasm32_unknown_unknown=f"{prefix}/bin/clang",
         AR_wasm32_unknown_unknown=f"{prefix}/bin/ar",
         CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="--cfg=web_sys_unstable_apis",

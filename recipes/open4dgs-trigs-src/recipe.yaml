@@ -4,7 +4,8 @@
 #
 # Nothing is compiled:
 #   - gsplat 1.5.3 (upstream's uv git pin) is the ai-demos prebuilt for CUDA 13 / torch 2.12 / py3.12 / sm_86 + sm_120
-#     (linux-64 only), the build [feature.vistadream] uses.
+#     (linux-64 only), the build [feature.vistadream] uses. linux-aarch64 has no such 1.5.3 build and takes ai-demos'
+#     1.6.0 (the pin below allows 1.5.3 up to 1.6.x; [feature.open4dgs] pins each platform).
 #   - PyTorch3D is not built. TRiGS calls only pytorch3d.ops.knn_points and sample_farthest_points, each inside a
 #     function; patch 0001 imports them from packages/open4dgs's `open4dgs.pytorch3d_ops` (plain torch), which the
 #     consuming feature supplies (editable PyPI path package, like vipe-src's vipe_mojo).
@@ -51,7 +52,7 @@ source:
 build:
   # Bump with every patch or build script change: the build string hash does not follow the recipe content, and the
   # shared rattler package cache would otherwise hand an older build to the next install.
-  number: 6
+  number: 7
   noarch: python
   script:
     # pixi-build reuses the host prefix between rebuilds: clear the target first.
@@ -72,7 +73,7 @@ requirements:
     # TRiGS trains on the GPU: never resolve a CPU pytorch.
     - pytorch >=2.12,<2.13 cuda*
     - cuda-version >=13.0,<14
-    - gsplat ==1.5.3
+    - gsplat >=1.5.3,<1.7
     - torchvision
     - torchmetrics
     - numpy

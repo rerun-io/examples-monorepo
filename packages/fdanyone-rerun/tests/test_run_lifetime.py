@@ -69,8 +69,10 @@ def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatc
     class BlockingStreamer:
         """A run that holds upstream's observers until it is stopped, then takes a while to clean up."""
 
-        def __init__(self, _config: RunConfig, _recording: object, previews: bool) -> None:
+        def __init__(self, _config: RunConfig, _recording: object, previews: bool, person: object = None) -> None:
             self.stop: threading.Event = threading.Event()
+            self.messages: list[str] = []
+            self.person_summary: None = None
 
         def on_stage(self, *_args: object) -> None:
             if self.stop.is_set():
@@ -91,12 +93,38 @@ def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatc
     monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
     monkeypatch.setattr(app, "PUMP_SECONDS", 0.05)
     video: str = str(tmp_path / "clip.mp4")
-    first = app.run_app(video, 6, 42)
-    assert next(first)[1].startswith("Running")
-    first.close()  # Stop: the page cancels the request, which closes its generator
-    statuses: list[str] = [status for _, status in app.run_app(video, 6, 42)]
+    first = app.run_app(video, 6, 42, False, 100, False)
+    assert str(next(first)[1]).endswith(" s)")
+    first.close()  # a closed page ends the request, which closes its generator
+    statuses: list[str] = [str(step[1]) for step in app.run_app(video, 6, 42, False, 100, False)]
     assert statuses[0] == "Waiting for the previous run to stop…"
     assert statuses[-1].startswith("Done")
     (_, first_end), (second_start, _) = runs
     assert second_start >= first_end  # no overlap
     assert list(app.stop_status()) == ["Stopped."]
+
+
+def test_stop_stops_a_run_whose_generator_gradio_left_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gradio's cancel does not close the run's generator: the Stop handler must set the run's stop event itself."""
+
+    class WaitingStreamer:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.stop: threading.Event = threading.Event()
+            self.messages: list[str] = []
+            self.person_summary: None = None
+
+        def run(self) -> None:
+            if not self.stop.wait(10):
+                raise AssertionError("never stopped")
+            raise RunCancelled("stopped")
+
+    monkeypatch.setattr(app, "RunStreamer", WaitingStreamer)
+    monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(app, "PUMP_SECONDS", 0.05)
+    run = app.run_app(str(tmp_path / "clip.mp4"), 6, 42, True, 100, False)
+    assert str(next(run)[1]).endswith(" s)")  # the newest progress line and the seconds so far
+    # The generator stays suspended, as after a Gradio cancel: only the Stop handler's event can stop the worker.
+    started: float = time.perf_counter()
+    assert list(app.stop_status())[-1] == "Stopped."
+    assert time.perf_counter() - started < 5.0
+    run.close()
