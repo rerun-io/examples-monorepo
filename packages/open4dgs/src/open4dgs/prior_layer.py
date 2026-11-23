@@ -31,6 +31,7 @@ from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, MultiViewClip
 from open4dgs.prior import ClipPriors, encode_normals
+from open4dgs.properties import PriorLayerProperties, PropertyValue, RoiSignature, any_values, parse_roi_cameras, row_cells
 
 ClipReader: TypeAlias = Literal["catalog", "selfcap"]
 """Which reader made the clip: ``catalog_clip.read_catalog_clip`` or ``selfcap_clip.read_timed_clip``."""
@@ -84,24 +85,25 @@ def as_stored(priors: ClipPriors) -> ClipPriors:
 
 def layer_properties(
     clip: MultiViewClip, source: str, max_side: int | None, resolution_level: int, *, reader: ClipReader, predictor: str
-) -> dict[str, str | int | float]:
+) -> PriorLayerProperties:
     """The ``moge2_prior`` recording property: model, source, window, sizes, the reader that made ``clip`` and the camera
-    grid (``roi_properties``)."""
-    return {
-        "model": MODEL_NAME,
-        "predictor": predictor,
-        "resolution_level": resolution_level,
-        "fov_source": "calibrated fx (fov_x = 2 atan(w / 2 fx))",
-        "source": source,
-        "frame_start": int(clip.frame_indices[0]),
-        "frame_end": int(clip.frame_indices[-1]),
-        "num_frames": len(clip.frame_indices),
-        "max_side": max_side or 0,
-        "cameras": ",".join(clip.camera_names),
-        "image_sizes": ",".join(f"{w}x{h}" for w, h in clip.sizes),
-        "loader": LOADERS[reader],
-        **roi_properties(clip),
-    }
+    grid (``roi_signature``)."""
+    return PriorLayerProperties(
+        model=MODEL_NAME,
+        predictor=predictor,
+        resolution_level=resolution_level,
+        fov_source="calibrated fx (fov_x = 2 atan(w / 2 fx))",
+        source=source,
+        frame_start=int(clip.frame_indices[0]),
+        frame_end=int(clip.frame_indices[-1]),
+        num_frames=len(clip.frame_indices),
+        max_side=max_side or 0,
+        cameras=clip.camera_names,
+        image_sizes=clip.sizes,
+        loader=LOADERS[reader],
+        roi="none" if clip.roi is None else f"people pad={clip.roi.pad:g} max_side={clip.roi.max_side}",
+        roi_cameras=roi_signature(clip, clip.camera_names),
+    )
 
 
 def compute_prior_layer(
@@ -144,9 +146,9 @@ def compute_prior_layer(
     timings: dict[str, float] = {"moge_s": time.perf_counter() - t0, "images": float(len(clip.camera_names) * len(clip.frame_indices))}
     del predictor, engine
     torch.cuda.empty_cache()
-    properties = layer_properties(
+    properties: dict[str, PropertyValue] = layer_properties(
         clip, source, max_side, resolution_level, reader=reader, predictor=ENGINE_PREDICTOR if on_engine else TORCH_PREDICTOR
-    )
+    ).to_properties()
     grid: str = hashlib.sha1(
         "|".join(str(properties[k]) for k in ("frame_start", "frame_end", "cameras", "image_sizes", "max_side", "roi", "roi_cameras")).encode()
     ).hexdigest()[:10]
@@ -167,44 +169,34 @@ def select_cameras(priors: ClipPriors, camera_names: Sequence[str]) -> ClipPrior
     return ClipPriors(tuple(camera_names), priors.frame_indices, tuple(priors.depth[i] for i in slots), tuple(priors.normals[i] for i in slots))
 
 
-def roi_signature(clip: MultiViewClip, camera_names: Sequence[str]) -> dict[str, str]:
-    """Per camera, the grid a prior map belongs to: ``none`` for a real camera, else the ROI pad, cap, size, ``K`` and rotation.
+def roi_signature(clip: MultiViewClip, camera_names: Sequence[str]) -> dict[str, RoiSignature | None]:
+    """Per camera, the grid a prior map belongs to: None for a real camera, else the ROI pad, cap, size, ``K`` and rotation.
 
-    Written into the layer's properties (``roi``, ``roi_cameras``); ``read_clip_priors`` compares it with the clip it reads into.
+    Written into the layer's properties (``roi_cameras``); ``read_clip_priors`` compares it with the clip it reads into.
     """
     if clip.roi is None:
-        return dict.fromkeys(camera_names, "none")
-    signatures: dict[str, str] = {}
+        return dict.fromkeys(camera_names)
+    signatures: dict[str, RoiSignature | None] = {}
     for name in camera_names:
         c: int = clip.camera_names.index(name)
         w, h = clip.sizes[c]
         k: Float32[ndarray, "3 3"] = clip.K[c].numpy()
-        r: str = ",".join(f"{v:.4f}" for v in clip.roi.cameras[c].cam_R_virtual.ravel())
-        signatures[name] = (
-            f"pad={clip.roi.pad:g};max_side={clip.roi.max_side};{w}x{h};K={k[0, 0]:.2f},{k[1, 1]:.2f},{k[0, 2]:.2f},{k[1, 2]:.2f};R={r}"
-        )
+        r = clip.roi.cameras[c].cam_R_virtual.ravel()
+        signatures[name] = RoiSignature.of(clip.roi.pad, clip.roi.max_side, w, h, k[[0, 1, 0, 1], [0, 1, 2, 2]].tolist(), r.tolist())
     return signatures
 
 
-def roi_properties(clip: MultiViewClip) -> dict[str, str]:
-    """Layer properties that pin the prior to the clip's camera grid (see ``roi_signature``)."""
-    signatures: dict[str, str] = roi_signature(clip, clip.camera_names)
-    roi: str = "none" if clip.roi is None else f"people pad={clip.roi.pad:g} max_side={clip.roi.max_side}"
-    return {"roi": roi, "roi_cameras": "|".join(f"{name}@{sig}" for name, sig in signatures.items())}
-
-
-def check_roi(clip: MultiViewClip, camera_names: Sequence[str], stored: str | None, source: str) -> None:
-    """Raise when the layer's ``roi_cameras`` property (None: a layer written before ROI cameras, real cameras) does not
-    describe ``clip``'s cameras ``camera_names``.
+def check_roi(clip: MultiViewClip, camera_names: Sequence[str], stored: dict[str, RoiSignature | None], source: str) -> None:
+    """Raise when the layer's camera grids ``stored`` (``parse_roi_cameras``; empty for a layer written before ROI
+    cameras: every camera real) do not describe ``clip``'s cameras ``camera_names``.
 
     Raises:
         ValueError: On a camera whose grid differs (an ROI clip read against a full-frame layer, another pad, cap or window).
     """
-    stored_of: dict[str, str] = dict(item.split("@", 1) for item in stored.split("|")) if stored else {}
     for name, expected in roi_signature(clip, camera_names).items():
-        got: str = stored_of.get(name, "none")
+        got: RoiSignature | None = stored.get(name)
         if got != expected:
-            raise ValueError(f"{source}: prior layer camera {name} was computed on grid {got!r}, the clip camera is {expected!r}")
+            raise ValueError(f"{source}: prior layer camera {name} was computed on grid {got}, the clip camera is {expected}")
 
 
 def prior_entity(camera_name: str, kind: Literal["depth", "normals"]) -> str:
@@ -212,10 +204,10 @@ def prior_entity(camera_name: str, kind: Literal["depth", "normals"]) -> str:
     return f"/world/{camera_name}/pinhole/moge2/{kind}"
 
 
-def write_prior_layer(path: Path, segment_id: str, priors: ClipPriors, properties: dict[str, str | int | float]) -> None:
+def write_prior_layer(path: Path, segment_id: str, priors: ClipPriors, properties: dict[str, PropertyValue]) -> None:
     """Write the ``moge2_prior`` layer recording (recording id = ``segment_id``)."""
     with atomic_recording(path, application_id="open4dgs-moge2-prior", recording_id=segment_id, send_properties=False) as rec:
-        rec.send_property(PRIOR_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
+        rec.send_property(PRIOR_LAYER, any_values(properties))
         frames: Int64[ndarray, " t"] = priors.frame_indices.numpy()
         for camera, depth, normals in zip(priors.camera_names, priors.depth, priors.normals, strict=True):
             depth_mm: np.ndarray = (depth.float() * 1000.0).round().clamp(0, 65535).numpy().astype(np.uint16)
@@ -270,16 +262,9 @@ def read_clip_priors(clip: MultiViewClip, catalog_url: str, dataset: str, segmen
         f"{prior_entity(name, 'normals')}:EncodedImage:blob" for name in names
     ]
     view = entry.filter_segments(segment_id).filter_contents(entities)
-    properties: pa.Table = entry.segment_table().to_arrow_table()
-    roi_column: str = f"property:{PRIOR_LAYER}:roi_cameras"
-    stored: str | None = None
-    if roi_column in properties.column_names:
-        segment_column: str = "rerun_segment_id"
-        rows: list[dict[str, object]] = [r for r in properties.select([segment_column, roi_column]).to_pylist() if r[segment_column] == segment_id]
-        cell: object = rows[0][roi_column] if rows else None
-        while isinstance(cell, list):
-            cell = cell[0] if cell else None
-        stored = None if cell is None else str(cell)
+    rows: list[dict[str, object]] = [r for r in entry.segment_table().to_arrow_table().to_pylist() if r["rerun_segment_id"] == segment_id]
+    stored_cell: list[object] = row_cells(rows[0], PRIOR_LAYER).get("roi_cameras", []) if rows else []
+    stored: dict[str, RoiSignature | None] = parse_roi_cameras(str(stored_cell[0]) if stored_cell else None)
     check_roi(clip, names, stored, f"{dataset}/{segment_id}")
     available: set[str] = {f"{c.entity_path}:{c.component}" for c in catalog_components(view.schema())}
     missing: list[str] = [c for c in columns if c not in available]

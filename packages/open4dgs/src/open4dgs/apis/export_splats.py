@@ -25,13 +25,13 @@ from simplecv.catalog_layers import register_layer
 
 from open4dgs.asog import AsogSettings, decode_asog, encode_asog
 from open4dgs.catalog_clip import LOCAL_CATALOG
-from open4dgs.run_log import RUNS_DATASET
+from open4dgs.properties import rrd_cells
+from open4dgs.run_log import RUNS_DATASET, RunProperties
 from open4dgs.splat_export import (
     ASOG_CUT_FORMAT,
     SPLAT_ENTITY,
     STOCK_VIEWER_NOTE,
     log_splat_frames,
-    run_property,
     run_recording,
     splats_at,
     write_asog_rrd,
@@ -83,7 +83,7 @@ def main(config: Config) -> dict[str, object]:
         return summary_asog
     out: Path = config.output or config.run / "splats.rrd"
     reader: RrdReader = RrdReader(config.run / "run.rrd")
-    frame_start: int = run_property(reader, "frame_start")
+    frame_start: int = RunProperties.from_cells(rrd_cells(reader, "run")).frame_start
     if config.asog is not None:
         trained = trained.with_params(decode_asog(config.asog.read_bytes(), device)[0])
     first = splats_at(trained, 0.0)

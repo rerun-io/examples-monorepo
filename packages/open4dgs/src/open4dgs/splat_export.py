@@ -29,6 +29,8 @@ from rerun.chunk import RrdReader
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE
+from open4dgs.properties import rrd_cells
+from open4dgs.run_log import RunProperties
 from open4dgs.trigs_adapter import TrainedClip
 
 SH_C0: float = 0.28209479177387814
@@ -140,26 +142,6 @@ def up_view_coordinates(world_T_cam: Float32[ndarray, "c 4 4"]) -> rr.components
     return table[(axis, positive)]
 
 
-def run_properties(reader: RrdReader) -> dict[str, list[object]]:
-    """The run recording's ``run`` property (``apis.train``) by field name, each a list of values."""
-    out: dict[str, list[object]] = {}
-    for chunk in reader.stream().filter(content="/__properties/run").to_chunks():
-        batch = chunk.to_record_batch()
-        for name in batch.schema.names:
-            values = batch.column(name).to_pylist()[0]
-            if isinstance(values, list):
-                out[name.split(":")[-1]] = values
-    return out
-
-
-def run_property(reader: RrdReader, name: str) -> int:
-    """One integer field of the run's ``run`` property (``frame_start``, ...)."""
-    values: list[object] | None = run_properties(reader).get(name)
-    if not values:
-        raise ValueError(f"{reader.path} has no run property {name!r}")
-    return int(values[0])  # pyrefly: ignore[bad-argument-type]
-
-
 def _train_camera_poses(reader: RrdReader) -> np.ndarray:
     """(c, 4, 4) world_T_cam of the training cameras, read back from the run's static Transform3D rows."""
     poses: list[np.ndarray] = []
@@ -206,7 +188,7 @@ def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_ro
     The one writer of ``open4dgs-export-asog`` and ``open4dgs-export-splats --format asog``; neither registers here.
     """
     reader: RrdReader = RrdReader(run_dir / "run.rrd")
-    frame_start: int = run_property(reader, "frame_start")
+    frame_start: int = RunProperties.from_cells(rrd_cells(reader, "run")).frame_start
     parsed = asog_decode.parse_asog(asog, f"{run_dir.name} asog")
     target: Float64[ndarray, " 3"] = np.median(asog_decode.decode(parsed).means, axis=0).astype(np.float64)
     recording, view_coordinates, view = run_recording(reader, run_dir.name, out, target)

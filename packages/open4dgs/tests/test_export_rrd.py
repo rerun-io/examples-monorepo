@@ -37,11 +37,18 @@ def tiny_run(root: Path) -> Path:
     """A run directory: ``run.rrd`` (the ``run`` property + one training camera) and ``trigs_ckpt.pt`` (synthetic params)."""
     import rerun as rr
 
+    from open4dgs.properties import any_values
+    from open4dgs.run_log import RunProperties
+
     run: Path = root / "tiny-run"
     run.mkdir()
     recording = rr.RecordingStream("open4dgs-runs", recording_id=run.name)
     recording.save(run / "run.rrd")
-    recording.send_property("run", rr.AnyValues(frame_start=FRAME_START))
+    properties = RunProperties(
+        dataset="d", segment_id=run.name, catalog_url="rerun+http://localhost:1", frame_start=FRAME_START, frame_end=FRAME_START + NUM_FRAMES - 1,
+        num_frames=NUM_FRAMES, cameras=("rig_00/cam_00",), train_cameras=("rig_00/cam_00",), holdout_cameras=(),
+    )  # fmt: skip
+    recording.send_property("run", any_values(properties.to_properties()))
     recording.log("/world/cameras/train/rig_00/cam_00", rr.Transform3D(translation=[0.0, 0.0, -2.0], mat3x3=np.eye(3)), static=True)
     recording.flush()
     recording.disconnect()

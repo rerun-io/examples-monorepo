@@ -28,10 +28,20 @@ from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evalu
 from open4dgs.geometry_eval import CameraGeometry, evaluate_geometry, mean_geometry
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, check_init_matches_run, log_init_cloud, read_init_cloud, read_layer_init_cloud
-from open4dgs.masks import MATTE_LAYER
 from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals
 from open4dgs.prior_layer import PRIOR_LAYER, compute_prior_layer, read_clip_priors, select_cameras
-from open4dgs.run_log import RUNS_DATASET, log_camera_eval, log_cameras, log_metric_rows, log_people, log_scalars, log_video, register_run
+from open4dgs.properties import any_values
+from open4dgs.run_log import (
+    RUNS_DATASET,
+    RunProperties,
+    log_camera_eval,
+    log_cameras,
+    log_metric_rows,
+    log_people,
+    log_scalars,
+    log_video,
+    register_run,
+)
 from open4dgs.splat_export import up_view_coordinates
 from open4dgs.trigs_adapter import CameraCompensation, TrainConfig, TrainedClip, train_clip, untrained_clip
 
@@ -482,40 +492,39 @@ def main(config: Config) -> dict[str, object]:
     _log_geometry(recording, clip, geometry, holdout_priors)
     log_scalars(recording, trained.scalars)
     _log_compensation(recording, clip.camera_names, holdout_names, learned, fits, config.train)
-    run_properties = {
-        "dataset": config.dataset,
-        "segment_id": config.segment_id,
-        "catalog_url": config.catalog_url,
-        "frame_start": int(clip.frame_indices[0]),
-        "frame_end": int(clip.frame_indices[-1]),
-        "num_frames": len(clip.frame_indices),
-        "cameras": list(clip.camera_names),
-        "train_cameras": list(train_names),
-        "holdout_cameras": list(holdout_names),
-        "holdout_seed": config.holdout_seed,
-        "max_side": config.max_side or 0,
-        "roi": f"{config.roi}:{config.roi_pad}" if config.roi else "full",
-        "init_method": f"rrd:{init.method}" if config.init_rrd is not None else init.method if config.init == "body" else f"layer:{config.init_layer}:{init.method}",
-        "init_rrd": str(config.init_rrd or ""),
-        "selfcap_roi": config.selfcap_roi,
-        "selfcap_time_start_s": config.selfcap_time_start_s if config.selfcap_time_start_s is not None else -1.0,
-        "view_coordinates": str(view_coordinates),
-        "samples_per_person": config.samples_per_person,
-        "keyframe_step": init.keyframe_step,
-        "prior": config.prior != "off",  # a bool, as in every run already on open4dgs-runs (the schema must not change)
-        "prior_mode": config.prior,
-        "prior_source": prior_source,
-        **({f"prior_{k}": v for k, v in dataclasses.asdict(prior_config).items()} if config.prior != "off" else {}),
-        "mask_source": config.mask_source if config.mask_source == "mesh" else f"layer:{config.mask_dataset or config.dataset}/{MATTE_LAYER}",
-        **{f"train_{k}": ",".join(str(x) for x in v) if isinstance(v, tuple) else v for k, v in dataclasses.asdict(config.train).items() if v is not None},
-        "train_time_offset_clamp_ms_resolved": float(trained.trigs_config.camera_time_offset_clamp_s) * 1e3,
-        "rs_signs_per_camera": ",".join(f"{v:g}" for v in (config.train.rs_signs(len(clip.camera_names)) or ())),
-        "selfcap_capture_times": config.selfcap_capture_times,
-        "holdout_fit_steps": config.holdout_fit_steps if fits else 0,
-        "holdout_protocol": "identity (gain 1, bias 0, gauge offset) on all frames; test-time fit on even frames scored on odd frames"
+    run_properties: RunProperties = RunProperties(
+        dataset=config.dataset,
+        segment_id=config.segment_id,
+        catalog_url=config.catalog_url,
+        frame_start=int(clip.frame_indices[0]),
+        frame_end=int(clip.frame_indices[-1]),
+        num_frames=len(clip.frame_indices),
+        cameras=clip.camera_names,
+        train_cameras=train_names,
+        holdout_cameras=holdout_names,
+        holdout_seed=config.holdout_seed,
+        max_side=config.max_side,
+        roi_pad=config.roi_pad if config.roi else None,
+        mask_dataset=None if config.mask_source == "mesh" else config.mask_dataset or config.dataset,
+        init_method=f"rrd:{init.method}" if config.init_rrd is not None else init.method if config.init == "body" else f"layer:{config.init_layer}:{init.method}",
+        init_rrd=str(config.init_rrd or ""),
+        selfcap_roi=config.selfcap_roi,
+        selfcap_time_start_s=config.selfcap_time_start_s,
+        view_coordinates=str(view_coordinates),
+        samples_per_person=config.samples_per_person,
+        keyframe_step=init.keyframe_step,
+        prior_mode=config.prior,
+        prior_source=prior_source,
+        prior_config=prior_config if config.prior != "off" else None,
+        train=config.train,
+        train_time_offset_clamp_ms_resolved=float(trained.trigs_config.camera_time_offset_clamp_s) * 1e3,
+        rs_signs_per_camera=config.train.rs_signs(len(clip.camera_names)) or (),
+        selfcap_capture_times=config.selfcap_capture_times,
+        holdout_fit_steps=config.holdout_fit_steps if fits else 0,
+        holdout_protocol="identity (gain 1, bias 0, gauge offset) on all frames; test-time fit on even frames scored on odd frames"
         if fits
         else "identity (gain 1, bias 0, gauge offset)",
-    }
+    )
     # Default layout: held-out gt / render / error (first two held-out cameras), the orbit, the 3D scene and the metrics.
     eval_views: list[rrb.Spatial2DView] = [
         rrb.Spatial2DView(origin=f"/eval/holdout/{name.replace('/', '_')}/{kind}", name=f"{name} {kind}")
@@ -544,7 +553,7 @@ def main(config: Config) -> dict[str, object]:
             collapse_panels=True,
         )
     )
-    recording.send_property("run", rr.AnyValues(**run_properties))  # pyrefly: ignore[bad-argument-type]
+    recording.send_property("run", any_values(run_properties.to_properties()))
     groups: tuple[str, ...] = ("holdout", "holdout_init", *(f"holdout_floor_{kind}" for kind in BASELINES), "train", "geometry_holdout")
     groups += tuple(g for g in ("train_appearance", "holdout_odd_identity", "holdout_odd_fit") if g in summary)
     flat: dict[str, float] = {f"{group}_{k}": float(v) for group in groups for k, v in summary[group].items()}  # type: ignore[union-attr]

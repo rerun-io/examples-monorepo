@@ -34,6 +34,7 @@ from simplecv.catalog_layers import atomic_recording, ensure_dataset, register_l
 from torch import Tensor
 
 from open4dgs.catalog_clip import FRAME_TIMELINE, RESAMPLE_CHUNK, MultiViewClip, resample_images, roi_grid, undistortion_grid
+from open4dgs.properties import MatteLayerProperties, any_values
 
 MATTE_NAME: str = "people_matte"
 """Leaf entity of a camera's matte under ``<camera>/pinhole``: ``posekit.mask_layer.MATTE_NAME`` (posekit is not in the
@@ -171,11 +172,11 @@ def write_mask_layer(
     camera_names: Sequence[str],
     frame_indices: Int64[ndarray, " t"],
     mattes: Sequence[UInt8[Tensor, "t h w"]],
-    properties: dict[str, str | int | float],
+    properties: MatteLayerProperties,
 ) -> None:
     """Write the ``people_matte`` layer recording (recording id = ``segment_id``) with one grayscale PNG per camera and frame."""
     with atomic_recording(path, application_id="open4dgs-masks", recording_id=segment_id, send_properties=False) as rec:
-        rec.send_property(MATTE_LAYER, rr.AnyValues(**properties))  # type: ignore[bad-argument-type]
+        rec.send_property(MATTE_LAYER, any_values(properties.to_properties()))
         for camera, matte in zip(camera_names, mattes, strict=True):
             entity: str = mask_entity(camera)
             blobs: list[bytes] = []

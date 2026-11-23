@@ -36,6 +36,7 @@ from open4dgs.masks import (
 )
 from open4dgs.prior import ClipPriors
 from open4dgs.prior_layer import compute_prior_layer, read_clip_priors
+from open4dgs.properties import MatteLayerProperties
 from open4dgs.selfcap_clip import TimedClip, read_timed_clip
 from open4dgs.selfcap_init import capsule_init, joint_box_points, moge_lift_init
 
@@ -101,16 +102,16 @@ def _masks(config: Config) -> None:
         clip.camera_names,
         clip.frame_indices.numpy(),
         mattes,
-        {
-            "model": MODEL_NAME,
-            "frame_start": int(clip.frame_indices[0]),
-            "num_frames": config.num_frames,
-            "time_start_s": float(timed.times_s[0, 0]),
-            "source_catalog": config.catalog_url,
-            "source_dataset": config.dataset,
-            "source_segment": config.segment_id,
-            "crop": f"projected joints + head proxies box pad {config.pad_fraction} + {config.pad_px} px",
-        },
+        MatteLayerProperties(
+            model=MODEL_NAME,
+            frame_start=int(clip.frame_indices[0]),
+            num_frames=config.num_frames,
+            time_start_s=float(timed.times_s[0, 0]),
+            source_catalog=config.catalog_url,
+            source_dataset=config.dataset,
+            source_segment=config.segment_id,
+            crop=f"projected joints + head proxies box pad {config.pad_fraction} + {config.pad_px} px",
+        ),
     )
     path.parent.chmod(0o775)
     if config.png_dir is not None:
