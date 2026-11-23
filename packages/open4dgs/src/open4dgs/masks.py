@@ -50,6 +50,12 @@ DECODE_THREADS: int = min(16, os.cpu_count() or 1)
 """PNG decode threads of ``read_clip_masks`` (``cv2.imdecode`` releases the GIL)."""
 
 
+MESH_PAD_FRACTION: float = 0.15
+"""Crop margin around projected SMPL-X vertices, as a fraction of their box (hair, loose clothes); ``person_boxes``' default for meshes."""
+MESH_PAD_PX: float = 24.0
+"""... plus this many pixels (a lens shift of up to 21 px on MAMMA: the box uses the pinhole on distorted frames)."""
+
+
 def mask_entity(camera_name: str) -> str:
     """The layer entity of a camera's foreground matte, e.g. ``/world/rig_01/cam_00/pinhole/people_matte``."""
     return f"/world/{camera_name}/pinhole/{MATTE_NAME}"

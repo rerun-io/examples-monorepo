@@ -20,6 +20,7 @@ from monopriors.models.moge_v2.export import (
     aspect_buckets,
     export_moge_v2_onnx,
     load_pinned_moge_v2,
+    moge_v2_onnx_path,
     preprocess_rgb,
     resolve_num_tokens,
     select_aspect_bucket,
@@ -29,9 +30,11 @@ from monopriors.third_party.moge.model._inference import CameraRecovery, recover
 from monopriors.third_party.moge.model.v2 import ForwardOutput, MoGeModel
 
 if TYPE_CHECKING:
+    from trtkit import TrtBuildConfig
     from trtkit.base import TensorRuntime
 else:
     TensorRuntime = object
+    TrtBuildConfig = object
 
 
 class MoGeV2NormalOutput(NamedTuple):
@@ -342,13 +345,42 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         if len(self.network_hw_options) == 1:
             self._ensure_runtime(self.network_hw_options[0])
 
+    def _build_config(self) -> TrtBuildConfig:
+        """The TensorRT build settings every engine of this predictor uses (part of the engine cache key)."""
+        from trtkit import TrtBuildConfig
+
+        return TrtBuildConfig(
+            max_batch_size=self.batch_size,
+            opt_batch_size=self.batch_size,
+            builder_optimization_level=self.builder_optimization_level,
+            hardware_compatibility=self.hardware_compatibility,
+        )
+
+    def has_engine(self, input_hw: tuple[int, int]) -> bool:
+        """Whether the engine for the network size an ``input_hw`` image uses is already built on this machine; checks
+        the caches only (no export, no build), so a caller can fall back to the torch predictor instead of waiting for a
+        build. False in an environment without trtkit."""
+        try:
+            from trtkit.trt_builder import cached_engine_path, onnx_content_hash
+        except ImportError:
+            return False
+
+        network_hw: tuple[int, int] = select_aspect_bucket(input_hw, self.network_hw_options)
+        onnx_path: Path = moge_v2_onnx_path(self.heads, self.encoder, network_hw, self.resolution_level, self.cache_dir)
+        if not onnx_path.exists():
+            return False
+        trt_dir: Path = self.cache_dir / "trt"
+        # The digest record lives in this predictor's cache, as ensure_engine keeps it (else the whole ONNX is hashed again).
+        digest: str = onnx_content_hash(onnx_path, cache_dir=trt_dir)
+        return cached_engine_path(onnx_path, self._build_config(), cache_dir=trt_dir, onnx_sha256=digest).exists()
+
     def _ensure_runtime(self, image_hw: tuple[int, int]) -> TensorRuntime:
         """Build or load the runtime for one static network size."""
         existing_runtime: TensorRuntime | None = self.runtimes.get(image_hw)
         if existing_runtime is not None:
             return existing_runtime
 
-        from trtkit import TrtBuildConfig, ensure_engine
+        from trtkit import ensure_engine
 
         onnx_path: Path = export_moge_v2_onnx(
             heads=self.heads,
@@ -358,13 +390,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
             max_batch_size=self.batch_size,
             cache_dir=self.cache_dir,
         )
-        config: TrtBuildConfig = TrtBuildConfig(
-            max_batch_size=self.batch_size,
-            opt_batch_size=self.batch_size,
-            builder_optimization_level=self.builder_optimization_level,
-            hardware_compatibility=self.hardware_compatibility,
-        )
-        engine_path: Path = ensure_engine(onnx_path, config, cache_dir=self.cache_dir / "trt")
+        engine_path: Path = ensure_engine(onnx_path, self._build_config(), cache_dir=self.cache_dir / "trt")
 
         from trtkit.tensorrt_runtime import TensorRtRuntime
 

@@ -221,6 +221,16 @@ class _MoGeV2Heads(nn.Module):
         return tuple(output[name] for name in ONNX_OUTPUT_NAMES[self.heads])
 
 
+def moge_v2_onnx_path(
+    heads: HeadSet, encoder: Encoder, image_hw: tuple[int, int], resolution_level: int = 9, cache_dir: Path = DEFAULT_CACHE_DIR
+) -> Path:
+    """Where :func:`export_moge_v2_onnx` caches the ONNX file of one head set, encoder, network size and detail level."""
+    num_tokens: int = resolve_num_tokens(resolution_level)
+    checkpoint_revision: str = MOGE_V2_CHECKPOINTS[encoder][1][:8]
+    export_version: int = _ONNX_EXPORT_VERSIONS[heads]
+    return cache_dir / "onnx" / f"moge-v2-{encoder}-{heads}_{image_hw[0]}x{image_hw[1]}_t{num_tokens}_v{export_version}_{checkpoint_revision}.onnx"
+
+
 def export_moge_v2_onnx(
     heads: HeadSet,
     encoder: Encoder,
@@ -255,12 +265,7 @@ def export_moge_v2_onnx(
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be positive, got {max_batch_size}.")
 
-    num_tokens: int = resolve_num_tokens(resolution_level)
-    checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS[encoder]
-    checkpoint_revision: str = checkpoint[1][:8]
-    onnx_dir: Path = cache_dir / "onnx"
-    export_version: int = _ONNX_EXPORT_VERSIONS[heads]
-    onnx_path: Path = onnx_dir / f"moge-v2-{encoder}-{heads}_{height}x{width}_t{num_tokens}_v{export_version}_{checkpoint_revision}.onnx"
+    onnx_path: Path = moge_v2_onnx_path(heads, encoder, (height, width), resolution_level, cache_dir)
     if onnx_path.exists():
         return onnx_path
 
@@ -323,6 +328,6 @@ def export_moge_v2_onnx(
     torch.cuda.empty_cache()
 
     current_sidecar: Path = onnx_path.with_name(f"{onnx_path.name}.data")
-    stale_prefix: str = f"moge-v2-{encoder}-{heads}_{height}x{width}_t{num_tokens}_"
-    sweep_stale_onnx_exports(onnx_dir, stale_prefix, keep_paths={onnx_path, current_sidecar})
+    stale_prefix: str = f"moge-v2-{encoder}-{heads}_{height}x{width}_t{resolve_num_tokens(resolution_level)}_"
+    sweep_stale_onnx_exports(onnx_path.parent, stale_prefix, keep_paths={onnx_path, current_sidecar})
     return onnx_path
