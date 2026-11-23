@@ -236,13 +236,7 @@ class MoGe2Engine:
         from monopriors.models.moge_v2 import MoGeV2TorchPredictor, MoGeV2TrtPredictor
 
         if self.backend == "tensorrt":
-            from monopriors.models.moge_v2 import export_moge_v2_onnx
-
-            # The ONNX (cached per grid, batch-dynamic) is exported for batches up to 8 as monoprior's default
-            # predictor does: a batch-1 export fails (torch.export rejects Dim(min=1, max=1)); the engine is batch 1.
-            export_moge_v2_onnx(
-                heads="geometry", encoder=self.encoder, image_hw=network_hw, resolution_level=self.resolution_level, max_batch_size=8
-            )
+            # monoprior's dynamic engine: one ONNX + one batch-1 engine per GPU serves every grid; this size builds it eagerly.
             return MoGeV2TrtPredictor(
                 encoder=self.encoder, heads="geometry", network_hw_options=(network_hw,), resolution_level=self.resolution_level, batch_size=1
             )
