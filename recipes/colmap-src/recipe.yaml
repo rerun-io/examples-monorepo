@@ -48,7 +48,7 @@ context:
   # main 2026-11-15, after FlexGlue's #4969. The patches apply to this revision only; SHA256SUMS proves it.
   colmap_rev: 137f21680c79d3f2fffbb1d11deb367162aa6f83
   cuda_archs: ${{ "121" if target_platform == "linux-aarch64" else "86;89;120" }}
-  cuda_arch_tag: ${{ "121" if target_platform == "linux-aarch64" else "86-89-120" }}
+  cuda_arch_tag: ${{ "121" if target_platform == "linux-aarch64" else "86_89_120" }}
 
 package:
   name: colmap-src
