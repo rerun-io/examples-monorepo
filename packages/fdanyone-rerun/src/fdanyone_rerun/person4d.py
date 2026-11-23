@@ -186,12 +186,30 @@ def read_run_clip(
     return clip, tuple(masks)
 
 
-def _prior_loss(clip: MultiViewClip, masks: tuple[Tensor, ...], config: PersonConfig) -> MonoPriorLoss:
-    """MoGe-2 maps of every view (all of them train) and the prior loss on them; the predictor is freed before training."""
-    from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor
+MOGE2_RESOLUTION_LEVEL: int = 9
+"""MoGe-2's detail level for the prior (open4dgs-prior's default)."""
+
+
+def _prior_loss(clip: MultiViewClip, masks: tuple[Tensor, ...], config: PersonConfig, report: Report) -> MonoPriorLoss:
+    """MoGe-2 maps of every view (all of them train) and the prior loss on them; the predictor is freed before training.
+
+    MoGe-2 runs through TensorRT when monopriors has an engine for these frames on this machine (built once by any earlier
+    TensorRT run), else through torch: a click never waits for an engine build.
+    """
+    from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor, MoGeV2TrtPredictor
     from open4dgs.prior_layer import compute_clip_priors
 
-    predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=9)
+    width, height = clip.sizes[0]
+    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = MoGeV2TrtPredictor(
+        encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL
+    )
+    try:
+        engine: bool = predictor.has_engine((height, width))
+    except ImportError:  # no TensorRT in this environment
+        engine = False
+    if not engine:
+        predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL)
+    report(f"MoGe-2 depth + normal prior on every view ({'TensorRT' if engine else 'torch'})")
     priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor)
     del predictor
     free_gpu()
@@ -236,9 +254,8 @@ def train_person(
         )
     prior: MonoPriorLoss | None = None
     if config.prior:
-        report("MoGe-2 depth + normal prior on every view")
         with stage("prior"):
-            prior = _prior_loss(clip, masks, config)
+            prior = _prior_loss(clip, masks, config, report)
 
     steps: int = config.train.steps
     middle: int = len(clip.frame_indices) // 2

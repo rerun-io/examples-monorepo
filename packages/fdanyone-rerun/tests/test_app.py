@@ -131,3 +131,19 @@ def test_a_page_closed_while_waiting_for_the_gpu_leaves_nothing_behind(runs: Pat
     assert not list(runs.glob("*.rrd"))  # no recording was opened
     assert app.SLOT.lock.acquire(blocking=False)  # the run slot is free
     app.SLOT.lock.release()
+
+
+@pytest.mark.parametrize(("train", "prior"), [(True, False), (True, True), (False, True)])
+def test_the_settings_map_onto_the_shared_person_config(runs: Path, monkeypatch: pytest.MonkeyPatch, train: bool, prior: bool) -> None:
+    """Steps and the MoGe-2 prior go into the one PersonConfig the CLI uses too (no app-only path); no training, no config."""
+    seen: list[object] = []
+
+    class Recording(QuickStreamer):
+        def __init__(self, config: object, recording: rr.RecordingStream, **kwargs: object) -> None:
+            super().__init__(config, recording)
+            seen.append(kwargs["person"])
+
+    monkeypatch.setattr(app, "RunStreamer", Recording)
+    list(run_app(str(runs / "clip.mp4"), 6, 42, train, 1234, prior))
+    expected: PersonConfig | None = PersonConfig(prior=prior).with_steps(1234) if train else None
+    assert seen == [expected]

@@ -42,6 +42,11 @@ RUN_LOG_LINES: int = 100
 """Lines the run log keeps."""
 APP_PERSON: PersonConfig = dataclasses.replace(PersonConfig().with_steps(5_000), prior=False)
 """The app's preset: 5,000 steps (about 2 min on the 5090) and no MoGe-2 prior (the demo runs no extra estimator model)."""
+PRIOR_INFO: str = (
+    "MoGe-2 depth and normals on every view shape the person's surface: on the 18-view example the held-out normal error "
+    "falls from 30° to 16° at the same PSNR. Costs about 70 s more for 6 views on an RTX 5090 and up to 11 GB of GPU memory."
+)
+"""The prior setting's hint: what it adds and what it costs."""
 VIEW_CHOICES: tuple[int, ...] = (6, 12, 18, 24)
 """Views on the ring (multiples of six, upstream's group size)."""
 READY: str = "Upload a clip of one person (at least 121 frames), or pick an example, then press Run."
@@ -138,7 +143,9 @@ def _release(gpu_lock: int | None) -> None:
     SLOT.lock.release()
 
 
-def run_app(video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float) -> Generator[RunYield, None, None]:
+def run_app(
+    video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float, prior: bool = False
+) -> Generator[RunYield, None, None]:
     """Run 4DAnyone on ``video`` (then train its 4D person) in a worker thread and pump the recording into the viewer
     until it ends; the status line shows the newest progress line, the run log all of them (newest first)."""
     skip: dict[str, object] = gr.skip()
@@ -149,7 +156,7 @@ def run_app(video: str | None, views_per_layer: int | float, seed: int | float, 
     config: RunConfig = RunConfig(
         video=Path(video), output_dir=RUNS_DIR / run_id, layout=ViewLayout(views_per_layer=int(views_per_layer)), seed=int(seed)
     )
-    person: PersonConfig | None = APP_PERSON.with_steps(int(steps)) if train else None
+    person: PersonConfig | None = dataclasses.replace(APP_PERSON.with_steps(int(steps)), prior=prior) if train else None
     while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
         yield b"", "Waiting for the previous run to stop…", skip, skip
     # The slot is ours: whatever fails before the worker owns it releases it (and the GPU flock) here.
@@ -285,6 +292,7 @@ def build(examples: list[Path] | None = None) -> gr.Blocks:
                             steps: gr.Number = gr.Number(
                                 label="Training steps (5,000 take about 90 s on an RTX 5090)", value=APP_PERSON.train.steps, precision=0, minimum=100
                             )
+                            prior: gr.Checkbox = gr.Checkbox(label="Depth + normal prior (MoGe-2)", value=APP_PERSON.prior, info=PRIOR_INFO)
                         gr.Examples(
                             examples=[[str(path)] for path in clips], inputs=[video], examples_per_page=4, cache_examples=False, elem_id="examples"
                         )
@@ -306,7 +314,7 @@ def build(examples: list[Path] | None = None) -> gr.Blocks:
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
         run_event = run_button.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
-            run_app, inputs=[video, views, seed, train, steps], outputs=[viewer, status, run_summary, run_log]
+            run_app, inputs=[video, views, seed, train, steps, prior], outputs=[viewer, status, run_summary, run_log]
         )
         run_event.success(latest_recording, outputs=[recording])
         stop_button.click(stop_status, outputs=[status], cancels=[run_event])

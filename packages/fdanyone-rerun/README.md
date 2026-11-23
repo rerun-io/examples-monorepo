@@ -49,7 +49,9 @@ as the person, BiRefNet mattes in a crop around the projected body, a body-surfa
 then TRiGS. The model is encoded as Animated SOG and logged into the run's recording; there is no other output file.
 The custom gsplat viewer (`packages/gsplat-rust-renderer`) plays it on `time`; a stock viewer shows one still pose. The
 app embeds that viewer: its gradio-rerun comes from `recipes/gradio-rerun-src` (the fdanyone envs do not take the PyPI
-wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app's preset: 5,000 steps, prior off.
+wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app's preset: 5,000 steps, prior off ("Depth + normal prior
+under Advanced settings turns it on: about 70 s more for 6 views on an RTX 5090, held-out normal error 30° -> 16°). MoGe-2
+runs through TensorRT when monopriors already has an engine for the frames, else through torch.
 
 The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
 
