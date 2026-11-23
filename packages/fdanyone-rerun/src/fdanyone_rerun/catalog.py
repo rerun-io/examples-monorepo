@@ -62,7 +62,8 @@ def camera_entity(view: int) -> str:
 
 
 def catalog_entity(run_entity: str, *, is_pinhole: bool) -> str | None:
-    """Where a run recording's entity goes in the segment; None for what the segment drops (previews, log).
+    """Where a run recording's entity goes in the segment; None for what the segment drops (previews, log, and the
+    view's ``world_T_cam``, which :func:`camera_chunks` replaces with ``cam_T_world``).
 
     ``is_pinhole``: the chunk holds the ``Pinhole`` of a camera node (run recordings put it on the node itself;
     the rig layout puts it on the node's ``pinhole`` child).
@@ -72,8 +73,7 @@ def catalog_entity(run_entity: str, *, is_pinhole: bool) -> str | None:
         return f"{camera_entity(int(video.group(1)))}/pinhole/video"
     camera: re.Match[str] | None = _RUN_CAMERA.fullmatch(run_entity)
     if camera is not None:
-        node: str = camera_entity(int(camera.group(1)))
-        return f"{node}/pinhole" if is_pinhole else node
+        return f"{camera_entity(int(camera.group(1)))}/pinhole" if is_pinhole else None
     if run_entity == "/world/source":
         return "/world/source/pinhole" if is_pinhole else "/world/source"
     return _MOVED.get(run_entity)
@@ -153,8 +153,6 @@ class RunCamera:
     """View index (``world/cameras/<NN>``)."""
     world_T_cam: Float64[ndarray, "4 4"]
     """Pose, OpenCV RDF axes, canonical world (Y up)."""
-    intrinsics: Float64[ndarray, "3 3"]
-    """Pixel intrinsics."""
     width: int
     """Video width, pixels."""
     height: int
@@ -262,7 +260,6 @@ def read_run_cameras(store: rrc.LazyStore) -> list[RunCamera]:
             RunCamera(
                 view=view,
                 world_T_cam=world_T_cam,
-                intrinsics=column_major(values["Pinhole:image_from_camera"][0]),  # type: ignore[arg-type]
                 width=width,
                 height=height,
             )
@@ -297,8 +294,6 @@ def segment_stream(store: rrc.LazyStore, cameras: list[RunCamera], clock: VideoC
 
     def move(chunk: rrc.Chunk) -> list[rrc.Chunk]:
         is_pinhole: bool = any(name.startswith("Pinhole:") for name in chunk.to_record_batch().schema.names)
-        if _RUN_CAMERA.fullmatch(chunk.entity_path) is not None and not is_pinhole:
-            return []  # world_T_cam: replaced by camera_chunks' cam_T_world
         target: str | None = catalog_entity(chunk.entity_path, is_pinhole=is_pinhole)
         return [] if target is None else [retime(chunk, target, clock.fps)]
 

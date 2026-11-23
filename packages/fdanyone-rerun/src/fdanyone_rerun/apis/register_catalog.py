@@ -16,6 +16,7 @@ from fdanyone_rerun.catalog import (
     RunCamera,
     SegmentProperties,
     VideoClock,
+    ViewPose,
     read_run_cameras,
     read_video_clock,
     segment_id,
@@ -58,11 +59,11 @@ def main(config: Config) -> Path:
         seed, source_video = metadata.generation.seed, metadata.input.filename
     store: rrc.LazyStore = rrc.RrdReader(config.rrd).store()
     cameras: list[RunCamera] = read_run_cameras(store)
+    poses: list[ViewPose] = [view_pose(camera.world_T_cam) for camera in cameras]
     if config.run_dir is not None:
         # The rig as upstream wrote it must be the rig the recording carries (same views, same yaw / pitch).
         rig = read_camera_rig(config.run_dir)
-        for camera, record in zip(cameras, rig.cameras, strict=True):
-            pose = view_pose(camera.world_T_cam)
+        for camera, pose, record in zip(cameras, poses, rig.cameras, strict=True):
             if abs((pose.yaw_deg - record.yaw + 180.0) % 360.0 - 180.0) > 0.01 or abs(pose.pitch_deg - record.pitch) > 0.01:
                 raise ValueError(f"view {camera.view}: recording yaw/pitch {pose} != cameras.json {record.yaw}/{record.pitch}")
     if seed is None:
@@ -79,8 +80,8 @@ def main(config: Config) -> Path:
         seed=seed,
         clip=config.clip,
         source_video=source_video,
-        yaws_deg=tuple(view_pose(camera.world_T_cam).yaw_deg for camera in cameras),
-        pitches_deg=tuple(view_pose(camera.world_T_cam).pitch_deg for camera in cameras),
+        yaws_deg=tuple(pose.yaw_deg for pose in poses),
+        pitches_deg=tuple(pose.pitch_deg for pose in poses),
     )
     config.output_dir.mkdir(parents=True, exist_ok=True)
     path: Path = config.output_dir / f"{segment}.rrd"

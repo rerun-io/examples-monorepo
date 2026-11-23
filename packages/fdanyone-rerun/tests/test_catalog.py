@@ -35,7 +35,7 @@ def test_segment_id_names_clip_views_and_seed() -> None:
     [
         ("/world/cameras/00/video", False, "/world/rig_00/cam_00/pinhole/video"),
         ("/world/cameras/17", True, "/world/rig_17/cam_00/pinhole"),
-        ("/world/cameras/17", False, "/world/rig_17/cam_00"),
+        ("/world/cameras/17", False, None),
         ("/world/source", True, "/world/source/pinhole"),
         ("/world/source", False, "/world/source"),
         ("/world/source/video", False, "/world/source/pinhole/video"),
@@ -54,14 +54,14 @@ def test_catalog_entity_maps_the_run_layout_onto_rigs(run_entity: str, is_pinhol
 def test_catalog_entities_are_what_the_rig_reader_parses() -> None:
     from simplecv.catalog_rig_layout import CatalogComponent, parse_rig_layout
 
-    from fdanyone_rerun.catalog import catalog_entity
+    from fdanyone_rerun.catalog import camera_entity, catalog_entity
 
     components: list[CatalogComponent] = []
     for view in range(18):
-        node = catalog_entity(f"/world/cameras/{view:02d}", is_pinhole=False)
+        node = camera_entity(view)
         pinhole = catalog_entity(f"/world/cameras/{view:02d}", is_pinhole=True)
         video = catalog_entity(f"/world/cameras/{view:02d}/video", is_pinhole=False)
-        assert node is not None and pinhole is not None and video is not None
+        assert pinhole is not None and video is not None
         components += [
             CatalogComponent.parse(node, "Transform3D:mat3x3", True),
             CatalogComponent.parse(pinhole, "Pinhole:image_from_camera", True),
@@ -115,7 +115,7 @@ def test_camera_chunks_store_cam_T_world_as_the_calibration_reader_expects() -> 
 
     pose = _look_from(120.0, 15.0)
     intrinsics = np.array([[1664.0, 0.0, 352.0], [0.0, 1664.0, 640.0], [0.0, 0.0, 1.0]])
-    camera = RunCamera(view=4, world_T_cam=pose, intrinsics=intrinsics, width=704, height=1280)
+    camera = RunCamera(view=4, world_T_cam=pose, width=704, height=1280)
     pinhole = rrc.Chunk.from_columns(
         "/world/rig_04/cam_00/pinhole", indexes=[], columns=rr.Pinhole.columns(image_from_camera=[intrinsics], resolution=[[704.0, 1280.0]])
     )
