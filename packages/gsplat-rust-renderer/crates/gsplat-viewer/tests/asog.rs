@@ -244,9 +244,6 @@ fn evaluate_matches_the_reference() {
     }
 }
 
-/// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
-/// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
-/// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
 /// Hash of every array `sog_dequant.wgsl` and `asog_motion.wgsl` read (texel planes, SH planes, motion codes,
 /// codebooks and bounds).
 fn parts_hash(p: &gsplat_core::asog::AsogParts) -> u64 {
@@ -304,10 +301,12 @@ fn parallel_inflate_gives_the_serial_parts() {
             parallel.quantization.count
         );
         assert_eq!(a, b, "{name}: parallel and serial inflate differ");
-        assert_eq!(parallel.motion_codes, serial.motion_codes);
     }
 }
 
+/// Load path: the GPU de-quantises the fixture (`sog_dequant.wgsl` + `asog_motion.wgsl`) and evaluates it
+/// (`trigs_deform.wgsl`); its motion rows match the CPU oracle `AsogParts::motion` (f64, rounded once) within f32
+/// rounding, and the evaluated rows match the asog reference itself within the bounds of `evaluate_matches_the_reference`.
 #[test]
 #[ignore = "integration: GPU"]
 fn gpu_load_path_matches_the_cpu_oracle_and_the_reference() {
