@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, companion_location, read_catalog_clip
 from open4dgs.prior_layer import compute_prior_layer
 
 
@@ -41,7 +41,7 @@ class Config:
 
 
 def main(config: Config) -> None:
-    target: str = config.register_dataset or (config.dataset if config.catalog_url == config.register_url else "open4dgs-mamma")
+    target: str = config.register_dataset or companion_location(config.catalog_url, config.dataset, config.register_url)[1]
     t0: float = time.perf_counter()
     clip: MultiViewClip = read_catalog_clip(
         config.catalog_url,

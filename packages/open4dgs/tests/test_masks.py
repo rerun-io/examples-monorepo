@@ -189,3 +189,40 @@ def test_threaded_png_decode_equals_serial() -> None:
         assert a is not None and b is not None
         np.testing.assert_array_equal(a, b)
         np.testing.assert_array_equal(a, original)
+
+
+class _BoxMatte(torch.nn.Module):
+    """A stand-in BiRefNet: logits from the crop's mean brightness, so a matte depends on where the box falls."""
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        return [x.mean(dim=1, keepdim=True).float() * 4.0 - 1.0]
+
+
+def test_clip_mattes_is_the_per_camera_box_and_matte_pipeline() -> None:
+    """``clip_mattes`` = per camera: boxes of the camera's points, gaps filled, BiRefNet in the box (what the three callers did)."""
+    from open4dgs.catalog_clip import MultiViewClip
+    from open4dgs.masks import clip_mattes, fill_missing_boxes, person_boxes, predict_mattes
+
+    world_T_cam, K = _camera()
+    gen = torch.Generator().manual_seed(0)
+    frames = tuple(torch.randint(0, 255, (3, 80, 100, 3), dtype=torch.uint8, generator=gen) for _ in range(2))
+    clip = MultiViewClip(
+        camera_names=("rig_00/cam_00", "rig_01/cam_00"),
+        frames=frames,
+        valid=tuple(torch.ones(80, 100, dtype=torch.bool) for _ in frames),
+        K=torch.from_numpy(K).expand(2, 3, 3).clone(),
+        world_T_cam=torch.from_numpy(world_T_cam).expand(2, 4, 4).clone(),
+        fps=30.0,
+        frame_indices=torch.arange(3),
+        people=None,
+    )
+    points = {
+        0: np.array([[[0.0, 0.0, 2.0], [0.2, 0.1, 2.0]]] * 3, dtype=np.float32),
+        1: np.array([[[-0.3, 0.0, 2.0], [0.1, 0.2, 2.5]], [[np.nan] * 3] * 2, [[-0.2, 0.1, 2.0], [0.0, 0.2, 2.0]]], dtype=np.float32),
+    }
+    model, cpu = _BoxMatte(), torch.device("cpu")
+    got = clip_mattes(clip, lambda cam: points[cam], model, 0.1, 4.0, cpu, batch_size=2)
+    for cam in range(2):
+        boxes = fill_missing_boxes(person_boxes(points[cam], world_T_cam, K, (100, 80), 0.1, 4.0))
+        assert torch.equal(got[cam], predict_mattes(model, frames[cam], boxes, cpu, 2))
+    assert got[1][1].any()  # the frame without points takes its neighbours' box

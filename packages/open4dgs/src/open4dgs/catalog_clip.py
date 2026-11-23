@@ -56,6 +56,12 @@ _GRID_CACHE: OrderedDict[Hashable, Tensor] = OrderedDict()
 _MESH_PATH: re.Pattern[str] = re.compile(r"^/world/(?P<source>.+)/people/(?P<person>person_\d+)/body/mesh$")
 
 
+def companion_location(catalog_url: str, dataset: str, local_url: str = LOCAL_CATALOG) -> tuple[str, str]:
+    """Where layers computed for ``dataset`` on ``catalog_url`` are registered: there when it is ``local_url``, else on
+    ``local_url`` in the companion dataset ``open4dgs-mamma`` (the read-only Spark, whose only open4dgs source is MAMMA)."""
+    return (catalog_url, dataset) if catalog_url == local_url else (local_url, "open4dgs-mamma")
+
+
 @dataclass(frozen=True, slots=True)
 class ClipPeople:
     """Every person's posed SMPL-X mesh at the clip's frames, from the segment's ``body_mesh`` layer."""
