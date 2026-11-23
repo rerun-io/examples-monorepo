@@ -133,8 +133,7 @@ def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str
                 config.png_dir.mkdir(parents=True, exist_ok=True)
                 tiles = [gt, renders["uncompressed"], renders["decoded"]]
                 strip = np.concatenate([(t.clamp(0, 1) * 255).round().byte().cpu().numpy() for t in tiles], axis=1)
-                stem = config.run.name
-                Image.fromarray(strip).save(config.png_dir / f"{stem}-{name.replace('/', '_')}-f{int(clip.frame_indices[f])}-gt_uncompressed_decoded.png")
+                Image.fromarray(strip).save(config.png_dir / f"{config.run.name}-{name.replace('/', '_')}-f{int(clip.frame_indices[f])}-gt_uncompressed_decoded.png")
     finite = [v for v in vs_full if math.isfinite(v)]
     return {
         "holdout_cameras": list(holdout_names),

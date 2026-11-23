@@ -266,9 +266,9 @@ def training_blueprint() -> rrb.Blueprint:
 
 
 def person_blueprint(rig: CameraRig) -> rrb.Blueprint:
-    """``result_blueprint`` with the trained 4D person in 3D. The 3D view looks from between the first two cameras at the
-    ring's distance (no frustum in front of the person) and leaves out the body and every image plane, which would cover
-    the person."""
+    """``result_blueprint`` with the trained 4D person in 3D. The 3D view looks from between the first two cameras, just
+    inside the ring (:data:`PERSON_EYE_DISTANCE`; no frustum in front of the person), and leaves out the body and every
+    image plane, which would cover the person."""
     target: Float64[ndarray, " 3"] = np.array([0.0, PERSON_MIDDLE_HEIGHT, 0.0])
     positions: list[Float64[ndarray, " 3"]] = [camera.world_T_cam[:3, 3] for camera in rig.cameras[:2]]
     between: Float64[ndarray, " 3"] = np.mean(positions, axis=0) - target

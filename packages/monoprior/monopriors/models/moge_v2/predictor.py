@@ -358,12 +358,21 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
 
     def has_engine(self, input_hw: tuple[int, int]) -> bool:
         """Whether the engine for the network size an ``input_hw`` image uses is already built on this machine; checks
-        the caches only (no export, no build), so a caller can fall back to the torch predictor instead of waiting for a build."""
-        from trtkit.trt_builder import cached_engine_path
+        the caches only (no export, no build), so a caller can fall back to the torch predictor instead of waiting for a
+        build. False in an environment without trtkit."""
+        try:
+            from trtkit.trt_builder import cached_engine_path, onnx_content_hash
+        except ImportError:
+            return False
 
         network_hw: tuple[int, int] = select_aspect_bucket(input_hw, self.network_hw_options)
         onnx_path: Path = moge_v2_onnx_path(self.heads, self.encoder, network_hw, self.resolution_level, self.cache_dir)
-        return onnx_path.exists() and cached_engine_path(onnx_path, self._build_config(), cache_dir=self.cache_dir / "trt").exists()
+        if not onnx_path.exists():
+            return False
+        trt_dir: Path = self.cache_dir / "trt"
+        # The digest record lives in this predictor's cache, as ensure_engine keeps it (else the whole ONNX is hashed again).
+        digest: str = onnx_content_hash(onnx_path, cache_dir=trt_dir)
+        return cached_engine_path(onnx_path, self._build_config(), cache_dir=trt_dir, onnx_sha256=digest).exists()
 
     def _ensure_runtime(self, image_hw: tuple[int, int]) -> TensorRuntime:
         """Build or load the runtime for one static network size."""

@@ -16,12 +16,11 @@ import torch
 from taehv import TAEHV
 
 from fdanyone.assets import TAEW2_2
-from fdanyone.errors import RunCancelled
 from fdanyone.model.vae import load_tiny_decoder
 from fdanyone_rerun.assets import model_dir
 from fdanyone_rerun.core import RunConfig, run_views
 from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
-from fdanyone_rerun.person4d import PersonConfig, PersonSummary, train_person
+from fdanyone_rerun.person4d import PersonConfig, PersonSummary, raise_if_stopped, train_person
 from fdanyone_rerun.previews import decode_previews
 from fdanyone_rerun.rerun_log import (
     DIFFUSION_TIMELINE,
@@ -81,8 +80,7 @@ class RunStreamer:
 
     def on_stage(self, label: str, fraction: float, canonical_clip: Path | None) -> None:
         """Upstream's stage callback: log the canonical clip once it exists, and switch the layout at phase boundaries."""
-        if self.stop.is_set():
-            raise RunCancelled("stopped")
+        raise_if_stopped(self.stop)
         self.message(f"{fraction:4.0%} {label}")
         if canonical_clip is not None:
             log_canonical_clip(canonical_clip, self.recording)
@@ -95,8 +93,7 @@ class RunStreamer:
 
     def on_step(self, step_index: int, view_indices: tuple[int, ...] | None, clean_estimate: torch.Tensor) -> None:
         """Upstream's step hook: decode and log each view's preview (the RCP proposals are not shown)."""
-        if self.stop.is_set():
-            raise RunCancelled("stopped")
+        raise_if_stopped(self.stop)
         if view_indices is None or not self.previews:
             return
         # Upstream's cached TAEW2.2, shared with its target decode; loaded here, after run_views set the allocator policy.

@@ -49,9 +49,10 @@ as the person, BiRefNet mattes in a crop around the projected body, a body-surfa
 then TRiGS. The model is encoded as Animated SOG and logged into the run's recording; there is no other output file.
 The custom gsplat viewer (`packages/gsplat-rust-renderer`) plays it on `time`; a stock viewer shows one still pose. The
 app embeds that viewer: its gradio-rerun comes from `recipes/gradio-rerun-src` (the fdanyone envs do not take the PyPI
-wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app's preset: 5,000 steps, prior off ("Depth + normal prior
-under Advanced settings turns it on: about 70 s more for 6 views on an RTX 5090, held-out normal error 30° -> 16°). MoGe-2
-runs through TensorRT when monopriors already has an engine for the frames, else through torch.
+wheel). CLI defaults: 25,000 steps, prior on (`--person.no-prior`); the app starts at 5,000 steps, prior off ("Depth + normal prior
+(MoGe-2)" under Advanced settings turns it on: about 70 s more for 6 views on an RTX 5090, held-out normal error 30° -> 16°).
+MoGe-2 runs through TensorRT when monopriors' engine cache already holds an engine for the frames' size on this machine
+(built by an earlier `MoGeV2TrtPredictor` run), else through torch.
 
 The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
 
@@ -71,7 +72,7 @@ the run through five layouts:
 2. the recovered body in 3D and over the source;
 3. a TAEW2.2 preview of every view at each denoising step (`previews/<NN>` on `diffusion_step`);
 4. the camera rig and the generated videos;
-5. with "Then train the 4D person" (on by default; steps under Settings): the front view as it trains, the loss and the
+5. with "Train the 4D person after the views" (on by default; steps under Advanced settings): the front view as it trains, the loss and the
    progress (step, it/s, ETA), then the person in 3D, playing with the views.
 
 The page fits the window. One run at a time; Stop ends the run at the next stage, denoising step or training step.

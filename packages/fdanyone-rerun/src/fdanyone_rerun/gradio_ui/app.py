@@ -1,10 +1,10 @@
 """The 4DAnyone app: pick a clip, press Run, watch the phases stream into the embedded Rerun viewer.
 
-The run is :class:`fdanyone_rerun.stream.RunStreamer`, the same core and defaults as ``fdanyone-run --train``; this
-module only adds the widgets, a worker thread, the byte pump into the viewer and the app's training preset
-(:data:`APP_PERSON`: a short run and no MoGe-2 prior).
+The run is :class:`fdanyone_rerun.stream.RunStreamer`, the same core as ``fdanyone-run --train``; this module only adds
+the widgets, a worker thread and the byte pump into the viewer. The widgets start at a short training run with no MoGe-2
+prior (:data:`APP_STEPS`, :data:`APP_PRIOR`); everything else is the CLI's default.
 
-The page has MetricTrail's look and layout (:mod:`simplecv.app_theme`): Input and Outputs tabs, Run, Stop and the status
+The page has our apps' shared look and layout (:mod:`simplecv.app_theme`): Input and Outputs tabs, Run, Stop and the status
 on the left, the viewer filling the rest of the window. When the browser has no WebGPU, a notice above the viewer says so
 (the gsplat renderer needs it).
 """
@@ -15,7 +15,9 @@ import json
 import os
 import threading
 import time
+import traceback
 import uuid
+from collections import deque
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,12 +26,12 @@ from typing import TypeAlias
 import gradio as gr
 import rerun as rr
 from gradio_rerun import Rerun
-from simplecv.app_theme import APP_CSS, DARK_HEAD, app_title
+from simplecv.app_theme import APP_CSS, DARK_HEAD, EXAMPLES_PER_PAGE, app_title, run_table
 
 from fdanyone.errors import RunCancelled
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, PACKAGE_ROOT
 from fdanyone_rerun.core import RunConfig, ViewLayout
-from fdanyone_rerun.person4d import PersonConfig, PersonSummary
+from fdanyone_rerun.person4d import PersonConfig, PersonSummary, free_gpu
 from fdanyone_rerun.stream import RunStreamer
 
 APPLICATION_ID: str = "fdanyone-rerun"
@@ -40,8 +42,10 @@ PUMP_SECONDS: float = 0.5
 """How often new recording bytes go to the viewer."""
 RUN_LOG_LINES: int = 100
 """Lines the run log keeps."""
-APP_PERSON: PersonConfig = dataclasses.replace(PersonConfig().with_steps(5_000), prior=False)
-"""The app's preset: 5,000 steps (about 2 min on the 5090) and no MoGe-2 prior (the demo runs no extra estimator model)."""
+APP_STEPS: int = 5_000
+"""The steps setting's start value: a short training run (the CLI's default is :class:`PersonConfig`'s)."""
+APP_PRIOR: bool = False
+"""The prior setting's start value: off, so a click runs no extra estimator model (MoGe-2)."""
 PRIOR_INFO: str = (
     "MoGe-2 depth and normals on every view shape the person's surface: on the 18-view example the held-out normal error "
     "falls from 30° to 16° at the same PSNR. Costs about 70 s more for 6 views on an RTX 5090 and up to 11 GB of GPU memory."
@@ -133,7 +137,7 @@ def summary_table(views: int, wall_s: float, person: PersonSummary | None, saved
             ("Animated SOG", f"{person.asog_bytes / 1e6:.1f} MB in the recording"),
         ]
     rows.append(("Recording", f"`{saved.name}`"))
-    return "| Run | |\n|---|---|\n" + "".join(f"| {name} | {value} |\n" for name, value in rows)
+    return run_table(rows)
 
 
 def _release(gpu_lock: int | None) -> None:
@@ -144,7 +148,7 @@ def _release(gpu_lock: int | None) -> None:
 
 
 def run_app(
-    video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float, prior: bool = False
+    video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float, prior: bool
 ) -> Generator[RunYield, None, None]:
     """Run 4DAnyone on ``video`` (then train its 4D person) in a worker thread and pump the recording into the viewer
     until it ends; the status line shows the newest progress line, the run log all of them (newest first)."""
@@ -156,7 +160,7 @@ def run_app(
     config: RunConfig = RunConfig(
         video=Path(video), output_dir=RUNS_DIR / run_id, layout=ViewLayout(views_per_layer=int(views_per_layer)), seed=int(seed)
     )
-    person: PersonConfig | None = dataclasses.replace(APP_PERSON.with_steps(int(steps)), prior=prior) if train else None
+    person: PersonConfig | None = dataclasses.replace(PersonConfig().with_steps(int(steps)), prior=prior) if train else None
     while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
         yield b"", "Waiting for the previous run to stop…", skip, skip
     # The slot is ours: whatever fails before the worker owns it releases it (and the GPU flock) here.
@@ -190,9 +194,11 @@ def run_app(
         except RunCancelled:
             pass  # a Stop; keeping it would keep its frames, the trainer's GPU memory among them, alive
         except BaseException as error:  # re-raised by the generator below, beartype violations included
+            traceback.clear_frames(error.__traceback__)  # the trace stays; the frames' tensors go
             errors.append(error)
         finally:
             recording.disconnect()  # closes the saved .rrd, stopped runs included; the stream keeps its unread bytes
+            free_gpu()  # a stopped or failed run leaves no cached GPU memory to the next job
             _release(gpu_lock)
 
     worker: threading.Thread = threading.Thread(target=work, name=f"fdanyone-{run_id}", daemon=True)
@@ -205,19 +211,18 @@ def run_app(
         raise
     SLOT.worker = worker
     SLOT.stop = streamer.stop
-    log: list[str] = []
-
-    lines_shown: list[str] = []
+    logged: int = 0
+    lines_shown: deque[str] = deque(maxlen=RUN_LOG_LINES)
 
     def log_text() -> Update:
         """The run log textbox after this poll: new progress lines stamped with the seconds since Run, newest first."""
-        new: list[str] = streamer.messages[len(log) :]
+        nonlocal logged
+        new: list[str] = streamer.messages[logged:]
         if not new:
             return skip
-        log.extend(new)
+        logged += len(new)
         stamp: float = time.perf_counter() - started
-        lines_shown[:0] = [f"{stamp:6.1f} s  {line}" for line in reversed(new)]
-        del lines_shown[RUN_LOG_LINES:]
+        lines_shown.extendleft(f"{stamp:6.1f} s  {line}" for line in new)
         return "\n".join(lines_shown)
 
     try:
@@ -264,7 +269,7 @@ def stop_status() -> Iterator[str]:
 
 
 def build(examples: list[Path] | None = None) -> gr.Blocks:
-    """MetricTrail's layout: Input and Outputs tabs, Run, Stop and the status on the left; the WebGPU notice and the
+    """The shared app layout: Input and Outputs tabs, Run, Stop and the status on the left; the WebGPU notice and the
     streaming Rerun viewer on the right. Serve it with :func:`launch` (its look comes with the launch).
 
     Args:
@@ -290,11 +295,11 @@ def build(examples: list[Path] | None = None) -> gr.Blocks:
                             seed: gr.Number = gr.Number(label="Seed", value=RunConfig().seed, precision=0)
                             train: gr.Checkbox = gr.Checkbox(label="Train the 4D person after the views", value=True)
                             steps: gr.Number = gr.Number(
-                                label="Training steps (5,000 take about 90 s on an RTX 5090)", value=APP_PERSON.train.steps, precision=0, minimum=100
+                                label=f"Training steps ({APP_STEPS:,} take about 90 s on an RTX 5090)", value=APP_STEPS, precision=0, minimum=100
                             )
-                            prior: gr.Checkbox = gr.Checkbox(label="Depth + normal prior (MoGe-2)", value=APP_PERSON.prior, info=PRIOR_INFO)
+                            prior: gr.Checkbox = gr.Checkbox(label="Depth + normal prior (MoGe-2)", value=APP_PRIOR, info=PRIOR_INFO)
                         gr.Examples(
-                            examples=[[str(path)] for path in clips], inputs=[video], examples_per_page=4, cache_examples=False, elem_id="examples"
+                            examples=[[str(path)] for path in clips], inputs=[video], examples_per_page=EXAMPLES_PER_PAGE, cache_examples=False, elem_id="examples"
                         )
                     with gr.Tab("Outputs", id="outputs"):
                         run_summary: gr.Markdown = gr.Markdown("No run yet.", elem_id="run-summary")

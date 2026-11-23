@@ -1,4 +1,4 @@
-"""The streamer's phase logic and the four layouts, without a GPU."""
+"""The streamer's phase logic and its layouts (motion, body, diffusion, result, training, person), without a GPU."""
 
 from pathlib import Path
 
@@ -6,11 +6,12 @@ import pytest
 import rerun as rr
 import torch
 
+from fdanyone.errors import RunCancelled
 from fdanyone_rerun.core import RunConfig, ViewLayout
 from fdanyone_rerun.outputs import CameraRecord, CameraRig
 from fdanyone_rerun.previews import preview_latent_index
 from fdanyone_rerun.rerun_log import body_blueprint, diffusion_blueprint, motion_blueprint, person_blueprint, result_blueprint, training_blueprint
-from fdanyone_rerun.stream import GENERATION_STAGE, RunCancelled, RunStreamer
+from fdanyone_rerun.stream import GENERATION_STAGE, RunStreamer
 
 
 def _streamer(tmp_path: Path) -> tuple[RunStreamer, rr.MemoryRecording]:

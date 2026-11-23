@@ -15,7 +15,7 @@ the video at real time behind the tracked frames (:class:`Playback`), so DPVO's 
 play smoothly over it. The trajectory and the final mesh come
 at the end, from the artifacts, and the clip plays on from where it is, in a loop.
 
-The page has the EgoHand app's look (:mod:`simplecv.app_theme`, shared with the 4DAnyone app): Input and Outputs tabs,
+The page has our apps' shared look (:mod:`simplecv.app_theme`): Input and Outputs tabs,
 Run and the status on the left, the viewer filling the rest of the window.
 """
 
@@ -37,7 +37,7 @@ import rerun as rr
 import torch
 from gradio_rerun import Rerun
 from gradio_rerun.commands import set_time
-from simplecv.app_theme import APP_CSS, DARK_HEAD, app_title
+from simplecv.app_theme import APP_CSS, DARK_HEAD, EXAMPLES_PER_PAGE, app_title, run_table
 from vipe.metrictrail.calibration.config import SharedKCalibrationConfig
 from vipe.metrictrail.calibration.policy import PIPELINE_BUDGETS
 from vipe.utils.model_cache import ModelCache
@@ -212,7 +212,7 @@ def summary_table(metrics: RunMetrics, wall_s: float, budget: str) -> str:
         ("Elapsed", f"{wall_s:.1f} s"),
         ("Calibration budget", f"`{budget}`"),
     ]
-    return "| Run | |\n|---|---|\n" + "".join(f"| {name} | {value} |\n" for name, value in rows)
+    return run_table(rows)
 
 
 @dataclass(slots=True)
@@ -381,7 +381,7 @@ def build_app(
                                 value=APP_BUDGET,
                             )
                         gr.Examples(
-                            examples=[[str(path)] for path in clips], inputs=[video_input], examples_per_page=4, cache_examples=False, elem_id="examples"
+                            examples=[[str(path)] for path in clips], inputs=[video_input], examples_per_page=EXAMPLES_PER_PAGE, cache_examples=False, elem_id="examples"
                         )
                     with gr.Tab("Outputs", id="outputs"):
                         run_summary: gr.Markdown = gr.Markdown("No run yet.", elem_id="run-summary")

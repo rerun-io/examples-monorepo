@@ -14,7 +14,7 @@ import rerun as rr
 from rerun.chunk import RrdReader
 
 from fdanyone_rerun.gradio_ui import app
-from fdanyone_rerun.gradio_ui.app import APP_PERSON, build, run_app
+from fdanyone_rerun.gradio_ui.app import APP_PRIOR, APP_STEPS, build, run_app
 from fdanyone_rerun.person4d import PersonConfig
 
 
@@ -49,7 +49,7 @@ def runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
 
 
 def start(runs: Path) -> Generator[app.RunYield, None, None]:
-    return run_app(str(runs / "clip.mp4"), 6, 42, True, 100)
+    return run_app(str(runs / "clip.mp4"), 6, 42, True, 100, False)
 
 
 def status(step: app.RunYield) -> str:
@@ -63,14 +63,14 @@ def test_app_builds() -> None:
 
 
 def test_run_without_a_video_asks_for_one() -> None:
-    (step,) = list(run_app(None, 6, 42, True, 5000))
+    (step,) = list(run_app(None, 6, 42, True, APP_STEPS, APP_PRIOR))
     assert step[:2] == (None, "Choose a video first.")
 
 
-def test_the_app_preset_differs_from_the_cli_only_in_length_and_prior() -> None:
-    # A demo app runs no extra estimator model (MoGe-2) and keeps a click short; everything else is the CLI's default.
-    assert APP_PERSON.prior is False and APP_PERSON.train.steps < PersonConfig().train.steps
-    assert PersonConfig(prior=False).with_steps(APP_PERSON.train.steps) == APP_PERSON
+def test_the_app_starts_shorter_than_the_cli_and_without_the_prior() -> None:
+    # A demo click stays short and runs no extra estimator model (MoGe-2); the settings map onto the CLI's config (below).
+    assert APP_PRIOR is False
+    assert PersonConfig().train.steps > APP_STEPS
 
 
 def test_a_run_saves_a_valid_recording_and_offers_it_by_name(runs: Path) -> None:
@@ -82,10 +82,11 @@ def test_a_run_saves_a_valid_recording_and_offers_it_by_name(runs: Path) -> None
     (saved,) = runs.glob("*.rrd")
     assert {"/world/p0", "/world/p1", "/world/p2"} <= {str(chunk.entity_path) for chunk in RrdReader(saved).stream().to_chunks()}
     assert sum(len(step[0] or b"") for step in pumped) > 0
-    _, done, summary, log = pumped[-1]
+    _, done, summary, _ = pumped[-1]
     assert isinstance(done, str) and done.startswith("Done in") and str(runs) not in done
     assert isinstance(summary, str) and f"`{saved.name}`" in summary and str(runs) not in summary
-    assert isinstance(log, str) or log == app.gr.skip()
+    logs: list[str] = [step[3] for step in pumped if isinstance(step[3], str)]  # a poll with no new line skips the box
+    assert logs and logs[0].endswith(" s  starting")  # each line stamped with the seconds since Run
     offered = app.latest_recording()
     assert offered.visible and saved.name in str(offered.value)
 

@@ -1,10 +1,13 @@
-"""The look of our Gradio + Rerun apps (MetricTrail, 4DAnyone): Rerun's brand colours and wordmark (https://rerun.io/media),
-forced dark, the left column of tabs, Run and status beside the viewer, which fills the rest of the window.
+"""The look of our Gradio + Rerun apps: Rerun's brand colours and wordmark (https://rerun.io/media), forced dark, the left
+column of tabs, Run and status beside the viewer, which fills the rest of the window.
 
-Strings only (no gradio import): an app passes :data:`APP_CSS` and :data:`DARK_HEAD` to ``Blocks.launch`` and puts
-:func:`app_title` at the top of its description. The layout rules key on element ids every app uses: ``app-title``,
-``app-description``, ``main-row``, ``left-column``, ``source-video``, ``examples``, ``run-row``, ``run-status``,
-``run-summary``, ``run-log`` and ``viewer``. posekit's EgoHand app still carries its own copy (``posekit.hands_app_ui.theme``).
+No gradio import: an app passes :data:`APP_CSS` and :data:`DARK_HEAD` to ``Blocks.launch``, puts :func:`app_title` at the
+top of its description, shows :data:`EXAMPLES_PER_PAGE` examples and writes its Outputs summary with :func:`run_table`.
+
+The layout rules key on element ids, so an app that takes this look gives its components these ids: ``app-title`` (from
+:func:`app_title`), ``app-description`` (the header Markdown), ``main-row`` (the row under it, ``scale=1`` in a
+``fill_height`` Blocks), ``left-column``, ``source-video``, ``examples``, ``run-row`` (Run and Stop), ``run-status``,
+``run-summary``, ``run-log`` and ``viewer`` (the Rerun component, ``height="100%"``).
 """
 
 import base64
@@ -25,7 +28,7 @@ DARK_HEAD: str = """<script>
     document.body.classList.add("dark");
 })();
 </script>"""
-"""Forces Gradio's dark theme without a reload (``posekit.track_ui_theme.FORCE_DARK_HEAD`` navigates, so the page loads twice).
+"""Forces Gradio's dark theme without a reload (navigating to a ``?__theme=dark`` URL would load the page twice).
 Gradio 6 inserts ``head`` after it has read its ``__theme`` URL switch, so the script also sets what that switch sets, the
 ``dark`` class on the body; the URL keeps the switch for what reads it later (the Settings panel)."""
 
@@ -37,6 +40,15 @@ def app_title(name: str) -> str:
         f'<img class="logo-light" src="{RERUN_LOGOS["light"]}" alt="Rerun"><img class="logo-dark" src="{RERUN_LOGOS["dark"]}" alt="Rerun">'
         f'</a> <span class="title-x">×</span> {name}</h1>'
     )
+
+
+EXAMPLES_PER_PAGE: int = 4
+"""Examples per page of ``gr.Examples``: one row of tiles (the ``#examples`` grid in :data:`APP_CSS` has four columns)."""
+
+
+def run_table(rows: list[tuple[str, str]]) -> str:
+    """The Outputs tab's summary of a finished run (``#run-summary``): a two-column Markdown table of names and values."""
+    return "| Run | |\n|---|---|\n" + "".join(f"| {name} | {value} |\n" for name, value in rows)
 
 
 APP_CSS: str = """@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");

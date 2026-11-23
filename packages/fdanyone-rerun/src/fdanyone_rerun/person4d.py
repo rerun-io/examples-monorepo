@@ -60,9 +60,9 @@ Report = Callable[[str], None]
 class PersonConfig:
     """Train the 4D person of a 4DAnyone run (Open4DGS / TRiGS) and log it as Animated SOG."""
 
-    train: TrainConfig = field(default_factory=lambda: TrainConfig(steps=25_000, cameras_per_step=8, log_every=100))
+    train: TrainConfig = field(default_factory=lambda: TrainConfig(steps=25_000, cameras_per_step=8))
     """Trainer settings: those of the measured runs on the 18-view example (12 train + 4 held out, prior off): 25,000 steps
-    23.07 dB held out (539 s on the 5090), 5,000 steps 22.44 dB. Scalars every 100 steps, as often as they are shown."""
+    23.07 dB held out (539 s on the 5090), 5,000 steps 22.44 dB. ``log_every`` is :attr:`report_every`'s."""
     max_side: int | None = None
     """Longer side of the training frames; None keeps the generated 704x1280 (as the measured runs)."""
     prior: bool = True
@@ -78,7 +78,7 @@ class PersonConfig:
     preview_every: int = 500
     """Steps between preview renders (0: none)."""
     report_every: int = 100
-    """Steps between progress lines and loss points."""
+    """Steps between progress lines and loss points; the trainer records its scalars as often (``train.log_every``)."""
 
     def with_steps(self, steps: int) -> "PersonConfig":
         """This config with ``train.steps`` replaced."""
@@ -186,28 +186,20 @@ def read_run_clip(
     return clip, tuple(masks)
 
 
-MOGE2_RESOLUTION_LEVEL: int = 9
-"""MoGe-2's detail level for the prior (open4dgs-prior's default)."""
-
-
 def _prior_loss(clip: MultiViewClip, masks: tuple[Tensor, ...], config: PersonConfig, report: Report) -> MonoPriorLoss:
     """MoGe-2 maps of every view (all of them train) and the prior loss on them; the predictor is freed before training.
 
-    MoGe-2 runs through TensorRT when monopriors has an engine for these frames on this machine (built once by any earlier
-    TensorRT run), else through torch: a click never waits for an engine build.
+    MoGe-2 runs through TensorRT when monopriors' engine cache already holds one for these frames on this machine (built
+    by an earlier ``MoGeV2TrtPredictor`` run at the same size and settings), else through torch: a click never waits for an
+    engine build.
     """
     from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor, MoGeV2TrtPredictor
     from open4dgs.prior_layer import compute_clip_priors
 
     width, height = clip.sizes[0]
-    trt: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL)
-    try:
-        engine: bool = trt.has_engine((height, width))
-    except ImportError:  # no TensorRT in this environment
-        engine = False
-    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = (
-        trt if engine else MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL)
-    )
+    trt: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry")
+    engine: bool = trt.has_engine((height, width))
+    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = trt if engine else MoGeV2TorchPredictor(encoder="vitl", heads="geometry")
     report(f"MoGe-2 depth + normal prior on every view ({'TensorRT' if engine else 'torch'})")
     priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor)
     del predictor, trt
@@ -281,7 +273,8 @@ def train_person(
             recording.reset_time()
 
     with stage("train"):
-        trained: TrainedClip = train_clip(clip, masks, init, config.train, (), device=device, prior=prior, on_step=on_step)
+        train: TrainConfig = dataclasses.replace(config.train, log_every=config.report_every)  # a loss point per report
+        trained: TrainedClip = train_clip(clip, masks, init, train, (), device=device, prior=prior, on_step=on_step)
     rows: int = int(trained.params["means"].shape[0])
     params: dict[str, Tensor] = {name: value.detach().cpu() for name, value in trained.params.items()}
     it_per_s: float = steps / trained.train_seconds
