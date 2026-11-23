@@ -56,6 +56,30 @@ MoGe-2 runs through TensorRT when monopriors' engine cache already holds an engi
 
 The default layout puts the rig and body in 3D beside the source camera, above a grid of the generated views.
 
+## Catalog
+
+`fdanyone-register-catalog` moves a finished run recording into the shared exoego:v2 rig layout and registers it as one
+segment (`<clip>__v<NN>-seed<seed>`) of the dataset `fdanyone-views`, so downstream training (Open4DGS) reads the views
+with the simplecv catalog readers like any other multi-camera capture. No GPU; the VideoStream packets are moved as
+generated (no re-encode).
+
+```bash
+pixi run -e fdanyone-rerun fdanyone-register-catalog --rrd run.rrd --run-dir data/runs/mine   # checks the rig against cameras.json
+pixi run -e fdanyone-rerun fdanyone-register-catalog --rrd run.rrd --seed 42                  # without a run directory
+```
+
+| Entity | What |
+| --- | --- |
+| `/world/rig_NN/cam_00` | static `cam_T_world` (`ChildFromParent`), view name, yaw and pitch |
+| `/world/rig_NN/cam_00/pinhole`, `.../video` | pinhole (RDF, no distortion) and the generated view (`VideoStream`, H.264) |
+| `/world/source`, `.../pinhole/video` | the fitted source camera (per frame) and the input clip |
+| `/world/pred/fdanyone/people/person_00/body/mesh` | SMPL-X mesh per frame |
+
+Timelines `frame_index` and `video_time`; properties `capture:*`, `episode:*`, `generation:*`. Each H.264 stream has one
+keyframe, so a random-access decode starts at frame 0. Registering the same segment id again replaces it. The segment
+file goes to `--output-dir` (a path the catalog server can read) and is registered on `--catalog-url`
+(`--catalog-url None` writes the file only).
+
 ## Tests
 
 `pixi run -e fdanyone-rerun-dev gate` (lint, typecheck, deadcode, unit, integration). The integration lane runs the
