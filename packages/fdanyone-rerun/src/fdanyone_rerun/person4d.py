@@ -200,18 +200,17 @@ def _prior_loss(clip: MultiViewClip, masks: tuple[Tensor, ...], config: PersonCo
     from open4dgs.prior_layer import compute_clip_priors
 
     width, height = clip.sizes[0]
-    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = MoGeV2TrtPredictor(
-        encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL
-    )
+    trt: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL)
     try:
-        engine: bool = predictor.has_engine((height, width))
+        engine: bool = trt.has_engine((height, width))
     except ImportError:  # no TensorRT in this environment
         engine = False
-    if not engine:
-        predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL)
+    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = (
+        trt if engine else MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=MOGE2_RESOLUTION_LEVEL)
+    )
     report(f"MoGe-2 depth + normal prior on every view ({'TensorRT' if engine else 'torch'})")
     priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor)
-    del predictor
+    del predictor, trt
     free_gpu()
     positions: tuple[int, ...] = tuple(range(len(clip.camera_names)))
     return MonoPriorLoss(config.prior_config.at_steps(config.train.steps), priors, masks, positions, clip.K)
