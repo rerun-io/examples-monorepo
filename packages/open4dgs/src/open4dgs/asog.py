@@ -1,7 +1,9 @@
 """Animated SOG (``.asog``, recipes/asog-src) for trained TRiGS clips: checkpoint parameters -> ``.asog`` and back.
 
-``.asog`` is a third-party interchange format (arrival-space/animated-sog): our data artifacts stay ``.rrd``; an
-``.asog`` is written only as an explicit export.
+``.asog`` is a third-party interchange format (arrival-space/animated-sog). Our artifact is the ``.rrd``: the ASOG bytes
+go into the recording as the gsplat viewer's ``AnimatedSogSplats3D`` payload (``gsplat_rust_renderer.sog3d.log_asog``),
+so ``encode_asog`` returns bytes and ``decode_asog`` reads bytes; upstream's encoder and reader only take paths, so both
+go through a temporary file.
 
 Encode: the checkpoint's parameters become the encoder's in-memory input (``asog.trigs.TrigsRuntime``, what upstream
 reads from a ``.trigsbin``) and go through ``asog.encode.encode_runtime`` (recipe hook 0001), so no ``.trigsbin`` is
@@ -27,6 +29,7 @@ translation; none of our runs has one.
 
 import dataclasses
 import math
+import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -182,24 +185,24 @@ def axis_anchors(runtime: TrigsRuntime, qp: float) -> Float64[ndarray, "n 3"]:
     return anchors
 
 
-def encode_params(params: Mapping[str, Tensor], fps: float, num_frames: int, dst: Path, settings: AsogSettings) -> EncodeStats:
-    """Write the clip as ``.asog`` to ``dst`` (mode 644)."""
-    dst.parent.mkdir(parents=True, exist_ok=True)
+def encode_asog(params: Mapping[str, Tensor], fps: float, num_frames: int, settings: AsogSettings) -> tuple[bytes, EncodeStats]:
+    """The clip as ``.asog`` bytes and the encoder's statistics."""
     options: AsogOptions = settings.options()
     runtime: TrigsRuntime = trigs_runtime(params, fps, num_frames)
     runtime.anchors = axis_anchors(runtime, options.qp)
-    stats: EncodeStats = encode_runtime(
-        runtime,
-        dst,
-        qp=options.qp,
-        qa=options.qa,
-        prune=options.prune,
-        mbits=options.mbits,
-        tbits=options.tbits,
-        lsbits=options.lsbits,
-    )
-    dst.chmod(0o644)
-    return stats
+    with tempfile.TemporaryDirectory(prefix="open4dgs-asog-") as scratch:
+        dst: Path = Path(scratch) / "clip.asog"
+        stats: EncodeStats = encode_runtime(
+            runtime,
+            dst,
+            qp=options.qp,
+            qa=options.qa,
+            prune=options.prune,
+            mbits=options.mbits,
+            tbits=options.tbits,
+            lsbits=options.lsbits,
+        )
+        return dst.read_bytes(), stats
 
 
 def nu_control_points(omega: Float64[ndarray, "3 n 3"], g: Float64[ndarray, "5 n"]) -> Float64[ndarray, "3 n 3"]:
@@ -253,10 +256,14 @@ def trigs_params(decoded: Asog, device: torch.device) -> dict[str, Tensor]:
     return params
 
 
-def decode_asog(path: Path, device: torch.device) -> tuple[dict[str, Tensor], float]:
-    """Read ``path`` and return (TRiGS parameters on ``device``, decode seconds incl. the mapping)."""
+def decode_asog(data: bytes, device: torch.device) -> tuple[dict[str, Tensor], float]:
+    """Decode ``.asog`` bytes and return (TRiGS parameters on ``device``, decode seconds incl. the mapping)."""
     t0: float = time.perf_counter()
-    params: dict[str, Tensor] = trigs_params(read_asog(path), device)
+    with tempfile.TemporaryDirectory(prefix="open4dgs-asog-") as scratch:
+        path: Path = Path(scratch) / "clip.asog"
+        path.write_bytes(data)
+        decoded: Asog = read_asog(path)
+    params: dict[str, Tensor] = trigs_params(decoded, device)
     return params, time.perf_counter() - t0
 
 

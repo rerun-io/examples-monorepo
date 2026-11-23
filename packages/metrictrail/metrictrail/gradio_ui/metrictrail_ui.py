@@ -15,8 +15,8 @@ the video at real time behind the tracked frames (:class:`Playback`), so DPVO's 
 play smoothly over it. The trajectory and the final mesh come
 at the end, from the artifacts, and the clip plays on from where it is, in a loop.
 
-The page has the EgoHand app's look (:mod:`metrictrail.gradio_ui.theme`): Input and Outputs tabs, Run and the status on
-the left, the viewer filling the rest of the window.
+The page has our apps' shared look (:mod:`simplecv.app_theme`): Input and Outputs tabs,
+Run and the status on the left, the viewer filling the rest of the window.
 """
 
 import sys
@@ -37,6 +37,7 @@ import rerun as rr
 import torch
 from gradio_rerun import Rerun
 from gradio_rerun.commands import set_time
+from simplecv.app_theme import APP_CSS, DARK_HEAD, EXAMPLES_PER_PAGE, app_title, run_table
 from vipe.metrictrail.calibration.config import SharedKCalibrationConfig
 from vipe.metrictrail.calibration.policy import PIPELINE_BUDGETS
 from vipe.utils.model_cache import ModelCache
@@ -47,7 +48,6 @@ from metrictrail.benchmarks import UPSTREAM_MAX_FRAMES
 from metrictrail.blueprint import calibration_blueprint, run_blueprint
 from metrictrail.calibration_live import RunPhase
 from metrictrail.examples import DATA_DIR, example_videos
-from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD, RERUN_LOGOS
 from metrictrail.outputs import RunMetrics
 
 # Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
@@ -59,9 +59,7 @@ RUN_LOG_LINES: int = 100
 """Lines the run log keeps (the textbox is sent whole when it changes)."""
 READY: str = "Upload a clip, or pick an example, then press Run."
 DESCRIPTION: str = (
-    f'<h1 id="app-title"><a href="https://rerun.io" target="_blank" rel="noopener" title="rerun.io">'
-    f'<img class="logo-light" src="{RERUN_LOGOS["light"]}" alt="Rerun"><img class="logo-dark" src="{RERUN_LOGOS["dark"]}" alt="Rerun">'
-    f'</a> <span class="title-x">×</span> MetricTrail</h1>\n\n'
+    app_title("MetricTrail") + "\n\n"
     "Metric camera trajectory and surface from one phone video: ViPE's `pipeline=metrictrail`, DPVO with MoGe-2 metric depth "
     "and DINOv3 features. **Pick an example or upload a clip, then press Run:** the camera's focal is calibrated from the video "
     "first (SharedK, 15-30 s), then the tracking, MoGe-2's depth and normals and a TSDF mesh stream in as the video plays."
@@ -214,7 +212,7 @@ def summary_table(metrics: RunMetrics, wall_s: float, budget: str) -> str:
         ("Elapsed", f"{wall_s:.1f} s"),
         ("Calibration budget", f"`{budget}`"),
     ]
-    return "| Run | |\n|---|---|\n" + "".join(f"| {name} | {value} |\n" for name, value in rows)
+    return run_table(rows)
 
 
 @dataclass(slots=True)
@@ -383,7 +381,7 @@ def build_app(
                                 value=APP_BUDGET,
                             )
                         gr.Examples(
-                            examples=[[str(path)] for path in clips], inputs=[video_input], examples_per_page=4, cache_examples=False, elem_id="examples"
+                            examples=[[str(path)] for path in clips], inputs=[video_input], examples_per_page=EXAMPLES_PER_PAGE, cache_examples=False, elem_id="examples"
                         )
                     with gr.Tab("Outputs", id="outputs"):
                         run_summary: gr.Markdown = gr.Markdown("No run yet.", elem_id="run-summary")

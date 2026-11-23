@@ -6,6 +6,8 @@ Entity layout (one recording per run, timelines ``time`` (seconds) and ``frame``
 - ``world/body/{mesh,keypoints,skeleton}``: the recovered SMPL-X body and its MHR70 conditioning keypoints.
 - ``world/source`` (+ ``/video``): the moving source camera, fitted to the body, and the run's canonical clip.
 - ``world/cameras/<NN>`` (+ ``/video``): each generated view's camera and its video.
+- ``world/person/splats``: the trained 4D person (``fdanyone_rerun.person4d``), Animated SOG, static.
+- ``train/preview``, ``train/loss_rgb``: the person's training, on the ``train_step`` timeline.
 
 Videos are ``rr.VideoStream`` samples (simplecv ``log_video``).
 """
@@ -165,6 +167,18 @@ def log_camera(camera: CameraRecord, output_dir: Path, recording: rr.RecordingSt
 
 PROGRESS: str = "log"
 """Stage and step messages (TextLog)."""
+PERSON: str = "world/person/splats"
+"""The trained 4D person: ``AnimatedSogSplats3D`` + a one-pose ``GaussianSplats3D`` preview, static."""
+PERSON_MIDDLE_HEIGHT: float = 0.9
+"""Height of a standing person's middle above the canonical world's ground, metres: where the 4D person view looks."""
+PERSON_EYE_DISTANCE: float = 0.9
+"""The 4D person view's eye: this many times the cameras' distance from the person's middle."""
+TRAIN_TIMELINE: str = "train_step"
+"""Optimizer steps of the person's training."""
+TRAIN_PREVIEW: str = "train/preview"
+"""The front view rendered from the model as it trains."""
+TRAIN_LOSS: str = "train/loss_rgb"
+"""TRiGS' RGB loss."""
 PREVIEWS: str = "previews"
 """``previews/<NN>``: each view's x_0 estimate per denoising step, on ``diffusion_step``."""
 DIFFUSION_TIMELINE: str = "diffusion_step"
@@ -223,10 +237,10 @@ def diffusion_blueprint(num_views: int) -> rrb.Blueprint:
     )
 
 
-def result_blueprint(num_views: int) -> rrb.Blueprint:
-    """The rig and body in 3D beside the source camera, above a grid of the generated views, playing on a loop."""
+def result_blueprint(num_views: int, world_view: rrb.Spatial3DView | None = None) -> rrb.Blueprint:
+    """The rig and body in 3D (or ``world_view``) beside the source camera, above a grid of the generated views, playing on a loop."""
     top: rrb.Horizontal = rrb.Horizontal(
-        rrb.Spatial3DView(origin="world", name="Canonical world"),
+        world_view if world_view is not None else rrb.Spatial3DView(origin="world", name="Canonical world"),
         rrb.Spatial2DView(origin=SOURCE, contents=["$origin/**", f"/{BODY}/**"], name="Source"),
         column_shares=[3.0, 1.0],
     )
@@ -236,6 +250,37 @@ def result_blueprint(num_views: int) -> rrb.Blueprint:
         _time_panel(TIMELINE, playing=True),
         collapse_panels=True,
     )
+
+
+def training_blueprint() -> rrb.Blueprint:
+    """Phase 5 (the 4D person trains): the front view rendered every few hundred steps, the loss and the progress log."""
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial2DView(origin=TRAIN_PREVIEW, name="Front view, as it trains"),
+            rrb.Vertical(rrb.TimeSeriesView(origin=TRAIN_LOSS, name="RGB loss"), rrb.TextLogView(origin=PROGRESS, name="Progress")),
+            column_shares=[2.0, 1.0],
+        ),
+        _time_panel(TRAIN_TIMELINE, playing=False),
+        collapse_panels=True,
+    )
+
+
+def person_blueprint(rig: CameraRig) -> rrb.Blueprint:
+    """``result_blueprint`` with the trained 4D person in 3D. The 3D view looks from between the first two cameras, just
+    inside the ring (:data:`PERSON_EYE_DISTANCE`; no frustum in front of the person), and leaves out the body and every
+    image plane, which would cover the person."""
+    target: Float64[ndarray, " 3"] = np.array([0.0, PERSON_MIDDLE_HEIGHT, 0.0])
+    positions: list[Float64[ndarray, " 3"]] = [camera.world_T_cam[:3, 3] for camera in rig.cameras[:2]]
+    between: Float64[ndarray, " 3"] = np.mean(positions, axis=0) - target
+    distance: float = float(np.linalg.norm(positions[0] - target))
+    eye: Float64[ndarray, " 3"] = target + PERSON_EYE_DISTANCE * distance * between / max(float(np.linalg.norm(between)), 1e-6)
+    person: rrb.Spatial3DView = rrb.Spatial3DView(
+        origin="world",
+        contents=["+ $origin/**", f"- /{BODY}/**", f"- /{SOURCE}/video", *(f"- /{camera_entity(camera.camera_id)}/video" for camera in rig.cameras)],
+        name="4D person",
+        eye_controls=rrb.EyeControls3D(position=eye.tolist(), look_target=target.tolist(), eye_up=[0.0, 1.0, 0.0]),
+    )
+    return result_blueprint(len(rig.cameras), person)
 
 
 def _log_clip_frames(frames: Iterator[ndarray] | tuple[ndarray, ...], fps: Fraction, recording: rr.RecordingStream) -> None:

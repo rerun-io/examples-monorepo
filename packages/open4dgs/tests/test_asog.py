@@ -71,13 +71,14 @@ def test_nu_control_points_reproduce_the_quartic() -> None:
 def test_round_trip_positions_rotations_and_weights(tmp_path: Path) -> None:
     from asog import read as read_asog
 
-    from open4dgs.asog import AsogSettings, decode_asog, encode_params
+    from open4dgs.asog import AsogSettings, decode_asog, encode_asog
 
     src = synthetic_params()
     path = tmp_path / "clip.asog"
-    stats = encode_params(src, FPS, NUM_FRAMES, path, AsogSettings(preset="upstream", prune=0.0))
+    data, stats = encode_asog(src, FPS, NUM_FRAMES, AsogSettings(preset="upstream", prune=0.0))
+    path.write_bytes(data)
     assert stats.count == 512 and path.stat().st_size == stats.bytes
-    decoded, _ = decode_asog(path, torch.device("cpu"))
+    decoded, _ = decode_asog(path.read_bytes(), torch.device("cpu"))
     # the encoder reorders the splats: match them by canonical centre (grid spacing 10 cm >> quantisation)
     order = torch.cdist(src["means"].double(), decoded["means"].double()).argmin(dim=1)
     assert len(set(order.tolist())) == 512
@@ -147,12 +148,12 @@ def test_decode_keeps_trigs_timing_and_a_stock_player_cuts_at_0_05(tmp_path: Pat
     0.0404 less (at gamma = 0.05), and blank once gamma < 0.05 (|dt| > 2.45 sigma instead of 3.03 sigma)."""
     from asog import read as read_asog
 
-    from open4dgs.asog import AsogSettings, decode_asog, encode_params
+    from open4dgs.asog import AsogSettings, decode_asog, encode_asog
 
     src = synthetic_params()
     path = tmp_path / "clip.asog"
-    encode_params(src, FPS, NUM_FRAMES, path, AsogSettings())
-    decoded, _ = decode_asog(path, torch.device("cpu"))
+    path.write_bytes(encode_asog(src, FPS, NUM_FRAMES, AsogSettings())[0])
+    decoded, _ = decode_asog(path.read_bytes(), torch.device("cpu"))
     reference = read_asog(path)
     np.testing.assert_allclose(decoded["log_durations"].reshape(-1).double().numpy(), np.log(reference.sigma), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(decoded["times"].reshape(-1).double().numpy(), reference.mu, atol=1e-6)
@@ -178,7 +179,7 @@ def test_translation_needs_a_rotation_axis_and_the_axis_anchor_keeps_it(tmp_path
     from asog import read as read_asog
     from asog.encode import encode_runtime
 
-    from open4dgs.asog import AsogSettings, decode_asog, encode_params, trigs_runtime
+    from open4dgs.asog import AsogSettings, decode_asog, encode_asog, trigs_runtime
 
     src = synthetic_params()
     pure, slow = torch.arange(1, 512, 16), torch.arange(2, 512, 16)  # dynamic rows (row % 16 == 0 is static)
@@ -192,8 +193,8 @@ def test_translation_needs_a_rotation_axis_and_the_axis_anchor_keeps_it(tmp_path
     raw = tmp_path / "original-anchor.asog"
     encode_runtime(trigs_runtime(src, FPS, NUM_FRAMES), raw, qp=options.qp, qa=options.qa, prune=options.prune, mbits=options.mbits)
     path = tmp_path / "clip.asog"
-    encode_params(src, FPS, NUM_FRAMES, path, AsogSettings())
-    decoded, _ = decode_asog(path, torch.device("cpu"))
+    path.write_bytes(encode_asog(src, FPS, NUM_FRAMES, AsogSettings())[0])
+    decoded, _ = decode_asog(path.read_bytes(), torch.device("cpu"))
     order = torch.cdist(src["means"].double(), decoded["means"].double()).argmin(dim=1)
     assert np.all(np.abs(read_asog(raw).omega[:, order[slow].numpy()]).sum(axis=(0, 2)) == 0)  # original anchor: omega -> 0
     assert np.all(np.abs(read_asog(path).omega[:, order[pure].numpy()]).sum(axis=(0, 2)) == 0)

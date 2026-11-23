@@ -41,6 +41,10 @@ simplecv-view-exoego = "simplecv.apis.view_exoego:entrypoint"
 [tool.setuptools.packages.find]
 include = ["simplecv*", "tools*", "tests*"]
 
+[tool.setuptools.package-data]
+# simplecv.app_theme reads the wordmarks on import; a non-editable install (a Space pinned by commit) needs them in the wheel.
+simplecv = ["data/*.webp"]
+
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks simplecv only while pytest runs (AGENTS.md, Beartype).
 beartype_packages = ["simplecv"]
