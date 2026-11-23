@@ -28,11 +28,11 @@ def _params(n: int, *, static: bool) -> dict[str, torch.Tensor]:
 
 
 def _eval(params: dict[str, torch.Tensor], t: float, with_sh: bool = False):
-    from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
-
     from open4dgs.splat_export import splats_at
+    from open4dgs.trigs_adapter import CheckpointMeta, TrainConfig, TrainedClip
 
-    return splats_at(params, t, TrigsTrainer(device="cpu"), TrigsTrainingConfig(fps=25.0), with_sh=with_sh)
+    meta = CheckpointMeta.without_cameras(TrainConfig(), sh_degree=3, fps=25.0, num_frames=25, keyframe_step=3)
+    return splats_at(TrainedClip.from_params(params, meta, torch.device("cpu")), t, with_sh=with_sh)
 
 
 def test_wxyz_to_xyzw() -> None:

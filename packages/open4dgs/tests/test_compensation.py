@@ -86,12 +86,10 @@ def test_holdout_fit_recovers_an_exposure_change_and_never_moves_a_gaussian() ->
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
     import math
 
-    from trigs.core.trainer import TrigsTrainer
-
     from open4dgs.catalog_clip import MultiViewClip
     from open4dgs.compensation import evaluate_holdout_fit
     from open4dgs.evaluate import Metrics
-    from open4dgs.trigs_adapter import TrainConfig, TrainedClip, camera_config
+    from open4dgs.trigs_adapter import CheckpointMeta, TrainConfig, TrainedClip
 
     dev = torch.device("cuda")
     frames_n, cams_n, h, w, fps = 6, 2, 96, 128, 30.0
@@ -124,21 +122,19 @@ def test_holdout_fit_recovers_an_exposure_change_and_never_moves_a_gaussian() ->
 
     world_T_cam = torch.stack([look_at(0.0), look_at(1.0)])
     K = torch.tensor([[120.0, 0, w / 2], [0, 120.0, h / 2], [0, 0, 1]]).expand(cams_n, 3, 3).clone()
-    config = TrainConfig(learn_appearance=True)
-    trainer = TrigsTrainer(device=str(dev))
-    trainer._sequence_t_max = (frames_n - 1) / fps
-    model = TrainedClip(
-        params=params,
-        trainer=trainer,
-        trigs_config=config.to_trigs(fps, frames_n - 1, (1,)),
-        cameras=camera_config(world_T_cam, K, [(w, h)] * cams_n, dev),
+    meta = CheckpointMeta(
+        train=TrainConfig(learn_appearance=True),
         sh_degree=sh_degree,
         fps=fps,
         num_frames=frames_n,
-        scalars={},
-        train_seconds=0.0,
-        peak_gpu_bytes=0,
+        keyframe_step=frames_n - 1,
+        holdout_positions=(1,),
+        render_depth=False,
+        world_T_cam=world_T_cam.numpy(),
+        K=K.numpy(),
+        sizes=((w, h),) * cams_n,
     )
+    model = TrainedClip.from_params(params, meta, dev)
     renders = [[model.render(model.cameras, c, f) for f in range(frames_n)] for c in range(cams_n)]
     truth = tuple(torch.stack([(0.8 * rgb * 255).round().to(torch.uint8).cpu() for rgb, _ in renders[c]]) for c in range(cams_n))
     masks = tuple(torch.stack([(alpha[..., 0] > 0.5).float().cpu() for _, alpha in renders[c]]) for c in range(cams_n))

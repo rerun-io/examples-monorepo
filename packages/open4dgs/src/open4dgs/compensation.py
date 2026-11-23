@@ -67,27 +67,16 @@ def fit_compensation(
             f: int = frames[step % len(frames)]
             if fit_offset:
                 t: Tensor = offset + model.capture_time(cam, f)
-                colors, alphas, _, _ = model.trainer._render(model.params, model.cameras, cam, t, model.sh_degree, config)
+                colors, alphas, _, _ = model.rasterize(model.cameras, cam, t)
             else:
                 if f not in cached:
                     with torch.no_grad():
-                        rgb, a, _, _ = model.trainer._render(
-                            model.params, model.cameras, cam, model.capture_time(cam, f) + start.offset_s, model.sh_degree, config
-                        )
+                        rgb, a, _, _ = model.rasterize(model.cameras, cam, model.capture_time(cam, f) + start.offset_s)
                     cached[f] = (rgb, a)
                 colors, alphas = cached[f]
             gt: Tensor = clip.frames[cam][f].to(device).float() / 255.0
             affine: dict[str, Tensor] = {"cam_gain": gain[None], "cam_bias": bias[None]} if fit_appearance else {}
-            rgb_loss, alpha_out, alpha_mask = model.trainer._photometric_losses(
-                affine,  # pyrefly: ignore[bad-argument-type]
-                colors,
-                alphas,
-                gt,
-                {f: [masks[cam][f].to(device)]},
-                f,
-                0,
-                config,
-            )
+            rgb_loss, alpha_out, alpha_mask = model.photometric_losses(affine, colors, alphas, gt, {f: [masks[cam][f].to(device)]}, f, 0)
             loss: Tensor = config.lambda_render * rgb_loss + config.lambda_alpha_outside_mask * alpha_out + config.lambda_alpha_mask * alpha_mask
             if fit_appearance:
                 loss = loss + config.lambda_camera_appearance_reg * ((gain - 1.0).pow(2).mean() + bias.pow(2).mean())

@@ -21,7 +21,7 @@ What the trainer gets:
 
 import dataclasses
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -30,6 +30,8 @@ import numpy as np
 import torch
 from jaxtyping import Float32, Float64
 from numpy import ndarray
+from serde import serde
+from serde.json import from_json, to_json
 from torch import Tensor, nn
 from trigs.core import losses as trigs_losses
 from trigs.core.camera import CameraConfig
@@ -42,6 +44,7 @@ from open4dgs.prior import MonoPriorLoss
 from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer
 
 
+@serde(deny_unknown_fields=True)
 @dataclass(frozen=True, slots=True)
 class TrainConfig:
     """The trainer settings we expose; everything else keeps the TRiGS default."""
@@ -152,6 +155,81 @@ class CameraCompensation:
     offset_s: float = 0.0
 
 
+LEGACY_KEYFRAME_STEP: int = 3
+"""Keyframe step assumed for a checkpoint without ``meta`` (written before it existed): the body-init default."""
+
+
+@serde(deny_unknown_fields=True)
+@dataclass(frozen=True, slots=True)
+class CheckpointMeta:
+    """What a checkpoint holds beside its tensors: everything needed to rebuild the trained model exactly
+    (``TrainedClip.from_params``). ``TrainedClip.save`` writes it as JSON under the key ``meta``."""
+
+    train: TrainConfig
+    sh_degree: int
+    fps: float
+    num_frames: int
+    keyframe_step: int
+    holdout_positions: tuple[int, ...]
+    """Held-out cameras, as indices into the clip cameras (TRiGS ``holdout_views``)."""
+    render_depth: bool
+    """The trainer rendered ``RGB+ED`` (the MoGe-2 prior was on)."""
+    world_T_cam: Float32[ndarray, "c 4 4"]
+    """The training cameras (every clip camera, clip order): camera-to-world, OpenCV RDF."""
+    K: Float32[ndarray, "c 3 3"]
+    sizes: tuple[tuple[int, int], ...]
+    """(width, height) per camera."""
+    capture_times: tuple[tuple[float, ...], ...] | None = None
+    """``gt_times_per_frame`` as [frame][camera] seconds; None = frame / fps."""
+
+    @classmethod
+    def for_clip(
+        cls,
+        clip: MultiViewClip,
+        train: TrainConfig,
+        sh_degree: int,
+        keyframe_step: int,
+        holdout_positions: tuple[int, ...],
+        render_depth: bool = False,
+        capture_times: dict[int, list[float]] | None = None,
+    ) -> "CheckpointMeta":
+        """The meta of a model trained on ``clip``."""
+        return cls(
+            train=train,
+            sh_degree=sh_degree,
+            fps=float(clip.fps),
+            num_frames=int(clip.frame_indices.shape[0]),
+            keyframe_step=keyframe_step,
+            holdout_positions=holdout_positions,
+            render_depth=render_depth,
+            world_T_cam=clip.world_T_cam.float().cpu().numpy(),
+            K=clip.K.float().cpu().numpy(),
+            sizes=tuple(clip.sizes),
+            capture_times=tuple(tuple(capture_times[f]) for f in sorted(capture_times)) if capture_times is not None else None,
+        )
+
+    @classmethod
+    def without_cameras(cls, train: TrainConfig, sh_degree: int, fps: float, num_frames: int, keyframe_step: int) -> "CheckpointMeta":
+        """A model with no cameras: it deforms and exports, it cannot render (in memory only: ``save`` needs cameras)."""
+        return cls(
+            train=train,
+            sh_degree=sh_degree,
+            fps=fps,
+            num_frames=num_frames,
+            keyframe_step=keyframe_step,
+            holdout_positions=(),
+            render_depth=False,
+            world_T_cam=np.zeros((0, 4, 4), np.float32),
+            K=np.zeros((0, 3, 3), np.float32),
+            sizes=(),
+        )
+
+    def trigs_config(self) -> TrigsTrainingConfig:
+        """The TRiGS config the model was trained with."""
+        config: TrigsTrainingConfig = self.train.to_trigs(self.fps, self.keyframe_step, self.holdout_positions)
+        return dataclasses.replace(config, render_depth=True) if self.render_depth else config
+
+
 @dataclass
 class ScalarLog:
     """Duck-typed SummaryWriter: keeps every ``add_scalar``."""
@@ -168,21 +246,92 @@ class ScalarLog:
 
 @dataclass(frozen=True)
 class TrainedClip:
-    """A trained 4D Gaussian model and what is needed to render it."""
+    """A trained 4D Gaussian model and what is needed to render it.
+
+    Build it with ``from_params`` or ``load``; it is the one caller of the trainer's private renderer, deformation and
+    loss (``_render``, ``_deform``, ``_photometric_losses``, ``_eval_render_time``).
+    """
 
     params: nn.ParameterDict
     trainer: TrigsTrainer
+    meta: CheckpointMeta
     trigs_config: TrigsTrainingConfig
+    """``meta.trigs_config()``, or a variant of it (``dataclasses.replace``: another temporal cut)."""
     cameras: CameraConfig
     """Every clip camera, in clip order."""
-    sh_degree: int
-    fps: float
-    num_frames: int
-    scalars: dict[str, list[tuple[int, float]]]
-    train_seconds: float
-    peak_gpu_bytes: int
-    capture_times: dict[int, list[float]] | None = None
+    capture_times: dict[int, list[float]] | None
     """``gt_times_per_frame`` the trainer was given (seconds per frame and clip camera); None = frame / fps."""
+    scalars: dict[str, list[tuple[int, float]]] = field(default_factory=dict)
+    train_seconds: float = 0.0
+    peak_gpu_bytes: int = 0
+
+    @classmethod
+    def from_params(
+        cls,
+        params: nn.ParameterDict | Mapping[str, Tensor],
+        meta: CheckpointMeta,
+        device: torch.device,
+        trainer: TrigsTrainer | None = None,
+        scalars: dict[str, list[tuple[int, float]]] | None = None,
+    ) -> "TrainedClip":
+        """The model of ``params`` as ``meta`` describes it. An ``nn.ParameterDict`` is kept as it is (the trainer updates
+        it in place); other tensors are copied to ``device`` as frozen parameters.
+
+        ``trainer``: the trainer that trains ``params`` (``train_clip``); default a plain ``TrigsTrainer`` for rendering.
+        """
+        trainer = trainer if trainer is not None else TrigsTrainer(device=str(device))
+        trainer._sequence_t_max = (meta.num_frames - 1) / meta.fps
+        times: dict[int, list[float]] | None = (
+            {f: list(row) for f, row in enumerate(meta.capture_times)} if meta.capture_times is not None else None
+        )
+        return cls(
+            params=params if isinstance(params, nn.ParameterDict) else frozen_parameters(params, device),
+            trainer=trainer,
+            meta=meta,
+            trigs_config=meta.trigs_config(),
+            cameras=camera_config(
+                torch.from_numpy(meta.world_T_cam), torch.from_numpy(meta.K), meta.sizes, device, meta.train.rs_signs(len(meta.sizes))
+            ),
+            capture_times=times,
+            scalars=scalars if scalars is not None else {},
+        )
+
+    @classmethod
+    def load(
+        cls, path: Path, device: torch.device, clip: MultiViewClip | None = None, holdout_positions: tuple[int, ...] = ()
+    ) -> "TrainedClip":
+        """The model a ``save`` checkpoint holds, on ``device``.
+
+        A checkpoint written before ``meta`` existed is read with the defaults it was trained with (``TrainConfig()``,
+        keyframe step ``LEGACY_KEYFRAME_STEP``, capture time = frame / fps); its cameras come from ``clip`` (and
+        ``holdout_positions``), or there are none (the model deforms and exports but cannot render).
+        """
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        if "meta" in checkpoint:
+            meta: CheckpointMeta = from_json(CheckpointMeta, checkpoint["meta"])
+        elif clip is not None:
+            meta = CheckpointMeta.for_clip(clip, TrainConfig(), int(checkpoint["sh_degree"]), LEGACY_KEYFRAME_STEP, holdout_positions)
+        else:
+            meta = CheckpointMeta.without_cameras(
+                TrainConfig(), int(checkpoint["sh_degree"]), float(checkpoint["fps"]), int(checkpoint["num_frames"]), LEGACY_KEYFRAME_STEP
+            )
+        return cls.from_params(checkpoint["params"], meta, device)
+
+    def with_params(self, params: Mapping[str, Tensor]) -> "TrainedClip":
+        """The same model settings with other parameters (e.g. the ASOG-decoded ones), on this model's device."""
+        return dataclasses.replace(self, params=frozen_parameters(params, self.params["means"].device))
+
+    @property
+    def sh_degree(self) -> int:
+        return self.meta.sh_degree
+
+    @property
+    def fps(self) -> float:
+        return self.meta.fps
+
+    @property
+    def num_frames(self) -> int:
+        return self.meta.num_frames
 
     def capture_time(self, cam: int, frame: int) -> float:
         """Base capture time of clip camera ``cam`` at clip frame ``frame``: the dataset's time, else frame / fps (no offset)."""
@@ -195,6 +344,30 @@ class TrainedClip:
             return frame / self.fps
         return float(self.trainer._eval_render_time(self.params, frame, cam, self.capture_times, self.trigs_config))
 
+    def rasterize(
+        self, cameras: CameraConfig, cam: int, t: float | Tensor, config: TrigsTrainingConfig | None = None
+    ) -> tuple[Tensor, Tensor, Tensor, dict]:
+        """The trainer's raw render of camera ``cam`` at time ``t`` (seconds; a tensor carries its gradient): colours,
+        alphas, gamma, info. ``config`` defaults to ``trigs_config``."""
+        return self.trainer._render(self.params, cameras, cam, t, self.sh_degree, config or self.trigs_config)
+
+    def deform(self, t: float) -> tuple[Float32[Tensor, "n 3"], Float32[Tensor, "n 4"], Tensor]:
+        """Centres, wxyz quaternions and temporal opacity gamma of every row at time ``t`` (seconds)."""
+        return self.trainer._deform(self.params, t, self.trigs_config)
+
+    def photometric_losses(
+        self,
+        affine: Mapping[str, Tensor],
+        colors: Tensor,
+        alphas: Tensor,
+        gt: Tensor,
+        masks: Mapping[int, list[Tensor]],
+        frame: int,
+        cam: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """The trainer's per-camera loss terms (rgb, alpha outside the mask, alpha-to-mask) of one render."""
+        return self.trainer._photometric_losses(affine, colors, alphas, gt, masks, frame, cam, self.trigs_config)  # pyrefly: ignore[bad-argument-type]
+
     def render(
         self, cameras: CameraConfig, cam: int, frame: int, appearance: bool = False, compensation: CameraCompensation | None = None
     ) -> tuple[Float32[Tensor, "h w 3"], Float32[Tensor, "h w 1"]]:
@@ -206,7 +379,7 @@ class TrainedClip:
         """
         t: float = self.capture_time(cam, frame) + compensation.offset_s if compensation is not None else self.render_time(cameras, cam, frame)
         with torch.no_grad():
-            rgb, alpha, _, _ = self.trainer._render(self.params, cameras, cam, t, self.sh_degree, self.trigs_config)
+            rgb, alpha, _, _ = self.rasterize(cameras, cam, t)
         out: Tensor = rgb[0]
         if compensation is not None:
             out = out * out.new_tensor(compensation.gain) + out.new_tensor(compensation.bias)
@@ -218,7 +391,7 @@ class TrainedClip:
         """Expected (alpha-normalised) camera z-depth (gsplat ``RGB+ED``, recipe patch 0003) and alpha at clip frame ``frame``."""
         config: TrigsTrainingConfig = dataclasses.replace(self.trigs_config, render_depth=True)
         with torch.no_grad():
-            _, alpha, _, info = self.trainer._render(self.params, cameras, cam, self.render_time(cameras, cam, frame), self.sh_degree, config)
+            _, alpha, _, info = self.rasterize(cameras, cam, self.render_time(cameras, cam, frame), config)
         return info["render_depth"][0, ..., 0], alpha[0, ..., 0]
 
     def learned(self) -> list[CameraCompensation]:
@@ -232,17 +405,24 @@ class TrainedClip:
         return [CameraCompensation(gain=tuple(g), bias=tuple(b), offset_s=o) for g, b, o in zip(gains, biases, offsets, strict=True)]  # type: ignore[arg-type]
 
     def save(self, path: Path) -> None:
-        """Checkpoint (.pt): the parameters on the CPU plus the scalars needed to render them."""
+        """Checkpoint (.pt): the parameters on the CPU and ``meta`` as JSON (plus its fps, frames and SH degree as plain
+        values, which checkpoints had before ``meta``)."""
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
                 "params": {name: value.detach().cpu() for name, value in self.params.items()},
+                "meta": to_json(self.meta),
                 "sh_degree": self.sh_degree,
                 "fps": self.fps,
                 "num_frames": self.num_frames,
             },
             path,
         )
+
+
+def frozen_parameters(params: Mapping[str, Tensor], device: torch.device) -> nn.ParameterDict:
+    """``params`` on ``device`` as parameters without gradients (a model that is rendered, not trained)."""
+    return nn.ParameterDict({name: nn.Parameter(value.detach().to(device), requires_grad=False) for name, value in params.items()})
 
 
 def camera_config(
@@ -379,37 +559,23 @@ def train_clip(
     gt_images, gt_alphas, holdout_positions = trainer_frames(
         clip, masks, holdout_names, resident_device(clip, masks, holdout_names, dev) if config.resident_frames else None
     )
-    trigs_config: TrigsTrainingConfig = config.to_trigs(clip.fps, init.keyframe_step, holdout_positions)
     if prior is not None:
         leaked: set[int] = set(prior.positions) & set(holdout_positions)
         if leaked:
             raise ValueError(f"the prior holds maps of held-out cameras {sorted(clip.camera_names[c] for c in leaked)}")
-        trigs_config = dataclasses.replace(trigs_config, render_depth=True)
     torch.manual_seed(config.seed)
     params, sh_degree, scene_extent = init_params(init, config.sh_degree, dev)
-    cameras: CameraConfig = camera_config(clip.world_T_cam, clip.K, clip.sizes, dev, config.rs_signs(len(clip.camera_names)))
     gt_times: dict[int, list[float]] | None = None
     if capture_times is not None:
         if capture_times.shape != (len(clip.camera_names), num_frames):
             raise ValueError(f"capture_times {capture_times.shape} must be (cameras, frames) = {(len(clip.camera_names), num_frames)}")
         gt_times = capture_times_per_frame(capture_times)
+    meta: CheckpointMeta = CheckpointMeta.for_clip(clip, config, sh_degree, init.keyframe_step, holdout_positions, prior is not None, gt_times)
     writer: ScalarLog = ScalarLog()
     trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
-    live: TrainedClip = TrainedClip(
-        params=params,
-        trainer=trainer,
-        trigs_config=trigs_config,
-        cameras=cameras,
-        sh_degree=sh_degree,
-        fps=clip.fps,
-        num_frames=num_frames,
-        scalars=writer.rows,
-        train_seconds=0.0,
-        peak_gpu_bytes=0,
-        capture_times=gt_times,
-    )
+    live: TrainedClip = TrainedClip.from_params(params, meta, dev, trainer=trainer, scalars=writer.rows)
     torch.cuda.reset_peak_memory_stats(dev)
     torch.cuda.synchronize(dev)
     start: float = time.perf_counter()
@@ -417,11 +583,11 @@ def train_clip(
         params=params,
         sh_degree=sh_degree,
         scene_extent=scene_extent,
-        cameras=cameras,
+        cameras=live.cameras,
         n_frames=num_frames,
         gt_images_per_frame=gt_images,
         gt_alphas_per_frame=gt_alphas,
-        config=trigs_config,
+        config=live.trigs_config,
         gt_times_per_frame=gt_times,
         writer=writer,
         progress_bar=_StepTicks(on_step, live) if on_step is not None else None,
@@ -441,18 +607,4 @@ def untrained_clip(
     dev: torch.device = device if device is not None else torch.device("cuda")
     holdout_positions: tuple[int, ...] = tuple(clip.camera_names.index(name) for name in holdout_names)
     params, sh_degree, _ = init_params(init, config.sh_degree, dev)
-    trainer: TrigsTrainer = TrigsTrainer(device=str(dev))
-    num_frames: int = int(clip.frame_indices.shape[0])
-    trainer._sequence_t_max = (num_frames - 1) / clip.fps
-    return TrainedClip(
-        params=params,
-        trainer=trainer,
-        trigs_config=config.to_trigs(clip.fps, init.keyframe_step, holdout_positions),
-        cameras=camera_config(clip.world_T_cam, clip.K, clip.sizes, dev, config.rs_signs(len(clip.camera_names))),
-        sh_degree=sh_degree,
-        fps=clip.fps,
-        num_frames=num_frames,
-        scalars={},
-        train_seconds=0.0,
-        peak_gpu_bytes=0,
-    )
+    return TrainedClip.from_params(params, CheckpointMeta.for_clip(clip, config, sh_degree, init.keyframe_step, holdout_positions), dev)

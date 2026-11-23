@@ -22,7 +22,6 @@ from gsplat_rust_renderer.sog3d import PREVIEW_ROWS
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
 from simplecv.catalog_layers import register_layer
-from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
 from open4dgs.asog import AsogSettings, decode_asog, encode_asog
 from open4dgs.catalog_clip import LOCAL_CATALOG
@@ -31,13 +30,13 @@ from open4dgs.splat_export import (
     ASOG_CUT_FORMAT,
     SPLAT_ENTITY,
     STOCK_VIEWER_NOTE,
-    checkpoint_params,
     log_splat_frames,
     run_property,
     run_recording,
     splats_at,
     write_asog_rrd,
 )
+from open4dgs.trigs_adapter import TrainedClip
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,14 +66,13 @@ class Config:
 def main(config: Config) -> dict[str, object]:
     """Write ``<run>/asog.rrd`` (or ``splats.rrd``), register it as layer ``asog`` (``splats``); returns sizes and counts."""
     run_name: str = config.run.name
-    checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-    fps: float = float(checkpoint["fps"])
-    num_frames: int = int(checkpoint["num_frames"])
+    device: torch.device = torch.device(config.device if config.format == "per-frame" else "cpu")
+    trained: TrainedClip = TrainedClip.load(config.run / "trigs_ckpt.pt", device)
     if config.format == "asog":
         if config.asog is not None:
             asog: bytes = config.asog.read_bytes()
         else:
-            asog = encode_asog(checkpoint_params(checkpoint, torch.device("cpu")), fps, num_frames, AsogSettings())[0]
+            asog = encode_asog(dict(trained.params), trained.fps, trained.num_frames, AsogSettings())[0]
         out_asog: Path = config.output or config.run / "asog.rrd"
         summary_asog: dict[str, object] = write_asog_rrd(config.run, asog, out_asog, ASOG_CUT_FORMAT, PREVIEW_ROWS)
         if config.register:
@@ -86,18 +84,15 @@ def main(config: Config) -> dict[str, object]:
     out: Path = config.output or config.run / "splats.rrd"
     reader: RrdReader = RrdReader(config.run / "run.rrd")
     frame_start: int = run_property(reader, "frame_start")
-    device: torch.device = torch.device(config.device)
-    params = decode_asog(config.asog.read_bytes(), device)[0] if config.asog is not None else checkpoint_params(checkpoint, device)
-    trainer: TrigsTrainer = TrigsTrainer(device=str(device))
-    trigs_config: TrigsTrainingConfig = TrigsTrainingConfig(fps=fps)  # _deform reads only the TRiGS defaults (gauge, smooth cull)
-
-    first = splats_at(params, 0.0, trainer, trigs_config)
+    if config.asog is not None:
+        trained = trained.with_params(decode_asog(config.asog.read_bytes(), device)[0])
+    first = splats_at(trained, 0.0)
     recording, view_coordinates, view = run_recording(reader, run_name, out, np.median(first.centers, axis=0).astype(np.float64))
 
     t0: float = time.perf_counter()
-    frames = range(0, num_frames, config.frame_step)
+    frames = range(0, trained.num_frames, config.frame_step)
     counts: list[int] = log_splat_frames(
-        recording, ((frame_start + f, splats_at(params, f / fps, trainer, trigs_config, config.with_sh)) for f in frames), SPLAT_ENTITY
+        recording, ((frame_start + f, splats_at(trained, f / trained.fps, config.with_sh)) for f in frames), SPLAT_ENTITY
     )
     recording.flush()
     recording.disconnect()
@@ -109,7 +104,7 @@ def main(config: Config) -> dict[str, object]:
         "gaussians_min": min(counts),
         "gaussians_median": int(np.median(counts)),
         "gaussians_max": max(counts),
-        "rows": params["means"].shape[0],
+        "rows": trained.params["means"].shape[0],
         "export_s": time.perf_counter() - t0,
         "view_coordinates": str(view_coordinates),
         "blueprint_view_id": str(view.id),
