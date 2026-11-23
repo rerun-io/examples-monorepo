@@ -107,12 +107,12 @@ def test_default_export_encodes_the_checkpoint_into_the_recording_only(tmp_path:
 
     from open4dgs.apis.export_splats import Config, main
     from open4dgs.asog import AsogSettings, encode_asog
-    from open4dgs.splat_export import SPLAT_ENTITY, checkpoint_params
+    from open4dgs.splat_export import SPLAT_ENTITY
 
     run: Path = tiny_run(tmp_path)
     main(Config(run=run, register=False))
     checkpoint = torch.load(run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-    expected = encode_asog(checkpoint_params(checkpoint, torch.device("cpu")), FPS, NUM_FRAMES, AsogSettings())[1]
+    expected = encode_asog(checkpoint["params"], FPS, NUM_FRAMES, AsogSettings())[1]
     payload: bytes = bytes(static_columns(run / "asog.rrd", SPLAT_ENTITY)["AnimatedSogSplats3D:asog"])
 
     assert parse_asog(payload, "asog.rrd").manifest.count == expected.count  # the band-safe encode of the checkpoint

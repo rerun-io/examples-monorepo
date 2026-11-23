@@ -28,15 +28,15 @@ from PIL import Image
 from rerun.catalog import CatalogClient
 from rerun.chunk import RrdReader
 from simplecv.catalog_layers import register_layer
-from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
+from trigs.core.trainer import TrigsTrainingConfig
 
 from open4dgs.asog import AsogSettings, decode_asog, encode_asog, tiny_omega_fraction
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
 from open4dgs.run_log import RUNS_DATASET
-from open4dgs.splat_export import ASOG_CUT_FORMAT, checkpoint_params, run_properties, write_asog_rrd
-from open4dgs.trigs_adapter import TrainConfig, TrainedClip, camera_config
+from open4dgs.splat_export import ASOG_CUT_FORMAT, run_properties, write_asog_rrd
+from open4dgs.trigs_adapter import TrainedClip
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,25 +70,23 @@ class Config:
     runs_catalog_url: str = LOCAL_CATALOG
 
 
-def _model(params: dict[str, torch.Tensor], clip: MultiViewClip, fps: float, num_frames: int, holdout: tuple[int, ...], cut: float) -> TrainedClip:
-    trainer: TrigsTrainer = TrigsTrainer(device="cuda")
-    trainer._sequence_t_max = (num_frames - 1) / fps
-    trigs_config = dataclasses.replace(TrainConfig().to_trigs(fps, 3, holdout), temporal_active_threshold=cut)
-    return TrainedClip(
-        params=params,  # pyrefly: ignore[bad-argument-type]
-        trainer=trainer,
-        trigs_config=trigs_config,
-        cameras=camera_config(clip.world_T_cam, clip.K, clip.sizes, torch.device("cuda")),
-        sh_degree=3,
-        fps=fps,
-        num_frames=num_frames,
-        scalars={},
-        train_seconds=0.0,
-        peak_gpu_bytes=0,
-    )
+def evaluation_models(path: Path, decoded: dict[str, torch.Tensor], clip: MultiViewClip | None, holdout: tuple[int, ...], device: torch.device) -> dict[str, TrainedClip]:
+    """The checkpoint at ``path`` as it was trained (``TrainedClip.load``: its own settings, cameras and capture times),
+    the same model with the ``decoded`` ASOG parameters, and that one at the ``.asog`` temporal cut (0.05).
+
+    ``clip`` and ``holdout`` only fill in a checkpoint written before ``CheckpointMeta``."""
+    uncompressed: TrainedClip = TrainedClip.load(path, device, clip, holdout)
+    decoded_model: TrainedClip = uncompressed.with_params(decoded)
+    return {
+        "uncompressed": uncompressed,
+        "decoded": decoded_model,
+        "decoded_cut05": dataclasses.replace(
+            decoded_model, trigs_config=dataclasses.replace(decoded_model.trigs_config, temporal_active_threshold=ASOG_CUT_FORMAT)
+        ),
+    }
 
 
-def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str, torch.Tensor], fps: float, num_frames: int) -> dict[str, object]:
+def _evaluate(config: Config, decoded: dict[str, torch.Tensor]) -> dict[str, object]:
     props = run_properties(RrdReader(config.run / "run.rrd"))
     roi: str = str(props.get("roi", ["full"])[0])  # runs before the ROI cameras have no roi property
     clip: MultiViewClip = read_catalog_clip(
@@ -106,11 +104,8 @@ def _evaluate(config: Config, params: dict[str, torch.Tensor], decoded: dict[str
     masks = read_clip_masks(clip, config.mask_catalog_url, mask_dataset, str(props["segment_id"][0]))
     holdout_names: tuple[str, ...] = tuple(str(c) for c in props["holdout_cameras"])
     holdout: tuple[int, ...] = tuple(clip.camera_names.index(n) for n in holdout_names)
-    models: dict[str, TrainedClip] = {
-        "uncompressed": _model({k: v.cuda() for k, v in params.items()}, clip, fps, num_frames, holdout, 0.01),
-        "decoded": _model({k: v.cuda() for k, v in decoded.items()}, clip, fps, num_frames, holdout, 0.01),
-        "decoded_cut05": _model({k: v.cuda() for k, v in decoded.items()}, clip, fps, num_frames, holdout, 0.05),
-    }
+    models: dict[str, TrainedClip] = evaluation_models(config.run / "trigs_ckpt.pt", decoded, clip, holdout, torch.device("cuda"))
+    num_frames: int = models["uncompressed"].num_frames
     metrics: Metrics = Metrics(torch.device("cuda"))
     rows: dict[str, list[FrameMetrics]] = {name: [] for name in models}
     vs_full: list[float] = []
@@ -156,12 +151,10 @@ def write_rrd(config: Config, asog: bytes, out: Path) -> dict[str, object]:
 
 def main(config: Config) -> dict[str, object]:
     """Write ``<run>/asog.rrd`` (and ``--asog-file``), decode the ASOG back, optionally evaluate; prints and returns the summary."""
-    checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-    fps: float = float(checkpoint["fps"])
-    num_frames: int = int(checkpoint["num_frames"])
-    params: dict[str, torch.Tensor] = checkpoint_params(checkpoint, torch.device("cpu"))
+    trained: TrainedClip = TrainedClip.load(config.run / "trigs_ckpt.pt", torch.device("cpu"))
+    params: dict[str, torch.Tensor] = dict(trained.params)
     t0: float = time.perf_counter()
-    asog, stats = encode_asog(params, fps, num_frames, config.settings)
+    asog, stats = encode_asog(params, trained.fps, trained.num_frames, config.settings)
     encode_s: float = time.perf_counter() - t0
     if config.asog_file is not None:
         config.asog_file.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +179,6 @@ def main(config: Config) -> dict[str, object]:
     }
     summary.update(write_rrd(config, asog, config.rrd or config.run / "asog.rrd"))
     if config.evaluate:
-        summary.update(_evaluate(config, params, decoded, fps, num_frames))
+        summary.update(_evaluate(config, decoded))
     print(json.dumps(summary, indent=2, default=float))
     return summary

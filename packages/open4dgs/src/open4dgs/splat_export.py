@@ -1,6 +1,6 @@
 """Per-frame Gaussian splats from a TRiGS checkpoint, as stock ``rr.GaussianSplats3D`` on the ``frame_index`` timeline.
 
-The TRiGS motion model is evaluated at every clip frame (``TrigsTrainer._deform``: centres and wxyz quaternions at time
+The TRiGS motion model is evaluated at every clip frame (``TrainedClip.deform``: centres and wxyz quaternions at time
 t, temporal opacity gamma). Opacity = sigmoid(logit) * gamma; rows below 1/255 are culled. Colours are the SH DC term
 (``0.5 + SH_C0 * sh0``) with alpha = opacity; the SH rest (degrees 1-3) is optional. The world frame is the training
 world, which is the run recording's world (``open4dgs.trigs_adapter.camera_config``), so the run's cameras line up.
@@ -13,7 +13,7 @@ recording with the run's cameras and meshes (``run_recording``) and the checkpoi
 """
 
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,9 +27,9 @@ from jaxtyping import Float16, Float32, Float64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 from torch import Tensor
-from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
 
 from open4dgs.catalog_clip import FRAME_TIMELINE
+from open4dgs.trigs_adapter import TrainedClip
 
 SH_C0: float = 0.28209479177387814
 """Degree-0 spherical-harmonics constant."""
@@ -68,10 +68,11 @@ def dc_rgba(sh0: Float32[Tensor, "n 3"], opacity: Float32[Tensor, " n"]) -> UInt
     return (rgba * 255.0 + 0.5).to(torch.uint8)
 
 
-def splats_at(params: Mapping[str, Tensor], t: float, trainer: TrigsTrainer, config: TrigsTrainingConfig, with_sh: bool = False) -> FrameSplats:
+def splats_at(model: TrainedClip, t: float, with_sh: bool = False) -> FrameSplats:
     """Evaluate the motion model at time ``t`` (seconds) and keep the rows with opacity above 1/255."""
+    params = model.params
     with torch.no_grad():
-        means_t, quats_t, gamma = trainer._deform(params, t, config)  # pyrefly: ignore[bad-argument-type]
+        means_t, quats_t, gamma = model.deform(t)
         opacity: Tensor = torch.sigmoid(params["opacities"].reshape(-1)) * gamma.reshape(-1)
         keep: Tensor = opacity > MIN_OPACITY
         quats: Tensor = torch.nn.functional.normalize(quats_t[keep], dim=-1)
@@ -83,14 +84,6 @@ def splats_at(params: Mapping[str, Tensor], t: float, trainer: TrigsTrainer, con
             colors=dc_rgba(params["sh0"].reshape(-1, 3)[keep], opacity[keep]).cpu().numpy(),
             sh_rest=sh_rest,
         )
-
-
-def checkpoint_params(checkpoint: Mapping[str, object], device: torch.device) -> dict[str, Tensor]:
-    """The parameter tensors of an ``open4dgs.trigs_adapter.TrainedClip.save`` checkpoint, on ``device``."""
-    params = checkpoint["params"]
-    if not isinstance(params, Mapping):
-        raise ValueError("checkpoint has no 'params' mapping")
-    return {str(name): value.to(device) for name, value in params.items()}
 
 
 def log_splat_frames(
