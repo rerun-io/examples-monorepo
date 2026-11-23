@@ -27,11 +27,6 @@ pub(crate) enum Primitives<'a> {
     Sog(&'a crate::sog::Payload<'a>),
     /// An `.asog` payload, decoded once on upload; its motion runs per view on the GPU.
     Asog(&'a crate::asog::Payload<'a>),
-    /// Canonical `GaussianSplats3D` rows + `TrigsMotion3D`, uploaded once; the motion runs per view on the GPU.
-    Animated {
-        splats: &'a NativeSplats<'a>,
-        motion: &'a gsplat_core::trigs::TrigsMotion<'a>,
-    },
 }
 
 impl Primitives<'_> {
@@ -47,7 +42,6 @@ impl Primitives<'_> {
             }
             Self::Sog(payload) => core.check_capacity(payload.count(), payload.max_degree()),
             Self::Asog(payload) => core.check_capacity(payload.info.count, payload.info.max_degree),
-            Self::Animated { splats, .. } => Self::Splats(splats).check_capacity(core),
         }
     }
 
@@ -74,11 +68,6 @@ impl Primitives<'_> {
                 payload.info.count,
                 "ASOG splats",
             ),
-            Self::Animated { splats, motion } => (
-                core.upload_animated(&splats.to_core(), gsplat_core::Motion::Twist(motion))?,
-                splats.centers.len(),
-                "TrigsMotion3D splats",
-            ),
         };
         re_log::debug!("Uploaded {} {kind}", re_format::format_uint(count));
         Ok(scene)
@@ -91,7 +80,6 @@ impl Primitives<'_> {
             Self::Hexels(hexels) => hexels.centers.len(),
             Self::Sog(payload) => payload.count(),
             Self::Asog(payload) => payload.info.count,
-            Self::Animated { splats, .. } => splats.centers.len(),
         }
     }
 
@@ -103,8 +91,6 @@ impl Primitives<'_> {
             Self::Sog(payload) => crate::bounds::from_splats(payload.preview),
             // One mid-clip pose (the preview).
             Self::Asog(payload) => crate::bounds::from_splats(payload.preview),
-            // The canonical rows of a TrigsMotion3D entity.
-            Self::Animated { splats, .. } => crate::bounds::from_splats(splats),
         }
     }
 }

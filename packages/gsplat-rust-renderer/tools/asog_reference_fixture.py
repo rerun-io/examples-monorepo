@@ -3,16 +3,14 @@
 Runs in an environment with the asog reference decoder (the `asog-src` recipe, e.g. the open4dgs env), not in the
 gsplat env: `python -I tools/asog_reference_fixture.py <src.asog> <out.rrd>`.
 
-It takes 2,048 rows of a real `.asog` (every row whose omega gets near zero, every row whose pinv mapping onto the
-twist form is rank-deficient or inexact, then random rows), re-encodes them as a smaller `.asog` with the same
+It takes 2,048 rows of a real `.asog` (every row whose omega gets near zero, every row whose min-norm pinv of the
+glue's `nu_control_points` is rank-deficient or inexact, then random rows), re-encodes them as a smaller `.asog` with the same
 manifest (the SH palette cut to the labels in use; every other quantity is per row, so each row decodes exactly as
 in the source) and logs:
   /asog                 AnimatedSogSplats3D:format "asog/1", :asog (the subset file bytes), :active_threshold 0.05
   /expected/canonical   Expected:means, :quats (wxyz), :log_scales, :opacity, :sh0, :sh_rest (first 64 rows), :mu, :sigma,
                         :anchor, :omega (O0..O2 per row), :g (G0..G4 per row), :static (1/0), :times; f32 flat batches
   /expected/t<k>        Expected:positions, :rotations (wxyz), :weights from `Asog.evaluate(times[k])`, f64 flat
-  /expected/twist       Expected:nu (N0..N2 per row, the min-norm pinv of the glue's `nu_control_points`, f32),
-                        :well_conditioned (1/0: relative G residual < 1e-9, rank 5, |omega(tau)|^2 >= 1e-8 on 33 taus)
 """
 
 import importlib
@@ -61,7 +59,7 @@ def main(src: Path, out: Path) -> None:
     manifest, streams, _ = container.read(src)
     full = decode.read(src)
     n: int = full.count
-    nu, residual, rank = nu_control_points(full.omega, full.g)
+    _, residual, rank = nu_control_points(full.omega, full.g)
     tiny = np.zeros(n, bool)
     for tau in np.linspace(0, 1, 33):
         om = motion.bezier2(np.full(n, tau), full.omega)
@@ -118,10 +116,8 @@ def main(src: Path, out: Path) -> None:
         assert np.array_equal(frame.positions, ref.positions[idx]) and np.array_equal(frame.weights, ref.weights[idx])
         rec.log(f"/expected/t{k}", expected(np.float64, positions=frame.positions, rotations=frame.rotations, weights=frame.weights), static=True)
         print(f"t={t}: {int((frame.weights > 0).sum())} of {len(idx)} rows visible")
-    well = (rank[idx] == 5) & (residual[idx] < 1e-9) & ~tiny[idx] & dynamic[idx]
-    rec.log("/expected/twist", expected(np.float32, nu=nu[:, idx].transpose(1, 0, 2), well_conditioned=well.astype(np.float64)), static=True)
     rec.flush()
-    print(f"{out}: {len(data):,} B subset .asog, {int(well.sum())} well-conditioned rows")
+    print(f"{out}: {len(data):,} B subset .asog")
 
 
 if __name__ == "__main__":

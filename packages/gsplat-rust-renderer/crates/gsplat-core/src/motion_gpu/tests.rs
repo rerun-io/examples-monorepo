@@ -1,4 +1,4 @@
-//! The motion pass read back against the CPU references of both forms.
+//! The motion pass read back against its CPU reference.
 use super::*;
 use crate::Splats;
 use crate::test_utils::{gpu, read};
@@ -45,7 +45,7 @@ fn canonical(n: usize, rng: &mut Rng) -> Splats {
 }
 
 /// Run the motion pass on `canonical` at `time` and read back (transforms, raw opacity).
-fn run(canonical: &Splats, motion: Motion<'_>, times: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
+fn run(canonical: &Splats, motion: &AsogMotion, times: &[f32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     let (device, queue) = gpu();
     let kernels = crate::kernels::Kernels::new(&device);
     let n = canonical.transforms.len();
@@ -55,7 +55,21 @@ fn run(canonical: &Splats, motion: Motion<'_>, times: &[f32]) -> Vec<(Vec<f32>, 
         bytemuck::cast_slice(&canonical.transforms),
         wgpu::BufferUsages::STORAGE,
     );
-    let gpu_motion = motion.upload(&device, n, u64::MAX).unwrap();
+    let params = crate::scene::upload(
+        &device,
+        "motion parameters",
+        bytemuck::cast_slice(&pack(motion)),
+        u64::MAX,
+    )
+    .unwrap();
+    let gpu_motion = GpuMotion::new(
+        &device,
+        params,
+        &motion.clips,
+        motion.active_threshold,
+        u64::MAX,
+    )
+    .unwrap();
     let mut deform = Deform::new(
         &device,
         &kernels.trigs_deform,
@@ -171,65 +185,6 @@ fn assert_within(worst: &Worst, form: &str) {
 
 #[test]
 #[ignore = "integration: GPU"]
-fn gpu_twist_form_matches_the_cpu_reference() {
-    let n = 70_001;
-    let mut rng = Rng(7);
-    let canonical = canonical(n, &mut rng);
-    let opacities: Vec<f32> = (0..n).map(|_| rng.next() * 0.5 + 0.5).collect();
-    let times: Vec<f32> = (0..n).map(|_| rng.next() * 2.0 + 2.0).collect();
-    let log_durations: Vec<f32> = (0..n).map(|_| rng.next() * 1.5 - 1.5).collect();
-    let mut twist = |scale: f32| -> Vec<[f32; 6]> {
-        (0..n)
-            .map(|_| std::array::from_fn(|_| rng.next() * scale))
-            .collect()
-    };
-    let mut base = twist(1.0);
-    let (c0, c1, c2) = (twist(0.5), twist(0.5), twist(0.5));
-    // Some rows with |omega| ~ 0 (gauge switch and the exp Taylor branch).
-    for row in base.iter_mut().step_by(97) {
-        row[3..].fill(0.0);
-    }
-    let anchors: Vec<[f32; 3]> = (0..n).map(|_| rng.v3(3.0)).collect();
-    let is_static: Vec<f32> = (0..n)
-        .map(|i| if i % 31 == 0 { 1.0 } else { 0.0 })
-        .collect();
-    let motion = TrigsMotion {
-        opacities: &opacities,
-        times: &times,
-        log_durations: &log_durations,
-        twist_base: &base,
-        twist_c0: &c0,
-        twist_c1: &c1,
-        twist_c2: &c2,
-        anchors: &anchors,
-        is_static: &is_static,
-        active_threshold: 0.01,
-    };
-    let eval_times = [0.5f32, 2.0, 3.25, 4.1];
-    let readbacks = run(&canonical, Motion::Twist(&motion), &eval_times);
-    for (time, readback) in eval_times.iter().zip(&readbacks) {
-        let expected: Vec<_> = (0..n)
-            .map(|i| {
-                let c = &canonical.transforms[i];
-                let d = motion.deform_row(i, [c[0], c[1], c[2]], [c[4], c[5], c[6], c[3]], *time);
-                let [x, y, z, w] = d.quaternion;
-                let raw = if d.opacity > 0.0 {
-                    crate::sog::logit(f64::from(d.opacity))
-                } else {
-                    CULLED_RAW_OPACITY
-                };
-                (d.center, [w, x, y, z], raw)
-            })
-            .collect();
-        assert_within(
-            &compare(readback, &expected, &canonical),
-            &format!("twist t={time}"),
-        );
-    }
-}
-
-#[test]
-#[ignore = "integration: GPU"]
 fn gpu_asog_form_matches_the_cpu_reference() {
     let n = 70_001;
     let mut rng = Rng(11);
@@ -277,7 +232,7 @@ fn gpu_asog_form_matches_the_cpu_reference() {
         active_threshold: 0.05,
     };
     let eval_times = [0.25f32, 0.75, 2.42, 4.2, 4.8];
-    let readbacks = run(&canonical, Motion::Asog(&motion), &eval_times);
+    let readbacks = run(&canonical, &motion, &eval_times);
     for (time, readback) in eval_times.iter().zip(&readbacks) {
         let evaluated = motion.evaluate(&canonical, *time);
         let expected: Vec<_> = evaluated
@@ -486,9 +441,8 @@ fn asog_file_timing() {
 }
 
 #[test]
-fn packing_strides_match_the_shader() {
+fn packing_stride_matches_the_shader() {
     let source = crate::shader::resolve("trigs_deform.wgsl");
-    assert!(source.contains(&format!("TWIST_STRIDE: u32 = {TWIST_STRIDE}u;")));
     assert!(source.contains(&format!("ASOG_STRIDE: u32 = {ASOG_STRIDE}u;")));
     let motion = AsogMotion {
         opacities: vec![0.5],
@@ -502,7 +456,7 @@ fn packing_strides_match_the_shader() {
         clips: vec![],
         active_threshold: 0.05,
     };
-    let (_, packed, _, _) = Motion::Asog(&motion).pack();
+    let packed = pack(&motion);
     assert_eq!(packed.len(), ASOG_STRIDE);
     assert_eq!(packed[3].to_bits(), 1 | (2 << 1));
     assert_eq!(packed[20], 11.0);
