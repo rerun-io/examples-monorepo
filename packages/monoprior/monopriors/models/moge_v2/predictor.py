@@ -41,6 +41,9 @@ else:
     TrtBuildConfig = object
 
 
+_Runtime: TypeAlias = TensorRuntime | TensorRtDynamicRuntime
+"""A static engine's batch-only runtime or the dynamic engine's runtime."""
+
 MoGeV2EngineProfile: TypeAlias = Literal["dynamic", "static"]
 """``dynamic`` (default): one engine over a range of token grids; ``static``: one engine per network size."""
 
@@ -363,7 +366,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         self.builder_optimization_level: int = builder_optimization_level
         self.patch_range: tuple[int, int] = dynamic_patch_range(self.num_tokens)
         """Per-axis token-grid range of the dynamic engine, in patches."""
-        self.runtimes: dict[tuple[int, int] | None, TensorRuntime | TensorRtDynamicRuntime] = {}
+        self.runtimes: dict[tuple[int, int] | None, _Runtime] = {}
         """Built runtimes by network size; the dynamic engine's key is None."""
         if network_hw_options is not None:
             for option_hw in network_hw_options:
@@ -440,10 +443,10 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         digest: str = onnx_content_hash(onnx_path, cache_dir=trt_dir)
         return cached_engine_path(onnx_path, config, cache_dir=trt_dir, onnx_sha256=digest).exists()
 
-    def _ensure_runtime(self, network_hw: tuple[int, int]) -> TensorRuntime | TensorRtDynamicRuntime:
+    def _ensure_runtime(self, network_hw: tuple[int, int]) -> _Runtime:
         """Build or load the runtime that serves one network size."""
         key: tuple[int, int] | None = network_hw if self.profile == "static" else None
-        existing_runtime: TensorRuntime | TensorRtDynamicRuntime | None = self.runtimes.get(key)
+        existing_runtime: _Runtime | None = self.runtimes.get(key)
         if existing_runtime is not None:
             return existing_runtime
 
@@ -460,7 +463,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         )
         engine_path: Path = ensure_engine(onnx_path, config, cache_dir=self.cache_dir / "trt")
 
-        runtime: TensorRuntime | TensorRtDynamicRuntime
+        runtime: _Runtime
         if self.profile == "static":
             from trtkit.tensorrt_runtime import TensorRtRuntime
 
@@ -483,7 +486,7 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
 
     def _run_graph(self, rgb_bhw3: UInt8[Tensor, "b h w 3"]) -> dict[str, Tensor]:
         network_hw: tuple[int, int] = self.network_hw((rgb_bhw3.shape[1], rgb_bhw3.shape[2]))
-        runtime: TensorRuntime | TensorRtDynamicRuntime = self._ensure_runtime(network_hw)
+        runtime: _Runtime = self._ensure_runtime(network_hw)
         image_b3hw: Float32[Tensor, "b 3 nh nw"] = preprocess_rgb(rgb_bhw3, network_hw).contiguous()
         runtime_output: dict[str, Tensor] = runtime({"image": image_b3hw})
         return {name: runtime_output[name].float() for name in ONNX_OUTPUT_NAMES[self.heads]}
