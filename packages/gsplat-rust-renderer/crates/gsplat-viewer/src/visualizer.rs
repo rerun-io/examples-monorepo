@@ -381,11 +381,17 @@ fn draw_splat_entity(
                         .store_context
                         .memoizer::<crate::asog::AsogCache, _>(|cache| {
                             cache.browser(generation, bytes, threshold, move || {
-                                egui.request_repaint();
+                                // As re_viewer's own web callbacks do: an immediate request from outside a pass
+                                // does not wake the web frame loop.
+                                egui.request_repaint_after(std::time::Duration::from_millis(10));
                             })
                         });
                     let inflated = match browser {
-                        crate::asog::Browser::Pending => continue,
+                        crate::asog::Browser::Pending => {
+                            ctx.egui_ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(10));
+                            continue;
+                        }
                         crate::asog::Browser::Ready(inflated) => Some(inflated),
                         crate::asog::Browser::Unused => None,
                     };

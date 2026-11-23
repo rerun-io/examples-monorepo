@@ -21,7 +21,6 @@ re_log = "=0.42.0"
 wasm-bindgen = "=0.2.129"
 # The page URL, for ?force_no_subgroups=1; DecompressionStream and its stream plumbing for the .asog inflate.
 web-sys = { version = "0.3", features = [
-  "Blob",
   "CompressionFormat",
   "DecompressionStream",
   "Location",

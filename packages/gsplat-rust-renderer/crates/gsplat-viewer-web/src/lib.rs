@@ -87,13 +87,17 @@ fn browser_inflate(members: Vec<Vec<u8>>, done: gsplat_viewer::asog::InflateDone
 async fn inflate_all(members: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, wasm_bindgen::JsValue> {
     let pending = js_sys::Array::new();
     for member in members {
-        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(member.as_slice()));
-        let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)?;
+        // A Response over the bytes (copied out of wasm memory) is the readable source: under a busy frame loop it
+        // inflates ~1.7x faster in Chrome than a Blob's stream.
+        let source = web_sys::Response::new_with_opt_buffer_source(Some(
+            &js_sys::Uint8Array::from(member.as_slice()),
+        ))?
+        .body()
+        .ok_or("a Response over bytes has a body")?;
         let inflate = web_sys::DecompressionStream::new(web_sys::CompressionFormat::Deflate)?;
         let pair = web_sys::ReadableWritablePair::new(&inflate.readable(), &inflate.writable());
-        let response = web_sys::Response::new_with_opt_readable_stream(Some(
-            &blob.stream().pipe_through(&pair),
-        ))?;
+        let response =
+            web_sys::Response::new_with_opt_readable_stream(Some(&source.pipe_through(&pair)))?;
         pending.push(&wasm_bindgen::JsValue::from(response.array_buffer()?));
     }
     let buffers = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&pending)).await?;

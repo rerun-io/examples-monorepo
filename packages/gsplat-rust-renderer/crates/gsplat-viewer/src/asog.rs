@@ -48,8 +48,10 @@ pub static BROWSER_INFLATE: std::sync::OnceLock<BrowserInflate> = std::sync::Onc
 /// Streams inflated outside the frame thread and assembled: what [`Payload::upload`] then uploads.
 pub(crate) struct Inflated {
     pub parts: gsplat_core::asog::AsogParts,
-    /// Payload seen -> inflated streams back, and the undo + assembly after it (frame thread).
+    /// Payload seen -> inflated streams back; back -> the next frame that took them; the undo + assembly (frame
+    /// thread).
     pub inflate: std::time::Duration,
+    pub wait: std::time::Duration,
     pub assemble: std::time::Duration,
 }
 
@@ -77,11 +79,12 @@ impl Payload<'_> {
             let scene = core.upload_asog(&ctx.queue, &inflated.parts)?;
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
             re_log::info!(
-                "ASOG decode: {} splats, SH degree {}, browser inflate {:.1} ms (concurrent, off the frame), undo + \
-                 assembly {:.1} ms (frame thread), upload + static and motion de-quantise GPU {:.1} ms (submit only)",
+                "ASOG decode: {} splats, SH degree {}, browser inflate {:.1} ms (concurrent, off the frame), next \
+                 frame {:.1} ms later, undo + assembly {:.1} ms (frame thread), upload + static and motion de-quantise GPU {:.1} ms (submit only)",
                 re_format::format_uint(scene.len()),
                 inflated.parts.sh.as_ref().map_or(0, |s| s.0),
                 ms(inflated.inflate),
+                ms(inflated.wait),
                 ms(inflated.assemble),
                 ms(start.elapsed()),
             );
@@ -112,8 +115,8 @@ impl Payload<'_> {
     }
 }
 
-/// A browser inflate in flight: the result slot the callback fills, and when it started.
-type Slot = Arc<Mutex<Option<Result<Vec<Vec<u8>>, String>>>>;
+/// A browser inflate in flight: the result slot the callback fills (with the time it was filled).
+type Slot = Arc<Mutex<Option<(Result<Vec<Vec<u8>>, String>, web_time::Instant)>>>;
 
 enum Load {
     Pending(Slot, web_time::Instant),
@@ -207,7 +210,7 @@ impl AsogCache {
             inflate(
                 members.iter().map(|m| m.data.to_vec()).collect(),
                 Box::new(move |result| {
-                    *filled.lock() = Some(result);
+                    *filled.lock() = Some((result, web_time::Instant::now()));
                     repaint();
                 }),
             );
@@ -215,10 +218,11 @@ impl AsogCache {
         });
         *seen = frame;
         if let Load::Pending(slot, started) = load {
-            let Some(result) = slot.lock().take() else {
+            let Some((result, back)) = slot.lock().take() else {
                 return Browser::Pending;
             };
-            let inflate = started.elapsed();
+            let inflate = back.duration_since(*started);
+            let wait = back.elapsed();
             let start = web_time::Instant::now();
             *load = match result.and_then(|inflated| {
                 gsplat_core::asog::decode_parts_inflated(bytes, active_threshold, inflated)
@@ -227,6 +231,7 @@ impl AsogCache {
                 Ok(parts) => Load::Ready(Arc::new(Inflated {
                     parts,
                     inflate,
+                    wait,
                     assemble: start.elapsed(),
                 })),
                 Err(error) => {
