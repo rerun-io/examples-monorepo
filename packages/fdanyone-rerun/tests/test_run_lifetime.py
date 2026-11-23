@@ -71,6 +71,8 @@ def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatc
 
         def __init__(self, _config: RunConfig, _recording: object, previews: bool, person: object = None) -> None:
             self.stop: threading.Event = threading.Event()
+            self.messages: list[str] = []
+            self.person_summary: None = None
 
         def on_stage(self, *_args: object) -> None:
             if self.stop.is_set():
@@ -92,9 +94,9 @@ def test_a_run_after_a_stop_waits_for_the_stopped_one(tmp_path: Path, monkeypatc
     monkeypatch.setattr(app, "PUMP_SECONDS", 0.05)
     video: str = str(tmp_path / "clip.mp4")
     first = app.run_app(video, 6, 42, False, 100)
-    assert next(first)[1].startswith("Running")
+    assert str(next(first)[1]).endswith(" s)")
     first.close()  # a closed page ends the request, which closes its generator
-    statuses: list[str] = [status for _, status in app.run_app(video, 6, 42, False, 100)]
+    statuses: list[str] = [str(step[1]) for step in app.run_app(video, 6, 42, False, 100)]
     assert statuses[0] == "Waiting for the previous run to stop…"
     assert statuses[-1].startswith("Done")
     (_, first_end), (second_start, _) = runs
@@ -108,6 +110,8 @@ def test_stop_stops_a_run_whose_generator_gradio_left_open(tmp_path: Path, monke
     class WaitingStreamer:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             self.stop: threading.Event = threading.Event()
+            self.messages: list[str] = []
+            self.person_summary: None = None
 
         def run(self) -> None:
             if not self.stop.wait(10):
@@ -118,7 +122,9 @@ def test_stop_stops_a_run_whose_generator_gradio_left_open(tmp_path: Path, monke
     monkeypatch.setattr(app, "RUNS_DIR", tmp_path)
     monkeypatch.setattr(app, "PUMP_SECONDS", 0.05)
     run = app.run_app(str(tmp_path / "clip.mp4"), 6, 42, True, 100)
-    assert next(run)[1].startswith("Running")  # the generator stays suspended, as after a Gradio cancel
+    assert str(next(run)[1]).endswith(
+        " s)"
+    )  # the newest progress line and the seconds so far  # the generator stays suspended, as after a Gradio cancel
     started: float = time.perf_counter()
     assert list(app.stop_status())[-1] == "Stopped."
     assert time.perf_counter() - started < 5.0

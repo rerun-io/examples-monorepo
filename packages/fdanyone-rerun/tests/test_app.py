@@ -26,6 +26,8 @@ class QuickStreamer:
     def __init__(self, _config: object, recording: rr.RecordingStream, **_kwargs: object) -> None:
         self.recording: rr.RecordingStream = recording
         self.stop: threading.Event = threading.Event()
+        self.messages: list[str] = ["starting"]
+        self.person_summary: None = None
 
     def run(self) -> None:
         time.sleep(0.1)  # a few empty reads first
@@ -46,8 +48,14 @@ def runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     yield tmp_path
 
 
-def start(runs: Path) -> Generator[tuple[bytes | None, str], None, None]:
+def start(runs: Path) -> Generator[app.RunYield, None, None]:
     return run_app(str(runs / "clip.mp4"), 6, 42, True, 100)
+
+
+def status(step: app.RunYield) -> str:
+    """The status box of one step (the app never skips it)."""
+    assert isinstance(step[1], str)
+    return step[1]
 
 
 def test_app_builds() -> None:
@@ -55,7 +63,8 @@ def test_app_builds() -> None:
 
 
 def test_run_without_a_video_asks_for_one() -> None:
-    assert list(run_app(None, 6, 42, True, 5000)) == [(None, "Choose a video first.")]
+    (step,) = list(run_app(None, 6, 42, True, 5000))
+    assert step[:2] == (None, "Choose a video first.")
 
 
 def test_the_app_preset_differs_from_the_cli_only_in_length_and_prior() -> None:
@@ -68,13 +77,15 @@ def test_a_run_saves_a_valid_recording_and_offers_it_by_name(runs: Path) -> None
     """The viewer's bytes and the saved ``<run>.rrd`` hold the same recording; the status names the file, not its path;
     the download box gets it. ``BinaryStream.read()`` returns None while nothing new was logged."""
     assert app.latest_recording().visible is False
-    pumped: list[tuple[bytes | None, str]] = list(start(runs))
+    pumped: list[app.RunYield] = list(start(runs))
 
     (saved,) = runs.glob("*.rrd")
     assert {"/world/p0", "/world/p1", "/world/p2"} <= {str(chunk.entity_path) for chunk in RrdReader(saved).stream().to_chunks()}
-    assert sum(len(data or b"") for data, _ in pumped) > 0
-    done: str = pumped[-1][1]
-    assert done.endswith(f"recording `{saved.name}`") and str(runs) not in done
+    assert sum(len(step[0] or b"") for step in pumped) > 0
+    _, done, summary, log = pumped[-1]
+    assert isinstance(done, str) and done.startswith("Done in") and str(runs) not in done
+    assert isinstance(summary, str) and f"`{saved.name}`" in summary and str(runs) not in summary
+    assert isinstance(log, str) or log == app.gr.skip()
     offered = app.latest_recording()
     assert offered.visible and saved.name in str(offered.value)
 
@@ -82,9 +93,9 @@ def test_a_run_saves_a_valid_recording_and_offers_it_by_name(runs: Path) -> None
 def test_a_stopped_run_says_so_and_offers_nothing(runs: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(QuickStreamer, "hold", True)
     run = start(runs)
-    assert next(run)[1].startswith("Running")
+    assert status(next(run)).endswith(" s)")  # the newest progress line and the seconds so far
     assert list(app.stop_status())[-1] == "Stopped."
-    assert [status for _, status in run][-1].startswith("Stopped after")
+    assert [status(step) for step in run][-1].startswith("Stopped after")
     assert app.latest_recording().visible is False
 
 
@@ -101,9 +112,9 @@ def test_the_gpu_lock_is_held_around_a_run_only(runs: Path, monkeypatch: pytest.
     release_other: Callable[[], None] = _hold_gpu_lock(lock)
     monkeypatch.setattr(app.SLOT, "gpu_lock", lock)
     run = start(runs)
-    assert next(run)[1].startswith("Waiting for the GPU")
+    assert status(next(run)).startswith("Waiting for the GPU")
     release_other()
-    assert [status for _, status in run][-1].startswith("Done")
+    assert [status(step) for step in run][-1].startswith("Done")
     mine: int = os.open(lock, os.O_RDWR)
     fcntl.flock(mine, fcntl.LOCK_EX | fcntl.LOCK_NB)  # free again once the run has ended
     os.close(mine)
@@ -114,7 +125,7 @@ def test_a_page_closed_while_waiting_for_the_gpu_leaves_nothing_behind(runs: Pat
     release_other: Callable[[], None] = _hold_gpu_lock(lock)
     monkeypatch.setattr(app.SLOT, "gpu_lock", lock)
     run = start(runs)
-    assert next(run)[1].startswith("Waiting for the GPU")
+    assert status(next(run)).startswith("Waiting for the GPU")
     run.close()  # the page goes away
     release_other()
     assert not list(runs.glob("*.rrd"))  # no recording was opened

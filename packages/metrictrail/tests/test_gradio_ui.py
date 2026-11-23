@@ -10,11 +10,11 @@ pytest.importorskip("gradio_rerun", reason="the metrictrail envs carry gradio-re
 
 import gradio as gr
 from gradio_rerun import Rerun
+from simplecv.app_theme import APP_CSS
 
 from metrictrail.blueprint import SceneView, calibration_blueprint, run_blueprint
 from metrictrail.examples import example_videos
 from metrictrail.gradio_ui.metrictrail_ui import RunLog, RunYield, app_overrides, build_app, metrictrail_streaming_fn, summary_table
-from metrictrail.gradio_ui.theme import APP_CSS
 from metrictrail.outputs import RunMetrics
 
 
@@ -187,8 +187,9 @@ def test_the_budget_dropdown_offers_exactly_vipes_budgets() -> None:
 
 def test_launch_serves_with_the_app_look_and_a_host_s_interface_and_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A host (the ZeroGPU Space) launches through launch(), so it gets the theme without copying the launch settings."""
+    from simplecv.app_theme import APP_CSS, DARK_HEAD
+
     from metrictrail.gradio_ui.metrictrail_ui import launch
-    from metrictrail.gradio_ui.theme import APP_CSS, DARK_HEAD
 
     calls: dict[str, object] = {}
     demo: gr.Blocks = build_app(tmp_path)

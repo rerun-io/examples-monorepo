@@ -1,13 +1,17 @@
-"""Look of the MetricTrail app: Rerun's brand colours and wordmark (https://rerun.io/media), the viewer filling the page.
+"""The look of our Gradio + Rerun apps (MetricTrail, 4DAnyone): Rerun's brand colours and wordmark (https://rerun.io/media),
+forced dark, the left column of tabs, Run and status beside the viewer, which fills the rest of the window.
 
-The same look as the EgoHand app (``posekit.hands_app_ui.theme``); the two move to one shared module once both stacks merge.
+Strings only (no gradio import): an app passes :data:`APP_CSS` and :data:`DARK_HEAD` to ``Blocks.launch`` and puts
+:func:`app_title` at the top of its description. The layout rules key on element ids every app uses: ``app-title``,
+``app-description``, ``main-row``, ``left-column``, ``source-video``, ``examples``, ``run-row``, ``run-status``,
+``run-summary``, ``run-log`` and ``viewer``. posekit's EgoHand app still carries its own copy (``posekit.hands_app_ui.theme``).
 """
 
 import base64
 from pathlib import Path
 
 RERUN_LOGOS: dict[str, str] = {
-    mode: "data:image/webp;base64," + base64.b64encode((Path(__file__).parent / f"rerun_wordmark_animated_{mode}.webp").read_bytes()).decode()
+    mode: "data:image/webp;base64," + base64.b64encode((Path(__file__).parent / "data" / f"rerun_wordmark_animated_{mode}.webp").read_bytes()).decode()
     for mode in ("light", "dark")
 }
 """Rerun's animated wordmark from the media kit (https://rerun.io/media) on a transparent ground, plays once: black letters for
@@ -24,6 +28,16 @@ DARK_HEAD: str = """<script>
 """Forces Gradio's dark theme without a reload (``posekit.track_ui_theme.FORCE_DARK_HEAD`` navigates, so the page loads twice).
 Gradio 6 inserts ``head`` after it has read its ``__theme`` URL switch, so the script also sets what that switch sets, the
 ``dark`` class on the body; the URL keeps the switch for what reads it later (the Settings panel)."""
+
+
+def app_title(name: str) -> str:
+    """The header's title line: Rerun's wordmark (a link to rerun.io), a faint ×, then ``name`` (Markdown-safe HTML)."""
+    return (
+        '<h1 id="app-title"><a href="https://rerun.io" target="_blank" rel="noopener" title="rerun.io">'
+        f'<img class="logo-light" src="{RERUN_LOGOS["light"]}" alt="Rerun"><img class="logo-dark" src="{RERUN_LOGOS["dark"]}" alt="Rerun">'
+        f'</a> <span class="title-x">×</span> {name}</h1>'
+    )
+
 
 APP_CSS: str = """@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 /* Rerun's brand base colours (https://rerun.io/media): #171616 ground, #F1EFEB type, #186ADD accent, #D72F21 red;

@@ -3,6 +3,10 @@
 The run is :class:`fdanyone_rerun.stream.RunStreamer`, the same core and defaults as ``fdanyone-run --train``; this
 module only adds the widgets, a worker thread, the byte pump into the viewer and the app's training preset
 (:data:`APP_PERSON`: a short run and no MoGe-2 prior).
+
+The page has MetricTrail's look and layout (:mod:`simplecv.app_theme`): Input and Outputs tabs, Run, Stop and the status
+on the left, the viewer filling the rest of the window. When the browser has no WebGPU, a notice above the viewer says so
+(the gsplat renderer needs it).
 """
 
 import dataclasses
@@ -15,15 +19,17 @@ import uuid
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeAlias
 
 import gradio as gr
 import rerun as rr
 from gradio_rerun import Rerun
+from simplecv.app_theme import APP_CSS, DARK_HEAD, app_title
 
 from fdanyone.errors import RunCancelled
 from fdanyone_rerun.assets import EXAMPLE_VIDEO, PACKAGE_ROOT
 from fdanyone_rerun.core import RunConfig, ViewLayout
-from fdanyone_rerun.person4d import PersonConfig
+from fdanyone_rerun.person4d import PersonConfig, PersonSummary
 from fdanyone_rerun.stream import RunStreamer
 
 APPLICATION_ID: str = "fdanyone-rerun"
@@ -32,22 +38,21 @@ RUNS_DIR: Path = PACKAGE_ROOT / "data" / "app-runs"
 4D person (Animated SOG) included."""
 PUMP_SECONDS: float = 0.5
 """How often new recording bytes go to the viewer."""
+RUN_LOG_LINES: int = 100
+"""Lines the run log keeps."""
 APP_PERSON: PersonConfig = dataclasses.replace(PersonConfig().with_steps(5_000), prior=False)
 """The app's preset: 5,000 steps (about 2 min on the 5090) and no MoGe-2 prior (the demo runs no extra estimator model)."""
-READY: str = "Pick the example or upload a clip of one person (at least 121 frames), then press Run."
+VIEW_CHOICES: tuple[int, ...] = (6, 12, 18, 24)
+"""Views on the ring (multiples of six, upstream's group size)."""
+READY: str = "Upload a clip of one person (at least 121 frames), or pick an example, then press Run."
 DESCRIPTION: str = (
-    "# 4DAnyone × Rerun\n"
+    app_title("4DAnyone") + "\n\n"
     "One casual video of a person becomes synchronized videos from new cameras around them "
-    "([4DAnyone](https://github.com/ant-research/4DAnyone), 4DAnyone-Turbo, four denoising steps). The viewer follows the run: "
-    "motion recovery, the recovered body, a preview of every view at each denoising step, then the camera rig and the views. "
-    "Then a 4D Gaussian model of the person trains on the views ([Open4DGS](https://github.com/ASU-NEM-Labs/open4dgs-trigs) TRiGS) "
-    "and plays in 3D as Animated SOG, inside the recording."
+    "([4DAnyone](https://github.com/ant-research/4DAnyone)-Turbo), then a 4D Gaussian model of the person trains on those views "
+    "([Open4DGS](https://github.com/ASU-NEM-Labs/open4dgs-trigs) TRiGS) and plays in 3D. **Pick an example or upload a clip, then "
+    "press Run:** motion recovery, the views as they denoise, the camera rig, then the person training (about 6 min on an RTX 5090)."
 )
-# The page fits the window (posekit #594): Blocks(fill_height) + Row(scale=1) give the main row the height the header leaves,
-# the viewer takes its column's height, and the footer stays hidden (Gradio adds its height to the size it posts to an iframe).
-# Below 900 px (iPad portrait, ~744 px) the two columns stack: the controls shrink to their content above the viewer, which
-# takes the rest of the window. Windows under 800 px tall get a smaller clip preview. Below 600 px (a phone) the page may scroll, and the viewer keeps 70% of the window height.
-# Touch targets are at least 44 px.
+"""Markdown above the app: Rerun's wordmark, then two short lines."""
 NO_WEBGPU: str = (
     "<b>This browser has no WebGPU</b>, so the viewer cannot run the gsplat renderer: the 4D person is drawn with "
     "Rerun's basic splats and looks blurry. On Linux Chrome: enable <code>chrome://flags/#enable-vulkan</code> and "
@@ -57,34 +62,22 @@ NO_WEBGPU: str = (
 """Shown above the viewer when the page finds no WebGPU adapter (the gsplat renderer needs WebGPU's compute limits)."""
 WEBGPU_CHECK_JS: str = (
     "async () => { const adapter = navigator.gpu ? await navigator.gpu.requestAdapter().catch(() => null) : null;"
-    " if (adapter) return; const notice = document.getElementById('webgpu-notice'); if (!notice) return;"
-    f" notice.innerHTML = {json.dumps(NO_WEBGPU)}; notice.style.display = 'block'; }}"
+    " if (adapter) return; const block = document.getElementById('webgpu-notice-block');"
+    " const notice = document.getElementById('webgpu-notice'); if (!block || !notice) return;"
+    f" notice.innerHTML = {json.dumps(NO_WEBGPU)}; block.style.display = 'block'; }}"
 )
-"""Runs once when the page loads: fills ``#webgpu-notice`` when ``navigator.gpu`` gives no adapter."""
-APP_CSS: str = """
-footer { display: none !important; }
-#webgpu-notice { display: none; padding: 0.6rem 0.8rem; margin-bottom: 0.4rem; border: 1px solid #b45309; border-radius: 6px;
+"""Runs once when the page loads: fills ``#webgpu-notice`` and shows its block when ``navigator.gpu`` gives no adapter."""
+NOTICE_CSS: str = """
+#webgpu-notice-block { display: none; }
+#webgpu-notice { padding: 0.6rem 0.8rem; margin-bottom: 0.4rem; border: 1px solid #b45309; border-radius: var(--radius-lg);
     background: #2a1a05; color: #fde68a; font-size: 0.9rem; }
-#main-row { min-height: 30rem; }
-#viewer-column { display: flex; flex-direction: column; min-height: 0; }
-#viewer { flex: 1 1 0; min-height: 0; }
-#left-column { height: 100%; max-height: 100%; overflow-y: auto; flex-wrap: nowrap; }
-#left-column button { min-height: 44px; min-width: 44px; }
-#left-column .gr-accordion { overflow-x: hidden !important; }
-#left-column .label-wrap { min-width: 0; box-sizing: border-box; }
-@media (max-width: 900px) {
-    #main-row { flex-direction: column; flex-wrap: nowrap; }
-    #left-column { height: auto; max-height: none; flex: 0 0 auto !important; overflow: visible; }
-    #source-video, #source-video video { max-height: 180px; }
-    #viewer-column { flex: 1 1 0; min-height: 0; }
-}
-@media (max-height: 800px) {
-    #source-video, #source-video video { max-height: 200px; }
-}
-@media (max-width: 600px) {
-    #viewer-column, #viewer { min-height: 70vh; }
-}
 """
+"""The WebGPU notice, on top of :data:`simplecv.app_theme.APP_CSS`; its block takes no room until the check shows it."""
+
+Update: TypeAlias = str | dict[str, object]
+"""A Markdown or Textbox value, or ``gr.skip()`` (no change)."""
+RunYield: TypeAlias = tuple[bytes | None, Update, Update, Update]
+"""One step of a run: Rerun bytes, the status box, the Outputs summary and the run log."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +114,23 @@ class _RunSlot:
 SLOT: _RunSlot = _RunSlot()
 
 
+def example_videos() -> list[Path]:
+    """The example clips ``fdanyone-download`` fetches, the README's first."""
+    return sorted(EXAMPLE_VIDEO.parent.glob("*.mp4"), key=lambda path: path != EXAMPLE_VIDEO)
+
+
+def summary_table(views: int, wall_s: float, person: PersonSummary | None, saved: Path) -> str:
+    """The Outputs tab's table of a finished run."""
+    rows: list[tuple[str, str]] = [("Views", f"{views}"), ("Elapsed", f"{wall_s:.0f} s")]
+    if person is not None:
+        rows += [
+            ("4D person", f"{person.rows:,} Gaussians, {person.steps:,} steps at {person.it_per_s:.0f} it/s"),
+            ("Animated SOG", f"{person.asog_bytes / 1e6:.1f} MB in the recording"),
+        ]
+    rows.append(("Recording", f"`{saved.name}`"))
+    return "| Run | |\n|---|---|\n" + "".join(f"| {name} | {value} |\n" for name, value in rows)
+
+
 def _release(gpu_lock: int | None) -> None:
     """Free the GPU flock (when held) and the run slot."""
     if gpu_lock is not None:
@@ -128,12 +138,12 @@ def _release(gpu_lock: int | None) -> None:
     SLOT.lock.release()
 
 
-def run_app(
-    video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float
-) -> Generator[tuple[bytes | None, str], None, None]:
-    """Run 4DAnyone on ``video`` (then train its 4D person) in a worker thread and pump the recording into the viewer until it ends."""
+def run_app(video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float) -> Generator[RunYield, None, None]:
+    """Run 4DAnyone on ``video`` (then train its 4D person) in a worker thread and pump the recording into the viewer
+    until it ends; the status line shows the newest progress line, the run log all of them (newest first)."""
+    skip: dict[str, object] = gr.skip()
     if video is None:
-        yield None, "Choose a video first."
+        yield None, "Choose a video first.", skip, skip
         return
     run_id: str = uuid.uuid4().hex[:12]
     config: RunConfig = RunConfig(
@@ -141,7 +151,7 @@ def run_app(
     )
     person: PersonConfig | None = APP_PERSON.with_steps(int(steps)) if train else None
     while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
-        yield b"", "Waiting for the previous run to stop…"
+        yield b"", "Waiting for the previous run to stop…", skip, skip
     # The slot is ours: whatever fails before the worker owns it releases it (and the GPU flock) here.
     gpu_lock: int | None = None
     try:
@@ -152,7 +162,7 @@ def run_app(
                     fcntl.flock(gpu_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    yield b"", "Waiting for the GPU (another job holds it)…"
+                    yield b"", "Waiting for the GPU (another job holds it)…", skip, skip
                     time.sleep(PUMP_SECONDS)
         SLOT.recording = None
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -188,20 +198,39 @@ def run_app(
         raise
     SLOT.worker = worker
     SLOT.stop = streamer.stop
+    log: list[str] = []
+
+    lines_shown: list[str] = []
+
+    def log_text() -> Update:
+        """The run log textbox after this poll: new progress lines stamped with the seconds since Run, newest first."""
+        new: list[str] = streamer.messages[len(log) :]
+        if not new:
+            return skip
+        log.extend(new)
+        stamp: float = time.perf_counter() - started
+        lines_shown[:0] = [f"{stamp:6.1f} s  {line}" for line in reversed(new)]
+        del lines_shown[RUN_LOG_LINES:]
+        return "\n".join(lines_shown)
+
     try:
         while worker.is_alive():
             worker.join(PUMP_SECONDS)
-            yield stream.read() or b"", f"Running… {time.perf_counter() - started:.0f} s"
+            latest: str = streamer.messages[-1] if streamer.messages else "starting"
+            yield stream.read() or b"", f"{latest} ({time.perf_counter() - started:.0f} s)", skip, log_text()
         if errors:
             raise errors[0]
+        wall_s: float = time.perf_counter() - started
         if streamer.stop.is_set():
-            yield stream.read() or b"", f"Stopped after {time.perf_counter() - started:.0f} s"
+            yield stream.read() or b"", f"Stopped after {wall_s:.0f} s", "Stopped.", log_text()
             return
-        person_line: str = " and the 4D person" if person is not None else ""
         SLOT.recording = saved
+        person_line: str = " and the 4D person" if person is not None else ""
         yield (
             stream.read() or b"",
-            f"Done in {time.perf_counter() - started:.0f} s: {config.layout.num_views} views{person_line}; recording `{saved.name}`",
+            f"Done in {wall_s:.0f} s: {config.layout.num_views} views{person_line}.",
+            summary_table(config.layout.num_views, wall_s, streamer.person_summary, saved),
+            log_text(),
         )
     finally:
         # A closed page ends this generator (a Stop sets the stop event in stop_status): the worker stops its subprocess
@@ -227,45 +256,65 @@ def stop_status() -> Iterator[str]:
     yield "Stopped."
 
 
-def build(examples: list[str] | None = None) -> gr.Blocks:
-    """The input, settings, Run and Stop on the left; the streaming Rerun viewer on the right."""
-    with gr.Blocks(title="4DAnyone × Rerun", fill_height=True) as demo:
+def build(examples: list[Path] | None = None) -> gr.Blocks:
+    """MetricTrail's layout: Input and Outputs tabs, Run, Stop and the status on the left; the WebGPU notice and the
+    streaming Rerun viewer on the right. Serve it with :func:`launch` (its look comes with the launch).
+
+    Args:
+        examples: The example clips; None: :func:`example_videos`.
+    """
+    clips: list[Path] = examples if examples is not None else example_videos()
+    # fill_width: Gradio caps the page at 1,536 px otherwise; fill_height with the main row's scale=1: the row takes the
+    # height the header leaves (simplecv.app_theme), so the page fits the window.
+    with gr.Blocks(title="Rerun × 4DAnyone", fill_width=True, fill_height=True) as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
         with gr.Row(elem_id="main-row", equal_height=False, scale=1):
-            with gr.Column(scale=1, min_width=340, elem_id="left-column"):
-                # A fixed height: a portrait 4K upload would otherwise stretch the column past the window.
-                video = gr.Video(label="Source clip", sources=["upload"], format=None, height=260, elem_id="source-video")
-                gr.Examples(
-                    examples=[[path] for path in (examples if examples is not None else [str(EXAMPLE_VIDEO)])], inputs=[video], cache_examples=False
-                )
-                with gr.Accordion("Settings", open=False):
-                    views = gr.Slider(
-                        label="Views (one ring, 15° above the subject)", minimum=6, maximum=24, step=6, value=ViewLayout().views_per_layer
-                    )
-                    seed = gr.Number(label="Seed", value=RunConfig().seed, precision=0)
-                    train = gr.Checkbox(label="Then train the 4D person on the views", value=True)
-                    steps = gr.Number(
-                        label="Training steps (5,000 take about 2 min on an RTX 5090)", value=APP_PERSON.train.steps, precision=0, minimum=100
-                    )
-                with gr.Row():
-                    run_button = gr.Button("Run", variant="primary")
-                    stop = gr.Button("Stop", variant="stop")
-                status = gr.Markdown(READY, elem_id="run-status")
-                recording = gr.File(label="Recording (.rrd, 4D person included)", interactive=False, visible=False, elem_id="recording")
-            with gr.Column(scale=3, elem_id="viewer-column"):
-                gr.HTML('<div id="webgpu-notice"></div>', padding=False)
-                viewer = Rerun(
+            with gr.Column(scale=1, min_width=360, elem_id="left-column"):
+                with gr.Tabs(selected="input") as tabs:
+                    with gr.Tab("Input", id="input"):
+                        # format=None: Gradio hands the upload over as it is.
+                        video: gr.Video = gr.Video(
+                            value=str(clips[0]) if clips else None, label="Source clip", sources=["upload"], format=None, elem_id="source-video"
+                        )
+                        with gr.Accordion("Advanced settings", open=False):
+                            views: gr.Dropdown = gr.Dropdown(
+                                label="Views (one ring, 15° above the person)", choices=list(VIEW_CHOICES), value=ViewLayout().views_per_layer
+                            )
+                            seed: gr.Number = gr.Number(label="Seed", value=RunConfig().seed, precision=0)
+                            train: gr.Checkbox = gr.Checkbox(label="Train the 4D person after the views", value=True)
+                            steps: gr.Number = gr.Number(
+                                label="Training steps (5,000 take about 90 s on an RTX 5090)", value=APP_PERSON.train.steps, precision=0, minimum=100
+                            )
+                        gr.Examples(
+                            examples=[[str(path)] for path in clips], inputs=[video], examples_per_page=4, cache_examples=False, elem_id="examples"
+                        )
+                    with gr.Tab("Outputs", id="outputs"):
+                        run_summary: gr.Markdown = gr.Markdown("No run yet.", elem_id="run-summary")
+                        recording: gr.File = gr.File(
+                            label="Recording (.rrd, 4D person included)", interactive=False, visible=False, elem_id="recording"
+                        )
+                        run_log: gr.Textbox = gr.Textbox(
+                            label="Run log (newest first)", lines=8, max_lines=8, autoscroll=False, interactive=False, elem_id="run-log"
+                        )
+                with gr.Row(elem_id="run-row"):
+                    run_button: gr.Button = gr.Button("Run", variant="primary")
+                    stop_button: gr.Button = gr.Button("Stop", variant="stop")
+                status: gr.Markdown = gr.Markdown(READY, elem_id="run-status")
+            with gr.Column(scale=3):
+                gr.HTML('<div id="webgpu-notice"></div>', padding=False, elem_id="webgpu-notice-block")
+                viewer: Rerun = Rerun(
                     streaming=True, panel_states={"time": "collapsed", "blueprint": "hidden", "selection": "hidden"}, height="100%", elem_id="viewer"
                 )
-
-        run_event = run_button.click(run_app, inputs=[video, views, seed, train, steps], outputs=[viewer, status])
+        run_event = run_button.click(lambda: gr.Tabs(selected="outputs"), outputs=[tabs]).then(
+            run_app, inputs=[video, views, seed, train, steps], outputs=[viewer, status, run_summary, run_log]
+        )
         run_event.success(latest_recording, outputs=[recording])
-        stop.click(stop_status, outputs=[status], cancels=[run_event])
+        stop_button.click(stop_status, outputs=[status], cancels=[run_event])
     return demo
 
 
 def launch(demo: gr.Blocks, config: Config) -> None:
-    """Serve ``demo``, one run at a time (the GPU holds one pipeline)."""
+    """Serve ``demo`` with the shared look (forced dark), one run at a time (the GPU holds one pipeline)."""
     SLOT.gpu_lock = config.gpu_lock
     demo.queue(max_size=1, default_concurrency_limit=1)
     demo.launch(
@@ -273,7 +322,8 @@ def launch(demo: gr.Blocks, config: Config) -> None:
         server_port=config.server_port,
         ssr_mode=False,
         allowed_paths=[str(EXAMPLE_VIDEO.parent), str(RUNS_DIR)],
-        css=APP_CSS,
+        css=APP_CSS + NOTICE_CSS,
+        head=DARK_HEAD,
         js=WEBGPU_CHECK_JS,
         show_error=True,
     )

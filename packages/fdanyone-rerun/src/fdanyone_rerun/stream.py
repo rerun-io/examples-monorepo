@@ -21,7 +21,7 @@ from fdanyone.model.vae import load_tiny_decoder
 from fdanyone_rerun.assets import model_dir
 from fdanyone_rerun.core import RunConfig, run_views
 from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
-from fdanyone_rerun.person4d import PersonConfig, train_person
+from fdanyone_rerun.person4d import PersonConfig, PersonSummary, train_person
 from fdanyone_rerun.previews import decode_previews
 from fdanyone_rerun.rerun_log import (
     DIFFUSION_TIMELINE,
@@ -56,6 +56,10 @@ class RunStreamer:
         """Decode each denoising step's x_0 estimate with TAEW2.2 and log it."""
         self.person: PersonConfig | None = person
         """Train the 4D person after the views (None: views only)."""
+        self.messages: list[str] = []
+        """Every progress line so far (the app's status line and run log read it)."""
+        self.person_summary: PersonSummary | None = None
+        """The 4D person's training, once it has run."""
         self.stop: threading.Event = threading.Event()
         """Set from another thread to cancel: a worker subprocess is stopped at once, the rest at the next stage or step."""
         self.output_dir: Path = config.output_dir.expanduser().resolve()
@@ -67,6 +71,7 @@ class RunStreamer:
         ``train_step`` and at its denoising step: it shows in every phase's layout.
         """
         print(f"[fdanyone-rerun] {text}")
+        self.messages.append(text)
         self.recording.set_time(TIMELINE, duration=0.0)
         self.recording.set_time(FRAME_TIMELINE, sequence=0)
         self.recording.set_time(DIFFUSION_TIMELINE, sequence=step)
@@ -121,5 +126,5 @@ class RunStreamer:
             f"{generation.peak_vram_reserved_bytes / 1e9:.2f} GB reserved)"
         )
         if self.person is not None:
-            train_person(self.output_dir, self.person, self.recording, report=self.message, cancel=self.stop)
+            self.person_summary = train_person(self.output_dir, self.person, self.recording, report=self.message, cancel=self.stop)
         return metadata
