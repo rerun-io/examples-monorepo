@@ -161,8 +161,10 @@ fn draw_splat_entity(
         report,
         ..
     } = entity;
-    let components =
-        GaussianSplats3D::all_component_identifiers().chain([render_mode_descriptor().component]);
+    // The splat rows and every payload component in one query.
+    let components = GaussianSplats3D::all_component_identifiers()
+        .chain([render_mode_descriptor().component])
+        .chain(crate::payload::components());
     let query_results =
         data.query_components_with_history(ctx, query, components, instruction, None);
     let results = VisualizerInstructionQueryResults::new(instruction, &query_results, output);
@@ -205,38 +207,18 @@ fn draw_splat_entity(
             &query_ctx,
             GaussianSplats3D::descriptor_spherical_harmonics_degree().component,
         );
-    // `.asog` payload (static, untyped): drawn instead of the preview rows when present.
-    let asog_ids = crate::asog::components();
-    let asog_query =
-        data.query_components_with_history(ctx, query, asog_ids.iter().copied(), instruction, None);
-    let asog_results = VisualizerInstructionQueryResults::new(instruction, &asog_query, output);
-    let [a_bytes, a_origin, a_threshold] = asog_ids.map(|id| asog_results.iter_optional(id));
-    let asog = last_slice::<u8>(&a_bytes).map(|bytes| {
-        let threshold = last_scalar::<f32>(&a_threshold, gsplat_core::trigs::ASOG_ACTIVE_THRESHOLD);
-        let origin = last_scalar::<f64>(&a_origin, 0.0);
-        (
-            bytes,
-            threshold,
-            origin,
-            hash64((
-                self::attribute_generation(instruction, &asog_query, asog_ids.into_iter()),
-                threshold.to_bits(),
-            ))
-            .hash64(),
-        )
-    });
-    let time_type = ctx.recording().timeline_type(&query.timeline);
-    // SOG payload fields (static, untyped Utf8 + u8): drawn instead of the preview rows when present.
-    let sog_ids = crate::sog::components();
-    let sog_query =
-        data.query_components_with_history(ctx, query, sog_ids.iter().copied(), instruction, None);
-    let sog_generation =
-        self::attribute_generation(instruction, &sog_query, sog_ids.iter().copied());
-    let sog_results = VisualizerInstructionQueryResults::new(instruction, &sog_query, output);
-    let sog_iters = sog_ids.map(|id| sog_results.iter_optional(id));
-    // meta.json is parsed once here, not once per row.
+    let payload_iters = crate::payload::components().map(|id| results.iter_optional(id));
     let payload =
-        sog_webp(&sog_iters).map(|(meta, webp)| (gsplat_core::sog::Meta::parse(&meta), webp));
+        match crate::payload::resolve(ctx, query, instruction, &query_results, &payload_iters) {
+            Some(Err(error)) => {
+                report(
+                    ViewerReportSeverity::Warning,
+                    format!("{error}; drawing the GaussianSplats3D preview rows"),
+                );
+                None
+            }
+            resolved => resolved.and_then(Result::ok),
+        };
     let mut retry = false;
     for (row, centers, scales, rotations, colors, sh, degree) in re_query::range_zip_1x5(
         centers.slice::<[f32; 3]>(),
@@ -265,119 +247,56 @@ fn draw_splat_entity(
                 .and_then(|d| d.first().copied())
                 .unwrap_or(*fallback_degree.0),
         };
-        if let Some((meta, webp)) = &payload {
-            // The payload replaces the preview rows; it decodes once per payload (row ids), never per time.
-            let meta = match meta {
-                Ok(meta) => Some(meta),
-                Err(error) => {
-                    report(
-                        ViewerReportSeverity::Warning,
-                        format!("{error}; drawing the GaussianSplats3D preview rows"),
-                    );
-                    None
-                }
-            };
-            if let Some(meta) = meta {
-                let sog = crate::sog::Payload {
+        // A payload replaces the rows, which stay its preview (bounds and the native fallback).
+        let (sog, asog);
+        let (signature, primitives, time) = match &payload {
+            Some(crate::payload::Payload::Sog {
+                meta,
+                webp,
+                generation,
+            }) => {
+                sog = crate::sog::Payload {
                     meta,
                     webp: *webp,
                     preview: &native,
                 };
-                retry |= draw_instances(
-                    entity,
-                    draw,
-                    row,
-                    hash64((signature, sog_generation)),
-                    Primitives::Sog(&sog),
-                    render_mode,
-                    0.0,
-                )?;
-                continue;
+                (hash64((signature, *generation)), Primitives::Sog(&sog), 0.0)
             }
-        }
-        if let Some((bytes, threshold, origin, generation)) = asog {
-            let info = ctx
-                .viewer_ctx
-                .store_context
-                .memoizer::<crate::asog::AsogCache, _>(|cache| cache.info(generation, bytes));
-            match info {
-                Ok(info) => {
-                    // Decoded once per payload; a time change is one motion dispatch in the view (time not in the key).
-                    let t = crate::asog::clip_seconds(time_type, query.latest_at, info.fps, origin);
-                    let payload = crate::asog::Payload {
-                        bytes,
-                        active_threshold: threshold,
-                        info,
-                        preview: &native,
-                    };
-                    retry |= draw_instances(
-                        entity,
-                        draw,
-                        row,
-                        hash64((signature, generation)),
-                        Primitives::Asog(&payload),
-                        render_mode,
-                        t,
-                    )?;
-                    continue;
-                }
-                Err(error) => report(
-                    ViewerReportSeverity::Warning,
-                    format!(
-                        "AnimatedSogSplats3D: {error}; drawing the GaussianSplats3D preview rows"
-                    ),
-                ),
+            Some(crate::payload::Payload::Asog {
+                bytes,
+                active_threshold,
+                info,
+                time,
+                generation,
+            }) => {
+                asog = crate::asog::Payload {
+                    bytes,
+                    active_threshold: *active_threshold,
+                    info: *info,
+                    preview: &native,
+                };
+                (
+                    hash64((signature, *generation)),
+                    Primitives::Asog(&asog),
+                    *time,
+                )
             }
-        }
-        retry |= draw_instances(
-            entity,
-            draw,
-            row,
-            signature,
-            Primitives::Splats(&native),
-            render_mode,
-            0.0,
-        )?;
+            None => (signature, Primitives::Splats(&native), 0.0),
+        };
+        retry |= draw_instances(entity, draw, row, signature, primitives, render_mode, time)?;
     }
     Ok(retry)
 }
 
-/// meta.json and the stored WebP planes of `SogSplats3D`, when meta and the five required planes are present.
-fn sog_webp<'a>(
-    iters: &'a [re_view::HybridResultsChunkIter<'a>; 8],
-) -> Option<(String, gsplat_core::sog::SogWebp<'a>)> {
-    let [
-        meta,
-        means_l,
-        means_u,
-        quats,
-        scales,
-        sh0,
-        centroids,
-        labels,
-    ] = iters;
-    let meta = meta.slice::<String>().last()?.1.first()?.to_string();
-    let webp = gsplat_core::sog::SogWebp {
-        means_l: last_slice::<u8>(means_l)?,
-        means_u: last_slice::<u8>(means_u)?,
-        quats: last_slice::<u8>(quats)?,
-        scales: last_slice::<u8>(scales)?,
-        sh0: last_slice::<u8>(sh0)?,
-        sh_centroids: last_slice::<u8>(centroids),
-        sh_labels: last_slice::<u8>(labels),
-    };
-    Some((meta, webp))
-}
-
 /// A cache key from `value` (the std hasher, as `attribute_generation`).
-fn hash64(value: impl std::hash::Hash) -> re_log_types::hash::Hash64 {
+pub(crate) fn hash64(value: impl std::hash::Hash) -> re_log_types::hash::Hash64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     re_log_types::hash::Hash64::from_u64(hasher.finish())
 }
 
 /// The first value of the last row of a (static, one-value) optional component, or `default`.
-fn last_scalar<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>, default: T) -> T
+pub(crate) fn last_scalar<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>, default: T) -> T
 where
     T: 'a + Copy + re_viewer::external::re_chunk::ChunkComponentSlicer<Item<'a> = &'a [T]>,
 {
@@ -387,7 +306,7 @@ where
 }
 
 /// The values of the last row of a (static, one-row) optional component.
-fn last_slice<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>) -> Option<&'a [T]>
+pub(crate) fn last_slice<'a, T>(iter: &'a re_view::HybridResultsChunkIter<'a>) -> Option<&'a [T]>
 where
     T: 'a + re_viewer::external::re_chunk::ChunkComponentSlicer<Item<'a> = &'a [T]>,
 {
