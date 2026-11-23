@@ -270,21 +270,23 @@ def _roi_clip(pad: float | None):
 
 
 def test_prior_layer_roi_check_accepts_its_own_grid_and_refuses_another() -> None:
-    from open4dgs.prior_layer import check_roi, roi_properties
+    from open4dgs.catalog_clip import MultiViewClip
+    from open4dgs.prior_layer import check_roi, roi_signature
+    from open4dgs.properties import RoiSignature, encode_roi_cameras, parse_roi_cameras
 
     full, roi, wider = _roi_clip(None), _roi_clip(0.15), _roi_clip(0.3)
     names = ("rig_01/cam_00",)
-    check_roi(full, names, None, "old layer")  # a layer from before ROI cameras holds real cameras
-    check_roi(full, names, roi_properties(full)["roi_cameras"], "full")
-    check_roi(roi, names, roi_properties(roi)["roi_cameras"], "roi")
-    for clip, stored in (
-        (roi, None),
-        (roi, roi_properties(full)["roi_cameras"]),
-        (full, roi_properties(roi)["roi_cameras"]),
-        (wider, roi_properties(roi)["roi_cameras"]),
-    ):
+
+    def stored(clip: MultiViewClip) -> dict[str, RoiSignature | None]:
+        """The grid as the layer property stores it and the reader parses it back."""
+        return parse_roi_cameras(encode_roi_cameras(roi_signature(clip, clip.camera_names)))
+
+    check_roi(full, names, parse_roi_cameras(None), "old layer")  # a layer from before ROI cameras holds real cameras
+    check_roi(full, names, stored(full), "full")
+    check_roi(roi, names, stored(roi), "roi")
+    for clip, layer in ((roi, parse_roi_cameras(None)), (roi, stored(full)), (full, stored(roi)), (wider, stored(roi))):
         with pytest.raises(ValueError, match="grid"):
-            check_roi(clip, names, stored, "mismatch")
+            check_roi(clip, names, layer, "mismatch")
 
 
 def test_schedule_follows_the_run_length_by_default() -> None:
@@ -383,5 +385,5 @@ def test_prior_layer_records_the_reader_that_made_the_clip() -> None:
     clip = _roi_clip(None)
     catalog = layer_properties(clip, "src", 640, 9, reader="catalog", predictor="p")
     selfcap = layer_properties(clip, "src", 640, 9, reader="selfcap", predictor="p")
-    assert catalog["loader"] == "open4dgs.catalog_clip.read_catalog_clip (undistorted)"
-    assert selfcap["loader"] == "open4dgs.selfcap_clip.read_timed_clip"
+    assert catalog.loader == "open4dgs.catalog_clip.read_catalog_clip (undistorted)"
+    assert selfcap.loader == "open4dgs.selfcap_clip.read_timed_clip"

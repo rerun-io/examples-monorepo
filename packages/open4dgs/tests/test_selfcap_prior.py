@@ -67,6 +67,7 @@ def test_selfcap_roi_prior_layer_records_the_grid_the_reader_checks(tmp_path: Pa
 
     from open4dgs.apis import selfcap
     from open4dgs.prior_layer import PRIOR_LAYER, check_roi
+    from open4dgs.properties import parse_roi_cameras, rrd_cells
     from open4dgs.selfcap_clip import TimedClip
 
     clip = _roi_clip(0.15)
@@ -80,12 +81,9 @@ def test_selfcap_roi_prior_layer_records_the_grid_the_reader_checks(tmp_path: Pa
 
     written = sorted((tmp_path / "prior" / selfcap.COMPANION_DATASET).glob(f"*.{PRIOR_LAYER}*.rrd"))
     assert len(written) == 1
-    stored: str | None = None
-    for chunk in RrdReader(written[0]).stream().filter(content=f"/__properties/{PRIOR_LAYER}").to_chunks():
-        batch = chunk.to_record_batch()
-        if "roi_cameras" in batch.schema.names:
-            stored = str(batch.column("roi_cameras").to_pylist()[0][0])
-    assert stored is not None, "the layer records no roi_cameras: read_clip_priors would treat it as real cameras"
+    cells = rrd_cells(RrdReader(written[0]), PRIOR_LAYER)
+    assert "roi_cameras" in cells, "the layer records no roi_cameras: read_clip_priors would treat it as real cameras"
+    stored = parse_roi_cameras(str(cells["roi_cameras"][0]))
     check_roi(clip, (NAME,), stored, "selfcap roi layer")  # --stage init --roi and the trainer read it back
     with pytest.raises(ValueError, match="grid"):
         check_roi(_roi_clip(0.3), (NAME,), stored, "another pad")

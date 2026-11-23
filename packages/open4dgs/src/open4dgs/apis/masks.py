@@ -31,6 +31,7 @@ from open4dgs.masks import (
     register_mask_layer,
     write_mask_layer,
 )
+from open4dgs.properties import MatteLayerProperties
 
 
 @dataclass
@@ -103,15 +104,15 @@ def main(config: Config) -> None:
         cameras,
         frame_indices.astype(np.int64),
         mattes,
-        {
-            "model": MODEL_NAME,
-            "frame_start": int(frame_indices[0]),
-            "num_frames": len(frame_indices),
-            "source_catalog": config.catalog_url,
-            "source_dataset": config.dataset,
-            "source_segment": config.segment_id,
-            "crop": f"smplx box pad {config.pad_fraction} + {config.pad_px} px",
-        },
+        MatteLayerProperties(
+            model=MODEL_NAME,
+            frame_start=int(frame_indices[0]),
+            num_frames=len(frame_indices),
+            source_catalog=config.catalog_url,
+            source_dataset=config.dataset,
+            source_segment=config.segment_id,
+            crop=f"smplx box pad {config.pad_fraction} + {config.pad_px} px",
+        ),
     )
     path.parent.chmod(0o775)
     print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")

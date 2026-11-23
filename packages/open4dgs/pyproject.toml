@@ -36,6 +36,8 @@ ignore_names = [
     "crop_raw_psnr", "crop_raw_ssim", "crop_raw_lpips", "crop_masked_psnr", "crop_masked_ssim", "crop_masked_lpips",
     "fg_psnr", "full_psnr", "full_ssim", "full_lpips", "alpha_iou", "init_layer",
     "has_velocity", "is_static", "dynamic_protect", "dynamic_allowed", "stage_keep",
+    # property record fields written through dataclasses.asdict (open4dgs.properties)
+    "source_catalog", "source_dataset", "source_segment", "init_seconds",
     "add_scalar", "_sequence_t_max", "pytestmark", "trigs", "rr_config", "exc",
     "num_pixels", "camera_loss_hook",
     # BrightnessSplit fields, read through dataclasses.asdict

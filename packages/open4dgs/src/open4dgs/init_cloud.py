@@ -10,7 +10,6 @@ that the trainer reads (``colors``, ``velocities``, ``times``, ``frames`` and th
 scalars and the provenance (dataset, segment, method) are the recording property ``init_cloud``.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +18,8 @@ import pyarrow as pa
 import rerun as rr
 from jaxtyping import Bool, Float32, Int32
 from numpy import ndarray
+
+from open4dgs.properties import InitCloudProperties, any_values, row_cells
 
 INIT_CLOUD_ENTITY: str = "/world/init_cloud"
 """Default entity path of the init cloud in a recording."""
@@ -140,21 +141,19 @@ def log_init_cloud(cloud: InitCloud, recording: rr.RecordingStream, entity: str 
             rr.Points3D(cloud.positions[rows], colors=(np.clip(cloud.colors[rows], 0.0, 1.0) * 255.0).round().astype(np.uint8)),
             rr.DynamicArchetype(_ARCHETYPE, components=components),
         )
-    recording.send_property(
-        _PROPERTY,
-        rr.AnyValues(
-            entity=entity,
-            frame_start=cloud.frame_start,
-            frame_end=cloud.frame_end,
-            keyframe_step=cloud.keyframe_step,
-            fps=cloud.fps,
-            source_frame_start=cloud.source_frame_start,
-            dataset=cloud.dataset,
-            segment_id=cloud.segment_id,
-            method=cloud.method,
-            num_rows=cloud.num_rows,
-        ),
+    properties: InitCloudProperties = InitCloudProperties(
+        entity=entity,
+        frame_start=cloud.frame_start,
+        frame_end=cloud.frame_end,
+        keyframe_step=cloud.keyframe_step,
+        fps=cloud.fps,
+        source_frame_start=cloud.source_frame_start,
+        dataset=cloud.dataset,
+        segment_id=cloud.segment_id,
+        method=cloud.method,
+        num_rows=cloud.num_rows,
     )
+    recording.send_property(_PROPERTY, any_values(properties.to_properties()))
 
 
 def _concat(table_column: list[list[object] | None], dtype: type, width: int | None) -> ndarray:
@@ -168,16 +167,12 @@ def read_init_cloud(rrd_path: Path, entity: str = INIT_CLOUD_ENTITY) -> InitClou
     """Read the init cloud that ``log_init_cloud`` wrote to ``rrd_path`` (the arrays come back bit-exact)."""
     with rr.server.Server(datasets={"init": [str(rrd_path)]}) as server:
         dataset = server.client().get_dataset("init")
-        segments: Mapping[str, list[object]] = dataset.segment_table().to_arrow_table().to_pydict()
+        segment: dict[str, object] = dataset.segment_table().to_arrow_table().to_pylist()[0]
         table = dataset.reader(index=FRAME_TIMELINE).to_arrow_table().sort_by(FRAME_TIMELINE)
-    # Property cells come back as one list per segment holding one value: [[value]].
-    prop: dict[str, object] = {
-        name.removeprefix(f"property:{_PROPERTY}:"): np.asarray(cells[0], dtype=object).reshape(-1)[0]
-        for name, cells in segments.items()
-        if name.startswith(f"property:{_PROPERTY}:")
-    }
-    if prop.get("entity") != entity:
-        raise ValueError(f"{rrd_path} holds no init cloud at {entity} (property init_cloud: {prop})")
+    cells: dict[str, list[object]] = row_cells(segment, _PROPERTY)
+    if cells.get("entity") != [entity]:
+        raise ValueError(f"{rrd_path} holds no init cloud at {entity} (property init_cloud: {cells})")
+    prop: InitCloudProperties = InitCloudProperties.from_cells(cells)
 
     def column(component: str, dtype: type, width: int | None = None, archetype: str = _ARCHETYPE) -> ndarray | None:
         name: str = f"{entity}:{archetype}:{component}"
@@ -199,14 +194,14 @@ def read_init_cloud(rrd_path: Path, entity: str = INIT_CLOUD_ENTITY) -> InitClou
         colors=required("colors", np.float32, 3),
         times=required("times", np.float32).reshape(-1, 1),
         frames=required("frames", np.int32),
-        frame_start=int(prop["frame_start"]),  # type: ignore[arg-type]
-        frame_end=int(prop["frame_end"]),  # type: ignore[arg-type]
-        keyframe_step=int(prop["keyframe_step"]),  # type: ignore[arg-type]
-        fps=float(prop["fps"]),  # type: ignore[arg-type]
-        source_frame_start=int(prop["source_frame_start"]),  # type: ignore[arg-type]
-        dataset=str(prop["dataset"]),
-        segment_id=str(prop["segment_id"]),
-        method=str(prop["method"]),
+        frame_start=prop.frame_start,
+        frame_end=prop.frame_end,
+        keyframe_step=prop.keyframe_step,
+        fps=prop.fps,
+        source_frame_start=prop.source_frame_start,
+        dataset=prop.dataset,
+        segment_id=prop.segment_id,
+        method=prop.method,
         durations=durations.reshape(-1, 1) if durations is not None else None,
         **flags,
     )
@@ -235,10 +230,10 @@ def read_layer_init_cloud(catalog_url: str, dataset: str, segment_id: str, layer
     url = urlparse(list(rows[0]["rerun_storage_urls"])[names.index(layer)])  # type: ignore[arg-type]
     if url.scheme != "file":
         raise ValueError(f"{dataset}/{segment_id}: layer {layer!r} is not a local file ({url.geturl()})")
-    holdout = rows[0].get(f"property:{layer}:holdout")
+    holdout: list[object] = row_cells(rows[0], layer).get("holdout", [])
     if not holdout:
         raise ValueError(f"{dataset}/{segment_id}: layer {layer!r} records no held-out cameras (property {layer}:holdout)")
-    return read_init_cloud(Path(unquote(url.path))), tuple(str(name) for name in holdout)  # type: ignore[union-attr]
+    return read_init_cloud(Path(unquote(url.path))), tuple(str(name) for name in holdout)
 
 
 def check_init_matches_run(

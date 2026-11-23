@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-import rerun as rr
 import torch
 from jaxtyping import Float32
 from numpy import ndarray
@@ -29,6 +28,7 @@ from open4dgs.catalog_clip import LOCAL_CATALOG, SPARK_CATALOG, MultiViewClip, r
 from open4dgs.holdout import select_holdout
 from open4dgs.init_cloud import InitCloud, log_init_cloud
 from open4dgs.masks import read_clip_masks
+from open4dgs.properties import InitRomaProperties, any_values
 from open4dgs.roma_init import RomaInitConfig, run_roma_init
 
 LAYER: str = "init_roma"
@@ -222,24 +222,22 @@ def main(config: Config) -> Path:
     rrd_path: Path = config.output_dir / f"{config.segment_id}__roma__f{config.frame_start}-{config.num_frames}.rrd"
     with atomic_recording(rrd_path, application_id=companion_dataset(config), recording_id=config.segment_id, send_properties=False) as recording:
         log_init_cloud(cloud, recording)
-        recording.send_property(
-            "init_roma",
-            rr.AnyValues(
-                holdout=list(holdout),
-                init_cameras=list(init_names),
-                num_holdout=config.num_holdout,
-                holdout_seed=config.holdout_seed,
-                max_side=config.max_side or 0,
-                masks=config.masks,
-                camera_neighbors=config.camera_neighbors,
-                wide_baseline_per_camera=config.wide_baseline_per_camera,
-                roma_v2_setting=config.roma_v2_setting,
-                memfof_max_side=config.memfof_max_side,
-                subkeyframe_min_speed=-1.0 if config.subkeyframe_min_speed is None else config.subkeyframe_min_speed,
-                extra_args=" ".join(config.extra_args),
-                init_seconds=init_s,
-            ),
+        properties: InitRomaProperties = InitRomaProperties(
+            holdout=tuple(holdout),
+            init_cameras=tuple(init_names),
+            num_holdout=config.num_holdout,
+            holdout_seed=config.holdout_seed,
+            max_side=config.max_side or 0,
+            masks=config.masks,
+            camera_neighbors=config.camera_neighbors,
+            wide_baseline_per_camera=config.wide_baseline_per_camera,
+            roma_v2_setting=config.roma_v2_setting,
+            memfof_max_side=config.memfof_max_side,
+            subkeyframe_min_speed=-1.0 if config.subkeyframe_min_speed is None else config.subkeyframe_min_speed,
+            extra_args=" ".join(config.extra_args),
+            init_seconds=init_s,
         )
+        recording.send_property(LAYER, any_values(properties.to_properties()))
     print(f"[init-roma] wrote {rrd_path}", flush=True)
 
     if config.register:

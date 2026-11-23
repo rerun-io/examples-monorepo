@@ -34,8 +34,9 @@ from open4dgs.asog import AsogSettings, decode_asog, encode_asog, tiny_omega_fra
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.evaluate import FrameMetrics, Metrics, mask_box, mean_metrics, psnr
 from open4dgs.masks import read_clip_masks
-from open4dgs.run_log import RUNS_DATASET
-from open4dgs.splat_export import ASOG_CUT_FORMAT, run_properties, write_asog_rrd
+from open4dgs.properties import rrd_cells
+from open4dgs.run_log import RUNS_DATASET, RunProperties
+from open4dgs.splat_export import ASOG_CUT_FORMAT, write_asog_rrd
 from open4dgs.trigs_adapter import TrainedClip
 
 
@@ -87,22 +88,22 @@ def evaluation_models(path: Path, decoded: dict[str, torch.Tensor], clip: MultiV
 
 
 def _evaluate(config: Config, decoded: dict[str, torch.Tensor]) -> dict[str, object]:
-    props = run_properties(RrdReader(config.run / "run.rrd"))
-    roi: str = str(props.get("roi", ["full"])[0])  # runs before the ROI cameras have no roi property
+    run: RunProperties = RunProperties.from_cells(rrd_cells(RrdReader(config.run / "run.rrd"), "run"))
     clip: MultiViewClip = read_catalog_clip(
-        str(props["catalog_url"][0]),
-        str(props["dataset"][0]),
-        str(props["segment_id"][0]),
-        int(props["frame_start"][0]),  # pyrefly: ignore[bad-argument-type]
-        int(props["num_frames"][0]),  # pyrefly: ignore[bad-argument-type]
-        cameras=[str(c) for c in props["cameras"]],
-        max_side=int(props["max_side"][0]) or None,  # pyrefly: ignore[bad-argument-type]
-        roi="people" if roi.startswith("people") else None,
-        roi_pad=float(roi.split(":")[1]) if roi.startswith("people") else 0.15,
+        run.catalog_url,
+        run.dataset,
+        run.segment_id,
+        run.frame_start,
+        run.num_frames,
+        cameras=list(run.cameras),
+        max_side=run.max_side,
+        roi="people" if run.roi_pad is not None else None,
+        roi_pad=run.roi_pad if run.roi_pad is not None else 0.15,
     )
-    mask_dataset: str = str(props["mask_source"][0]).removeprefix("layer:").rsplit("/", 1)[0]  # ".../masks" (older runs) or ".../people_matte"
-    masks = read_clip_masks(clip, config.mask_catalog_url, mask_dataset, str(props["segment_id"][0]))
-    holdout_names: tuple[str, ...] = tuple(str(c) for c in props["holdout_cameras"])
+    if run.mask_dataset is None:
+        raise ValueError(f"{config.run}: trained on mesh silhouettes; --evaluate reads the people_matte layer")
+    masks = read_clip_masks(clip, config.mask_catalog_url, run.mask_dataset, run.segment_id)
+    holdout_names: tuple[str, ...] = run.holdout_cameras
     holdout: tuple[int, ...] = tuple(clip.camera_names.index(n) for n in holdout_names)
     models: dict[str, TrainedClip] = evaluation_models(config.run / "trigs_ckpt.pt", decoded, clip, holdout, torch.device("cuda"))
     num_frames: int = models["uncompressed"].num_frames
