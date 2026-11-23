@@ -26,10 +26,8 @@ from open4dgs.init_cloud import log_init_cloud
 from open4dgs.masks import (
     MATTE_LAYER,
     MODEL_NAME,
-    fill_missing_boxes,
+    clip_mattes,
     load_birefnet,
-    person_boxes,
-    predict_mattes,
     read_clip_masks,
     register_mask_layer,
     write_mask_layer,
@@ -83,17 +81,12 @@ def _masks(config: Config) -> None:
     clip = timed.clip
     device = torch.device("cuda")
     model = load_birefnet(config.model_dir, device)
-    mattes = []
     started: float = time.perf_counter()
-    for cam, name in enumerate(clip.camera_names):
-        assert timed.joints is not None
-        points = joint_box_points(timed.joints.at(timed.times_s[cam]), WORLD_UP)
-        boxes = fill_missing_boxes(
-            person_boxes(points, clip.world_T_cam[cam].numpy(), clip.K[cam].numpy(), clip.sizes[cam], config.pad_fraction, config.pad_px)
-        )
-        matte = predict_mattes(model, clip.frames[cam], boxes, device, batch_size=2)
-        mattes.append(matte)
-        print(f"{name}: foreground fraction {matte.float().mean().item() / 255:.4f}")
+    joints = timed.joints
+    assert joints is not None
+    mattes = clip_mattes(
+        clip, lambda cam: joint_box_points(joints.at(timed.times_s[cam]), WORLD_UP), model, config.pad_fraction, config.pad_px, device, batch_size=2
+    )
     print(f"{len(mattes) * config.num_frames} masks in {time.perf_counter() - started:.1f} s")
     path: Path = config.output_root / "masks" / config.register_dataset / f"{config.segment_id}.{MATTE_LAYER}.rrd"
     write_mask_layer(

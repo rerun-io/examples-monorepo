@@ -16,7 +16,7 @@ import importlib.util
 import os
 import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -164,6 +164,46 @@ def predict_mattes(
             matte: Tensor = F.interpolate(probs[slot : slot + 1], size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False)[0, 0]
             out[i, y0:y1, x0:x1] = (matte * 255.0).round().clamp(0, 255).to(torch.uint8).cpu()
     return out
+
+
+def camera_matte(
+    model: torch.nn.Module,
+    frames: UInt8[Tensor, "n h w 3"],
+    box_points: Float32[ndarray, "n k 3"],
+    world_T_cam: Float32[ndarray, "4 4"],
+    K: Float32[ndarray, "3 3"],
+    image_wh: tuple[int, int],
+    pad_fraction: float,
+    pad_px: float,
+    device: torch.device,
+    batch_size: int = 8,
+) -> UInt8[Tensor, "n h w"]:
+    """The person matte of one camera's frames: BiRefNet inside the padded box of ``box_points`` (world, per frame: mesh
+    vertices or joint proxies) projected into the camera; a frame without a box takes the union of its nearest boxes.
+
+    The one matte pipeline: ``clip_mattes`` (``open4dgs-masks``, SelfCap) and the fdanyone app call it."""
+    boxes: Float32[ndarray, "n 4"] = fill_missing_boxes(person_boxes(box_points, world_T_cam, K, image_wh, pad_fraction, pad_px))
+    return predict_mattes(model, frames, boxes, device, batch_size)
+
+
+def clip_mattes(
+    clip: MultiViewClip,
+    box_points: Callable[[int], Float32[ndarray, "n k 3"]],
+    model: torch.nn.Module,
+    pad_fraction: float,
+    pad_px: float,
+    device: torch.device,
+    batch_size: int = 8,
+) -> list[UInt8[Tensor, "n h w"]]:
+    """``camera_matte`` of every clip camera; ``box_points(camera)`` gives that camera's box points per frame."""
+    mattes: list[UInt8[Tensor, "n h w"]] = []
+    for cam, name in enumerate(clip.camera_names):
+        matte: UInt8[Tensor, "n h w"] = camera_matte(
+            model, clip.frames[cam], box_points(cam), clip.world_T_cam[cam].numpy(), clip.K[cam].numpy(), clip.sizes[cam], pad_fraction, pad_px, device, batch_size
+        )
+        print(f"{name}: foreground fraction {matte.float().mean().item() / 255:.4f}")
+        mattes.append(matte)
+    return mattes
 
 
 def write_mask_layer(

@@ -18,16 +18,14 @@ from rerun.catalog import CatalogClient
 from simplecv.catalog_rig_layout import catalog_components, parse_rig_layout
 from torch import Tensor
 
-from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, companion_location, read_catalog_clip
 from open4dgs.masks import (
     MATTE_LAYER,
     MESH_PAD_FRACTION,
     MESH_PAD_PX,
     MODEL_NAME,
-    fill_missing_boxes,
+    clip_mattes,
     load_birefnet,
-    person_boxes,
-    predict_mattes,
     register_mask_layer,
     write_mask_layer,
 )
@@ -62,7 +60,7 @@ class Config:
 
 
 def main(config: Config) -> None:
-    target: str = config.register_dataset or (config.dataset if config.catalog_url == config.register_url else "open4dgs-mamma")
+    target: str = config.register_dataset or companion_location(config.catalog_url, config.dataset, config.register_url)[1]
     entry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     cameras: list[str] = config.cameras or [
         camera.name for camera in parse_rig_layout(catalog_components(entry.filter_segments(config.segment_id).schema())).cameras
@@ -71,7 +69,6 @@ def main(config: Config) -> None:
     model: torch.nn.Module = load_birefnet(config.model_dir, device)
     mattes: list[UInt8[Tensor, "t h w"]] = []
     frame_indices: ndarray | None = None
-    model_seconds: float = 0.0
     started: float = perf_counter()
     for start in range(0, len(cameras), config.camera_group):
         group: list[str] = cameras[start : start + config.camera_group]
@@ -82,21 +79,11 @@ def main(config: Config) -> None:
             raise ValueError(f"{config.segment_id} has no body meshes: the person crop needs them")
         vertices: Float32[ndarray, "t v 3"] = clip.people.vertices.reshape(len(clip.frame_indices), -1, 3).numpy()
         frame_indices = clip.frame_indices.numpy()
-        for camera in range(len(group)):
-            boxes: Float32[ndarray, "t 4"] = fill_missing_boxes(
-                person_boxes(
-                    vertices, clip.world_T_cam[camera].numpy(), clip.K[camera].numpy(), clip.sizes[camera], config.pad_fraction, config.pad_px
-                )
-            )
-            tic: float = perf_counter()
-            matte: UInt8[Tensor, "t h w"] = predict_mattes(model, clip.frames[camera], boxes, device, config.batch_size)
-            model_seconds += perf_counter() - tic
-            mattes.append(matte)
-            print(f"{group[camera]}: foreground fraction {matte.float().mean().item() / 255:.4f}")
+        mattes += clip_mattes(clip, lambda _cam, v=vertices: v, model, config.pad_fraction, config.pad_px, device, config.batch_size)
         del clip
     assert frame_indices is not None
     count: int = len(cameras) * len(frame_indices)
-    print(f"{count} masks: {count / model_seconds:.1f} masks/s in the model, {count / (perf_counter() - started):.1f} masks/s with decode")
+    print(f"{count} masks: {count / (perf_counter() - started):.1f} masks/s with decode")
     path: Path = config.output_dir / target / f"{config.segment_id}.{MATTE_LAYER}.rrd"
     write_mask_layer(
         path,

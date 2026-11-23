@@ -31,7 +31,7 @@ from open4dgs.asog import AsogSettings, encode_asog
 from open4dgs.body_init import body_surface_init
 from open4dgs.catalog_clip import RESAMPLE_CHUNK, ClipPeople, MultiViewClip, fit_max_side, resample_frames, scale_intrinsics
 from open4dgs.init_cloud import InitCloud
-from open4dgs.masks import MESH_PAD_FRACTION, MESH_PAD_PX, fill_missing_boxes, load_birefnet, person_boxes, predict_mattes, resample_masks
+from open4dgs.masks import MESH_PAD_FRACTION, MESH_PAD_PX, camera_matte, load_birefnet, resample_masks
 from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig
 from open4dgs.splat_export import ASOG_CUT_FORMAT
 from open4dgs.trigs_adapter import TrainConfig, TrainedClip, train_clip
@@ -133,12 +133,17 @@ def read_run_clip(
             stored_wh: tuple[int, int] = (camera.image_width, camera.image_height)
             target_wh: tuple[int, int] = fit_max_side(*stored_wh, max_side)
             stored: UInt8[Tensor, "frames h w 3"] = torch.from_numpy(np.stack(read_rgb_video(output_dir / camera.video, expected_frames=num_frames)))
-            boxes = fill_missing_boxes(
-                person_boxes(
-                    vertices, camera.world_T_cam.astype(np.float32), camera.intrinsics.astype(np.float32), stored_wh, MESH_PAD_FRACTION, MESH_PAD_PX
-                )
+            mattes: UInt8[Tensor, "frames h w"] = camera_matte(
+                matte_model,
+                stored,
+                vertices,
+                camera.world_T_cam.astype(np.float32),
+                camera.intrinsics.astype(np.float32),
+                stored_wh,
+                MESH_PAD_FRACTION,
+                MESH_PAD_PX,
+                device,
             )
-            mattes: UInt8[Tensor, "frames h w"] = predict_mattes(matte_model, stored, boxes, device)
             masks.append(resample_masks(mattes, None, target_wh, device, torch.device("cpu"), torch.float32))
             if target_wh != stored_wh:
                 stored = torch.cat(

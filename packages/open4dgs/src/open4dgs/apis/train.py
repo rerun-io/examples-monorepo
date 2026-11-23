@@ -21,7 +21,7 @@ from PIL import Image
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from open4dgs.body_init import mesh_silhouette_masks
-from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip
+from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, companion_location
 from open4dgs.compensation import BrightnessSplit, HoldoutFit, camera_brightness, evaluate_holdout_fit
 from open4dgs.evaluate import BASELINES, HEADLINE, CameraRenders, Metrics, evaluate_cameras, mean_metrics, render_orbit
 from open4dgs.geometry_eval import CameraGeometry, evaluate_geometry, mean_geometry
@@ -163,8 +163,9 @@ class Config:
             return None
         url: str = self.prior_catalog_url or self.mask_catalog_url or self.catalog_url
         dataset: str = self.prior_dataset or self.mask_dataset or self.dataset
-        if self.prior_catalog_url is None and url != LOCAL_CATALOG:
-            url, dataset = LOCAL_CATALOG, self.prior_dataset or "open4dgs-mamma"
+        if self.prior_catalog_url is None:
+            url, companion = companion_location(url, dataset)
+            dataset = self.prior_dataset or companion
         source: ClipSource = self.clip_source()
         return PriorSource(
             catalog_url=url,
