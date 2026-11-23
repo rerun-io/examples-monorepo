@@ -141,9 +141,9 @@ def _synthetic_clip(names: tuple[str, ...], holdout: tuple[str, ...], num_frames
 
 def test_holdout_wiring_black_frames_zero_masks_positions_and_init_colours() -> None:
     pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src (open4dgs envs)")
-    from open4dgs.apis.train import split_cameras
     from open4dgs.body_init import body_surface_init
     from open4dgs.holdout import select_holdout
+    from open4dgs.run_inputs import split_cameras
     from open4dgs.trigs_adapter import TrainConfig, trainer_frames
 
     names = ("rig_03/cam_00", "rig_00/cam_00", "rig_02/cam_00", "rig_01/cam_00")  # not sorted: positions are clip order
