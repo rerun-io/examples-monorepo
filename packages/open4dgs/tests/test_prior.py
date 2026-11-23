@@ -381,7 +381,7 @@ def test_prior_layer_records_the_reader_that_made_the_clip() -> None:
     from open4dgs.prior_layer import layer_properties
 
     clip = _roi_clip(None)
-    catalog = layer_properties(clip, "src", 640, 9, reader="catalog")
-    selfcap = layer_properties(clip, "src", 640, 9, reader="selfcap")
+    catalog = layer_properties(clip, "src", 640, 9, reader="catalog", predictor="p")
+    selfcap = layer_properties(clip, "src", 640, 9, reader="selfcap", predictor="p")
     assert catalog["loader"] == "open4dgs.catalog_clip.read_catalog_clip (undistorted)"
     assert selfcap["loader"] == "open4dgs.selfcap_clip.read_timed_clip"

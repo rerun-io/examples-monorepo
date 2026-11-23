@@ -69,7 +69,8 @@ Steps (`open4dgs.apis.train`):
    reach the trainer. The MoGe-2 depth + normal prior (`open4dgs.prior`) is ON by default (`--prior auto`): the
    segment's `moge2_prior` layer (masks' catalog/dataset; the local companion dataset when the source is the
    read-only Spark) is used when it matches the clip (window, cameras, sizes, ROI grid); otherwise MoGe-2 runs at
-   start (monopriors torch predictor, about 16-22 images/s) and the maps are registered as that layer for the next run
+   start (monopriors' dynamic TensorRT engine, about 40 images/s at 1028 px on a 5090; the first run on a GPU builds
+   the engine, about 90 s) and the maps are registered as that layer for the next run
    (replacing a layer of another grid; the file of each grid is kept). `--prior layer` requires a matching layer,
    `--prior off` trains without. Weights 0.05 / 0.05; the prior starts at 15 % of `--train.steps`, reaches full
    weight at 40 % and its normal term drops contradicting pixels from 75 %. No body mesh is needed (SelfCap trains

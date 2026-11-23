@@ -43,6 +43,10 @@ PRIOR_LAYER: str = "moge2_prior"
 """Catalog layer name of the MoGe-2 prior maps."""
 MODEL_NAME: str = "moge-2-vitl-normal"
 """Recorded in the layer's properties."""
+ENGINE_PREDICTOR: str = "MoGeV2TrtPredictor dynamic"
+"""Layer property ``predictor`` of maps from monopriors' dynamic-shape TensorRT engine (one per GPU and detail level, built once)."""
+TORCH_PREDICTOR: str = "MoGeV2TorchPredictor fp16 autocast"
+"""Layer property ``predictor`` of maps from the torch predictor (a clip with a camera outside the engine's aspect range)."""
 
 
 def compute_clip_priors(
@@ -79,13 +83,13 @@ def as_stored(priors: ClipPriors) -> ClipPriors:
 
 
 def layer_properties(
-    clip: MultiViewClip, source: str, max_side: int | None, resolution_level: int, *, reader: ClipReader
+    clip: MultiViewClip, source: str, max_side: int | None, resolution_level: int, *, reader: ClipReader, predictor: str
 ) -> dict[str, str | int | float]:
     """The ``moge2_prior`` recording property: model, source, window, sizes, the reader that made ``clip`` and the camera
     grid (``roi_properties``)."""
     return {
         "model": MODEL_NAME,
-        "predictor": "MoGeV2TorchPredictor fp16 autocast",
+        "predictor": predictor,
         "resolution_level": resolution_level,
         "fov_source": "calibrated fx (fov_x = 2 atan(w / 2 fx))",
         "source": source,
@@ -114,25 +118,35 @@ def compute_prior_layer(
     batch_size: int = 8,
     resolution_level: int = 9,
 ) -> tuple[ClipPriors, Path, dict[str, float]]:
-    """MoGe-2 (monopriors torch predictor, vitl) on every clip camera and frame, written as the ``moge2_prior`` layer
-    recording and registered on ``catalog_url``/``dataset`` (get-or-create; replaces the segment's previous layer).
+    """MoGe-2 (vitl) on every clip camera and frame, written as the ``moge2_prior`` layer recording and registered on
+    ``catalog_url``/``dataset`` (get-or-create; replaces the segment's previous layer).
 
     The file is ``<output_dir>/<dataset>/<segment_id>.moge2_prior-<grid>.rrd``, ``<grid>`` a hash of the window, cameras,
     sizes and ROI grid, so a layer of another grid is never overwritten on disk. Returns the maps as stored
     (``as_stored``), the path and the timings (``moge_s``, ``images``, ``write_s``, ``register_s``). The predictor is
     freed before returning.
-    """
-    from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor
 
-    predictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=resolution_level)
+    The maps come from monopriors' dynamic TensorRT engine (the first call on a GPU builds it, ~90 s) when it serves every
+    camera (``MoGeV2TrtPredictor.serves``: aspects 1:2 to 2:1), else from the torch predictor for the whole clip (wide ROI
+    crops); property ``predictor`` records which.
+    """
+    from monopriors.models.moge_v2.predictor import MoGeV2TorchPredictor, MoGeV2TrtPredictor
+
+    engine = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", resolution_level=resolution_level, batch_size=batch_size)
+    on_engine: bool = all(engine.serves((height, width)) for width, height in clip.sizes)
+    predictor: MoGeV2TrtPredictor | MoGeV2TorchPredictor = (
+        engine if on_engine else MoGeV2TorchPredictor(encoder="vitl", heads="geometry", resolution_level=resolution_level)
+    )
     torch.cuda.synchronize()
     t0: float = time.perf_counter()
     priors: ClipPriors = compute_clip_priors(clip, clip.camera_names, predictor, batch_size=batch_size)
     torch.cuda.synchronize()
     timings: dict[str, float] = {"moge_s": time.perf_counter() - t0, "images": float(len(clip.camera_names) * len(clip.frame_indices))}
-    del predictor
+    del predictor, engine
     torch.cuda.empty_cache()
-    properties = layer_properties(clip, source, max_side, resolution_level, reader=reader)
+    properties = layer_properties(
+        clip, source, max_side, resolution_level, reader=reader, predictor=ENGINE_PREDICTOR if on_engine else TORCH_PREDICTOR
+    )
     grid: str = hashlib.sha1(
         "|".join(str(properties[k]) for k in ("frame_start", "frame_end", "cameras", "image_sizes", "max_side", "roi", "roi_cameras")).encode()
     ).hexdigest()[:10]

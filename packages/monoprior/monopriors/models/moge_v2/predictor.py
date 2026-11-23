@@ -392,6 +392,15 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
             )
         return grid_hw
 
+    def serves(self, input_hw: tuple[int, int]) -> bool:
+        """Whether this predictor runs an ``input_hw`` image: the dynamic engine holds aspects 1:2 through 2:1
+        (:meth:`network_hw`), a static engine every size. Builds nothing."""
+        try:
+            self.network_hw(input_hw)
+        except ValueError:
+            return False
+        return True
+
     def _engine_spec(self, network_hw: tuple[int, int]) -> tuple[Path, TrtBuildConfig]:
         """ONNX path and build settings (the engine cache key) of the engine that serves ``network_hw``."""
         from trtkit import InputShapeProfile, TrtBuildConfig
@@ -431,11 +440,9 @@ class MoGeV2TrtPredictor(_MoGeV2Predictor):
         except ImportError:
             return False
 
-        try:
-            network_hw: tuple[int, int] = self.network_hw(input_hw)
-        except ValueError:
+        if not self.serves(input_hw):
             return False
-        onnx_path, config = self._engine_spec(network_hw)
+        onnx_path, config = self._engine_spec(self.network_hw(input_hw))
         if not onnx_path.exists():
             return False
         trt_dir: Path = self.cache_dir / "trt"
