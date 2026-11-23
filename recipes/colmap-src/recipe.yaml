@@ -40,15 +40,15 @@
 # Two-step build: pycolmap's pyproject builds only the bindings (`cmake.source-dir = "python/"`) and links a
 # separately installed libcolmap, and CASPAR_ENABLED lives in libcolmap. So libcolmap is built and installed first.
 #
-# Arch: SASS for every GPU of its platform, no PTX. linux-64 = RTX 3060 (sm_86) + RTX 5090 (sm_120), linux-aarch64 =
-# DGX Spark GB10 (sm_121). COLMAP refuses "native"/"all" while CASPAR is on (cmake/FindDependencies.cmake), and Caspar's
-# generated CMakeLists honours an explicit CMAKE_CUDA_ARCHITECTURES, so no patch is needed for it. `cuda_archs` is the
-# CMake list (quoted where a shell reads it: `;` ends a command); `cuda_arch_tag` is its build-string form.
+# Arch: SASS for every GPU of its platform, no PTX. linux-64 = RTX 3060 (sm_86) + RTX 4090 (sm_89) + RTX 5090 (sm_120),
+# linux-aarch64 = DGX Spark GB10 (sm_121). COLMAP refuses "native"/"all" while CASPAR is on (cmake/FindDependencies.cmake),
+# and Caspar's generated CMakeLists honours an explicit CMAKE_CUDA_ARCHITECTURES, so no patch is needed for it. `cuda_archs`
+# is the CMake list (quoted where a shell reads it: `;` ends a command); `cuda_arch_tag` is its build-string form.
 context:
   # main 2026-11-15, after FlexGlue's #4969. The patches apply to this revision only; SHA256SUMS proves it.
   colmap_rev: 137f21680c79d3f2fffbb1d11deb367162aa6f83
-  cuda_archs: ${{ "121" if target_platform == "linux-aarch64" else "86;120" }}
-  cuda_arch_tag: ${{ "121" if target_platform == "linux-aarch64" else "86-120" }}
+  cuda_archs: ${{ "121" if target_platform == "linux-aarch64" else "86;89;120" }}
+  cuda_arch_tag: ${{ "121" if target_platform == "linux-aarch64" else "86-89-120" }}
 
 package:
   name: colmap-src
@@ -188,7 +188,7 @@ requirements:
     - poselib
     - onnxruntime-cpp * *_cuda130
   run_constraints:
-    # SASS for sm_86 + sm_120 (linux-64) or sm_121 (linux-aarch64), no PTX for other GPUs.
+    # SASS for sm_86 + sm_89 + sm_120 (linux-64) or sm_121 (linux-aarch64), no PTX for other GPUs.
     - __cuda >=13.0
 
 tests:
