@@ -56,7 +56,7 @@ source:
 
 build:
   # Bump with every patch or build script change (the build string hash does not follow the recipe content).
-  number: 1
+  number: 2
   noarch: python
   script:
     file: build.sh

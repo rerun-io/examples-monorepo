@@ -21,8 +21,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from gsplat_rust_renderer.asog_decode import decode as decode_asog_file
-from gsplat_rust_renderer.asog_decode import parse_asog
+from gsplat_rust_renderer import asog_decode
 from gsplat_rust_renderer.sog3d import log_asog
 from gsplat_rust_renderer.trigs_motion3d import TrigsParams
 from jaxtyping import Float16, Float32, Float64, UInt8
@@ -237,8 +236,8 @@ def write_asog_rrd(run_dir: Path, asog: bytes, out: Path, cut: float, preview_ro
     """
     reader: RrdReader = RrdReader(run_dir / "run.rrd")
     frame_start: int = run_property(reader, "frame_start")
-    parsed = parse_asog(asog, f"{run_dir.name} asog")
-    target: Float64[ndarray, " 3"] = np.median(decode_asog_file(parsed).means, axis=0).astype(np.float64)
+    parsed = asog_decode.parse_asog(asog, f"{run_dir.name} asog")
+    target: Float64[ndarray, " 3"] = np.median(asog_decode.decode(parsed).means, axis=0).astype(np.float64)
     recording, view_coordinates, view = run_recording(reader, run_dir.name, out, target)
     t0: float = time.perf_counter()
     log_asog(SPLAT_ENTITY, parsed, float(frame_start), cut, preview_rows, recording=recording)

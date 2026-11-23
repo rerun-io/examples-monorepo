@@ -6,9 +6,9 @@ from pathlib import Path
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from fdanyone_rerun.assets import model_dir
-from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
+from fdanyone_rerun.outputs import RunMetadata
 from fdanyone_rerun.person4d import PersonConfig, train_person
-from fdanyone_rerun.rerun_log import log_run, person_blueprint
+from fdanyone_rerun.rerun_log import log_run
 
 
 @dataclass
@@ -36,5 +36,4 @@ def main(config: Config) -> RunMetadata:
     metadata: RunMetadata = log_run(output_dir, config.video, model_dir(), recording)
     if config.train:
         train_person(output_dir, config.person, recording)
-        recording.send_blueprint(person_blueprint(read_camera_rig(output_dir)))
     return metadata

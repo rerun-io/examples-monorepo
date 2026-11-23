@@ -10,10 +10,9 @@ mkdir -p "$SRC_DIR/stock"
 cp -r "$SRC_DIR/web-viewer-npm" "$SRC_DIR/stock/npm"
 export CARGO_HOME="$SRC_DIR/.cargo"
 export CARGO_BUILD_JOBS="${CPU_COUNT:-8}"
-# build_web_viewer.py takes clang and ar from CONDA_PREFIX: the build prefix here. Without CONDA_BUILD: re_build_tools
-# (re_viewer's build script) treats a conda build as Rerun's own packaging and runs `cargo metadata` on the patched crate.
-# The build script is loaded by path (its package's __init__ files are not part of the sources).
-env -u CONDA_BUILD CONDA_PREFIX="$BUILD_PREFIX" python -c "
+# The build script is loaded by path (its package's __init__ files are not among the sources); clang and ar come from
+# the build prefix.
+python -c "
 import importlib.util
 import sys
 from pathlib import Path
@@ -21,7 +20,7 @@ spec = importlib.util.spec_from_file_location('build_web_viewer', '$GS/gsplat_ru
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module  # dataclasses look the module up while it executes
 spec.loader.exec_module(module)
-module.main(module.BuildWebViewerConfig(stock_dir=Path('$SRC_DIR/stock'), out_dir=Path('$SRC_DIR/web-out'), cargo_home=Path('$CARGO_HOME')))
+module.main(module.BuildWebViewerConfig(stock_dir=Path('$SRC_DIR/stock'), out_dir=Path('$SRC_DIR/web-out'), cargo_home=Path('$CARGO_HOME'), toolchain_prefix=Path('$BUILD_PREFIX')))
 "
 
 rm -rf "$GRV/frontend/gsplat-web-viewer"

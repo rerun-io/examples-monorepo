@@ -20,7 +20,7 @@ from fdanyone.errors import RunCancelled
 from fdanyone.model.vae import load_tiny_decoder
 from fdanyone_rerun.assets import model_dir
 from fdanyone_rerun.core import RunConfig, run_views
-from fdanyone_rerun.outputs import CameraRig, RunMetadata, read_camera_rig
+from fdanyone_rerun.outputs import RunMetadata, read_camera_rig
 from fdanyone_rerun.person4d import PersonConfig, train_person
 from fdanyone_rerun.previews import decode_previews
 from fdanyone_rerun.rerun_log import (
@@ -36,10 +36,8 @@ from fdanyone_rerun.rerun_log import (
     log_cameras,
     log_canonical_clip,
     motion_blueprint,
-    person_blueprint,
     preview_entity,
     result_blueprint,
-    training_blueprint,
 )
 
 CONDITIONING_STAGE: str = "Building foreground masks and skeletons"
@@ -111,12 +109,11 @@ class RunStreamer:
         return float(MotionResult.load(self.output_dir / "gvhmr").fps)
 
     def run(self) -> RunMetadata:
-        """Run the pipeline and stream all four phases; returns upstream's run summary."""
+        """Run the pipeline and stream every phase; returns upstream's run summary."""
         self.recording.send_blueprint(motion_blueprint())
         self.recording.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True)
         metadata: RunMetadata = run_views(self.config, on_stage=self.on_stage, on_step=self.on_step, cancel=self.stop)
-        rig: CameraRig = read_camera_rig(self.output_dir)
-        log_cameras(rig, self.output_dir, self.recording)
+        log_cameras(read_camera_rig(self.output_dir), self.output_dir, self.recording)
         self.recording.send_blueprint(result_blueprint(self.config.layout.num_views))
         generation = metadata.generation
         self.message(
@@ -124,9 +121,5 @@ class RunStreamer:
             f"{generation.peak_vram_reserved_bytes / 1e9:.2f} GB reserved)"
         )
         if self.person is not None:
-            if self.stop.is_set():
-                raise RunCancelled("stopped")
-            self.recording.send_blueprint(training_blueprint())
             train_person(self.output_dir, self.person, self.recording, report=self.message, cancel=self.stop)
-            self.recording.send_blueprint(person_blueprint(rig))
         return metadata

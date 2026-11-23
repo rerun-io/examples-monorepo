@@ -11,8 +11,9 @@ Open4DGS in the monorepo: 4D Gaussian people trained from Rerun catalog segments
 
 ## Environments
 
-`open4dgs` (prod: training runs and timings) and `open4dgs-dev` (tests, lint, typecheck), linux-64 only: the
-ai-demos gsplat 1.5.3 build (CUDA 13, torch 2.12, sm_86 + sm_120) exists only there. Both carry the Rerun catalog
+`open4dgs` (prod: training runs and timings) and `open4dgs-dev` (tests, lint, typecheck), linux-64 and linux-aarch64:
+gsplat is the ai-demos 1.5.3 build (CUDA 13, torch 2.12, sm_86 + sm_120) on linux-64 and 1.6.0 on linux-aarch64 (no
+1.5.3 build exists there; the Spark passed a smoke test, no held-out band check). Both carry the Rerun catalog
 lane (rerun-sdk 0.42 with the catalog and dataloader extras), simplecv, torchcodec and monopriors.
 
 ```bash
@@ -107,14 +108,16 @@ made LPIPS depend on the batch shape at the 1e-4 level. Training keeps PyTorch's
 
 ## Animated SOG export
 
-`open4dgs-export-asog` writes a run's checkpoint as an `.asog` file. The default preset `band-safe` keeps held-out
+`open4dgs-export-asog` encodes a run's checkpoint as Animated SOG into the recording `<run>/asog.rrd`
+(`--asog-file` also writes an `.asog` for other players). The default preset `band-safe` keeps held-out
 PSNR within 1 % of the uncompressed clip (about 12 MB); `--settings.preset small` gives a smaller file for web
 streaming (upstream's encoder defaults, about 7 MB; `upstream` is an alias).
 
 `open4dgs-export-splats` turns a run into a recording, layer of the run on `open4dgs-runs`. One `--format` flag:
 
-- `asog` (default): the run's `.asog` (from `open4dgs-export-asog`) stored once as `AnimatedSogSplats3D` plus a
-  one-pose preview, `<run>/asog.rrd`, layer `asog`; the same recording `open4dgs-export-asog` writes (`--rrd`). The
+- `asog` (default): the checkpoint encoded as Animated SOG (band-safe; or an `.asog` file given with `--asog`) stored
+  once as `AnimatedSogSplats3D` plus a one-pose preview, `<run>/asog.rrd`, layer `asog`; the same recording
+  `open4dgs-export-asog` writes (`--rrd`). The
   gsplat viewer plays it; a stock Rerun viewer shows one still pose.
 - `per-frame`: one `GaussianSplats3D` per frame, `<run>/splats.rrd`, layer `splats`; plays in stock viewers.
 - `trigs-motion`: the checkpoint once as `TrigsMotion3D`, `<run>/trigs_motion.rrd`, layer `trigs_motion`; the gsplat

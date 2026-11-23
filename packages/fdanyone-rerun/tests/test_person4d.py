@@ -2,6 +2,7 @@
 
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import rerun as rr
@@ -10,14 +11,16 @@ pytest.importorskip("trigs", reason="TRiGS comes from recipes/open4dgs-trigs-src
 
 pytestmark = pytest.mark.integration
 
+if TYPE_CHECKING:
+    from fdanyone_rerun.person4d import PersonConfig
 
-def _short(steps: int) -> object:
+
+def _short(steps: int) -> "PersonConfig":
     import dataclasses
 
     from fdanyone_rerun.person4d import PersonConfig
 
-    base = PersonConfig()
-    return dataclasses.replace(base, train=dataclasses.replace(base.train, steps=steps), prior=False, preview_every=100, report_every=100)
+    return dataclasses.replace(PersonConfig().with_steps(steps), prior=False, preview_every=100, report_every=100)
 
 
 def test_the_person_goes_into_the_recording_only(example_run: Path, tmp_path: Path) -> None:
@@ -30,7 +33,7 @@ def test_the_person_goes_into_the_recording_only(example_run: Path, tmp_path: Pa
     recording = rr.RecordingStream("fdanyone-rerun-test")
     recording.save(tmp_path / "person.rrd")
     lines: list[str] = []
-    summary = train_person(example_run, _short(300), recording, report=lines.append)  # pyrefly: ignore[bad-argument-type]
+    summary = train_person(example_run, _short(300), recording, report=lines.append)
     recording.flush()
     recording.disconnect()
 
@@ -62,4 +65,4 @@ def test_stop_ends_the_training(example_run: Path, tmp_path: Path) -> None:
     recording = rr.RecordingStream("fdanyone-rerun-test")
     recording.memory_recording()
     with pytest.raises(RunCancelled):
-        train_person(example_run, _short(5_000), recording, report=report, cancel=cancel)  # pyrefly: ignore[bad-argument-type]
+        train_person(example_run, _short(5_000), recording, report=report, cancel=cancel)

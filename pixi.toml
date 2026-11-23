@@ -4434,8 +4434,8 @@ description = "Upstream RoMa v2 + MEMFOF init of a catalog window on its trainin
 # open4dgs — Open4DGS 4D Gaussian people from catalog segments (TRiGS trainer)
 # ═══════════════════════════════════════════════════════════════════════════
 # The trainer is recipes/open4dgs-trigs-src (pure Python); packages/open4dgs holds catalog input, Rerun output,
-# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. linux-64 only: the ai-demos gsplat 1.5.3
-# build (CUDA 13 / torch 2.12 / sm_86 + sm_120) exists only there.
+# priors, held-out eval and the torch stand-ins for PyTorch3D's two ops. gsplat: the ai-demos 1.5.3 build (CUDA 13 /
+# torch 2.12 / sm_86 + sm_120) on linux-64, 1.6.0 on linux-aarch64 (see the target table below).
 [feature.open4dgs]
 platforms = ["linux-64", "linux-aarch64"]
 

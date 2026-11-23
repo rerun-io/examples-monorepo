@@ -338,7 +338,7 @@ An exception raised here ends the run and propagates out of ``train_clip`` (a St
 
 
 class _StepTicks:
-    """TRiGS' ``progress_bar`` (a duck-typed tqdm: ``update`` after each step, ``set_postfix``) that calls ``on_step``."""
+    """TRiGS' ``progress_bar`` (a duck-typed tqdm: ``update`` after each step; ``set_postfix`` is optional) that calls ``on_step``."""
 
     def __init__(self, on_step: StepCallback, live: "TrainedClip") -> None:
         self.on_step: StepCallback = on_step
@@ -348,9 +348,6 @@ class _StepTicks:
     def update(self, n: int = 1) -> None:
         self.steps += n
         self.on_step(self.steps, self.live)
-
-    def set_postfix(self, **_values: object) -> None:
-        pass
 
 
 def train_clip(
@@ -399,22 +396,20 @@ def train_clip(
     writer: ScalarLog = ScalarLog()
     trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
     trainer.camera_loss_hook = prior
-    ticks: _StepTicks | None = None
-    if on_step is not None:
-        live: TrainedClip = TrainedClip(
-            params=params,
-            trainer=trainer,
-            trigs_config=trigs_config,
-            cameras=cameras,
-            sh_degree=sh_degree,
-            fps=clip.fps,
-            num_frames=num_frames,
-            scalars=writer.rows,
-            train_seconds=0.0,
-            peak_gpu_bytes=0,
-            capture_times=gt_times,
-        )
-        ticks = _StepTicks(on_step, live)
+    # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
+    live: TrainedClip = TrainedClip(
+        params=params,
+        trainer=trainer,
+        trigs_config=trigs_config,
+        cameras=cameras,
+        sh_degree=sh_degree,
+        fps=clip.fps,
+        num_frames=num_frames,
+        scalars=writer.rows,
+        train_seconds=0.0,
+        peak_gpu_bytes=0,
+        capture_times=gt_times,
+    )
     torch.cuda.reset_peak_memory_stats(dev)
     torch.cuda.synchronize(dev)
     start: float = time.perf_counter()
@@ -429,26 +424,14 @@ def train_clip(
         config=trigs_config,
         gt_times_per_frame=gt_times,
         writer=writer,
-        progress_bar=ticks,
+        progress_bar=_StepTicks(on_step, live) if on_step is not None else None,
     )
     torch.cuda.synchronize(dev)
     train_seconds: float = time.perf_counter() - start
     if prior is not None:
         prior.finish()
         writer.rows.update(prior.rows)
-    return TrainedClip(
-        params=result.params,
-        trainer=trainer,
-        trigs_config=trigs_config,
-        cameras=cameras,
-        sh_degree=sh_degree,
-        fps=clip.fps,
-        num_frames=num_frames,
-        scalars=writer.rows,
-        train_seconds=train_seconds,
-        peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)),
-        capture_times=gt_times,
-    )
+    return dataclasses.replace(live, params=result.params, train_seconds=train_seconds, peak_gpu_bytes=int(torch.cuda.max_memory_allocated(dev)))
 
 
 def untrained_clip(

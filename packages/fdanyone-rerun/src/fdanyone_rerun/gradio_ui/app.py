@@ -31,7 +31,7 @@ RUNS_DIR: Path = PACKAGE_ROOT / "data" / "app-runs"
 4D person (Animated SOG) included."""
 PUMP_SECONDS: float = 0.5
 """How often new recording bytes go to the viewer."""
-APP_PERSON: PersonConfig = PersonConfig(train=dataclasses.replace(PersonConfig().train, steps=5_000), prior=False)
+APP_PERSON: PersonConfig = dataclasses.replace(PersonConfig().with_steps(5_000), prior=False)
 """The app's preset: 5,000 steps (about 2 min on the 5090) and no MoGe-2 prior (the demo runs no extra estimator model)."""
 READY: str = "Pick the example or upload a clip of one person (at least 121 frames), then press Run."
 DESCRIPTION: str = (
@@ -105,6 +105,13 @@ class _RunSlot:
 SLOT: _RunSlot = _RunSlot()
 
 
+def _release(gpu_lock: int | None) -> None:
+    """Free the GPU flock (when held) and the run slot."""
+    if gpu_lock is not None:
+        os.close(gpu_lock)
+    SLOT.lock.release()
+
+
 def run_app(
     video: str | None, views_per_layer: int | float, seed: int | float, train: bool, steps: int | float
 ) -> Generator[tuple[bytes | None, str], None, None]:
@@ -116,33 +123,13 @@ def run_app(
     config: RunConfig = RunConfig(
         video=Path(video), output_dir=RUNS_DIR / run_id, layout=ViewLayout(views_per_layer=int(views_per_layer)), seed=int(seed)
     )
-    person: PersonConfig | None = dataclasses.replace(APP_PERSON, train=dataclasses.replace(APP_PERSON.train, steps=int(steps))) if train else None
-    RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    saved: Path = RUNS_DIR / f"{run_id}.rrd"
-    recording: rr.RecordingStream = rr.RecordingStream(APPLICATION_ID, recording_id=run_id)
-    # Two sinks: the bytes the viewer gets, and the SDK's own file (appending stream reads would not be one valid .rrd).
-    stream: rr.BinaryStream = recording.binary_stream()
-    recording.set_sinks(rr.FileSink(str(saved)), stream)
-    streamer: RunStreamer = RunStreamer(config, recording, previews=True, person=person)
-    errors: list[BaseException] = []
-
-    gpu_lock: int | None = None
-
-    def work() -> None:
-        try:
-            streamer.run()
-        except BaseException as error:  # re-raised by the generator below, beartype violations included
-            errors.append(error)
-        finally:
-            recording.disconnect()  # closes the saved .rrd, stopped runs included; the stream keeps its unread bytes
-            if gpu_lock is not None:
-                os.close(gpu_lock)  # releases the flock
-            SLOT.lock.release()
-
+    person: PersonConfig | None = APP_PERSON.with_steps(int(steps)) if train else None
     while not SLOT.lock.acquire(timeout=PUMP_SECONDS):
         yield b"", "Waiting for the previous run to stop…"
-    if SLOT.gpu_lock is not None:
-        try:
+    # The slot is ours: whatever fails before the worker owns it releases it (and the GPU flock) here.
+    gpu_lock: int | None = None
+    try:
+        if SLOT.gpu_lock is not None:
             gpu_lock = os.open(SLOT.gpu_lock, os.O_RDWR | os.O_CREAT, 0o664)
             while True:
                 try:
@@ -151,19 +138,37 @@ def run_app(
                 except BlockingIOError:
                     yield b"", "Waiting for the GPU (another job holds it)…"
                     time.sleep(PUMP_SECONDS)
-        except BaseException:
-            if gpu_lock is not None:
-                os.close(gpu_lock)
-            SLOT.lock.release()
-            raise
+        SLOT.recording = None
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        saved: Path = RUNS_DIR / f"{run_id}.rrd"
+        recording: rr.RecordingStream = rr.RecordingStream(APPLICATION_ID, recording_id=run_id)
+        # Two sinks: the bytes the viewer gets, and the SDK's own file (appending stream reads would not be one valid .rrd).
+        stream: rr.BinaryStream = recording.binary_stream()
+        recording.set_sinks(rr.FileSink(str(saved)), stream)
+        streamer: RunStreamer = RunStreamer(config, recording, previews=True, person=person)
+    except BaseException:
+        _release(gpu_lock)
+        raise
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            streamer.run()
+        except RunCancelled:
+            pass  # a Stop; keeping it would keep its frames, the trainer's GPU memory among them, alive
+        except BaseException as error:  # re-raised by the generator below, beartype violations included
+            errors.append(error)
+        finally:
+            recording.disconnect()  # closes the saved .rrd, stopped runs included; the stream keeps its unread bytes
+            _release(gpu_lock)
+
     worker: threading.Thread = threading.Thread(target=work, name=f"fdanyone-{run_id}", daemon=True)
     started: float = time.perf_counter()
     try:
         worker.start()
     except BaseException:
-        if gpu_lock is not None:
-            os.close(gpu_lock)
-        SLOT.lock.release()
+        recording.disconnect()
+        _release(gpu_lock)
         raise
     SLOT.worker = worker
     SLOT.stop = streamer.stop
@@ -171,8 +176,11 @@ def run_app(
         while worker.is_alive():
             worker.join(PUMP_SECONDS)
             yield stream.read() or b"", f"Running… {time.perf_counter() - started:.0f} s"
-        if errors and not isinstance(errors[0], RunCancelled):
+        if errors:
             raise errors[0]
+        if streamer.stop.is_set():
+            yield stream.read() or b"", f"Stopped after {time.perf_counter() - started:.0f} s"
+            return
         person_line: str = " and the 4D person" if person is not None else ""
         SLOT.recording = saved
         yield (
@@ -233,7 +241,7 @@ def build(examples: list[str] | None = None) -> gr.Blocks:
                 )
 
         run_event = run_button.click(run_app, inputs=[video, views, seed, train, steps], outputs=[viewer, status])
-        run_event.then(latest_recording, outputs=[recording])
+        run_event.success(latest_recording, outputs=[recording])
         stop.click(stop_status, outputs=[status], cancels=[run_event])
     return demo
 

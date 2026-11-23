@@ -74,14 +74,14 @@ def main(config: Config) -> dict[str, object]:
     """Write ``<run>/asog.rrd`` (or ``splats.rrd``, ``trigs_motion.rrd``), register it as layer ``asog`` (``splats``,
     ``trigs_motion``); returns sizes and counts."""
     run_name: str = config.run.name
+    checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
+    fps: float = float(checkpoint["fps"])
+    num_frames: int = int(checkpoint["num_frames"])
     if config.format == "asog":
         if config.asog is not None:
             asog: bytes = config.asog.read_bytes()
         else:
-            checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-            asog = encode_asog(
-                checkpoint_params(checkpoint, torch.device("cpu")), float(checkpoint["fps"]), int(checkpoint["num_frames"]), AsogSettings()
-            )[0]
+            asog = encode_asog(checkpoint_params(checkpoint, torch.device("cpu")), fps, num_frames, AsogSettings())[0]
         out_asog: Path = config.output or config.run / "asog.rrd"
         summary_asog: dict[str, object] = write_asog_rrd(config.run, asog, out_asog, ASOG_CUT_FORMAT, PREVIEW_ROWS)
         if config.register:
@@ -97,9 +97,6 @@ def main(config: Config) -> dict[str, object]:
     layer: str = "trigs_motion" if motion else "splats"
     reader: RrdReader = RrdReader(config.run / "run.rrd")
     frame_start: int = run_property(reader, "frame_start")
-    checkpoint = torch.load(config.run / "trigs_ckpt.pt", map_location="cpu", weights_only=True)
-    fps: float = float(checkpoint["fps"])
-    num_frames: int = int(checkpoint["num_frames"])
     if motion:
         compact: TrigsParams = trigs_motion_params(checkpoint_params(checkpoint, torch.device("cpu")))
         recording, view_coordinates, view = run_recording(reader, run_name, out, np.median(compact.means, axis=0).astype(np.float64))

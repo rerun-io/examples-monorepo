@@ -63,7 +63,7 @@ with the banked reference recording (below).
 
 `pixi run -e fdanyone-rerun fdanyone-app` serves a Gradio app on the same core as `fdanyone-run`
 (`fdanyone_rerun.stream.RunStreamer`). Pick the example or upload a clip, press Run, and the embedded viewer follows
-the run through four layouts:
+the run through five layouts:
 
 1. motion recovery (source clip and progress log);
 2. the recovered body in 3D and over the source;

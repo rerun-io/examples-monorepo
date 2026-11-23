@@ -21,6 +21,8 @@ from torch import Tensor
 from open4dgs.catalog_clip import LOCAL_CATALOG, MultiViewClip, read_catalog_clip
 from open4dgs.masks import (
     MATTE_LAYER,
+    MESH_PAD_FRACTION,
+    MESH_PAD_PX,
     MODEL_NAME,
     fill_missing_boxes,
     load_birefnet,
@@ -52,9 +54,9 @@ class Config:
     camera_group: int = 4
     """Cameras decoded at a time (stored MAMMA frames are 9 MB each)."""
     batch_size: int = 8
-    pad_fraction: float = 0.15
+    pad_fraction: float = MESH_PAD_FRACTION
     """Crop padding around the projected SMPL-X box, as a fraction of its size (hair, loose clothes) ..."""
-    pad_px: float = 24.0
+    pad_px: float = MESH_PAD_PX
     """... plus this many pixels (lens shift of up to 21 px on MAMMA: the box uses the pinhole on distorted frames)."""
 
 

@@ -169,6 +169,8 @@ PROGRESS: str = "log"
 """Stage and step messages (TextLog)."""
 PERSON: str = "world/person/splats"
 """The trained 4D person: ``AnimatedSogSplats3D`` + a one-pose ``GaussianSplats3D`` preview, static."""
+PERSON_MIDDLE_HEIGHT: float = 0.9
+"""Height of a standing person's middle above the canonical world's ground, metres: where the 4D person view looks."""
 PERSON_EYE_DISTANCE: float = 0.9
 """The 4D person view's eye: this many times the cameras' distance from the person's middle."""
 TRAIN_TIMELINE: str = "train_step"
@@ -235,10 +237,10 @@ def diffusion_blueprint(num_views: int) -> rrb.Blueprint:
     )
 
 
-def result_blueprint(num_views: int) -> rrb.Blueprint:
-    """The rig and body in 3D beside the source camera, above a grid of the generated views, playing on a loop."""
+def result_blueprint(num_views: int, world_view: rrb.Spatial3DView | None = None) -> rrb.Blueprint:
+    """The rig and body in 3D (or ``world_view``) beside the source camera, above a grid of the generated views, playing on a loop."""
     top: rrb.Horizontal = rrb.Horizontal(
-        rrb.Spatial3DView(origin="world", name="Canonical world"),
+        world_view if world_view is not None else rrb.Spatial3DView(origin="world", name="Canonical world"),
         rrb.Spatial2DView(origin=SOURCE, contents=["$origin/**", f"/{BODY}/**"], name="Source"),
         column_shares=[3.0, 1.0],
     )
@@ -264,10 +266,10 @@ def training_blueprint() -> rrb.Blueprint:
 
 
 def person_blueprint(rig: CameraRig) -> rrb.Blueprint:
-    """The trained 4D person in 3D beside the source camera, above the generated views. The 3D view looks from between the
-    first two cameras at the ring's distance (no frustum in front of the person) and leaves out the body and every image
-    plane, which would cover the person."""
-    target: Float64[ndarray, " 3"] = np.array([0.0, 0.9, 0.0])
+    """``result_blueprint`` with the trained 4D person in 3D. The 3D view looks from between the first two cameras at the
+    ring's distance (no frustum in front of the person) and leaves out the body and every image plane, which would cover
+    the person."""
+    target: Float64[ndarray, " 3"] = np.array([0.0, PERSON_MIDDLE_HEIGHT, 0.0])
     positions: list[Float64[ndarray, " 3"]] = [camera.world_T_cam[:3, 3] for camera in rig.cameras[:2]]
     between: Float64[ndarray, " 3"] = np.mean(positions, axis=0) - target
     distance: float = float(np.linalg.norm(positions[0] - target))
@@ -278,16 +280,7 @@ def person_blueprint(rig: CameraRig) -> rrb.Blueprint:
         name="4D person",
         eye_controls=rrb.EyeControls3D(position=eye.tolist(), look_target=target.tolist(), eye_up=[0.0, 1.0, 0.0]),
     )
-    num_views: int = len(rig.cameras)
-    top: rrb.Horizontal = rrb.Horizontal(
-        person, rrb.Spatial2DView(origin=SOURCE, contents=["$origin/**", f"/{BODY}/**"], name="Source"), column_shares=[3.0, 1.0]
-    )
-    rows: float = float(-(-num_views // min(num_views, 6)))
-    return rrb.Blueprint(
-        rrb.Vertical(top, _grid(num_views, camera_entity), row_shares=[2.0, max(1.0, rows / 2.0)]),
-        _time_panel(TIMELINE, playing=True),
-        collapse_panels=True,
-    )
+    return result_blueprint(len(rig.cameras), person)
 
 
 def _log_clip_frames(frames: Iterator[ndarray] | tuple[ndarray, ...], fps: Fraction, recording: rr.RecordingStream) -> None:
