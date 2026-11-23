@@ -75,6 +75,10 @@ class TrtBuildConfig:
     with its consumers — the escape hatch for miscompiled fusions (e.g. plane-sweep
     cost-volume GridSample). Each pattern must match at least one tensor. Part of
     the engine cache key."""
+    runtime_activation_resize: bool = False
+    """Build with TensorRT's ``RUNTIME_ACTIVATION_RESIZE_10_10`` preview feature, so a context can size activation
+    memory to the shapes it runs (``TensorRtDynamicRuntime(per_shape_activation_memory=True)``) instead of the
+    profile's max. Part of the engine cache key."""
     shape_profiles: tuple[InputShapeProfile, ...] = ()
     """Per-input min/opt/max shapes for engines whose dynamic dims go beyond the
     batch (or whose inputs do not share one batch dim). When set, every dynamic
@@ -115,6 +119,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
         else ""
     )
     hardware_key: str = "_hcsamecc" if config.hardware_compatibility == "same_compute_capability" else ""
+    hardware_key += "_rar" if config.runtime_activation_resize else ""
     profiles_key: str = (
         f"_s{hashlib.sha256(repr([asdict(profile) for profile in config.shape_profiles]).encode()).hexdigest()[:8]}"
         if config.shape_profiles
@@ -182,6 +187,8 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if config.fp8_attention:
         builder_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     builder_config.builder_optimization_level = int(config.builder_optimization_level)
+    if config.runtime_activation_resize:
+        builder_config.set_preview_feature(trt.PreviewFeature.RUNTIME_ACTIVATION_RESIZE_10_10, True)
     if config.hardware_compatibility == "same_compute_capability":
         builder_config.hardware_compatibility_level = trt.HardwareCompatibilityLevel.SAME_COMPUTE_CAPABILITY
     if not config.allow_tf32:
@@ -243,6 +250,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
         "hardware_compatibility": config.hardware_compatibility,
+        "runtime_activation_resize": config.runtime_activation_resize,
         "build_seconds": build_seconds,
         "tensorrt_version": str(trt.__version__),
         "cuda_device_name": torch.cuda.get_device_name(),

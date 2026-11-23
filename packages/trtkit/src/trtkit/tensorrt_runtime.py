@@ -22,8 +22,10 @@ from trtkit.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
 class _TrtEngine:
     """Deserialized engine, execution context, private stream, and CUDA-graph capture shared by both runtimes."""
 
-    def __init__(self, engine_path: Path, *, use_cuda_graph: bool) -> None:
+    def __init__(self, engine_path: Path, *, use_cuda_graph: bool, user_managed_memory: bool = False) -> None:
         """Deserialize a machine-local engine and create its execution context.
+
+        ``user_managed_memory``: the context gets no activation memory of its own; the subclass binds it per call.
 
         Raises:
             RuntimeError: If CUDA is unavailable or the engine cannot be deserialized.
@@ -34,7 +36,10 @@ class _TrtEngine:
 
         self._trt: Any = cast(Any, tensorrt)  # the compiled bindings have incomplete stubs
         engine: Any = self._trt.Runtime(self._trt.Logger(self._trt.Logger.WARNING)).deserialize_cuda_engine(engine_path.expanduser().read_bytes())
-        context: Any = None if engine is None else engine.create_execution_context()
+        strategy: Any = (
+            self._trt.ExecutionContextAllocationStrategy.USER_MANAGED if user_managed_memory else self._trt.ExecutionContextAllocationStrategy.STATIC
+        )
+        context: Any = None if engine is None else engine.create_execution_context(strategy)
         if engine is None or context is None:
             raise RuntimeError(f"Could not load TensorRT engine: {engine_path}")
         self._engine: Any = engine
@@ -57,6 +62,7 @@ class _TrtEngine:
         self._graphs = {}
         self._input_buffers = {}
         self._output_buffers = {}
+        self._activation_memory = None
         self._context = None
         self._engine = None
 
@@ -276,9 +282,15 @@ class TensorRtDynamicRuntime(_TrtEngine):
 
     CUDA graphs need fixed addresses, so ``direct_binding`` and ``use_cuda_graph``
     exclude each other.
+
+    ``per_shape_activation_memory=True`` (needs ``direct_binding``) sizes the context's activation memory to each
+    call's shapes instead of the profile's max: for engines built with ``TrtBuildConfig.runtime_activation_resize``,
+    whose max corner can need several times the memory of the shapes callers send. The buffer grows, never shrinks.
     """
 
-    def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False, direct_binding: bool = False) -> None:
+    def __init__(
+        self, engine_path: Path, *, use_cuda_graph: bool = False, direct_binding: bool = False, per_shape_activation_memory: bool = False
+    ) -> None:
         """Deserialize an engine and allocate its I/O buffers.
 
         Args:
@@ -286,15 +298,21 @@ class TensorRtDynamicRuntime(_TrtEngine):
             use_cuda_graph: Capture and replay one CUDA graph per input-shape signature.
             direct_binding: Bind device inputs in place and size outputs to each call (see the class docstring)
                 instead of copying into max-shape buffers.
+            per_shape_activation_memory: Size activation memory to each call's shapes (see the class docstring).
 
         Raises:
             RuntimeError: If CUDA is unavailable or the engine cannot be deserialized.
-            ValueError: If ``direct_binding`` and ``use_cuda_graph`` are both set.
+            ValueError: If ``direct_binding`` and ``use_cuda_graph`` are both set, or ``per_shape_activation_memory``
+                lacks ``direct_binding``.
         """
         if direct_binding and use_cuda_graph:
             raise ValueError("direct_binding binds a new address per call; CUDA graph replay needs fixed addresses.")
-        super().__init__(engine_path, use_cuda_graph=use_cuda_graph)
+        if per_shape_activation_memory and not direct_binding:
+            raise ValueError("per_shape_activation_memory regrows memory between calls; it needs direct_binding.")
+        super().__init__(engine_path, use_cuda_graph=use_cuda_graph, user_managed_memory=per_shape_activation_memory)
         self.direct_binding: bool = direct_binding
+        self.per_shape_activation_memory: bool = per_shape_activation_memory
+        self._activation_memory: Tensor | None = None
         self.device_index: int = torch.cuda.current_device()
         """The CUDA device the context and stream were created on; direct-binding inputs must live there."""
         trt: Any = self._trt
@@ -407,6 +425,13 @@ class TensorRtDynamicRuntime(_TrtEngine):
                 if buffer is None or buffer.numel() < needed:
                     self._output_buffers[name] = torch.empty(needed, dtype=dtype, device=self._device)
                 self._context.set_tensor_address(name, int(self._output_buffers[name].data_ptr()))
+        if self.per_shape_activation_memory:
+            needed_bytes: int = max(int(self._context.update_device_memory_size_for_shapes()), 1)
+            if self._activation_memory is None or self._activation_memory.numel() < needed_bytes:
+                self._stream.synchronize()  # the previous call may still read the old buffer
+                self._activation_memory = None
+                self._activation_memory = torch.empty(needed_bytes, dtype=torch.uint8, device=self._device)
+            self._context.set_device_memory(int(self._activation_memory.data_ptr()), int(self._activation_memory.numel()))
         if self._use_cuda_graph:
             key: tuple[tuple[str, tuple[int, ...]], ...] = tuple(sorted(self._active_shapes.items()))
             if key not in self._graphs:
