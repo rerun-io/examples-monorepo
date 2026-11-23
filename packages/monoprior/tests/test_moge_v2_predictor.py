@@ -129,6 +129,16 @@ def test_select_aspect_bucket_uses_nearest_log_aspect(
     assert selected_bucket == expected_bucket
 
 
+def test_dynamic_engine_serves_aspects_one_to_two_through_two_to_one() -> None:
+    """``serves`` names the sizes the one dynamic engine runs (no build); a static engine serves every size."""
+    from monopriors.models.moge_v2 import MoGeV2TrtPredictor
+
+    dynamic: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry")
+    assert dynamic.serves((1028, 752)) and dynamic.serves((1280, 704))  # MAMMA landscape-ish, 4DAnyone 9:16
+    assert not dynamic.serves((278, 640))  # a 2.3:1 person crop
+    assert MoGeV2TrtPredictor(encoder="vitl", heads="geometry", profile="static").serves((278, 640))
+
+
 @pytest.mark.parametrize("profile", ("static", "dynamic"))
 def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: MoGeV2EngineProfile) -> None:
     """A single network option eagerly creates its runtime: keyed by that size (static) or the one engine (dynamic)."""

@@ -18,8 +18,8 @@ from typing import Literal
 
 import cv2
 import numpy as np
-import rerun as rr
 import torch
+from simplecv.catalog_layers import atomic_recording
 
 from open4dgs.catalog_clip import LOCAL_CATALOG, SPARK_CATALOG
 from open4dgs.init_cloud import log_init_cloud
@@ -194,11 +194,8 @@ def _init(config: Config) -> None:
     print(f"init {cloud.method}: {cloud.num_rows:,} rows over {len(cloud.keyframes)} keyframes in {time.perf_counter() - started:.1f} s")
     path: Path = config.output_root / "init" / config.register_dataset / f"{config.segment_id}__{config.init_name}.rrd"
     path.parent.mkdir(parents=True, exist_ok=True)
-    rec = rr.RecordingStream("open4dgs-init", recording_id=config.segment_id)
-    rec.save(path)
-    log_init_cloud(cloud, rec)
-    rec.flush()
-    rec.disconnect()
+    with atomic_recording(path, application_id="open4dgs-init", recording_id=config.segment_id, send_properties=False) as rec:
+        log_init_cloud(cloud, rec)
     path.chmod(0o644)
     path.parent.chmod(0o775)
     print(f"wrote {path}")

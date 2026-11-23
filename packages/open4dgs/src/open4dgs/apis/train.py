@@ -85,7 +85,7 @@ class Config:
     """Register the saved run recording on ``runs_catalog_url`` / ``open4dgs-runs`` (the one switch; ``--no-register`` turns it off)."""
     runs_catalog_url: str = LOCAL_CATALOG
     prior: Literal["auto", "layer", "off"] = "auto"
-    """MoGe-2 depth + normal prior on the training cameras. ``auto`` (default): the segment's ``moge2_prior`` layer when it matches the clip (window, cameras, sizes, ROI grid), else MoGe-2 runs at start (16-22 images/s) and the maps are registered as that layer for the next run; ``layer``: the layer or an error; ``off``: no prior."""
+    """MoGe-2 depth + normal prior on the training cameras. ``auto`` (default): the segment's ``moge2_prior`` layer when it matches the clip (window, cameras, sizes, ROI grid), else MoGe-2 runs at start (monopriors' dynamic TensorRT engine, ~40 images/s at 1028 px on a 5090; the first run on a GPU builds it, ~90 s) and the maps are registered as that layer for the next run; ``layer``: the layer or an error; ``off``: no prior."""
     prior_catalog_url: str | None = None
     """Catalog of the ``moge2_prior`` layer (default ``mask_catalog_url``, then ``catalog_url``; a source catalog other than the local one, i.e. the read-only Spark, is replaced by the local catalog)."""
     prior_dataset: str | None = None

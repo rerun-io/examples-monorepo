@@ -42,10 +42,14 @@ def _roi_clip(pad: float):
 
 
 class _ConstantMoGe:
-    """Stands in for ``MoGeV2TorchPredictor``: depth 2 m, normals facing the camera, everything valid."""
+    """Stands in for both MoGe-2 predictors: depth 2 m, normals facing the camera, everything valid."""
 
     def __init__(self, **_kwargs: object) -> None:
         pass
+
+    def serves(self, input_hw: tuple[int, int]) -> bool:
+        del input_hw
+        return True
 
     def predict_geometry(self, batch: torch.Tensor, fov_x: float) -> types.SimpleNamespace:
         del fov_x
@@ -69,7 +73,7 @@ def test_selfcap_roi_prior_layer_records_the_grid_the_reader_checks(tmp_path: Pa
     timed = TimedClip(clip=clip, times_s=np.array([[10 / 30.0, 11 / 30.0]]), joints=None)
     monkeypatch.setattr(selfcap, "read_timed_clip", lambda *_args, **_kwargs: timed)
     fake = types.ModuleType("monopriors.models.moge_v2.predictor")
-    fake.MoGeV2TorchPredictor = _ConstantMoGe  # type: ignore[attr-defined]
+    fake.MoGeV2TrtPredictor = fake.MoGeV2TorchPredictor = _ConstantMoGe  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "monopriors.models.moge_v2.predictor", fake)
 
     selfcap.main(selfcap.Config(stage="prior", roi=True, register=False, output_root=tmp_path, png_dir=None, num_frames=2))
