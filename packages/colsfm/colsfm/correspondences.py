@@ -59,6 +59,10 @@ def load_correspondences(
     construction; a mismatch is a bug in whoever wrote the database and is
     reported rather than silently mis-triangulated.
 
+    An image that already holds the database's keypoints (a model a previous
+    `run_mapping` left behind, as `--no-regularised-extrinsics` re-maps it) keeps
+    them and the tracks on them: pycolmap only sets `points2D` on an empty image.
+
     Args:
         reconstruction: A reconstruction with registered, pose-carrying frames.
         database_path: COLMAP database written by the feature and matching stages.
@@ -96,10 +100,15 @@ def load_correspondences(
         if expected_image_id != image_id:
             mismatched.append(f"{cached_image.name}: database id {image_id}, reconstruction id {expected_image_id}")
             continue
-        reconstruction.image(image_id).points2D = cached_image.points2D
+        image: pycolmap.Image = reconstruction.image(image_id)
+        if image.num_points2D() == 0:
+            image.points2D = cached_image.points2D
+        elif image.num_points2D() != cached_image.num_points2D():
+            mismatched.append(f"{cached_image.name}: {image.num_points2D()} keypoints in the model, {cached_image.num_points2D()} in the database")
+            continue
         num_loaded += 1
     if mismatched:
-        raise ValueError(f"Database and reconstruction disagree on image ids: {mismatched[:5]}")
+        raise ValueError(f"Database and reconstruction disagree on images: {mismatched[:5]}")
     if num_loaded == 0:
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 

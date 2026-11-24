@@ -95,7 +95,7 @@ def test_load_correspondences_rejects_a_database_with_other_image_ids(synthetic_
     )
 
     reconstruction: pycolmap.Reconstruction = build_reconstruction(synthetic_rig.frames_meta).reconstruction
-    with pytest.raises(ValueError, match="disagree on image ids"):
+    with pytest.raises(ValueError, match="disagree on images"):
         load_correspondences(reconstruction, database_path)
 
 

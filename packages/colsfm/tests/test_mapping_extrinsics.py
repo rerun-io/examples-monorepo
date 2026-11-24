@@ -31,6 +31,7 @@ from mapping_helpers import (
 )
 
 from colsfm.config import CusfmConfig, VisionMappingConfig
+from colsfm.extrinsic_refinement import ExtrinsicRefinementOptions, ExtrinsicRefinementResult, refine_extrinsics
 from colsfm.frames_meta import FramesMeta, read_frames_meta
 from colsfm.mapping import MappingResult, run_mapping
 from colsfm.reconstruction import build_reconstruction, gauge_camera_params_id
@@ -325,3 +326,33 @@ def test_refining_extrinsics_on_a_vehicle_referenced_rig_is_refused(
             mapping_config,
             quiet_options(optimize_extrinsics=True),
         )
+
+
+def test_the_unregularised_refinement_runs_on_an_already_mapped_model(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """`--no-regularised-extrinsics` refines the model stage 7 left behind instead of crashing.
+
+    Stage 7b hands `refine_extrinsics` a reconstruction whose images already hold the database keypoints; the
+    unregularised path used to load them a second time, which pycolmap refuses (`image.cc:60 points2D_.empty()`).
+    """
+    mapping_config: VisionMappingConfig = isaac_config.vision_mapping
+    reference_camera_params_id: int = gauge_camera_params_id(synthetic_rig.frames_meta)
+    mapped: MappingResult = run_mapping(
+        build_reconstruction(synthetic_rig.frames_meta, reference_camera_params_id=reference_camera_params_id),
+        synthetic_database,
+        mapping_config,
+        quiet_options(num_threads=1),
+    )
+    num_points: int = mapped.num_points3D
+    refinement: ExtrinsicRefinementResult = refine_extrinsics(
+        mapped,
+        synthetic_database,
+        mapping_config,
+        quiet_options(num_threads=1),
+        {camera_params_id: camera.vehicle_T_cam for camera_params_id, camera in synthetic_rig.frames_meta.cameras.items()},
+        ExtrinsicRefinementOptions(regularised=False, verbose=False),
+    )
+    assert refinement.mapping.refined_extrinsics is not None
+    assert refinement.mapping.num_points3D >= 0.9 * num_points
+    assert refinement.mapping.mean_reprojection_error_px < 1.0
