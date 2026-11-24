@@ -94,7 +94,8 @@ CUBE_LAYER: str = "cube"
 LENS_BATCH_PIXELS: int = 16 * 1920 * 1920
 """Lens pixels the cube and panorama layers decode, join and encode per step: 16 framesets at 1920, 4 at 3840."""
 RUN_GOPS: int = 8
-"""GOPs one NVDEC decoder holds at most (its samples muxed in memory): about 225 MB per lens of the X5's 3840 HEVC."""
+"""GOPs one NVDEC decoder holds at most: on the X5's 3840 HEVC a run's samples are about 225 MB per lens, held once as
+the muxed MP4 while the decoder reads it (the packed samples are freed when the decoder opens)."""
 LENS_FPS: int = 30
 """Nominal rate of the muxed lens segments, the face videos and the panorama; ``log_video_stream`` stamps the real times."""
 RUN_SOURCE: str = schema.SLAM_RS_SOURCE
@@ -202,58 +203,76 @@ def decode_runs(indices: Int64[ndarray, " k"], gop_starts: Int64[ndarray, " g"],
         raise ValueError("the wanted pictures must be increasing and not negative")
     if gop_starts.size == 0 or gop_starts[0] != 0:
         raise ValueError("the first GOP must start at sample 0")
-    keyframes: Int64[ndarray, " k"] = gop_starts[np.searchsorted(gop_starts, indices, side="right") - 1]
+    if indices.size == 0:
+        return []
+    gop: Int64[ndarray, " k"] = np.searchsorted(gop_starts, indices, side="right") - 1
+    keyframes: Int64[ndarray, " k"] = gop_starts[gop]
     runs: list[DecodeRun] = []
     first: int = 0
-    for k in range(1, indices.size + 1):
-        if k < indices.size:
-            decoded: int = int(indices[k - 1])  # the last sample this run decoded
-            gops: int = int(np.searchsorted(gop_starts, decoded, side="right") - np.searchsorted(gop_starts, keyframes[first], side="left"))
-            if keyframes[k] <= decoded or (keyframes[k] == decoded + 1 and gops < max_gops):
-                continue
+    for k in range(1, indices.size):
+        # Carry on within a GOP, or into the next one when it starts right after the last sample decoded and the run has room.
+        if gop[k] == gop[k - 1] or (keyframes[k] == indices[k - 1] + 1 and gop[k - 1] - gop[first] + 1 < max_gops):
+            continue
         runs.append(DecodeRun(start=int(keyframes[first]), stop=int(indices[k - 1]) + 1, wanted=indices[first:k]))
         first = k
+    runs.append(DecodeRun(start=int(keyframes[first]), stop=int(indices[-1]) + 1, wanted=indices[first:]))
     return runs
+
+
+def rebatch(chunks: Iterable[UInt8[Tensor, "n 3 h w"]], batch: int) -> Iterator[UInt8[Tensor, "b 3 h w"]]:
+    """The pictures of ``chunks``, in order, ``batch`` at a time (the last batch may be shorter)."""
+    pending: list[UInt8[Tensor, "n 3 h w"]] = []
+    held: int = 0
+    for chunk in chunks:
+        pending.append(chunk)
+        held += chunk.shape[0]
+        while held >= batch:
+            joined: UInt8[Tensor, "n 3 h w"] = pending[0] if len(pending) == 1 else torch.cat(pending)
+            yield joined[:batch]
+            pending, held = ([joined[batch:]] if held > batch else []), held - batch
+    if held:
+        yield pending[0] if len(pending) == 1 else torch.cat(pending)
+
+
+def run_decoder(rig: insta360_io.InsvRig, lens: int, run: DecodeRun, device: torch.device):  # noqa: ANN201 - torchcodec is imported lazily
+    """A torchcodec decoder over the samples of ``run``, muxed once into an in-memory MP4 (simplecv's ``wrap_mp4``).
+
+    Raises:
+        RuntimeError: If torchcodec decodes on the CPU (no NVDEC for the stream).
+    """
+    from torchcodec.decoders import VideoDecoder
+
+    data, bounds, irap = rig.read_packed(lens, run.start, run.stop)
+    samples: list[UInt8[ndarray, " n"]] = [data[a:b] for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist(), strict=True)]
+    decoder = VideoDecoder(wrap_mp4(samples, irap.tolist(), LENS_FPS, codec=rig.codec), device=str(device), seek_mode="exact")
+    if decoder.cpu_fallback:
+        raise RuntimeError(f"NVDEC cannot decode lens {lens} ({decoder.cpu_fallback}); run the layer on the cpu device (--cube-device / --pano-device cpu)")
+    return decoder
 
 
 def lens_batches(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"], device: torch.device, *, batch: int, threads: int) -> Iterator[UInt8[Tensor, "b 3 h w"]]:
     """The RGB pictures ``indices`` (increasing) of one lens on ``device``, ``batch`` at a time.
 
-    ``cuda``: the pictures in ``decode_runs``; each run's samples muxed once into an in-memory MP4 (simplecv's
-    ``wrap_mp4``) and decoded front to back on NVDEC by one torchcodec decoder, so a sample is decoded once at any stride
-    (a decoder per batch from each picture's keyframe decoded the X5's stride-1 cube 8 times over). A batch may take
-    pictures from two runs. ``cpu``: PyAV with ``threads`` frame threads, as torchcodec's CPU decoder runs about 1.6x
-    slower here (it seeks per picture; clip B).
+    ``cuda``: one NVDEC decoder per run of ``decode_runs``, read front to back, so each sample is decoded at most once;
+    a batch may span two runs. ``cpu``: PyAV with ``threads`` frame threads, as torchcodec's CPU decoder runs about
+    1.6x slower here (it seeks per picture; clip B).
 
     Raises:
         RuntimeError: If torchcodec decodes a ``cuda`` run on the CPU (no NVDEC for the stream).
     """
     if device.type == "cpu":
         frames: Iterator[UInt8[ndarray, "h w 3"]] = rgb_frames(rig, lens, indices, threads=threads)
-        while chunk := list(itertools.islice(frames, batch)):
-            yield torch.from_numpy(np.stack(chunk)).permute(0, 3, 1, 2)
+        yield from rebatch((torch.from_numpy(frame[None]).permute(0, 3, 1, 2) for frame in frames), batch)
         return
-    from torchcodec.decoders import VideoDecoder
 
-    pending: list[UInt8[Tensor, "n 3 h w"]] = []
-    held: int = 0
-    for run in decode_runs(indices, rig.gops(lens)[:, 0]):
-        data, bounds, irap = rig.read_packed(lens, run.start, run.stop)
-        samples: list[UInt8[ndarray, " n"]] = [data[a:b] for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist(), strict=True)]
-        decoder = VideoDecoder(wrap_mp4(samples, irap.tolist(), LENS_FPS, codec=rig.codec), device=str(device), seek_mode="exact")
-        if decoder.cpu_fallback:
-            raise RuntimeError(f"NVDEC cannot decode lens {lens} ({decoder.cpu_fallback}); run the layer on the cpu device (--cube-device / --pano-device cpu)")
-        offsets: list[int] = (run.wanted - run.start).tolist()
-        while offsets:
-            take: list[int] = offsets[: batch - held]
-            offsets = offsets[len(take) :]
-            pending.append(decoder.get_frames_at(take).data)
-            held += len(take)
-            if held == batch:
-                yield pending[0] if len(pending) == 1 else torch.cat(pending)
-                pending, held = [], 0
-    if pending:
-        yield pending[0] if len(pending) == 1 else torch.cat(pending)
+    def chunks() -> Iterator[UInt8[Tensor, "n 3 h w"]]:
+        for run in decode_runs(indices, rig.gops(lens)[:, 0]):
+            decoder = run_decoder(rig, lens, run, device)
+            for offsets in itertools.batched((run.wanted - run.start).tolist(), batch):
+                yield decoder.get_frames_at(list(offsets)).data
+            del decoder  # its muxed samples go before the next run's are read
+
+    yield from rebatch(chunks(), batch)
 
 
 def lens_pictures(

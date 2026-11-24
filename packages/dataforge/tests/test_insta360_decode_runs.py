@@ -10,10 +10,10 @@ from jaxtyping import Int64
 from numpy import ndarray
 
 
-def decoded_samples(indices: Int64[ndarray, " k"], gop_starts: Int64[ndarray, " g"], max_gops: int = 8) -> int:
+def decoded_samples(indices: Int64[ndarray, " k"], gop_starts: Int64[ndarray, " g"]) -> int:
     from dataforge.datasets.insta360 import decode_runs
 
-    return sum(run.stop - run.start for run in decode_runs(indices, gop_starts, max_gops=max_gops))
+    return sum(run.stop - run.start for run in decode_runs(indices, gop_starts))
 
 
 def x5_gops(frames: int = 2498, gop: int = 60) -> Int64[ndarray, " g"]:
@@ -74,3 +74,19 @@ def test_runs_decode_exactly_the_samples_from_each_picture_s_keyframe_once(gop_l
     for p in indices.tolist():
         needed.update(range(int(gop_starts[np.searchsorted(gop_starts, p, side="right") - 1]), p + 1))
     assert sum(run.stop - run.start for run in runs) == len(needed)
+
+
+@given(sizes=st.lists(st.integers(1, 7), min_size=0, max_size=12), batch=st.integers(1, 9))
+def test_rebatching_keeps_every_picture_in_order_in_full_batches(sizes: list[int], batch: int) -> None:
+    import torch
+
+    from dataforge.datasets.insta360 import rebatch
+
+    chunks = []
+    start = 0
+    for size in sizes:
+        chunks.append(torch.arange(start, start + size, dtype=torch.uint8).reshape(size, 1, 1, 1).expand(size, 3, 1, 1).contiguous())
+        start += size
+    batches = list(rebatch(iter(chunks), batch))
+    assert [b.shape[0] for b in batches[:-1]] == [batch] * (len(batches) - 1) and (not batches or 0 < batches[-1].shape[0] <= batch)
+    assert torch.cat(batches)[:, 0, 0, 0].tolist() == list(range(start)) if batches else start == 0
