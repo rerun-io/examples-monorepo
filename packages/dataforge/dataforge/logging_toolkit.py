@@ -54,6 +54,8 @@ from dataforge.video_encoding import (
     resolve_ffmpeg as resolve_ffmpeg,
 )
 
+VIDEO_CODEC_COMPONENT: str = "VideoStream:codec"
+"""The static codec column of a ``VideoStream``."""
 VIDEO_SAMPLE_COMPONENT: str = "VideoStream:sample"
 """Component that marks an ``Mp4Reader`` chunk as carrying samples, not keyframe flags."""
 
@@ -102,6 +104,54 @@ def classify_video_chunk(record_batch: pa.RecordBatch) -> VideoChunkKind:
         f"{entity_path}: an Mp4Reader chunk indexed on {schema.TIMELINE} carries neither {VIDEO_SAMPLE_COMPONENT} "
         f"nor {VIDEO_KEYFRAME_COMPONENT}, only {names}; the reader's chunk shapes changed and retiming it would be a guess"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class VideoStreamSamples:
+    """One ``VideoStream`` entity of a recording as encoded samples, in time order."""
+
+    codec: int
+    """``VideoStream:codec`` (``rr.VideoCodec``'s value)."""
+    times_ns: Int64[ndarray, " n"]
+    """Each sample's ``video_time``, nanoseconds, increasing."""
+    samples: list[bytes]
+    """Each sample's bytes."""
+    keyframes: Bool[ndarray, " n"]
+    """Whether each sample is a keyframe."""
+
+
+def read_video_stream(store: rrc.LazyStore, entity: str) -> VideoStreamSamples:
+    """The ``VideoStream`` at ``entity``: its codec, and its samples with their stamps and keyframe flags, in time order.
+
+    Chunks are told apart by ``classify_video_chunk`` (the ``Mp4Reader`` shapes ``log_video_stream`` writes).
+
+    Raises:
+        ValueError: If the entity holds no samples or no codec.
+    """
+    codec: int | None = None
+    times: list[int] = []
+    samples: list[bytes] = []
+    keyframe_times: set[int] = set()
+    for chunk in store.stream().filter(content=[entity]).to_chunks():
+        if chunk.entity_path != entity:
+            continue
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        kind: VideoChunkKind = classify_video_chunk(batch)
+        if kind == "codec":
+            codec = int(batch.column(VIDEO_CODEC_COMPONENT).to_pylist()[0][0])
+            continue
+        stamps: list[int] = batch.column(schema.TIMELINE).cast(pa.int64()).to_pylist()
+        if kind == "sample":
+            times += stamps
+            samples += [bytes(row[0]) for row in batch.column(VIDEO_SAMPLE_COMPONENT).to_pylist()]
+        if VIDEO_KEYFRAME_COMPONENT in batch.schema.names:  # its own chunk (Mp4Reader) or beside the samples
+            keyframe_times.update(t for t, flags in zip(stamps, batch.column(VIDEO_KEYFRAME_COMPONENT).to_pylist(), strict=True) if flags and flags[0])
+    if not samples or codec is None:
+        raise ValueError(f"{entity} holds no VideoStream samples or no codec")
+    order: Int64[ndarray, " n"] = np.argsort(np.asarray(times, dtype=np.int64), kind="stable")
+    times_ns: Int64[ndarray, " n"] = np.asarray(times, dtype=np.int64)[order]
+    keyframes: Bool[ndarray, " n"] = np.asarray([t in keyframe_times for t in times_ns.tolist()], dtype=np.bool_)
+    return VideoStreamSamples(codec=codec, times_ns=times_ns, samples=[samples[k] for k in order.tolist()], keyframes=keyframes)
 
 
 def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:

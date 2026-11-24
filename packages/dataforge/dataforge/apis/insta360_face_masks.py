@@ -28,6 +28,7 @@ from numpy import ndarray
 from dataforge import schema, writing
 from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording
+from dataforge.logging_toolkit import read_video_stream
 
 MASK_NAME: str = "people_mask"
 """The mask entity under each ``pinhole``, on the lenses and on the faces."""
@@ -88,14 +89,7 @@ def faces_from_layer(faces: Path, lenses: LensCameras) -> dict[int, cube.CubeFac
 
 def face_stamps(faces: Path) -> Int64[ndarray, " k"]:
     """The face frame stamps (``video_time``, ns) of the first face; the cube layer gives every face the same ones."""
-    entity: str = schema.video_path(RIG, FACE_CAMS[0])
-    stamps: list[int] = []
-    for chunk in rrc.RrdReader(faces).store().stream().filter(is_static=False, content=entity):
-        if chunk.entity_path == entity:
-            batch = chunk.to_record_batch()
-            if "VideoStream:sample" in batch.schema.names:
-                stamps += batch.column("video_time").cast("int64").to_pylist()
-    return np.unique(np.asarray(stamps, dtype=np.int64))
+    return read_video_stream(rrc.RrdReader(faces).store(), schema.video_path(RIG, FACE_CAMS[0])).times_ns
 
 
 def lens_masks(masks: Path, stamps: set[int]) -> Iterator[tuple[int, int, UInt8[ndarray, "h w"]]]:

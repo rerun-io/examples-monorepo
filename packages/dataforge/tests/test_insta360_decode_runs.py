@@ -17,7 +17,7 @@ def test_every_frame_of_the_x5_clip_is_decoded_once_in_runs_of_eight_gops() -> N
     """Stride 1 on the X5 (GOP 60): 2,498 samples decoded, where a decoder per batch of 4 decoded 19,898."""
     from simplecv.catalog_video_decode import decode_runs
 
-    from dataforge.datasets.insta360 import RUN_GOPS
+    from dataforge.datasets.insta360_lens_video import RUN_GOPS
 
     indices = np.arange(2498, dtype=np.int64)
     runs = decode_runs(indices, x5_gops(), max_gops=RUN_GOPS)
@@ -30,7 +30,7 @@ def test_every_frame_of_the_x5_clip_is_decoded_once_in_runs_of_eight_gops() -> N
 def test_rebatching_keeps_every_picture_in_order_in_full_batches(sizes: list[int], batch: int) -> None:
     import torch
 
-    from dataforge.datasets.insta360 import rebatch
+    from dataforge.datasets.insta360_lens_video import rebatch
 
     chunks = []
     start = 0

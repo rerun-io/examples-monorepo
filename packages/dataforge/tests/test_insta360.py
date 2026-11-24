@@ -131,12 +131,12 @@ def test_the_clip_converts_into_mei_cameras_on_the_imu_with_their_readout_and_ex
     assert clip.rolling_shutter_ms is not None
     frame_ns: Int64[ndarray, " n"] = video_times(converted.targets[paths.BASE_LAYER], schema.video_path(0, 0))
     assert frame_ns.size == FRAMES
-    from dataforge.datasets.insta360_lens_video import halved_camera, lens_halvings
+    from dataforge.datasets.insta360_lens_video import LENS_MAX_SIZE
 
     width: int = insta360_io.InsvRig(str(converted.clip), 1).resolution[0]
-    halvings: int = lens_halvings(width)
+    halvings: int = insta360_io.lens_halvings(width, LENS_MAX_SIZE)
     for cam, lens in enumerate(clip.lenses_v6):
-        camera = halved_camera(lens.camera, halvings)
+        camera = insta360_io.halved_camera(lens.camera, halvings)
         node: dict[str, object] = static_values(store, schema.cam_path(0, cam))
         assert (node["name"], node["camera_model"], node["stream_id"]) == (f"lens{cam}", "mei_v6", f"track{clip.lens_track[cam]}")
         assert (node["video_codec"], node["stored_width"], node["source_width"]) == ("av1", width >> halvings, width)
@@ -169,7 +169,7 @@ def test_the_cpu_lens_decoder_decodes_both_lenses_of_an_h264_body(insv_x3_clip: 
     """The X3 records H.264: the PyAV lens decoder (the cpu panorama and cube) follows the clip's codec."""
     import insta360_io
 
-    from dataforge.datasets.insta360 import rgb_frames
+    from dataforge.datasets.insta360_lens_video import rgb_frames
 
     rig = insta360_io.InsvRig(str(insv_x3_clip), 30)
     width, height = rig.resolution
@@ -186,7 +186,7 @@ def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_
     import insta360_io
     import torch
 
-    from dataforge.datasets.insta360 import lens_pictures
+    from dataforge.datasets.insta360_lens_video import lens_pictures
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
@@ -245,7 +245,8 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
     import torch
 
     from dataforge import paths
-    from dataforge.datasets.insta360 import PANO_ENTITY, base_lens_videos, cameras_from_recording, lens_pictures
+    from dataforge.datasets.insta360 import PANO_ENTITY, cameras_from_recording
+    from dataforge.datasets.insta360_lens_video import lens_pictures, read_base_lens_videos
     from dataforge.datasets.insta360_panorama import SEAM_BAND_DEG, PanoramaJoin, default_panorama_width, panorama_table
 
     # Only the first sample (a keyframe) is decoded: the whole layer at 3840x1920 RGB would hold about 2 GB.
@@ -260,7 +261,7 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
     decoder = av.CodecContext.create("libdav1d", "r")
     decoded: UInt8[ndarray, "h w 3"] = (decoder.decode(av.Packet(first)) + decoder.decode(None))[0].to_ndarray(format="rgb24")  # pyrefly: ignore[missing-attribute]
     assert decoded.shape == (1920, 3840, 3)
-    source = base_lens_videos(converted.targets[paths.BASE_LAYER])  # the pixels the layer reads
+    source = read_base_lens_videos(converted.targets[paths.BASE_LAYER])  # the pixels the layer reads
     lenses = cameras_from_recording(converted.targets[paths.BASE_LAYER])
     table = panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, default_panorama_width(lenses.size[0]), SEAM_BAND_DEG)
     join = PanoramaJoin(table, lenses.size, torch.device("cuda"))
@@ -283,7 +284,8 @@ def test_the_x5_base_stores_each_lens_as_1920_av1_of_that_lens(insv_x5_clip: Pat
     import torch
 
     from dataforge import paths
-    from dataforge.datasets.insta360 import base_lens_videos, cameras_from_recording, lens_pictures
+    from dataforge.datasets.insta360 import cameras_from_recording
+    from dataforge.datasets.insta360_lens_video import lens_pictures, read_base_lens_videos
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
@@ -293,7 +295,7 @@ def test_the_x5_base_stores_each_lens_as_1920_av1_of_that_lens(insv_x5_clip: Pat
     first = np.zeros(1, dtype=np.int64)
     cuda = torch.device("cuda")
     clip = [torch.nn.functional.avg_pool2d(lens.float(), 2)[0] for lens in next(lens_pictures(rig, first, cuda, batch=1, threads=1))]
-    stored = [lens.float()[0] for lens in next(lens_pictures(base_lens_videos(base), first, cuda, batch=1, threads=1))]
+    stored = [lens.float()[0] for lens in next(lens_pictures(read_base_lens_videos(base), first, cuda, batch=1, threads=1))]
     psnr = [[float(10.0 * torch.log10(255.0**2 / torch.mean((stored[a] - clip[b]) ** 2))) for b in range(2)] for a in range(2)]
     print(f"stored lens vs halved clip lens PSNR (rows: stored cam_00, cam_01): {psnr}")
     for lens in range(2):
