@@ -1,10 +1,12 @@
 """Insta360 dual-fisheye ``.insv`` clips: one base recording per clip, and on request a derived panorama layer.
 
 The base is ``insta360_io.InsvReader``'s chunk stream (packages/insta360-io; the reader's module docstring states its
-entities, the device profile and the clock), sent as it comes with ``entity_path`` the rig ``/world/rig_00`` and
-``timeline_name`` ``video_time`` (``capture:start_time_ns`` is its zero). ``cam_00`` and ``cam_01`` are lens 0 and lens
-1, whichever track holds them (``stream_id``). This module adds only the exoego:v2 tags (rig node, sensor names, camera
-sources), the IMU noise model and the capture properties. A clip without a device profile gets no rig reference and no
+entities, the device profile and the clock) with ``entity_path`` the rig ``/world/rig_00`` and ``timeline_name``
+``video_time`` (``capture:start_time_ns`` is its zero), apart from the lens videos and cameras: each lens is stored
+re-encoded to AV1 at most 1920 pixels wide (one halving on the X5, an exception to dataforge's ~3 MP cap) and its Mei
+camera scaled to that size (``insta360_lens_video``). ``cam_00`` and ``cam_01`` are lens 0 and lens 1, whichever track
+holds them (``stream_id``). This module adds the exoego:v2 tags (rig node, sensor names, camera sources), the IMU noise
+model and the capture properties. A clip without a device profile gets no rig reference and no
 IMU noise model, so slam-rs refuses it. The IMU noise model is a placeholder, marked as such in its ``source``.
 
 Panorama layer (``--panorama``; off by default). ``panorama`` holds the RGB equirectangular panorama of every
@@ -24,7 +26,7 @@ Cube layer (``--cube``; off by default). ``cube`` holds the six-face cubemap of 
 ``cube6_front0``, ``cube6_front1``, ``cube6_left``, ``cube6_right``, ``cube6_up``, ``cube6_down``, each with its name on
 the node, a static face-from-IMU ``Transform3D`` (``ChildFromParent``), a plain ``Pinhole`` (RDF) and an RGB AV1
 ``VideoStream`` on the source frameset's stamp. The tables come from the base recording's two cameras through
-``MeiCamera.project``, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (the default when torch sees a GPU) the
+``MeiCamera.project`` and the pictures from its lens videos, so the layer can be added beside an existing base. On ``cube_device`` ``cuda`` (the default when torch sees a GPU) the
 stage stays on the GPU (the dataforge-cuda env): NVDEC decode, one remap per face, NVENC from device memory (SVT-AV1 from
 host memory where NVENC does not encode AV1, e.g. Ampere); ``cpu`` decodes with PyAV and remaps with OpenCV behind the
 same API, and encodes on NVENC when the host has it, else SVT-AV1.
@@ -84,9 +86,10 @@ from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets import insta360_panorama
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
 from dataforge.datasets.insta360_blueprint import FACE_CAMS, FIRST_FACE_CAM, PANO_ENTITY, RIG, segment_layout, segment_walk
+from dataforge.datasets.insta360_lens_video import BaseLensVideos, LensSamples, halved_camera, lens_halvings, log_lens_camera
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_camera_source, log_rig_node, log_video_stream
-from dataforge.video_encoding import NVENC_PRESET, nvenc_av1_options, nvenc_slot, work_dir
+from dataforge.video_encoding import AV1_CQ, AV1_GOP, NVENC_PRESET, nvenc_av1_options, nvenc_slot, work_dir
 
 PANORAMA_LAYER: str = "panorama"
 """The derived panorama, written only under ``--panorama``: an AV1 ``VideoStream`` at ``PANO_ENTITY`` on the frame times."""
@@ -103,9 +106,12 @@ RUN_SOURCE: str = schema.SLAM_RS_SOURCE
 """The run layer the segment-table card shows: slam-rs tracks these clips."""
 
 
-def _pictures(rig: insta360_io.InsvRig, lens: int, frames: int, *, threads: int) -> Iterator[av.VideoFrame]:
+def _pictures(rig: LensSamples, lens: int, frames: int, *, threads: int) -> Iterator[av.VideoFrame]:
     """The pictures of the first ``frames`` samples of one lens, read one GOP at a time."""
-    decoder = av.CodecContext.create(rig.codec, "r")
+    # FFmpeg's native ``av1`` decoder decodes only through a hardware accelerator; dav1d is the software one.
+    decoder = av.CodecContext.create("libdav1d" if rig.codec == "av1" else rig.codec, "r")
+    if not isinstance(decoder, av.VideoCodecContext):
+        raise TypeError(f"{rig.codec} is not a video codec")
     decoder.thread_count = threads
     decoder.thread_type = "NONE" if threads == 1 else "FRAME"
     for start, stop in rig.gops(lens).tolist():
@@ -156,7 +162,7 @@ def cameras_from_recording(base: Path) -> LensCameras:
     return LensCameras(cameras=cameras, lens_from_rig=lens_from_rig, size=(int(intrinsics.width), int(intrinsics.height)))
 
 
-def rgb_frames(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"], *, threads: int) -> Iterator[UInt8[ndarray, "h w 3"]]:
+def rgb_frames(rig: LensSamples, lens: int, indices: Int64[ndarray, " k"], *, threads: int) -> Iterator[UInt8[ndarray, "h w 3"]]:
     """The pictures ``indices`` (increasing) of one lens as ``rgb24``; every picture up to the last is decoded."""
     wanted: set[int] = {int(i) for i in indices}
     stop: int = int(indices[-1]) + 1
@@ -184,7 +190,7 @@ def rebatch(chunks: Iterable[UInt8[Tensor, "n 3 h w"]], batch: int) -> Iterator[
         yield pending[0] if len(pending) == 1 else torch.cat(pending)
 
 
-def run_decoder(rig: insta360_io.InsvRig, lens: int, run: DecodeRun, device: torch.device):  # noqa: ANN201 - torchcodec is imported lazily
+def run_decoder(rig: LensSamples, lens: int, run: DecodeRun, device: torch.device):  # noqa: ANN201 - torchcodec is imported lazily
     """A torchcodec decoder over the samples of ``run``, muxed once into an in-memory MP4 (simplecv's ``wrap_mp4``).
 
     Raises:
@@ -200,7 +206,7 @@ def run_decoder(rig: insta360_io.InsvRig, lens: int, run: DecodeRun, device: tor
     return decoder
 
 
-def lens_batches(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"], device: torch.device, *, batch: int, threads: int) -> Iterator[UInt8[Tensor, "b 3 h w"]]:
+def lens_batches(rig: LensSamples, lens: int, indices: Int64[ndarray, " k"], device: torch.device, *, batch: int, threads: int) -> Iterator[UInt8[Tensor, "b 3 h w"]]:
     """The RGB pictures ``indices`` (increasing) of one lens on ``device``, ``batch`` at a time.
 
     ``cuda``: one NVDEC decoder per run of ``decode_runs``, read front to back, so each sample is decoded at most once;
@@ -226,7 +232,7 @@ def lens_batches(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " 
 
 
 def lens_pictures(
-    rig: insta360_io.InsvRig, indices: Int64[ndarray, " k"], device: torch.device, *, batch: int, threads: int
+    rig: LensSamples, indices: Int64[ndarray, " k"], device: torch.device, *, batch: int, threads: int
 ) -> Iterator[tuple[UInt8[Tensor, "b 3 h w"], UInt8[Tensor, "b 3 h w"]]]:
     """``lens_batches`` of both lenses, decoded side by side on two threads (CUDA bound on each), one batch ahead of the caller."""
     batches: list[Iterator[UInt8[Tensor, "b 3 h w"]]] = [lens_batches(rig, lens, indices, device, batch=batch, threads=threads) for lens in range(2)]
@@ -238,6 +244,11 @@ def lens_pictures(
                 return
             ahead = [pool.submit(next, lens, None) for lens in batches]
             yield lens0, lens1
+
+
+def base_lens_videos(base: Path) -> BaseLensVideos:
+    """The base recording's two lens videos, the pixels of the derived layers."""
+    return BaseLensVideos(base, (schema.video_path(RIG, 0), schema.video_path(RIG, 1)))
 
 
 def cube_indices(frames: int, stride: int, limit: int | None) -> Int64[ndarray, " k"]:
@@ -371,6 +382,10 @@ class Insta360Config(FrameLimitedConfig):
     """NVENC constant-quality target of the faces: they feed SfM and splat training, so near visually lossless."""
     cube_gop: int = 10
     """Face keyframe interval in sampled framesets."""
+    lens_device: Literal["cuda", "cpu"] | None = None
+    """Where the base's lens videos are decoded, halved and encoded: ``cuda`` (NVDEC, CUDA box filter, NVENC from device
+    memory, or SVT-AV1 where NVENC does not encode AV1; the dataforge-cuda env) or ``cpu`` (PyAV, torch on the host,
+    NVENC when the host has it, else SVT-AV1). None: ``cuda`` when torch sees a GPU."""
     cube_device: Literal["cuda", "cpu"] | None = None
     """Where the faces are decoded and joined: ``cuda`` (NVDEC, CUDA remap, NVENC from device memory, or SVT-AV1 where NVENC
     does not encode AV1; the dataforge-cuda env) or ``cpu`` (PyAV, OpenCV remap; NVENC when the host has it, else software AV1). None: ``cuda`` when torch sees a GPU."""
@@ -416,8 +431,8 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                 pending,
                 {
                     paths.BASE_LAYER: lambda recording: self.write_base(recording, identity, reader),
-                    PANORAMA_LAYER: lambda recording: self.write_panorama(recording, reader.rig, targets[paths.BASE_LAYER]),
-                    CUBE_LAYER: lambda recording: self.write_cube(recording, reader.rig, targets[paths.BASE_LAYER]),
+                    PANORAMA_LAYER: lambda recording: self.write_panorama(recording, targets[paths.BASE_LAYER]),
+                    CUBE_LAYER: lambda recording: self.write_cube(recording, targets[paths.BASE_LAYER]),
                 },
                 base_blueprint=segment_layout(panorama=PANORAMA_LAYER in pending),
             )
@@ -427,8 +442,19 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         """The reader's chunks (videos, cameras, exposure, IMU), then the exoego:v2 tags, the IMU noise and the capture properties."""
         rig: insta360_io.InsvRig = reader.rig
         width, height = rig.resolution
+        halvings: int = lens_halvings(width)
+        lens_videos: set[str] = {reader.video_entity(lens) for lens in range(2)}
+        lens_pinholes: set[str] = {f"{reader.cam(lens)}/pinhole" for lens in range(2)}
         for chunk in reader.chunks():
-            rr.send_chunks(chunk, recording=recording)
+            # The reader's order: statics, IMU, exposure, then only the lens video samples, stored re-encoded below.
+            if chunk.entity_path in lens_videos and not chunk.is_static:
+                break
+            if chunk.entity_path not in lens_videos | lens_pinholes:
+                rr.send_chunks(chunk, recording=recording)
+        stored: tuple[int, int] = (width >> halvings, height >> halvings)
+        for lens in range(2):
+            log_lens_camera(recording, schema.pinhole_path(RIG, lens), halved_camera(rig.lenses[lens].camera, halvings), *stored)
+        self.write_lens_videos(recording, rig, halvings)
         profiled: bool = rig.profile_name is not None
         # Without a device profile the IMU has no pose in the rig (the reader logged the reason), so no sensor is the
         # rig frame and the IMU gets no noise model: slam-rs refuses such a rig instead of running VIO on it.
@@ -453,7 +479,20 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         for cam in range(2):
             name: str = f"lens{cam}"
             recording.log(schema.cam_path(RIG, cam), rr.AnyValues(name=name, kind="rgb"), static=True)
-            log_camera_source(recording, RIG, cam, name=name, source_width=width, source_height=height, video_codec=rig.codec, stream_id=f"track{rig.lens_track[cam]}")
+            log_camera_source(
+                recording,
+                RIG,
+                cam,
+                name=name,
+                source_width=width,
+                source_height=height,
+                video_codec="av1",
+                cq=AV1_CQ,
+                gop=AV1_GOP,
+                stored_width=stored[0],
+                stored_height=stored[1],
+                stream_id=f"track{rig.lens_track[cam]}",
+            )
         frame_ns: Int64[ndarray, " n"] = rig.frame_ns()
         self.timer.capture_s = float(frame_ns[-1] - frame_ns[0]) / 1e9
         writing.send_capture_properties(
@@ -467,13 +506,59 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             + ("frames at the middle row's mid-exposure time" if profiled else "frames at the raw exposure-record stamps (no device profile)"),
         )
 
-    def write_panorama(self, recording: rr.RecordingStream, rig: insta360_io.InsvRig, base: Path) -> None:
+    def write_lens_videos(self, recording: rr.RecordingStream, rig: insta360_io.InsvRig, halvings: int) -> None:
+        """Store both lens videos box-filtered ``halvings`` times and encoded AV1 (``AV1_CQ``, a keyframe every
+        ``AV1_GOP``), on the clip's frame times (``insta360_lens_video``).
+
+        Lens ``k`` is read through the rig as lens ``k`` (whichever track holds it, its ``stream_id``) and becomes ``cam_0k``.
+        On ``lens_device`` ``cuda`` no picture leaves the GPU: NVDEC (``decode_runs``), the box filter, NVENC from device
+        memory (SVT-AV1 from host memory where NVENC does not encode AV1).
+
+        Raises:
+            ValueError: If an encoder takes or a stream holds another number of frames than the clip has framesets.
+        """
+        width, height = rig.resolution
+        scale: int = 1 << halvings
+        device: torch.device = torch.device(self.config.lens_device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+        def stored(pictures: UInt8[Tensor, "b 3 h w"]) -> UInt8[Tensor, "b 3 hs ws"]:
+            if scale == 1:
+                return pictures
+            return torch.nn.functional.avg_pool2d(pictures.float(), scale).round_().to(torch.uint8)
+
+        indices: Int64[ndarray, " n"] = np.arange(rig.num_frames, dtype=np.int64)
+        with work_dir("insta360-lens-") as work:
+            videos: list[Path] = [work / f"lens{lens}.mp4" for lens in range(2)]
+            with self.timer.stage("base:lenses"):
+                batch: int = max(1, LENS_BATCH_PIXELS // (width * height))
+                pictures = lens_pictures(rig, indices, device, batch=batch, threads=self.config.decode_threads)
+                fed: int = encode_videos(
+                    (torch.stack([stored(lens0), stored(lens1)]) for lens0, lens1 in pictures),
+                    videos,
+                    width=width // scale,
+                    height=height // scale,
+                    gop=AV1_GOP,
+                    cq=AV1_CQ,
+                    device=device,
+                    codec=av1_codec(),
+                )
+            if fed != rig.num_frames:
+                raise ValueError(f"the lens encoders took {fed} frames for {rig.num_frames} framesets")
+            times_ns: Int64[ndarray, " n"] = rig.frame_ns() - rig.start_ns
+            for lens, video in enumerate(videos):
+                samples: int = log_video_stream(recording, video, schema.video_path(RIG, lens), times_ns=times_ns)
+                if samples != rig.num_frames:
+                    raise ValueError(f"cam_{lens:02d} holds {samples} frames for {rig.num_frames} framesets")
+
+    def write_panorama(self, recording: rr.RecordingStream, base: Path) -> None:
         """Join every frameset's two lens images into the panorama (frame ``E``, module docstring) and log it as AV1 on the frame times.
 
-        The tables come from the two cameras as the base recording states them (``cameras_from_recording``). On
-        ``pano_device`` ``cuda`` no picture leaves the GPU: NVDEC, remap, flow seam, NVENC.
+        The tables come from the two cameras as the base recording states them (``cameras_from_recording``), the pictures
+        from its lens videos (``BaseLensVideos``). On ``pano_device`` ``cuda`` no picture leaves the GPU: NVDEC, remap,
+        flow seam, NVENC.
         """
         lenses: LensCameras = cameras_from_recording(base)
+        source: BaseLensVideos = base_lens_videos(base)
         width: int = self.config.pano_width or insta360_panorama.default_panorama_width(lenses.size[0])
         table: insta360_panorama.PanoramaTable = insta360_panorama.panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, width, self.config.pano_band_deg)
         width, height = table.size
@@ -497,7 +582,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             video: Path = work / "pano.mp4"
             with self.timer.stage("panorama"):
                 batch: int = max(1, LENS_BATCH_PIXELS // (lenses.size[0] * lenses.size[1]))
-                pictures = lens_pictures(rig, np.arange(rig.num_frames, dtype=np.int64), device, batch=batch, threads=self.config.decode_threads)
+                pictures = lens_pictures(source, np.arange(source.num_frames, dtype=np.int64), device, batch=batch, threads=self.config.decode_threads)
                 fed: int = encode_videos(
                     (join.panoramas(lens0, lens1)[None] for lens0, lens1 in pictures),
                     [video],
@@ -508,13 +593,13 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     device=device,
                     codec=av1_codec(),
                 )
-            if fed != rig.num_frames:
-                raise ValueError(f"the panorama encoder took {fed} frames for {rig.num_frames} framesets")
-            samples: int = log_video_stream(recording, video, PANO_ENTITY, times_ns=rig.frame_ns() - rig.start_ns)
-        if samples != rig.num_frames:
-            raise ValueError(f"the panorama holds {samples} frames for {rig.num_frames} framesets")
+            if fed != source.num_frames:
+                raise ValueError(f"the panorama encoder took {fed} frames for {source.num_frames} framesets")
+            samples: int = log_video_stream(recording, video, PANO_ENTITY, times_ns=source.times_ns)
+        if samples != source.num_frames:
+            raise ValueError(f"the panorama holds {samples} frames for {source.num_frames} framesets")
 
-    def write_cube(self, recording: rr.RecordingStream, rig: insta360_io.InsvRig, base: Path) -> None:
+    def write_cube(self, recording: rr.RecordingStream, base: Path) -> None:
         """Join every sampled frameset's two lens images into the six cube faces and log each face as AV1 on the frameset's stamp.
 
         On ``cube_device``: both lenses decoded batch by batch, each face one remap of the stacked pair, six encoders fed from
@@ -522,8 +607,9 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         """
         lenses: LensCameras = cameras_from_recording(base)
         size: int = self.config.cube_face_size or cube.default_face_size(lenses.size[0])
-        indices: Int64[ndarray, " k"] = cube_indices(rig.num_frames, self.config.cube_stride, self.config.cube_max_framesets)
-        times_ns: Int64[ndarray, " k"] = rig.frame_ns()[indices] - rig.start_ns
+        source: BaseLensVideos = base_lens_videos(base)
+        indices: Int64[ndarray, " k"] = cube_indices(source.num_frames, self.config.cube_stride, self.config.cube_max_framesets)
+        times_ns: Int64[ndarray, " k"] = source.times_ns[indices]
         faces: list[cube.CubeFace] = cube.cube_faces(size)
         tables: list[cube.FaceTable] = [cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces]
         recording.send_property(
@@ -557,7 +643,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
             videos: list[Path] = [work / f"{face.name}.mp4" for face in faces]
             with self.timer.stage("cube:faces"):
                 batch: int = max(1, LENS_BATCH_PIXELS // (lenses.size[0] * lenses.size[1]))
-                pictures = lens_pictures(rig, indices, device, batch=batch, threads=self.config.decode_threads)
+                pictures = lens_pictures(source, indices, device, batch=batch, threads=self.config.decode_threads)
                 fed: int = encode_videos(
                     (join.faces(lens0, lens1) for lens0, lens1 in pictures),
                     videos,
