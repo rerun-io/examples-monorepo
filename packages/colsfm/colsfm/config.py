@@ -58,6 +58,55 @@ class ColsfmProfileConfig:
     """`colsfm.loop_closure.LoopClosureConfig.max_prior_translation_m`; None = no prior-consistency gate."""
     loop_max_prior_rotation_deg: float | None = None
     """`colsfm.loop_closure.LoopClosureConfig.max_prior_rotation_deg`; None = no prior-consistency gate."""
+    prior_overlap_pairs_per_image: int = 0
+    """`PriorOverlapConfig.pairs_per_image`; 0 = no prior-overlap pairs (cuSFM's pair list)."""
+    prior_overlap_max_axis_angle_deg: float = 60.0
+    """`PriorOverlapConfig.max_axis_angle_deg`."""
+    prior_overlap_max_centre_distance_m: float = 2.0
+    """`PriorOverlapConfig.max_centre_distance_m`."""
+    prior_overlap_suppression_rig_frames: int = 2
+    """`PriorOverlapConfig.suppression_rig_frames`."""
+
+
+@dataclass(frozen=True, slots=True)
+class PriorOverlapConfig:
+    """Pair images of any two cameras whose prior views overlap (`colsfm.pairs.prior_overlap_pairs`)."""
+
+    pairs_per_image: int
+    """Partners each image proposes; the pair count is at most this times the image count."""
+    max_axis_angle_deg: float = 60.0
+    """Largest angle between the two prior optical axes."""
+    max_centre_distance_m: float = 2.0
+    """Largest distance between the two prior camera centres."""
+    suppression_rig_frames: int = 2
+    """One image's partners lie at least this many rig frames apart, so the frames next to it cannot take its budget."""
+
+    def __post_init__(self) -> None:
+        if self.pairs_per_image < 1:
+            raise ValueError(f"pairs_per_image is {self.pairs_per_image}, which should be at least 1")
+        if not 0.0 < self.max_axis_angle_deg <= 180.0:
+            raise ValueError(f"max_axis_angle_deg is {self.max_axis_angle_deg}, which should be in (0, 180]")
+        if self.suppression_rig_frames < 1:
+            raise ValueError(f"suppression_rig_frames is {self.suppression_rig_frames}, which should be at least 1")
+
+    @classmethod
+    def of(cls, profile: ColsfmProfileConfig) -> PriorOverlapConfig | None:
+        """The profile's rule, or None when it asks for no prior-overlap pairs.
+
+        Args:
+            profile: The profile's `colsfm.toml`.
+
+        Returns:
+            The rule, or None.
+        """
+        if profile.prior_overlap_pairs_per_image == 0:
+            return None
+        return cls(
+            pairs_per_image=profile.prior_overlap_pairs_per_image,
+            max_axis_angle_deg=profile.prior_overlap_max_axis_angle_deg,
+            max_centre_distance_m=profile.prior_overlap_max_centre_distance_m,
+            suppression_rig_frames=profile.prior_overlap_suppression_rig_frames,
+        )
 
 
 def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
@@ -316,6 +365,8 @@ class PoseGraphConfig:
     """From `colsfm.toml` (`LoopClosureConfig.max_prior_translation_m`)."""
     loop_max_prior_rotation_deg: float | None = None
     """From `colsfm.toml` (`LoopClosureConfig.max_prior_rotation_deg`)."""
+    prior_overlap: PriorOverlapConfig | None = None
+    """From `colsfm.toml`: the prior-overlap pair rule, or None for cuSFM's pair list."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,6 +643,7 @@ def read_config_directory(
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
             loop_max_prior_translation_m=profile.loop_max_prior_translation_m,
             loop_max_prior_rotation_deg=profile.loop_max_prior_rotation_deg,
+            prior_overlap=PriorOverlapConfig.of(profile),
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),

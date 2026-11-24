@@ -23,7 +23,7 @@ import pycolmap
 from jaxtyping import Int
 from numpy import ndarray
 
-from colsfm.config import CusfmConfig, KeyframeSelectionConfig, PoseGraphConfig, read_config_directory
+from colsfm.config import CusfmConfig, KeyframeSelectionConfig, PoseGraphConfig, PriorOverlapConfig, read_config_directory
 from colsfm.database import (
     Descriptors,
     ImagePair,
@@ -63,7 +63,7 @@ from colsfm.matching import (
     MatchReport,
     match_pairs,
 )
-from colsfm.pairs import select_pairs
+from colsfm.pairs import pair_mix, select_pairs
 from colsfm.pose_graph import PoseGraphEdge, PoseGraphResult, RigNode, sequential_edges, solve_pose_graph
 from colsfm.reconstruction import PosedModel, build_reconstruction, gauge_camera_params_id
 from colsfm.retrieval import RetrievalIndex, build_retrieval_index
@@ -294,10 +294,12 @@ def run_pair_selection_stage(selected: FramesMeta, config: CusfmConfig) -> list[
     Raises:
         ValueError: When `connected_keyframe_num` is below 1.
     """
-    pairs: list[ImagePair] = select_pairs(selected, config.pose_graph.connected_keyframe_num)
+    prior_overlap: PriorOverlapConfig | None = config.pose_graph.prior_overlap
+    pairs: list[ImagePair] = select_pairs(selected, config.pose_graph.connected_keyframe_num, prior_overlap)
     print(
         f"[colsfm] {len(pairs)} pairs from connected_keyframe_num="
         f"{config.pose_graph.connected_keyframe_num} and {len(selected.stereo_pairs)} stereo declarations"
+        + ("" if prior_overlap is None else f" and prior overlap ({pair_mix(selected, pairs)})")
     )
     return pairs
 

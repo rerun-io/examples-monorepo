@@ -23,8 +23,13 @@ Pairs are normalised to `(min, max)`, deduplicated and sorted, which is what
 pose-graph order instead; only byte-identical task files would notice, and the
 matcher is order independent.
 
-Note the stage cannot invent cross-camera pairs beyond the stereo baseline: all
-other cross-camera connectivity comes from loop closure.
+Those rules cannot pair two cameras beyond a declared stereo baseline, and loop
+closure pairs a camera only with itself. A rig whose cameras never share a view inside
+one frame (the six faces of a 360 cube) then has no cross-camera pair at all, so its
+intrinsics and rig cannot be estimated, and its long-range links are few (Mission
+office: 0 of 6,470 verified pairs cross-face; ~2,860 pairs more than 10 rig frames
+apart against Spirula's ~23,000). `prior_overlap_pairs` is colsfm's fourth rule, off by
+default: it pairs any two images whose *prior* views overlap, at a fixed budget per image.
 """
 
 from __future__ import annotations
@@ -32,6 +37,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
+from jaxtyping import Float64, Int64
+from numpy import ndarray
+
+from colsfm.config import PriorOverlapConfig
 from colsfm.database import ImagePair, image_ids_by_name
 from colsfm.frames_meta import FramesMeta, KeyframeMeta, RigFrame
 
@@ -111,7 +121,70 @@ def stereo_pairs(frames_meta: FramesMeta) -> list[ImagePair]:
     return sorted(pairs)
 
 
-def select_pairs(frames_meta: FramesMeta, connected_keyframe_num: int = 1) -> list[ImagePair]:
+def prior_overlap_proposals(frames_meta: FramesMeta, config: PriorOverlapConfig, connected_keyframe_num: int) -> dict[int, list[int]]:
+    """The partners each image proposes from its prior view overlap.
+
+    Candidates are the images of any camera in another rig frame whose prior optical
+    axis is within `max_axis_angle_deg` and whose centre is within
+    `max_centre_distance_m`, less the same-camera images CONSECUTIVE already pairs.
+    Each image takes the best-aligned candidates first, skipping any candidate within
+    `suppression_rig_frames` of one it already took, until it holds `pairs_per_image`.
+    The suppression is what keeps long-range links: without it the rig frames next to
+    an image, whose views overlap it most, would take the whole budget.
+
+    Args:
+        frames_meta: The collection, with prior `world_T_cam` poses.
+        config: The rule.
+        connected_keyframe_num: CONSECUTIVE's lookahead; those same-camera pairs are left out.
+
+    Returns:
+        Partner keyframe ids per keyframe id, best-aligned first.
+    """
+    keyframes: list[KeyframeMeta] = sorted(frames_meta.keyframes, key=lambda entry: entry.keyframe_id)
+    position: dict[int, int] = {rig_frame.synced_sample_id: index for index, rig_frame in enumerate(frames_meta.rig_frames())}
+    axes: Float64[ndarray, "num_images 3"] = np.array([keyframe.world_T_cam.rotation.matrix()[:, 2] for keyframe in keyframes])
+    centres: Float64[ndarray, "num_images 3"] = np.array([np.asarray(keyframe.world_T_cam.translation) for keyframe in keyframes])
+    frames: Int64[ndarray, " num_images"] = np.array([position[keyframe.synced_sample_id] for keyframe in keyframes], dtype=np.int64)
+    cameras: Int64[ndarray, " num_images"] = np.array([keyframe.camera_params_id for keyframe in keyframes], dtype=np.int64)
+    cos_limit: float = float(np.cos(np.radians(config.max_axis_angle_deg)))
+    proposals: dict[int, list[int]] = {}
+    for row, keyframe in enumerate(keyframes):
+        cosines: Float64[ndarray, " num_images"] = axes @ axes[row]
+        gaps: Int64[ndarray, " num_images"] = np.abs(frames - frames[row])
+        consecutive: np.ndarray = (cameras == cameras[row]) & (gaps <= connected_keyframe_num)
+        near: np.ndarray = np.linalg.norm(centres - centres[row], axis=1) <= config.max_centre_distance_m
+        candidates: Int64[ndarray, " num_candidates"] = np.flatnonzero((cosines >= cos_limit) & near & (gaps > 0) & ~consecutive)
+        taken_frames: list[int] = []
+        partners: list[int] = []
+        for candidate in candidates[np.argsort(-cosines[candidates], kind="stable")]:
+            if len(partners) == config.pairs_per_image:
+                break
+            if any(abs(int(frames[candidate]) - taken) < config.suppression_rig_frames for taken in taken_frames):
+                continue
+            taken_frames.append(int(frames[candidate]))
+            partners.append(keyframes[candidate].keyframe_id)
+        proposals[keyframe.keyframe_id] = partners
+    return proposals
+
+
+def prior_overlap_pairs(frames_meta: FramesMeta, config: PriorOverlapConfig, connected_keyframe_num: int) -> list[ImagePair]:
+    """Pair images of any two cameras whose prior views overlap; see `prior_overlap_proposals`.
+
+    Args:
+        frames_meta: The collection, with prior `world_T_cam` poses.
+        config: The rule.
+        connected_keyframe_num: CONSECUTIVE's lookahead; those same-camera pairs are left out.
+
+    Returns:
+        Normalised, deduplicated, sorted pairs; at most `pairs_per_image` times the image count.
+    """
+    proposals: dict[int, list[int]] = prior_overlap_proposals(frames_meta, config, connected_keyframe_num)
+    return sorted({normalise_pair(keyframe_id, partner) for keyframe_id, partners in proposals.items() for partner in partners})
+
+
+def select_pairs(
+    frames_meta: FramesMeta, connected_keyframe_num: int = 1, prior_overlap: PriorOverlapConfig | None = None
+) -> list[ImagePair]:
     """Build the whole matching pair list for a collection.
 
     Loop pairs are deliberately absent: they only exist after retrieval and
@@ -122,6 +195,7 @@ def select_pairs(frames_meta: FramesMeta, connected_keyframe_num: int = 1) -> li
     Args:
         frames_meta: The keyframes to match, already filtered by keyframe selection.
         connected_keyframe_num: Rig-frame lookahead for same-camera links.
+        prior_overlap: The prior-overlap rule, or None for cuSFM's two rules alone.
 
     Returns:
         Normalised, deduplicated, sorted `(image_id1, image_id2)` pairs.
@@ -131,7 +205,33 @@ def select_pairs(frames_meta: FramesMeta, connected_keyframe_num: int = 1) -> li
     """
     pairs: set[ImagePair] = set(consecutive_pairs(frames_meta, connected_keyframe_num))
     pairs.update(stereo_pairs(frames_meta))
+    if prior_overlap is not None:
+        pairs.update(prior_overlap_pairs(frames_meta, prior_overlap, connected_keyframe_num))
     return sorted(pairs)
+
+
+LONG_RANGE_RIG_FRAMES: int = 10
+"""`pair_mix` counts a pair as long-range above this many rig frames apart (the sfm-root yardstick)."""
+
+
+def pair_mix(frames_meta: FramesMeta, pairs: Sequence[ImagePair]) -> str:
+    """Say how many pairs join two cameras and how many span more than `LONG_RANGE_RIG_FRAMES`.
+
+    Args:
+        frames_meta: The collection the pairs index.
+        pairs: Image pairs.
+
+    Returns:
+        A short phrase for the run log.
+    """
+    keyframes: dict[int, KeyframeMeta] = frames_meta.keyframe_by_id()
+    position: dict[int, int] = {rig_frame.synced_sample_id: index for index, rig_frame in enumerate(frames_meta.rig_frames())}
+    cross: int = sum(keyframes[first].camera_params_id != keyframes[second].camera_params_id for first, second in pairs)
+    long_range: int = sum(
+        abs(position[keyframes[first].synced_sample_id] - position[keyframes[second].synced_sample_id]) > LONG_RANGE_RIG_FRAMES
+        for first, second in pairs
+    )
+    return f"{cross} cross-camera, {long_range} more than {LONG_RANGE_RIG_FRAMES} rig frames apart"
 
 
 def normalise_pair(image_id1: int, image_id2: int) -> ImagePair:
