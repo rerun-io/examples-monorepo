@@ -18,6 +18,7 @@ share it, and now do not, are:
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +43,7 @@ from numpy import ndarray
 
 from colsfm.config import CusfmConfig, VisionMappingConfig
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
-from colsfm.mapping import MappingResult, RoundStats, load_correspondences, pixel_error_schedule, run_mapping
+from colsfm.mapping import MappingResult, RoundStats, load_correspondences, pixel_error_schedule, run_mapping, triangulator_options
 from colsfm.reconstruction import RIG_ID, PosedModel, build_reconstruction, camera_sensor_id, gauge_rig_frame, rig_from_world, rig_sensor_from_rig
 
 
@@ -312,3 +313,19 @@ def test_the_round_callback_sees_every_round_as_it_finishes(synthetic_rig: Synth
     assert [entry[0] for entry in seen] == [stats.round_index for stats in result.rounds]
     assert all(reported == live for _index, reported, live in seen)
     assert seen[-1][1] == result.reconstruction.num_points3D()
+
+
+def test_the_merge_gate_can_be_capped_below_the_round_gate(isaac_config: CusfmConfig) -> None:
+    """`max_merge_pixel_error` caps where tracks merge; completion keeps the round's gate.
+
+    With many cross-time pairs (prior-overlap pairs on MSD MGO05) merging at the first rounds' 20-25 px fused tracks
+    of different points: 12.5 views per track, ATE 18.9 mm against 13.8 mm without those pairs; capping the merge at
+    5 px gave 14.8 mm.
+    """
+    capped: VisionMappingConfig = dataclasses.replace(isaac_config.vision_mapping, max_merge_pixel_error=5.0)
+    loose: pycolmap.IncrementalTriangulatorOptions = triangulator_options(capped, 25.0)
+    assert loose.merge_max_reproj_error == 5.0
+    assert loose.complete_max_reproj_error == 25.0
+    assert triangulator_options(capped, 4.0).merge_max_reproj_error == 4.0
+    default: pycolmap.IncrementalTriangulatorOptions = triangulator_options(isaac_config.vision_mapping, 25.0)
+    assert default.merge_max_reproj_error == 25.0

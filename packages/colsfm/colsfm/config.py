@@ -66,6 +66,8 @@ class ColsfmProfileConfig:
     """`PriorOverlapConfig.max_centre_distance_m`."""
     prior_overlap_suppression_rig_frames: int = 2
     """`PriorOverlapConfig.suppression_rig_frames`."""
+    max_merge_pixel_error: float | None = None
+    """`VisionMappingConfig.max_merge_pixel_error`; None = merge under each round's gate, as cuSFM does."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,11 +434,17 @@ class VisionMappingConfig:
     """Refine stage drops the robust loss."""
     bundle_adjustment: BundleAdjustmentConfig
     """Ceres settings for the mapping BA."""
+    max_merge_pixel_error: float | None = None
+    """From `colsfm.toml`: tracks merge under `min(round gate, this)`; completion and filtering keep the round's gate.
+    None = cuSFM's single gate. A dense cross-time match graph needs it: merging at the first rounds' 20-25 px fuses
+    tracks of different points (`colsfm.mapping.triangulator_options`)."""
 
     def __post_init__(self) -> None:
         # Every range comparison with a NaN limit is False, so a NaN here would empty the map; a non-positive one too.
         if not (math.isfinite(self.depth_threshold) and self.depth_threshold > 0.0):
             raise ValueError(f"vision_mapping_config.depth_threshold must be finite and positive, got {self.depth_threshold}")
+        if self.max_merge_pixel_error is not None and not (math.isfinite(self.max_merge_pixel_error) and self.max_merge_pixel_error > 0.0):
+            raise ValueError(f"max_merge_pixel_error must be finite and positive, got {self.max_merge_pixel_error}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,5 +683,6 @@ def read_config_directory(
             refine_ba_use_fixed_max_pixel_error=bool(mapping_message.refine_ba_use_fixed_max_pixel_error),
             refine_ba_avoid_loss_function=bool(mapping_message.refine_ba_avoid_loss_function),
             bundle_adjustment=_bundle_adjustment(mapping_message.bundle_adjustment_config, resolved_schema),
+            max_merge_pixel_error=profile.max_merge_pixel_error,
         ),
     )

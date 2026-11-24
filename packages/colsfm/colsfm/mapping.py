@@ -326,11 +326,13 @@ def triangulator_options(mapping_config: VisionMappingConfig, max_pixel_error: f
         max_pixel_error: The round's reprojection gate, in pixels.
 
     Returns:
-        Options with the module docstring's overrides applied.
+        Options with the module docstring's overrides applied; tracks merge under
+        `min(max_pixel_error, mapping_config.max_merge_pixel_error)` when the profile caps it.
     """
     options: pycolmap.IncrementalTriangulatorOptions = pycolmap.IncrementalTriangulatorOptions()
     options.min_angle = mapping_config.min_triangulation_deg
-    options.merge_max_reproj_error = max_pixel_error
+    merge_cap: float | None = mapping_config.max_merge_pixel_error
+    options.merge_max_reproj_error = max_pixel_error if merge_cap is None else min(max_pixel_error, merge_cap)
     options.complete_max_reproj_error = max_pixel_error
     options.ignore_two_view_tracks = mapping_config.min_correspondences > 2
     options.random_seed = mapping_config.random_seed
