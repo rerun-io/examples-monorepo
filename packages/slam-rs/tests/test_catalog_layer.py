@@ -17,7 +17,7 @@ from rerun.catalog import DatasetEntry
 from slam_rs.apis import catalog_layer as catalog_layer_api
 from slam_rs.catalog_feed import CatalogSegment
 from slam_rs.catalog_layer import write_layer
-from slam_rs.follow_frame import floor_entity, follow_entity
+from slam_rs.follow_frame import follow_entity
 from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
 
@@ -93,9 +93,8 @@ def test_each_run_gets_its_level_follow_frame(tmp_path: Path, read_rows: RowsRea
 
 
 def test_the_run_scoped_names_are_the_ones_the_dataforge_layouts_read() -> None:
-    """dataforge's Insta360 layout roots its follow views at ``schema.follow_path(source)`` and shows ``schema.floor_path(source)``."""
+    """dataforge's Insta360 layout roots its follow views at ``schema.follow_path(source)``."""
     assert follow_entity("/world/runs/slam_rs") == schema.follow_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/follow"
-    assert floor_entity("/world/runs/slam_rs_vio") == schema.floor_path(schema.SLAM_RS_VIO_SOURCE) == "/world/runs/slam_rs_vio/floor_grid"
 
 
 class _FakeCalibration:

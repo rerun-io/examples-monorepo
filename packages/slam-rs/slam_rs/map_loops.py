@@ -72,13 +72,31 @@ def correction_segments(raw_poses: Float64[ndarray, "k 7"], corrected_poses: Flo
 
 
 def log_loops(keyframes: _core.MapKeyframes) -> None:
-    """Draw the map's loops and corrections at the current cursor (an empty set is logged too, which clears old ones)."""
+    """Draw the map's loops at the current cursor: every loop it holds, each between its keyframes' current positions
+    (an empty set is logged too, which clears old ones)."""
     segments: Float64[ndarray, "l 2 3"] = loop_segments(keyframes.t_ns, keyframes.poses, keyframes.loop_edges)
     fused: Bool[ndarray, " l"] = keyframes.loop_fused
     colors: UInt8[ndarray, "l 4"] = np.where(fused[:, None], np.array(FUSED_LOOP_COLOR, dtype=np.uint8), np.array(PGO_LOOP_COLOR, dtype=np.uint8))
     rr.log(LOOPS_ENTITY, rr.LineStrips3D(list(segments), colors=colors, radii=0.006))
+
+
+def log_corrections(keyframes: _core.MapKeyframes, *, shown: bool) -> bool:
+    """Draw the pose-graph corrections at the current cursor when there are any; clear them once when there are none.
+
+    Args:
+        keyframes: The map's keyframes as read.
+        shown: Whether corrections are drawn from an earlier cursor on.
+
+    Returns:
+        Whether corrections are drawn from this cursor on.
+    """
     corrections: Float64[ndarray, "m 2 3"] = correction_segments(keyframes.raw_poses, keyframes.poses)
-    rr.log(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D(list(corrections), colors=PGO_CORRECTION_COLOR, radii=0.004))
+    if len(corrections):
+        rr.log(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D(list(corrections), colors=PGO_CORRECTION_COLOR, radii=0.004))
+        return True
+    if shown:
+        rr.log(PGO_CORRECTIONS_ENTITY, rr.Clear(recursive=False))
+    return False
 
 
 def log_pose_graph(map_snapshot: _core.MapSnapshot) -> None:

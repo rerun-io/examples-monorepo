@@ -7,6 +7,7 @@ alignment to the ground truth. Until the final run exists, ``slam_rs`` repeats t
 sits on the raw run while the replay plays.
 """
 
+import colorsys
 import itertools
 import time
 from collections.abc import Sequence
@@ -23,10 +24,10 @@ from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
-from slam_rs.follow_frame import FloorGrid, FloorHeight, HeadingFilter, floor_entity, floor_grid, follow_entity, follow_yaw, yaw_quaternion_xyzw
+from slam_rs.follow_frame import HeadingFilter, follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
 from slam_rs.landmark_colors import LandmarkColors
-from slam_rs.map_loops import RUN_ENTITY, log_loops, log_pose_graph
+from slam_rs.map_loops import RUN_ENTITY, log_corrections, log_loops, log_pose_graph
 from slam_rs.map_point_blocks import MapPointBlocks
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, PoseLog, Trajectory, ate
@@ -104,19 +105,33 @@ IMAGE_PLANE_M: float = 0.1
 """How far a rig camera's ``Pinhole`` frustum extends, metres: Rerun's default grows with the scene, so they changed size as landmarks came in."""
 ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
-ROUTE_ALPHA: int = 40
-"""How opaque a whole path is (:meth:`VioLogger.log_complete_paths`) beside the trail drawn up to the cursor."""
 SlotFamily: TypeAlias = Literal["window", "marginalized"]
 """The two families of numbered frame slots under the run: the estimator's window, and what its last marginalization removed."""
 UNIFIED_SPHERE_MODELS: tuple[str, ...] = ("mei_v3", "mei_v6", "ds")
 """Camera models whose focal is the unified sphere's ``gamma`` and whose first coefficient is ``xi`` (:func:`display_intrinsics`)."""
-FLOOR_GRID_RADIUS_UI: float = 0.5
-"""Stroke of a floor-grid edge, ui points: hairlines at every zoom."""
-ROUTE_RADIUS_M: float = 0.0015
-"""How thick a whole path is, metres: under half the trail's, so the two read as one line and its ghost."""
+WALK_GO_HUE: float = 120.0
+"""Hue of the raw run's path at the start of the walk: green."""
+WALK_STOP_HUE: float = 0.0
+"""Hue of the raw run's path at the end of the walk: red, through yellow and orange (HSV, so no muddy brown between)."""
+WALK_SATURATION: float = 0.85
+"""Saturation of the walk gradient."""
+ENDPOINT_RADIUS_UI: float = 9.0
+"""Radius of the start and end dots of the raw run's path, ui points."""
+START_RING_M: float = 0.25
+"""Radius of the ring around the start dot, metres: the walk passes the start again, the ring tells the two apart."""
 
 IDENTITY: SimilarityTransform = SimilarityTransform(dst_R_src=np.eye(3), dst_t_src=np.zeros(3), scale=1.0)
 """The alignment a run carries before enough of it has been associated with the ground truth."""
+
+
+def walk_colors(t_ns: Int64[ndarray, " n"], first_ns: int, last_ns: int) -> UInt8[ndarray, "n 3"]:
+    """The walk gradient at each stamp: green at ``first_ns``, through yellow, to red at ``last_ns`` (HSV hue
+    :data:`WALK_GO_HUE` to :data:`WALK_STOP_HUE`). colsfm draws its path with the same gradient (``colsfm.rerun_layer``;
+    a test pins both to the same colours).
+    """
+    fraction: Float64[ndarray, " n"] = np.clip((t_ns - first_ns) / max(last_ns - first_ns, 1), 0.0, 1.0)
+    rgb: list[tuple[float, float, float]] = [colorsys.hsv_to_rgb((WALK_GO_HUE + (WALK_STOP_HUE - WALK_GO_HUE) * f) / 360.0, WALK_SATURATION, 1.0) for f in fraction]
+    return np.round(np.asarray(rgb, dtype=np.float64).reshape(-1, 3) * 255.0).astype(np.uint8)
 
 
 def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_frames"]) -> Trajectory:
@@ -259,16 +274,20 @@ class VioLogger:
     """Also move the dataset's rig (``/world/rig_00``) with the raw VIO pose: only for a replay viewed on its own, on a
     segment without ground truth. Off, the rig belongs to the layers that own it: ``gt``, or the catalog ``slam_rs``
     layer, which writes the final poses there (:func:`slam_rs.catalog_layer.write_layer`). Each run's level follow
-    frame and floor are written either way (:mod:`slam_rs.follow_frame`): the raw run's as it goes, the final run's
-    with it (:meth:`log_final_run`)."""
+    frame is written either way (:mod:`slam_rs.follow_frame`): the raw run's as it goes, the final run's with it
+    (:meth:`log_final_run`)."""
     video_entities: tuple[str, ...] = ()
     """The dataset's ``VideoStream`` of each camera, in :attr:`cameras` order. With them the run's rig references the
     current frame of each lens under its ``pinhole`` and a window keyframe the frames of its own time
     (``VideoFrameReference``: nothing is encoded again); empty, the frusta stay empty."""
     heading: HeadingFilter = field(default_factory=HeadingFilter)
     """The follow frame's heading so far: the direction of travel, low-passed."""
-    floor_height: FloorHeight = field(default_factory=FloorHeight)
-    """The rig's height over the floor so far, from the landmarks each window held around it."""
+    loops_as_found: bool = True
+    """Draw the map's loops at every map read, as the back end finds them (a live run). Off (a replay), the loops are
+    drawn once, the final set at the end (:meth:`log_final_map`): a replay's loops would otherwise stand from their
+    detection on, each drawn again at every read."""
+    corrections_shown: bool = False
+    """Whether pose-graph corrections are drawn from the last map read on (:func:`slam_rs.map_loops.log_corrections`)."""
     poses: PoseLog = field(default_factory=PoseLog)
     """Every pose the run reported, for the CSV export, the ATE and the per-frameset path segment."""
     ground_truth_strip: Trajectory = field(init=False)
@@ -356,7 +375,6 @@ class VioLogger:
             rr.log(RIG_ENTITY, rig_pose)
         half_yaw: float = 0.5 * self.heading.update(result.t_ns, pose[0:3])
         rr.log(follow_entity(VIO_RUN_ENTITY), rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)])))
-        self.floor_height.add(pose[0:3], snapshot.landmark_positions.astype(np.float64))
         if colors is not None:
             for camera, color in enumerate(colors):
                 self.landmark_colors.remember(frame.ids(camera), frame.positions(camera), color, self.tracked_resolution[camera])
@@ -391,50 +409,31 @@ class VioLogger:
         return self.poses.trajectory()
 
     def log_complete_paths(self) -> None:
-        """Log each whole path once, static, so all three are visible at every cursor.
+        """Log each whole path once, at the cursor the caller set (the last frameset's), with the raw run's endpoints.
 
-        The per-frameset segments show where each run had got to; these show
-        where it went. Static rows have no timestamp, so they cost one copy of
-        each path however long the clip is.
-
-        They are drawn faded and thin (:data:`ROUTE_ALPHA`,
-        :data:`ROUTE_RADIUS_M`) for the same reason the frames the last
-        marginalization removed are: two things in one place have to be told
-        apart. At full colour and radius the route covers the trail exactly, and
-        a cursor halfway through a clip looks like a cursor at the end of it.
+        The per-frameset segments show where each run had got to, within a view's visible time range; the
+        ``trajectory_full`` entities show where it went, from the end of the walk on, so no whole path stands over a
+        cursor halfway through the clip. The raw run's path keeps its walk gradient (:func:`walk_colors`); its start
+        dot (with a ring, static) and end dot (from this cursor on) say where it began and ended.
         """
-        for entity, trajectory, color in (
-            (f"{VIO_RUN_ENTITY}/path", self.estimated(), ESTIMATE_COLOR),
-            (f"{GT_ENTITY}/path", self.ground_truth_strip, GT_COLOR),
-        ):
-            if len(trajectory) < 2:
-                continue
-            rr.log(entity, rr.LineStrips3D([trajectory.position_m], colors=(*color, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
-        self.log_floor_grid(VIO_RUN_ENTITY, self.estimated())
+        estimated: Trajectory = self.estimated()
+        if len(estimated) >= 2:
+            colors: UInt8[ndarray, "n 3"] = self.walk_colors(estimated.t_ns)
+            segments: Float64[ndarray, "s 2 3"] = np.stack([estimated.position_m[:-1], estimated.position_m[1:]], axis=1)
+            rr.log(f"{VIO_RUN_ENTITY}/trajectory_full", rr.LineStrips3D(list(segments), colors=colors[1:], radii=0.004))
+            start, end = estimated.position_m[0], estimated.position_m[-1]
+            endpoint = rr.Radius.ui_points(ENDPOINT_RADIUS_UI)
+            rr.log(f"{VIO_RUN_ENTITY}/endpoints/start", rr.Points3D([start], colors=colors[:1], radii=endpoint, labels=["start"], show_labels=True), static=True)
+            angles: Float64[ndarray, " k"] = np.linspace(0.0, 2.0 * np.pi, 49)
+            ring: Float64[ndarray, "k 3"] = start + START_RING_M * np.stack([np.cos(angles), np.sin(angles), np.zeros_like(angles)], axis=1)
+            rr.log(f"{VIO_RUN_ENTITY}/endpoints/start_ring", rr.LineStrips3D([ring], colors=colors[:1], radii=rr.Radius.ui_points(2.5)), static=True)
+            rr.log(f"{VIO_RUN_ENTITY}/endpoints/end", rr.Points3D([end], colors=colors[-1:], radii=endpoint, labels=["end"], show_labels=True))
+        if len(self.ground_truth_strip) >= 2:
+            rr.log(f"{GT_ENTITY}/trajectory_full", rr.LineStrips3D([self.ground_truth_strip.position_m], colors=GT_COLOR, radii=0.004))
 
-    def log_floor_grid(self, run_entity: str, trajectory: Trajectory) -> None:
-        """Lay the floor grid under one run's walk, when the landmarks around the rig gave a floor.
-
-        The grid lies the rig's carrying height (:attr:`floor_height`) under ``trajectory``. Its edges go on
-        ``video_time`` at the time the walk passed them, a row per stamp, so a view chooses how much of the floor it
-        shows around the cursor.
-
-        Args:
-            run_entity: The run the floor belongs to (:func:`slam_rs.follow_frame.floor_entity`).
-            trajectory: That run's poses, on the estimator's clock.
-        """
-        height: float | None = self.floor_height.height_m()
-        if height is None or len(trajectory) < 2:
-            return
-        grid: FloorGrid = floor_grid(trajectory.t_ns, trajectory.position_m, height)
-        stamps, counts = np.unique(grid.t_ns, return_counts=True)
-        entity: str = floor_entity(run_entity)
-        rr.send_columns(
-            entity,
-            indexes=[rr.TimeColumn(TIMELINE, duration=(stamps - self.cam_time_offset_ns).astype("timedelta64[ns]"))],
-            columns=rr.LineStrips3D.columns(strips=grid.strips, colors=grid.colors).partition(counts.tolist()),
-        )
-        rr.log(entity, rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(FLOOR_GRID_RADIUS_UI)), static=True)
+    def walk_colors(self, t_ns: Int64[ndarray, " n"]) -> UInt8[ndarray, "n 3"]:
+        """The walk gradient at each stamp over the segment's framesets (:attr:`frame_t_ns`)."""
+        return walk_colors(t_ns, int(self.frame_t_ns[0]), int(self.frame_t_ns[-1])) if len(self.frame_t_ns) else walk_colors(t_ns, 0, 0)
 
     def _log_paths(self) -> None:
         """Draw the segment each trajectory gained at this cursor.
@@ -454,7 +453,8 @@ class VioLogger:
         t_ns: int = int(self.poses.t_ns[last])
         if last >= 1:
             segment: Float64[ndarray, "2 3"] = self.poses.position_m[last - 1 : last + 1].copy()
-            rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=ESTIMATE_COLOR, radii=0.004))
+            color: UInt8[ndarray, "1 3"] = self.walk_colors(np.array([t_ns], dtype=np.int64))
+            rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=color, radii=0.004))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 2:
             return
@@ -568,7 +568,7 @@ class VioLogger:
             map_snapshot: The map after :meth:`slam_rs._core.Vio.flush` (current in both modes).
             t_ns: Video time of the cursor the caller set, usually the last frameset's.
         """
-        self._log_map_keyframes(map_snapshot.map_keyframes, t_ns)
+        self._log_map_keyframes(map_snapshot.map_keyframes, t_ns, loops=True)
         # The end of the run: one entity holds the whole map from here on, where a layout's overrides find it.
         rr.log(MAP_POINT_BLOCKS_ENTITY, rr.Clear(recursive=True))
         rr.log(
@@ -590,16 +590,22 @@ class VioLogger:
         """
         if len(final) < 2:
             return
-        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D([final.position_m], colors=FINAL_COLOR, radii=0.004))
-        # What a view of the final run needs at every cursor, not only from the last frameset on: the whole path
-        # (static, as the raw run's), its level follow frame and its floor, on the walk's own times.
-        rr.log(f"{RUN_ENTITY}/path", rr.LineStrips3D([final.position_m], colors=(*FINAL_COLOR, ROUTE_ALPHA), radii=ROUTE_RADIUS_M), static=True)
+        rr.log(f"{RUN_ENTITY}/trajectory_full", rr.LineStrips3D([final.position_m], colors=FINAL_COLOR, radii=0.004))
+        # What a view of the final run needs on the walk's own times: a segment a pose (a view's visible time range
+        # makes the trail) and its level follow frame.
+        video_time = rr.TimeColumn(TIMELINE, duration=(final.t_ns - self.cam_time_offset_ns).astype("timedelta64[ns]"))
+        segments: Float64[ndarray, "s 2 3"] = np.stack([final.position_m[:-1], final.position_m[1:]], axis=1)
+        rr.send_columns(
+            f"{RUN_ENTITY}/trajectory",
+            indexes=[rr.TimeColumn(TIMELINE, duration=(final.t_ns[1:] - self.cam_time_offset_ns).astype("timedelta64[ns]"))],
+            columns=rr.LineStrips3D.columns(strips=list(segments)).partition([1] * len(segments)),
+        )
+        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D.from_fields(colors=FINAL_COLOR, radii=0.004), static=True)
         rr.send_columns(
             follow_entity(RUN_ENTITY),
-            indexes=[rr.TimeColumn(TIMELINE, duration=(final.t_ns - self.cam_time_offset_ns).astype("timedelta64[ns]"))],
+            indexes=[video_time],
             columns=rr.Transform3D.columns(translation=final.position_m, quaternion=yaw_quaternion_xyzw(follow_yaw(final.t_ns, final.position_m))),
         )
-        self.log_floor_grid(RUN_ENTITY, final)
         alignment: SimilarityTransform = IDENTITY
         if len(self.ground_truth) and len(final) >= MIN_ASSOCIATED_POSES:
             against_truth: AteResult = ate(final, self.ground_truth)
@@ -607,19 +613,22 @@ class VioLogger:
                 alignment = inverted(against_truth.alignment)
         log_alignment(RUN_ENTITY, alignment)
 
-    def _log_map_keyframes(self, keyframes: _core.MapKeyframes, t_ns: int) -> None:
-        """Draw the back end's keyframes (window ones in the window colour) and its loops at the cursor."""
+    def _log_map_keyframes(self, keyframes: _core.MapKeyframes, t_ns: int, *, loops: bool) -> None:
+        """Draw the back end's keyframes (window ones in the window colour), with ``loops`` its loops, and its pose-graph
+        corrections at the cursor."""
         colors: UInt8[ndarray, "k 4"] = np.where(
             keyframes.active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
         )
         rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(keyframes.poses[:, 0:3], colors=colors, radii=0.012))
-        log_loops(keyframes)
+        if loops:
+            log_loops(keyframes)
+        self.corrections_shown = log_corrections(keyframes, shown=self.corrections_shown)
         self.map_keyframes_t_ns = t_ns
 
     def _log_map_delta(self, map_delta: _core.MapDelta, t_ns: int) -> None:
         """While the run goes on: the keyframes and loops, the delta into :attr:`map_point_blocks`, and when the points
         are due the blocks it marked."""
-        self._log_map_keyframes(map_delta.map_keyframes, t_ns)
+        self._log_map_keyframes(map_delta.map_keyframes, t_ns, loops=self.loops_as_found)
         self.map_point_blocks.apply(
             map_delta.revision, map_delta.map_keyframes.t_ns, map_delta.changed_hosts, map_delta.point_counts, map_delta.point_ids, map_delta.points_world
         )
