@@ -1,4 +1,4 @@
-"""FullCircle helpers: nearest-frame fill, the view up hint, disk dilation, mask scales, and the lens calibration reader."""
+"""FullCircle helpers: the operator direction gate, nearest-frame fill, the view up hint, disk dilation, mask scales, and the lens calibration reader."""
 
 from __future__ import annotations
 
@@ -23,6 +23,52 @@ def test_fill_nearest_refuses_a_sequence_without_detections() -> None:
 
     with pytest.raises(ValueError, match="no person"):
         fill_nearest([None, None])
+
+
+def _unit(azimuth_deg: float) -> np.ndarray:
+    """A horizontal direction ``azimuth_deg`` from +Z towards +X."""
+    a: float = math.radians(azimuth_deg)
+    return np.array([math.sin(a), 0.0, math.cos(a)])
+
+
+def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
+    return math.degrees(math.acos(float(np.clip(a @ b, -1.0, 1.0))))
+
+
+def test_operator_direction_ignores_a_larger_false_detection_away_from_the_operator() -> None:
+    from posekit.models.fullcircle import OperatorDetections, operator_directions
+
+    # The operator at azimuth 0 (drifting 2 degrees a frame); frame 2 also boxes a desk 50 degrees away, larger than the operator.
+    frames: list[OperatorDetections] = [OperatorDetections(np.stack([_unit(2.0 * i)]), np.array([1.0])) for i in range(5)]
+    frames[2] = OperatorDetections(np.stack([_unit(4.0), _unit(54.0)]), np.array([1.0, 1.5]))
+    directions = operator_directions(frames, gate_deg=30.0, lost_after=3)
+    for i, direction in enumerate(directions):
+        assert direction is not None
+        assert _angle_deg(direction, _unit(2.0 * i)) < 0.5
+
+
+def test_operator_direction_starts_on_the_heaviest_cluster() -> None:
+    from posekit.models.fullcircle import OperatorDetections, operator_directions
+
+    # First frame: the operator split over two faces (10 degrees apart, total weight 1.6) and a lone false box (weight 1.0).
+    first: OperatorDetections = OperatorDetections(np.stack([_unit(-5.0), _unit(5.0), _unit(90.0)]), np.array([0.8, 0.8, 1.0]))
+    directions = operator_directions([first], gate_deg=30.0, lost_after=3)
+    assert directions[0] is not None
+    assert _angle_deg(directions[0], _unit(0.0)) < 0.5
+
+
+def test_operator_direction_reacquires_after_the_operator_is_lost() -> None:
+    from posekit.models.fullcircle import OperatorDetections, operator_directions
+
+    empty: OperatorDetections = OperatorDetections(np.zeros((0, 3)), np.zeros(0))
+    far: OperatorDetections = OperatorDetections(np.stack([_unit(120.0)]), np.array([1.0]))
+    frames: list[OperatorDetections] = [OperatorDetections(np.stack([_unit(0.0)]), np.array([1.0])), empty, far, far, far, far]
+    directions = operator_directions(frames, gate_deg=30.0, lost_after=3)
+    # No detection: no direction (filled later). Detections only outside the gate: none for lost_after - 1 framesets,
+    # then the operator is taken as lost and the heaviest cluster restarts the gate there.
+    assert directions[1] is None and directions[2] is None and directions[3] is None
+    assert directions[4] is not None and _angle_deg(directions[4], _unit(120.0)) < 0.5
+    assert directions[5] is not None and _angle_deg(directions[5], _unit(120.0)) < 0.5
 
 
 def test_view_up_keeps_fullcircle_up_unless_the_operator_is_near_it() -> None:

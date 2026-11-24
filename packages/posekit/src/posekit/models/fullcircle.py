@@ -12,8 +12,9 @@ training and no manual prompt. Their eight steps, and where each lives here:
 3. The detections -> one operator direction (``perspectives2omni.py`` -> ``centers/<frame>.csv``, read by
    ``omni2synthetic.py``): the area-weighted mean of the detection centres on the sphere. Their per-face module
    ``perspectives2omni_two_cubes`` is missing from the release, so the centre rows are taken as one row per detection
-   (centre, area), which is what ``omni2synthetic.py`` consumes. A frame with no detection reuses the nearest frame
-   that has one (earlier first at equal distance), as ``omni2synthetic.py`` does: :func:`fill_nearest`.
+   (centre, area), which is what ``omni2synthetic.py`` consumes. Here the mean takes only the detections near the
+   previous direction (:func:`operator_directions`). A frame with no direction reuses the nearest frame that has one
+   (earlier first at equal distance), as ``omni2synthetic.py`` does: :func:`fill_nearest`.
 4. A synthetic fisheye looking along that direction (``omni2synthetic.py``: ``look_at_camZ`` with up ``+Y``, the
    rear lens of ``mapping.txt`` as an OPENCV_FISHEYE at 2880 px with a 107.5 px border): the same lens scaled to the
    tracker's input size, with one up hint per sequence (:func:`view_up`).
@@ -28,7 +29,7 @@ training and no manual prompt. Their eight steps, and where each lives here:
 8. Dilation (``dilate.py``: 9x9 ellipse, 1 iteration at 2880 px, "about 4 pixels" in the paper): a disk of
    ``dilate_px`` image pixels, applied at mask resolution.
 
-Four changes, each forced by a measured failure (FullCircle's room3 scene: IoU against the masks FullCircle released;
+Five changes, each forced by a measured failure (FullCircle's room3 scene: IoU against the masks FullCircle released;
 clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the operator):
 
 - Box prompt, not the centre click: EfficientTAM (FullCircle used SAM 2.1 Hiera-L) segments only the shirt on a torso
@@ -36,12 +37,17 @@ clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the o
 - Re-prompts: a single prompt drifted onto other people within 10 s of clip 007.
 - One up hint per sequence: with the operator below the camera (near +Y) the look-at fallback flipped the view.
 - Level faces: lens 0's +Y is not down on the X4 Air, and people lying sideways in the faces were missed.
+- Gated direction: FullCircle averages all detections and assumes few false positives. On the Mission office X5 clip
+  a YOLOX box on a desk with a jacket (7.0 s) moved the view about 50 degrees off the operator, and 6 of 250 tracked
+  framesets ended more than 40 px (of 512) off centre. Only detections within ``direction_gate_deg`` of the previous
+  direction count; the first frame and a lost operator start from the heaviest cluster of detections.
 """
 
 from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -135,6 +141,12 @@ class FullCircleConfig:
     """Tracked framesets between two re-prompts of the tracker with the detector's box (0: FullCircle's single prompt);
     3 at 3 Hz (every 10th frameset at 30 fps) is once a second. The Insta360 stage sets it from
     ``reprompt_every_frames`` and ``stride`` (:class:`~posekit.apis.fullcircle_masks.FullCircleMasksConfig`)."""
+    direction_gate_deg: float = 30.0
+    """Detections whose centre lies within this angle of the previous operator direction make the next direction
+    (:func:`operator_directions`); also the radius of a cluster of detections on the sphere."""
+    lost_after: int = 3
+    """Framesets in a row with detections, none of them within the gate, after which the operator is taken as lost and
+    the heaviest cluster starts the gate again (3 at 3 Hz: one second)."""
     reprompt_radius: float = 0.15
     """A re-prompt box that does not hold the view centre must have its centre within this fraction of the view size."""
     face_size: int = 640
@@ -152,11 +164,21 @@ class FullCircleConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorDetections:
+    """The person detections of one frameset on the sphere."""
+
+    centres: Float64[ndarray, "n 3"]
+    """Unit direction of each detection's centre in the rig frame."""
+    weights: Float64[ndarray, " n"]
+    """Each detection's weight: its area in face pixels."""
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorEvidence:
     """What the face detector saw in one frameset."""
 
-    direction: Float64[ndarray, "3"] | None
-    """Area-weighted mean direction of the detections in the rig frame (unit), ``None`` without detections."""
+    detections: OperatorDetections
+    """The detections as directions and weights, input of :func:`operator_directions`."""
     boxes: Float32[ndarray, "n 4"]
     """Each detection's face-pixel box ``xyxy``."""
     faces: Int64[ndarray, " n"]
@@ -175,6 +197,55 @@ class OperatorMasks:
     """The synthetic fisheye the tracker saw."""
     synthetic_mask: Bool[Tensor, "s s"]
     """The tracker's mask on it."""
+
+
+def _mean_direction(detections: OperatorDetections, keep: Bool[ndarray, " n"]) -> Float64[ndarray, "3"]:
+    """Weighted mean of the kept detection centres, made unit (plain mean when their weights sum to zero)."""
+    weights: Float64[ndarray, " k"] = detections.weights[keep]
+    mean: Float64[ndarray, "3"] = (
+        np.average(detections.centres[keep], axis=0, weights=weights) if weights.sum() > 0 else detections.centres[keep].mean(axis=0)
+    )
+    return mean / np.linalg.norm(mean)
+
+
+def _heaviest_cluster(detections: OperatorDetections, cos_gate: float) -> Float64[ndarray, "3"]:
+    """The mean direction of the heaviest cluster: the detections within the gate of one detection, largest weight sum."""
+    near: Bool[ndarray, "n n"] = detections.centres @ detections.centres.T >= cos_gate
+    seed: int = int(np.argmax(near.astype(np.float64) @ detections.weights))
+    return _mean_direction(detections, near[seed])
+
+
+def operator_directions(frames: Sequence[OperatorDetections], gate_deg: float, lost_after: int) -> list[Float64[ndarray, "3"] | None]:
+    """Per frameset, the operator direction from the detections near the previous one (``None`` without such detections).
+
+    FullCircle's area-weighted mean over all detections follows any false positive; here only detections within
+    ``gate_deg`` of the last direction count. The first frameset with detections, and the first after ``lost_after``
+    framesets in a row whose detections all lie outside the gate, start from the heaviest cluster of detections
+    (:func:`_heaviest_cluster`). A frameset without detections leaves the state unchanged.
+    """
+    cos_gate: float = math.cos(math.radians(gate_deg))
+    previous: Float64[ndarray, "3"] | None = None
+    outside: int = 0
+    directions: list[Float64[ndarray, "3"] | None] = []
+    for detections in frames:
+        direction: Float64[ndarray, "3"] | None = None
+        if len(detections.weights):
+            if previous is None:
+                direction = _heaviest_cluster(detections, cos_gate)
+            else:
+                keep: Bool[ndarray, " n"] = detections.centres @ previous >= cos_gate
+                if keep.any():
+                    direction = _mean_direction(detections, keep)
+                    outside = 0
+                else:
+                    outside += 1
+                    if outside >= lost_after:
+                        direction = _heaviest_cluster(detections, cos_gate)
+                        outside = 0
+        if direction is not None:
+            previous = direction
+        directions.append(direction)
+    return directions
 
 
 def fill_nearest(directions: list[Float64[ndarray, "3"] | None]) -> list[Float64[ndarray, "3"]]:
@@ -304,7 +375,7 @@ class FullCircleMasker:
 
     @torch.inference_mode()
     def detect(self, framesets: list[list[UInt8[Tensor, "h w 3"]]], rig_R_levels: list[Float64[ndarray, "3 3"]]) -> list[OperatorEvidence]:
-        """Steps 1-3 on a batch of framesets: cube faces, person detection (one detector call), the operator directions.
+        """Steps 1-3 on a batch of framesets: cube faces, person detection (one detector call), the detections on the sphere.
 
         The faces are those of each frameset's level frame (``rig_R_levels``, +Y along gravity), so people stand upright
         in them, as they do in the horizon-levelled panoramas FullCircle starts from (identity for an already level source).
@@ -341,14 +412,9 @@ class FullCircleMasker:
         face_ids: Int64[ndarray, " n"] = detections.frame_indices.cpu().numpy()
         evidence: list[OperatorEvidence] = []
         for index in range(len(framesets)):
-            keep: ndarray = face_ids // 6 == index
-            direction: Float64[ndarray, "3"] | None = None
-            if keep.any():
-                mean: Float64[ndarray, "3"] = (
-                    np.average(centres[keep], axis=0, weights=weights[keep]) if weights[keep].sum() > 0 else centres[keep].mean(axis=0)
-                )
-                direction = mean / np.linalg.norm(mean)
-            evidence.append(OperatorEvidence(direction, all_boxes[keep], face_ids[keep] % 6, faces[6 * index : 6 * index + 6]))
+            keep: Bool[ndarray, " n"] = face_ids // 6 == index
+            detections_here: OperatorDetections = OperatorDetections(centres[keep], weights[keep])
+            evidence.append(OperatorEvidence(detections_here, all_boxes[keep], face_ids[keep] % 6, faces[6 * index : 6 * index + 6]))
         self._tick("detect", start)
         return evidence
 
@@ -426,6 +492,7 @@ __all__ = (
     "FULLCIRCLE_SYNTHETIC_LENS",
     "FullCircleConfig",
     "FullCircleMasker",
+    "OperatorDetections",
     "OperatorDetector",
     "OperatorEvidence",
     "OperatorMasks",
@@ -433,5 +500,6 @@ __all__ = (
     "disk_dilate",
     "fill_nearest",
     "level_rotation",
+    "operator_directions",
     "view_up",
 )

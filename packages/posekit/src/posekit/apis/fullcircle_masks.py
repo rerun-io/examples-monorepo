@@ -37,11 +37,13 @@ from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
     FullCircleConfig,
     FullCircleMasker,
+    OperatorDetections,
     OperatorEvidence,
     OperatorMasks,
     SphereSource,
     fill_nearest,
     level_rotation,
+    operator_directions,
     view_up,
 )
 from posekit.ops.sphere import MeiCamera
@@ -229,7 +231,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         decode_wait_s += prefetched.wait_s
 
     detect_start: float = time.perf_counter()
-    directions: list[Float64[ndarray, "3"] | None] = []
+    detections: list[OperatorDetections] = []
     for begin, chunk, frames in decoded_chunks():
         # Detector calls of DETECT_FRAMESETS framesets (6 faces each), whatever the decode chunk: the YOLOX engine's batch,
         # and a bound on the eager SAM 3 detector's memory.
@@ -239,7 +241,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
             for evidence in masker.detect(frames[group : group + DETECT_FRAMESETS], levels[begin + group : begin + group + DETECT_FRAMESETS])
         ]
         for position, (index, evidence) in enumerate(zip(chunk, batch, strict=True), start=begin):
-            directions.append(evidence.direction)
+            detections.append(evidence.detections)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 for face in range(6):
@@ -248,9 +250,11 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
                     debug.log(
                         f"faces/face_{face}/persons", rr.Boxes2D(array=evidence.boxes[keep], array_format=rr.Box2DFormat.XYXY, colors=(255, 200, 0))
                     )
-    found: int = sum(d is not None for d in directions)
+    directions: list[Float64[ndarray, "3"] | None] = operator_directions(detections, config.masker.direction_gate_deg, config.masker.lost_after)
+    found: int = sum(len(d.weights) > 0 for d in detections)
+    gated: int = sum(d is not None for d in directions)
     detect_wall: float = time.perf_counter() - detect_start
-    print(f"pass 1 (detect): {found} of {len(tracked)} framesets with a person, {detect_wall:.1f} s")
+    print(f"pass 1 (detect): {found} of {len(tracked)} framesets with a person, {gated} with an operator direction, {detect_wall:.1f} s")
     filled: list[Float64[ndarray, "3"]] = fill_nearest(directions)
     up_level: Float64[ndarray, "3"] = view_up([level.T @ d for level, d in zip(levels, filled, strict=True)])
     print(f"view up hint (level frame) {up_level.tolist()}")
