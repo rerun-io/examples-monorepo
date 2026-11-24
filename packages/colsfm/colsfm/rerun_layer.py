@@ -12,14 +12,14 @@ segment it was read from:
 - `/world/runs/<source>/points`: the sparse model, coloured from the images, static, so every layout shows the map;
 - `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
   (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
-- `/world/runs/<source>/trajectory`: the optimised path, one segment per rig frame on `video_time` (a layout's visible
-  time range makes the trail), green at the first rig frame through yellow to red at the last (`walk_colors`);
-  `trajectory_full` the whole path in the same colours, one row at the last rig frame; `endpoints/start` (with a ring,
-  static) and `endpoints/end` (from the last rig frame on);
+- the optimised path in dataforge's names (`log_walk_path`): `/world/runs/<source>/trail`, one segment per rig frame on
+  `video_time` (a layout's visible time range makes the trail), green at the first rig frame through yellow to red at
+  the last (`walk_colors`); `trajectory`, the whole path in the same colours, one row at the last rig frame;
+  `endpoints/start` (with a ring, static) and `endpoints/end` (from the last rig frame on);
 - `/world/runs/<source>/rig_view`, for a catalog input whose segment has viewing faces (dataforge's Insta360 `cube_view`
-  layer, `pinhole/video_view`): a pose at every viewing frame, the prior's pose there corrected by the run's offset from
-  the prior, interpolated between the registered rig frames (`view_rig_poses`), with each camera's frustum referencing
-  its viewing face of that frame. `rig` keeps the registered rig frames only;
+  layer, `pinhole/video_view`): a pose at every viewing frame, the prior re-anchored on the registered rig frames
+  (`colsfm.frame_poses.view_rig_poses`, the every-frame export's rule), with each camera's frustum referencing its
+  viewing face of that frame. `rig` keeps the registered rig frames only;
 - `/world/runs/<source>/position_difference`: how far each optimised rig frame lies from the prior pose the run started
   from (the run's own `keyframes/frames_meta.json`), in metres, on `video_time`; left out for a run without that file;
 - the `colsfm` recording property: the run's headline numbers (registered images, points, reprojection, wall time).
@@ -42,6 +42,7 @@ from numpy import ndarray
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
 from colsfm.frame_manifest import FrameSourceManifest
+from colsfm.frame_poses import ViewRigSource, view_rig_poses
 from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, KeyframeMeta, read_frames_meta
 from colsfm.rerun_log import camera_k_matrix
 from colsfm.run_lifecycle import KEYFRAME_DIR_NAME
@@ -66,6 +67,10 @@ WALK_SATURATION: Final[float] = 0.85
 """Saturation of the walk gradient."""
 PATH_RADIUS_UI: Final[float] = 2.0
 """Path stroke, ui points."""
+START_RING_RADIUS_UI: Final[float] = 2.5
+"""Stroke of the ring around the start dot, ui points (as slam-rs's ``walk_path``)."""
+RING_POINTS: Final[int] = 49
+"""Points on the start ring (the first repeated last)."""
 ENDPOINT_RADIUS_UI: Final[float] = 9.0
 """Radius of the start and end dots, ui points."""
 START_RING_M: Final[float] = 0.25
@@ -79,56 +84,6 @@ def walk_colors(t_ns: Int64[ndarray, " n"], first_ns: int, last_ns: int) -> UInt
     fraction: Float64[ndarray, " n"] = np.clip((t_ns - first_ns) / max(last_ns - first_ns, 1), 0.0, 1.0)
     rgb: list[tuple[float, float, float]] = [colorsys.hsv_to_rgb((WALK_GO_HUE + (WALK_STOP_HUE - WALK_GO_HUE) * f) / 360.0, WALK_SATURATION, 1.0) for f in fraction]
     return np.round(np.asarray(rgb, dtype=np.float64).reshape(-1, 3) * 255.0).astype(np.uint8)
-
-
-@dataclass(frozen=True)
-class ViewRigSource:
-    """What a layer's viewing rig is drawn from: the prior the run started from, at its own rate, and the viewing frames."""
-
-    prior_t_ns: Int64[ndarray, " n"]
-    """Prior timestamps, increasing, nanoseconds on the layer's timeline."""
-    world_T_prior: Float64[ndarray, "n 4 4"]
-    """The prior's `world_T_rig` at each."""
-    view_t_ns: Int64[ndarray, " m"]
-    """Stamps of the viewing frames (the samples of each camera's `video_view`), increasing."""
-
-
-def interpolated_poses(t_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 4 4"], query_ns: Int64[ndarray, " m"]) -> Float64[ndarray, "m 4 4"]:
-    """`poses` at `query_ns` (inside `[t_ns[0], t_ns[-1]]`): rotations slerped, translations linear."""
-    from scipy.spatial.transform import Rotation, Slerp
-
-    source: Float64[ndarray, " n"] = t_ns.astype(np.float64)
-    query: Float64[ndarray, " m"] = query_ns.astype(np.float64)
-    out: Float64[ndarray, "m 4 4"] = np.tile(np.eye(4), (len(query_ns), 1, 1))
-    out[:, :3, :3] = Slerp(source, Rotation.from_matrix(poses[:, :3, :3]))(query).as_matrix()
-    out[:, :3, 3] = np.stack([np.interp(query, source, poses[:, axis, 3]) for axis in range(3)], axis=-1)
-    return out
-
-
-def view_rig_poses(
-    rig_t_ns: Int64[ndarray, " k"], world_T_rig: Float64[ndarray, "k 4 4"], source: ViewRigSource
-) -> tuple[Int64[ndarray, " m"], Float64[ndarray, "m 4 4"]]:
-    """The rig at every viewing frame between the first and last registered rig frame: the prior's pose there times the
-    run's offset from the prior in the rig's own frame (`prior^-1 rig`), that offset interpolated between the registered
-    rig frames. At a registered rig frame it is the run's pose exactly; between them it moves as the prior does (a
-    hand-held walk does not move like a slerp between keyframes).
-
-    Args:
-        rig_t_ns: Registered rig frame stamps, increasing (at least two).
-        world_T_rig: The run's poses at them.
-        source: The prior and the viewing frames.
-
-    Returns:
-        The viewing frames between the first and last rig frame inside the prior's span, and the rig pose at each;
-        nothing with fewer than two such rig frames.
-    """
-    keys = (rig_t_ns >= source.prior_t_ns[0]) & (rig_t_ns <= source.prior_t_ns[-1])
-    if keys.sum() < 2:
-        return np.zeros(0, dtype=np.int64), np.zeros((0, 4, 4))
-    key_t_ns: Int64[ndarray, " k"] = rig_t_ns[keys]
-    inside: Int64[ndarray, " m"] = source.view_t_ns[(source.view_t_ns >= key_t_ns[0]) & (source.view_t_ns <= key_t_ns[-1])]
-    offsets: Float64[ndarray, "k 4 4"] = np.linalg.inv(interpolated_poses(source.prior_t_ns, source.world_T_prior, key_t_ns)) @ world_T_rig[keys]
-    return inside, interpolated_poses(source.prior_t_ns, source.world_T_prior, inside) @ interpolated_poses(key_t_ns, offsets, inside)
 
 
 @dataclass(frozen=True)
@@ -358,10 +313,9 @@ def log_rig_trajectory(
     times_ns: Int64[ndarray, " n"],
     world_T_rig: Float64[ndarray, "n 4 4"],
     timeline: str,
+    color: tuple[int, int, int] | None = None,
 ) -> None:
-    """Log `world_T_rig` over time at `<root>/rig` (as columns), and the path in the walk gradient: a segment per rig
-    frame at `<root>/trajectory`, the whole path at `<root>/trajectory_full` from the last rig frame on, and the start
-    and end dots at `<root>/endpoints`.
+    """Log `world_T_rig` over time at `<root>/rig` (as columns) and the path (`log_walk_path`).
 
     Args:
         recording: The layer's recording.
@@ -369,34 +323,45 @@ def log_rig_trajectory(
         times_ns: One timestamp per pose, nanoseconds on `timeline`, increasing.
         world_T_rig: The poses.
         timeline: The segment's video timeline.
+        color: One colour for the path in place of the walk gradient (a comparison source beside a colsfm run).
     """
     recording.send_columns(
         f"{root}/rig",
         indexes=[rr.TimeColumn(timeline, duration=times_ns.astype("timedelta64[ns]"))],
         columns=rr.Transform3D.columns(translation=world_T_rig[:, :3, 3], mat3x3=world_T_rig[:, :3, :3]),
     )
+    log_walk_path(recording, root, times_ns, world_T_rig[:, :3, 3], timeline, color)
+
+
+def log_walk_path(
+    recording: rr.RecordingStream,
+    root: str,
+    times_ns: Int64[ndarray, " n"],
+    positions: Float64[ndarray, "n 3"],
+    timeline: str,
+    color: tuple[int, int, int] | None = None,
+) -> None:
+    """Log a path in dataforge's names: a segment per pose at `<root>/trail`, the whole path at `<root>/trajectory` from
+    the last pose on, the start dot and ring (static) and the end dot (from the last pose on) at `<root>/endpoints`; in the
+    walk gradient, or in one `color`. Nothing with fewer than two poses.
+    """
     if len(times_ns) < 2:
         return
-    positions: Float64[ndarray, "n 3"] = world_T_rig[:, :3, 3]
-    colors: UInt8[ndarray, "n 3"] = walk_colors(times_ns, int(times_ns[0]), int(times_ns[-1]))
-    segments: Float64[ndarray, "s 2 3"] = np.stack([positions[:-1], positions[1:]], axis=1)
+    colors: UInt8[ndarray, "n 3"] = (
+        walk_colors(times_ns, int(times_ns[0]), int(times_ns[-1])) if color is None else np.tile(np.asarray(color, dtype=np.uint8), (len(times_ns), 1))
+    )
+    strips = rr.LineStrips3D.columns(strips=list(np.stack([positions[:-1], positions[1:]], axis=1)), colors=colors[1:])
     radius = rr.Radius.ui_points(PATH_RADIUS_UI)
-    recording.send_columns(
-        f"{root}/trajectory",
-        indexes=[rr.TimeColumn(timeline, duration=times_ns[1:].astype("timedelta64[ns]"))],
-        columns=rr.LineStrips3D.columns(strips=list(segments), colors=colors[1:]).partition([1] * len(segments)),
-    )
-    recording.log(f"{root}/trajectory", rr.LineStrips3D.from_fields(radii=radius), static=True)
+    recording.send_columns(f"{root}/trail", indexes=[rr.TimeColumn(timeline, duration=times_ns[1:].astype("timedelta64[ns]"))], columns=strips.partition([1] * (len(times_ns) - 1)))
+    recording.log(f"{root}/trail", rr.LineStrips3D.from_fields(radii=radius), static=True)
     last = [rr.TimeColumn(timeline, duration=times_ns[-1:].astype("timedelta64[ns]"))]
-    recording.send_columns(
-        f"{root}/trajectory_full", indexes=last, columns=rr.LineStrips3D.columns(strips=list(segments), colors=colors[1:]).partition([len(segments)])
-    )
-    recording.log(f"{root}/trajectory_full", rr.LineStrips3D.from_fields(radii=radius), static=True)
+    recording.send_columns(f"{root}/trajectory", indexes=last, columns=strips.partition([len(times_ns) - 1]))
+    recording.log(f"{root}/trajectory", rr.LineStrips3D.from_fields(radii=radius), static=True)
     endpoint = rr.Radius.ui_points(ENDPOINT_RADIUS_UI)
     recording.log(f"{root}/endpoints/start", rr.Points3D(positions[:1], colors=colors[:1], radii=endpoint, labels=["start"], show_labels=True), static=True)
-    angles: Float64[ndarray, " a"] = np.linspace(0.0, 2.0 * np.pi, 49)
+    angles: Float64[ndarray, " a"] = np.linspace(0.0, 2.0 * np.pi, RING_POINTS)
     ring: Float64[ndarray, "a 3"] = positions[0] + START_RING_M * np.stack([np.cos(angles), np.sin(angles), np.zeros_like(angles)], axis=1)
-    recording.log(f"{root}/endpoints/start_ring", rr.LineStrips3D([ring], colors=colors[:1], radii=rr.Radius.ui_points(2.5)), static=True)
+    recording.log(f"{root}/endpoints/start_ring", rr.LineStrips3D([ring], colors=colors[:1], radii=rr.Radius.ui_points(START_RING_RADIUS_UI)), static=True)
     recording.send_columns(f"{root}/endpoints/end", indexes=last, columns=rr.Points3D.columns(positions=positions[-1:], colors=colors[-1:]))
     recording.log(f"{root}/endpoints/end", rr.Points3D.from_fields(radii=endpoint, labels=["end"], show_labels=True), static=True)
 
@@ -423,9 +388,9 @@ def log_view_rig(
         world_T_rig: The run's poses at them.
         source: The prior and the viewing frames.
     """
-    if len(rig_t_ns) < 2:
-        return
     view_t_ns, world_T_view = view_rig_poses(rig_t_ns, world_T_rig, source)
+    if len(view_t_ns) == 0:
+        return
     index = [rr.TimeColumn(manifest.timeline, duration=view_t_ns.astype("timedelta64[ns]"))]
     recording.send_columns(f"{root}/rig_view", indexes=index, columns=rr.Transform3D.columns(translation=world_T_view[:, :3, 3], mat3x3=world_T_view[:, :3, :3]))
     by_name: dict[str, KeyframeMeta] = {keyframe.image_name: keyframe for keyframe in frames_meta.keyframes}
@@ -436,7 +401,9 @@ def log_view_rig(
         camera: CameraParams = frames_meta.cameras[named.camera_params_id]
         entity: str = f"{root}/rig_view/{camera.sensor_name}"
         _log_camera(recording, entity, camera)
-        video_view: str = "/" + stream.entity.lstrip("/").removesuffix("/video") + "/video_view"
+        video_view: str | None = source.view_entities.get("/" + stream.entity.lstrip("/"))
+        if video_view is None:
+            continue
         recording.log(f"{entity}/pinhole/video", rr.VideoFrameReference.from_fields(video_reference=video_view), static=True)
         recording.send_columns(f"{entity}/pinhole/video", indexes=index, columns=rr.VideoFrameReference.columns_nanos(view_t_ns))
 
@@ -465,7 +432,12 @@ def write_run_layer(
 
     Returns:
         What was written.
+
+    Raises:
+        ValueError: If ``view`` comes without ``frames`` (the viewing rig references the streams ``frames`` names).
     """
+    if view is not None and frames is None:
+        raise ValueError("a viewing rig needs the run's frame source (frames)")
     artifacts: RunArtifacts = read_run(run_dir, source)
     reconstruction: pycolmap.Reconstruction = artifacts.reconstruction
     registered: set[str] = {image.name for image in reconstruction.images.values() if image.has_pose}

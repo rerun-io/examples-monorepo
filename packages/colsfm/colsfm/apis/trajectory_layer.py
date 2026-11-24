@@ -99,7 +99,8 @@ def main(config: Config) -> None:
     if not segment:
         raise ValueError("--segment is required: it is the layer's recording id")
     recording = open_layer(config.output, segment)
-    log_rig_trajectory(recording, f"/world/runs/{config.source}", times_ns, world_T_rig, config.timeline)
+    # A comparison source keeps one colour beside a colsfm run's walk gradient.
+    log_rig_trajectory(recording, f"/world/runs/{config.source}", times_ns, world_T_rig, config.timeline, color=(60, 160, 255))
     recording.flush()
     print(f"[colsfm] {config.output}: {len(times_ns)} rig poses under /world/runs/{config.source}")
     if config.dataset is not None:

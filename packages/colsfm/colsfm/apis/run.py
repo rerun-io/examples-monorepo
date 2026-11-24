@@ -21,7 +21,7 @@ from typing import Annotated, TypeAlias
 import tyro
 
 from colsfm import DATA_DIR
-from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input, read_view_rig_source
+from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
 from colsfm.rerun_layer import LayerSummary, write_run_layer
@@ -61,7 +61,7 @@ class CatalogCommand:
 
     def execute(self) -> None:
         """Prepare the input, run the pipeline and write the layer."""
-        prepared: PreparedInput = prepare_catalog_input(self.source)
+        prepared: PreparedInput = prepare_catalog_input(self.source, view_rig=self.view_rig)
         output_dir: Path = (
             DATA_DIR / "runs" / prepared.input_dir.name if self.options.output_dir == UNSET_DIR else self.options.output_dir
         )
@@ -75,7 +75,7 @@ class CatalogCommand:
             segment=self.source.segment,
             timeline=self.source.timeline,
             frames=read_manifest(prepared.input_dir / FRAME_SOURCE_FILE),
-            view=read_view_rig_source(self.source, prepared.cameras) if self.view_rig else None,
+            view=prepared.view,
         )
         print(
             f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points, "

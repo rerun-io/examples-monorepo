@@ -24,7 +24,7 @@ from typing import Final, NamedTuple, TypeAlias
 
 import numpy as np
 import pycolmap
-from jaxtyping import Float64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 
@@ -250,3 +250,18 @@ def img_from_cam(camera: pycolmap.Camera, points_in_camera: Float64[ndarray, "n 
     if pixels is None:
         raise TypeError("Camera.img_from_cam returned None for a batch of points")
     return pixels
+
+
+def interpolate_poses(t_ns: Int64[ndarray, " n"], poses: Float64[ndarray, "n 4 4"], query_ns: Int64[ndarray, " m"]) -> Float64[ndarray, "m 4 4"]:
+    """``poses`` (4x4, at increasing ``t_ns``) at ``query_ns`` inside ``[t_ns[0], t_ns[-1]]``: rotations by slerp,
+    translations linearly."""
+    from scipy.spatial.transform import Slerp
+
+    if len(t_ns) == 1:
+        return np.repeat(poses, len(query_ns), axis=0)
+    source: Float64[ndarray, " n"] = t_ns.astype(np.float64)
+    query: Float64[ndarray, " m"] = query_ns.astype(np.float64)
+    out: Float64[ndarray, "m 4 4"] = np.tile(np.eye(4), (len(query_ns), 1, 1))
+    out[:, :3, :3] = Slerp(source, Rotation.from_matrix(poses[:, :3, :3]))(query).as_matrix()
+    out[:, :3, 3] = np.stack([np.interp(query, source, poses[:, axis, 3]) for axis in range(3)], axis=-1)
+    return out
