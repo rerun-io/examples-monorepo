@@ -336,7 +336,8 @@ python tools/apps/fullcircle_masks.py --dataset <dataset> --segment <segment> --
 ```
 
 The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on every 10th frameset (`--stride`), the tracker re-prompted once a second
-(`--reprompt-every-frames 30`, which follows the stride), already dilated. On FullCircle's room3 scene at half rate
+(`--reprompt-every-frames 30`, which follows the stride), already dilated by 12 px (`--masker.dilate-px`; FullCircle
+trains on its `masks-5`, about 13 px at 1920 px). On FullCircle's room3 scene at half rate
 (179 frames, 3 Hz) the masks match the masks FullCircle released with its dataset at a mean
 IoU of 0.9402, median 0.9556 (357 frames at full rate with the defaults: 0.9350). Golden test: `tests/test_fullcircle_golden.py`, asset `POSEKIT_FULLCIRCLE_SCENE`.
 

@@ -26,8 +26,9 @@ training and no manual prompt. Their eight steps, and where each lives here:
    the image; the paper's intent is the image centre.
 6.-7. Synthetic mask -> omni -> raw fisheye masks (``synthetic2omni.py``, ``omni2fisheyes.py``): every source mask
    pixel looks its ray up in the synthetic mask (nearest), in one step.
-8. Dilation (``dilate.py``: 9x9 ellipse, 1 iteration at 2880 px, "about 4 pixels" in the paper): a disk of
-   ``dilate_px`` image pixels, applied at mask resolution.
+8. Dilation (``dilate.py``: a 9x9 ellipse at 2880 px, 1 iteration -> ``masks-1``, "about 4 pixels" in the paper, and 5
+   iterations -> ``masks-5``, about 20 px; training reads ``masks-5``, ``threedgrut/datasets/dataset_colmap.py``): a disk
+   of ``dilate_px`` image pixels, applied at mask resolution, 12 px by default (``masks-5`` is about 13 px at 1920 px).
 
 Five changes, each forced by a measured failure (FullCircle's room3 scene: IoU against the masks FullCircle released;
 clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the operator):
@@ -155,8 +156,10 @@ class FullCircleConfig:
     """Synthetic fisheye size, pixels (sam-ui resizes to 512)."""
     work_size: int = 1280
     """Source images are area-downscaled by a whole factor to at most this size before resampling (anti-aliasing)."""
-    dilate_px: float = 4.0
-    """Dilation radius in source-image pixels (FullCircle: about 4 px at 2880 px)."""
+    dilate_px: float = 12.0
+    """Dilation radius in source-image pixels. FullCircle trains on its ``masks-5`` (a 9x9 ellipse 5 times at 2880 px,
+    about 13 px at 1920 px); 12 px is 3 cells of the 480 px mask grid of a 1920 px lens (4 px, FullCircle's ``masks-1``,
+    was 1 cell). On the Mission office X5 clip 12 px costs about 0.6 % of the lens disc more than 4 px."""
     device: str = "cuda"
     """Inference device."""
     step_timing: bool = False
