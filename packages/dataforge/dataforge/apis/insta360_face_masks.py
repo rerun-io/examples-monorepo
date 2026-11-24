@@ -29,12 +29,6 @@ from dataforge import schema, writing
 from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording, layer_device
 
-MASK_NAME: str = "people_mask"
-"""The mask entity under each ``pinhole``, on the lenses and on the faces."""
-MASK_ANNOTATION: rr.AnnotationContext = rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (1, "masked", (40, 110, 255, 140))])
-"""How a face mask draws over its face: kept pixels clear, masked pixels a blue tint (the lens masks' own,
-``posekit.mask_layer.MASK_ANNOTATION``); without it the viewer colours the class ids itself and hides the picture."""
-
 
 @dataclass
 class Config:
@@ -103,7 +97,7 @@ def face_stamps(faces: Path) -> Int64[ndarray, " k"]:
 
 def lens_masks(masks: Path, stamps: set[int]) -> Iterator[tuple[int, int, UInt8[ndarray, "h w"]]]:
     """``(lens, stamp, mask)`` for every lens mask row of ``masks`` whose stamp is in ``stamps``."""
-    entities: dict[str, int] = {f"{schema.pinhole_path(RIG, lens)}/{MASK_NAME}": lens for lens in range(2)}
+    entities: dict[str, int] = {schema.people_mask_path(RIG, lens): lens for lens in range(2)}
     for chunk in rrc.RrdReader(masks).stream():
         if chunk.entity_path not in entities or chunk.is_static:
             continue
@@ -121,9 +115,21 @@ def lens_masks(masks: Path, stamps: set[int]) -> Iterator[tuple[int, int, UInt8[
                 yield entities[chunk.entity_path], stamp, pixels.reshape(fmt["height"], fmt["width"])
 
 
+def lens_mask_annotation(masks: Path) -> rr.AnnotationContext | None:
+    """The lens masks' own ``AnnotationContext`` (posekit logs one on each lens mask: kept clear, masked tinted), to
+    draw the face masks the same way; None when the mask layer has none."""
+    entity: str = schema.people_mask_path(RIG, 0)
+    for chunk in rrc.RrdReader(masks).store().stream().filter(is_static=True, content=[entity]).to_chunks():
+        batch = chunk.to_record_batch()
+        if chunk.entity_path == entity and "AnnotationContext:context" in batch.schema.names:
+            entries = batch.column("AnnotationContext:context").to_pylist()[0][0]
+            return rr.AnnotationContext([(entry["class_id"], entry["class_description"]["info"]["label"], entry["class_description"]["info"]["color"]) for entry in entries])
+    return None
+
+
 def lens_mask_scales(masks: Path) -> dict[int, tuple[float, float]]:
     """Each lens mask entity's static ``Transform3D`` scale ``(sx, sy)``; a lens without one is absent (scale 1)."""
-    entities: dict[str, int] = {f"{schema.pinhole_path(RIG, lens)}/{MASK_NAME}": lens for lens in range(2)}
+    entities: dict[str, int] = {schema.people_mask_path(RIG, lens): lens for lens in range(2)}
     scales: dict[int, tuple[float, float]] = {}
     # The manifest's lazy store reads only the chunks it keeps (a full stream decodes every mask: 14 s on clip 007).
     for chunk in rrc.RrdReader(masks).store().stream().filter(is_static=True, content=list(entities)):
@@ -161,9 +167,11 @@ def main(config: Config) -> None:
     pending: dict[int, dict[int, UInt8[ndarray, "h w"]]] = {}
     done: set[int] = set()
     recording_id: str = rrc.RrdReader(config.base).recordings()[0].recording_id
+    annotation: rr.AnnotationContext | None = lens_mask_annotation(config.masks)
     with writing.atomic_recording(config.output, recording_id=recording_id, send_properties=False) as recording:
         for cam in faces:
-            rr.log(f"{schema.pinhole_path(RIG, cam)}/{MASK_NAME}", MASK_ANNOTATION, static=True, recording=recording)
+            if annotation is not None:
+                rr.log(schema.people_mask_path(RIG, cam), annotation, static=True, recording=recording)
         for lens, stamp, mask in lens_masks(config.masks, wanted):
             if stamp in done:
                 continue
@@ -176,7 +184,7 @@ def main(config: Config) -> None:
             done.add(stamp)
             recording.set_time("video_time", duration=np.timedelta64(stamp, "ns"))
             for cam, joined in zip(faces, join.faces(pair[0], pair[1]), strict=True):
-                rr.log(f"{schema.pinhole_path(RIG, cam)}/{MASK_NAME}", rr.SegmentationImage(joined), recording=recording)
+                rr.log(schema.people_mask_path(RIG, cam), rr.SegmentationImage(joined), recording=recording)
         absent: list[int] = sorted(wanted - done)
         if absent:
             raise ValueError(f"{len(absent)} face stamps have no mask on both lenses in {config.masks}, first {absent[:5]}")

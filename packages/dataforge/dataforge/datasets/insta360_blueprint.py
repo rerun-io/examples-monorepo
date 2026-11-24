@@ -15,21 +15,22 @@ What the 3D views lean on, beside the runs themselves:
   not move the eye (0.42). slam-rs writes it with the rig (``slam_rs.follow_frame``). No grid: the built-in one lies on
   the view origin's plane, which is not the floor.
 
-The paths are logged a segment per pose and shown as a trail over the last ``TRAIL_S`` of the cursor; each run logs its
-whole path (``trajectory_full``) and its loops once, at the last frame, so a cursor halfway through a clip shows no
+The paths are logged a segment per pose (``schema.trail_path``) and shown as a trail over the last ``TRAIL_S`` of the
+cursor; each run logs its whole path (``schema.trajectory_path``) and its loops once, at the last frame, so a cursor halfway through a clip shows no
 path ahead of it. The raw slam-rs run and colsfm carry their walk gradient (green at the start, red at the end) and
 start and end dots in their data; in the Comparison tab slam-rs is one flat grey (``COMPARISON_SLAM_COLOR``) so the two
 runs stay apart. The colsfm cloud by first view (``points_growing``) shows since the start, so it grows along the walk.
 The overviews turn slowly about the walk (``OVERVIEW_SPIN_RAD_S``).
 
-With the ``cube_view`` layer (``view_faces``) the colsfm tab shows the viewing faces (``pinhole/video_view``, every
+With the ``cube_view`` layer (``ColsfmRig``) the colsfm tab shows the viewing faces (``pinhole/video_view``, every
 frame) and the colsfm views draw ``rig_view`` (a pose at every viewing frame referencing them) for ``rig`` (the
 registered rig frames).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import TypeAlias
 
 import numpy as np
@@ -65,10 +66,13 @@ COLSFM: str = schema.run_path(schema.COLSFM_SOURCE)
 POSITION_DIFFERENCE: str = f"{COLSFM}/position_difference"
 """How far each colsfm rig frame lies from the prior pose it started from, metres (``colsfm.rerun_layer``)."""
 
+Color: TypeAlias = tuple[int, int, int] | tuple[int, int, int, int]
+"""An RGB or RGBA override colour."""
+
 SLAM_COLOR: tuple[int, int, int] = (255, 140, 0)
-"""slam-rs in every tab: paths and frusta."""
+"""slam-rs's frusta, its catalog-layer trail and its cloud tint (the raw run's path keeps its walk gradient)."""
 COLSFM_COLOR: tuple[int, int, int] = (64, 170, 255)
-"""colsfm in every tab."""
+"""colsfm's frusta and cloud tint (its path keeps its walk gradient)."""
 COMPARISON_SLAM_COLOR: tuple[int, int, int, int] = (215, 215, 215, 153)
 """slam-rs in the Comparison tab: light grey at 60 % opacity, so colsfm keeps the walk gradient and the two runs stay apart."""
 DIFFERENCE_COLOR: tuple[int, int, int] = (230, 230, 235)
@@ -180,12 +184,12 @@ def cloud(radius_ui: float, color: tuple[int, int, int] | None = None) -> rr.Poi
     return rr.Points3D.from_fields(radii=rr.Radius.ui_points(radius_ui), colors=color)
 
 
-def stroke(color: tuple[int, ...] | None, radius_ui: float) -> rr.LineStrips3D:
+def stroke(color: Color | None, radius_ui: float) -> rr.LineStrips3D:
     """A path's width in ui points and, with ``color``, one colour in place of its own (the walk gradient)."""
     return rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui))
 
 
-def trail(color: tuple[int, ...] | None, radius_ui: float) -> list[blueprints.VisualizerLike]:
+def trail(color: Color | None, radius_ui: float) -> list[blueprints.VisualizerLike]:
     """A path logged a segment a pose, drawn over the last ``TRAIL_S`` of the cursor (``stroke``)."""
     return [blueprints.cursor_window(TRAIL_S), stroke(color, radius_ui)]
 
@@ -195,8 +199,8 @@ def pictures() -> list[str]:
     return [f"- {schema.cam_path(RIG, cam)}/**" for cam in (0, 1, *FACE_CAMS)]
 
 
-def frusta(root: str, cameras: Sequence[str], color: tuple[int, int, int], size_m: float) -> Overrides:
-    """One colour and size for the frusta of ``cameras`` under ``root``."""
+def frusta(root: str, cameras: Sequence[str], color: Color | None, size_m: float) -> Overrides:
+    """One size for the frusta of ``cameras`` under ``root`` and, with ``color``, one colour in place of their own."""
     return {f"{root}/{camera}": rr.Pinhole.from_fields(color=color, image_plane_distance=size_m, line_width=FRUSTUM_LINE_WIDTH) for camera in cameras}
 
 
@@ -207,9 +211,9 @@ def lens_frusta(size_m: float) -> Overrides:
 
 def window_frusta(size_m: float) -> Overrides:
     """Both lenses of every frame in the estimator's window, and of the frames its last marginalization removed, in the
-    role colour slam-rs logs (keyframe, long-term keyframe, pose): only their size and stroke here."""
+    role colour slam-rs logs (keyframe, long-term keyframe, pose)."""
     slots: list[str] = [f"window/{slot:02d}" for slot in range(WINDOW_SLOTS)] + [f"marginalized/{slot:02d}" for slot in range(MARGINALIZED_SLOTS)]
-    return {f"{VIO}/{slot}/{lens}/pinhole": rr.Pinhole.from_fields(image_plane_distance=size_m, line_width=FRUSTUM_LINE_WIDTH) for slot in slots for lens in LENSES}
+    return frusta(VIO, [f"{slot}/{lens}/pinhole" for slot in slots for lens in LENSES], None, size_m)
 
 
 def window_pictures() -> list[str]:
@@ -218,9 +222,24 @@ def window_pictures() -> list[str]:
     return [f"- {VIO}/window/{slot:02d}/{lens}/pinhole/video" for slot in range(WINDOW_SLOTS) for lens in LENSES]
 
 
-def colsfm_rig(view_faces: bool) -> str:
-    """The colsfm rig the views draw: ``rig_view`` (every viewing frame) with the viewing faces, else ``rig``."""
-    return f"{COLSFM}/rig_view" if view_faces else f"{COLSFM}/rig"
+@dataclass(frozen=True, slots=True)
+class ColsfmRig:
+    """What a segment's layers let the colsfm views draw: the rig with its face frusta, the rig they leave out, and the
+    face stream the face panes play."""
+
+    drawn: str
+    """``rig_view`` (every viewing frame) with the ``cube_view`` layer, else ``rig`` (the registered rig frames)."""
+    dropped: str
+    """The other one."""
+    face_video: Callable[[int, int], str]
+    """``schema.video_view_path`` with the ``cube_view`` layer, else ``schema.video_path``."""
+
+
+def colsfm_rig(view_faces: bool) -> ColsfmRig:
+    """The colsfm rig and face stream for a segment with (``view_faces``) or without the ``cube_view`` layer."""
+    if view_faces:
+        return ColsfmRig(drawn=f"{COLSFM}/rig_view", dropped=f"{COLSFM}/rig", face_video=schema.video_view_path)
+    return ColsfmRig(drawn=f"{COLSFM}/rig", dropped=f"{COLSFM}/rig_view", face_video=schema.video_path)
 
 
 def run_pictures() -> list[str]:
@@ -254,31 +273,29 @@ def slam_overrides(*, close: bool) -> Overrides:
         **window_frusta(0.075),
     }
     return {
-        f"{VIO}/trajectory": trail(None, 3.0),
-        f"{VIO}/trajectory_full": stroke(None, 2.5),
-        # The catalog layer's per-pose trail, where a segment has that layer and not the replay.
-        schema.trail_path(schema.SLAM_RS_SOURCE): trail(SLAM_COLOR, 3.0),
+        schema.trail_path(schema.SLAM_RS_VIO_SOURCE): trail(None, 3.0),
+        schema.trajectory_path(schema.SLAM_RS_VIO_SOURCE): stroke(None, 2.5),
         # The final path lies on the VIO path; the darkened stroke keeps the VIO path readable.
-        f"{SLAM}/trajectory": trail(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
-        f"{SLAM}/trajectory_full": stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
+        schema.trail_path(schema.SLAM_RS_SOURCE): trail(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
+        schema.trajectory_path(schema.SLAM_RS_SOURCE): stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
         f"{SLAM}/map/points": cloud(1.5 if close else 2.0),
-        **hidden(schema.trail_path(schema.SLAM_RS_VIO_SOURCE), f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes", f"{VIO}/marginalized"),
+        **hidden(f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes", f"{VIO}/marginalized"),
         **(at_the_rig if close else hidden(f"{VIO}/landmarks", f"{VIO}/window", f"{VIO}/rig")),
     }
 
 
-def colsfm_overrides(*, close: bool, view_faces: bool) -> Overrides:
+def colsfm_overrides(*, close: bool, rig: ColsfmRig) -> Overrides:
     """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk, the trail in its walk
     gradient (the whole path at the end), and the cube rig in blue, each face's picture in its frustum."""
     return {
-        f"{COLSFM}/trajectory": trail(None, 3.0),
-        f"{COLSFM}/trajectory_full": stroke(None, 2.5),
+        schema.trail_path(schema.COLSFM_SOURCE): trail(None, 3.0),
+        schema.trajectory_path(schema.COLSFM_SOURCE): stroke(None, 2.5),
         f"{COLSFM}/points_growing": [blueprints.cursor_window(None), cloud(1.5 if close else 2.0)],
-        **face_frusta(colsfm_rig(view_faces), 0.18 if close else 0.3),
+        **face_frusta(rig.drawn, 0.18 if close else 0.3),
     }
 
 
-def comparison_overrides(*, close: bool, view_faces: bool) -> Overrides:
+def comparison_overrides(*, close: bool, rig: ColsfmRig) -> Overrides:
     """How a Comparison-tab 3D view draws both sources: the final slam-rs path in flat grey and colsfm's in its walk
     gradient, colsfm's rig, two clouds in their sources' colours.
 
@@ -288,16 +305,16 @@ def comparison_overrides(*, close: bool, view_faces: bool) -> Overrides:
     wide, narrow = (3.5, 3.5) if close else (6.0, 3.0)
     size_m: float = 0.125 if close else 0.25
     return {
-        f"{SLAM}/trajectory": trail(COMPARISON_SLAM_COLOR, wide),
-        f"{SLAM}/trajectory_full": stroke(COMPARISON_SLAM_COLOR, wide),
-        f"{COLSFM}/trajectory": trail(None, narrow),
-        f"{COLSFM}/trajectory_full": stroke(None, narrow),
+        schema.trail_path(schema.SLAM_RS_SOURCE): trail(COMPARISON_SLAM_COLOR, wide),
+        schema.trajectory_path(schema.SLAM_RS_SOURCE): stroke(COMPARISON_SLAM_COLOR, wide),
+        schema.trail_path(schema.COLSFM_SOURCE): trail(None, narrow),
+        schema.trajectory_path(schema.COLSFM_SOURCE): stroke(None, narrow),
         # The final map only: while the run goes on slam-rs draws its map as blocks under ``map/points/blocks``, which
         # no override can reach (exact paths only), so they keep their image colours until the final draw replaces them.
         f"{SLAM}/map/points": cloud(1.5, shade(SLAM_COLOR, CLOUD_SHADE)),
         f"{COLSFM}/points": cloud(1.5, shade(COLSFM_COLOR, CLOUD_SHADE)),
         **hidden(f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes", f"{SLAM}/loops"),
-        **face_frusta(colsfm_rig(view_faces), size_m),
+        **face_frusta(rig.drawn, size_m),
     }
 
 
@@ -342,19 +359,18 @@ def lens_pane(cam: int) -> rrb.Spatial2DView:
         f"Lens {cam}: tracked keypoints, people mask",
         RIG,
         cam,
-        contents=[schema.video_path(RIG, cam), f"{pinhole}/keypoints", f"{pinhole}/people_mask"],
+        contents=[schema.video_path(RIG, cam), f"{pinhole}/keypoints", schema.people_mask_path(RIG, cam)],
         overrides={f"{pinhole}/keypoints": rr.Points2D.from_fields(colors=KEYPOINT_COLOR, radii=rr.Radius.ui_points(KEYPOINT_RADIUS_UI))},
     )
 
 
-def face_pane(cam: int, name: str, *, view_faces: bool) -> rrb.Spatial2DView:
-    """One cube face, colsfm's input, and the people mask that keeps keypoints off the operator: the viewing face (every
-    frame) with ``view_faces``, else the analysis face."""
+def face_pane(cam: int, name: str, video: str) -> rrb.Spatial2DView:
+    """One cube face, colsfm's input: the face ``video`` (the viewing or the analysis stream) and the people mask that
+    keeps keypoints off the operator."""
     title: str = name.removeprefix("cube6_")
     if title[-1].isdigit():
         title = f"{title[:-1]} {title[-1]}"
-    video: str = schema.video_view_path(RIG, cam) if view_faces else schema.video_path(RIG, cam)
-    return blueprints.camera_view(f"Face {title}", RIG, cam, contents=[video, f"{schema.pinhole_path(RIG, cam)}/people_mask"])
+    return blueprints.camera_view(f"Face {title}", RIG, cam, contents=[video, schema.people_mask_path(RIG, cam)])
 
 
 def imu_strip() -> rrb.Horizontal:
@@ -397,34 +413,29 @@ def slam_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
     )
 
 
-def other_colsfm_rig(view_faces: bool) -> str:
-    """Content rule that drops the colsfm rig the views do not draw (``colsfm_rig``)."""
-    return f"- {COLSFM}/rig/**" if view_faces else f"- {COLSFM}/rig_view/**"
-
-
-def colsfm_tab(eye: rrb.EyeControls3D | None, *, view_faces: bool) -> rrb.Horizontal:
+def colsfm_tab(eye: rrb.EyeControls3D | None, rig: ColsfmRig) -> rrb.Horizontal:
     """colsfm: the cloud that grows with the walk, the follow view of the cube rig, and the six faces it reads."""
     # Followed on the final slam-rs path, the prior colsfm refined: its rig stays within a metre or so of it.
     scene: list[str] = [
         f"{COLSFM}/**",
         f"- {COLSFM}/points/**",
         f"- {POSITION_DIFFERENCE}/**",
-        other_colsfm_rig(view_faces),
+        f"- {rig.dropped}/**",
         schema.follow_path(schema.SLAM_RS_SOURCE),
     ]
     return rrb.Horizontal(
         rrb.Vertical(
-            overview("Overview: colsfm cloud grows with the walk", scene, colsfm_overrides(close=False, view_faces=view_faces), eye, schema.SLAM_RS_SOURCE),
-            follow("Follow: level chase view, cube rig", scene, colsfm_overrides(close=True, view_faces=view_faces), schema.SLAM_RS_SOURCE),
+            overview("Overview: colsfm cloud grows with the walk", scene, colsfm_overrides(close=False, rig=rig), eye, schema.SLAM_RS_SOURCE),
+            follow("Follow: level chase view, cube rig", scene, colsfm_overrides(close=True, rig=rig), schema.SLAM_RS_SOURCE),
             row_shares=[5, 4],
         ),
-        rrb.Grid(*(face_pane(cam, name, view_faces=view_faces) for cam, (name, _) in zip(FACE_CAMS, cube.FACES, strict=True)), grid_columns=2, name="Cube faces"),
+        rrb.Grid(*(face_pane(cam, name, rig.face_video(RIG, cam)) for cam, (name, _) in zip(FACE_CAMS, cube.FACES, strict=True)), grid_columns=2, name="Cube faces"),
         column_shares=[8, 5],
         name="colsfm",
     )
 
 
-def comparison_tab(eye: rrb.EyeControls3D | None, *, view_faces: bool) -> rrb.Vertical:
+def comparison_tab(eye: rrb.EyeControls3D | None, rig: ColsfmRig) -> rrb.Vertical:
     """Both sources in one world, close up at the rig, and how far apart their positions are over the walk."""
     scene: list[str] = [
         "/world/**",
@@ -432,21 +443,20 @@ def comparison_tab(eye: rrb.EyeControls3D | None, *, view_faces: bool) -> rrb.Ve
         *run_pictures(),
         f"- {COLSFM}/points_growing/**",
         f"- {POSITION_DIFFERENCE}/**",
-        other_colsfm_rig(view_faces),
+        f"- {rig.dropped}/**",
         # The final path is what colsfm started from; the causal VIO stands metres off it early in a long walk.
         f"- {VIO}/**",
-        f"- {schema.trail_path(schema.SLAM_RS_SOURCE)}/**",
     ]
     return rrb.Vertical(
         rrb.Horizontal(
             overview(
                 "Overview: slam-rs (grey path; live map in image colours, orange once final) and colsfm (blue)",
                 scene,
-                comparison_overrides(close=False, view_faces=view_faces),
+                comparison_overrides(close=False, rig=rig),
                 eye,
                 schema.SLAM_RS_SOURCE,
             ),
-            follow("Follow: colsfm's rig on the final slam-rs path", scene, comparison_overrides(close=True, view_faces=view_faces), schema.SLAM_RS_SOURCE),
+            follow("Follow: colsfm's rig on the final slam-rs path", scene, comparison_overrides(close=True, rig=rig), schema.SLAM_RS_SOURCE),
             column_shares=[3, 2],
         ),
         rrb.TimeSeriesView(
@@ -471,11 +481,12 @@ def segment_layout(*, panorama: bool, view_faces: bool = False, walk: Float64[nd
             then frames the walk for its own pane (``walk_eye``). Without them the viewer frames the view's bounds.
     """
     eyes: list[rrb.EyeControls3D | None] = [None if walk is None else walk_eye(walk, aspect=aspect) for aspect in OVERVIEW_ASPECTS]
+    rig: ColsfmRig = colsfm_rig(view_faces)
     return rrb.Blueprint(
         rrb.Tabs(
             slam_tab(eyes[0]),
-            colsfm_tab(eyes[1], view_faces=view_faces),
-            comparison_tab(eyes[2], view_faces=view_faces),
+            colsfm_tab(eyes[1], rig),
+            comparison_tab(eyes[2], rig),
             *([rrb.Spatial2DView(name="Panorama", origin=PANO_ENTITY)] if panorama else []),
             active_tab=0,
         ),

@@ -530,19 +530,18 @@ Viewer layout (`datasets/insta360_blueprint.py`): three tabs with one skeleton, 
 and the source's own pictures. **SLAM**: slam-rs's map and VIO path, both lenses with the tracked keypoints and the
 people mask, the IMU as a strip. **colsfm**: the cloud growing with the walk and the six cube faces with their masks.
 **Comparison**: both paths, rigs and clouds in one world, and the colsfm layer's `position_difference` (metres from
-the slam-rs prior). Each path is a trail over the last 8 s of the cursor, and its whole path (`trajectory_full`) and
-slam-rs's loops show only from the last frame on; the raw slam-rs run and colsfm run green to red along the walk, with
-start and end dots, and in Comparison slam-rs is flat grey. The overviews turn slowly (one turn in 75 s). With the
-`--cube-view` layer the colsfm tab plays the faces at every frame on colsfm's `rig_view`. A `--panorama` layer adds a
-fourth tab. Each follow
-view is rooted at the level follow frame of the run its tab shows, `/world/runs/<run>/follow` (slam-rs writes one per run:
-the run's position, turned about the world's up axis towards the walk), so the horizon holds while the stick swings:
-the causal VIO in the SLAM tab, the final path (colsfm's prior) in colsfm and Comparison; on clip 007 the two part by
-16 m at 65 s. No view draws a grid or a floor. The runs draw their rigs in the dataset's own layout (camera, `pinhole`,
-picture): slam-rs's live rig references the lens frames (its window frames show their frusta, not their pictures),
-colsfm's cube rig the face frames
-(`VideoFrameReference` into the base's `VideoStream`s, nothing encoded again). The overviews frame the walk when the catalog dataset holds one walked
-segment: run `dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.
+the slam-rs prior). Each path is a trail over the last 8 s of the cursor, and its whole path and slam-rs's loops show
+only from the last frame on; the raw slam-rs run and colsfm run green to red along the walk, with start and end dots,
+and in Comparison slam-rs is flat grey. The overviews turn slowly (one turn in 75 s). With the `--cube-view` layer the
+colsfm tab plays the faces at every frame on colsfm's `rig_view`. A `--panorama` layer adds a fourth tab. Each follow
+view is rooted at the level follow frame of the run its tab shows, `/world/runs/<run>/follow` (slam-rs writes one per
+run: the run's position, turned about the world's up axis towards the walk), so the horizon holds while the stick
+swings: the causal VIO in the SLAM tab, the final path (colsfm's prior) in colsfm and Comparison; on clip 007 the two
+part by 16 m at 65 s. No view draws a grid or a floor. The runs draw their rigs in the dataset's own layout (camera,
+`pinhole`, picture): slam-rs's live rig references the lens frames (its window frames show their frusta, not their
+pictures), colsfm's cube rig the face frames (`VideoFrameReference` into the base's `VideoStream`s, nothing encoded
+again). The overviews frame the walk when the catalog dataset holds one walked segment: run
+`dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.
 
 Poses to the panorama (for colsfm / COLMAP `EQUIRECTANGULAR`). slam-rs tracks the two lens cameras and reports the
 rig pose `T_world_imu` (the rig reference is `imu_00`). The panorama frame has camera 0's axes and its origin at the

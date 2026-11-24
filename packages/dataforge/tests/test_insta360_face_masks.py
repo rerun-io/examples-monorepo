@@ -84,6 +84,8 @@ def write_masks(path: Path, stamps: list[int], factor: int = 1, scale: float | N
     discs = [disc[factor // 2 :: factor, factor // 2 :: factor] for disc in discs]
     with rr.RecordingStream("test", recording_id="insta360__clip") as recording:
         recording.save(path)
+        for lens in range(2):  # what posekit's mask layers log on each lens mask
+            recording.log(f"/world/rig_00/cam_0{lens}/pinhole/people_mask", rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (1, "masked", (40, 110, 255, 140))]), static=True)
         if factor > 1:
             for lens in range(2):
                 s: float = float(factor) if scale is None else scale
@@ -133,7 +135,7 @@ def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) ->
 
 
 def test_each_face_mask_draws_masked_pixels_as_a_tint_over_a_clear_face(tmp_path: Path) -> None:
-    """The face masks carry the lens masks' annotation context: class 0 transparent, class 1 a blue tint."""
+    """The face masks carry the lens masks' own annotation context (posekit's): class 0 transparent, class 1 a blue tint."""
     from dataforge.apis.insta360_face_masks import Config, main
 
     base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))

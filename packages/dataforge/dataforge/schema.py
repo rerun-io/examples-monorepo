@@ -84,6 +84,12 @@ def video_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/video"
 
 
+def people_mask_path(rig: int, cam: int) -> str:
+    """``.../pinhole/people_mask`` — the ``SegmentationImage`` that keeps keypoints off people (posekit's lens masks,
+    dataforge's Insta360 face masks)."""
+    return f"{pinhole_path(rig, cam)}/people_mask"
+
+
 def video_view_path(rig: int, cam: int) -> str:
     """``.../pinhole/video_view`` — a second VideoStream of the same camera for playback (every frame, lower quality)
     where ``video`` is the sparser analysis stream (dataforge's Insta360 ``cube_view`` layer)."""
