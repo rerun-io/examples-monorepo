@@ -416,7 +416,7 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
                     CUBE_LAYER: lambda recording: self.write_cube(recording, targets[paths.BASE_LAYER]),
                     CUBE_VIEW_LAYER: lambda recording: self.write_cube_view(recording, targets[paths.BASE_LAYER]),
                 },
-                base_blueprint=segment_layout(panorama=PANORAMA_LAYER in pending),
+                base_blueprint=segment_layout(panorama=PANORAMA_LAYER in pending, view_faces=CUBE_VIEW_LAYER in pending),
             )
         return targets[paths.BASE_LAYER]
 
@@ -622,10 +622,16 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         return segment_layout(panorama=False)
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
-        """The segment layout shows the panorama tab when any registered segment holds the panorama layer, and its
-        overviews frame the walk when the dataset holds one walked segment (``insta360_blueprint.segment_walk``)."""
+        """The segment layout shows the panorama tab when any registered segment holds the panorama layer, plays the
+        viewing faces when any holds the cube_view layer, and its overviews frame the walk when the dataset holds one
+        walked segment (``insta360_blueprint.segment_walk``)."""
         layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
-        return segment_layout(panorama=any(PANORAMA_LAYER in names for names in layer_names), walk=segment_walk(entry)), self.table_blueprint()
+        layout: rrb.Blueprint = segment_layout(
+            panorama=any(PANORAMA_LAYER in names for names in layer_names),
+            view_faces=any(CUBE_VIEW_LAYER in names for names in layer_names),
+            walk=segment_walk(entry),
+        )
+        return layout, self.table_blueprint()
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Preview card: the rig beside lens 0."""

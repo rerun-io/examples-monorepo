@@ -31,6 +31,9 @@ from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_fro
 
 MASK_NAME: str = "people_mask"
 """The mask entity under each ``pinhole``, on the lenses and on the faces."""
+MASK_ANNOTATION: rr.AnnotationContext = rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (1, "masked", (40, 110, 255, 140))])
+"""How a face mask draws over its face: kept pixels clear, masked pixels a blue tint (the lens masks' own,
+``posekit.mask_layer.MASK_ANNOTATION``); without it the viewer colours the class ids itself and hides the picture."""
 
 
 @dataclass
@@ -159,6 +162,8 @@ def main(config: Config) -> None:
     done: set[int] = set()
     recording_id: str = rrc.RrdReader(config.base).recordings()[0].recording_id
     with writing.atomic_recording(config.output, recording_id=recording_id, send_properties=False) as recording:
+        for cam in faces:
+            rr.log(f"{schema.pinhole_path(RIG, cam)}/{MASK_NAME}", MASK_ANNOTATION, static=True, recording=recording)
         for lens, stamp, mask in lens_masks(config.masks, wanted):
             if stamp in done:
                 continue
