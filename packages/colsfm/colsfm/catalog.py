@@ -46,6 +46,7 @@ from colsfm.export import write_tum_file
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSourceManifest, StreamKeyframes, write_manifest
 from colsfm.frames_meta import FRAMES_META_NAME
 from colsfm.geometry import TumPose, rigid3d_from_matrix
+from colsfm.rerun_layer import ViewRigSource
 from colsfm.run_lifecycle import STAGING_SUFFIX, publish_directory
 
 DEFAULT_CATALOG_URL: Final[str] = "rerun+http://dgx-spark:51235"
@@ -612,3 +613,31 @@ def prepare_catalog_input(config: CatalogInputConfig) -> PreparedInput:
     seconds: float = time.perf_counter() - started
     print(f"[colsfm.catalog] {config.segment}: {len(candidates)} rig frames, {written} keyframes, {len(cameras)} cameras in {seconds:.1f} s")
     return PreparedInput(input_dir=input_dir, cameras=cameras, num_rig_frames=len(candidates), num_keyframes=written, seconds=seconds)
+
+
+def read_view_rig_source(config: CatalogInputConfig, cameras: Sequence[CatalogCameraModel]) -> ViewRigSource | None:
+    """The prior and the viewing frames a layer's `rig_view` is drawn from, when every camera has a viewing stream
+    (`<camera>/pinhole/video_view`, dataforge's Insta360 `cube_view` layer); None otherwise.
+
+    The viewing frames are the samples of the first camera's viewing stream (the layer gives every face the same ones).
+
+    Args:
+        config: The run's segment, trajectory entity and timeline.
+        cameras: The cameras the run read.
+
+    Returns:
+        The prior at its own rate and the viewing frame stamps, or None without viewing streams.
+    """
+    dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(name=config.dataset)
+    streams: set[str] = {
+        component.entity_path for component in catalog_components(dataset.schema()) if component.archetype == "VideoStream" and component.field == "sample"
+    }
+    views: list[str] = [f"{camera.entity}/pinhole/video_view" for camera in cameras]
+    if not views or any(view not in streams for view in views):
+        return None
+    prior: CatalogTrajectory = read_catalog_trajectory(dataset, config.segment, config.trajectory_entity, config.timeline)
+    (view,) = read_catalog_videos(dataset, config.segment, views[:1], config.timeline)
+    world_T_prior: Float64[ndarray, "n 4 4"] = np.tile(np.eye(4), (len(prior.t_ns), 1, 1))
+    world_T_prior[:, :3, :3] = prior.rotations.as_matrix()
+    world_T_prior[:, :3, 3] = prior.translations
+    return ViewRigSource(prior_t_ns=prior.t_ns, world_T_prior=world_T_prior, view_t_ns=np.asarray(view.t_ns).view(np.int64))
