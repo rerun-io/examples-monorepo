@@ -340,7 +340,8 @@ def test_the_cube_layer_on_cuda_is_the_cpu_layer_within_the_nvenc_band(insv_clip
 
 @pytest.mark.integration
 def test_the_cube_view_layer_holds_the_six_faces_on_every_base_stamp_beside_the_analysis_faces(insv_clip: Path, tmp_path: Path) -> None:
-    """``--cube --cube-view``: ``video`` on every tenth stamp, ``video_view`` on every stamp, the same faces at the same size."""
+    """``--cube --cube-view``: ``video`` on every ``stride``-th stamp, ``video_view`` on every stamp up to the last analysis
+    face, the same faces at the same size; with ``cube_max_framesets`` the viewing faces end at the last analysis face too."""
     import torch
 
     from dataforge import paths, schema
@@ -348,17 +349,24 @@ def test_the_cube_view_layer_holds_the_six_faces_on_every_base_stamp_beside_the_
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
-    targets: dict[str, Path] = convert_layers(insv_clip, tmp_path, cube=True, cube_view=True)
-    stamps: Int64[ndarray, " n"] = video_times(targets[paths.BASE_LAYER], schema.video_path(0, 0))
-    assert recording_properties(read_back(targets[CUBE_VIEW_LAYER]), "cube_view")["stride"] == 1
-    for cam in FACE_CAMS:
-        np.testing.assert_array_equal(video_times(targets[CUBE_LAYER], schema.video_path(0, cam)), stamps[::10])
-        np.testing.assert_array_equal(video_times(targets[CUBE_VIEW_LAYER], schema.video_view_path(0, cam)), stamps)
-        view: UInt8[ndarray, "n h w 3"] = decoded_rgb(targets[CUBE_VIEW_LAYER], schema.video_view_path(0, cam))
-        analysis: UInt8[ndarray, "k h w 3"] = decoded_rgb(targets[CUBE_LAYER], schema.video_path(0, cam))
-        assert view.shape == (stamps.size, 800, 800, 3)
-        mse: float = float(np.mean((view[::10].astype(np.float64) - analysis.astype(np.float64)) ** 2))
-        assert 10.0 * np.log10(255.0**2 / mse) > 30.0, f"cam_{cam:02d}"
+    for limit, root in ((None, tmp_path / "all"), (3, tmp_path / "pack")):
+        targets: dict[str, Path] = convert_layers(insv_clip, root, cube=True, cube_view=True, cube_max_framesets=limit)
+        stamps: Int64[ndarray, " n"] = video_times(targets[paths.BASE_LAYER], schema.video_path(0, 0))
+        cube: dict[str, object] = recording_properties(read_back(targets[CUBE_LAYER]), "cube")
+        stride, size = int(cube["stride"]), int(cube["face_size"])  # pyrefly: ignore[bad-argument-type]
+        analysis: Int64[ndarray, " k"] = stamps[::stride][:limit]
+        shown: Int64[ndarray, " m"] = stamps[stamps <= analysis[-1]]
+        assert recording_properties(read_back(targets[CUBE_VIEW_LAYER]), "cube_view")["stride"] == 1
+        for cam in FACE_CAMS:
+            np.testing.assert_array_equal(video_times(targets[CUBE_LAYER], schema.video_path(0, cam)), analysis)
+            np.testing.assert_array_equal(video_times(targets[CUBE_VIEW_LAYER], schema.video_view_path(0, cam)), shown)
+            if limit is not None:
+                continue
+            view: UInt8[ndarray, "n h w 3"] = decoded_rgb(targets[CUBE_VIEW_LAYER], schema.video_view_path(0, cam))
+            faces: UInt8[ndarray, "k h w 3"] = decoded_rgb(targets[CUBE_LAYER], schema.video_path(0, cam))
+            assert view.shape == (shown.size, size, size, 3)
+            mse: float = float(np.mean((view[::stride].astype(np.float64) - faces.astype(np.float64)) ** 2))
+            assert 10.0 * np.log10(255.0**2 / mse) > 30.0, f"cam_{cam:02d}"
 
 
 @pytest.mark.integration

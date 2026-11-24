@@ -35,8 +35,8 @@ Cube view layer (``--cube-view``; off by default). ``cube_view`` holds the same 
 ``cube_view_stride``-th frameset (default every one), AV1 at the viewing quality (``cube_view_cq`` 36, a keyframe every
 ``cube_view_gop`` 30), on ``/world/rig_00/cam_02 .. cam_07/pinhole/video_view`` with the same face poses and pinholes: the
 pictures a viewer plays and a run's per-frame viewing rig references, while ``video`` keeps the sparse analysis faces.
-It is a second pass over the base (a decode run per eight GOPs makes it seconds); one pass would need twelve encoder
-sessions at once.
+It is a second pass over the base (9 s for the X5 office clip's 2,498 framesets on an RTX 5090); one pass would need
+twelve encoder sessions at once. With ``cube_max_framesets`` the viewing faces end at the last analysis face.
 
 Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)`` of a
 ``W``-wide panorama (pixel centres at integers) looks along longitude ``lon = (u + 0.5) 2 pi / W - pi / 2``,
@@ -63,7 +63,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import io
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -158,6 +158,27 @@ class FaceRig:
     """The six faces, in ``FACE_CAMS`` order."""
     tables: list[cube.FaceTable]
     """Each face's lens lookup."""
+
+
+def log_face_cameras(recording: rr.RecordingStream, rig: FaceRig) -> None:
+    """Each face's node (name, an RGB pinhole camera with AV1 video), static pose and ``Pinhole``: what both cube layers
+    log, so either one draws the faces. The encoders' quality is on each layer's recording property (``cube``, ``cube_view``)."""
+    for cam, face in zip(FACE_CAMS, rig.faces, strict=True):
+        node: str = schema.cam_path(RIG, cam)
+        rr.log(node, rr.AnyValues(name=face.name, kind="rgb", camera_model="pinhole", video_codec="av1"), static=True, recording=recording)
+        face_T_rig: Float64[ndarray, "4 4"] = cube.face_from_rig(face, rig.lenses.lens_from_rig)
+        rr.log(
+            node,
+            rr.Transform3D(translation=face_T_rig[:3, 3], mat3x3=face_T_rig[:3, :3], relation=rr.TransformRelation.ChildFromParent),
+            static=True,
+            recording=recording,
+        )
+        rr.log(
+            schema.pinhole_path(RIG, cam),
+            rr.Pinhole(image_from_camera=face.intrinsics, width=rig.size, height=rig.size, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.05),
+            static=True,
+            recording=recording,
+        )
 
 
 def layer_device(choice: Literal["cuda", "cpu"] | None) -> torch.device:
@@ -528,80 +549,68 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
     def write_cube(self, recording: rr.RecordingStream, base: Path) -> None:
         """Join every ``cube_stride``-th frameset's two lens images into the six cube faces (the analysis faces SfM, the
         masks and splat training read) and log each face as AV1 on the frameset's stamp at ``pinhole/video``."""
-        faces: FaceRig = self.face_rig(recording, base)
-        indices: Int64[ndarray, " k"] = cube_indices(faces.source.num_frames, self.config.cube_stride, self.config.cube_max_framesets)
+        rig: FaceRig = self.face_rig(base)
+        indices: Int64[ndarray, " k"] = self.analysis_indices(rig.source.num_frames)
         recording.send_property(
             "cube",
-            rr.AnyValues(face_size=faces.size, stride=self.config.cube_stride, framesets=int(indices.size), first_cam=FIRST_FACE_CAM, cq=self.config.cube_cq, gop=self.config.cube_gop),
+            rr.AnyValues(face_size=rig.size, stride=self.config.cube_stride, framesets=int(indices.size), first_cam=FIRST_FACE_CAM, cq=self.config.cube_cq, gop=self.config.cube_gop),
         )
-        for cam, face in zip(FACE_CAMS, faces.faces, strict=True):
-            rr.log(
-                schema.cam_path(RIG, cam),
-                rr.AnyValues(name=face.name, kind="rgb", camera_model="pinhole", video_codec="av1", cq=self.config.cube_cq, gop=self.config.cube_gop),
-                static=True,
-                recording=recording,
-            )
+        log_face_cameras(recording, rig)
         with self.timer.stage("cube:faces"):
-            self.encode_faces(recording, faces, indices, cq=self.config.cube_cq, gop=self.config.cube_gop, entity=schema.video_path)
+            self.encode_faces(recording, rig, indices, [schema.video_path(RIG, cam) for cam in FACE_CAMS], cq=self.config.cube_cq, gop=self.config.cube_gop)
 
     def write_cube_view(self, recording: rr.RecordingStream, base: Path) -> None:
-        """The same six faces at every ``cube_view_stride``-th frameset, for playback: AV1 at ``cube_view_cq`` on
-        ``pinhole/video_view``, beside the analysis faces' ``pinhole/video`` (a second decode of the base; one pass would
-        hold twelve encoder sessions, past ``DATAFORGE_NVENC_SLOTS`` and a GeForce driver's limit)."""
-        faces: FaceRig = self.face_rig(recording, base)
-        indices: Int64[ndarray, " k"] = cube_indices(faces.source.num_frames, self.config.cube_view_stride, self.config.cube_max_framesets)
+        """The same six faces at every ``cube_view_stride``-th frameset up to the last analysis face, for playback: AV1 at
+        ``cube_view_cq`` on ``pinhole/video_view``, beside the analysis faces' ``pinhole/video`` (a second decode of the
+        base; one pass would hold twelve encoder sessions, past ``DATAFORGE_NVENC_SLOTS`` and a GeForce driver's limit)."""
+        rig: FaceRig = self.face_rig(base)
+        last: int = int(self.analysis_indices(rig.source.num_frames)[-1])
+        indices: Int64[ndarray, " k"] = cube_indices(last + 1, self.config.cube_view_stride, None)
         recording.send_property(
             "cube_view",
-            rr.AnyValues(face_size=faces.size, stride=self.config.cube_view_stride, framesets=int(indices.size), cq=self.config.cube_view_cq, gop=self.config.cube_view_gop),
+            rr.AnyValues(
+                face_size=rig.size,
+                stride=self.config.cube_view_stride,
+                framesets=int(indices.size),
+                first_cam=FIRST_FACE_CAM,
+                cq=self.config.cube_view_cq,
+                gop=self.config.cube_view_gop,
+            ),
         )
+        log_face_cameras(recording, rig)
         with self.timer.stage("cube_view:faces"):
-            self.encode_faces(recording, faces, indices, cq=self.config.cube_view_cq, gop=self.config.cube_view_gop, entity=schema.video_view_path)
+            entities: list[str] = [schema.video_view_path(RIG, cam) for cam in FACE_CAMS]
+            self.encode_faces(recording, rig, indices, entities, cq=self.config.cube_view_cq, gop=self.config.cube_view_gop)
 
-    def face_rig(self, recording: rr.RecordingStream, base: Path) -> FaceRig:
-        """The base's lens videos and cameras, the six faces at ``cube_face_size`` with their tables, and each face's
-        static pose and ``Pinhole`` logged (both cube layers log the same, so either one draws the faces)."""
+    def analysis_indices(self, frames: int) -> Int64[ndarray, " k"]:
+        """The framesets the analysis faces sample (``cube_stride``, ``cube_max_framesets``); the viewing faces end at the last."""
+        return cube_indices(frames, self.config.cube_stride, self.config.cube_max_framesets)
+
+    def face_rig(self, base: Path) -> FaceRig:
+        """The base's lens videos and cameras, and the six faces at ``cube_face_size`` with their tables."""
         lenses: LensCameras = cameras_from_recording(base)
         size: int = self.config.cube_face_size or cube.default_face_size(lenses.size[0])
         faces: list[cube.CubeFace] = cube.cube_faces(size)
-        for cam, face in zip(FACE_CAMS, faces, strict=True):
-            face_T_rig: Float64[ndarray, "4 4"] = cube.face_from_rig(face, lenses.lens_from_rig)
-            rr.log(
-                schema.cam_path(RIG, cam),
-                rr.Transform3D(translation=face_T_rig[:3, 3], mat3x3=face_T_rig[:3, :3], relation=rr.TransformRelation.ChildFromParent),
-                static=True,
-                recording=recording,
-            )
-            rr.log(
-                schema.pinhole_path(RIG, cam),
-                rr.Pinhole(image_from_camera=face.intrinsics, width=size, height=size, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.05),
-                static=True,
-                recording=recording,
-            )
         tables: list[cube.FaceTable] = [cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces]
         return FaceRig(source=read_base_lens_videos(base), lenses=lenses, size=size, faces=faces, tables=tables)
 
-    def encode_faces(
-        self, recording: rr.RecordingStream, faces: FaceRig, indices: Int64[ndarray, " k"], *, cq: int, gop: int, entity: Callable[[int, int], str]
-    ) -> None:
-        """Join the framesets ``indices`` into the six faces and log each face as AV1 on the frameset's stamp at ``entity(RIG, cam)``.
+    def encode_faces(self, recording: rr.RecordingStream, rig: FaceRig, indices: Int64[ndarray, " k"], entities: list[str], *, cq: int, gop: int) -> None:
+        """Join the framesets ``indices`` into the six faces and log face ``k`` as AV1 on the frameset's stamp at ``entities[k]``.
 
         On ``cube_device``: both lenses decoded batch by batch (``decode_runs``), each face one remap of the stacked pair,
         six encoders fed from the device (``cuda``: no host copy of a picture).
-
-        Raises:
-            ValueError: If an encoder takes or a stream holds another number of frames than ``indices``.
         """
         device: torch.device = layer_device(self.config.cube_device)
-        join = cube.CubeJoin(faces.tables, faces.lenses.size, device)
-        batch: int = max(1, LENS_BATCH_PIXELS // (faces.lenses.size[0] * faces.lenses.size[1]))
-        pictures = lens_pictures(faces.source, indices, device, batch=batch, threads=self.config.decode_threads)
+        join = cube.CubeJoin(rig.tables, rig.lenses.size, device)
+        batch: int = max(1, LENS_BATCH_PIXELS // (rig.lenses.size[0] * rig.lenses.size[1]))
+        pictures = lens_pictures(rig.source, indices, device, batch=batch, threads=self.config.decode_threads)
         encode_and_log(
             recording,
             (join.faces(lens0, lens1) for lens0, lens1 in pictures),
-            [entity(RIG, cam) for cam in FACE_CAMS],
-            faces.source.times_ns[indices],
-            width=faces.size,
-            height=faces.size,
+            entities,
+            rig.source.times_ns[indices],
+            width=rig.size,
+            height=rig.size,
             gop=gop,
             cq=cq,
             device=device,
