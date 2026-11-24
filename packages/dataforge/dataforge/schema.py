@@ -84,6 +84,12 @@ def video_path(rig: int, cam: int) -> str:
     return f"{pinhole_path(rig, cam)}/video"
 
 
+def video_view_path(rig: int, cam: int) -> str:
+    """``.../pinhole/video_view`` — a second VideoStream of the same camera for playback (every frame, lower quality)
+    where ``video`` is the sparser analysis stream (dataforge's Insta360 ``cube_view`` layer)."""
+    return f"{pinhole_path(rig, cam)}/video_view"
+
+
 def audio_path(rig: int, audio: int) -> str:
     """``/world/rig_NN/audio_MM`` — a microphone's track (AssetAudio) at its first sample on ``video_time``."""
     return f"{rig_path(rig)}/audio_{_index(audio, 'audio')}"
