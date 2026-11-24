@@ -70,6 +70,64 @@ other generated file byte for byte as the generator env gives it. Source: local 
 rim rig at scene scales 1, 0.01 and 0.002 ends at Ceres' cost, both solvers scored on one set of observations (in front
 at the start and in Ceres' solution).
 
+## caspar-diag-exit-no-convergence.patch, caspar-rig-refine.patch, caspar-rig-refine-generated-f32.patch
+
+Applied after the five patches above (`refine_sensor_from_rig` on CASPAR, 2026-11-24).
+
+- **Diag exit** (`caspar-diag-exit-no-convergence.patch`, hand-written, 1 file): `CONVERGED_DIAG_EXIT` (the LM damping
+  passed `diag_exit_value` after uphill steps) is reported as `NO_CONVERGENCE`, not `CONVERGENCE`. It hid the Mission
+  office fisheye stall (observations near 90 deg off-axis).
+- **Rig refinement, hand-written** (`caspar-rig-refine.patch`, 5 files): `caspar_generate.py` gets one tunable
+  `<Model>SensorFromRig` Pose3 node per model and 40 "rig" factors (sensor_from_rig tunable), registered after every
+  existing factor: calib {merged, focal+extra (principal point fixed), fixed} x pose {var, fixed} x point {var, fixed}
+  for SIMPLE_RADIAL, PINHOLE and OPENCV_FISHEYE, fixed calib for FULL_OPENCV. The adapter
+  (`bundle_adjustment_caspar.{h,cc}`, `caspar_model_adapter.h`) uses a rig factor for a non-reference image when, as in
+  the Ceres BA, `refine_sensor_from_rig` is set, the sensor is not constant in the config and the rig's reference
+  sensor has an image in the problem; one SensorFromRig node per (rig, sensor) and model, written back to the `Rig`.
+  The reference sensor stays identity (gauge); external observations keep a constant sensor_from_rig (as Ceres).
+  `LOG(FATAL_THROW)` remains for principal-point-only refinement with a rig and for FULL_OPENCV with refined
+  intrinsics (no factor generated). The rig setters are one macro line per calibration state
+  (`CASPAR_RIG_ADAPTER_MEMBERS`). `bundle_adjustment_caspar_test.cc`: the old "throws on variable sensor_from_rig"
+  test becomes a rig-vs-Ceres test plus a principal-point-only throw test.
+- **Shared memory.** A factor kernel's static shared memory is its largest accessor buffer (`inout_shared`, 16 KB at
+  1024 threads) plus one 8 KB SharedIndex array per tunable node plus, per `AddSum` output, a `__shared__` sum buffer.
+  The six factors with four tunable nodes (pose, sensor_from_rig, calib, point) needed 49,156 B in `score` and
+  `res_jac_first`: 4 B over the 48 KB static limit. A smaller block is not an option (SharedIndices groups every
+  factor's indices in 1024-thread blocks). For those six factors only, the generator's `AddSumDirect` adds the block's
+  residual sum to global memory itself, with the same reduction and the same one atomicAdd per block, without the 4 B
+  buffer: every kernel now fits (24 at exactly 49,152 B). All other kernels regenerate byte for byte as before.
+- **Generated** (`caspar-rig-refine-generated-f32.patch`): 424 new kernel files and the 4 aggregates. `solver.{h,cc}`
+  are regenerated and then carry the reduced-camera-system edits again: its seven `solver.cc` hunks and one `solver.h`
+  hunk applied by context (`patch -p1`), the one whose context moved (`DoUpdateR` ends with
+  `SimpleRadialSensorFromRig` now) by hand, and the span helper block re-rendered with `tools/caspar_rcs_helpers.py`
+  (the camera span now ends at `SimpleRadialSensorFromRig`). The beta fix lives in `solver_tools`, which did not change.
+
+```bash
+# regenerate (generator env as above), outside the checkout:
+python src/thirdparty/Symforce-Caspar/caspar_generate.py /tmp/caspar-gen-rig/rig f32
+# take the new files + caspar_mappings.{h,cu}; take solver.{h,cc} and re-apply the RCS solver hunks, then
+python <recipe>/tools/caspar_rcs_helpers.py <checkout>   # exit 0 once the printed block is in solver.cc
+```
+
+- **Measurements** (2026-11-24, RTX 5090 dev build sm_120, f32; CASPAR under /tmp/gpu-5090.lock, Ceres 2.x on 8 CPU
+  threads of a loaded machine, TRIVIAL loss = CASPAR's L2, same start, poses compared after a Sim(3) fit of the frame
+  centres since each solver picks its own gauge points):
+  - Mission office H10b, 2-lens OPENCV_FISHEYE, obs <= 80 deg (606 images, 200k points, rig + poses + points + all
+    intrinsics): Ceres 62.95 s, cost 1.085148e6; CASPAR RCS (diag_exit_value 1e12) 0.87 s, 1.085161e6, rig 0.00014 deg /
+    2.8e-6 from Ceres (baseline 0.03048 both), poses 0.0005 deg max; full PCG 0.77 s, rig 0.006 deg. The full problem
+    (obs up to 90 deg) still stalls on CASPAR (cost 1.4378e6 vs start 1.4380e6, rig unchanged; Ceres 39.2 s, 1.3509e6):
+    the hemisphere-edge / no-robust-loss limit, now reported as NO_CONVERGENCE.
+  - EuRoC V1_01 stereo (FULL_OPENCV, intrinsics fixed, 400 images, 71k points), sensor_from_rig perturbed 1 deg / 2 cm:
+    Ceres 14.2 s; CASPAR RCS 0.65 s, rig 0.00001 deg from Ceres, both back to 0.025 deg / baseline 0.1109 m vs factory
+    0.1101 m. TWO_CAMS_FROM_WORLD gauge: FULL_OPENCV has no fixed-point factor (pre-existing), so THREE_POINTS throws.
+  - Synthetic 2-camera rigs (12 frames, 400 points, rig perturbed 2 deg / 3 cm): PINHOLE {none, focal+extra, all},
+    OPENCV_FISHEYE {none, focal+extra}: CASPAR within 0.0065 deg (rig) and 0.007 deg (poses) of Ceres, cost within 1e-5.
+    SIMPLE_RADIAL focal+extra: 0.0001 deg. OPENCV_FISHEYE with every intrinsic refined is weak (a principal-point shift
+    trades against a small rotation, ~1 px per 0.15 deg): CASPAR RCS reaches Ceres' cost (2.511456e3) with the rig
+    0.002-0.03 deg off across runs (f32 atomics are not deterministic); the full PCG stops at 2.51160e3 (+6e-5) with
+    0.15-0.21 deg. Tests: caspar-rig/tests/ on the NAS (Mission office scratch), 10/10 passing.
+  - CASPAR reports NO_CONVERGENCE at these minima: its f32 steps get rejected until the damping passes diag_exit_value.
+
 ## caspar-pcg-beta-recurrence.patch and caspar-reduced-camera-system.patch
 
 Hand-written patches, cut like the others. One part depends on the generated layout: the span helpers in `solver.cc`

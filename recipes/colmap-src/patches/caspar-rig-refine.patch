@@ -1,0 +1,1101 @@
+diff --git a/src/colmap/estimators/bundle_adjustment_caspar.cc b/src/colmap/estimators/bundle_adjustment_caspar.cc
+index fb1e40989d923b2dbfe890fdfcaef60228046c15..3ce730cca3d16b9a227b8bb49993b8ed0d8ba23a 100644
+--- a/src/colmap/estimators/bundle_adjustment_caspar.cc
++++ b/src/colmap/estimators/bundle_adjustment_caspar.cc
+@@ -27,6 +27,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
+     VLOG(2) << "Creating Caspar bundle adjuster";
+ 
+     LogUnsupportedOptions();
++    FindRigsWithRefSensor();
+     BuildObservationCounts();
+     FixGauge();
+     BuildFactors();
+@@ -43,6 +44,30 @@ class CasparBundleAdjuster : public BundleAdjuster {
+     }
+   }
+ 
++  // As in the Ceres BA: a rig's sensor_from_rig can be refined only when its
++  // reference sensor has an image in the problem; otherwise the relative
++  // poses are not constrained.
++  void FindRigsWithRefSensor() {
++    for (const image_t image_id : config_.Images()) {
++      const Image& image = reconstruction_.Image(image_id);
++      if (image.IsRefInFrame()) {
++        rigs_with_ref_sensor_.insert(image.FramePtr()->RigId());
++      }
++    }
++  }
++
++  // The reference sensor's sensor_from_rig is the identity (the rig's gauge)
++  // and is never a node.
++  bool IsSensorFromRigVariable(const Image& image) const {
++    if (!options_.refine_sensor_from_rig || image.IsRefInFrame()) {
++      return false;
++    }
++    const Frame& frame = *image.FramePtr();
++    return frame.HasRigPtr() &&
++           !config_.HasConstantSensorFromRigPose(image.DataId().sensor_id) &&
++           rigs_with_ref_sensor_.count(frame.RigId()) > 0;
++  }
++
+   ICasparModelAdapter* GetAdapter(const CameraModelId model_id) {
+     auto it = adapters_.find(model_id);
+     if (it != adapters_.end()) {
+@@ -137,7 +162,23 @@ class CasparBundleAdjuster : public BundleAdjuster {
+     for (const image_t image_id : config_.Images()) {
+       const Image& image = reconstruction_.Image(image_id);
+       const Camera& camera = reconstruction_.Camera(image.CameraId());
+-      frame_to_model.emplace(image.FrameId(), camera.model_id);
++      const auto [it, inserted] =
++          frame_to_model.emplace(image.FrameId(), camera.model_id);
++      // Pose nodes are per camera model, so a frame whose images use two
++      // models gets two unlinked rig_from_world nodes.
++      if (!inserted && it->second != camera.model_id &&
++          IsPoseVariable(image.FrameId())) {
++        if (options_.refine_sensor_from_rig) {
++          LOG(FATAL_THROW)
++              << "Frame " << image.FrameId()
++              << " mixes camera models; CASPAR keeps one pose per model, so "
++                 "refine_sensor_from_rig would refine unlinked poses. Use one "
++                 "camera model per rig or the Ceres BA.";
++        }
++        LOG(WARNING) << "Frame " << image.FrameId()
++                     << " mixes camera models; CASPAR refines one "
++                        "rig_from_world per model, not linked across them.";
++      }
+     }
+     for (const auto& [frame_id, model_id] : frame_to_model) {
+       GetOrCreatePose(frame_id, model_id);
+@@ -202,16 +243,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
+       }
+       if (!adapter) continue;
+ 
+-      if (options_.refine_sensor_from_rig) {
+-        const Frame& frame = *image.FramePtr();
+-        if (frame.HasRigPtr() && !image.IsRefInFrame()) {
+-          LOG(FATAL_THROW)
+-              << "Camera " << camera_id
+-              << ": refine_sensor_from_rig=true is not supported by CASPAR. "
+-                 "Set refine_sensor_from_rig=false or use the Ceres BA.";
+-        }
+-      }
+       const bool pose_var = IsPoseVariable(image.FrameId());
++      const bool sensor_from_rig_var = IsSensorFromRigVariable(image);
+ 
+       for (const Point2D& point2D : image.Points2D()) {
+         if (!point2D.HasPoint3D() ||
+@@ -224,6 +257,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
+                       point2D,
+                       reconstruction_.Point3D(point2D.point3D_id),
+                       pose_var,
++                      sensor_from_rig_var,
+                       focal_and_extra,
+                       principal_point_var,
+                       calib_idx,
+@@ -267,15 +301,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
+       // observations.
+       frames_from_outside_config_.insert(image.FrameId());
+       cameras_from_outside_config_.insert(camera.camera_id);
+-      if (options_.refine_sensor_from_rig) {
+-        const Frame& frame = *image.FramePtr();
+-        if (frame.HasRigPtr() && !image.IsRefInFrame()) {
+-          LOG(FATAL_THROW)
+-              << "Camera " << camera.camera_id
+-              << ": refine_sensor_from_rig=true is not supported by CASPAR. "
+-                 "Set refine_sensor_from_rig=false or use the Ceres BA.";
+-        }
+-      }
++      // As in the Ceres BA, an observation from outside the config sees a
++      // constant cam_from_world, sensor_from_rig included.
+       const Point2D& point2D = image.Point2D(track_el.point2D_idx);
+       const size_t calib_idx = GetOrCreateCalibration(camera.camera_id, camera);
+       AddFactorCore(image,
+@@ -283,6 +310,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
+                     point2D,
+                     point3D,
+                     /*pose_var=*/false,
++                    /*sensor_from_rig_var=*/false,
+                     /*focal_and_extra=*/false,
+                     /*principal_point_var=*/false,
+                     calib_idx,
+@@ -295,6 +323,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
+                      const Point2D& point2D,
+                      const Point3D& point3D,
+                      bool pose_var,
++                     bool sensor_from_rig_var,
+                      bool focal_and_extra,
+                      bool principal_point_var,
+                      size_t calib_idx,
+@@ -302,7 +331,8 @@ class CasparBundleAdjuster : public BundleAdjuster {
+     const bool point_var = IsPointVariable(point2D.point3D_id);
+ 
+     // Skip fully-constant observations, there's nothing to optimize
+-    if (!pose_var && !focal_and_extra && !principal_point_var && !point_var) {
++    if (!pose_var && !sensor_from_rig_var && !focal_and_extra &&
++        !principal_point_var && !point_var) {
+       return;
+     }
+ 
+@@ -338,9 +368,20 @@ class CasparBundleAdjuster : public BundleAdjuster {
+                       (static_cast<int>(principal_point_var) << 1) |
+                       static_cast<int>(point_var)];
+ 
+-    VariantData& vd = md.variants[static_cast<int>(v)];
+-
+-    AppendPose(vd.sensor_from_rig_data, GetSensorFromRig(image));
++    VariantData& vd =
++        sensor_from_rig_var
++            ? md.rig_variants[RigVariantIndex(
++                  GetRigCalibState(camera, focal_and_extra, principal_point_var, adapter),
++                  pose_var,
++                  point_var)]
++            : md.variants[static_cast<int>(v)];
++
++    if (sensor_from_rig_var) {
++      vd.sensor_from_rig_indices.push_back(
++          GetOrCreateSensorFromRig(image, camera.model_id));
++    } else {
++      AppendPose(vd.sensor_from_rig_data, GetSensorFromRig(image));
++    }
+ 
+     if (pose_var) {
+       vd.pose_indices.push_back(
+@@ -437,6 +478,75 @@ class CasparBundleAdjuster : public BundleAdjuster {
+     return Rigid3d{};
+   }
+ 
++  // The rig factors cover a merged calib, focal and extra only, and a fixed
++  // calibration (per model: SupportsRigCalibState).
++  static RigCalibState GetRigCalibState(const Camera& camera,
++                                        bool focal_and_extra,
++                                        bool principal_point_var,
++                                        const ICasparModelAdapter& adapter) {
++    RigCalibState state = RigCalibState::FIXED;
++    if (focal_and_extra && principal_point_var) {
++      state = RigCalibState::MERGED;
++    } else if (focal_and_extra) {
++      state = RigCalibState::FOCAL_AND_EXTRA;
++    } else if (principal_point_var) {
++      LOG(FATAL_THROW) << "Camera " << camera.camera_id
++                       << ": refine_sensor_from_rig with only the principal "
++                          "point refined is not supported by CASPAR. Use the "
++                          "Ceres BA.";
++    }
++    if (!adapter.SupportsRigCalibState(state)) {
++      LOG(FATAL_THROW) << "Camera " << camera.camera_id << " ("
++                       << camera.ModelName()
++                       << "): refine_sensor_from_rig with refined intrinsics "
++                          "is not supported by CASPAR for this model. Fix "
++                          "the intrinsics or use the Ceres BA.";
++    }
++    return state;
++  }
++
++  // One SensorFromRig node per (rig, non-reference sensor), per model.
++  size_t GetOrCreateSensorFromRig(const Image& image,
++                                  const CameraModelId model_id) {
++    const Frame& frame = *image.FramePtr();
++    const std::pair<rig_t, sensor_t> key(frame.RigId(),
++                                         image.DataId().sensor_id);
++    auto& index = sensor_from_rig_index_per_model_[model_id];
++    const size_t next = index.size();
++    auto [it, inserted] = index.try_emplace(key, next);
++    if (inserted) {
++      sensor_from_rig_keys_per_model_[model_id].push_back(key);
++      Rigid3d sensor_from_rig = frame.RigPtr()->SensorFromRig(key.second);
++      sensor_from_rig.rotation().normalize();
++      AppendPose(sensor_from_rig_data_per_model_[model_id], sensor_from_rig);
++    }
++    return it->second;
++  }
++
++  size_t NumSensorFromRigs(const CameraModelId model_id) const {
++    const auto it = sensor_from_rig_keys_per_model_.find(model_id);
++    return it != sensor_from_rig_keys_per_model_.end() ? it->second.size()
++                                                       : 0;
++  }
++
++  // Merged Calib nodes exist when a factor tunes both intrinsic groups.
++  static bool HasMergedCalibFactors(const ModelData& md) {
++    for (const FactorVariant v : {FactorVariant::BASE,
++                                  FactorVariant::FIXED_POSE,
++                                  FactorVariant::FIXED_POINT,
++                                  FactorVariant::FIXED_POSE_FIXED_POINT}) {
++      if (md.variants[static_cast<int>(v)].num_factors > 0) {
++        return true;
++      }
++    }
++    for (int v = 0; v < 4; ++v) {  // RigCalibState::MERGED
++      if (md.rig_variants[v].num_factors > 0) {
++        return true;
++      }
++    }
++    return false;
++  }
++
+   // Calib indices are per-model: index 0 for SimpleRadial is unrelated to
+   // index 0 for Pinhole.
+   size_t GetOrCreateCalibration(const camera_t camera_id,
+@@ -631,15 +741,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
+             n_calib);
+ 
+         // Set merged Calib nodes when both intrinsic groups are tunable.
+-        const bool has_merged =
+-            md.variants[static_cast<int>(FactorVariant::BASE)].num_factors >
+-                0 ||
+-            md.variants[static_cast<int>(FactorVariant::FIXED_POSE)]
+-                    .num_factors > 0 ||
+-            md.variants[static_cast<int>(FactorVariant::FIXED_POINT)]
+-                    .num_factors > 0 ||
+-            md.variants[static_cast<int>(FactorVariant::FIXED_POSE_FIXED_POINT)]
+-                    .num_factors > 0;
++        const bool has_merged = HasMergedCalibFactors(md);
+         if (has_merged) {
+           const size_t fae_size = adapter_ptr->FocalAndExtraSize();
+           const size_t pp_size = adapter_ptr->PrincipalPointSize();
+@@ -670,6 +772,17 @@ class CasparBundleAdjuster : public BundleAdjuster {
+               solver, static_cast<FactorVariant>(v), md.variants[v]);
+         }
+       }
++      if (const size_t n_sfr = NumSensorFromRigs(model_id); n_sfr > 0) {
++        VLOG(2) << "  SensorFromRig (" << static_cast<int>(model_id)
++                << "): " << n_sfr;
++        adapter_ptr->SetSensorFromRigNodes(
++            solver, sensor_from_rig_data_per_model_.at(model_id).data(), n_sfr);
++      }
++      for (int v = 0; v < CASPAR_NUM_RIG_VARIANTS; ++v) {
++        if (md.rig_variants[v].num_factors > 0) {
++          adapter_ptr->SetRigVariantFactors(solver, v, md.rig_variants[v]);
++        }
++      }
+     }
+     solver.finish_indices();
+   }
+@@ -687,6 +800,10 @@ class CasparBundleAdjuster : public BundleAdjuster {
+         adapter_ptr->GetPoseNodes(
+             solver, pose_data_per_model_.at(model_id).data(), n_poses);
+       }
++      if (const size_t n_sfr = NumSensorFromRigs(model_id); n_sfr > 0) {
++        adapter_ptr->GetSensorFromRigNodes(
++            solver, sensor_from_rig_data_per_model_.at(model_id).data(), n_sfr);
++      }
+     }
+ 
+     for (const auto& [model_id, adapter_ptr] : adapters_) {
+@@ -700,15 +817,7 @@ class CasparBundleAdjuster : public BundleAdjuster {
+ 
+         // Split the merged Calib node back into focal_and_extra_data and
+         // principal_point_data, overwriting the stale split-pool values above.
+-        const bool has_merged =
+-            md.variants[static_cast<int>(FactorVariant::BASE)].num_factors >
+-                0 ||
+-            md.variants[static_cast<int>(FactorVariant::FIXED_POSE)]
+-                    .num_factors > 0 ||
+-            md.variants[static_cast<int>(FactorVariant::FIXED_POINT)]
+-                    .num_factors > 0 ||
+-            md.variants[static_cast<int>(FactorVariant::FIXED_POSE_FIXED_POINT)]
+-                    .num_factors > 0;
++        const bool has_merged = HasMergedCalibFactors(md);
+         if (has_merged) {
+           const size_t fae_size = adapter_ptr->FocalAndExtraSize();
+           const size_t pp_size = adapter_ptr->PrincipalPointSize();
+@@ -798,6 +907,23 @@ class CasparBundleAdjuster : public BundleAdjuster {
+       }
+     }
+ 
++    for (const auto& [model_id, keys] : sensor_from_rig_keys_per_model_) {
++      const auto& data = sensor_from_rig_data_per_model_.at(model_id);
++      for (size_t idx = 0; idx < keys.size(); ++idx) {
++        const auto& [rig_id, sensor_id] = keys[idx];
++        Rigid3d& sensor_from_rig =
++            reconstruction_.Rig(rig_id).SensorFromRig(sensor_id);
++        sensor_from_rig.rotation().x() = data[idx * 7 + 0];
++        sensor_from_rig.rotation().y() = data[idx * 7 + 1];
++        sensor_from_rig.rotation().z() = data[idx * 7 + 2];
++        sensor_from_rig.rotation().w() = data[idx * 7 + 3];
++        sensor_from_rig.translation().x() = data[idx * 7 + 4];
++        sensor_from_rig.translation().y() = data[idx * 7 + 5];
++        sensor_from_rig.translation().z() = data[idx * 7 + 6];
++        sensor_from_rig.rotation().normalize();
++      }
++    }
++
+     WriteCalibsToReconstruction();
+   }
+ 
+@@ -852,13 +978,21 @@ class CasparBundleAdjuster : public BundleAdjuster {
+                 << FactorVariantName(static_cast<FactorVariant>(v))
+                 << " factors=" << md.variants[v].num_factors;
+       }
++      for (int v = 0; v < CASPAR_NUM_RIG_VARIANTS; ++v) {
++        if (md.rig_variants[v].num_factors > 0) {
++          VLOG(1) << "  model=" << static_cast<int>(model_id)
++                  << " rig variant=" << v
++                  << " factors=" << md.rig_variants[v].num_factors;
++        }
++      }
+     }
+     VLOG(1) << "  Gauge-fixed frames: " << gauge_fixed_frames_.size()
+             << "  Gauge-fixed points: " << gauge_fixed_points_.size();
+     VLOG(1) << "  refine_focal_length=" << options_.refine_focal_length
+             << " refine_extra_params=" << options_.refine_extra_params
+             << " refine_pp=" << options_.refine_principal_point
+-            << " refine_pose=" << options_.refine_rig_from_world;
++            << " refine_pose=" << options_.refine_rig_from_world
++            << " refine_sensor_from_rig=" << options_.refine_sensor_from_rig;
+   }
+ 
+   size_t ComputeTotalResiduals() const {
+@@ -867,6 +1001,9 @@ class CasparBundleAdjuster : public BundleAdjuster {
+       for (int v = 0; v < CASPAR_NUM_VARIANTS; ++v) {
+         total += md.variants[v].num_factors;
+       }
++      for (int v = 0; v < CASPAR_NUM_RIG_VARIANTS; ++v) {
++        total += md.rig_variants[v].num_factors;
++      }
+     }
+     return 2 * total;
+   }
+@@ -917,6 +1054,11 @@ class CasparBundleAdjuster : public BundleAdjuster {
+     if (const ModelData* md = get_md(CameraModelId::kFullOpenCV)) {
+       adapters_.at(CameraModelId::kFullOpenCV)->FillSizing(sz, *md, 0);
+     }
++    for (const auto& [model_id, adapter] : adapters_) {
++      if (const ModelData* md = get_md(model_id)) {
++        adapter->FillRigSizing(sz, *md, NumSensorFromRigs(model_id));
++      }
++    }
+     return sz;
+   }
+ 
+@@ -1021,6 +1163,15 @@ class CasparBundleAdjuster : public BundleAdjuster {
+   FlatHashMap<point3D_t, size_t> point3D_id_to_idx_;
+   std::vector<point3D_t> point3D_idx_to_id_;
+ 
++  // Refined sensor_from_rig (rig factors), per model like the poses.
++  NodeHashMap<CameraModelId, std::vector<StorageType>>
++      sensor_from_rig_data_per_model_;
++  NodeHashMap<CameraModelId, std::map<std::pair<rig_t, sensor_t>, size_t>>
++      sensor_from_rig_index_per_model_;
++  NodeHashMap<CameraModelId, std::vector<std::pair<rig_t, sensor_t>>>
++      sensor_from_rig_keys_per_model_;
++  FlatHashSet<rig_t> rigs_with_ref_sensor_;
++
+   FlatHashSet<frame_t> frames_from_outside_config_;
+   FlatHashSet<camera_t> cameras_from_outside_config_;
+   FlatHashSet<frame_t> gauge_fixed_frames_;
+diff --git a/src/colmap/estimators/bundle_adjustment_caspar.h b/src/colmap/estimators/bundle_adjustment_caspar.h
+index 0fb6c4d507d616723cab22745a0e321764465baf..e94a0c57c91d0dca29edf02865c2981cfdbcd565 100644
+--- a/src/colmap/estimators/bundle_adjustment_caspar.h
++++ b/src/colmap/estimators/bundle_adjustment_caspar.h
+@@ -47,8 +47,21 @@ enum class FactorVariant {
+   FIXED_FOCAL_AND_EXTRA_FIXED_PRINCIPAL_POINT_FIXED_POINT,
+ };
+ 
++// Rig factors (tunable sensor_from_rig, refine_sensor_from_rig=true):
++// index = 4 * calib state + 2 * (pose fixed) + (point fixed), with calib state
++// 0 = merged calib tunable, 1 = focal and extra tunable (principal point
++// fixed), 2 = calibration fixed. The order is the registration order in
++// Symforce-Caspar/caspar_generate.py (register_rig_variants).
++#define CASPAR_NUM_RIG_VARIANTS 12
++enum class RigCalibState { MERGED = 0, FOCAL_AND_EXTRA = 1, FIXED = 2 };
++inline int RigVariantIndex(RigCalibState calib, bool pose_var, bool point_var) {
++  return 4 * static_cast<int>(calib) + (pose_var ? 0 : 2) +
++         (point_var ? 0 : 1);
++}
++
+ struct VariantData {
+   std::vector<unsigned int> pose_indices;
++  std::vector<unsigned int> sensor_from_rig_indices;  // rig factors only
+   std::vector<StorageType> sensor_from_rig_data;  // 7 floats per factor
+   std::vector<unsigned int> focal_and_extra_indices;
+   std::vector<unsigned int> principal_point_indices;
+@@ -72,6 +85,8 @@ struct ModelData {
+       principal_point_data;  // PrincipalPointSize() per camera
+   std::array<VariantData, CASPAR_NUM_VARIANTS>
+       variants{};  // Indexed by FactorVariant
++  std::array<VariantData, CASPAR_NUM_RIG_VARIANTS>
++      rig_variants{};  // Indexed by RigVariantIndex
+ };
+ 
+ // Solver parameters mirroring caspar::SolverParams, stored as double to
+diff --git a/src/colmap/estimators/bundle_adjustment_caspar_test.cc b/src/colmap/estimators/bundle_adjustment_caspar_test.cc
+index 6863c056486de48f774f24f802be3fe21f0e8aad..71adf46dd256ff914f07009439d27b3afedc8cfc 100644
+--- a/src/colmap/estimators/bundle_adjustment_caspar_test.cc
++++ b/src/colmap/estimators/bundle_adjustment_caspar_test.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "colmap/estimators/bundle_adjustment_ceres.h"
+ #include "colmap/geometry/rigid3_matchers.h"
++#include "colmap/math/math.h"
+ #include "colmap/scene/reconstruction_matchers.h"
+ #include "colmap/scene/synthetic.h"
+ #include "colmap/sensor/models.h"
+@@ -60,7 +61,68 @@ constexpr double kConstantPoseVarEps = 1e-9;
+ namespace colmap {
+ namespace {
+ 
+-TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
++TEST(DefaultBundleAdjuster, RigVariableSensorFromRigMatchesCeres) {
++  Reconstruction gt_reconstruction;
++  SyntheticDatasetOptions synthetic_dataset_options;
++  synthetic_dataset_options.num_rigs = 1;
++  synthetic_dataset_options.num_cameras_per_rig = 2;
++  synthetic_dataset_options.num_frames_per_rig = 10;
++  synthetic_dataset_options.num_points3D = 200;
++  synthetic_dataset_options.sensor_from_rig_rotation_stddev = 30.0;
++  synthetic_dataset_options.sensor_from_rig_translation_stddev = 0.3;
++  SynthesizeDataset(synthetic_dataset_options, &gt_reconstruction);
++
++  Reconstruction reconstruction = gt_reconstruction;
++  SyntheticNoiseOptions synthetic_noise_options;
++  synthetic_noise_options.point2D_stddev = 0.5;
++  synthetic_noise_options.point3D_stddev = 0.05;
++  synthetic_noise_options.rig_from_world_rotation_stddev = 0.3;
++  synthetic_noise_options.rig_from_world_translation_stddev = 0.05;
++  SynthesizeNoise(synthetic_noise_options, &reconstruction);
++  // Perturb the non-reference sensor_from_rig by 2 deg and 3 cm.
++  Rig& rig = reconstruction.Rig(reconstruction.Rigs().begin()->first);
++  for (auto& [sensor_id, sensor_from_rig] : rig.NonRefSensors()) {
++    sensor_from_rig->rotation() =
++        Eigen::Quaterniond(Eigen::AngleAxisd(DegToRad(2.0),
++                                             Eigen::Vector3d::UnitX())) *
++        sensor_from_rig->rotation();
++    sensor_from_rig->translation() += Eigen::Vector3d(0.03, 0, 0);
++  }
++
++  BundleAdjustmentConfig config;
++  for (const image_t image_id : reconstruction.RegImageIds()) {
++    config.AddImage(image_id);
++  }
++  config.FixGauge(BundleAdjustmentGauge::THREE_POINTS);
++  BundleAdjustmentOptions options;
++  options.refine_sensor_from_rig = true;
++
++  Reconstruction reconstruction_ceres = reconstruction;
++  Reconstruction reconstruction_caspar = reconstruction;
++  ASSERT_NE(CreateDefaultCeresBundleAdjuster(options, config, reconstruction_ceres)
++                ->Solve()
++                ->termination_type,
++            BundleAdjustmentTerminationType::FAILURE);
++  ASSERT_NE(
++      CreateDefaultCasparBundleAdjuster(options, config, reconstruction_caspar)
++          ->Solve()
++          ->termination_type,
++      BundleAdjustmentTerminationType::FAILURE);
++
++  const Rig& rig_ceres = reconstruction_ceres.Rig(rig.RigId());
++  const Rig& rig_caspar = reconstruction_caspar.Rig(rig.RigId());
++  for (const auto& [sensor_id, sensor_from_rig] : rig_ceres.NonRefSensors()) {
++    EXPECT_THAT(rig_caspar.SensorFromRig(sensor_id),
++                Rigid3dNear(*sensor_from_rig, /*rtol=*/1e-3, /*ttol=*/1e-3));
++    EXPECT_THAT(rig_caspar.SensorFromRig(sensor_id),
++                Rigid3dNear(gt_reconstruction.Rig(rig.RigId())
++                                .SensorFromRig(sensor_id),
++                            /*rtol=*/1e-2,
++                            /*ttol=*/1e-2));
++  }
++}
++
++TEST(DefaultBundleAdjuster, RigVariableSensorFromRigPrincipalPointOnlyThrows) {
+   Reconstruction reconstruction;
+   SyntheticDatasetOptions synthetic_dataset_options;
+   synthetic_dataset_options.num_rigs = 1;
+@@ -69,8 +131,11 @@ TEST(DefaultBundleAdjuster, RigThrowsErrorOnVariableSensorFromRig) {
+   synthetic_dataset_options.num_points3D = 200;
+   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
+   BundleAdjustmentOptions options;
++  options.refine_sensor_from_rig = true;
++  options.refine_focal_length = false;
++  options.refine_extra_params = false;
++  options.refine_principal_point = true;  // No generated rig factor.
+   BundleAdjustmentConfig config;
+-  options.refine_sensor_from_rig = true;  // Not supported yet
+   for (const image_t image_id : reconstruction.RegImageIds()) {
+     config.AddImage(image_id);
+   }
+diff --git a/src/colmap/estimators/caspar/caspar_model_adapter.h b/src/colmap/estimators/caspar/caspar_model_adapter.h
+index 010f654d68cbdd8b6a89aaae608657315f3ba362..d6eed1cd8502335bfbc4d4a9ed07202d5c771176 100644
+--- a/src/colmap/estimators/caspar/caspar_model_adapter.h
++++ b/src/colmap/estimators/caspar/caspar_model_adapter.h
+@@ -98,6 +98,18 @@ struct CasparSolverSizing {
+       num_opencv_fisheye_split_fixed_focal_and_extra_fixed_principal_point_fixed_point =
+           0;
+ 
++  // Rig factors (tunable sensor_from_rig): one SensorFromRig node per
++  // non-reference sensor, counts indexed by RigVariantIndex. FULL_OPENCV has
++  // only the fixed-calibration entries (8..11).
++  size_t num_simple_radial_sensor_from_rigs = 0;
++  size_t num_pinhole_sensor_from_rigs = 0;
++  size_t num_opencv_fisheye_sensor_from_rigs = 0;
++  size_t num_full_opencv_sensor_from_rigs = 0;
++  std::array<size_t, CASPAR_NUM_RIG_VARIANTS> num_simple_radial_rig{};
++  std::array<size_t, CASPAR_NUM_RIG_VARIANTS> num_pinhole_rig{};
++  std::array<size_t, CASPAR_NUM_RIG_VARIANTS> num_opencv_fisheye_rig{};
++  std::array<size_t, CASPAR_NUM_RIG_VARIANTS> num_full_opencv_rig{};
++
+   size_t num_full_opencv_poses = 0;
+   size_t num_full_opencv_split_fixed_focal_and_extra_fixed_principal_point = 0;
+   size_t
+@@ -169,12 +181,142 @@ class ICasparModelAdapter {
+   virtual void SetVariantFactors(caspar::GraphSolver& solver,
+                                  FactorVariant variant,
+                                  const VariantData& data) const = 0;
++
++  // Rig factors (tunable sensor_from_rig). A model supports the calibration
++  // states it has generated rig factors for.
++  virtual bool SupportsRigCalibState(RigCalibState state) const = 0;
++  virtual void SetSensorFromRigNodes(caspar::GraphSolver& solver,
++                                     StorageType* data,
++                                     size_t n) const = 0;
++  virtual void GetSensorFromRigNodes(caspar::GraphSolver& solver,
++                                     StorageType* data,
++                                     size_t n) const = 0;
++  virtual void SetRigVariantFactors(caspar::GraphSolver& solver,
++                                    int rig_variant,
++                                    const VariantData& data) const = 0;
++  virtual void FillRigSizing(CasparSolverSizing& sz,
++                             const ModelData& md,
++                             size_t num_sensor_from_rigs) const = 0;
+ };
+ 
++// The rig factors' setters, one case per RigVariantIndex. Factor F's tunable
++// arguments take indices (Set<F><Arg>IndicesFromHost), its constant ones data
++// (Set<F><Arg>DataFromStackedHost); FAE is the model's focal group name.
++#define CASPAR_RIG_POSE_VAR(F) \
++  s.Set##F##PoseIndicesFromHost(d.pose_indices.data(), n);
++#define CASPAR_RIG_POSE_FIX(F) \
++  s.Set##F##PoseDataFromStackedHost(d.const_poses.data(), 0, n);
++#define CASPAR_RIG_POINT_VAR(F) \
++  s.Set##F##PointIndicesFromHost(d.point_indices.data(), n);
++#define CASPAR_RIG_POINT_FIX(F) \
++  s.Set##F##PointDataFromStackedHost(d.const_points.data(), 0, n);
++#define CASPAR_RIG_CALIB_MERGED(F, FAE) \
++  s.Set##F##CalibIndicesFromHost(d.focal_and_extra_indices.data(), n);
++#define CASPAR_RIG_CALIB_SPLIT(F, FAE)                                      \
++  s.Set##F##FAE##IndicesFromHost(d.focal_and_extra_indices.data(), n);      \
++  s.Set##F##PrincipalPointDataFromStackedHost(d.const_principal_point.data(), \
++                                              0, n);
++#define CASPAR_RIG_CALIB_FIXED(F, FAE)                                        \
++  s.Set##F##FAE##DataFromStackedHost(d.const_focal_and_extra.data(), 0, n);   \
++  s.Set##F##PrincipalPointDataFromStackedHost(d.const_principal_point.data(), \
++                                              0, n);
++#define CASPAR_RIG_CASE(IDX, F, FAE, CALIB, POSE, POINT)                     \
++  case IDX:                                                                  \
++    s.Set##F##Num(n);                                                        \
++    s.Set##F##SensorFromRigIndicesFromHost(d.sensor_from_rig_indices.data(), \
++                                           n);                               \
++    CASPAR_RIG_CALIB_##CALIB(F, FAE) CASPAR_RIG_POSE_##POSE(F)               \
++        CASPAR_RIG_POINT_##POINT(F)                                          \
++            s.Set##F##PixelDataFromStackedHost(d.pixels.data(), 0, n);       \
++    break;
++#define CASPAR_RIG_CASES_MERGED(M)                                       \
++  CASPAR_RIG_CASE(0, M##Rig, , MERGED, VAR, VAR)                         \
++  CASPAR_RIG_CASE(1, M##RigFixedPoint, , MERGED, VAR, FIX)               \
++  CASPAR_RIG_CASE(2, M##RigFixedPose, , MERGED, FIX, VAR)                \
++  CASPAR_RIG_CASE(3, M##RigFixedPoseFixedPoint, , MERGED, FIX, FIX)
++#define CASPAR_RIG_CASES_FOCAL_AND_EXTRA(M, FAE)                             \
++  CASPAR_RIG_CASE(4, M##RigSplitFixedPrincipalPoint, FAE, SPLIT, VAR, VAR)   \
++  CASPAR_RIG_CASE(                                                           \
++      5, M##RigSplitFixedPrincipalPointFixedPoint, FAE, SPLIT, VAR, FIX)     \
++  CASPAR_RIG_CASE(                                                           \
++      6, M##RigSplitFixedPoseFixedPrincipalPoint, FAE, SPLIT, FIX, VAR)      \
++  CASPAR_RIG_CASE(7,                                                         \
++                  M##RigSplitFixedPoseFixedPrincipalPointFixedPoint,         \
++                  FAE,                                                       \
++                  SPLIT,                                                     \
++                  FIX,                                                       \
++                  FIX)
++#define CASPAR_RIG_CASES_FIXED(M, FAE)                                        \
++  CASPAR_RIG_CASE(                                                            \
++      8, M##RigSplitFixed##FAE##FixedPrincipalPoint, FAE, FIXED, VAR, VAR)    \
++  CASPAR_RIG_CASE(9,                                                          \
++                  M##RigSplitFixed##FAE##FixedPrincipalPointFixedPoint,       \
++                  FAE,                                                        \
++                  FIXED,                                                      \
++                  VAR,                                                        \
++                  FIX)                                                        \
++  CASPAR_RIG_CASE(10,                                                         \
++                  M##RigSplitFixedPoseFixed##FAE##FixedPrincipalPoint,        \
++                  FAE,                                                        \
++                  FIXED,                                                      \
++                  FIX,                                                        \
++                  VAR)                                                        \
++  CASPAR_RIG_CASE(                                                            \
++      11,                                                                     \
++      M##RigSplitFixedPoseFixed##FAE##FixedPrincipalPointFixedPoint,          \
++      FAE,                                                                    \
++      FIXED,                                                                  \
++      FIX,                                                                    \
++      FIX)
++
++// The rig members of one adapter class: P is the node-type prefix (e.g.
++// OpenCVFisheye), SZ the CasparSolverSizing member stem, SUPPORTED_EXPR the
++// calib states with generated rig factors, CASES their setter cases.
++#define CASPAR_RIG_ADAPTER_MEMBERS(P, SZ, SUPPORTED_EXPR, CASES)           \
++  bool SupportsRigCalibState(RigCalibState state) const override {         \
++    return SUPPORTED_EXPR;                                                 \
++  }                                                                        \
++  void SetSensorFromRigNodes(                                              \
++      caspar::GraphSolver& s, StorageType* data, size_t n) const override {  \
++    s.Set##P##SensorFromRigNodesFromStackedHost(data, 0, n);               \
++  }                                                                        \
++  void GetSensorFromRigNodes(                                              \
++      caspar::GraphSolver& s, StorageType* data, size_t n) const override {  \
++    s.Get##P##SensorFromRigNodesToStackedHost(data, 0, n);                 \
++  }                                                                        \
++  void SetRigVariantFactors(caspar::GraphSolver& s,                        \
++                            int rig_variant,                               \
++                            const VariantData& d) const override {         \
++    const size_t n = d.num_factors;                                        \
++    switch (rig_variant) {                                                 \
++      CASES                                                                \
++      default:                                                             \
++        LOG(FATAL_THROW) << "No CASPAR rig factor " << rig_variant         \
++                         << " for " #P;                                    \
++    }                                                                      \
++  }                                                                        \
++  void FillRigSizing(CasparSolverSizing& sz,                               \
++                     const ModelData& md,                                  \
++                     size_t num_sensor_from_rigs) const override {         \
++    sz.num_##SZ##_sensor_from_rigs = num_sensor_from_rigs;                 \
++    for (int v = 0; v < CASPAR_NUM_RIG_VARIANTS; ++v) {                    \
++      sz.num_##SZ##_rig[v] = md.rig_variants[v].num_factors;               \
++    }                                                                      \
++  }
++
++
+ // SimpleRadial implementation
+ 
+ class SimpleRadialAdapter : public ICasparModelAdapter {
+  public:
++  CASPAR_RIG_ADAPTER_MEMBERS(
++      SimpleRadial,
++      simple_radial,
++      true,
++      CASPAR_RIG_CASES_MERGED(SimpleRadial)
++          CASPAR_RIG_CASES_FOCAL_AND_EXTRA(SimpleRadial, FocalAndExtra)
++              CASPAR_RIG_CASES_FIXED(SimpleRadial, FocalAndExtra))
++
+   CameraModelId ModelId() const override {
+     return CameraModelId::kSimpleRadial;
+   }
+@@ -571,6 +713,12 @@ class SimpleRadialAdapter : public ICasparModelAdapter {
+ // skipping observations.
+ class FullOpenCVAdapter : public ICasparModelAdapter {
+  public:
++  // Fixed calibration only, like the non-rig FULL_OPENCV factors.
++  CASPAR_RIG_ADAPTER_MEMBERS(FullOpenCV,
++                             full_opencv,
++                             state == RigCalibState::FIXED,
++                             CASPAR_RIG_CASES_FIXED(FullOpencv, FocalAndExtra))
++
+   CameraModelId ModelId() const override { return CameraModelId::kFullOpenCV; }
+ 
+   // COLMAP params: [fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6]
+@@ -720,6 +868,13 @@ class FullOpenCVAdapter : public ICasparModelAdapter {
+ 
+ class PinholeAdapter : public ICasparModelAdapter {
+  public:
++  CASPAR_RIG_ADAPTER_MEMBERS(Pinhole,
++                             pinhole,
++                             true,
++                             CASPAR_RIG_CASES_MERGED(Pinhole)
++                                 CASPAR_RIG_CASES_FOCAL_AND_EXTRA(Pinhole, Focal)
++                                     CASPAR_RIG_CASES_FIXED(Pinhole, Focal))
++
+   CameraModelId ModelId() const override { return CameraModelId::kPinhole; }
+   // Pinhole: params = [fx, fy, cx, cy]
+   // focal           = [fx, fy]
+@@ -1096,6 +1251,14 @@ class PinholeAdapter : public ICasparModelAdapter {
+ 
+ class OpenCVFisheyeAdapter : public ICasparModelAdapter {
+  public:
++  CASPAR_RIG_ADAPTER_MEMBERS(
++      OpenCVFisheye,
++      opencv_fisheye,
++      true,
++      CASPAR_RIG_CASES_MERGED(OpencvFisheye)
++          CASPAR_RIG_CASES_FOCAL_AND_EXTRA(OpencvFisheye, FocalAndExtra)
++              CASPAR_RIG_CASES_FIXED(OpencvFisheye, FocalAndExtra))
++
+   CameraModelId ModelId() const override {
+     return CameraModelId::kOpenCVFisheye;
+   }
+@@ -1527,24 +1690,29 @@ inline caspar::GraphSolver CreateSolver(
+   return caspar::GraphSolver(
+       params,
+       // Node type counts (alphabetical):
+-      //   FullOpenCVPose,
++      //   FullOpenCVPose, FullOpenCVSensorFromRig,
+       //   OpenCVFisheyeCalib, OpenCVFisheyeFocalAndExtra,
+       //   OpenCVFisheyePose, OpenCVFisheyePrincipalPoint,
++      //   OpenCVFisheyeSensorFromRig,
+       //   PinholeCalib, PinholeFocal, PinholePose,
+-      //   PinholePrincipalPoint, Point,
++      //   PinholePrincipalPoint, PinholeSensorFromRig, Point,
+       //   SimpleRadialCalib, SimpleRadialFocalAndExtra,
+-      //   SimpleRadialPose, SimpleRadialPrincipalPoint
++      //   SimpleRadialPose, SimpleRadialPrincipalPoint,
++      //   SimpleRadialSensorFromRig
+       sz.num_full_opencv_poses,      // FullOpenCVPose
++      sz.num_full_opencv_sensor_from_rigs,  // FullOpenCVSensorFromRig
+       sz.num_opencv_fisheye_calibs,  // OpenCVFisheyeCalib     (merged pool)
+       sz.num_opencv_fisheye_calibs,  // OpenCVFisheyeFocalAndExtra
+                                      // (split pool)
+       sz.num_opencv_fisheye_poses,   // OpenCVFisheyePose
+       sz.num_opencv_fisheye_calibs,  // OpenCVFisheyePrincipalPoint
+                                      // (split pool)
++      sz.num_opencv_fisheye_sensor_from_rigs,  // OpenCVFisheyeSensorFromRig
+       sz.num_pinhole_calibs,        // PinholeCalib        (merged pool)
+       sz.num_pinhole_calibs,        // PinholeFocal         (split pool)
+       sz.num_pinhole_poses,         // PinholePose
+       sz.num_pinhole_calibs,        // PinholePrincipalPoint (split pool)
++      sz.num_pinhole_sensor_from_rigs,  // PinholeSensorFromRig
+       sz.num_points,                // Point
+       sz.num_simple_radial_calibs,  // SimpleRadialCalib              (merged
+                                     // pool)
+@@ -1553,6 +1721,7 @@ inline caspar::GraphSolver CreateSolver(
+       sz.num_simple_radial_poses,   // SimpleRadialPose
+       sz.num_simple_radial_calibs,  // SimpleRadialPrincipalPoint      (split
+                                     // pool)
++      sz.num_simple_radial_sensor_from_rigs,  // SimpleRadialSensorFromRig
+       // simple_radial factor counts (r=0..2 over {pose, point}):
+       sz.num_simple_radial,                         // {}
+       sz.num_simple_radial_fixed_pose,              // {pose}
+@@ -1613,6 +1782,28 @@ inline caspar::GraphSolver CreateSolver(
+       // full_opencv fixed-calibration factors (registered last):
+       sz.num_full_opencv_split_fixed_focal_and_extra_fixed_principal_point,
+       sz.num_full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point,
++      // Rig factors (registered last): merged x {simple_radial, pinhole,
++      // opencv_fisheye}, then split x the same three, then full_opencv;
++      // each in RigVariantIndex order.
++      sz.num_simple_radial_rig[0], sz.num_simple_radial_rig[1],
++      sz.num_simple_radial_rig[2], sz.num_simple_radial_rig[3],
++      sz.num_pinhole_rig[0], sz.num_pinhole_rig[1], sz.num_pinhole_rig[2],
++      sz.num_pinhole_rig[3],
++      sz.num_opencv_fisheye_rig[0], sz.num_opencv_fisheye_rig[1],
++      sz.num_opencv_fisheye_rig[2], sz.num_opencv_fisheye_rig[3],
++      sz.num_simple_radial_rig[4], sz.num_simple_radial_rig[5],
++      sz.num_simple_radial_rig[6], sz.num_simple_radial_rig[7],
++      sz.num_simple_radial_rig[8], sz.num_simple_radial_rig[9],
++      sz.num_simple_radial_rig[10], sz.num_simple_radial_rig[11],
++      sz.num_pinhole_rig[4], sz.num_pinhole_rig[5], sz.num_pinhole_rig[6],
++      sz.num_pinhole_rig[7], sz.num_pinhole_rig[8], sz.num_pinhole_rig[9],
++      sz.num_pinhole_rig[10], sz.num_pinhole_rig[11],
++      sz.num_opencv_fisheye_rig[4], sz.num_opencv_fisheye_rig[5],
++      sz.num_opencv_fisheye_rig[6], sz.num_opencv_fisheye_rig[7],
++      sz.num_opencv_fisheye_rig[8], sz.num_opencv_fisheye_rig[9],
++      sz.num_opencv_fisheye_rig[10], sz.num_opencv_fisheye_rig[11],
++      sz.num_full_opencv_rig[8], sz.num_full_opencv_rig[9],
++      sz.num_full_opencv_rig[10], sz.num_full_opencv_rig[11],
+       device_id);
+ }
+ 
+diff --git a/src/thirdparty/Symforce-Caspar/caspar_generate.py b/src/thirdparty/Symforce-Caspar/caspar_generate.py
+index a13b97c76b960c7c0219e3ec23963a5365c189ab..375fed89b897685b21e0542ce01e05083c3eafa2 100644
+--- a/src/thirdparty/Symforce-Caspar/caspar_generate.py
++++ b/src/thirdparty/Symforce-Caspar/caspar_generate.py
+@@ -23,6 +23,7 @@ import symforce.symbolic as sf  # noqa: E402
+ from symforce import typing as T  # noqa: E402
+ from symforce.caspar import CasparLibrary  # noqa: E402
+ from symforce.caspar import memory as mem  # noqa: E402
++from symforce.caspar.code_generation import factor as _factor_module  # noqa: E402
+ from symforce.caspar.memory.accessors import Common  # noqa: E402
+ 
+ 
+@@ -73,6 +74,78 @@ def _add_sum_write_template(self: mem.AddSum, idx: int) -> str:
+ mem.AddSum.write_template = _add_sum_write_template
+ 
+ 
++# ---------------------------------------------------------------------------
++# Generator change: no shared `_local` buffer for the residual sum of factors
++# with four tunable nodes.
++#
++# A factor kernel's static shared memory is its largest accessor buffer
++# (`inout_shared`, 16 KB at 1024 threads) plus one SharedIndex array per
++# tunable node (8 B x 1024 = 8 KB each) plus, for `AddSum` outputs, a
++# `__shared__ float <name>_local[dim]` that only carries the block's sum from
++# `SumStore` to `SumFlushFinal`.  With four tunable nodes (pose,
++# sensor_from_rig, calib, point: the rig factors that refine intrinsics) the
++# score and res_jac_first kernels need 16 KB + 32 KB + 4 B, 4 bytes over the
++# 48 KB static limit.  The block size cannot simply shrink: SharedIndices
++# groups the indices of every factor in 1024-thread blocks.
++#
++# For those factors only, `AddSumDirect` reduces exactly as `SumStore` does
++# (warp sums into `inout_shared`, then warp 0) and has thread 0 add the block
++# total to global memory itself, the one atomicAdd per block that
++# `SumFlushFinal` did, so the `_local` buffer goes.  Every other kernel is
++# generated as before.
++class AddSumDirect(mem.AddSum):
++    """`AddSum` whose block total goes straight to global memory."""
++
++    def write_template(self, idx: int) -> str:
++        common: Common = Common(self, idx)
++        if common.dim != 1:
++            raise NotImplementedError("AddSumDirect sums scalars only")
++        t = common.storage_t
++        return f"""
++    }}}};
++    {{{{
++      auto group = cg::tiled_partition<32>(cg::this_thread_block());
++      __syncthreads();
++      {t} tot = cg::reduce(group, global_thread_idx < problem_size ? {{arg_0}} : static_cast<{t}>(0), cg::plus<{t}>());
++      if (group.thread_rank() == 0) {{{{
++        (({common.SharedT}*)inout_shared)[group.meta_group_rank()] = tot;
++      }}}}
++      __syncthreads();
++      if (group.meta_group_rank() == 0) {{{{
++        tot = cg::reduce(group, (({common.SharedT}*)inout_shared)[group.thread_rank()], cg::plus<{t}>());
++        if (group.thread_rank() == 0) {{{{
++          atomicAdd(&{self.name}[{self.chunk_indices[idx][0]}], tot);
++        }}}}
++      }}}}
++    }}}}
++    if (global_thread_idx < problem_size) {{{{
++    """.strip()
++
++    def pre_calc_code(self) -> str:  # noqa: PLR6301
++        return ""
++
++    def post_calc_code(self) -> str:  # noqa: PLR6301
++        return ""
++
++
++_FOUR_TUNABLE_NODES = 4
++_factor_make_kernels = _factor_module.Factor.make_kernels
++
++
++def _make_kernels_shared_budget(self: Any) -> Any:
++    """Build a factor's kernels, with AddSumDirect for four tunable nodes."""
++    if len(self.node_arg_types) < _FOUR_TUNABLE_NODES:
++        return _factor_make_kernels(self)
++    _factor_module.AddSum = AddSumDirect
++    try:
++        return _factor_make_kernels(self)
++    finally:
++        _factor_module.AddSum = mem.AddSum
++
++
++_factor_module.Factor.make_kernels = _make_kernels_shared_budget
++
++
+ # Point and ConstPoint are shared across camera models so that different
+ # camera types can observe the same 3D points in the same node pool.
+ class Point(sf.V3):
+@@ -269,13 +342,37 @@ class ConstOpenCVFisheyeSensorFromRig(sf.Pose3):
+     pass
+ 
+ 
++# Tunable sensor_from_rig for the "rig" factors (refine_sensor_from_rig=true):
++# one node per non-reference sensor of a rig, shared by every observation of
++# that sensor, so the rig extrinsic is refined jointly with poses, points and
++# intrinsics.  One type per model, like the Pose nodes, so that factors of
++# different models are never batched together.  The reference sensor keeps the
++# non-rig factors (identity sensor_from_rig): it fixes the rig's gauge.
++class SimpleRadialSensorFromRig(sf.Pose3):
++    pass
++
++
++class PinholeSensorFromRig(sf.Pose3):
++    pass
++
++
++class OpenCVFisheyeSensorFromRig(sf.Pose3):
++    pass
++
++
++class FullOpenCVSensorFromRig(sf.Pose3):
++    pass
++
++
+ def _make_variant(
+     core_fn: Callable[..., Any],
+     name: str,
+     base_params: list[str],
+     hints: dict[str, Any],
+     fixed: dict[str, Any],
++    overrides: dict[str, Any] | None = None,
+ ) -> Callable[..., Any]:
++    hints = {**hints, **(overrides or {})}
+     new_hints = {}
+     for p in base_params:
+         if p in fixed:
+@@ -344,6 +441,49 @@ def register_camera_model(
+             )
+ 
+ 
++def register_rig_variants(
++    caslib: CasparLibrary,
++    model_name: str,
++    core_fn: Callable[..., Any],
++    sensor_from_rig_type: type,
++    fixable_params: dict[str, Any],
++    calib_fixed_sets: list[tuple[str, ...]],
++) -> None:
++    """Register the factors with a tunable sensor_from_rig.
++
++    Every combination of {pose, point} fixed/tunable is registered for each
++    calibration state in `calib_fixed_sets` (the calib parameters held
++    constant: () for a tunable merged calib, ("principal_point",) for focal and
++    extra only, both split groups for a calibrated camera).  Names follow
++    register_camera_model with "_rig" after the model name, e.g.
++    `opencv_fisheye_rig_split_fixed_pose_fixed_principal_point`.
++    """
++    hints = get_type_hints(core_fn, include_extras=True)
++    base_params = list(inspect.signature(core_fn).parameters.keys())
++    overrides = {
++        "sensor_from_rig": Annotated[sensor_from_rig_type, mem.TunableShared]
++    }
++    fixable_items = list(fixable_params.items())
++    for calib_fixed in calib_fixed_sets:
++        for fix_pose in (False, True):
++            for fix_point in (False, True):
++                fixed_names = set(calib_fixed)
++                if fix_pose:
++                    fixed_names.add("pose")
++                if fix_point:
++                    fixed_names.add("point")
++                fixed = {p: t for p, t in fixable_items if p in fixed_names}
++                suffix = "_".join(
++                    f"fixed_{p}" for p, _ in fixable_items if p in fixed
++                )
++                name = f"{model_name}_{suffix}" if suffix else model_name
++                caslib.add_factor(
++                    _make_variant(
++                        core_fn, name, base_params, hints, fixed, overrides
++                    )
++                )
++
++
+ # --- Camera models ---
+ 
+ # Merged cores define the canonical projection math reused by split variants.
+@@ -616,6 +756,28 @@ def full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point(
+     )
+ 
+ 
++def full_opencv_split_core(
++    pose: T.Annotated[FullOpenCVPose, mem.TunableShared],
++    sensor_from_rig: T.Annotated[
++        ConstFullOpenCVSensorFromRig, mem.ConstantSequential
++    ],
++    focal_and_extra: T.Annotated[
++        ConstFullOpenCVFocalAndExtra, mem.ConstantSequential
++    ],
++    principal_point: T.Annotated[
++        ConstFullOpenCVPrincipalPoint, mem.ConstantSequential
++    ],
++    point: T.Annotated[Point, mem.TunableShared],
++    pixel: T.Annotated[ConstPixel, mem.ConstantSequential],
++) -> sf.V2:
++    """FULL_OPENCV residual, the core of the fixed-calib rig factors."""
++    cam_T_world = sensor_from_rig * pose
++    return (
++        full_opencv_project(cam_T_world * point, focal_and_extra, principal_point)
++        - pixel
++    )
++
++
+ dtype = mem.DType.DOUBLE if precision == "f64" else mem.DType.FLOAT
+ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
+ 
+@@ -632,16 +794,17 @@ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
+ # Limitations:
+ #   - constant_rig_from_world_rotation not supported (needs separate pose
+ #     rotation/translation sub-nodes)
+-#   - refine_sensor_from_rig=true not supported (tunable sensor_from_rig would
+-#     need a second Pose3 node, likely overflowing the 48 KB limit without
+-#     splitting Pose3 into rotation/translation sub-nodes)
++#   - refine_sensor_from_rig=true uses the rig factors registered at the end
++#     (tunable SensorFromRig node); principal point refined alone with a
++#     refined rig is not generated, FULL_OPENCV has fixed-calib rig factors only
+ #   - refine_focal_length != refine_extra_params not supported (observations
+ #     skipped with a warning because the merged focal_and_extra node
+ #     cannot be split)
+ #
+-# sensor_from_rig is always present as a ConstantShared parameter. For single-
+-# camera datasets the host passes identity, making it a no-op. For multi-camera
+-# rigs it carries the per-sensor extrinsic calibration.
++# In the non-rig factors sensor_from_rig is constant sequential data. For
++# single-camera datasets and reference sensors the host passes identity, making
++# it a no-op. For multi-camera rigs it carries the per-sensor extrinsic
++# calibration when it is not refined.
+ 
+ FIXABLE_SIMPLE_RADIAL = {
+     "pose": ConstSimpleRadialPose,
+@@ -743,6 +906,74 @@ caslib.add_factor(
+     full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point
+ )
+ 
++# Rig factors (refine_sensor_from_rig=true), registered after every existing
++# factor so that the factor-count arguments of the GraphSolver constructor keep
++# their order and the rig counts follow them.  Calibration states: the merged
++# calib (all intrinsics refined), focal and extra only (COLMAP's default
++# refine_principal_point=false) and a calibrated camera.  Principal point only
++# is not generated (the adapter fails loudly on it).
++register_rig_variants(
++    caslib,
++    "simple_radial_rig",
++    simple_radial_core,
++    SimpleRadialSensorFromRig,
++    FIXABLE_SIMPLE_RADIAL,
++    [()],
++)
++register_rig_variants(
++    caslib,
++    "pinhole_rig",
++    pinhole_core,
++    PinholeSensorFromRig,
++    FIXABLE_PINHOLE,
++    [()],
++)
++register_rig_variants(
++    caslib,
++    "opencv_fisheye_rig",
++    opencv_fisheye_core,
++    OpenCVFisheyeSensorFromRig,
++    FIXABLE_OPENCV_FISHEYE,
++    [()],
++)
++register_rig_variants(
++    caslib,
++    "simple_radial_rig_split",
++    simple_radial_split_core,
++    SimpleRadialSensorFromRig,
++    FIXABLE_SIMPLE_RADIAL_SPLIT,
++    [("principal_point",), ("focal_and_extra", "principal_point")],
++)
++register_rig_variants(
++    caslib,
++    "pinhole_rig_split",
++    pinhole_split_core,
++    PinholeSensorFromRig,
++    FIXABLE_PINHOLE_SPLIT,
++    [("principal_point",), ("focal", "principal_point")],
++)
++register_rig_variants(
++    caslib,
++    "opencv_fisheye_rig_split",
++    opencv_fisheye_split_core,
++    OpenCVFisheyeSensorFromRig,
++    FIXABLE_OPENCV_FISHEYE_SPLIT,
++    [("principal_point",), ("focal_and_extra", "principal_point")],
++)
++register_rig_variants(
++    caslib,
++    "full_opencv_rig_split",
++    full_opencv_split_core,
++    FullOpenCVSensorFromRig,
++    {
++        "pose": ConstFullOpenCVPose,
++        "focal_and_extra": ConstFullOpenCVFocalAndExtra,
++        "principal_point": ConstFullOpenCVPrincipalPoint,
++        "point": ConstPoint,
++    },
++    [("focal_and_extra", "principal_point")],
++)
++
+ out_dir = Path(f"{sys.argv[1]}")
+ print(f"Generating Caspar kernels with precision {precision}: {out_dir}")
+ caslib.generate(out_dir, use_symlinks=False, python_bindings=False)
