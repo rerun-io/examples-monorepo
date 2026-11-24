@@ -20,6 +20,7 @@ from slam_rs.catalog_layer import write_layer
 from slam_rs.follow_frame import follow_entity
 from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
+from slam_rs.walk_path import TRAIL, TRAJECTORY
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ def test_layer_leaves_the_base_rig_and_its_sensors_to_the_dataset(tmp_path: Path
     path: Path = tmp_path / "result.rrd"
     write_layer(path, "session", run, clock_offset_ns=0, profile="fast", backend="cpu")
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(path).stream().collect().stream()}
-    parts: tuple[str, ...] = ("rig", "trajectory", "trail", "endpoints", "follow")
+    parts: tuple[str, ...] = ("rig", "trajectory", "trail", "endpoints/start", "endpoints/start_ring", "endpoints/end", "follow")
     assert entities == {"/", "/world/runs/slam_rs", *(f"/world/runs/{name}/{part}" for name in ("slam_rs", "slam_rs_vio") for part in parts)}
 
 
@@ -93,8 +94,11 @@ def test_each_run_gets_its_level_follow_frame(tmp_path: Path, read_rows: RowsRea
 
 
 def test_the_run_scoped_names_are_the_ones_the_dataforge_layouts_read() -> None:
-    """dataforge's Insta360 layout roots its follow views at ``schema.follow_path(source)``."""
+    """dataforge's layouts root follow views at ``schema.follow_path(source)`` and draw ``trail_path`` / ``trajectory_path``."""
     assert follow_entity("/world/runs/slam_rs") == schema.follow_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/follow"
+    # The replay's core restates the path names (it runs without dataforge): one vocabulary for both writers.
+    assert f"/world/runs/slam_rs/{TRAIL}" == schema.trail_path(schema.SLAM_RS_SOURCE)
+    assert f"/world/runs/slam_rs_vio/{TRAJECTORY}" == schema.trajectory_path(schema.SLAM_RS_VIO_SOURCE)
 
 
 class _FakeCalibration:

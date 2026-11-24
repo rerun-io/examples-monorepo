@@ -7,7 +7,6 @@ alignment to the ground truth. Until the final run exists, ``slam_rs`` repeats t
 sits on the raw run while the replay plays.
 """
 
-import colorsys
 import itertools
 import time
 from collections.abc import Sequence
@@ -27,10 +26,11 @@ from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, 
 from slam_rs.follow_frame import HeadingFilter, follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
 from slam_rs.landmark_colors import LandmarkColors
-from slam_rs.map_loops import RUN_ENTITY, log_corrections, log_loops, log_pose_graph
+from slam_rs.map_loops import PGO_CORRECTION_COLOR, PGO_CORRECTIONS_ENTITY, RUN_ENTITY, correction_segments, log_loops, log_pose_graph
 from slam_rs.map_point_blocks import MapPointBlocks
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, PoseLog, Trajectory, ate
+from slam_rs.walk_path import PATH_RADIUS_M, TRAIL, send_endpoints, send_trail, send_trajectory, walk_colors
 
 FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
 """How a replay's input rung draws the frames it was fed.
@@ -109,29 +109,8 @@ SlotFamily: TypeAlias = Literal["window", "marginalized"]
 """The two families of numbered frame slots under the run: the estimator's window, and what its last marginalization removed."""
 UNIFIED_SPHERE_MODELS: tuple[str, ...] = ("mei_v3", "mei_v6", "ds")
 """Camera models whose focal is the unified sphere's ``gamma`` and whose first coefficient is ``xi`` (:func:`display_intrinsics`)."""
-WALK_GO_HUE: float = 120.0
-"""Hue of the raw run's path at the start of the walk: green."""
-WALK_STOP_HUE: float = 0.0
-"""Hue of the raw run's path at the end of the walk: red, through yellow and orange (HSV, so no muddy brown between)."""
-WALK_SATURATION: float = 0.85
-"""Saturation of the walk gradient."""
-ENDPOINT_RADIUS_UI: float = 9.0
-"""Radius of the start and end dots of the raw run's path, ui points."""
-START_RING_M: float = 0.25
-"""Radius of the ring around the start dot, metres: the walk passes the start again, the ring tells the two apart."""
-
 IDENTITY: SimilarityTransform = SimilarityTransform(dst_R_src=np.eye(3), dst_t_src=np.zeros(3), scale=1.0)
 """The alignment a run carries before enough of it has been associated with the ground truth."""
-
-
-def walk_colors(t_ns: Int64[ndarray, " n"], first_ns: int, last_ns: int) -> UInt8[ndarray, "n 3"]:
-    """The walk gradient at each stamp: green at ``first_ns``, through yellow, to red at ``last_ns`` (HSV hue
-    :data:`WALK_GO_HUE` to :data:`WALK_STOP_HUE`). colsfm draws its path with the same gradient (``colsfm.rerun_layer``;
-    a test pins both to the same colours).
-    """
-    fraction: Float64[ndarray, " n"] = np.clip((t_ns - first_ns) / max(last_ns - first_ns, 1), 0.0, 1.0)
-    rgb: list[tuple[float, float, float]] = [colorsys.hsv_to_rgb((WALK_GO_HUE + (WALK_STOP_HUE - WALK_GO_HUE) * f) / 360.0, WALK_SATURATION, 1.0) for f in fraction]
-    return np.round(np.asarray(rgb, dtype=np.float64).reshape(-1, 3) * 255.0).astype(np.uint8)
 
 
 def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_frames"]) -> Trajectory:
@@ -287,7 +266,7 @@ class VioLogger:
     drawn once, the final set at the end (:meth:`log_final_map`): a replay's loops would otherwise stand from their
     detection on, each drawn again at every read."""
     corrections_shown: bool = False
-    """Whether pose-graph corrections are drawn from the last map read on (:func:`slam_rs.map_loops.log_corrections`)."""
+    """Whether pose-graph corrections are drawn from the last map read on (:meth:`_log_corrections`)."""
     poses: PoseLog = field(default_factory=PoseLog)
     """Every pose the run reported, for the CSV export, the ATE and the per-frameset path segment."""
     ground_truth_strip: Trajectory = field(init=False)
@@ -409,31 +388,24 @@ class VioLogger:
         return self.poses.trajectory()
 
     def log_complete_paths(self) -> None:
-        """Log each whole path once, at the cursor the caller set (the last frameset's), with the raw run's endpoints.
+        """Log each reference's whole path once, at the last frameset, with the raw run's endpoints (:mod:`slam_rs.walk_path`).
 
-        The per-frameset segments show where each run had got to, within a view's visible time range; the
-        ``trajectory_full`` entities show where it went, from the end of the walk on, so no whole path stands over a
-        cursor halfway through the clip. The raw run's path keeps its walk gradient (:func:`walk_colors`); its start
-        dot (with a ring, static) and end dot (from this cursor on) say where it began and ended.
+        The per-frameset segments (``trail``) show where each run had got to, within a view's visible time range; the
+        ``trajectory`` entities show where it went, from the end of the walk on, so no whole path stands over a cursor
+        halfway through the clip. The raw run keeps its walk gradient.
         """
         estimated: Trajectory = self.estimated()
         if len(estimated) >= 2:
-            colors: UInt8[ndarray, "n 3"] = self.walk_colors(estimated.t_ns)
-            segments: Float64[ndarray, "s 2 3"] = np.stack([estimated.position_m[:-1], estimated.position_m[1:]], axis=1)
-            rr.log(f"{VIO_RUN_ENTITY}/trajectory_full", rr.LineStrips3D(list(segments), colors=colors[1:], radii=0.004))
-            start, end = estimated.position_m[0], estimated.position_m[-1]
-            endpoint = rr.Radius.ui_points(ENDPOINT_RADIUS_UI)
-            rr.log(f"{VIO_RUN_ENTITY}/endpoints/start", rr.Points3D([start], colors=colors[:1], radii=endpoint, labels=["start"], show_labels=True), static=True)
-            angles: Float64[ndarray, " k"] = np.linspace(0.0, 2.0 * np.pi, 49)
-            ring: Float64[ndarray, "k 3"] = start + START_RING_M * np.stack([np.cos(angles), np.sin(angles), np.zeros_like(angles)], axis=1)
-            rr.log(f"{VIO_RUN_ENTITY}/endpoints/start_ring", rr.LineStrips3D([ring], colors=colors[:1], radii=rr.Radius.ui_points(2.5)), static=True)
-            rr.log(f"{VIO_RUN_ENTITY}/endpoints/end", rr.Points3D([end], colors=colors[-1:], radii=endpoint, labels=["end"], show_labels=True))
-        if len(self.ground_truth_strip) >= 2:
-            rr.log(f"{GT_ENTITY}/trajectory_full", rr.LineStrips3D([self.ground_truth_strip.position_m], colors=GT_COLOR, radii=0.004))
+            last_ns: int = int(estimated.t_ns[-1]) - self.cam_time_offset_ns
+            colors: UInt8[ndarray, "n 3"] = self._walk_colors_at(estimated.t_ns)
+            send_trajectory(VIO_RUN_ENTITY, last_ns, estimated.position_m, colors)
+            send_endpoints(VIO_RUN_ENTITY, last_ns, estimated.position_m[0], estimated.position_m[-1], (colors[0], colors[-1]))
+        if len(self.ground_truth_strip) >= 2 and len(estimated):
+            send_trajectory(GT_ENTITY, int(estimated.t_ns[-1]) - self.cam_time_offset_ns, self.ground_truth_strip.position_m, GT_COLOR)
 
-    def walk_colors(self, t_ns: Int64[ndarray, " n"]) -> UInt8[ndarray, "n 3"]:
+    def _walk_colors_at(self, t_ns: Int64[ndarray, " n"]) -> UInt8[ndarray, "n 3"]:
         """The walk gradient at each stamp over the segment's framesets (:attr:`frame_t_ns`)."""
-        return walk_colors(t_ns, int(self.frame_t_ns[0]), int(self.frame_t_ns[-1])) if len(self.frame_t_ns) else walk_colors(t_ns, 0, 0)
+        return walk_colors(t_ns, int(self.frame_t_ns[0]), int(self.frame_t_ns[-1]))
 
     def _log_paths(self) -> None:
         """Draw the segment each trajectory gained at this cursor.
@@ -453,12 +425,12 @@ class VioLogger:
         t_ns: int = int(self.poses.t_ns[last])
         if last >= 1:
             segment: Float64[ndarray, "2 3"] = self.poses.position_m[last - 1 : last + 1].copy()
-            color: UInt8[ndarray, "1 3"] = self.walk_colors(np.array([t_ns], dtype=np.int64))
-            rr.log(f"{VIO_RUN_ENTITY}/trajectory", rr.LineStrips3D([segment], colors=color, radii=0.004))
+            color: UInt8[ndarray, "1 3"] = self._walk_colors_at(np.array([t_ns], dtype=np.int64))
+            rr.log(f"{VIO_RUN_ENTITY}/{TRAIL}", rr.LineStrips3D([segment], colors=color, radii=PATH_RADIUS_M))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 2:
             return
-        rr.log(f"{GT_ENTITY}/trajectory", rr.LineStrips3D([self.ground_truth_strip.position_m[drawn - 2 : drawn]], colors=GT_COLOR, radii=0.004))
+        rr.log(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D([self.ground_truth_strip.position_m[drawn - 2 : drawn]], colors=GT_COLOR, radii=PATH_RADIUS_M))
 
     def _draw_slot(self, family: SlotFamily, k: int, t_ns: int, pose: Float64[ndarray, " 7"], color: tuple[int, int, int, int], *, pictures: bool) -> None:
         """Draw one window or marginalized frame on its slot: the rig's pose, and a frustum a camera in the role's colour.
@@ -590,20 +562,14 @@ class VioLogger:
         """
         if len(final) < 2:
             return
-        rr.log(f"{RUN_ENTITY}/trajectory_full", rr.LineStrips3D([final.position_m], colors=FINAL_COLOR, radii=0.004))
-        # What a view of the final run needs on the walk's own times: a segment a pose (a view's visible time range
-        # makes the trail) and its level follow frame.
-        video_time = rr.TimeColumn(TIMELINE, duration=(final.t_ns - self.cam_time_offset_ns).astype("timedelta64[ns]"))
-        segments: Float64[ndarray, "s 2 3"] = np.stack([final.position_m[:-1], final.position_m[1:]], axis=1)
-        rr.send_columns(
-            f"{RUN_ENTITY}/trajectory",
-            indexes=[rr.TimeColumn(TIMELINE, duration=(final.t_ns[1:] - self.cam_time_offset_ns).astype("timedelta64[ns]"))],
-            columns=rr.LineStrips3D.columns(strips=list(segments)).partition([1] * len(segments)),
-        )
-        rr.log(f"{RUN_ENTITY}/trajectory", rr.LineStrips3D.from_fields(colors=FINAL_COLOR, radii=0.004), static=True)
+        # On the walk's own times: a segment a pose (a view's visible time range makes the trail), the whole path from
+        # the last pose on, and the level follow frame.
+        pose_ns: Int64[ndarray, " n"] = final.t_ns - self.cam_time_offset_ns
+        send_trail(RUN_ENTITY, pose_ns, final.position_m, FINAL_COLOR)
+        send_trajectory(RUN_ENTITY, int(pose_ns[-1]), final.position_m, FINAL_COLOR)
         rr.send_columns(
             follow_entity(RUN_ENTITY),
-            indexes=[video_time],
+            indexes=[rr.TimeColumn(TIMELINE, duration=pose_ns.astype("timedelta64[ns]"))],
             columns=rr.Transform3D.columns(translation=final.position_m, quaternion=yaw_quaternion_xyzw(follow_yaw(final.t_ns, final.position_m))),
         )
         alignment: SimilarityTransform = IDENTITY
@@ -622,8 +588,17 @@ class VioLogger:
         rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(keyframes.poses[:, 0:3], colors=colors, radii=0.012))
         if loops:
             log_loops(keyframes)
-        self.corrections_shown = log_corrections(keyframes, shown=self.corrections_shown)
+        self._log_corrections(keyframes)
         self.map_keyframes_t_ns = t_ns
+
+    def _log_corrections(self, keyframes: _core.MapKeyframes) -> None:
+        """Draw the pose-graph corrections at the cursor when there are any; clear them once when they go."""
+        corrections: Float64[ndarray, "m 2 3"] = correction_segments(keyframes.raw_poses, keyframes.poses)
+        if len(corrections):
+            rr.log(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D(list(corrections), colors=PGO_CORRECTION_COLOR, radii=0.004))
+        elif self.corrections_shown:
+            rr.log(PGO_CORRECTIONS_ENTITY, rr.Clear(recursive=False))
+        self.corrections_shown = bool(len(corrections))
 
     def _log_map_delta(self, map_delta: _core.MapDelta, t_ns: int) -> None:
         """While the run goes on: the keyframes and loops, the delta into :attr:`map_point_blocks`, and when the points
@@ -1002,7 +977,7 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
                     origin="/world",
                     name="world",
                     contents=["/world/**"],
-                    overrides={f"{run}/trajectory": trail for run in (RUN_ENTITY, VIO_RUN_ENTITY, GT_ENTITY)},
+                    overrides={f"{run}/{TRAIL}": trail for run in (RUN_ENTITY, VIO_RUN_ENTITY, GT_ENTITY)},
                 ),
                 rrb.Vertical(*views),
                 column_shares=[2, 1],

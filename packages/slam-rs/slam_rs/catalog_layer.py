@@ -19,6 +19,7 @@ from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE
 from slam_rs.follow_frame import follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
+from slam_rs.walk_path import segments, send_endpoints, send_trail, walk_colors
 
 POSE_SOURCE: str = "slam_rs"
 """Catalog layer name, and DataForge run name of the final (optimised, non-causal) trajectory."""
@@ -66,13 +67,12 @@ def write_layer(
     finite: bool = all(np.isfinite(array).all() for array in (positions, rotations, raw_positions, raw_rotations))
     if not finite or not np.all(np.diff(times) > 0):
         raise ValueError("refusing non-finite poses or non-increasing timestamps")
-    progress: Float64[ndarray, " n_edges"] = np.linspace(0.0, 1.0, len(positions) - 1)
-    gradient: UInt8[ndarray, "n_edges 3"] = np.column_stack([255 * progress, 255 * (1 - progress), np.zeros_like(progress)]).astype(np.uint8)
+    gradient: UInt8[ndarray, "n 3"] = walk_colors(times, int(times[0]), int(times[-1]))
     root: str = schema.run_path(POSE_SOURCE)
     with atomic_recording(path, application_id="dataforge", recording_id=segment_id, send_properties=False) as rec:
         rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         _log_run(rec, POSE_SOURCE, times, positions, rotations, gradient)
-        _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, np.tile(np.array(VIO_COLOR, dtype=np.uint8), (len(progress), 1)))
+        _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, np.tile(np.array(VIO_COLOR, dtype=np.uint8), (len(times), 1)))
         if animate_base_rig:
             rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                              columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
@@ -93,9 +93,11 @@ def _log_run(
     times: Int64[ndarray, " n"],
     positions: Float64[ndarray, "n 3"],
     rotations: Float64[ndarray, "n 4"],
-    colors: UInt8[ndarray, "n_edges 3"],
+    colors: UInt8[ndarray, "n 3"],
 ) -> None:
-    """One run under ``/world/runs/<source>``: the per-frame rig, the whole path, its trail up to the cursor and its endpoints.
+    """One run under ``/world/runs/<source>`` (:mod:`slam_rs.walk_path`'s names): the per-frame rig, its follow frame,
+    the whole path (static here: every dataset's catalog layout draws it at any cursor), the trail up to the cursor and
+    the endpoints.
 
     Args:
         rec: The layer's recording.
@@ -103,23 +105,16 @@ def _log_run(
         times: ``video_time`` of each pose, nanoseconds.
         positions: Rig positions in the world, metres.
         rotations: Rig rotations, Rerun's XYZW.
-        colors: One colour per edge between consecutive poses.
+        colors: One colour per pose (a segment takes its later pose's).
     """
-    rig: str = f"{schema.run_path(source)}/rig"
-    rec.send_columns(rig, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
-                     columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
-    rec.send_columns(follow_entity(schema.run_path(source)), indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
-                     columns=rr.Transform3D.columns(translation=positions, quaternion=yaw_quaternion_xyzw(follow_yaw(times, positions))))
+    run: str = schema.run_path(source)
+    rig: str = f"{run}/rig"
+    index = [rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))]
+    rec.send_columns(rig, indexes=index, columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
+    rec.send_columns(follow_entity(run), indexes=index, columns=rr.Transform3D.columns(translation=positions, quaternion=yaw_quaternion_xyzw(follow_yaw(times, positions))))
     rec.log(rig, rr.TransformAxes3D(RIG_AXIS_LENGTH_M), static=True)
     indices: Int64[ndarray, " n_overview"] = np.unique(np.append(np.arange(0, len(positions), max(1, len(positions) // 4000)), len(positions) - 1))
     overview: Float64[ndarray, "n_overview 3"] = positions[indices]
-    rec.log(schema.trajectory_path(source), rr.LineStrips3D(np.stack([overview[:-1], overview[1:]], axis=1), colors=colors[indices[:-1]],
-                                                            radii=rr.Radius.ui_points(1.5)), static=True)
-    rec.log(f"{schema.run_path(source)}/endpoints", rr.Points3D(positions[[0, -1]], colors=[[0, 255, 0], [255, 0, 0]],
-                                                                 radii=rr.Radius.ui_points(3.0), labels=["start", "end"]), static=True)
-    rec.send_columns(
-        schema.trail_path(source),
-        indexes=[rr.TimeColumn(TIMELINE, duration=times[1:].astype("timedelta64[ns]"))],
-        columns=rr.LineStrips3D.columns(strips=np.stack([positions[:-1], positions[1:]], axis=1), colors=colors),
-    )
-    rec.log(schema.trail_path(source), rr.LineStrips3D.from_fields(radii=0.006), static=True)
+    rec.log(schema.trajectory_path(source), rr.LineStrips3D(segments(overview), colors=colors[indices[1:]], radii=rr.Radius.ui_points(1.5)), static=True)
+    send_trail(run, times, positions, colors, recording=rec)
+    send_endpoints(run, int(times[-1]), positions[0], positions[-1], (colors[0], colors[-1]), recording=rec)

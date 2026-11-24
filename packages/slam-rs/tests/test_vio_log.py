@@ -75,6 +75,7 @@ from slam_rs.vio_log import (
     log_rig,
     vio_blueprint,
 )
+from slam_rs.walk_path import walk_colors
 
 FRAMESETS: int = 12
 """Enough framesets for the estimator to initialise, optimise and fill a window."""
@@ -309,7 +310,7 @@ def test_a_window_keyframe_shows_both_lenses_at_its_own_time_and_keeps_its_slot(
 def test_every_tracked_frameset_writes_the_rung(logged: Logged) -> None:
     """One row per tracked frameset on each of the rung's entities, at its own time.
 
-    The three ``trajectory`` entities are not here: they are drawn one segment at
+    The three ``trail`` entities are not here: they are drawn one segment at
     a time and a line with no second pose yet writes nothing, which is what the
     two path tests below pin.
     """
@@ -336,7 +337,7 @@ def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None
     themselves are two points each, which is what makes the rung linear. The
     first tracked frameset has one pose and no pair, so it writes no row.
     """
-    rows: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trajectory"]
+    rows: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trail"]
     assert [t_ns for t_ns, _ in rows] == logged.tracked[1:]
     assert [len(values["LineStrips3D:strips"][0]) for _, values in rows] == [2] * len(rows)
     assert len(logged.logger.estimated()) == len(logged.tracked)
@@ -344,7 +345,7 @@ def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None
 
 def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -> None:
     """A reference known in advance still stops where the estimate has got to."""
-    for entity in (f"{GT_ENTITY}/trajectory",):
+    for entity in (f"{GT_ENTITY}/trail",):
         rows: list[Row] = logged.rows[entity]
         # One reference pose every frame interval, from zero, so a cursor before
         # the second one has no segment to draw.
@@ -359,29 +360,29 @@ def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -
 
 
 def test_the_whole_paths_are_logged_once_at_the_last_cursor_and_none_is_static(logged: Logged) -> None:
-    """One ``trajectory_full`` row per path at the end of the walk, so no whole path stands over a cursor halfway through
+    """One ``trajectory`` row per path at the end of the walk, so no whole path stands over a cursor halfway through
     it; the raw run's start dot and ring are static, its end dot comes with the last cursor."""
     assert sorted(static_path_lengths(logged.recording)) == [f"{VIO_RUN_ENTITY}/endpoints/start_ring"]
-    vio_full: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trajectory_full"]
+    vio_full: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trajectory"]
     assert [row.t_ns for row in vio_full] == [logged.tracked[-1]]
     assert len(vio_full[0].values["LineStrips3D:strips"]) == len(logged.tracked) - 1, "a segment a pose pair, each in its gradient colour"
-    gt_full: list[Row] = logged.rows[f"{GT_ENTITY}/trajectory_full"]
-    assert [row.t_ns for row in gt_full] == [logged.tracked[-1]] and len(gt_full[0].values["LineStrips3D:strips"][0]) == FRAMESETS
+    gt_full: list[Row] = logged.rows[f"{GT_ENTITY}/trajectory"]
+    assert [row.t_ns for row in gt_full] == [logged.tracked[-1]] and len(gt_full[0].values["LineStrips3D:strips"]) == FRAMESETS - 1
     assert [row.t_ns for row in logged.rows[f"{VIO_RUN_ENTITY}/endpoints/end"]] == [logged.tracked[-1]]
 
 
 def test_the_raw_run_s_path_runs_green_to_red_along_the_walk(logged: Logged) -> None:
     """Each segment takes the walk gradient at its stamp over the segment's framesets: green at the first, red at the last."""
-    rows: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trajectory"]
+    rows: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trail"]
     colors: list[int] = [row.values["LineStrips3D:colors"][0] for row in rows]
-    expected = vio_log.walk_colors(np.asarray([row.t_ns for row in rows], dtype=np.int64), 0, (FRAMESETS - 1) * FRAME_PERIOD_NS)
+    expected = walk_colors(np.asarray([row.t_ns for row in rows], dtype=np.int64), 0, (FRAMESETS - 1) * FRAME_PERIOD_NS)
     assert colors == [(int(r) << 24) | (int(g) << 16) | (int(b) << 8) | 255 for r, g, b in expected]
 
 
 def test_the_walk_gradient_is_colsfm_s() -> None:
     """The colours ``colsfm.rerun_layer`` pins for the same fractions (its walk gradient is a copy: no shared package)."""
     t_ns: Int64[ndarray, " n"] = np.array([0, 25, 50, 75, 100], dtype=np.int64)
-    np.testing.assert_array_equal(vio_log.walk_colors(t_ns, 0, 100), [[38, 255, 38], [147, 255, 38], [255, 255, 38], [255, 147, 38], [255, 38, 38]])
+    np.testing.assert_array_equal(walk_colors(t_ns, 0, 100), [[38, 255, 38], [147, 255, 38], [255, 255, 38], [255, 147, 38], [255, 38, 38]])
 
 
 def test_a_replay_draws_the_loops_once_at_the_end_and_a_live_run_at_every_map_read(
@@ -496,11 +497,11 @@ def test_each_run_gets_its_own_level_follow_frame_and_path(
     assert [t_ns for t_ns, _ in final_rows] == logged.tracked, "the final follow frame covers the whole walk, on its times"
     for final_row, vio_row in zip(final_rows, logged.rows[vio_follow], strict=True):
         np.testing.assert_allclose(np.asarray(final_row.values["Transform3D:translation"]) - np.asarray(vio_row.values["Transform3D:translation"]), [shift], atol=1e-9)
-    segments: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory"]
+    segments: list[Row] = logged.rows[f"{RUN_ENTITY}/trail"]
     assert [row.t_ns for row in segments] == logged.tracked[1:], "the final run's path a segment a pose, a trail for a view's time range"
-    for row, vio_row in zip(segments, logged.rows[f"{VIO_RUN_ENTITY}/trajectory"], strict=True):
+    for row, vio_row in zip(segments, logged.rows[f"{VIO_RUN_ENTITY}/trail"], strict=True):
         np.testing.assert_allclose(np.asarray(row.values["LineStrips3D:strips"][0]) - np.asarray(vio_row.values["LineStrips3D:strips"][0]), [shift, shift], atol=1e-5)
-    assert [row.t_ns for row in logged.rows[f"{RUN_ENTITY}/trajectory_full"]] == [logged.tracked[-1]]
+    assert [row.t_ns for row in logged.rows[f"{RUN_ENTITY}/trajectory"]] == [logged.tracked[-1]]
     assert static_strips(logged.recording, f"{RUN_ENTITY}/path") is None, "no whole path stands over the walk's cursors"
 
 
@@ -659,9 +660,9 @@ def test_only_the_three_paths_reach_back_to_the_start_of_the_recording(camera: C
     """
     world: rrb.View = views_of(vio_blueprint((camera(0, 0.0), camera(1, 0.1))).root_container)[0]
     assert sorted(str(entity) for entity in world.visualizer_overrides) == [
-        f"{GT_ENTITY}/trajectory",
-        f"{RUN_ENTITY}/trajectory",
-        f"{VIO_RUN_ENTITY}/trajectory",
+        f"{GT_ENTITY}/trail",
+        f"{RUN_ENTITY}/trail",
+        f"{VIO_RUN_ENTITY}/trail",
     ]
     reaching_back: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
         rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
@@ -844,16 +845,17 @@ def test_the_live_run_is_the_raw_vio_and_the_final_run_has_its_own_alignment(
         finals.append(final)
 
     logged: Logged = drive(pipeline(2), (camera(0, 0.0), camera(1, 0.1)), truth, texture, tmp_path / "final.rrd", read_rows, finish=finish)
-    for part in ("rig", "window/00", "landmarks", "trajectory"):
+    for part in ("rig", "window/00", "landmarks", "trail"):
         assert f"{VIO_RUN_ENTITY}/{part}" in logged.rows, part
     assert f"{RUN_ENTITY}/rig" not in logged.rows
     assert sorted(static_path_lengths(logged.recording)) == [f"{VIO_RUN_ENTITY}/endpoints/start_ring"]
 
     # The final run: its whole path once, at the last cursor, under its own alignment.
     (final,) = finals
-    drawn: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory_full"]
+    drawn: list[Row] = logged.rows[f"{RUN_ENTITY}/trajectory"]
     assert [row.t_ns for row in drawn] == [logged.tracked[-1]]
-    np.testing.assert_allclose(np.asarray(drawn[0].values["LineStrips3D:strips"][0], dtype=np.float64), final.position_m, atol=1e-6)
+    strips: Float64[ndarray, "s 2 3"] = np.asarray(drawn[0].values["LineStrips3D:strips"], dtype=np.float64)
+    np.testing.assert_allclose(np.concatenate([strips[:, 0], strips[-1:, 1]]), final.position_m, atol=1e-6)
     placed: list[Row] = [row for row in logged.rows[RUN_ENTITY] if "Transform3D:translation" in row.values]
     assert [row.t_ns for row in placed] == [logged.tracked[-1]]
     expected: SimilarityTransform = inverted(ate(final, truth).alignment)
