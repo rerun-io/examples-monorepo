@@ -3,8 +3,10 @@
 Reads the lens videos, their Mei calibrations and the accelerometer of a dataforge Insta360 base recording from its
 catalog segment (both lenses in one read; the decoders get the packets of the run window), runs
 :class:`~posekit.models.fullcircle.FullCircleMasker` in FullCircle's two passes (detect the operator direction on
-every tracked frameset, fill the gaps from the nearest frameset, then track and map back) and writes the mask layer
-contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a ``SegmentationImage`` (uint8, 1 = operator)
+every tracked frameset, fill the gaps from the nearest frameset, then track and map back), adds the bystanders found
+on the same level faces (:class:`~posekit.models.fullcircle_people.FacePeople`, ``--people.no-enabled`` for the
+operator only) and writes the mask layer contract (track 3, v2): per lens ``<camera>/pinhole/people_mask``, a
+``SegmentationImage`` (uint8, 1 = operator or bystander)
 at the resolution it is computed at, with one static ``Transform3D(scale=[W_img / W_mask, H_img / H_mask, 1])``,
 stamped with that lens's frame times, every ``stride``-th frameset; the dilation is already applied.
 
@@ -35,6 +37,7 @@ from torch import Tensor
 
 from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
+    FaceBoxes,
     FullCircleConfig,
     FullCircleMasker,
     OperatorDetections,
@@ -46,6 +49,7 @@ from posekit.models.fullcircle import (
     operator_directions,
     view_up,
 )
+from posekit.models.fullcircle_people import FacePeople, FacePeopleConfig, FacePeopleMasks
 from posekit.ops.sphere import MeiCamera
 
 DETECT_FRAMESETS: int = 8
@@ -85,6 +89,8 @@ class FullCircleMasksConfig:
     """Mask size = lens size / this (480 px for 1920 px lenses, about the synthetic view's angular resolution)."""
     masker: FullCircleConfig = field(default_factory=FullCircleConfig)
     """FullCircle options (detector, tracker, view sizes, dilation in lens pixels)."""
+    people: FacePeopleConfig = field(default_factory=FacePeopleConfig)
+    """Bystanders from the same level faces (on by default; ``--people.no-enabled``: the operator only)."""
     timeline: str = "video_time"
     """Timeline of the lens videos and of the masks."""
     accel: str = "/world/rig_00/imu_00/accel"
@@ -232,6 +238,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
 
     detect_start: float = time.perf_counter()
     detections: list[OperatorDetections] = []
+    face_boxes: list[FaceBoxes] = []
     for begin, chunk, frames in decoded_chunks():
         # Detector calls of DETECT_FRAMESETS framesets (6 faces each), whatever the decode chunk: the YOLOX engine's batch,
         # and a bound on the eager SAM 3 detector's memory.
@@ -242,13 +249,20 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
         ]
         for position, (index, evidence) in enumerate(zip(chunk, batch, strict=True), start=begin):
             detections.append(evidence.detections)
+            face_boxes.append(evidence.boxes)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 for face in range(6):
                     debug.log(f"faces/face_{face}", rr.Image(evidence.face_images[face].cpu().numpy()).compress(90))
-                    keep: ndarray = evidence.faces == face
+                    keep: ndarray = evidence.boxes.faces == face
                     debug.log(
-                        f"faces/face_{face}/persons", rr.Boxes2D(array=evidence.boxes[keep], array_format=rr.Box2DFormat.XYXY, colors=(255, 200, 0))
+                        f"faces/face_{face}/persons",
+                        rr.Boxes2D(
+                            array=evidence.boxes.xyxy[keep],
+                            array_format=rr.Box2DFormat.XYXY,
+                            labels=[f"{score:.2f}" for score in evidence.boxes.scores[keep]],
+                            colors=(255, 200, 0),
+                        ),
                     )
     directions: list[Float64[ndarray, "3"] | None] = operator_directions(detections, config.masker.direction_gate_deg, config.masker.lost_after)
     found: int = sum(len(d.weights) > 0 for d in detections)
@@ -263,20 +277,37 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     for target, source in zip(targets, sources, strict=True):
         rr.log(target, MASK_ANNOTATION, static=True)
         rr.log(target, rr.Transform3D(scale=[*source.mask_scale, 1.0]), static=True)
+    people: FacePeople | None = FacePeople(config.people, masker) if config.people.enabled else None
     if debug is not None:
         debug.log("synthetic/mask", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "operator", (255, 0, 0, 160))]), static=True)
+        debug.log("people", rr.AnnotationContext([(0, "keep", (0, 0, 0, 0)), (MASKED_CLASS_ID, "bystander", (255, 200, 0, 160))]), static=True)
+    bystander_framesets: int = 0
     track_start: float = time.perf_counter()
     for begin, chunk, frames in decoded_chunks():
         chunk_masks: list[list[Tensor]] = [[] for _ in targets]
         for position, (index, lens_frames) in enumerate(zip(chunk, frames, strict=True), start=begin):
             result: OperatorMasks = masker.track(lens_frames, filled[position], levels[position] @ up_level)
-            for lens_masks, mask in zip(chunk_masks, result.source_masks, strict=True):
+            masks: list[Tensor] = result.source_masks
+            bystanders: FacePeopleMasks | None = None
+            if people is not None:
+                bystanders = people(lens_frames, face_boxes[position], levels[position], result)
+                masks = [operator | other for operator, other in zip(masks, bystanders.source_masks, strict=True)]
+                bystander_framesets += bool(bystanders.face_masks.any())
+            for lens_masks, mask in zip(chunk_masks, masks, strict=True):
                 lens_masks.append(mask)
             if debug is not None and position % config.debug_every == 0:
                 debug.set_time("frameset", sequence=index)
                 debug.log("synthetic", rr.Image(result.synthetic_rgb.cpu().numpy()).compress(90))
                 debug.log("synthetic/mask", rr.SegmentationImage(result.synthetic_mask.to(torch.uint8).cpu().numpy()))
                 debug.log("operator_direction", rr.Arrows3D(vectors=[filled[position]], colors=(255, 0, 0)))
+                if bystanders is not None:
+                    debug.log("people", rr.Clear(recursive=True))
+                    scale: float = config.people.face_size / config.masker.face_size
+                    for face, image, face_mask in zip(bystanders.faces, bystanders.face_images, bystanders.face_masks, strict=True):
+                        debug.log(f"people/face_{face}", rr.Image(image.cpu().numpy()).compress(90))
+                        debug.log(f"people/face_{face}/mask", rr.SegmentationImage(face_mask.to(torch.uint8).cpu().numpy()))
+                        boxes: ndarray = bystanders.candidates[bystanders.candidate_faces == face] * scale
+                        debug.log(f"people/face_{face}/candidates", rr.Boxes2D(array=boxes, array_format=rr.Box2DFormat.XYXY, colors=(255, 200, 0)))
         # One host copy per lens and chunk.
         for lens, (target, lens_masks) in enumerate(zip(targets, chunk_masks, strict=True)):
             host: UInt8[ndarray, "n mh mw"] = (torch.stack(lens_masks).to(torch.uint8) * MASKED_CLASS_ID).cpu().numpy()
@@ -297,5 +328,11 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     steps: str = "".join(f"{k} {v:.1f} s, " for k, v in masker.seconds.items()) if config.masker.step_timing else "(--masker.step-timing), "
     print(
         f"pass 2 (track + map back): {len(tracked)} framesets in {track_wall:.1f} s; waiting for decode (both passes) {decode_wait_s:.1f} s; steps: {steps}"
-        f"{masker.prompts} tracker prompts; peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks"
+        f"{masker.prompts} tracker prompts; "
+        + (
+            f"bystanders on {bystander_framesets} framesets (SAM 3 on {people.sam3_faces} faces, {people.seconds:.1f} s); "
+            if people is not None
+            else ""
+        )
+        + f"peak GPU allocated {torch.cuda.max_memory_allocated() / 1e9:.1f} GB; total {total:.1f} s for {len(tracked) * 2} lens masks"
     )

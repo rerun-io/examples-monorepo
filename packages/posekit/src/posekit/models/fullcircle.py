@@ -120,11 +120,15 @@ class FullCircleConfig:
     """Person detector on the cube faces: posekit YOLOX-HumanArt (TensorRT) or SAM 3 ``person``."""
     yolox: YoloxDetectorConfig = field(
         default_factory=lambda: YoloxDetectorConfig(
-            backend=TensorRtBackendConfig(max_batch_size=48, opt_batch_size=48), onnx_transform=fp16_dynamic_yolox
+            backend=TensorRtBackendConfig(max_batch_size=48, opt_batch_size=48), onnx_transform=fp16_dynamic_yolox, score_thr=0.25
         )
     )
     """YOLOX variant, backend and thresholds: a dynamic-batch engine with an fp16 trunk that takes the faces of 8
-    framesets per call."""
+    framesets per call. Boxes from 0.25 are kept for the bystanders
+    (:class:`~posekit.models.fullcircle_people.FacePeopleConfig`); the operator uses those from ``operator_score``."""
+    operator_score: float = 0.5
+    """Lowest YOLOX score of a detection that counts for the operator direction (YOLOX's default threshold); SAM 3
+    detections all count, at ``sam3.score_threshold``."""
     sam3: Sam3SegmenterConfig = field(default_factory=lambda: Sam3SegmenterConfig(score_threshold=0.25))
     """SAM 3 options (FullCircle runs it at conf 0.25)."""
     sam3_prompt: str = "person"
@@ -155,7 +159,12 @@ class FullCircleConfig:
     synthetic_size: int = 512
     """Synthetic fisheye size, pixels (sam-ui resizes to 512)."""
     work_size: int = 1280
-    """Source images are area-downscaled by a whole factor to at most this size before resampling (anti-aliasing)."""
+    """Source images are area-downscaled by a whole factor to at most this size before the synthetic view is resampled
+    from them (anti-aliasing)."""
+    face_work_size: int = 2048
+    """The same for the faces. A 640 px face holds about 7 px per degree, the 1920 px X5 lens about 10, so the faces
+    sample the full lens: from the 960 px work image YOLOX missed the people behind the glass of the Mission office clip
+    (46.7 s), from the full lens it boxes them."""
     dilate_px: float = 12.0
     """Dilation radius in source-image pixels. FullCircle trains on its ``masks-5`` (a 9x9 ellipse 5 times at 2880 px,
     about 13 px at 1920 px); 12 px is 3 cells of the 480 px mask grid of a 1920 px lens (4 px, FullCircle's ``masks-1``,
@@ -177,15 +186,25 @@ class OperatorDetections:
 
 
 @dataclass(frozen=True, slots=True)
+class FaceBoxes:
+    """The detector's boxes on the six faces of one frameset."""
+
+    xyxy: Float32[ndarray, "n 4"]
+    """Each detection's face-pixel box."""
+    scores: Float32[ndarray, " n"]
+    """Each detection's score."""
+    faces: Int64[ndarray, " n"]
+    """Face index of each detection."""
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorEvidence:
     """What the face detector saw in one frameset."""
 
     detections: OperatorDetections
-    """The detections as directions and weights, input of :func:`operator_directions`."""
-    boxes: Float32[ndarray, "n 4"]
-    """Each detection's face-pixel box ``xyxy``."""
-    faces: Int64[ndarray, " n"]
-    """Face index of each detection."""
+    """The detections of the operator score as directions and weights, input of :func:`operator_directions`."""
+    boxes: FaceBoxes
+    """All the detections' boxes (from YOLOX's threshold, for the bystanders)."""
     face_images: UInt8[Tensor, "6 s s 3"]
     """The six faces as the detector saw them."""
 
@@ -200,6 +219,8 @@ class OperatorMasks:
     """The synthetic fisheye the tracker saw."""
     synthetic_mask: Bool[Tensor, "s s"]
     """The tracker's mask on it."""
+    rig_R_view: Float64[ndarray, "3 3"]
+    """Rotation of the synthetic view's rays into the rig frame."""
 
 
 def _mean_direction(detections: OperatorDetections, keep: Bool[ndarray, " n"]) -> Float64[ndarray, "3"]:
@@ -321,6 +342,7 @@ class FullCircleMasker:
         # Sources see the work images, whose pixel (i, j) covers full pixels [f i - 0.5, f (i + 1) - 0.5): grids are
         # normalised by the full size, which grid_sample maps onto any resolution of the same image.
         self.downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.work_size)) for s in sources]
+        self.face_downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.face_work_size)) for s in sources]
         self.full_hw: list[tuple[int, int]] = [s.image_hw for s in sources]
         # Ray tables are solved in float64 and kept in float32, as is every per-frame projection through them.
         rig_R_cams: Float64[Tensor, "n_src 3 3"] = torch.from_numpy(np.stack([s.rig_R_cam for s in sources])).to(device)
@@ -355,12 +377,16 @@ class FullCircleMasker:
         self.seconds: dict[str, float] = {"faces": 0.0, "detect": 0.0, "synthetic": 0.0, "track": 0.0, "backmap": 0.0}
         """Synchronised wall time per step since construction (with ``config.step_timing``)."""
 
-    def _work_images(self, frames: list[UInt8[Tensor, "h w 3"]]) -> list[Float[Tensor, "3 hw ww"]]:
+    def _work_images(self, frames: list[UInt8[Tensor, "h w 3"]], downscale: list[int]) -> list[Float[Tensor, "3 hw ww"]]:
         images: list[Tensor] = []
-        for frame, factor in zip(frames, self.downscale, strict=True):
+        for frame, factor in zip(frames, downscale, strict=True):
             chw: Float[Tensor, "3 h w"] = rearrange(frame, "h w c -> c h w").float()
             images.append(F.avg_pool2d(chw[None], factor)[0] if factor > 1 else chw)
         return images
+
+    def face_images(self, frames: list[UInt8[Tensor, "h w 3"]]) -> list[Float[Tensor, "3 hw ww"]]:
+        """The source frames the faces are sampled from (``face_work_size``), float and channels first."""
+        return self._work_images(frames, self.face_downscale)
 
     def _detect_people(self, images: UInt8[Tensor, "b s s 3"]) -> BoxDetections:
         if self.yolox is not None:
@@ -391,7 +417,7 @@ class FullCircleMasker:
             # The six faces stacked into one 6s x s view: one sampling plan per frameset.
             rays: Float32[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces[index].float().transpose(1, 2)
             view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
-            stacked: UInt8[Tensor, "3 f s"] = sample_sphere(self._work_images(frames), view).round().clamp(0, 255).to(torch.uint8)
+            stacked: UInt8[Tensor, "3 f s"] = sample_sphere(self.face_images(frames), view).round().clamp(0, 255).to(torch.uint8)
             faces[6 * index : 6 * index + 6] = rearrange(stacked, "c (f h) w -> f h w c", f=6)
         start = self._tick("faces", start)
         detections: BoxDetections = self._detect_people(faces)
@@ -412,12 +438,16 @@ class FullCircleMasker:
         centres: Float64[ndarray, "n 3"] = torch.einsum("nij,nj->ni", rotations, rays).cpu().numpy()
         weights: Float64[ndarray, " n"] = areas.double().cpu().numpy()
         all_boxes: Float32[ndarray, "n 4"] = boxes.cpu().numpy()
+        scores: Float32[ndarray, " n"] = detections.scores.float().cpu().numpy()
         face_ids: Int64[ndarray, " n"] = detections.frame_indices.cpu().numpy()
+        operator: Bool[ndarray, " n"] = scores >= self.config.operator_score if self.yolox is not None else np.ones(len(scores), dtype=bool)
         evidence: list[OperatorEvidence] = []
         for index in range(len(framesets)):
             keep: Bool[ndarray, " n"] = face_ids // 6 == index
-            detections_here: OperatorDetections = OperatorDetections(centres[keep], weights[keep])
-            evidence.append(OperatorEvidence(detections_here, all_boxes[keep], face_ids[keep] % 6, faces[6 * index : 6 * index + 6]))
+            detections_here: OperatorDetections = OperatorDetections(centres[keep & operator], weights[keep & operator])
+            evidence.append(
+                OperatorEvidence(detections_here, FaceBoxes(all_boxes[keep], scores[keep], face_ids[keep] % 6), faces[6 * index : 6 * index + 6])
+            )
         self._tick("detect", start)
         return evidence
 
@@ -434,13 +464,15 @@ class FullCircleMasker:
         centre: float = (size - 1) / 2
         zero: Tensor = torch.zeros(1, dtype=torch.long, device=self.device)
         detections: BoxDetections = self._detect_people(synthetic[None])
-        if detections.num_detections == 0:
+        boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
+        if self.yolox is not None:
+            boxes = boxes[detections.scores >= self.config.operator_score]
+        if len(boxes) == 0:
             if not first:
                 return None
             return SegmentationPrompts(
                 frame_indices=zero, points_xy=torch.tensor([[centre, centre]], dtype=torch.float32, device=self.device), track_ids=zero
             )
-        boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
         centres: Float[Tensor, "n 2"] = (boxes[:, :2] + boxes[:, 2:]) / 2
         contains: Bool[Tensor, " n"] = (boxes[:, 0] <= centre) & (boxes[:, 2] >= centre) & (boxes[:, 1] <= centre) & (boxes[:, 3] >= centre)
         distance: Float[Tensor, " n"] = (centres - centre).norm(dim=1)
@@ -462,7 +494,7 @@ class FullCircleMasker:
         rig_R_view: Float64[ndarray, "3 3"] = look_at(direction, up)
         rotation: Float32[Tensor, "3 3"] = torch.from_numpy(rig_R_view).to(self.device, torch.float32)
         view: SphereView = view_from_rays(self.synthetic_rays @ rotation.T, size, size, self.cameras, self.rig_R_cams, self.full_hw)
-        rendered: Float[Tensor, "3 s s"] = sample_sphere(self._work_images(frames), view) * self.synthetic_valid[None]
+        rendered: Float[Tensor, "3 s s"] = sample_sphere(self._work_images(frames, self.downscale), view) * self.synthetic_valid[None]
         synthetic: UInt8[Tensor, "s s 3"] = rearrange(rendered.round().clamp(0, 255).to(torch.uint8), "c h w -> h w c").contiguous()
         start = self._tick("synthetic", start)
         prompts: SegmentationPrompts | None = None
@@ -488,11 +520,12 @@ class FullCircleMasker:
             mask: Bool[Tensor, "mh mw"] = (hit[0, 0] > 0.5) & (valid & self.mask_ray_valid[index]).reshape(source.mask_hw)
             source_masks.append(disk_dilate(mask, self.mask_radius[index]))
         self._tick("backmap", start)
-        return OperatorMasks(source_masks, synthetic, synthetic_mask)
+        return OperatorMasks(source_masks, synthetic, synthetic_mask, rig_R_view)
 
 
 __all__ = (
     "FULLCIRCLE_SYNTHETIC_LENS",
+    "FaceBoxes",
     "FullCircleConfig",
     "FullCircleMasker",
     "OperatorDetections",
