@@ -174,8 +174,10 @@ def test_the_cpu_lens_decoder_decodes_both_lenses_of_an_h264_body(insv_x3_clip: 
 
 
 @pytest.mark.integration
-def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_clip: Path) -> None:
-    """The X3 (H.264, a GOP of 16, its lenses in two files) at stride 7 in batches of 5, so batches span several GOP segments."""
+@pytest.mark.parametrize("stride", [1, 7])
+def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_clip: Path, stride: int) -> None:
+    """The X3 (H.264, a GOP of 16, its lenses in two files) in batches of 5: at stride 1 batches span decode runs (eight
+    GOPs each), at stride 7 several GOPs."""
     import insta360_io
     import torch
 
@@ -184,7 +186,7 @@ def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
     rig = insta360_io.InsvRig(str(insv_x3_clip), 120)
-    indices: Int64[ndarray, " k"] = np.arange(0, 120, 7, dtype=np.int64)
+    indices: Int64[ndarray, " k"] = np.arange(0, 120, stride, dtype=np.int64)
     pairs = {device: list(lens_pictures(rig, indices, torch.device(device), batch=5, threads=4)) for device in ("cuda", "cpu")}
     for lens in range(2):
         cuda, cpu = (torch.cat([pair[lens] for pair in pairs[device]]).cpu().numpy().astype(np.int16) for device in ("cuda", "cpu"))
