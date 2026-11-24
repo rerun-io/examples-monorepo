@@ -108,7 +108,7 @@ from colsfm.matching import (
     MatchReport,
 )
 from colsfm.prior_alignment import align_run_directory
-from colsfm.run_config import PipelineOptions, ResolvedRun, SelectionOptions, resolve_run
+from colsfm.run_config import PipelineOptions, ResolvedRun, SelectionOptions, plan_runs_extrinsic_stage, resolve_run
 from colsfm.run_lifecycle import (
     EXTRINSIC_REFINEMENT_STAGE,
     KEYFRAME_DIR_NAME,
@@ -298,7 +298,7 @@ def run_pipeline(options: PipelineOptions, observer: PipelineObserver | None = N
     # matching and loop closure had already been paid for and the previous run's
     # database had already been deleted.
     resolved: ResolvedRun = resolve_run(options)
-    stages: tuple[StageName, ...] = stage_names(options.optimize_extrinsics)
+    stages: tuple[StageName, ...] = stage_names(plan_runs_extrinsic_stage(options))
     workspace: RunWorkspace = open_workspace(options.output_dir, stages)
     # Every stage writes into the staging directory, the database included, because
     # the stages take an options object whose `output_dir` is that directory. The
@@ -414,7 +414,9 @@ def _run_stages(
     mapped_meta: FramesMeta = pose_graph.frames_meta
     changes: tuple[ExtrinsicChange, ...] = ()
     rounds_run: int = 0
-    if options.optimize_extrinsics:
+    if options.refine_camera_model and mapping.refined_extrinsics is not None:
+        mapped_meta = pose_graph.frames_meta.with_extrinsics(mapping.refined_extrinsics)
+    if plan_runs_extrinsic_stage(options):
         with timed_stage(ledger, EXTRINSIC_REFINEMENT_STAGE), watcher.stage_scope(EXTRINSIC_REFINEMENT_STAGE):
             refinement: ExtrinsicRefinementStageResult = run_extrinsic_refinement_stage(
                 staged, pose_graph.frames_meta, config, mapping_options, mapping

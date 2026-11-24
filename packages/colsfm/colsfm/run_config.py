@@ -145,6 +145,13 @@ class PipelineOptions:
     extrinsic_refinement_rounds: int = DEFAULT_EXTRINSIC_ROUNDS
     """Ceiling on the extrinsics-then-poses rounds the regularised refinement may take (`DEFAULT_EXTRINSIC_ROUNDS`); it
     also stops early on `ExtrinsicRefinementOptions`' tolerances."""
+    refine_camera_model: bool = False
+    """Free every camera's focal length (fx, fy) and the rig (`sensor_from_rig`) in every mapping round. Off by default.
+
+    cuSFM holds the calibration fixed, so a nominal model that is off ends up in the poses: Mission office's cube faces
+    are 1-1.4 % off f = 800 and 0.12-0.20 deg off the nominal rig. With Spirula's matches, colsfm's mapper ends 0.2645
+    deg from Spirula's poses with the model held and 0.034 deg with it free (focals within 0.5 px). The rig solve runs
+    on Ceres (CASPAR cannot refine `sensor_from_rig`) on a camera-referenced rig, and replaces stage 7b."""
     loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted"
     """Which of the loop stage's image pairs stay in the database the mapper triangulates from.
 
@@ -349,6 +356,18 @@ class ResolvedRun:
         )
 
 
+def plan_runs_extrinsic_stage(options: PipelineOptions) -> bool:
+    """Whether stage 7b runs: `--optimize-extrinsics`, unless `--refine-camera-model` already freed the rig in the mapper.
+
+    Args:
+        options: The command line.
+
+    Returns:
+        True when the run refines its extrinsics after mapping.
+    """
+    return options.optimize_extrinsics and not options.refine_camera_model
+
+
 def resolve_run(options: PipelineOptions) -> ResolvedRun:
     """Turn one command line into the per-stage settings the run will execute.
 
@@ -394,7 +413,7 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
         # solve, so the mapping pass stays on the GPU. Only the unregularised
         # ablation is `run_mapping(..., optimize_extrinsics=True)`, which is the
         # call CASPAR throws on.
-        optimize_extrinsics=options.optimize_extrinsics and not options.regularised_extrinsics,
+        optimize_extrinsics=(options.optimize_extrinsics and not options.regularised_extrinsics) or options.refine_camera_model,
     )
     # Said once, here, where the decision was made. The only thing left to decide is
     # the camera-model check, which needs the reconstruction stage 7 builds.
@@ -408,7 +427,13 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
         match_limit=MatchLimitPolicy.of(options.match_cap_mode, options.max_matches_per_pair),
         # The mapper receives the plan itself, not the knobs it was made from: there is
         # one decision about bundle adjustment in a run, and this is it.
-        mapping=MappingOptions(num_threads=options.ba_num_threads, use_gpu=options.ba_use_gpu, ba_plan=ba_plan),
+        mapping=MappingOptions(
+            num_threads=options.ba_num_threads,
+            use_gpu=options.ba_use_gpu,
+            ba_plan=ba_plan,
+            optimize_extrinsics=options.refine_camera_model,
+            refine_focal_length=options.refine_camera_model,
+        ),
         ba_plan=ba_plan,
         device=options.device,
         num_threads=options.num_threads,

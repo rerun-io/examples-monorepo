@@ -560,7 +560,8 @@ def run_reconstruction_stage(
         FileNotFoundError: When the database does not exist.
         ValueError: When no frame is registered.
     """
-    reference_camera_params_id: int | None = gauge_camera_params_id(pose_graph_meta) if options.optimize_extrinsics else None
+    camera_referenced: bool = options.optimize_extrinsics or options.refine_camera_model
+    reference_camera_params_id: int | None = gauge_camera_params_id(pose_graph_meta) if camera_referenced else None
     model: PosedModel = build_reconstruction(pose_graph_meta, reference_camera_params_id=reference_camera_params_id)
     mapping: MappingResult = run_mapping(model, options.database_path, config.vision_mapping, mapping_options)
     _print_mapping(mapping)

@@ -255,6 +255,14 @@ class MappingOptions:
     extrinsics in `colsfm.extrinsic_refinement`, whose every call here leaves this
     False. Only `--no-regularised-extrinsics` turns it on, and that is the one thing
     that takes `ba_backend="caspar"` off the GPU."""
+    refine_focal_length: bool = False
+    """Free every camera's focal length (fx, fy) in every round's bundle adjustment; cuSFM holds intrinsics fixed.
+
+    A nominal calibration that is off pushes its error into the poses (Mission office cube faces: 1-1.4 % off
+    f = 800, poses 0.25 deg from Spirula's); refined from the first round, the loose early gates keep the
+    observations the nominal model would have filtered."""
+    refine_principal_point: bool = False
+    """Free every camera's principal point as well; only read with `refine_focal_length`."""
     fixed_camera_params_id: int | None = None
     """Camera whose extrinsic stays fixed while the others are refined; cuSFM's `--fixed_camera_name`."""
     num_threads: int | None = None
@@ -359,8 +367,8 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
         KeyError: When the configuration names a loss pycolmap does not have.
     """
     ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    ba_options.refine_focal_length = False
-    ba_options.refine_principal_point = False
+    ba_options.refine_focal_length = options.refine_focal_length
+    ba_options.refine_principal_point = options.refine_focal_length and options.refine_principal_point
     ba_options.refine_extra_params = False
     ba_options.refine_rig_from_world = True
     ba_options.refine_sensor_from_rig = options.optimize_extrinsics

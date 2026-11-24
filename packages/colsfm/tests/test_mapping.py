@@ -329,3 +329,36 @@ def test_the_merge_gate_can_be_capped_below_the_round_gate(isaac_config: CusfmCo
     assert triangulator_options(capped, 4.0).merge_max_reproj_error == 4.0
     default: pycolmap.IncrementalTriangulatorOptions = triangulator_options(isaac_config.vision_mapping, 25.0)
     assert default.merge_max_reproj_error == 25.0
+
+
+def test_the_mapper_can_refine_focal_lengths_in_every_round(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """`refine_focal_length` frees fx, fy of every camera in every round, so most of a 2 % focal error comes back.
+
+    Measured from a 510 px start (truth 500): fx 498.8 px, fy only 509.3 px. The synthetic points span a narrow
+    height band, so the scene constrains fy weakly; the test asserts fx within 0.5 % and fy moving towards the truth.
+
+    Holding the calibration at a nominal value pushes its error into the poses: Mission office's cube faces are 1-1.4 %
+    off f = 800 and colsfm's poses end 0.25 deg from Spirula's (sfm-root ROOT-CAUSE cause 1).
+    """
+    model: PosedModel = build_reconstruction(synthetic_rig.frames_meta)
+    truth: float = float(model.reconstruction.camera(1).params[0])
+    for camera in model.reconstruction.cameras.values():
+        params = np.asarray(camera.params).copy()
+        params[:2] *= 1.02
+        camera.params = params
+    fixed_start: PosedModel = build_reconstruction(synthetic_rig.frames_meta)
+    for camera in fixed_start.reconstruction.cameras.values():
+        params = np.asarray(camera.params).copy()
+        params[:2] *= 1.02
+        camera.params = params
+
+    refined: MappingResult = run_mapping(model, synthetic_database, isaac_config.vision_mapping, quiet_options(num_threads=1, refine_focal_length=True))
+    held: MappingResult = run_mapping(fixed_start, synthetic_database, isaac_config.vision_mapping, quiet_options(num_threads=1))
+
+    for camera in refined.reconstruction.cameras.values():
+        assert abs(float(camera.params[0]) - truth) < 0.005 * truth
+        assert float(camera.params[1]) < 1.02 * truth
+    assert all(float(camera.params[0]) == pytest.approx(1.02 * truth) for camera in held.reconstruction.cameras.values())
+    assert refined.mean_reprojection_error_px < held.mean_reprojection_error_px
