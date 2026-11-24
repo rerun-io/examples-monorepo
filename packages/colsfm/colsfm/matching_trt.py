@@ -180,7 +180,7 @@ def normalize_keypoints_raco(keypoints_xy: KeypointsXY, image_width: int, image_
     LightGlue+ (fabio-sim's matcher trained against RaCo-ALIKED, the `raco` backend) takes cuSFM's
     `align_corners=False` normalisation over the network input and applies `[1, H_proc / W]` inside the graph, which
     composes to the same LightGlue frame as `normalize_keypoints`. This is the exact inverse of
-    `colsfm.features_native.normalized_to_pixels`, `2 * p / (size - 1) - 1`. Passing `normalize_keypoints` here would
+    `colsfm.features_native.normalized_to_pixels`, `(2 * p + 1) / size - 1`. Passing `normalize_keypoints` here would
     scale x correctly by luck and y by `H / W`, which silently degrades matching rather than failing.
 
     Args:
@@ -191,8 +191,8 @@ def normalize_keypoints_raco(keypoints_xy: KeypointsXY, image_width: int, image_
     Returns:
         Float32 `[1, num_keypoints, 2]`, the engine's binding shape.
     """
-    scale_xy: Float32[ndarray, " 2"] = np.asarray([(image_width - 1) / 2.0, (image_height - 1) / 2.0], dtype=np.float32)
-    normalized: Float32[ndarray, "num_keypoints 2"] = np.asarray(keypoints_xy, dtype=np.float32) / scale_xy - np.float32(1.0)
+    size_xy: Float32[ndarray, " 2"] = np.asarray([image_width, image_height], dtype=np.float32)
+    normalized: Float32[ndarray, "num_keypoints 2"] = (np.float32(2.0) * np.asarray(keypoints_xy, dtype=np.float32) + np.float32(1.0)) / size_xy - np.float32(1.0)
     return np.ascontiguousarray(normalized[None])
 
 

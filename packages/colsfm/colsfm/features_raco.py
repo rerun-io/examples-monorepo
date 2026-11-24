@@ -15,7 +15,7 @@ documents.
 
 **The engines.** The graph has a real batch axis, `image [batch, 3, h, w]`, so each engine is built with an
 optimisation profile and `DEFAULT_BATCH_SIZE` images run together. Everything either side of the engine runs through
-`colsfm.features_native`: GPU frames from the run's `colsfm.frames.FrameSource`, the `(k + 1) * 0.5 * (size - 1)`
+`colsfm.features_native`: GPU frames from the run's `colsfm.frames.FrameSource`, the `(k + 1) * 0.5 * size - 0.5`
 mapping back onto the original image, and the two database columns written for image rows somebody else created.
 What this module owns is what is RaCo's alone —
 which of two graphs serves a size, what its optimisation profiles are, how wide

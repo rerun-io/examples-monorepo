@@ -164,9 +164,11 @@ class ExtractionGroup:
 def normalized_to_pixels(normalized_xy: NormalizedKeypoints, image_width: int, image_height: int) -> KeypointsXY:
     """Map ALIKED's normalised coordinates onto the original image.
 
-    `(k + 1) * 0.5 * (size - 1)`, the blob's own mapping
-    (feature_extractor_main.md §6.3), which targets the **original** image size
-    rather than the network's — the stretch is undone here and nowhere else.
+    `(k + 1) * 0.5 * size - 0.5`, the inverse of the `align_corners=False` normalisation the RaCo graph emits
+    (`colsfm.raco_export`, metadata `cusfm_keypoints`), into 0-based pixel centres. It targets the **original** image
+    size rather than the network's — the stretch is undone here and nowhere else. The blob's own mapping,
+    `(k + 1) * 0.5 * (size - 1)` (feature_extractor_main.md §6.3), is the `align_corners=True` inverse: on RaCo's
+    output it scaled every keypoint by `1 - 1 / size` about the centre (half a pixel at the edges).
 
     Args:
         normalized_xy: Float32 `[num_keypoints, 2]` coordinates in [-1, 1].
@@ -176,8 +178,8 @@ def normalized_to_pixels(normalized_xy: NormalizedKeypoints, image_width: int, i
     Returns:
         Float32 `[num_keypoints, 2]` xy pixel coordinates.
     """
-    scale_xy: Float32[ndarray, " 2"] = np.asarray([(image_width - 1) / 2.0, (image_height - 1) / 2.0], dtype=np.float32)
-    return np.ascontiguousarray((normalized_xy + np.float32(1.0)) * scale_xy, dtype=np.float32)
+    scale_xy: Float32[ndarray, " 2"] = np.asarray([image_width / 2.0, image_height / 2.0], dtype=np.float32)
+    return np.ascontiguousarray((normalized_xy + np.float32(1.0)) * scale_xy - np.float32(0.5), dtype=np.float32)
 
 
 def select_keypoints(scores: KeypointScores, *, min_score: float, max_num_features: int) -> Bool[ndarray, " num_keypoints"]:

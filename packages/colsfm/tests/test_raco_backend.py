@@ -76,7 +76,7 @@ FP16_EDGE_TOLERANCE_PX: float = 1.0
 
 The graph emits normalised coordinates and the half-precision arithmetic can put
 a point on the border at -1.0008 rather than -1, which `normalized_to_pixels`
-turns into -0.47 px. It is rounding, not a frame error: a frame error moves every
+turns into -0.76 px on a 640 px image (the edge itself is -0.5). It is rounding, not a frame error: a frame error moves every
 point by a fraction of the image, not the border ones by half a pixel."""
 
 
