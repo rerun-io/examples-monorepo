@@ -238,11 +238,12 @@ def test_storing_a_batch_writes_exactly_the_gated_points_per_image(
     np.testing.assert_array_equal(
         first,
         np.asarray(
-            [[0.0, 0.0], [tasks[0].image_width - 1.0, tasks[0].image_height - 1.0]],
+            # Normalised -1 / +1 are the image's outer edges, half a pixel past the corner pixel centres (align_corners=False).
+            [[-0.5, -0.5], [tasks[0].image_width - 0.5, tasks[0].image_height - 0.5]],
             dtype=np.float32,
         ),
     )
-    np.testing.assert_array_equal(second[0], np.asarray([tasks[1].image_width - 1.0, tasks[1].image_height - 1.0], dtype=np.float32))
+    np.testing.assert_array_equal(second[0], np.asarray([tasks[1].image_width - 0.5, tasks[1].image_height - 0.5], dtype=np.float32))
 
     stored: dict[int, Descriptors] = read_descriptors_from_database(database_path, [task.image_id for task in tasks])
     first_descriptors: Descriptors = stored[tasks[0].image_id]
