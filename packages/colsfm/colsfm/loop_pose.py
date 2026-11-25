@@ -328,6 +328,48 @@ def bearings_of(camera: pycolmap.Camera, keypoints: Keypoints) -> Bearings:
     return homogeneous / np.linalg.norm(homogeneous, axis=1, keepdims=True)
 
 
+PURE_ROTATION_BASELINE_M: Final[float] = 1e-6
+"""Below this baseline the epipolar constraint is undefined and the error is the rotation's transfer angle."""
+
+def sampson_error_px(
+    b_from_a: pycolmap.Rigid3d, bearings_a: Float64[ndarray, "n_matches 3"], bearings_b: Float64[ndarray, "n_matches 3"], focal_px: float
+) -> Float64[ndarray, "n_matches"]:
+    """Sampson (first-order geometric) epipolar error of matched bearings under a relative pose, in pixels.
+
+    Computed on the sphere, with the gradient projected onto each bearing's tangent plane, so it holds for fisheye and
+    wide cube faces as for pinholes; pixels are the angle times `focal_px`.
+
+    Args:
+        b_from_a: Pose of camera a in camera b's frame.
+        bearings_a: Float64 bearings in camera a with shape `[n_matches, 3]`; any length.
+        bearings_b: Float64 bearings in camera b with shape `[n_matches, 3]`; any length.
+        focal_px: Focal length the angle is converted with.
+
+    Returns:
+        Float64 errors with shape `[n_matches]`.
+    """
+    unit_a: Float64[ndarray, "n_matches 3"] = bearings_a / np.linalg.norm(bearings_a, axis=1, keepdims=True)
+    unit_b: Float64[ndarray, "n_matches 3"] = bearings_b / np.linalg.norm(bearings_b, axis=1, keepdims=True)
+    rotation: Float64[ndarray, "3 3"] = np.asarray(b_from_a.rotation.matrix(), dtype=np.float64)
+    translation: Float64[ndarray, "3"] = np.asarray(b_from_a.translation, dtype=np.float64)
+    baseline_m: float = float(np.linalg.norm(translation))
+    if baseline_m < PURE_ROTATION_BASELINE_M:
+        cosine: Float64[ndarray, "n_matches"] = np.clip(np.sum((unit_a @ rotation.T) * unit_b, axis=1), -1.0, 1.0)
+        return np.arccos(cosine) * focal_px
+    direction: Float64[ndarray, "3"] = translation / baseline_m
+    skew: Float64[ndarray, "3 3"] = np.array(
+        [[0.0, -direction[2], direction[1]], [direction[2], 0.0, -direction[0]], [-direction[1], direction[0], 0.0]], dtype=np.float64
+    )
+    essential: Float64[ndarray, "3 3"] = skew @ rotation
+    line_b: Float64[ndarray, "n_matches 3"] = unit_a @ essential.T
+    line_a: Float64[ndarray, "n_matches 3"] = unit_b @ essential
+    residual: Float64[ndarray, "n_matches"] = np.sum(unit_b * line_b, axis=1)
+    gradient_a: Float64[ndarray, "n_matches 3"] = line_a - unit_a * np.sum(unit_a * line_a, axis=1, keepdims=True)
+    gradient_b: Float64[ndarray, "n_matches 3"] = line_b - unit_b * np.sum(unit_b * line_b, axis=1, keepdims=True)
+    norm: Float64[ndarray, "n_matches"] = np.sqrt(np.sum(gradient_a**2, axis=1) + np.sum(gradient_b**2, axis=1))
+    return np.abs(residual) / np.maximum(norm, np.finfo(np.float64).tiny) * focal_px
+
+
 def direction_angle_deg(first: pycolmap.Rigid3d, second: pycolmap.Rigid3d) -> float:
     """Angle between the translation directions of two poses.
 

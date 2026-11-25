@@ -3,7 +3,7 @@
 Seams under test (all public):
 
 * `colsfm.loop_pairs.observation_pairs` — the observation walk, one enumeration for the plan and the check.
-* `colsfm.loop_mapper_check.sampson_error_px` — the epipolar error of a match through the rig.
+* `colsfm.loop_pose.sampson_error_px` — the epipolar error of a match through the rig.
 * `colsfm.loop_mapper_check.pose_checked_inliers` — the check itself, over the square scene of `test_loop_closure`.
 
 The scene is `test_loop_closure`'s square-walking stereo rig with its one true revisit; its matcher knows every true
@@ -17,15 +17,17 @@ from dataclasses import replace
 import numpy as np
 import pycolmap
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from jaxtyping import Float64, Int64, UInt32
 from numpy import ndarray
 from test_loop_closure import SEEDED_SERIAL_CONFIG, SquareRigScene, make_match_function, make_square_rig_scene  # pyrefly: ignore[missing-import]
 
 from colsfm.database import ImagePair
 from colsfm.loop_closure import LoopClosureResult, LoopSearchPlan, MatchFunction, plan_loop_search, verify_loop_plan
-from colsfm.loop_mapper_check import pose_checked_inliers, sampson_error_px
+from colsfm.loop_mapper_check import pose_checked_inliers
 from colsfm.loop_pairs import ObservationPair, local_map_partners, observation_pairs, required_image_pairs
-from colsfm.loop_pose import RigPoseEstimator
+from colsfm.loop_pose import RigPoseEstimator, sampson_error_px
 from colsfm.pairs import normalise_pair
 
 
@@ -111,6 +113,24 @@ def _revisit_observation(plan: LoopSearchPlan, scene: SquareRigScene) -> tuple[t
                 best = (count, rig_pair, observation)
     assert best is not None and best[0] >= 30
     return best[1], best[2]
+
+
+@given(
+    offset_rad=st.floats(min_value=1e-5, max_value=0.1),
+    baseline_m=st.floats(min_value=1e-3, max_value=10.0),
+    focal_px=st.floats(min_value=50.0, max_value=2000.0),
+)
+def test_sampson_error_is_the_offset_angle_shared_by_both_bearings_in_pixels(offset_rad: float, baseline_m: float, focal_px: float) -> None:
+    """A bearing turned `offset_rad` out of the epipolar plane costs `focal_px * tan(offset_rad) / sqrt(2)`.
+
+    The units: pixels of `focal_px`, not radians. The `sqrt(2)`: Sampson's first-order correction moves both bearings,
+    each by half the offset (here both gradients have the same length).
+    """
+    b_from_a: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([baseline_m, 0.0, 0.0]))
+    bearings_a: Float64[ndarray, "1 3"] = np.array([[0.0, 0.0, 1.0]])
+    bearings_b: Float64[ndarray, "1 3"] = np.array([[0.0, np.sin(offset_rad), np.cos(offset_rad)]])
+    error: float = float(sampson_error_px(b_from_a, bearings_a, bearings_b, focal_px)[0])
+    assert error == pytest.approx(focal_px * np.tan(offset_rad) / np.sqrt(2.0), rel=1e-9)
 
 
 def test_sampson_error_through_the_rig_is_zero_for_exact_matches(scene: SquareRigScene, plan: LoopSearchPlan) -> None:
