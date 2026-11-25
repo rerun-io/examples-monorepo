@@ -36,7 +36,8 @@ SLAM_RS_VIO_SOURCE: str = "slam_rs_vio"
 """Run source of slam-rs's raw causal VIO replay, in the same layer."""
 COLSFM_SOURCE: str = "colsfm"
 """Run source of the colsfm layer (``colsfm.rerun_layer.DEFAULT_SOURCE``): rig, frusta, ``points`` (static) and
-``points_growing`` (each point at its first observing rig frame). colsfm does not depend on dataforge; a test pins the names."""
+``points_growing`` (the points by first view, in blocks and recent rows: ``simplecv.rerun_growing_points``). colsfm does not depend on
+dataforge; a test pins the names."""
 GT_RUN_SOURCE: str = "gt"
 """Run source of the ground-truth trajectory and trail under ``/world/runs/``.
 
