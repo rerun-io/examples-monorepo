@@ -1,8 +1,8 @@
 //! Compute requirements shared by standalone and viewer devices.
 use crate::Error;
 
-// Every raster batch and its workgroup arrays fit this budget (256 splats of 40 bytes plus four scalars); the
-// kernels.rs tests check each shader against it.
+// Every raster batch and its workgroup arrays fit this budget, the size of 256 splats of 40 bytes plus four scalars
+// (the splat raster holds 232 splats and their block masks in it); the kernels.rs tests check each shader against it.
 pub(crate) const REQUIRED_WORKGROUP_STORAGE_BYTES: u32 = 10_256;
 
 fn required_limits() -> wgpu::Limits {
