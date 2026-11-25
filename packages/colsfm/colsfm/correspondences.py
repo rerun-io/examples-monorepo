@@ -13,7 +13,7 @@ which want the round loop that follows it.
 from __future__ import annotations
 
 import copy
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,7 +49,6 @@ def load_correspondences(
     database_path: Path,
     min_num_matches: int = 0,
     *,
-    excluded_pairs: Collection[tuple[int, int]] = (),
     inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] | None = None,
 ) -> Correspondences:
     """Load keypoints and verified two-view geometries into the reconstruction.
@@ -73,8 +72,6 @@ def load_correspondences(
         database_path: COLMAP database written by the feature and matching stages.
         min_num_matches: Drop image pairs with fewer inlier matches; cuSFM's
             `min_num_matches_per_pair`.
-        excluded_pairs: Pairs `(min id, max id)` left out of the graph although the database holds their geometry
-            (`MappingOptions.excluded_pairs`).
         inlier_overrides: Per pair `(min id, max id)`, the subset of its stored inlier matches the graph carries instead
             (`MappingOptions.inlier_overrides`); a pair left below `min_num_matches` leaves the graph.
 
@@ -119,8 +116,8 @@ def load_correspondences(
     if num_loaded == 0:
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 
-    graph: pycolmap.CorrespondenceGraph = graph_without_pairs(
-        database_cache, geometry_rows, excluded_pairs, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches
+    graph: pycolmap.CorrespondenceGraph = graph_with_inlier_overrides(
+        database_cache, geometry_rows, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches
     )
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
     return Correspondences(
@@ -132,19 +129,18 @@ def load_correspondences(
     )
 
 
-def graph_without_pairs(
+def graph_with_inlier_overrides(
     database_cache: pycolmap.DatabaseCache,
     geometry_rows: tuple[Sequence[int], Sequence[pycolmap.TwoViewGeometry]],
-    excluded_pairs: Collection[tuple[int, int]],
     *,
     inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] | None = None,
     min_num_matches: int = 0,
 ) -> pycolmap.CorrespondenceGraph:
-    """The cache's correspondence graph without the given image pairs, rebuilt from the database's own rows.
+    """The cache's correspondence graph with some pairs' inliers replaced, rebuilt from the database's own rows.
 
-    `DatabaseCache` has no pair filter, and leaving a pair out here is what lets a stage take back pairs it matched only
-    for its own use without deleting database rows (COLMAP runs a full `VACUUM` when it closes a connection that
-    deleted anything). The rebuild runs for every load, an empty set included, so there is one path.
+    `DatabaseCache` has no match filter, and replacing a pair's inliers here is what lets a stage trim the pairs it
+    matched without rewriting database rows (COLMAP runs a full `VACUUM` when it closes a connection that deleted
+    anything). The rebuild runs for every load, no override included, so there is one path.
 
     It replays what `DatabaseCache::Load` did: the same rows (`ReadTwoViewGeometries`), in their order, each added with
     its stored geometry, so every correspondence list comes out in the same order, many-to-one matches included. Which
@@ -155,7 +151,6 @@ def graph_without_pairs(
         database_cache: The loaded cache.
         geometry_rows: `Database.read_two_view_geometries()` of the database the cache was loaded from: pair ids and
             geometries in row order.
-        excluded_pairs: Pairs `(min id, max id)` to leave out.
         inlier_overrides: Per pair `(min id, max id)`, the inlier matches (columns in that id order) to add instead of the
             stored ones; a match-level filter without database writes.
         min_num_matches: The cache's own floor, applied again to an overridden pair.
@@ -164,7 +159,6 @@ def graph_without_pairs(
         A finalized graph over the cache's images.
     """
     cached: pycolmap.CorrespondenceGraph = database_cache.correspondence_graph
-    excluded: set[tuple[int, int]] = {(min(pair), max(pair)) for pair in excluded_pairs}
     graph: pycolmap.CorrespondenceGraph = pycolmap.CorrespondenceGraph()
     for image_id, image in database_cache.images.items():
         if cached.exists_image(image_id):
@@ -175,8 +169,6 @@ def graph_without_pairs(
             continue
         image_id1, image_id2 = pycolmap.pair_id_to_image_pair(int(pair_id))
         pair: tuple[int, int] = (min(image_id1, image_id2), max(image_id1, image_id2))
-        if pair in excluded:
-            continue
         override: UInt32[ndarray, "n_inliers 2"] | None = None if inlier_overrides is None else inlier_overrides.get(pair)
         if override is not None:
             if len(override) == 0 or len(override) < min_num_matches:

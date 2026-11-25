@@ -1,8 +1,8 @@
-"""The mapper's correspondence graph can leave pairs out without deleting database rows.
+"""The mapper's correspondence graph can trim a pair's inliers without rewriting database rows.
 
-`loop_pairs_in_mapper="accepted"` used to delete the loop stage's rejected pairs, and COLMAP rewrites the whole database
-(`VACUUM`) when it closes a connection that deleted anything. The graph is now rebuilt without them instead; with nothing
-excluded it is the cache's own graph, pair for pair.
+COLMAP rewrites the whole database (`VACUUM`) when it closes a connection that deleted anything, so the graph is rebuilt
+from the database's rows with the loop stage's inlier overrides instead; with no override it is the cache's own graph,
+pair for pair.
 """
 
 from __future__ import annotations
@@ -77,17 +77,6 @@ def test_unusual_rows_rebuild_to_the_caches_graph(synthetic_rig: SyntheticRig, t
     _assert_same_graph(loaded)
     if min_num_matches > 15:
         assert len(_pairs(loaded.graph)) < len(matches), "the threshold drops pairs, and the rebuild drops the same ones"
-
-
-def test_excluded_pairs_leave_the_graph_and_stay_in_the_database(synthetic_rig: SyntheticRig, database: Path) -> None:
-    full: dict[tuple[int, int], int] = _pairs(load_correspondences(build_reconstruction(synthetic_rig.frames_meta).reconstruction, database).graph)
-    excluded: tuple[int, int] = sorted(full)[1]
-    loaded: Correspondences = load_correspondences(
-        build_reconstruction(synthetic_rig.frames_meta).reconstruction, database, excluded_pairs=[excluded[::-1]]
-    )
-    assert _pairs(loaded.graph) == {pair: n for pair, n in full.items() if pair != excluded}
-    with pycolmap.Database.open(database) as handle:
-        assert handle.exists_two_view_geometry(*excluded), "nothing is deleted: the database keeps the pair"
 
 
 def test_an_inlier_override_trims_one_pair_and_stays_out_of_the_database(synthetic_rig: SyntheticRig, database: Path) -> None:

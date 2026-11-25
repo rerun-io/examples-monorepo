@@ -46,8 +46,9 @@ Ordering notes worth knowing before reading the code:
   database. `colsfm.mapping.load_correspondences` reads *every* verified
   two-view geometry, so a loop pair matched in stage 5 reaches the triangulator
   without being named in stage 3's list, whether or not its loop edge was
-  accepted (`PipelineOptions.loop_pairs_in_mapper="accepted"` leaves the rejected
-  ones out of the mapper's correspondence graph; no row is deleted).
+  accepted (`PipelineOptions.loop_pairs_in_mapper="pose-checked"` keeps only the
+  inliers that agree with a pose in the mapper's correspondence graph; no row is
+  rewritten).
 * **Loop closure needs matches to verify, and matching is a batch operation.**
   The estimator pulls matches through an injected `match_fn` one pair at a time,
   and running COLMAP's matcher per pair would reload the LightGlue graph per
@@ -403,11 +404,8 @@ def _run_stages(
         pose_graph: PoseGraphStageResult = run_pose_graph_stage(staged, selection.selected, config, loops.edges)
     watcher.on_pose_graph(pose_graph)
 
-    # The loop stage writes no row back: under "pose-checked" the mapper keeps only the pose-consistent inliers of its pairs,
-    # under "accepted" it leaves the rejected candidates' pairs out of its graph.
-    mapping_options: MappingOptions = replace(
-        resolved.mapping, excluded_pairs=frozenset(loops.excluded_pairs), inlier_overrides=loops.inlier_overrides
-    )
+    # The loop stage writes no row back: under "pose-checked" the mapper keeps only the pose-consistent inliers of its pairs.
+    mapping_options: MappingOptions = replace(resolved.mapping, inlier_overrides=loops.inlier_overrides)
 
     # ── 7. triangulation and bundle adjustment ───────────────────────────────────────
     with timed_stage(ledger, "reconstruction"), watcher.stage_scope("reconstruction"):

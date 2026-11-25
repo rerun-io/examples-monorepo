@@ -53,7 +53,6 @@ from colsfm.loop_closure import (
     LoopClosureDiagnostics,
     LoopClosureResult,
     LoopSearchPlan,
-    pairs_outside_accepted_edges,
     plan_loop_search,
     verify_loop_plan,
 )
@@ -339,8 +338,6 @@ class LoopClosureStageResult:
     means a caller — a viewer, a notebook — can read them instead of parsing stdout.
     None on the two paths that return before the search: loop closure switched off, and
     a database with no descriptors."""
-    excluded_pairs: tuple[ImagePair, ...] = ()
-    """Pairs this stage matched that the mapper should leave out (`loop_pairs_in_mapper="accepted"`); empty otherwise."""
     inlier_overrides: Mapping[ImagePair, UInt32[ndarray, "n_inliers 2"]] = field(default_factory=dict)
     """Per pair this stage matched, the inliers the mapper keeps when the pose check removed some
     (`loop_pairs_in_mapper="pose-checked"`); empty otherwise."""
@@ -400,7 +397,7 @@ def run_loop_closure_stage(
         frames: The run's frame source, for a matcher that reads pixels; one is opened per call when None.
         loop_pairs_in_mapper: `PipelineOptions.loop_pairs_in_mapper`: with `"pose-checked"`, the inliers of the pairs
             this stage matched that disagree with their rig pair's pose are returned as `inlier_overrides`; with
-            `"accepted"`, the pairs matched only to measure a rejected candidate are returned as `excluded_pairs`.
+            `"shortlisted"`, the mapper keeps every inlier.
 
     Returns:
         The loop edges and how many extra pairs were matched to find them.
@@ -464,10 +461,6 @@ def run_loop_closure_stage(
 
             overrides = pose_checked_inliers(plan, result.candidates, missing_pairs, read_inliers)
     edges: list[PoseGraphEdge] = list(result.edges)
-    # The mapper reads every verified two-view geometry in the database, so a pair matched here only to measure a
-    # rejected candidate would feed its cross-revisit tracks to the triangulator. Under "accepted" those pairs are left
-    # out when the mapper builds its correspondence graph (`MappingOptions.excluded_pairs`); nothing is deleted.
-    excluded: tuple[ImagePair, ...] = tuple(pairs_outside_accepted_edges(plan, edges, missing_pairs)) if loop_pairs_in_mapper == "accepted" else ()
     # Print the counters, not just the edge count: zero edges is the normal outcome on a
     # short or a low-recall sequence, and only the rejection breakdown says which it was.
     print(
@@ -478,12 +471,9 @@ def run_loop_closure_stage(
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified, {result.diagnostics.counters.not_best} not the best of their rig frame, "
         f"{result.diagnostics.counters.below_good_loop} best below {plan.config.good_loop_threshold} inliers, over {len(plan.image_pairs)} image pairs; "
-        f"{len(excluded)} of the {len(missing_pairs)} pairs matched here left out of the mapper, "
-        f"{len(overrides)} trimmed by the pose check ({loop_pairs_in_mapper})"
+        f"{len(overrides)} of the {len(missing_pairs)} pairs matched here trimmed by the pose check ({loop_pairs_in_mapper})"
     )
-    return LoopClosureStageResult(
-        edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, excluded_pairs=excluded, inlier_overrides=overrides
-    )
+    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, inlier_overrides=overrides)
 
 
 @dataclass(frozen=True, slots=True)

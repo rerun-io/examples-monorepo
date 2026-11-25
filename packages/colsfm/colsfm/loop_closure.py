@@ -322,7 +322,6 @@ __all__ = [
     "RetrievalHit",
     "best_per_query_rig",
     "find_loop_edges",
-    "pairs_outside_accepted_edges",
     "is_good_match",
     "minimum_time_gap_seconds",
     "plan_loop_search",
@@ -876,23 +875,6 @@ def find_loop_edges(
         FileNotFoundError: When `database_path` does not exist and no `keypoints` were given.
     """
     return verify_loop_plan(plan_loop_search(frames_meta, database_path, index, config, keypoints), match_fn)
-
-
-def pairs_outside_accepted_edges(plan: LoopSearchPlan, edges: Sequence[PoseGraphEdge], matched: Sequence[ImagePair]) -> list[ImagePair]:
-    """The pairs of `matched` that no accepted loop edge's measurement uses: what the mapper should not see.
-
-    Args:
-        plan: The plan the edges were verified from.
-        edges: The accepted loop edges, directed as their measurement was.
-        matched: Image pairs the loop stage matched itself.
-
-    Returns:
-        The pairs of `matched` outside every accepted edge's local maps and observations, in `matched`'s order.
-    """
-    kept: set[ImagePair] = set(
-        required_image_pairs(plan.rig_index, plan.geometry, plan.keypoints, plan.config.rig_pose.neighbour_span, [(edge.source, edge.target) for edge in edges])
-    )
-    return [pair for pair in matched if pair not in kept]
 
 
 def best_per_query_rig(

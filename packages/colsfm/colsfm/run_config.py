@@ -49,7 +49,7 @@ from colsfm.verification import VerifyChunking
 DEFAULT_CONFIG_DIR: Final[Path] = RESOURCES_DIR / "configs" / "loop-closure-fixed"
 """`isaac` with loop closure repaired; what the blob reference runs used."""
 
-LoopPairsInMapper: TypeAlias = Literal["pose-checked", "shortlisted", "accepted"]
+LoopPairsInMapper: TypeAlias = Literal["pose-checked", "shortlisted"]
 """`PipelineOptions.loop_pairs_in_mapper`."""
 
 DEFAULT_EXTRINSIC_ROUNDS: Final[int] = 3
@@ -164,9 +164,9 @@ class PipelineOptions:
     pair's measured pose (verified candidates) or, without one, with the prior relative pose within a drift tolerance
     (`colsfm.loop_mapper_check`); the database keeps every row. `"shortlisted"`: every pair the stage matched with all
     its inliers (fork decision 15), so cross-revisit tracks reach the triangulator even when their loop edge was
-    rejected. `"accepted"` (cuSFM's way): only the image pairs of the loop edges that were kept. Measured: `"accepted"` cost MSD MGO05 0.23 cm SE(3) (1.41 against
-    1.18 cm) and put KITTI 06 back at cuSFM's 1.328 m, because the kitti profile's loop edge gates reject every edge and
-    its revisits reach the map only through these pairs (0.845 m with `"shortlisted"`)."""
+    rejected. cuSFM's way, only the image pairs of the loop edges that were kept, was removed: it cost MSD MGO05 0.23 cm
+    SE(3) (1.41 against 1.18 cm) and put KITTI 06 back at cuSFM's 1.328 m, because the kitti profile's loop edge gates
+    reject every edge and its revisits reach the map only through these pairs (0.845 m with `"shortlisted"`)."""
     loop_closure: bool = True
     """Run retrieval-based loop closure. On by default, as in the blob, so every run and
     every blob comparison pays for the same stage (NOTES.md decision 10, revised). On the

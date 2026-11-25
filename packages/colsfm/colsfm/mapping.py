@@ -295,10 +295,6 @@ class MappingOptions:
     CASPAR does not apply."""
     verbose: bool = True
     """Print one line per triangulation pass and per outer round, as cuSFM does."""
-    excluded_pairs: frozenset[tuple[int, int]] = frozenset()
-    """Image pairs `(min id, max id)` the correspondence graph leaves out although the database holds their verified
-    geometry: the loop stage's rejected candidates under `loop_pairs_in_mapper="accepted"`. Left out when the graph is
-    built (`colsfm.correspondences.load_correspondences`), so no stage deletes database rows."""
     inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] = MappingProxyType({})
     """Per image pair `(min id, max id)`, the subset of its stored inliers the correspondence graph carries: the loop
     stage's pose check under `loop_pairs_in_mapper="pose-checked"` (`colsfm.loop_mapper_check`). No row is rewritten."""
@@ -786,7 +782,6 @@ def run_mapping(
         reconstruction,
         database_path,
         mapping_config.min_num_matches_per_pair,
-        excluded_pairs=resolved_options.excluded_pairs,
         inlier_overrides=resolved_options.inlier_overrides,
     )
     correspondence_seconds: float = time.perf_counter() - correspondence_started

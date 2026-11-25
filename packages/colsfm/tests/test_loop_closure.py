@@ -51,7 +51,6 @@ from colsfm.loop_closure import (
     find_loop_edges,
     is_good_match,
     minimum_time_gap_seconds,
-    pairs_outside_accepted_edges,
     plan_loop_search,
     prior_distance_bound,
     session_duration_seconds,
@@ -684,18 +683,6 @@ def test_the_stage_is_on_by_default_and_disabling_it_is_inert(scene: SquareRigSc
     assert result.edges == []
     assert result.num_pairs_matched == 0
     assert result.diagnostics is None
-
-
-def test_only_accepted_edges_pairs_stay_for_the_mapper(scene: SquareRigScene, match_fn: MatchFunction) -> None:
-    """Pairs matched only for a candidate that was then rejected go; every pair an accepted edge was measured from stays."""
-    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, SEEDED_SERIAL_CONFIG)
-    result: LoopClosureResult = verify_loop_plan(plan, match_fn)
-    assert result.edges and len(result.edges) < len(plan.rig_pairs)
-    dropped: list[tuple[int, int]] = pairs_outside_accepted_edges(plan, result.edges, list(plan.image_pairs))
-    kept: set[tuple[int, int]] = set(plan.image_pairs) - set(dropped)
-    assert dropped and kept
-    assert pairs_outside_accepted_edges(plan, result.edges, sorted(kept)) == []
-    assert pairs_outside_accepted_edges(plan, [], list(plan.image_pairs)) == list(plan.image_pairs)
 
 
 def test_the_score_gate_is_one_constant_and_can_be_overridden(scene: SquareRigScene, match_fn: MatchFunction, loop_result: LoopClosureResult) -> None:
