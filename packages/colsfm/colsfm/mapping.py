@@ -729,7 +729,9 @@ def run_mapping(
     # below asks `colsfm.ba_backend` anything again, and nothing rewrites the backend
     # mid-run. `for_camera_models` returns the same plan unless CASPAR would silently
     # drop a model's observations.
-    plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(camera.model.name for camera in reconstruction.cameras.values())
+    plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(
+        (camera.model.name for camera in reconstruction.cameras.values()), refine_intrinsics=given_options.refine_focal_length
+    )
     if plan.fallback_reason != given_options.ba_plan.fallback_reason:
         plan.announce()
     resolved_options: MappingOptions = replace(given_options, ba_plan=plan)

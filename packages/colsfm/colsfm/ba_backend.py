@@ -240,6 +240,43 @@ def _caspar_projects(model_name: str) -> bool:
     return summary.num_residuals > 0
 
 
+def _caspar_refines_intrinsics(model_name: str) -> bool:
+    """Whether this build's CASPAR refines one camera model's focal and distortion block.
+
+    The `_caspar_projects` probe with `refine_focal_length` and `refine_extra_params` on (CASPAR takes them together).
+    recipes/colmap-src's FULL_OPENCV adapter throws here ("supported by CASPAR only for fixed intrinsics"); any
+    exception or an empty problem is a no.
+
+    Args:
+        model_name: A `pycolmap.CameraModelId` member name.
+
+    Returns:
+        True when the solve took the free intrinsics and left a usable solution.
+    """
+    reconstruction: pycolmap.Reconstruction | None = _caspar_probe_reconstruction(model_name)
+    if reconstruction is None:
+        return False
+    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
+    for image_id in sorted(reconstruction.images):
+        config.add_image(image_id)
+    config.set_constant_rig_from_world_pose(min(reconstruction.frames))
+    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
+    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND["caspar"]
+    ba_options.print_summary = False
+    ba_options.refine_sensor_from_rig = False
+    ba_options.refine_focal_length = True
+    ba_options.refine_extra_params = True
+    ba_options.refine_principal_point = False
+    ba_options.refine_rig_from_world = True
+    ba_options.refine_points3D = True
+    ba_options.caspar.gpu_index = "-1"
+    try:
+        summary: pycolmap.BundleAdjustmentSummary = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction).solve()
+    except (ValueError, RuntimeError):
+        return False
+    return summary.num_residuals > 0 and summary.is_solution_usable()
+
+
 def _caspar_refines_sensor_from_rig() -> bool:
     """Whether this build's CASPAR refines `sensor_from_rig`, measured on a two-camera PINHOLE probe rig.
 
@@ -314,6 +351,24 @@ class CasparCapability:
 
     Stock CASPAR throws on a multi-sensor frame with free extrinsics; recipes/colmap-src with the rig factor solves it.
     False keeps every solve that frees the rig on Ceres."""
+    intrinsics_refinable_camera_models: frozenset[str] = frozenset()
+    """The projected models whose focal (and distortion block) CASPAR also refines (`_caspar_refines_intrinsics`).
+
+    A subset of `supported_camera_models`: recipes/colmap-src's FULL_OPENCV adapter projects with fixed intrinsics only
+    and throws mid-run when they are freed. Empty when not measured, so a stated capability refines nothing on CASPAR."""
+
+    def fixed_intrinsics_only(self, camera_model_names: Iterable[str]) -> frozenset[str]:
+        """The models whose intrinsics this build's CASPAR cannot refine.
+
+        Args:
+            camera_model_names: `pycolmap.CameraModelId` member names.
+
+        Returns:
+            The names outside `intrinsics_refinable_camera_models`; empty when nothing was measured.
+        """
+        if not self.guards_camera_models:
+            return frozenset()
+        return frozenset(camera_model_names) - self.intrinsics_refinable_camera_models
 
     @property
     def guards_camera_models(self) -> bool:
@@ -385,6 +440,7 @@ def detect_caspar_capability() -> CasparCapability:
             supported_camera_models=frozenset(supported),
             probe_errors=tuple(errors),
             refines_sensor_from_rig="PINHOLE" in supported and _caspar_refines_sensor_from_rig(),
+            intrinsics_refinable_camera_models=frozenset(model_name for model_name in sorted(supported) if _caspar_refines_intrinsics(model_name)),
         )
     availability: CasparAvailability = "probe_failed" if errors else "unavailable"
     return CasparCapability(availability=availability, supported_camera_models=frozenset(), probe_errors=tuple(errors))
@@ -698,7 +754,7 @@ class BaExecutionPlan:
         """
         return self.backend != self.requested_backend
 
-    def for_camera_models(self, camera_model_names: Iterable[str]) -> BaExecutionPlan:
+    def for_camera_models(self, camera_model_names: Iterable[str], *, refine_intrinsics: bool = False) -> BaExecutionPlan:
         """The same plan, narrowed by the camera models the reconstruction turned out to hold.
 
         The one fact resolution cannot have: the reconstruction is built in stage 7,
@@ -708,21 +764,32 @@ class BaExecutionPlan:
         Args:
             camera_model_names: `pycolmap.CameraModelId` member names in the model
                 about to be adjusted.
+            refine_intrinsics: Whether the solves free the focal length; CASPAR throws
+                mid-run for a model it projects with fixed intrinsics only (FULL_OPENCV).
 
         Returns:
             This plan when nothing changes, or the Ceres plan with the camera-model
-            reason when CASPAR would drop a model's observations.
+            reason when CASPAR would drop a model's observations or cannot free its intrinsics.
         """
         if self.backend != "caspar":
             return self
-        unsupported: frozenset[str] = self.capability.unsupported(camera_model_names)
-        if not unsupported:
+        names: frozenset[str] = frozenset(camera_model_names)
+        unsupported: frozenset[str] = self.capability.unsupported(names)
+        if unsupported:
+            return replace(
+                self,
+                backend="ceres",
+                ceres_polish=False,
+                fallback_reason=unsupported_models_reason(self.capability.supported_camera_models, unsupported),
+            )
+        fixed: frozenset[str] = self.capability.fixed_intrinsics_only(names) if refine_intrinsics else frozenset()
+        if not fixed:
             return self
         return replace(
             self,
             backend="ceres",
             ceres_polish=False,
-            fallback_reason=unsupported_models_reason(self.capability.supported_camera_models, unsupported),
+            fallback_reason=f"this CASPAR build refines the intrinsics of {sorted(self.capability.intrinsics_refinable_camera_models)} only, and this model frees them for {sorted(fixed)}",
         )
 
     def announce(self) -> None:

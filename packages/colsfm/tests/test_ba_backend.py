@@ -43,6 +43,7 @@ RIG_CAPABILITY: CasparCapability = CasparCapability(
     supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"}),
     probe_errors=(),
     refines_sensor_from_rig=True,
+    intrinsics_refinable_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"}),
 )
 """A build whose CASPAR also refines `sensor_from_rig` (recipes/colmap-src with the rig factor)."""
 
@@ -186,6 +187,32 @@ def test_a_ceres_request_is_never_second_guessed() -> None:
 def test_free_extrinsics_fall_back_to_ceres_with_a_reason() -> None:
     """A CASPAR that holds `sensor_from_rig` throws when asked to refine it, so Ceres takes the solve."""
     assert resolve_backend("caspar", optimize_extrinsics=True, capability=STOCK_CAPABILITY) == ("ceres", EXTRINSICS_FALLBACK_REASON)
+
+
+FIXED_INTRINSICS_CAPABILITY: CasparCapability = CasparCapability(
+    availability="available",
+    supported_camera_models=frozenset({"PINHOLE", "FULL_OPENCV"}),
+    probe_errors=(),
+    refines_sensor_from_rig=True,
+    intrinsics_refinable_camera_models=frozenset({"PINHOLE"}),
+)
+"""A build that projects FULL_OPENCV with fixed intrinsics only (recipes/colmap-src's adapter), and refines PINHOLE."""
+
+
+def test_refining_intrinsics_of_a_fixed_intrinsics_model_falls_back_to_ceres() -> None:
+    """CASPAR throws mid-run when asked to free a FULL_OPENCV focal, so the plan hands that solve to Ceres up front.
+
+    Measured on MSD MGO05 (FULL_OPENCV cameras) with the focal free on CASPAR: "[caspar_model_adapter.h:708]
+    FULL_OPENCV is supported by CASPAR only for fixed intrinsics", raised in the first bundle adjustment.
+    """
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=True, capability=FIXED_INTRINSICS_CAPABILITY)
+    assert plan.backend == "caspar"
+    narrowed: BaExecutionPlan = plan.for_camera_models(["FULL_OPENCV", "PINHOLE"], refine_intrinsics=True)
+    assert narrowed.backend == "ceres"
+    assert narrowed.fallback_reason is not None
+    assert "FULL_OPENCV" in narrowed.fallback_reason
+    assert plan.for_camera_models(["PINHOLE"], refine_intrinsics=True).backend == "caspar"
+    assert plan.for_camera_models(["FULL_OPENCV"], refine_intrinsics=False).backend == "caspar"
 
 
 def test_free_extrinsics_stay_on_caspar_when_the_build_refines_the_rig() -> None:

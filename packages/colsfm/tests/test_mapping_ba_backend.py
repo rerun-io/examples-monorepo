@@ -238,6 +238,23 @@ def test_the_probe_reports_the_camera_models_this_caspar_build_projects(
 
 
 @pytest.mark.integration
+def test_the_probe_knows_which_models_caspar_can_free_the_intrinsics_of(caspar_enabled: bool) -> None:
+    """PINHOLE's focal is refinable on every CASPAR build; FULL_OPENCV, where projected, is fixed-intrinsics only.
+
+    Measured on MSD MGO05 (FULL_OPENCV): freeing the focal on CASPAR raised "[caspar_model_adapter.h:708] FULL_OPENCV
+    is supported by CASPAR only for fixed intrinsics" in the first round; the probe has to know before the run.
+    """
+    if not caspar_enabled:
+        pytest.skip("this pycolmap is built without CASPAR_ENABLED; run under `pixi run -e colsfm-dev`")
+    capability = detect_caspar_capability()
+    print(f"[colsfm] CASPAR refines the intrinsics of {sorted(capability.intrinsics_refinable_camera_models)}")
+    assert "PINHOLE" in capability.intrinsics_refinable_camera_models
+    assert capability.intrinsics_refinable_camera_models <= capability.supported_camera_models
+    if "FULL_OPENCV" in capability.supported_camera_models:
+        assert "FULL_OPENCV" not in capability.intrinsics_refinable_camera_models
+
+
+@pytest.mark.integration
 def test_a_free_rig_solves_where_the_rig_probe_says(caspar_enabled: bool, synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
     """The rig probe's answer is the backend a mapping that frees `sensor_from_rig` runs on, and that mapping completes.
 
