@@ -12,8 +12,9 @@ training and no manual prompt. Their eight steps, and where each lives here:
 3. The detections -> one operator direction (``perspectives2omni.py`` -> ``centers/<frame>.csv``, read by
    ``omni2synthetic.py``): the area-weighted mean of the detection centres on the sphere. Their per-face module
    ``perspectives2omni_two_cubes`` is missing from the release, so the centre rows are taken as one row per detection
-   (centre, area), which is what ``omni2synthetic.py`` consumes. A frame with no detection reuses the nearest frame
-   that has one (earlier first at equal distance), as ``omni2synthetic.py`` does: :func:`fill_nearest`.
+   (centre, area), which is what ``omni2synthetic.py`` consumes. Here the mean takes only the detections near the
+   previous direction (:func:`operator_directions`). A frame with no direction reuses the nearest frame that has one
+   (earlier first at equal distance), as ``omni2synthetic.py`` does: :func:`fill_nearest`.
 4. A synthetic fisheye looking along that direction (``omni2synthetic.py``: ``look_at_camZ`` with up ``+Y``, the
    rear lens of ``mapping.txt`` as an OPENCV_FISHEYE at 2880 px with a 107.5 px border): the same lens scaled to the
    tracker's input size, with one up hint per sequence (:func:`view_up`).
@@ -25,10 +26,11 @@ training and no manual prompt. Their eight steps, and where each lives here:
    the image; the paper's intent is the image centre.
 6.-7. Synthetic mask -> omni -> raw fisheye masks (``synthetic2omni.py``, ``omni2fisheyes.py``): every source mask
    pixel looks its ray up in the synthetic mask (nearest), in one step.
-8. Dilation (``dilate.py``: 9x9 ellipse, 1 iteration at 2880 px, "about 4 pixels" in the paper): a disk of
-   ``dilate_px`` image pixels, applied at mask resolution.
+8. Dilation (``dilate.py``: a 9x9 ellipse at 2880 px, 1 iteration -> ``masks-1``, "about 4 pixels" in the paper, and 5
+   iterations -> ``masks-5``, about 20 px; training reads ``masks-5``, ``threedgrut/datasets/dataset_colmap.py``): a disk
+   of ``dilate_px`` image pixels, applied at mask resolution, 12 px by default (``masks-5`` is about 13 px at 1920 px).
 
-Four changes, each forced by a measured failure (FullCircle's room3 scene: IoU against the masks FullCircle released;
+Five changes, each forced by a measured failure (FullCircle's room3 scene: IoU against the masks FullCircle released;
 clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the operator):
 
 - Box prompt, not the centre click: EfficientTAM (FullCircle used SAM 2.1 Hiera-L) segments only the shirt on a torso
@@ -36,12 +38,17 @@ clip 007: a 17.8 min Insta360 X4 Air walk with the camera on a stick above the o
 - Re-prompts: a single prompt drifted onto other people within 10 s of clip 007.
 - One up hint per sequence: with the operator below the camera (near +Y) the look-at fallback flipped the view.
 - Level faces: lens 0's +Y is not down on the X4 Air, and people lying sideways in the faces were missed.
+- Gated direction: FullCircle averages all detections and assumes few false positives. On the Mission office X5 clip
+  a YOLOX box on a desk with a jacket (7.0 s) moved the view about 50 degrees off the operator, and 6 of 250 tracked
+  framesets ended more than 40 px (of 512) off centre. Only detections within ``direction_gate_deg`` of the previous
+  direction count; the first frame and a lost operator start from the heaviest cluster of detections.
 """
 
 from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -104,20 +111,29 @@ class SphereSource:
         """Image pixels per mask cell ``(sx, sy)``: the grid the masks are sampled on and the scale written with them."""
         return (self.image_hw[1] / self.mask_hw[1], self.image_hw[0] / self.mask_hw[0])
 
+    def mask_radius(self, dilate_px: float) -> int:
+        """A dilation radius of ``dilate_px`` source-image pixels in mask cells (across), rounded up."""
+        return math.ceil(dilate_px / self.mask_scale[0] - 1e-9)
+
 
 @dataclass(frozen=True, slots=True)
 class FullCircleConfig:
     """FullCircle operator masking options."""
 
     detector: OperatorDetector = "yolox"
-    """Person detector on the cube faces: posekit YOLOX-HumanArt (TensorRT) or SAM 3 ``person``."""
+    """Person detector on the cube faces: posekit YOLOX-HumanArt (TensorRT) or SAM 3 ``person`` (operator only: the
+    bystanders confirm YOLOX boxes with SAM 3)."""
     yolox: YoloxDetectorConfig = field(
         default_factory=lambda: YoloxDetectorConfig(
-            backend=TensorRtBackendConfig(max_batch_size=48, opt_batch_size=48), onnx_transform=fp16_dynamic_yolox
+            backend=TensorRtBackendConfig(max_batch_size=48, opt_batch_size=48), onnx_transform=fp16_dynamic_yolox, score_thr=0.25
         )
     )
     """YOLOX variant, backend and thresholds: a dynamic-batch engine with an fp16 trunk that takes the faces of 8
-    framesets per call."""
+    framesets per call. Boxes from 0.25 are kept for the bystanders
+    (:class:`~posekit.models.fullcircle_people.FacePeopleConfig`); the operator uses those from ``operator_score``."""
+    operator_score: float = 0.5
+    """Lowest YOLOX score of a detection that counts for the operator direction (YOLOX's default threshold); SAM 3
+    detections all count, at ``sam3.score_threshold``."""
     sam3: Sam3SegmenterConfig = field(default_factory=lambda: Sam3SegmenterConfig(score_threshold=0.25))
     """SAM 3 options (FullCircle runs it at conf 0.25)."""
     sam3_prompt: str = "person"
@@ -135,6 +151,12 @@ class FullCircleConfig:
     """Tracked framesets between two re-prompts of the tracker with the detector's box (0: FullCircle's single prompt);
     3 at 3 Hz (every 10th frameset at 30 fps) is once a second. The Insta360 stage sets it from
     ``reprompt_every_frames`` and ``stride`` (:class:`~posekit.apis.fullcircle_masks.FullCircleMasksConfig`)."""
+    direction_gate_deg: float = 30.0
+    """Detections whose centre lies within this angle of the previous operator direction make the next direction
+    (:func:`operator_directions`); also the radius of a cluster of detections on the sphere."""
+    lost_after: int = 3
+    """Framesets in a row with detections, none of them within the gate, after which the operator is taken as lost and
+    the heaviest cluster starts the gate again (3 at 3 Hz: one second)."""
     reprompt_radius: float = 0.15
     """A re-prompt box that does not hold the view centre must have its centre within this fraction of the view size."""
     face_size: int = 640
@@ -142,9 +164,16 @@ class FullCircleConfig:
     synthetic_size: int = 512
     """Synthetic fisheye size, pixels (sam-ui resizes to 512)."""
     work_size: int = 1280
-    """Source images are area-downscaled by a whole factor to at most this size before resampling (anti-aliasing)."""
-    dilate_px: float = 4.0
-    """Dilation radius in source-image pixels (FullCircle: about 4 px at 2880 px)."""
+    """Source images are area-downscaled by a whole factor to at most this size before the synthetic view is resampled
+    from them (anti-aliasing)."""
+    face_work_size: int = 2048
+    """The same for the faces. A 640 px face holds about 7 px per degree, the 1920 px X5 lens about 10, so the faces
+    sample the full lens: from the 960 px work image YOLOX missed the people behind the glass of the Mission office clip
+    (46.7 s), from the full lens it boxes them."""
+    dilate_px: float = 12.0
+    """Dilation radius in source-image pixels. FullCircle trains on its ``masks-5`` (a 9x9 ellipse 5 times at 2880 px,
+    about 13 px at 1920 px); 12 px is 3 cells of the 480 px mask grid of a 1920 px lens (4 px, FullCircle's ``masks-1``,
+    was 1 cell). On the Mission office X5 clip 12 px costs about 0.6 % of the lens disc more than 4 px."""
     device: str = "cuda"
     """Inference device."""
     step_timing: bool = False
@@ -152,15 +181,35 @@ class FullCircleConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorDetections:
+    """The person detections of one frameset on the sphere."""
+
+    centres: Float64[ndarray, "n 3"]
+    """Unit direction of each detection's centre in the rig frame."""
+    weights: Float64[ndarray, " n"]
+    """Each detection's weight: its area in face pixels."""
+
+
+@dataclass(frozen=True, slots=True)
+class FaceBoxes:
+    """The detector's boxes on the six faces of one frameset."""
+
+    xyxy: Float32[ndarray, "n 4"]
+    """Each detection's face-pixel box."""
+    scores: Float32[ndarray, " n"]
+    """Each detection's score."""
+    faces: Int64[ndarray, " n"]
+    """Face index of each detection."""
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorEvidence:
     """What the face detector saw in one frameset."""
 
-    direction: Float64[ndarray, "3"] | None
-    """Area-weighted mean direction of the detections in the rig frame (unit), ``None`` without detections."""
-    boxes: Float32[ndarray, "n 4"]
-    """Each detection's face-pixel box ``xyxy``."""
-    faces: Int64[ndarray, " n"]
-    """Face index of each detection."""
+    detections: OperatorDetections
+    """The detections of the operator score as directions and weights, input of :func:`operator_directions`."""
+    boxes: FaceBoxes
+    """All the detections' boxes (from YOLOX's threshold, for the bystanders)."""
     face_images: UInt8[Tensor, "6 s s 3"]
     """The six faces as the detector saw them."""
 
@@ -175,6 +224,57 @@ class OperatorMasks:
     """The synthetic fisheye the tracker saw."""
     synthetic_mask: Bool[Tensor, "s s"]
     """The tracker's mask on it."""
+    rig_R_view: Float64[ndarray, "3 3"]
+    """Rotation of the synthetic view's rays into the rig frame."""
+
+
+def _mean_direction(detections: OperatorDetections, keep: Bool[ndarray, " n"]) -> Float64[ndarray, "3"]:
+    """Weighted mean of the kept detection centres, made unit (plain mean when their weights sum to zero)."""
+    weights: Float64[ndarray, " k"] = detections.weights[keep]
+    mean: Float64[ndarray, "3"] = (
+        np.average(detections.centres[keep], axis=0, weights=weights) if weights.sum() > 0 else detections.centres[keep].mean(axis=0)
+    )
+    return mean / np.linalg.norm(mean)
+
+
+def _heaviest_cluster(detections: OperatorDetections, cos_gate: float) -> Float64[ndarray, "3"]:
+    """The mean direction of the heaviest cluster: the detections within the gate of one detection, largest weight sum."""
+    near: Bool[ndarray, "n n"] = detections.centres @ detections.centres.T >= cos_gate
+    seed: int = int(np.argmax(near.astype(np.float64) @ detections.weights))
+    return _mean_direction(detections, near[seed])
+
+
+def operator_directions(frames: Sequence[OperatorDetections], gate_deg: float, lost_after: int) -> list[Float64[ndarray, "3"] | None]:
+    """Per frameset, the operator direction from the detections near the previous one (``None`` without such detections).
+
+    FullCircle's area-weighted mean over all detections follows any false positive; here only detections within
+    ``gate_deg`` of the last direction count. The first frameset with detections, and the first after ``lost_after``
+    framesets in a row whose detections all lie outside the gate, start from the heaviest cluster of detections
+    (:func:`_heaviest_cluster`). A frameset without detections leaves the state unchanged.
+    """
+    cos_gate: float = math.cos(math.radians(gate_deg))
+    previous: Float64[ndarray, "3"] | None = None
+    outside: int = 0
+    directions: list[Float64[ndarray, "3"] | None] = []
+    for detections in frames:
+        direction: Float64[ndarray, "3"] | None = None
+        if len(detections.weights):
+            if previous is None:
+                direction = _heaviest_cluster(detections, cos_gate)
+            else:
+                keep: Bool[ndarray, " n"] = detections.centres @ previous >= cos_gate
+                if keep.any():
+                    direction = _mean_direction(detections, keep)
+                    outside = 0
+                else:
+                    outside += 1
+                    if outside >= lost_after:
+                        direction = _heaviest_cluster(detections, cos_gate)
+                        outside = 0
+        if direction is not None:
+            previous = direction
+        directions.append(direction)
+    return directions
 
 
 def fill_nearest(directions: list[Float64[ndarray, "3"] | None]) -> list[Float64[ndarray, "3"]]:
@@ -230,6 +330,25 @@ def disk_dilate(mask: Bool[Tensor, "h w"], radius: int) -> Bool[Tensor, "h w"]:
     return dilate_by_footprint(mask[None], disk)[0]
 
 
+def sample_faces(
+    images: list[Float[Tensor, "3 hw ww"]],
+    face_rays: Float32[Tensor, "n 3"],
+    rig_R_faces: Float32[Tensor, "k 3 3"],
+    size: int,
+    cameras: list[SphereCamera],
+    rig_R_cams: Float32[Tensor, "n_src 3 3"],
+    full_hw: list[tuple[int, int]],
+) -> UInt8[Tensor, "k s s 3"]:
+    """Render ``k`` square faces of ``size`` pixels (rays ``face_rays`` turned by each ``rig_R_face``) from the sources.
+
+    The faces are stacked into one ``k size x size`` view, so one sampling plan serves them all.
+    """
+    rays: Float32[Tensor, "k n 3"] = face_rays @ rig_R_faces.transpose(1, 2)
+    view: SphereView = view_from_rays(rays.reshape(-1, 3), len(rig_R_faces) * size, size, cameras, rig_R_cams, full_hw)
+    stacked: UInt8[Tensor, "3 ks s"] = sample_sphere(images, view).round().clamp(0, 255).to(torch.uint8)
+    return rearrange(stacked, "c (k h) w -> k h w c", k=len(rig_R_faces)).contiguous()
+
+
 class FullCircleMasker:
     """FullCircle's operator masking over a set of co-centred source cameras (two fisheye lenses or one panorama)."""
 
@@ -247,6 +366,7 @@ class FullCircleMasker:
         # Sources see the work images, whose pixel (i, j) covers full pixels [f i - 0.5, f (i + 1) - 0.5): grids are
         # normalised by the full size, which grid_sample maps onto any resolution of the same image.
         self.downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.work_size)) for s in sources]
+        self.face_downscale: list[int] = [max(1, math.ceil(max(s.image_hw) / config.face_work_size)) for s in sources]
         self.full_hw: list[tuple[int, int]] = [s.image_hw for s in sources]
         # Ray tables are solved in float64 and kept in float32, as is every per-frame projection through them.
         rig_R_cams: Float64[Tensor, "n_src 3 3"] = torch.from_numpy(np.stack([s.rig_R_cam for s in sources])).to(device)
@@ -264,12 +384,11 @@ class FullCircleMasker:
         # Each mask pixel's ray in the rig frame (static), and the dilation radius at mask resolution (across).
         self.mask_rays: list[Float32[Tensor, "n 3"]] = []
         self.mask_ray_valid: list[Bool[Tensor, " n"]] = []
-        self.mask_radius: list[int] = []
+        self.mask_radius: list[int] = [source.mask_radius(config.dilate_px) for source in sources]
         for index, source in enumerate(sources):
             rays, valid = source.camera.unproject(pixel_grid(source.mask_hw[0], source.mask_hw[1], device, scale=source.mask_scale))
             self.mask_rays.append((rays @ rig_R_cams[index].T).float())
             self.mask_ray_valid.append(valid)
-            self.mask_radius.append(math.ceil(config.dilate_px / source.mask_scale[0] - 1e-9))
 
         self.yolox: YoloxDetector | None = config.yolox.setup() if config.detector == "yolox" else None
         self.sam3: Sam3Segmenter | None = config.sam3.setup() if config.detector == "sam3" else None
@@ -281,12 +400,19 @@ class FullCircleMasker:
         self.seconds: dict[str, float] = {"faces": 0.0, "detect": 0.0, "synthetic": 0.0, "track": 0.0, "backmap": 0.0}
         """Synchronised wall time per step since construction (with ``config.step_timing``)."""
 
-    def _work_images(self, frames: list[UInt8[Tensor, "h w 3"]]) -> list[Float[Tensor, "3 hw ww"]]:
+    def _work_images(self, frames: list[UInt8[Tensor, "h w 3"]], downscale: list[int]) -> list[Float[Tensor, "3 hw ww"]]:
         images: list[Tensor] = []
-        for frame, factor in zip(frames, self.downscale, strict=True):
+        for frame, factor in zip(frames, downscale, strict=True):
             chw: Float[Tensor, "3 h w"] = rearrange(frame, "h w c -> c h w").float()
             images.append(F.avg_pool2d(chw[None], factor)[0] if factor > 1 else chw)
         return images
+
+    def render_faces(
+        self, frames: list[UInt8[Tensor, "h w 3"]], rig_R_faces: Float32[Tensor, "k 3 3"], face_rays: Float32[Tensor, "n 3"], size: int
+    ) -> UInt8[Tensor, "k s s 3"]:
+        """Faces of ``size`` pixels along ``rig_R_faces`` from one frameset, sampled at ``face_work_size`` (:func:`sample_faces`)."""
+        images: list[Float[Tensor, "3 hw ww"]] = self._work_images(frames, self.face_downscale)
+        return sample_faces(images, face_rays, rig_R_faces, size, self.cameras, self.rig_R_cams, self.full_hw)
 
     def _detect_people(self, images: UInt8[Tensor, "b s s 3"]) -> BoxDetections:
         if self.yolox is not None:
@@ -304,7 +430,7 @@ class FullCircleMasker:
 
     @torch.inference_mode()
     def detect(self, framesets: list[list[UInt8[Tensor, "h w 3"]]], rig_R_levels: list[Float64[ndarray, "3 3"]]) -> list[OperatorEvidence]:
-        """Steps 1-3 on a batch of framesets: cube faces, person detection (one detector call), the operator directions.
+        """Steps 1-3 on a batch of framesets: cube faces, person detection (one detector call), the detections on the sphere.
 
         The faces are those of each frameset's level frame (``rig_R_levels``, +Y along gravity), so people stand upright
         in them, as they do in the horizon-levelled panoramas FullCircle starts from (identity for an already level source).
@@ -314,11 +440,7 @@ class FullCircleMasker:
         rig_R_faces: Float64[Tensor, "b 6 3 3"] = torch.from_numpy(np.stack([level @ FACE_ROTATIONS for level in rig_R_levels])).to(self.device)
         faces: UInt8[Tensor, "b6 s s 3"] = torch.empty((6 * len(framesets), size, size, 3), dtype=torch.uint8, device=self.device)
         for index, frames in enumerate(framesets):
-            # The six faces stacked into one 6s x s view: one sampling plan per frameset.
-            rays: Float32[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces[index].float().transpose(1, 2)
-            view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
-            stacked: UInt8[Tensor, "3 f s"] = sample_sphere(self._work_images(frames), view).round().clamp(0, 255).to(torch.uint8)
-            faces[6 * index : 6 * index + 6] = rearrange(stacked, "c (f h) w -> f h w c", f=6)
+            faces[6 * index : 6 * index + 6] = self.render_faces(frames, rig_R_faces[index].float(), self.face_rays, size)
         start = self._tick("faces", start)
         detections: BoxDetections = self._detect_people(faces)
         boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
@@ -338,17 +460,16 @@ class FullCircleMasker:
         centres: Float64[ndarray, "n 3"] = torch.einsum("nij,nj->ni", rotations, rays).cpu().numpy()
         weights: Float64[ndarray, " n"] = areas.double().cpu().numpy()
         all_boxes: Float32[ndarray, "n 4"] = boxes.cpu().numpy()
+        scores: Float32[ndarray, " n"] = detections.scores.float().cpu().numpy()
         face_ids: Int64[ndarray, " n"] = detections.frame_indices.cpu().numpy()
+        operator: Bool[ndarray, " n"] = scores >= self.config.operator_score if self.yolox is not None else np.ones(len(scores), dtype=bool)
         evidence: list[OperatorEvidence] = []
         for index in range(len(framesets)):
-            keep: ndarray = face_ids // 6 == index
-            direction: Float64[ndarray, "3"] | None = None
-            if keep.any():
-                mean: Float64[ndarray, "3"] = (
-                    np.average(centres[keep], axis=0, weights=weights[keep]) if weights[keep].sum() > 0 else centres[keep].mean(axis=0)
-                )
-                direction = mean / np.linalg.norm(mean)
-            evidence.append(OperatorEvidence(direction, all_boxes[keep], face_ids[keep] % 6, faces[6 * index : 6 * index + 6]))
+            keep: Bool[ndarray, " n"] = face_ids // 6 == index
+            detections_here: OperatorDetections = OperatorDetections(centres[keep & operator], weights[keep & operator])
+            evidence.append(
+                OperatorEvidence(detections_here, FaceBoxes(all_boxes[keep], scores[keep], face_ids[keep] % 6), faces[6 * index : 6 * index + 6])
+            )
         self._tick("detect", start)
         return evidence
 
@@ -365,13 +486,15 @@ class FullCircleMasker:
         centre: float = (size - 1) / 2
         zero: Tensor = torch.zeros(1, dtype=torch.long, device=self.device)
         detections: BoxDetections = self._detect_people(synthetic[None])
-        if detections.num_detections == 0:
+        boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
+        if self.yolox is not None:
+            boxes = boxes[detections.scores >= self.config.operator_score]
+        if len(boxes) == 0:
             if not first:
                 return None
             return SegmentationPrompts(
                 frame_indices=zero, points_xy=torch.tensor([[centre, centre]], dtype=torch.float32, device=self.device), track_ids=zero
             )
-        boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
         centres: Float[Tensor, "n 2"] = (boxes[:, :2] + boxes[:, 2:]) / 2
         contains: Bool[Tensor, " n"] = (boxes[:, 0] <= centre) & (boxes[:, 2] >= centre) & (boxes[:, 1] <= centre) & (boxes[:, 3] >= centre)
         distance: Float[Tensor, " n"] = (centres - centre).norm(dim=1)
@@ -393,7 +516,7 @@ class FullCircleMasker:
         rig_R_view: Float64[ndarray, "3 3"] = look_at(direction, up)
         rotation: Float32[Tensor, "3 3"] = torch.from_numpy(rig_R_view).to(self.device, torch.float32)
         view: SphereView = view_from_rays(self.synthetic_rays @ rotation.T, size, size, self.cameras, self.rig_R_cams, self.full_hw)
-        rendered: Float[Tensor, "3 s s"] = sample_sphere(self._work_images(frames), view) * self.synthetic_valid[None]
+        rendered: Float[Tensor, "3 s s"] = sample_sphere(self._work_images(frames, self.downscale), view) * self.synthetic_valid[None]
         synthetic: UInt8[Tensor, "s s 3"] = rearrange(rendered.round().clamp(0, 255).to(torch.uint8), "c h w -> h w c").contiguous()
         start = self._tick("synthetic", start)
         prompts: SegmentationPrompts | None = None
@@ -419,13 +542,15 @@ class FullCircleMasker:
             mask: Bool[Tensor, "mh mw"] = (hit[0, 0] > 0.5) & (valid & self.mask_ray_valid[index]).reshape(source.mask_hw)
             source_masks.append(disk_dilate(mask, self.mask_radius[index]))
         self._tick("backmap", start)
-        return OperatorMasks(source_masks, synthetic, synthetic_mask)
+        return OperatorMasks(source_masks, synthetic, synthetic_mask, rig_R_view)
 
 
 __all__ = (
     "FULLCIRCLE_SYNTHETIC_LENS",
+    "FaceBoxes",
     "FullCircleConfig",
     "FullCircleMasker",
+    "OperatorDetections",
     "OperatorDetector",
     "OperatorEvidence",
     "OperatorMasks",
@@ -433,5 +558,7 @@ __all__ = (
     "disk_dilate",
     "fill_nearest",
     "level_rotation",
+    "operator_directions",
+    "sample_faces",
     "view_up",
 )

@@ -26,7 +26,7 @@ HEIGHT, WIDTH = 720, 1440
 
 
 def test_fullcircle_masks_match_released_masks() -> None:
-    from posekit.models.fullcircle import FullCircleConfig, FullCircleMasker, SphereSource, fill_nearest, view_up
+    from posekit.models.fullcircle import FullCircleConfig, FullCircleMasker, SphereSource, fill_nearest, operator_directions, view_up
     from posekit.ops.sphere import EquirectCamera
 
     scene_env: str | None = os.environ.get("POSEKIT_FULLCIRCLE_SCENE")
@@ -43,7 +43,8 @@ def test_fullcircle_masks_match_released_masks() -> None:
         FullCircleConfig(work_size=WIDTH, dilate_px=0.0), [SphereSource(EquirectCamera(WIDTH, HEIGHT), np.eye(3), (HEIGHT, WIDTH), (HEIGHT, WIDTH))]
     )
     evidence = masker.detect([[torch.from_numpy(f).cuda()] for f in frames], [np.eye(3)] * len(frames))
-    directions = [e.direction for e in evidence]
+    config: FullCircleConfig = masker.config
+    directions = operator_directions([e.detections for e in evidence], config.direction_gate_deg, config.lost_after)
     filled: list[np.ndarray] = fill_nearest(directions)
     up: np.ndarray = view_up(filled)
     ious: list[float] = []
