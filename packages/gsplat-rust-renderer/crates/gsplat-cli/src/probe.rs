@@ -2,8 +2,8 @@
 //! excludes screenshot readback. The production viewer keeps one hook for it: a process-wide count of
 //! encoded splat frames (`gsplat_viewer::compute_encoded_frames`).
 //! With `--frames-in-flight` the probe queues frames like a swapchain instead of waiting for each one,
-//! so `fresh_frames` shows how many UI frames encoded a new splat image.
-//! Splat frames per second: `fresh_frames / measured_wall_seconds` (both cover the measured frames).
+//! so `encoded_frames` shows how many UI frames encoded a new splat image.
+//! Splat frames per second: `encoded_frames / measured_wall_seconds` (both cover the measured frames).
 use gsplat_viewer::application;
 
 use gsplat_cli::camera::CameraSpec;
@@ -33,9 +33,10 @@ struct Report<'a> {
     msaa_samples: u32,
     frames_in_flight: usize,
     /// Splat frames encoded during the measured frames, summed over every compute view and entity of
-    /// the process. With one splat entity, `fresh_frames / frames.len()` is the fraction of UI frames
-    /// that show a new splat image (the others show the previous one).
-    fresh_frames: u64,
+    /// the process. With one splat entity, `encoded_frames / frames.len()` is the fraction of UI frames
+    /// that encode a new splat image (the others show the previous one). A frame counts when it is
+    /// encoded, also one that overflows its intersection capacity and keeps the previous image.
+    encoded_frames: u64,
     /// Wall time from the end of the last warmup frame to the end of the last measured frame; unlike
     /// the sum of `frames[].ms` it includes the time between frames.
     measured_wall_seconds: f64,
@@ -240,7 +241,7 @@ impl FrameProbe {
             minimum_camera_delta,
             msaa_samples,
             frames_in_flight: self.frames_in_flight,
-            fresh_frames: encoded_frames - self.encoded_at_start,
+            encoded_frames: encoded_frames - self.encoded_at_start,
             measured_wall_seconds: self.measured_from.elapsed().as_secs_f64(),
             gpu_bytes_scene: gpu_bytes[0],
             gpu_bytes_views: gpu_bytes[1],

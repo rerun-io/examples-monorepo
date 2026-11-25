@@ -109,7 +109,7 @@ and measurement end on whole 300-frame orbit boundaries; the ten warmup seconds 
 from the first splat frame, after the scene has loaded. `--frames-in-flight N` queues
 up to N frames before waiting for the oldest, like a swapchain, so a frame's `ms` is the
 steady-state frame interval rather than its latency. The report counts the splat frames
-encoded during the measured frames (`fresh_frames`, a process-wide counter) and their wall
+encoded during the measured frames (`encoded_frames`, a process-wide counter) and their wall
 time (`measured_wall_seconds`); their ratio is the splat frame rate. Production viewer code
 contains no timing hooks.
 
