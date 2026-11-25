@@ -14,6 +14,7 @@ pub mod asog;
 mod gpu;
 mod kernels;
 mod lens;
+pub mod lod;
 mod motion_gpu;
 pub mod native;
 mod output;
@@ -42,7 +43,7 @@ pub use view::ViewState;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "gsplat-core requires eight storage buffers, three storage textures, 256 threads and 10 KiB workgroup memory"
+        "gsplat-core requires eight storage buffers, three storage textures, 256 threads, 10 KiB workgroup memory and 64 KiB uniform bindings"
     )]
     Capabilities,
 
@@ -81,6 +82,9 @@ pub enum Error {
     #[error(transparent)]
     Asog(#[from] asog::Error),
 
+    #[error(transparent)]
+    Lod(#[from] lod::Error),
+
     #[error("too many splats: {0}")]
     TooManySplats(#[from] std::num::TryFromIntError),
 }
@@ -89,6 +93,8 @@ pub enum Error {
 mod hexel_tests;
 #[cfg(test)]
 mod primitive_tests;
+#[cfg(test)]
+mod raster_tests;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;

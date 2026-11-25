@@ -25,6 +25,8 @@ pub(crate) enum Primitives<'a> {
     Hexels(&'a NativeHexels<'a>),
     /// A compressed SOG payload, decoded once on upload.
     Sog(&'a crate::sog::Payload<'a>),
+    /// A Streamed SOG payload: every loaded level in one scene, rows selected per view.
+    SogLod(&'a crate::sog_lod::Payload<'a>),
     /// An `.asog` payload, decoded once on upload; its motion runs per view on the GPU.
     Asog(&'a crate::asog::Payload<'a>),
 }
@@ -41,6 +43,7 @@ impl Primitives<'_> {
                 core.check_hexel_capacity(hexels.centers.len(), hexels.variant())
             }
             Self::Sog(payload) => core.check_capacity(payload.count(), payload.max_degree()),
+            Self::SogLod(payload) => payload.check_capacity(core),
             Self::Asog(payload) => core.check_capacity(payload.info.count, payload.info.max_degree),
         }
     }
@@ -49,9 +52,21 @@ impl Primitives<'_> {
         self,
         ctx: &re_renderer::RenderContext,
         core: &gsplat_core::Renderer,
-    ) -> Result<Arc<gsplat_core::Scene>, gsplat_core::Error> {
+    ) -> Result<
+        (
+            Arc<gsplat_core::Scene>,
+            Option<Arc<gsplat_core::lod::LodIndex>>,
+        ),
+        gsplat_core::Error,
+    > {
         re_tracing::profile_scope!("upload");
+        let mut lod = None;
         let (scene, count, kind) = match self {
+            Self::SogLod(payload) => {
+                let (scene, index) = payload.upload(ctx, core)?;
+                lod = Some(index);
+                (scene, payload.count(), "Streamed SOG splats")
+            }
             Self::Sog(payload) => (payload.upload(ctx, core)?, payload.count(), "SOG splats"),
             Self::Splats(cloud) => (
                 core.upload(&cloud.to_core())?,
@@ -70,7 +85,7 @@ impl Primitives<'_> {
             ),
         };
         re_log::debug!("Uploaded {} {kind}", re_format::format_uint(count));
-        Ok(scene)
+        Ok((scene, lod))
     }
 
     /// Rows of the entity: splats or hexels.
@@ -79,6 +94,7 @@ impl Primitives<'_> {
             Self::Splats(cloud) => cloud.centers.len(),
             Self::Hexels(hexels) => hexels.centers.len(),
             Self::Sog(payload) => payload.count(),
+            Self::SogLod(payload) => payload.count(),
             Self::Asog(payload) => payload.info.count,
         }
     }
@@ -89,6 +105,8 @@ impl Primitives<'_> {
             Self::Hexels(hexels) => crate::bounds::from_hexels(hexels),
             // The preview is a uniform subsample of the same splats (file order is Morton order).
             Self::Sog(payload) => crate::bounds::from_splats(payload.preview),
+            // The preview is a subsample of one level (each level covers the whole scene).
+            Self::SogLod(payload) => crate::bounds::from_splats(payload.preview),
             // One mid-clip pose (the preview).
             Self::Asog(payload) => crate::bounds::from_splats(payload.preview),
         }
@@ -107,6 +125,8 @@ pub(crate) struct BatchKey {
 struct CachedScene {
     last_frame: u64,
     scene: Arc<gsplat_core::Scene>,
+    /// Streamed SOG scenes: the host-side level index every view selects from.
+    lod: Option<Arc<gsplat_core::lod::LodIndex>>,
     bounds: re_renderer::RobustBounds,
 }
 
@@ -214,6 +234,30 @@ impl re_byte_size::MemUsageTreeCapture for GpuCache {
     }
 }
 
+/// The last level selection of every Streamed SOG view (one entry per view, entity and instance), for the probe.
+pub fn compute_lod_selections(
+    ctx: &re_viewer_context::ViewContext<'_>,
+) -> Vec<crate::renderer::LodSelectionReport> {
+    ctx.viewer_ctx
+        .store_context
+        .memoizer::<GpuCache, _>(|cache| {
+            let mut out: Vec<_> = cache
+                .views
+                .iter()
+                .filter_map(|(key, e)| {
+                    e.render.lock().lod_selection().map(|r| {
+                        (
+                            format!("{:?}/{}/{}", key.view_id, key.entity, key.instance),
+                            r,
+                        )
+                    })
+                })
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out.into_iter().map(|(_, r)| r).collect()
+        })
+}
+
 /// GPU bytes of shared scene uploads and of per-view scratch and targets, for the frame probe.
 pub fn compute_gpu_bytes(ctx: &re_viewer_context::ViewContext<'_>) -> [u64; 2] {
     ctx.viewer_ctx
@@ -295,11 +339,12 @@ impl GpuCache {
         let frame = self.frame;
         let shared = match self.scenes.entry(generation) {
             Entry::Vacant(entry) => {
-                let scene = primitives.upload(ctx, core)?;
+                let (scene, lod) = primitives.upload(ctx, core)?;
                 entry.insert(CachedScene {
                     last_frame: frame,
                     bounds: primitives.bounds(),
                     scene,
+                    lod,
                 })
             }
             Entry::Occupied(entry) => entry.into_mut(),
@@ -331,6 +376,7 @@ impl GpuCache {
             render.replace_scene(core, &shared.scene)?;
             entry.generation = generation;
         }
+        render.set_lod(shared.lod.clone());
         let prepared = render.prepare(renderer, ctx, camera, options)?;
         Ok((
             GaussianDrawData {

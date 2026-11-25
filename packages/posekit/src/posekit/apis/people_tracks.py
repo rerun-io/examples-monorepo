@@ -6,9 +6,9 @@ streams (with ``lookahead`` on its own thread and CUDA stream, started ``redetec
 tracker steps before it; SAM 3 reads only its frames, so the masks stay the same). Its instances are matched to the
 live tracks by mask IoU (matched tracks are re-anchored on the SAM 3 box, unmatched instances start tracks, duplicate
 tracks are dropped). A track that stays empty for ``max_misses`` steps, or
-that SAM 3 does not confirm at ``max_unconfirmed`` re-detects in a row, is dropped. On frames that are a multiple of
-``output_every`` the union of the track masks (and of the SAM 3 masks on a re-detect step) is dilated at full
-resolution and logged as a ``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask``
+that SAM 3 does not confirm at ``max_unconfirmed`` re-detects in a row, is dropped. On the output frames
+(every ``output_every``-th; by default the cube layer's framesets, :mod:`posekit.cube_layer`) the union of the track
+masks (and of the SAM 3 masks on a re-detect step) is dilated at full resolution and logged as a ``SegmentationImage`` (uint8, 1 = person) at ``<parent of the video entity>/people_mask``
 with the frame's own stamp, in the mask layer contract (track 3, v2): ``mask_downscale`` times smaller than the frame
 (a cell is masked when any of its pixels is, the pooling ``mask_union`` would do), with one static
 ``Transform3D(scale=[mask_downscale, mask_downscale, 1])`` to frame pixels.
@@ -43,6 +43,7 @@ from posekit.apis.people_masks import (
     set_frame_time,
     write_overlay,
 )
+from posekit.cube_layer import CubeSampling, cube_sampling, sampled_framesets
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
 from posekit.ops.people_masks import dilate_masks
@@ -58,8 +59,8 @@ class TrackOptions:
         default_factory=lambda: Sam2VideoSegmenterConfig(memory_on_device=True, bf16=True, max_conditional_memories=4)
     )
     """EfficientTAM variant and memory options."""
-    stride: int = 10
-    """Frames between two tracker steps; must divide ``output_every``."""
+    stride: int | None = None
+    """Frames between two tracker steps; must divide the output stride (default: the output stride)."""
     redetect_every: int = 2
     """Tracker steps between two SAM 3 re-detects (step 0 initialises).
 
@@ -97,11 +98,15 @@ class PeopleTracksConfig:
     rr_config: RerunTyroConfig
     """Output sink; pass ``--rr-config.save <layer.rrd> --rr-config.headless --rr-config.recording-id <segment>``."""
     start: int = 0
-    """First frame index (must be a multiple of ``output_every``)."""
+    """First frame index (must be a multiple of the output stride)."""
     end: int | None = None
     """Frame index after the last (default: end of the streams)."""
-    output_every: int = 10
-    """Masks are written for the frame indices that are multiples of this."""
+    output_every: int | None = None
+    """Masks are written for the frame indices that are multiples of this. Default: the cube layer's stride (its
+    ``cube`` recording property, in ``rrd`` or ``cube_rrd``), so the masks cover every face stamp, else 10. With a cube
+    layer masks are written for its framesets only, and a value that disagrees with it is an error."""
+    cube_rrd: Path | None = None
+    """The recording's cube layer file (dataforge ``--cube``) whose ``cube`` property sets the output stride."""
     timeline: str = "video_time"
     """Timeline of the video streams and of the masks."""
     mask_downscale: int = 4
@@ -287,8 +292,6 @@ class PeopleTracker:
 
 def main(config: PeopleTracksConfig) -> None:
     """Write the tracked people-mask layer and print speed and GPU memory."""
-    if config.output_every % config.track.stride or config.start % config.output_every:
-        raise ValueError("track.stride must divide output_every, and start must be a multiple of output_every")
     process_start: float = time.perf_counter()
     torch.cuda.reset_peak_memory_stats()
     with rr.server.Server(datasets={"in": [str(config.rrd)]}) as server:
@@ -302,9 +305,14 @@ def main(config: PeopleTracksConfig) -> None:
         available: list[str] = [c.entity_path for c in dataset.schema().component_columns() if c.component == "VideoStream:sample"]
         entities: list[str] = select_entities(available, config.entities, ())
         videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, entities, config.timeline)
+        cube: CubeSampling | None = cube_sampling(dataset, segment_id, config.cube_rrd)
     n_packets: int = min(len(v.samples) for v in videos)
     end: int = n_packets if config.end is None else min(config.end, n_packets)
-    tracked: list[int] = list(range(config.start, end, config.track.stride))
+    outputs: range = sampled_framesets("--output-every", config.output_every, cube, config.start, end)
+    step: int = outputs.step if config.track.stride is None else config.track.stride
+    if outputs.step % step or config.start % outputs.step:
+        raise ValueError(f"track.stride {step} must divide the output stride {outputs.step}, and start must be a multiple of it")
+    tracked: list[int] = list(range(config.start, outputs.stop, step))
     print(f"segment {segment_id}: streams {entities}, {len(tracked)} tracker steps over frames {config.start}..{end - 1}")
     print(f"rrd read {time.perf_counter() - process_start:.1f} s")
 
@@ -342,7 +350,7 @@ def main(config: PeopleTracksConfig) -> None:
             if tracker.steps == 0 and (height % factor or width % factor):
                 raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
             union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
-            if index % config.output_every == 0:
+            if index in outputs:
                 dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
                 cells: Bool[Tensor, "s hm wm"] = dilated.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
                 masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()

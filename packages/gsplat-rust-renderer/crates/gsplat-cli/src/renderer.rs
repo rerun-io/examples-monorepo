@@ -17,6 +17,8 @@ pub struct PlyScene {
     pub mode: RenderMode,
     pub center: Vec3,
     pub extent: f32,
+    /// A Streamed SOG set (`--lod`); then `data` holds only the leaf box centres used for framing.
+    pub lod: Option<std::sync::Arc<crate::lod::LodSource>>,
 }
 
 impl PlyScene {
@@ -84,7 +86,47 @@ impl PlyScene {
             mode,
             center: (min + max) * 0.5,
             extent: (max - min).length() * 0.5,
+            lod: None,
         })
+    }
+
+    /// A Streamed SOG set with the selection flags; framing from the leaf boxes.
+    pub fn load_lod(path: &Path, args: &crate::lod::LodArgs) -> Result<Self> {
+        let source = crate::lod::LodSource::read(path, args)?;
+        let (center, extent) = source.bounds();
+        let means = source
+            .meta
+            .leaves
+            .iter()
+            .flat_map(|l| {
+                let c = (Vec3::from(l.min) + Vec3::from(l.max)) * 0.5;
+                c.to_array()
+            })
+            .collect();
+        Ok(Self {
+            data: SplatData {
+                means,
+                rotations: None,
+                log_scales: None,
+                sh_coeffs: None,
+                raw_opacities: None,
+            },
+            hexels: None,
+            image_size: None,
+            mode: RenderMode::Default,
+            center,
+            extent,
+            lod: Some(std::sync::Arc::new(source)),
+        })
+    }
+
+    /// `--lod` when given, else the PLY.
+    pub async fn load_any(ply: &Path, lod: &crate::lod::LodArgs) -> Result<Self> {
+        if let Some(dir) = &lod.lod {
+            return Self::load_lod(dir, lod);
+        }
+        anyhow::ensure!(!ply.as_os_str().is_empty(), "pass --ply or --lod");
+        Self::load(ply).await
     }
 }
 
@@ -149,6 +191,15 @@ pub enum Output {
 pub enum Primitives<'a> {
     Splats(&'a Splats),
     Hexels(&'a Hexels),
+    /// A Streamed SOG set, drawn through a per-camera selection.
+    Lod(&'a crate::lod::LodSource),
+}
+
+/// The level-of-detail state of a renderer: index and the last selection (parameters: `RenderOptions::lod`).
+struct LodState {
+    index: std::sync::Arc<gsplat_core::lod::LodIndex>,
+    last: Option<(gsplat_core::Camera, gsplat_core::lod::SelectionStats, f64)>,
+    upload_seconds: f64,
 }
 
 /// Per-pixel surface outputs: expected and median depth, then the world normal (w = 0).
@@ -169,9 +220,62 @@ pub struct StandaloneRenderer {
     surface: Option<(wgpu::Buffer, wgpu::Buffer)>,
     size: UVec2,
     last_output: Option<Output>,
+    lod: Option<LodState>,
+    scene_bytes: u64,
 }
 
 impl StandaloneRenderer {
+    /// Select the rows for `camera` (only when it changed) and hand them to the view.
+    fn select(&mut self, camera: &CameraSpec) -> Result<()> {
+        let Some(lod) = &mut self.lod else {
+            return Ok(());
+        };
+        let core_camera = camera.core_camera();
+        if lod.last.as_ref().is_some_and(|(c, _, _)| *c == core_camera) {
+            return Ok(());
+        }
+        let start = std::time::Instant::now();
+        let selection = gsplat_core::lod::select(
+            &lod.index,
+            &core_camera,
+            &self.options.world_from_local,
+            &self.options.lod,
+        );
+        let micros = start.elapsed().as_secs_f64() * 1e6;
+        self.view.set_runs(Some(&selection.runs))?;
+        lod.last = Some((core_camera, selection.stats, micros));
+        Ok(())
+    }
+
+    /// New selection parameters (level-of-detail scenes); the next render selects again.
+    pub fn set_lod_params(&mut self, params: gsplat_core::lod::LodParams) {
+        self.options.lod = params;
+        if let Some(lod) = &mut self.lod {
+            lod.last = None;
+        }
+    }
+
+    /// The selection of the last rendered camera (level-of-detail scenes only): stats and CPU microseconds.
+    pub fn lod_stats(&self) -> Option<(&gsplat_core::lod::SelectionStats, f64)> {
+        let (_, stats, micros) = self.lod.as_ref()?.last.as_ref()?;
+        Some((stats, *micros))
+    }
+
+    /// The loaded set (level-of-detail scenes only).
+    pub fn lod_index(&self) -> Option<&gsplat_core::lod::LodIndex> {
+        self.lod.as_ref().map(|l| &*l.index)
+    }
+
+    /// Seconds of the set upload (CPU WebP decode + GPU de-quantisation; level-of-detail scenes only).
+    pub fn lod_upload_seconds(&self) -> Option<f64> {
+        self.lod.as_ref().map(|l| l.upload_seconds)
+    }
+
+    /// GPU bytes of the scene and of this renderer's view.
+    pub fn gpu_bytes(&self) -> (u64, u64) {
+        (self.scene_bytes, self.view.gpu_byte_size())
+    }
+
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter
     }
@@ -215,7 +319,7 @@ impl StandaloneRenderer {
     }
     pub async fn new(
         primitives: Primitives<'_>,
-        options: RenderOptions,
+        mut options: RenderOptions,
         size: UVec2,
         initial_capacity: u32,
     ) -> Result<Self> {
@@ -236,10 +340,31 @@ impl StandaloneRenderer {
             })
             .await?;
         let core = gsplat_core::Renderer::new(&device)?;
+        let mut lod = None;
         let scene = match primitives {
             Primitives::Splats(splats) => core.upload(splats)?,
             Primitives::Hexels(hexels) => core.upload_hexels(hexels)?,
+            Primitives::Lod(source) => {
+                options.lod = source.params;
+                let start = std::time::Instant::now();
+                let (scene, index) = core.upload_lod(&queue, &source.set(), &source.load)?;
+                device.poll(wgpu::PollType::wait_indefinitely())?;
+                if index.min_level() > source.load.min_level {
+                    eprintln!(
+                        "Streamed SOG: levels finer than {} do not fit the GPU binding limit; loaded from level {}",
+                        index.min_level(),
+                        index.min_level()
+                    );
+                }
+                lod = Some(LodState {
+                    index,
+                    last: None,
+                    upload_seconds: start.elapsed().as_secs_f64(),
+                });
+                scene
+            }
         };
+        let scene_bytes = scene.gpu_byte_size();
         let view = core.create_view(&scene, initial_capacity)?;
         let bytes = u64::from(size.x) * u64::from(size.y) * 16;
         if bytes == 0 || bytes > device.limits().max_storage_buffer_binding_size {
@@ -269,6 +394,8 @@ impl StandaloneRenderer {
             surface: None,
             size,
             last_output: None,
+            lod,
+            scene_bytes,
         })
     }
     pub fn render(
@@ -280,6 +407,7 @@ impl StandaloneRenderer {
         if UVec2::new(camera.width, camera.height) != self.size {
             anyhow::bail!("renderer resolution changed");
         }
+        self.select(camera)?;
         if matches!(output, Output::Surface) && self.surface.is_none() {
             let pixels = self.float.size() / 16;
             let buffer = |label, bytes| {
@@ -340,6 +468,7 @@ impl StandaloneRenderer {
         if UVec2::new(camera.width, camera.height) != self.size {
             anyhow::bail!("renderer resolution changed");
         }
+        self.select(camera)?;
         loop {
             let mut encoder = self.device.create_command_encoder(&Default::default());
             match self.core.render(

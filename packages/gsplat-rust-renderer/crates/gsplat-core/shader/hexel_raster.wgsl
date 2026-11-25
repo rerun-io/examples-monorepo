@@ -36,3 +36,10 @@ fn sample(h: Hexel, pix: vec2u, surface: bool) -> Sample {
     }
     return Sample(select(alpha, 0.0, depth < HEX_NEAR), color, depth, normal);
 }
+
+// No block masks: every pixel of the tile samples every hexel of the batch.
+fn stage(t: u32, h: Hexel, tile: vec2u) {}
+
+fn reaches(t: u32, lid: u32) -> bool {
+    return true;
+}

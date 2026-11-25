@@ -34,12 +34,16 @@ The 256-byte uniform block follows renderer upload alignment. Raw allocation,
 binding, upload, and readback operations are isolated in `gpu.rs`. Shader files
 use relative `#import <...>` directives through a small local import resolver.
 
-The forward path projects, sorts visible depths, scans intersection counts,
-projects visible splats, maps and sorts tiles, computes tile offsets, and
-rasterizes. Splats and hexels give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K
-blend, and all three share one set of output entry points. Counts and dispatch plans stay on the GPU. An eight-byte count
-readback detects overflow; the output remains intact until capacity grows and
-the view rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
+The forward path projects each primitive once (geometry and view-dependent
+colour, stored by global id), sorts visible depths, scans intersection counts,
+maps and sorts tiles, computes tile offsets, and rasterizes. Splats and hexels
+give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K blend,
+and all three share one set of output entry points. A splat joins a tile only
+when a pixel centre of the tile can reach the alpha cutoff, and in raster it
+marks the 8x4 pixel blocks it can reach so that the other pixels skip it.
+Counts and dispatch plans stay on the GPU. An eight-byte count readback detects
+overflow; the output remains intact until capacity grows and the view
+rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
 Render mode is a per-render option: default blur or mip antialiasing.
 
 Targets own their GPU handles and provide f32 RGBA, packed RGBA8, or storage
@@ -59,9 +63,15 @@ overrides remain portable to stock Rerun, which draws native splats and the
 hexel fallback points.
 
 A store-owned cache shares uploads across views and tracks each instance's target
-with dirty, pending, complete, or capacity-failed state. Optional-attribute changes invalidate the
-upload even when centers retain their row ID. Blueprint values need a content
-hash because their source row IDs are cleared by Rerun. Camera and mode changes
+with dirty, pending, complete, or capacity-failed state. While one of its three
+feedback slots is free, a moving view encodes a splat frame on every UI frame:
+a GPU frame longer than the display interval does not leave the GPU idle until
+its feedback returns, the UI runs at the splat rate, and each UI frame shows a
+splat image from its own camera. Growing scratch after an overflow and a new
+target size wait for the frames in flight; frames encoded before an overflow is
+reported overflow too and keep the previous image. Optional-attribute changes
+invalidate the upload even when centers retain their row ID. Blueprint values
+need a content hash because their source row IDs are cleared by Rerun. Camera and mode changes
 reuse the scene. Unused entries are evicted when frames advance.
 
 Splats and hexels are trained with display-space blending over a solid
@@ -95,7 +105,12 @@ replace those fields.
 `gsplat probe` is enabled by the `probe` feature of `gsplat-cli`. It reads the camera
 through a view context system and measures a full headless UI/compute/composite
 frame with GPU completion. Its moving-camera guard rejects held views, and warmup
-and measurement end on whole 300-frame orbit boundaries. Production viewer code
+and measurement end on whole 300-frame orbit boundaries; the ten warmup seconds count
+from the first splat frame, after the scene has loaded. `--frames-in-flight N` queues
+up to N frames before waiting for the oldest, like a swapchain, so a frame's `ms` is the
+steady-state frame interval rather than its latency. The report counts the splat frames
+encoded during the measured frames (`encoded_frames`, a process-wide counter) and their wall
+time (`measured_wall_seconds`); their ratio is the splat frame rate. Production viewer code
 contains no timing hooks.
 
 ## Training and evaluation

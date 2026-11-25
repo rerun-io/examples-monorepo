@@ -20,6 +20,7 @@ fn one_splat(log_scale: f32) -> PlyScene {
         mode: gsplat_core::RenderMode::Default,
         center: Vec3::ZERO,
         extent: 1.0,
+        lod: None,
     }
 }
 async fn capture(renderer: &mut Engine, camera: &CameraSpec) -> Vec<f32> {

@@ -155,6 +155,15 @@ impl Meta {
         })
     }
 
+    /// Upper bound of the SH degree from meta.json alone: `shN.bands`, else the most the version allows (v3: 4,
+    /// v2: 3); 0 without `shN`.
+    pub fn max_sh_degree(&self) -> u32 {
+        match &self.sh_n {
+            Some(sh) => sh.bands.unwrap_or(if self.version == 3 { 4 } else { 3 }),
+            None => 0,
+        }
+    }
+
     /// SH bands: `shN.bands` (checked against the width) or inferred from a centroid width of 192/512/960/1536.
     pub fn sh_bands(&self, centroid_width: u32) -> Result<u32, Error> {
         let inferred = (1..=4).find(|&b| 64 * rest_coefficients(b) as u32 == centroid_width);

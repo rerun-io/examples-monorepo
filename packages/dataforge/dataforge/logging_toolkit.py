@@ -22,12 +22,15 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views
+from simplecv.catalog_video_codec import CatalogCodecName
 from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import log_pinhole
+from simplecv.rerun_walk_path import send_trail
 from simplecv.rig import CameraKind, PeerSensorKind
 
 from dataforge import schema
@@ -54,6 +57,8 @@ from dataforge.video_encoding import (
     resolve_ffmpeg as resolve_ffmpeg,
 )
 
+VIDEO_CODEC_COMPONENT: str = "VideoStream:codec"
+"""The static codec column of a ``VideoStream``."""
 VIDEO_SAMPLE_COMPONENT: str = "VideoStream:sample"
 """Component that marks an ``Mp4Reader`` chunk as carrying samples, not keyframe flags."""
 
@@ -102,6 +107,47 @@ def classify_video_chunk(record_batch: pa.RecordBatch) -> VideoChunkKind:
         f"{entity_path}: an Mp4Reader chunk indexed on {schema.TIMELINE} carries neither {VIDEO_SAMPLE_COMPONENT} "
         f"nor {VIDEO_KEYFRAME_COMPONENT}, only {names}; the reader's chunk shapes changed and retiming it would be a guess"
     )
+
+
+def read_video_stream(store: rrc.LazyStore, entity: str) -> CatalogVideo:
+    """The ``VideoStream`` at ``entity`` as simplecv's ``CatalogVideo``: zero-copy packet views (``packet_views``) with
+    their ``video_time`` stamps (int64 ns) and keyframe flags, in time order, and the codec.
+
+    Chunks are told apart by ``classify_video_chunk`` (the ``Mp4Reader`` shapes ``log_video_stream`` writes, keyframe
+    flags in their own chunk, so matched by stamp). Read from the chunks rather than a dataframe query, which holds
+    about twice the samples in memory (6.4 GB against 2.7 GB for a two-lens 1920 px base of 17 minutes).
+
+    Raises:
+        ValueError: If the entity holds no samples or no codec, or two samples share a stamp.
+    """
+    codec: CatalogCodecName | None = None
+    times: list[Int64[ndarray, " c"]] = []
+    samples: list[UInt8[ndarray, " b"]] = []
+    keyframe_times: list[Int64[ndarray, " f"]] = []
+    for chunk in store.stream().filter(content=[entity]).to_chunks():
+        if chunk.entity_path != entity:
+            continue
+        batch: pa.RecordBatch = chunk.to_record_batch()
+        kind: VideoChunkKind = classify_video_chunk(batch)
+        if kind == "codec":
+            codec = catalog_codec(pa.chunked_array([batch.column(VIDEO_CODEC_COMPONENT)]), entity)
+            continue
+        stamps: Int64[ndarray, " c"] = batch.column(schema.TIMELINE).cast(pa.int64()).to_numpy()
+        if kind == "sample":
+            times.append(stamps)
+            samples += packet_views(pa.chunked_array([batch.column(VIDEO_SAMPLE_COMPONENT)]))
+        if VIDEO_KEYFRAME_COMPONENT in batch.schema.names:  # its own chunk (Mp4Reader) or beside the samples
+            flags: Bool[ndarray, " c"] = np.asarray(catalog_keyframes(pa.chunked_array([batch.column(VIDEO_KEYFRAME_COMPONENT)])), dtype=np.bool_)
+            keyframe_times.append(stamps[flags])
+    if not samples or codec is None:
+        raise ValueError(f"{entity} holds no VideoStream samples or no codec")
+    all_times: Int64[ndarray, " n"] = np.concatenate(times)
+    order: Int64[ndarray, " n"] = np.argsort(all_times, kind="stable")
+    times_ns: Int64[ndarray, " n"] = all_times[order]
+    if np.any(np.diff(times_ns) <= 0):
+        raise ValueError(f"{entity}: expected samples with strictly increasing stamps")
+    keyframes: Bool[ndarray, " n"] = np.isin(times_ns, np.concatenate(keyframe_times)) if keyframe_times else np.zeros(times_ns.size, dtype=np.bool_)
+    return CatalogVideo(times=times_ns, samples=[samples[k] for k in order.tolist()], keyframes=keyframes.tolist(), codec=codec)
 
 
 def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
@@ -664,7 +710,8 @@ def log_trail_segments(
     color: tuple[int, int, int] = TRAIL_COLOR,
     radius_ui_points: float = TRAIL_RADIUS_UI_POINTS,
 ) -> None:
-    """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it.
+    """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it
+    (``simplecv.rerun_walk_path.send_trail``, the trail every run writer shares: slam-rs, colsfm, dataforge).
 
     A trail is what a blueprint shows through a cursor-relative window, so it has
     to be **per pose** rather than one growing strip — but a per-pose
@@ -693,20 +740,7 @@ def log_trail_segments(
         radius_ui_points: Stroke width in ui points; Rerun carries it as a
             negative radius, which is what keeps it screen-space.
     """
-    rr.log(
-        entity_path,
-        rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui_points)),
-        static=True,
-        recording=recording,
-    )
-    previous: Int64[ndarray, "n_poses"] = np.maximum(np.arange(times_ns.size, dtype=np.int64) - 1, 0)
-    segments_xyz: Float64[ndarray, "n_poses 2 3"] = np.stack([translations_xyz[previous], translations_xyz], axis=1)
-    rr.send_columns(
-        entity_path,
-        indexes=[time_column(times_ns)],
-        columns=rr.LineStrips3D.columns(strips=list(segments_xyz)),
-        recording=recording,
-    )
+    send_trail(entity_path, times_ns, translations_xyz, color, timeline=schema.TIMELINE, radius_ui=radius_ui_points, recording=recording)
 
 
 @dataclass(frozen=True, slots=True)

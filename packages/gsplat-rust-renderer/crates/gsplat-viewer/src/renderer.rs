@@ -6,6 +6,7 @@ use re_renderer::external::smallvec::smallvec;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 use re_renderer::{BindGroupDesc, BindGroupEntry, GpuBindGroup, GpuTexture};
 use re_viewer::external::{parking_lot, re_log, re_renderer, re_viewer_context};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub(crate) struct GaussianRenderer {
@@ -24,7 +25,9 @@ struct TargetImage {
     id: GpuTexture,
     composite: GpuBindGroup,
 }
-// Only Pending can carry an in-flight eye; Dirty retains the previous image on overflow.
+// Pending carries the newest in-flight eye; Dirty retains the previous image on overflow.
+// Frames encoded before an overflow is reported also overflow and keep the previous image until
+// scratch grows.
 enum Image {
     // Keep the fallback for this scene generation; moving the eye must not retry
     // an impossible allocation on every other frame. A relog resets this state.
@@ -58,6 +61,36 @@ pub(crate) struct RenderView {
     image: Image,
     last_good: Option<GpuBindGroup>,
     profile: Option<crate::profile::ViewProfile>,
+    /// Streamed SOG scenes: the shared level index, and the eye + instance transform the runs were selected for.
+    lod: Option<Arc<gsplat_core::lod::LodIndex>>,
+    lod_selected_for: Option<(
+        Camera,
+        gsplat_core::glam::Affine3A,
+        gsplat_core::lod::LodParams,
+    )>,
+    lod_report: Option<LodSelectionReport>,
+}
+
+/// The last level selection of one view, for the frame probe.
+#[derive(Clone, Debug)]
+pub struct LodSelectionReport {
+    pub params: gsplat_core::lod::LodParams,
+    pub stats: gsplat_core::lod::SelectionStats,
+    /// Host time of the last `select` call.
+    pub select_us: f64,
+    /// Selections this view made since it was created (one per encoded frame with a new eye at most).
+    pub selections: u64,
+    /// Rows of the whole scene (all loaded levels) and of each level.
+    pub scene_rows: u32,
+    pub level_rows: Vec<u64>,
+}
+
+// Process-wide, so the count never goes back when the cache evicts or replaces a view.
+static ENCODED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Splat frames encoded by every view of this process, for the frame probe's fresh-frame count.
+pub fn compute_encoded_frames() -> u64 {
+    ENCODED_FRAMES.load(Ordering::Relaxed)
 }
 
 impl RenderView {
@@ -75,6 +108,52 @@ impl RenderView {
         self.last_good = self.completed();
         self.image = Image::Dirty;
         self.core = view;
+        self.lod_selected_for = None;
+        Ok(())
+    }
+
+    /// The scene's level index (None for scenes without levels); a new index selects again on the next encode.
+    pub(crate) fn set_lod(&mut self, lod: Option<Arc<gsplat_core::lod::LodIndex>>) {
+        let same = match (&self.lod, &lod) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.lod = lod;
+            self.lod_selected_for = None;
+            self.lod_report = None;
+        }
+    }
+
+    pub(crate) fn lod_selection(&self) -> Option<LodSelectionReport> {
+        self.lod_report.clone()
+    }
+
+    /// Select this view's rows for `camera` (host, microseconds) unless they were selected for the same eye,
+    /// instance transform and parameters (`options.lod`).
+    fn select_lod(&mut self, camera: &Camera, options: &RenderOptions) -> Result<(), Error> {
+        let Some(index) = &self.lod else {
+            return Ok(());
+        };
+        let params = options.lod;
+        let eye = (*camera, options.world_from_local, params);
+        if self.lod_selected_for == Some(eye) {
+            return Ok(());
+        }
+        let start = web_time::Instant::now();
+        let selection = gsplat_core::lod::select(index, camera, &options.world_from_local, &params);
+        let select_us = start.elapsed().as_secs_f64() * 1e6;
+        self.core.set_runs(Some(&selection.runs))?;
+        self.lod_selected_for = Some(eye);
+        self.lod_report = Some(LodSelectionReport {
+            params,
+            stats: selection.stats,
+            select_us,
+            selections: self.lod_report.as_ref().map_or(0, |r| r.selections) + 1,
+            scene_rows: index.rows(),
+            level_rows: (0..index.levels()).map(|l| index.level_rows(l)).collect(),
+        });
         Ok(())
     }
 
@@ -87,6 +166,12 @@ impl RenderView {
 
     fn is_current(&self, camera: &Camera, options: &RenderOptions) -> bool {
         matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && old_options == options)
+    }
+
+    fn is_in_flight(&self, camera: &Camera, options: &RenderOptions) -> bool {
+        // A feedback error leaves Pending with nothing in flight; such a view encodes again.
+        self.core.has_pending_frames()
+            && matches!(&self.image, Image::Pending { camera: newest, options: newest_options } if newest == camera && newest_options == options)
     }
 
     pub(crate) fn prepare(
@@ -114,25 +199,41 @@ impl RenderView {
             }
             Err(error) => return Err(error),
         };
-        if let Some(stats) = feedback
-            && let Image::Pending { camera, options } = self.image
-        {
-            self.image = if stats.needs_rerender {
-                Image::Dirty
-            } else {
-                self.last_good = None;
-                Image::Complete { camera, options }
-            };
-        }
-        if self.core.has_pending_frames() {
-            return Ok(Prepared::Pending);
+        if let Some(stats) = feedback {
+            // The target holds a finished image; an overflow left the one before it in place.
+            if !stats.needs_rerender {
+                self.last_good = Some(self.target.composite.clone());
+            }
+            if !self.core.has_pending_frames()
+                && let Image::Pending { camera, options } = self.image
+            {
+                self.image = if stats.needs_rerender {
+                    Image::Dirty
+                } else {
+                    self.last_good = None;
+                    Image::Complete { camera, options }
+                };
+            }
         }
         if self.is_current(camera, &options) {
             return Ok(Prepared::Current);
         }
-        renderer
+        // Encode up to one frame per slot while feedback is in flight; a new target size waits for it.
+        if self.is_in_flight(camera, &options)
+            || !self.core.has_free_frame()
+            || (self.core.has_pending_frames() && self.target.size != camera.size)
+        {
+            return Ok(Prepared::Pending);
+        }
+        self.select_lod(camera, &options)?;
+        match renderer
             .core()?
-            .prepare_view(&ctx.queue, &mut self.core, camera)?;
+            .prepare_view(&ctx.queue, &mut self.core, camera)
+        {
+            // Scratch grows after an overflow once the frames still in flight have reported.
+            Err(Error::Busy(_)) => return Ok(Prepared::Pending),
+            result => result?,
+        }
         if self.target.size != camera.size {
             self.last_good = self.completed();
             self.image = Image::Dirty;
@@ -178,6 +279,7 @@ impl RenderView {
             camera: *camera,
             options,
         };
+        ENCODED_FRAMES.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -254,6 +356,9 @@ impl GaussianRenderer {
             image: Image::Dirty,
             last_good: None,
             profile: crate::profile::ViewProfile::new(&ctx.device),
+            lod: None,
+            lod_selected_for: None,
+            lod_report: None,
         })
     }
 

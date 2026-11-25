@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import pytest
 import tyro
+from conftest import content_rules  # pyrefly: ignore[missing-import]
 
 pytest.importorskip("rerun.catalog", reason="catalog dependencies are optional outside the dataforge catalog environment")
 
@@ -260,3 +261,56 @@ def test_the_insta360_overviews_frame_the_walk_of_a_dataset_with_one_walked_segm
     assert targets(entry) == [[5.0, 2.0, 1.0]] * 3
     entry.register([walked(THREE)], layer_name="slam").wait()
     assert targets(entry) == [None, None, None], "one blueprint cannot frame two walks"
+
+
+def test_the_insta360_colsfm_views_draw_the_viewing_rig_only_when_a_colsfm_layer_holds_it(server: Server, layer: Callable[[str, str], str], tmp_path: Path) -> None:
+    """The viewing faces are the segment's ``cube_view`` layer, the viewing rig the colsfm layer's ``rig_view``. A colsfm
+    layer written without it (``align_to_prior``, ``--no-view-rig``) must keep its ``rig`` in the colsfm views: a layout
+    that dropped ``rig`` for a ``rig_view`` nobody wrote showed no colsfm rig at all."""
+    from dataforge.datasets.insta360 import CUBE_VIEW_LAYER, Insta360Config, Insta360Dataset
+
+    dataset = Insta360Dataset(Insta360Config())
+    colsfm: str = schema.run_path(schema.COLSFM_SOURCE)
+
+    def dropped_rigs(entry: DatasetEntry) -> set[str]:
+        rules: set[str] = {rule for view in blueprint_views(dataset.catalog_blueprints(entry)[0]) for rule in content_rules(view)}
+        return {rig for rig in ("rig", "rig_view") if f"- {colsfm}/{rig}/**" in rules}
+
+    def colsfm_layer(name: str, rigs: tuple[str, ...]) -> str:
+        target: Path = tmp_path / name / f"{FOUR}.rrd"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with recording_to(target, recording_id=FOUR, send_properties=False) as recording:
+            recording.set_time(schema.TIMELINE, duration=0.0)
+            for rig in rigs:
+                recording.log(f"{colsfm}/{rig}", rr.Transform3D(translation=[0.0, 0.0, 0.0]))
+        return target.as_uri()
+
+    entry: DatasetEntry = server.client().create_dataset("insta360-rig-view-test")
+    entry.register([layer("base", FOUR)], layer_name="base").wait()
+    entry.register([layer(CUBE_VIEW_LAYER, FOUR)], layer_name=CUBE_VIEW_LAYER).wait()
+    assert dropped_rigs(entry) == {"rig"}, "before a colsfm layer: what a default colsfm run on viewing faces writes"
+    entry.register([colsfm_layer("colsfm", ("rig",))], layer_name="colsfm").wait()
+    assert dropped_rigs(entry) == {"rig_view"}, "the layer has no rig_view, so its rig stays"
+    entry.register([colsfm_layer("colsfm_view", ("rig", "rig_view"))], layer_name="colsfm_view").wait()
+    assert dropped_rigs(entry) == {"rig"}, "a layer with rig_view: the views draw it"
+
+
+def test_the_insta360_face_panes_play_the_viewing_faces_only_when_every_segment_holds_them(server: Server, layer: Callable[[str, str], str]) -> None:
+    """One layout serves every segment of a dataset. A segment without the ``cube_view`` layer has no ``video_view``, so
+    its face panes would be empty; the analysis faces (``video``) play in every segment."""
+    from dataforge.datasets.insta360 import CUBE_VIEW_LAYER, Insta360Config, Insta360Dataset
+    from dataforge.datasets.insta360_blueprint import FACE_CAMS, RIG
+
+    dataset = Insta360Dataset(Insta360Config())
+
+    def face_videos(entry: DatasetEntry) -> set[str]:
+        rules: set[str] = {rule for view in blueprint_views(dataset.catalog_blueprints(entry)[0]) for rule in content_rules(view)}
+        return rules & {video(RIG, cam) for cam in FACE_CAMS for video in (schema.video_path, schema.video_view_path)}
+
+    entry: DatasetEntry = server.client().create_dataset("insta360-mixed-faces-test")
+    entry.register([layer("base", FOUR), layer("base", THREE)], layer_name="base").wait()
+    entry.register([layer(CUBE_VIEW_LAYER, FOUR)], layer_name=CUBE_VIEW_LAYER).wait()
+    assert face_videos(entry) == {schema.video_path(RIG, cam) for cam in FACE_CAMS}, "one segment has no viewing faces"
+    entry.register([layer(CUBE_VIEW_LAYER, THREE)], layer_name=CUBE_VIEW_LAYER).wait()
+    assert face_videos(entry) == {schema.video_view_path(RIG, cam) for cam in FACE_CAMS}
+

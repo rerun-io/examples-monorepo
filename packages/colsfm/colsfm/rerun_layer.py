@@ -10,9 +10,19 @@ segment it was read from:
   that camera's sample in the segment's own `VideoStream`, so each frustum shows the picture the run read (the same
   camera, pinhole, video layout as the dataset's rig; nothing is copied or encoded again);
 - `/world/runs/<source>/points`: the sparse model, coloured from the images, static, so every layout shows the map;
-- `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
-  (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
-- `/world/runs/<source>/trajectory`: the whole optimised path as one line strip;
+- `/world/runs/<source>/points_growing`: the same points by when each is first observed
+  (`simplecv.rerun_growing_points.log_points_by_first_view`): one entity per `GROWING_BLOCK_S` block under `blocks` (one
+  row, at the block's last first view), and under `recent` one row per rig frame; a layout that opts in (the blocks as
+  they are, the recent rows over the last block) grows the cloud along the walk;
+- the optimised path in dataforge's names (`simplecv.rerun_walk_path.send_walk_path`): `/world/runs/<source>/trail`,
+  one segment per rig frame on `video_time` (a layout's visible time range makes the trail), green at the first rig
+  frame through yellow to red at the last; `trajectory`, the whole path in the same colours, one row at the last rig
+  frame; `endpoints/start` (with a ring, static) and `endpoints/end` (from the last rig frame on);
+- `/world/runs/<source>/rig_view`, for a catalog input whose segment has viewing faces (dataforge's Insta360 `cube_view`
+  layer, `pinhole/video_view`): a pose at every viewing frame, the prior re-anchored on the rig frames `rig` holds
+  (every input rig frame when the run wrote the every-frame export, else the registered ones;
+  `colsfm.frame_poses.view_rig_poses`, the every-frame export's rule), with each camera's frustum referencing its
+  viewing face of that frame. `rig` keeps its own rig frames;
 - `/world/runs/<source>/position_difference`: how far each optimised rig frame lies from the prior pose the run started
   from (the run's own `keyframes/frames_meta.json`), in metres, on `video_time`; left out for a run without that file;
 - the `colsfm` recording property: the run's headline numbers (registered images, points, reprojection, wall time).
@@ -31,9 +41,12 @@ import pycolmap
 import rerun as rr
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from simplecv.rerun_growing_points import log_points_by_first_view
+from simplecv.rerun_walk_path import send_walk_path
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
 from colsfm.frame_manifest import FrameSourceManifest
+from colsfm.frame_poses import ViewRigSource, view_rig_poses
 from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, KeyframeMeta, read_frames_meta
 from colsfm.rerun_log import camera_k_matrix
 from colsfm.run_lifecycle import KEYFRAME_DIR_NAME
@@ -160,36 +173,6 @@ def read_rrd_trajectory(rrd_path: Path, entity: str, timeline: str) -> tuple[Int
     return t_ns[keep], poses
 
 
-def log_points_by_first_view(
-    recording: rr.RecordingStream,
-    entity: str,
-    xyz: Float64[ndarray, "p 3"],
-    rgb: UInt8[ndarray, "p 3"],
-    seen_ns: Int64[ndarray, " p"],
-    timeline: str,
-) -> None:
-    """Log the cloud as one row per first-seen time (a rig frame), each holding the points that rig frame first observes.
-
-    Rows, not one chunk per point: 1.6 M points of a 1 km clip land in one row per rig frame. The radius is one static value.
-
-    Args:
-        recording: The layer's recording.
-        entity: The points entity.
-        xyz: Positions, metres.
-        rgb: Colours.
-        seen_ns: Per point, when it is first observed.
-        timeline: The segment's video timeline.
-    """
-    order: Int64[ndarray, " p"] = np.argsort(seen_ns, kind="stable")
-    times, counts = np.unique(seen_ns[order], return_counts=True)
-    recording.send_columns(
-        entity,
-        indexes=[rr.TimeColumn(timeline, duration=times.astype("timedelta64[ns]"))],
-        columns=rr.Points3D.columns(positions=xyz[order], colors=rgb[order]).partition(counts.tolist()),
-    )
-    recording.log(entity, rr.Points3D.from_fields(radii=rr.Radius.ui_points(1.5)), static=True)
-
-
 def log_position_difference(
     recording: rr.RecordingStream,
     entity: str,
@@ -278,28 +261,78 @@ def log_rig_trajectory(
     times_ns: Int64[ndarray, " n"],
     world_T_rig: Float64[ndarray, "n 4 4"],
     timeline: str,
-    color: tuple[int, int, int] = TRAJECTORY_RGB,
+    color: tuple[int, int, int] | None = None,
 ) -> None:
-    """Log `world_T_rig` over time at `<root>/rig` (as columns) and the whole path at `<root>/trajectory`.
+    """Log `world_T_rig` over time at `<root>/rig` (as columns) and the path (`simplecv.rerun_walk_path.send_walk_path`).
 
     Args:
         recording: The layer's recording.
         root: `/world/runs/<source>`.
-        times_ns: One timestamp per pose, nanoseconds on `timeline`.
+        times_ns: One timestamp per pose, nanoseconds on `timeline`, increasing.
         world_T_rig: The poses.
         timeline: The segment's video timeline.
-        color: Line colour.
+        color: One colour for the path in place of the walk gradient (a comparison source beside a colsfm run).
     """
     recording.send_columns(
         f"{root}/rig",
         indexes=[rr.TimeColumn(timeline, duration=times_ns.astype("timedelta64[ns]"))],
         columns=rr.Transform3D.columns(translation=world_T_rig[:, :3, 3], mat3x3=world_T_rig[:, :3, :3]),
     )
-    recording.log(f"{root}/trajectory", rr.LineStrips3D([world_T_rig[:, :3, 3]], colors=[color], radii=rr.Radius.ui_points(2.0)), static=True)
+    send_walk_path(root, times_ns, world_T_rig[:, :3, 3], color, timeline=timeline, recording=recording)
+
+
+def log_view_rig(
+    recording: rr.RecordingStream,
+    root: str,
+    frames_meta: FramesMeta,
+    manifest: FrameSourceManifest,
+    rig_t_ns: Int64[ndarray, " k"],
+    world_T_rig: Float64[ndarray, "k 4 4"],
+    source: ViewRigSource,
+) -> None:
+    """Log `<root>/rig_view`: the rig at every viewing frame (`view_rig_poses`), its cameras as under `<root>/rig`, and
+    under each camera's pinhole a reference to that camera's viewing face (`video_view`, beside the stream the run read)
+    at each frame.
+
+    Args:
+        recording: The layer's recording.
+        root: `/world/runs/<source>`.
+        frames_meta: The run's cameras and keyframes (which camera reads which stream).
+        manifest: The run's frame source: each camera's stream.
+        rig_t_ns: The stamps of the rig frames `rig` holds (every input rig frame with the every-frame export, else
+            the registered ones), increasing: the anchors.
+        world_T_rig: The run's poses at them.
+        source: The prior and the viewing frames.
+    """
+    view_t_ns, world_T_view = view_rig_poses(rig_t_ns, world_T_rig, source)
+    if len(view_t_ns) == 0:
+        return
+    index = [rr.TimeColumn(manifest.timeline, duration=view_t_ns.astype("timedelta64[ns]"))]
+    recording.send_columns(f"{root}/rig_view", indexes=index, columns=rr.Transform3D.columns(translation=world_T_view[:, :3, 3], mat3x3=world_T_view[:, :3, :3]))
+    by_name: dict[str, KeyframeMeta] = {keyframe.image_name: keyframe for keyframe in frames_meta.keyframes}
+    for stream in manifest.streams:
+        named: KeyframeMeta | None = next((by_name[name] for name in stream.names if name in by_name), None)
+        if named is None:
+            continue
+        camera: CameraParams = frames_meta.cameras[named.camera_params_id]
+        entity: str = f"{root}/rig_view/{camera.sensor_name}"
+        _log_camera(recording, entity, camera)
+        video_view: str | None = source.view_entities.get("/" + stream.entity.lstrip("/"))
+        if video_view is None:
+            continue
+        recording.log(f"{entity}/pinhole/video", rr.VideoFrameReference.from_fields(video_reference=video_view), static=True)
+        recording.send_columns(f"{entity}/pinhole/video", indexes=index, columns=rr.VideoFrameReference.columns_nanos(view_t_ns))
 
 
 def write_run_layer(
-    run_dir: Path, rrd_path: Path, *, segment: str, source: str = DEFAULT_SOURCE, timeline: str = "video_time", frames: FrameSourceManifest | None = None
+    run_dir: Path,
+    rrd_path: Path,
+    *,
+    segment: str,
+    source: str = DEFAULT_SOURCE,
+    timeline: str = "video_time",
+    frames: FrameSourceManifest | None = None,
+    view: ViewRigSource | None = None,
 ) -> LayerSummary:
     """Write one finished run as a layer of `segment`.
 
@@ -311,10 +344,16 @@ def write_run_layer(
         timeline: Timeline of the rig poses; the segment's video timeline.
         frames: The run's frame source, for a catalog input: the frusta then reference their pictures in the segment's
             video streams (`log_frame_references`).
+        view: With `frames`, the prior and the segment's viewing frames: the layer then carries `rig_view` (`log_view_rig`).
 
     Returns:
         What was written.
+
+    Raises:
+        ValueError: If ``view`` comes without ``frames`` (the viewing rig references the streams ``frames`` names).
     """
+    if view is not None and frames is None:
+        raise ValueError("a viewing rig needs the run's frame source (frames)")
     artifacts: RunArtifacts = read_run(run_dir, source)
     reconstruction: pycolmap.Reconstruction = artifacts.reconstruction
     registered: set[str] = {image.name for image in reconstruction.images.values() if image.has_pose}
@@ -330,6 +369,8 @@ def write_run_layer(
         _log_camera(recording, f"{root}/rig/{camera.sensor_name}", camera)
     if frames is not None:
         log_frame_references(recording, root, posed, frames)
+        if view is not None:
+            log_view_rig(recording, root, artifacts.frames_meta, frames, times_ns, world_T_rig, view)
     points: Float64[ndarray, "p 3"] = artifacts.points_xyz()
     colors: UInt8[ndarray, "p 3"] = artifacts.points_rgb().astype(np.uint8)
     recording.log(f"{root}/points", rr.Points3D(points, colors=colors, radii=rr.Radius.ui_points(1.5)), static=True)

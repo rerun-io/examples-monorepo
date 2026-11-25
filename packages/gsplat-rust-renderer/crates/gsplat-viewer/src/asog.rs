@@ -9,7 +9,6 @@
 //! Time: `t [s] = (frame - frame_origin) / frameRate` with the manifest's frameRate on a sequence timeline; on a
 //! duration or timestamp timeline `t = seconds - frame_origin / frameRate` ([`clip_seconds`]).
 use re_viewer::external::{re_log, re_log_types, re_renderer, re_sdk_types, re_viewer_context};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) const ARCHETYPE: &str = "AnimatedSogSplats3D";
@@ -86,10 +85,7 @@ impl Payload<'_> {
 
 /// Manifest facts by payload generation (row ids + threshold), kept while drawn; nothing is decoded here.
 #[derive(Default)]
-pub(crate) struct AsogCache {
-    frame: u64,
-    infos: HashMap<u64, (Result<Info, String>, u64)>,
-}
+pub(crate) struct AsogCache(crate::generation_cache::GenerationCache<Info>);
 
 impl re_viewer_context::Cache for AsogCache {
     fn name(&self) -> &'static str {
@@ -97,8 +93,7 @@ impl re_viewer_context::Cache for AsogCache {
     }
 
     fn begin_frame(&mut self) {
-        self.infos.retain(|_, (_, seen)| *seen + 1 >= self.frame);
-        self.frame += 1;
+        self.0.begin_frame();
     }
 
     fn purge_memory(&mut self) {
@@ -116,9 +111,8 @@ impl re_byte_size::MemUsageTreeCapture for AsogCache {
 impl AsogCache {
     /// Header + manifest only, once per `generation`.
     pub(crate) fn info(&mut self, generation: u64, bytes: &[u8]) -> Result<Info, String> {
-        let frame = self.frame;
-        let (info, seen) = self.infos.entry(generation).or_insert_with(|| {
-            let info = gsplat_core::asog::parse(bytes)
+        self.0.get_or_parse(generation, || {
+            gsplat_core::asog::parse(bytes)
                 .map(|c| {
                     let m = &c.manifest;
                     Info {
@@ -128,10 +122,7 @@ impl AsogCache {
                         max_degree: m.sh_n.as_ref().map_or(0, |sh| sh.bands().unwrap_or(4)),
                     }
                 })
-                .map_err(|e| e.to_string());
-            (info, frame)
-        });
-        *seen = frame;
-        info.clone()
+                .map_err(|e| e.to_string())
+        })
     }
 }

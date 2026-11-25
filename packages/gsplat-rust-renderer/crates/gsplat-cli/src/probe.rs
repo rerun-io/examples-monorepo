@@ -1,5 +1,9 @@
 //! Opt-in headless frame timing. Includes UI, compute, composite, and GPU completion;
-//! excludes screenshot readback. The production viewer has no probe hooks.
+//! excludes screenshot readback. The production viewer keeps one hook for it: a process-wide count of
+//! encoded splat frames (`gsplat_viewer::compute_encoded_frames`).
+//! With `--frames-in-flight` the probe queues frames like a swapchain instead of waiting for each one,
+//! so `encoded_frames` shows how many UI frames encoded a new splat image.
+//! Splat frames per second: `encoded_frames / measured_wall_seconds` (both cover the measured frames).
 use gsplat_viewer::application;
 
 use gsplat_cli::camera::CameraSpec;
@@ -7,25 +11,89 @@ use re_viewer::external::{eframe, egui, parking_lot::Mutex};
 use serde::Serialize;
 use std::time::Instant;
 
+/// Warm-up and measurement end on whole orbits of the kit recordings (300 frames at the 1/60 s step).
+const ORBIT_FRAMES: usize = 300;
+const WARMUP_MS: f64 = 10_000.0;
+const MEASURE_MS: f64 = 10_000.0;
+
 #[derive(Serialize)]
 struct Frame {
     ms: f64,
     camera: CameraSpec,
+    /// Streamed SOG: rows the views' last selections draw (summed over views) at this frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lod_rows: Option<u64>,
+}
+
+/// The last level selection of one view (Streamed SOG recordings only).
+#[derive(Serialize)]
+struct LodView {
+    #[serde(flatten)]
+    params: gsplat_core::lod::LodParams,
+    /// Rows drawn by the last selection and their split per level (index = level, 0 = finest).
+    #[serde(flatten)]
+    stats: gsplat_core::lod::SelectionStats,
+    select_us: f64,
+    /// Selections the view made since it was created (at most one per encoded frame with a new eye).
+    selections: u64,
+    /// Rows of the scene (all loaded levels) and of each level.
+    scene_rows: u32,
+    level_rows: Vec<u64>,
+}
+
+impl From<gsplat_viewer::LodSelectionReport> for LodView {
+    fn from(r: gsplat_viewer::LodSelectionReport) -> Self {
+        Self {
+            params: r.params,
+            stats: r.stats,
+            select_us: r.select_us,
+            selections: r.selections,
+            scene_rows: r.scene_rows,
+            level_rows: r.level_rows,
+        }
+    }
 }
 #[derive(Serialize)]
 struct Report<'a> {
     #[serde(flatten)]
     provenance: gsplat_cli::Provenance,
     adapter: String,
-    boundary: &'static str,
+    boundary: String,
     warmup_frames: usize,
     warmup_seconds: f64,
     minimum_camera_delta: f32,
     msaa_samples: u32,
+    frames_in_flight: usize,
+    /// Splat frames encoded during the measured frames, summed over every compute view and entity of
+    /// the process. With one splat entity, `encoded_frames / frames.len()` is the fraction of UI frames
+    /// that encode a new splat image (the others show the previous one). A frame counts when it is
+    /// encoded, also one that overflows its intersection capacity and keeps the previous image.
+    encoded_frames: u64,
+    /// Wall time from the end of the last warmup frame to the end of the last measured frame; unlike
+    /// the sum of `frames[].ms` it includes the time between frames.
+    measured_wall_seconds: f64,
     /// Compute-renderer GPU bytes at the last frame: shared scene uploads, per-view scratch and targets.
     gpu_bytes_scene: u64,
     gpu_bytes_views: u64,
+    /// 3D views that published an eye in the last frame (the timing camera is the first one).
+    views: usize,
+    /// Seconds from the start of `gsplat probe` to the end of the first UI frame that encoded a splat frame.
+    first_splat_frame_seconds: f64,
+    /// Peak resident set size of the process (Linux `VmHWM`), at the end of the run.
+    peak_rss_bytes: Option<u64>,
+    /// Streamed SOG recordings: the last selection of every view at the last frame; empty otherwise.
+    lod: Vec<LodView>,
+    /// Streamed SOG: mean over the measured frames of `frames[].lod_rows`.
+    lod_rows_mean: Option<f64>,
     frames: &'a [Frame],
+}
+
+/// Linux `VmHWM` of this process in bytes.
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024)
 }
 
 pub struct FrameProbe {
@@ -38,6 +106,13 @@ pub struct FrameProbe {
     measured_ms: f64,
     started: Instant,
     require_motion: bool,
+    frames_in_flight: usize,
+    submitted: std::collections::VecDeque<wgpu::SubmissionIndex>,
+    encoded_at_start: u64,
+    measured_from: Instant,
+    splats_seen: bool,
+    process_start: Instant,
+    first_splat_frame_seconds: f64,
 }
 impl FrameProbe {
     pub fn new(
@@ -45,6 +120,8 @@ impl FrameProbe {
         state: eframe::egui_wgpu::RenderState,
         size: egui::Vec2,
         require_motion: bool,
+        frames_in_flight: usize,
+        process_start: Instant,
     ) -> Self {
         let target = state.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("headless frame probe"),
@@ -70,9 +147,17 @@ impl FrameProbe {
             measured_ms: 0.0,
             started: Instant::now(),
             require_motion,
+            frames_in_flight,
+            submitted: std::collections::VecDeque::new(),
+            encoded_at_start: 0,
+            measured_from: Instant::now(),
+            splats_seen: false,
+            process_start,
+            first_splat_frame_seconds: f64::NAN,
         }
     }
-    /// Paint the full UI into a persistent offscreen target, then wait for the GPU.
+    /// Paint the full UI into a persistent offscreen target, then wait for the GPU to finish all but
+    /// `frames_in_flight` frames.
     pub fn end_frame(
         &mut self,
         ctx: &egui::Context,
@@ -80,6 +165,8 @@ impl FrameProbe {
         camera: gsplat_core::Camera,
         msaa_samples: u32,
         gpu_bytes: [u64; 2],
+        views: usize,
+        lod: Vec<gsplat_viewer::LodSelectionReport>,
     ) -> anyhow::Result<bool> {
         if let Some(first) = self.frames.first() {
             anyhow::ensure!(
@@ -123,26 +210,50 @@ impl FrameProbe {
                 .forget_lifetime();
             renderer.render(&mut pass, &shapes, &screen);
         }
-        self.state
-            .queue
-            .submit(buffers.into_iter().chain([encoder.finish()]));
-        self.state
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())?;
+        self.submitted.push_back(
+            self.state
+                .queue
+                .submit(buffers.into_iter().chain([encoder.finish()])),
+        );
+        while self.submitted.len() > self.frames_in_flight {
+            self.state.device.poll(wgpu::PollType::Wait {
+                submission_index: self.submitted.pop_front(),
+                timeout: None,
+            })?;
+        }
         let ms = self.started.elapsed().as_secs_f64() * 1000.0;
-        if self.warmup < 300 || self.warmup_ms < 5_000.0 || !self.warmup.is_multiple_of(300) {
+        // Read after egui's paint callbacks, which encode this frame's splats.
+        let encoded_frames = gsplat_viewer::compute_encoded_frames();
+        // The warm-up clock restarts at the first splat frame: a large scene loads for seconds with cheap
+        // UI-only frames, and a desktop GPU needs that long under load to settle its clock.
+        if !self.splats_seen && encoded_frames > 0 {
+            self.splats_seen = true;
+            self.first_splat_frame_seconds = self.process_start.elapsed().as_secs_f64();
+            self.warmup_ms = 0.0;
+            // A load longer than the warm-up: the frames measured so far drew no splats.
+            self.warmup += self.frames.len();
+            self.frames.clear();
+            self.measured_ms = 0.0;
+        }
+        if self.warmup < ORBIT_FRAMES
+            || self.warmup_ms < WARMUP_MS
+            || !self.warmup.is_multiple_of(ORBIT_FRAMES)
+        {
             self.warmup += 1;
             self.warmup_ms += ms;
+            self.encoded_at_start = encoded_frames;
+            self.measured_from = Instant::now();
             return Ok(false);
         }
         self.frames.push(Frame {
             ms,
             camera: CameraSpec::from_core(camera),
+            lod_rows: (!lod.is_empty()).then(|| lod.iter().map(|r| r.stats.rows).sum()),
         });
         self.measured_ms += ms;
-        if self.frames.len() < 300
-            || self.measured_ms < 10_000.0
-            || !self.frames.len().is_multiple_of(300)
+        if self.frames.len() < ORBIT_FRAMES
+            || self.measured_ms < MEASURE_MS
+            || !self.frames.len().is_multiple_of(ORBIT_FRAMES)
         {
             return Ok(false);
         }
@@ -164,16 +275,43 @@ impl FrameProbe {
             !self.require_motion || minimum_camera_delta > 1e-5,
             "camera held during a moving-view measurement"
         );
+        anyhow::ensure!(
+            self.splats_seen,
+            "no splat frame was encoded: the measured frames drew only the UI"
+        );
+        // With frames in flight a frame waits for an older submission, so its ms is the steady-state frame
+        // interval, not one frame's latency.
+        let completion = if self.frames_in_flight == 0 {
+            String::new()
+        } else {
+            format!(
+                " of the frame {} submissions back (swapchain-like)",
+                self.frames_in_flight
+            )
+        };
         let report = Report {
             provenance: gsplat_cli::Provenance::capture(),
             adapter: self.state.adapter.get_info().name,
-            boundary: "headless UI step + compute + Rerun composite + egui paint + GPU completion; no pixel readback; no idle wait",
+            boundary: format!(
+                "headless UI step + compute + Rerun composite + egui paint + GPU completion{completion}; no pixel readback; no idle wait"
+            ),
             warmup_frames: self.warmup,
             warmup_seconds: self.warmup_ms / 1000.0,
             minimum_camera_delta,
             msaa_samples,
+            frames_in_flight: self.frames_in_flight,
+            encoded_frames: encoded_frames - self.encoded_at_start,
+            measured_wall_seconds: self.measured_from.elapsed().as_secs_f64(),
             gpu_bytes_scene: gpu_bytes[0],
             gpu_bytes_views: gpu_bytes[1],
+            views,
+            first_splat_frame_seconds: self.first_splat_frame_seconds,
+            peak_rss_bytes: peak_rss_bytes(),
+            lod_rows_mean: (!lod.is_empty()).then(|| {
+                self.frames.iter().filter_map(|f| f.lod_rows).sum::<u64>() as f64
+                    / self.frames.len() as f64
+            }),
+            lod: lod.into_iter().map(LodView::from).collect(),
             frames: &self.frames,
         };
         std::fs::write(&self.path, serde_json::to_vec_pretty(&report)?)?;
@@ -207,11 +345,20 @@ pub struct Args {
     /// Reject a timing run if any adjacent measured cameras are identical.
     #[arg(long)]
     require_motion: bool,
+    /// Queue up to this many frames before waiting for the oldest, like a swapchain; 0 waits for every frame.
+    #[arg(long, default_value_t = 0)]
+    frames_in_flight: usize,
+    /// Accept a recording with several 3D views (the first view's eye is the timing camera).
+    #[arg(long)]
+    multi_view: bool,
 }
 struct ProbeView {
+    /// The view's id (Debug text): a stable order across frames, so the timing camera stays the same view.
+    view: String,
     camera: gsplat_core::Camera,
     msaa_samples: u32,
     gpu_bytes: [u64; 2],
+    lod: Vec<gsplat_viewer::LodSelectionReport>,
 }
 static CAMERAS: Mutex<Vec<ProbeView>> = Mutex::new(Vec::new());
 #[derive(Default)]
@@ -231,6 +378,7 @@ impl ViewContextSystem for ProbeEye {
     ) {
         if let Some(camera) = gsplat_viewer::camera_from_view(ctx, query) {
             CAMERAS.lock().push(ProbeView {
+                view: format!("{:?}", query.view_id),
                 camera,
                 msaa_samples: re_renderer::ViewBuilder::main_target_default_msaa_state(
                     ctx.render_ctx().render_config(),
@@ -238,11 +386,13 @@ impl ViewContextSystem for ProbeEye {
                 )
                 .count,
                 gpu_bytes: gsplat_viewer::compute_gpu_bytes(ctx),
+                lod: gsplat_viewer::compute_lod_selections(ctx),
             });
         }
     }
 }
 pub fn run(cli: Args) -> anyhow::Result<()> {
+    let process_start = Instant::now();
     anyhow::ensure!(
         cli.rrd.is_file(),
         "recording does not exist: {}",
@@ -309,14 +459,26 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
         state.get().expect("created device").clone(),
         cli.window_size,
         cli.require_motion,
+        cli.frames_in_flight,
+        process_start,
     );
     let started = Instant::now();
     loop {
         CAMERAS.lock().clear();
         probe.started = Instant::now();
         harness.step();
-        let cameras = std::mem::take(&mut *CAMERAS.lock());
-        anyhow::ensure!(cameras.len() <= 1, "the frame probe requires one 3D view");
+        let mut cameras = std::mem::take(&mut *CAMERAS.lock());
+        anyhow::ensure!(
+            cli.multi_view || cameras.len() <= 1,
+            "the frame probe requires one 3D view (or --multi-view)"
+        );
+        let views = cameras.len();
+        cameras.sort_by(|a, b| a.view.cmp(&b.view));
+        // The selections are process-wide (every view): take them from the last view's sample.
+        let lod = cameras
+            .last_mut()
+            .map(|v| std::mem::take(&mut v.lod))
+            .unwrap_or_default();
         let Some(view) = cameras.first() else {
             anyhow::ensure!(
                 started.elapsed().as_secs() < 120,
@@ -330,6 +492,8 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
             view.camera,
             view.msaa_samples,
             view.gpu_bytes,
+            views,
+            lod,
         )? {
             harness
                 .render()
