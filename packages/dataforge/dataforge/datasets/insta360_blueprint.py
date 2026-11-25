@@ -15,10 +15,10 @@ What the 3D views lean on, beside the runs themselves:
   not move the eye (0.42). slam-rs writes it with the rig (``slam_rs.follow_frame``). No grid: the built-in one lies on
   the view origin's plane, which is not the floor.
 
-What accumulates is logged once at its own time and shown through a cursor window: each slam-rs run's path a segment
-a pose (``schema.trail_path``) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in
-the follow view, and the colsfm cloud by first view (``points_growing``) since the start, so it grows along the walk.
-Each slam-rs run logs its whole path (``schema.trajectory_path``) once, at the last frame.
+What accumulates is logged once at its own time and shown through a cursor window: each run's path a segment a pose
+(``schema.trail_path``) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in the
+follow view, and the colsfm cloud by first view (``points_growing``) since the start, so it grows along the walk. Each
+run logs its whole path (``schema.trajectory_path``) once, at the last frame.
 """
 
 from __future__ import annotations
@@ -243,10 +243,12 @@ def slam_overrides(*, close: bool) -> Overrides:
 
 
 def colsfm_overrides(*, close: bool) -> Overrides:
-    """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk, the path and the cube rig in
-    blue, each face's picture in its frustum."""
+    """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk, the trail (the whole path at
+    the end) and the cube rig in blue, each face's picture in its frustum."""
+    window_s: float = FOLLOW_PATH_WINDOW_S if close else OVERVIEW_PATH_WINDOW_S
     return {
-        f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, 2.0),
+        schema.trail_path(schema.COLSFM_SOURCE): [blueprints.cursor_window(window_s), stroke(COLSFM_COLOR, 2.0)],
+        schema.trajectory_path(schema.COLSFM_SOURCE): stroke(COLSFM_COLOR, 2.0),
         f"{COLSFM}/points_growing": [blueprints.cursor_window(None), cloud(1.5 if close else 2.0)],
         **face_frusta(0.35 if close else 0.6),
     }
@@ -264,7 +266,8 @@ def comparison_overrides(*, close: bool) -> Overrides:
     return {
         schema.trail_path(schema.SLAM_RS_SOURCE): [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, wide)],
         schema.trajectory_path(schema.SLAM_RS_SOURCE): stroke(SLAM_COLOR, wide),
-        f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, narrow),
+        schema.trail_path(schema.COLSFM_SOURCE): [blueprints.cursor_window(window_s), stroke(COLSFM_COLOR, narrow)],
+        schema.trajectory_path(schema.COLSFM_SOURCE): stroke(COLSFM_COLOR, narrow),
         # The final map only: while the run goes on slam-rs draws its map as blocks under ``map/points/blocks``, which
         # no override can reach (exact paths only), so they keep their image colours until the final draw replaces them.
         f"{SLAM}/map/points": cloud(1.5, shade(SLAM_COLOR, CLOUD_SHADE)),

@@ -136,11 +136,13 @@ def test_each_source_keeps_one_colour_in_every_tab() -> None:
     layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
     for view in layout["SLAM"][:2]:
         assert stroke_color(view, schema.trail_path(schema.SLAM_RS_VIO_SOURCE)) == packed(SLAM_COLOR)
-    assert stroke_color(layout["colsfm"][1], f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
+    for entity in (schema.trail_path(schema.COLSFM_SOURCE), schema.trajectory_path(schema.COLSFM_SOURCE)):
+        assert stroke_color(layout["colsfm"][1], entity) == packed(COLSFM_COLOR)
     for view in layout["Comparison"][:2]:
         assert stroke_color(view, schema.trail_path(schema.SLAM_RS_SOURCE)) == packed(SLAM_COLOR)
         assert stroke_color(view, schema.trajectory_path(schema.SLAM_RS_SOURCE)) == packed(SLAM_COLOR)
-        assert stroke_color(view, f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
+        assert stroke_color(view, schema.trail_path(schema.COLSFM_SOURCE)) == packed(COLSFM_COLOR)
+        assert stroke_color(view, schema.trajectory_path(schema.COLSFM_SOURCE)) == packed(COLSFM_COLOR)
         tints: dict[str, tuple[int, ...]] = {}
         for entity in (f"{SLAM}/map/points", f"{COLSFM}/points"):
             points: rr.Points3D = next(item for item in override(view, entity) if isinstance(item, rr.Points3D))
@@ -205,7 +207,7 @@ def test_the_run_sources_name_the_entities_their_producers_write() -> None:
 WRITTEN: dict[str, set[str]] = {
     schema.SLAM_RS_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "map", "keyframes", "loops", "gba", "pgo", "pose_graph"},
     schema.SLAM_RS_VIO_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "landmarks", "window", "marginalized"},
-    schema.COLSFM_SOURCE: {"rig", "points", "points_growing", TRAJECTORY, "position_difference"},
+    schema.COLSFM_SOURCE: {"rig", "rig_view", "points", "points_growing", TRAIL, TRAJECTORY, ENDPOINTS, "position_difference"},
 }
 """The first entity under each run that its writers produce (slam-rs ``vio_log``, ``catalog_layer``, ``map_loops``,
 ``gba_log``; ``colsfm.rerun_layer``); the path leaves are :mod:`simplecv.rerun_walk_path`'s."""
@@ -220,3 +222,18 @@ def test_every_run_override_targets_an_entity_a_writer_produces() -> None:
                 parts: list[str] = str(entity).removeprefix("/world/runs/").split("/")
                 if str(entity).startswith("/world/runs/"):
                     assert parts[1] in WRITTEN[parts[0]], (name, view.name, str(entity))
+
+
+def test_every_run_trail_a_tab_shows_is_drawn_through_a_cursor_window() -> None:
+    """A trail is a segment a pose: without a cursor window a view draws only the latest one, and the whole path comes
+    only at the last frame, so a run would show no path through the walk."""
+    shown: dict[str, tuple[str, ...]] = {
+        "SLAM": (schema.SLAM_RS_VIO_SOURCE, schema.SLAM_RS_SOURCE),
+        "colsfm": (schema.COLSFM_SOURCE,),
+        "Comparison": (schema.SLAM_RS_SOURCE, schema.COLSFM_SOURCE),
+    }
+    layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
+    for name, sources in shown.items():
+        for view in layout[name][:2]:
+            for source in sources:
+                assert any(isinstance(item, rrb.VisibleTimeRanges) for item in override(view, schema.trail_path(source))), (name, view.name, source)
