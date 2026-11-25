@@ -288,7 +288,7 @@ from colsfm.config import PoseGraphConfig
 from colsfm.database import ImagePair, read_keypoints_batch
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.geometry import MICROSECONDS_PER_SECOND
-from colsfm.loop_pairs import required_image_pairs
+from colsfm.loop_pairs import observation_pairs, required_image_pairs
 from colsfm.loop_pose import (
     BEARING_CACHE_IMAGES,
     DEFAULT_RIG_POSE_CONFIG,
@@ -424,6 +424,14 @@ class LoopClosureConfig:
     bound must keep every rig pair that can see common structure. On KITTI 06 the shortlisted rig pairs reach 13.4 m
     (ground truth), and their two-view inliers still agree with ground truth (81 % within 4 px beyond 10 m); 30 m is
     over twice that."""
+    covisibility_depth_quantile: float = 0.9
+    """Which quantile of the stage-4 pairs' median scene depth is the covisibility radius
+    (`colsfm.loop_covisibility.covisibility_radius_m`). Rig pairs beyond `prior_distance_bound` but within that radius
+    are matched for the mapper only. One default, not a profile key: 0.9 gives 26.8 m on TartanAir WesternDesertTown
+    (keeps 99.6 % of its far right loop inliers) and 5.2 m on Casa Loma 007 (still drops 99.2 % of its empty far pairs);
+    0.75 kept 59 % of WesternDesertTown's."""
+    covisibility_sample_pairs: int = 2000
+    """Most stage-4 pairs read to learn the covisibility radius (`colsfm.database.read_inlier_sample`)."""
     use_stored_weights: bool = False
     """When True the edge information is `loop_edge_information(inliers, loop_residual_weight)`
     instead of the identity. The blob's own solver discards the stored value; measured
@@ -600,6 +608,10 @@ class LoopSearchPlan:
     which is what makes one matcher load serve the whole stage."""
     groups: tuple[tuple[int, tuple[RetrievalHit, ...]], ...]
     """The measurement's own units: one source rig frame and its shortlisted hits."""
+    mapper_only_rig_pairs: tuple[tuple[int, int], ...]
+    """Shortlisted `(source rig id, target rig id)` pairs beyond `prior_distance_bound` but inside the covisibility
+    radius, grouped by source rig frame as `rig_pairs` is. Their observation pairs are in `image_pairs` so the mapper
+    gets their matches; they are never measured, because no rig pair beyond the bound can give an edge."""
     queried_by: Mapping[tuple[int, int], frozenset[int]]
     """Per unordered rig pair, the query rig frames that kept it among their candidates; each keeps only its best measured pair."""
     geometry: RigGeometry
@@ -656,6 +668,7 @@ def plan_loop_search(
     index: RetrievalIndex,
     config: LoopClosureConfig,
     keypoints: Mapping[int, Keypoints] | None = None,
+    covisibility_radius_m: float = 0.0,
 ) -> LoopSearchPlan:
     """Decide which rig pairs to measure and which image pairs that needs, matching nothing.
 
@@ -671,6 +684,8 @@ def plan_loop_search(
         index: Retrieval index over the same keyframe ids.
         config: Gates and thresholds.
         keypoints: Keypoint pixels per image id, already read; read here when None.
+        covisibility_radius_m: Prior distance up to which a rig pair beyond `prior_distance_bound` is still matched,
+            for the mapper only (`colsfm.loop_covisibility`); 0.0 matches nothing beyond the bound.
 
     Returns:
         The plan, which `verify_loop_plan` turns into edges.
@@ -699,13 +714,24 @@ def plan_loop_search(
     )
     pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
     rig_index: RigFrameIndex = rig_frame_index(frames_meta)
-    shortlist = _within_prior_bound(shortlist, rig_index, config, counters)
+    bounded: tuple[Shortlist, dict[tuple[int, int], RetrievalHit]] = _within_prior_bound(shortlist, rig_index, config, covisibility_radius_m, counters)
+    shortlist = bounded[0]
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)
     rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
+    mapper_only: tuple[tuple[int, int], ...] = tuple(
+        (source_rig_id, hit.target_rig_id) for source_rig_id, hits in _group_by_source_rig(bounded[1]) for hit in hits
+    )
+    measured_pairs: tuple[ImagePair, ...] = required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs)
+    mapper_pairs: set[ImagePair] = {
+        normalise_pair(observation.anchor, observation.observed)
+        for rig_pair in mapper_only
+        for observation in observation_pairs(rig_index, empty_geometry, pixels, rig_pair)
+    }
     return LoopSearchPlan(
         config=config,
-        image_pairs=required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs),
+        image_pairs=tuple(sorted(set(measured_pairs) | mapper_pairs)),
         groups=tuple(groups),
+        mapper_only_rig_pairs=mapper_only,
         queried_by=shortlist.queried_by,
         geometry=empty_geometry,
         rig_index=rig_index,
@@ -747,8 +773,10 @@ def prior_distance_bound(config: LoopClosureConfig, path_m: float) -> float:
     return reach_m + allowance_m
 
 
-def _within_prior_bound(shortlist: Shortlist, rig_index: RigFrameIndex, config: LoopClosureConfig, counters: FunnelCounters) -> Shortlist:
-    """Drop the shortlisted rig pairs the prior puts beyond `prior_distance_bound`.
+def _within_prior_bound(
+    shortlist: Shortlist, rig_index: RigFrameIndex, config: LoopClosureConfig, covisibility_radius_m: float, counters: FunnelCounters
+) -> tuple[Shortlist, dict[tuple[int, int], RetrievalHit]]:
+    """Split off the shortlisted rig pairs the prior puts beyond `prior_distance_bound`.
 
     Applied after the candidate cap and the deduplication, as pure subtraction: a freed slot is not refilled, so the plan
     holds a subset of the unbounded plan's rig pairs, in the same order.
@@ -757,10 +785,12 @@ def _within_prior_bound(shortlist: Shortlist, rig_index: RigFrameIndex, config: 
         shortlist: The deduplicated shortlist.
         rig_index: Rig frames in capture order with their prior poses.
         config: The gates and the drift allowance.
-        counters: Diagnostic counters; `rejected_by_prior_bound` is added to.
+        covisibility_radius_m: Prior distance up to which a pair beyond the bound is kept for the mapper only.
+        counters: Diagnostic counters; `rejected_by_prior_bound` and `matched_for_mapper_only` are added to.
 
     Returns:
-        The shortlist without those rig pairs, `queried_by` included.
+        The shortlist without the rig pairs beyond the bound (`queried_by` included), and the hits of those beyond the
+        bound but inside the covisibility radius.
     """
     centres_xyz: Float64[ndarray, "n 3"] = np.asarray(
         [rig_index.world_T_rig[rig_id].translation for rig_id in rig_index.sequence], dtype=np.float64
@@ -769,6 +799,7 @@ def _within_prior_bound(shortlist: Shortlist, rig_index: RigFrameIndex, config: 
     path_from_start_m: Float64[ndarray, "n"] = np.concatenate([np.zeros(1), np.cumsum(steps_m)])
     position_of: dict[int, int] = {rig_id: position for position, rig_id in enumerate(rig_index.sequence)}
     kept: dict[tuple[int, int], RetrievalHit] = {}
+    mapper_only: dict[tuple[int, int], RetrievalHit] = {}
     for pair, hit in shortlist.hits.items():
         source: int = position_of[hit.source_rig_id]
         target: int = position_of[hit.target_rig_id]
@@ -776,8 +807,11 @@ def _within_prior_bound(shortlist: Shortlist, rig_index: RigFrameIndex, config: 
         path_m: float = float(abs(path_from_start_m[target] - path_from_start_m[source]))
         if distance_m <= prior_distance_bound(config, path_m):
             kept[pair] = hit
-    counters.rejected_by_prior_bound += len(shortlist.hits) - len(kept)
-    return Shortlist(hits=kept, queried_by={pair: voters for pair, voters in shortlist.queried_by.items() if pair in kept})
+        elif distance_m <= covisibility_radius_m:
+            mapper_only[pair] = hit
+    counters.rejected_by_prior_bound += len(shortlist.hits) - len(kept) - len(mapper_only)
+    counters.matched_for_mapper_only += len(mapper_only)
+    return Shortlist(hits=kept, queried_by={pair: voters for pair, voters in shortlist.queried_by.items() if pair in kept}), mapper_only
 
 
 def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosureResult:

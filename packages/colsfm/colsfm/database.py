@@ -37,7 +37,7 @@ from typing import Final, TypeAlias
 
 import numpy as np
 import pycolmap
-from jaxtyping import Float, Float32, Int64, UInt8
+from jaxtyping import Float, Float32, Int64, UInt8, UInt32
 from numpy import ndarray
 
 from colsfm.cameras import colmap_cameras
@@ -442,6 +442,30 @@ def pairs_with_matches(database_path: Path, pairs: Sequence[ImagePair]) -> set[I
     """
     with pycolmap.Database.open(database_path) as database:
         return {pair for pair in pairs if database.exists_matches(pair[0], pair[1])}
+
+
+def read_inlier_sample(database_path: Path, max_pairs: int) -> dict[ImagePair, UInt32[ndarray, "n_inliers 2"]]:
+    """The two-view inliers of at most `max_pairs` image pairs, every k-th pair with inliers in pair-id order.
+
+    The loop stage learns the scene depth from the pairs stage 4 verified (`colsfm.loop_covisibility`); a deterministic
+    stride keeps the read bounded on long clips (86,704 overlap pairs on Casa Loma 007) and spreads it over the run.
+
+    Args:
+        database_path: An existing database.
+        max_pairs: Most pairs to read; at least 1.
+
+    Returns:
+        Inlier rows per pair `(min id, max id)`, columns in that id order.
+    """
+    with _read_only_connection(database_path) as connection:
+        pair_ids: list[int] = [row[0] for row in connection.execute("SELECT pair_id FROM two_view_geometries WHERE rows > 0 ORDER BY pair_id")]
+        stride: int = max(1, -(-len(pair_ids) // max(max_pairs, 1)))
+        sample: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = {}
+        for pair_id in pair_ids[::stride]:
+            num_rows, blob = connection.execute("SELECT rows, data FROM two_view_geometries WHERE pair_id = ?", (pair_id,)).fetchone()
+            image_ids: tuple[int, int] = pycolmap.pair_id_to_image_pair(pair_id)
+            sample[(int(image_ids[0]), int(image_ids[1]))] = np.frombuffer(blob, dtype=np.uint32).reshape(num_rows, 2).copy()
+    return sample
 
 
 def pair_inlier_counts(database_path: Path, pairs: Sequence[ImagePair]) -> dict[ImagePair, int]:

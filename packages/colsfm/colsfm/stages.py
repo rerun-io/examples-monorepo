@@ -31,6 +31,7 @@ from colsfm.database import (
     create_database,
     pairs_with_matches,
     read_descriptors_from_database,
+    read_inlier_sample,
     read_keypoints_batch,
 )
 from colsfm.export import (
@@ -56,6 +57,7 @@ from colsfm.loop_closure import (
     plan_loop_search,
     verify_loop_plan,
 )
+from colsfm.loop_covisibility import covisibility_radius_m
 from colsfm.loop_mapper_check import pose_checked_inliers
 from colsfm.mapping import MappingOptions, MappingResult, run_mapping
 from colsfm.matching import (
@@ -67,6 +69,7 @@ from colsfm.pairs import pair_mix, select_pairs
 from colsfm.pose_graph import PoseGraphEdge, PoseGraphResult, RigNode, sequential_edges, solve_pose_graph
 from colsfm.reconstruction import PosedModel, build_reconstruction, gauge_camera_params_id
 from colsfm.retrieval import RetrievalIndex, build_retrieval_index
+from colsfm.rig_geometry import rig_frame_index, rig_geometry
 from colsfm.run_config import LoopPairsInMapper, PipelineOptions, SelectionOptions
 from colsfm.run_lifecycle import (
     LOOP_EDGES_NAME,
@@ -427,7 +430,15 @@ def run_loop_closure_stage(
     # the batch match, and on RoboCap they are 148 MB.
     keypoints: dict[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64)
 
-    plan: LoopSearchPlan = plan_loop_search(frames_meta, database_path, index, config, keypoints)
+    # Learned before the loop stage matches anything: the database holds stage 4's pairs only.
+    radius_m: float = covisibility_radius_m(
+        read_inlier_sample(database_path, config.covisibility_sample_pairs),
+        rig_frame_index(frames_meta),
+        rig_geometry(frames_meta),
+        keypoints,
+        config.covisibility_depth_quantile,
+    )
+    plan: LoopSearchPlan = plan_loop_search(frames_meta, database_path, index, config, keypoints, covisibility_radius_m=radius_m)
     # Presence, not count: a pair stage 4 matched and found nothing in is finished work,
     # and matching it again would cost a matcher call to produce the same nothing. Most
     # of the plan is stage 4's own consecutive and stereo pairs (8 400 of 14 443 on
@@ -436,7 +447,9 @@ def run_loop_closure_stage(
     missing_pairs: list[ImagePair] = [pair for pair in plan.image_pairs if pair not in present]
     print(
         f"[colsfm] loop closure: {len(plan.rig_pairs)} shortlisted rig pairs need "
-        f"{len(plan.image_pairs)} image pairs, {len(present)} already matched, {len(missing_pairs)} to match"
+        f"{len(plan.image_pairs)} image pairs, {len(present)} already matched, {len(missing_pairs)} to match; "
+        f"{len(plan.mapper_only_rig_pairs)} more rig pairs beyond the prior bound but inside the {radius_m:.1f} m covisibility radius "
+        "matched for the mapper only"
     )
     if missing_pairs:
         match_pairs(database_path, missing_pairs, matching_options, frames)
@@ -467,7 +480,7 @@ def run_loop_closure_stage(
         f"[colsfm] loop closure: {len(edges)} loop edges | {result.diagnostics.counters.queries} queries, "
         f"{result.diagnostics.counters.candidates_retrieved} retrieved, {result.diagnostics.counters.rejected_by_score} below score, "
         f"{result.diagnostics.counters.rejected_by_time} inside the {result.diagnostics.min_time_gap_seconds:.2f}s gap, "
-        f"{result.diagnostics.counters.rejected_by_prior_bound} rig pairs beyond the prior bound, "
+        f"{result.diagnostics.counters.rejected_by_prior_bound} rig pairs beyond the prior bound and the covisibility radius, "
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified, {result.diagnostics.counters.not_best} not the best of their rig frame, "
         f"{result.diagnostics.counters.below_good_loop} best below {plan.config.good_loop_threshold} inliers, over {len(plan.image_pairs)} image pairs; "

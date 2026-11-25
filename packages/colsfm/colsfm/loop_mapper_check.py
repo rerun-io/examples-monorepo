@@ -66,7 +66,7 @@ def pose_checked_inliers(
     """
     observed_pairs: set[ImagePair] = {
         normalise_pair(observation.anchor, observation.observed)
-        for rig_pair in plan.rig_pairs
+        for rig_pair in (*plan.rig_pairs, *plan.mapper_only_rig_pairs)
         for observation in observation_pairs(plan.rig_index, plan.geometry, plan.keypoints, rig_pair)
     }
     # `low_T_high` per unordered rig pair: `source_T_target` read with the lower rig id as source.
