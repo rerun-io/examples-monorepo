@@ -499,8 +499,11 @@ DATAFORGE_OUTPUT_ROOT=<rrd> pixi run -e dataforge --frozen dataforge-convert tar
 ### Insta360 (insta360)
 
 Local device captures: each `.insv` clip directly in `--root` is one sequence. The base is the chunk stream of
-`insta360_io.InsvReader` (`packages/insta360-io`), sent as it comes: the two HEVC lens tracks remuxed sample for
-sample in `Mp4Reader`'s chunk shapes, the cameras, exposure and IMU; dataforge adds only its exoego tags. Each lens is a
+`insta360_io.InsvReader` (`packages/insta360-io`): the cameras, exposure and IMU as the reader gives them, and each
+lens re-encoded to AV1 at most 1920 pixels wide (one halving of the X5's 3840; an Insta360 exception to the ~3 MP
+cap, `datasets/insta360_lens_video.py`), its camera scaled to that size with `c' = (c + 0.5) s - 0.5`; lens `k` is
+`cam_0k` whichever track holds it (`stream_id`). dataforge adds its exoego tags. The panorama and cube layers read
+their pixels and their cameras from the base. Each lens is a
 camera with its factory model, `mei_v6` (`mei_v3` without a V6 string), posed in the IMU frame through the device
 profile. What the file does not carry (IMU-to-rig rotation, lever arm, frame-time model, readout, IMU noise) is a
 measured record in insta360-io's `insta360_profiles.toml`, chosen by the clip's camera type, lens type, frame
@@ -527,14 +530,18 @@ Viewer layout (`datasets/insta360_blueprint.py`): three tabs with one skeleton, 
 and the source's own pictures. **SLAM**: slam-rs's map and VIO path, both lenses with the tracked keypoints and the
 people mask, the IMU as a strip. **colsfm**: the cloud growing with the walk and the six cube faces with their masks.
 **Comparison**: both paths, rigs and clouds in one world, and the colsfm layer's `position_difference` (metres from
-the slam-rs prior). slam-rs is orange and colsfm blue in every tab; a `--panorama` layer adds a fourth tab. Each follow
-view is rooted at the level follow frame of the run its tab shows, `/world/runs/<run>/follow` (slam-rs writes one per run:
-the run's position, turned about the world's up axis towards the walk), so the horizon holds while the stick swings:
-the causal VIO in the SLAM tab, the final path (colsfm's prior) in colsfm and Comparison; on clip 007 the two part by
-16 m at 65 s. Each run's floor is `/world/runs/<run>/floor_grid`. The runs draw their rigs in the dataset's own layout (camera, `pinhole`,
-picture): slam-rs's live rig and its window keyframes reference the lens frames, colsfm's cube rig the face frames
-(`VideoFrameReference` into the base's `VideoStream`s, nothing encoded again). The overviews frame the walk when the catalog dataset holds one walked
-segment: run `dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.
+the slam-rs prior). Each path is a trail over the last 8 s of the cursor, and its whole path and slam-rs's loops show
+only from the last frame on; the raw slam-rs run and colsfm run green to red along the walk, with start and end dots,
+and in Comparison slam-rs is flat grey. The overviews turn slowly (one turn in 75 s). With the `--cube-view` layer the
+colsfm tab plays the faces at every frame on colsfm's `rig_view`. A `--panorama` layer adds a fourth tab. Each follow
+view is rooted at the level follow frame of the run its tab shows, `/world/runs/<run>/follow` (slam-rs writes one per
+run: the run's position, turned about the world's up axis towards the walk), so the horizon holds while the stick
+swings: the causal VIO in the SLAM tab, the final path (colsfm's prior) in colsfm and Comparison; on clip 007 the two
+part by 16 m at 65 s. No view draws a grid or a floor. The runs draw their rigs in the dataset's own layout (camera,
+`pinhole`, picture): slam-rs's live rig references the lens frames (its window frames show their frusta, not their
+pictures), colsfm's cube rig the face frames (`VideoFrameReference` into the base's `VideoStream`s, nothing encoded
+again). The overviews frame the walk when the catalog dataset holds one walked segment: run
+`dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.
 
 Poses to the panorama (for colsfm / COLMAP `EQUIRECTANGULAR`). slam-rs tracks the two lens cameras and reports the
 rig pose `T_world_imu` (the rig reference is `imu_00`). The panorama frame has camera 0's axes and its origin at the
@@ -631,7 +638,7 @@ is a nominal-rate fiction for such a file.
 | `harmony4d` | one Harmony4D sequence, read in place from its release zip (one zip per scene and split, fetched from the Hub) | **four** rrds: `base` with ~20 GoPros (OPENCV_FISHEYE, 4K JPEG frames as 1080p AV1) and, when worn, both Aria glasses' rgb/slam cameras (upright) and per-frame poses; `body_pose` (SMPL parameters, SMPL-45 joints, COCO-17 keypoints in COCO-133 per person), `body_mesh` (shipped SMPL vertices, 10 Hz), `projections` (through each full lens, plus the shipped boxes); see [docs/harmony4d.md](docs/harmony4d.md) |
 | `gsi-six-view` | one GSI episode, its two shipped rrds fetched through GSI's API | exoego:v2: `base` (rig, six H.265 views with GSI's pinholes in RDF, SLAM pose and path), `pose` (COCO-133 hands, wrists, confidence, MANO records), `hand_mesh`, `projections`; see [docs/gsi-six-view.md](docs/gsi-six-view.md) |
 | `vslam-lab` | one VSLAM-LAB benchmark sequence, read from a local VSLAM-LAB tree | up to **three** rrds: `base` with one AV1 video per camera, depth as the sensor's 16-bit PNGs (`EncodedDepthImage`) where the benchmark has it, the IMU where it has one; `gt` with world_T_body, its path and trail, and the root `ViewCoordinates`; `sensor_metadata` with the IMU noise model |
-| `insta360` | one Insta360 dual-fisheye `.insv` clip in `--root` | `base` with both lens tracks remuxed as H.265 `VideoStream`s (no re-encode), each lens a `mei_v6` camera with its readout and exposure, the IMU as the rig reference; with `--panorama` also `panorama`, the RGB AV1 equirectangular panorama at twice the lens width (3840x1920 at 1920), flow seam on CUDA, on the frame times |
+| `insta360` | one Insta360 dual-fisheye `.insv` clip in `--root` | `base` with both lenses as AV1 `VideoStream`s at most 1920 wide, each lens a `mei_v6` camera with its readout and exposure, the IMU as the rig reference; with `--panorama` also `panorama`, the RGB AV1 equirectangular panorama at twice the lens width (3840x1920 at 1920), flow seam on CUDA, on the frame times |
 
 A config's `command` is its CLI subcommand; its `name` is the catalog dataset
 and the prefix of every recording id. They are equal for robocap, selfcap and

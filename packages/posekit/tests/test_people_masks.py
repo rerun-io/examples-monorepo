@@ -113,8 +113,8 @@ def test_selection_windows_group_frames_that_share_a_decode_run() -> None:
     from posekit.ops.people_masks import selection_windows
 
     keyframes: list[bool] = [i % 4 == 0 for i in range(16)]
-    windows = selection_windows(keyframes, [1, 2, 9, 15])
-    assert [(w.first, w.indices) for w in windows] == [(0, (1, 2)), (8, (9,)), (12, (15,))]
+    windows = selection_windows(keyframes, [15, 2, 9, 1, 2])  # unsorted, with a repeat
+    assert [(run.start, run.stop, run.wanted.tolist()) for run in windows] == [(0, 3, [1, 2]), (8, 10, [9]), (12, 16, [15])]
 
 
 def test_selection_windows_rejects_out_of_range_and_missing_keyframe() -> None:

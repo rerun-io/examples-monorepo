@@ -353,6 +353,14 @@ def test_a_zero_frame_limit_and_reads_outside_the_rig_raise_instead_of_panicking
         rig.gops(2)
 
 
+@pytest.mark.integration
+def test_the_reader_refuses_to_emit_the_track_size_videos_beside_halved_cameras(insv_clip: Path) -> None:
+    """The cameras at the stored size describe the caller's re-encoded videos, not the track's: ``videos=True`` would mix scales."""
+    with pytest.raises(ValueError, match="videos=False"):
+        insta360_io.InsvReader(insv_clip, frame_limit=2, max_lens_size=1024)
+    assert insta360_io.InsvReader(insv_clip, frame_limit=2, max_lens_size=1024, videos=False).halvings > 0
+
+
 @pytest.mark.golden
 def test_the_reader_logs_the_typed_mei_model_and_a_paraxial_pinhole(insv_clip: Path, tmp_path: Path) -> None:
     """Each lens: ``DistortionModel`` ``mei_v6_unified`` with ``gamma_x, gamma_y, xi, half_field_rad, d0 .. d12``, and a

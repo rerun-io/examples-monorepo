@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float32, Int64, UInt8
 from numpy import ndarray
+from simplecv.catalog_video_decode import DecodeRun, decode_runs
 from torch import Tensor
 
 
@@ -27,16 +28,6 @@ class TileWindow:
     """First column."""
     x1: int
     """Column after the last."""
-
-
-@dataclass(frozen=True, slots=True)
-class DecodeWindow:
-    """A run of packets that one decoder decodes: from the keyframe ``first`` up to the last selected frame."""
-
-    first: int
-    """Packet index of the keyframe the decode starts at."""
-    indices: tuple[int, ...]
-    """Selected packet indices in the run, ascending."""
 
 
 def union_instances(masks: Bool[ndarray, "n h w"], frame_indices: Int64[ndarray, "n"], *, n_frames: int, min_area_px: int) -> Bool[ndarray, "f h w"]:
@@ -116,28 +107,19 @@ def dilate_masks(masks: Bool[Tensor, "n h w"], radius_px: int) -> Bool[Tensor, "
     return dilate_by_footprint(masks, torch.from_numpy(kernel).bool())
 
 
-def selection_windows(keyframes: Sequence[bool], indices: Sequence[int]) -> list[DecodeWindow]:
-    """Group selected packet indices into decode runs that each start at a keyframe.
-
-    A selected frame joins the current run when its keyframe lies inside it, so the decoder never decodes a packet twice.
+def selection_windows(keyframes: Sequence[bool], indices: Sequence[int]) -> list[DecodeRun]:
+    """Group selected packet indices into decode runs (simplecv's ``decode_runs``, one GOP per run) that each start at
+    a keyframe, so the decoder never decodes a packet twice.
 
     Raises:
         ValueError: If an index is out of range or no keyframe precedes it.
     """
-    key_positions: Int64[ndarray, "k"] = np.flatnonzero(np.asarray(keyframes, dtype=bool)).astype(np.int64)
-    windows: list[DecodeWindow] = []
-    for index in sorted(set(indices)):
-        if not 0 <= index < len(keyframes):
-            raise ValueError(f"frame index {index} out of range for a stream of {len(keyframes)} packets")
-        preceding: Int64[ndarray, "p"] = key_positions[key_positions <= index]
-        if not len(preceding):
-            raise ValueError(f"no keyframe at or before frame {index}")
-        key: int = int(preceding[-1])
-        if windows and key <= windows[-1].indices[-1]:
-            windows[-1] = DecodeWindow(windows[-1].first, (*windows[-1].indices, index))
-        else:
-            windows.append(DecodeWindow(key, (index,)))
-    return windows
+    wanted: Int64[ndarray, "k"] = np.asarray(sorted(set(indices)), dtype=np.int64)
+    if wanted.size and not (wanted[0] >= 0 and wanted[-1] < len(keyframes)):
+        bad: int = int(wanted[0] if wanted[0] < 0 else wanted[-1])
+        raise ValueError(f"frame index {bad} out of range for a stream of {len(keyframes)} packets")
+    key_positions: Int64[ndarray, "g"] = np.flatnonzero(np.asarray(keyframes, dtype=bool)).astype(np.int64)
+    return decode_runs(wanted, key_positions, max_gops=1)
 
 
 def overlay_mask(rgb: UInt8[ndarray, "h w 3"], mask: Bool[ndarray, "h w"], *, alpha: float = 0.5) -> UInt8[ndarray, "h w 3"]:

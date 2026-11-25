@@ -35,6 +35,10 @@ def catalog_codec_name(fourcc: int) -> CatalogCodecName:
     return _CODEC_NAME[codec]
 
 
+SOFTWARE_DECODERS: dict[CatalogCodecName, str] = {"av1": "libdav1d", "h264": "h264", "hevc": "hevc"}
+"""FFmpeg decoder that decodes each codec on the CPU: its native ``av1`` decoder decodes only through a hardware accelerator."""
+
+
 def video_codec(name: str | None) -> rr.VideoCodec:
     """The ``rr.VideoCodec`` for a decoder codec name (inverse of :func:`catalog_codec_name`; torchcodec's
     ``metadata.codec`` uses the same names).

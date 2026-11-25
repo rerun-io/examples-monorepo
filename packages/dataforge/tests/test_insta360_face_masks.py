@@ -84,6 +84,8 @@ def write_masks(path: Path, stamps: list[int], factor: int = 1, scale: float | N
     discs = [disc[factor // 2 :: factor, factor // 2 :: factor] for disc in discs]
     with rr.RecordingStream("test", recording_id="insta360__clip") as recording:
         recording.save(path)
+        for lens in range(2):  # what posekit's mask layers log on each lens mask
+            recording.log(f"/world/rig_00/cam_0{lens}/pinhole/people_mask", rr.AnnotationContext([(0, "kept", (255, 255, 255, 0)), (1, "masked", (40, 110, 255, 140))]), static=True)
         if factor > 1:
             for lens in range(2):
                 s: float = float(factor) if scale is None else scale
@@ -130,6 +132,25 @@ def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) ->
     # Lens 1's disc sits on the lens-1 half of cube6_left: the image's left half (image right points to +Z0).
     left: UInt8[ndarray, "n n"] = found["/world/rig_00/cam_04/pinhole/people_mask"][0][1]
     assert left[:, : FACE // 2].sum() > 0 and left[:, FACE // 2 :].sum() == 0
+
+
+def test_each_face_mask_draws_masked_pixels_as_a_tint_over_a_clear_face(tmp_path: Path) -> None:
+    """The face masks carry the lens masks' own annotation context (posekit's): class 0 transparent, class 1 a blue tint."""
+    from dataforge.apis.insta360_face_masks import Config, main
+
+    base, faces, masks, output = (tmp_path / f"{name}.rrd" for name in ("base", "faces", "masks", "out"))
+    write_base(base)
+    write_faces(faces)
+    write_masks(masks, STAMPS)
+    main(Config(base=base, masks=masks, faces=faces, output=output))
+    contexts: dict[str, object] = {}
+    for chunk in rrc.RrdReader(output).store().stream().filter(is_static=True):
+        batch = chunk.to_record_batch()
+        if "AnnotationContext:context" in batch.schema.names:
+            contexts[str(chunk.entity_path)] = batch.column("AnnotationContext:context").to_pylist()[0][0]
+    assert sorted(contexts) == [f"/world/rig_00/cam_{cam:02d}/pinhole/people_mask" for cam in range(2, 8)]
+    classes = {entry["class_id"]: entry["class_description"]["info"] for entry in contexts["/world/rig_00/cam_02/pinhole/people_mask"]}
+    assert classes[0]["color"] & 255 == 0 and classes[1]["color"] & 255 == 140
 
 
 def test_the_face_mask_layer_joins_the_base_recording_whatever_the_file_is_called(tmp_path: Path) -> None:

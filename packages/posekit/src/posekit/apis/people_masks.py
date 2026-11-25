@@ -232,13 +232,12 @@ def decode_selected(video: CatalogVideo, indices: list[int], device: str) -> tup
 
     decoded: list[int] = []
     frames: list[UInt8[Tensor, "m h w 3"]] = []
-    for window in selection_windows(video.keyframes, indices):
-        last: int = window.indices[-1]
-        data: bytes = wrap_mp4(video.samples[window.first : last + 1], video.keyframes[window.first : last + 1], 30, codec=video.codec)
+    for run in selection_windows(video.keyframes, indices):
+        data: bytes = wrap_mp4(video.samples[run.start : run.stop], video.keyframes[run.start : run.stop], 30, codec=video.codec)
         decoder = VideoDecoder(data, device=device, seek_mode="exact")
-        batch: UInt8[Tensor, "m 3 h w"] = decoder.get_frames_at([i - window.first for i in window.indices]).data
+        batch: UInt8[Tensor, "m 3 h w"] = decoder.get_frames_at((run.wanted - run.start).tolist()).data
         frames.append(rearrange(batch, "m c h w -> m h w c").contiguous())
-        decoded.extend(window.indices)
+        decoded.extend(run.wanted.tolist())
     return decoded, torch.cat(frames, dim=0)
 
 

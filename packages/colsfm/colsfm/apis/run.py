@@ -21,7 +21,7 @@ from typing import Annotated, TypeAlias
 import tyro
 
 from colsfm import DATA_DIR
-from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input
+from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input, serve_catalog_input
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
 from colsfm.rerun_layer import LayerSummary, write_run_layer
@@ -51,15 +51,21 @@ class CatalogCommand:
     """Read a catalog segment, run all eight stages on it, and write the run as a layer of that segment."""
 
     source: CatalogInputConfig
-    """Segment, cameras, initial trajectory and sampling."""
+    """Segment (on a catalog, or a local base rrd plus layer rrds), cameras, initial trajectory and sampling."""
     options: PipelineOptions = field(default_factory=lambda: PipelineOptions(input_dir=UNSET_DIR, output_dir=UNSET_DIR))
     """The per-stage knobs; `input_dir` and `output_dir` are set from the segment unless given."""
     layer_path: Path | None = None
     """Where the layer `.rrd` goes; `packages/colsfm/data/rrd/<segment>.colsfm.rrd` by default."""
+    view_rig: bool = True
+    """Also log `rig_view` (`colsfm.rerun_layer.log_view_rig`) when the segment has viewing faces (`pinhole/video_view`)."""
 
     def execute(self) -> None:
-        """Prepare the input, run the pipeline and write the layer."""
-        prepared: PreparedInput = prepare_catalog_input(self.source)
+        """Prepare the input, run the pipeline and write the layer (a local input is served for the whole run)."""
+        with serve_catalog_input(self.source) as source:
+            self._run(source)
+
+    def _run(self, source: CatalogInputConfig) -> None:
+        prepared: PreparedInput = prepare_catalog_input(source, view_rig=self.view_rig)
         output_dir: Path = (
             DATA_DIR / "runs" / prepared.input_dir.name if self.options.output_dir == UNSET_DIR else self.options.output_dir
         )
@@ -68,7 +74,12 @@ class CatalogCommand:
         print(f"[colsfm] summary written to {summary.options.output_dir / SUMMARY_NAME}")
         layer_path: Path = self.layer_path or DATA_DIR / "rrd" / f"{prepared.input_dir.name}.colsfm.rrd"
         layer: LayerSummary = write_run_layer(
-            output_dir, layer_path, segment=self.source.segment, timeline=self.source.timeline, frames=read_manifest(prepared.input_dir / FRAME_SOURCE_FILE)
+            output_dir,
+            layer_path,
+            segment=source.segment,
+            timeline=source.timeline,
+            frames=read_manifest(prepared.input_dir / FRAME_SOURCE_FILE),
+            view=prepared.view,
         )
         print(
             f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points, "

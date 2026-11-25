@@ -34,6 +34,12 @@ factory calibration), frames at the raw exposure-record stamps, no ``Transform3D
 in the rig), and the ``insta360`` property states ``profile = "none"`` and ``profile_note`` (the reason) instead of the
 version and ``pano_from_imu``. Visual-inertial consumers (slam-rs) refuse such a recording.
 
+Stored size. A consumer that stores the lens videos re-encoded at a smaller size (dataforge's Insta360 base) asks for
+``max_lens_size``: the lenses are then halved until they are at most that wide (``lens_halvings``) and each camera is
+logged for the halved image (``halved_camera``: a box filter puts camera pixel ``p`` at ``(p + 0.5) s - 0.5``,
+``s = 2^-halvings``), with the halved ``Pinhole`` size. ``videos=False`` leaves out the lens videos (their codec, sample
+and keyframe chunks), for that consumer to write its own.
+
 Time. Every temporal chunk is on one duration timeline (``timeline_name``, ``video`` by default as in
 ``Mp4Reader``): nanoseconds since the earliest frame or IMU sample on the trailer clock (``InsvRig.start_ns``).
 Frames are at their effective time on the IMU clock (the device profile's frame-time model), not at the mp4 PTS.
@@ -53,7 +59,7 @@ from jaxtyping import Bool, Float64, Int32, Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import Chunk, LazyChunkStream
 
-from insta360_io._insta360_io import InsvRig
+from insta360_io._insta360_io import InsvRig, MeiCamera
 
 LOG: logging.Logger = logging.getLogger(__name__)
 NO_PROFILE: str = "none"
@@ -71,6 +77,31 @@ DISTORTION_COEFFICIENTS: rr.ComponentDescriptor = rr.ComponentDescriptor(
 """The camera model coefficients (float32 list), as ``CameraDistortion`` writes them."""
 BLOB: pa.DataType = pa.list_(pa.field("item", pa.uint8(), nullable=False))
 """Arrow type of one ``VideoSample``."""
+
+
+def lens_halvings(width: int, max_lens_size: int | None) -> int:
+    """How many times a lens ``width`` pixels wide is halved to be at most ``max_lens_size`` wide (0 with None).
+
+    Raises:
+        ValueError: If ``max_lens_size`` is not positive (no halving reaches it).
+    """
+    if max_lens_size is not None and max_lens_size <= 0:
+        raise ValueError(f"max_lens_size must be positive, got {max_lens_size}")
+    count: int = 0
+    while max_lens_size is not None and (width >> count) > max_lens_size:
+        count += 1
+    return count
+
+
+def halved_camera(camera: MeiCamera, halvings: int) -> MeiCamera:
+    """``camera`` on its image box-filtered ``halvings`` times: focal ``f s``, principal point ``(c + 0.5) s - 0.5``,
+    ``s = 2^-halvings``; the unitless coefficients (``xi``, the field and the distortion terms) are unchanged.
+
+    The Mei projection is ``gamma m(x) + c`` with ``m`` unitless, so the halved camera projects every ray onto
+    ``(p + 0.5) s - 0.5`` of the full camera's ``p``: the stored pixel whose box holds it.
+    """
+    scale: float = 1.0 / (1 << halvings)
+    return MeiCamera(camera.model, camera.fx * scale, camera.fy * scale, (camera.cx + 0.5) * scale - 0.5, (camera.cy + 0.5) * scale - 0.5, list(camera.coefficients))
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +143,16 @@ def blobs(data: UInt8[ndarray, " n_bytes"], offsets: Int32[ndarray, " n_plus_1"]
 class InsvReader:
     """Read chunks from an Insta360 ``.insv`` clip: both lens videos, calibration, IMU and exposure (module docstring)."""
 
-    def __init__(self, path: str | Path, *, entity_path: str | None = None, timeline_name: str = "video", frame_limit: int | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        entity_path: str | None = None,
+        timeline_name: str = "video",
+        frame_limit: int | None = None,
+        max_lens_size: int | None = None,
+        videos: bool = True,
+    ) -> None:
         """Open the clip and select its device profile.
 
         Args:
@@ -120,14 +160,23 @@ class InsvReader:
             entity_path: Root of the rig; like ``Mp4Reader``, the absolute file path when ``None``.
             timeline_name: The duration timeline every temporal chunk is on.
             frame_limit: Keep the first frames only (and the IMU up to 1 s past them).
+            max_lens_size: Log the cameras for the lenses halved until they are at most this wide (module docstring,
+                "Stored size"); None: the track size.
+            videos: Emit the lens videos; False leaves them out for the caller to write.
 
         Raises:
-            ValueError: On a malformed clip.
+            ValueError: On a malformed clip, a non-positive ``max_lens_size``, or ``videos`` with halved cameras (the
+                track-size videos would not match the cameras).
         """
         self.path: Path = Path(path).absolute()
         self.entity_path: str = str(self.path) if entity_path is None else entity_path
         self.timeline_name: str = timeline_name
         self.rig: InsvRig = InsvRig(str(self.path), frame_limit)
+        self.videos: bool = videos
+        self.halvings: int = lens_halvings(self.rig.resolution[0], max_lens_size)
+        """Times each lens camera is halved (``lens_halvings``)."""
+        if videos and self.halvings:
+            raise ValueError(f"{self.path.name}: cameras halved {self.halvings} times describe re-encoded videos, not the track's: pass videos=False")
         if self.rig.profile_name is None:
             LOG.warning("%s (%s): read without a device profile: %s", self.path.name, self.rig.camera_type, self.rig.profile_note)
 
@@ -145,6 +194,12 @@ class InsvReader:
     def video_entity(self, lens: int) -> str:
         """Entity of one lens video."""
         return f"{self.cam(lens)}/pinhole/video"
+
+    @property
+    def stored_size(self) -> tuple[int, int]:
+        """Width and height of the lens images the cameras are logged for."""
+        width, height = self.rig.resolution
+        return width >> self.halvings, height >> self.halvings
 
     def time(self, times_ns: Int64[ndarray, " n"]) -> rr.TimeColumn:
         """Times on the trailer clock as the reader's duration timeline."""
@@ -165,6 +220,8 @@ class InsvReader:
             for first in range(0, frame_ns.size, ROWS_PER_CHUNK):
                 window = slice(first, first + ROWS_PER_CHUNK)
                 yield Chunk.from_columns(f"{self.cam(lens)}/exposure", [self.time(frame_ns[window])], rr.Scalars.columns(scalars=exposure[lens, window]))
+        if not self.videos:
+            return
         gops: list[Int64[ndarray, "g 2"]] = [rig.gops(lens) for lens in range(2)]
         keyframe_ns: list[list[Int64[ndarray, " k"]]] = [[], []]
         # Lens 0 and lens 1 GOP by GOP, so a consumer that stops early holds both lenses up to the same time.
@@ -184,9 +241,9 @@ class InsvReader:
     def static_chunks(self) -> Iterator[Chunk]:
         """The rig's statics: per lens the pose, camera, codec and series names; the IMU node; the clip property."""
         rig: InsvRig = self.rig
-        width, height = rig.resolution
+        width, height = self.stored_size
         for lens, factory in enumerate(rig.lenses):
-            camera = factory.camera
+            camera: MeiCamera = halved_camera(factory.camera, self.halvings)
             rig_T_lens: Float64[ndarray, "4 4"] = np.asarray(rig.rig_from_lens(lens), dtype=np.float64)
             lens_R_rig: Float64[ndarray, "3 3"] = rig_T_lens[:3, :3].T
             yield static_chunk(
@@ -213,7 +270,8 @@ class InsvReader:
                 Described(DISTORTION_COEFFICIENTS, coefficients),
             ]
             yield static_chunk(f"{self.cam(lens)}/pinhole", described(pinhole) + distortion)
-            yield static_chunk(self.video_entity(lens), described(rr.VideoStream(codec=CODECS[rig.codec])))
+            if self.videos:
+                yield static_chunk(self.video_entity(lens), described(rr.VideoStream(codec=CODECS[rig.codec])))
             yield static_chunk(f"{self.cam(lens)}/exposure", described(rr.SeriesLines(names=["exposure_s"])))
         clip = {"source_file": self.path.name, "camera_type": rig.camera_type, "firmware": rig.firmware}
         if rig.profile_name is None:
