@@ -119,7 +119,7 @@ import pycolmap
 from jaxtyping import Bool, Float64, Int
 from numpy import ndarray
 
-from colsfm.loop_pairs import local_map_partners
+from colsfm.loop_pairs import local_map_partners, observation_pairs
 from colsfm.rig_geometry import RigFrameIndex, RigGeometry
 
 Matches: TypeAlias = Int[ndarray, "n_matches 2"]
@@ -763,39 +763,30 @@ class RigPoseEstimator:
         epipolar_source: list[Keypoints] = []
         epipolar_target: list[Keypoints] = []
         epipolar_positions: list[int] = []
-        for camera_id in self.geometry.camera_ids:
-            anchor: int | None = self.index.keyframe(source_rig_id, camera_id)
-            if anchor is None:
+        for observation in observation_pairs(self.index, self.geometry, self.keypoints, (source_rig_id, target_rig_id)):
+            anchor: int = observation.anchor
+            observed: int = observation.observed
+            pair_matches: Matches = np.asarray(self.match_fn(anchor, observed), dtype=np.int64).reshape(-1, 2)
+            if len(pair_matches) == 0:
                 continue
-            target_cameras: list[int] = [camera_id]
-            partner_camera: int | None = self.geometry.stereo_partner.get(camera_id)
-            if partner_camera is not None:
-                target_cameras.append(partner_camera)
+            position: int = self.geometry.position_of(observation.observed_camera_id)
+            if observation.observed_camera_id == observation.anchor_camera_id and anchor in self.keypoints:
+                epipolar_source.append(self.keypoints[anchor][pair_matches[:, 0]])
+                epipolar_target.append(self.keypoints[observed][pair_matches[:, 1]])
+                epipolar_positions.extend([position] * len(pair_matches))
             anchor_landmarks: AnchorLandmarks | None = landmarks.get(anchor)
-            for target_camera in target_cameras:
-                observed: int | None = self.index.keyframe(target_rig_id, target_camera)
-                if observed is None or observed not in self.keypoints:
-                    continue
-                pair_matches: Matches = np.asarray(self.match_fn(anchor, observed), dtype=np.int64).reshape(-1, 2)
-                if len(pair_matches) == 0:
-                    continue
-                position: int = self.geometry.position_of(target_camera)
-                if target_camera == camera_id and anchor in self.keypoints:
-                    epipolar_source.append(self.keypoints[anchor][pair_matches[:, 0]])
-                    epipolar_target.append(self.keypoints[observed][pair_matches[:, 1]])
-                    epipolar_positions.extend([position] * len(pair_matches))
-                if anchor_landmarks is None or len(anchor_landmarks) == 0:
-                    continue
-                insertion: Int[ndarray, "n_matches"] = np.searchsorted(anchor_landmarks.keypoint_indices, pair_matches[:, 0])
-                clipped: Int[ndarray, "n_matches"] = np.clip(insertion, 0, len(anchor_landmarks) - 1)
-                matched: Bool[ndarray, "n_matches"] = anchor_landmarks.keypoint_indices[clipped] == pair_matches[:, 0]
-                hits: int = int(matched.sum())
-                if hits == 0:
-                    continue
-                pixel_blocks.append(self.keypoints[observed][pair_matches[matched, 1]])
-                point_blocks.append(anchor_landmarks.points_in_rig[clipped[matched]])
-                camera_indices.extend([position] * hits)
-                contributing.add(target_camera)
+            if anchor_landmarks is None or len(anchor_landmarks) == 0:
+                continue
+            insertion: Int[ndarray, "n_matches"] = np.searchsorted(anchor_landmarks.keypoint_indices, pair_matches[:, 0])
+            clipped: Int[ndarray, "n_matches"] = np.clip(insertion, 0, len(anchor_landmarks) - 1)
+            matched: Bool[ndarray, "n_matches"] = anchor_landmarks.keypoint_indices[clipped] == pair_matches[:, 0]
+            hits: int = int(matched.sum())
+            if hits == 0:
+                continue
+            pixel_blocks.append(self.keypoints[observed][pair_matches[matched, 1]])
+            point_blocks.append(anchor_landmarks.points_in_rig[clipped[matched]])
+            camera_indices.extend([position] * hits)
+            contributing.add(observation.observed_camera_id)
         epipolar: _EpipolarCorrespondences = _EpipolarCorrespondences(
             source_pixels=epipolar_source, target_pixels=epipolar_target, camera_indices=epipolar_positions
         )

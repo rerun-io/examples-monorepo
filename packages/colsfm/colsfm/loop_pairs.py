@@ -63,19 +63,20 @@ class ObservationPair:
     """Image id of the source rig frame's anchor."""
     observed: int
     """Image id of the target rig frame's image: the anchor's own camera or its stereo partner."""
-    source_rig_id: int
-    """The rig frame whose local map the anchor belongs to."""
-    target_rig_id: int
-    """The rig frame being localised."""
+    anchor_camera_id: int
+    """The anchor's camera."""
+    observed_camera_id: int
+    """The observed image's camera: `anchor_camera_id` or its stereo partner."""
 
 
 def observation_pairs(
     index: RigFrameIndex, geometry: RigGeometry, keypoints: Mapping[int, Keypoints], rig_pair: tuple[int, int]
 ) -> list[ObservationPair]:
-    """The observation walk of one shortlisted rig pair, as `RigPoseEstimator._observations` walks it.
+    """The observation walk of one shortlisted rig pair, in the order `RigPoseEstimator` matches it.
 
     Each source anchor against the target rig's same camera and that camera's stereo partner. One enumeration for the
-    plan (`required_image_pairs`) and for the mapper's pose check (`colsfm.loop_mapper_check`).
+    estimator (`colsfm.loop_pose`), the plan (`required_image_pairs`) and the mapper's pose check
+    (`colsfm.loop_mapper_check`).
 
     Args:
         index: The rig-frame index.
@@ -100,7 +101,7 @@ def observation_pairs(
             observed: int | None = index.keyframe(target_rig_id, target_camera)
             if observed is None or observed not in keypoints:
                 continue
-            pairs.append(ObservationPair(anchor=anchor, observed=observed, source_rig_id=source_rig_id, target_rig_id=target_rig_id))
+            pairs.append(ObservationPair(anchor=anchor, observed=observed, anchor_camera_id=camera_id, observed_camera_id=target_camera))
     return pairs
 
 

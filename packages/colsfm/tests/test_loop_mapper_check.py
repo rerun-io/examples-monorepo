@@ -25,6 +25,7 @@ from colsfm.database import ImagePair
 from colsfm.loop_closure import LoopClosureResult, LoopSearchPlan, MatchFunction, plan_loop_search, verify_loop_plan
 from colsfm.loop_mapper_check import pose_checked_inliers, sampson_error_px
 from colsfm.loop_pairs import ObservationPair, local_map_partners, observation_pairs, required_image_pairs
+from colsfm.loop_pose import RigPoseEstimator
 from colsfm.pairs import normalise_pair
 
 
@@ -57,7 +58,6 @@ def test_observation_pairs_and_required_image_pairs_agree(plan: LoopSearchPlan) 
     observed: set[ImagePair] = set()
     for rig_pair in plan.rig_pairs:
         walk: list[ObservationPair] = observation_pairs(plan.rig_index, plan.geometry, plan.keypoints, rig_pair)
-        assert all((o.source_rig_id, o.target_rig_id) == rig_pair for o in walk)
         observed.update(normalise_pair(o.anchor, o.observed) for o in walk)
     local: set[ImagePair] = set()
     for source_rig_id in {source for source, _ in plan.rig_pairs}:
@@ -74,6 +74,25 @@ def test_observation_pairs_and_required_image_pairs_agree(plan: LoopSearchPlan) 
     assert observed and set(required) == observed | local
 
 
+def test_the_estimator_asks_for_exactly_the_observation_walk(plan: LoopSearchPlan, match_fn: MatchFunction) -> None:
+    """`RigPoseEstimator` matches each rig pair's observation pairs in the walk's order, and the walk names their cameras."""
+    asked: list[tuple[int, int]] = []
+
+    def recording_match_fn(image_id_a: int, image_id_b: int) -> Int64[ndarray, "n_matches 2"]:
+        asked.append((image_id_a, image_id_b))
+        return np.asarray(match_fn(image_id_a, image_id_b), dtype=np.int64)
+
+    estimator: RigPoseEstimator = RigPoseEstimator(plan.rig_index, plan.geometry, plan.keypoints, recording_match_fn, plan.config.rig_pose)
+    camera_of: dict[int, int] = {image: camera for (_, camera), image in plan.rig_index.keyframe_by_rig_camera.items()}
+    for rig_pair in plan.rig_pairs:
+        walk: list[ObservationPair] = observation_pairs(plan.rig_index, plan.geometry, plan.keypoints, rig_pair)
+        asked.clear()
+        # An empty local map: `measure` asks for the observation pairs only.
+        estimator.measure(*rig_pair, landmarks={})
+        assert walk and asked == [(o.anchor, o.observed) for o in walk]
+        assert all((camera_of[o.anchor], camera_of[o.observed]) == (o.anchor_camera_id, o.observed_camera_id) for o in walk)
+
+
 def _true_matches(scene: SquareRigScene, image_a: int, image_b: int) -> Int64[ndarray, "n_matches 2"]:
     """Keypoint index pairs of the two images that observe the same scene point."""
     points_a: Int64[ndarray, "n_a"] = np.asarray(scene.point_index_by_keypoint[image_a], dtype=np.int64)
@@ -82,29 +101,28 @@ def _true_matches(scene: SquareRigScene, image_a: int, image_b: int) -> Int64[nd
     return np.stack([index_a, index_b], axis=1).astype(np.int64)
 
 
-def _revisit_observation(plan: LoopSearchPlan, scene: SquareRigScene) -> ObservationPair:
-    """A cross-camera observation pair of a shortlisted rig pair that shares many true matches."""
-    best: tuple[int, ObservationPair] | None = None
+def _revisit_observation(plan: LoopSearchPlan, scene: SquareRigScene) -> tuple[tuple[int, int], ObservationPair]:
+    """A shortlisted rig pair and one of its observation pairs that shares many true matches."""
+    best: tuple[int, tuple[int, int], ObservationPair] | None = None
     for rig_pair in plan.rig_pairs:
         for observation in observation_pairs(plan.rig_index, plan.geometry, plan.keypoints, rig_pair):
             count: int = len(_true_matches(scene, observation.anchor, observation.observed))
             if best is None or count > best[0]:
-                best = (count, observation)
+                best = (count, rig_pair, observation)
     assert best is not None and best[0] >= 30
-    return best[1]
+    return best[1], best[2]
 
 
 def test_sampson_error_through_the_rig_is_zero_for_exact_matches(scene: SquareRigScene, plan: LoopSearchPlan) -> None:
     """Exact projections of shared points have zero epipolar error under the true pose through the rig; a turned pose does not."""
-    observation: ObservationPair = _revisit_observation(plan, scene)
+    (source_rig_id, target_rig_id), observation = _revisit_observation(plan, scene)
     matches: Int64[ndarray, "n_matches 2"] = _true_matches(scene, observation.anchor, observation.observed)
-    camera_ids: dict[int, int] = {image: camera for (_, camera), image in plan.rig_index.keyframe_by_rig_camera.items()}
-    position_a: int = plan.geometry.position_of(camera_ids[observation.anchor])
-    position_b: int = plan.geometry.position_of(camera_ids[observation.observed])
+    position_a: int = plan.geometry.position_of(observation.anchor_camera_id)
+    position_b: int = plan.geometry.position_of(observation.observed_camera_id)
     true_b_from_a: pycolmap.Rigid3d = (
         plan.geometry.cams_from_rig[position_b]
-        * scene.world_T_rig[observation.target_rig_id].inverse()
-        * scene.world_T_rig[observation.source_rig_id]
+        * scene.world_T_rig[target_rig_id].inverse()
+        * scene.world_T_rig[source_rig_id]
         * plan.geometry.cams_from_rig[position_a].inverse()
     )
     # Exact pixels: re-project the true points instead of reading the scene's noisy keypoints.
