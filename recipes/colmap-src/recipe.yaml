@@ -41,10 +41,9 @@
 # How the patches were made, with the generator command and versions: patches/PROVENANCE.md.
 # This is the one recipe whose patch is larger than "a hook": the adapter is C++ inside COLMAP's Caspar backend,
 # so it cannot live in a Python package (recipes/README.md "Patch or package" names the exception). The generated
-# CUDA travels in the patch because conda-forge has no symforce. Source of both patches and of the regeneration
-# tool (tools/caspar_fisheye_patch.sh): pablovela5620/pyCuSFM, branch feat/pycolmap-open-pipeline,
-# packages/pycolmap-caspar-fisheye (FULL_OPENCV: a branch on top of it, see PROVENANCE.md). Drop an adapter when upstream
-# CASPAR gains its model.
+# CUDA travels in the patch because conda-forge has no symforce. Source of all eight patches: one commit per patch on
+# a local colmap branch, cut by tools/cut_patches.sh (branch, commits and generator: patches/PROVENANCE.md). Drop an
+# adapter when upstream CASPAR gains its model.
 #
 # Two-step build: pycolmap's pyproject builds only the bindings (`cmake.source-dir = "python/"`) and links a
 # separately installed libcolmap, and CASPAR_ENABLED lives in libcolmap. So libcolmap is built and installed first.
