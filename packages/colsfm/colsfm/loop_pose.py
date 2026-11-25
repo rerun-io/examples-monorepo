@@ -512,10 +512,8 @@ class RigPoseEstimator:
     """Gates and thresholds."""
     cache_images: int = BEARING_CACHE_IMAGES
     """Images the bearing memo keeps; several workers split `BEARING_CACHE_IMAGES` between them."""
-    _camera_of_image: dict[int, int] = field(init=False, repr=False)
-    """`camera_params_id` per image id, inverted from the rig-frame index."""
-    _rig_of_image: dict[int, int] = field(init=False, repr=False)
-    """`synced_sample_id` per image id, inverted from the rig-frame index."""
+    _rig_camera_of_image: dict[int, tuple[int, int]] = field(init=False, repr=False)
+    """`(synced_sample_id, camera_params_id)` per image id, inverted from the rig-frame index."""
     _bearings: OrderedDict[int, Bearings] = field(init=False, repr=False, default_factory=OrderedDict)
     """Memoised unit bearings per image id, most recently used last.
 
@@ -525,9 +523,8 @@ class RigPoseEstimator:
     at once, for a measurement that only ever reads a few rig frames' worth."""
 
     def __post_init__(self) -> None:
-        """Invert the rig-frame index into the per-image lookups every step needs."""
-        self._camera_of_image = {image_id: camera_id for (_, camera_id), image_id in self.index.keyframe_by_rig_camera.items()}
-        self._rig_of_image = {image_id: rig_id for (rig_id, _), image_id in self.index.keyframe_by_rig_camera.items()}
+        """Invert the rig-frame index into the per-image lookup every step needs."""
+        self._rig_camera_of_image = self.index.rig_camera_by_keyframe()
 
     def camera_of(self, image_id: int) -> pycolmap.Camera:
         """The calibrated camera that took one image.
@@ -541,7 +538,7 @@ class RigPoseEstimator:
         Raises:
             KeyError: When the image is not part of the indexed rig frames.
         """
-        return self.geometry.cameras[self.geometry.position_of(self._camera_of_image[image_id])]
+        return self.geometry.cameras[self.geometry.position_of(self._rig_camera_of_image[image_id][1])]
 
     def bearings(self, image_id: int) -> Bearings:
         """Unit bearings of every keypoint of one image.
@@ -707,8 +704,8 @@ class RigPoseEstimator:
             partner_matches: Matches = np.asarray(self.match_fn(anchor, partner), dtype=np.int64).reshape(-1, 2)
             if partner not in self.keypoints or len(partner_matches) == 0:
                 continue
-            partner_camera: int = self._camera_of_image[partner]
-            rig_T_partner_rig: pycolmap.Rigid3d = world_T_rig.inverse() * self.index.world_T_rig[self._rig_of_image[partner]]
+            partner_rig, partner_camera = self._rig_camera_of_image[partner]
+            rig_T_partner_rig: pycolmap.Rigid3d = world_T_rig.inverse() * self.index.world_T_rig[partner_rig]
             projections[partner] = np.asarray(
                 (self.geometry.cams_from_rig[self.geometry.position_of(partner_camera)] * rig_T_partner_rig.inverse()).matrix(), dtype=np.float64
             )
