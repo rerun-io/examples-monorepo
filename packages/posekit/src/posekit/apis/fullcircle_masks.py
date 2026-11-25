@@ -35,6 +35,7 @@ from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
+from posekit.cube_layer import CubeSampling, read_cube_sampling, sampled_framesets, segment_cube_sampling
 from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
     FaceBoxes,
@@ -73,14 +74,18 @@ class FullCircleMasksConfig:
     """A base recording not on a catalog yet, instead of ``dataset``/``segment``: served by an in-process catalog."""
     cameras: tuple[str, str] = ("/world/rig_00/cam_00", "/world/rig_00/cam_01")
     """The two lens camera nodes (each has ``pinhole`` and ``pinhole/video``)."""
-    stride: int = 10
-    """Framesets between two tracked framesets: 10 at 30 fps = 3 Hz, the stamps of the people layer that the union
-    keeps (FullCircle captures at 5 fps)."""
+    stride: int | None = None
+    """Framesets between two tracked framesets. Default: the cube layer's (its ``cube`` recording property, from the
+    catalog segment or ``cube_rrd``), so the masks cover every face stamp, else 10 (3 Hz at 30 fps; FullCircle captures
+    at 5 fps). With a cube layer only its framesets are tracked, and a stride that disagrees with it is an error."""
+    cube_rrd: Path | None = None
+    """The base's cube layer file (dataforge ``--cube``) whose ``cube`` property sets the stride, for an ``rrd`` base
+    or a catalog segment without its cube layer."""
     reprompt_every_frames: int = 30
     """Frames of video between two re-prompts of the tracker (30 at 30 fps = once a second; 0: a single prompt). It sets
     ``masker.reprompt_every`` (which this tool therefore ignores) to ``round(reprompt_every_frames / stride)`` tracked
-    framesets, at least 1, so ``--stride 5`` keeps a re-prompt once a second (every 6th tracked frameset); at ``stride``
-    10 that is every 3rd."""
+    framesets, at least 1, so stride 5 keeps a re-prompt once a second (every 6th tracked frameset); at stride 10 that
+    is every 3rd."""
     start: int = 0
     """First frameset index."""
     end: int | None = None
@@ -208,10 +213,16 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     times: list[ndarray] = [video.times for video in videos]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
-    tracked: list[int] = list(range(config.start, end, config.stride))
+    cube: CubeSampling | None = (
+        read_cube_sampling(config.cube_rrd, segment_id) if config.cube_rrd is not None else segment_cube_sampling(dataset, segment_id)
+    )
+    framesets: range = sampled_framesets("--stride", config.stride, cube, config.start, end)
+    stride: int = framesets.step
+    tracked: list[int] = list(framesets)
     read_s: float = time.perf_counter() - process_start
+    origin: str = "the cube layer's" if cube is not None else "no cube layer"
     print(
-        f"segment {segment_id}: {n_framesets} framesets, tracking {len(tracked)} (stride {config.stride}) over {config.start}..{end - 1}; read {read_s:.1f} s"
+        f"segment {segment_id}: {n_framesets} framesets, tracking {len(tracked)} (stride {stride}, {origin}) over {config.start}..{end - 1}; read {read_s:.1f} s"
     )
 
     levels: list[Float64[ndarray, "3 3"]] = read_level_rotations(
@@ -225,7 +236,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     )
     load_start: float = time.perf_counter()
     masker: FullCircleMasker = FullCircleMasker(
-        replace(config.masker, reprompt_every=max(1, round(config.reprompt_every_frames / config.stride)) if config.reprompt_every_frames > 0 else 0), sources
+        replace(config.masker, reprompt_every=max(1, round(config.reprompt_every_frames / stride)) if config.reprompt_every_frames > 0 else 0), sources
     )
     print(f"model load + static tables {time.perf_counter() - load_start:.1f} s")
     debug: rr.RecordingStream | None = None
