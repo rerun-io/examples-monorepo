@@ -8,12 +8,14 @@ prior behavior. All Rerun side effects are spied so no viewer is launched.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 import rerun as rr
+from rerun.chunk import RrdReader
 
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -89,20 +91,9 @@ def test_new_fields_have_backwards_compatible_defaults() -> None:
     assert field_defaults["port"] == 9876
 
 
-def _chunks_per_entity(rrd: Path) -> dict[str, int]:
-    import rerun.chunk as rrc
-
-    counts: dict[str, int] = {}
-    for chunk in rrc.RrdReader(rrd).stream().to_chunks():
-        counts[str(chunk.entity_path)] = counts.get(str(chunk.entity_path), 0) + 1
-    return counts
-
-
 def test_save_only_writes_few_large_chunks(tmp_path: Path) -> None:
     """A file holds a steady per-frame log in a few chunks, not one per 200 ms batcher tick: the viewer walks every
     chunk of a file it opens by path on every frame (re_viewer 0.42 prefetch), so tiny chunks cost frame time."""
-    import time
-
     save = tmp_path / "out.rrd"
     config = RerunTyroConfig(application_id="tyro-file-batcher", save=save)
     for i in range(120):  # ~1.2 s of a 100 Hz log: six default ticks
@@ -111,4 +102,4 @@ def test_save_only_writes_few_large_chunks(tmp_path: Path) -> None:
         time.sleep(0.01)
     config.rec_stream.disconnect()
 
-    assert _chunks_per_entity(save)["/stats/value"] == 1
+    assert sum(str(chunk.entity_path) == "/stats/value" for chunk in RrdReader(save).stream().to_chunks()) == 1
