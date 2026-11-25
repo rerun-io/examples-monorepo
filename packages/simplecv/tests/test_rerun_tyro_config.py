@@ -103,3 +103,14 @@ def test_save_only_writes_few_large_chunks(tmp_path: Path) -> None:
     config.rec_stream.disconnect()
 
     assert sum(str(chunk.entity_path) == "/stats/value" for chunk in RrdReader(save).stream().to_chunks()) == 1
+
+
+def test_save_only_without_recording_id_uses_the_default_recording_id(tmp_path: Path) -> None:
+    """With no ``recording_id``, a file-only save logs to the id ``rr.init`` picks (derived from the multiprocessing
+    authkey), so ``multiprocessing`` workers that save files keep sharing one recording."""
+    config = RerunTyroConfig(application_id="tyro-default-id", save=tmp_path / "out.rrd")
+    file_recording_id = config.rec_stream.get_recording_id()
+    config.rec_stream.disconnect()
+
+    rr.init("tyro-default-id")
+    assert file_recording_id == rr.get_recording_id()
