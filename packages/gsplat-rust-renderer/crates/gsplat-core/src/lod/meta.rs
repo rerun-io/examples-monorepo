@@ -197,8 +197,17 @@ mod tests {
                 "tree":{{"bound":{{"min":[0,0,0],"max":[1,1,1]}},"lods":{{"0":{{"file":0,"offset":0,"count":1}}}}}}}}"#
             )
         };
-        assert_eq!(LodMeta::parse(&json(u64::from(MAX_LEVELS))).unwrap().levels, MAX_LEVELS);
-        assert!(matches!(LodMeta::parse(&json(u64::from(MAX_LEVELS) + 1)), Err(Error::Invalid(_))));
-        assert!(matches!(LodMeta::parse(&json(4_000_000_000)), Err(Error::Invalid(_))));
+        assert_eq!(
+            LodMeta::parse(&json(u64::from(MAX_LEVELS))).unwrap().levels,
+            MAX_LEVELS
+        );
+        assert!(matches!(
+            LodMeta::parse(&json(u64::from(MAX_LEVELS) + 1)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            LodMeta::parse(&json(4_000_000_000)),
+            Err(Error::Invalid(_))
+        ));
     }
 }
