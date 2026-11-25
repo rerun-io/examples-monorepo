@@ -66,6 +66,11 @@ pub(crate) struct Info {
 
 fn info(lod_meta: &str, metas: &[&str]) -> Result<Info, String> {
     let meta = LodMeta::parse(lod_meta).map_err(|e| e.to_string())?;
+    if let Some(environment) = &meta.environment {
+        re_log::warn_once!(
+            "SogLodSplats3D: the set's environment ({environment}) is not drawn; only its levels are"
+        );
+    }
     if metas.len() < meta.filenames.len() {
         return Err(format!(
             "SogLodSplats3D: {} meta.json texts for {} files",

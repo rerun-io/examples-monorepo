@@ -12,6 +12,10 @@ pub enum Error {
     Invalid(String),
 }
 
+/// Most levels a set may declare. splat-transform writes about six; each leaf holds one slot per level, so an
+/// unchecked count from a file would size every leaf's allocation.
+pub const MAX_LEVELS: u32 = 32;
+
 /// A run of rows inside one file of the set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub struct FileRun {
@@ -72,6 +76,12 @@ impl LodMeta {
         let raw: RawMeta = serde_json::from_str(json)?;
         if raw.version != 1 {
             return Err(Error::Version(raw.version));
+        }
+        if raw.lod_levels > MAX_LEVELS {
+            return Err(Error::Invalid(format!(
+                "{} levels, more than the {MAX_LEVELS} a set can hold",
+                raw.lod_levels
+            )));
         }
         let mut leaves = Vec::new();
         let mut stack = vec![&raw.tree];
@@ -165,5 +175,19 @@ mod tests {
         );
         assert_eq!(meta.file_levels().unwrap(), vec![Some(0), Some(1)]);
         assert!(LodMeta::parse(&json.replace("\"version\":1", "\"version\":2")).is_err());
+    }
+
+    #[test]
+    fn refuses_more_levels_than_a_set_can_hold() {
+        // Each leaf allocates one slot per level, so the count from the file is bounded before any leaf is read.
+        let json = |levels: u64| {
+            format!(
+                r#"{{"version":1,"count":1,"lodLevels":{levels},"filenames":["0_0/meta.json"],
+                "tree":{{"bound":{{"min":[0,0,0],"max":[1,1,1]}},"lods":{{"0":{{"file":0,"offset":0,"count":1}}}}}}}}"#
+            )
+        };
+        assert_eq!(LodMeta::parse(&json(u64::from(MAX_LEVELS))).unwrap().levels, MAX_LEVELS);
+        assert!(matches!(LodMeta::parse(&json(u64::from(MAX_LEVELS) + 1)), Err(Error::Invalid(_))));
+        assert!(matches!(LodMeta::parse(&json(4_000_000_000)), Err(Error::Invalid(_))));
     }
 }
