@@ -74,6 +74,7 @@ from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import MeiParameters
 from simplecv.catalog_calibration import CatalogCameraCalibration, read_camera_models_from_store
 from simplecv.catalog_video_codec import wrap_mp4
+from simplecv.catalog_video_decode import DecodeRun, decode_runs
 from simplecv.imu_calibration import ImuCalibration
 from simplecv.video_io import bind_cuda_device
 from torch import Tensor
@@ -168,57 +169,6 @@ def rgb_frames(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " k"
         raise ValueError(f"lens {lens} decoded {decoded} pictures of the {stop} asked for")
 
 
-@dataclass(frozen=True, slots=True)
-class DecodeRun:
-    """Samples ``start .. stop - 1`` of one lens, decoded in order by one decoder, and the pictures wanted among them."""
-
-    start: int
-    """First sample: a keyframe."""
-    stop: int
-    """One past the last wanted picture."""
-    wanted: Int64[ndarray, " w"]
-    """Wanted pictures (increasing), all in ``start .. stop - 1``."""
-
-
-def decode_runs(indices: Int64[ndarray, " k"], gop_starts: Int64[ndarray, " g"], *, max_gops: int = RUN_GOPS) -> list[DecodeRun]:
-    """Split the pictures ``indices`` (increasing) of one lens into runs that a decoder reads front to back, so no sample
-    is decoded twice and none is decoded past the last picture wanted.
-
-    A run goes on while the next picture's GOP starts at or before the sample after the last one decoded: carrying on
-    decodes exactly the samples a fresh decoder from that keyframe would. It ends at a GOP gap, or at a keyframe once it
-    holds ``max_gops`` GOPs, which caps the samples muxed in memory.
-
-    Args:
-        indices: The wanted pictures, increasing.
-        gop_starts: The first sample of each GOP, increasing, starting at 0.
-        max_gops: GOPs after which a run ends at the next keyframe.
-
-    Returns:
-        The runs, in order; together their ``wanted`` are ``indices``.
-
-    Raises:
-        ValueError: If ``indices`` is not increasing or ``gop_starts`` does not start at sample 0.
-    """
-    if indices.size and (np.any(np.diff(indices) <= 0) or indices[0] < 0):
-        raise ValueError("the wanted pictures must be increasing and not negative")
-    if gop_starts.size == 0 or gop_starts[0] != 0:
-        raise ValueError("the first GOP must start at sample 0")
-    if indices.size == 0:
-        return []
-    gop: Int64[ndarray, " k"] = np.searchsorted(gop_starts, indices, side="right") - 1
-    keyframes: Int64[ndarray, " k"] = gop_starts[gop]
-    runs: list[DecodeRun] = []
-    first: int = 0
-    for k in range(1, indices.size):
-        # Carry on within a GOP, or into the next one when it starts right after the last sample decoded and the run has room.
-        if gop[k] == gop[k - 1] or (keyframes[k] == indices[k - 1] + 1 and gop[k - 1] - gop[first] + 1 < max_gops):
-            continue
-        runs.append(DecodeRun(start=int(keyframes[first]), stop=int(indices[k - 1]) + 1, wanted=indices[first:k]))
-        first = k
-    runs.append(DecodeRun(start=int(keyframes[first]), stop=int(indices[-1]) + 1, wanted=indices[first:]))
-    return runs
-
-
 def rebatch(chunks: Iterable[UInt8[Tensor, "n 3 h w"]], batch: int) -> Iterator[UInt8[Tensor, "b 3 h w"]]:
     """The pictures of ``chunks``, in order, ``batch`` at a time (the last batch may be shorter)."""
     pending: list[UInt8[Tensor, "n 3 h w"]] = []
@@ -266,7 +216,7 @@ def lens_batches(rig: insta360_io.InsvRig, lens: int, indices: Int64[ndarray, " 
         return
 
     def chunks() -> Iterator[UInt8[Tensor, "n 3 h w"]]:
-        for run in decode_runs(indices, rig.gops(lens)[:, 0]):
+        for run in decode_runs(indices, rig.gops(lens)[:, 0], max_gops=RUN_GOPS):
             decoder = run_decoder(rig, lens, run, device)
             for offsets in itertools.batched((run.wanted - run.start).tolist(), batch):
                 yield decoder.get_frames_at(list(offsets)).data
