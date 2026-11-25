@@ -1,8 +1,35 @@
 # Provenance of the colmap-src patches
 
-The five patches apply, in `recipe.yaml`'s order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main,
-2026-11-15, after FlexGlue #4908..#4969). `SHA256SUMS` hashes all 284 files they touch (verified by the recipe's Step 0
-before the build); re-hash with the `git diff --name-only` command below, all five patches committed.
+The eight patches apply, in `recipe.yaml`'s order, to colmap/colmap `137f21680c79d3f2fffbb1d11deb367162aa6f83` (main,
+2026-11-15, after FlexGlue #4908..#4969). `SHA256SUMS` hashes all 709 files they touch (verified by the recipe's Step 0
+before the build). `tools/cut_patches.sh` cuts the three rig patches, re-hashes `SHA256SUMS` and checks that all eight
+apply to a fresh checkout of the pin ("Source branch" below).
+
+## Source branch
+
+All eight patches come from one branch, `caspar-rig-refine-main` @ `186e11b50578776388195839c91164bf4ace9e54`, in a
+local clone of colmap/colmap on pablo-dl-server (`~/wt-colmap-caspar-rig`, a worktree of
+`~/0Dev/forks/colmap-caspar-fisheye`). **The branch is pushed nowhere** (its only remote is colmap/colmap): until it is
+pushed to a fork (for example pablovela5620/colmap), nobody can re-cut or extend these patches on another machine. That
+push is a decision for Pablo. One commit per patch, on top of the pin:
+
+| Commit | Patch (`git diff --full-index <previous> <commit>`) |
+|---|---|
+| `6fe00835b1b7b2c7c8d889b3ca5837e7dcb12a22` | `add-caspar-adapters.patch` (plus its hand-written `#` header) |
+| `dede6d9afa40cf7ea23a861474fb7c23d9e337cd` | `add-caspar-adapters-generated-f32.patch` (plus header) |
+| `597f7fd8d71a74043495a741a4cd7ceb928a5817` | `add-database-transaction-rollback.patch` (plus header) |
+| `3d605402adc1ce8a7b8c7f6246bbff623b4bd597` | `caspar-pcg-beta-recurrence.patch` |
+| `d9993d026193f89d85b2a7b1f56b2fb5606d9048` | `caspar-reduced-camera-system.patch` |
+| `5089fc9834fa386d569a1fe0a47044e5ecb9482f` | `caspar-diag-exit-no-convergence.patch` |
+| `6414b76e`, `1abd4e16`, `4829dda1`, `186e11b5` | `caspar-rig-refine.patch` (hand-written files) and `caspar-rig-refine-generated-f32.patch` (`generated/f32`), both `git diff --full-index 5089fc98 186e11b5` split by path |
+
+The last four rows are byte for byte what `git diff` gives today; the first three carry a hand-written header above the
+diff. Re-cut and verify (the checkout is only read; a temporary shared clone of it does the check):
+
+```bash
+recipes/colmap-src/tools/cut_patches.sh ~/wt-colmap-caspar-rig d9993d02 5089fc98 186e11b5
+# -> rewrites the 3 rig patches and SHA256SUMS, prints "SUMS OK: 709 files, 8 patches"
+```
 
 | Patch | Kind | Content |
 |---|---|---|
@@ -16,7 +43,8 @@ The adapters were first written against COLMAP 4.2.0 (`be5e2916`): OPENCV_FISHEY
 `caspar-full-opencv` @ 06871fdc + fc4a8e6c (local clone; the setter calls use Symforce's `FullOpencvSplit...` names).
 For FlexGlue the recipe moved to COLMAP main. The hand-written changes applied there without conflict (upstream changed
 only SPDX headers, `#ifdef CASPAR_ENABLED` guards, and a warning in place of a throw for invalid camera parameters); the
-port is branch `caspar-adapters-main` @ 391f7467 (generated kernels @ 700de612) in a local clone of colmap main.
+port was branch `caspar-adapters-main` @ 391f7467 (generated kernels @ 700de612) in a local clone of colmap main, no
+longer present; its content is commits `6fe00835` and `dede6d9a` of the source branch above.
 
 FULL_OPENCV follows upstream PR #4657 (fixed-calibration THIN_PRISM_FISHEYE): FULL_OPENCV's 12 parameters do not fit a
 tunable merged or split calib in Caspar's 48 KB shared-memory budget, so only two factors are generated, with the
@@ -46,8 +74,7 @@ Cut and checked:
 git diff --full-index 137f2168 HEAD -- doc/faq.rst src/colmap/estimators/bundle_adjustment_caspar.cc \
   src/colmap/estimators/caspar/caspar_model_adapter.h src/thirdparty/Symforce-Caspar/caspar_generate.py   # hand-written
 git diff --full-index 137f2168 HEAD -- src/thirdparty/Symforce-Caspar/generated/f32                      # generated
-git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS   # with all five patches committed
-# fresh checkout of 137f2168: git apply the five patches; sha256sum -c SHA256SUMS -> 284/284
+# SHA256SUMS and the fresh-checkout check of all eight patches: tools/cut_patches.sh (above)
 ```
 
 Drop an adapter when upstream CASPAR supports its model.
@@ -72,7 +99,8 @@ at the start and in Ceres' solution).
 
 ## caspar-diag-exit-no-convergence.patch, caspar-rig-refine.patch, caspar-rig-refine-generated-f32.patch
 
-Applied after the five patches above (`refine_sensor_from_rig` on CASPAR, 2026-11-24).
+Applied after the five patches above (`refine_sensor_from_rig` on CASPAR, 2026-11-24). Source: commits `5089fc98`
+(diag exit) and `6414b76e`..`186e11b5` (rig) of the source branch above.
 
 - **Diag exit** (`caspar-diag-exit-no-convergence.patch`, hand-written, 1 file): `CONVERGED_DIAG_EXIT` (the LM damping
   passed `diag_exit_value` after uphill steps) is reported as `NO_CONVERGENCE`, not `CONVERGENCE`. It hid the Mission
@@ -102,11 +130,17 @@ Applied after the five patches above (`refine_sensor_from_rig` on CASPAR, 2026-1
   `SimpleRadialSensorFromRig` now) by hand, and the span helper block re-rendered with `tools/caspar_rcs_helpers.py`
   (the camera span now ends at `SimpleRadialSensorFromRig`). The beta fix lives in `solver_tools`, which did not change.
 
+Generator environment: a copy of pyCuSFM's `packages/pycolmap-caspar-fisheye/generator/pixi.{toml,lock}` in
+`~/caspar-rig-dev/gen` on pablo-dl-server (symforce 0.12.0 from PyPI, clang-format 21.1.2, python 3.11).
+
 ```bash
-# regenerate (generator env as above), outside the checkout:
-python src/thirdparty/Symforce-Caspar/caspar_generate.py /tmp/caspar-gen-rig/rig f32
-# take the new files + caspar_mappings.{h,cu}; take solver.{h,cc} and re-apply the RCS solver hunks, then
+# on the source branch at 5089fc98 + the generator commit 6414b76e: regenerate outside the checkout
+~/caspar-rig-dev/gen/.pixi/envs/default/bin/python src/thirdparty/Symforce-Caspar/caspar_generate.py /tmp/caspar-gen-rig/rig f32
+# copy the new files + caspar_mappings.{h,cu} into generated/f32; take solver.{h,cc} and re-apply the RCS solver
+# hunks (patch -p1, the moved one by hand), then
 python <recipe>/tools/caspar_rcs_helpers.py <checkout>   # exit 0 once the printed block is in solver.cc
+# commit (1abd4e16 on the source branch), then the adapter commits; then cut:
+recipes/colmap-src/tools/cut_patches.sh <checkout> d9993d02 5089fc98 HEAD
 ```
 
 - **Measurements** (2026-11-24, RTX 5090 dev build sm_120, f32; CASPAR under /tmp/gpu-5090.lock, Ceres 2.x on 8 CPU
