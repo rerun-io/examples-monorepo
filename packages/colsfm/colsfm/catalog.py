@@ -655,6 +655,7 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
         def write_truth(path: Path) -> object:
             return write_ground_truth(path, ground_truth, rig_frames, cameras)
 
+    view: ViewRigSource | None = view_rig_source(dataset, config, cameras, trajectory) if view_rig else None
     input_dir: Path = config.input_dir
     write_snapshot(
         input_dir,
@@ -665,7 +666,6 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
     )
     seconds: float = time.perf_counter() - started
     print(f"[colsfm.catalog] {config.segment}: {len(candidates)} rig frames, {written} keyframes, {len(cameras)} cameras in {seconds:.1f} s")
-    view: ViewRigSource | None = view_rig_source(dataset, config, cameras, trajectory) if view_rig else None
     return PreparedInput(input_dir=input_dir, cameras=cameras, num_rig_frames=len(candidates), num_keyframes=written, seconds=seconds, view=view)
 
 
