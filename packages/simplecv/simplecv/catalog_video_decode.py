@@ -1,8 +1,9 @@
 """NVDEC decode of catalog video streams, with the next chunk decoded on one thread per stream.
 
 ``decode_runs`` plans which samples each decoder reads, so that no sample is decoded twice at any selection of pictures.
-A torchcodec CUDA decoder fails on a thread other than the one that created it, so each stream's decoder is created and
-used on its own thread. Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
+A torchcodec CUDA decoder decodes on any thread that has a current CUDA context (``video_io.bind_cuda_device``), not
+only on the one that created it; here each stream's decoder is created and used on its own thread, which binds the device
+once. Two NVDEC threads decode about twice the frames per second of one thread on the RTX 5090.
 """
 
 import time
