@@ -20,8 +20,9 @@ from colsfm.cameras import (
 from colsfm.export import write_colmap_model
 from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, read_frames_meta, write_frames_meta
 from colsfm.geometry import rigid3d_from_axis_angle_degrees
+from colsfm.reconstruction import gauge_camera_params_id
 from colsfm.rerun_log import camera_k_matrix
-from colsfm.run_report import FocalChange, focal_changes
+from colsfm.run_report import FocalChange, camera_model_changes, focal_changes
 
 
 def read_blob_cameras(path: Path) -> dict[int, pycolmap.Camera]:
@@ -151,6 +152,23 @@ def test_refined_intrinsics_reach_the_written_metadata_as_the_sparse_model_holds
     changes: tuple[FocalChange, ...] = focal_changes(nominal, refined)
     assert [change.camera_params_id for change in changes] == sorted(nominal.cameras)
     assert all(change.focal_change_percent == pytest.approx(1.2) for change in changes)
+
+
+def test_a_camera_model_refinement_reports_the_rig_movement_beside_the_focals() -> None:
+    """`--refine-camera-model` frees the rig in the mapper and skips stage 7b, which used to be the only writer of
+    `summary.json`'s `extrinsic_changes`: the summary then said the rig had not moved."""
+    nominal: FramesMeta = build_synthetic_rig(num_frames=2, num_points=10).frames_meta
+    reference: int = gauge_camera_params_id(nominal)
+    moved: int = next(camera_params_id for camera_params_id in sorted(nominal.cameras) if camera_params_id != reference)
+    refined_extrinsics: dict[int, pycolmap.Rigid3d] = {camera_params_id: camera.vehicle_T_cam for camera_params_id, camera in nominal.cameras.items()}
+    nudged: pycolmap.Rigid3d = nominal.cameras[moved].vehicle_T_cam
+    refined_extrinsics[moved] = pycolmap.Rigid3d(nudged.rotation, np.asarray(nudged.translation) + np.array([0.003, 0.0, 0.0]))
+
+    extrinsics, focals = camera_model_changes(nominal, nominal.with_extrinsics(refined_extrinsics), refined_extrinsics)
+    assert [change.camera_params_id for change in extrinsics] == sorted(nominal.cameras)
+    assert [change.camera_params_id for change in extrinsics if change.is_reference] == [reference]
+    assert {change.camera_params_id: round(change.translation_change_mm, 6) for change in extrinsics if change.translation_change_mm > 0} == {moved: 3.0}
+    assert [change.camera_params_id for change in focals] == sorted(nominal.cameras)
 
 
 def test_unmoved_intrinsics_leave_the_metadata_byte_identical() -> None:

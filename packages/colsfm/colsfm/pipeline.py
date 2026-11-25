@@ -128,7 +128,7 @@ from colsfm.run_report import (
     FocalChange,
     MappingStats,
     PipelineSummary,
-    focal_changes,
+    camera_model_changes,
 )
 from colsfm.stages import (
     ExportStageResult,
@@ -421,7 +421,7 @@ def _run_stages(
     if options.refine_camera_model and mapping.refined_extrinsics is not None:
         # The mapper freed the rig and the intrinsics; `sparse/` is written from its reconstruction, and so is this.
         mapped_meta = with_colmap_intrinsics(pose_graph.frames_meta.with_extrinsics(mapping.refined_extrinsics), mapping.reconstruction)
-        focals = focal_changes(pose_graph.frames_meta, mapped_meta)
+        changes, focals = camera_model_changes(pose_graph.frames_meta, mapped_meta, mapping.refined_extrinsics)
     if plan_runs_extrinsic_stage(options):
         with timed_stage(ledger, EXTRINSIC_REFINEMENT_STAGE), watcher.stage_scope(EXTRINSIC_REFINEMENT_STAGE):
             refinement: ExtrinsicRefinementStageResult = run_extrinsic_refinement_stage(

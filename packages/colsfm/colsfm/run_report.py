@@ -29,6 +29,7 @@ from colsfm.frames_meta import CameraParams, FramesMeta
 from colsfm.geometry import MILLIMETRES_PER_METRE, relative_rotation_degrees
 from colsfm.mapping import MappingResult, PolishStats
 from colsfm.pose_graph import EdgeKind, PoseGraphEdge
+from colsfm.reconstruction import gauge_camera_params_id
 from colsfm.rig_calibration import ExtrinsicChange
 from colsfm.run_config import PipelineOptions
 from colsfm.run_lifecycle import StageName
@@ -175,7 +176,8 @@ class PipelineSummary:
     total_seconds: float
     """Wall-clock seconds for the whole run."""
     extrinsic_changes: tuple[ExtrinsicChange, ...] = ()
-    """Per-camera extrinsic movement the refinement produced; empty when the flag is off."""
+    """Per-camera extrinsic movement the extrinsic stage (or, under `--refine-camera-model`, the mapper) produced; empty
+    when neither freed the rig."""
     extrinsic_refinement_rounds_run: int = 0
     """Rounds the regularised refinement actually took before it converged."""
     focal_changes: tuple[FocalChange, ...] = ()
@@ -325,3 +327,20 @@ def focal_changes(nominal: FramesMeta, refined: FramesMeta) -> tuple[FocalChange
             )
         )
     return tuple(changes)
+
+
+def camera_model_changes(
+    nominal: FramesMeta, refined: FramesMeta, refined_extrinsics: Mapping[int, pycolmap.Rigid3d]
+) -> tuple[tuple[ExtrinsicChange, ...], tuple[FocalChange, ...]]:
+    """What a `--refine-camera-model` mapper did to the rig and to the focals, for `summary.json`.
+
+    Args:
+        nominal: The collection the mapper started from.
+        refined: The same collection with the mapper's extrinsics and intrinsics written back.
+        refined_extrinsics: `vehicle_T_cam` per camera after the mapper (`MappingResult.refined_extrinsics`).
+
+    Returns:
+        The rig movement per camera, measured from the gauge camera as the extrinsic stage measures it, and the focal
+        movement per camera.
+    """
+    return extrinsic_changes(nominal, refined_extrinsics, gauge_camera_params_id(nominal)), focal_changes(nominal, refined)
