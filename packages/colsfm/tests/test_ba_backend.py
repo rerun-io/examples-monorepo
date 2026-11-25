@@ -38,6 +38,14 @@ STOCK_CAPABILITY: CasparCapability = CasparCapability(
 )
 """What stock CASPAR reports: two adapters, no probe error."""
 
+RIG_CAPABILITY: CasparCapability = CasparCapability(
+    availability="available",
+    supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"}),
+    probe_errors=(),
+    refines_sensor_from_rig=True,
+)
+"""A build whose CASPAR also refines `sensor_from_rig` (recipes/colmap-src with the rig factor)."""
+
 NO_BUILD_CAPABILITY: CasparCapability = CasparCapability(
     availability="unavailable", supported_camera_models=frozenset(), probe_errors=("built without CASPAR_ENABLED",)
 )
@@ -176,8 +184,18 @@ def test_a_ceres_request_is_never_second_guessed() -> None:
 
 
 def test_free_extrinsics_fall_back_to_ceres_with_a_reason() -> None:
-    """CASPAR throws when asked to refine `sensor_from_rig`, so Ceres takes the solve."""
-    assert resolve_backend("caspar", optimize_extrinsics=True) == ("ceres", EXTRINSICS_FALLBACK_REASON)
+    """A CASPAR that holds `sensor_from_rig` throws when asked to refine it, so Ceres takes the solve."""
+    assert resolve_backend("caspar", optimize_extrinsics=True, capability=STOCK_CAPABILITY) == ("ceres", EXTRINSICS_FALLBACK_REASON)
+
+
+def test_free_extrinsics_stay_on_caspar_when_the_build_refines_the_rig() -> None:
+    """A build whose probe refined a two-sensor rig keeps the solve on the GPU.
+
+    Measured on Mission office (rig + per-face focals free in every round): 46 s of mapping on CASPAR against 383 s on
+    Ceres, poses 0.018 deg apart.
+    """
+    assert resolve_backend("caspar", optimize_extrinsics=True, camera_model_names=["PINHOLE"], capability=RIG_CAPABILITY) == ("caspar", None)
+    assert resolve_backend("caspar", optimize_extrinsics=True, camera_model_names=["FULL_OPENCV"], capability=RIG_CAPABILITY)[0] == "ceres"
 
 
 def test_an_unsupported_camera_model_falls_back_and_names_both_sets() -> None:
@@ -240,7 +258,7 @@ def test_a_ceres_plan_carries_no_polish() -> None:
 
 def test_a_fallback_plan_records_what_was_asked_for_and_why_it_was_refused() -> None:
     """The request, the effective backend and the reason all survive into the plan."""
-    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=True, optimize_extrinsics=True)
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=True, optimize_extrinsics=True, capability=STOCK_CAPABILITY)
     assert plan.requested_backend == "caspar"
     assert plan.backend == "ceres"
     assert plan.fell_back

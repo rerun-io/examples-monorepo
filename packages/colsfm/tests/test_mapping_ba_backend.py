@@ -237,6 +237,27 @@ def test_the_probe_reports_the_camera_models_this_caspar_build_projects(
         assert supported == CASPAR_STOCK_CAMERA_MODELS
 
 
+@pytest.mark.integration
+def test_a_free_rig_solves_where_the_rig_probe_says(caspar_enabled: bool, synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
+    """The rig probe's answer is the backend a mapping that frees `sensor_from_rig` runs on, and that mapping completes.
+
+    A build with the rig factor (recipes/colmap-src caspar-rig-refine) keeps it on CASPAR; a stock build falls back to
+    Ceres with `EXTRINSICS_FALLBACK_REASON` instead of throwing mid-run.
+    """
+    if not caspar_enabled:
+        pytest.skip("this pycolmap is built without CASPAR_ENABLED; run under `pixi run -e colsfm-dev`")
+    refines: bool = detect_caspar_capability().refines_sensor_from_rig
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=True)
+    model = build_reconstruction(synthetic_rig.frames_meta, reference_camera_params_id=0)
+    result: MappingResult = run_mapping(
+        model, synthetic_database, isaac_config.vision_mapping, quiet_options(num_threads=1, ba_plan=plan, optimize_extrinsics=True, use_gpu=True)
+    )
+    print(f"[colsfm] CASPAR refines sensor_from_rig: {refines}; free-rig mapping ran on {result.ba_plan.backend}")
+    assert result.ba_plan.backend == ("caspar" if refines else "ceres")
+    assert result.refined_extrinsics is not None
+    assert result.mean_reprojection_error_px < 1.0
+
+
 def test_the_probe_solves_once_however_often_it_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     """The probe is cached, so the mapper pays for its CASPAR solves once per process.
 

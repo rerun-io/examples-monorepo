@@ -395,11 +395,9 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     plan: BaExecutionPlan = options.ba_plan
     ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[plan.backend]
     if plan.backend == "caspar":
-        # CASPAR throws on a multi-sensor frame whose extrinsics are free, and throws
-        # again unless focal length and the distortion block agree; both are False here.
-        # The plan already refuses CASPAR for a solve that frees the extrinsics, so this
-        # is the constraint stated where the options are built rather than a second rule.
-        ba_options.refine_sensor_from_rig = False
+        # CASPAR refines focal length and the distortion block together. The plan keeps a solve that frees
+        # `sensor_from_rig` on CASPAR only when the build's probe refined a rig (`CasparCapability.refines_sensor_from_rig`).
+        ba_options.refine_sensor_from_rig = options.optimize_extrinsics and plan.capability.refines_sensor_from_rig
         ba_options.refine_extra_params = ba_options.refine_focal_length
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
