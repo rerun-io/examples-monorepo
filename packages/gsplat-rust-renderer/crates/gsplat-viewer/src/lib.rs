@@ -15,4 +15,5 @@ mod sog;
 mod visualizer;
 
 pub use cache::compute_gpu_bytes;
+pub use renderer::compute_encoded_frames;
 pub use visualizer::camera_from_view;

@@ -6,6 +6,7 @@ use re_renderer::external::smallvec::smallvec;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 use re_renderer::{BindGroupDesc, BindGroupEntry, GpuBindGroup, GpuTexture};
 use re_viewer::external::{parking_lot, re_log, re_renderer, re_viewer_context};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub(crate) struct GaussianRenderer {
@@ -58,6 +59,14 @@ pub(crate) struct RenderView {
     image: Image,
     last_good: Option<GpuBindGroup>,
     profile: Option<crate::profile::ViewProfile>,
+}
+
+// Process-wide, so the count never goes back when the cache evicts or replaces a view.
+static ENCODED_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Splat frames encoded by every view of this process, for the frame probe's fresh-frame count.
+pub fn compute_encoded_frames() -> u64 {
+    ENCODED_FRAMES.load(Ordering::Relaxed)
 }
 
 impl RenderView {
@@ -178,6 +187,7 @@ impl RenderView {
             camera: *camera,
             options,
         };
+        ENCODED_FRAMES.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }

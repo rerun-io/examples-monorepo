@@ -1,11 +1,20 @@
 //! Opt-in headless frame timing. Includes UI, compute, composite, and GPU completion;
-//! excludes screenshot readback. The production viewer has no probe hooks.
+//! excludes screenshot readback. The production viewer keeps one hook for it: a process-wide count of
+//! encoded splat frames (`gsplat_viewer::compute_encoded_frames`).
+//! With `--frames-in-flight` the probe queues frames like a swapchain instead of waiting for each one,
+//! so `fresh_frames` shows how many UI frames encoded a new splat image.
+//! Splat frames per second: `fresh_frames / measured_wall_seconds` (both cover the measured frames).
 use gsplat_viewer::application;
 
 use gsplat_cli::camera::CameraSpec;
 use re_viewer::external::{eframe, egui, parking_lot::Mutex};
 use serde::Serialize;
 use std::time::Instant;
+
+/// Warm-up and measurement end on whole orbits of the kit recordings (300 frames at the 1/60 s step).
+const ORBIT_FRAMES: usize = 300;
+const WARMUP_MS: f64 = 10_000.0;
+const MEASURE_MS: f64 = 10_000.0;
 
 #[derive(Serialize)]
 struct Frame {
@@ -17,11 +26,19 @@ struct Report<'a> {
     #[serde(flatten)]
     provenance: gsplat_cli::Provenance,
     adapter: String,
-    boundary: &'static str,
+    boundary: String,
     warmup_frames: usize,
     warmup_seconds: f64,
     minimum_camera_delta: f32,
     msaa_samples: u32,
+    frames_in_flight: usize,
+    /// Splat frames encoded during the measured frames, summed over every compute view and entity of
+    /// the process. With one splat entity, `fresh_frames / frames.len()` is the fraction of UI frames
+    /// that show a new splat image (the others show the previous one).
+    fresh_frames: u64,
+    /// Wall time from the end of the last warmup frame to the end of the last measured frame; unlike
+    /// the sum of `frames[].ms` it includes the time between frames.
+    measured_wall_seconds: f64,
     /// Compute-renderer GPU bytes at the last frame: shared scene uploads, per-view scratch and targets.
     gpu_bytes_scene: u64,
     gpu_bytes_views: u64,
@@ -38,6 +55,11 @@ pub struct FrameProbe {
     measured_ms: f64,
     started: Instant,
     require_motion: bool,
+    frames_in_flight: usize,
+    submitted: std::collections::VecDeque<wgpu::SubmissionIndex>,
+    encoded_at_start: u64,
+    measured_from: Instant,
+    splats_seen: bool,
 }
 impl FrameProbe {
     pub fn new(
@@ -45,6 +67,7 @@ impl FrameProbe {
         state: eframe::egui_wgpu::RenderState,
         size: egui::Vec2,
         require_motion: bool,
+        frames_in_flight: usize,
     ) -> Self {
         let target = state.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("headless frame probe"),
@@ -70,9 +93,15 @@ impl FrameProbe {
             measured_ms: 0.0,
             started: Instant::now(),
             require_motion,
+            frames_in_flight,
+            submitted: std::collections::VecDeque::new(),
+            encoded_at_start: 0,
+            measured_from: Instant::now(),
+            splats_seen: false,
         }
     }
-    /// Paint the full UI into a persistent offscreen target, then wait for the GPU.
+    /// Paint the full UI into a persistent offscreen target, then wait for the GPU to finish all but
+    /// `frames_in_flight` frames.
     pub fn end_frame(
         &mut self,
         ctx: &egui::Context,
@@ -123,16 +152,38 @@ impl FrameProbe {
                 .forget_lifetime();
             renderer.render(&mut pass, &shapes, &screen);
         }
-        self.state
-            .queue
-            .submit(buffers.into_iter().chain([encoder.finish()]));
-        self.state
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())?;
+        self.submitted.push_back(
+            self.state
+                .queue
+                .submit(buffers.into_iter().chain([encoder.finish()])),
+        );
+        while self.submitted.len() > self.frames_in_flight {
+            self.state.device.poll(wgpu::PollType::Wait {
+                submission_index: self.submitted.pop_front(),
+                timeout: None,
+            })?;
+        }
         let ms = self.started.elapsed().as_secs_f64() * 1000.0;
-        if self.warmup < 300 || self.warmup_ms < 5_000.0 || !self.warmup.is_multiple_of(300) {
+        // Read after egui's paint callbacks, which encode this frame's splats.
+        let encoded_frames = gsplat_viewer::compute_encoded_frames();
+        // The warm-up clock restarts at the first splat frame: a large scene loads for seconds with cheap
+        // UI-only frames, and a desktop GPU needs that long under load to settle its clock.
+        if !self.splats_seen && encoded_frames > 0 {
+            self.splats_seen = true;
+            self.warmup_ms = 0.0;
+            // A load longer than the warm-up: the frames measured so far drew no splats.
+            self.warmup += self.frames.len();
+            self.frames.clear();
+            self.measured_ms = 0.0;
+        }
+        if self.warmup < ORBIT_FRAMES
+            || self.warmup_ms < WARMUP_MS
+            || !self.warmup.is_multiple_of(ORBIT_FRAMES)
+        {
             self.warmup += 1;
             self.warmup_ms += ms;
+            self.encoded_at_start = encoded_frames;
+            self.measured_from = Instant::now();
             return Ok(false);
         }
         self.frames.push(Frame {
@@ -140,9 +191,9 @@ impl FrameProbe {
             camera: CameraSpec::from_core(camera),
         });
         self.measured_ms += ms;
-        if self.frames.len() < 300
-            || self.measured_ms < 10_000.0
-            || !self.frames.len().is_multiple_of(300)
+        if self.frames.len() < ORBIT_FRAMES
+            || self.measured_ms < MEASURE_MS
+            || !self.frames.len().is_multiple_of(ORBIT_FRAMES)
         {
             return Ok(false);
         }
@@ -164,14 +215,29 @@ impl FrameProbe {
             !self.require_motion || minimum_camera_delta > 1e-5,
             "camera held during a moving-view measurement"
         );
+        // With frames in flight a frame waits for an older submission, so its ms is the steady-state frame
+        // interval, not one frame's latency.
+        let completion = if self.frames_in_flight == 0 {
+            String::new()
+        } else {
+            format!(
+                " of the frame {} submissions back (swapchain-like)",
+                self.frames_in_flight
+            )
+        };
         let report = Report {
             provenance: gsplat_cli::Provenance::capture(),
             adapter: self.state.adapter.get_info().name,
-            boundary: "headless UI step + compute + Rerun composite + egui paint + GPU completion; no pixel readback; no idle wait",
+            boundary: format!(
+                "headless UI step + compute + Rerun composite + egui paint + GPU completion{completion}; no pixel readback; no idle wait"
+            ),
             warmup_frames: self.warmup,
             warmup_seconds: self.warmup_ms / 1000.0,
             minimum_camera_delta,
             msaa_samples,
+            frames_in_flight: self.frames_in_flight,
+            fresh_frames: encoded_frames - self.encoded_at_start,
+            measured_wall_seconds: self.measured_from.elapsed().as_secs_f64(),
             gpu_bytes_scene: gpu_bytes[0],
             gpu_bytes_views: gpu_bytes[1],
             frames: &self.frames,
@@ -207,6 +273,9 @@ pub struct Args {
     /// Reject a timing run if any adjacent measured cameras are identical.
     #[arg(long)]
     require_motion: bool,
+    /// Queue up to this many frames before waiting for the oldest, like a swapchain; 0 waits for every frame.
+    #[arg(long, default_value_t = 0)]
+    frames_in_flight: usize,
 }
 struct ProbeView {
     camera: gsplat_core::Camera,
@@ -309,6 +378,7 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
         state.get().expect("created device").clone(),
         cli.window_size,
         cli.require_motion,
+        cli.frames_in_flight,
     );
     let started = Instant::now();
     loop {
