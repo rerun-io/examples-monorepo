@@ -7,7 +7,8 @@
 #   <rcs-ref>   commit with the five earlier patches applied (recipe: caspar-reduced-camera-system)
 #   <diag-ref>  commit that adds caspar-diag-exit-no-convergence on top of <rcs-ref>
 #   <head-ref>  last rig-refinement commit (default HEAD)
-# The checkout is only read: the verification runs in a temporary shared clone.
+# The checkout is only read: the verification runs in a temporary shared clone. The new patches and SHA256SUMS are
+# written to a temporary directory and replace the recipe's files only after the check passes.
 set -euo pipefail
 
 if [ $# -lt 3 ] || [ $# -gt 4 ]; then
@@ -35,25 +36,29 @@ HAND=(
   src/thirdparty/Symforce-Caspar/caspar_generate.py
 )
 
-git -C "$C" diff --full-index "$RCS" "$DIAG" > "$P/caspar-diag-exit-no-convergence.patch"
-git -C "$C" diff --full-index "$DIAG" "$HEAD_REF" -- "${HAND[@]}" > "$P/caspar-rig-refine.patch"
-git -C "$C" diff --full-index "$DIAG" "$HEAD_REF" -- "$GEN" > "$P/caspar-rig-refine-generated-f32.patch"
+V=$(mktemp -d /tmp/colmap-cut.XXXXXX)
+trap 'rm -rf "$V"' EXIT
+OUT=$V/out
+mkdir "$OUT"
+CUT=(caspar-diag-exit-no-convergence.patch caspar-rig-refine.patch caspar-rig-refine-generated-f32.patch)
+git -C "$C" diff --full-index "$RCS" "$DIAG" > "$OUT/${CUT[0]}"
+git -C "$C" diff --full-index "$DIAG" "$HEAD_REF" -- "${HAND[@]}" > "$OUT/${CUT[1]}"
+git -C "$C" diff --full-index "$DIAG" "$HEAD_REF" -- "$GEN" > "$OUT/${CUT[2]}"
 
 # Nothing outside the two rig cuts.
 other=$(git -C "$C" diff --name-only "$DIAG" "$HEAD_REF" | grep -v "^$GEN/" | grep -vxF -f <(printf '%s\n' "${HAND[@]}") || true)
 [ -z "$other" ] || { echo "uncut files: $other" >&2; exit 1; }
 
 # Hash the committed tree of <head-ref>, not the work tree: a dirty checkout must not leak into SHA256SUMS.
-V=$(mktemp -d /tmp/colmap-cut.XXXXXX)
-trap 'rm -rf "$V"' EXIT
 git clone -q --shared --no-checkout "$C" "$V/head"
 git -C "$V/head" checkout -q --detach "$(git -C "$C" rev-parse "$HEAD_REF")"
-git -C "$C" diff --name-only "$PIN" "$HEAD_REF" | (cd "$V/head" && xargs sha256sum) > "$P/SHA256SUMS"
+git -C "$C" diff --name-only "$PIN" "$HEAD_REF" | (cd "$V/head" && xargs sha256sum) > "$OUT/SHA256SUMS"
 
 git clone -q --shared --no-checkout "$C" "$V/pin"
 git -C "$V/pin" checkout -q --detach "$PIN"
 for p in "${PATCHES[@]}"; do
-  git -C "$V/pin" apply "$P/$p"
+  if [ -e "$OUT/$p" ]; then git -C "$V/pin" apply "$OUT/$p"; else git -C "$V/pin" apply "$P/$p"; fi
 done
-(cd "$V/pin" && sha256sum --quiet -c "$P/SHA256SUMS")
+(cd "$V/pin" && sha256sum --quiet -c "$OUT/SHA256SUMS")
+mv "$OUT"/* "$P/"
 echo "SUMS OK: $(wc -l < "$P/SHA256SUMS") files, ${#PATCHES[@]} patches"
