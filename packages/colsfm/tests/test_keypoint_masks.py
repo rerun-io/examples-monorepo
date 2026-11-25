@@ -9,7 +9,7 @@ import numpy as np
 import pyarrow as pa
 import pycolmap
 import pytest
-from jaxtyping import Bool, Float32, Float64
+from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
 
 from colsfm.catalog import CatalogCameraModel, frames_meta_document
@@ -412,6 +412,23 @@ def _fisheye_and_pinhole_database(tmp_path: Path) -> Path:
     return database_path
 
 
+THREE_KEYPOINTS: Float32[ndarray, "3 6"] = np.zeros((3, 6), dtype=np.float32)
+THREE_KEYPOINTS[:, :2] = [[49.5, 49.5], [0.0, 0.0], [59.5, 49.5]]
+"""Centre, corner and a point 10 px right of the centre (Nx6, as the `pycolmap` backend writes them)."""
+THREE_DESCRIPTORS: UInt8[ndarray, "3 8"] = np.repeat(np.arange(3, dtype=np.uint8)[:, None], 8, axis=1)
+"""One distinct uint8 descriptor row per keypoint, so a test sees which rows are kept."""
+
+
+def _write_three_keypoints(database_path: Path) -> dict[str, int]:
+    """`THREE_KEYPOINTS` and `THREE_DESCRIPTORS` on every image; returns image ids by name."""
+    with pycolmap.Database.open(database_path) as database:
+        ids: dict[str, int] = {image.name: int(image.image_id) for image in database.read_all_images()}
+        for image_id in ids.values():
+            database.write_keypoints(image_id, THREE_KEYPOINTS)
+            database.write_descriptors(image_id, pycolmap.FeatureDescriptors(data=THREE_DESCRIPTORS, type=pycolmap.FeatureExtractorType.ALIKED_N16ROT))
+    return ids
+
+
 def test_a_database_without_a_wide_camera_keeps_its_mask_source_unchanged(tmp_path: Path) -> None:
     database_path: Path = _two_camera_database(tmp_path)
     user_masks: DictMasks = DictMasks({"wide/1000": np.ones((HEIGHT, WIDTH), dtype=bool)})
@@ -439,14 +456,7 @@ def test_the_valid_angle_mask_joins_a_user_mask_on_the_cameras_it_covers(tmp_pat
 def test_dropping_masked_keypoints_from_a_database_keeps_the_rest_in_order(tmp_path: Path) -> None:
     """The `pycolmap` backend writes its own keypoints (Nx6, uint8 descriptor blobs): the guard runs after it."""
     database_path: Path = _fisheye_and_pinhole_database(tmp_path)
-    keypoints: Float32[ndarray, "3 6"] = np.zeros((3, 6), dtype=np.float32)
-    keypoints[:, :2] = [[49.5, 49.5], [0.0, 0.0], [60.0, 49.5]]
-    descriptors: ndarray = np.repeat(np.arange(3, dtype=np.uint8)[:, None], 8, axis=1)
-    with pycolmap.Database.open(database_path) as database:
-        ids: dict[str, int] = {image.name: int(image.image_id) for image in database.read_all_images()}
-        for image_id in ids.values():
-            database.write_keypoints(image_id, keypoints)
-            database.write_descriptors(image_id, pycolmap.FeatureDescriptors(data=descriptors, type=pycolmap.FeatureExtractorType.ALIKED_N16ROT))
+    ids: dict[str, int] = _write_three_keypoints(database_path)
 
     guarded: MaskSource | None = with_valid_angle_masks(database_path, None)
     assert guarded is not None
@@ -456,24 +466,10 @@ def test_dropping_masked_keypoints_from_a_database_keeps_the_rest_in_order(tmp_p
         fish_keypoints: ndarray = database.read_keypoints(ids["fish/1000"])
         fish_descriptors = database.read_descriptors(ids["fish/1000"])
         cube_keypoints: ndarray = database.read_keypoints(ids["cube/1000"])
-    np.testing.assert_array_equal(fish_keypoints, keypoints[[0, 2]])
-    np.testing.assert_array_equal(fish_descriptors.data, descriptors[[0, 2]])
+    np.testing.assert_array_equal(fish_keypoints, THREE_KEYPOINTS[[0, 2]])
+    np.testing.assert_array_equal(fish_descriptors.data, THREE_DESCRIPTORS[[0, 2]])
     assert fish_descriptors.type == pycolmap.FeatureExtractorType.ALIKED_N16ROT
-    np.testing.assert_array_equal(cube_keypoints, keypoints)
-
-
-def _write_three_keypoints(database_path: Path) -> dict[str, int]:
-    """Centre, corner and a point 10 px right of the centre on every image; returns image ids by name."""
-    keypoints: Float32[ndarray, "3 6"] = np.zeros((3, 6), dtype=np.float32)
-    keypoints[:, :2] = [[49.5, 49.5], [0.0, 0.0], [59.5, 49.5]]
-    with pycolmap.Database.open(database_path) as database:
-        ids: dict[str, int] = {image.name: int(image.image_id) for image in database.read_all_images()}
-        for image_id in ids.values():
-            database.write_keypoints(image_id, keypoints)
-            database.write_descriptors(
-                image_id, pycolmap.FeatureDescriptors(data=np.zeros((3, 8), dtype=np.uint8), type=pycolmap.FeatureExtractorType.ALIKED_N16ROT)
-            )
-    return ids
+    np.testing.assert_array_equal(cube_keypoints, THREE_KEYPOINTS)
 
 
 def test_pycolmap_extraction_applies_the_valid_angle_guard_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -338,8 +338,10 @@ class ValidAngleMasks:
         """
         own: KeypointMask | None = None if self.masks is None else self.masks.mask(name, width, height)
         angle: KeypointMask | None = self.angle_masks.get(name)
-        if angle is None or own is None:
-            return own if angle is None else angle
+        if own is None:
+            return angle
+        if angle is None:
+            return own
         return own | angle
 
 
