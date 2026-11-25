@@ -793,7 +793,7 @@ index 010f654d68cbdd8b6a89aaae608657315f3ba362..d6eed1cd8502335bfbc4d4a9ed07202d
  }
  
 diff --git a/src/thirdparty/Symforce-Caspar/caspar_generate.py b/src/thirdparty/Symforce-Caspar/caspar_generate.py
-index a13b97c76b960c7c0219e3ec23963a5365c189ab..375fed89b897685b21e0542ce01e05083c3eafa2 100644
+index c997bfcbd5b69b470d628df2d886915c27b2bcc3..21574c456bdcecf663bcb74f4fede11a8554c1c3 100644
 --- a/src/thirdparty/Symforce-Caspar/caspar_generate.py
 +++ b/src/thirdparty/Symforce-Caspar/caspar_generate.py
 @@ -23,6 +23,7 @@ import symforce.symbolic as sf  # noqa: E402
@@ -971,7 +971,7 @@ index a13b97c76b960c7c0219e3ec23963a5365c189ab..375fed89b897685b21e0542ce01e0508
  # --- Camera models ---
  
  # Merged cores define the canonical projection math reused by split variants.
-@@ -616,6 +756,28 @@ def full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point(
+@@ -620,6 +760,28 @@ def full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point(
      )
  
  
@@ -1000,7 +1000,7 @@ index a13b97c76b960c7c0219e3ec23963a5365c189ab..375fed89b897685b21e0542ce01e0508
  dtype = mem.DType.DOUBLE if precision == "f64" else mem.DType.FLOAT
  caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
  
-@@ -632,16 +794,17 @@ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
+@@ -636,16 +798,17 @@ caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
  # Limitations:
  #   - constant_rig_from_world_rotation not supported (needs separate pose
  #     rotation/translation sub-nodes)
@@ -1024,7 +1024,7 @@ index a13b97c76b960c7c0219e3ec23963a5365c189ab..375fed89b897685b21e0542ce01e0508
  
  FIXABLE_SIMPLE_RADIAL = {
      "pose": ConstSimpleRadialPose,
-@@ -743,6 +906,74 @@ caslib.add_factor(
+@@ -747,6 +910,74 @@ caslib.add_factor(
      full_opencv_split_fixed_pose_fixed_focal_and_extra_fixed_principal_point
  )
  
