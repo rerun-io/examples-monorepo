@@ -80,7 +80,13 @@ BLOB: pa.DataType = pa.list_(pa.field("item", pa.uint8(), nullable=False))
 
 
 def lens_halvings(width: int, max_lens_size: int | None) -> int:
-    """How many times a lens ``width`` pixels wide is halved to be at most ``max_lens_size`` wide (0 with None)."""
+    """How many times a lens ``width`` pixels wide is halved to be at most ``max_lens_size`` wide (0 with None).
+
+    Raises:
+        ValueError: If ``max_lens_size`` is not positive (no halving reaches it).
+    """
+    if max_lens_size is not None and max_lens_size <= 0:
+        raise ValueError(f"max_lens_size must be positive, got {max_lens_size}")
     count: int = 0
     while max_lens_size is not None and (width >> count) > max_lens_size:
         count += 1
@@ -159,7 +165,8 @@ class InsvReader:
             videos: Emit the lens videos; False leaves them out for the caller to write.
 
         Raises:
-            ValueError: On a malformed clip.
+            ValueError: On a malformed clip, a non-positive ``max_lens_size``, or ``videos`` with halved cameras (the
+                track-size videos would not match the cameras).
         """
         self.path: Path = Path(path).absolute()
         self.entity_path: str = str(self.path) if entity_path is None else entity_path
@@ -168,6 +175,8 @@ class InsvReader:
         self.videos: bool = videos
         self.halvings: int = lens_halvings(self.rig.resolution[0], max_lens_size)
         """Times each lens camera is halved (``lens_halvings``)."""
+        if videos and self.halvings:
+            raise ValueError(f"{self.path.name}: cameras halved {self.halvings} times describe re-encoded videos, not the track's: pass videos=False")
         if self.rig.profile_name is None:
             LOG.warning("%s (%s): read without a device profile: %s", self.path.name, self.rig.camera_type, self.rig.profile_note)
 

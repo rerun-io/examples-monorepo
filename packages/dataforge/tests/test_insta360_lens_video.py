@@ -34,6 +34,9 @@ def test_a_lens_is_halved_until_it_is_at_most_1920_wide() -> None:
 
     assert [insta360_io.lens_halvings(width, LENS_MAX_SIZE) for width in (3840, 2880, 1920, 1440)] == [1, 1, 0, 0]
     assert insta360_io.lens_halvings(3840, None) == 0, "without a stored size the reader keeps the track size"
+    for limit in (0, -1920):
+        with pytest.raises(ValueError, match="positive"):
+            insta360_io.lens_halvings(3840, limit)
 
 
 def test_the_halved_camera_projects_each_ray_into_the_stored_pixel_whose_box_holds_it() -> None:
