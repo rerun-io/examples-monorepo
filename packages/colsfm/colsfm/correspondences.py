@@ -93,8 +93,7 @@ def load_correspondences(
         database_cache: pycolmap.DatabaseCache = pycolmap.DatabaseCache.create(database, cache_options)
         # The rows `DatabaseCache` itself read (`ReadTwoViewGeometries`, in row order), for the rebuild below; with
         # nothing overridden the cache's own graph is used, so neither the read nor the rebuild runs.
-        rebuild: bool = bool(inlier_overrides)
-        geometry_rows: tuple[list[int], list[pycolmap.TwoViewGeometry]] = database.read_two_view_geometries() if rebuild else ([], [])
+        geometry_rows: tuple[list[int], list[pycolmap.TwoViewGeometry]] | None = database.read_two_view_geometries() if inlier_overrides else None
 
     image_id_by_name: dict[str, int] = {image.name: image_id for image_id, image in reconstruction.images.items()}
     mismatched: list[str] = []
@@ -119,9 +118,9 @@ def load_correspondences(
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 
     graph: pycolmap.CorrespondenceGraph = (
-        graph_with_inlier_overrides(database_cache, geometry_rows, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches)
-        if rebuild
-        else database_cache.correspondence_graph
+        database_cache.correspondence_graph
+        if geometry_rows is None
+        else graph_with_inlier_overrides(database_cache, geometry_rows, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches)
     )
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
     return Correspondences(
