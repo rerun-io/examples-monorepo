@@ -44,13 +44,18 @@ class PrefetchedChunks:
     """
 
     def __init__(self, videos: tuple[CatalogVideo, ...], chunks: list[list[int]], start: int, end: int, device: str, fps: int = 30) -> None:
-        """Start the decoders and the first chunk (decoding starts at construction)."""
+        """Start the decoders and the first chunk (decoding starts at construction).
+
+        Each decoder muxes its packets up to the last frame the chunks want, or ``end`` when that is earlier: a caller
+        that passes the end of the clip but samples only its start does not hold the whole clip in memory.
+        """
         self.chunks: list[list[int]] = chunks
         self.device: str = device
         self.wait_s: float = 0.0
         self.threads: list[ThreadPoolExecutor] = [ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"decode-{slot}") for slot in range(len(videos))]
+        last: int = min(end, max((chunk[-1] for chunk in chunks if chunk), default=start) + 1)
         self.decoders: list[Future[StreamDecoder]] = [
-            thread.submit(StreamDecoder, video, start, end, device, fps) for thread, video in zip(self.threads, videos, strict=True)
+            thread.submit(StreamDecoder, video, start, last, device, fps) for thread, video in zip(self.threads, videos, strict=True)
         ]
         self.pending: list[Future[Tensor]] = self._submit(chunks[0]) if chunks else []
 
