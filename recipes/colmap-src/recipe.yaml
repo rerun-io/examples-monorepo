@@ -79,7 +79,7 @@ source:
 build:
   # Bump with every patch or build-script edit: the build string hash does not follow them (recipes/README.md).
   number: 6
-  string: main137f216_caspar_fisheye_fullopencv_rig_cu130_sm${{ cuda_arch_tag }}_py312_${{ build_number }}
+  string: 137f216_caspar_fisheye_fullopencv_rig_cu130_sm${{ cuda_arch_tag }}_py312_${{ build_number }}
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
     # already-applied hunk with a warning and exit 0; a skipped hunk in solver.cc would compile and solve wrong.
