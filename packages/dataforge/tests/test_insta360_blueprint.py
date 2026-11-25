@@ -132,7 +132,10 @@ def test_paths_are_trails_and_the_colsfm_cloud_accumulates_through_cursor_window
     for view in layout["colsfm"][:2]:
         # simplecv.rerun_growing_points.log_points_by_first_view: finished blocks by latest-at (no window, so the viewer keeps them
         # processed through playback), the block the cursor is in from the recent rows.
-        assert f"{COLSFM}/points_growing" not in (view.visualizer_overrides or {}), "the blocks show as they are"
+        # A layer written before the blocks has its rows on the parent: those keep growing since the start (exact paths
+        # only, so this does not reach the blocks).
+        assert blueprints.cursor_window(None) in override(view, f"{COLSFM}/points_growing"), "a layer without blocks still grows"
+        assert not any(str(entity).startswith(f"{COLSFM}/points_growing/blocks") for entity in view.visualizer_overrides or {}), "the blocks show as they are"
         assert blueprints.cursor_window(GROWING_BLOCK_S) in override(view, f"{COLSFM}/points_growing/recent"), "the block the cursor is in"
     for view, size in zip(layout["colsfm"][:2], (2.0, 1.5), strict=True):
         # No override reaches the block entities (exact paths only): they log no radius and take the view's default.

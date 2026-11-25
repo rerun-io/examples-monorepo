@@ -324,6 +324,9 @@ def colsfm_overrides(*, close: bool, rig: ColsfmRig) -> Overrides:
         schema.trail_path(schema.COLSFM_SOURCE): trail(None, 3.0),
         schema.trajectory_path(schema.COLSFM_SOURCE): stroke(None, 2.5),
         f"{COLSFM}/points_growing/recent": [blueprints.cursor_window(GROWING_BLOCK_S), cloud(growing_cloud_size(close=close))],
+        # A layer written before the blocks holds a row per rig frame on the parent itself: since the start, as before.
+        # A layer with blocks has no points there, so this is inert for it.
+        f"{COLSFM}/points_growing": [blueprints.cursor_window(None), cloud(growing_cloud_size(close=close))],
         **face_frusta(rig.drawn, 0.18 if close else 0.3),
     }
 
