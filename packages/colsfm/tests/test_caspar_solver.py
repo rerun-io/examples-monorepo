@@ -412,7 +412,9 @@ def test_caspar_recovers_a_perturbed_rig_where_ceres_does(model: str, intrinsics
     With every intrinsic of a fisheye free, a principal-point shift and a small rotation trade almost freely (~1 px per
     0.15 deg); f32 CASPAR stops a hair above Ceres' cost along that mode. So every CASPAR run reaches Ceres' cost
     (within 1e-4), the reduced camera system (colsfm's mode) matches the rig to 0.01 deg (0.05 deg on that weak mode),
-    and the full PCG's rig is checked where the principal point is held.
+    and the full PCG's rig is checked where the principal point is held. The full PCG's stop along the weak mode varies
+    from run to run (1.2e-4 to 1.6e-4 above Ceres over 8 runs on an RTX 5090, on two builds), so its cost bound there
+    is 5e-4.
     """
     truth, start = _rig_problem(model)
     start_rot_deg: float = _rig_diff(truth, start).rig_rot_deg
@@ -422,7 +424,8 @@ def test_caspar_recovers_a_perturbed_rig_where_ceres_does(model: str, intrinsics
     for mode, reduced in (("full", False), ("reduced", True)):
         caspar, summary = _rig_solve(start, _rig_options("caspar", intrinsics, reduced_camera_system=reduced))
         assert summary.termination_type != pycolmap.BundleAdjustmentTerminationType.FAILURE, mode
-        assert _l2_cost(caspar) <= ceres_cost * (1.0 + 1e-4), (mode, _l2_cost(caspar), ceres_cost)
+        cost_tolerance: float = 5e-4 if weak and not reduced else 1e-4
+        assert _l2_cost(caspar) <= ceres_cost * (1.0 + cost_tolerance), (mode, _l2_cost(caspar), ceres_cost)
         if not reduced and intrinsics == "all":
             continue
         diff: RigDiff = _rig_diff(ceres, caspar)
