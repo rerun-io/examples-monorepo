@@ -17,7 +17,7 @@ exist before the loop stage, so it is one default for every dataset, not a profi
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Final
 
 import numpy as np
@@ -57,6 +57,27 @@ def triangulated_depths_m(
     scales: Float64[ndarray, "n_matches 2"] = np.linalg.solve(normal, right_side[..., None])[..., 0]
     in_front: Bool[ndarray, "n_matches"] = (scales[:, 0] > 0.0) & (scales[:, 1] > 0.0)
     return np.where(in_front, scales[:, 0], np.nan)
+
+
+def spans_two_rig_frames(rig_index: RigFrameIndex) -> Callable[[ImagePair], bool]:
+    """Whether an image pair joins two different rig frames, the only pairs `covisibility_radius_m` learns from.
+
+    Handed to `colsfm.database.read_inlier_sample`, so its stride runs over these pairs only.
+
+    Args:
+        rig_index: Rig frames with their keyframes.
+
+    Returns:
+        The test for one pair `(min id, max id)`; False for an image outside the index.
+    """
+    rig_camera_of: dict[int, tuple[int, int]] = rig_index.rig_camera_by_keyframe()
+
+    def spans(pair: ImagePair) -> bool:
+        rig_camera_a: tuple[int, int] | None = rig_camera_of.get(pair[0])
+        rig_camera_b: tuple[int, int] | None = rig_camera_of.get(pair[1])
+        return rig_camera_a is not None and rig_camera_b is not None and rig_camera_a[0] != rig_camera_b[0]
+
+    return spans
 
 
 def covisibility_radius_m(

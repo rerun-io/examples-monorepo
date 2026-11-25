@@ -23,7 +23,7 @@ from test_loop_closure import SquareRigScene, make_square_rig_scene  # pyrefly: 
 
 from colsfm.database import ImagePair, read_inlier_sample
 from colsfm.loop_closure import LoopClosureConfig, LoopSearchPlan, plan_loop_search
-from colsfm.loop_covisibility import covisibility_radius_m, triangulated_depths_m
+from colsfm.loop_covisibility import covisibility_radius_m, spans_two_rig_frames, triangulated_depths_m
 from colsfm.loop_mapper_check import pose_checked_inliers
 from colsfm.loop_pairs import observation_pairs
 from colsfm.pairs import normalise_pair
@@ -122,6 +122,36 @@ def test_the_inlier_sample_reads_every_kth_pair_with_inliers(tmp_path: Path) -> 
     sample: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = read_inlier_sample(database_path, max_pairs=5)
     assert sorted(sample) == [(1, 2), (1, 4), (1, 6), (1, 9), (1, 11)]
     assert sample[(1, 4)].shape == (4, 2) and int(sample[(1, 4)][0, 0]) == 4
+
+
+def test_the_sample_strides_over_cross_frame_pairs_only(scene: SquareRigScene, tmp_path: Path) -> None:
+    """Stereo and consecutive rows interleave in pair-id order (stereo, left, right per rig frame); a stride of 3 over
+    all of them lands on stereo pairs only and learns no radius, so the stride runs over the cross-frame pairs."""
+    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    sequence: tuple[int, ...] = plan.rig_index.sequence
+    pairs: list[ImagePair] = []
+    for rig_id, next_rig_id in zip(sequence[:-1], sequence[1:], strict=True):
+        images: list[int | None] = [plan.rig_index.keyframe(rig_id, camera_id) for camera_id in plan.geometry.camera_ids]
+        following: list[int | None] = [plan.rig_index.keyframe(next_rig_id, camera_id) for camera_id in plan.geometry.camera_ids]
+        left, right = images
+        assert left is not None and right is not None and following[0] is not None and following[1] is not None
+        triple: list[ImagePair] = [normalise_pair(left, right), normalise_pair(left, following[0]), normalise_pair(right, following[1])]
+        if all(len(_true_matches(scene, *pair)) > 0 for pair in triple):  # an empty row would shift the stride's phase
+            pairs.extend(triple)
+    database_path: Path = tmp_path / "database.db"
+    with pycolmap.Database.open(database_path) as database:
+        for image_a, image_b in pairs:
+            geometry: pycolmap.TwoViewGeometry = pycolmap.TwoViewGeometry()
+            geometry.inlier_matches = _true_matches(scene, image_a, image_b)
+            database.write_two_view_geometry(image_a, image_b, geometry)
+    max_pairs: int = len(pairs) // 3  # stride 3: every pick is a stereo row
+    unfiltered: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = read_inlier_sample(database_path, max_pairs)
+    assert covisibility_radius_m(unfiltered, plan.rig_index, plan.geometry, plan.keypoints, quantile=0.9) == 0.0
+    eligible = spans_two_rig_frames(plan.rig_index)
+    sample: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = read_inlier_sample(database_path, max_pairs, eligible=eligible)
+    assert 0 < len(sample) <= max_pairs
+    assert all(eligible(pair) for pair in sample)
+    assert covisibility_radius_m(sample, plan.rig_index, plan.geometry, plan.keypoints, quantile=0.9) > 1.0
 
 
 def test_a_rig_pair_beyond_the_edge_bound_inside_the_radius_is_matched_for_the_mapper_only(scene: SquareRigScene) -> None:

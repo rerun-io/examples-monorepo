@@ -58,7 +58,7 @@ from colsfm.loop_closure import (
     plan_loop_search,
     verify_loop_plan,
 )
-from colsfm.loop_covisibility import covisibility_radius_m
+from colsfm.loop_covisibility import covisibility_radius_m, spans_two_rig_frames
 from colsfm.loop_mapper_check import pose_checked_inliers
 from colsfm.mapping import MappingOptions, MappingResult, run_mapping
 from colsfm.matching import (
@@ -70,7 +70,7 @@ from colsfm.pairs import pair_mix, select_pairs
 from colsfm.pose_graph import PoseGraphEdge, PoseGraphResult, RigNode, sequential_edges, solve_pose_graph
 from colsfm.reconstruction import PosedModel, build_reconstruction, gauge_camera_params_id
 from colsfm.retrieval import RetrievalIndex, build_retrieval_index
-from colsfm.rig_geometry import rig_frame_index, rig_geometry
+from colsfm.rig_geometry import RigFrameIndex, rig_frame_index, rig_geometry
 from colsfm.run_config import LoopPairsInMapper, PipelineOptions, SelectionOptions
 from colsfm.run_lifecycle import (
     LOOP_EDGES_NAME,
@@ -433,9 +433,10 @@ def run_loop_closure_stage(
     keypoints: dict[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64)
 
     # Learned before the loop stage matches anything: the database holds stage 4's pairs only.
+    rig_index: RigFrameIndex = rig_frame_index(frames_meta)
     radius_m: float = covisibility_radius_m(
-        read_inlier_sample(database_path, config.covisibility_sample_pairs),
-        rig_frame_index(frames_meta),
+        read_inlier_sample(database_path, config.covisibility_sample_pairs, eligible=spans_two_rig_frames(rig_index)),
+        rig_index,
         rig_geometry(frames_meta),
         keypoints,
         config.covisibility_depth_quantile,

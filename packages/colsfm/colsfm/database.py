@@ -31,7 +31,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Final, TypeAlias
@@ -464,27 +464,46 @@ def pairs_with_matches(database_path: Path, pairs: Sequence[ImagePair]) -> set[I
         return {pair for pair in pairs if database.exists_matches(pair[0], pair[1])}
 
 
-def read_inlier_sample(database_path: Path, max_pairs: int) -> dict[ImagePair, UInt32[ndarray, "n_inliers 2"]]:
-    """The two-view inliers of at most `max_pairs` image pairs, every k-th pair with inliers in pair-id order.
+def _image_pair(pair_id: int) -> ImagePair:
+    """The `(min id, max id)` image pair of a COLMAP pair id.
+
+    Args:
+        pair_id: A `two_view_geometries` / `matches` key.
+
+    Returns:
+        The two image ids, lower first.
+    """
+    image_ids: tuple[int, int] = pycolmap.pair_id_to_image_pair(pair_id)
+    return int(image_ids[0]), int(image_ids[1])
+
+
+def read_inlier_sample(
+    database_path: Path, max_pairs: int, eligible: Callable[[ImagePair], bool] | None = None
+) -> dict[ImagePair, UInt32[ndarray, "n_inliers 2"]]:
+    """The two-view inliers of at most `max_pairs` image pairs, every k-th eligible pair with inliers in pair-id order.
 
     The loop stage learns the scene depth from the pairs stage 4 verified (`colsfm.loop_covisibility`); a deterministic
     stride keeps the read bounded on long clips (86,704 overlap pairs on Casa Loma 007) and spreads it over the run.
+    The stride runs over the eligible pairs only: on a stereo rig the stereo rows interleave with the consecutive ones,
+    and a stride over all of them can land on stereo rows only.
 
     Args:
         database_path: An existing database.
         max_pairs: Most pairs to read; at least 1.
+        eligible: Which pairs `(min id, max id)` may be read; None reads any.
 
     Returns:
         Inlier rows per pair `(min id, max id)`, columns in that id order.
     """
     with _read_only_connection(database_path) as connection:
         pair_ids: list[int] = [row[0] for row in connection.execute("SELECT pair_id FROM two_view_geometries WHERE rows > 0 ORDER BY pair_id")]
+        if eligible is not None:
+            pair_ids = [pair_id for pair_id in pair_ids if eligible(_image_pair(pair_id))]
         stride: int = max(1, -(-len(pair_ids) // max(max_pairs, 1)))
         sample: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = {}
         for pair_id in pair_ids[::stride]:
             num_rows, blob = connection.execute("SELECT rows, data FROM two_view_geometries WHERE pair_id = ?", (pair_id,)).fetchone()
-            image_ids: tuple[int, int] = pycolmap.pair_id_to_image_pair(pair_id)
-            sample[(int(image_ids[0]), int(image_ids[1]))] = np.frombuffer(blob, dtype=np.uint32).reshape(num_rows, 2).copy()
+            sample[_image_pair(pair_id)] = np.frombuffer(blob, dtype=np.uint32).reshape(num_rows, 2).copy()
     return sample
 
 
