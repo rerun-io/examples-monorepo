@@ -94,6 +94,7 @@ from dataclasses import dataclass, replace
 
 from serde.json import to_json
 
+from colsfm.cameras import with_colmap_intrinsics
 from colsfm.config import CusfmConfig
 from colsfm.database import (
     ImagePair,
@@ -124,8 +125,10 @@ from colsfm.run_lifecycle import (
 )
 from colsfm.run_report import (
     ExtrinsicChange,
+    FocalChange,
     MappingStats,
     PipelineSummary,
+    focal_changes,
 )
 from colsfm.stages import (
     ExportStageResult,
@@ -414,8 +417,11 @@ def _run_stages(
     mapped_meta: FramesMeta = pose_graph.frames_meta
     changes: tuple[ExtrinsicChange, ...] = ()
     rounds_run: int = 0
+    focals: tuple[FocalChange, ...] = ()
     if options.refine_camera_model and mapping.refined_extrinsics is not None:
-        mapped_meta = pose_graph.frames_meta.with_extrinsics(mapping.refined_extrinsics)
+        # The mapper freed the rig and the intrinsics; `sparse/` is written from its reconstruction, and so is this.
+        mapped_meta = with_colmap_intrinsics(pose_graph.frames_meta.with_extrinsics(mapping.refined_extrinsics), mapping.reconstruction)
+        focals = focal_changes(pose_graph.frames_meta, mapped_meta)
     if plan_runs_extrinsic_stage(options):
         with timed_stage(ledger, EXTRINSIC_REFINEMENT_STAGE), watcher.stage_scope(EXTRINSIC_REFINEMENT_STAGE):
             refinement: ExtrinsicRefinementStageResult = run_extrinsic_refinement_stage(
@@ -448,6 +454,7 @@ def _run_stages(
         total_seconds=time.perf_counter() - started,
         extrinsic_changes=changes,
         extrinsic_refinement_rounds_run=rounds_run,
+        focal_changes=focals,
     )
     (staged.output_dir / SUMMARY_NAME).write_text(to_json(summary) + "\n")
     print(

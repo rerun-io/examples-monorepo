@@ -1877,6 +1877,13 @@
       "name": "missing-import",
       "concise_description": "Cannot find module `mapping_helpers`",
       "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_cameras.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
     }
   ]
 }

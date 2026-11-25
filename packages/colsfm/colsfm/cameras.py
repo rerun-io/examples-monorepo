@@ -26,6 +26,7 @@ model. Do not mix these keypoints with COLMAP-detected features.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Final, Literal, TypeAlias
 
 import numpy as np
@@ -190,3 +191,75 @@ def colmap_cameras(frames_meta: FramesMeta) -> dict[int, pycolmap.Camera]:
         Cameras keyed by `camera_params_id`.
     """
     return {camera_params_id: colmap_camera(camera) for camera_params_id, camera in sorted(frames_meta.cameras.items())}
+
+
+def _calibration_matrix(fx: float, fy: float, cx: float, cy: float) -> Float64[ndarray, "3 3"]:
+    """The zero-skew 3x3 intrinsic matrix of four pinhole parameters.
+
+    Args:
+        fx: Focal length along x, in pixels.
+        fy: Focal length along y, in pixels.
+        cx: Principal point x, in pixels.
+        cy: Principal point y, in pixels.
+
+    Returns:
+        The matrix.
+    """
+    return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+
+def camera_params_with_colmap_intrinsics(camera: CameraParams, colmap: pycolmap.Camera) -> CameraParams:
+    """Write a COLMAP camera's parameters back into the cuSFM fields `colmap_camera_parameters` reads them from.
+
+    The inverse of `colmap_camera_parameters`. The pinhole family rewrites the rectified `projection_matrix` as
+    `K_new @ inv(K_old) @ P`, so the 3x3 block becomes the new intrinsics and the 4th column (a stereo camera's baseline
+    term) keeps its geometry; the distorted models rewrite `camera_matrix` (skew kept) and the first coefficients
+    the COLMAP model consumes. A camera whose parameters did not move is returned as it is, byte for byte.
+
+    Args:
+        camera: The calibration the solve started from.
+        colmap: The same camera after the solve.
+
+    Returns:
+        The calibration carrying the solve's parameters.
+
+    Raises:
+        ValueError: When the projection model is unknown or its source matrix is missing.
+    """
+    nominal: CameraParameters = colmap_camera_parameters(camera)
+    params: CameraParameters = np.asarray(colmap.params, dtype=np.float64)
+    if np.array_equal(nominal, params):
+        return camera
+    k_new: Float64[ndarray, "3 3"] = _calibration_matrix(float(params[0]), float(params[1]), float(params[2]), float(params[3]))
+    if camera.projection_model in PINHOLE_FAMILY_MODELS:
+        assert camera.projection_matrix is not None, "colmap_camera_parameters has checked it"
+        k_old: Float64[ndarray, "3 3"] = _calibration_matrix(float(nominal[0]), float(nominal[1]), float(nominal[2]), float(nominal[3]))
+        projection: Float64[ndarray, "3 4"] = k_new @ np.linalg.solve(k_old, camera.projection_matrix)
+        return replace(camera, projection_matrix=projection)
+    assert camera.camera_matrix is not None, "colmap_camera_parameters has checked it"
+    camera_matrix: Float64[ndarray, "3 3"] = camera.camera_matrix.astype(np.float64)
+    camera_matrix[[0, 1, 0, 1], [0, 1, 2, 2]] = k_new[[0, 1, 0, 1], [0, 1, 2, 2]]
+    wanted: int = DISTORTION_COUNT_BY_PROJECTION_MODEL[camera.projection_model]
+    distortion: CameraParameters = np.concatenate([params[4 : 4 + wanted], camera.distortion_coefficients[wanted:].astype(np.float64)])
+    return replace(camera, camera_matrix=camera_matrix, distortion_coefficients=distortion)
+
+
+def with_colmap_intrinsics(frames_meta: FramesMeta, reconstruction: pycolmap.Reconstruction) -> FramesMeta:
+    """The collection with every camera's calibration taken from a solved reconstruction.
+
+    What makes `--refine-camera-model` reach `frames_meta.json` and the Rerun layer, not only `sparse/cameras.txt`.
+
+    Args:
+        frames_meta: The collection the reconstruction was built from (`camera_id` is `camera_params_id`).
+        reconstruction: The solved model.
+
+    Returns:
+        The collection carrying the reconstruction's intrinsics.
+    """
+    return frames_meta.with_intrinsics(
+        {
+            camera_id: camera_params_with_colmap_intrinsics(frames_meta.cameras[camera_id], colmap)
+            for camera_id, colmap in reconstruction.cameras.items()
+            if camera_id in frames_meta.cameras
+        }
+    )

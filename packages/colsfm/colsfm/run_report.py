@@ -18,12 +18,13 @@ from pathlib import Path
 
 import numpy as np
 import pycolmap
-from jaxtyping import Float
+from jaxtyping import Float, Float64
 from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 
 from colsfm.ba_backend import BaBackend
+from colsfm.cameras import colmap_camera_parameters
 from colsfm.frames_meta import CameraParams, FramesMeta
 from colsfm.geometry import MILLIMETRES_PER_METRE, relative_rotation_degrees
 from colsfm.mapping import MappingResult, PolishStats
@@ -125,6 +126,23 @@ class PriorAlignment:
 
 @serde
 @dataclass(frozen=True, slots=True)
+class FocalChange:
+    """How far one camera's focal moved in a mapper that refined it (`--refine-camera-model`)."""
+
+    camera_params_id: int
+    """The camera, by its `frames_meta.json` id."""
+    sensor_name: str
+    """The camera folder name, for reading the table."""
+    nominal_focal_px: tuple[float, float]
+    """fx, fy the run started from."""
+    refined_focal_px: tuple[float, float]
+    """fx, fy the mapper ended on."""
+    focal_change_percent: float
+    """The larger of the two relative changes, in percent."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
 class PipelineSummary:
     """`summary.json`: what one run produced and how long each stage took."""
 
@@ -160,6 +178,8 @@ class PipelineSummary:
     """Per-camera extrinsic movement the refinement produced; empty when the flag is off."""
     extrinsic_refinement_rounds_run: int = 0
     """Rounds the regularised refinement actually took before it converged."""
+    focal_changes: tuple[FocalChange, ...] = ()
+    """Per-camera focal movement the mapper produced under `--refine-camera-model`; empty when the flag is off."""
     prior_alignment: PriorAlignment | None = None
     """The similarity `align_to_prior` applied to every exported product; None when it did not run."""
 
@@ -279,3 +299,29 @@ def extrinsic_changes(
     return tuple(changes)
 
 
+
+
+def focal_changes(nominal: FramesMeta, refined: FramesMeta) -> tuple[FocalChange, ...]:
+    """Measure what a refining mapper did to each camera's focal.
+
+    Args:
+        nominal: The collection the mapper started from.
+        refined: The same collection after `colsfm.cameras.with_colmap_intrinsics`.
+
+    Returns:
+        One record per camera, ordered by `camera_params_id`.
+    """
+    changes: list[FocalChange] = []
+    for camera_params_id in sorted(refined.cameras):
+        before: Float64[ndarray, " 2"] = colmap_camera_parameters(nominal.cameras[camera_params_id])[:2]
+        after: Float64[ndarray, " 2"] = colmap_camera_parameters(refined.cameras[camera_params_id])[:2]
+        changes.append(
+            FocalChange(
+                camera_params_id=camera_params_id,
+                sensor_name=refined.cameras[camera_params_id].sensor_name,
+                nominal_focal_px=(float(before[0]), float(before[1])),
+                refined_focal_px=(float(after[0]), float(after[1])),
+                focal_change_percent=float(100.0 * np.max(np.abs(after / before - 1.0))),
+            )
+        )
+    return tuple(changes)
