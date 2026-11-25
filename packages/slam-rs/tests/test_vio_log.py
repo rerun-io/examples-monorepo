@@ -45,6 +45,7 @@ from fixture_types import (
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
+from simplecv.rerun_walk_path import walk_colors
 
 from slam_rs import _core, vio_log
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib
@@ -75,7 +76,6 @@ from slam_rs.vio_log import (
     log_rig,
     vio_blueprint,
 )
-from slam_rs.walk_path import walk_colors
 
 FRAMESETS: int = 12
 """Enough framesets for the estimator to initialise, optimise and fill a window."""
@@ -335,10 +335,12 @@ def test_the_estimated_path_gains_one_segment_a_frameset(logged: Logged) -> None
     The whole path is what a viewer shows, and it is the view's visible time
     range that assembles it (:func:`slam_rs.vio_log.vio_blueprint`); the rows
     themselves are two points each, which is what makes the rung linear. The
-    first tracked frameset has one pose and no pair, so it writes no row.
+    first tracked frameset has one pose, so it writes a zero-length segment:
+    a row per pose, as every batch trail writer.
     """
     rows: list[Row] = logged.rows[f"{VIO_RUN_ENTITY}/trail"]
-    assert [t_ns for t_ns, _ in rows] == logged.tracked[1:]
+    assert [t_ns for t_ns, _ in rows] == logged.tracked
+    np.testing.assert_array_equal(rows[0].values["LineStrips3D:strips"][0][0], rows[0].values["LineStrips3D:strips"][0][1])
     assert [len(values["LineStrips3D:strips"][0]) for _, values in rows] == [2] * len(rows)
     assert len(logged.logger.estimated()) == len(logged.tracked)
 
@@ -347,9 +349,9 @@ def test_a_reference_segment_ends_at_the_cursor_and_no_further(logged: Logged) -
     """A reference known in advance still stops where the estimate has got to."""
     for entity in (f"{GT_ENTITY}/trail",):
         rows: list[Row] = logged.rows[entity]
-        # One reference pose every frame interval, from zero, so a cursor before
-        # the second one has no segment to draw.
-        assert [t_ns for t_ns, _ in rows] == [t_ns for t_ns in logged.tracked if t_ns >= FRAME_PERIOD_NS], entity
+        # One reference pose every frame interval, from zero, so every cursor
+        # has a row (the first a zero-length segment).
+        assert [t_ns for t_ns, _ in rows] == logged.tracked, entity
         for t_ns, values in rows:
             drawn: list = values["LineStrips3D:strips"][0]
             assert len(drawn) == 2, entity
@@ -377,12 +379,6 @@ def test_the_raw_run_s_path_runs_green_to_red_along_the_walk(logged: Logged) -> 
     colors: list[int] = [row.values["LineStrips3D:colors"][0] for row in rows]
     expected = walk_colors(np.asarray([row.t_ns for row in rows], dtype=np.int64), 0, (FRAMESETS - 1) * FRAME_PERIOD_NS)
     assert colors == [(int(r) << 24) | (int(g) << 16) | (int(b) << 8) | 255 for r, g, b in expected]
-
-
-def test_the_walk_gradient_is_colsfm_s() -> None:
-    """The colours ``colsfm.rerun_layer`` pins for the same fractions (its walk gradient is a copy: no shared package)."""
-    t_ns: Int64[ndarray, " n"] = np.array([0, 25, 50, 75, 100], dtype=np.int64)
-    np.testing.assert_array_equal(walk_colors(t_ns, 0, 100), [[38, 255, 38], [147, 255, 38], [255, 255, 38], [255, 147, 38], [255, 38, 38]])
 
 
 def test_a_replay_draws_the_loops_once_at_the_end_and_a_live_run_at_every_map_read(
@@ -498,7 +494,7 @@ def test_each_run_gets_its_own_level_follow_frame_and_path(
     for final_row, vio_row in zip(final_rows, logged.rows[vio_follow], strict=True):
         np.testing.assert_allclose(np.asarray(final_row.values["Transform3D:translation"]) - np.asarray(vio_row.values["Transform3D:translation"]), [shift], atol=1e-9)
     segments: list[Row] = logged.rows[f"{RUN_ENTITY}/trail"]
-    assert [row.t_ns for row in segments] == logged.tracked[1:], "the final run's path a segment a pose, a trail for a view's time range"
+    assert [row.t_ns for row in segments] == logged.tracked, "the final run's path a segment a pose, a trail for a view's time range"
     for row, vio_row in zip(segments, logged.rows[f"{VIO_RUN_ENTITY}/trail"], strict=True):
         np.testing.assert_allclose(np.asarray(row.values["LineStrips3D:strips"][0]) - np.asarray(vio_row.values["LineStrips3D:strips"][0]), [shift, shift], atol=1e-5)
     assert [row.t_ns for row in logged.rows[f"{RUN_ENTITY}/trajectory"]] == [logged.tracked[-1]]

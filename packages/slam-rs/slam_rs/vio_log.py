@@ -19,6 +19,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
+from simplecv.rerun_walk_path import ENDPOINTS, PATH_RADIUS_UI, TRAIL, TRAJECTORY, send_endpoints, send_trail, send_trajectory, walk_colors
 from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
@@ -30,7 +31,6 @@ from slam_rs.map_loops import PGO_CORRECTION_COLOR, PGO_CORRECTIONS_ENTITY, RUN_
 from slam_rs.map_point_blocks import MapPointBlocks
 from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, PoseLog, Trajectory, ate
-from slam_rs.walk_path import PATH_RADIUS_M, TRAIL, send_endpoints, send_trail, send_trajectory, walk_colors
 
 FrameMode: TypeAlias = Literal["downscaled", "jpeg", "off"]
 """How a replay's input rung draws the frames it was fed.
@@ -388,7 +388,7 @@ class VioLogger:
         return self.poses.trajectory()
 
     def log_complete_paths(self) -> None:
-        """Log each reference's whole path once, at the last frameset, with the raw run's endpoints (:mod:`slam_rs.walk_path`).
+        """Log each reference's whole path once, at the last frameset, with the raw run's endpoints (:mod:`simplecv.rerun_walk_path`).
 
         The per-frameset segments (``trail``) show where each run had got to, within a view's visible time range; the
         ``trajectory`` entities show where it went, from the end of the walk on, so no whole path stands over a cursor
@@ -398,10 +398,10 @@ class VioLogger:
         if len(estimated) >= 2:
             last_ns: int = int(estimated.t_ns[-1]) - self.cam_time_offset_ns
             colors: UInt8[ndarray, "n 3"] = self._walk_colors_at(estimated.t_ns)
-            send_trajectory(VIO_RUN_ENTITY, last_ns, estimated.position_m, colors)
-            send_endpoints(VIO_RUN_ENTITY, last_ns, estimated.position_m[0], estimated.position_m[-1], (colors[0], colors[-1]))
+            send_trajectory(f"{VIO_RUN_ENTITY}/{TRAJECTORY}", last_ns, estimated.position_m, colors)
+            send_endpoints(f"{VIO_RUN_ENTITY}/{ENDPOINTS}", last_ns, estimated.position_m[0], estimated.position_m[-1], (colors[0], colors[-1]))
         if len(self.ground_truth_strip) >= 2 and len(estimated):
-            send_trajectory(GT_ENTITY, int(estimated.t_ns[-1]) - self.cam_time_offset_ns, self.ground_truth_strip.position_m, GT_COLOR)
+            send_trajectory(f"{GT_ENTITY}/{TRAJECTORY}", int(estimated.t_ns[-1]) - self.cam_time_offset_ns, self.ground_truth_strip.position_m, GT_COLOR)
 
     def _walk_colors_at(self, t_ns: Int64[ndarray, " n"]) -> UInt8[ndarray, "n 3"]:
         """The walk gradient at each stamp over the segment's framesets (:attr:`frame_t_ns`)."""
@@ -412,10 +412,11 @@ class VioLogger:
 
         One two-point strip a line a frameset, ending on the newest pose at or
         before the cursor: the view's visible time range (:func:`vio_blueprint`)
-        is what accumulates them into the path so far, and a reference that has
-        no second pose yet draws nothing. Each is logged in its own frame; the
-        run entities' alignment transforms are what bring them together in
-        the dataset's world.
+        is what accumulates them into the path so far. The first pose draws a
+        zero-length segment, so a trail has a row per pose, as the batch writers
+        in :mod:`simplecv.rerun_walk_path` do; a reference with no pose yet
+        draws nothing. Each is logged in its own frame; the run entities'
+        alignment transforms are what bring them together in the dataset's world.
 
         The estimate's segment is taken from the two poses this run last
         appended, not from :meth:`estimated`: a segment needs two poses, not the
@@ -423,14 +424,14 @@ class VioLogger:
         """
         last: int = len(self.poses) - 1
         t_ns: int = int(self.poses.t_ns[last])
-        if last >= 1:
-            segment: Float64[ndarray, "2 3"] = self.poses.position_m[last - 1 : last + 1].copy()
-            color: UInt8[ndarray, "1 3"] = self._walk_colors_at(np.array([t_ns], dtype=np.int64))
-            rr.log(f"{VIO_RUN_ENTITY}/{TRAIL}", rr.LineStrips3D([segment], colors=color, radii=PATH_RADIUS_M))
+        segment: Float64[ndarray, "2 3"] = self.poses.position_m[[max(last - 1, 0), last]]
+        color: UInt8[ndarray, "1 3"] = self._walk_colors_at(np.array([t_ns], dtype=np.int64))
+        rr.log(f"{VIO_RUN_ENTITY}/{TRAIL}", rr.LineStrips3D([segment], colors=color, radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
-        if drawn < 2:
+        if drawn < 1:
             return
-        rr.log(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D([self.ground_truth_strip.position_m[drawn - 2 : drawn]], colors=GT_COLOR, radii=PATH_RADIUS_M))
+        reference: Float64[ndarray, "2 3"] = self.ground_truth_strip.position_m[[max(drawn - 2, 0), drawn - 1]]
+        rr.log(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D([reference], colors=GT_COLOR, radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
 
     def _draw_slot(self, family: SlotFamily, k: int, t_ns: int, pose: Float64[ndarray, " 7"], color: tuple[int, int, int, int], *, pictures: bool) -> None:
         """Draw one window or marginalized frame on its slot: the rig's pose, and a frustum a camera in the role's colour.
@@ -565,8 +566,8 @@ class VioLogger:
         # On the walk's own times: a segment a pose (a view's visible time range makes the trail), the whole path from
         # the last pose on, and the level follow frame.
         pose_ns: Int64[ndarray, " n"] = final.t_ns - self.cam_time_offset_ns
-        send_trail(RUN_ENTITY, pose_ns, final.position_m, FINAL_COLOR)
-        send_trajectory(RUN_ENTITY, int(pose_ns[-1]), final.position_m, FINAL_COLOR)
+        send_trail(f"{RUN_ENTITY}/{TRAIL}", pose_ns, final.position_m, FINAL_COLOR)
+        send_trajectory(f"{RUN_ENTITY}/{TRAJECTORY}", int(pose_ns[-1]), final.position_m, FINAL_COLOR)
         rr.send_columns(
             follow_entity(RUN_ENTITY),
             indexes=[rr.TimeColumn(TIMELINE, duration=pose_ns.astype("timedelta64[ns]"))],

@@ -14,12 +14,12 @@ from dataforge import schema
 from dataforge.writing import atomic_recording
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, segments, send_endpoints, send_trail, walk_colors
 
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE
 from slam_rs.follow_frame import follow_entity, follow_yaw, yaw_quaternion_xyzw
 from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, shift_clock
-from slam_rs.walk_path import segments, send_endpoints, send_trail, walk_colors
 
 POSE_SOURCE: str = "slam_rs"
 """Catalog layer name, and DataForge run name of the final (optimised, non-causal) trajectory."""
@@ -95,7 +95,7 @@ def _log_run(
     rotations: Float64[ndarray, "n 4"],
     colors: UInt8[ndarray, "n 3"],
 ) -> None:
-    """One run under ``/world/runs/<source>`` (:mod:`slam_rs.walk_path`'s names): the per-frame rig, its follow frame,
+    """One run under ``/world/runs/<source>`` (:mod:`simplecv.rerun_walk_path`'s names): the per-frame rig, its follow frame,
     the whole path (static here: every dataset's catalog layout draws it at any cursor), the trail up to the cursor and
     the endpoints.
 
@@ -116,5 +116,5 @@ def _log_run(
     indices: Int64[ndarray, " n_overview"] = np.unique(np.append(np.arange(0, len(positions), max(1, len(positions) // 4000)), len(positions) - 1))
     overview: Float64[ndarray, "n_overview 3"] = positions[indices]
     rec.log(schema.trajectory_path(source), rr.LineStrips3D(segments(overview), colors=colors[indices[1:]], radii=rr.Radius.ui_points(1.5)), static=True)
-    send_trail(run, times, positions, colors, recording=rec)
-    send_endpoints(run, int(times[-1]), positions[0], positions[-1], (colors[0], colors[-1]), recording=rec)
+    send_trail(f"{run}/{TRAIL}", times, positions, colors, recording=rec)
+    send_endpoints(f"{run}/{ENDPOINTS}", int(times[-1]), positions[0], positions[-1], (colors[0], colors[-1]), recording=rec)

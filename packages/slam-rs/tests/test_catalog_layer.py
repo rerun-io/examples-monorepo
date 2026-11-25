@@ -13,6 +13,7 @@ import rerun.chunk as rrc
 from dataforge import schema
 from fixture_types import Rows, RowsReader
 from rerun.catalog import DatasetEntry
+from simplecv.rerun_walk_path import TRAIL, TRAJECTORY
 
 from slam_rs.apis import catalog_layer as catalog_layer_api
 from slam_rs.catalog_feed import CatalogSegment
@@ -20,7 +21,6 @@ from slam_rs.catalog_layer import write_layer
 from slam_rs.follow_frame import follow_entity
 from slam_rs.tracking import DroppedFrameset, DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, empty_trajectory
-from slam_rs.walk_path import TRAIL, TRAJECTORY
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def test_layer_writes_both_runs_on_camera_time(tmp_path: Path, read_rows: RowsRe
     assert [row.t_ns for row in rows[f"{run_root}/rig"]] == [1_000_000_000, 2_000_000_000]
     np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:translation"], [[1, 2, 3]])
     np.testing.assert_allclose(rows[f"{run_root}/rig"][-1].values["Transform3D:quaternion"], [[0, 0, 0, 1]])
-    assert [row.t_ns for row in rows[f"{run_root}/trail"]] == [2_000_000_000]
+    assert [row.t_ns for row in rows[f"{run_root}/trail"]] == [1_000_000_000, 2_000_000_000], "a trail row per pose"
 
 
 def test_the_final_run_is_the_re_anchored_trajectory_and_the_raw_run_the_vio(tmp_path: Path, read_rows: RowsReader, run: SegmentRun) -> None:
