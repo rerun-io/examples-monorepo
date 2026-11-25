@@ -117,22 +117,42 @@ def _solve(
     pycolmap.create_default_bundle_adjuster(options, config, reconstruction).solve()
 
 
-def _squared_error(reconstruction: pycolmap.Reconstruction, *, skip_behind: bool = False) -> float:
-    """Sum of squared reprojection errors, px^2; NaN when any pose or point went non-finite.
+Observation = tuple[int, int]
+"""(image id, point2D index)."""
 
-    `skip_behind`: leave out observations whose point sits behind their camera (a fisheye rim point can end up there).
-    """
-    total: float = 0.0
-    for image in reconstruction.images.values():
-        camera: pycolmap.Camera = reconstruction.camera(image.camera_id)
+
+def _depths(reconstruction: pycolmap.Reconstruction) -> dict[Observation, float]:
+    """Camera-frame Z of every observed point, per observation."""
+    depths: dict[Observation, float] = {}
+    for image_id, image in reconstruction.images.items():
         cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
-        for point2D in image.points2D:
+        for point2D_index, point2D in enumerate(image.points2D):
             if point2D.has_point3D():
                 xyz: Float64[ndarray, " 3"] = reconstruction.points3D[point2D.point3D_id].xyz
+                depths[image_id, point2D_index] = float((np.asarray(cam_from_world.rotation.matrix()) @ xyz + np.asarray(cam_from_world.translation))[2])
+    return depths
+
+
+def _in_front(*reconstructions: pycolmap.Reconstruction) -> frozenset[Observation]:
+    """The observations whose point sits in front of its camera in every reconstruction given."""
+    return frozenset.intersection(*(frozenset(key for key, depth in _depths(rec).items() if depth > 0.0) for rec in reconstructions))
+
+
+def _squared_error(reconstruction: pycolmap.Reconstruction, observations: frozenset[Observation] | None = None) -> float:
+    """Sum of squared reprojection errors, px^2; NaN when any pose or point went non-finite or a scored point is behind.
+
+    `observations`: score only these (default: all). Solvers compared on a fisheye rim problem get one fixed set, so
+    neither can lower its score by pushing points behind a camera.
+    """
+    total: float = 0.0
+    for image_id, image in reconstruction.images.items():
+        camera: pycolmap.Camera = reconstruction.camera(image.camera_id)
+        cam_from_world: pycolmap.Rigid3d = image.cam_from_world()
+        for point2D_index, point2D in enumerate(image.points2D):
+            if point2D.has_point3D() and (observations is None or (image_id, point2D_index) in observations):
+                xyz: Float64[ndarray, " 3"] = reconstruction.points3D[point2D.point3D_id].xyz
                 in_camera: Float64[ndarray, " 3"] = np.asarray(cam_from_world.rotation.matrix()) @ xyz + np.asarray(cam_from_world.translation)
-                if skip_behind and in_camera[2] <= 0.0:
-                    continue
-                projected = camera.img_from_cam(in_camera[None])
+                projected = camera.img_from_cam(in_camera[None]) if in_camera[2] > 0.0 else None
                 if projected is None:
                     return float("nan")
                 total += float(((np.asarray(projected)[0] - point2D.xy) ** 2).sum())
@@ -315,14 +335,16 @@ def test_caspar_moves_a_fisheye_rig_with_rim_observations_to_the_ceres_minimum()
     """From the same knocked-off start as Ceres, CASPAR ends at Ceres' cost and brings the rig back to the truth.
 
     Stock (X/Z) factor: every LM trial uphill, the start returned unchanged (cost and centre error as knocked off).
+    Both solvers are scored on the observations in front of their camera at the start and in Ceres' solution.
     """
     start, truth = _rim_rig()
-    start_error: float = _squared_error(start, skip_behind=True)
     reference, _ = _rim_rig()
     _solve(reference, "ceres", [1], {})
     reconstruction, _ = _rim_rig()
     _solve(reconstruction, "caspar", [1], {"reduced_camera_system": True})
-    error, expected = _squared_error(reconstruction, skip_behind=True), _squared_error(reference, skip_behind=True)
+    scored: frozenset[Observation] = _in_front(start, reference)
+    start_error: float = _squared_error(start, scored)
+    error, expected = _squared_error(reconstruction, scored), _squared_error(reference, scored)
     # f32 kernels: 4e-4 above Ceres measured (the stock factor stays at the start, 23x above).
     assert error <= expected * (1.0 + 1e-3), f"CASPAR {error:.3f} px^2, Ceres {expected:.3f}, start {start_error:.3f}"
     assert _centre_error_m(reconstruction, truth) < 0.5 * _centre_error_m(start, truth)
