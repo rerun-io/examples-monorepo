@@ -36,7 +36,8 @@ Cube view layer (``--cube-view``; off by default). ``cube_view`` holds the same 
 ``cube_view_gop`` 30), on ``/world/rig_00/cam_02 .. cam_07/pinhole/video_view`` with the same face poses and pinholes: the
 pictures a viewer plays and a run's per-frame viewing rig references, while ``video`` keeps the sparse analysis faces.
 It is a second pass over the base (9 s for the X5 office clip's 2,498 framesets on an RTX 5090); one pass would need
-twelve encoder sessions at once. With ``cube_max_framesets`` the viewing faces end at the last analysis face.
+twelve encoder sessions at once. The viewing faces end at the last analysis face (a run has no pose after it), so up
+to ``cube_stride - 1`` framesets at the end of a clip, and everything past ``cube_max_framesets``, have none.
 
 Panorama frame ``E``. Axes = camera 0's (RDF), origin = the midpoint of the two camera centres. Pixel ``(u, v)`` of a
 ``W``-wide panorama (pixel centres at integers) looks along longitude ``lon = (u + 0.5) 2 pi / W - pi / 2``,
@@ -349,7 +350,7 @@ class Insta360Config(FrameLimitedConfig):
     cube_view: bool = False
     """Also write the cube_view layer: the six faces for viewing, at ``cube_view_stride``, on ``pinhole/video_view``."""
     cube_view_stride: int = 1
-    """The viewing faces sample every this-many framesets, from frameset 0: every frame, for playback."""
+    """The viewing faces sample every this-many framesets, from frameset 0 to the last analysis face: every frame, for playback."""
     cube_view_cq: int = 36
     """NVENC constant-quality target of the viewing faces (dataforge's ``AV1_CQ``): pictures to watch, not to measure."""
     cube_view_gop: int = 30
