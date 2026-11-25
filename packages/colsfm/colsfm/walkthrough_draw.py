@@ -17,6 +17,7 @@ import pycolmap
 import rerun as rr
 from jaxtyping import Float, Float64, Int64, UInt8
 from numpy import ndarray
+from simplecv.rerun_walk_path import segments
 
 from colsfm.cameras import colmap_camera
 from colsfm.frame_manifest import FrameSource
@@ -146,7 +147,7 @@ def polyline_segments(positions: Float64[ndarray, "n 3"]) -> Float64[ndarray, "m
     """
     if len(positions) < 2:
         return np.zeros((0, 2, 3), dtype=np.float64)
-    return np.stack([positions[:-1], positions[1:]], axis=1)
+    return segments(positions)
 
 
 def arc_strip(start_xyz: Float64[ndarray, "3"], end_xyz: Float64[ndarray, "3"]) -> Float64[ndarray, "n 3"]:

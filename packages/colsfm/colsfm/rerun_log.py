@@ -56,6 +56,7 @@ from simplecv.camera_parameters import (
     PinholeParameters,
 )
 from simplecv.rerun_rig_logger import log_rig_pose_stream, log_rig_static
+from simplecv.rerun_walk_path import segments
 from simplecv.rig import CameraSensor, Rig, RigCalibration, RigPoseStream, entity_id
 
 from colsfm.bench_report import render_markdown_report
@@ -319,14 +320,14 @@ def log_trajectory(name: str, positions: Float64[ndarray, "n 3"], *, source: str
     """
     if len(positions) < 2:
         return False
-    segments: Float64[ndarray, "num_segments 2 3"] = np.stack([positions[:-1], positions[1:]], axis=1)
-    ramp: Float64[ndarray, "num_segments"] = np.linspace(COLOUR_RAMP_FLOOR, 1.0, len(segments))
+    strips: Float64[ndarray, "num_segments 2 3"] = segments(positions)
+    ramp: Float64[ndarray, "num_segments"] = np.linspace(COLOUR_RAMP_FLOOR, 1.0, len(strips))
     colors: UInt8[ndarray, "num_segments 4"] = np.stack(
         [
             (ramp * hue[0]).astype(np.uint8),
             (ramp * hue[1]).astype(np.uint8),
             (ramp * hue[2]).astype(np.uint8),
-            np.full(len(segments), 255, dtype=np.uint8),
+            np.full(len(strips), 255, dtype=np.uint8),
         ],
         axis=-1,
     )
@@ -334,7 +335,7 @@ def log_trajectory(name: str, positions: Float64[ndarray, "n 3"], *, source: str
     rr.log(run_path, rr.AnyValues(num_poses=len(positions), source=source), static=True)
     rr.log(
         f"{run_path}/trajectory",
-        rr.LineStrips3D(segments, colors=colors, radii=TRAJECTORY_RADIUS),
+        rr.LineStrips3D(strips, colors=colors, radii=TRAJECTORY_RADIUS),
         static=True,
     )
     rr.log(

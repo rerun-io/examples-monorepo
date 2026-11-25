@@ -12,10 +12,10 @@ segment it was read from:
 - `/world/runs/<source>/points`: the sparse model, coloured from the images, static, so every layout shows the map;
 - `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
   (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
-- the optimised path in dataforge's names (`log_walk_path`): `/world/runs/<source>/trail`, one segment per rig frame on
-  `video_time` (a layout's visible time range makes the trail), green at the first rig frame through yellow to red at
-  the last (`walk_colors`); `trajectory`, the whole path in the same colours, one row at the last rig frame;
-  `endpoints/start` (with a ring, static) and `endpoints/end` (from the last rig frame on);
+- the optimised path in dataforge's names (`simplecv.rerun_walk_path.send_walk_path`): `/world/runs/<source>/trail`,
+  one segment per rig frame on `video_time` (a layout's visible time range makes the trail), green at the first rig
+  frame through yellow to red at the last; `trajectory`, the whole path in the same colours, one row at the last rig
+  frame; `endpoints/start` (with a ring, static) and `endpoints/end` (from the last rig frame on);
 - `/world/runs/<source>/rig_view`, for a catalog input whose segment has viewing faces (dataforge's Insta360 `cube_view`
   layer, `pinhole/video_view`): a pose at every viewing frame, the prior re-anchored on the registered rig frames
   (`colsfm.frame_poses.view_rig_poses`, the every-frame export's rule), with each camera's frustum referencing its
@@ -29,7 +29,6 @@ The recording id is the segment id, which is what lets a catalog register the fi
 
 from __future__ import annotations
 
-import colorsys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -39,6 +38,7 @@ import pycolmap
 import rerun as rr
 from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
+from simplecv.rerun_walk_path import send_walk_path
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
 from colsfm.frame_manifest import FrameSourceManifest
@@ -58,33 +58,6 @@ TRAJECTORY_RGB: Final[tuple[int, int, int]] = (255, 140, 0)
 
 IMAGE_PLANE_DISTANCE: Final[float] = 0.1
 """Frustum length in metres."""
-
-WALK_GO_HUE: Final[float] = 120.0
-"""Hue of the path at the first rig frame: green."""
-WALK_STOP_HUE: Final[float] = 0.0
-"""Hue of the path at the last rig frame: red, through yellow and orange (HSV, so no muddy brown between)."""
-WALK_SATURATION: Final[float] = 0.85
-"""Saturation of the walk gradient."""
-PATH_RADIUS_UI: Final[float] = 2.0
-"""Path stroke, ui points."""
-START_RING_RADIUS_UI: Final[float] = 2.5
-"""Stroke of the ring around the start dot, ui points (as slam-rs's ``walk_path``)."""
-RING_POINTS: Final[int] = 49
-"""Points on the start ring (the first repeated last)."""
-ENDPOINT_RADIUS_UI: Final[float] = 9.0
-"""Radius of the start and end dots, ui points."""
-START_RING_M: Final[float] = 0.25
-"""Radius of the ring around the start dot, metres: a walk that passes its start again keeps the start readable."""
-
-
-def walk_colors(t_ns: Int64[ndarray, " n"], first_ns: int, last_ns: int) -> UInt8[ndarray, "n 3"]:
-    """The walk gradient at each stamp: green at `first_ns`, through yellow, to red at `last_ns` (HSV hue `WALK_GO_HUE` to
-    `WALK_STOP_HUE`). slam-rs draws its raw run with the same gradient (`slam_rs.vio_log.walk_colors`; a test in each
-    package pins the same colours)."""
-    fraction: Float64[ndarray, " n"] = np.clip((t_ns - first_ns) / max(last_ns - first_ns, 1), 0.0, 1.0)
-    rgb: list[tuple[float, float, float]] = [colorsys.hsv_to_rgb((WALK_GO_HUE + (WALK_STOP_HUE - WALK_GO_HUE) * f) / 360.0, WALK_SATURATION, 1.0) for f in fraction]
-    return np.round(np.asarray(rgb, dtype=np.float64).reshape(-1, 3) * 255.0).astype(np.uint8)
-
 
 @dataclass(frozen=True)
 class LayerSummary:
@@ -315,7 +288,7 @@ def log_rig_trajectory(
     timeline: str,
     color: tuple[int, int, int] | None = None,
 ) -> None:
-    """Log `world_T_rig` over time at `<root>/rig` (as columns) and the path (`log_walk_path`).
+    """Log `world_T_rig` over time at `<root>/rig` (as columns) and the path (`simplecv.rerun_walk_path.send_walk_path`).
 
     Args:
         recording: The layer's recording.
@@ -330,40 +303,7 @@ def log_rig_trajectory(
         indexes=[rr.TimeColumn(timeline, duration=times_ns.astype("timedelta64[ns]"))],
         columns=rr.Transform3D.columns(translation=world_T_rig[:, :3, 3], mat3x3=world_T_rig[:, :3, :3]),
     )
-    log_walk_path(recording, root, times_ns, world_T_rig[:, :3, 3], timeline, color)
-
-
-def log_walk_path(
-    recording: rr.RecordingStream,
-    root: str,
-    times_ns: Int64[ndarray, " n"],
-    positions: Float64[ndarray, "n 3"],
-    timeline: str,
-    color: tuple[int, int, int] | None = None,
-) -> None:
-    """Log a path in dataforge's names: a segment per pose at `<root>/trail`, the whole path at `<root>/trajectory` from
-    the last pose on, the start dot and ring (static) and the end dot (from the last pose on) at `<root>/endpoints`; in the
-    walk gradient, or in one `color`. Nothing with fewer than two poses.
-    """
-    if len(times_ns) < 2:
-        return
-    colors: UInt8[ndarray, "n 3"] = (
-        walk_colors(times_ns, int(times_ns[0]), int(times_ns[-1])) if color is None else np.tile(np.asarray(color, dtype=np.uint8), (len(times_ns), 1))
-    )
-    strips = rr.LineStrips3D.columns(strips=list(np.stack([positions[:-1], positions[1:]], axis=1)), colors=colors[1:])
-    radius = rr.Radius.ui_points(PATH_RADIUS_UI)
-    recording.send_columns(f"{root}/trail", indexes=[rr.TimeColumn(timeline, duration=times_ns[1:].astype("timedelta64[ns]"))], columns=strips.partition([1] * (len(times_ns) - 1)))
-    recording.log(f"{root}/trail", rr.LineStrips3D.from_fields(radii=radius), static=True)
-    last = [rr.TimeColumn(timeline, duration=times_ns[-1:].astype("timedelta64[ns]"))]
-    recording.send_columns(f"{root}/trajectory", indexes=last, columns=strips.partition([len(times_ns) - 1]))
-    recording.log(f"{root}/trajectory", rr.LineStrips3D.from_fields(radii=radius), static=True)
-    endpoint = rr.Radius.ui_points(ENDPOINT_RADIUS_UI)
-    recording.log(f"{root}/endpoints/start", rr.Points3D(positions[:1], colors=colors[:1], radii=endpoint, labels=["start"], show_labels=True), static=True)
-    angles: Float64[ndarray, " a"] = np.linspace(0.0, 2.0 * np.pi, RING_POINTS)
-    ring: Float64[ndarray, "a 3"] = positions[0] + START_RING_M * np.stack([np.cos(angles), np.sin(angles), np.zeros_like(angles)], axis=1)
-    recording.log(f"{root}/endpoints/start_ring", rr.LineStrips3D([ring], colors=colors[:1], radii=rr.Radius.ui_points(START_RING_RADIUS_UI)), static=True)
-    recording.send_columns(f"{root}/endpoints/end", indexes=last, columns=rr.Points3D.columns(positions=positions[-1:], colors=colors[-1:]))
-    recording.log(f"{root}/endpoints/end", rr.Points3D.from_fields(radii=endpoint, labels=["end"], show_labels=True), static=True)
+    send_walk_path(root, times_ns, world_T_rig[:, :3, 3], color, timeline=timeline, recording=recording)
 
 
 def log_view_rig(

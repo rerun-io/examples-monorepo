@@ -13,11 +13,12 @@ from mapping_helpers import SyntheticRig, build_synthetic_rig  # pyrefly: ignore
 from numpy import ndarray
 from rerun.chunk import RrdReader
 from scipy.spatial.transform import Rotation
+from simplecv.rerun_walk_path import walk_colors
 
 from colsfm.frame_manifest import FrameSourceManifest, StreamKeyframes
 from colsfm.frame_poses import ViewRigSource, view_rig_poses
 from colsfm.frames_meta import KeyframeMeta
-from colsfm.rerun_layer import log_rig_trajectory, log_view_rig, walk_colors
+from colsfm.rerun_layer import log_rig_trajectory, log_view_rig
 
 FRAME_NS: int = 33_366_667
 """One frame at 29.97 fps."""
@@ -51,12 +52,6 @@ def rows(rrd: Path) -> tuple[dict[str, list[tuple[int, dict[str, Any]]]], dict[s
     return temporal, static
 
 
-def test_the_walk_gradient_is_slam_rs_s() -> None:
-    """The colours ``slam_rs.vio_log`` pins for the same fractions (its walk gradient is a copy: no shared package)."""
-    t_ns: Int64[ndarray, " n"] = np.array([0, 25, 50, 75, 100], dtype=np.int64)
-    np.testing.assert_array_equal(walk_colors(t_ns, 0, 100), [[38, 255, 38], [147, 255, 38], [255, 255, 38], [255, 147, 38], [255, 38, 38]])
-
-
 def test_the_path_is_a_gradient_trail_with_the_whole_path_and_its_end_from_the_last_rig_frame(tmp_path: Path) -> None:
     times: Int64[ndarray, " n"] = np.arange(5, dtype=np.int64) * 10 * FRAME_NS
     poses: Float64[ndarray, "n 4 4"] = wiggly_walk(times)
@@ -70,9 +65,10 @@ def test_the_path_is_a_gradient_trail_with_the_whole_path_and_its_end_from_the_l
     colors = walk_colors(times, int(times[0]), int(times[-1]))
     packed: list[int] = [(int(r) << 24) | (int(g) << 16) | (int(b) << 8) | 255 for r, g, b in colors]
     trail = temporal["/world/runs/colsfm/trail"]
-    assert [t for t, _ in trail] == times[1:].tolist()
-    assert [values["LineStrips3D:colors"] for _, values in trail] == [[c] for c in packed[1:]]
-    np.testing.assert_allclose(np.asarray(trail[0][1]["LineStrips3D:strips"][0]), poses[:2, :3, 3], atol=1e-6)
+    assert [t for t, _ in trail] == times.tolist(), "a trail row per rig frame (simplecv.rerun_walk_path's one rule)"
+    assert [values["LineStrips3D:colors"] for _, values in trail] == [[c] for c in packed]
+    np.testing.assert_allclose(np.asarray(trail[0][1]["LineStrips3D:strips"][0]), poses[[0, 0], :3, 3], atol=1e-6)
+    np.testing.assert_allclose(np.asarray(trail[1][1]["LineStrips3D:strips"][0]), poses[:2, :3, 3], atol=1e-6)
     full = temporal["/world/runs/colsfm/trajectory"]
     assert [t for t, _ in full] == [int(times[-1])] and len(full[0][1]["LineStrips3D:strips"]) == 4
     assert [t for t, _ in temporal["/world/runs/colsfm/endpoints/end"]] == [int(times[-1])]
@@ -142,6 +138,7 @@ def test_a_comparison_source_keeps_one_colour(tmp_path: Path) -> None:
     log_rig_trajectory(recording, "/world/runs/slam_rs", times, wiggly_walk(times), "video_time", color=(60, 160, 255))
     recording.flush()
     del recording
-    temporal, _ = rows(rrd)
+    temporal, static = rows(rrd)
     flat: int = (60 << 24) | (160 << 16) | (255 << 8) | 255
-    assert {values["LineStrips3D:colors"][0] for _, values in temporal["/world/runs/slam_rs/trail"]} == {flat}
+    assert static["/world/runs/slam_rs/trail"]["LineStrips3D:colors"] == [flat] == static["/world/runs/slam_rs/trajectory"]["LineStrips3D:colors"]
+    assert len(temporal["/world/runs/slam_rs/trail"]) == len(times)
