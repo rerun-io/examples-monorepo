@@ -106,6 +106,16 @@ class FullCircleMasksConfig:
     fps: int = 30
     """Nominal frame rate of the wrapping MP4 track (decoding only)."""
 
+    def __post_init__(self) -> None:
+        """Refuse bystanders without YOLOX boxes.
+
+        Raises:
+            ValueError: If ``people`` is enabled with the SAM 3 operator detector: the bystander candidates are YOLOX
+                boxes that SAM 3 must confirm, so SAM 3 boxes would confirm themselves, and a second SAM 3 would load.
+        """
+        if self.people.enabled and self.masker.detector != "yolox":
+            raise ValueError("--people needs the YOLOX operator detector (--masker.detector yolox) or --people.no-enabled")
+
 
 def read_lens_sources(
     dataset: DatasetEntry, segment: str, cameras: tuple[str, str], mask_downscale: int

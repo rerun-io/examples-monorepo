@@ -73,3 +73,16 @@ def test_mask_radius_is_the_dilation_in_mask_cells() -> None:
     source: SphereSource = SphereSource(EquirectCamera(1920, 960), np.eye(3), (960, 1920), (240, 480))
     assert [source.mask_radius(px) for px in (0.0, 8.0, 12.0, 13.0)] == [0, 2, 3, 4]
 
+
+def test_people_refuse_the_sam3_operator_detector() -> None:
+    import pytest
+    from simplecv.rerun_log_utils import RerunTyroConfig
+
+    from posekit.apis.fullcircle_masks import FullCircleMasksConfig
+    from posekit.models.fullcircle import FullCircleConfig
+    from posekit.models.fullcircle_people import FacePeopleConfig
+
+    sink: RerunTyroConfig = RerunTyroConfig(headless=True)
+    with pytest.raises(ValueError, match="YOLOX"):
+        FullCircleMasksConfig(rr_config=sink, masker=FullCircleConfig(detector="sam3"))
+    FullCircleMasksConfig(rr_config=sink, masker=FullCircleConfig(detector="sam3"), people=FacePeopleConfig(enabled=False))

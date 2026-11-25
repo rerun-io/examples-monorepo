@@ -121,7 +121,8 @@ class FullCircleConfig:
     """FullCircle operator masking options."""
 
     detector: OperatorDetector = "yolox"
-    """Person detector on the cube faces: posekit YOLOX-HumanArt (TensorRT) or SAM 3 ``person``."""
+    """Person detector on the cube faces: posekit YOLOX-HumanArt (TensorRT) or SAM 3 ``person`` (operator only: the
+    bystanders confirm YOLOX boxes with SAM 3)."""
     yolox: YoloxDetectorConfig = field(
         default_factory=lambda: YoloxDetectorConfig(
             backend=TensorRtBackendConfig(max_batch_size=48, opt_batch_size=48), onnx_transform=fp16_dynamic_yolox, score_thr=0.25
