@@ -7,3 +7,5 @@ recipes/colmap-src/patches/*.patch -text
 recipes/colmap-src/patches/SHA256SUMS -text
 # ~3 MiB of Symforce-generated CUDA; read it with `git diff --text`.
 recipes/colmap-src/patches/add-opencv-fisheye-generated-*.patch linguist-generated=true -diff
+# ~7 MiB: the rig factors' Symforce-generated CUDA (sensor_from_rig refinement).
+recipes/colmap-src/patches/caspar-rig-refine-generated-f32.patch linguist-generated=true -diff

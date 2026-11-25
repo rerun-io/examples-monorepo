@@ -781,7 +781,7 @@ index cdf783910a920b721e6085b569e8a63ddccd37fa..010f654d68cbdd8b6a89aaae60865731
  }
  
 diff --git a/src/thirdparty/Symforce-Caspar/caspar_generate.py b/src/thirdparty/Symforce-Caspar/caspar_generate.py
-index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a5365c189ab 100644
+index ed9daf02d3ac86d19202608382de8db0fac451f3..c997bfcbd5b69b470d628df2d886915c27b2bcc3 100644
 --- a/src/thirdparty/Symforce-Caspar/caspar_generate.py
 +++ b/src/thirdparty/Symforce-Caspar/caspar_generate.py
 @@ -23,6 +23,54 @@ import symforce.symbolic as sf  # noqa: E402
@@ -936,7 +936,7 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
  def _make_variant(
      core_fn: Callable[..., Any],
      name: str,
-@@ -267,6 +398,62 @@ def pinhole_core(
+@@ -267,6 +398,66 @@ def pinhole_core(
      return sf.V2([fx * p[0] + cx, fy * p[1] + cy]) - pixel
  
  
@@ -962,7 +962,7 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
 +    Distortion (models.h:1660-1675) and ImgFromFisheye (models.h:1601-1611):
 +
 +        r     = |(u, v)|                      # u = X/Z, v = Y/Z
-+        theta = atan(r)
++        theta = atan(r)                       # here atan2(|(X, Y)|, Z)
 +        (uu, vv) = (u, v) * theta / r         # FisheyeFromNormal
 +        theta2   = uu^2 + vv^2                # already theta^2
 +        radial   = k1*theta2 + k2*theta2^2 + k3*theta2^3 + k4*theta2^4
@@ -984,22 +984,26 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
 +    cam_T_world = sensor_from_rig * pose
 +    fx, fy, k1, k2, k3, k4, cx, cy = calib
 +    point_cam = cam_T_world * point
-+    depth = point_cam[2]
-+    p = sf.V2(point_cam[:2]) / (depth + sf.epsilon() * sf.sign_no_zero(depth))
-+    r = p.norm(sf.epsilon())
-+    theta = sf.atan(r)
++    # theta from the ray: equal to atan(|XY/Z|) for Z > 0 and continuous through
++    # Z = 0, where XY/Z mirrors the point and a rim observation stalls the LM.
++    # The ray is normalised first, so the epsilons act on a unit ray, not on
++    # metric X^2 + Y^2 and Z: the residual does not depend on the scene scale.
++    ray = point_cam / point_cam.norm(sf.epsilon())
++    xy = sf.V2(ray[:2])
++    rho = xy.norm(sf.epsilon())
++    theta = sf.atan2(rho, ray[2], sf.epsilon())
 +    theta2 = theta * theta
 +    radial = theta2 * (k1 + theta2 * (k2 + theta2 * (k3 + theta2 * k4)))
-+    scale = theta * (1 + radial) / r
++    scale = theta * (1 + radial) / rho
 +    return (
-+        sf.V2([fx * scale * p[0] + cx, fy * scale * p[1] + cy]) - pixel
++        sf.V2([fx * scale * xy[0] + cx, fy * scale * xy[1] + cy]) - pixel
 +    )
 +
 +
  # Split cores delegate to merged cores to avoid duplicating projection math.
  
  
-@@ -318,6 +505,117 @@ def pinhole_split_core(
+@@ -318,6 +509,117 @@ def pinhole_split_core(
      return pinhole_core(pose, sensor_from_rig, calib, point, pixel)
  
  
@@ -1117,7 +1121,7 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
  dtype = mem.DType.DOUBLE if precision == "f64" else mem.DType.FLOAT
  caslib = CasparLibrary(name="caspar_lib", dtype=dtype)
  
-@@ -355,6 +653,11 @@ FIXABLE_PINHOLE = {
+@@ -355,6 +657,11 @@ FIXABLE_PINHOLE = {
      "point": ConstPoint,
  }
  
@@ -1129,7 +1133,7 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
  FIXABLE_SIMPLE_RADIAL_SPLIT = {
      "pose": ConstSimpleRadialPose,
      "focal_and_extra": ConstSimpleRadialFocalAndExtra,
-@@ -369,6 +672,13 @@ FIXABLE_PINHOLE_SPLIT = {
+@@ -369,6 +676,13 @@ FIXABLE_PINHOLE_SPLIT = {
      "point": ConstPoint,
  }
  
@@ -1143,7 +1147,7 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
  # Merged: BASE, FIXED_POSE, FIXED_POINT, FIXED_POSE_FIXED_POINT (4 variants).
  register_camera_model(
      caslib,
-@@ -380,6 +690,13 @@ register_camera_model(
+@@ -380,6 +694,13 @@ register_camera_model(
  register_camera_model(
      caslib, "pinhole", pinhole_core, FIXABLE_PINHOLE, include_all_fixed=True
  )
@@ -1157,7 +1161,7 @@ index ed9daf02d3ac86d19202608382de8db0fac451f3..a13b97c76b960c7c0219e3ec23963a53
  
  # Split: all variants where at least one of
  # {focal_and_extra, principal_point} is fixed (11 variants per model).
-@@ -397,6 +714,34 @@ register_camera_model(
+@@ -397,6 +718,34 @@ register_camera_model(
      FIXABLE_PINHOLE_SPLIT,
      must_fix_one_of={"focal", "principal_point"},
  )

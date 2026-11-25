@@ -1,0 +1,16 @@
+diff --git a/src/colmap/estimators/bundle_adjustment_caspar.cc b/src/colmap/estimators/bundle_adjustment_caspar.cc
+index 4431eff49be194878b35272ce43b6f3e5683baed..fb1e40989d923b2dbfe890fdfcaef60228046c15 100644
+--- a/src/colmap/estimators/bundle_adjustment_caspar.cc
++++ b/src/colmap/estimators/bundle_adjustment_caspar.cc
+@@ -1046,7 +1046,10 @@ CasparBundleAdjustmentSummary::Create(
+       VLOG(1) << "Caspar: CONVERGED_DIAG_EXIT after "
+               << caspar_summary.iteration_count << " iters"
+               << " (diag limit hit -> likely premature termination)";
+-      summary->termination_type = BundleAdjustmentTerminationType::CONVERGENCE;
++      // The LM damping grew past diag_exit_value: every recent step went
++      // uphill, so the solver stopped without reaching a minimum.
++      summary->termination_type =
++          BundleAdjustmentTerminationType::NO_CONVERGENCE;
+       break;
+     case caspar::ExitReason::CONVERGED_SCORE_THRESHOLD:
+       VLOG(1) << "Caspar: CONVERGED_SCORE_THRESHOLD after "
