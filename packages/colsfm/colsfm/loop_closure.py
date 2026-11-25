@@ -714,12 +714,12 @@ def plan_loop_search(
     )
     pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
     rig_index: RigFrameIndex = rig_frame_index(frames_meta)
-    bounded: tuple[Shortlist, dict[tuple[int, int], RetrievalHit]] = _within_prior_bound(shortlist, rig_index, config, covisibility_radius_m, counters)
-    shortlist = bounded[0]
+    mapper_only_hits: dict[tuple[int, int], RetrievalHit]
+    shortlist, mapper_only_hits = _split_by_prior_bound(shortlist, rig_index, config, covisibility_radius_m, counters)
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)
     rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
     mapper_only: tuple[tuple[int, int], ...] = tuple(
-        (source_rig_id, hit.target_rig_id) for source_rig_id, hits in _group_by_source_rig(bounded[1]) for hit in hits
+        (source_rig_id, hit.target_rig_id) for source_rig_id, hits in _group_by_source_rig(mapper_only_hits) for hit in hits
     )
     measured_pairs: tuple[ImagePair, ...] = required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs)
     mapper_pairs: set[ImagePair] = {
@@ -773,10 +773,10 @@ def prior_distance_bound(config: LoopClosureConfig, path_m: float) -> float:
     return reach_m + allowance_m
 
 
-def _within_prior_bound(
+def _split_by_prior_bound(
     shortlist: Shortlist, rig_index: RigFrameIndex, config: LoopClosureConfig, covisibility_radius_m: float, counters: FunnelCounters
 ) -> tuple[Shortlist, dict[tuple[int, int], RetrievalHit]]:
-    """Split off the shortlisted rig pairs the prior puts beyond `prior_distance_bound`.
+    """Split the shortlist by prior distance: measured within `prior_distance_bound`, mapper-only beyond it within the radius.
 
     Applied after the candidate cap and the deduplication, as pure subtraction: a freed slot is not refilled, so the plan
     holds a subset of the unbounded plan's rig pairs, in the same order.
