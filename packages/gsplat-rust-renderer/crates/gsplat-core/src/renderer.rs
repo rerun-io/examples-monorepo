@@ -24,6 +24,13 @@ impl Renderer {
         })
     }
 
+    /// The renderer with its splat rasterizers built from `source`, a patched `raster.wgsl`.
+    #[cfg(test)]
+    pub(crate) fn with_splat_raster(mut self, source: &str) -> Self {
+        self.kernels.set_splat_raster(&self.device, source);
+        self
+    }
+
     /// Whether the scan and sort kernels use subgroup operations (the device enabled `SUBGROUP`)
     /// or their workgroup-memory variant.
     pub fn uses_subgroups(&self) -> bool {

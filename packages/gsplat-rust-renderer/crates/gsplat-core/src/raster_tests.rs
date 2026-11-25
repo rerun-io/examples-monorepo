@@ -1,7 +1,11 @@
-//! Tile coverage against brute force over pixel centres.
-use glam::{BVec2, DMat2, DVec2, UVec2, UVec4, Vec2, Vec3};
+//! Tile and block coverage against brute force over pixel centres, and the raster's block masks against the same
+//! raster with every block reached.
+use crate::kernels::TILE_WIDTH;
+use crate::test_utils::{gpu, pinhole_camera, read, render_fitted, upload};
+use crate::{RenderOptions, Renderer, Splats, Target};
+use glam::{BVec2, DMat2, DVec2, Quat, UVec2, UVec4, Vec2, Vec3};
 
-const TILE: f32 = 16.0;
+const TILE: f32 = TILE_WIDTH as f32;
 
 // Line for line the WGSL of common.wgsl (`sigma`, `bbox_extent`, `tile_bbox`, `rect_hit`), so the brute-force
 // checks below hold the shader expressions; edit both together.
@@ -113,17 +117,22 @@ fn assert_rejection_is_safe(
     }
 }
 
+fn block_origin(b: u32) -> UVec2 {
+    // pixel(tile, 32b) in raster_outputs.wgsl: x takes lid bits 0, 2, 4, 6 and y bits 1, 3, 5, 7.
+    UVec2::new(8 * ((b >> 1) & 1), 4 * (b & 1) + 8 * ((b >> 2) & 1))
+}
+
 #[test]
-fn rejected_tiles_have_no_pixel_centre_inside_the_splat() {
+fn rejected_tiles_and_blocks_have_no_pixel_centre_inside_the_splat() {
     let tiles = UVec2::new(6, 5);
     let mut rng = Lcg(7);
-    let mut tile_hits = 0;
+    let (mut tile_hits, mut block_hits) = (0, 0);
     for _ in 0..4000 {
         let (p, c, power) = random_splat(&mut rng, (-24.0, 120.0));
         let bb = tile_bbox(p, bbox_extent(c, power), tiles);
         for ty in 0..tiles.y {
             for tx in 0..tiles.x {
-                let origin = UVec2::new(tx, ty) * 16;
+                let origin = UVec2::new(tx, ty) * TILE_WIDTH;
                 let centres = |size: UVec2, at: UVec2| {
                     (0..size.y).flat_map(move |y| {
                         (0..size.x).map(move |x| (at + UVec2::new(x, y)).as_vec2() + 0.5)
@@ -132,7 +141,7 @@ fn rejected_tiles_have_no_pixel_centre_inside_the_splat() {
                 let inside_bbox = (bb.x..bb.z).contains(&tx) && (bb.y..bb.w).contains(&ty);
                 if !inside_bbox {
                     assert_rejection_is_safe(
-                        centres(UVec2::splat(16), origin),
+                        centres(UVec2::splat(TILE_WIDTH), origin),
                         p,
                         c,
                         power,
@@ -144,16 +153,141 @@ fn rejected_tiles_have_no_pixel_centre_inside_the_splat() {
                     tile_hits += 1;
                 } else {
                     assert_rejection_is_safe(
-                        centres(UVec2::splat(16), origin),
+                        centres(UVec2::splat(TILE_WIDTH), origin),
                         p,
                         c,
                         power,
                         "tile",
                     );
                 }
+                for b in 0..8 {
+                    let at = origin + block_origin(b);
+                    let lo = at.as_vec2() + 0.5;
+                    if rect_hit(lo, lo + Vec2::new(7.0, 3.0), p, c, power) {
+                        block_hits += 1;
+                    } else {
+                        assert_rejection_is_safe(
+                            centres(UVec2::new(8, 4), at),
+                            p,
+                            c,
+                            power,
+                            "8x4 block",
+                        );
+                    }
+                }
             }
         }
     }
-    // Most tiles miss; enough must hit that both outcomes are exercised.
-    assert!(tile_hits > 4000, "{tile_hits} tiles hit");
+    // Most rectangles miss; enough must hit that both outcomes are exercised.
+    assert!(
+        tile_hits > 4000 && block_hits > 4 * tile_hits,
+        "{tile_hits} tiles, {block_hits} blocks hit"
+    );
+}
+
+/// Small eccentric splats at 8x4 block and 16x16 tile borders, several batches deep in each tile.
+fn border_splats(focal: Vec2, size: u32) -> Splats {
+    let mut rng = Lcg(3);
+    let mut splats = Splats::default();
+    let center = size as f32 * 0.5;
+    for _ in 0..6 {
+        for v in (0..size).step_by(4) {
+            for u in (0..size).step_by(8) {
+                let depth = rng.range(2.0, 4.0) as f32;
+                let jitter = Vec2::new(rng.range(-1.5, 1.5) as f32, rng.range(-1.5, 1.5) as f32);
+                let xy = (UVec2::new(u, v).as_vec2() + jitter - center) * depth / focal;
+                // A pixel is about depth / focal = 0.05 world units: about 0.3 to 4 pixels long, mostly thin.
+                let pixel = depth / focal.x;
+                let long = pixel * rng.range(0.3, 4.0) as f32;
+                let thin = long * rng.range(0.05, 1.0) as f32;
+                let q = Quat::from_xyzw(
+                    rng.range(-1.0, 1.0) as f32,
+                    rng.range(-1.0, 1.0) as f32,
+                    rng.range(-1.0, 1.0) as f32,
+                    rng.range(-1.0, 1.0) as f32,
+                )
+                .normalize();
+                splats.transforms.push([
+                    xy.x,
+                    xy.y,
+                    depth,
+                    q.w,
+                    q.x,
+                    q.y,
+                    q.z,
+                    long.ln(),
+                    thin.ln(),
+                    thin.ln(),
+                ]);
+                splats.raw_opacities.push(rng.range(-3.0, 2.0) as f32);
+                splats.sh_coefficients.push([
+                    rng.range(-1.5, 1.5) as f32,
+                    rng.range(-1.5, 1.5) as f32,
+                    rng.range(-1.5, 1.5) as f32,
+                ]);
+            }
+        }
+    }
+    splats
+}
+
+#[test]
+#[ignore = "integration: GPU"]
+fn block_masks_skip_only_splats_that_miss_the_block() {
+    let (device, queue) = &gpu();
+    // An image size that is not a multiple of 16 keeps partial edge tiles in the test.
+    let camera = pinhole_camera(72);
+    let splats = border_splats(camera.focal(), camera.size.x);
+    let pixels = (camera.size.x * camera.size.y) as usize;
+    let render = |source: Option<String>| {
+        let renderer = Renderer::new(device).unwrap();
+        let renderer = match source {
+            Some(source) => renderer.with_splat_raster(&source),
+            None => renderer,
+        };
+        let scene = renderer.upload(&splats).unwrap();
+        let mut view = renderer.create_view(&scene, 1).unwrap();
+        let float = upload(device, &vec![[0.0f32; 4]; pixels]);
+        render_fitted(
+            device,
+            queue,
+            &renderer,
+            &mut view,
+            &camera,
+            &RenderOptions::default(),
+            &Target::Float(float.clone()),
+        );
+        read::<[f32; 4]>(device, queue, &float, pixels)
+            .into_iter()
+            .flatten()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    };
+    let source = crate::shader::resolve_variant(
+        "raster.wgsl",
+        device.features().contains(wgpu::Features::SUBGROUP),
+    );
+    let mask = "return (blocks[t] & (1u << (lid >> 5u))) != 0u;";
+    assert_eq!(source.matches(mask).count(), 1);
+    let masked = render(None);
+    let every_block = render(Some(source.replace(mask, "return true;")));
+    // The test must see a wrong block: with the block index off by one row of blocks, pixels lose contributors.
+    let wrong_block = render(Some(source.replace(
+        mask,
+        "return (blocks[t] & (1u << ((lid >> 5u) ^ 1u))) != 0u;",
+    )));
+    let covered = every_block
+        .chunks(4)
+        .filter(|rgba| f32::from_bits(rgba[3]) > 0.5)
+        .count();
+    assert!(
+        covered > pixels / 2,
+        "only {covered} of {pixels} pixels covered"
+    );
+    let differ = |a: &[u32], b: &[u32]| a.iter().zip(b).filter(|(a, b)| a != b).count();
+    assert_eq!(differ(&masked, &every_block), 0, "the masks changed pixels");
+    assert!(
+        differ(&wrong_block, &every_block) > 0,
+        "a wrong block index went unnoticed"
+    );
 }

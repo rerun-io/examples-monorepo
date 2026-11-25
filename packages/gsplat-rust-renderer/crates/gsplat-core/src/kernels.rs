@@ -256,6 +256,14 @@ impl Kernels {
             Inputs::Hexels { .. } => &self.hexels,
         }
     }
+
+    /// Rebuild the splat rasterizers from `source`, a patched `raster.wgsl` (tests).
+    #[cfg(test)]
+    pub fn set_splat_raster(&mut self, device: &wgpu::Device, source: &str) {
+        let raster = module(device, source);
+        self.splats.rasters =
+            RASTERS.map(|entry| Some(pipeline(device, &raster, entry, bindings(entry))));
+    }
 }
 
 #[cfg(test)]

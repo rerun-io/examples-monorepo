@@ -38,11 +38,13 @@ The forward path projects each primitive once (geometry and view-dependent
 colour, stored by global id), sorts visible depths, scans intersection counts,
 maps and sorts tiles, computes tile offsets, and rasterizes. Splats and hexels
 give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K blend,
-and all three share one set of output entry points. Counts and dispatch plans
-stay on the GPU. An eight-byte count readback detects overflow; the output
-remains intact until capacity grows and the view rerenders. Pinhole, KB4, RT8,
-and thin-prism camera models share this path. Render mode is a per-render
-option: default blur or mip antialiasing.
+and all three share one set of output entry points. A splat joins a tile only
+when a pixel centre of the tile can reach the alpha cutoff, and in raster it
+marks the 8x4 pixel blocks it can reach so that the other pixels skip it.
+Counts and dispatch plans stay on the GPU. An eight-byte count readback detects
+overflow; the output remains intact until capacity grows and the view
+rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
+Render mode is a per-render option: default blur or mip antialiasing.
 
 Targets own their GPU handles and provide f32 RGBA, packed RGBA8, or storage
 textures. The viewer requests color and alpha-weighted camera depth for
