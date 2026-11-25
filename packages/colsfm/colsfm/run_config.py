@@ -150,12 +150,13 @@ class PipelineOptions:
 
     cuSFM holds the calibration fixed, so a nominal model that is off ends up in the poses: Mission office's cube faces
     are 1-1.4 % off f = 800 and 0.12-0.20 deg off the nominal rig. With Spirula's matches, colsfm's mapper ends 0.2645
-    deg from Spirula's poses with the model held and 0.034 deg with it free (focals within 0.5 px). The rig solve runs
-    on Ceres (CASPAR cannot refine `sensor_from_rig`) on a camera-referenced rig, and replaces stage 7b.
+    deg from Spirula's poses with the model held and 0.034 deg with it free (focals within 0.5 px). The rig is solved on
+    a camera-referenced rig and replaces stage 7b; on CASPAR when the build's probe refines `sensor_from_rig`
+    (recipes/colmap-src caspar-rig-refine: 46 s of mapping on Mission office), on Ceres otherwise.
 
     Only for a rig whose calibration is nominal: unregularised, it overfits a calibrated one (MSD MGO05 with prior-overlap
-    pairs and the merge cap: ATE 14.2 mm with it, 8.2 mm without, main 10.6-12.0 mm). Measured cost on Mission office:
-    reconstruction 640 s on Ceres (4 threads) against 55 s with the model held."""
+    pairs and the merge cap: ATE 14.2 mm with it, 8.2 mm without, main 10.6-12.0 mm). On Ceres the Mission office
+    reconstruction takes 640 s (4 threads) against 55 s with the model held."""
     loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted"
     """Which of the loop stage's image pairs stay in the database the mapper triangulates from.
 
