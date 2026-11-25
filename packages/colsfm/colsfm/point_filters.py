@@ -85,6 +85,39 @@ def filter_degenerate_points(
     Returns:
         Observations removed, i.e. the summed track length of the deleted points.
     """
+    doomed, unposed = _degenerate_point_ids(reconstruction, depth_threshold)
+    removed: int = 0
+    for point3D_id in doomed:
+        removed += reconstruction.point3D(point3D_id).track.length()
+        observation_manager.delete_point3D(point3D_id)
+    # A track seen only by unposed images (an inconsistent or imported model; colsfm's own frames are all registered)
+    # has no camera to measure from. The observation manager refuses it (COLMAP checks `image.HasPose()` per
+    # observation), so it leaves through the reconstruction, which keeps no per-image bookkeeping for unposed images.
+    for point3D_id in unposed:
+        removed += reconstruction.point3D(point3D_id).track.length()
+        reconstruction.delete_point3D(point3D_id)
+    return removed
+
+
+def _degenerate_point_ids(reconstruction: pycolmap.Reconstruction, depth_threshold: float) -> tuple[list[int], list[int]]:
+    """The points `filter_degenerate_points` deletes: (doomed, unposed), each in `points3D` iteration order.
+
+    A vectorised screen first keeps every point within `depth_threshold - spread` of the camera centroid `c0`, `spread`
+    being the farthest camera centre from `c0`: by the triangle inequality every camera, so every observer, is then in
+    range. It applies only when every image is registered with a finite centre (colsfm's own models), so any non-empty
+    track has an observer to measure from, and it keeps a relative margin of 1e-9 so rounding never keeps a point the
+    exact test drops. Only the rest go through the exact per-track loop (none of the 2.32 M points of the final Casa Loma
+    007 model, camera spread 118.5 m against 300 m). Same ids, same order as the loop over every point, at about half
+    its cost: what remains is pybind's per-point `xyz` and `track` access.
+
+    Args:
+        reconstruction: The model.
+        depth_threshold: The guard's bound, metres.
+
+    Returns:
+        The ids to delete through the observation manager (non-finite, or out of range of every observing camera), and
+        those whose track no registered image observes.
+    """
     # Registered cameras with a usable centre. A camera whose pose went non-finite observes nothing here: it must not
     # take down the points its healthy neighbours see (a NaN distance would). Point ids stay Python ints (COLMAP's are
     # unsigned 64-bit).
@@ -95,10 +128,24 @@ def filter_degenerate_points(
         x, y, z = (float(v) for v in reconstruction.image(image_id).projection_center())
         if np.isfinite((x, y, z)).all():
             centres[image_id] = (x, y, z)
+    point3D_ids: list[int] = list(reconstruction.points3D.keys())
+    points: list[pycolmap.Point3D] = list(reconstruction.points3D.values())
+    candidates: list[int] = list(range(len(points)))
+    if points and centres and len(centres) == reconstruction.num_images():
+        centre_xyz: Float64[ndarray, "c 3"] = np.asarray(list(centres.values()), dtype=np.float64)
+        c0: Float64[ndarray, "3"] = centre_xyz.mean(axis=0)
+        spread: float = float(np.linalg.norm(centre_xyz - c0, axis=1).max())
+        xyz: Float64[ndarray, "n 3"] = np.asarray([point.xyz for point in points], dtype=np.float64)
+        tracked: Bool[ndarray, "n"] = np.fromiter((point.track.length() > 0 for point in points), dtype=bool, count=len(points))
+        with np.errstate(invalid="ignore", over="ignore"):
+            sure_keep: Bool[ndarray, "n"] = tracked & (np.linalg.norm(xyz - c0, axis=1) + spread <= depth_threshold * (1.0 - 1e-9))
+        candidates = np.flatnonzero(~sure_keep).tolist()
     limit_sq: float = depth_threshold * depth_threshold
     doomed: list[int] = []
     unposed: list[int] = []
-    for point3D_id, point in reconstruction.points3D.items():
+    for index in candidates:
+        point3D_id: int = point3D_ids[index]
+        point: pycolmap.Point3D = points[index]
         image_ids: list[int] = [element.image_id for element in point.track.elements]
         if not any(image_id in registered for image_id in image_ids):
             unposed.append(point3D_id)
@@ -114,17 +161,7 @@ def filter_degenerate_points(
                 break
         else:
             doomed.append(point3D_id)
-    removed: int = 0
-    for point3D_id in doomed:
-        removed += reconstruction.point3D(point3D_id).track.length()
-        observation_manager.delete_point3D(point3D_id)
-    # A track seen only by unposed images (an inconsistent or imported model; colsfm's own frames are all registered)
-    # has no camera to measure from. The observation manager refuses it (COLMAP checks `image.HasPose()` per
-    # observation), so it leaves through the reconstruction, which keeps no per-image bookkeeping for unposed images.
-    for point3D_id in unposed:
-        removed += reconstruction.point3D(point3D_id).track.length()
-        reconstruction.delete_point3D(point3D_id)
-    return removed
+    return doomed, unposed
 
 
 def projection_sanity_bound_px(reconstruction: pycolmap.Reconstruction) -> float:
