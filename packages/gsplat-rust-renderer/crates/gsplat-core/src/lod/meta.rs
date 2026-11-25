@@ -141,13 +141,21 @@ impl LodMeta {
     }
 
     /// The files a load keeps, as `(file, level)` in `filenames` order: referenced files of a level >= `min_level`.
+    /// A `min_level` past the set's coarsest level is an error, not an empty scene.
     pub fn loaded_files(&self, min_level: u32) -> Result<Vec<(usize, u32)>, Error> {
-        Ok(self
-            .file_levels()?
-            .into_iter()
+        let levels = self.file_levels()?;
+        let kept: Vec<(usize, u32)> = levels
+            .iter()
             .enumerate()
             .filter_map(|(file, level)| level.filter(|&l| l >= min_level).map(|l| (file, l)))
-            .collect())
+            .collect();
+        if kept.is_empty() && levels.iter().any(Option::is_some) {
+            return Err(Error::Invalid(format!(
+                "minimum level {min_level} is past the coarsest level of the set ({} levels)",
+                self.levels
+            )));
+        }
+        Ok(kept)
     }
 }
 
@@ -174,6 +182,9 @@ mod tests {
             })
         );
         assert_eq!(meta.file_levels().unwrap(), vec![Some(0), Some(1)]);
+        assert_eq!(meta.loaded_files(1).unwrap(), vec![(1, 1)]);
+        // A minimum level past the coarsest would load an empty scene.
+        assert!(matches!(meta.loaded_files(2), Err(Error::Invalid(_))));
         assert!(LodMeta::parse(&json.replace("\"version\":1", "\"version\":2")).is_err());
     }
 

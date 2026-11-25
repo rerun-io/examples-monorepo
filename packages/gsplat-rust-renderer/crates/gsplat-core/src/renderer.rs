@@ -87,8 +87,6 @@ impl Renderer {
         )?))
     }
 
-    /// A Streamed SOG set (all loaded levels in one scene, see [`crate::lod`]) and its host-side index.
-    /// WebP decode on the CPU, one GPU de-quantisation pass per file (submitted on `queue`).
     /// The finest level >= `requested` at which a Streamed SOG set (per file: level, rows, SH degree bound) fits
     /// this device; [`Self::upload_lod`] applies the same rule. `None` when not even the coarsest level fits.
     pub fn fit_lod_min_level(&self, files: &[(u32, usize, u32)], requested: u32) -> Option<u32> {
@@ -97,6 +95,8 @@ impl Renderer {
         })
     }
 
+    /// A Streamed SOG set (all loaded levels in one scene, see [`crate::lod`]) and its host-side index.
+    /// WebP decode on the CPU, one GPU de-quantisation pass per file (submitted on `queue`).
     pub fn upload_lod(
         &self,
         queue: &wgpu::Queue,
