@@ -16,6 +16,8 @@ from serde.json import from_json
 from gsplat_rust_renderer.sog_decode import SogFile, read_sog
 
 LOD_META: str = "lod-meta.json"
+MAX_LEVELS: int = 32
+"""Most levels a set may declare, as the Rust reader (`gsplat_core::lod::MAX_LEVELS`); splat-transform writes about six."""
 
 
 @serde(type_check=coerce)
@@ -53,13 +55,17 @@ class LodMeta:
     version: int
     filenames: list[str]
     tree: NodeMeta
-    lodLevels: int | None = None
+    lodLevels: int
     counts: list[int] | None = None
     environment: str | None = None
 
     def __post_init__(self) -> None:
         if self.version != 1:
             raise ValueError(f"lod-meta version {self.version} is not supported (1 only)")
+        if self.lodLevels > MAX_LEVELS:
+            raise ValueError(f"{self.lodLevels} levels, more than the {MAX_LEVELS} a set can hold")
+        if self.lodLevels < 0:
+            raise ValueError(f"{self.lodLevels} levels")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +139,10 @@ def read_sog_lod(path: Path) -> SogLodSet:
     file_levels: list[int | None] = [None] * len(files)
     for leaf in leaves:
         for run in leaf.runs:
+            if run.offset < 0 or run.count < 0:
+                raise ValueError(f"{meta_path}: a level {run.level} run has a negative offset or count ({run.offset}, {run.count})")
+            if not 0 <= run.level < meta.lodLevels:
+                raise ValueError(f"{meta_path}: a level {run.level} run is outside the {meta.lodLevels} levels")
             if not 0 <= run.file < len(meta.filenames):
                 raise ValueError(f"{meta_path}: a level {run.level} run names file {run.file}, outside the filenames")
             if run.offset + run.count > sogs[run.file].meta.count:
@@ -143,6 +153,5 @@ def read_sog_lod(path: Path) -> SogLodSet:
             if file_levels[run.file] not in (None, run.level):
                 raise ValueError(f"{meta_path}: {files[run.file]} holds rows of levels {file_levels[run.file]} and {run.level}")
             file_levels[run.file] = run.level
-    levels: int = meta.lodLevels if meta.lodLevels is not None else 1 + max((r.level for leaf in leaves for r in leaf.runs), default=0)
     counts: list[int] = list(meta.counts) if meta.counts is not None else []
-    return SogLodSet(text, files, sogs, file_levels, levels, counts, leaves)
+    return SogLodSet(text, files, sogs, file_levels, meta.lodLevels, counts, leaves)

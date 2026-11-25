@@ -1,7 +1,9 @@
 """Streamed SOG (lod-meta.json + SOG files) read and logged as `SogLodSplats3D`."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -76,6 +78,45 @@ def test_reader_rejects_runs_past_their_file(tmp_path: Path) -> None:
     text: str = (root / "lod-meta.json").read_text().replace('"offset": 150, "count": 150', '"offset": 200, "count": 150')
     (root / "lod-meta.json").write_text(text)
     with pytest.raises(ValueError, match="past the 300 splats"):
+        read_sog_lod(root)
+
+
+def edit_lod_meta(root: Path, edit: Callable[[dict[str, Any]], None]) -> None:
+    """Rewrite the set's lod-meta.json with `edit` applied to the parsed document."""
+    meta: dict[str, Any] = json.loads((root / "lod-meta.json").read_text())
+    edit(meta)
+    (root / "lod-meta.json").write_text(json.dumps(meta))
+
+
+def drop_lod_levels(meta: dict[str, Any]) -> None:
+    del meta["lodLevels"]
+
+
+def set_lod_levels(meta: dict[str, Any]) -> None:
+    meta["lodLevels"] = 33
+
+
+def negative_offset(meta: dict[str, Any]) -> None:
+    meta["tree"]["children"][0]["lods"]["0"]["offset"] = -1
+
+
+def level_past_lod_levels(meta: dict[str, Any]) -> None:
+    meta["lodLevels"] = 1
+
+
+@pytest.mark.parametrize(
+    ("edit", "error"),
+    [
+        (drop_lod_levels, "lodLevels"),
+        (set_lod_levels, "33 levels, more than the 32"),
+        (negative_offset, "negative"),
+        (level_past_lod_levels, "level 1 run is outside the 1 levels"),
+    ],
+)
+def test_reader_refuses_what_the_rust_reader_refuses(tmp_path: Path, edit: Callable[[dict[str, Any]], None], error: str) -> None:
+    root: Path = write_lod_set(tmp_path / "set")
+    edit_lod_meta(root, edit)
+    with pytest.raises(ValueError, match=error):
         read_sog_lod(root)
 
 
