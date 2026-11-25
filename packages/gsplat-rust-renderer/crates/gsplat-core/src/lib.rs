@@ -89,6 +89,8 @@ pub enum Error {
 mod hexel_tests;
 #[cfg(test)]
 mod primitive_tests;
+#[cfg(test)]
+mod raster_tests;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
