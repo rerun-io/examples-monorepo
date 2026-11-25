@@ -57,7 +57,10 @@ logic?" means our package. A patch over about 100 lines is a sign that logic lea
 The one exception is `colmap-src`: its Caspar adapters (`OPENCV_FISHEYE`, fixed-calibration `FULL_OPENCV`) are C++ inside COLMAP's Caspar bundle adjuster, which no Python
 package can hold, and the generated kernels must travel with it because conda-forge has no symforce. They pass the first
 test (the same adapter is the kind of change upstream PRs colmap#4611 / #4657 make for other camera models) and each pair is
-dropped when upstream CASPAR handles its model. Their source branch, generator and cut script
+dropped when upstream CASPAR handles its model. The exception also covers the `sensor_from_rig` refinement
+(`caspar-rig-refine.patch`, about 1,100 lines, plus its generated kernels): feature logic in the same adapter (rig
+bookkeeping, 40 rig factors in `caspar_generate.py`), kept as a patch for the same reason, and dropped when upstream CASPAR
+refines `sensor_from_rig`. Their source branch, generator and cut script
 (`tools/cut_patches.sh`) are in `colmap-src/patches/PROVENANCE.md`.
 
 ## Rules and traps
