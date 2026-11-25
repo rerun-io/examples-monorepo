@@ -14,6 +14,7 @@ degenerate model on purpose rather than through a whole mapping run.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -130,7 +131,7 @@ def _degenerate_point_ids(reconstruction: pycolmap.Reconstruction, depth_thresho
             centres[image_id] = (x, y, z)
     point3D_ids: list[int] = list(reconstruction.points3D.keys())
     points: list[pycolmap.Point3D] = list(reconstruction.points3D.values())
-    candidates: list[int] = list(range(len(points)))
+    candidates: Sequence[int] = range(len(points))  # a range, not a list: 80 MiB at 2.3 M points
     if points and centres and len(centres) == reconstruction.num_images():
         centre_xyz: Float64[ndarray, "c 3"] = np.asarray(list(centres.values()), dtype=np.float64)
         c0: Float64[ndarray, "3"] = centre_xyz.mean(axis=0)
