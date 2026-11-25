@@ -8,6 +8,7 @@ import rerun.blueprint as rrb
 from conftest import content_rules  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
+from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, TRAJECTORY
 
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
@@ -238,3 +239,37 @@ def test_with_the_viewing_faces_the_colsfm_views_play_them_on_the_viewing_rig() 
             for view in layout[name][:2]:
                 assert f"- {COLSFM}/{dropped}/**" in content_rules(view), (name, view_faces)
                 assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/{drawn}/cube6_front0/pinhole")), (name, view_faces)
+
+WRITTEN: dict[str, set[str]] = {
+    schema.SLAM_RS_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "map", "keyframes", "loops", "gba", "pgo", "pose_graph"},
+    schema.SLAM_RS_VIO_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "landmarks", "window", "marginalized"},
+    schema.COLSFM_SOURCE: {"rig", "rig_view", "points", "points_growing", TRAIL, TRAJECTORY, ENDPOINTS, "position_difference"},
+}
+"""The first entity under each run that its writers produce (slam-rs ``vio_log``, ``catalog_layer``, ``map_loops``,
+``gba_log``; ``colsfm.rerun_layer``); the path leaves are :mod:`simplecv.rerun_walk_path`'s."""
+
+
+def test_every_run_override_targets_an_entity_a_writer_produces() -> None:
+    """An override on an entity no writer produces is inert, so a renamed or removed entity (a slam-rs ``path``, a
+    ``floor_grid``) would leave a view silently unstyled: each overridden run entity is one the writers produce."""
+    for name, views in tabs(segment_layout(panorama=True)).items():
+        for view in views:
+            for entity in view.visualizer_overrides or {}:
+                parts: list[str] = str(entity).removeprefix("/world/runs/").split("/")
+                if str(entity).startswith("/world/runs/"):
+                    assert parts[1] in WRITTEN[parts[0]], (name, view.name, str(entity))
+
+
+def test_every_run_trail_a_tab_shows_is_drawn_through_a_cursor_window() -> None:
+    """A trail is a segment a pose: without a cursor window a view draws only the latest one, and the whole path comes
+    only at the last frame, so a run would show no path through the walk."""
+    shown: dict[str, tuple[str, ...]] = {
+        "SLAM": (schema.SLAM_RS_VIO_SOURCE, schema.SLAM_RS_SOURCE),
+        "colsfm": (schema.COLSFM_SOURCE,),
+        "Comparison": (schema.SLAM_RS_SOURCE, schema.COLSFM_SOURCE),
+    }
+    layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
+    for name, sources in shown.items():
+        for view in layout[name][:2]:
+            for source in sources:
+                assert any(isinstance(item, rrb.VisibleTimeRanges) for item in override(view, schema.trail_path(source))), (name, view.name, source)
