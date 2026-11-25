@@ -31,12 +31,13 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Final, TypeAlias
 
 import numpy as np
 import pycolmap
-from jaxtyping import Float, Float32, Int64
+from jaxtyping import Float, Float32, Int64, UInt8
 from numpy import ndarray
 
 from colsfm.cameras import colmap_cameras
@@ -64,6 +65,24 @@ KeypointDtype: TypeAlias = type[np.float32 | np.float64]
 
 KEYPOINT_XY_COLUMNS: Final[int] = 2
 """COLMAP's keypoint rows are Nx2, Nx4 or Nx6; only the leading xy pair is a position."""
+
+FLOAT_DESCRIPTOR_TYPES: Final[frozenset[pycolmap.FeatureExtractorType]] = frozenset(
+    {
+        pycolmap.FeatureExtractorType.ALIKED_N16ROT,
+        pycolmap.FeatureExtractorType.ALIKED_N32,
+        pycolmap.FeatureExtractorType.LOMA_B,
+        pycolmap.FeatureExtractorType.LOMA_B128,
+    }
+)
+"""Descriptor types COLMAP stores as float32 bytes, which `FeatureDescriptors.to_float()` reinterprets; it casts SIFT's uint8."""
+
+FLOAT32_BYTES: Final[int] = 4
+"""Bytes per float32 descriptor component."""
+
+DESCRIPTOR_READ_THREADS: Final[int] = 8
+"""Read-only connections `read_descriptors_from_database` reads on by default. On Casa Loma 007
+(18,576 images, 18 GB of descriptors) the serial pycolmap read took 38-48 s from a cold page
+cache and 7 s from a warm one; 8 connections took 5-8 s and 2.3 s."""
 
 MatchIndices: TypeAlias = Int64[ndarray, "num_matches 2"]
 """One row per match: the keypoint index in the pair's first image, then in its second."""
@@ -231,7 +250,9 @@ def read_keypoints_batch(
     return keypoints
 
 
-def read_descriptors_from_database(database_path: Path, image_ids: Iterable[int] | None = None) -> dict[int, Descriptors]:
+def read_descriptors_from_database(
+    database_path: Path, image_ids: Iterable[int] | None = None, threads: int = DESCRIPTOR_READ_THREADS
+) -> dict[int, Descriptors]:
     """Read float32 feature descriptors out of a COLMAP database.
 
     COLMAP 4.2 stores descriptors as an opaque uint8 blob, so an Nx128 float32 ALIKED
@@ -239,31 +260,97 @@ def read_descriptors_from_database(database_path: Path, image_ids: Iterable[int]
     `FeatureDescriptors.to_float()` — a reinterpret, not a cast
     (`docs/spec/pycolmap-capabilities.md` §4).
 
+    The blobs are read on `threads` read-only SQLite connections, each taking every
+    `threads`-th image; SQLite releases the GIL while it reads, so the connections overlap.
+    A float block (`FLOAT_DESCRIPTOR_TYPES`) is a read-only view of the blob SQLite
+    returned, which is what `to_float()` gives bit for bit, without its two copies; any
+    other type still goes through `to_float()`. Each image is held once, so the peak memory
+    is the result plus a blob per thread.
+
     Args:
         database_path: An existing database.
         image_ids: Images to read, or None for every image in the database.
+        threads: Read-only connections to read on; 1 reads in this thread.
 
     Returns:
-        Descriptors per image id; an image with no descriptor row is left out.
+        Descriptors per image id, in the order of `image_ids` (of the images table when
+        None); an image with no descriptor row is left out.
 
     Raises:
         FileNotFoundError: When the database does not exist.
+        ValueError: When `threads` is not positive.
     """
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
+    if threads < 1:
+        raise ValueError(f"threads must be at least 1, got {threads}")
+    if image_ids is None:
+        with pycolmap.Database.open(database_path) as database:
+            wanted: list[int] = [int(image.image_id) for image in database.read_all_images()]
+    else:
+        wanted = [int(image_id) for image_id in image_ids]
+    shares: list[list[int]] = [wanted[start::threads] for start in range(min(threads, len(wanted)))]
+    found: dict[int, Descriptors] = {}
+    if len(shares) <= 1:
+        for share in shares:
+            found.update(_read_descriptor_share(database_path, share))
+    else:
+        with ThreadPoolExecutor(max_workers=len(shares)) as pool:
+            for part in pool.map(lambda share: _read_descriptor_share(database_path, share), shares):
+                found.update(part)
+    return {image_id: found[image_id] for image_id in wanted if image_id in found}
+
+
+def _read_descriptor_share(database_path: Path, image_ids: Sequence[int]) -> dict[int, Descriptors]:
+    """Read some images' descriptors on one read-only connection.
+
+    `mode=ro`, as in `count_two_view_geometries`: `pycolmap.Database.open` sets pragmas and
+    migrates the schema, which several handles at once must not do.
+
+    Args:
+        database_path: An existing database.
+        image_ids: Images to read.
+
+    Returns:
+        Descriptors per image id; an image with no descriptor row is left out.
+    """
     descriptors_by_image: dict[int, Descriptors] = {}
-    with pycolmap.Database.open(database_path) as database:
-        wanted: list[int] = (
-            [int(image.image_id) for image in database.read_all_images()]
-            if image_ids is None
-            else [int(image_id) for image_id in image_ids]
-        )
-        for image_id in wanted:
-            if not database.exists_descriptors(image_id):
+    with contextlib.closing(sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+        for image_id in image_ids:
+            row: tuple[int, int, int] | None = connection.execute(
+                "SELECT type, rows, cols FROM descriptors WHERE image_id = ?", (image_id,)
+            ).fetchone()
+            if row is None:
                 continue
-            stored: pycolmap.FeatureDescriptors = database.read_descriptors(image_id)
+            descriptor_type: pycolmap.FeatureExtractorType = pycolmap.FeatureExtractorType(row[0])
+            data: bytes = _read_descriptor_blob(connection, image_id) if row[1] * row[2] > 0 else b""
+            if descriptor_type in FLOAT_DESCRIPTOR_TYPES:
+                # What `to_float` does to these types, without its two copies: a view of the blob SQLite returned.
+                descriptors_by_image[image_id] = np.frombuffer(data, dtype=np.float32).reshape(row[1], row[2] // FLOAT32_BYTES)
+                continue
+            blob: UInt8[ndarray, "rows cols"] = np.frombuffer(data, dtype=np.uint8).reshape(row[1], row[2])
+            stored: pycolmap.FeatureDescriptors = pycolmap.FeatureDescriptors(data=blob, type=descriptor_type)
             descriptors_by_image[image_id] = np.ascontiguousarray(stored.to_float().data, dtype=np.float32)
     return descriptors_by_image
+
+
+def _read_descriptor_blob(connection: sqlite3.Connection, image_id: int) -> bytes:
+    """Read one descriptor blob through SQLite's incremental blob I/O.
+
+    Selecting the `data` column has SQLite assemble the blob in a buffer of its own before
+    Python copies it; on Casa Loma 007 that held about 0.5 GB more at the peak than
+    `pycolmap.Database.read_descriptors`. The blob handle reads the pages straight into
+    the returned bytes, which matches today's peak.
+
+    Args:
+        connection: A read-only connection to the database.
+        image_id: The image, which is the rowid of its `descriptors` row.
+
+    Returns:
+        The raw blob.
+    """
+    with connection.blobopen("descriptors", "data", image_id, readonly=True) as blob:
+        return blob.read()
 
 
 def keypoint_counts(database_path: Path, image_ids: Iterable[int] | None = None) -> dict[int, int]:
