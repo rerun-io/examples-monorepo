@@ -7,7 +7,7 @@ import pytest
 
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, apply_radial_tangential_distortion
 from simplecv.sensors.camera.base_camera import pixels_in_image
-from simplecv.sensors.camera.fisheye62 import project_fisheye62
+from simplecv.sensors.camera.fisheye62 import kb_fold_angle, project_fisheye62
 from simplecv.umetrack_temp.cameras import Camera
 
 
@@ -84,3 +84,13 @@ def test_a_camera_without_a_lens_is_refused() -> None:
     )
     with pytest.raises(ValueError, match="bare: project_fisheye62 needs a KannalaBrandt distortion"):
         project_fisheye62(np.array([[0.0, 0.0, 1.0]]), camera)
+
+
+def test_the_fold_angle_is_the_first_turning_point_of_the_radial_polynomial_or_the_cap() -> None:
+    # theta_d = theta (1 + k1 theta^2) turns where 1 + 3 k1 theta^2 = 0.
+    fold: float = math.sqrt(1 / 0.6)
+    assert kb_fold_angle((-0.2,), math.pi / 2) == pytest.approx(fold, abs=1e-12)
+    assert kb_fold_angle((-0.2, 0.0, 0.0, 0.0, 0.0, 0.0), math.pi / 2) == pytest.approx(fold, abs=1e-12)
+    assert kb_fold_angle((-0.2,), 1.0) == 1.0
+    assert kb_fold_angle((0.0, 0.0, 0.0, 0.0), 1.5) == 1.5
+    assert kb_fold_angle((0.1, -0.02, 0.003, -0.0004), math.pi / 2) == math.pi / 2
