@@ -32,6 +32,7 @@ import pyarrow as pa
 import pycolmap
 from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
+from simplecv.sensors.camera.fisheye62 import kb_fold_angle
 
 from colsfm.frame_manifest import FrameSourceManifest
 
@@ -267,7 +268,8 @@ def valid_angle(camera: pycolmap.Camera) -> float | None:
 
     `OPENCV_FISHEYE` (Kannala-Brandt, theta_d = theta (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8)) can image
     any angle, so it gets the smaller of 90 degrees less `VALID_ANGLE_MARGIN_DEG` and the polynomial's first turning
-    point (past it two rays share a pixel; RoboCap's lens reaches it inside the image), found analytically.
+    point (`simplecv.sensors.camera.fisheye62.kb_fold_angle`; past it two rays share a pixel, and RoboCap's lens reaches it
+    inside the image).
     `PINHOLE` and `FULL_OPENCV` are perspective: every pixel holds a ray in front of the camera. `FULL_OPENCV`'s rational
     pole is `colsfm.point_filters.before_rational_pole`'s guard, applied to the map's points.
 
@@ -279,13 +281,7 @@ def valid_angle(camera: pycolmap.Camera) -> float | None:
     """
     if camera.model != pycolmap.CameraModelId.OPENCV_FISHEYE:
         return None
-    k1, k2, k3, k4 = (float(value) for value in camera.params[4:8])
-    # d theta_d / d theta = 1 + 3 k1 x + 5 k2 x^2 + 7 k3 x^3 + 9 k4 x^4 with x = theta^2.
-    turning: list[float] = [
-        float(root.real) for root in np.roots([9 * k4, 7 * k3, 5 * k2, 3 * k1, 1.0]) if abs(root.imag) < 1e-12 and root.real > 0.0
-    ]
-    horizon: float = float(np.radians(90.0 - VALID_ANGLE_MARGIN_DEG))
-    return min(horizon, float(np.sqrt(min(turning)))) if turning else horizon
+    return kb_fold_angle([float(value) for value in camera.params[4:8]], float(np.radians(90.0 - VALID_ANGLE_MARGIN_DEG)))
 
 
 def valid_angle_mask(camera: pycolmap.Camera) -> KeypointMask | None:
