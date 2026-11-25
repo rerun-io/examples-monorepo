@@ -32,6 +32,7 @@ from mapping_helpers import (
     SYNTHETIC_NOISE_PX,
     SyntheticRig,
     build_synthetic_rig,
+    caspar_plan,
     every_round,
     match_tracks_to_truth,
     quiet_options,
@@ -400,3 +401,15 @@ def test_both_backends_free_the_same_intrinsics_when_the_camera_model_is_refined
         freed.append((options.refine_focal_length, options.refine_extra_params, options.refine_principal_point, options.refine_sensor_from_rig))
     assert freed == [(True, True, False, True), (True, True, False, True)]
 
+
+def test_a_caspar_plan_that_cannot_free_the_rig_refuses_a_free_rig_request(isaac_config: CusfmConfig) -> None:
+    """A CASPAR plan without the rig capability and a mapper asked to free `sensor_from_rig` is a broken invariant.
+
+    `resolve_backend` never makes that plan; if one arrives anyway, holding the rig fixed would silently drop the
+    refinement that was asked for, so the options builder raises instead.
+    """
+    plan: BaExecutionPlan = caspar_plan(supported_camera_models=frozenset({"PINHOLE"}))
+    assert plan.backend == "caspar"
+    assert plan.capability.refines_sensor_from_rig is False
+    with pytest.raises(ValueError, match="sensor_from_rig"):
+        bundle_adjustment_options(isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan, optimize_extrinsics=True))

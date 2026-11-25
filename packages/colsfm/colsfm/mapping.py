@@ -168,6 +168,7 @@ import pycolmap
 from colsfm.ba_backend import (
     BUNDLE_ADJUSTMENT_BACKEND,
     CERES_ONLY_PLAN,
+    EXTRINSICS_FALLBACK_REASON,
     BaBackend,
     BaExecutionPlan,
     CasparOptions,
@@ -365,6 +366,7 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
 
     Raises:
         KeyError: When the configuration names a loss pycolmap does not have.
+        ValueError: When a CASPAR plan without the rig capability meets `optimize_extrinsics`.
     """
     ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
     ba_options.refine_focal_length = options.refine_focal_length
@@ -397,8 +399,9 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[plan.backend]
     if plan.backend == "caspar":
         # The plan keeps a solve that frees `sensor_from_rig` on CASPAR only when the build's probe refined a rig
-        # (`CasparCapability.refines_sensor_from_rig`).
-        ba_options.refine_sensor_from_rig = options.optimize_extrinsics and plan.capability.refines_sensor_from_rig
+        # (`resolve_backend`); a plan that breaks that would hold a requested rig refinement fixed without a word.
+        if options.optimize_extrinsics and not plan.capability.refines_sensor_from_rig:
+            raise ValueError(f"a CASPAR plan cannot free sensor_from_rig on this build: {EXTRINSICS_FALLBACK_REASON}")
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
         ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
