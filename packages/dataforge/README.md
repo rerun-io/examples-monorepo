@@ -534,7 +534,7 @@ the slam-rs prior). slam-rs is orange and colsfm blue in every tab; a `--panoram
 view is rooted at the level follow frame of the run its tab shows, `/world/runs/<run>/follow` (slam-rs writes one per run:
 the run's position, turned about the world's up axis towards the walk), so the horizon holds while the stick swings:
 the causal VIO in the SLAM tab, the final path (colsfm's prior) in colsfm and Comparison; on clip 007 the two part by
-16 m at 65 s. Each run's floor is `/world/runs/<run>/floor_grid`. The runs draw their rigs in the dataset's own layout (camera, `pinhole`,
+16 m at 65 s. No view draws a grid or a floor. The runs draw their rigs in the dataset's own layout (camera, `pinhole`,
 picture): slam-rs's live rig and its window keyframes reference the lens frames, colsfm's cube rig the face frames
 (`VideoFrameReference` into the base's `VideoStream`s, nothing encoded again). The overviews frame the walk when the catalog dataset holds one walked
 segment: run `dataforge-publish-blueprints` after the SLAM layer is registered. Otherwise the viewer frames them.

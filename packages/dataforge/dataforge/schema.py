@@ -170,12 +170,6 @@ def follow_path(source: str) -> str:
     return f"{run_path(source)}/follow"
 
 
-def floor_path(source: str) -> str:
-    """``.../runs/<source>/floor_grid`` — one-metre cells on the floor under the source's walk, each edge on
-    ``video_time`` at the time the walk passed it (slam-rs: ``slam_rs.follow_frame``)."""
-    return f"{run_path(source)}/floor_grid"
-
-
 def capture_property(name: str) -> str:
     """``property:capture:<name>`` — recording-level capture metadata key."""
     return f"property:capture:{name}"

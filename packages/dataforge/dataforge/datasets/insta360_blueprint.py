@@ -11,18 +11,14 @@ What the 3D views lean on, beside the runs themselves:
 
 - ``schema.follow_path(source)``: the level follow frame of the run a tab shows, where its follow view is rooted: the
   causal VIO in the SLAM tab, the final slam-rs path in colsfm and Comparison (colsfm's prior; clip 007: 16 m from
-  the VIO at 65 s). A view rooted at a rig rolls and
-  pitches with the stick, and the viewer's ``tracking_entity`` does not move the eye (0.42);
-- ``schema.floor_path(source)``: the floor under that run's walk, each edge at the time the walk passed it. The built-in grid
-  lies on the view origin's plane: it stands still under a follow view, and in the world it sits at the rig's first
-  height, through the cloud. An overview shows every floor of the walk; a follow view the floor of the
-  ``FOLLOW_FLOOR_WINDOW_S`` around the cursor, so on a walk over several storeys it draws the one under the rig.
+  the VIO at 65 s). A view rooted at a rig rolls and pitches with the stick, and the viewer's ``tracking_entity`` does
+  not move the eye (0.42). slam-rs writes it with the rig (``slam_rs.follow_frame``). No grid: the built-in one lies on
+  the view origin's plane, which is not the floor.
 
-slam-rs writes both with the rig (``slam_rs.follow_frame``).
-
-What accumulates is logged once at its own time and shown through a cursor window: the VIO path (a segment per
-frameset) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in the follow view, and
-the colsfm cloud by first view (``points_growing``) since the start, so it grows along the walk.
+What accumulates is logged once at its own time and shown through a cursor window: each slam-rs run's path a segment
+a pose (``schema.trail_path``) over the last ``OVERVIEW_PATH_WINDOW_S`` in the overview and ``FOLLOW_PATH_WINDOW_S`` in
+the follow view, and the colsfm cloud by first view (``points_growing``) since the start, so it grows along the walk.
+Each slam-rs run logs its whole path (``schema.trajectory_path``) once, at the last frame.
 """
 
 from __future__ import annotations
@@ -97,10 +93,6 @@ FOLLOW_PATH_WINDOW_S: float = 30.0
 OVERVIEW_PATH_WINDOW_S: float = 120.0
 """The same for the overview. Bounded on purpose: on clip 007 (1,069 s, 32 k segments) a window from the start played at
 7 fps in the native viewer, 120 s at 16.5 fps; the darkened whole path still shows where the walk went."""
-OVERVIEW_FLOOR_COLOR: tuple[int, int, int] = (30, 31, 36)
-"""The floor in an overview: a step over the background, so the walk's floor is a hint under the clouds and paths."""
-FOLLOW_FLOOR_WINDOW_S: float = 20.0
-"""How far either side of the cursor a follow view shows the floor, in seconds: about the grid's own reach at a walk."""
 IMU_WINDOW_S: float = 5.0
 """Half width of the IMU strip's time axis: a window that rides the cursor reads as a waveform, a whole clip as noise."""
 FOV_Y_RAD: float = float(np.radians(55.0))
@@ -239,14 +231,13 @@ def slam_overrides(*, close: bool) -> Overrides:
         **window_frusta(0.15),
     }
     return {
-        f"{VIO}/path": stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
-        f"{VIO}/trajectory": [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, 3.0)],
-        # The catalog layer's per-pose trail, where a segment has that layer and not the replay.
-        schema.trail_path(schema.SLAM_RS_SOURCE): [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, 3.0)],
-        # The final path lands on the VIO path at the last frameset; the darkened stroke keeps the VIO path readable.
-        f"{SLAM}/trajectory": stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
+        schema.trail_path(schema.SLAM_RS_VIO_SOURCE): [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, 3.0)],
+        schema.trajectory_path(schema.SLAM_RS_VIO_SOURCE): stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
+        # The final path lies on the VIO path; the darkened stroke keeps the VIO path readable.
+        schema.trail_path(schema.SLAM_RS_SOURCE): [blueprints.cursor_window(window_s), stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5)],
+        schema.trajectory_path(schema.SLAM_RS_SOURCE): stroke(shade(SLAM_COLOR, WHOLE_PATH_SHADE), 1.5),
         f"{SLAM}/map/points": cloud(1.5 if close else 2.0),
-        **hidden(schema.trail_path(schema.SLAM_RS_VIO_SOURCE), f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes"),
+        **hidden(f"{SLAM}/gba", f"{SLAM}/pgo", f"{SLAM}/pose_graph", f"{SLAM}/keyframes"),
         **(at_the_rig if close else hidden(f"{VIO}/landmarks", f"{VIO}/window", f"{VIO}/marginalized", f"{VIO}/rig")),
     }
 
@@ -269,9 +260,10 @@ def comparison_overrides(*, close: bool) -> Overrides:
     """
     wide, narrow = (3.5, 3.5) if close else (6.0, 2.0)
     size_m: float = 0.25 if close else 0.5
+    window_s: float = FOLLOW_PATH_WINDOW_S if close else OVERVIEW_PATH_WINDOW_S
     return {
-        f"{SLAM}/path": stroke(SLAM_COLOR, wide),
-        f"{SLAM}/trajectory": stroke(SLAM_COLOR, wide),
+        schema.trail_path(schema.SLAM_RS_SOURCE): [blueprints.cursor_window(window_s), stroke(SLAM_COLOR, wide)],
+        schema.trajectory_path(schema.SLAM_RS_SOURCE): stroke(SLAM_COLOR, wide),
         f"{COLSFM}/trajectory": stroke(COLSFM_COLOR, narrow),
         # The final map only: while the run goes on slam-rs draws its map as blocks under ``map/points/blocks``, which
         # no override can reach (exact paths only), so they keep their image colours until the final draw replaces them.
@@ -282,20 +274,11 @@ def comparison_overrides(*, close: bool) -> Overrides:
     }
 
 
-def floor_window(half_s: float | None) -> rrb.VisibleTimeRanges:
-    """The floor a view shows: the edges the walk passed within ``half_s`` of the cursor, or with None all of them."""
-    if half_s is None:
-        return rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
-    return rrb.VisibleTimeRanges(
-        rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.cursor_relative(seconds=-half_s), end=rrb.TimeRangeBoundary.cursor_relative(seconds=half_s))
-    )
-
-
 def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeControls3D | None, source: str) -> rrb.Spatial3DView:
     """A tab's world view of the whole walk of ``source``, with that run's position as a dot.
 
     The rig is centimetres on a walk of tens of metres, so a point at the follow frame's origin with a ui-point radius
-    marks it at any zoom. No built-in grid: the floor is ``schema.floor_path(source)``, all of it.
+    marks it at any zoom. No grid.
     """
     return rrb.Spatial3DView(
         name=name,
@@ -303,9 +286,6 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
         contents=contents,
         overrides={
             schema.follow_path(source): rr.Points3D([[0.0, 0.0, 0.0]], radii=rr.Radius.ui_points(6.0), colors=[RIG_MARK_COLOR]),
-            # From the overview distance the floor's edges merge into a haze over the walk (clip 007: 41,687 edges, six
-            # storeys), so it takes one faint colour there; the follow views keep the layer's own fade.
-            schema.floor_path(source): [floor_window(None), rr.LineStrips3D.from_fields(colors=OVERVIEW_FLOOR_COLOR)],
             **overrides,
         },
         eye_controls=eye,
@@ -314,12 +294,12 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
 
 
 def follow(name: str, contents: list[str], overrides: Overrides, source: str) -> rrb.Spatial3DView:
-    """A tab's chase view, rooted at the level follow frame of ``source``, over that run's floor around the cursor."""
+    """A tab's chase view, rooted at the level follow frame of ``source``."""
     return rrb.Spatial3DView(
         name=name,
         origin=schema.follow_path(source),
         contents=contents,
-        overrides={schema.floor_path(source): floor_window(FOLLOW_FLOOR_WINDOW_S), **overrides},
+        overrides=overrides,
         eye_controls=FOLLOW_EYE,
         line_grid=False,
     )
@@ -371,7 +351,7 @@ def imu_strip() -> rrb.Horizontal:
 def slam_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
     """slam-rs: the map and the VIO path, the follow view of the window, both lenses, over the IMU strip."""
     # The causal VIO is what this tab shows: its window, landmarks and lens frusta live in that run's frame.
-    scene: list[str] = ["/world/**", *pictures(), f"- {COLSFM}/**", f"- {schema.floor_path(schema.SLAM_RS_SOURCE)}/**"]
+    scene: list[str] = ["/world/**", *pictures(), f"- {COLSFM}/**"]
     return rrb.Vertical(
         rrb.Horizontal(
             rrb.Vertical(
@@ -396,7 +376,6 @@ def colsfm_tab(eye: rrb.EyeControls3D | None) -> rrb.Horizontal:
         f"- {COLSFM}/points/**",
         f"- {POSITION_DIFFERENCE}/**",
         schema.follow_path(schema.SLAM_RS_SOURCE),
-        schema.floor_path(schema.SLAM_RS_SOURCE),
     ]
     return rrb.Horizontal(
         rrb.Vertical(
@@ -420,7 +399,6 @@ def comparison_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
         f"- {POSITION_DIFFERENCE}/**",
         # The final path is what colsfm started from; the causal VIO stands metres off it early in a long walk.
         f"- {VIO}/**",
-        f"- {schema.trail_path(schema.SLAM_RS_SOURCE)}/**",
     ]
     return rrb.Vertical(
         rrb.Horizontal(

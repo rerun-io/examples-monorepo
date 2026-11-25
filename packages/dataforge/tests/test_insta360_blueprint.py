@@ -8,11 +8,11 @@ import rerun.blueprint as rrb
 from conftest import content_rules  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
+from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, TRAJECTORY
 
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
     COLSFM_COLOR,
-    FOLLOW_FLOOR_WINDOW_S,
     FOLLOW_PATH_WINDOW_S,
     OVERVIEW_PATH_WINDOW_S,
     PANO_ENTITY,
@@ -104,43 +104,14 @@ def test_the_colsfm_tab_shows_the_six_cube_faces_with_their_masks() -> None:
 def test_paths_and_the_colsfm_cloud_accumulate_through_cursor_windows() -> None:
     layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
     slam_overview, slam_follow = layout["SLAM"][:2]
-    assert blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S) in override(slam_overview, f"{VIO}/trajectory"), "a bounded window keeps a long walk fast"
-    assert blueprints.cursor_window(FOLLOW_PATH_WINDOW_S) in override(slam_follow, f"{VIO}/trajectory"), "the follow view draws the recent path only"
+    for trail in (schema.trail_path(schema.SLAM_RS_VIO_SOURCE), schema.trail_path(schema.SLAM_RS_SOURCE)):
+        assert blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S) in override(slam_overview, trail), "a bounded window keeps a long walk fast"
+        assert blueprints.cursor_window(FOLLOW_PATH_WINDOW_S) in override(slam_follow, trail), "the follow view draws the recent path only"
     for view in layout["colsfm"][:2]:
         assert blueprints.cursor_window(None) in override(view, f"{COLSFM}/points_growing"), "the cloud grows from the start of the walk"
         assert f"- {COLSFM}/points/**" in content_rules(view), "the static copy would hide the growth"
     for view in layout["Comparison"][:2]:
         assert f"- {COLSFM}/points_growing/**" in content_rules(view), "the comparison shows both whole clouds"
-
-
-def test_the_follow_views_show_the_floor_around_the_cursor_and_the_overviews_all_of_it() -> None:
-    """slam-rs stamps each floor edge with the time the walk passed it. A follow view shows the floor of the seconds
-    around the cursor, so on a walk over several storeys it draws the floor under the rig and not the one above; an
-    overview shows every floor, whatever the cursor."""
-    around = rrb.VisibleTimeRanges(
-        rrb.VisibleTimeRange(
-            schema.TIMELINE,
-            start=rrb.TimeRangeBoundary.cursor_relative(seconds=-FOLLOW_FLOOR_WINDOW_S),
-            end=rrb.TimeRangeBoundary.cursor_relative(seconds=FOLLOW_FLOOR_WINDOW_S),
-        )
-    )
-    whole = rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
-    for name, views in tabs(segment_layout(panorama=False)).items():
-        overview, follow = views[:2]
-        floor_entity: str = schema.floor_path(FOLLOWED[name])
-        floor: list[object] = override(overview, floor_entity)
-        assert whole in floor, name
-        # Far off, a walk's floor edges merge into a haze (clip 007: 41,687 edges over six storeys): one faint colour.
-        strips: rr.LineStrips3D = next(item for item in floor if isinstance(item, rr.LineStrips3D))
-        assert strips.colors is not None
-        packed_rgba: int = strips.colors.as_arrow_array().to_pylist()[0]
-        assert max((packed_rgba >> 24) & 255, (packed_rgba >> 16) & 255, (packed_rgba >> 8) & 255) <= 40, name
-        assert override(follow, floor_entity) == [around], name
-        other: str = schema.floor_path(schema.SLAM_RS_SOURCE if FOLLOWED[name] == schema.SLAM_RS_VIO_SOURCE else schema.SLAM_RS_VIO_SOURCE)
-        for view in (overview, follow):
-            rules: list[str] = content_rules(view)
-            dropped: bool = any(rule.startswith("- ") and rule.endswith("/**") and other.startswith(rule[2:-3]) for rule in rules)
-            assert dropped or "/world/**" not in rules, (name, "one floor per tab")
 
 
 def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> None:
@@ -164,10 +135,11 @@ def test_each_source_keeps_one_colour_in_every_tab() -> None:
     """slam-rs is orange and colsfm blue wherever a path of theirs is drawn; in Comparison their clouds take the tint too."""
     layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
     for view in layout["SLAM"][:2]:
-        assert stroke_color(view, f"{VIO}/trajectory") == packed(SLAM_COLOR)
+        assert stroke_color(view, schema.trail_path(schema.SLAM_RS_VIO_SOURCE)) == packed(SLAM_COLOR)
     assert stroke_color(layout["colsfm"][1], f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
     for view in layout["Comparison"][:2]:
-        assert stroke_color(view, f"{SLAM}/path") == packed(SLAM_COLOR)
+        assert stroke_color(view, schema.trail_path(schema.SLAM_RS_SOURCE)) == packed(SLAM_COLOR)
+        assert stroke_color(view, schema.trajectory_path(schema.SLAM_RS_SOURCE)) == packed(SLAM_COLOR)
         assert stroke_color(view, f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
         tints: dict[str, tuple[int, ...]] = {}
         for entity in (f"{SLAM}/map/points", f"{COLSFM}/points"):
@@ -186,7 +158,7 @@ def test_colsfm_and_comparison_show_the_final_path_and_no_causal_vio() -> None:
             assert f"- {VIO}/**" in rules or ("/world/**" not in rules and not any(rule.startswith(VIO) for rule in rules)), name
             assert f"- {schema.rig_path(RIG)}" in rules or schema.rig_path(RIG) not in rules, (name, "the base rig rides the VIO in a replay")
     comparison: list[rrb.View] = tabs(segment_layout(panorama=False))["Comparison"]
-    assert stroke_color(comparison[0], f"{SLAM}/path") == packed(SLAM_COLOR)
+    assert stroke_color(comparison[0], schema.trajectory_path(schema.SLAM_RS_SOURCE)) == packed(SLAM_COLOR)
     for name, views in tabs(segment_layout(panorama=False)).items():
         mark = override(views[0], schema.follow_path(FOLLOWED[name]))
         assert any(isinstance(item, rr.Points3D) for item in mark), name
@@ -224,6 +196,27 @@ def test_the_run_sources_name_the_entities_their_producers_write() -> None:
     assert schema.run_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs"
     # slam_rs.follow_frame (a slam-rs test pins its two names to these).
     assert schema.follow_path(schema.SLAM_RS_VIO_SOURCE) == "/world/runs/slam_rs_vio/follow"
-    assert schema.floor_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/floor_grid"
+    # simplecv.rerun_walk_path, which slam-rs and colsfm write their paths with.
+    assert (schema.trail_path(schema.SLAM_RS_SOURCE), schema.trajectory_path(schema.COLSFM_SOURCE)) == (f"{SLAM}/{TRAIL}", f"{COLSFM}/{TRAJECTORY}")
     # colsfm.rerun_layer.write_run_layer (colsfm does not depend on dataforge).
     assert f"{COLSFM}/points_growing" == "/world/runs/colsfm/points_growing"
+
+
+WRITTEN: dict[str, set[str]] = {
+    schema.SLAM_RS_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "map", "keyframes", "loops", "gba", "pgo", "pose_graph"},
+    schema.SLAM_RS_VIO_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "landmarks", "window", "marginalized"},
+    schema.COLSFM_SOURCE: {"rig", "points", "points_growing", TRAJECTORY, "position_difference"},
+}
+"""The first entity under each run that its writers produce (slam-rs ``vio_log``, ``catalog_layer``, ``map_loops``,
+``gba_log``; ``colsfm.rerun_layer``); the path leaves are :mod:`simplecv.rerun_walk_path`'s."""
+
+
+def test_every_run_override_targets_an_entity_a_writer_produces() -> None:
+    """An override on an entity no writer produces is inert, so a renamed or removed entity (a slam-rs ``path``, a
+    ``floor_grid``) would leave a view silently unstyled: each overridden run entity is one the writers produce."""
+    for name, views in tabs(segment_layout(panorama=True)).items():
+        for view in views:
+            for entity in view.visualizer_overrides or {}:
+                parts: list[str] = str(entity).removeprefix("/world/runs/").split("/")
+                if str(entity).startswith("/world/runs/"):
+                    assert parts[1] in WRITTEN[parts[0]], (name, view.name, str(entity))
