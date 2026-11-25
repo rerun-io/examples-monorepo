@@ -1,8 +1,9 @@
 """Where the uncommitted model graphs live, and what to run when they are not there.
 
-`packages/colsfm/data/models/` is gitignored: the RaCo graphs are exported, not shipped, and
-the engines built from them are specific to one TensorRT version and one GPU
-architecture. A fresh clone therefore has none of it — and since 2026-09-06 the
+`colsfm.MODEL_DIR` holds them: `$COLSFM_MODEL_DIR`, else a worktree's gitignored
+`data/models/` that already has graphs, else the host-local `~/.cache/colsfm/models/`.
+The RaCo graphs are exported, not shipped, and the engines built from them are specific
+to one TensorRT version and one GPU architecture. A fresh host therefore has none of it — and since 2026-09-06 the
 default run asks for RaCo-ALIKED and LightGlue+ (NOTES.md decision 17), so "none of
 it" is the first thing a fresh clone hits.
 
@@ -25,18 +26,17 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from colsfm import DATA_DIR
+from colsfm import MODEL_DIR, MODEL_DIR_ENV
 from colsfm.features import FeatureBackend
 from colsfm.matching import FLEXGLUE_FP8_COMMAND, FLEXGLUE_MODEL_DIR, FLEXGLUE_MODEL_FILES, FlexGlueOptions, MatchingBackend, gpu_has_fp8
 
-RACO_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco-aliked-b1-16.onnx"
+RACO_ONNX_PATH: Final[Path] = MODEL_DIR / "raco-aliked-b1-16.onnx"
 """The batch-dynamic RaCo-ALIKED graph; its engine is cached beside it.
 
-Not committed — `packages/colsfm/data/models` is gitignored and the graph is 8.9 MB of
-weights. Produce it with
+Not committed (8.9 MB of weights; `colsfm.MODEL_DIR`). Produce it with
 `pixi run -e colsfm colsfm-raco-export`."""
 
-RACO_DYNAMIC_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco-aliked-dyn.onnx"
+RACO_DYNAMIC_ONNX_PATH: Final[Path] = MODEL_DIR / "raco-aliked-dyn.onnx"
 """The batch- **and** shape-dynamic RaCo-ALIKED graph; its engine is cached beside it.
 
 Also not committed. Produce it with
@@ -47,11 +47,11 @@ fixed-shape engine does not cover (`colsfm.features_raco.select_raco_engine`), w
 Galileo, at the profile maximum, never is. A dataset that does need it says so at the
 engine build, by name."""
 
-RACO_LIGHTGLUE_ONNX_PATH: Final[Path] = DATA_DIR / "models" / "raco" / "aliked_lightglue" / "lightglue_aliked.onnx"
+RACO_LIGHTGLUE_ONNX_PATH: Final[Path] = MODEL_DIR / "raco" / "aliked_lightglue" / "lightglue_aliked.onnx"
 """The RaCo-trained LightGlue+ graph; its engine is cached beside it.
 
 Not committed either. Produce it with `pixi run -e colsfm colsfm-raco-export`, which writes
-both this and the batch-1 extractor under `packages/colsfm/data/models/raco/aliked_lightglue/`."""
+both this and the batch-1 extractor under `MODEL_DIR/raco/aliked_lightglue/`."""
 
 RACO_EXPORT_COMMANDS: Final[tuple[str, ...]] = (
     "pixi run -e colsfm colsfm-raco-export",
@@ -101,8 +101,8 @@ def missing_raco_graphs_message(missing: Sequence[Path]) -> str:
     exports: str = "\n".join(f"  {command}" for command in RACO_EXPORT_COMMANDS)
     return (
         "[colsfm] the default feature and matching backends are RaCo-ALIKED and LightGlue+, "
-        f"and this checkout is missing:\n{files}\n"
-        f"Export them (they are gitignored, so every clone builds its own):\n{exports}\n"
+        f"and the model directory {MODEL_DIR} is missing:\n{files}\n"
+        f"Create them (they are not committed; ${MODEL_DIR_ENV} points at another directory):\n{exports}\n"
         f"Or run the no-GPU-engine ablation, which needs no graph of ours: {PYCOLMAP_ABLATION_FLAGS}"
     )
 

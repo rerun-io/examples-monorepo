@@ -94,7 +94,7 @@ import pycolmap
 from jaxtyping import Float32, Int64
 from numpy import ndarray
 
-from colsfm import DATA_DIR
+from colsfm import MODEL_DIR
 from colsfm.database import (
     ImagePair,
     Keypoints,
@@ -115,7 +115,7 @@ from colsfm.verification import (
     write_verified,
 )
 
-FLEXGLUE_MODEL_DIR: Final[Path] = DATA_DIR / "models" / "flexglue"
+FLEXGLUE_MODEL_DIR: Final[Path] = MODEL_DIR / "flexglue"
 """Where `colsfm-download-flexglue` puts FlexGlue's ONNX graphs (gitignored, like the RaCo exports)."""
 
 FLEXGLUE_MODEL_FILES: Final[dict[str, str]] = {

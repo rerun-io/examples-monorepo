@@ -1,4 +1,4 @@
-"""Download FlexGlue's three ONNX graphs (cvg/FlexGlue release v0.1) into `data/models/flexglue`.
+"""Download FlexGlue's three ONNX graphs (cvg/FlexGlue release v0.1) into `MODEL_DIR/flexglue`.
 
 COLMAP's FlexGlue options default to these release URLs and would fetch them at run time; colsfm passes local paths
 instead, so a run never touches the network. The URLs and sha256 sums are the ones COLMAP pins in

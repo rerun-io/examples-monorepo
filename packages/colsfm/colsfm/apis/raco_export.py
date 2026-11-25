@@ -1,4 +1,4 @@
-"""Export every RaCo graph the default run needs into `packages/colsfm/data/models/` (the `colsfm-raco-export` task)."""
+"""Export every RaCo graph the default run needs into `colsfm.MODEL_DIR` (the `colsfm-raco-export` task)."""
 
 from __future__ import annotations
 
