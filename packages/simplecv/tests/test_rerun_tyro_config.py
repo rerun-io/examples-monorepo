@@ -17,7 +17,7 @@ import pytest
 import rerun as rr
 from rerun.chunk import RrdReader
 
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_log_utils import RerunTyroConfig, file_batcher_config
 
 
 @pytest.fixture
@@ -102,7 +102,16 @@ def test_save_only_writes_few_large_chunks(tmp_path: Path) -> None:
         time.sleep(0.01)
     config.rec_stream.disconnect()
 
-    assert sum(str(chunk.entity_path) == "/stats/value" for chunk in RrdReader(save).stream().to_chunks()) == 1
+    chunks = [chunk for chunk in RrdReader(save).stream().to_chunks() if str(chunk.entity_path) == "/stats/value"]
+    assert [chunk.num_rows for chunk in chunks] == [120], "one chunk, and it holds every row logged before the disconnect"
+
+
+def test_the_file_batcher_keeps_a_flush_tick_set_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``RERUN_FLUSH_TICK_SECS`` is the user's own answer to the same question, so the file default must not replace it."""
+    monkeypatch.delenv("RERUN_FLUSH_TICK_SECS", raising=False)
+    assert file_batcher_config().flush_tick.total_seconds() == 30.0
+    monkeypatch.setenv("RERUN_FLUSH_TICK_SECS", "0.05")
+    assert file_batcher_config().flush_tick.total_seconds() == 0.05
 
 
 def test_save_only_without_recording_id_uses_the_default_recording_id(tmp_path: Path) -> None:

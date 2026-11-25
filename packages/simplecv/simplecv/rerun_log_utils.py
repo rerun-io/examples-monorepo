@@ -174,6 +174,21 @@ def get_safe_application_id() -> str:
     return "rerun-application"  # Default fallback
 
 
+FILE_FLUSH_TICK_S: float = 30.0
+"""Batcher tick of a recording that only goes to a file (`file_batcher_config`), seconds."""
+
+
+def file_batcher_config() -> rr.ChunkBatcherConfig:
+    """The chunk batcher of a recording that only goes to a file.
+
+    A file is read back whole, so batch for the reader, not for latency: the default 200 ms tick cuts a per-frame log
+    into chunks of a few rows, and the viewer walks every chunk of a file opened by path on every frame (117k chunks
+    cost ~55 ms/frame on an M5). The byte and row limits keep their defaults, and a `RERUN_FLUSH_TICK_SECS` in the
+    environment keeps its value.
+    """
+    return rr.ChunkBatcherConfig(flush_tick=None if "RERUN_FLUSH_TICK_SECS" in os.environ else FILE_FLUSH_TICK_S)
+
+
 @dataclass
 class RerunTyroConfig:
     application_id: str = field(default_factory=get_safe_application_id)
@@ -215,17 +230,14 @@ class RerunTyroConfig:
         )
         file_only = self.save is not None and not self.serve and not self.connect and (not self.live or self.headless)
         if file_only:
-            # A file is read back whole, so batch for the reader, not for latency: the default 200 ms tick cuts a
-            # per-frame log into chunks of a few rows, and the viewer walks every chunk of a file opened by path on
-            # every frame (117k chunks cost ~55 ms/frame on an M5). The byte and row limits keep their defaults.
             # rr.init takes no batcher config, so reopen its recording id (the multiprocessing-shared default when
-            # none is pinned) with one.
+            # none is pinned) with the file's (`file_batcher_config`).
             self.rec_stream: rr.RecordingStream = rr.RecordingStream(
                 self.application_id,
                 recording_id=rr.get_recording_id(),
                 make_default=True,
                 default_enabled=True,
-                batcher_config=rr.ChunkBatcherConfig(flush_tick=30.0),
+                batcher_config=file_batcher_config(),
             )
         else:
             self.rec_stream = rr.get_global_data_recording()  # type: ignore[assignment]
