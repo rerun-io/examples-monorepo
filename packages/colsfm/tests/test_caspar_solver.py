@@ -92,8 +92,12 @@ def _solve(
     caspar: dict[str, int | float | bool],
     *,
     camera_only: bool = False,
+    refine_rig: bool = False,
 ) -> None:
-    """One bundle adjustment. `camera_only`: the points fixed, the shared focal length free (CASPAR's PinholeFocal)."""
+    """One bundle adjustment. `camera_only`: the points fixed, the shared focal length free (CASPAR's PinholeFocal).
+
+    `refine_rig`: the non-reference `sensor_from_rig` free too (CASPAR's rig factors, `caspar-rig-refine.patch`).
+    """
     config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
     for image_id in sorted(reconstruction.images):
         config.add_image(image_id)
@@ -103,7 +107,8 @@ def _solve(
         config.set_constant_cam_intrinsics(1)
     options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
     options.print_summary = False
-    options.refine_principal_point = options.refine_sensor_from_rig = False
+    options.refine_principal_point = False
+    options.refine_sensor_from_rig = refine_rig
     # CASPAR refuses a free focal length with a fixed distortion block; PINHOLE has none, so the two move together.
     options.refine_focal_length = options.refine_extra_params = camera_only
     options.refine_points3D = not camera_only
@@ -352,3 +357,53 @@ def test_caspar_moves_a_fisheye_rig_with_rim_observations_to_the_ceres_minimum(s
     # f32 kernels: 4e-4 above Ceres measured (the stock factor stays at the start, 23x above).
     assert error <= expected * (1.0 + 1e-3), f"CASPAR {error:.3f} px^2, Ceres {expected:.3f}, start {start_error:.3f}"
     assert _centre_error_m(reconstruction, truth) < 0.5 * _centre_error_m(start, truth)
+
+
+def _knocked_rim_rig() -> pycolmap.Reconstruction:
+    """The rim rig with camera 2's `sensor_from_rig` knocked 0.5 deg / 1.7 cm off as well."""
+    reconstruction, _ = _rim_rig()
+    rig: pycolmap.Rig = reconstruction.rig(RIG_ID)
+    sensor_from_rig: pycolmap.Rigid3d | None = rig.sensor_from_rig(camera_sensor_id(2))
+    assert sensor_from_rig is not None
+    turn: pycolmap.Rotation3d = pycolmap.Rotation3d(np.radians(np.array([0.3, -0.3, 0.25])))
+    rig.set_sensor_from_rig(
+        camera_sensor_id(2), pycolmap.Rigid3d(turn * sensor_from_rig.rotation, np.asarray(sensor_from_rig.translation) + np.array([0.01, -0.01, 0.01]))
+    )
+    return reconstruction
+
+
+def _sensor_from_rig(reconstruction: pycolmap.Reconstruction) -> pycolmap.Rigid3d:
+    """Camera 2's `sensor_from_rig`."""
+    sensor_from_rig: pycolmap.Rigid3d | None = reconstruction.rig(RIG_ID).sensor_from_rig(camera_sensor_id(2))
+    assert sensor_from_rig is not None
+    return sensor_from_rig
+
+
+def _rig_apart(a: pycolmap.Rigid3d, b: pycolmap.Rigid3d) -> tuple[float, float]:
+    """Rotation (deg) and translation (m) between two `sensor_from_rig`s."""
+    relative: Float64[ndarray, "3 3"] = np.asarray(a.rotation.matrix()) @ np.asarray(b.rotation.matrix()).T
+    angle: float = float(np.degrees(np.arccos(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))))
+    return angle, float(np.linalg.norm(np.asarray(a.translation) - np.asarray(b.translation)))
+
+
+def test_caspar_refines_a_fisheye_rig_with_rim_observations_as_ceres_does() -> None:
+    """`refine_sensor_from_rig` on the rim rig: the OPENCV_FISHEYE rig factor ends at Ceres' cost and Ceres' rig.
+
+    Frames 1 and 2 constant fix the gauge, scale included; frame 2 is held at its knocked-off pose, so the rig's
+    translation has no true value to return to, only its rotation. Both solvers are scored on the observations in front
+    of their camera at the start and in Ceres' solution.
+    """
+    truth: pycolmap.Rigid3d = _sensor_from_rig(_rim_rig()[0])
+    start: pycolmap.Reconstruction = _knocked_rim_rig()
+    reference: pycolmap.Reconstruction = _knocked_rim_rig()
+    _solve(reference, "ceres", [1, 2], {}, refine_rig=True)
+    reconstruction: pycolmap.Reconstruction = _knocked_rim_rig()
+    _solve(reconstruction, "caspar", [1, 2], {"reduced_camera_system": True}, refine_rig=True)
+    scored: frozenset[Observation] = _in_front(start, reference)
+    error, expected = _squared_error(reconstruction, scored), _squared_error(reference, scored)
+    assert error <= expected * (1.0 + 1e-3), f"CASPAR {error:.3f} px^2, Ceres {expected:.3f}, start {_squared_error(start, scored):.3f}"
+    start_deg, _ = _rig_apart(_sensor_from_rig(start), truth)
+    ceres_deg, _ = _rig_apart(_sensor_from_rig(reference), truth)
+    assert ceres_deg < 0.5 * start_deg, f"Ceres rig rotation {ceres_deg:.4f} deg from the truth, start {start_deg:.4f}"
+    apart_deg, apart_m = _rig_apart(_sensor_from_rig(reconstruction), _sensor_from_rig(reference))
+    assert apart_deg < 0.01 and apart_m < 1e-3, f"CASPAR rig {apart_deg:.5f} deg / {apart_m * 1e3:.3f} mm from Ceres'"
