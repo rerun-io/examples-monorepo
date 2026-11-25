@@ -23,6 +23,7 @@ from colsfm.ba_backend import (
     CASPAR_BUILD_FALLBACK_REASON,
     CASPAR_PROBE_FAILED_REASON,
     EXTRINSICS_FALLBACK_REASON,
+    MIXED_MODEL_RIG_FALLBACK_REASON,
     BaExecutionPlan,
     CasparCapability,
     CasparOptions,
@@ -213,6 +214,20 @@ def test_refining_intrinsics_of_a_fixed_intrinsics_model_falls_back_to_ceres() -
     assert "FULL_OPENCV" in narrowed.fallback_reason
     assert plan.for_camera_models(["PINHOLE"], refine_intrinsics=True).backend == "caspar"
     assert plan.for_camera_models(["FULL_OPENCV"], refine_intrinsics=False).backend == "caspar"
+
+
+def test_a_rig_that_mixes_camera_models_falls_back_to_ceres() -> None:
+    """One rig with a PINHOLE and a SIMPLE_RADIAL camera goes to Ceres; the same models in two rigs stay on CASPAR.
+
+    CASPAR keys a frame's pose by camera model, so a mixed rig frame becomes one pose per model.
+    """
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=True, optimize_extrinsics=False, capability=STOCK_CAPABILITY)
+    names: list[str] = ["PINHOLE", "SIMPLE_RADIAL"]
+    narrowed: BaExecutionPlan = plan.for_camera_models(names, rig_camera_models=[frozenset(names)])
+    assert narrowed.backend == "ceres"
+    assert not narrowed.ceres_polish
+    assert narrowed.fallback_reason == MIXED_MODEL_RIG_FALLBACK_REASON
+    assert plan.for_camera_models(names, rig_camera_models=[frozenset({"PINHOLE"}), frozenset({"SIMPLE_RADIAL"})]) is plan
 
 
 def test_free_extrinsics_stay_on_caspar_when_the_build_refines_the_rig() -> None:

@@ -645,6 +645,17 @@ them fixed in every pycolmap solve. What reaches this sentence is
 `--no-regularised-extrinsics`, whose refinement *is*
 `run_mapping(..., optimize_extrinsics=True)`."""
 
+MIXED_MODEL_RIG_FALLBACK_REASON: Final[str] = (
+    "a rig of this model holds cameras of more than one camera model, and CASPAR keys a frame's pose by camera "
+    "model (one pose per model instead of one rig pose; a free `sensor_from_rig` stops the solve)"
+)
+"""Why a `caspar` request ends up on Ceres when one rig mixes camera models.
+
+Every model may project on this build and the problem is still wrong: the rig
+constraint between a PINHOLE and an OPENCV_FISHEYE camera of the same frame is
+lost. `build_rig` gives each cuSFM camera its own model, so a mixed rig is a real
+input, not a corner case."""
+
 CASPAR_BUILD_FALLBACK_REASON: Final[str] = (
     "this pycolmap is built without CASPAR_ENABLED, so the GPU backend cannot solve "
     "(the `colsfm` environment, recipes/colmap-src, has the build that can)"
@@ -760,7 +771,13 @@ class BaExecutionPlan:
         """
         return self.backend != self.requested_backend
 
-    def for_camera_models(self, camera_model_names: Iterable[str], *, refine_intrinsics: bool = False) -> BaExecutionPlan:
+    def for_camera_models(
+        self,
+        camera_model_names: Iterable[str],
+        *,
+        refine_intrinsics: bool = False,
+        rig_camera_models: Iterable[frozenset[str]] = (),
+    ) -> BaExecutionPlan:
         """The same plan, narrowed by the camera models the reconstruction turned out to hold.
 
         The one fact resolution cannot have: the reconstruction is built in stage 7,
@@ -788,6 +805,8 @@ class BaExecutionPlan:
                 ceres_polish=False,
                 fallback_reason=unsupported_models_reason(self.capability.supported_camera_models, unsupported),
             )
+        if any(len(models) > 1 for models in rig_camera_models):
+            return replace(self, backend="ceres", ceres_polish=False, fallback_reason=MIXED_MODEL_RIG_FALLBACK_REASON)
         fixed: frozenset[str] = self.capability.fixed_intrinsics_only(names) if refine_intrinsics else frozenset()
         if not fixed:
             return self

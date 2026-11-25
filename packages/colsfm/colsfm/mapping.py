@@ -575,6 +575,24 @@ def solve_bundle_adjustment(
     )
 
 
+def rig_camera_models(reconstruction: pycolmap.Reconstruction) -> tuple[frozenset[str], ...]:
+    """The camera model names of each rig's cameras, one set per rig.
+
+    Args:
+        reconstruction: The model about to be adjusted.
+
+    Returns:
+        One set of `pycolmap.CameraModelId` names per rig; the data-less IMU reference
+        contributes nothing.
+    """
+    return tuple(
+        frozenset(
+            reconstruction.camera(sensor.id).model.name for sensor in rig.sensor_ids() if sensor.type == pycolmap.SensorType.CAMERA
+        )
+        for rig in reconstruction.rigs.values()
+    )
+
+
 def _check_extrinsics_are_refinable(model: PosedModel) -> None:
     """Refuse an extrinsic refinement COLMAP would silently turn into a no-op.
 
@@ -733,7 +751,9 @@ def run_mapping(
     # mid-run. `for_camera_models` returns the same plan unless CASPAR would silently
     # drop a model's observations.
     plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(
-        (camera.model.name for camera in reconstruction.cameras.values()), refine_intrinsics=given_options.refine_focal_length
+        (camera.model.name for camera in reconstruction.cameras.values()),
+        refine_intrinsics=given_options.refine_focal_length,
+        rig_camera_models=rig_camera_models(reconstruction),
     )
     if plan.fallback_reason != given_options.ba_plan.fallback_reason:
         plan.announce()

@@ -7,7 +7,7 @@ survived the pre-flight. That needs a rig, a database and a CASPAR build to be
 present or absent, which is why it is not in the pure-contract file — and why it
 is not in `test_mapping.py` either, whose subject is the map rather than the solver.
 
-Covered here: the three CASPAR fallbacks (camera model, extrinsics refinement, a
+Covered here: the CASPAR fallbacks (camera model, mixed-model rig, extrinsics refinement, a
 build without CASPAR_ENABLED), the capability probe, the solver-option cast, and
 the single Ceres bundle adjustment that finishes a CASPAR run.
 """
@@ -34,6 +34,7 @@ from colsfm.ba_backend import (
     CASPAR_BUILD_FALLBACK_REASON,
     CASPAR_PROBE_CAMERA_MODELS,
     CASPAR_STOCK_CAMERA_MODELS,
+    MIXED_MODEL_RIG_FALLBACK_REASON,
     BaExecutionPlan,
     apply_caspar_options,
     backend_name,
@@ -42,8 +43,8 @@ from colsfm.ba_backend import (
     resolve_ba_plan,
 )
 from colsfm.config import BundleAdjustmentConfig, CusfmConfig, VisionMappingConfig
-from colsfm.mapping import MappingOptions, MappingResult, bundle_adjustment_options, ceres_polish_options, run_mapping
-from colsfm.reconstruction import build_reconstruction
+from colsfm.mapping import MappingOptions, MappingResult, bundle_adjustment_options, ceres_polish_options, rig_camera_models, run_mapping
+from colsfm.reconstruction import PosedModel, build_reconstruction
 from colsfm.run_config import PipelineOptions
 from colsfm.run_report import MappingStats
 
@@ -213,6 +214,46 @@ def test_a_fisheye_rig_stays_on_caspar_when_the_build_has_the_adapter(
     )
     assert backend_name(ba_options) == "caspar"
     assert "OPENCV_FISHEYE" not in capsys.readouterr().out
+
+
+def _mixed_model_rig(rig: SyntheticRig) -> PosedModel:
+    """The rig's reconstruction with its second camera turned OPENCV_FISHEYE: one rig, two camera models.
+
+    `build_rig` gives each cuSFM camera its own model, so nothing stops a rig from
+    holding a PINHOLE and an OPENCV_FISHEYE camera at once.
+    """
+    model: PosedModel = build_reconstruction(rig.frames_meta)
+    camera: pycolmap.Camera = model.reconstruction.cameras[1]
+    camera.model = pycolmap.CameraModelId.OPENCV_FISHEYE
+    camera.params = [*camera.params[:4], 0.0, 0.0, 0.0, 0.0]
+    return model
+
+
+def test_a_rig_with_two_camera_models_falls_back_to_ceres(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rig frame whose cameras have two models solves on Ceres, even where CASPAR projects both.
+
+    CASPAR keys a frame's pose by camera model: with fixed extrinsics it solves one pose
+    per model instead of one rig pose, and with a free `sensor_from_rig` it stops. Both
+    models projecting is not enough; the rig layout decides.
+    """
+    model: PosedModel = _mixed_model_rig(synthetic_rig)
+    assert rig_camera_models(model.reconstruction) == (frozenset({"PINHOLE", "OPENCV_FISHEYE"}),)
+    both: frozenset[str] = CASPAR_STOCK_CAMERA_MODELS | {"OPENCV_FISHEYE"}
+    planned: BaExecutionPlan = caspar_plan(supported_camera_models=both)
+    assert planned.for_camera_models(["PINHOLE", "OPENCV_FISHEYE"]).backend == "caspar", "two models in two rigs stay on CASPAR"
+
+    result: MappingResult = run_mapping(
+        model,
+        synthetic_database,
+        isaac_config.vision_mapping,
+        quiet_options(ba_plan=planned),
+    )
+    assert result.ba_plan.backend == "ceres"
+    assert result.ba_plan.fallback_reason == MIXED_MODEL_RIG_FALLBACK_REASON
+    assert result.polish is None, "a Ceres run has converged; there is nothing to polish"
+    assert MIXED_MODEL_RIG_FALLBACK_REASON in capsys.readouterr().out
 
 
 def test_the_probe_reports_the_camera_models_this_caspar_build_projects(
