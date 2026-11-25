@@ -62,8 +62,8 @@ with `optimize_extrinsics` False.
 | `merge_max_reproj_error`, `complete_max_reproj_error` | 4.0 | the round's gate `g_k` | cuSFM merges and completes under the same decaying gate (§5.4, §5.6) |
 | `ignore_two_view_tracks` | True | `min_correspondences > 2` | `min_correspondences: 3` drops two-view tracks |
 | `random_seed` | -1 | `random_seed` (1) | determinism |
-| `refine_focal_length` | True | False | `--optimize_intrinsics=false` |
-| `refine_extra_params` | True | False | same |
+| `refine_focal_length` | True | `MappingOptions.refine_focal_length` (False) | `--optimize_intrinsics=false`; `--refine-camera-model` frees it |
+| `refine_extra_params` | True | `refine_focal_length` (False) | same; CASPAR takes the focal only with the distortion block, so both backends free them together |
 | `refine_principal_point` | False | False | same; already off |
 | `refine_sensor_from_rig` | True | `MappingOptions.optimize_extrinsics` (False) | `--optimize_extrinsics=false`; needs a camera-referenced rig, see below |
 | `ceres.loss_function_type` | TRIVIAL | `loss_type` (CAUCHY) | config §3.2 |
@@ -148,25 +148,30 @@ of CASPAR — stock ships PINHOLE and SIMPLE_RADIAL, the `colsfm` environment (r
 OPENCV_FISHEYE (`docs/caspar-fisheye-adapter.md`) — and no pycolmap call lists
 them, so `caspar_supported_camera_models` measures them with one tiny solve per
 model. `refine_sensor_from_rig = True` is a hard throw on a
-multi-sensor frame, so `optimize_extrinsics` falls back too (the regularised
-`colsfm.extrinsic_refinement` path keeps CASPAR: it holds the extrinsics fixed
+multi-sensor frame of a stock build, so `optimize_extrinsics` falls back too unless the
+build's probe refined a rig (`CasparCapability.refines_sensor_from_rig`; the regularised
+`colsfm.extrinsic_refinement` path keeps CASPAR either way: it holds the extrinsics fixed
 inside the pycolmap solve by construction); and `refine_focal_length` must equal
-`refine_extra_params`, which it does — both are False.
+`refine_extra_params`, which it does on both backends.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 import pycolmap
+from jaxtyping import UInt32
+from numpy import ndarray
 
 from colsfm.ba_backend import (
     BUNDLE_ADJUSTMENT_BACKEND,
     CERES_ONLY_PLAN,
+    EXTRINSICS_FALLBACK_REASON,
     BaBackend,
     BaExecutionPlan,
     CasparOptions,
@@ -255,6 +260,13 @@ class MappingOptions:
     extrinsics in `colsfm.extrinsic_refinement`, whose every call here leaves this
     False. Only `--no-regularised-extrinsics` turns it on, and that is the one thing
     that takes `ba_backend="caspar"` off the GPU."""
+    refine_focal_length: bool = False
+    """Free every camera's focal length (fx, fy) and distortion block in every round's bundle adjustment; cuSFM holds
+    intrinsics fixed. The principal point stays fixed.
+
+    A nominal calibration that is off pushes its error into the poses (Mission office cube faces: 1-1.4 % off
+    f = 800, poses 0.25 deg from Spirula's); refined from the first round, the loose early gates keep the
+    observations the nominal model would have filtered."""
     fixed_camera_params_id: int | None = None
     """Camera whose extrinsic stays fixed while the others are refined; cuSFM's `--fixed_camera_name`."""
     num_threads: int | None = None
@@ -283,10 +295,9 @@ class MappingOptions:
     CASPAR does not apply."""
     verbose: bool = True
     """Print one line per triangulation pass and per outer round, as cuSFM does."""
-    excluded_pairs: frozenset[tuple[int, int]] = frozenset()
-    """Image pairs `(min id, max id)` the correspondence graph leaves out although the database holds their verified
-    geometry: the loop stage's rejected candidates under `loop_pairs_in_mapper="accepted"`. Left out when the graph is
-    built (`colsfm.correspondences.load_correspondences`), so no stage deletes database rows."""
+    inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] = MappingProxyType({})
+    """Per image pair `(min id, max id)`, the subset of its stored inliers the correspondence graph carries: the loop
+    stage's pose check under `loop_pairs_in_mapper="pose-checked"` (`colsfm.loop_mapper_check`). No row is rewritten."""
     round_callback: RoundCallback | None = None
     """Called once at the end of every outer round, after the round's filter and solve.
 
@@ -326,11 +337,13 @@ def triangulator_options(mapping_config: VisionMappingConfig, max_pixel_error: f
         max_pixel_error: The round's reprojection gate, in pixels.
 
     Returns:
-        Options with the module docstring's overrides applied.
+        Options with the module docstring's overrides applied; tracks merge under
+        `min(max_pixel_error, mapping_config.max_merge_pixel_error)` when the profile caps it.
     """
     options: pycolmap.IncrementalTriangulatorOptions = pycolmap.IncrementalTriangulatorOptions()
     options.min_angle = mapping_config.min_triangulation_deg
-    options.merge_max_reproj_error = max_pixel_error
+    merge_cap: float | None = mapping_config.max_merge_pixel_error
+    options.merge_max_reproj_error = max_pixel_error if merge_cap is None else min(max_pixel_error, merge_cap)
     options.complete_max_reproj_error = max_pixel_error
     options.ignore_two_view_tracks = mapping_config.min_correspondences > 2
     options.random_seed = mapping_config.random_seed
@@ -355,11 +368,13 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
 
     Raises:
         KeyError: When the configuration names a loss pycolmap does not have.
+        ValueError: When a CASPAR plan without the rig capability meets `optimize_extrinsics`.
     """
     ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    ba_options.refine_focal_length = False
+    ba_options.refine_focal_length = options.refine_focal_length
     ba_options.refine_principal_point = False
-    ba_options.refine_extra_params = False
+    # CASPAR takes the focal only together with the distortion block; Ceres follows, so both backends refine one model.
+    ba_options.refine_extra_params = options.refine_focal_length
     ba_options.refine_rig_from_world = True
     ba_options.refine_sensor_from_rig = options.optimize_extrinsics
     ba_options.refine_points3D = True
@@ -385,12 +400,10 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     plan: BaExecutionPlan = options.ba_plan
     ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[plan.backend]
     if plan.backend == "caspar":
-        # CASPAR throws on a multi-sensor frame whose extrinsics are free, and throws
-        # again unless focal length and the distortion block agree; both are False here.
-        # The plan already refuses CASPAR for a solve that frees the extrinsics, so this
-        # is the constraint stated where the options are built rather than a second rule.
-        ba_options.refine_sensor_from_rig = False
-        ba_options.refine_extra_params = ba_options.refine_focal_length
+        # The plan keeps a solve that frees `sensor_from_rig` on CASPAR only when the build's probe refined a rig
+        # (`resolve_backend`); a plan that breaks that would hold a requested rig refinement fixed without a word.
+        if options.optimize_extrinsics and not plan.capability.refines_sensor_from_rig:
+            raise ValueError(f"a CASPAR plan cannot free sensor_from_rig on this build: {EXTRINSICS_FALLBACK_REASON}")
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
         ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
@@ -564,6 +577,24 @@ def solve_bundle_adjustment(
     )
 
 
+def rig_camera_models(reconstruction: pycolmap.Reconstruction) -> tuple[frozenset[str], ...]:
+    """The camera model names of each rig's cameras, one set per rig.
+
+    Args:
+        reconstruction: The model about to be adjusted.
+
+    Returns:
+        One set of `pycolmap.CameraModelId` names per rig; the data-less IMU reference
+        contributes nothing.
+    """
+    return tuple(
+        frozenset(
+            reconstruction.camera(sensor.id).model.name for sensor in rig.sensor_ids() if sensor.type == pycolmap.SensorType.CAMERA
+        )
+        for rig in reconstruction.rigs.values()
+    )
+
+
 def _check_extrinsics_are_refinable(model: PosedModel) -> None:
     """Refuse an extrinsic refinement COLMAP would silently turn into a no-op.
 
@@ -721,7 +752,11 @@ def run_mapping(
     # below asks `colsfm.ba_backend` anything again, and nothing rewrites the backend
     # mid-run. `for_camera_models` returns the same plan unless CASPAR would silently
     # drop a model's observations.
-    plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(camera.model.name for camera in reconstruction.cameras.values())
+    plan: BaExecutionPlan = given_options.ba_plan.for_camera_models(
+        (camera.model.name for camera in reconstruction.cameras.values()),
+        refine_intrinsics=given_options.refine_focal_length,
+        rig_camera_models=rig_camera_models(reconstruction),
+    )
     if plan.fallback_reason != given_options.ba_plan.fallback_reason:
         plan.announce()
     resolved_options: MappingOptions = replace(given_options, ba_plan=plan)
@@ -744,7 +779,10 @@ def run_mapping(
 
     correspondence_started: float = time.perf_counter()
     correspondences: Correspondences = load_correspondences(
-        reconstruction, database_path, mapping_config.min_num_matches_per_pair, excluded_pairs=resolved_options.excluded_pairs
+        reconstruction,
+        database_path,
+        mapping_config.min_num_matches_per_pair,
+        inlier_overrides=resolved_options.inlier_overrides,
     )
     correspondence_seconds: float = time.perf_counter() - correspondence_started
 

@@ -7,7 +7,7 @@ survived the pre-flight. That needs a rig, a database and a CASPAR build to be
 present or absent, which is why it is not in the pure-contract file — and why it
 is not in `test_mapping.py` either, whose subject is the map rather than the solver.
 
-Covered here: the three CASPAR fallbacks (camera model, extrinsics refinement, a
+Covered here: the CASPAR fallbacks (camera model, mixed-model rig, extrinsics refinement, a
 build without CASPAR_ENABLED), the capability probe, the solver-option cast, and
 the single Ceres bundle adjustment that finishes a CASPAR run.
 """
@@ -34,6 +34,7 @@ from colsfm.ba_backend import (
     CASPAR_BUILD_FALLBACK_REASON,
     CASPAR_PROBE_CAMERA_MODELS,
     CASPAR_STOCK_CAMERA_MODELS,
+    MIXED_MODEL_RIG_FALLBACK_REASON,
     BaExecutionPlan,
     apply_caspar_options,
     backend_name,
@@ -42,8 +43,8 @@ from colsfm.ba_backend import (
     resolve_ba_plan,
 )
 from colsfm.config import BundleAdjustmentConfig, CusfmConfig, VisionMappingConfig
-from colsfm.mapping import MappingOptions, MappingResult, bundle_adjustment_options, ceres_polish_options, run_mapping
-from colsfm.reconstruction import build_reconstruction
+from colsfm.mapping import MappingOptions, MappingResult, bundle_adjustment_options, ceres_polish_options, rig_camera_models, run_mapping
+from colsfm.reconstruction import PosedModel, build_reconstruction
 from colsfm.run_config import PipelineOptions
 from colsfm.run_report import MappingStats
 
@@ -215,6 +216,46 @@ def test_a_fisheye_rig_stays_on_caspar_when_the_build_has_the_adapter(
     assert "OPENCV_FISHEYE" not in capsys.readouterr().out
 
 
+def _mixed_model_rig(rig: SyntheticRig) -> PosedModel:
+    """The rig's reconstruction with its second camera turned OPENCV_FISHEYE: one rig, two camera models.
+
+    `build_rig` gives each cuSFM camera its own model, so nothing stops a rig from
+    holding a PINHOLE and an OPENCV_FISHEYE camera at once.
+    """
+    model: PosedModel = build_reconstruction(rig.frames_meta)
+    camera: pycolmap.Camera = model.reconstruction.cameras[1]
+    camera.model = pycolmap.CameraModelId.OPENCV_FISHEYE
+    camera.params = [*camera.params[:4], 0.0, 0.0, 0.0, 0.0]
+    return model
+
+
+def test_a_rig_with_two_camera_models_falls_back_to_ceres(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rig frame whose cameras have two models solves on Ceres, even where CASPAR projects both.
+
+    CASPAR keys a frame's pose by camera model: with fixed extrinsics it solves one pose
+    per model instead of one rig pose, and with a free `sensor_from_rig` it stops. Both
+    models projecting is not enough; the rig layout decides.
+    """
+    model: PosedModel = _mixed_model_rig(synthetic_rig)
+    assert rig_camera_models(model.reconstruction) == (frozenset({"PINHOLE", "OPENCV_FISHEYE"}),)
+    both: frozenset[str] = CASPAR_STOCK_CAMERA_MODELS | {"OPENCV_FISHEYE"}
+    planned: BaExecutionPlan = caspar_plan(supported_camera_models=both)
+    assert planned.for_camera_models(["PINHOLE", "OPENCV_FISHEYE"]).backend == "caspar", "two models in two rigs stay on CASPAR"
+
+    result: MappingResult = run_mapping(
+        model,
+        synthetic_database,
+        isaac_config.vision_mapping,
+        quiet_options(ba_plan=planned),
+    )
+    assert result.ba_plan.backend == "ceres"
+    assert result.ba_plan.fallback_reason == MIXED_MODEL_RIG_FALLBACK_REASON
+    assert result.polish is None, "a Ceres run has converged; there is nothing to polish"
+    assert MIXED_MODEL_RIG_FALLBACK_REASON in capsys.readouterr().out
+
+
 def test_the_probe_reports_the_camera_models_this_caspar_build_projects(
     caspar_enabled: bool, pixi_environment_name: str
 ) -> None:
@@ -237,40 +278,94 @@ def test_the_probe_reports_the_camera_models_this_caspar_build_projects(
         assert supported == CASPAR_STOCK_CAMERA_MODELS
 
 
+@pytest.mark.integration
+def test_the_probe_knows_which_models_caspar_can_free_the_intrinsics_of(caspar_enabled: bool) -> None:
+    """PINHOLE's focal is refinable on every CASPAR build; FULL_OPENCV, where projected, is fixed-intrinsics only.
+
+    Measured on MSD MGO05 (FULL_OPENCV): freeing the focal on CASPAR raised "[caspar_model_adapter.h:708] FULL_OPENCV
+    is supported by CASPAR only for fixed intrinsics" in the first round; the probe has to know before the run.
+    """
+    if not caspar_enabled:
+        pytest.skip("this pycolmap is built without CASPAR_ENABLED; run under `pixi run -e colsfm-dev`")
+    capability = detect_caspar_capability()
+    print(f"[colsfm] CASPAR refines the intrinsics of {sorted(capability.intrinsics_refinable_camera_models)}")
+    assert "PINHOLE" in capability.intrinsics_refinable_camera_models
+    assert capability.intrinsics_refinable_camera_models <= capability.supported_camera_models
+    if "FULL_OPENCV" in capability.supported_camera_models:
+        assert "FULL_OPENCV" not in capability.intrinsics_refinable_camera_models
+
+
+@pytest.mark.integration
+def test_a_free_rig_solves_where_the_rig_probe_says(caspar_enabled: bool, synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig) -> None:
+    """The rig probe's answer is the backend a mapping that frees `sensor_from_rig` runs on, and that mapping completes.
+
+    A build with the rig factor (recipes/colmap-src caspar-rig-refine) keeps it on CASPAR; a stock build falls back to
+    Ceres with `EXTRINSICS_FALLBACK_REASON` instead of throwing mid-run.
+    """
+    if not caspar_enabled:
+        pytest.skip("this pycolmap is built without CASPAR_ENABLED; run under `pixi run -e colsfm-dev`")
+    refines: bool = detect_caspar_capability().refines_sensor_from_rig
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=True)
+    model = build_reconstruction(synthetic_rig.frames_meta, reference_camera_params_id=0)
+    result: MappingResult = run_mapping(
+        model, synthetic_database, isaac_config.vision_mapping, quiet_options(num_threads=1, ba_plan=plan, optimize_extrinsics=True, use_gpu=True)
+    )
+    print(f"[colsfm] CASPAR refines sensor_from_rig: {refines}; free-rig mapping ran on {result.ba_plan.backend}")
+    assert result.ba_plan.backend == ("caspar" if refines else "ceres")
+    assert result.refined_extrinsics is not None
+    assert result.mean_reprojection_error_px < 1.0
+
+
 def test_the_probe_solves_once_however_often_it_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     """The probe is cached, so the mapper pays for its CASPAR solves once per process.
 
-    The expensive thing is `_caspar_projects`: one real bundle adjustment per
-    candidate camera model. The contract is that the whole sweep runs once and
-    every later caller reads the answer, so the test counts the solves. Timing
-    the second call instead — which is what this used to do, against a 10 ms
-    budget — measures the machine, and asking whether two calls returned the
-    same object measures `functools.cache` rather than the mapper's cost.
+    The expensive thing is `_caspar_probe_solve`: one real bundle adjustment per
+    question — one per candidate camera model, then the rig factor and the free
+    intrinsics of each projected model. The contract is that the whole sweep runs
+    once and every later caller reads the answer, so the test counts the solves.
+    Timing the second call instead measures the machine, and asking whether two
+    calls returned the same object measures `functools.cache` rather than the
+    mapper's cost.
 
-    Counting also frees the test from needing a CASPAR build: the stand-in
-    answers for the solve, so the caching contract is checked on every
-    environment rather than only where the GPU backend exists.
+    Counting also frees the test from needing a CASPAR build: the stand-in answers
+    for every solve, so the caching contract is checked on every environment rather
+    than only where the GPU backend exists.
     """
-    asked: list[str] = []
+    asked: list[tuple[str, int, bool, bool]] = []
 
-    def counting_probe(model_name: str) -> bool:
-        """Stand in for one CASPAR solve, recording which model it was asked about."""
-        asked.append(model_name)
-        return model_name in CASPAR_STOCK_CAMERA_MODELS
+    def counting_solve(
+        model_name: str, *, num_sensors: int = 1, refine_intrinsics: bool = False, refine_sensor_from_rig: bool = False, constant_intrinsics: bool = False
+    ) -> pycolmap.BundleAdjustmentSummary | None:
+        """Stand in for one CASPAR solve: stock models project, PINHOLE alone frees its intrinsics, no rig factor."""
+        asked.append((model_name, num_sensors, refine_intrinsics, refine_sensor_from_rig))
+        if refine_sensor_from_rig:
+            raise ValueError("refine_sensor_from_rig=true is not supported by CASPAR")
+        summary: pycolmap.BundleAdjustmentSummary = pycolmap.BundleAdjustmentSummary()
+        projects: bool = model_name in CASPAR_STOCK_CAMERA_MODELS and (not refine_intrinsics or model_name == "PINHOLE")
+        summary.num_residuals = 32 if projects else 0
+        summary.termination_type = pycolmap.BundleAdjustmentTerminationType.CONVERGENCE
+        return summary
 
-    monkeypatch.setattr(ba_backend, "_caspar_projects", counting_probe)
+    monkeypatch.setattr(ba_backend, "_caspar_probe_solve", counting_solve)
     # The real answer is memoised for the life of the process, so the cache has
     # to be empty going in and empty again coming out — otherwise this test
     # either reads a real probe or leaves the stand-in's answer behind.
     detect_caspar_capability.cache_clear()
     try:
-        first: frozenset[str] = caspar_supported_camera_models()
-        repeats: list[frozenset[str]] = [caspar_supported_camera_models() for _ in range(3)]
+        first = detect_caspar_capability()
+        repeats = [detect_caspar_capability() for _ in range(3)]
     finally:
         detect_caspar_capability.cache_clear()
 
-    assert asked == list(CASPAR_PROBE_CAMERA_MODELS), "the sweep runs once, in probe order"
-    assert first == CASPAR_STOCK_CAMERA_MODELS
+    stock: list[str] = sorted(CASPAR_STOCK_CAMERA_MODELS)
+    assert asked == [
+        *((model_name, 1, False, False) for model_name in CASPAR_PROBE_CAMERA_MODELS),
+        ("PINHOLE", 2, False, True),
+        *((model_name, 1, True, False) for model_name in stock),
+    ], "the sweep runs once, in probe order"
+    assert first.supported_camera_models == CASPAR_STOCK_CAMERA_MODELS
+    assert first.refines_sensor_from_rig is False
+    assert first.intrinsics_refinable_camera_models == frozenset({"PINHOLE"})
     assert repeats == [first, first, first]
 
 

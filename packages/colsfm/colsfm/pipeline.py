@@ -46,8 +46,9 @@ Ordering notes worth knowing before reading the code:
   database. `colsfm.mapping.load_correspondences` reads *every* verified
   two-view geometry, so a loop pair matched in stage 5 reaches the triangulator
   without being named in stage 3's list, whether or not its loop edge was
-  accepted (`PipelineOptions.loop_pairs_in_mapper="accepted"` leaves the rejected
-  ones out of the mapper's correspondence graph; no row is deleted).
+  accepted (`PipelineOptions.loop_pairs_in_mapper="pose-checked"` keeps only the
+  inliers that agree with a pose in the mapper's correspondence graph; no row is
+  rewritten).
 * **Loop closure needs matches to verify, and matching is a batch operation.**
   The estimator pulls matches through an injected `match_fn` one pair at a time,
   and running COLMAP's matcher per pair would reload the LightGlue graph per
@@ -94,6 +95,7 @@ from dataclasses import dataclass, replace
 
 from serde.json import to_json
 
+from colsfm.cameras import with_colmap_intrinsics
 from colsfm.config import CusfmConfig
 from colsfm.database import (
     ImagePair,
@@ -108,7 +110,7 @@ from colsfm.matching import (
     MatchReport,
 )
 from colsfm.prior_alignment import align_run_directory
-from colsfm.run_config import PipelineOptions, ResolvedRun, SelectionOptions, resolve_run
+from colsfm.run_config import PipelineOptions, ResolvedRun, SelectionOptions, plan_runs_extrinsic_stage, resolve_run
 from colsfm.run_lifecycle import (
     EXTRINSIC_REFINEMENT_STAGE,
     KEYFRAME_DIR_NAME,
@@ -124,8 +126,10 @@ from colsfm.run_lifecycle import (
 )
 from colsfm.run_report import (
     ExtrinsicChange,
+    FocalChange,
     MappingStats,
     PipelineSummary,
+    camera_model_changes,
 )
 from colsfm.stages import (
     ExportStageResult,
@@ -298,7 +302,7 @@ def run_pipeline(options: PipelineOptions, observer: PipelineObserver | None = N
     # matching and loop closure had already been paid for and the previous run's
     # database had already been deleted.
     resolved: ResolvedRun = resolve_run(options)
-    stages: tuple[StageName, ...] = stage_names(options.optimize_extrinsics)
+    stages: tuple[StageName, ...] = stage_names(plan_runs_extrinsic_stage(options))
     workspace: RunWorkspace = open_workspace(options.output_dir, stages)
     # Every stage writes into the staging directory, the database included, because
     # the stages take an options object whose `output_dir` is that directory. The
@@ -400,8 +404,8 @@ def _run_stages(
         pose_graph: PoseGraphStageResult = run_pose_graph_stage(staged, selection.selected, config, loops.edges)
     watcher.on_pose_graph(pose_graph)
 
-    # The loop stage's rejected pairs stay in the database; under "accepted" the mapper leaves them out of its graph.
-    mapping_options: MappingOptions = replace(resolved.mapping, excluded_pairs=frozenset(loops.excluded_pairs))
+    # The loop stage writes no row back: under "pose-checked" the mapper keeps only the pose-consistent inliers of its pairs.
+    mapping_options: MappingOptions = replace(resolved.mapping, inlier_overrides=loops.inlier_overrides)
 
     # ── 7. triangulation and bundle adjustment ───────────────────────────────────────
     with timed_stage(ledger, "reconstruction"), watcher.stage_scope("reconstruction"):
@@ -414,7 +418,12 @@ def _run_stages(
     mapped_meta: FramesMeta = pose_graph.frames_meta
     changes: tuple[ExtrinsicChange, ...] = ()
     rounds_run: int = 0
-    if options.optimize_extrinsics:
+    focals: tuple[FocalChange, ...] = ()
+    if options.refine_camera_model and mapping.refined_extrinsics is not None:
+        # The mapper freed the rig and the intrinsics; `sparse/` is written from its reconstruction, and so is this.
+        mapped_meta = with_colmap_intrinsics(pose_graph.frames_meta.with_extrinsics(mapping.refined_extrinsics), mapping.reconstruction)
+        changes, focals = camera_model_changes(pose_graph.frames_meta, mapped_meta, mapping.refined_extrinsics)
+    if plan_runs_extrinsic_stage(options):
         with timed_stage(ledger, EXTRINSIC_REFINEMENT_STAGE), watcher.stage_scope(EXTRINSIC_REFINEMENT_STAGE):
             refinement: ExtrinsicRefinementStageResult = run_extrinsic_refinement_stage(
                 staged, pose_graph.frames_meta, config, mapping_options, mapping
@@ -446,6 +455,7 @@ def _run_stages(
         total_seconds=time.perf_counter() - started,
         extrinsic_changes=changes,
         extrinsic_refinement_rounds_run=rounds_run,
+        focal_changes=focals,
     )
     (staged.output_dir / SUMMARY_NAME).write_text(to_json(summary) + "\n")
     print(

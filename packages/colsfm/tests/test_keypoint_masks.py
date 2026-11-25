@@ -108,14 +108,14 @@ def test_storing_a_masked_batch_drops_masked_keypoints_and_keeps_the_other_descr
 
     database_path: Path = _two_camera_database(tmp_path)
     tasks: list[ImageTask] = image_tasks(database_path, ["wide/1000", "tall/1000"])
-    # Normalised [-1, 1] coordinates; on the 64x48 image x = (k + 1) * 31.5, y = (k + 1) * 23.5.
+    # Normalised [-1, 1] coordinates; on the 64x48 image x = (k + 1) * 32 - 0.5, y = (k + 1) * 24 - 0.5.
     keypoints_bn2: Float32[ndarray, "2 4 2"] = np.asarray(
         [[[-1.0, -1.0], [0.0, 0.0], [1.0, 1.0], [-1.0, 1.0]], [[-1.0, -1.0], [0.0, 0.0], [1.0, 1.0], [-1.0, 1.0]]], dtype=np.float32
     )
     descriptors_bnd: Float32[ndarray, "2 4 128"] = np.tile(np.arange(4, dtype=np.float32).reshape(1, 4, 1), (2, 1, 128))
     wide_mask: Bool[ndarray, "48 64"] = np.zeros((HEIGHT, WIDTH), dtype=bool)
     wide_mask[20:28, 28:36] = True  # covers the centre keypoint (31.5, 23.5) -> pixel (32, 24)
-    wide_mask[47, 0] = True  # covers the bottom-left keypoint (0, 47)
+    wide_mask[47, 0] = True  # covers the bottom-left keypoint (-0.5, 47.5), clipped into pixel (0, 47)
 
     with pycolmap.Database.open(database_path) as database:
         store_feature_batch(
@@ -128,7 +128,7 @@ def test_storing_a_masked_batch_drops_masked_keypoints_and_keeps_the_other_descr
         )
 
     wide = read_keypoints(database_path, tasks[0].image_id)
-    np.testing.assert_array_equal(wide, np.asarray([[0.0, 0.0], [63.0, 47.0]], dtype=np.float32))
+    np.testing.assert_array_equal(wide, np.asarray([[-0.5, -0.5], [63.5, 47.5]], dtype=np.float32))
     stored = read_descriptors_from_database(database_path, [task.image_id for task in tasks])
     np.testing.assert_array_equal(stored[tasks[0].image_id][:, 0], np.asarray([0.0, 2.0], dtype=np.float32))
     assert read_keypoints(database_path, tasks[1].image_id).shape == (4, 2)

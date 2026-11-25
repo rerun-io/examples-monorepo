@@ -119,7 +119,7 @@ import pycolmap
 from jaxtyping import Bool, Float64, Int
 from numpy import ndarray
 
-from colsfm.loop_pairs import local_map_partners
+from colsfm.loop_pairs import local_map_partners, observation_pairs
 from colsfm.rig_geometry import RigFrameIndex, RigGeometry
 
 Matches: TypeAlias = Int[ndarray, "n_matches 2"]
@@ -328,6 +328,48 @@ def bearings_of(camera: pycolmap.Camera, keypoints: Keypoints) -> Bearings:
     return homogeneous / np.linalg.norm(homogeneous, axis=1, keepdims=True)
 
 
+PURE_ROTATION_BASELINE_M: Final[float] = 1e-6
+"""Below this baseline the epipolar constraint is undefined and the error is the rotation's transfer angle."""
+
+def sampson_error_px(
+    b_from_a: pycolmap.Rigid3d, bearings_a: Float64[ndarray, "n_matches 3"], bearings_b: Float64[ndarray, "n_matches 3"], focal_px: float
+) -> Float64[ndarray, "n_matches"]:
+    """Sampson (first-order geometric) epipolar error of matched bearings under a relative pose, in pixels.
+
+    Computed on the sphere, with the gradient projected onto each bearing's tangent plane, so it holds for fisheye and
+    wide cube faces as for pinholes; pixels are the angle times `focal_px`.
+
+    Args:
+        b_from_a: Pose of camera a in camera b's frame.
+        bearings_a: Float64 bearings in camera a with shape `[n_matches, 3]`; any length.
+        bearings_b: Float64 bearings in camera b with shape `[n_matches, 3]`; any length.
+        focal_px: Focal length the angle is converted with.
+
+    Returns:
+        Float64 errors with shape `[n_matches]`.
+    """
+    unit_a: Float64[ndarray, "n_matches 3"] = bearings_a / np.linalg.norm(bearings_a, axis=1, keepdims=True)
+    unit_b: Float64[ndarray, "n_matches 3"] = bearings_b / np.linalg.norm(bearings_b, axis=1, keepdims=True)
+    rotation: Float64[ndarray, "3 3"] = np.asarray(b_from_a.rotation.matrix(), dtype=np.float64)
+    translation: Float64[ndarray, "3"] = np.asarray(b_from_a.translation, dtype=np.float64)
+    baseline_m: float = float(np.linalg.norm(translation))
+    if baseline_m < PURE_ROTATION_BASELINE_M:
+        cosine: Float64[ndarray, "n_matches"] = np.clip(np.sum((unit_a @ rotation.T) * unit_b, axis=1), -1.0, 1.0)
+        return np.arccos(cosine) * focal_px
+    direction: Float64[ndarray, "3"] = translation / baseline_m
+    skew: Float64[ndarray, "3 3"] = np.array(
+        [[0.0, -direction[2], direction[1]], [direction[2], 0.0, -direction[0]], [-direction[1], direction[0], 0.0]], dtype=np.float64
+    )
+    essential: Float64[ndarray, "3 3"] = skew @ rotation
+    line_b: Float64[ndarray, "n_matches 3"] = unit_a @ essential.T
+    line_a: Float64[ndarray, "n_matches 3"] = unit_b @ essential
+    residual: Float64[ndarray, "n_matches"] = np.sum(unit_b * line_b, axis=1)
+    gradient_a: Float64[ndarray, "n_matches 3"] = line_a - unit_a * np.sum(unit_a * line_a, axis=1, keepdims=True)
+    gradient_b: Float64[ndarray, "n_matches 3"] = line_b - unit_b * np.sum(unit_b * line_b, axis=1, keepdims=True)
+    norm: Float64[ndarray, "n_matches"] = np.sqrt(np.sum(gradient_a**2, axis=1) + np.sum(gradient_b**2, axis=1))
+    return np.abs(residual) / np.maximum(norm, np.finfo(np.float64).tiny) * focal_px
+
+
 def direction_angle_deg(first: pycolmap.Rigid3d, second: pycolmap.Rigid3d) -> float:
     """Angle between the translation directions of two poses.
 
@@ -470,10 +512,8 @@ class RigPoseEstimator:
     """Gates and thresholds."""
     cache_images: int = BEARING_CACHE_IMAGES
     """Images the bearing memo keeps; several workers split `BEARING_CACHE_IMAGES` between them."""
-    _camera_of_image: dict[int, int] = field(init=False, repr=False)
-    """`camera_params_id` per image id, inverted from the rig-frame index."""
-    _rig_of_image: dict[int, int] = field(init=False, repr=False)
-    """`synced_sample_id` per image id, inverted from the rig-frame index."""
+    _rig_camera_of_image: dict[int, tuple[int, int]] = field(init=False, repr=False)
+    """`(synced_sample_id, camera_params_id)` per image id, inverted from the rig-frame index."""
     _bearings: OrderedDict[int, Bearings] = field(init=False, repr=False, default_factory=OrderedDict)
     """Memoised unit bearings per image id, most recently used last.
 
@@ -483,9 +523,8 @@ class RigPoseEstimator:
     at once, for a measurement that only ever reads a few rig frames' worth."""
 
     def __post_init__(self) -> None:
-        """Invert the rig-frame index into the per-image lookups every step needs."""
-        self._camera_of_image = {image_id: camera_id for (_, camera_id), image_id in self.index.keyframe_by_rig_camera.items()}
-        self._rig_of_image = {image_id: rig_id for (rig_id, _), image_id in self.index.keyframe_by_rig_camera.items()}
+        """Invert the rig-frame index into the per-image lookup every step needs."""
+        self._rig_camera_of_image = self.index.rig_camera_by_keyframe()
 
     def camera_of(self, image_id: int) -> pycolmap.Camera:
         """The calibrated camera that took one image.
@@ -499,7 +538,7 @@ class RigPoseEstimator:
         Raises:
             KeyError: When the image is not part of the indexed rig frames.
         """
-        return self.geometry.cameras[self.geometry.position_of(self._camera_of_image[image_id])]
+        return self.geometry.cameras[self.geometry.position_of(self._rig_camera_of_image[image_id][1])]
 
     def bearings(self, image_id: int) -> Bearings:
         """Unit bearings of every keypoint of one image.
@@ -665,8 +704,8 @@ class RigPoseEstimator:
             partner_matches: Matches = np.asarray(self.match_fn(anchor, partner), dtype=np.int64).reshape(-1, 2)
             if partner not in self.keypoints or len(partner_matches) == 0:
                 continue
-            partner_camera: int = self._camera_of_image[partner]
-            rig_T_partner_rig: pycolmap.Rigid3d = world_T_rig.inverse() * self.index.world_T_rig[self._rig_of_image[partner]]
+            partner_rig, partner_camera = self._rig_camera_of_image[partner]
+            rig_T_partner_rig: pycolmap.Rigid3d = world_T_rig.inverse() * self.index.world_T_rig[partner_rig]
             projections[partner] = np.asarray(
                 (self.geometry.cams_from_rig[self.geometry.position_of(partner_camera)] * rig_T_partner_rig.inverse()).matrix(), dtype=np.float64
             )
@@ -763,39 +802,30 @@ class RigPoseEstimator:
         epipolar_source: list[Keypoints] = []
         epipolar_target: list[Keypoints] = []
         epipolar_positions: list[int] = []
-        for camera_id in self.geometry.camera_ids:
-            anchor: int | None = self.index.keyframe(source_rig_id, camera_id)
-            if anchor is None:
+        for observation in observation_pairs(self.index, self.geometry, self.keypoints, (source_rig_id, target_rig_id)):
+            anchor: int = observation.anchor
+            observed: int = observation.observed
+            pair_matches: Matches = np.asarray(self.match_fn(anchor, observed), dtype=np.int64).reshape(-1, 2)
+            if len(pair_matches) == 0:
                 continue
-            target_cameras: list[int] = [camera_id]
-            partner_camera: int | None = self.geometry.stereo_partner.get(camera_id)
-            if partner_camera is not None:
-                target_cameras.append(partner_camera)
+            position: int = self.geometry.position_of(observation.observed_camera_id)
+            if observation.observed_camera_id == observation.anchor_camera_id and anchor in self.keypoints:
+                epipolar_source.append(self.keypoints[anchor][pair_matches[:, 0]])
+                epipolar_target.append(self.keypoints[observed][pair_matches[:, 1]])
+                epipolar_positions.extend([position] * len(pair_matches))
             anchor_landmarks: AnchorLandmarks | None = landmarks.get(anchor)
-            for target_camera in target_cameras:
-                observed: int | None = self.index.keyframe(target_rig_id, target_camera)
-                if observed is None or observed not in self.keypoints:
-                    continue
-                pair_matches: Matches = np.asarray(self.match_fn(anchor, observed), dtype=np.int64).reshape(-1, 2)
-                if len(pair_matches) == 0:
-                    continue
-                position: int = self.geometry.position_of(target_camera)
-                if target_camera == camera_id and anchor in self.keypoints:
-                    epipolar_source.append(self.keypoints[anchor][pair_matches[:, 0]])
-                    epipolar_target.append(self.keypoints[observed][pair_matches[:, 1]])
-                    epipolar_positions.extend([position] * len(pair_matches))
-                if anchor_landmarks is None or len(anchor_landmarks) == 0:
-                    continue
-                insertion: Int[ndarray, "n_matches"] = np.searchsorted(anchor_landmarks.keypoint_indices, pair_matches[:, 0])
-                clipped: Int[ndarray, "n_matches"] = np.clip(insertion, 0, len(anchor_landmarks) - 1)
-                matched: Bool[ndarray, "n_matches"] = anchor_landmarks.keypoint_indices[clipped] == pair_matches[:, 0]
-                hits: int = int(matched.sum())
-                if hits == 0:
-                    continue
-                pixel_blocks.append(self.keypoints[observed][pair_matches[matched, 1]])
-                point_blocks.append(anchor_landmarks.points_in_rig[clipped[matched]])
-                camera_indices.extend([position] * hits)
-                contributing.add(target_camera)
+            if anchor_landmarks is None or len(anchor_landmarks) == 0:
+                continue
+            insertion: Int[ndarray, "n_matches"] = np.searchsorted(anchor_landmarks.keypoint_indices, pair_matches[:, 0])
+            clipped: Int[ndarray, "n_matches"] = np.clip(insertion, 0, len(anchor_landmarks) - 1)
+            matched: Bool[ndarray, "n_matches"] = anchor_landmarks.keypoint_indices[clipped] == pair_matches[:, 0]
+            hits: int = int(matched.sum())
+            if hits == 0:
+                continue
+            pixel_blocks.append(self.keypoints[observed][pair_matches[matched, 1]])
+            point_blocks.append(anchor_landmarks.points_in_rig[clipped[matched]])
+            camera_indices.extend([position] * hits)
+            contributing.add(observation.observed_camera_id)
         epipolar: _EpipolarCorrespondences = _EpipolarCorrespondences(
             source_pixels=epipolar_source, target_pixels=epipolar_target, camera_indices=epipolar_positions
         )

@@ -49,7 +49,7 @@ from colsfm.verification import VerifyChunking
 DEFAULT_CONFIG_DIR: Final[Path] = RESOURCES_DIR / "configs" / "loop-closure-fixed"
 """`isaac` with loop closure repaired; what the blob reference runs used."""
 
-LoopPairsInMapper: TypeAlias = Literal["accepted", "shortlisted"]
+LoopPairsInMapper: TypeAlias = Literal["pose-checked", "shortlisted"]
 """`PipelineOptions.loop_pairs_in_mapper`."""
 
 DEFAULT_EXTRINSIC_ROUNDS: Final[int] = 3
@@ -145,14 +145,28 @@ class PipelineOptions:
     extrinsic_refinement_rounds: int = DEFAULT_EXTRINSIC_ROUNDS
     """Ceiling on the extrinsics-then-poses rounds the regularised refinement may take (`DEFAULT_EXTRINSIC_ROUNDS`); it
     also stops early on `ExtrinsicRefinementOptions`' tolerances."""
-    loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted"
-    """Which of the loop stage's image pairs stay in the database the mapper triangulates from.
+    refine_camera_model: bool = False
+    """Free every camera's focal length (fx, fy), its distortion block and the rig (`sensor_from_rig`) in every mapping round.
 
-    `"shortlisted"` (default): every pair the stage matched (fork decision 15), so cross-revisit tracks reach the
-    triangulator even when their loop edge was rejected. `"accepted"` (cuSFM's way): only the image pairs of the loop
-    edges that were kept; the rest are deleted again. Measured: `"accepted"` cost MSD MGO05 0.23 cm SE(3) (1.41 against
-    1.18 cm) and put KITTI 06 back at cuSFM's 1.328 m, because the kitti profile's loop edge gates reject every edge and
-    its revisits reach the map only through these pairs (0.845 m with `"shortlisted"`)."""
+    cuSFM holds the calibration fixed, so a nominal model that is off ends up in the poses: Mission office's cube faces
+    are 1-1.4 % off f = 800 and 0.12-0.20 deg off the nominal rig. With Spirula's matches, colsfm's mapper ends 0.2645
+    deg from Spirula's poses with the model held and 0.034 deg with it free (focals within 0.5 px). The rig is solved on
+    a camera-referenced rig and replaces stage 7b; on CASPAR when the build's probe refines `sensor_from_rig`
+    (recipes/colmap-src caspar-rig-refine: 46 s of mapping on Mission office), on Ceres otherwise.
+
+    Only for a rig whose calibration is nominal: unregularised, it overfits a calibrated one (MSD MGO05 with prior-overlap
+    pairs and the merge cap: ATE 14.2 mm with it, 8.2 mm without, main 10.6-12.0 mm). On Ceres the Mission office
+    reconstruction takes 640 s (4 threads) against 55 s with the model held."""
+    loop_pairs_in_mapper: LoopPairsInMapper = "pose-checked"
+    """Which of the loop stage's image pairs and inliers the mapper triangulates from.
+
+    `"pose-checked"` (default): every pair the stage matched, each keeping only the inliers that agree with its rig
+    pair's measured pose (verified candidates) or, without one, with the prior relative pose within a drift tolerance
+    (`colsfm.loop_mapper_check`); the database keeps every row. `"shortlisted"`: every pair the stage matched with all
+    its inliers (fork decision 15), so cross-revisit tracks reach the triangulator even when their loop edge was
+    rejected. cuSFM's way, only the image pairs of the loop edges that were kept, was removed: it cost MSD MGO05 0.23 cm
+    SE(3) (1.41 against 1.18 cm) and put KITTI 06 back at cuSFM's 1.328 m, because the kitti profile's loop edge gates
+    reject every edge and its revisits reach the map only through these pairs (0.845 m with `"shortlisted"`)."""
     loop_closure: bool = True
     """Run retrieval-based loop closure. On by default, as in the blob, so every run and
     every blob comparison pays for the same stage (NOTES.md decision 10, revised). On the
@@ -349,6 +363,18 @@ class ResolvedRun:
         )
 
 
+def plan_runs_extrinsic_stage(options: PipelineOptions) -> bool:
+    """Whether stage 7b runs: `--optimize-extrinsics`, unless `--refine-camera-model` already freed the rig in the mapper.
+
+    Args:
+        options: The command line.
+
+    Returns:
+        True when the run refines its extrinsics after mapping.
+    """
+    return options.optimize_extrinsics and not options.refine_camera_model
+
+
 def resolve_run(options: PipelineOptions) -> ResolvedRun:
     """Turn one command line into the per-stage settings the run will execute.
 
@@ -394,7 +420,7 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
         # solve, so the mapping pass stays on the GPU. Only the unregularised
         # ablation is `run_mapping(..., optimize_extrinsics=True)`, which is the
         # call CASPAR throws on.
-        optimize_extrinsics=options.optimize_extrinsics and not options.regularised_extrinsics,
+        optimize_extrinsics=(options.optimize_extrinsics and not options.regularised_extrinsics) or options.refine_camera_model,
     )
     # Said once, here, where the decision was made. The only thing left to decide is
     # the camera-model check, which needs the reconstruction stage 7 builds.
@@ -408,7 +434,13 @@ def resolve_run(options: PipelineOptions) -> ResolvedRun:
         match_limit=MatchLimitPolicy.of(options.match_cap_mode, options.max_matches_per_pair),
         # The mapper receives the plan itself, not the knobs it was made from: there is
         # one decision about bundle adjustment in a run, and this is it.
-        mapping=MappingOptions(num_threads=options.ba_num_threads, use_gpu=options.ba_use_gpu, ba_plan=ba_plan),
+        mapping=MappingOptions(
+            num_threads=options.ba_num_threads,
+            use_gpu=options.ba_use_gpu,
+            ba_plan=ba_plan,
+            optimize_extrinsics=options.refine_camera_model,
+            refine_focal_length=options.refine_camera_model,
+        ),
         ba_plan=ba_plan,
         device=options.device,
         num_threads=options.num_threads,

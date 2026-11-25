@@ -38,7 +38,7 @@ from colsfm.model_assets import (
     required_raco_graphs,
 )
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
-from colsfm.run_config import DEFAULT_CONFIG_DIR, PipelineOptions, ResolvedRun, SelectionOptions, resolve_run
+from colsfm.run_config import DEFAULT_CONFIG_DIR, PipelineOptions, ResolvedRun, SelectionOptions, plan_runs_extrinsic_stage, resolve_run
 from colsfm.run_lifecycle import (
     ALL_STAGE_NAMES,
     LOOP_EDGES_NAME,
@@ -523,6 +523,22 @@ def test_the_unregularised_refinement_is_the_one_that_takes_caspar_off_the_gpu(
     assert plan.ba_plan.backend == "ceres"
     assert plan.ba_plan.fallback_reason == EXTRINSICS_FALLBACK_REASON
     assert plan.ba_plan.ceres_polish is False
+
+
+def test_refining_the_camera_model_frees_focals_and_the_rig_in_the_mapper(galileo_input_dir: Path, tmp_path: Path) -> None:
+    """`--refine-camera-model` frees fx, fy and `sensor_from_rig` in every mapping round, on Ceres, and drops stage 7b.
+
+    Measured on Mission office with Spirula's own matches: colsfm's mapper with the nominal cube model held ends 0.2645
+    deg from Spirula's poses; with these freedoms 0.034 deg, the per-face focals within 0.5 px of Spirula's.
+    """
+    plan: ResolvedRun = resolve_run(
+        replace(PYCOLMAP_ABLATION, input_dir=galileo_input_dir, output_dir=tmp_path / "cusfm", ba_backend="caspar", refine_camera_model=True)
+    )
+    assert plan.mapping.refine_focal_length is True
+    assert plan.mapping.optimize_extrinsics is True
+    assert plan.ba_plan.backend == "ceres"
+    assert plan.ba_plan.fallback_reason == EXTRINSICS_FALLBACK_REASON
+    assert stage_names(optimize_extrinsics=plan_runs_extrinsic_stage(replace(PYCOLMAP_ABLATION, refine_camera_model=True))) == STAGE_NAMES
 
 
 @pytest.mark.skipif(

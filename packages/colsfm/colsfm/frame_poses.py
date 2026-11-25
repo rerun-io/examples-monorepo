@@ -157,7 +157,8 @@ def every_frame_meta(input_meta: FramesMeta, optimised: FramesMeta, registered_k
     """The input collection with every keyframe posed: mapped ones optimised, the others re-anchored.
 
     The cameras carry the optimised extrinsics, so `world_T_cam = world_T_vehicle * vehicle_T_cam` agrees with the
-    optimised collection on every mapped keyframe.
+    optimised collection on every mapped keyframe, and the optimised intrinsics (`--refine-camera-model`), so both
+    collections give a camera one model.
 
     Args:
         input_meta: The input collection, every frame, with the start poses.
@@ -170,7 +171,9 @@ def every_frame_meta(input_meta: FramesMeta, optimised: FramesMeta, registered_k
     times_us, world_T_vehicle = every_frame_world_T_vehicle(input_meta, optimised, registered_keyframe_ids)
     if len(times_us) == 0:
         return input_meta
-    with_extrinsics: FramesMeta = input_meta.with_extrinsics({camera_id: camera.vehicle_T_cam for camera_id, camera in optimised.cameras.items()})
+    with_extrinsics: FramesMeta = input_meta.with_intrinsics(optimised.cameras).with_extrinsics(
+        {camera_id: camera.vehicle_T_cam for camera_id, camera in optimised.cameras.items()}
+    )
     row_by_time: dict[int, int] = {int(time_us): row for row, time_us in enumerate(times_us.tolist())}
     keyframe_by_id: dict[int, KeyframeMeta] = with_extrinsics.keyframe_by_id()
     world_T_cam: dict[int, pycolmap.Rigid3d] = {}

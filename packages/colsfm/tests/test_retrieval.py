@@ -267,6 +267,55 @@ def test_search_reports_what_the_temporal_gate_dropped_from_the_same_walk(synthe
     assert {candidate.image_id for candidate in narrow.candidates}.isdisjoint({9, 11})
 
 
+def _walk_in_score_order(index: RetrievalIndex, image_id: int, top_k: int, gap_us: int | None, timestamps_us: dict[int, int]) -> RetrievalQuery:
+    """The ranking walk `search` promises, spelled from its definition.
+
+    Every positive score, best first, equal scores in row order; the query itself is
+    skipped, a hit closer in time than `gap_us` is counted and skipped, the walk stops at
+    `top_k` candidates.
+    """
+    scores: Float32[ndarray, "n_images"] = index.similarity[index.image_ids.index(image_id)]
+    ranked: list[int] = sorted((row for row in range(len(index.image_ids)) if scores[row] > 0.0), key=lambda row: (-float(scores[row]), row))
+    candidates: list[Candidate] = []
+    rejected_by_time: int = 0
+    for row in ranked:
+        if len(candidates) == top_k:
+            break
+        other_id: int = index.image_ids[row]
+        if other_id == image_id:
+            continue
+        if gap_us is not None and abs(timestamps_us[other_id] - timestamps_us[image_id]) < gap_us:
+            rejected_by_time += 1
+            continue
+        candidates.append(Candidate(image_id=other_id, score=float(scores[row])))
+    return RetrievalQuery(candidates=candidates, rejected_by_time=rejected_by_time)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_partial_search_equals_the_full_sort_with_ties_and_the_time_gate(seed: int) -> None:
+    """`search` ranks exactly as a full stable sort would, ties and the time gate included.
+
+    The scores take five levels, zero among them, so most hits tie with many others and the
+    k-th score is shared across the cut; the gate is wide enough to drop dozens of hits per
+    query, so the walk must reach past the first `top_k` rows.
+    """
+    generator: np.random.Generator = np.random.default_rng(seed)
+    n_images: int = 300
+    levels: Float32[ndarray, "5"] = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+    upper: Float32[ndarray, "n_images n_images"] = np.triu(levels[generator.integers(0, len(levels), size=(n_images, n_images))], 1)
+    similarity: Float32[ndarray, "n_images n_images"] = upper + upper.T + np.eye(n_images, dtype=np.float32)
+    image_ids: tuple[int, ...] = tuple(sorted(generator.choice(10 * n_images, size=n_images, replace=False).tolist()))
+    timestamps_us: dict[int, int] = {image_id: int(generator.integers(0, 60 * FRAME_PERIOD_US)) for image_id in image_ids}
+    index: RetrievalIndex = RetrievalIndex(
+        image_ids=image_ids, similarity=similarity, descriptors_per_image=1, config=RetrievalConfig(), build_seconds=0.0
+    )
+    for image_id in image_ids[::15]:
+        for top_k in (1, 3, 20, n_images + 5):
+            for gap_us in (None, 5 * FRAME_PERIOD_US, 30 * FRAME_PERIOD_US):
+                expected: RetrievalQuery = _walk_in_score_order(index, image_id, top_k, gap_us, timestamps_us)
+                assert index.search(image_id, top_k=top_k, min_time_gap_us=gap_us, timestamps=timestamps_us) == expected
+
+
 def test_the_config_nests_the_two_backends_and_still_defaults_in_one_call() -> None:
     """`RetrievalConfig()` builds a whole working config; each backend owns its own knobs.
 

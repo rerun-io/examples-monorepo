@@ -401,3 +401,112 @@ def test_new_extrinsics_that_move_observations_past_the_pole_never_reach_the_adj
     assert handed and max(handed) < pole_deg
     assert solve.num_past_pole_before > 0
     assert solve.num_removed == before - reconstruction.compute_num_observations()
+
+
+def _reference_degenerate_point_ids(reconstruction: pycolmap.Reconstruction, depth_threshold: float) -> tuple[list[int], list[int]]:
+    """The guard's per-point loop as it was before the vectorised screen: (doomed, unposed) in iteration order."""
+    centres: dict[int, tuple[float, float, float]] = {}
+    registered: set[int] = set()
+    for image_id in reconstruction.reg_image_ids():
+        registered.add(image_id)
+        x, y, z = (float(v) for v in reconstruction.image(image_id).projection_center())
+        if np.isfinite((x, y, z)).all():
+            centres[image_id] = (x, y, z)
+    limit_sq: float = depth_threshold * depth_threshold
+    doomed: list[int] = []
+    unposed: list[int] = []
+    for point3D_id, point in reconstruction.points3D.items():
+        image_ids: list[int] = [element.image_id for element in point.track.elements]
+        if not any(image_id in registered for image_id in image_ids):
+            unposed.append(point3D_id)
+            continue
+        px, py, pz = (float(v) for v in point.xyz)
+        if not np.isfinite((px, py, pz)).all():
+            doomed.append(point3D_id)
+            continue
+        for image_id in image_ids:
+            centre = centres.get(image_id)
+            if centre is not None and (px - centre[0]) ** 2 + (py - centre[1]) ** 2 + (pz - centre[2]) ** 2 <= limit_sq:
+                break
+        else:
+            doomed.append(point3D_id)
+    return doomed, unposed
+
+
+def _reference_filter_degenerate_points(
+    observation_manager: pycolmap.ObservationManager, reconstruction: pycolmap.Reconstruction, depth_threshold: float
+) -> int:
+    """The guard before the vectorised screen, deletions included, in the same order."""
+    doomed, unposed = _reference_degenerate_point_ids(reconstruction, depth_threshold)
+    removed: int = 0
+    for point3D_id in doomed:
+        removed += reconstruction.point3D(point3D_id).track.length()
+        observation_manager.delete_point3D(point3D_id)
+    for point3D_id in unposed:
+        removed += reconstruction.point3D(point3D_id).track.length()
+        reconstruction.delete_point3D(point3D_id)
+    return removed
+
+
+def _degenerate_scene(
+    rig: SyntheticRig, database_path: Path, config: CusfmConfig, seed: int, case: str
+) -> tuple[pycolmap.Reconstruction, Correspondences, float]:
+    """A triangulated synthetic model, corrupted the same way for a given seed and case, and the threshold to test it at.
+
+    Every case moves a random fifth of the points to 0.5x / 1x / 2x the threshold from a random observer, and to the
+    exact edge of the sure-keep screen (`|p - c0| + spread = threshold`), and adds a NaN point and an empty-track point.
+    `case` adds what turns the screen off or empties it: an unposed-only track, a NaN camera centre, or a threshold
+    below the camera spread.
+    """
+    reconstruction, correspondences = _triangulated(rig, database_path, config)
+    rng: np.random.Generator = np.random.default_rng(seed)
+    centres: dict[int, Float64[ndarray, "3"]] = _centres(reconstruction)
+    stacked: Float64[ndarray, "n 3"] = np.stack(list(centres.values()))
+    c0: Float64[ndarray, "3"] = stacked.mean(axis=0)
+    spread: float = float(np.linalg.norm(stacked - c0, axis=1).max())
+    threshold: float = 0.5 * spread if case == "threshold_below_spread" else float(rng.uniform(2.0, 20.0)) * spread
+    point3D_ids: list[int] = sorted(reconstruction.points3D)
+    for point3D_id in rng.choice(point3D_ids, size=len(point3D_ids) // 5, replace=False).tolist():
+        direction: Float64[ndarray, "3"] = rng.normal(size=3)
+        direction /= np.linalg.norm(direction)
+        kind: int = int(rng.integers(4))
+        if kind == 3:
+            xyz: Float64[ndarray, "3"] = c0 + direction * (threshold - spread)
+        else:
+            observer: int = int(rng.choice([element.image_id for element in reconstruction.point3D(point3D_id).track.elements]))
+            xyz = centres[observer] + direction * threshold * (0.5, 1.0, 2.0)[kind]
+        _corrupt_point(reconstruction, point3D_id, xyz)
+    _corrupt_point(reconstruction, point3D_ids[0], np.array([np.nan, 0.0, 0.0]))
+    reconstruction.add_point3D(c0, pycolmap.Track())
+    if case == "unposed_track":
+        frame_id: int = sorted(reconstruction.reg_frame_ids())[-1]
+        image_ids: list[int] = [data_id.id for data_id in reconstruction.frame(frame_id).image_ids]
+        reconstruction.deregister_frame(frame_id)
+        elements: list[pycolmap.TrackElement] = []
+        for image_id in image_ids[:2]:
+            free: int = next(index for index, point2D in enumerate(reconstruction.image(image_id).points2D) if not point2D.has_point3D())
+            elements.append(pycolmap.TrackElement(image_id, free))
+        reconstruction.add_point3D(c0, pycolmap.Track(elements))
+    elif case == "nan_camera":
+        frame = reconstruction.frame(sorted(reconstruction.reg_frame_ids())[0])
+        frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(), np.full(3, np.nan))
+    return reconstruction, correspondences, threshold
+
+
+@pytest.mark.parametrize("case", ["all_registered", "unposed_track", "nan_camera", "threshold_below_spread"])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_degeneracy_guard_removes_what_the_per_point_loop_removed(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig, seed: int, case: str
+) -> None:
+    """The vectorised screen is a pure speed-up: the same points go, in the same order, with the same count."""
+    expected_model, expected_correspondences, threshold = _degenerate_scene(synthetic_rig, synthetic_database, isaac_config, seed, case)
+    actual_model, actual_correspondences, _ = _degenerate_scene(synthetic_rig, synthetic_database, isaac_config, seed, case)
+    expected_ids: tuple[list[int], list[int]] = _reference_degenerate_point_ids(expected_model, threshold)
+    assert expected_ids[0] and len(expected_ids[0]) < expected_model.num_points3D(), "the scene keeps some points and dooms others"
+
+    assert point_filters._degenerate_point_ids(actual_model, threshold) == expected_ids
+    expected_removed: int = _reference_filter_degenerate_points(expected_correspondences.observation_manager, expected_model, threshold)
+    assert filter_degenerate_points(actual_correspondences.observation_manager, actual_model, threshold) == expected_removed
+    assert list(actual_model.points3D) == list(expected_model.points3D)
+    for image_id in expected_model.images:
+        assert actual_model.image(image_id).num_points3D == expected_model.image(image_id).num_points3D

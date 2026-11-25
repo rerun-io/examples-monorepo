@@ -20,7 +20,10 @@ Pipeline per rig frame
    same-rig-frame gate.
 3. Candidates: each query rig frame pools its query keyframes' hits and keeps the
    `loop_candidates_per_frame` best target rig frames by retrieval score (3; 1 in the kitti
-   profile), then one hit per unordered rig pair.
+   profile), then one hit per unordered rig pair. The prior bound (`prior_distance_bound`:
+   the edge reach plus the drift allowance) then drops the rig pairs too far apart in the
+   prior to give an edge; those still inside the covisibility radius
+   (`colsfm.loop_covisibility`) are matched for the mapper only and never measured.
 4. Measurement: `colsfm.loop_pose.RigPoseEstimator` on each surviving rig pair — a metric
    point cloud triangulated in the source rig frame from its own cameras and its temporal
    neighbours, then `estimate_and_refine_generalized_absolute_pose` for the whole target
@@ -33,12 +36,11 @@ Pipeline per rig frame
    when it has at least `good_loop_threshold` inliers (cuSFM's isaac default, 150), then
    `colsfm.pose_graph.gate_loop_edges` with real thresholds.
 
-Steps 1-3 read nothing but the retrieval index and the timestamps. That is deliberate: the
-pipeline learns which image pairs to match by running this whole stage once with a matcher
-that returns nothing, so any pair whose request depends on a match result would never be
-matched in production (`colsfm.pipeline._find_loop_edges`, `colsfm.loop_pose`). It is also
-why step 3 ranks by retrieval score: the inlier count only exists after the measurement, and
-step 5 is where it decides.
+Steps 1-3 read no loop match: only the retrieval index, the timestamps and the prior poses.
+That is deliberate: `plan_loop_search` decides every image pair to match before the batch
+match runs, so any pair whose request depended on a match result would never be matched
+(`LoopSearchPlan`, `colsfm.loop_pose`). It is also why step 3 ranks by retrieval score: the
+inlier count only exists after the measurement, and step 5 is where it decides.
 
 The temporal gate
 -----------------
@@ -281,12 +283,14 @@ from typing import Final
 
 import numpy as np
 import pycolmap
+from jaxtyping import Float64
+from numpy import ndarray
 
 from colsfm.config import PoseGraphConfig
 from colsfm.database import ImagePair, read_keypoints_batch
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.geometry import MICROSECONDS_PER_SECOND
-from colsfm.loop_pairs import required_image_pairs
+from colsfm.loop_pairs import observed_image_pairs, required_image_pairs
 from colsfm.loop_pose import (
     BEARING_CACHE_IMAGES,
     DEFAULT_RIG_POSE_CONFIG,
@@ -320,7 +324,6 @@ __all__ = [
     "RetrievalHit",
     "best_per_query_rig",
     "find_loop_edges",
-    "pairs_outside_accepted_edges",
     "is_good_match",
     "minimum_time_gap_seconds",
     "plan_loop_search",
@@ -406,6 +409,31 @@ class LoopClosureConfig:
     0.53 m / 1.6 deg (revisit) and 0.6 m / 3.5 deg (start-end), false ones by 2-16 m and 60-179 deg."""
     max_prior_rotation_deg: float | None = None
     """Rotation half of the prior-consistency gate; None = no gate."""
+    prior_drift_floor_m: float = 3.5
+    """Constant part of the drift allowance `prior_distance_bound` grants the prior between two rig frames, metres.
+
+    One default for every dataset, not a profile key. Measured against ground truth on the DGX Spark base runs at
+    a997bc83b (every pair of rig frames, `| |prior distance| - |GT distance| |`): the worst case fits under
+    1.74 m + 1 % of the prior path (KITTI 06, 1,241 m: 4.2 m at 800-1,600 m of path, and a 1.8 m prior jump over 4.5 m of
+    path); EuRoC V1_01 stays under 0.16 m and MSD MGO05 under 0.08 m. The allowance is twice that worst case."""
+    prior_drift_per_metre: float = 0.02
+    """Part of the drift allowance that grows with the prior path travelled between the two rig frames (2 %, twice the
+    1 % of the worst case above)."""
+    closed_gate_reach_m: float = 30.0
+    """The prior distance that replaces the edge gate when an edge gate is closed (`max_translation_m` or `max_rotation_deg` <= 0).
+
+    No edge is accepted then, but the loop pairs still feed the mapper (removing them cost KITTI 06 42 % ATE), so the
+    bound must keep every rig pair that can see common structure. On KITTI 06 the shortlisted rig pairs reach 13.4 m
+    (ground truth), and their two-view inliers still agree with ground truth (81 % within 4 px beyond 10 m); 30 m is
+    over twice that."""
+    covisibility_depth_quantile: float = 0.9
+    """Which quantile of the stage-4 pairs' median scene depth is the covisibility radius
+    (`colsfm.loop_covisibility.covisibility_radius_m`). Rig pairs beyond `prior_distance_bound` but within that radius
+    are matched for the mapper only. One default, not a profile key: 0.9 gives 26.8 m on TartanAir WesternDesertTown
+    (keeps 99.6 % of its far right loop inliers) and 5.2 m on Casa Loma 007 (still drops 99.2 % of its empty far pairs);
+    0.75 kept 59 % of WesternDesertTown's."""
+    covisibility_sample_pairs: int = 2000
+    """Most stage-4 pairs read to learn the covisibility radius (`colsfm.database.read_inlier_sample`)."""
     use_stored_weights: bool = False
     """When True the edge information is `loop_edge_information(inliers, loop_residual_weight)`
     instead of the identity. The blob's own solver discards the stored value; measured
@@ -567,8 +595,8 @@ class LoopSearchPlan:
     change to verification became a change to scheduling.
 
     Nothing in the first pass needed matches. Retrieval, the score and time gates,
-    the candidate cap and the rig-pair deduplication read the index and the
-    timestamps; the pair list follows from the rig geometry and the shortlist
+    the candidate cap, the rig-pair deduplication and the prior bound read the index, the
+    timestamps and the prior poses; the pair list follows from the rig geometry and the shortlist
     (`colsfm.loop_pairs.required_image_pairs`). So the plan is simply that work, done
     once, and `verify_loop_plan` is the only pass that matches anything.
     """
@@ -582,6 +610,10 @@ class LoopSearchPlan:
     which is what makes one matcher load serve the whole stage."""
     groups: tuple[tuple[int, tuple[RetrievalHit, ...]], ...]
     """The measurement's own units: one source rig frame and its shortlisted hits."""
+    mapper_only_rig_pairs: tuple[tuple[int, int], ...]
+    """Shortlisted `(source rig id, target rig id)` pairs beyond `prior_distance_bound` but inside the covisibility
+    radius, grouped by source rig frame as `rig_pairs` is. Their observation pairs are in `image_pairs` so the mapper
+    gets their matches; they are never measured, because no rig pair beyond the bound can give an edge."""
     queried_by: Mapping[tuple[int, int], frozenset[int]]
     """Per unordered rig pair, the query rig frames that kept it among their candidates; each keeps only its best measured pair."""
     geometry: RigGeometry
@@ -638,6 +670,7 @@ def plan_loop_search(
     index: RetrievalIndex,
     config: LoopClosureConfig,
     keypoints: Mapping[int, Keypoints] | None = None,
+    covisibility_radius_m: float = 0.0,
 ) -> LoopSearchPlan:
     """Decide which rig pairs to measure and which image pairs that needs, matching nothing.
 
@@ -653,6 +686,8 @@ def plan_loop_search(
         index: Retrieval index over the same keyframe ids.
         config: Gates and thresholds.
         keypoints: Keypoint pixels per image id, already read; read here when None.
+        covisibility_radius_m: Prior distance up to which a rig pair beyond `prior_distance_bound` is still matched,
+            for the mapper only (`colsfm.loop_covisibility`); 0.0 matches nothing beyond the bound.
 
     Returns:
         The plan, which `verify_loop_plan` turns into edges.
@@ -680,13 +715,21 @@ def plan_loop_search(
         counters=counters,
     )
     pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
+    rig_index: RigFrameIndex = rig_frame_index(frames_meta)
+    mapper_only_hits: dict[tuple[int, int], RetrievalHit]
+    shortlist, mapper_only_hits = _split_by_prior_bound(shortlist, rig_index, config, covisibility_radius_m, counters)
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)
     rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
-    rig_index: RigFrameIndex = rig_frame_index(frames_meta)
+    mapper_only: tuple[tuple[int, int], ...] = tuple(
+        (source_rig_id, hit.target_rig_id) for source_rig_id, hits in _group_by_source_rig(mapper_only_hits) for hit in hits
+    )
+    measured_pairs: tuple[ImagePair, ...] = required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs)
+    mapper_pairs: set[ImagePair] = observed_image_pairs(rig_index, empty_geometry, pixels, mapper_only)
     return LoopSearchPlan(
         config=config,
-        image_pairs=required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs),
+        image_pairs=tuple(sorted(set(measured_pairs) | mapper_pairs)),
         groups=tuple(groups),
+        mapper_only_rig_pairs=mapper_only,
         queried_by=shortlist.queried_by,
         geometry=empty_geometry,
         rig_index=rig_index,
@@ -696,6 +739,78 @@ def plan_loop_search(
         gap_seconds=gap_seconds,
         score_threshold=score_threshold,
     )
+
+
+def prior_distance_bound(config: LoopClosureConfig, path_m: float) -> float:
+    """The largest prior distance at which two rig frames can still give a loop edge or loop pairs worth matching.
+
+    `reach + allowance`. The reach is the edge gate T (`max_translation_m`): an accepted edge measures `|t_meas| <= T`.
+    The allowance is what the prior may be off by between the two rig frames: `prior_drift_floor_m +
+    prior_drift_per_metre * path_m`, from ground truth (see the fields). Where the profile sets a prior translation gate
+    P, an accepted edge also needs `|t_meas - t_prior| <= P` (`agrees_with_prior`: the translation of
+    `prior^-1 * meas` is `R_prior^T (t_meas - t_prior)`), so by the triangle inequality `|t_prior| <= T + P`: the
+    allowance is then the smaller of the two. With a closed edge gate (`max_translation_m <= 0` or
+    `max_rotation_deg <= 0`) no edge is accepted, the loop pairs feed only the mapper, and the reach is
+    `closed_gate_reach_m`.
+
+    On Casa Loma 007 (cube profile, T 3 m, P 1.5 m) the bound is 4.5 m and drops 6,215 of 7,210 shortlisted rig pairs
+    (37,290 of 42,910 loop image pairs, 95-97 % of them empty); the largest prior distance of an accepted edge there is
+    3.07 m. On the EuRoC, MSD and KITTI base runs it drops none.
+
+    Args:
+        config: The edge gate, the prior gate and the drift allowance.
+        path_m: The prior path travelled between the two rig frames, metres.
+
+    Returns:
+        The bound in metres.
+    """
+    edge_gate_open: bool = config.max_translation_m > 0.0 and config.max_rotation_deg > 0.0
+    reach_m: float = config.max_translation_m if edge_gate_open else config.closed_gate_reach_m
+    allowance_m: float = config.prior_drift_floor_m + config.prior_drift_per_metre * path_m
+    if edge_gate_open and config.max_prior_translation_m is not None:
+        allowance_m = min(allowance_m, config.max_prior_translation_m)
+    return reach_m + allowance_m
+
+
+def _split_by_prior_bound(
+    shortlist: Shortlist, rig_index: RigFrameIndex, config: LoopClosureConfig, covisibility_radius_m: float, counters: FunnelCounters
+) -> tuple[Shortlist, dict[tuple[int, int], RetrievalHit]]:
+    """Split the shortlist by prior distance: measured within `prior_distance_bound`, mapper-only beyond it within the radius.
+
+    Applied after the candidate cap and the deduplication, as pure subtraction: a freed slot is not refilled, so the plan
+    holds a subset of the unbounded plan's rig pairs, in the same order.
+
+    Args:
+        shortlist: The deduplicated shortlist.
+        rig_index: Rig frames in capture order with their prior poses.
+        config: The gates and the drift allowance.
+        covisibility_radius_m: Prior distance up to which a pair beyond the bound is kept for the mapper only.
+        counters: Diagnostic counters; `rejected_by_prior_bound` and `matched_for_mapper_only` are added to.
+
+    Returns:
+        The shortlist without the rig pairs beyond the bound (`queried_by` included), and the hits of those beyond the
+        bound but inside the covisibility radius.
+    """
+    centres_xyz: Float64[ndarray, "n 3"] = np.asarray(
+        [rig_index.world_T_rig[rig_id].translation for rig_id in rig_index.sequence], dtype=np.float64
+    ).reshape(-1, 3)
+    steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(centres_xyz, axis=0), axis=1)
+    path_from_start_m: Float64[ndarray, "n"] = np.concatenate([np.zeros(1), np.cumsum(steps_m)])
+    position_of: dict[int, int] = {rig_id: position for position, rig_id in enumerate(rig_index.sequence)}
+    kept: dict[tuple[int, int], RetrievalHit] = {}
+    mapper_only: dict[tuple[int, int], RetrievalHit] = {}
+    for pair, hit in shortlist.hits.items():
+        source: int = position_of[hit.source_rig_id]
+        target: int = position_of[hit.target_rig_id]
+        distance_m: float = float(np.linalg.norm(centres_xyz[source] - centres_xyz[target]))
+        path_m: float = float(abs(path_from_start_m[target] - path_from_start_m[source]))
+        if distance_m <= prior_distance_bound(config, path_m):
+            kept[pair] = hit
+        elif distance_m <= covisibility_radius_m:
+            mapper_only[pair] = hit
+    counters.rejected_by_prior_bound += len(shortlist.hits) - len(kept) - len(mapper_only)
+    counters.matched_for_mapper_only += len(mapper_only)
+    return Shortlist(hits=kept, queried_by={pair: voters for pair, voters in shortlist.queried_by.items() if pair in kept}), mapper_only
 
 
 def verify_loop_plan(plan: LoopSearchPlan, match_fn: MatchFunction) -> LoopClosureResult:
@@ -793,23 +908,6 @@ def find_loop_edges(
         FileNotFoundError: When `database_path` does not exist and no `keypoints` were given.
     """
     return verify_loop_plan(plan_loop_search(frames_meta, database_path, index, config, keypoints), match_fn)
-
-
-def pairs_outside_accepted_edges(plan: LoopSearchPlan, edges: Sequence[PoseGraphEdge], matched: Sequence[ImagePair]) -> list[ImagePair]:
-    """The pairs of `matched` that no accepted loop edge's measurement uses: what the mapper should not see.
-
-    Args:
-        plan: The plan the edges were verified from.
-        edges: The accepted loop edges, directed as their measurement was.
-        matched: Image pairs the loop stage matched itself.
-
-    Returns:
-        The pairs of `matched` outside every accepted edge's local maps and observations, in `matched`'s order.
-    """
-    kept: set[ImagePair] = set(
-        required_image_pairs(plan.rig_index, plan.geometry, plan.keypoints, plan.config.rig_pose.neighbour_span, [(edge.source, edge.target) for edge in edges])
-    )
-    return [pair for pair in matched if pair not in kept]
 
 
 def best_per_query_rig(

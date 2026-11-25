@@ -103,6 +103,31 @@ def test_the_every_frame_collection_poses_every_keyframe_through_the_optimised_e
             np.testing.assert_allclose(_matrix(keyframe.world_T_cam), _matrix(by_id[keyframe.keyframe_id].world_T_cam), atol=1e-6)
 
 
+def test_the_every_frame_collection_carries_the_optimised_intrinsics(synthetic_rig: SyntheticRig) -> None:
+    """Under `--refine-camera-model` the optimised collection holds the solved focals: the every-frame collection must
+    hold the same cameras, or the two `frames_meta.json` files give one camera two models."""
+    import pycolmap
+
+    from colsfm.cameras import colmap_cameras, with_colmap_intrinsics
+    from colsfm.frame_poses import every_frame_meta
+
+    optimised, mapped = _optimised(synthetic_rig, 3, lambda index: _shift([0.3, 0.0, 0.0]))
+    solved: pycolmap.Reconstruction = pycolmap.Reconstruction()
+    for camera in colmap_cameras(optimised).values():
+        params = np.asarray(camera.params, dtype=np.float64).copy()
+        params[:2] *= 1.012
+        solved.add_camera(pycolmap.Camera(camera_id=camera.camera_id, model=camera.model, width=camera.width, height=camera.height, params=params))
+    refined = with_colmap_intrinsics(optimised, solved)
+
+    dense = every_frame_meta(synthetic_rig.frames_meta, refined, mapped)
+    for camera_id, camera in colmap_cameras(dense).items():
+        np.testing.assert_allclose(camera.params, solved.cameras[camera_id].params, rtol=1e-12)
+    unrefined = every_frame_meta(synthetic_rig.frames_meta, optimised, mapped)
+    assert {camera_id: camera.params.tolist() for camera_id, camera in colmap_cameras(unrefined).items()} == {
+        camera_id: camera.params.tolist() for camera_id, camera in colmap_cameras(synthetic_rig.frames_meta).items()
+    }, "cameras the solve did not move stay as the input has them"
+
+
 def test_no_registered_keyframe_means_no_poses(synthetic_rig: SyntheticRig) -> None:
     from colsfm.frame_poses import every_frame_world_T_vehicle
 

@@ -18,6 +18,7 @@ share it, and now do not, are:
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ from mapping_helpers import (
     SYNTHETIC_NOISE_PX,
     SyntheticRig,
     build_synthetic_rig,
+    caspar_plan,
     every_round,
     match_tracks_to_truth,
     quiet_options,
@@ -40,9 +42,18 @@ from mapping_helpers import (
 )
 from numpy import ndarray
 
+from colsfm.ba_backend import BaExecutionPlan, CasparCapability, resolve_ba_plan
 from colsfm.config import CusfmConfig, VisionMappingConfig
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
-from colsfm.mapping import MappingResult, RoundStats, load_correspondences, pixel_error_schedule, run_mapping
+from colsfm.mapping import (
+    MappingResult,
+    RoundStats,
+    bundle_adjustment_options,
+    load_correspondences,
+    pixel_error_schedule,
+    run_mapping,
+    triangulator_options,
+)
 from colsfm.reconstruction import RIG_ID, PosedModel, build_reconstruction, camera_sensor_id, gauge_rig_frame, rig_from_world, rig_sensor_from_rig
 
 
@@ -95,7 +106,7 @@ def test_load_correspondences_rejects_a_database_with_other_image_ids(synthetic_
     )
 
     reconstruction: pycolmap.Reconstruction = build_reconstruction(synthetic_rig.frames_meta).reconstruction
-    with pytest.raises(ValueError, match="disagree on image ids"):
+    with pytest.raises(ValueError, match="disagree on images"):
         load_correspondences(reconstruction, database_path)
 
 
@@ -312,3 +323,93 @@ def test_the_round_callback_sees_every_round_as_it_finishes(synthetic_rig: Synth
     assert [entry[0] for entry in seen] == [stats.round_index for stats in result.rounds]
     assert all(reported == live for _index, reported, live in seen)
     assert seen[-1][1] == result.reconstruction.num_points3D()
+
+
+def test_the_merge_gate_can_be_capped_below_the_round_gate(isaac_config: CusfmConfig) -> None:
+    """`max_merge_pixel_error` caps where tracks merge; completion keeps the round's gate.
+
+    With many cross-time pairs (prior-overlap pairs on MSD MGO05) merging at the first rounds' 20-25 px fused tracks
+    of different points: 12.5 views per track, ATE 18.9 mm against 13.8 mm without those pairs; capping the merge at
+    5 px gave 14.8 mm.
+    """
+    capped: VisionMappingConfig = dataclasses.replace(isaac_config.vision_mapping, max_merge_pixel_error=5.0)
+    loose: pycolmap.IncrementalTriangulatorOptions = triangulator_options(capped, 25.0)
+    assert loose.merge_max_reproj_error == 5.0
+    assert loose.complete_max_reproj_error == 25.0
+    assert triangulator_options(capped, 4.0).merge_max_reproj_error == 4.0
+    default: pycolmap.IncrementalTriangulatorOptions = triangulator_options(isaac_config.vision_mapping, 25.0)
+    assert default.merge_max_reproj_error == 25.0
+
+
+def test_the_mapper_can_refine_focal_lengths_in_every_round(
+    synthetic_rig: SyntheticRig, synthetic_database: Path, isaac_config: CusfmConfig
+) -> None:
+    """`refine_focal_length` frees fx, fy of every camera in every round, so most of a 2 % focal error comes back.
+
+    Measured from a 510 px start (truth 500): fx 498.8 px, fy only 509.3 px. The synthetic points span a narrow
+    height band, so the scene constrains fy weakly; the test asserts fx within 0.5 % and fy moving towards the truth.
+
+    Holding the calibration at a nominal value pushes its error into the poses: Mission office's cube faces are 1-1.4 %
+    off f = 800 and colsfm's poses end 0.25 deg from Spirula's (sfm-root ROOT-CAUSE cause 1).
+    """
+    model: PosedModel = build_reconstruction(synthetic_rig.frames_meta)
+    truth: float = float(model.reconstruction.camera(1).params[0])
+    for camera in model.reconstruction.cameras.values():
+        params = np.asarray(camera.params).copy()
+        params[:2] *= 1.02
+        camera.params = params
+    fixed_start: PosedModel = build_reconstruction(synthetic_rig.frames_meta)
+    for camera in fixed_start.reconstruction.cameras.values():
+        params = np.asarray(camera.params).copy()
+        params[:2] *= 1.02
+        camera.params = params
+
+    refined: MappingResult = run_mapping(model, synthetic_database, isaac_config.vision_mapping, quiet_options(num_threads=1, refine_focal_length=True))
+    held: MappingResult = run_mapping(fixed_start, synthetic_database, isaac_config.vision_mapping, quiet_options(num_threads=1))
+
+    for camera in refined.reconstruction.cameras.values():
+        assert abs(float(camera.params[0]) - truth) < 0.005 * truth
+        assert float(camera.params[1]) < 1.02 * truth
+    assert all(float(camera.params[0]) == pytest.approx(1.02 * truth) for camera in held.reconstruction.cameras.values())
+    assert refined.mean_reprojection_error_px < held.mean_reprojection_error_px
+
+
+RIG_CAPABLE_CASPAR: CasparCapability = CasparCapability(
+    availability="available",
+    supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}),
+    probe_errors=(),
+    refines_sensor_from_rig=True,
+    intrinsics_refinable_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}),
+)
+"""A stated CASPAR build with the rig factor that frees PINHOLE and SIMPLE_RADIAL intrinsics; no probe runs."""
+
+
+def test_both_backends_free_the_same_intrinsics_when_the_camera_model_is_refined(isaac_config: CusfmConfig) -> None:
+    """`refine_focal_length` frees the focal and the distortion block on Ceres as on CASPAR, and never the principal point.
+
+    CASPAR accepts the focal only together with the distortion block; Ceres used to free the focal alone, so a
+    SIMPLE_RADIAL or OPENCV_FISHEYE run refined a different camera model depending on the backend.
+    """
+    caspar: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=True, capability=RIG_CAPABLE_CASPAR)
+    ceres: BaExecutionPlan = resolve_ba_plan("ceres", (), ceres_polish=False, optimize_extrinsics=True)
+    assert (caspar.backend, ceres.backend) == ("caspar", "ceres")
+    freed: list[tuple[bool, bool, bool, bool]] = []
+    for plan in (caspar, ceres):
+        options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
+            isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan, optimize_extrinsics=True, refine_focal_length=True)
+        )
+        freed.append((options.refine_focal_length, options.refine_extra_params, options.refine_principal_point, options.refine_sensor_from_rig))
+    assert freed == [(True, True, False, True), (True, True, False, True)]
+
+
+def test_a_caspar_plan_that_cannot_free_the_rig_refuses_a_free_rig_request(isaac_config: CusfmConfig) -> None:
+    """A CASPAR plan without the rig capability and a mapper asked to free `sensor_from_rig` is a broken invariant.
+
+    `resolve_backend` never makes that plan; if one arrives anyway, holding the rig fixed would silently drop the
+    refinement that was asked for, so the options builder raises instead.
+    """
+    plan: BaExecutionPlan = caspar_plan(supported_camera_models=frozenset({"PINHOLE"}))
+    assert plan.backend == "caspar"
+    assert plan.capability.refines_sensor_from_rig is False
+    with pytest.raises(ValueError, match="sensor_from_rig"):
+        bundle_adjustment_options(isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan, optimize_extrinsics=True))

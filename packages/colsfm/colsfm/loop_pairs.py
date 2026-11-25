@@ -15,6 +15,7 @@ verification became a change to scheduling.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
 from colsfm.database import Keypoints
 from colsfm.pairs import normalise_pair
@@ -54,6 +55,56 @@ def local_map_partners(
     return partners
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationPair:
+    """One image pair the measurement of a rig pair matches: a source anchor against a target image."""
+
+    anchor: int
+    """Image id of the source rig frame's anchor."""
+    observed: int
+    """Image id of the target rig frame's image: the anchor's own camera or its stereo partner."""
+    anchor_camera_id: int
+    """The anchor's camera."""
+    observed_camera_id: int
+    """The observed image's camera: `anchor_camera_id` or its stereo partner."""
+
+
+def observation_pairs(
+    index: RigFrameIndex, geometry: RigGeometry, keypoints: Mapping[int, Keypoints], rig_pair: tuple[int, int]
+) -> list[ObservationPair]:
+    """The observation walk of one shortlisted rig pair, in the order `RigPoseEstimator` matches it.
+
+    Each source anchor against the target rig's same camera and that camera's stereo partner. One enumeration for the
+    estimator (`colsfm.loop_pose`), the plan (`required_image_pairs`) and the mapper's pose check
+    (`colsfm.loop_mapper_check`).
+
+    Args:
+        index: The rig-frame index.
+        geometry: The rig's cameras and their stereo declarations.
+        keypoints: Keypoint pixels per image id; a target image without them is skipped where the estimator skips it.
+        rig_pair: `(source rig id, target rig id)`, directed as the measurement walks it.
+
+    Returns:
+        The pairs in camera order, anchor first.
+    """
+    source_rig_id, target_rig_id = rig_pair
+    pairs: list[ObservationPair] = []
+    for camera_id in geometry.camera_ids:
+        anchor: int | None = index.keyframe(source_rig_id, camera_id)
+        if anchor is None:
+            continue
+        target_cameras: list[int] = [camera_id]
+        partner_camera: int | None = geometry.stereo_partner.get(camera_id)
+        if partner_camera is not None:
+            target_cameras.append(partner_camera)
+        for target_camera in target_cameras:
+            observed: int | None = index.keyframe(target_rig_id, target_camera)
+            if observed is None or observed not in keypoints:
+                continue
+            pairs.append(ObservationPair(anchor=anchor, observed=observed, anchor_camera_id=camera_id, observed_camera_id=target_camera))
+    return pairs
+
+
 def required_image_pairs(
     index: RigFrameIndex,
     geometry: RigGeometry,
@@ -88,29 +139,36 @@ def required_image_pairs(
     Returns:
         The image pairs, normalised low id first, deduplicated and sorted.
     """
-    targets_by_source: dict[int, list[int]] = {}
-    for source_rig_id, target_rig_id in rig_pairs:
-        targets_by_source.setdefault(source_rig_id, []).append(target_rig_id)
-
+    rig_pairs = tuple(rig_pairs)
     pairs: set[tuple[int, int]] = set()
-    for source_rig_id, target_rig_ids in targets_by_source.items():
+    for source_rig_id in dict.fromkeys(source for source, _ in rig_pairs):
         for camera_id in geometry.camera_ids:
             anchor: int | None = index.keyframe(source_rig_id, camera_id)
-            if anchor is None:
-                continue
             # `local_map` only anchors an image it has keypoints for; `_observations`
             # matches from that anchor whether or not it does.
-            if anchor in keypoints:
+            if anchor is not None and anchor in keypoints:
                 for partner in local_map_partners(index, geometry, neighbour_span, source_rig_id, camera_id):
                     pairs.add(normalise_pair(anchor, partner))
-            target_cameras: list[int] = [camera_id]
-            partner_camera: int | None = geometry.stereo_partner.get(camera_id)
-            if partner_camera is not None:
-                target_cameras.append(partner_camera)
-            for target_rig_id in target_rig_ids:
-                for target_camera in target_cameras:
-                    observed: int | None = index.keyframe(target_rig_id, target_camera)
-                    if observed is None or observed not in keypoints:
-                        continue
-                    pairs.add(normalise_pair(anchor, observed))
+    pairs |= observed_image_pairs(index, geometry, keypoints, rig_pairs)
     return tuple(sorted(pairs))
+
+
+def observed_image_pairs(
+    index: RigFrameIndex, geometry: RigGeometry, keypoints: Mapping[int, Keypoints], rig_pairs: Iterable[tuple[int, int]]
+) -> set[tuple[int, int]]:
+    """The image pairs of the observation walks of some rig pairs (`observation_pairs`), normalised low id first.
+
+    Args:
+        index: The rig-frame index.
+        geometry: The rig's cameras and their stereo declarations.
+        keypoints: Keypoint pixels per image id; a target image without them is skipped where the estimator skips it.
+        rig_pairs: `(source rig id, target rig id)` pairs, directed as the measurement walks them.
+
+    Returns:
+        The image pairs, deduplicated.
+    """
+    return {
+        normalise_pair(observation.anchor, observation.observed)
+        for rig_pair in rig_pairs
+        for observation in observation_pairs(index, geometry, keypoints, rig_pair)
+    }

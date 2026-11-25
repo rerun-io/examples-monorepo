@@ -14,16 +14,16 @@ does not state itself.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pycolmap
-from jaxtyping import Int
+from jaxtyping import Int, UInt32
 from numpy import ndarray
 
-from colsfm.config import CusfmConfig, KeyframeSelectionConfig, PoseGraphConfig, read_config_directory
+from colsfm.config import CusfmConfig, KeyframeSelectionConfig, PoseGraphConfig, PriorOverlapConfig, read_config_directory
 from colsfm.database import (
     Descriptors,
     ImagePair,
@@ -31,7 +31,9 @@ from colsfm.database import (
     create_database,
     pairs_with_matches,
     read_descriptors_from_database,
+    read_inlier_sample,
     read_keypoints_batch,
+    release_freed_memory,
 )
 from colsfm.export import (
     EVERY_FRAME_METADATA_SUBPATH,
@@ -53,20 +55,22 @@ from colsfm.loop_closure import (
     LoopClosureDiagnostics,
     LoopClosureResult,
     LoopSearchPlan,
-    pairs_outside_accepted_edges,
     plan_loop_search,
     verify_loop_plan,
 )
+from colsfm.loop_covisibility import covisibility_radius_m, spans_two_rig_frames
+from colsfm.loop_mapper_check import pose_checked_inliers
 from colsfm.mapping import MappingOptions, MappingResult, run_mapping
 from colsfm.matching import (
     MatchingOptions,
     MatchReport,
     match_pairs,
 )
-from colsfm.pairs import select_pairs
+from colsfm.pairs import pair_mix, select_pairs
 from colsfm.pose_graph import PoseGraphEdge, PoseGraphResult, RigNode, sequential_edges, solve_pose_graph
 from colsfm.reconstruction import PosedModel, build_reconstruction, gauge_camera_params_id
 from colsfm.retrieval import RetrievalIndex, build_retrieval_index
+from colsfm.rig_geometry import RigFrameIndex, rig_frame_index, rig_geometry
 from colsfm.run_config import LoopPairsInMapper, PipelineOptions, SelectionOptions
 from colsfm.run_lifecycle import (
     LOOP_EDGES_NAME,
@@ -294,10 +298,12 @@ def run_pair_selection_stage(selected: FramesMeta, config: CusfmConfig) -> list[
     Raises:
         ValueError: When `connected_keyframe_num` is below 1.
     """
-    pairs: list[ImagePair] = select_pairs(selected, config.pose_graph.connected_keyframe_num)
+    prior_overlap: PriorOverlapConfig | None = config.pose_graph.prior_overlap
+    pairs: list[ImagePair] = select_pairs(selected, config.pose_graph.connected_keyframe_num, prior_overlap)
     print(
         f"[colsfm] {len(pairs)} pairs from connected_keyframe_num="
         f"{config.pose_graph.connected_keyframe_num} and {len(selected.stereo_pairs)} stereo declarations"
+        + ("" if prior_overlap is None else f" and prior overlap ({pair_mix(selected, pairs)})")
     )
     return pairs
 
@@ -336,8 +342,9 @@ class LoopClosureStageResult:
     means a caller — a viewer, a notebook — can read them instead of parsing stdout.
     None on the two paths that return before the search: loop closure switched off, and
     a database with no descriptors."""
-    excluded_pairs: tuple[ImagePair, ...] = ()
-    """Pairs this stage matched that the mapper should leave out (`loop_pairs_in_mapper="accepted"`); empty otherwise."""
+    inlier_overrides: Mapping[ImagePair, UInt32[ndarray, "n_inliers 2"]] = field(default_factory=dict)
+    """Per pair this stage matched, the inliers the mapper keeps when the pose check removed some
+    (`loop_pairs_in_mapper="pose-checked"`); empty otherwise."""
 
 
 def _warn_about_closed_loop_gates(pose_graph_config: PoseGraphConfig) -> None:
@@ -376,7 +383,7 @@ def run_loop_closure_stage(
     *,
     enabled: bool,
     frames: FrameSource | None = None,
-    loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted",
+    loop_pairs_in_mapper: LoopPairsInMapper = "pose-checked",
 ) -> LoopClosureStageResult:
     """Retrieve, match and verify loop candidates.
 
@@ -392,8 +399,9 @@ def run_loop_closure_stage(
         matching_options: Settings for the batch match over the missing pairs.
         enabled: Whether to run at all.
         frames: The run's frame source, for a matcher that reads pixels; one is opened per call when None.
-        loop_pairs_in_mapper: `PipelineOptions.loop_pairs_in_mapper`: with `"accepted"`, the image pairs this stage
-            matched only to measure a candidate it then rejected are returned as `excluded_pairs`, for the mapper to leave out.
+        loop_pairs_in_mapper: `PipelineOptions.loop_pairs_in_mapper`: with `"pose-checked"`, the inliers of the pairs
+            this stage matched that disagree with their rig pair's pose are returned as `inlier_overrides`; with
+            `"shortlisted"`, the mapper keeps every inlier.
 
     Returns:
         The loop edges and how many extra pairs were matched to find them.
@@ -416,6 +424,7 @@ def run_loop_closure_stage(
     # 4.7 GB, which would otherwise stay resident for the whole stage -- through the
     # keypoint read, the batch match and the measurement.
     del descriptors
+    release_freed_memory()  # the read's worker threads allocated them: without this the freed blocks stay resident
     print(f"[colsfm] loop closure: retrieval index over {len(index.image_ids)} images in {index.build_seconds:.2f}s")
 
     config: LoopClosureConfig = LoopClosureConfig.from_pose_graph(pose_graph_config)
@@ -423,7 +432,16 @@ def run_loop_closure_stage(
     # the batch match, and on RoboCap they are 148 MB.
     keypoints: dict[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64)
 
-    plan: LoopSearchPlan = plan_loop_search(frames_meta, database_path, index, config, keypoints)
+    # Learned before the loop stage matches anything: the database holds stage 4's pairs only.
+    rig_index: RigFrameIndex = rig_frame_index(frames_meta)
+    radius_m: float = covisibility_radius_m(
+        read_inlier_sample(database_path, config.covisibility_sample_pairs, eligible=spans_two_rig_frames(rig_index)),
+        rig_index,
+        rig_geometry(frames_meta),
+        keypoints,
+        config.covisibility_depth_quantile,
+    )
+    plan: LoopSearchPlan = plan_loop_search(frames_meta, database_path, index, config, keypoints, covisibility_radius_m=radius_m)
     # Presence, not count: a pair stage 4 matched and found nothing in is finished work,
     # and matching it again would cost a matcher call to produce the same nothing. Most
     # of the plan is stage 4's own consecutive and stereo pairs (8 400 of 14 443 on
@@ -432,7 +450,9 @@ def run_loop_closure_stage(
     missing_pairs: list[ImagePair] = [pair for pair in plan.image_pairs if pair not in present]
     print(
         f"[colsfm] loop closure: {len(plan.rig_pairs)} shortlisted rig pairs need "
-        f"{len(plan.image_pairs)} image pairs, {len(present)} already matched, {len(missing_pairs)} to match"
+        f"{len(plan.image_pairs)} image pairs, {len(present)} already matched, {len(missing_pairs)} to match; "
+        f"{len(plan.mapper_only_rig_pairs)} more rig pairs beyond the prior bound but inside the {radius_m:.1f} m covisibility radius "
+        "matched for the mapper only"
     )
     if missing_pairs:
         match_pairs(database_path, missing_pairs, matching_options, frames)
@@ -446,23 +466,30 @@ def run_loop_closure_stage(
             return np.asarray(database.read_matches(image_id_a, image_id_b), dtype=np.int64)
 
         result: LoopClosureResult = verify_loop_plan(plan, read_matches)
+        overrides: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = {}
+        if loop_pairs_in_mapper == "pose-checked":
+
+            def read_inliers(image_id_a: int, image_id_b: int) -> UInt32[ndarray, "n_inliers 2"]:
+                """One pair's stored two-view inliers, columns in `(image_id_a, image_id_b)` order; none without a row."""
+                if not database.exists_two_view_geometry(image_id_a, image_id_b):
+                    return np.zeros((0, 2), dtype=np.uint32)
+                return np.ascontiguousarray(database.read_two_view_geometry(image_id_a, image_id_b).inlier_matches, dtype=np.uint32)
+
+            overrides = pose_checked_inliers(plan, result.candidates, missing_pairs, read_inliers)
     edges: list[PoseGraphEdge] = list(result.edges)
-    # The mapper reads every verified two-view geometry in the database, so a pair matched here only to measure a
-    # rejected candidate would feed its cross-revisit tracks to the triangulator. Under "accepted" those pairs are left
-    # out when the mapper builds its correspondence graph (`MappingOptions.excluded_pairs`); nothing is deleted.
-    excluded: tuple[ImagePair, ...] = tuple(pairs_outside_accepted_edges(plan, edges, missing_pairs)) if loop_pairs_in_mapper == "accepted" else ()
     # Print the counters, not just the edge count: zero edges is the normal outcome on a
     # short or a low-recall sequence, and only the rejection breakdown says which it was.
     print(
         f"[colsfm] loop closure: {len(edges)} loop edges | {result.diagnostics.counters.queries} queries, "
         f"{result.diagnostics.counters.candidates_retrieved} retrieved, {result.diagnostics.counters.rejected_by_score} below score, "
         f"{result.diagnostics.counters.rejected_by_time} inside the {result.diagnostics.min_time_gap_seconds:.2f}s gap, "
+        f"{result.diagnostics.counters.rejected_by_prior_bound} rig pairs beyond the prior bound and the covisibility radius, "
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified, {result.diagnostics.counters.not_best} not the best of their rig frame, "
         f"{result.diagnostics.counters.below_good_loop} best below {plan.config.good_loop_threshold} inliers, over {len(plan.image_pairs)} image pairs; "
-        f"{len(excluded)} of the {len(missing_pairs)} pairs matched here left out of the mapper ({loop_pairs_in_mapper})"
+        f"{len(overrides)} of the {len(missing_pairs)} pairs matched here trimmed by the pose check ({loop_pairs_in_mapper})"
     )
-    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, excluded_pairs=excluded)
+    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, inlier_overrides=overrides)
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,7 +585,8 @@ def run_reconstruction_stage(
         FileNotFoundError: When the database does not exist.
         ValueError: When no frame is registered.
     """
-    reference_camera_params_id: int | None = gauge_camera_params_id(pose_graph_meta) if options.optimize_extrinsics else None
+    camera_referenced: bool = options.optimize_extrinsics or options.refine_camera_model
+    reference_camera_params_id: int | None = gauge_camera_params_id(pose_graph_meta) if camera_referenced else None
     model: PosedModel = build_reconstruction(pose_graph_meta, reference_camera_params_id=reference_camera_params_id)
     mapping: MappingResult = run_mapping(model, options.database_path, config.vision_mapping, mapping_options)
     _print_mapping(mapping)

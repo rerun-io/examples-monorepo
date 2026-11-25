@@ -58,6 +58,57 @@ class ColsfmProfileConfig:
     """`colsfm.loop_closure.LoopClosureConfig.max_prior_translation_m`; None = no prior-consistency gate."""
     loop_max_prior_rotation_deg: float | None = None
     """`colsfm.loop_closure.LoopClosureConfig.max_prior_rotation_deg`; None = no prior-consistency gate."""
+    prior_overlap_pairs_per_image: int = 0
+    """`PriorOverlapConfig.pairs_per_image`; 0 = no prior-overlap pairs (cuSFM's pair list)."""
+    prior_overlap_max_axis_angle_deg: float = 60.0
+    """`PriorOverlapConfig.max_axis_angle_deg`."""
+    prior_overlap_max_centre_distance_m: float = 2.0
+    """`PriorOverlapConfig.max_centre_distance_m`."""
+    prior_overlap_suppression_rig_frames: int = 2
+    """`PriorOverlapConfig.suppression_rig_frames`."""
+    max_merge_pixel_error: float | None = None
+    """`VisionMappingConfig.max_merge_pixel_error`; None = merge under each round's gate, as cuSFM does."""
+
+
+@dataclass(frozen=True, slots=True)
+class PriorOverlapConfig:
+    """Pair images of any two cameras whose prior views overlap (`colsfm.pairs.prior_overlap_pairs`)."""
+
+    pairs_per_image: int
+    """Partners each image proposes; the pair count is at most this times the image count."""
+    max_axis_angle_deg: float = 60.0
+    """Largest angle between the two prior optical axes."""
+    max_centre_distance_m: float = 2.0
+    """Largest distance between the two prior camera centres."""
+    suppression_rig_frames: int = 2
+    """One image's partners lie at least this many rig frames apart, so the frames next to it cannot take its budget."""
+
+    def __post_init__(self) -> None:
+        if self.pairs_per_image < 1:
+            raise ValueError(f"pairs_per_image is {self.pairs_per_image}, which should be at least 1")
+        if not 0.0 < self.max_axis_angle_deg <= 180.0:
+            raise ValueError(f"max_axis_angle_deg is {self.max_axis_angle_deg}, which should be in (0, 180]")
+        if self.suppression_rig_frames < 1:
+            raise ValueError(f"suppression_rig_frames is {self.suppression_rig_frames}, which should be at least 1")
+
+    @classmethod
+    def of(cls, profile: ColsfmProfileConfig) -> PriorOverlapConfig | None:
+        """The profile's rule, or None when it asks for no prior-overlap pairs.
+
+        Args:
+            profile: The profile's `colsfm.toml`.
+
+        Returns:
+            The rule, or None.
+        """
+        if profile.prior_overlap_pairs_per_image == 0:
+            return None
+        return cls(
+            pairs_per_image=profile.prior_overlap_pairs_per_image,
+            max_axis_angle_deg=profile.prior_overlap_max_axis_angle_deg,
+            max_centre_distance_m=profile.prior_overlap_max_centre_distance_m,
+            suppression_rig_frames=profile.prior_overlap_suppression_rig_frames,
+        )
 
 
 def read_colsfm_profile(directory: Path) -> ColsfmProfileConfig:
@@ -316,6 +367,8 @@ class PoseGraphConfig:
     """From `colsfm.toml` (`LoopClosureConfig.max_prior_translation_m`)."""
     loop_max_prior_rotation_deg: float | None = None
     """From `colsfm.toml` (`LoopClosureConfig.max_prior_rotation_deg`)."""
+    prior_overlap: PriorOverlapConfig | None = None
+    """From `colsfm.toml`: the prior-overlap pair rule, or None for cuSFM's pair list."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,11 +434,17 @@ class VisionMappingConfig:
     """Refine stage drops the robust loss."""
     bundle_adjustment: BundleAdjustmentConfig
     """Ceres settings for the mapping BA."""
+    max_merge_pixel_error: float | None = None
+    """From `colsfm.toml`: tracks merge under `min(round gate, this)`; completion and filtering keep the round's gate.
+    None = cuSFM's single gate. A dense cross-time match graph needs it: merging at the first rounds' 20-25 px fuses
+    tracks of different points (`colsfm.mapping.triangulator_options`)."""
 
     def __post_init__(self) -> None:
         # Every range comparison with a NaN limit is False, so a NaN here would empty the map; a non-positive one too.
         if not (math.isfinite(self.depth_threshold) and self.depth_threshold > 0.0):
             raise ValueError(f"vision_mapping_config.depth_threshold must be finite and positive, got {self.depth_threshold}")
+        if self.max_merge_pixel_error is not None and not (math.isfinite(self.max_merge_pixel_error) and self.max_merge_pixel_error > 0.0):
+            raise ValueError(f"max_merge_pixel_error must be finite and positive, got {self.max_merge_pixel_error}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,6 +651,7 @@ def read_config_directory(
             loop_edge_rotation_threshold_degrees=float(pose_graph_message.loop_edge_rotation_threshold_degrees),
             loop_max_prior_translation_m=profile.loop_max_prior_translation_m,
             loop_max_prior_rotation_deg=profile.loop_max_prior_rotation_deg,
+            prior_overlap=PriorOverlapConfig.of(profile),
         ),
         vision_mapping=VisionMappingConfig(
             min_num_matches_per_pair=int(mapping_message.min_num_matches_per_pair),
@@ -623,5 +683,6 @@ def read_config_directory(
             refine_ba_use_fixed_max_pixel_error=bool(mapping_message.refine_ba_use_fixed_max_pixel_error),
             refine_ba_avoid_loss_function=bool(mapping_message.refine_ba_avoid_loss_function),
             bundle_adjustment=_bundle_adjustment(mapping_message.bundle_adjustment_config, resolved_schema),
+            max_merge_pixel_error=profile.max_merge_pixel_error,
         ),
     )

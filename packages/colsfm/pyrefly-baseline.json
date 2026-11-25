@@ -1870,6 +1870,20 @@
       "severity": "error",
       "line": 11,
       "stop_line": 11
+    },
+    {
+      "column": 1,
+      "path": "tests/test_prior_overlap_pairs.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
+    },
+    {
+      "column": 1,
+      "path": "tests/test_cameras.py",
+      "name": "missing-import",
+      "concise_description": "Cannot find module `mapping_helpers`",
+      "severity": "error"
     }
   ]
 }

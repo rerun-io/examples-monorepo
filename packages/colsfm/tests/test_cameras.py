@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pycolmap
+import pytest
+from mapping_helpers import build_synthetic_rig
 
-from colsfm.cameras import colmap_camera, fit_distortion_coefficients
-from colsfm.frames_meta import CameraParams
+from colsfm.cameras import (
+    camera_params_with_colmap_intrinsics,
+    colmap_camera,
+    colmap_cameras,
+    fit_distortion_coefficients,
+    with_colmap_intrinsics,
+)
+from colsfm.export import write_colmap_model
+from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, read_frames_meta, write_frames_meta
 from colsfm.geometry import rigid3d_from_axis_angle_degrees
+from colsfm.reconstruction import gauge_camera_params_id
+from colsfm.rerun_log import camera_k_matrix
+from colsfm.run_report import FocalChange, camera_model_changes, focal_changes
 
 
 def read_blob_cameras(path: Path) -> dict[int, pycolmap.Camera]:
@@ -94,3 +107,96 @@ def test_absent_distortion_coefficients_become_zeros() -> None:
     assert np.allclose(camera.params[4:], np.zeros(8))
 
 
+def _refined(camera: pycolmap.Camera, focal_scale: float, extra_shift: float) -> pycolmap.Camera:
+    """A copy of one COLMAP camera with its focal scaled and every distortion term shifted, as a refining solve leaves it.
+
+    Args:
+        camera: The nominal camera.
+        focal_scale: Factor on fx and fy.
+        extra_shift: Added to every parameter after cx, cy.
+
+    Returns:
+        The moved camera.
+    """
+    params: np.ndarray = np.asarray(camera.params, dtype=np.float64).copy()
+    params[:2] *= focal_scale
+    params[4:] += extra_shift
+    return pycolmap.Camera(camera_id=camera.camera_id, model=camera.model, width=camera.width, height=camera.height, params=params)
+
+
+@pytest.mark.parametrize("fisheye", [False, True], ids=["pinhole", "fisheye"])
+def test_refined_intrinsics_reach_the_written_metadata_as_the_sparse_model_holds_them(fisheye: bool, tmp_path: Path) -> None:
+    """`with_colmap_intrinsics` writes a solve's cameras back, so `frames_meta.json`, `sparse/` and the frusta agree.
+
+    With `--refine-camera-model` the mapper moves every focal (and, on a distorted model, the distortion block), and
+    `sparse/cameras.txt` is written from that reconstruction. The exported `frames_meta.json` and the Rerun layer read
+    the metadata, so it has to carry the same numbers: PINHOLE through the rectified `projection_matrix` (whose 4th
+    column, the stereo baseline term, keeps its geometry), the distorted models through `camera_matrix` and the
+    coefficients. The focal report says how far each camera moved.
+    """
+    nominal: FramesMeta = build_synthetic_rig(num_frames=2, num_points=10, fisheye=fisheye).frames_meta
+    reconstruction: pycolmap.Reconstruction = pycolmap.Reconstruction()
+    for camera in colmap_cameras(nominal).values():
+        reconstruction.add_camera(_refined(camera, 1.012, 0.001 if fisheye else 0.0))
+    write_colmap_model(tmp_path, reconstruction)
+
+    refined: FramesMeta = with_colmap_intrinsics(nominal, reconstruction)
+    write_frames_meta(tmp_path / FRAMES_META_NAME, refined)
+    written: FramesMeta = read_frames_meta(tmp_path / FRAMES_META_NAME)
+
+    sparse: dict[int, pycolmap.Camera] = read_blob_cameras(tmp_path / "sparse")
+    assert_cameras_match(colmap_cameras(written), sparse)
+    for camera_params_id, camera in written.cameras.items():
+        assert np.allclose(camera_k_matrix(camera), sparse[camera_params_id].calibration_matrix(), atol=1e-9)
+        assert camera.vehicle_T_cam.matrix() == pytest.approx(nominal.cameras[camera_params_id].vehicle_T_cam.matrix())
+    changes: tuple[FocalChange, ...] = focal_changes(nominal, refined)
+    assert [change.camera_params_id for change in changes] == sorted(nominal.cameras)
+    assert all(change.focal_change_percent == pytest.approx(1.2) for change in changes)
+
+
+def test_a_camera_model_refinement_reports_the_rig_movement_beside_the_focals() -> None:
+    """`--refine-camera-model` frees the rig in the mapper and skips stage 7b, which used to be the only writer of
+    `summary.json`'s `extrinsic_changes`: the summary then said the rig had not moved."""
+    nominal: FramesMeta = build_synthetic_rig(num_frames=2, num_points=10).frames_meta
+    reference: int = gauge_camera_params_id(nominal)
+    moved: int = next(camera_params_id for camera_params_id in sorted(nominal.cameras) if camera_params_id != reference)
+    refined_extrinsics: dict[int, pycolmap.Rigid3d] = {camera_params_id: camera.vehicle_T_cam for camera_params_id, camera in nominal.cameras.items()}
+    nudged: pycolmap.Rigid3d = nominal.cameras[moved].vehicle_T_cam
+    refined_extrinsics[moved] = pycolmap.Rigid3d(nudged.rotation, np.asarray(nudged.translation) + np.array([0.003, 0.0, 0.0]))
+
+    extrinsics, focals = camera_model_changes(nominal, nominal.with_extrinsics(refined_extrinsics), refined_extrinsics)
+    assert [change.camera_params_id for change in extrinsics] == sorted(nominal.cameras)
+    assert [change.camera_params_id for change in extrinsics if change.is_reference] == [reference]
+    assert {change.camera_params_id: round(change.translation_change_mm, 6) for change in extrinsics if change.translation_change_mm > 0} == {moved: 3.0}
+    assert [change.camera_params_id for change in focals] == sorted(nominal.cameras)
+
+
+def test_unmoved_intrinsics_leave_the_metadata_byte_identical() -> None:
+    """A camera the solve did not move keeps its matrices exactly, so a held model rewrites nothing."""
+    nominal: FramesMeta = build_synthetic_rig(num_frames=2, num_points=10).frames_meta
+    reconstruction: pycolmap.Reconstruction = pycolmap.Reconstruction()
+    for camera in colmap_cameras(nominal).values():
+        reconstruction.add_camera(camera)
+    assert with_colmap_intrinsics(nominal, reconstruction).to_json() == nominal.to_json()
+
+
+def test_a_refined_stereo_projection_keeps_its_baseline() -> None:
+    """The right camera of a rectified pair, `P = K [I | (-B, 0, 0)]`, keeps the baseline `B` when its K is refined.
+
+    So the 4th column follows the new focal (`-fx_new * B`) rather than keeping the nominal `-fx_old * B`.
+    """
+    baseline_m: float = 0.12
+    k_old: np.ndarray = np.array([[500.0, 0.0, 640.0], [0.0, 501.0, 360.0], [0.0, 0.0, 1.0]])
+    right: CameraParams = replace(
+        distorted_pinhole_camera(np.array([])),
+        projection_model="PINHOLE",
+        camera_matrix=None,
+        projection_matrix=k_old @ np.hstack([np.eye(3), np.array([[-baseline_m], [0.0], [0.0]])]),
+    )
+    k_new: np.ndarray = np.array([[506.0, 0.0, 641.5], [0.0, 507.0, 359.0], [0.0, 0.0, 1.0]])
+    solved: pycolmap.Camera = pycolmap.Camera(
+        camera_id=right.camera_params_id, model="PINHOLE", width=right.image_width, height=right.image_height, params=[506.0, 507.0, 641.5, 359.0]
+    )
+    refined: CameraParams = camera_params_with_colmap_intrinsics(right, solved)
+    assert refined.projection_matrix is not None
+    assert np.allclose(refined.projection_matrix, k_new @ np.hstack([np.eye(3), np.array([[-baseline_m], [0.0], [0.0]])]))

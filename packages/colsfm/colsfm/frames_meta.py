@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
 
@@ -333,6 +333,24 @@ class FramesMeta:
                 continue
             write_rigid_transform(camera_sensor.sensor_meta_data.sensor_to_vehicle_transform, pose)
         return parse_message(message)
+
+    def with_intrinsics(self, camera_by_camera_params_id: Mapping[int, CameraParams]) -> FramesMeta:
+        """Replace camera calibrations, keeping every other field byte-identical.
+
+        The intrinsic counterpart of `with_extrinsics`: `colsfm.cameras.with_colmap_intrinsics` builds the cameras a
+        refining solve (`--refine-camera-model`) left, and this swaps them in. Cameras missing from the mapping keep
+        their calibration.
+
+        Args:
+            camera_by_camera_params_id: New calibration per `camera_params_id`.
+
+        Returns:
+            A new `FramesMeta`.
+        """
+        cameras: dict[int, CameraParams] = {
+            camera_params_id: camera_by_camera_params_id.get(camera_params_id, camera) for camera_params_id, camera in self.cameras.items()
+        }
+        return parse_message(replace(self, cameras=cameras).current_message())
 
     def filtered(
         self,

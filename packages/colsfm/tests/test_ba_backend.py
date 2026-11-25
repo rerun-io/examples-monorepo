@@ -23,6 +23,7 @@ from colsfm.ba_backend import (
     CASPAR_BUILD_FALLBACK_REASON,
     CASPAR_PROBE_FAILED_REASON,
     EXTRINSICS_FALLBACK_REASON,
+    MIXED_MODEL_RIG_FALLBACK_REASON,
     BaExecutionPlan,
     CasparCapability,
     CasparOptions,
@@ -37,6 +38,15 @@ STOCK_CAPABILITY: CasparCapability = CasparCapability(
     availability="available", supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}), probe_errors=()
 )
 """What stock CASPAR reports: two adapters, no probe error."""
+
+RIG_CAPABILITY: CasparCapability = CasparCapability(
+    availability="available",
+    supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"}),
+    probe_errors=(),
+    refines_sensor_from_rig=True,
+    intrinsics_refinable_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL", "OPENCV_FISHEYE"}),
+)
+"""A build whose CASPAR also refines `sensor_from_rig` (recipes/colmap-src with the rig factor)."""
 
 NO_BUILD_CAPABILITY: CasparCapability = CasparCapability(
     availability="unavailable", supported_camera_models=frozenset(), probe_errors=("built without CASPAR_ENABLED",)
@@ -176,8 +186,58 @@ def test_a_ceres_request_is_never_second_guessed() -> None:
 
 
 def test_free_extrinsics_fall_back_to_ceres_with_a_reason() -> None:
-    """CASPAR throws when asked to refine `sensor_from_rig`, so Ceres takes the solve."""
-    assert resolve_backend("caspar", optimize_extrinsics=True) == ("ceres", EXTRINSICS_FALLBACK_REASON)
+    """A CASPAR that holds `sensor_from_rig` throws when asked to refine it, so Ceres takes the solve."""
+    assert resolve_backend("caspar", optimize_extrinsics=True, capability=STOCK_CAPABILITY) == ("ceres", EXTRINSICS_FALLBACK_REASON)
+
+
+FIXED_INTRINSICS_CAPABILITY: CasparCapability = CasparCapability(
+    availability="available",
+    supported_camera_models=frozenset({"PINHOLE", "FULL_OPENCV"}),
+    probe_errors=(),
+    refines_sensor_from_rig=True,
+    intrinsics_refinable_camera_models=frozenset({"PINHOLE"}),
+)
+"""A build that projects FULL_OPENCV with fixed intrinsics only (recipes/colmap-src's adapter), and refines PINHOLE."""
+
+
+def test_refining_intrinsics_of_a_fixed_intrinsics_model_falls_back_to_ceres() -> None:
+    """CASPAR throws mid-run when asked to free a FULL_OPENCV focal, so the plan hands that solve to Ceres up front.
+
+    Measured on MSD MGO05 (FULL_OPENCV cameras) with the focal free on CASPAR: "[caspar_model_adapter.h:708]
+    FULL_OPENCV is supported by CASPAR only for fixed intrinsics", raised in the first bundle adjustment.
+    """
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=True, capability=FIXED_INTRINSICS_CAPABILITY)
+    assert plan.backend == "caspar"
+    narrowed: BaExecutionPlan = plan.for_camera_models(["FULL_OPENCV", "PINHOLE"], refine_intrinsics=True)
+    assert narrowed.backend == "ceres"
+    assert narrowed.fallback_reason is not None
+    assert "FULL_OPENCV" in narrowed.fallback_reason
+    assert plan.for_camera_models(["PINHOLE"], refine_intrinsics=True).backend == "caspar"
+    assert plan.for_camera_models(["FULL_OPENCV"], refine_intrinsics=False).backend == "caspar"
+
+
+def test_a_rig_that_mixes_camera_models_falls_back_to_ceres() -> None:
+    """One rig with a PINHOLE and a SIMPLE_RADIAL camera goes to Ceres; the same models in two rigs stay on CASPAR.
+
+    CASPAR keys a frame's pose by camera model, so a mixed rig frame becomes one pose per model.
+    """
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=True, optimize_extrinsics=False, capability=STOCK_CAPABILITY)
+    names: list[str] = ["PINHOLE", "SIMPLE_RADIAL"]
+    narrowed: BaExecutionPlan = plan.for_camera_models(names, rig_camera_models=[frozenset(names)])
+    assert narrowed.backend == "ceres"
+    assert not narrowed.ceres_polish
+    assert narrowed.fallback_reason == MIXED_MODEL_RIG_FALLBACK_REASON
+    assert plan.for_camera_models(names, rig_camera_models=[frozenset({"PINHOLE"}), frozenset({"SIMPLE_RADIAL"})]) is plan
+
+
+def test_free_extrinsics_stay_on_caspar_when_the_build_refines_the_rig() -> None:
+    """A build whose probe refined a two-sensor rig keeps the solve on the GPU.
+
+    Measured on Mission office (rig + per-face focals free in every round): 46 s of mapping on CASPAR against 383 s on
+    Ceres, poses 0.018 deg apart.
+    """
+    assert resolve_backend("caspar", optimize_extrinsics=True, camera_model_names=["PINHOLE"], capability=RIG_CAPABILITY) == ("caspar", None)
+    assert resolve_backend("caspar", optimize_extrinsics=True, camera_model_names=["FULL_OPENCV"], capability=RIG_CAPABILITY)[0] == "ceres"
 
 
 def test_an_unsupported_camera_model_falls_back_and_names_both_sets() -> None:
@@ -240,7 +300,7 @@ def test_a_ceres_plan_carries_no_polish() -> None:
 
 def test_a_fallback_plan_records_what_was_asked_for_and_why_it_was_refused() -> None:
     """The request, the effective backend and the reason all survive into the plan."""
-    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=True, optimize_extrinsics=True)
+    plan: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=True, optimize_extrinsics=True, capability=STOCK_CAPABILITY)
     assert plan.requested_backend == "caspar"
     assert plan.backend == "ceres"
     assert plan.fell_back

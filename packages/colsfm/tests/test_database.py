@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
 import pycolmap
 import pytest
-from jaxtyping import Float32
+from jaxtyping import Float32, UInt8
 from mapping_helpers import SyntheticRig
 from numpy import ndarray
 
+from colsfm import database
 from colsfm.database import (
     ImagePair,
     count_two_view_geometries,
@@ -20,8 +22,10 @@ from colsfm.database import (
     pair_inlier_counts,
     pairs_with_matches,
     raw_match_counts,
+    read_descriptors_from_database,
     read_keypoints,
     read_two_view_geometry,
+    release_freed_memory,
 )
 from colsfm.frames_meta import FramesMeta, KeyframeMeta, read_frames_meta
 from colsfm.reconstruction import RIG_ID, camera_sensor_id, vehicle_sensor_id
@@ -258,3 +262,70 @@ def test_an_interrupted_create_database_leaves_no_rows(synthetic_rig: SyntheticR
         assert database.num_images() == 0
         assert database.num_frames() == 0
         assert database.num_cameras() == 0
+
+
+def test_parallel_descriptor_read_equals_the_serial_read(tmp_path: Path) -> None:
+    """Every thread count returns the stored blocks bit-exactly, keyed in the requested order.
+
+    Images of different descriptor counts, one with an empty block, one with no
+    descriptor row at all, and one SIFT block (uint8, which `to_float` casts rather than
+    reinterprets), so a worker that drops, reorders or mixes up images would show.
+    """
+    generator: np.random.Generator = np.random.default_rng(5)
+    database_path: Path = tmp_path / "database.db"
+    database: pycolmap.Database = pycolmap.Database.open(str(database_path))
+    database.write_camera(pycolmap.Camera(camera_id=1, model="PINHOLE", width=64, height=48, params=[50.0, 50.0, 32.0, 24.0]), use_camera_id=True)
+    written: dict[int, Float32[ndarray, "n 128"]] = {}
+    for image_id in range(1, 42):
+        database.write_image(pycolmap.Image(image_id=image_id, name=f"{image_id}.png", camera_id=1), use_image_id=True)
+        if image_id == 17:
+            continue
+        rows: int = 0 if image_id == 9 else int(generator.integers(1, 300))
+        if image_id == 23:
+            sift: UInt8[ndarray, "n 128"] = generator.integers(0, 256, size=(rows, 128), dtype=np.uint8)
+            database.write_descriptors(image_id, pycolmap.FeatureDescriptors(data=sift, type=pycolmap.FeatureExtractorType.SIFT))
+            written[image_id] = sift.astype(np.float32)
+            continue
+        block: Float32[ndarray, "n 128"] = generator.standard_normal((rows, 128), dtype=np.float32)
+        database.write_descriptors(image_id, pycolmap.FeatureDescriptorsFloat(data=block, type=pycolmap.FeatureExtractorType.ALIKED_N32).to_bytes())
+        written[image_id] = block
+    database.close()
+
+    requested: list[int] = [int(image_id) for image_id in generator.permutation(np.arange(1, 42))]
+    for threads in (1, 3, 8, 64):
+        every: dict[int, Float32[ndarray, "n 128"]] = read_descriptors_from_database(database_path, threads=threads)
+        assert list(every) == sorted(written)
+        chosen: dict[int, Float32[ndarray, "n 128"]] = read_descriptors_from_database(database_path, requested, threads=threads)
+        assert list(chosen) == [image_id for image_id in requested if image_id in written]
+        for image_id, block in written.items():
+            np.testing.assert_array_equal(every[image_id], block)
+            np.testing.assert_array_equal(chosen[image_id], block)
+
+
+class _FakeLibc:
+    """A C library whose `malloc_trim` records its arguments."""
+
+    def __init__(self) -> None:
+        self.trims: list[int] = []
+
+    def malloc_trim(self, pad: int) -> int:
+        self.trims.append(pad)
+        return 1
+
+
+def test_releasing_freed_memory_trims_every_arena(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`release_freed_memory` asks glibc's `malloc_trim(0)` once, and says False on a C library without it.
+
+    The parallel descriptor read allocates its blobs on worker threads. glibc keeps such blocks in the workers' arenas
+    after they are freed, where the main thread cannot reuse them: on an 18 GB read that was 4.6 GB more peak memory
+    for the stages that follow. The call is the contract; how much the resident set drops depends on the allocator's
+    settings (`MALLOC_MMAP_THRESHOLD_=32768` serves these blocks from mmap, and nothing is left to trim).
+    """
+    if sys.platform.startswith("linux"):
+        assert release_freed_memory(), "glibc has malloc_trim"
+    libc: _FakeLibc = _FakeLibc()
+    monkeypatch.setattr(database.ctypes, "CDLL", lambda _name: libc)
+    assert release_freed_memory()
+    assert libc.trims == [0]
+    monkeypatch.setattr(database.ctypes, "CDLL", lambda _name: object())
+    assert not release_freed_memory()

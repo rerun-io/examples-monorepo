@@ -108,16 +108,30 @@ def test_a_strictly_decreasing_rank_truncates_from_the_front() -> None:
 
 
 def test_normalized_coordinates_map_onto_the_original_image_not_the_network() -> None:
-    """`(k + 1) * 0.5 * (size - 1)` against the camera's own size.
+    """`(k + 1) * 0.5 * size - 0.5` against the camera's own size: the `align_corners=False` inverse.
 
     The stretch to the engine's input is undone here and nowhere else, so the
-    extrema have to land on the original image's corners.
+    extrema have to land on the original image's outer edges, half a pixel past the corner pixel centres.
     """
     normalized_xy: Float32[ndarray, "3 2"] = np.asarray([[-1.0, -1.0], [1.0, 1.0], [0.0, 0.0]], dtype=np.float32)
 
     pixels_xy: KeypointsXY = normalized_to_pixels(normalized_xy, 1920, 1080)
 
-    np.testing.assert_array_equal(pixels_xy, np.asarray([[0.0, 0.0], [1919.0, 1079.0], [959.5, 539.5]], dtype=np.float32))
+    np.testing.assert_array_equal(pixels_xy, np.asarray([[-0.5, -0.5], [1919.5, 1079.5], [959.5, 539.5]], dtype=np.float32))
+
+
+def test_a_pixel_centre_the_graph_emits_decodes_to_that_pixel() -> None:
+    """The RaCo graph normalises pixel centres with `2 * (i + 0.5) / size - 1` (`raco_export`, align_corners=False).
+
+    Decoding with the `align_corners=True` inverse instead scaled every keypoint by `1 - 1 / size` about the centre:
+    half a pixel at the edges, a 0.5 px focal error on a 1600 px cube face (sfm-root H2).
+    """
+    columns: Float32[ndarray, " 4"] = np.asarray([0.0, 1.0, 800.0, 1599.0], dtype=np.float32)
+    normalized_xy: Float32[ndarray, "4 2"] = np.stack([2.0 * (columns + 0.5) / 1600.0 - 1.0] * 2, axis=1).astype(np.float32)
+
+    pixels_xy: KeypointsXY = normalized_to_pixels(normalized_xy, 1600, 1600)
+
+    np.testing.assert_allclose(pixels_xy, np.stack([columns, columns], axis=1), atol=1e-3)
     assert pixels_xy.dtype == np.float32
     assert pixels_xy.flags.c_contiguous
 
@@ -224,11 +238,12 @@ def test_storing_a_batch_writes_exactly_the_gated_points_per_image(
     np.testing.assert_array_equal(
         first,
         np.asarray(
-            [[0.0, 0.0], [tasks[0].image_width - 1.0, tasks[0].image_height - 1.0]],
+            # Normalised -1 / +1 are the image's outer edges, half a pixel past the corner pixel centres (align_corners=False).
+            [[-0.5, -0.5], [tasks[0].image_width - 0.5, tasks[0].image_height - 0.5]],
             dtype=np.float32,
         ),
     )
-    np.testing.assert_array_equal(second[0], np.asarray([tasks[1].image_width - 1.0, tasks[1].image_height - 1.0], dtype=np.float32))
+    np.testing.assert_array_equal(second[0], np.asarray([tasks[1].image_width - 0.5, tasks[1].image_height - 0.5], dtype=np.float32))
 
     stored: dict[int, Descriptors] = read_descriptors_from_database(database_path, [task.image_id for task in tasks])
     first_descriptors: Descriptors = stored[tasks[0].image_id]
