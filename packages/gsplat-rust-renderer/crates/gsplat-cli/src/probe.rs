@@ -215,6 +215,10 @@ impl FrameProbe {
             !self.require_motion || minimum_camera_delta > 1e-5,
             "camera held during a moving-view measurement"
         );
+        anyhow::ensure!(
+            self.splats_seen,
+            "no splat frame was encoded: the measured frames drew only the UI"
+        );
         // With frames in flight a frame waits for an older submission, so its ms is the steady-state frame
         // interval, not one frame's latency.
         let completion = if self.frames_in_flight == 0 {
