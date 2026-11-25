@@ -291,6 +291,13 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 **and** a `.rrd` at once, set `rr_config.live` together with `--rr-config.save`:
 `RerunTyroConfig` then fans out to both via `set_sinks` (the `live`/`port` fields).
 
+**Optimize every `.rrd` a person opens whole** (a merged pipeline result, a recording
+copied to a laptop, a page download): end the step that writes it with
+`rerun rrd optimize --output <out.rrd> <in.rrd>`. Per-frame logging leaves many tiny
+chunks, and the 0.42 viewer walks the whole chunk list on every frame, so frame rate
+falls with the chunk count, not the data size. Casa Loma 007: 117 k -> 13.5 k chunks,
+7.6-15 -> 45-56 fps on an M5 on every tab. Check the count with `rerun rrd stats`.
+
 ### Rerun 0.42 names: old -> new
 
 Do not guess Rerun names from memory. Old spellings fail or emit a `DeprecationWarning`;
