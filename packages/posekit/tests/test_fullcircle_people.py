@@ -44,3 +44,32 @@ def test_only_instances_a_bystander_box_confirms_are_kept() -> None:
     keep: np.ndarray = match_instances(candidates, instances, min_iou=0.3)
     assert keep.tolist() == [True, False, False]
     assert match_instances(np.zeros((0, 4), dtype=np.float32), instances, min_iou=0.3).tolist() == [False, False, False]
+
+
+def test_faces_render_the_source_pixels_each_face_looks_at() -> None:
+    from posekit.models.fullcircle import sample_faces
+    from posekit.ops.sphere import EquirectCamera, PinholeCamera, pixel_grid
+
+    # Panorama dark left of straight ahead (x < 0), bright right of it.
+    width, height = 96, 48
+    source: EquirectCamera = EquirectCamera(width, height)
+    rays, _ = source.unproject(pixel_grid(height, width, torch.device("cpu")))
+    image: torch.Tensor = torch.where(rays[:, 0] > 0, 200.0, 0.0).float().reshape(1, height, width).expand(3, -1, -1)
+    face_rays, _ = PinholeCamera(32).unproject(pixel_grid(32, 32, torch.device("cpu")))
+    behind: torch.Tensor = torch.tensor([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]])
+    faces: torch.Tensor = sample_faces(
+        [image], face_rays.float(), torch.stack([torch.eye(3), behind]), 32, [source], torch.eye(3)[None], [(height, width)]
+    )
+    assert faces.shape == (2, 32, 32, 3) and faces.dtype == torch.uint8
+    # Ahead: left half dark, right half bright; behind, the face's right is the rig's left.
+    assert int(faces[0, :, :12].max()) == 0 and int(faces[0, :, 20:].min()) == 200
+    assert int(faces[1, :, :12].min()) == 200 and int(faces[1, :, 20:].max()) == 0
+
+
+def test_mask_radius_is_the_dilation_in_mask_cells() -> None:
+    from posekit.models.fullcircle import SphereSource
+    from posekit.ops.sphere import EquirectCamera
+
+    source: SphereSource = SphereSource(EquirectCamera(1920, 960), np.eye(3), (960, 1920), (240, 480))
+    assert [source.mask_radius(px) for px in (0.0, 8.0, 12.0, 13.0)] == [0, 2, 3, 4]
+

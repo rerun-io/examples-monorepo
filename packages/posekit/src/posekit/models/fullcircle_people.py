@@ -17,21 +17,19 @@ Mission office X5 clip most framesets keep no candidate, so SAM 3 runs on few fa
 
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-from einops import rearrange
-from jaxtyping import Bool, Float, Float32, Float64, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
 
 from posekit.models.base import SegmentationPrompts
 from posekit.models.fullcircle import FACE_ROTATIONS, FaceBoxes, FullCircleMasker, OperatorMasks, disk_dilate
 from posekit.models.sam3_segmenter import Sam3Segmenter, Sam3SegmenterConfig
-from posekit.ops.sphere import PinholeCamera, SphereView, pixel_grid, sample_sphere, view_from_rays
+from posekit.ops.sphere import PinholeCamera, pixel_grid
 from posekit.predictions import BoxDetections
 
 COVER_SAMPLES: int = 16
@@ -123,7 +121,7 @@ class FacePeople:
         self.face_rays: Float32[Tensor, "n 3"] = face_rays.float()
         self.sam3: Sam3Segmenter = config.sam3.setup()
         self.sam3.prepare(config.prompt)
-        self.mask_radius: list[int] = [math.ceil(config.dilate_px / s.mask_scale[0] - 1e-9) for s in masker.sources]
+        self.mask_radius: list[int] = [source.mask_radius(config.dilate_px) for source in masker.sources]
         steps: Float32[Tensor, " q"] = (torch.arange(COVER_SAMPLES, device=device, dtype=torch.float32) + 0.5) / COVER_SAMPLES
         self.cover_grid: Float32[Tensor, "q2 2"] = torch.stack(torch.meshgrid(steps, steps, indexing="xy"), dim=-1).reshape(-1, 2)
         self.sam3_faces: int = 0
@@ -170,14 +168,7 @@ class FacePeople:
                 candidate_faces,
             )
         rig_R_faces: Float32[Tensor, "k 3 3"] = torch.from_numpy(rig_R_level @ FACE_ROTATIONS[faces]).to(device, torch.float32)
-        rays: Float32[Tensor, "k n 3"] = self.face_rays @ rig_R_faces.transpose(1, 2)
-        view: SphereView = view_from_rays(
-            rays.reshape(-1, 3), len(faces) * size, size, self.masker.cameras, self.masker.rig_R_cams, self.masker.full_hw
-        )
-        stacked: Float[Tensor, "3 ks s"] = sample_sphere(self.masker.face_images(frames), view)
-        face_images: UInt8[Tensor, "k s s 3"] = rearrange(
-            stacked.round().clamp(0, 255).to(torch.uint8), "c (k h) w -> k h w c", k=len(faces)
-        ).contiguous()
+        face_images: UInt8[Tensor, "k s s 3"] = self.masker.render_faces(frames, rig_R_faces, self.face_rays, size)
         detections: BoxDetections = self.sam3(
             face_images, SegmentationPrompts(frame_indices=torch.arange(len(faces), device=device), text=self.config.prompt)
         )

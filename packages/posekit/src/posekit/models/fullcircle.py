@@ -111,6 +111,10 @@ class SphereSource:
         """Image pixels per mask cell ``(sx, sy)``: the grid the masks are sampled on and the scale written with them."""
         return (self.image_hw[1] / self.mask_hw[1], self.image_hw[0] / self.mask_hw[0])
 
+    def mask_radius(self, dilate_px: float) -> int:
+        """A dilation radius of ``dilate_px`` source-image pixels in mask cells (across), rounded up."""
+        return math.ceil(dilate_px / self.mask_scale[0] - 1e-9)
+
 
 @dataclass(frozen=True, slots=True)
 class FullCircleConfig:
@@ -325,6 +329,25 @@ def disk_dilate(mask: Bool[Tensor, "h w"], radius: int) -> Bool[Tensor, "h w"]:
     return dilate_by_footprint(mask[None], disk)[0]
 
 
+def sample_faces(
+    images: list[Float[Tensor, "3 hw ww"]],
+    face_rays: Float32[Tensor, "n 3"],
+    rig_R_faces: Float32[Tensor, "k 3 3"],
+    size: int,
+    cameras: list[SphereCamera],
+    rig_R_cams: Float32[Tensor, "n_src 3 3"],
+    full_hw: list[tuple[int, int]],
+) -> UInt8[Tensor, "k s s 3"]:
+    """Render ``k`` square faces of ``size`` pixels (rays ``face_rays`` turned by each ``rig_R_face``) from the sources.
+
+    The faces are stacked into one ``k size x size`` view, so one sampling plan serves them all.
+    """
+    rays: Float32[Tensor, "k n 3"] = face_rays @ rig_R_faces.transpose(1, 2)
+    view: SphereView = view_from_rays(rays.reshape(-1, 3), len(rig_R_faces) * size, size, cameras, rig_R_cams, full_hw)
+    stacked: UInt8[Tensor, "3 ks s"] = sample_sphere(images, view).round().clamp(0, 255).to(torch.uint8)
+    return rearrange(stacked, "c (k h) w -> k h w c", k=len(rig_R_faces)).contiguous()
+
+
 class FullCircleMasker:
     """FullCircle's operator masking over a set of co-centred source cameras (two fisheye lenses or one panorama)."""
 
@@ -360,12 +383,11 @@ class FullCircleMasker:
         # Each mask pixel's ray in the rig frame (static), and the dilation radius at mask resolution (across).
         self.mask_rays: list[Float32[Tensor, "n 3"]] = []
         self.mask_ray_valid: list[Bool[Tensor, " n"]] = []
-        self.mask_radius: list[int] = []
+        self.mask_radius: list[int] = [source.mask_radius(config.dilate_px) for source in sources]
         for index, source in enumerate(sources):
             rays, valid = source.camera.unproject(pixel_grid(source.mask_hw[0], source.mask_hw[1], device, scale=source.mask_scale))
             self.mask_rays.append((rays @ rig_R_cams[index].T).float())
             self.mask_ray_valid.append(valid)
-            self.mask_radius.append(math.ceil(config.dilate_px / source.mask_scale[0] - 1e-9))
 
         self.yolox: YoloxDetector | None = config.yolox.setup() if config.detector == "yolox" else None
         self.sam3: Sam3Segmenter | None = config.sam3.setup() if config.detector == "sam3" else None
@@ -384,9 +406,12 @@ class FullCircleMasker:
             images.append(F.avg_pool2d(chw[None], factor)[0] if factor > 1 else chw)
         return images
 
-    def face_images(self, frames: list[UInt8[Tensor, "h w 3"]]) -> list[Float[Tensor, "3 hw ww"]]:
-        """The source frames the faces are sampled from (``face_work_size``), float and channels first."""
-        return self._work_images(frames, self.face_downscale)
+    def render_faces(
+        self, frames: list[UInt8[Tensor, "h w 3"]], rig_R_faces: Float32[Tensor, "k 3 3"], face_rays: Float32[Tensor, "n 3"], size: int
+    ) -> UInt8[Tensor, "k s s 3"]:
+        """Faces of ``size`` pixels along ``rig_R_faces`` from one frameset, sampled at ``face_work_size`` (:func:`sample_faces`)."""
+        images: list[Float[Tensor, "3 hw ww"]] = self._work_images(frames, self.face_downscale)
+        return sample_faces(images, face_rays, rig_R_faces, size, self.cameras, self.rig_R_cams, self.full_hw)
 
     def _detect_people(self, images: UInt8[Tensor, "b s s 3"]) -> BoxDetections:
         if self.yolox is not None:
@@ -414,11 +439,7 @@ class FullCircleMasker:
         rig_R_faces: Float64[Tensor, "b 6 3 3"] = torch.from_numpy(np.stack([level @ FACE_ROTATIONS for level in rig_R_levels])).to(self.device)
         faces: UInt8[Tensor, "b6 s s 3"] = torch.empty((6 * len(framesets), size, size, 3), dtype=torch.uint8, device=self.device)
         for index, frames in enumerate(framesets):
-            # The six faces stacked into one 6s x s view: one sampling plan per frameset.
-            rays: Float32[Tensor, "6 n 3"] = self.face_rays @ rig_R_faces[index].float().transpose(1, 2)
-            view: SphereView = view_from_rays(rays.reshape(-1, 3), 6 * size, size, self.cameras, self.rig_R_cams, self.full_hw)
-            stacked: UInt8[Tensor, "3 f s"] = sample_sphere(self.face_images(frames), view).round().clamp(0, 255).to(torch.uint8)
-            faces[6 * index : 6 * index + 6] = rearrange(stacked, "c (f h) w -> f h w c", f=6)
+            faces[6 * index : 6 * index + 6] = self.render_faces(frames, rig_R_faces[index].float(), self.face_rays, size)
         start = self._tick("faces", start)
         detections: BoxDetections = self._detect_people(faces)
         boxes: Float32[Tensor, "n 4"] = detections.xyxy.float()
@@ -534,6 +555,7 @@ __all__ = (
     "OperatorMasks",
     "SphereSource",
     "disk_dilate",
+    "sample_faces",
     "fill_nearest",
     "level_rotation",
     "operator_directions",
