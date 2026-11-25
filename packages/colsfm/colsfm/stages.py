@@ -14,13 +14,13 @@ does not state itself.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pycolmap
-from jaxtyping import Int
+from jaxtyping import Int, UInt32
 from numpy import ndarray
 
 from colsfm.config import CusfmConfig, KeyframeSelectionConfig, PoseGraphConfig, PriorOverlapConfig, read_config_directory
@@ -57,6 +57,7 @@ from colsfm.loop_closure import (
     plan_loop_search,
     verify_loop_plan,
 )
+from colsfm.loop_mapper_check import pose_checked_inliers
 from colsfm.mapping import MappingOptions, MappingResult, run_mapping
 from colsfm.matching import (
     MatchingOptions,
@@ -340,6 +341,9 @@ class LoopClosureStageResult:
     a database with no descriptors."""
     excluded_pairs: tuple[ImagePair, ...] = ()
     """Pairs this stage matched that the mapper should leave out (`loop_pairs_in_mapper="accepted"`); empty otherwise."""
+    inlier_overrides: Mapping[ImagePair, UInt32[ndarray, "n_inliers 2"]] = field(default_factory=dict)
+    """Per pair this stage matched, the inliers the mapper keeps when the pose check removed some
+    (`loop_pairs_in_mapper="pose-checked"`); empty otherwise."""
 
 
 def _warn_about_closed_loop_gates(pose_graph_config: PoseGraphConfig) -> None:
@@ -378,7 +382,7 @@ def run_loop_closure_stage(
     *,
     enabled: bool,
     frames: FrameSource | None = None,
-    loop_pairs_in_mapper: LoopPairsInMapper = "shortlisted",
+    loop_pairs_in_mapper: LoopPairsInMapper = "pose-checked",
 ) -> LoopClosureStageResult:
     """Retrieve, match and verify loop candidates.
 
@@ -394,8 +398,9 @@ def run_loop_closure_stage(
         matching_options: Settings for the batch match over the missing pairs.
         enabled: Whether to run at all.
         frames: The run's frame source, for a matcher that reads pixels; one is opened per call when None.
-        loop_pairs_in_mapper: `PipelineOptions.loop_pairs_in_mapper`: with `"accepted"`, the image pairs this stage
-            matched only to measure a candidate it then rejected are returned as `excluded_pairs`, for the mapper to leave out.
+        loop_pairs_in_mapper: `PipelineOptions.loop_pairs_in_mapper`: with `"pose-checked"`, the inliers of the pairs
+            this stage matched that disagree with their rig pair's pose are returned as `inlier_overrides`; with
+            `"accepted"`, the pairs matched only to measure a rejected candidate are returned as `excluded_pairs`.
 
     Returns:
         The loop edges and how many extra pairs were matched to find them.
@@ -448,6 +453,16 @@ def run_loop_closure_stage(
             return np.asarray(database.read_matches(image_id_a, image_id_b), dtype=np.int64)
 
         result: LoopClosureResult = verify_loop_plan(plan, read_matches)
+        overrides: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = {}
+        if loop_pairs_in_mapper == "pose-checked":
+
+            def read_inliers(image_id_a: int, image_id_b: int) -> UInt32[ndarray, "n_inliers 2"]:
+                """One pair's stored two-view inliers, columns in `(image_id_a, image_id_b)` order; none without a row."""
+                if not database.exists_two_view_geometry(image_id_a, image_id_b):
+                    return np.zeros((0, 2), dtype=np.uint32)
+                return np.ascontiguousarray(database.read_two_view_geometry(image_id_a, image_id_b).inlier_matches, dtype=np.uint32)
+
+            overrides = pose_checked_inliers(plan, result.candidates, missing_pairs, read_inliers)
     edges: list[PoseGraphEdge] = list(result.edges)
     # The mapper reads every verified two-view geometry in the database, so a pair matched here only to measure a
     # rejected candidate would feed its cross-revisit tracks to the triangulator. Under "accepted" those pairs are left
@@ -463,9 +478,12 @@ def run_loop_closure_stage(
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified, {result.diagnostics.counters.not_best} not the best of their rig frame, "
         f"{result.diagnostics.counters.below_good_loop} best below {plan.config.good_loop_threshold} inliers, over {len(plan.image_pairs)} image pairs; "
-        f"{len(excluded)} of the {len(missing_pairs)} pairs matched here left out of the mapper ({loop_pairs_in_mapper})"
+        f"{len(excluded)} of the {len(missing_pairs)} pairs matched here left out of the mapper, "
+        f"{len(overrides)} trimmed by the pose check ({loop_pairs_in_mapper})"
     )
-    return LoopClosureStageResult(edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, excluded_pairs=excluded)
+    return LoopClosureStageResult(
+        edges=edges, num_pairs_matched=len(missing_pairs), diagnostics=result.diagnostics, excluded_pairs=excluded, inlier_overrides=overrides
+    )
 
 
 @dataclass(frozen=True, slots=True)

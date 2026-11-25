@@ -12,11 +12,15 @@ which want the round loop that follows it.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+import copy
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pycolmap
+from jaxtyping import UInt32
+from numpy import ndarray
 
 
 @dataclass(slots=True)
@@ -46,6 +50,7 @@ def load_correspondences(
     min_num_matches: int = 0,
     *,
     excluded_pairs: Collection[tuple[int, int]] = (),
+    inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] | None = None,
 ) -> Correspondences:
     """Load keypoints and verified two-view geometries into the reconstruction.
 
@@ -70,6 +75,8 @@ def load_correspondences(
             `min_num_matches_per_pair`.
         excluded_pairs: Pairs `(min id, max id)` left out of the graph although the database holds their geometry
             (`MappingOptions.excluded_pairs`).
+        inlier_overrides: Per pair `(min id, max id)`, the subset of its stored inlier matches the graph carries instead
+            (`MappingOptions.inlier_overrides`); a pair left below `min_num_matches` leaves the graph.
 
     Returns:
         The graph, the observation manager and the cache that owns them.
@@ -112,7 +119,9 @@ def load_correspondences(
     if num_loaded == 0:
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 
-    graph: pycolmap.CorrespondenceGraph = graph_without_pairs(database_cache, geometry_rows, excluded_pairs)
+    graph: pycolmap.CorrespondenceGraph = graph_without_pairs(
+        database_cache, geometry_rows, excluded_pairs, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches
+    )
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
     return Correspondences(
         database_cache=database_cache,
@@ -127,6 +136,9 @@ def graph_without_pairs(
     database_cache: pycolmap.DatabaseCache,
     geometry_rows: tuple[Sequence[int], Sequence[pycolmap.TwoViewGeometry]],
     excluded_pairs: Collection[tuple[int, int]],
+    *,
+    inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] | None = None,
+    min_num_matches: int = 0,
 ) -> pycolmap.CorrespondenceGraph:
     """The cache's correspondence graph without the given image pairs, rebuilt from the database's own rows.
 
@@ -144,6 +156,9 @@ def graph_without_pairs(
         geometry_rows: `Database.read_two_view_geometries()` of the database the cache was loaded from: pair ids and
             geometries in row order.
         excluded_pairs: Pairs `(min id, max id)` to leave out.
+        inlier_overrides: Per pair `(min id, max id)`, the inlier matches (columns in that id order) to add instead of the
+            stored ones; a match-level filter without database writes.
+        min_num_matches: The cache's own floor, applied again to an overridden pair.
 
     Returns:
         A finalized graph over the cache's images.
@@ -159,8 +174,17 @@ def graph_without_pairs(
         if int(pair_id) not in in_cache:
             continue
         image_id1, image_id2 = pycolmap.pair_id_to_image_pair(int(pair_id))
-        if (min(image_id1, image_id2), max(image_id1, image_id2)) in excluded:
+        pair: tuple[int, int] = (min(image_id1, image_id2), max(image_id1, image_id2))
+        if pair in excluded:
             continue
+        override: UInt32[ndarray, "n_inliers 2"] | None = None if inlier_overrides is None else inlier_overrides.get(pair)
+        if override is not None:
+            if len(override) == 0 or len(override) < min_num_matches:
+                continue
+            geometry = copy.copy(geometry)
+            # The override is written low id first; a row stored the other way round keeps its own column order.
+            columns: UInt32[ndarray, "n_inliers 2"] = override if image_id1 < image_id2 else override[:, ::-1]
+            geometry.inlier_matches = np.ascontiguousarray(columns, dtype=np.uint32)
         graph.add_two_view_geometry(image_id1, image_id2, geometry)
     graph.finalize()
     return graph

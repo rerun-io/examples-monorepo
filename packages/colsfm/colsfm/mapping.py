@@ -158,12 +158,15 @@ inside the pycolmap solve by construction); and `refine_focal_length` must equal
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 import pycolmap
+from jaxtyping import UInt32
+from numpy import ndarray
 
 from colsfm.ba_backend import (
     BUNDLE_ADJUSTMENT_BACKEND,
@@ -296,6 +299,9 @@ class MappingOptions:
     """Image pairs `(min id, max id)` the correspondence graph leaves out although the database holds their verified
     geometry: the loop stage's rejected candidates under `loop_pairs_in_mapper="accepted"`. Left out when the graph is
     built (`colsfm.correspondences.load_correspondences`), so no stage deletes database rows."""
+    inlier_overrides: Mapping[tuple[int, int], UInt32[ndarray, "n_inliers 2"]] = MappingProxyType({})
+    """Per image pair `(min id, max id)`, the subset of its stored inliers the correspondence graph carries: the loop
+    stage's pose check under `loop_pairs_in_mapper="pose-checked"` (`colsfm.loop_mapper_check`). No row is rewritten."""
     round_callback: RoundCallback | None = None
     """Called once at the end of every outer round, after the round's filter and solve.
 
@@ -777,7 +783,11 @@ def run_mapping(
 
     correspondence_started: float = time.perf_counter()
     correspondences: Correspondences = load_correspondences(
-        reconstruction, database_path, mapping_config.min_num_matches_per_pair, excluded_pairs=resolved_options.excluded_pairs
+        reconstruction,
+        database_path,
+        mapping_config.min_num_matches_per_pair,
+        excluded_pairs=resolved_options.excluded_pairs,
+        inlier_overrides=resolved_options.inlier_overrides,
     )
     correspondence_seconds: float = time.perf_counter() - correspondence_started
 

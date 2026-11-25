@@ -88,3 +88,23 @@ def test_excluded_pairs_leave_the_graph_and_stay_in_the_database(synthetic_rig: 
     assert _pairs(loaded.graph) == {pair: n for pair, n in full.items() if pair != excluded}
     with pycolmap.Database.open(database) as handle:
         assert handle.exists_two_view_geometry(*excluded), "nothing is deleted: the database keeps the pair"
+
+
+def test_an_inlier_override_trims_one_pair_and_stays_out_of_the_database(synthetic_rig: SyntheticRig, database: Path) -> None:
+    """The loop stage's pose check keeps a subset of a pair's inliers; the graph carries that subset, the database all of them."""
+    full: dict[tuple[int, int], int] = _pairs(load_correspondences(build_reconstruction(synthetic_rig.frames_meta).reconstruction, database).graph)
+    trimmed, emptied = sorted(full)[0], sorted(full)[2]
+    with pycolmap.Database.open(database) as handle:
+        rows: np.ndarray = np.asarray(handle.read_two_view_geometry(*trimmed).inlier_matches)
+    kept: np.ndarray = rows[: len(rows) // 2]
+    loaded: Correspondences = load_correspondences(
+        build_reconstruction(synthetic_rig.frames_meta).reconstruction,
+        database,
+        min_num_matches=15,
+        inlier_overrides={trimmed: kept, emptied: rows[:3]},
+    )
+    expected: dict[tuple[int, int], int] = {pair: n for pair, n in full.items() if pair != emptied}
+    expected[trimmed] = len(kept)
+    assert _pairs(loaded.graph) == expected, "a pair the override leaves below min_num_matches leaves the graph"
+    with pycolmap.Database.open(database) as handle:
+        assert len(handle.read_two_view_geometry(*trimmed).inlier_matches) == len(rows), "nothing is written back"

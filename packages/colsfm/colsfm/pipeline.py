@@ -403,8 +403,11 @@ def _run_stages(
         pose_graph: PoseGraphStageResult = run_pose_graph_stage(staged, selection.selected, config, loops.edges)
     watcher.on_pose_graph(pose_graph)
 
-    # The loop stage's rejected pairs stay in the database; under "accepted" the mapper leaves them out of its graph.
-    mapping_options: MappingOptions = replace(resolved.mapping, excluded_pairs=frozenset(loops.excluded_pairs))
+    # The loop stage writes no row back: under "pose-checked" the mapper keeps only the pose-consistent inliers of its pairs,
+    # under "accepted" it leaves the rejected candidates' pairs out of its graph.
+    mapping_options: MappingOptions = replace(
+        resolved.mapping, excluded_pairs=frozenset(loops.excluded_pairs), inlier_overrides=loops.inlier_overrides
+    )
 
     # ── 7. triangulation and bundle adjustment ───────────────────────────────────────
     with timed_stage(ledger, "reconstruction"), watcher.stage_scope("reconstruction"):
