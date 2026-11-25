@@ -30,6 +30,7 @@ from simplecv.catalog_video_codec import CatalogCodecName
 from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import log_pinhole
+from simplecv.rerun_walk_path import send_trail
 from simplecv.rig import CameraKind, PeerSensorKind
 
 from dataforge import schema
@@ -709,7 +710,8 @@ def log_trail_segments(
     color: tuple[int, int, int] = TRAIL_COLOR,
     radius_ui_points: float = TRAIL_RADIUS_UI_POINTS,
 ) -> None:
-    """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it.
+    """Send a motion trail columnar: one two-point ``LineStrips3D`` per pose, the step that reached it
+    (``simplecv.rerun_walk_path.send_trail``, the trail every run writer shares: slam-rs, colsfm, dataforge).
 
     A trail is what a blueprint shows through a cursor-relative window, so it has
     to be **per pose** rather than one growing strip — but a per-pose
@@ -738,20 +740,7 @@ def log_trail_segments(
         radius_ui_points: Stroke width in ui points; Rerun carries it as a
             negative radius, which is what keeps it screen-space.
     """
-    rr.log(
-        entity_path,
-        rr.LineStrips3D.from_fields(colors=color, radii=rr.Radius.ui_points(radius_ui_points)),
-        static=True,
-        recording=recording,
-    )
-    previous: Int64[ndarray, "n_poses"] = np.maximum(np.arange(times_ns.size, dtype=np.int64) - 1, 0)
-    segments_xyz: Float64[ndarray, "n_poses 2 3"] = np.stack([translations_xyz[previous], translations_xyz], axis=1)
-    rr.send_columns(
-        entity_path,
-        indexes=[time_column(times_ns)],
-        columns=rr.LineStrips3D.columns(strips=list(segments_xyz)),
-        recording=recording,
-    )
+    send_trail(entity_path, times_ns, translations_xyz, color, timeline=schema.TIMELINE, radius_ui=radius_ui_points, recording=recording)
 
 
 @dataclass(frozen=True, slots=True)
