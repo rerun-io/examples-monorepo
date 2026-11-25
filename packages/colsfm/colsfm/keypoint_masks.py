@@ -382,26 +382,29 @@ def drop_masked_keypoints(database_path: Path, masks: MaskSource) -> None:
         masks: The masks to apply.
     """
     angle_masks, content = (masks.angle_masks, masks.masks) if isinstance(masks, ValidAngleMasks) else ({}, masks)
-    # pycolmap updates keypoints but cannot replace a descriptor row (its write is an INSERT), so both rows are
-    # rewritten through sqlite once the pycolmap handle is closed; `cols` and the descriptor `type` stay as stored.
-    rewrites: list[tuple[int, Float32[ndarray, "kept columns"], UInt8[ndarray, "kept bytes"]]] = []
     with pycolmap.Database.open(database_path) as database:
-        cameras: dict[int, pycolmap.Camera] = {int(camera.camera_id): camera for camera in database.read_all_cameras()}
-        for image in database.read_all_images():
-            camera: pycolmap.Camera = cameras[int(image.camera_id)]
-            content_mask: KeypointMask | None = None if content is None else content.mask(image.name, int(camera.width), int(camera.height))
-            angle_mask: KeypointMask | None = angle_masks.get(image.name)
-            if (content_mask is None and angle_mask is None) or not database.exists_keypoints(image.image_id):
+        sizes: dict[int, tuple[int, int]] = {int(camera.camera_id): (int(camera.width), int(camera.height)) for camera in database.read_all_cameras()}
+        images: list[tuple[int, str, tuple[int, int]]] = [(int(image.image_id), image.name, sizes[int(image.camera_id)]) for image in database.read_all_images()]
+    # pycolmap updates keypoints but cannot replace a descriptor row (its write is an INSERT), so both rows are read and
+    # rewritten through sqlite, one image at a time on one transaction; `cols` and the descriptor `type` stay as stored.
+    with contextlib.closing(sqlite3.connect(database_path)) as connection, connection:
+        for image_id, name, (width, height) in images:
+            content_mask: KeypointMask | None = None if content is None else content.mask(name, width, height)
+            angle_mask: KeypointMask | None = angle_masks.get(name)
+            if content_mask is None and angle_mask is None:
                 continue
-            keypoints: Float32[ndarray, "n columns"] = database.read_keypoints(image.image_id)
+            stored: tuple[int, int, bytes] | None = connection.execute("SELECT rows, cols, data FROM keypoints WHERE image_id = ?", (image_id,)).fetchone()
+            if stored is None or stored[0] == 0:
+                continue
+            keypoints: Float32[ndarray, "n columns"] = np.frombuffer(stored[2], dtype=np.float32).reshape(stored[0], stored[1])
             kept: Bool[ndarray, " n"] = np.ones(len(keypoints), dtype=bool)
             if content_mask is not None:
                 kept &= keypoints_outside_mask(keypoints[:, :2], content_mask, pixel_centre=0.5)
             if angle_mask is not None:
                 kept &= keypoints_outside_mask(keypoints[:, :2], angle_mask)
-            if not kept.all():
-                rewrites.append((int(image.image_id), keypoints[kept], database.read_descriptors(image.image_id).data[kept]))
-    with contextlib.closing(sqlite3.connect(database_path)) as connection, connection:
-        for image_id, keypoints, descriptors in rewrites:
-            connection.execute("UPDATE keypoints SET rows = ?, data = ? WHERE image_id = ?", (len(keypoints), keypoints.tobytes(), image_id))
+            if kept.all():
+                continue
+            num_descriptors, blob = connection.execute("SELECT rows, data FROM descriptors WHERE image_id = ?", (image_id,)).fetchone()
+            descriptors: UInt8[ndarray, "kept bytes"] = np.frombuffer(blob, dtype=np.uint8).reshape(num_descriptors, -1)[kept]
+            connection.execute("UPDATE keypoints SET rows = ?, data = ? WHERE image_id = ?", (int(kept.sum()), keypoints[kept].tobytes(), image_id))
             connection.execute("UPDATE descriptors SET rows = ?, data = ? WHERE image_id = ?", (len(descriptors), descriptors.tobytes(), image_id))
