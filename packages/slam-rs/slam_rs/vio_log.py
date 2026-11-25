@@ -74,8 +74,6 @@ VIO_STATS_ENTITY: str = "/stats/vio"
 
 FINAL_COLOR: tuple[int, int, int] = (255, 120, 40)
 """The final run: orange, over the raw run's green."""
-ESTIMATE_COLOR: tuple[int, int, int] = (70, 220, 130)
-"""The raw VIO run: green."""
 GT_COLOR: tuple[int, int, int] = (235, 235, 235)
 """Ground truth: near-white, the reference every error is measured against."""
 KEYFRAME_COLOR: tuple[int, int, int, int] = (90, 200, 255, 255)
