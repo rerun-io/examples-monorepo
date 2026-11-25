@@ -21,7 +21,7 @@ path ahead of it. The raw slam-rs run and colsfm carry their walk gradient (gree
 start and end dots in their data; in the Comparison tab slam-rs is one flat grey (``COMPARISON_SLAM_COLOR``) so the two
 runs stay apart. The colsfm cloud by first view grows along the walk: its 30 s blocks (``points_growing/blocks/NNNN``,
 sized by the view's defaults) show as they are and its rows per rig frame (``points_growing/recent``) over the last block
-(``GROWING_BLOCK_S``). A range query from the start would change on every frame of playback, and the viewer processes all
+(``simplecv.rerun_growing_points.GROWING_BLOCK_S``, the writer's block span). A range query from the start would change on every frame of playback, and the viewer processes all
 of its rows again each time (clip 007: 3,096 rows, 2.32 M points, in each view).
 The overviews turn slowly about the walk (``OVERVIEW_SPIN_RAD_S``).
 
@@ -44,6 +44,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.encodings import EntityPathLike
+from simplecv.rerun_growing_points import GROWING_BLOCK_S
 
 from dataforge import blueprints, schema
 from dataforge.datasets import insta360_cube as cube
@@ -101,10 +102,6 @@ MARGINALIZED_SLOTS: int = 4
 """The same for the frames a marginalization removed (``marginalized/NN``)."""
 LENSES: tuple[str, str] = ("cam_00", "cam_01")
 """The two lens cameras, as slam-rs names them under its rig and under each window frame."""
-GROWING_BLOCK_S: float = 30.0
-"""Window of colsfm's ``points_growing/recent`` rows: the span of one ``points_growing/blocks/NNNN`` block
-(``colsfm.rerun_layer.GROWING_BLOCK_S``; dataforge does not import colsfm, a test pins both). The blocks show as they are
-(latest-at), the recent rows cover the block the cursor is in."""
 TRAIL_S: float = 8.0
 """How far back of the cursor a path logged a segment a pose is drawn, in seconds: about 4 to 5 m of walk."""
 OVERVIEW_SPIN_RAD_S: float = 2.0 * np.pi / 75.0

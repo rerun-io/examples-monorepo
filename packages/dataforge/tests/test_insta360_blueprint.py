@@ -8,13 +8,13 @@ import rerun.blueprint as rrb
 from conftest import content_rules  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
+from simplecv.rerun_growing_points import GROWING_BLOCK_S
 from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, TRAJECTORY
 
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
     COMPARISON_SLAM_COLOR,
     FACE_CAMS,
-    GROWING_BLOCK_S,
     OVERVIEW_SPIN_RAD_S,
     PANO_ENTITY,
     RIG,
@@ -130,7 +130,7 @@ def test_paths_are_trails_and_the_colsfm_cloud_accumulates_through_cursor_window
                 assert blueprints.cursor_window(TRAIL_S) in override(view, schema.trail_path(run)), (name, run)
                 assert not any(isinstance(item, rrb.VisibleTimeRanges) for item in override(view, schema.trajectory_path(run))), (name, run)
     for view in layout["colsfm"][:2]:
-        # colsfm.rerun_layer.log_points_by_first_view: finished blocks by latest-at (no window, so the viewer keeps them
+        # simplecv.rerun_growing_points.log_points_by_first_view: finished blocks by latest-at (no window, so the viewer keeps them
         # processed through playback), the block the cursor is in from the recent rows.
         assert f"{COLSFM}/points_growing" not in (view.visualizer_overrides or {}), "the blocks show as they are"
         assert blueprints.cursor_window(GROWING_BLOCK_S) in override(view, f"{COLSFM}/points_growing/recent"), "the block the cursor is in"
@@ -248,8 +248,6 @@ def test_the_run_sources_name_the_entities_their_producers_write() -> None:
     assert schema.follow_path(schema.SLAM_RS_VIO_SOURCE) == "/world/runs/slam_rs_vio/follow"
     # colsfm.rerun_layer.write_run_layer (colsfm does not depend on dataforge).
     assert f"{COLSFM}/points_growing" == "/world/runs/colsfm/points_growing"
-    # colsfm.rerun_layer.GROWING_BLOCK_S: the recent rows' window must cover the block the cursor is in.
-    assert GROWING_BLOCK_S == 30.0
 
 
 def test_with_the_viewing_faces_the_colsfm_views_play_them_on_the_viewing_rig() -> None:

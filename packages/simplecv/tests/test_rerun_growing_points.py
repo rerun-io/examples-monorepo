@@ -1,4 +1,4 @@
-"""The colsfm layer's growing cloud: one entity per block of `GROWING_BLOCK_S` under `points_growing/blocks` (one row: its
+"""A growing cloud (colsfm's `points_growing`): one entity per block of `GROWING_BLOCK_S` under `points_growing/blocks` (one row: its
 points, at the block's last first view) and `points_growing/recent`, one row per rig frame (each point at its first
 observing rig frame).
 
@@ -17,7 +17,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.chunk import RrdReader
 
-from colsfm.rerun_layer import GROWING_BLOCK_S, log_points_by_first_view
+from simplecv.rerun_growing_points import log_points_by_first_view
 
 ENTITY: str = "/world/runs/colsfm/points_growing"
 RECENT: str = f"{ENTITY}/recent"
@@ -84,7 +84,3 @@ def test_a_cloud_without_points_logs_nothing(tmp_path: Path) -> None:
     rows, static = logged_rows(write(tmp_path, np.zeros((0, 3)), np.zeros(0, dtype=np.int64), block_ns=30))
     assert not rows and not {entity for entity in static if entity.startswith(ENTITY)}
 
-
-def test_the_block_is_thirty_seconds() -> None:
-    """dataforge's Insta360 layout draws `points_growing/recent` over this window (it pins the same number)."""
-    assert GROWING_BLOCK_S == 30.0
