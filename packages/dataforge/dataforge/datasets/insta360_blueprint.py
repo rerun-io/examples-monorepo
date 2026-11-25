@@ -383,11 +383,17 @@ def lens_pane(cam: int) -> rrb.Spatial2DView:
 
 def face_pane(cam: int, name: str, video: str) -> rrb.Spatial2DView:
     """One cube face, colsfm's input: the face ``video`` (the viewing or the analysis stream) and the people mask that
-    keeps keypoints off the operator."""
+    keeps keypoints off the operator.
+
+    The masks are on the analysis stamps only: over the viewing stream a mask shows on its own stamp alone (an exact
+    cursor range), as latest-at would hold it over the viewing frames up to the next.
+    """
     title: str = name.removeprefix("cube6_")
     if title[-1].isdigit():
         title = f"{title[:-1]} {title[-1]}"
-    return blueprints.camera_view(f"Face {title}", RIG, cam, contents=[video, schema.people_mask_path(RIG, cam)])
+    mask: str = schema.people_mask_path(RIG, cam)
+    overrides: Overrides = {mask: blueprints.cursor_window(0.0)} if video == schema.video_view_path(RIG, cam) else {}
+    return blueprints.camera_view(f"Face {title}", RIG, cam, contents=[video, mask], overrides=overrides or None)
 
 
 def imu_strip() -> rrb.Horizontal:

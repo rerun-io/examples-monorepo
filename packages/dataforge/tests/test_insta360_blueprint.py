@@ -98,6 +98,15 @@ def test_the_colsfm_tab_shows_the_six_cube_faces_with_their_masks() -> None:
     assert [str(view.name) for view in faces] == ["Face front 0", "Face front 1", "Face left", "Face right", "Face up", "Face down"]
     for cam, pane in zip(FACE_CAMS, faces, strict=True):
         assert content_rules(pane) == [schema.video_path(RIG, cam), schema.people_mask_path(RIG, cam)]
+        assert schema.people_mask_path(RIG, cam) not in (pane.visualizer_overrides or {}), "the analysis faces share the masks' stamps"
+
+
+def test_on_the_viewing_faces_a_people_mask_shows_only_on_its_own_stamp() -> None:
+    """The masks are on the analysis stamps only: latest-at would hold one over the viewing frames up to the next."""
+    faces: list[rrb.View] = [view for view in tabs(segment_layout(panorama=False, view_faces=True))["colsfm"] if isinstance(view, rrb.Spatial2DView)]
+    for cam, pane in zip(FACE_CAMS, faces, strict=True):
+        assert content_rules(pane) == [schema.video_view_path(RIG, cam), schema.people_mask_path(RIG, cam)]
+        assert override(pane, schema.people_mask_path(RIG, cam)) == [blueprints.cursor_window(0.0)]
 
 
 def test_paths_are_trails_and_the_colsfm_cloud_accumulates_through_cursor_windows() -> None:
