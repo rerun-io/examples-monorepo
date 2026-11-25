@@ -46,7 +46,7 @@ def _assert_same_graph(loaded: Correspondences) -> None:
             assert mine == theirs
 
 
-def test_with_nothing_excluded_the_graph_is_the_caches_own(synthetic_rig: SyntheticRig, database: Path) -> None:
+def test_with_no_override_the_graph_is_the_caches_own(synthetic_rig: SyntheticRig, database: Path) -> None:
     _assert_same_graph(load_correspondences(build_reconstruction(synthetic_rig.frames_meta).reconstruction, database))
 
 
