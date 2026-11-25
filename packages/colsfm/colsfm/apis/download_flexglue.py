@@ -8,6 +8,7 @@ instead, so a run never touches the network. The URLs and sha256 sums are the on
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import urllib.request
 from dataclasses import dataclass, field
@@ -65,13 +66,16 @@ def main(config: Config) -> None:
         if destination.is_file() and sha256(destination) == expected:
             print(f"[colsfm] {name}: present")
             continue
-        partial: Path = destination.with_suffix(".onnx.part")
+        # Every worktree on the host shares this directory: stage under this process's own name, as raco_export does.
+        staged: Path = destination.with_name(f".{destination.stem}.{os.getpid()}.onnx")
         request = urllib.request.Request(f"{RELEASE_URL}/{name}", headers={"User-Agent": "colsfm-download"})
-        with urllib.request.urlopen(request, timeout=600) as response, partial.open("wb") as handle:
-            shutil.copyfileobj(response, handle, length=1 << 24)
-        actual: str = sha256(partial)
-        if actual != expected:
-            partial.unlink()
-            raise RuntimeError(f"{name}: sha256 {actual}, expected {expected}")
-        partial.rename(destination)
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response, staged.open("wb") as handle:
+                shutil.copyfileobj(response, handle, length=1 << 24)
+            actual: str = sha256(staged)
+            if actual != expected:
+                raise RuntimeError(f"{name}: sha256 {actual}, expected {expected}")
+            staged.replace(destination)
+        finally:
+            staged.unlink(missing_ok=True)
         print(f"[colsfm] {name}: {destination.stat().st_size / 1e6:.0f} MB")
