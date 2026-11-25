@@ -31,6 +31,14 @@ impl Renderer {
         self
     }
 
+    /// The renderer with its splat projection and tile mapping built from `project` and `map`, a patched
+    /// `project.wgsl` and `map.wgsl`.
+    #[cfg(test)]
+    pub(crate) fn with_splat_tiles(mut self, project: &str, map: &str) -> Self {
+        self.kernels.set_splat_tiles(&self.device, project, map);
+        self
+    }
+
     /// Whether the scan and sort kernels use subgroup operations (the device enabled `SUBGROUP`)
     /// or their workgroup-memory variant.
     pub fn uses_subgroups(&self) -> bool {

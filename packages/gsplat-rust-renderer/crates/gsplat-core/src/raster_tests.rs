@@ -231,13 +231,50 @@ fn border_splats(focal: Vec2, size: u32) -> Splats {
     splats
 }
 
+/// The border scene rendered by `renderer` to a float target, as bits.
+fn render_border_splats(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &Renderer,
+    camera: &crate::Camera,
+) -> Vec<u32> {
+    let splats = border_splats(camera.focal(), camera.size.x);
+    let pixels = (camera.size.x * camera.size.y) as usize;
+    let scene = renderer.upload(&splats).unwrap();
+    let mut view = renderer.create_view(&scene, 1).unwrap();
+    let float = upload(device, &vec![[0.0f32; 4]; pixels]);
+    render_fitted(
+        device,
+        queue,
+        renderer,
+        &mut view,
+        camera,
+        &RenderOptions::default(),
+        &Target::Float(float.clone()),
+    );
+    read::<[f32; 4]>(device, queue, &float, pixels)
+        .into_iter()
+        .flatten()
+        .map(f32::to_bits)
+        .collect()
+}
+
+fn covered_pixels(bits: &[u32]) -> usize {
+    bits.chunks(4)
+        .filter(|rgba| f32::from_bits(rgba[3]) > 0.5)
+        .count()
+}
+
+fn differ(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).filter(|(a, b)| a != b).count()
+}
+
 #[test]
 #[ignore = "integration: GPU"]
 fn block_masks_skip_only_splats_that_miss_the_block() {
     let (device, queue) = &gpu();
     // An image size that is not a multiple of 16 keeps partial edge tiles in the test.
     let camera = pinhole_camera(72);
-    let splats = border_splats(camera.focal(), camera.size.x);
     let pixels = (camera.size.x * camera.size.y) as usize;
     let render = |source: Option<String>| {
         let renderer = Renderer::new(device).unwrap();
@@ -245,23 +282,7 @@ fn block_masks_skip_only_splats_that_miss_the_block() {
             Some(source) => renderer.with_splat_raster(&source),
             None => renderer,
         };
-        let scene = renderer.upload(&splats).unwrap();
-        let mut view = renderer.create_view(&scene, 1).unwrap();
-        let float = upload(device, &vec![[0.0f32; 4]; pixels]);
-        render_fitted(
-            device,
-            queue,
-            &renderer,
-            &mut view,
-            &camera,
-            &RenderOptions::default(),
-            &Target::Float(float.clone()),
-        );
-        read::<[f32; 4]>(device, queue, &float, pixels)
-            .into_iter()
-            .flatten()
-            .map(f32::to_bits)
-            .collect::<Vec<_>>()
+        render_border_splats(device, queue, &renderer, &camera)
     };
     let source = crate::shader::resolve_variant(
         "raster.wgsl",
@@ -276,18 +297,57 @@ fn block_masks_skip_only_splats_that_miss_the_block() {
         mask,
         "return (blocks[t] & (1u << ((lid >> 5u) ^ 1u))) != 0u;",
     )));
-    let covered = every_block
-        .chunks(4)
-        .filter(|rgba| f32::from_bits(rgba[3]) > 0.5)
-        .count();
+    let covered = covered_pixels(&every_block);
     assert!(
         covered > pixels / 2,
         "only {covered} of {pixels} pixels covered"
     );
-    let differ = |a: &[u32], b: &[u32]| a.iter().zip(b).filter(|(a, b)| a != b).count();
     assert_eq!(differ(&masked, &every_block), 0, "the masks changed pixels");
     assert!(
         differ(&wrong_block, &every_block) > 0,
         "a wrong block index went unnoticed"
+    );
+}
+
+/// The WGSL `tile_hit` itself (the CPU copy above checks only the Rust transcription): rejecting tiles must
+/// not change a pixel against the same render with every tile of the bounding box hit.
+#[test]
+#[ignore = "integration: GPU"]
+fn tile_hit_skips_only_tiles_that_no_pixel_centre_reaches() {
+    let (device, queue) = &gpu();
+    let camera = pinhole_camera(72);
+    let pixels = (camera.size.x * camera.size.y) as usize;
+    let subgroups = device.features().contains(wgpu::Features::SUBGROUP);
+    let (project, map) = (
+        crate::shader::resolve_variant("project.wgsl", subgroups),
+        crate::shader::resolve_variant("map.wgsl", subgroups),
+    );
+    let test = "return rect_hit(lo, lo + f32(TILE_WIDTH - 1u), p, c, power);";
+    assert_eq!(project.matches(test).count(), 1);
+    assert_eq!(map.matches(test).count(), 1);
+    // Projection counts and mapping emits with the same patched test, as the stock kernels do.
+    let render = |replacement: Option<&str>| {
+        let renderer = Renderer::new(device).unwrap();
+        let renderer = match replacement {
+            Some(r) => renderer.with_splat_tiles(&project.replace(test, r), &map.replace(test, r)),
+            None => renderer,
+        };
+        render_border_splats(device, queue, &renderer, &camera)
+    };
+    let tested = render(None);
+    let every_tile = render(Some("return true;"));
+    // The test must see a wrong tile: tested one tile to the right, pixels lose contributors.
+    let wrong_tile = render(Some(
+        "return rect_hit(lo + vec2f(f32(TILE_WIDTH), 0.0), lo + vec2f(f32(2u * TILE_WIDTH - 1u), f32(TILE_WIDTH - 1u)), p, c, power);",
+    ));
+    let covered = covered_pixels(&every_tile);
+    assert!(
+        covered > pixels / 2,
+        "only {covered} of {pixels} pixels covered"
+    );
+    assert_eq!(differ(&tested, &every_tile), 0, "tile_hit changed pixels");
+    assert!(
+        differ(&wrong_tile, &every_tile) > 0,
+        "a wrong tile test went unnoticed"
     );
 }

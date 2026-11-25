@@ -264,6 +264,17 @@ impl Kernels {
         self.splats.rasters =
             RASTERS.map(|entry| Some(pipeline(device, &raster, entry, bindings(entry))));
     }
+
+    /// Rebuild the splat projection and tile mapping from `project` and `map`, a patched `project.wgsl`
+    /// and `map.wgsl` (tests).
+    #[cfg(test)]
+    pub fn set_splat_tiles(&mut self, device: &wgpu::Device, project: &str, map: &str) {
+        let kernel = |source: &str, entry: &str| {
+            pipeline(device, &module(device, source), entry, bindings(entry))
+        };
+        self.splats.forward = kernel(project, "project_forward");
+        self.splats.map_tiles = kernel(map, "map_tiles");
+    }
 }
 
 #[cfg(test)]
