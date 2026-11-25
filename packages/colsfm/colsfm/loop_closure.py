@@ -288,7 +288,7 @@ from colsfm.config import PoseGraphConfig
 from colsfm.database import ImagePair, read_keypoints_batch
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
 from colsfm.geometry import MICROSECONDS_PER_SECOND
-from colsfm.loop_pairs import observation_pairs, required_image_pairs
+from colsfm.loop_pairs import observed_image_pairs, required_image_pairs
 from colsfm.loop_pose import (
     BEARING_CACHE_IMAGES,
     DEFAULT_RIG_POSE_CONFIG,
@@ -722,11 +722,7 @@ def plan_loop_search(
         (source_rig_id, hit.target_rig_id) for source_rig_id, hits in _group_by_source_rig(mapper_only_hits) for hit in hits
     )
     measured_pairs: tuple[ImagePair, ...] = required_image_pairs(rig_index, empty_geometry, pixels, config.rig_pose.neighbour_span, rig_pairs)
-    mapper_pairs: set[ImagePair] = {
-        normalise_pair(observation.anchor, observation.observed)
-        for rig_pair in mapper_only
-        for observation in observation_pairs(rig_index, empty_geometry, pixels, rig_pair)
-    }
+    mapper_pairs: set[ImagePair] = observed_image_pairs(rig_index, empty_geometry, pixels, mapper_only)
     return LoopSearchPlan(
         config=config,
         image_pairs=tuple(sorted(set(measured_pairs) | mapper_pairs)),

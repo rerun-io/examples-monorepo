@@ -32,7 +32,7 @@ from numpy import ndarray
 from colsfm.database import ImagePair
 from colsfm.geometry import relative_pose
 from colsfm.loop_closure import LoopCandidate, LoopSearchPlan
-from colsfm.loop_pairs import observation_pairs
+from colsfm.loop_pairs import observed_image_pairs
 from colsfm.loop_pose import bearings_of, sampson_error_px
 from colsfm.pairs import normalise_pair
 
@@ -64,11 +64,9 @@ def pose_checked_inliers(
         Per pair `(min id, max id)` that loses inliers, the kept rows (possibly none), columns in that id order. A pair
         that passes whole is absent.
     """
-    observed_pairs: set[ImagePair] = {
-        normalise_pair(observation.anchor, observation.observed)
-        for rig_pair in (*plan.rig_pairs, *plan.mapper_only_rig_pairs)
-        for observation in observation_pairs(plan.rig_index, plan.geometry, plan.keypoints, rig_pair)
-    }
+    observed_pairs: set[ImagePair] = observed_image_pairs(
+        plan.rig_index, plan.geometry, plan.keypoints, (*plan.rig_pairs, *plan.mapper_only_rig_pairs)
+    )
     # `low_T_high` per unordered rig pair: `source_T_target` read with the lower rig id as source.
     measured: dict[tuple[int, int], pycolmap.Rigid3d] = {
         normalise_pair(candidate.hit.source_rig_id, candidate.hit.target_rig_id): (
