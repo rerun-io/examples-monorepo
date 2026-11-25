@@ -267,30 +267,39 @@ def colour_points(reconstruction: pycolmap.Reconstruction, frames: FrameSource) 
         return 0
     # Each image adds its samples into the observed rows only: a per-image `np.bincount(minlength=points)` costs O(points)
     # per image, which was 170 of the 194 s colsfm spent colouring clip 007 (18,606 images, 1.6 M points). Memory stays
-    # O(points) plus one image's observations.
-    sums: ndarray = np.zeros((len(point_ids), 3), dtype=np.float64)
-    counts: ndarray = np.zeros(len(point_ids), dtype=np.int64)
+    # O(points) plus one image's observations. The sums stay on the frames' device (`index_add_`, one download at the
+    # end), so a GPU source does not sync per image.
+    sums: Tensor | None = None
+    counts: Tensor | None = None
     image_ids: list[int] = sorted(int(image_id) for image_id in reconstruction.reg_image_ids())
     names: list[str] = [reconstruction.image(image_id).name for image_id in image_ids]
     for image_id, (_, rgb) in zip(image_ids, frames.frames(names), strict=True):
-        observed = [(point2D.xy, point2D.point3D_id) for point2D in reconstruction.image(image_id).points2D if point2D.has_point3D()]
+        observed: pycolmap.Point2DList = reconstruction.image(image_id).get_observation_points2D()
         if not observed:
             continue
-        xy: ndarray = np.asarray([pixel for pixel, _ in observed], dtype=np.float64)
-        rows: ndarray = np.searchsorted(point_ids, np.asarray([point_id for _, point_id in observed], dtype=np.int64))
+        xy: ndarray = np.asarray([point2D.xy for point2D in observed], dtype=np.float64)
+        rows: ndarray = np.searchsorted(point_ids, np.fromiter((point2D.point3D_id for point2D in observed), dtype=np.int64, count=len(observed)))
         height, width = int(rgb.shape[1]), int(rgb.shape[2])
         centre: ndarray = xy - 0.5
         inside: ndarray = (centre[:, 0] >= 0) & (centre[:, 0] <= width - 1) & (centre[:, 1] >= 0) & (centre[:, 1] <= height - 1)
         if not inside.any():
             continue
+        if sums is None or counts is None:
+            sums = torch.zeros((len(point_ids), 3), dtype=torch.float64, device=rgb.device)
+            counts = torch.zeros(len(point_ids), dtype=torch.int64, device=rgb.device)
         grid: Tensor = torch.from_numpy((2.0 * xy[inside] / np.array([width, height]) - 1.0).astype(np.float32)).to(rgb.device)[None, None]
-        sampled: ndarray = torch.nn.functional.grid_sample(rgb[None].float(), grid, mode="bilinear", align_corners=False)[0, :, 0].T.cpu().numpy()
-        # `np.add.at`, not `sums[rows] += ...`: a point seen twice in one image adds both samples.
-        np.add.at(sums, rows[inside], sampled.astype(np.float64))
-        np.add.at(counts, rows[inside], 1)
+        sampled: Tensor = torch.nn.functional.grid_sample(rgb[None].float(), grid, mode="bilinear", align_corners=False)[0, :, 0].T
+        # `index_add_`, not `sums[rows] += ...`: a point seen twice in one image adds both samples.
+        index: Tensor = torch.from_numpy(rows[inside]).to(rgb.device)
+        sums.index_add_(0, index, sampled.double())
+        counts.index_add_(0, index, torch.ones_like(index))
+    if sums is None or counts is None:
+        return 0
+    total: ndarray = sums.cpu().numpy()
+    seen_counts: ndarray = counts.cpu().numpy()
     coloured: int = 0
-    seen: ndarray = np.flatnonzero(counts)
-    colours: ndarray = np.clip(np.rint(sums[seen] / counts[seen, None]), 0, 255).astype(np.uint8)
+    seen: ndarray = np.flatnonzero(seen_counts)
+    colours: ndarray = np.clip(np.rint(total[seen] / seen_counts[seen, None]), 0, 255).astype(np.uint8)
     for point_id, colour in zip(point_ids[seen], colours, strict=True):
         reconstruction.points3D[int(point_id)].color = colour
         coloured += int(colour.any())
