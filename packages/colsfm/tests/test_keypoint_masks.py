@@ -7,15 +7,29 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pycolmap
 import pytest
-from jaxtyping import Bool, Float32
+from jaxtyping import Bool, Float32, Float64
 from numpy import ndarray
 
 from colsfm.catalog import CatalogCameraModel, frames_meta_document
 from colsfm.database import create_database, read_descriptors_from_database, read_keypoints
 from colsfm.frame_manifest import FrameSourceManifest, StreamKeyframes
 from colsfm.frames_meta import FRAMES_META_NAME, read_frames_meta
-from colsfm.keypoint_masks import CatalogMasks, DictMasks, keypoints_outside_mask, open_mask_source, pack_mask_table
+from colsfm.keypoint_masks import (
+    VALID_ANGLE_MARGIN_DEG,
+    CatalogMasks,
+    DictMasks,
+    KeypointMask,
+    MaskSource,
+    drop_masked_keypoints,
+    keypoints_outside_mask,
+    open_mask_source,
+    pack_mask_table,
+    valid_angle,
+    valid_angle_mask,
+    with_valid_angle_masks,
+)
 
 WIDTH: int = 64
 HEIGHT: int = 48
@@ -294,3 +308,203 @@ def test_a_malformed_mask_row_names_its_entity_and_stamp(buffers: list, formats:
     entity: str = "world/cam/people_mask"
     with pytest.raises(ValueError, match=rf"/world/cam/people_mask at t_ns 10: .*{message}"):
         pack_mask_table(_mask_table(entity, buffers, formats), "video_time", entity)
+
+
+# The valid-angle guard: no keypoint is stored where the camera model's unprojection folds its ray.
+
+TARTANAIR_FOCAL: float = 1000.0 / np.radians(195.0)
+"""TartanAir's 195 degree equidistant fisheye, 1000x1000, as colsfm maps it (COLMAP OPENCV_FISHEYE, k = 0)."""
+
+
+def _fisheye(focal: float, width: int, height: int, k: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)) -> pycolmap.Camera:
+    centre_x, centre_y = (width - 1) / 2, (height - 1) / 2
+    return pycolmap.Camera(model="OPENCV_FISHEYE", width=width, height=height, params=[focal, focal, centre_x, centre_y, *k])
+
+
+def _off_axis_degrees(camera: pycolmap.Camera, pixels: Float64[ndarray, "n 2"]) -> Float64[ndarray, " n"]:
+    """The angle of each pixel's ray off the optical axis, from the model's forward projection (exact for k = 0)."""
+    normalised: Float64[ndarray, "n 2"] = (pixels - camera.params[2:4]) / camera.params[0:2]
+    return np.degrees(np.hypot(normalised[:, 0], normalised[:, 1]))
+
+
+def test_perspective_cameras_have_no_valid_angle_limit() -> None:
+    pinhole = pycolmap.Camera(model="PINHOLE", width=640, height=480, params=[100.0, 100.0, 319.5, 239.5])
+    # MSD MGO07 cam 2's rational pole sits inside its image; `point_filters.before_rational_pole` owns that guard.
+    full_opencv = pycolmap.Camera(
+        model="FULL_OPENCV", width=640, height=480, params=[200.0, 200.0, 319.5, 239.5, 0.1, 0.01, 0.0, 0.0, 0.0, 0.3, 0.1, 0.0]
+    )
+
+    for camera in (pinhole, full_opencv):
+        assert valid_angle(camera) is None
+        assert valid_angle_mask(camera) is None
+
+
+def test_an_equidistant_fisheye_wider_than_180_degrees_is_cut_just_below_its_horizon() -> None:
+    camera = _fisheye(TARTANAIR_FOCAL, 1000, 1000)
+
+    limit: float | None = valid_angle(camera)
+    mask: KeypointMask | None = valid_angle_mask(camera)
+
+    assert limit is not None and np.degrees(limit) == pytest.approx(90.0 - VALID_ANGLE_MARGIN_DEG)
+    assert mask is not None and mask.shape == (1000, 1000)
+    rows, columns = np.mgrid[0:1000, 0:1000]
+    pixels: Float64[ndarray, "n 2"] = np.stack([columns.ravel(), rows.ravel()], axis=1).astype(np.float64)
+    angles: Float64[ndarray, " n"] = _off_axis_degrees(camera, pixels)
+    dropped: Bool[ndarray, " n"] = mask.ravel()
+    assert not dropped[angles < 88.9].any()
+    assert dropped[angles > 89.1].all()
+    # COLMAP's unprojection folds every ray past 90 degrees into the front hemisphere; no kept pixel does.
+    rays: Float64[ndarray, "n 3"] = np.concatenate([np.asarray(camera.cam_from_img(pixels), dtype=np.float64), np.ones((len(pixels), 1))], axis=1)
+    unprojected: Float64[ndarray, " n"] = np.degrees(np.arctan2(np.hypot(rays[:, 0], rays[:, 1]), rays[:, 2]))
+    folded: Bool[ndarray, " n"] = np.abs(unprojected - angles) > 0.01
+    assert folded.sum() > 0.1 * len(pixels)
+    assert dropped[folded].all()
+
+
+def test_a_folding_kannala_brandt_polynomial_is_cut_at_its_fold() -> None:
+    # theta_d = theta (1 - 0.3 theta^2) stops growing at theta = 1 / sqrt(0.9) = 60.4 degrees: past it, two rays share a pixel.
+    camera = _fisheye(200.0, 640, 480, k=(-0.3, 0.0, 0.0, 0.0))
+
+    limit: float | None = valid_angle(camera)
+    mask: KeypointMask | None = valid_angle_mask(camera)
+
+    assert limit is not None and limit == pytest.approx(1.0 / np.sqrt(0.9))
+    fold_radius_px: float = 200.0 * limit * (1.0 - 0.3 * limit**2)
+    assert mask is not None
+    assert not mask[240, int(319.5 + fold_radius_px - 1)]
+    assert mask[240, int(319.5 + fold_radius_px + 2)]
+
+
+def test_a_fisheye_whose_image_stays_inside_its_valid_angle_gets_no_mask() -> None:
+    # 640x480 at f = 400: the corner is 1.0 rad (57 degrees) off the axis.
+    assert valid_angle_mask(_fisheye(400.0, 640, 480)) is None
+
+
+def _fisheye_and_pinhole_database(tmp_path: Path) -> Path:
+    """A database with a TartanAir-like 195 degree fisheye ("fish", 100x100 at a tenth of the scale) and a pinhole ("cube")."""
+    focal: float = TARTANAIR_FOCAL / 10
+    cameras: list[CatalogCameraModel] = [
+        CatalogCameraModel(
+            entity="/world/rig_00/cam_00",
+            name="fish",
+            rig_T_cam=np.eye(4),
+            k_matrix=np.asarray([[focal, 0.0, 49.5], [0.0, focal, 49.5], [0.0, 0.0, 1.0]]),
+            width=100,
+            height=100,
+            projection="OPENCV_FISHEYE",
+            distortion=(0.0, 0.0, 0.0, 0.0),
+        ),
+        CatalogCameraModel(
+            entity="/world/rig_00/cam_01",
+            name="cube",
+            rig_T_cam=np.eye(4),
+            k_matrix=np.asarray([[32.0, 0.0, 31.5], [0.0, 32.0, 23.5], [0.0, 0.0, 1.0]]),
+            width=WIDTH,
+            height=HEIGHT,
+            projection="PINHOLE",
+            distortion=(),
+        ),
+    ]
+    document = frames_meta_document(cameras, [{"fish": (1_000, np.eye(4)), "cube": (1_000, np.eye(4))}], ())
+    (tmp_path / FRAMES_META_NAME).write_text(json.dumps(document))
+    database_path: Path = tmp_path / "fisheye.db"
+    create_database(database_path, read_frames_meta(tmp_path / FRAMES_META_NAME))
+    return database_path
+
+
+def test_a_database_without_a_wide_camera_keeps_its_mask_source_unchanged(tmp_path: Path) -> None:
+    database_path: Path = _two_camera_database(tmp_path)
+    user_masks: DictMasks = DictMasks({"wide/1000": np.ones((HEIGHT, WIDTH), dtype=bool)})
+
+    assert with_valid_angle_masks(database_path, None) is None
+    assert with_valid_angle_masks(database_path, user_masks) is user_masks
+
+
+def test_the_valid_angle_mask_joins_a_user_mask_on_the_cameras_it_covers(tmp_path: Path) -> None:
+    database_path: Path = _fisheye_and_pinhole_database(tmp_path)
+    people: Bool[ndarray, "100 100"] = np.zeros((100, 100), dtype=bool)
+    people[50, 50] = True
+
+    guarded: MaskSource | None = with_valid_angle_masks(database_path, DictMasks({"fish/1000": people}))
+    unmasked: MaskSource | None = with_valid_angle_masks(database_path, None)
+
+    assert guarded is not None and unmasked is not None
+    fish: KeypointMask | None = guarded.mask("fish/1000", 100, 100)
+    assert fish is not None and fish[50, 50] and fish[0, 0] and not fish[50, 60]
+    only_angle: KeypointMask | None = unmasked.mask("fish/1000", 100, 100)
+    assert only_angle is not None and only_angle[0, 0] and not only_angle[50, 50]
+    assert guarded.mask("cube/1000", WIDTH, HEIGHT) is None
+
+
+def test_dropping_masked_keypoints_from_a_database_keeps_the_rest_in_order(tmp_path: Path) -> None:
+    """The `pycolmap` backend writes its own keypoints (Nx6, uint8 descriptor blobs): the guard runs after it."""
+    database_path: Path = _fisheye_and_pinhole_database(tmp_path)
+    keypoints: Float32[ndarray, "3 6"] = np.zeros((3, 6), dtype=np.float32)
+    keypoints[:, :2] = [[49.5, 49.5], [0.0, 0.0], [60.0, 49.5]]
+    descriptors: ndarray = np.repeat(np.arange(3, dtype=np.uint8)[:, None], 8, axis=1)
+    with pycolmap.Database.open(database_path) as database:
+        ids: dict[str, int] = {image.name: int(image.image_id) for image in database.read_all_images()}
+        for image_id in ids.values():
+            database.write_keypoints(image_id, keypoints)
+            database.write_descriptors(image_id, pycolmap.FeatureDescriptors(data=descriptors, type=pycolmap.FeatureExtractorType.ALIKED_N16ROT))
+
+    guarded: MaskSource | None = with_valid_angle_masks(database_path, None)
+    assert guarded is not None
+    drop_masked_keypoints(database_path, guarded)
+
+    with pycolmap.Database.open(database_path) as database:
+        fish_keypoints: ndarray = database.read_keypoints(ids["fish/1000"])
+        fish_descriptors = database.read_descriptors(ids["fish/1000"])
+        cube_keypoints: ndarray = database.read_keypoints(ids["cube/1000"])
+    np.testing.assert_array_equal(fish_keypoints, keypoints[[0, 2]])
+    np.testing.assert_array_equal(fish_descriptors.data, descriptors[[0, 2]])
+    assert fish_descriptors.type == pycolmap.FeatureExtractorType.ALIKED_N16ROT
+    np.testing.assert_array_equal(cube_keypoints, keypoints)
+
+
+def _write_three_keypoints(database_path: Path) -> dict[str, int]:
+    """Centre, corner and a point 10 px right of the centre on every image; returns image ids by name."""
+    keypoints: Float32[ndarray, "3 6"] = np.zeros((3, 6), dtype=np.float32)
+    keypoints[:, :2] = [[49.5, 49.5], [0.0, 0.0], [59.5, 49.5]]
+    with pycolmap.Database.open(database_path) as database:
+        ids: dict[str, int] = {image.name: int(image.image_id) for image in database.read_all_images()}
+        for image_id in ids.values():
+            database.write_keypoints(image_id, keypoints)
+            database.write_descriptors(
+                image_id, pycolmap.FeatureDescriptors(data=np.zeros((3, 8), dtype=np.uint8), type=pycolmap.FeatureExtractorType.ALIKED_N16ROT)
+            )
+    return ids
+
+
+def test_pycolmap_extraction_applies_the_valid_angle_guard_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from colsfm import features
+
+    database_path: Path = _fisheye_and_pinhole_database(tmp_path)
+    written: dict[str, int] = {}
+    monkeypatch.setattr(features.pycolmap, "extract_features", lambda *args, **kwargs: written.update(_write_three_keypoints(database_path)))
+
+    features.extract_features(database_path, tmp_path, ["fish/1000", "cube/1000"], features.FeatureOptions(device="cpu"))
+
+    assert read_keypoints(database_path, written["fish/1000"]).tolist() == [[49.5, 49.5], [59.5, 49.5]]
+    assert len(read_keypoints(database_path, written["cube/1000"])) == 3
+
+
+def test_raco_extraction_receives_the_valid_angle_masks_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tensorrt", reason="colsfm.features_raco imports tensorrt at module scope")
+    from colsfm import features, features_raco, frames
+
+    seen: list[MaskSource | None] = []
+
+    def fake_extract_raco(*args: object, masks: MaskSource | None = None, **kwargs: object) -> tuple[dict[int, int], float]:
+        seen.append(masks)
+        return {}, 0.0
+
+    monkeypatch.setattr(features_raco, "extract_raco", fake_extract_raco)
+    for database_path in (_fisheye_and_pinhole_database(tmp_path), _two_camera_database(tmp_path)):
+        features.extract_features(database_path, tmp_path, [], features.FeatureOptions(backend="raco"), frames=frames.ImageFolderFrames(tmp_path))
+
+    assert seen[1] is None
+    first: MaskSource | None = seen[0]
+    assert first is not None and first.mask("cube/1000", WIDTH, HEIGHT) is None
+    fish: KeypointMask | None = first.mask("fish/1000", 100, 100)
+    assert fish is not None and fish[0, 0] and not fish[49, 49]

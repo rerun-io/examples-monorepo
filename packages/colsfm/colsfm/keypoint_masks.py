@@ -12,16 +12,25 @@ with a static `Transform3D(scale=[W_img / W_mask, H_img / H_mask, 1])` on the sa
 pixel takes the mask pixel that covers its centre, `(2c + 1) * W_mask // (2 * W_img)` per axis, which is how the viewer
 draws the scaled mask. `CatalogMasks` reads each stream's masks once, on first use, keeps them bit-packed (one bit per
 pixel) and hands each one out at its image's resolution.
+
+Every input also gets a mask from its camera model, without a flag: `valid_angle_mask` drops the pixels whose ray the
+model cannot unproject back to itself (`valid_angle`), and `with_valid_angle_masks` joins it to the catalog's masks.
+Only a lens that images rays at or past 90 degrees, or a fisheye polynomial that folds inside the image, has such
+pixels; every other camera keeps every keypoint, bit for bit.
 """
 
 from __future__ import annotations
 
+import contextlib
+import sqlite3
 from collections.abc import Mapping
-from typing import Protocol, runtime_checkable
+from pathlib import Path
+from typing import Final, Protocol, runtime_checkable
 
 import numpy as np
 import pyarrow as pa
-from jaxtyping import Bool, Float32, UInt8
+import pycolmap
+from jaxtyping import Bool, Float32, Float64, UInt8
 from numpy import ndarray
 
 from colsfm.frame_manifest import FrameSourceManifest
@@ -239,3 +248,148 @@ def open_mask_source(manifest: FrameSourceManifest | None) -> MaskSource | None:
     if manifest is None or all(stream.mask_entity is None for stream in manifest.streams):
         return None
     return CatalogMasks(manifest)
+
+
+VALID_ANGLE_MARGIN_DEG: Final[float] = 1.0
+"""How far short of 90 degrees an `OPENCV_FISHEYE` keypoint must stay off the optical axis.
+
+COLMAP projects nothing at or behind z = 0 (`HasProjectableDepth`), and its fisheye unprojection
+(`NormalFromFisheye`) returns a z = 1 point, so a pixel at theta > 90 degrees comes back folded into the front
+hemisphere with no error: on TartanAir's 195 degree lens (k = 0) a 95 degree pixel unprojects to 58.9 degrees. At 90
+degrees the z = 1 point is at infinity. One degree short keeps it finite (tan 89 = 57); on that lens, an 89 degree
+keypoint cut halved the trajectory error against ground truth (34 to 17 mm) with the default bundle adjuster."""
+
+
+def valid_angle(camera: pycolmap.Camera) -> float | None:
+    """The widest angle off the optical axis whose pixel unprojects back to its own ray, or None when the model has no limit.
+
+    `OPENCV_FISHEYE` (Kannala-Brandt, theta_d = theta (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8)) can image
+    any angle, so it gets the smaller of 90 degrees less `VALID_ANGLE_MARGIN_DEG` and the polynomial's first turning
+    point (past it two rays share a pixel; RoboCap's lens reaches it inside the image), found analytically.
+    `PINHOLE` and `FULL_OPENCV` are perspective: every pixel holds a ray in front of the camera. `FULL_OPENCV`'s rational
+    pole is `colsfm.point_filters.before_rational_pole`'s guard, applied to the map's points.
+
+    Args:
+        camera: The camera.
+
+    Returns:
+        The angle in radians, or None.
+    """
+    if camera.model != pycolmap.CameraModelId.OPENCV_FISHEYE:
+        return None
+    k1, k2, k3, k4 = (float(value) for value in camera.params[4:8])
+    # d theta_d / d theta = 1 + 3 k1 x + 5 k2 x^2 + 7 k3 x^3 + 9 k4 x^4 with x = theta^2.
+    turning: list[float] = [
+        float(root.real) for root in np.roots([9 * k4, 7 * k3, 5 * k2, 3 * k1, 1.0]) if abs(root.imag) < 1e-12 and root.real > 0.0
+    ]
+    horizon: float = float(np.radians(90.0 - VALID_ANGLE_MARGIN_DEG))
+    return min(horizon, float(np.sqrt(min(turning)))) if turning else horizon
+
+
+def valid_angle_mask(camera: pycolmap.Camera) -> KeypointMask | None:
+    """The pixels past the camera's `valid_angle`, or None when no pixel of its image is.
+
+    The boundary is the forward projection of the limit, which is exact: `OPENCV_FISHEYE` distorts radially in
+    normalised coordinates, so the limit's rays land on an ellipse with semi-axes fx theta_d and fy theta_d around the
+    principal point. Pixel centres sit on integers, as `keypoints_outside_mask` reads them.
+
+    Args:
+        camera: The camera.
+
+    Returns:
+        `[height, width]` booleans, True = drop, or None.
+    """
+    limit: float | None = valid_angle(camera)
+    if limit is None:
+        return None
+    width, height = int(camera.width), int(camera.height)
+    limit_rays: Float64[ndarray, "2 3"] = np.asarray([[np.sin(limit), 0.0, np.cos(limit)], [0.0, np.sin(limit), np.cos(limit)]])
+    edge: Float64[ndarray, "2 2"] = np.asarray(camera.img_from_cam(limit_rays), dtype=np.float64)
+    centre_x, centre_y = float(camera.principal_point_x), float(camera.principal_point_y)
+    columns: Float64[ndarray, " width"] = ((np.arange(width) - centre_x) / (edge[0, 0] - centre_x)) ** 2
+    rows: Float64[ndarray, " height"] = ((np.arange(height) - centre_y) / (edge[1, 1] - centre_y)) ** 2
+    outside: KeypointMask = rows[:, None] + columns[None, :] > 1.0
+    return outside if outside.any() else None
+
+
+class ValidAngleMasks:
+    """Another mask source with each camera's `valid_angle_mask` joined in (a pixel either drops is dropped)."""
+
+    def __init__(self, angle_masks: Mapping[str, KeypointMask], masks: MaskSource | None) -> None:
+        """Hold both.
+
+        Args:
+            angle_masks: Image name -> its camera's `valid_angle_mask`; names not present have none.
+            masks: The input's own masks, or None.
+        """
+        self.angle_masks: Mapping[str, KeypointMask] = angle_masks
+        self.masks: MaskSource | None = masks
+
+    def mask(self, name: str, width: int, height: int) -> KeypointMask | None:
+        """The image's joined mask, or None when neither source masks it.
+
+        Args:
+            name: Image name.
+            width: The image's width.
+            height: The image's height.
+
+        Returns:
+            `[height, width]` booleans, True = drop.
+        """
+        own: KeypointMask | None = None if self.masks is None else self.masks.mask(name, width, height)
+        angle: KeypointMask | None = self.angle_masks.get(name)
+        if angle is None or own is None:
+            return own if angle is None else angle
+        return own | angle
+
+
+def with_valid_angle_masks(database_path: Path, masks: MaskSource | None) -> MaskSource | None:
+    """The input's masks with every camera's `valid_angle_mask` joined in; `masks` itself when no camera has one.
+
+    Args:
+        database_path: The run's database; its camera and image rows name each image's camera.
+        masks: The input's own masks, or None.
+
+    Returns:
+        A `ValidAngleMasks`, or `masks` unchanged.
+    """
+    with pycolmap.Database.open(database_path) as database:
+        by_camera: dict[int, KeypointMask | None] = {int(camera.camera_id): valid_angle_mask(camera) for camera in database.read_all_cameras()}
+        angle_masks: dict[str, KeypointMask] = {
+            image.name: mask for image in database.read_all_images() if (mask := by_camera[int(image.camera_id)]) is not None
+        }
+    if not angle_masks:
+        return masks
+    limited: list[str] = sorted({name.split("/")[0] for name in angle_masks})
+    print(f"[colsfm.masks] valid-angle mask on {len(angle_masks)} images ({', '.join(limited)})")
+    return ValidAngleMasks(angle_masks, masks)
+
+
+def drop_masked_keypoints(database_path: Path, masks: MaskSource) -> None:
+    """Remove the masked keypoints, and their descriptors, of every image already in the database.
+
+    For an extractor that writes its own rows (the `pycolmap` backend); the `raco` backend applies masks before it
+    stores anything (`colsfm.features_native.store_feature_batch`). Kept rows keep their order and every column.
+
+    Args:
+        database_path: A database whose keypoints and descriptors are written.
+        masks: The masks to apply.
+    """
+    # pycolmap updates keypoints but cannot replace a descriptor row (its write is an INSERT), so both rows are
+    # rewritten through sqlite once the pycolmap handle is closed; `cols` and the descriptor `type` stay as stored.
+    rewrites: list[tuple[int, Float32[ndarray, "kept columns"], UInt8[ndarray, "kept bytes"]]] = []
+    with pycolmap.Database.open(database_path) as database:
+        cameras: dict[int, pycolmap.Camera] = {int(camera.camera_id): camera for camera in database.read_all_cameras()}
+        for image in database.read_all_images():
+            camera: pycolmap.Camera = cameras[int(image.camera_id)]
+            mask: KeypointMask | None = masks.mask(image.name, int(camera.width), int(camera.height))
+            if mask is None or not database.exists_keypoints(image.image_id):
+                continue
+            keypoints: Float32[ndarray, "n columns"] = database.read_keypoints(image.image_id)
+            kept: Bool[ndarray, " n"] = keypoints_outside_mask(keypoints[:, :2], mask)
+            if not kept.all():
+                rewrites.append((int(image.image_id), keypoints[kept], database.read_descriptors(image.image_id).data[kept]))
+    with contextlib.closing(sqlite3.connect(database_path)) as connection, connection:
+        for image_id, keypoints, descriptors in rewrites:
+            connection.execute("UPDATE keypoints SET rows = ?, data = ? WHERE image_id = ?", (len(keypoints), keypoints.tobytes(), image_id))
+            connection.execute("UPDATE descriptors SET rows = ?, data = ? WHERE image_id = ?", (len(descriptors), descriptors.tobytes(), image_id))
