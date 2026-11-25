@@ -277,19 +277,15 @@ def extract_features(
         RuntimeError: When `options.device` is `cuda` and CUDA is unusable.
         ImportError: When `options.backend` is `raco` and TensorRT or
             `cuda-python` is not importable.
-        ValueError: When the catalog input names keypoint masks and the backend is not `raco`.
     """
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     if not image_root.is_dir():
         raise FileNotFoundError(f"No image directory at {image_root}")
 
-    # A catalog input may name keypoint masks per camera stream; only the raco backend applies them.
+    # A catalog input may name keypoint masks per camera stream. Every backend applies them, joined with the camera
+    # model's valid angle (`colsfm.keypoint_masks.valid_angle`): a no-op for a camera none of whose pixels lies past it.
     masks: MaskSource | None = open_mask_source(read_manifest(image_root / FRAME_SOURCE_FILE) if is_catalog_input(image_root) else None)
-    if masks is not None and options.backend != "raco":
-        raise ValueError(f"keypoint masks are applied by the raco backend only, not {options.backend}")
-    # Every backend drops keypoints past the camera model's valid angle (`colsfm.keypoint_masks.valid_angle`): a
-    # no-op for a camera none of whose pixels lies past it.
     masks = with_valid_angle_masks(database_path, masks)
 
     if options.backend == "raco":

@@ -504,3 +504,20 @@ def test_raco_extraction_receives_the_valid_angle_masks_by_default(tmp_path: Pat
     assert first is not None and first.mask("cube/1000", WIDTH, HEIGHT) is None
     fish: KeypointMask | None = first.mask("fish/1000", 100, 100)
     assert fish is not None and fish[0, 0] and not fish[49, 49]
+
+
+def test_pycolmap_extraction_applies_the_input_masks_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Masks the input names (a catalog's people masks) drop keypoints after the `pycolmap` backend, as after `raco`."""
+    from colsfm import features
+
+    database_path: Path = _fisheye_and_pinhole_database(tmp_path)
+    corner: Bool[ndarray, "48 64"] = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    corner[0, 0] = True
+    monkeypatch.setattr(features, "open_mask_source", lambda manifest: DictMasks({"cube/1000": corner}))
+    written: dict[str, int] = {}
+    monkeypatch.setattr(features.pycolmap, "extract_features", lambda *args, **kwargs: written.update(_write_three_keypoints(database_path)))
+
+    features.extract_features(database_path, tmp_path, ["fish/1000", "cube/1000"], features.FeatureOptions(device="cpu"))
+
+    assert read_keypoints(database_path, written["cube/1000"]).tolist() == [[49.5, 49.5], [59.5, 49.5]]
+    assert read_keypoints(database_path, written["fish/1000"]).tolist() == [[49.5, 49.5], [59.5, 49.5]]
