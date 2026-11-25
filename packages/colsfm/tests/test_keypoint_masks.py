@@ -472,6 +472,47 @@ def test_dropping_masked_keypoints_from_a_database_keeps_the_rest_in_order(tmp_p
     np.testing.assert_array_equal(cube_keypoints, THREE_KEYPOINTS)
 
 
+def test_a_content_mask_drops_pycolmap_keypoints_by_the_pixel_they_fall_in(tmp_path: Path) -> None:
+    """COLMAP keypoints put pixel centres at +0.5: pixel c covers [c, c + 1), so 29.7 is in pixel 29 and 39.7 in 39."""
+    database_path: Path = _two_camera_database(tmp_path)
+    people: Bool[ndarray, "48 64"] = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    people[10:20, 30:40] = True
+    keypoints: Float32[ndarray, "4 6"] = np.zeros((4, 6), dtype=np.float32)
+    keypoints[:, :2] = [[29.7, 15.0], [30.3, 15.0], [39.7, 19.7], [40.3, 15.0]]
+    descriptors: UInt8[ndarray, "4 8"] = np.repeat(np.arange(4, dtype=np.uint8)[:, None], 8, axis=1)
+    with pycolmap.Database.open(database_path) as database:
+        image_id: int = next(int(image.image_id) for image in database.read_all_images() if image.name == "wide/1000")
+        database.write_keypoints(image_id, keypoints)
+        database.write_descriptors(image_id, pycolmap.FeatureDescriptors(data=descriptors, type=pycolmap.FeatureExtractorType.ALIKED_N16ROT))
+
+    drop_masked_keypoints(database_path, DictMasks({"wide/1000": people}))
+
+    with pycolmap.Database.open(database_path) as database:
+        np.testing.assert_array_equal(database.read_keypoints(image_id), keypoints[[0, 3]])
+        np.testing.assert_array_equal(database.read_descriptors(image_id).data, descriptors[[0, 3]])
+
+
+def test_the_valid_angle_mask_reads_pycolmap_keypoints_at_the_nearest_pixel_centre(tmp_path: Path) -> None:
+    """`valid_angle_mask` samples the camera at integer COLMAP coordinates, so its lookup rounds, unlike a content mask's."""
+    database_path: Path = _fisheye_and_pinhole_database(tmp_path)
+    guarded: MaskSource | None = with_valid_angle_masks(database_path, DictMasks({"fish/1000": np.zeros((100, 100), dtype=bool)}))
+    assert guarded is not None
+    angle: KeypointMask | None = guarded.mask("fish/1000", 100, 100)
+    assert angle is not None
+    # The last dropped column left of the centre on the middle row: rounding 0.7 past it reads the kept column next to it.
+    edge: int = int(np.flatnonzero(angle[50, :50])[-1])
+    keypoints: Float32[ndarray, "1 6"] = np.zeros((1, 6), dtype=np.float32)
+    keypoints[0, :2] = [edge + 0.7, 50.0]
+    with pycolmap.Database.open(database_path) as database:
+        image_id: int = next(int(image.image_id) for image in database.read_all_images() if image.name == "fish/1000")
+        database.write_keypoints(image_id, keypoints)
+        database.write_descriptors(image_id, pycolmap.FeatureDescriptors(data=np.zeros((1, 8), dtype=np.uint8), type=pycolmap.FeatureExtractorType.ALIKED_N16ROT))
+
+    drop_masked_keypoints(database_path, guarded)
+
+    assert read_keypoints(database_path, image_id).tolist() == keypoints[:, :2].tolist()
+
+
 def test_pycolmap_extraction_applies_the_valid_angle_guard_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from colsfm import features
 

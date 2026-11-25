@@ -57,22 +57,24 @@ class MaskSource(Protocol):
         ...
 
 
-def keypoints_outside_mask(keypoints_xy: Float32[ndarray, "n 2"], mask: KeypointMask) -> Bool[ndarray, " n"]:
-    """Which keypoints survive a mask: those whose nearest pixel is not masked.
+def keypoints_outside_mask(keypoints_xy: Float32[ndarray, "n 2"], mask: KeypointMask, pixel_centre: float = 0.0) -> Bool[ndarray, " n"]:
+    """Which keypoints survive a mask: those whose pixel is not masked.
 
-    Keypoints are in OpenCV pixel convention (pixel centres on integers), so the pixel is the rounded coordinate,
-    clipped into the image.
+    The pixel is the coordinate less `pixel_centre`, rounded, clipped into the image: OpenCV keypoints (the `raco`
+    backend) put pixel centres on integers (0.0), COLMAP keypoints (the `pycolmap` backend) at +0.5, so a content mask
+    reads them at 0.5.
 
     Args:
         keypoints_xy: Pixel coordinates.
         mask: True = drop.
+        pixel_centre: The coordinate of pixel 0's centre in the keypoints' convention.
 
     Returns:
         True for each keypoint to keep.
     """
     height, width = mask.shape
-    columns: ndarray = np.clip(np.rint(keypoints_xy[:, 0]).astype(np.int64), 0, width - 1)
-    rows: ndarray = np.clip(np.rint(keypoints_xy[:, 1]).astype(np.int64), 0, height - 1)
+    columns: ndarray = np.clip(np.rint(keypoints_xy[:, 0] - pixel_centre).astype(np.int64), 0, width - 1)
+    rows: ndarray = np.clip(np.rint(keypoints_xy[:, 1] - pixel_centre).astype(np.int64), 0, height - 1)
     return ~mask[rows, columns]
 
 
@@ -291,7 +293,7 @@ def valid_angle_mask(camera: pycolmap.Camera) -> KeypointMask | None:
 
     The boundary is the forward projection of the limit, which is exact: `OPENCV_FISHEYE` distorts radially in
     normalised coordinates, so the limit's rays land on an ellipse with semi-axes fx theta_d and fy theta_d around the
-    principal point. Pixel centres sit on integers, as `keypoints_outside_mask` reads them.
+    principal point. It is sampled at integer pixel coordinates, the nearest of which `keypoints_outside_mask` reads.
 
     Args:
         camera: The camera.
@@ -372,11 +374,14 @@ def drop_masked_keypoints(database_path: Path, masks: MaskSource) -> None:
 
     For an extractor that writes its own rows (the `pycolmap` backend); the `raco` backend applies masks before it
     stores anything (`colsfm.features_native.store_feature_batch`). Kept rows keep their order and every column.
+    COLMAP keypoints put pixel centres at +0.5, so a content mask reads each keypoint in the pixel it falls in; a
+    `ValidAngleMasks`' camera mask is sampled at integer COLMAP coordinates and reads it at the nearest one.
 
     Args:
         database_path: A database whose keypoints and descriptors are written.
         masks: The masks to apply.
     """
+    angle_masks, content = (masks.angle_masks, masks.masks) if isinstance(masks, ValidAngleMasks) else ({}, masks)
     # pycolmap updates keypoints but cannot replace a descriptor row (its write is an INSERT), so both rows are
     # rewritten through sqlite once the pycolmap handle is closed; `cols` and the descriptor `type` stay as stored.
     rewrites: list[tuple[int, Float32[ndarray, "kept columns"], UInt8[ndarray, "kept bytes"]]] = []
@@ -384,11 +389,16 @@ def drop_masked_keypoints(database_path: Path, masks: MaskSource) -> None:
         cameras: dict[int, pycolmap.Camera] = {int(camera.camera_id): camera for camera in database.read_all_cameras()}
         for image in database.read_all_images():
             camera: pycolmap.Camera = cameras[int(image.camera_id)]
-            mask: KeypointMask | None = masks.mask(image.name, int(camera.width), int(camera.height))
-            if mask is None or not database.exists_keypoints(image.image_id):
+            content_mask: KeypointMask | None = None if content is None else content.mask(image.name, int(camera.width), int(camera.height))
+            angle_mask: KeypointMask | None = angle_masks.get(image.name)
+            if (content_mask is None and angle_mask is None) or not database.exists_keypoints(image.image_id):
                 continue
             keypoints: Float32[ndarray, "n columns"] = database.read_keypoints(image.image_id)
-            kept: Bool[ndarray, " n"] = keypoints_outside_mask(keypoints[:, :2], mask)
+            kept: Bool[ndarray, " n"] = np.ones(len(keypoints), dtype=bool)
+            if content_mask is not None:
+                kept &= keypoints_outside_mask(keypoints[:, :2], content_mask, pixel_centre=0.5)
+            if angle_mask is not None:
+                kept &= keypoints_outside_mask(keypoints[:, :2], angle_mask)
             if not kept.all():
                 rewrites.append((int(image.image_id), keypoints[kept], database.read_descriptors(image.image_id).data[kept]))
     with contextlib.closing(sqlite3.connect(database_path)) as connection, connection:
