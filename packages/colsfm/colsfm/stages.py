@@ -33,6 +33,7 @@ from colsfm.database import (
     read_descriptors_from_database,
     read_inlier_sample,
     read_keypoints_batch,
+    release_freed_memory,
 )
 from colsfm.export import (
     EVERY_FRAME_METADATA_SUBPATH,
@@ -423,6 +424,7 @@ def run_loop_closure_stage(
     # 4.7 GB, which would otherwise stay resident for the whole stage -- through the
     # keypoint read, the batch match and the measurement.
     del descriptors
+    release_freed_memory()  # the read's worker threads allocated them: without this the freed blocks stay resident
     print(f"[colsfm] loop closure: retrieval index over {len(index.image_ids)} images in {index.build_seconds:.2f}s")
 
     config: LoopClosureConfig = LoopClosureConfig.from_pose_graph(pose_graph_config)

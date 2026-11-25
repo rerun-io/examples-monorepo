@@ -29,6 +29,7 @@ Keypoints written by COLMAP are Nx6 (xy plus a 2x2 affine block), so
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -299,6 +300,25 @@ def read_descriptors_from_database(
             for part in pool.map(lambda share: _read_descriptor_share(database_path, share), shares):
                 found.update(part)
     return {image_id: found[image_id] for image_id in wanted if image_id in found}
+
+
+def release_freed_memory() -> bool:
+    """Hand the allocator's freed blocks back to the operating system; call it after dropping a large parallel read.
+
+    `read_descriptors_from_database` allocates its blobs on worker threads. glibc keeps a thread's freed blocks in that
+    thread's arena, where the main thread cannot reuse them, so after `del` the memory is neither in use nor available:
+    on Casa Loma 007 (18 GB of descriptors) the peak of the whole run rose from 22.9 GB to 27.8 GB. `malloc_trim` returns
+    the free pages of every arena (measured there: resident 19.85 GB -> 1.88 GB after the descriptors are dropped).
+
+    Returns:
+        Whether the allocator was asked: False on a C library without `malloc_trim` (not glibc).
+    """
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+    except (AttributeError, OSError):
+        return False
+    malloc_trim(0)
+    return True
 
 
 def _read_only_connection(database_path: Path) -> contextlib.closing[sqlite3.Connection]:
