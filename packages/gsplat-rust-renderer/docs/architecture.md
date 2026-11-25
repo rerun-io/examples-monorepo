@@ -34,13 +34,15 @@ The 256-byte uniform block follows renderer upload alignment. Raw allocation,
 binding, upload, and readback operations are isolated in `gpu.rs`. Shader files
 use relative `#import <...>` directives through a small local import resolver.
 
-The forward path projects, sorts visible depths, scans intersection counts,
-projects visible splats, maps and sorts tiles, computes tile offsets, and
-rasterizes. Splats and hexels give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K
-blend, and all three share one set of output entry points. Counts and dispatch plans stay on the GPU. An eight-byte count
-readback detects overflow; the output remains intact until capacity grows and
-the view rerenders. Pinhole, KB4, RT8, and thin-prism camera models share this path.
-Render mode is a per-render option: default blur or mip antialiasing.
+The forward path projects each primitive once (geometry and view-dependent
+colour, stored by global id), sorts visible depths, scans intersection counts,
+maps and sorts tiles, computes tile offsets, and rasterizes. Splats and hexels
+give one tile rasterizer a per-pixel `sample()`, 2D fits keep a top-K blend,
+and all three share one set of output entry points. Counts and dispatch plans
+stay on the GPU. An eight-byte count readback detects overflow; the output
+remains intact until capacity grows and the view rerenders. Pinhole, KB4, RT8,
+and thin-prism camera models share this path. Render mode is a per-render
+option: default blur or mip antialiasing.
 
 Targets own their GPU handles and provide f32 RGBA, packed RGBA8, or storage
 textures. The viewer requests color and alpha-weighted camera depth for

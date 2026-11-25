@@ -2,13 +2,12 @@
 #import <./counts.wgsl>
 #import <./lens.wgsl>
 
-// Brush project_forward + project_visible, adapted to raw buffers.
+// Brush project_forward (projection, tile count and SH colour in one pass), adapted to raw buffers.
 @group(0) @binding(1) var<storage, read> transforms: array<f32>;
 @group(0) @binding(2) var<storage, read> raw_opacity: array<f32>;
 @group(0) @binding(3) var<storage, read> min_scale: array<f32>;
 @group(0) @binding(4) var<storage, read_write> global_from_compact: array<u32>;
 @group(0) @binding(5) var<storage, read_write> depths: array<u32>;
-@group(0) @binding(7) var<storage, read_write> tile_hits: array<u32>;
 @group(0) @binding(8) var<storage, read_write> projected: array<Splat>;
 @group(0) @binding(9) var<storage, read> coeffs: array<f32>;
 struct Projection {
@@ -20,8 +19,6 @@ struct Projection {
     mean: vec3f
 }
 
-// Shared projection arithmetic. The visible pass trusts forward culling;
-// its unused validity result lets the compiler discard the finite predicates.
 fn project_core(id: u32, mean: vec3f, point: vec3f) -> Projection {
     let base = id * 10u;
     var scale = exp(vec3f(transforms[base + 7u], transforms[base + 8u], transforms[base + 9u]) + frame.options.log_scale_offset);
@@ -181,25 +178,11 @@ fn sh_color(id: u32, v: vec3f) -> vec3f {
             hit++;
         }
     }
-    tile_hits[id] = hit;
-    add_intersections(hit);
+    add_tile_hits(id, hit);
     let write = atomicAdd(&counts[0], 1u) & 0x7fffffffu;
     global_from_compact[write] = id;
     depths[write] = depth_key(p.depth);
-}
-
-@compute @workgroup_size(WG) fn project_visible(@builtin(workgroup_id) gid: vec3u,
-    @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let compact = (gid.x + gid.y * groups.x) * WG + lid;
-    if compact >= atomicLoad(&counts[0]) {
-        return;
-    }
-    let id = global_from_compact[compact];
-    let base = id * 10u;
-    let mean = vec3f(transforms[base], transforms[base + 1u], transforms[base + 2u]);
-    let point = (frame.view_from_obj * vec4f(mean, 1.0)).xyz;
-    let p = project_core(id, mean, point);
-    let v = normalize(p.mean - frame.camera_position_in_obj.xyz);
-    let color = sh_color(id, v);
-    projected[compact] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z, p.depth);
+    // Splat-id order keeps the SH row reads coalesced.
+    let color = sh_color(id, normalize(p.mean - frame.camera_position_in_obj.xyz));
+    projected[id] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z, p.depth);
 }

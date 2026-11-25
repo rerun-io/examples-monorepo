@@ -17,7 +17,7 @@ struct Intersections {
 impl Intersections {
     fn new(device: &wgpu::Device, kernels: &Kernels, counts: &wgpu::Buffer, capacity: u32) -> Self {
         let keys = storage(device, "intersection tile keys", u64::from(capacity) * 4);
-        let ids = storage(device, "intersection compact IDs", u64::from(capacity) * 4);
+        let ids = storage(device, "intersection global IDs", u64::from(capacity) * 4);
         let sort = RadixSort::new(
             device,
             kernels,
@@ -31,11 +31,6 @@ impl Intersections {
     }
 }
 
-struct ProjectionGroups {
-    forward: wgpu::BindGroup,
-    visible: wgpu::BindGroup,
-}
-
 struct MappingGroups {
     tiles: wgpu::BindGroup,
     offsets: wgpu::BindGroup,
@@ -44,7 +39,7 @@ struct MappingGroups {
 struct FrameSlot {
     uniform: wgpu::Buffer,
     readback: wgpu::Buffer,
-    projection: ProjectionGroups,
+    forward: wgpu::BindGroup,
     mapping: MappingGroups,
     raster: Option<(Target, wgpu::BindGroup)>,
 }
@@ -81,6 +76,10 @@ impl Scratch {
                 &[
                     (0, uniform.as_entire_binding()),
                     (1, self.counts.as_entire_binding()),
+                    (
+                        2,
+                        self.depth_sort.output(DEPTH_KEY_BITS).1.as_entire_binding(),
+                    ),
                     (5, self.projected.as_entire_binding()),
                     (6, self.scan.output().as_entire_binding()),
                     (7, self.intersections.sort.output(0).0.as_entire_binding()),
@@ -126,11 +125,26 @@ pub struct ViewState {
     deform: Option<crate::motion_gpu::Deform>,
 }
 
+/// Byte offset of the per-primitive tile counts in the counts buffer (`TILE_HITS` in counts.wgsl).
+const TILE_HITS: u64 = 256;
+
+fn tile_hits(counts: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer: counts,
+        offset: TILE_HITS,
+        size: None,
+    })
+}
+
 const VISIBLE: u32 = 0;
 
 const INTERSECTIONS: u32 = 1;
 
 const DEPTH_SORT: u32 = 2;
+
+/// Depth key width. Gather and `map_tiles` read the global ids in depth order from
+/// `depth_sort.output(DEPTH_KEY_BITS).1`, whose buffer depends on the pass count.
+const DEPTH_KEY_BITS: u32 = 32;
 
 const TILE_SORT: u32 = 4;
 
@@ -184,39 +198,45 @@ impl ViewState {
         let capacity = initial_capacity.max(1);
         let n = scene.n;
         let projected = u64::from(n.max(1)) * scene.projected_bytes();
-        for required in [u64::from(capacity) * 4, projected] {
+        let counts_bytes = TILE_HITS + u64::from(n.max(1)) * 4;
+        for required in [u64::from(capacity) * 4, projected, counts_bytes] {
             if required > limit {
                 return Err(Error::Capacity { required, limit });
             }
         }
-        let counts = storage(device, "visible and intersection counts", 8);
+        let counts = storage(
+            device,
+            "visible and intersection counts, global tile counts",
+            counts_bytes,
+        );
         let ids = storage(device, "compact IDs", u64::from(n) * 4);
         let depths = storage(device, "depth keys", u64::from(n) * 4);
-        let hits = storage(device, "global tile counts", u64::from(n) * 4);
         let gathered = storage(device, "sorted tile counts", u64::from(n) * 4);
         let visible = CountSlot::Visible;
+        let depth_sort = RadixSort::new(
+            device,
+            kernels,
+            n,
+            visible,
+            (&depths, &ids),
+            &counts,
+            DEPTH_SORT,
+        );
+        let gather = bind(
+            device,
+            &kernels.gather.layout,
+            &[
+                (1, counts.as_entire_binding()),
+                (2, depth_sort.output(DEPTH_KEY_BITS).1.as_entire_binding()),
+                (3, tile_hits(&counts)),
+                (4, gathered.as_entire_binding()),
+            ],
+        );
         let scratch = Scratch {
             projected: storage(device, "projected primitives", projected),
-            depth_sort: RadixSort::new(
-                device,
-                kernels,
-                n,
-                visible,
-                (&depths, &ids),
-                &counts,
-                DEPTH_SORT,
-            ),
+            depth_sort,
             scan: Scan::new(device, kernels, n, visible, &gathered, &counts, SCAN),
-            gather: bind(
-                device,
-                &kernels.gather.layout,
-                &[
-                    (1, counts.as_entire_binding()),
-                    (2, ids.as_entire_binding()),
-                    (3, hits.as_entire_binding()),
-                    (4, gathered.as_entire_binding()),
-                ],
-            ),
+            gather,
             intersections: Intersections::new(device, kernels, &counts, capacity),
             offsets: storage(device, "tile ranges", 8),
             bits: 1,
@@ -236,8 +256,8 @@ impl ViewState {
         let stages = kernels.stages(scene);
         let frames = std::array::from_fn(|_| {
             let uniform = uniform(device, &[0; size_of::<Uniforms>() / 4]);
-            let projection = |kernel: &crate::gpu::Kernel, visible: bool| {
-                let mut bindings = scene.bindings(visible);
+            let forward = {
+                let mut bindings = scene.bindings();
                 if let Some(deform) = &deform {
                     // The projector reads this view's evaluated rows instead of the canonical ones.
                     for (binding, resource) in &mut bindings {
@@ -251,26 +271,16 @@ impl ViewState {
                 bindings.extend([
                     (0, uniform.as_entire_binding()),
                     (4, ids.as_entire_binding()),
+                    (5, depths.as_entire_binding()),
                     (6, scratch.counts.as_entire_binding()),
+                    (8, scratch.projected.as_entire_binding()),
                 ]);
-                if visible {
-                    bindings.push((8, scratch.projected.as_entire_binding()));
-                } else {
-                    bindings.extend([
-                        (5, depths.as_entire_binding()),
-                        (7, hits.as_entire_binding()),
-                    ]);
-                }
-                bind(device, &kernel.layout, &bindings)
-            };
-            let projection = ProjectionGroups {
-                forward: projection(&stages.forward, false),
-                visible: projection(&stages.visible, true),
+                bind(device, &stages.forward.layout, &bindings)
             };
             let mapping = scratch.mapping(device, kernels, scene, &uniform);
             FrameSlot {
                 uniform,
-                projection,
+                forward,
                 mapping,
                 raster: None,
                 readback: gpu::feedback_buffer(device),
@@ -419,6 +429,20 @@ impl ViewState {
 mod tests {
     use crate::test_utils::{gpu, upload};
     use crate::{Error, RenderOptions, Renderer, Target};
+
+    #[test]
+    fn tile_hits_offset_matches_counts_wgsl() {
+        assert_eq!(
+            super::TILE_HITS % 256,
+            0,
+            "the portable storage offset alignment"
+        );
+        let words = super::TILE_HITS / 4;
+        assert!(
+            include_str!("../../shader/counts.wgsl")
+                .contains(&format!("const TILE_HITS = {words}u;"))
+        );
+    }
 
     #[test]
     #[ignore = "integration: GPU"]

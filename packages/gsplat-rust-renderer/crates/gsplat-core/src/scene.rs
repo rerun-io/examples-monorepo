@@ -99,8 +99,8 @@ impl Scene {
         }
     }
 
-    /// Scene buffers read by the forward (`visible == false`) or visible projection.
-    pub(crate) fn bindings(&self, visible: bool) -> Vec<(u32, wgpu::BindingResource<'_>)> {
+    /// Scene buffers read by the forward projection.
+    pub(crate) fn bindings(&self) -> Vec<(u32, wgpu::BindingResource<'_>)> {
         match &self.inputs {
             Inputs::Splats {
                 transforms,
@@ -109,15 +109,12 @@ impl Scene {
                 min_scale,
                 ..
             } => {
-                let mut bindings = vec![
+                vec![
                     (1, transforms.as_entire_binding()),
                     (2, opacity.as_entire_binding()),
                     (3, min_scale.as_entire_binding()),
-                ];
-                if visible {
-                    bindings.push((9, sh.as_entire_binding()));
-                }
-                bindings
+                    (9, sh.as_entire_binding()),
+                ]
             }
             Inputs::Hexels { params, .. } => vec![(1, params.as_entire_binding())],
         }

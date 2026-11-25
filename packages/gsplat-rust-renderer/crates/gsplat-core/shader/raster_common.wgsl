@@ -4,7 +4,7 @@
 // module defines `alias Primitive`, `const BATCH` (BATCH primitives fit the 10 KiB workgroup budget) and
 // `fn sample(p: Primitive, pix: vec2u, surface: bool) -> Sample`; alpha below the cutoff is a miss.
 struct Sample { alpha: f32, color: vec3f, depth: f32, normal: vec3f, }
-@group(0) @binding(1) var<storage, read> compact_from_isect: array<u32>;
+@group(0) @binding(1) var<storage, read> global_from_isect: array<u32>;
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> projected: array<Primitive>;
 @group(0) @binding(7) var<storage, read> counts: array<u32>;
@@ -45,7 +45,7 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
     var out: Raster;
     out.isect = NO_ID;
     if lid == 0u {
-        skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
+        skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&global_from_isect));
     }
     if workgroupUniformLoad(&skip) != 0u {
         return out;
@@ -72,7 +72,7 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
         }
         let remaining = min(BATCH, hi - start);
         if lid < remaining {
-            batch[lid] = projected[compact_from_isect[start + lid]];
+            batch[lid] = projected[global_from_isect[start + lid]];
         }
         workgroupBarrier();
         let was_done = done;

@@ -2,7 +2,7 @@
 #import <./raster_outputs.wgsl>
 
 // Top-10 normalized blend: no transmittance, opacity or depth order.
-@group(0) @binding(1) var<storage, read> compact_from_isect: array<u32>;
+@group(0) @binding(1) var<storage, read> global_from_isect: array<u32>;
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> projected: array<ImageHexel>;
 @group(0) @binding(7) var<storage, read> counts: array<u32>;
@@ -22,7 +22,7 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
     var out: Raster;
     out.isect = NO_ID;
     if lid == 0u {
-        skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
+        skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&global_from_isect));
         let index = (tile.x + tile.y * frame.image.tiles_x) * 2u;
         range_lo = offsets[index];
         range_hi = offsets[index + 1u];
@@ -44,14 +44,14 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
         let remaining = min(BATCH, hi - start);
         workgroupBarrier();
         if lid < remaining {
-            batch[lid] = projected[compact_from_isect[start + lid]];
+            batch[lid] = projected[global_from_isect[start + lid]];
         }
         workgroupBarrier();
         for (var t = 0u; out.inside && t < remaining; t++) {
             let h = batch[t];
             let w = weight(h, vec2f(h.x, h.y) - p);
             if w > min_weight {
-                ids[min_slot] = compact_from_isect[start + t];
+                ids[min_slot] = global_from_isect[start + t];
                 weights[min_slot] = w;
                 if min_weight < 0.0 && min_slot + 1u < TOP_K {
                     min_slot++;

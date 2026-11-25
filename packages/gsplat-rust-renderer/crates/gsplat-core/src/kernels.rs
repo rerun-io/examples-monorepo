@@ -83,20 +83,11 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (4, W),
             (5, W),
             (6, W),
-            (7, W),
-        ],
-        "project_visible" => &[
-            (0, U),
-            (1, R),
-            (2, R),
-            (3, R),
-            (4, W),
-            (6, W),
             (8, W),
             (9, R),
         ],
         "gather" => &[(1, R), (2, R), (3, R), (4, W)],
-        "map_tiles" => &[(0, U), (1, R), (5, R), (6, R), (7, W), (8, W)],
+        "map_tiles" => &[(0, U), (1, R), (2, R), (5, R), (6, R), (7, W), (8, W)],
         "tile_offsets" => &[(0, U), (1, R), (7, W), (9, W)],
         "raster_float" => &[(0, U), (1, R), (2, R), (3, R), (4, W), (7, R)],
         "raster_packed" => &[(0, U), (1, R), (2, R), (3, R), (5, W), (7, R)],
@@ -109,11 +100,9 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (6, COLOR),
             (7, R),
             (8, DEPTH),
-            (11, R),
             (12, ID),
         ],
-        "hexel_forward" | "image_forward" => &[(0, U), (1, R), (4, W), (5, W), (6, W), (7, W)],
-        "hexel_visible" | "image_visible" => &[(0, U), (1, R), (4, W), (6, W), (8, W)],
+        "hexel_forward" | "image_forward" => &[(0, U), (1, R), (4, W), (5, W), (6, W), (8, W)],
         "raster_surface" => &[
             (0, U),
             (1, R),
@@ -141,7 +130,6 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
 /// Kernels that depend on the primitive; the sort, scan and tile-range kernels are shared.
 pub(crate) struct Stages {
     pub forward: Kernel,
-    pub visible: Kernel,
     pub map_tiles: Kernel,
     /// Rasterizers in `RasterKind` order; `None` where unsupported.
     rasters: [Option<Kernel>; 5],
@@ -214,29 +202,33 @@ impl Kernels {
             pipeline(device, module, entry, bindings(entry))
         };
         // 2D fits keep only the float and packed targets.
-        let stages = |project,
-                      [forward, visible]: [&str; 2],
-                      map,
-                      raster: &wgpu::ShaderModule,
-                      targets: usize| Stages {
+        let stages = |project, forward, map, raster: &wgpu::ShaderModule, targets: usize| Stages {
             forward: kernel(project, forward),
-            visible: kernel(project, visible),
             map_tiles: kernel(map, "map_tiles"),
             rasters: std::array::from_fn(|i| (i < targets).then(|| kernel(raster, RASTERS[i]))),
         };
-        let splat = ["project_forward", "project_visible"];
-        let params = ["hexel_forward", "hexel_visible"];
-        let image = ["image_forward", "image_visible"];
         Self {
-            splats: stages(&projection, splat, &mapping, &raster, RASTERS.len()),
+            splats: stages(
+                &projection,
+                "project_forward",
+                &mapping,
+                &raster,
+                RASTERS.len(),
+            ),
             hexels: stages(
                 &hexel_projection,
-                params,
+                "hexel_forward",
                 &hexel_mapping,
                 &hexel_raster,
                 RASTERS.len(),
             ),
-            images: stages(&image_projection, image, &image_mapping, &image_raster, 2),
+            images: stages(
+                &image_projection,
+                "image_forward",
+                &image_mapping,
+                &image_raster,
+                2,
+            ),
             gather: kernel(&mapping, "gather"),
             tile_offsets: kernel(&mapping, "tile_offsets"),
             scan: kernel(&scan, "scan"),
