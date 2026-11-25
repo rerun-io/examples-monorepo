@@ -420,7 +420,7 @@ class LoopClosureConfig:
     """Part of the drift allowance that grows with the prior path travelled between the two rig frames (2 %, twice the
     1 % of the worst case above)."""
     closed_gate_reach_m: float = 30.0
-    """The prior distance that replaces the edge gate when the edge gates are closed (`max_translation_m <= 0`).
+    """The prior distance that replaces the edge gate when an edge gate is closed (`max_translation_m` or `max_rotation_deg` <= 0).
 
     No edge is accepted then, but the loop pairs still feed the mapper (removing them cost KITTI 06 42 % ATE), so the
     bound must keep every rig pair that can see common structure. On KITTI 06 the shortlisted rig pairs reach 13.4 m
@@ -749,8 +749,9 @@ def prior_distance_bound(config: LoopClosureConfig, path_m: float) -> float:
     prior_drift_per_metre * path_m`, from ground truth (see the fields). Where the profile sets a prior translation gate
     P, an accepted edge also needs `|t_meas - t_prior| <= P` (`agrees_with_prior`: the translation of
     `prior^-1 * meas` is `R_prior^T (t_meas - t_prior)`), so by the triangle inequality `|t_prior| <= T + P`: the
-    allowance is then the smaller of the two. With closed edge gates (`max_translation_m <= 0`) no edge is accepted, the
-    loop pairs feed only the mapper, and the reach is `closed_gate_reach_m`.
+    allowance is then the smaller of the two. With a closed edge gate (`max_translation_m <= 0` or
+    `max_rotation_deg <= 0`) no edge is accepted, the loop pairs feed only the mapper, and the reach is
+    `closed_gate_reach_m`.
 
     On Casa Loma 007 (cube profile, T 3 m, P 1.5 m) the bound is 4.5 m and drops 6,215 of 7,210 shortlisted rig pairs
     (37,290 of 42,910 loop image pairs, 95-97 % of them empty); the largest prior distance of an accepted edge there is
@@ -763,7 +764,7 @@ def prior_distance_bound(config: LoopClosureConfig, path_m: float) -> float:
     Returns:
         The bound in metres.
     """
-    edge_gate_open: bool = config.max_translation_m > 0.0
+    edge_gate_open: bool = config.max_translation_m > 0.0 and config.max_rotation_deg > 0.0
     reach_m: float = config.max_translation_m if edge_gate_open else config.closed_gate_reach_m
     allowance_m: float = config.prior_drift_floor_m + config.prior_drift_per_metre * path_m
     if edge_gate_open and config.max_prior_translation_m is not None:

@@ -548,6 +548,8 @@ def test_the_prior_bound_is_the_edge_gate_plus_the_tighter_of_the_prior_gate_and
     assert prior_distance_bound(LoopClosureConfig(max_translation_m=1.0), path_m=100.0) == pytest.approx(6.5)
     assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_rotation_deg=10.0), path_m=50.0) == pytest.approx(7.5)
     assert prior_distance_bound(LoopClosureConfig(max_translation_m=0.0), path_m=600.0) == pytest.approx(45.5)
+    # A zero rotation gate rejects every edge as well (`gate_loop_edges` needs both), so the reach is the closed one.
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=1.0, max_rotation_deg=0.0), path_m=600.0) == pytest.approx(45.5)
     assert prior_distance_bound(LoopClosureConfig(max_translation_m=0.0, max_prior_translation_m=1.5), path_m=600.0) == pytest.approx(45.5), (
         "with closed edge gates no edge is accepted, so the prior gate bounds nothing: the drift allowance applies"
     )
