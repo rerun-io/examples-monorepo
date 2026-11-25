@@ -94,8 +94,8 @@ class ViewRigSource:
 
 
 def view_rig_poses(rig_t_ns: Int64[ndarray, " k"], world_T_rig: Float64[ndarray, "k 4 4"], source: ViewRigSource) -> tuple[Int64[ndarray, " m"], Float64[ndarray, "m 4 4"]]:
-    """The rig at every viewing frame between the first and last registered rig frame inside the prior's span: the prior
-    re-anchored on the registered rig frames (`reanchor`). A hand-held walk does not move like a slerp between them.
+    """The rig at every viewing frame between the first and last anchor rig frame (`rig_t_ns`) inside the prior's span:
+    the prior re-anchored on those rig frames (`reanchor`). A hand-held walk does not move like a slerp between them.
 
     Returns:
         Those viewing frames and the rig pose at each; nothing with fewer than two such rig frames.

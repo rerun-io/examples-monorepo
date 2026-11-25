@@ -17,9 +17,10 @@ segment it was read from:
   frame through yellow to red at the last; `trajectory`, the whole path in the same colours, one row at the last rig
   frame; `endpoints/start` (with a ring, static) and `endpoints/end` (from the last rig frame on);
 - `/world/runs/<source>/rig_view`, for a catalog input whose segment has viewing faces (dataforge's Insta360 `cube_view`
-  layer, `pinhole/video_view`): a pose at every viewing frame, the prior re-anchored on the registered rig frames
-  (`colsfm.frame_poses.view_rig_poses`, the every-frame export's rule), with each camera's frustum referencing its
-  viewing face of that frame. `rig` keeps the registered rig frames only;
+  layer, `pinhole/video_view`): a pose at every viewing frame, the prior re-anchored on the rig frames `rig` holds
+  (every input rig frame when the run wrote the every-frame export, else the registered ones;
+  `colsfm.frame_poses.view_rig_poses`, the every-frame export's rule), with each camera's frustum referencing its
+  viewing face of that frame. `rig` keeps its own rig frames;
 - `/world/runs/<source>/position_difference`: how far each optimised rig frame lies from the prior pose the run started
   from (the run's own `keyframes/frames_meta.json`), in metres, on `video_time`; left out for a run without that file;
 - the `colsfm` recording property: the run's headline numbers (registered images, points, reprojection, wall time).
@@ -324,7 +325,8 @@ def log_view_rig(
         root: `/world/runs/<source>`.
         frames_meta: The run's cameras and keyframes (which camera reads which stream).
         manifest: The run's frame source: each camera's stream.
-        rig_t_ns: Registered rig frame stamps, increasing.
+        rig_t_ns: The stamps of the rig frames `rig` holds (every input rig frame with the every-frame export, else
+            the registered ones), increasing: the anchors.
         world_T_rig: The run's poses at them.
         source: The prior and the viewing frames.
     """
