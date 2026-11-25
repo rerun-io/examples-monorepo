@@ -174,6 +174,21 @@ def get_safe_application_id() -> str:
     return "rerun-application"  # Default fallback
 
 
+FILE_FLUSH_TICK_S: float = 30.0
+"""Batcher tick of a recording that only goes to a file (`file_batcher_config`), seconds."""
+
+
+def file_batcher_config() -> rr.ChunkBatcherConfig:
+    """The chunk batcher of a recording that only goes to a file.
+
+    A file is read back whole, so batch for the reader, not for latency: the default 200 ms tick cuts a per-frame log
+    into chunks of a few rows, and the viewer walks every chunk of a file opened by path on every frame (117k chunks
+    cost ~55 ms/frame on an M5). The byte and row limits keep their defaults, and a `RERUN_FLUSH_TICK_SECS` in the
+    environment keeps its value.
+    """
+    return rr.ChunkBatcherConfig(flush_tick=None if "RERUN_FLUSH_TICK_SECS" in os.environ else FILE_FLUSH_TICK_S)
+
+
 @dataclass
 class RerunTyroConfig:
     application_id: str = field(default_factory=get_safe_application_id)
@@ -213,7 +228,19 @@ class RerunTyroConfig:
             default_enabled=True,
             strict=True,
         )
-        self.rec_stream: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
+        file_only = self.save is not None and not self.serve and not self.connect and (not self.live or self.headless)
+        if file_only:
+            # rr.init takes no batcher config, so reopen its recording id (the pinned one, else the
+            # multiprocessing-shared default) with the file's (`file_batcher_config`).
+            self.rec_stream: rr.RecordingStream = rr.RecordingStream(
+                self.application_id,
+                recording_id=self.recording_id or rr.get_recording_id(),
+                make_default=True,
+                default_enabled=True,
+                batcher_config=file_batcher_config(),
+            )
+        else:
+            self.rec_stream = rr.get_global_data_recording()  # type: ignore[assignment]
 
         if self.serve:
             rr.serve_grpc(server_memory_limit=self.server_memory_limit)
@@ -239,7 +266,8 @@ class RerunTyroConfig:
                 rr.FileSink(str(self.save)),
             )
         elif self.save is not None:
-            rr.save(self.save)
+            # This config's stream by name: inside another active recording, a bare rr.save would attach the file to that one.
+            rr.save(self.save, recording=self.rec_stream)
         elif not self.headless:
             rr.spawn(
                 port=self.port,

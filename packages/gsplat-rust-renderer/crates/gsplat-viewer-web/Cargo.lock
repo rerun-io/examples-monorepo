@@ -3965,6 +3965,7 @@ dependencies = [
  "re_grpc_server",
  "re_math",
  "re_tracing",
+ "re_video",
  "re_viewer",
  "tokio",
  "web-time",

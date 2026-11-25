@@ -335,8 +335,11 @@ python tools/apps/fullcircle_masks.py --dataset <dataset> --segment <segment> --
 # a base not registered yet: --rrd <base.rrd> instead of --dataset/--segment
 ```
 
-The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on every 10th frameset (`--stride`), the tracker re-prompted once a second
-(`--reprompt-every-frames 30`, which follows the stride), already dilated. On FullCircle's room3 scene at half rate
+The masks are 1/4 of the lens resolution with a static `Transform3D(scale=[4, 4, 1])`, on the framesets of the segment's cube layer (its `cube` property, or `--cube-rrd`; every 10th without one; `--stride` must agree with it), the tracker re-prompted once a second
+(`--reprompt-every-frames 30`, which follows the stride), already dilated by 12 px (`--masker.dilate-px`; FullCircle
+trains on its `masks-5`, about 13 px at 1920 px). The layer also holds the bystanders: YOLOX boxes on the same level
+faces that the operator track does not cover, confirmed by SAM 3 on those faces (`posekit.models.fullcircle_people`;
+`--people.no-enabled` writes the operator only). On FullCircle's room3 scene at half rate
 (179 frames, 3 Hz) the masks match the masks FullCircle released with its dataset at a mean
 IoU of 0.9402, median 0.9556 (357 frames at full rate with the defaults: 0.9350). Golden test: `tests/test_fullcircle_golden.py`, asset `POSEKIT_FULLCIRCLE_SCENE`.
 

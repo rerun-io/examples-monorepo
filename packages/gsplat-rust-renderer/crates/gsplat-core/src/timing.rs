@@ -2,8 +2,8 @@
 pub const STAGE_NAMES: [&str; 8] = [
     "project_forward",
     "depth_sort",
-    "gather_scan",
-    "project_visible",
+    "gather",
+    "scan",
     "map_intersections",
     "tile_sort",
     "tile_offsets",

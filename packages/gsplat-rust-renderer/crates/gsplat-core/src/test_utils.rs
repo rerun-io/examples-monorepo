@@ -152,3 +152,32 @@ pub fn asog_gpu_load(parts: &crate::asog::AsogParts, times: &[f32]) -> AsogGpuLo
         evaluated,
     }
 }
+
+/// Render `target`, again while the view grows its intersection buffer (the first frame holds one).
+pub fn render_fitted(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &crate::Renderer,
+    view: &mut crate::ViewState,
+    camera: &crate::Camera,
+    options: &crate::RenderOptions,
+    target: &crate::Target,
+) -> crate::FrameStats {
+    loop {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer
+            .render(queue, &mut encoder, view, camera, options, target.clone())
+            .expect("encode test frame");
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("wait for test frame");
+        let stats = view
+            .poll_feedback()
+            .expect("test frame feedback")
+            .expect("finished test frame");
+        if !stats.needs_rerender {
+            return stats;
+        }
+    }
+}

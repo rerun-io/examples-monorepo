@@ -3,6 +3,7 @@ pub mod camera;
 pub mod camera_files;
 pub mod engines;
 pub mod hexel_ply;
+pub mod lod;
 mod metrics;
 mod provenance;
 mod renderer;

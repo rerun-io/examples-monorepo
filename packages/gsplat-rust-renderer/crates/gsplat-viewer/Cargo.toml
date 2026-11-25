@@ -37,6 +37,11 @@ re_crash_handler = { version = "=0.42.0" }
 re_grpc_server = { version = "=0.42.0" }
 tokio = { workspace = true }
 re_viewer = { version = "=0.42.0" }
+# Native AV1 decoding at full speed (the lens and face videos of dataforge recordings): `nasm` turns on dav1d's
+# assembly. Without it Rerun 0.42 refuses AV1 on Linux x86-64 ("compile Rerun with the `nasm` feature") and decodes
+# 2-3x slower on Apple silicon. x86-64 assembles with nasm (the pixi feature's `nasm`); Apple silicon with the C
+# compiler. Linux arm64 has no native AV1 decoder in re_video 0.42 (no dav1d there), so the feature changes nothing.
+re_video = { version = "=0.42.0", features = ["nasm"] }
 
 # The web build drops analytics and the agent panel (its reqwest pulls a second wasm-streams,
 # whose exported JS classes collide in wasm-bindgen).

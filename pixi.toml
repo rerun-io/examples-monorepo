@@ -2134,6 +2134,7 @@ pandas = ">=2.3.3"
 # clang compiles the C deps, also for the wasm32 web build (linux-only). macOS uses Xcode's clang and linker: conda's
 # ld64 956 cannot link against the macOS 27 SDK, whose libSystem.tbd lists arm64e but no arm64 slice ("malformed file").
 clang = "*"
+nasm = "*"
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"
@@ -4230,19 +4231,19 @@ PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 [feature.colsfm.tasks.colsfm-raco-export]
 cmd = "python tools/raco_export.py"
 cwd = "packages/colsfm"
-description = "Export the RaCo-ALIKED and LightGlue+ ONNX graphs into packages/colsfm/data/models (kept when present)"
+description = "Export the RaCo-ALIKED and LightGlue+ ONNX graphs into colsfm's model directory (kept when present)"
 
 [feature.colsfm.tasks.colsfm-download-flexglue]
 cmd = "python tools/download_flexglue.py"
 cwd = "packages/colsfm"
-description = "Download FlexGlue's ONNX graphs (cvg/FlexGlue v0.1, sha256-pinned as in COLMAP) into packages/colsfm/data/models/flexglue"
+description = "Download FlexGlue's ONNX graphs (cvg/FlexGlue v0.1, sha256-pinned as in COLMAP) into colsfm's model directory, flexglue/"
 
 [feature.colsfm.tasks.colsfm-flexglue-fp8]
 # The eight Galileo cameras as calibration sequences; a valid FP8 graph is kept (rerun after a FlexGlue graph change).
 cmd = "python tools/flexglue_fp8.py --image-dirs data/r2b_galileo/front_stereo_camera_left data/r2b_galileo/front_stereo_camera_right data/r2b_galileo/back_stereo_camera_left data/r2b_galileo/back_stereo_camera_right data/r2b_galileo/left_stereo_camera_left data/r2b_galileo/left_stereo_camera_right data/r2b_galileo/right_stereo_camera_left data/r2b_galileo/right_stereo_camera_right"
 depends-on = ["colsfm-download-galileo", "colsfm-download-flexglue"]
 cwd = "packages/colsfm"
-description = "Calibrate FlexGlue's FP8 matcher (TensorRT backend) on the Galileo frames, once per machine -> packages/colsfm/data/models/flexglue"
+description = "Calibrate FlexGlue's FP8 matcher (TensorRT backend) on the Galileo frames, once per machine -> colsfm's model directory, flexglue/"
 
 [feature.colsfm.tasks.colsfm-download-galileo]
 cmd = "python tools/download_galileo.py"

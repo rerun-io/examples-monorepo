@@ -1,7 +1,7 @@
 #import <./common.wgsl>
 
 // Output entry points shared by every primitive. The importing module defines
-// `fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster` and `compact_from_isect`.
+// `fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster` and `global_from_isect`.
 // `isect` is the intersection index of the median contributor, NO_ID when nothing contributed.
 struct Raster { rgba: vec4f, depth: f32, median: f32, normal: vec3f, pix: vec2u, inside: bool, isect: u32, }
 const NO_ID = 0xffffffffu;
@@ -22,7 +22,6 @@ fn pixel(tile: vec2u, lid: u32) -> vec2u {
 @group(0) @binding(8) var out_depth: texture_storage_2d<r32float, write>;
 @group(0) @binding(9) var<storage, read_write> out_depths: array<vec2f>;
 @group(0) @binding(10) var<storage, read_write> out_normals: array<vec4f>;
-@group(0) @binding(11) var<storage, read> global_from_compact: array<u32>;
 @group(0) @binding(12) var out_id: texture_storage_2d<r32uint, write>;
 
 @compute @workgroup_size(WG) fn raster_float(@builtin(workgroup_id) gid: vec3u,
@@ -60,7 +59,7 @@ fn pixel(tile: vec2u, lid: u32) -> vec2u {
         textureStore(out_depth, r.pix, vec4f(r.depth));
         var id = NO_ID;
         if r.isect != NO_ID {
-            id = global_from_compact[compact_from_isect[r.isect]];
+            id = global_from_isect[r.isect];
         }
         textureStore(out_id, r.pix, vec4u(id));
     }

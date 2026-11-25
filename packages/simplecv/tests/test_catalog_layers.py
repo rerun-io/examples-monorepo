@@ -9,7 +9,7 @@ pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this t
 import rerun.chunk as rrc  # noqa: E402
 from rerun.catalog import CatalogClient  # noqa: E402
 
-from simplecv.catalog_layers import atomic_recording, atomic_write, ensure_dataset, register_layer  # noqa: E402
+from simplecv.catalog_layers import atomic_recording, atomic_write, ensure_dataset, register_layer, serve_local_segment  # noqa: E402
 
 
 def _write_layer(path: Path, group: str, value: str, *, send_properties: bool) -> Path:
@@ -93,3 +93,27 @@ def test_ensure_dataset_retries_once(tmp_path: Path, monkeypatch: pytest.MonkeyP
         monkeypatch.setattr(CatalogClient, "create_dataset", lambda self, name, *, exist_ok=False: racing_create(name, exist_ok=exist_ok))
         assert ensure_dataset(client, "raced").name == "raced"
         assert calls == ["raced", "raced"]
+
+
+@pytest.mark.integration
+def test_a_local_segment_serves_the_base_and_its_named_layers_privately(tmp_path: Path) -> None:
+    """A base rrd and two named layer rrds of its segment, on a private in-process catalog on an OS port."""
+    base: Path = _write_layer(tmp_path / "base.rrd", "capture", "base", send_properties=True)
+    masks: Path = _write_layer(tmp_path / "masks.rrd", "masks", "masks", send_properties=False)
+    poses: Path = _write_layer(tmp_path / "poses.rrd", "poses", "poses", send_properties=False)
+    with serve_local_segment(base, {"people_mask": masks, "slam_rs": poses}, dataset="local") as local:
+        assert local.segment == "segment"
+        assert not local.url.endswith(":51234") and not local.url.endswith(":51235")
+        entry = CatalogClient(local.url).get_dataset(name="local")
+        row: dict[str, object] = entry.segment_table().to_arrow_table().to_pylist()[0]
+    assert sorted(row["rerun_layer_names"]) == ["base", "people_mask", "slam_rs"]  # pyrefly: ignore[bad-argument-type]
+
+
+@pytest.mark.integration
+def test_a_layer_of_another_recording_is_refused(tmp_path: Path) -> None:
+    base: Path = _write_layer(tmp_path / "base.rrd", "capture", "base", send_properties=True)
+    other: Path = tmp_path / "other.rrd"
+    with atomic_recording(other, application_id="simplecv-test", recording_id="other", send_properties=False) as recording:
+        recording.log("/other", rr.Points3D([[0.0, 0.0, 0.0]]), static=True)
+    with pytest.raises(ValueError, match="other"), serve_local_segment(base, {"slam_rs": other}, dataset="local"):
+        pass

@@ -1,6 +1,7 @@
 //! Render scenes, evaluate images, and compare renderer quality and speed.
 mod camera_args;
 mod eval_command;
+mod lod_bench;
 mod parity;
 #[cfg(feature = "probe")]
 mod probe;
@@ -32,6 +33,8 @@ enum Action {
     Speed(speed::SpeedArgs),
     /// Compare float renders against a reference renderer.
     Parity(parity::Args),
+    /// Time and score a Streamed SOG set per level-of-detail mode in one process.
+    LodBench(lod_bench::Args),
     /// Score a trained PLY without clipping or quantizing its float output.
     Score(score::ScoreArgs),
 }
@@ -47,7 +50,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 async fn main() -> Result<()> {
     let action = Args::parse().command;
     let out = match &action {
-        Action::Render(_) | Action::Eval(_) => None,
+        Action::Render(_) | Action::Eval(_) | Action::LodBench(_) => None,
         #[cfg(feature = "probe")]
         Action::Probe(_) => None,
         Action::Speed(a) => Some(a.out.clone()),
@@ -62,6 +65,7 @@ async fn main() -> Result<()> {
         Action::Speed(a) => speed::run(a).await,
         Action::Parity(a) => parity::run(a).await,
         Action::Score(a) => score::run(a).await,
+        Action::LodBench(a) => lod_bench::run(a).await,
     };
     if let (Err(error), Some(out)) = (&result, out)
         && let Some(gsplat_cli::Unsupported(reason)) =
@@ -168,6 +172,7 @@ mod tests {
             mode: gsplat_core::RenderMode::Default,
             center: glam::Vec3::ZERO,
             extent: 1.0,
+            lod: None,
         };
         let path = cameras(&args.camera, &scene).await.unwrap();
         let expected = [

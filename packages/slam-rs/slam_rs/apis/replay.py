@@ -437,6 +437,8 @@ def main(config: Config) -> None:
                     animate_base_rig=config.animate_base_rig,
                     # The base's own lens videos: the run's frusta reference their frames, nothing is encoded again.
                     video_entities=dataset_videos(feed.camera_positions),
+                    # A replay draws the final loop set at the end, not each loop from its detection on.
+                    loops_as_found=False,
                 ),
             )
             rr.send_blueprint(vio_blueprint(feed.cameras))
