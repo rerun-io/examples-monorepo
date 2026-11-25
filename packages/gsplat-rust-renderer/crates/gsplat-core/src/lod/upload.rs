@@ -75,6 +75,32 @@ pub fn fit_min_level(
     })
 }
 
+/// The minimum level [`upload`] loads under `limit`: [`fit_min_level`], or, when not even the coarsest level fits,
+/// that level's capacity error (before any file is decoded). With no file the requested level stands.
+fn loaded_min_level(
+    files: &[(u32, usize, u32)],
+    requested: u32,
+    limit: u64,
+) -> Result<u32, crate::Error> {
+    let bytes = |rows, degree| crate::Splats::gpu_bytes(rows, degree);
+    if let Some(level) = fit_min_level(files, requested, |rows, degree| {
+        bytes(rows, degree) <= limit
+    }) {
+        return Ok(level);
+    }
+    let Some(coarsest) = files.iter().map(|f| f.0).max() else {
+        return Ok(requested);
+    };
+    let kept = || files.iter().filter(|f| f.0 == coarsest);
+    Err(crate::Error::Capacity {
+        required: bytes(
+            kept().map(|f| f.1).sum(),
+            kept().map(|f| f.2).max().unwrap_or(0),
+        ),
+        limit,
+    })
+}
+
 /// Decode every loaded file (CPU WebP), de-quantise each on the GPU at its row offset into one scene, and build the
 /// index. Files are placed in (level, file) order; levels finer than `options.min_level` and `None` files are skipped.
 /// When those files do not fit the device's binding limit, finer levels are dropped until they do (the index's
@@ -107,10 +133,7 @@ pub(crate) fn upload(
         .iter()
         .map(|(level, _, m)| (*level, m.count, m.max_sh_degree()))
         .collect();
-    let fitted = fit_min_level(&sizes, options.min_level, |rows, degree| {
-        crate::Splats::gpu_bytes(rows, degree) <= limit
-    })
-    .unwrap_or(options.min_level);
+    let fitted = loaded_min_level(&sizes, options.min_level, limit)?;
     let mut decoded = Vec::with_capacity(metas.len());
     for (level, f, sog_meta) in metas.into_iter().filter(|m| m.0 >= fitted) {
         let file = set.files[f].as_ref().expect("filtered above");
@@ -241,6 +264,23 @@ mod tests {
         assert_eq!(fit_min_level(&files, 0, fits(30)), Some(2));
         assert_eq!(fit_min_level(&files, 0, fits(10)), None);
         assert_eq!(fit_min_level(&[], 0, fits(10)), None);
+    }
+
+    #[test]
+    fn loaded_min_level_refuses_a_set_whose_coarsest_level_does_not_fit() {
+        // Level 0: 100 rows with SH 3 (1600 bytes each); level 1: 50 + 10 rows, no SH (40 bytes each).
+        let files = [(0, 100, 3), (1, 50, 0), (1, 10, 0)];
+        assert_eq!(loaded_min_level(&files, 0, u64::MAX).unwrap(), 0);
+        assert_eq!(loaded_min_level(&files, 0, 60 * 40).unwrap(), 1);
+        assert!(matches!(
+            loaded_min_level(&files, 0, 60 * 40 - 1),
+            Err(crate::Error::Capacity {
+                required: 2400,
+                limit: 2399
+            })
+        ));
+        // A set with no loaded file keeps the requested level (an empty scene).
+        assert_eq!(loaded_min_level(&[], 2, 0).unwrap(), 2);
     }
 
     #[test]
