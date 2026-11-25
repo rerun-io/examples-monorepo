@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,13 @@ import pycolmap
 import pytest
 from mapping_helpers import build_synthetic_rig
 
-from colsfm.cameras import colmap_camera, colmap_cameras, fit_distortion_coefficients, with_colmap_intrinsics
+from colsfm.cameras import (
+    camera_params_with_colmap_intrinsics,
+    colmap_camera,
+    colmap_cameras,
+    fit_distortion_coefficients,
+    with_colmap_intrinsics,
+)
 from colsfm.export import write_colmap_model
 from colsfm.frames_meta import FRAMES_META_NAME, CameraParams, FramesMeta, read_frames_meta, write_frames_meta
 from colsfm.geometry import rigid3d_from_axis_angle_degrees
@@ -99,8 +106,6 @@ def test_absent_distortion_coefficients_become_zeros() -> None:
     assert np.allclose(camera.params[4:], np.zeros(8))
 
 
-
-
 def _refined(camera: pycolmap.Camera, focal_scale: float, extra_shift: float) -> pycolmap.Camera:
     """A copy of one COLMAP camera with its focal scaled and every distortion term shifted, as a refining solve leaves it.
 
@@ -155,3 +160,25 @@ def test_unmoved_intrinsics_leave_the_metadata_byte_identical() -> None:
     for camera in colmap_cameras(nominal).values():
         reconstruction.add_camera(camera)
     assert with_colmap_intrinsics(nominal, reconstruction).to_json() == nominal.to_json()
+
+
+def test_a_refined_stereo_projection_keeps_its_baseline() -> None:
+    """The right camera of a rectified pair, `P = K [I | (-B, 0, 0)]`, keeps the baseline `B` when its K is refined.
+
+    So the 4th column follows the new focal (`-fx_new * B`) rather than keeping the nominal `-fx_old * B`.
+    """
+    baseline_m: float = 0.12
+    k_old: np.ndarray = np.array([[500.0, 0.0, 640.0], [0.0, 501.0, 360.0], [0.0, 0.0, 1.0]])
+    right: CameraParams = replace(
+        distorted_pinhole_camera(np.array([])),
+        projection_model="PINHOLE",
+        camera_matrix=None,
+        projection_matrix=k_old @ np.hstack([np.eye(3), np.array([[-baseline_m], [0.0], [0.0]])]),
+    )
+    k_new: np.ndarray = np.array([[506.0, 0.0, 641.5], [0.0, 507.0, 359.0], [0.0, 0.0, 1.0]])
+    solved: pycolmap.Camera = pycolmap.Camera(
+        camera_id=right.camera_params_id, model="PINHOLE", width=right.image_width, height=right.image_height, params=[506.0, 507.0, 641.5, 359.0]
+    )
+    refined: CameraParams = camera_params_with_colmap_intrinsics(right, solved)
+    assert refined.projection_matrix is not None
+    assert np.allclose(refined.projection_matrix, k_new @ np.hstack([np.eye(3), np.array([[-baseline_m], [0.0], [0.0]])]))
