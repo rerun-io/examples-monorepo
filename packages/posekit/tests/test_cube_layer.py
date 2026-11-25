@@ -53,3 +53,17 @@ def test_the_cube_layer_must_belong_to_the_recording(tmp_path: Path) -> None:
     _write(tmp_path / "cube.rrd", "/world/rig_00/cam_02", cube_stride=7)
     with pytest.raises(ValueError, match="other"):
         read_cube_sampling(tmp_path / "cube.rrd", "other")
+
+
+def test_a_cube_layer_file_overrides_the_segment_property(tmp_path: Path) -> None:
+    import rerun as rr
+    from rerun.catalog import DatasetEntry
+
+    from posekit.cube_layer import CubeSampling, cube_sampling
+
+    _write(tmp_path / "base.rrd", "/world/rig_00/cam_00", cube_stride=None)
+    _write(tmp_path / "cube.rrd", "/world/rig_00/cam_02", cube_stride=7)
+    with rr.server.Server(datasets={"in": [str(tmp_path / "base.rrd")]}) as server:
+        dataset: DatasetEntry = server.client().get_dataset("in")
+        assert cube_sampling(dataset, "clip", None) is None
+        assert cube_sampling(dataset, "clip", tmp_path / "cube.rrd") == CubeSampling(stride=7, framesets=4)

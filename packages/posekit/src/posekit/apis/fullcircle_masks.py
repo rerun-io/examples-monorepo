@@ -35,7 +35,7 @@ from simplecv.catalog_video_decode import PrefetchedChunks
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-from posekit.cube_layer import CubeSampling, read_cube_sampling, sampled_framesets, segment_cube_sampling
+from posekit.cube_layer import CubeSampling, cube_sampling, sampled_framesets
 from posekit.mask_layer import MASK_ANNOTATION, MASK_NAME, MASKED_CLASS_ID
 from posekit.models.fullcircle import (
     FaceBoxes,
@@ -213,9 +213,7 @@ def write_masks(config: FullCircleMasksConfig, dataset: DatasetEntry, segment_id
     times: list[ndarray] = [video.times for video in videos]
     n_framesets: int = min(len(t) for t in times)
     end: int = n_framesets if config.end is None else min(config.end, n_framesets)
-    cube: CubeSampling | None = (
-        read_cube_sampling(config.cube_rrd, segment_id) if config.cube_rrd is not None else segment_cube_sampling(dataset, segment_id)
-    )
+    cube: CubeSampling | None = cube_sampling(dataset, segment_id, config.cube_rrd)
     framesets: range = sampled_framesets("--stride", config.stride, cube, config.start, end)
     stride: int = framesets.step
     tracked: list[int] = list(framesets)

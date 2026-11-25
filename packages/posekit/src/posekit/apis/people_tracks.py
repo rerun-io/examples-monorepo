@@ -43,7 +43,7 @@ from posekit.apis.people_masks import (
     set_frame_time,
     write_overlay,
 )
-from posekit.cube_layer import CubeSampling, read_cube_sampling, sampled_framesets, segment_cube_sampling
+from posekit.cube_layer import CubeSampling, cube_sampling, sampled_framesets
 from posekit.models.base import SegmentationPrompts
 from posekit.models.sam2_video import Sam2VideoSegmenter, Sam2VideoSegmenterConfig
 from posekit.ops.people_masks import dilate_masks
@@ -305,9 +305,7 @@ def main(config: PeopleTracksConfig) -> None:
         available: list[str] = [c.entity_path for c in dataset.schema().component_columns() if c.component == "VideoStream:sample"]
         entities: list[str] = select_entities(available, config.entities, ())
         videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment_id, entities, config.timeline)
-        cube: CubeSampling | None = (
-            read_cube_sampling(config.cube_rrd, segment_id) if config.cube_rrd is not None else segment_cube_sampling(dataset, segment_id)
-        )
+        cube: CubeSampling | None = cube_sampling(dataset, segment_id, config.cube_rrd)
     n_packets: int = min(len(v.samples) for v in videos)
     end: int = n_packets if config.end is None else min(config.end, n_packets)
     outputs: range = sampled_framesets("--output-every", config.output_every, cube, config.start, end)

@@ -556,9 +556,9 @@ __all__ = (
     "OperatorMasks",
     "SphereSource",
     "disk_dilate",
-    "sample_faces",
     "fill_nearest",
     "level_rotation",
     "operator_directions",
+    "sample_faces",
     "view_up",
 )

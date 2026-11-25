@@ -62,6 +62,11 @@ def read_cube_sampling(rrd: Path, segment: str) -> CubeSampling | None:
         return segment_cube_sampling(dataset, segment)
 
 
+def cube_sampling(dataset: DatasetEntry, segment: str, cube_rrd: Path | None) -> CubeSampling | None:
+    """The cube sampling of ``segment``: from ``cube_rrd`` when given, else from the segment's ``cube`` property."""
+    return read_cube_sampling(cube_rrd, segment) if cube_rrd is not None else segment_cube_sampling(dataset, segment)
+
+
 def sampled_framesets(option: str, stride: int | None, cube: CubeSampling | None, start: int, end: int) -> range:
     """The framesets a masker samples in ``[start, end)``: the cube layer's when there is one, else every ``stride``-th.
 
@@ -87,4 +92,4 @@ def sampled_framesets(option: str, stride: int | None, cube: CubeSampling | None
     return range(start, min(end, cube.stride * cube.framesets), cube.stride)
 
 
-__all__ = ("DEFAULT_STRIDE", "CubeSampling", "read_cube_sampling", "sampled_framesets", "segment_cube_sampling")
+__all__ = ("DEFAULT_STRIDE", "CubeSampling", "cube_sampling", "read_cube_sampling", "sampled_framesets", "segment_cube_sampling")
