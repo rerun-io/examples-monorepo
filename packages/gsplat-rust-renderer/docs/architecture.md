@@ -63,9 +63,15 @@ overrides remain portable to stock Rerun, which draws native splats and the
 hexel fallback points.
 
 A store-owned cache shares uploads across views and tracks each instance's target
-with dirty, pending, complete, or capacity-failed state. Optional-attribute changes invalidate the
-upload even when centers retain their row ID. Blueprint values need a content
-hash because their source row IDs are cleared by Rerun. Camera and mode changes
+with dirty, pending, complete, or capacity-failed state. While one of its three
+feedback slots is free, a moving view encodes a splat frame on every UI frame:
+a GPU frame longer than the display interval does not leave the GPU idle until
+its feedback returns, the UI runs at the splat rate, and each UI frame shows a
+splat image from its own camera. Growing scratch after an overflow and a new
+target size wait for the frames in flight; frames encoded before an overflow is
+reported overflow too and keep the previous image. Optional-attribute changes
+invalidate the upload even when centers retain their row ID. Blueprint values
+need a content hash because their source row IDs are cleared by Rerun. Camera and mode changes
 reuse the scene. Unused entries are evicted when frames advance.
 
 Splats and hexels are trained with display-space blending over a solid

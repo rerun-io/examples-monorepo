@@ -368,6 +368,11 @@ impl ViewState {
         !self.pending.is_empty()
     }
 
+    /// Whether a frame slot is free to encode another frame before feedback arrives.
+    pub fn has_free_frame(&self) -> bool {
+        self.pending.len() < self.frames.len()
+    }
+
     /// Nonblocking completed-frame counts. An overflow preserves the target and requests a rerender.
     pub fn poll_feedback(&mut self) -> Result<Option<FrameStats>, Error> {
         self.device.poll(wgpu::PollType::Poll)?;
@@ -480,8 +485,10 @@ mod tests {
         let mut encoder = device.create_command_encoder(&Default::default());
         for z in [10.0, 0.0, 10.0] {
             camera.position.z = z;
+            assert!(view.has_free_frame());
             render(&mut encoder, &mut view, &camera).unwrap();
         }
+        assert!(!view.has_free_frame());
         assert!(render(&mut encoder, &mut view, &camera).is_err());
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();

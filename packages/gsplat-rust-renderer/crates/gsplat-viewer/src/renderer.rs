@@ -25,7 +25,9 @@ struct TargetImage {
     id: GpuTexture,
     composite: GpuBindGroup,
 }
-// Only Pending can carry an in-flight eye; Dirty retains the previous image on overflow.
+// Pending carries the newest in-flight eye; Dirty retains the previous image on overflow.
+// Frames encoded before an overflow is reported also overflow and keep the previous image until
+// scratch grows.
 enum Image {
     // Keep the fallback for this scene generation; moving the eye must not retry
     // an impossible allocation on every other frame. A relog resets this state.
@@ -98,6 +100,12 @@ impl RenderView {
         matches!(&self.image, Image::Complete { camera: old_camera, options: old_options } if old_camera == camera && old_options == options)
     }
 
+    fn is_in_flight(&self, camera: &Camera, options: &RenderOptions) -> bool {
+        // A feedback error leaves Pending with nothing in flight; such a view encodes again.
+        self.core.has_pending_frames()
+            && matches!(&self.image, Image::Pending { camera: newest, options: newest_options } if newest == camera && newest_options == options)
+    }
+
     pub(crate) fn prepare(
         &mut self,
         renderer: &GaussianRenderer,
@@ -123,25 +131,40 @@ impl RenderView {
             }
             Err(error) => return Err(error),
         };
-        if let Some(stats) = feedback
-            && let Image::Pending { camera, options } = self.image
-        {
-            self.image = if stats.needs_rerender {
-                Image::Dirty
-            } else {
-                self.last_good = None;
-                Image::Complete { camera, options }
-            };
-        }
-        if self.core.has_pending_frames() {
-            return Ok(Prepared::Pending);
+        if let Some(stats) = feedback {
+            // The target holds a finished image; an overflow left the one before it in place.
+            if !stats.needs_rerender {
+                self.last_good = Some(self.target.composite.clone());
+            }
+            if !self.core.has_pending_frames()
+                && let Image::Pending { camera, options } = self.image
+            {
+                self.image = if stats.needs_rerender {
+                    Image::Dirty
+                } else {
+                    self.last_good = None;
+                    Image::Complete { camera, options }
+                };
+            }
         }
         if self.is_current(camera, &options) {
             return Ok(Prepared::Current);
         }
-        renderer
+        // Encode up to one frame per slot while feedback is in flight; a new target size waits for it.
+        if self.is_in_flight(camera, &options)
+            || !self.core.has_free_frame()
+            || (self.core.has_pending_frames() && self.target.size != camera.size)
+        {
+            return Ok(Prepared::Pending);
+        }
+        match renderer
             .core()?
-            .prepare_view(&ctx.queue, &mut self.core, camera)?;
+            .prepare_view(&ctx.queue, &mut self.core, camera)
+        {
+            // Scratch grows after an overflow once the frames still in flight have reported.
+            Err(Error::Busy(_)) => return Ok(Prepared::Pending),
+            result => result?,
+        }
         if self.target.size != camera.size {
             self.last_good = self.completed();
             self.image = Image::Dirty;
