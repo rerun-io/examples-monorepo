@@ -1,5 +1,7 @@
 """Write a catalog layer atomically and register it: one writer and one registrar for every package.
 
+``serve_local_segment`` serves a base recording and named layer files of its segment on a private in-process catalog.
+
 A layer is a recording file with its segment's recording id; the catalog stacks a segment's layers by that id. A target
 file either exists complete or not at all: half-written files poison batch runs and the catalog server, and saving over
 an rrd that a server has registered truncates what the server reads. So ``atomic_recording`` writes a temp file beside
@@ -16,8 +18,9 @@ property group after the layer.
 import os
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import rerun as rr
@@ -128,3 +131,40 @@ def register_layer(entry: DatasetEntry, paths: Sequence[Path], layer: str | None
         entry.register(uris, on_duplicate=on_duplicate).wait()
     else:
         entry.register(uris, layer_name=layer, on_duplicate=on_duplicate).wait()
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSegment:
+    """One segment served from local files by ``serve_local_segment``."""
+
+    url: str
+    """The private catalog's URL (an OS-assigned port, never a shared catalog's)."""
+    dataset: DatasetEntry
+    """The dataset that holds the segment."""
+    segment: str
+    """The segment id: the base recording's recording id."""
+
+
+@contextmanager
+def serve_local_segment(base: Path, layers: Mapping[str, Path], *, dataset: str) -> Iterator[LocalSegment]:
+    """Serve a base recording and named layers of its segment on a private in-process catalog, while the context is open.
+
+    Args:
+        base: The base recording; its recording id names the segment.
+        layers: Layer name -> recording file of the same segment (``register_layer``).
+        dataset: Name of the one dataset on the private catalog.
+
+    Yields:
+        The served segment.
+
+    Raises:
+        ValueError: When the base holds more than one recording, or a layer's recording id is not the base's.
+    """
+    with rr.server.Server(host="127.0.0.1", port=0, datasets={dataset: [str(base)]}) as server:
+        entry: DatasetEntry = server.client().get_dataset(dataset)
+        for name, path in layers.items():
+            register_layer(entry, [path], name)
+        segments: list[str] = sorted(entry.segment_ids())
+        if len(segments) != 1:
+            raise ValueError(f"{base} and layers {sorted(layers)} hold segments {segments}; every layer must carry the base's recording id")
+        yield LocalSegment(url=server.url(), dataset=entry, segment=segments[0])
