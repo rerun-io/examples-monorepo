@@ -230,11 +230,11 @@ class RerunTyroConfig:
         )
         file_only = self.save is not None and not self.serve and not self.connect and (not self.live or self.headless)
         if file_only:
-            # rr.init takes no batcher config, so reopen its recording id (the multiprocessing-shared default when
-            # none is pinned) with the file's (`file_batcher_config`).
+            # rr.init takes no batcher config, so reopen its recording id (the pinned one, else the
+            # multiprocessing-shared default) with the file's (`file_batcher_config`).
             self.rec_stream: rr.RecordingStream = rr.RecordingStream(
                 self.application_id,
-                recording_id=rr.get_recording_id(),
+                recording_id=self.recording_id or rr.get_recording_id(),
                 make_default=True,
                 default_enabled=True,
                 batcher_config=file_batcher_config(),
@@ -266,7 +266,8 @@ class RerunTyroConfig:
                 rr.FileSink(str(self.save)),
             )
         elif self.save is not None:
-            rr.save(self.save)
+            # This config's stream by name: inside another active recording, a bare rr.save would attach the file to that one.
+            rr.save(self.save, recording=self.rec_stream)
         elif not self.headless:
             rr.spawn(
                 port=self.port,

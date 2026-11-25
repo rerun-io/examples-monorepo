@@ -123,3 +123,18 @@ def test_save_only_without_recording_id_uses_the_default_recording_id(tmp_path: 
 
     rr.init("tyro-default-id")
     assert file_recording_id == rr.get_recording_id()
+
+
+def test_save_only_inside_another_recording_keeps_its_own_id_and_file(tmp_path: Path) -> None:
+    """Built while another recording is the thread's active one, a file-only save still pins its ``recording_id`` and
+    writes what its own stream logs: the id lookup and ``rr.save`` both resolve the active recording first."""
+    save = tmp_path / "out.rrd"
+    with rr.RecordingStream("tyro-outer", recording_id="OUTER"):
+        config = RerunTyroConfig(application_id="tyro-nested", recording_id="PINNED", save=save)
+        config.rec_stream.set_time("frame", sequence=0)
+        config.rec_stream.log("/stats/value", rr.Scalars(1.0))
+        config.rec_stream.disconnect()
+
+    assert config.rec_stream.get_recording_id() == "PINNED"
+    assert [chunk.num_rows for chunk in RrdReader(save).stream().to_chunks() if str(chunk.entity_path) == "/stats/value"] == [1]
+
