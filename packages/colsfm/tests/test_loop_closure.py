@@ -526,12 +526,32 @@ def _observation_pairs(plan: LoopSearchPlan, rig_pair: tuple[int, int]) -> set[t
     return pairs
 
 
-def test_the_prior_bound_is_the_sum_of_the_edge_and_prior_gates() -> None:
-    """3 m edge gate + 1.5 m prior gate = 4.5 m; no bound without a prior translation gate or with closed edge gates."""
-    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_translation_m=1.5)) == 4.5
-    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0)) is None
-    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_rotation_deg=10.0)) is None
-    assert prior_distance_bound(LoopClosureConfig(max_translation_m=0.0, max_prior_translation_m=1.5)) is None
+def _prior_path_m(plan: LoopSearchPlan, rig_pair: tuple[int, int]) -> float:
+    """The path the prior travels between two rig frames, summed over the rig frames in between.
+
+    Args:
+        plan: A plan.
+        rig_pair: `(source rig id, target rig id)`.
+
+    Returns:
+        Metres along the prior trajectory.
+    """
+    sequence: tuple[int, ...] = plan.rig_index.sequence
+    low, high = sorted((sequence.index(rig_pair[0]), sequence.index(rig_pair[1])))
+    return sum(_prior_distance_m(plan, (sequence[step], sequence[step + 1])) for step in range(low, high))
+
+
+def test_the_prior_bound_is_the_edge_gate_plus_the_tighter_of_the_prior_gate_and_the_drift_allowance() -> None:
+    """Edge gate T plus min(P, 3.5 m + 2 % of the prior path); a closed edge gate (KITTI's T = 0) reaches 30 m instead of T."""
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_translation_m=1.5), path_m=0.0) == 4.5
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_translation_m=1.5), path_m=1000.0) == 4.5
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0), path_m=0.0) == pytest.approx(6.5)
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=1.0), path_m=100.0) == pytest.approx(6.5)
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_rotation_deg=10.0), path_m=50.0) == pytest.approx(7.5)
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=0.0), path_m=600.0) == pytest.approx(45.5)
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=0.0, max_prior_translation_m=1.5), path_m=600.0) == pytest.approx(45.5), (
+        "with closed edge gates no edge is accepted, so the prior gate bounds nothing: the drift allowance applies"
+    )
 
 
 @settings(max_examples=300, deadline=None)
@@ -562,10 +582,8 @@ def test_no_rig_pair_beyond_the_bound_can_pass_both_gates(
     passes_both: bool = agrees_with_prior(candidate, {1: pycolmap.Rigid3d(), 2: prior}, config) and bool(
         gate_loop_edges([edge], config.max_translation_m, config.max_rotation_deg)
     )
-    bound: float | None = prior_distance_bound(config)
-    assert bound is not None
     if passes_both:
-        assert float(np.linalg.norm(prior.translation)) <= bound + 1e-9
+        assert float(np.linalg.norm(prior.translation)) <= prior_distance_bound(config, path_m=0.0) + 1e-9
 
 
 def test_a_rig_pair_the_prior_puts_beyond_the_bound_is_never_matched(scene: SquareRigScene) -> None:
@@ -587,17 +605,51 @@ def test_a_rig_pair_the_prior_puts_beyond_the_bound_is_never_matched(scene: Squa
     assert {(3, 43), (4, 44)} <= {(min(pair), max(pair)) for pair in bounded.rig_pairs}, "the true revisits 0.3 m apart stay"
 
 
-def test_without_a_prior_gate_the_plan_is_unchanged(scene: SquareRigScene) -> None:
-    """No prior translation gate, or closed edge gates (KITTI's T = 0): the plan is the one before the bound existed."""
+def test_the_default_bound_keeps_every_rig_pair_of_the_square_scene(scene: SquareRigScene) -> None:
+    """The scene's shortlisted pairs are at most 3.6 m apart in a prior that hardly drifts: no default bound drops one.
+
+    The same holds for closed edge gates (KITTI's T = 0, whose loop pairs feed the mapper) and with only a rotation prior gate.
+    """
     for config in (
         LoopClosureConfig(),
         LoopClosureConfig(max_prior_rotation_deg=10.0),
+        LoopClosureConfig(max_translation_m=0.0),
         LoopClosureConfig(max_translation_m=0.0, max_prior_translation_m=1.5),
     ):
         plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, config)
         assert len(plan.rig_pairs) == UNBOUNDED_SCENE_RIG_PAIRS
         assert len(plan.image_pairs) == UNBOUNDED_SCENE_IMAGE_PAIRS
         assert plan.counters.rejected_by_prior_bound == 0
+
+
+def test_without_a_prior_gate_a_rig_pair_beyond_the_drift_allowance_is_never_matched(scene: SquareRigScene) -> None:
+    """No prior gate, T = 0.5 m and a flat 0.5 m allowance: the bound is 1 m, as with the prior gate of the B test."""
+    default: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    bounded: LoopSearchPlan = plan_loop_search(
+        scene.frames_meta,
+        scene.database_path,
+        scene.index,
+        LoopClosureConfig(max_translation_m=0.5, prior_drift_floor_m=0.5, prior_drift_per_metre=0.0),
+    )
+    assert list(bounded.rig_pairs) == [pair for pair in default.rig_pairs if _prior_distance_m(default, pair) <= 1.0]
+    assert bounded.counters.rejected_by_prior_bound == len(default.rig_pairs) - len(bounded.rig_pairs) >= 10
+
+
+def test_the_drift_allowance_grows_with_the_prior_path_between_the_rig_frames(scene: SquareRigScene) -> None:
+    """T = 0.5 m, no floor, 10 % of the path: a pair is kept when its prior distance is at most 0.5 m + 0.1 x its prior path."""
+    default: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    bounded: LoopSearchPlan = plan_loop_search(
+        scene.frames_meta,
+        scene.database_path,
+        scene.index,
+        LoopClosureConfig(max_translation_m=0.5, prior_drift_floor_m=0.0, prior_drift_per_metre=0.1),
+    )
+    expected: list[tuple[int, int]] = [
+        pair for pair in default.rig_pairs if _prior_distance_m(default, pair) <= 0.5 + 0.1 * _prior_path_m(default, pair)
+    ]
+    assert list(bounded.rig_pairs) == expected
+    assert any(_prior_distance_m(default, pair) > 1.5 for pair in expected), "a long path must keep a pair a flat 1.5 m bound would drop"
+    assert len(expected) < len(default.rig_pairs), "and some pair must still be beyond the allowance"
 
 
 def test_the_bound_drops_after_the_cap(scene: SquareRigScene) -> None:

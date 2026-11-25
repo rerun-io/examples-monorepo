@@ -408,6 +408,23 @@ class LoopClosureConfig:
     0.53 m / 1.6 deg (revisit) and 0.6 m / 3.5 deg (start-end), false ones by 2-16 m and 60-179 deg."""
     max_prior_rotation_deg: float | None = None
     """Rotation half of the prior-consistency gate; None = no gate."""
+    prior_drift_floor_m: float = 3.5
+    """Constant part of the drift allowance `prior_distance_bound` grants the prior between two rig frames, metres.
+
+    One default for every dataset, not a profile key. Measured against ground truth on the DGX Spark base runs at
+    a997bc83b (every pair of rig frames, `| |prior distance| - |GT distance| |`): the worst case fits under
+    1.74 m + 1 % of the prior path (KITTI 06, 1,241 m: 4.2 m at 800-1,600 m of path, and a 1.8 m prior jump over 4.5 m of
+    path); EuRoC V1_01 stays under 0.16 m and MSD MGO05 under 0.08 m. The allowance is twice that worst case."""
+    prior_drift_per_metre: float = 0.02
+    """Part of the drift allowance that grows with the prior path travelled between the two rig frames (2 %, twice the
+    1 % of the worst case above)."""
+    closed_gate_reach_m: float = 30.0
+    """The prior distance that replaces the edge gate when the edge gates are closed (`max_translation_m <= 0`).
+
+    No edge is accepted then, but the loop pairs still feed the mapper (removing them cost KITTI 06 42 % ATE), so the
+    bound must keep every rig pair that can see common structure. On KITTI 06 the shortlisted rig pairs reach 13.4 m
+    (ground truth), and their two-view inliers still agree with ground truth (81 % within 4 px beyond 10 m); 30 m is
+    over twice that."""
     use_stored_weights: bool = False
     """When True the edge information is `loop_edge_information(inliers, loop_residual_weight)`
     instead of the identity. The blob's own solver discards the stored value; measured
@@ -683,9 +700,7 @@ def plan_loop_search(
     )
     pixels: Mapping[int, Keypoints] = read_keypoints_batch(database_path, index.image_ids, dtype=np.float64) if keypoints is None else keypoints
     rig_index: RigFrameIndex = rig_frame_index(frames_meta)
-    bound_m: float | None = prior_distance_bound(config)
-    if bound_m is not None:
-        shortlist = _within_prior_bound(shortlist, rig_index.world_T_rig, bound_m, counters)
+    shortlist = _within_prior_bound(shortlist, rig_index, config, counters)
     groups: list[tuple[int, tuple[RetrievalHit, ...]]] = _group_by_source_rig(shortlist.hits)
     rig_pairs: tuple[tuple[int, int], ...] = tuple((source_rig_id, hit.target_rig_id) for source_rig_id, hits in groups for hit in hits)
     return LoopSearchPlan(
@@ -703,47 +718,64 @@ def plan_loop_search(
     )
 
 
-def prior_distance_bound(config: LoopClosureConfig) -> float | None:
-    """The largest prior rig distance an accepted loop edge can have: `max_translation_m + max_prior_translation_m`.
+def prior_distance_bound(config: LoopClosureConfig, path_m: float) -> float:
+    """The largest prior distance at which two rig frames can still give a loop edge or loop pairs worth matching.
 
-    An accepted edge needs `|t_meas| <= T` (`gate_loop_edges`) and `|t(prior^-1 * meas)| <= P` (`agrees_with_prior`).
-    That translation is `R_prior^T (t_meas - t_prior)`, so `|t_meas - t_prior| <= P`, and by the triangle inequality
-    `|t_prior| <= T + P`. A shortlisted rig pair the prior puts farther apart can never give an edge, so the plan need not
-    match it. On Casa Loma 007 (cube profile, 3 m + 1.5 m) that is 6,215 of 7,210 rig pairs and 37,290 of 42,910 loop
-    image pairs, 95-97 % of them empty; the largest prior distance of an accepted edge there is 3.07 m.
+    `reach + allowance`. The reach is the edge gate T (`max_translation_m`): an accepted edge measures `|t_meas| <= T`.
+    The allowance is what the prior may be off by between the two rig frames: `prior_drift_floor_m +
+    prior_drift_per_metre * path_m`, from ground truth (see the fields). Where the profile sets a prior translation gate
+    P, an accepted edge also needs `|t_meas - t_prior| <= P` (`agrees_with_prior`: the translation of
+    `prior^-1 * meas` is `R_prior^T (t_meas - t_prior)`), so by the triangle inequality `|t_prior| <= T + P`: the
+    allowance is then the smaller of the two. With closed edge gates (`max_translation_m <= 0`) no edge is accepted, the
+    loop pairs feed only the mapper, and the reach is `closed_gate_reach_m`.
+
+    On Casa Loma 007 (cube profile, T 3 m, P 1.5 m) the bound is 4.5 m and drops 6,215 of 7,210 shortlisted rig pairs
+    (37,290 of 42,910 loop image pairs, 95-97 % of them empty); the largest prior distance of an accepted edge there is
+    3.07 m. On the EuRoC, MSD and KITTI base runs it drops none.
 
     Args:
-        config: The edge gate `max_translation_m` and the prior gate `max_prior_translation_m`.
+        config: The edge gate, the prior gate and the drift allowance.
+        path_m: The prior path travelled between the two rig frames, metres.
 
     Returns:
-        The bound in metres, or None (no bound, today's plan) when the profile sets no prior translation gate or closes
-        the edge gates (`max_translation_m <= 0`, the kitti profile, where the loop pairs feed only the mapper).
+        The bound in metres.
     """
-    if config.max_prior_translation_m is None or config.max_translation_m <= 0.0:
-        return None
-    return config.max_translation_m + config.max_prior_translation_m
+    edge_gate_open: bool = config.max_translation_m > 0.0
+    reach_m: float = config.max_translation_m if edge_gate_open else config.closed_gate_reach_m
+    allowance_m: float = config.prior_drift_floor_m + config.prior_drift_per_metre * path_m
+    if edge_gate_open and config.max_prior_translation_m is not None:
+        allowance_m = min(allowance_m, config.max_prior_translation_m)
+    return reach_m + allowance_m
 
 
-def _within_prior_bound(shortlist: Shortlist, world_T_rig: Mapping[int, pycolmap.Rigid3d], bound_m: float, counters: FunnelCounters) -> Shortlist:
-    """Drop the shortlisted rig pairs the prior puts more than `bound_m` apart.
+def _within_prior_bound(shortlist: Shortlist, rig_index: RigFrameIndex, config: LoopClosureConfig, counters: FunnelCounters) -> Shortlist:
+    """Drop the shortlisted rig pairs the prior puts beyond `prior_distance_bound`.
 
     Applied after the candidate cap and the deduplication, as pure subtraction: a freed slot is not refilled, so the plan
     holds a subset of the unbounded plan's rig pairs, in the same order.
 
     Args:
         shortlist: The deduplicated shortlist.
-        world_T_rig: Prior rig poses by rig id (`RigFrameIndex.world_T_rig`).
-        bound_m: `prior_distance_bound`.
+        rig_index: Rig frames in capture order with their prior poses.
+        config: The gates and the drift allowance.
         counters: Diagnostic counters; `rejected_by_prior_bound` is added to.
 
     Returns:
         The shortlist without those rig pairs, `queried_by` included.
     """
+    centres_xyz: Float64[ndarray, "n 3"] = np.asarray(
+        [rig_index.world_T_rig[rig_id].translation for rig_id in rig_index.sequence], dtype=np.float64
+    ).reshape(-1, 3)
+    steps_m: Float64[ndarray, "n_steps"] = np.linalg.norm(np.diff(centres_xyz, axis=0), axis=1)
+    path_from_start_m: Float64[ndarray, "n"] = np.concatenate([np.zeros(1), np.cumsum(steps_m)])
+    position_of: dict[int, int] = {rig_id: position for position, rig_id in enumerate(rig_index.sequence)}
     kept: dict[tuple[int, int], RetrievalHit] = {}
     for pair, hit in shortlist.hits.items():
-        source_xyz: Float64[ndarray, "3"] = np.asarray(world_T_rig[hit.source_rig_id].translation, dtype=np.float64)
-        target_xyz: Float64[ndarray, "3"] = np.asarray(world_T_rig[hit.target_rig_id].translation, dtype=np.float64)
-        if float(np.linalg.norm(source_xyz - target_xyz)) <= bound_m:
+        source: int = position_of[hit.source_rig_id]
+        target: int = position_of[hit.target_rig_id]
+        distance_m: float = float(np.linalg.norm(centres_xyz[source] - centres_xyz[target]))
+        path_m: float = float(abs(path_from_start_m[target] - path_from_start_m[source]))
+        if distance_m <= prior_distance_bound(config, path_m):
             kept[pair] = hit
     counters.rejected_by_prior_bound += len(shortlist.hits) - len(kept)
     return Shortlist(hits=kept, queried_by={pair: voters for pair, voters in shortlist.queried_by.items() if pair in kept})
