@@ -23,8 +23,8 @@ runs stay apart. The colsfm cloud by first view (``points_growing``) shows since
 The overviews turn slowly about the walk (``OVERVIEW_SPIN_RAD_S``).
 
 With the ``cube_view`` layer (``ColsfmRig``) the colsfm tab shows the viewing faces (``pinhole/video_view``, every
-frame) and the colsfm views draw ``rig_view`` (a pose at every viewing frame referencing them) for ``rig`` (the
-registered rig frames).
+frame). The colsfm views draw ``rig_view`` (a pose at every viewing frame referencing them) for ``rig`` (the registered
+rig frames) when the colsfm layer holds it (``colsfm_view_rig``): a layer written without it keeps ``rig``.
 """
 
 from __future__ import annotations
@@ -228,18 +228,35 @@ class ColsfmRig:
     face stream the face panes play."""
 
     drawn: str
-    """``rig_view`` (every viewing frame) with the ``cube_view`` layer, else ``rig`` (the registered rig frames)."""
+    """``rig_view`` (every viewing frame) when the colsfm layer holds it, else ``rig`` (the registered rig frames)."""
     dropped: str
     """The other one."""
     face_video: Callable[[int, int], str]
     """``schema.video_view_path`` with the ``cube_view`` layer, else ``schema.video_path``."""
 
 
-def colsfm_rig(view_faces: bool) -> ColsfmRig:
-    """The colsfm rig and face stream for a segment with (``view_faces``) or without the ``cube_view`` layer."""
-    if view_faces:
-        return ColsfmRig(drawn=f"{COLSFM}/rig_view", dropped=f"{COLSFM}/rig", face_video=schema.video_view_path)
-    return ColsfmRig(drawn=f"{COLSFM}/rig", dropped=f"{COLSFM}/rig_view", face_video=schema.video_path)
+def colsfm_rig(view_faces: bool, view_rig: bool) -> ColsfmRig:
+    """The colsfm rig for a colsfm layer with (``view_rig``) or without ``rig_view``, and the face stream for a segment
+    with (``view_faces``) or without the ``cube_view`` layer."""
+    drawn, dropped = ("rig_view", "rig") if view_rig else ("rig", "rig_view")
+    return ColsfmRig(drawn=f"{COLSFM}/{drawn}", dropped=f"{COLSFM}/{dropped}", face_video=schema.video_view_path if view_faces else schema.video_path)
+
+
+def colsfm_view_rig(entry: DatasetEntry, view_faces: bool) -> bool:
+    """Whether the colsfm views draw ``rig_view``: when a registered colsfm layer holds it. A colsfm layer without it
+    (``colsfm.apis.align_to_prior``, ``run --no-view-rig``, a run made before the viewing faces) keeps ``rig``. Before
+    any colsfm layer is registered the answer is ``view_faces``: a default colsfm run on viewing faces writes it.
+
+    Args:
+        entry: The catalog dataset, its layers registered.
+        view_faces: Whether a segment holds the ``cube_view`` layer.
+    """
+
+    def written(rig: str) -> bool:
+        return any(entity == f"{COLSFM}/{rig}" or entity.startswith(f"{COLSFM}/{rig}/") for entity in entities)
+
+    entities: set[str] = {str(found.entity_path) for found in entry.schema().component_columns()}
+    return written("rig_view") or (view_faces and not written("rig"))
 
 
 def run_pictures() -> list[str]:
@@ -470,18 +487,21 @@ def comparison_tab(eye: rrb.EyeControls3D | None, rig: ColsfmRig) -> rrb.Vertica
     )
 
 
-def segment_layout(*, panorama: bool, view_faces: bool = False, walk: Float64[ndarray, "n 3"] | None = None) -> rrb.Blueprint:
+def segment_layout(
+    *, panorama: bool, view_faces: bool = False, view_rig: bool | None = None, walk: Float64[ndarray, "n 3"] | None = None
+) -> rrb.Blueprint:
     """The Insta360 layout: SLAM, colsfm and Comparison tabs, and with ``panorama`` a tab for the panorama.
 
     Args:
         panorama: Whether a segment holds the panorama layer.
-        view_faces: Whether a segment holds the ``cube_view`` layer: the colsfm tab then plays the viewing faces and
-            its views draw colsfm's ``rig_view``.
+        view_faces: Whether a segment holds the ``cube_view`` layer: the colsfm tab then plays the viewing faces.
+        view_rig: Whether the colsfm layer holds ``rig_view`` (``colsfm_view_rig``): the colsfm views then draw it for
+            ``rig``. None, before a colsfm layer exists: as ``view_faces``.
         walk: Rig positions of the segment's walk (world frame, metres), when the caller knows them: each overview
             then frames the walk for its own pane (``walk_eye``). Without them the viewer frames the view's bounds.
     """
     eyes: list[rrb.EyeControls3D | None] = [None if walk is None else walk_eye(walk, aspect=aspect) for aspect in OVERVIEW_ASPECTS]
-    rig: ColsfmRig = colsfm_rig(view_faces)
+    rig: ColsfmRig = colsfm_rig(view_faces, view_faces if view_rig is None else view_rig)
     return rrb.Blueprint(
         rrb.Tabs(
             slam_tab(eyes[0]),

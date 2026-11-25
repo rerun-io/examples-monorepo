@@ -88,7 +88,7 @@ from dataforge import blueprints, paths, schema, writing
 from dataforge.datasets import insta360_cube as cube
 from dataforge.datasets import insta360_panorama
 from dataforge.datasets.base import DataforgeDataset, FrameLimitedConfig
-from dataforge.datasets.insta360_blueprint import FACE_CAMS, FIRST_FACE_CAM, PANO_ENTITY, RIG, segment_layout, segment_walk
+from dataforge.datasets.insta360_blueprint import FACE_CAMS, FIRST_FACE_CAM, PANO_ENTITY, RIG, colsfm_view_rig, segment_layout, segment_walk
 from dataforge.datasets.insta360_lens_video import LENS_FPS, LENS_MAX_SIZE, BaseLensVideos, lens_pictures, read_base_lens_videos
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import log_camera_source, log_rig_node, log_video_stream
@@ -623,12 +623,15 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
         """The segment layout shows the panorama tab when any registered segment holds the panorama layer, plays the
-        viewing faces when any holds the cube_view layer, and its overviews frame the walk when the dataset holds one
-        walked segment (``insta360_blueprint.segment_walk``)."""
+        viewing faces when any holds the cube_view layer, draws colsfm's viewing rig when a colsfm layer holds it
+        (``insta360_blueprint.colsfm_view_rig``), and its overviews frame the walk when the dataset holds one walked
+        segment (``insta360_blueprint.segment_walk``)."""
         layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
+        view_faces: bool = any(CUBE_VIEW_LAYER in names for names in layer_names)
         layout: rrb.Blueprint = segment_layout(
             panorama=any(PANORAMA_LAYER in names for names in layer_names),
-            view_faces=any(CUBE_VIEW_LAYER in names for names in layer_names),
+            view_faces=view_faces,
+            view_rig=colsfm_view_rig(entry, view_faces),
             walk=segment_walk(entry),
         )
         return layout, self.table_blueprint()

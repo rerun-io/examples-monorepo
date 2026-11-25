@@ -240,6 +240,19 @@ def test_with_the_viewing_faces_the_colsfm_views_play_them_on_the_viewing_rig() 
                 assert f"- {COLSFM}/{dropped}/**" in content_rules(view), (name, view_faces)
                 assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/{drawn}/cube6_front0/pinhole")), (name, view_faces)
 
+
+def test_a_colsfm_layer_without_the_viewing_rig_keeps_its_rig_beside_the_viewing_faces() -> None:
+    """``rig_view`` is the colsfm layer's own (``colsfm run`` with viewing faces writes it; ``align_to_prior`` and
+    ``--no-view-rig`` do not): without it the views keep ``rig``, and the face panes still play the viewing faces."""
+    layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False, view_faces=True, view_rig=False))
+    faces: list[rrb.View] = [view for view in layout["colsfm"] if isinstance(view, rrb.Spatial2DView)]
+    assert [content_rules(pane)[0] for pane in faces] == [schema.video_view_path(RIG, cam) for cam in FACE_CAMS]
+    for name in ("colsfm", "Comparison"):
+        for view in layout[name][:2]:
+            assert f"- {COLSFM}/rig_view/**" in content_rules(view), name
+            assert f"- {COLSFM}/rig/**" not in content_rules(view), name
+            assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/rig/cube6_front0/pinhole")), name
+
 WRITTEN: dict[str, set[str]] = {
     schema.SLAM_RS_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "map", "keyframes", "loops", "gba", "pgo", "pose_graph"},
     schema.SLAM_RS_VIO_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "landmarks", "window", "marginalized"},
