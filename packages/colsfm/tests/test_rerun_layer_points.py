@@ -79,6 +79,12 @@ def test_blocks_by_latest_at_and_recent_rows_over_one_block_show_exactly_the_poi
     assert len(blocks) <= 400_000 // block_ns + 1
 
 
+def test_a_cloud_without_points_logs_nothing(tmp_path: Path) -> None:
+    """A run that triangulated nothing still writes its layer (rig, path): the growing cloud is then absent, not an error."""
+    rows, static = logged_rows(write(tmp_path, np.zeros((0, 3)), np.zeros(0, dtype=np.int64), block_ns=30))
+    assert not rows and not {entity for entity in static if entity.startswith(ENTITY)}
+
+
 def test_the_block_is_thirty_seconds() -> None:
     """dataforge's Insta360 layout draws `points_growing/recent` over this window (it pins the same number)."""
     assert GROWING_BLOCK_S == 30.0

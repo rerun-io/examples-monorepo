@@ -192,7 +192,7 @@ def log_points_by_first_view(
     view, so latest-at shows it once the cursor has seen all of it. `entity/recent` gets one row per first-seen time (a
     rig frame). A layout that draws the blocks as they are and `entity/recent` over the last `block_ns` shows every point
     seen by the cursor and none after it: the block the cursor is in comes from the recent rows, which also redraw at
-    most one finished block in place.
+    most one finished block in place. A cloud without points logs nothing.
 
     Why blocks: the viewer (Rerun 0.42) makes a point batch per row and processes a query's rows again whenever its result
     changes. A range from the start to the cursor changes on every frame of playback, so one row per rig frame since the
@@ -208,6 +208,8 @@ def log_points_by_first_view(
         timeline: The segment's video timeline.
         block_ns: Span of one block, nanoseconds of `timeline`.
     """
+    if len(seen_ns) == 0:
+        return
     order: Int64[ndarray, " p"] = np.argsort(seen_ns, kind="stable")
     seen_sorted: Int64[ndarray, " p"] = seen_ns[order]
     xyz_sorted: Float64[ndarray, "p 3"] = xyz[order]
