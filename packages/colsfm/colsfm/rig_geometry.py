@@ -83,6 +83,14 @@ class RigFrameIndex:
         """
         return self.keyframe_by_rig_camera.get((rig_id, camera_id))
 
+    def rig_camera_by_keyframe(self) -> dict[int, tuple[int, int]]:
+        """The inverse of `keyframe_by_rig_camera`: `(rig id, camera_params_id)` per image id.
+
+        Returns:
+            A new dict; build it once per pass, not per lookup.
+        """
+        return {image_id: key for key, image_id in self.keyframe_by_rig_camera.items()}
+
     def neighbours(self, rig_id: int, span: int) -> tuple[int, ...]:
         """Rig frames within `span` steps of one rig frame, in time order.
 

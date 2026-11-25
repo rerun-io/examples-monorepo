@@ -82,7 +82,7 @@ def covisibility_radius_m(
     Returns:
         The radius in metres; 0.0 when no pair qualifies.
     """
-    rig_camera_of: dict[int, tuple[int, int]] = {image_id: key for key, image_id in rig_index.keyframe_by_rig_camera.items()}
+    rig_camera_of: dict[int, tuple[int, int]] = rig_index.rig_camera_by_keyframe()
     medians_m: list[float] = []
     for (image_a, image_b), rows in inliers_by_pair.items():
         if len(rows) == 0 or image_a not in rig_camera_of or image_b not in rig_camera_of or image_a not in keypoints or image_b not in keypoints:

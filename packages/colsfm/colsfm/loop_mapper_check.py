@@ -76,7 +76,7 @@ def pose_checked_inliers(
         )
         for candidate in candidates
     }
-    rig_camera_of: dict[int, tuple[int, int]] = {image_id: key for key, image_id in plan.rig_index.keyframe_by_rig_camera.items()}
+    rig_camera_of: dict[int, tuple[int, int]] = plan.rig_index.rig_camera_by_keyframe()
 
     overrides: dict[ImagePair, UInt32[ndarray, "n_inliers 2"]] = {}
     for pair in pairs:
