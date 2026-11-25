@@ -10,8 +10,10 @@ segment it was read from:
   that camera's sample in the segment's own `VideoStream`, so each frustum shows the picture the run read (the same
   camera, pinhole, video layout as the dataset's rig; nothing is copied or encoded again);
 - `/world/runs/<source>/points`: the sparse model, coloured from the images, static, so every layout shows the map;
-- `/world/runs/<source>/points_growing`: the same points, each on `video_time` at the first rig frame that observes it
-  (one row per rig frame); a layout that opts in (a cursor window from the start) grows the cloud along the walk;
+- `/world/runs/<source>/points_growing`: the same points by when each is first observed (`log_points_by_first_view`):
+  one entity per `GROWING_BLOCK_S` block under `blocks` (one row, at the block's last first view), and under `recent` one
+  row per rig frame; a layout that opts in (the blocks as they are, the recent rows over the last block) grows the cloud
+  along the walk;
 - the optimised path in dataforge's names (`simplecv.rerun_walk_path.send_walk_path`): `/world/runs/<source>/trail`,
   one segment per rig frame on `video_time` (a layout's visible time range makes the trail), green at the first rig
   frame through yellow to red at the last; `trajectory`, the whole path in the same colours, one row at the last rig
@@ -59,6 +61,11 @@ TRAJECTORY_RGB: Final[tuple[int, int, int]] = (255, 140, 0)
 
 IMAGE_PLANE_DISTANCE: Final[float] = 0.1
 """Frustum length in metres."""
+GROWING_BLOCK_S: Final[float] = 30.0
+"""Span of one `points_growing/blocks/NNNN` entity, seconds: a layout draws each block as it is (latest-at) and
+`points_growing/recent` over the last block (dataforge's Insta360 layout pins the same number). Clip 007 (1,068 s) makes
+36 blocks, and the recent rows hold a few percent of the cloud."""
+
 
 @dataclass(frozen=True)
 class LayerSummary:
@@ -176,27 +183,51 @@ def log_points_by_first_view(
     rgb: UInt8[ndarray, "p 3"],
     seen_ns: Int64[ndarray, " p"],
     timeline: str,
+    *,
+    block_ns: int = round(GROWING_BLOCK_S * 1e9),
 ) -> None:
-    """Log the cloud as one row per first-seen time (a rig frame), each holding the points that rig frame first observes.
+    """Log the cloud by when each point is first observed, in blocks of `block_ns` from the first view.
 
-    Rows, not one chunk per point: 1.6 M points of a 1 km clip land in one row per rig frame. The radius is one static value.
+    Each block is one entity, `entity/blocks/NNNN`, with one row: the points first seen in it, at the block's last first
+    view, so latest-at shows it once the cursor has seen all of it. `entity/recent` gets one row per first-seen time (a
+    rig frame). A layout that draws the blocks as they are and `entity/recent` over the last `block_ns` shows every point
+    seen by the cursor and none after it: the block the cursor is in comes from the recent rows, which also redraw at
+    most one finished block in place.
+
+    Why blocks: the viewer (Rerun 0.42) makes a point batch per row and processes a query's rows again whenever its result
+    changes. A range from the start to the cursor changes on every frame of playback, so one row per rig frame since the
+    start (3,096 rows, 2.32 M points on clip 007) was processed in full on every frame. A block's latest-at result stays
+    the same, so only the recent rows are processed again.
 
     Args:
         recording: The layer's recording.
-        entity: The points entity.
+        entity: The points entity; the cloud goes under it.
         xyz: Positions, metres.
         rgb: Colours.
         seen_ns: Per point, when it is first observed.
         timeline: The segment's video timeline.
+        block_ns: Span of one block, nanoseconds of `timeline`.
     """
     order: Int64[ndarray, " p"] = np.argsort(seen_ns, kind="stable")
-    times, counts = np.unique(seen_ns[order], return_counts=True)
+    seen_sorted: Int64[ndarray, " p"] = seen_ns[order]
+    xyz_sorted: Float64[ndarray, "p 3"] = xyz[order]
+    rgb_sorted: UInt8[ndarray, "p 3"] = rgb[order]
+    recent: str = f"{entity}/recent"
+    times, counts = np.unique(seen_sorted, return_counts=True)
     recording.send_columns(
-        entity,
+        recent,
         indexes=[rr.TimeColumn(timeline, duration=times.astype("timedelta64[ns]"))],
-        columns=rr.Points3D.columns(positions=xyz[order], colors=rgb[order]).partition(counts.tolist()),
+        columns=rr.Points3D.columns(positions=xyz_sorted, colors=rgb_sorted).partition(counts.tolist()),
     )
-    recording.log(entity, rr.Points3D.from_fields(radii=rr.Radius.ui_points(1.5)), static=True)
+    recording.log(recent, rr.Points3D.from_fields(radii=rr.Radius.ui_points(1.5)), static=True)
+    # Sorted by first view, so each block is one slice.
+    block: Int64[ndarray, " p"] = (seen_sorted - seen_sorted[0]) // block_ns
+    starts: Int64[ndarray, " b"] = np.flatnonzero(np.r_[True, block[1:] != block[:-1]])
+    ends: Int64[ndarray, " b"] = np.r_[starts[1:], len(block)]
+    for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
+        recording.set_time(timeline, duration=np.timedelta64(int(seen_sorted[end - 1]), "ns"))
+        recording.log(f"{entity}/blocks/{int(block[start]):04d}", rr.Points3D(xyz_sorted[start:end], colors=rgb_sorted[start:end]))
+    recording.reset_time()
 
 
 def log_position_difference(

@@ -19,7 +19,10 @@ The paths are logged a segment per pose (``schema.trail_path``) and shown as a t
 cursor; each run logs its whole path (``schema.trajectory_path``) and its loops once, at the last frame, so a cursor halfway through a clip shows no
 path ahead of it. The raw slam-rs run and colsfm carry their walk gradient (green at the start, red at the end) and
 start and end dots in their data; in the Comparison tab slam-rs is one flat grey (``COMPARISON_SLAM_COLOR``) so the two
-runs stay apart. The colsfm cloud by first view (``points_growing``) shows since the start, so it grows along the walk.
+runs stay apart. The colsfm cloud by first view grows along the walk: its 30 s blocks (``points_growing/blocks/NNNN``,
+sized by the view's defaults) show as they are and its rows per rig frame (``points_growing/recent``) over the last block
+(``GROWING_BLOCK_S``). A range query from the start would change on every frame of playback, and the viewer processes all
+of its rows again each time (clip 007: 3,096 rows, 2.32 M points, in each view).
 The overviews turn slowly about the walk (``OVERVIEW_SPIN_RAD_S``).
 
 With the ``cube_view`` layer (``ColsfmRig``) the colsfm tab shows the viewing faces (``pinhole/video_view``, every
@@ -98,6 +101,10 @@ MARGINALIZED_SLOTS: int = 4
 """The same for the frames a marginalization removed (``marginalized/NN``)."""
 LENSES: tuple[str, str] = ("cam_00", "cam_01")
 """The two lens cameras, as slam-rs names them under its rig and under each window frame."""
+GROWING_BLOCK_S: float = 30.0
+"""Window of colsfm's ``points_growing/recent`` rows: the span of one ``points_growing/blocks/NNNN`` block
+(``colsfm.rerun_layer.GROWING_BLOCK_S``; dataforge does not import colsfm, a test pins both). The blocks show as they are
+(latest-at), the recent rows cover the block the cursor is in."""
 TRAIL_S: float = 8.0
 """How far back of the cursor a path logged a segment a pose is drawn, in seconds: about 4 to 5 m of walk."""
 OVERVIEW_SPIN_RAD_S: float = 2.0 * np.pi / 75.0
@@ -301,13 +308,25 @@ def slam_overrides(*, close: bool) -> Overrides:
     }
 
 
+def growing_cloud_size(*, close: bool) -> float:
+    """Point radius of colsfm's growing cloud in a colsfm-tab view, ui points."""
+    return 1.5 if close else 2.0
+
+
+def colsfm_cloud_defaults(*, close: bool) -> list[rr.Points3D]:
+    """A colsfm-tab view's point size for the blocks of colsfm's growing cloud (``points_growing/blocks/NNNN``): an
+    override takes an exact path and the number of blocks comes with the clip, so they log no radius and take this."""
+    return [cloud(growing_cloud_size(close=close))]
+
+
 def colsfm_overrides(*, close: bool, rig: ColsfmRig) -> Overrides:
-    """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk, the trail in its walk
-    gradient (the whole path at the end), and the cube rig in blue, each face's picture in its frustum."""
+    """How a colsfm-tab 3D view draws colsfm: the cloud growing from the start of the walk (its blocks as they are, the
+    block the cursor is in from the recent rows), the trail in its walk gradient (the whole path at the end), and the
+    cube rig in blue, each face's picture in its frustum."""
     return {
         schema.trail_path(schema.COLSFM_SOURCE): trail(None, 3.0),
         schema.trajectory_path(schema.COLSFM_SOURCE): stroke(None, 2.5),
-        f"{COLSFM}/points_growing": [blueprints.cursor_window(None), cloud(1.5 if close else 2.0)],
+        f"{COLSFM}/points_growing/recent": [blueprints.cursor_window(GROWING_BLOCK_S), cloud(growing_cloud_size(close=close))],
         **face_frusta(rig.drawn, 0.18 if close else 0.3),
     }
 
@@ -335,11 +354,13 @@ def comparison_overrides(*, close: bool, rig: ColsfmRig) -> Overrides:
     }
 
 
-def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeControls3D | None, source: str) -> rrb.Spatial3DView:
+def overview(
+    name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeControls3D | None, source: str, defaults: list[rr.Points3D] | None = None
+) -> rrb.Spatial3DView:
     """A tab's world view of the whole walk of ``source``, with that run's position as a dot.
 
     The rig is centimetres on a walk of tens of metres, so a point at the follow frame's origin with a ui-point radius
-    marks it at any zoom. No grid.
+    marks it at any zoom. No grid. ``defaults`` style what no override reaches (``colsfm_cloud_defaults``).
     """
     return rrb.Spatial3DView(
         name=name,
@@ -351,16 +372,18 @@ def overview(name: str, contents: list[str], overrides: Overrides, eye: rrb.EyeC
         },
         eye_controls=eye,
         line_grid=False,
+        defaults=defaults,
     )
 
 
-def follow(name: str, contents: list[str], overrides: Overrides, source: str) -> rrb.Spatial3DView:
-    """A tab's chase view, rooted at the level follow frame of ``source``."""
+def follow(name: str, contents: list[str], overrides: Overrides, source: str, defaults: list[rr.Points3D] | None = None) -> rrb.Spatial3DView:
+    """A tab's chase view, rooted at the level follow frame of ``source``; ``defaults`` as in ``overview``."""
     return rrb.Spatial3DView(
         name=name,
         origin=schema.follow_path(source),
         contents=contents,
         overrides=overrides,
+        defaults=defaults,
         eye_controls=FOLLOW_EYE,
         line_grid=False,
     )
@@ -448,8 +471,21 @@ def colsfm_tab(eye: rrb.EyeControls3D | None, rig: ColsfmRig) -> rrb.Horizontal:
     ]
     return rrb.Horizontal(
         rrb.Vertical(
-            overview("Overview: colsfm cloud grows with the walk", scene, colsfm_overrides(close=False, rig=rig), eye, schema.SLAM_RS_SOURCE),
-            follow("Follow: level chase view, cube rig", scene, colsfm_overrides(close=True, rig=rig), schema.SLAM_RS_SOURCE),
+            overview(
+                "Overview: colsfm cloud grows with the walk",
+                scene,
+                colsfm_overrides(close=False, rig=rig),
+                eye,
+                schema.SLAM_RS_SOURCE,
+                colsfm_cloud_defaults(close=False),
+            ),
+            follow(
+                "Follow: level chase view, cube rig",
+                scene,
+                colsfm_overrides(close=True, rig=rig),
+                schema.SLAM_RS_SOURCE,
+                colsfm_cloud_defaults(close=True),
+            ),
             row_shares=[5, 4],
         ),
         rrb.Grid(*(face_pane(cam, name, rig.face_video(RIG, cam)) for cam, (name, _) in zip(FACE_CAMS, cube.FACES, strict=True)), grid_columns=2, name="Cube faces"),
