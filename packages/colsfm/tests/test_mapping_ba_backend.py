@@ -278,37 +278,53 @@ def test_a_free_rig_solves_where_the_rig_probe_says(caspar_enabled: bool, synthe
 def test_the_probe_solves_once_however_often_it_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     """The probe is cached, so the mapper pays for its CASPAR solves once per process.
 
-    The expensive thing is `_caspar_projects`: one real bundle adjustment per
-    candidate camera model. The contract is that the whole sweep runs once and
-    every later caller reads the answer, so the test counts the solves. Timing
-    the second call instead — which is what this used to do, against a 10 ms
-    budget — measures the machine, and asking whether two calls returned the
-    same object measures `functools.cache` rather than the mapper's cost.
+    The expensive thing is `_caspar_probe_solve`: one real bundle adjustment per
+    question — one per candidate camera model, then the rig factor and the free
+    intrinsics of each projected model. The contract is that the whole sweep runs
+    once and every later caller reads the answer, so the test counts the solves.
+    Timing the second call instead measures the machine, and asking whether two
+    calls returned the same object measures `functools.cache` rather than the
+    mapper's cost.
 
-    Counting also frees the test from needing a CASPAR build: the stand-in
-    answers for the solve, so the caching contract is checked on every
-    environment rather than only where the GPU backend exists.
+    Counting also frees the test from needing a CASPAR build: the stand-in answers
+    for every solve, so the caching contract is checked on every environment rather
+    than only where the GPU backend exists.
     """
-    asked: list[str] = []
+    asked: list[tuple[str, int, bool, bool]] = []
 
-    def counting_probe(model_name: str) -> bool:
-        """Stand in for one CASPAR solve, recording which model it was asked about."""
-        asked.append(model_name)
-        return model_name in CASPAR_STOCK_CAMERA_MODELS
+    def counting_solve(
+        model_name: str, *, num_sensors: int = 1, refine_intrinsics: bool = False, refine_sensor_from_rig: bool = False, constant_intrinsics: bool = False
+    ) -> pycolmap.BundleAdjustmentSummary | None:
+        """Stand in for one CASPAR solve: stock models project, PINHOLE alone frees its intrinsics, no rig factor."""
+        asked.append((model_name, num_sensors, refine_intrinsics, refine_sensor_from_rig))
+        if refine_sensor_from_rig:
+            raise ValueError("refine_sensor_from_rig=true is not supported by CASPAR")
+        summary: pycolmap.BundleAdjustmentSummary = pycolmap.BundleAdjustmentSummary()
+        projects: bool = model_name in CASPAR_STOCK_CAMERA_MODELS and (not refine_intrinsics or model_name == "PINHOLE")
+        summary.num_residuals = 32 if projects else 0
+        summary.termination_type = pycolmap.BundleAdjustmentTerminationType.CONVERGENCE
+        return summary
 
-    monkeypatch.setattr(ba_backend, "_caspar_projects", counting_probe)
+    monkeypatch.setattr(ba_backend, "_caspar_probe_solve", counting_solve)
     # The real answer is memoised for the life of the process, so the cache has
     # to be empty going in and empty again coming out — otherwise this test
     # either reads a real probe or leaves the stand-in's answer behind.
     detect_caspar_capability.cache_clear()
     try:
-        first: frozenset[str] = caspar_supported_camera_models()
-        repeats: list[frozenset[str]] = [caspar_supported_camera_models() for _ in range(3)]
+        first = detect_caspar_capability()
+        repeats = [detect_caspar_capability() for _ in range(3)]
     finally:
         detect_caspar_capability.cache_clear()
 
-    assert asked == list(CASPAR_PROBE_CAMERA_MODELS), "the sweep runs once, in probe order"
-    assert first == CASPAR_STOCK_CAMERA_MODELS
+    stock: list[str] = sorted(CASPAR_STOCK_CAMERA_MODELS)
+    assert asked == [
+        *((model_name, 1, False, False) for model_name in CASPAR_PROBE_CAMERA_MODELS),
+        ("PINHOLE", 2, False, True),
+        *((model_name, 1, True, False) for model_name in stock),
+    ], "the sweep runs once, in probe order"
+    assert first.supported_camera_models == CASPAR_STOCK_CAMERA_MODELS
+    assert first.refines_sensor_from_rig is False
+    assert first.intrinsics_refinable_camera_models == frozenset({"PINHOLE"})
     assert repeats == [first, first, first]
 
 

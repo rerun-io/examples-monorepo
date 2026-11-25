@@ -195,6 +195,55 @@ def _caspar_probe_reconstruction(model_name: str, num_sensors: int = 1) -> pycol
     return reconstruction
 
 
+def _caspar_probe_solve(
+    model_name: str,
+    *,
+    num_sensors: int = 1,
+    refine_intrinsics: bool = False,
+    refine_sensor_from_rig: bool = False,
+    constant_intrinsics: bool = False,
+) -> pycolmap.BundleAdjustmentSummary | None:
+    """One CASPAR bundle adjustment of the probe model: the solve every capability probe reads.
+
+    Args:
+        model_name: A `pycolmap.CameraModelId` member name.
+        num_sensors: Cameras in the probe rig (`_caspar_probe_reconstruction`).
+        refine_intrinsics: Free the focal and the distortion block (CASPAR takes them together).
+        refine_sensor_from_rig: Free the rig's `sensor_from_rig`.
+        constant_intrinsics: Hold camera 1's intrinsics constant in the config as well.
+
+    Returns:
+        The solve's summary, or None when this pycolmap has no such camera model.
+
+    Raises:
+        ValueError: When pycolmap is built without CASPAR_ENABLED, or CASPAR refuses the problem.
+        RuntimeError: When CASPAR throws mid-solve.
+    """
+    reconstruction: pycolmap.Reconstruction | None = _caspar_probe_reconstruction(model_name, num_sensors=num_sensors)
+    if reconstruction is None:
+        return None
+    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
+    for image_id in sorted(reconstruction.images):
+        config.add_image(image_id)
+    config.set_constant_rig_from_world_pose(min(reconstruction.frames))
+    if constant_intrinsics:
+        config.set_constant_cam_intrinsics(1)
+
+    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
+    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND["caspar"]
+    ba_options.print_summary = False
+    ba_options.refine_sensor_from_rig = refine_sensor_from_rig
+    ba_options.refine_focal_length = refine_intrinsics
+    ba_options.refine_extra_params = refine_intrinsics
+    ba_options.refine_principal_point = False
+    ba_options.refine_rig_from_world = True
+    ba_options.refine_points3D = True
+    # `-1` lets COLMAP pick the device, which is what this module's `use_gpu=False`
+    # means everywhere else; the probe asks about adapters, not about a GPU.
+    ba_options.caspar.gpu_index = "-1"
+    return pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction).solve()
+
+
 def _caspar_projects(model_name: str) -> bool:
     """Whether this build's CASPAR has an adapter for one camera model.
 
@@ -214,38 +263,35 @@ def _caspar_projects(model_name: str) -> bool:
     Raises:
         ValueError: When pycolmap is built without CASPAR_ENABLED.
     """
-    reconstruction: pycolmap.Reconstruction | None = _caspar_probe_reconstruction(model_name)
-    if reconstruction is None:
-        return False
-    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
-    for image_id in sorted(reconstruction.images):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(min(reconstruction.frames))
-    config.set_constant_cam_intrinsics(1)
+    summary: pycolmap.BundleAdjustmentSummary | None = _caspar_probe_solve(model_name, constant_intrinsics=True)
+    return summary is not None and summary.num_residuals > 0
 
-    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND["caspar"]
-    ba_options.print_summary = False
-    ba_options.refine_sensor_from_rig = False
-    ba_options.refine_focal_length = False
-    ba_options.refine_extra_params = False
-    ba_options.refine_principal_point = False
-    ba_options.refine_rig_from_world = True
-    ba_options.refine_points3D = True
-    # `-1` lets COLMAP pick the device, which is what this module's `use_gpu=False`
-    # means everywhere else; the probe asks about adapters, not about a GPU.
-    ba_options.caspar.gpu_index = "-1"
-    adjuster: pycolmap.BundleAdjuster = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction)
-    summary: pycolmap.BundleAdjustmentSummary = adjuster.solve()
-    return summary.num_residuals > 0
+
+def _caspar_solves_usably(model_name: str, *, num_sensors: int = 1, refine_intrinsics: bool = False, refine_sensor_from_rig: bool = False) -> bool:
+    """Whether the probe solve with these freedoms ran and left a usable solution; any exception or an empty problem is a no.
+
+    Args:
+        model_name: A `pycolmap.CameraModelId` member name.
+        num_sensors: Cameras in the probe rig.
+        refine_intrinsics: Free the focal and the distortion block.
+        refine_sensor_from_rig: Free the rig's `sensor_from_rig`.
+
+    Returns:
+        True when the solve took the problem and left a usable solution.
+    """
+    try:
+        summary: pycolmap.BundleAdjustmentSummary | None = _caspar_probe_solve(
+            model_name, num_sensors=num_sensors, refine_intrinsics=refine_intrinsics, refine_sensor_from_rig=refine_sensor_from_rig
+        )
+    except (ValueError, RuntimeError):
+        return False
+    return summary is not None and summary.num_residuals > 0 and summary.is_solution_usable()
 
 
 def _caspar_refines_intrinsics(model_name: str) -> bool:
     """Whether this build's CASPAR refines one camera model's focal and distortion block.
 
-    The `_caspar_projects` probe with `refine_focal_length` and `refine_extra_params` on (CASPAR takes them together).
-    recipes/colmap-src's FULL_OPENCV adapter throws here ("supported by CASPAR only for fixed intrinsics"); any
-    exception or an empty problem is a no.
+    recipes/colmap-src's FULL_OPENCV adapter throws here ("supported by CASPAR only for fixed intrinsics").
 
     Args:
         model_name: A `pycolmap.CameraModelId` member name.
@@ -253,28 +299,7 @@ def _caspar_refines_intrinsics(model_name: str) -> bool:
     Returns:
         True when the solve took the free intrinsics and left a usable solution.
     """
-    reconstruction: pycolmap.Reconstruction | None = _caspar_probe_reconstruction(model_name)
-    if reconstruction is None:
-        return False
-    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
-    for image_id in sorted(reconstruction.images):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(min(reconstruction.frames))
-    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND["caspar"]
-    ba_options.print_summary = False
-    ba_options.refine_sensor_from_rig = False
-    ba_options.refine_focal_length = True
-    ba_options.refine_extra_params = True
-    ba_options.refine_principal_point = False
-    ba_options.refine_rig_from_world = True
-    ba_options.refine_points3D = True
-    ba_options.caspar.gpu_index = "-1"
-    try:
-        summary: pycolmap.BundleAdjustmentSummary = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction).solve()
-    except (ValueError, RuntimeError):
-        return False
-    return summary.num_residuals > 0 and summary.is_solution_usable()
+    return _caspar_solves_usably(model_name, refine_intrinsics=True)
 
 
 def _caspar_refines_sensor_from_rig() -> bool:
@@ -282,33 +307,12 @@ def _caspar_refines_sensor_from_rig() -> bool:
 
     Stock CASPAR throws "refine_sensor_from_rig=true is not supported by CASPAR" on a multi-sensor frame with free
     extrinsics; recipes/colmap-src with the rig factor solves it (Mission office: rig + per-face focals free in every
-    mapping round, 46 s against 383 s on Ceres, poses 0.018 deg apart). Any exception or an empty problem is a no.
+    mapping round, 46 s against 383 s on Ceres, poses 0.018 deg apart).
 
     Returns:
         True when the solve took the rig problem and left a usable solution.
     """
-    reconstruction: pycolmap.Reconstruction | None = _caspar_probe_reconstruction("PINHOLE", num_sensors=2)
-    if reconstruction is None:
-        return False
-    config: pycolmap.BundleAdjustmentConfig = pycolmap.BundleAdjustmentConfig()
-    for image_id in sorted(reconstruction.images):
-        config.add_image(image_id)
-    config.set_constant_rig_from_world_pose(min(reconstruction.frames))
-    ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
-    ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND["caspar"]
-    ba_options.print_summary = False
-    ba_options.refine_sensor_from_rig = True
-    ba_options.refine_focal_length = False
-    ba_options.refine_extra_params = False
-    ba_options.refine_principal_point = False
-    ba_options.refine_rig_from_world = True
-    ba_options.refine_points3D = True
-    ba_options.caspar.gpu_index = "-1"
-    try:
-        summary: pycolmap.BundleAdjustmentSummary = pycolmap.create_default_bundle_adjuster(ba_options, config, reconstruction).solve()
-    except (ValueError, RuntimeError):
-        return False
-    return summary.num_residuals > 0 and summary.is_solution_usable()
+    return _caspar_solves_usably("PINHOLE", num_sensors=2, refine_sensor_from_rig=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════════════
@@ -412,9 +416,11 @@ def detect_caspar_capability() -> CasparCapability:
 
     There is no pycolmap call that lists CASPAR's adapters, so the only way to know
     is to hand it a problem and see whether it took it: `_caspar_projects` solves a
-    sixteen-point model per candidate and reads `num_residuals`. The whole sweep is
-    five sub-millisecond GPU solves, and `resolve_ba_plan` only reaches it when
-    `caspar` was actually asked for.
+    sixteen-point model per candidate and reads `num_residuals`; on a build that projects
+    something, one more solve asks about the rig factor and one per projected model about
+    free intrinsics. Every probe runs through `_caspar_probe_solve` and only from here, so
+    the `functools.cache` above bounds the whole sweep to once per process; `resolve_ba_plan`
+    only reaches it when `caspar` was actually asked for.
 
     Returns:
         The typed outcome: which models are projected, and — when none are —
