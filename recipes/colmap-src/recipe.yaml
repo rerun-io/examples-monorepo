@@ -84,16 +84,8 @@ build:
   script:
     # Step 0: prove the patches landed byte for byte before the long CUDA compile. A fuzzy applier can skip an
     # already-applied hunk with a warning and exit 0; a skipped hunk in solver.cc would compile and solve wrong.
+    # SHA256SUMS lists every file the patches touch, new files included, so no per-patch grep is needed.
     - sha256sum --quiet -c "$RECIPE_DIR/patches/SHA256SUMS"
-    - grep -q "class OpenCVFisheyeAdapter" src/colmap/estimators/caspar/caspar_model_adapter.h
-    - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -ci fisheye)" -eq 346
-    - grep -q "class FullOpenCVAdapter" src/colmap/estimators/caspar/caspar_model_adapter.h
-    - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -ci full_\\?opencv)" -eq 100
-    - grep -q "void RollbackTransaction() const override" src/colmap/scene/database_sqlite.cc
-    - grep -qF "*beta_denum = *beta_num;" src/thirdparty/Symforce-Caspar/generated/f32/solver_tools.cu
-    - grep -q "void GraphSolver::RcsReduceRhs()" src/thirdparty/Symforce-Caspar/generated/f32/solver.cc
-    - test "$(ls src/thirdparty/Symforce-Caspar/generated/f32 | grep -c '_rig\|SensorFromRig')" -eq 424
-    - grep -q "CASPAR_RIG_ADAPTER_MEMBERS" src/colmap/estimators/caspar/caspar_model_adapter.h
     # conda's onnxruntime-cpp nests its headers under include/onnxruntime/core/session/; COLMAP includes them flat.
     - export CPATH="$PREFIX/include/onnxruntime/core/session${CPATH:+:$CPATH}"
     # Step 1: libcolmap with CASPAR. FETCH_ONNX=OFF: the fetched prebuilt onnxruntime is CUDA 12. FETCH_FAISS and
