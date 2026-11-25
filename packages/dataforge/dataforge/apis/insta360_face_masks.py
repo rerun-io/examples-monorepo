@@ -27,7 +27,7 @@ from numpy import ndarray
 
 from dataforge import schema, writing
 from dataforge.datasets import insta360_cube as cube
-from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording
+from dataforge.datasets.insta360 import FACE_CAMS, RIG, LensCameras, cameras_from_recording, layer_device
 
 MASK_NAME: str = "people_mask"
 """The mask entity under each ``pinhole``, on the lenses and on the faces."""
@@ -150,7 +150,7 @@ def main(config: Config) -> None:
     """
     lenses: LensCameras = cameras_from_recording(config.base)
     faces: dict[int, cube.CubeFace] = faces_from_layer(config.faces, lenses)
-    device: torch.device = torch.device(config.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    device: torch.device = layer_device(config.device)
     join = cube.MaskJoin([cube.face_table(face, lenses.cameras, lenses.lens1_from_lens0, lenses.size) for face in faces.values()], lenses.size, device)
     wanted: set[int] = {int(s) for s in face_stamps(config.faces)}
     lens_shape: tuple[int, int] = (lenses.size[1], lenses.size[0])
