@@ -145,13 +145,13 @@ covers all 90 of the blob's RoboCap loop pairs.
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal, TypeAlias
 
 import numpy as np
 from bow_vocab import Vocabulary
-from jaxtyping import Bool, Float32, Int32
+from jaxtyping import Bool, Float32, Int32, Int64
 from numpy import ndarray
 
 from colsfm.database import Descriptors
@@ -167,6 +167,12 @@ ResolvedBackend: TypeAlias = Literal["brute_force", "vocab"]
 
 ALIKED_DESCRIPTOR_DIM: Final[int] = 128
 """Descriptor width `feature_extractor_main` writes (`docs/spec/feature_extractor_main.md` §4)."""
+
+SEARCH_ROWS_PER_SLOT: Final[int] = 4
+"""Rows `RetrievalIndex.search` ranks first per requested slot (and four times as many
+each time the walk runs past them). A slot can also be spent on the query itself or on a
+hit the time gate drops, so the first cut is wider than `top_k`; on EuRoC V1_01 the gate
+drops about 40 hits per query of 20 slots, so one or two widenings are typical there."""
 
 GOOD_SCORE_THRESHOLD: Final[float] = 0.1
 """Retrieval score a loop candidate must clear, on either backend.
@@ -473,7 +479,6 @@ class RetrievalIndex:
         position: int = self._position_of(image_id)
 
         scores: Float32[ndarray, "n_images"] = self.similarity[position]
-        order: Int32[ndarray, "n_images"] = np.argsort(-scores, kind="stable").astype(np.int32)
         gated: bool = min_time_gap_us is not None and timestamps is not None
         capture_us: Mapping[int, int] = timestamps if timestamps is not None else {}
         gap_us: int = min_time_gap_us if min_time_gap_us is not None else 0
@@ -481,12 +486,10 @@ class RetrievalIndex:
 
         candidates: list[Candidate] = []
         rejected_by_time: int = 0
-        for rank in order:
+        for rank in _positive_rows_best_first(scores, first_rows=SEARCH_ROWS_PER_SLOT * (top_k + 1)):
             if len(candidates) == top_k:
                 break
             score: float = float(scores[rank])
-            if score <= 0.0:
-                break
             other_id: int = self.image_ids[int(rank)]
             if other_id == image_id:
                 continue
@@ -532,6 +535,41 @@ class RetrievalIndex:
 # ======================================================================================
 # brute force (docs/spec/bow.md §9.4 Option A)
 # ======================================================================================
+
+
+def _positive_rows_best_first(scores: Float32[ndarray, "n_images"], first_rows: int) -> Iterator[int]:
+    """Yield the rows with a positive score, best first, equal scores in row order.
+
+    The order of a full `np.argsort(-scores, kind="stable")` cut at the first score <= 0,
+    without sorting the whole row: a walk usually stops after a few dozen rows of
+    thousands. Each round selects every row scoring at least the `length`-th best positive
+    score (all rows tied with it, so the cut never splits a tie), stable-sorts only those,
+    and yields the ones past the previous round. Rows at or above a threshold are a prefix
+    of the full order, and a lower threshold only extends that prefix, so the rows come out
+    exactly as the full sort would give them. When the walk asks for more, `length` grows
+    by `SEARCH_ROWS_PER_SLOT`.
+
+    Args:
+        scores: One row of the similarity matrix.
+        first_rows: How many rows the first round ranks.
+
+    Yields:
+        Row indices into `scores`.
+    """
+    positive: Int64[ndarray, "n_positive"] = np.flatnonzero(scores > 0.0)
+    positive_scores: Float32[ndarray, "n_positive"] = scores[positive]
+    yielded: int = 0
+    length: int = first_rows
+    while yielded < positive.size:
+        if length >= positive.size:
+            selected: Int64[ndarray, "n_selected"] = positive
+        else:
+            threshold: np.float32 = np.partition(positive_scores, positive.size - length)[positive.size - length]
+            selected = positive[positive_scores >= threshold]
+        ranked: Int64[ndarray, "n_selected"] = selected[np.argsort(-scores[selected], kind="stable")]
+        yield from ranked[yielded:].tolist()
+        yielded = ranked.size
+        length *= SEARCH_ROWS_PER_SLOT
 
 
 def _subsample(descriptors: Descriptors, keep: int) -> Descriptors:
