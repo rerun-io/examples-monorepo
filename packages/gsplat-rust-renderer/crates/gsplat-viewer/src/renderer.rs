@@ -61,6 +61,28 @@ pub(crate) struct RenderView {
     image: Image,
     last_good: Option<GpuBindGroup>,
     profile: Option<crate::profile::ViewProfile>,
+    /// Streamed SOG scenes: the shared level index, and the eye + instance transform the runs were selected for.
+    lod: Option<Arc<gsplat_core::lod::LodIndex>>,
+    lod_selected_for: Option<(
+        Camera,
+        gsplat_core::glam::Affine3A,
+        gsplat_core::lod::LodParams,
+    )>,
+    lod_report: Option<LodSelectionReport>,
+}
+
+/// The last level selection of one view, for the frame probe.
+#[derive(Clone, Debug)]
+pub struct LodSelectionReport {
+    pub params: gsplat_core::lod::LodParams,
+    pub stats: gsplat_core::lod::SelectionStats,
+    /// Host time of the last `select` call.
+    pub select_us: f64,
+    /// Selections this view made since it was created (one per encoded frame with a new eye at most).
+    pub selections: u64,
+    /// Rows of the whole scene (all loaded levels) and of each level.
+    pub scene_rows: u32,
+    pub level_rows: Vec<u64>,
 }
 
 // Process-wide, so the count never goes back when the cache evicts or replaces a view.
@@ -86,6 +108,52 @@ impl RenderView {
         self.last_good = self.completed();
         self.image = Image::Dirty;
         self.core = view;
+        self.lod_selected_for = None;
+        Ok(())
+    }
+
+    /// The scene's level index (None for scenes without levels); a new index selects again on the next encode.
+    pub(crate) fn set_lod(&mut self, lod: Option<Arc<gsplat_core::lod::LodIndex>>) {
+        let same = match (&self.lod, &lod) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.lod = lod;
+            self.lod_selected_for = None;
+            self.lod_report = None;
+        }
+    }
+
+    pub(crate) fn lod_selection(&self) -> Option<LodSelectionReport> {
+        self.lod_report.clone()
+    }
+
+    /// Select this view's rows for `camera` (host, microseconds) unless they were selected for the same eye,
+    /// instance transform and parameters (`options.lod`).
+    fn select_lod(&mut self, camera: &Camera, options: &RenderOptions) -> Result<(), Error> {
+        let Some(index) = &self.lod else {
+            return Ok(());
+        };
+        let params = options.lod;
+        let eye = (*camera, options.world_from_local, params);
+        if self.lod_selected_for == Some(eye) {
+            return Ok(());
+        }
+        let start = web_time::Instant::now();
+        let selection = gsplat_core::lod::select(index, camera, &options.world_from_local, &params);
+        let select_us = start.elapsed().as_secs_f64() * 1e6;
+        self.core.set_runs(Some(&selection.runs))?;
+        self.lod_selected_for = Some(eye);
+        self.lod_report = Some(LodSelectionReport {
+            params,
+            stats: selection.stats,
+            select_us,
+            selections: self.lod_report.as_ref().map_or(0, |r| r.selections) + 1,
+            scene_rows: index.rows(),
+            level_rows: (0..index.levels()).map(|l| index.level_rows(l)).collect(),
+        });
         Ok(())
     }
 
@@ -157,6 +225,7 @@ impl RenderView {
         {
             return Ok(Prepared::Pending);
         }
+        self.select_lod(camera, &options)?;
         match renderer
             .core()?
             .prepare_view(&ctx.queue, &mut self.core, camera)
@@ -287,6 +356,9 @@ impl GaussianRenderer {
             image: Image::Dirty,
             last_good: None,
             profile: crate::profile::ViewProfile::new(&ctx.device),
+            lod: None,
+            lod_selected_for: None,
+            lod_report: None,
         })
     }
 

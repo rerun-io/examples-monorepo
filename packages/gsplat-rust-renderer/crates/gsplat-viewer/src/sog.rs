@@ -45,11 +45,8 @@ impl Payload<'_> {
 
     /// An upper bound of the SH degree before the planes are decoded (old v2 files omit `shN.bands`: v2 has <= 3).
     pub(crate) fn max_degree(&self) -> u32 {
-        match (&self.meta.sh_n, self.webp.sh_centroids, self.webp.sh_labels) {
-            (Some(sh), Some(_), Some(_)) => sh.bands.unwrap_or(match self.meta.version {
-                3 => 4,
-                _ => 3,
-            }),
+        match (self.webp.sh_centroids, self.webp.sh_labels) {
+            (Some(_), Some(_)) => self.meta.max_sh_degree(),
             _ => 0,
         }
     }
