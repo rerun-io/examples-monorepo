@@ -12,6 +12,9 @@ catalog (`colsfm.frames.VideoStreamFrames`), so the matcher sees the original vi
 Every camera pose handed to the pipeline is `world_T_rig(t) @ rig_T_cam` at the camera's own frame time, the rig pose
 interpolated (slerp + linear) from the trajectory stream; frames outside the trajectory's time span are dropped, not
 extrapolated.
+
+The segment can also be local files: a base rrd and named layer rrds of its segment (`CatalogInputConfig.rrd`,
+`layers`), which `serve_catalog_input` serves on a private in-process catalog for as long as the run reads it.
 """
 
 from __future__ import annotations
@@ -22,7 +25,8 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
@@ -36,6 +40,7 @@ from scipy.spatial.transform import Rotation
 from serde import serde
 from serde.json import to_json
 from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models
+from simplecv.catalog_layers import serve_local_segment
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.rrd_query_utils import first_valid_value
@@ -106,10 +111,15 @@ class CatalogInputConfig:
 
     dataset: str
     """Catalog dataset name, e.g. `robocap` or `dataforge-vslam-lab-kitti`."""
-    segment: str
-    """Segment id, e.g. `robocap__f408193e6447b3b0__s00000021`."""
+    segment: str = ""
+    """Segment id, e.g. `robocap__f408193e6447b3b0__s00000021`; taken from `rrd` when that is set."""
     catalog_url: str = DEFAULT_CATALOG_URL
-    """Catalog server."""
+    """Catalog server; unused when `rrd` is set."""
+    rrd: Path | None = None
+    """A local base recording read instead of `catalog_url`: it and `layers` are served on a private in-process catalog
+    for the run (`serve_catalog_input`), and its recording id is the segment. None = read `catalog_url`."""
+    layers: dict[str, Path] = field(default_factory=dict)
+    """Layer name -> local recording of `rrd`'s segment, e.g. `cube`, `slam_rs`, `people_mask`; needs `rrd`."""
     cameras: tuple[str, ...] = ()
     """Camera names (the camera node's static `name`) fed to the pipeline; empty means every video camera."""
     stereo_pairs: tuple[tuple[str, str], ...] = ()
@@ -139,6 +149,17 @@ class CatalogInputConfig:
     `people_mask` reads `<camera>/pinhole/people_mask`), on the video's stamps, nonzero = no keypoint there. Every
     selected camera must carry it at every keyframe stamp. None = no mask."""
 
+    def __post_init__(self) -> None:
+        """Check that the input names a segment and that local layers have a base.
+
+        Raises:
+            ValueError: When neither `segment` nor `rrd` is set, or `layers` is set without `rrd`.
+        """
+        if self.rrd is None and not self.segment:
+            raise ValueError("a catalog input needs --source.segment, or a local --source.rrd to take it from")
+        if self.rrd is None and self.layers:
+            raise ValueError(f"layers {sorted(self.layers)} need the base recording they stack on: set --source.rrd")
+
     def spec(self) -> str:
         """Everything that decides the snapshot's contents, as canonical JSON (`output_root` only says where it goes).
 
@@ -148,6 +169,10 @@ class CatalogInputConfig:
         fields: dict[str, object] = {f.name: getattr(self, f.name) for f in dataclasses.fields(self) if f.name != "output_root"}
         if self.mask_entity is None:
             del fields["mask_entity"]  # An unset mask is not part of the spec, so unmasked snapshot names stay stable.
+        if self.rrd is None:
+            del fields["rrd"], fields["layers"]  # Likewise for catalog inputs.
+        else:
+            del fields["catalog_url"]  # The private server's port changes per run; the files name the source.
         return json.dumps(fields, sort_keys=True, default=str)
 
     @property
@@ -161,6 +186,29 @@ class CatalogInputConfig:
         cap: str = "" if self.max_samples is None else f"_n{self.max_samples}"
         digest: str = hashlib.sha256(self.spec().encode()).hexdigest()[:10]
         return self.output_root / f"{self.segment}_s{self.frame_stride}{cap}_{digest}"
+
+
+@contextmanager
+def serve_catalog_input(config: CatalogInputConfig) -> Iterator[CatalogInputConfig]:
+    """The input as a catalog segment for as long as the context is open: as given, or served from its local files.
+
+    Args:
+        config: The input; with `rrd` set, its base and `layers` are served on a private catalog (OS port).
+
+    Yields:
+        `config` itself, or for a local input a copy whose `catalog_url` and `segment` are the private catalog's.
+
+    Raises:
+        ValueError: When a given `segment` is not the base recording's.
+    """
+    if config.rrd is None:
+        yield config
+        return
+    with serve_local_segment(config.rrd, config.layers, dataset=config.dataset) as local:
+        if config.segment and config.segment != local.segment:
+            raise ValueError(f"--source.segment {config.segment} is not {config.rrd}'s segment {local.segment}")
+        print(f"[colsfm.catalog] serving {config.rrd} with layers {sorted(config.layers)} at {local.url}, segment {local.segment}")
+        yield dataclasses.replace(config, catalog_url=local.url, segment=local.segment)
 
 
 CATALOG_INPUT_FILE: Final[str] = "catalog_input.json"

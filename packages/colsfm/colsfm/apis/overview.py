@@ -8,6 +8,7 @@ are merged with `rerun rrd merge`, so the result carries exactly one blueprint.
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from rerun.catalog import CatalogClient, DatasetEntry
 from rerun.chunk import RrdReader
 
 from colsfm.benchmark import read_run
-from colsfm.catalog import CatalogInputConfig, read_catalog_cameras, read_catalog_trajectory
+from colsfm.catalog import CatalogInputConfig, read_catalog_cameras, read_catalog_trajectory, serve_catalog_input
 from colsfm.overview import OverviewNumbers, log_overview, notes_markdown, overview_eye, overview_tab
 from colsfm.walkthrough import APPLICATION_ID
 from colsfm.walkthrough_blueprint import stage_tab
@@ -64,7 +65,7 @@ def sample_panes(walkthrough_rrd: Path) -> list[SamplePane]:
 
 
 def main(config: Config) -> OverviewNumbers:
-    """Write the combined recording and print the numbers table.
+    """Write the combined recording and print the numbers table (a local input is served while it reads).
 
     Args:
         config: The run and the destination.
@@ -72,6 +73,11 @@ def main(config: Config) -> OverviewNumbers:
     Returns:
         The overview's numbers.
     """
+    with serve_catalog_input(config.source) as source:
+        return _overview(dataclasses.replace(config, source=source))
+
+
+def _overview(config: Config) -> OverviewNumbers:
     dataset: DatasetEntry = CatalogClient(config.source.catalog_url).get_dataset(name=config.source.dataset)
     if config.source.ground_truth_entity is None:
         raise ValueError("--source.ground-truth-entity is required: the overview scores against ground truth")
