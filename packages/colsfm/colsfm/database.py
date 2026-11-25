@@ -301,11 +301,25 @@ def read_descriptors_from_database(
     return {image_id: found[image_id] for image_id in wanted if image_id in found}
 
 
+def _read_only_connection(database_path: Path) -> contextlib.closing[sqlite3.Connection]:
+    """A plain SQLite connection to the database in `mode=ro`, closed on exit.
+
+    `pycolmap.Database.open` sets pragmas and migrates the schema, which several handles at once must not do; `mode=ro`
+    writes nothing, and a missing path is an error rather than a new file.
+
+    Args:
+        database_path: An existing database.
+
+    Returns:
+        The connection, as a context manager that closes it.
+    """
+    return contextlib.closing(sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True))
+
+
 def _read_descriptor_share(database_path: Path, image_ids: Sequence[int]) -> dict[int, Descriptors]:
     """Read some images' descriptors on one read-only connection.
 
-    `mode=ro`, as in `count_two_view_geometries`: `pycolmap.Database.open` sets pragmas and
-    migrates the schema, which several handles at once must not do.
+    Each worker opens its own `_read_only_connection`.
 
     Args:
         database_path: An existing database.
@@ -315,7 +329,7 @@ def _read_descriptor_share(database_path: Path, image_ids: Sequence[int]) -> dic
         Descriptors per image id; an image with no descriptor row is left out.
     """
     descriptors_by_image: dict[int, Descriptors] = {}
-    with contextlib.closing(sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+    with _read_only_connection(database_path) as connection:
         for image_id in image_ids:
             row: tuple[int, int, int] | None = connection.execute(
                 "SELECT type, rows, cols FROM descriptors WHERE image_id = ?", (image_id,)
@@ -468,7 +482,7 @@ def count_two_view_geometries(database_path: Path, pairs: Sequence[ImagePair]) -
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     pair_ids: list[int] = [pycolmap.image_pair_to_pair_id(image_id1, image_id2) for image_id1, image_id2 in pairs]
-    with contextlib.closing(sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+    with _read_only_connection(database_path) as connection:
         stored: set[int] = {int(row[0]) for row in connection.execute("SELECT pair_id FROM two_view_geometries")}
     return sum(1 for pair_id in pair_ids if pair_id in stored)
 
