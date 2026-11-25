@@ -29,14 +29,15 @@ import rerun.chunk as rrc
 import torch
 from jaxtyping import Bool, Int64, UInt8
 from numpy import ndarray
-from simplecv.catalog_video_codec import SOFTWARE_DECODERS, CatalogCodecName, catalog_codec_name, wrap_mp4
+from simplecv.catalog_video import CatalogVideo
+from simplecv.catalog_video_codec import SOFTWARE_DECODERS, CatalogCodecName, wrap_mp4
 from simplecv.catalog_video_decode import DecodeRun, decode_runs
 from simplecv.video_io import bind_cuda_device
 from torch import Tensor
 
 from dataforge import schema
 from dataforge.datasets.insta360_blueprint import RIG
-from dataforge.logging_toolkit import VideoStreamSamples, read_video_stream
+from dataforge.logging_toolkit import read_video_stream
 
 if TYPE_CHECKING:
     import torchcodec.decoders  # imported where a decoder is built: its import is slow
@@ -70,13 +71,14 @@ class LensSamples(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class BaseLensVideos:
-    """The two lens videos of a base recording as encoded samples (``LensSamples``), held in memory, and their stamps."""
+    """The two lens videos of a base recording as encoded samples (``LensSamples``), held in memory as simplecv's
+    zero-copy packet views, and their stamps."""
 
     codec: CatalogCodecName
     """The lens videos' codec."""
     times_ns: Int64[ndarray, " n"]
     """``video_time`` of each frameset, nanoseconds."""
-    videos: tuple[VideoStreamSamples, VideoStreamSamples]
+    videos: tuple[CatalogVideo, CatalogVideo]
     """``cam_00``'s and ``cam_01``'s samples."""
 
     @property
@@ -86,31 +88,32 @@ class BaseLensVideos:
 
     def gops(self, lens: int) -> Int64[ndarray, "g 2"]:
         """``[start, stop)`` of each GOP of one lens, from its keyframe flags."""
-        starts: Int64[ndarray, " g"] = np.flatnonzero(self.videos[lens].keyframes).astype(np.int64)
+        starts: Int64[ndarray, " g"] = np.flatnonzero(np.asarray(self.videos[lens].keyframes, dtype=np.bool_)).astype(np.int64)
         return np.stack([starts, np.r_[starts[1:], self.num_frames]], axis=1)
 
     def read_packed(self, lens: int, start: int, stop: int) -> tuple[UInt8[ndarray, " n"], Int64[ndarray, " m"], Bool[ndarray, " k"]]:
         """Samples ``start .. stop - 1`` of one lens end to end, their bounds and keyframe flags."""
-        chosen: list[bytes] = self.videos[lens].samples[start:stop]
-        bounds: Int64[ndarray, " m"] = np.r_[0, np.cumsum([len(sample) for sample in chosen])].astype(np.int64)
-        return np.frombuffer(b"".join(chosen), dtype=np.uint8), bounds, self.videos[lens].keyframes[start:stop].copy()
+        chosen: list[UInt8[ndarray, " b"]] = self.videos[lens].samples[start:stop]
+        bounds: Int64[ndarray, " m"] = np.r_[0, np.cumsum([sample.size for sample in chosen])].astype(np.int64)
+        data: UInt8[ndarray, " n"] = np.concatenate(chosen) if chosen else np.empty(0, dtype=np.uint8)
+        return data, bounds, np.asarray(self.videos[lens].keyframes[start:stop], dtype=np.bool_)
 
 
 def read_base_lens_videos(base: Path) -> BaseLensVideos:
-    """Both lens videos of a base recording (``cam_00``, ``cam_01``).
+    """Both lens videos of a base recording (``cam_00``, ``cam_01``), as ``CatalogVideo`` packet views (``read_video_stream``).
 
     Raises:
         ValueError: If a lens video does not start on a keyframe, or the two differ in stamps or codec.
     """
     store: rrc.LazyStore = rrc.RrdReader(base).store()
-    videos: tuple[VideoStreamSamples, VideoStreamSamples] = (read_video_stream(store, schema.video_path(RIG, 0)), read_video_stream(store, schema.video_path(RIG, 1)))
+    videos: tuple[CatalogVideo, CatalogVideo] = (read_video_stream(store, schema.video_path(RIG, 0)), read_video_stream(store, schema.video_path(RIG, 1)))
     if any(not video.keyframes[0] for video in videos):
         raise ValueError(f"{base}: a lens video does not start on a keyframe")
     if videos[0].codec != videos[1].codec:
         raise ValueError(f"{base}: the lens videos have different codecs")
-    if not np.array_equal(videos[0].times_ns, videos[1].times_ns):
+    if not np.array_equal(videos[0].t_ns, videos[1].t_ns):
         raise ValueError(f"{base}: the two lens videos are not on the same stamps")
-    return BaseLensVideos(codec=catalog_codec_name(videos[0].codec), times_ns=videos[0].times_ns, videos=videos)
+    return BaseLensVideos(codec=videos[0].codec, times_ns=videos[0].t_ns, videos=videos)
 
 
 def _pictures(rig: LensSamples, lens: int, frames: int, *, threads: int) -> Iterator[av.VideoFrame]:

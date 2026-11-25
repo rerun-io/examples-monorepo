@@ -71,11 +71,15 @@ def write_lens_videos(path: Path, stamps: list[list[int]], keyframes: list[list[
 
 
 def test_the_base_serves_each_lens_s_samples_gops_and_stamps(tmp_path: Path) -> None:
+    from simplecv.catalog_video import CatalogVideo
+
     from dataforge.datasets.insta360_lens_video import read_base_lens_videos
 
     flags: list[bool] = [True, False, False, True, False]
     base = write_lens_videos(tmp_path / "base.rrd", [[0, 33, 66, 100, 133]] * 2, [flags, flags])
     source = read_base_lens_videos(base)
+    assert all(isinstance(video, CatalogVideo) for video in source.videos), "simplecv's zero-copy packets, no dataforge copy"
+    assert [bytes(sample) for sample in source.videos[0].samples] == [bytes([0, k]) for k in range(5)]
     assert (source.codec, source.num_frames) == ("av1", 5)
     np.testing.assert_array_equal(source.times_ns, [0, 33, 66, 100, 133])
     np.testing.assert_array_equal(source.gops(1), [[0, 3], [3, 5]])

@@ -22,9 +22,11 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Bool, Float32, Float64, Int64
+from jaxtyping import Bool, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views
+from simplecv.catalog_video_codec import CatalogCodecName
 from simplecv.data.skeleton.coco133_layers import COCO133_ROI_COLORS, COCO133_ROI_LABELS, Coco133RoiLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 from simplecv.rerun_log_utils import log_pinhole
@@ -106,52 +108,43 @@ def classify_video_chunk(record_batch: pa.RecordBatch) -> VideoChunkKind:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class VideoStreamSamples:
-    """One ``VideoStream`` entity of a recording as encoded samples, in time order."""
+def read_video_stream(store: rrc.LazyStore, entity: str) -> CatalogVideo:
+    """The ``VideoStream`` at ``entity`` as simplecv's ``CatalogVideo``: zero-copy packet views (``packet_views``) with
+    their ``video_time`` stamps (int64 ns) and keyframe flags, in time order, and the codec.
 
-    codec: int
-    """``VideoStream:codec`` (``rr.VideoCodec``'s value)."""
-    times_ns: Int64[ndarray, " n"]
-    """Each sample's ``video_time``, nanoseconds, increasing."""
-    samples: list[bytes]
-    """Each sample's bytes."""
-    keyframes: Bool[ndarray, " n"]
-    """Whether each sample is a keyframe."""
-
-
-def read_video_stream(store: rrc.LazyStore, entity: str) -> VideoStreamSamples:
-    """The ``VideoStream`` at ``entity``: its codec, and its samples with their stamps and keyframe flags, in time order.
-
-    Chunks are told apart by ``classify_video_chunk`` (the ``Mp4Reader`` shapes ``log_video_stream`` writes).
+    Chunks are told apart by ``classify_video_chunk`` (the ``Mp4Reader`` shapes ``log_video_stream`` writes, keyframe
+    flags in their own chunk, so matched by stamp). Read from the chunks rather than a dataframe query, which holds
+    about twice the samples in memory (6.4 GB against 2.7 GB for a two-lens 1920 px base of 17 minutes).
 
     Raises:
         ValueError: If the entity holds no samples or no codec.
     """
-    codec: int | None = None
-    times: list[int] = []
-    samples: list[bytes] = []
-    keyframe_times: set[int] = set()
+    codec: CatalogCodecName | None = None
+    times: list[Int64[ndarray, " c"]] = []
+    samples: list[UInt8[ndarray, " b"]] = []
+    keyframe_times: list[Int64[ndarray, " f"]] = []
     for chunk in store.stream().filter(content=[entity]).to_chunks():
         if chunk.entity_path != entity:
             continue
         batch: pa.RecordBatch = chunk.to_record_batch()
         kind: VideoChunkKind = classify_video_chunk(batch)
         if kind == "codec":
-            codec = int(batch.column(VIDEO_CODEC_COMPONENT).to_pylist()[0][0])
+            codec = catalog_codec(pa.chunked_array([batch.column(VIDEO_CODEC_COMPONENT)]), entity)
             continue
-        stamps: list[int] = batch.column(schema.TIMELINE).cast(pa.int64()).to_pylist()
+        stamps: Int64[ndarray, " c"] = batch.column(schema.TIMELINE).cast(pa.int64()).to_numpy()
         if kind == "sample":
-            times += stamps
-            samples += [bytes(row[0]) for row in batch.column(VIDEO_SAMPLE_COMPONENT).to_pylist()]
+            times.append(stamps)
+            samples += packet_views(pa.chunked_array([batch.column(VIDEO_SAMPLE_COMPONENT)]))
         if VIDEO_KEYFRAME_COMPONENT in batch.schema.names:  # its own chunk (Mp4Reader) or beside the samples
-            keyframe_times.update(t for t, flags in zip(stamps, batch.column(VIDEO_KEYFRAME_COMPONENT).to_pylist(), strict=True) if flags and flags[0])
+            flags: Bool[ndarray, " c"] = np.asarray(catalog_keyframes(pa.chunked_array([batch.column(VIDEO_KEYFRAME_COMPONENT)])), dtype=np.bool_)
+            keyframe_times.append(stamps[flags])
     if not samples or codec is None:
         raise ValueError(f"{entity} holds no VideoStream samples or no codec")
-    order: Int64[ndarray, " n"] = np.argsort(np.asarray(times, dtype=np.int64), kind="stable")
-    times_ns: Int64[ndarray, " n"] = np.asarray(times, dtype=np.int64)[order]
-    keyframes: Bool[ndarray, " n"] = np.asarray([t in keyframe_times for t in times_ns.tolist()], dtype=np.bool_)
-    return VideoStreamSamples(codec=codec, times_ns=times_ns, samples=[samples[k] for k in order.tolist()], keyframes=keyframes)
+    all_times: Int64[ndarray, " n"] = np.concatenate(times)
+    order: Int64[ndarray, " n"] = np.argsort(all_times, kind="stable")
+    times_ns: Int64[ndarray, " n"] = all_times[order]
+    keyframes: Bool[ndarray, " n"] = np.isin(times_ns, np.concatenate(keyframe_times)) if keyframe_times else np.zeros(times_ns.size, dtype=np.bool_)
+    return CatalogVideo(times=times_ns, samples=[samples[k] for k in order.tolist()], keyframes=keyframes.tolist(), codec=codec)
 
 
 def time_column(times_ns: Int64[ndarray, "n_samples"]) -> rr.TimeColumn:
