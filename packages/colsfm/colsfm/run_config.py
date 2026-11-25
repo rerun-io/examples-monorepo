@@ -146,7 +146,7 @@ class PipelineOptions:
     """Ceiling on the extrinsics-then-poses rounds the regularised refinement may take (`DEFAULT_EXTRINSIC_ROUNDS`); it
     also stops early on `ExtrinsicRefinementOptions`' tolerances."""
     refine_camera_model: bool = False
-    """Free every camera's focal length (fx, fy) and the rig (`sensor_from_rig`) in every mapping round. Off by default.
+    """Free every camera's focal length (fx, fy), its distortion block and the rig (`sensor_from_rig`) in every mapping round.
 
     cuSFM holds the calibration fixed, so a nominal model that is off ends up in the poses: Mission office's cube faces
     are 1-1.4 % off f = 800 and 0.12-0.20 deg off the nominal rig. With Spirula's matches, colsfm's mapper ends 0.2645

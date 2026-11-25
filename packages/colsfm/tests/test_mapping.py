@@ -41,9 +41,18 @@ from mapping_helpers import (
 )
 from numpy import ndarray
 
+from colsfm.ba_backend import BaExecutionPlan, CasparCapability, resolve_ba_plan
 from colsfm.config import CusfmConfig, VisionMappingConfig
 from colsfm.frames_meta import FramesMeta, KeyframeMeta
-from colsfm.mapping import MappingResult, RoundStats, load_correspondences, pixel_error_schedule, run_mapping, triangulator_options
+from colsfm.mapping import (
+    MappingResult,
+    RoundStats,
+    bundle_adjustment_options,
+    load_correspondences,
+    pixel_error_schedule,
+    run_mapping,
+    triangulator_options,
+)
 from colsfm.reconstruction import RIG_ID, PosedModel, build_reconstruction, camera_sensor_id, gauge_rig_frame, rig_from_world, rig_sensor_from_rig
 
 
@@ -362,3 +371,32 @@ def test_the_mapper_can_refine_focal_lengths_in_every_round(
         assert float(camera.params[1]) < 1.02 * truth
     assert all(float(camera.params[0]) == pytest.approx(1.02 * truth) for camera in held.reconstruction.cameras.values())
     assert refined.mean_reprojection_error_px < held.mean_reprojection_error_px
+
+
+RIG_CAPABLE_CASPAR: CasparCapability = CasparCapability(
+    availability="available",
+    supported_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}),
+    probe_errors=(),
+    refines_sensor_from_rig=True,
+    intrinsics_refinable_camera_models=frozenset({"PINHOLE", "SIMPLE_RADIAL"}),
+)
+"""A stated CASPAR build with the rig factor that frees PINHOLE and SIMPLE_RADIAL intrinsics; no probe runs."""
+
+
+def test_both_backends_free_the_same_intrinsics_when_the_camera_model_is_refined(isaac_config: CusfmConfig) -> None:
+    """`refine_focal_length` frees the focal and the distortion block on Ceres as on CASPAR, and never the principal point.
+
+    CASPAR accepts the focal only together with the distortion block; Ceres used to free the focal alone, so a
+    SIMPLE_RADIAL or OPENCV_FISHEYE run refined a different camera model depending on the backend.
+    """
+    caspar: BaExecutionPlan = resolve_ba_plan("caspar", (), ceres_polish=False, optimize_extrinsics=True, capability=RIG_CAPABLE_CASPAR)
+    ceres: BaExecutionPlan = resolve_ba_plan("ceres", (), ceres_polish=False, optimize_extrinsics=True)
+    assert (caspar.backend, ceres.backend) == ("caspar", "ceres")
+    freed: list[tuple[bool, bool, bool, bool]] = []
+    for plan in (caspar, ceres):
+        options: pycolmap.BundleAdjustmentOptions = bundle_adjustment_options(
+            isaac_config.vision_mapping.bundle_adjustment, quiet_options(ba_plan=plan, optimize_extrinsics=True, refine_focal_length=True)
+        )
+        freed.append((options.refine_focal_length, options.refine_extra_params, options.refine_principal_point, options.refine_sensor_from_rig))
+    assert freed == [(True, True, False, True), (True, True, False, True)]
+

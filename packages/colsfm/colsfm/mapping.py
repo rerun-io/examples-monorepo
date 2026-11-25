@@ -62,8 +62,8 @@ with `optimize_extrinsics` False.
 | `merge_max_reproj_error`, `complete_max_reproj_error` | 4.0 | the round's gate `g_k` | cuSFM merges and completes under the same decaying gate (§5.4, §5.6) |
 | `ignore_two_view_tracks` | True | `min_correspondences > 2` | `min_correspondences: 3` drops two-view tracks |
 | `random_seed` | -1 | `random_seed` (1) | determinism |
-| `refine_focal_length` | True | False | `--optimize_intrinsics=false` |
-| `refine_extra_params` | True | False | same |
+| `refine_focal_length` | True | `MappingOptions.refine_focal_length` (False) | `--optimize_intrinsics=false`; `--refine-camera-model` frees it |
+| `refine_extra_params` | True | `refine_focal_length` (False) | same; CASPAR takes the focal only with the distortion block, so both backends free them together |
 | `refine_principal_point` | False | False | same; already off |
 | `refine_sensor_from_rig` | True | `MappingOptions.optimize_extrinsics` (False) | `--optimize_extrinsics=false`; needs a camera-referenced rig, see below |
 | `ceres.loss_function_type` | TRIVIAL | `loss_type` (CAUCHY) | config §3.2 |
@@ -148,10 +148,11 @@ of CASPAR — stock ships PINHOLE and SIMPLE_RADIAL, the `colsfm` environment (r
 OPENCV_FISHEYE (`docs/caspar-fisheye-adapter.md`) — and no pycolmap call lists
 them, so `caspar_supported_camera_models` measures them with one tiny solve per
 model. `refine_sensor_from_rig = True` is a hard throw on a
-multi-sensor frame, so `optimize_extrinsics` falls back too (the regularised
-`colsfm.extrinsic_refinement` path keeps CASPAR: it holds the extrinsics fixed
+multi-sensor frame of a stock build, so `optimize_extrinsics` falls back too unless the
+build's probe refined a rig (`CasparCapability.refines_sensor_from_rig`; the regularised
+`colsfm.extrinsic_refinement` path keeps CASPAR either way: it holds the extrinsics fixed
 inside the pycolmap solve by construction); and `refine_focal_length` must equal
-`refine_extra_params`, which it does — both are False.
+`refine_extra_params`, which it does on both backends.
 """
 
 from __future__ import annotations
@@ -256,13 +257,12 @@ class MappingOptions:
     False. Only `--no-regularised-extrinsics` turns it on, and that is the one thing
     that takes `ba_backend="caspar"` off the GPU."""
     refine_focal_length: bool = False
-    """Free every camera's focal length (fx, fy) in every round's bundle adjustment; cuSFM holds intrinsics fixed.
+    """Free every camera's focal length (fx, fy) and distortion block in every round's bundle adjustment; cuSFM holds
+    intrinsics fixed. The principal point stays fixed.
 
     A nominal calibration that is off pushes its error into the poses (Mission office cube faces: 1-1.4 % off
     f = 800, poses 0.25 deg from Spirula's); refined from the first round, the loose early gates keep the
     observations the nominal model would have filtered."""
-    refine_principal_point: bool = False
-    """Free every camera's principal point as well; only read with `refine_focal_length`."""
     fixed_camera_params_id: int | None = None
     """Camera whose extrinsic stays fixed while the others are refined; cuSFM's `--fixed_camera_name`."""
     num_threads: int | None = None
@@ -368,8 +368,9 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     """
     ba_options: pycolmap.BundleAdjustmentOptions = pycolmap.BundleAdjustmentOptions()
     ba_options.refine_focal_length = options.refine_focal_length
-    ba_options.refine_principal_point = options.refine_focal_length and options.refine_principal_point
-    ba_options.refine_extra_params = False
+    ba_options.refine_principal_point = False
+    # CASPAR takes the focal only together with the distortion block; Ceres follows, so both backends refine one model.
+    ba_options.refine_extra_params = options.refine_focal_length
     ba_options.refine_rig_from_world = True
     ba_options.refine_sensor_from_rig = options.optimize_extrinsics
     ba_options.refine_points3D = True
@@ -395,10 +396,9 @@ def bundle_adjustment_options(ba_config: BundleAdjustmentConfig, options: Mappin
     plan: BaExecutionPlan = options.ba_plan
     ba_options.backend = BUNDLE_ADJUSTMENT_BACKEND[plan.backend]
     if plan.backend == "caspar":
-        # CASPAR refines focal length and the distortion block together. The plan keeps a solve that frees
-        # `sensor_from_rig` on CASPAR only when the build's probe refined a rig (`CasparCapability.refines_sensor_from_rig`).
+        # The plan keeps a solve that frees `sensor_from_rig` on CASPAR only when the build's probe refined a rig
+        # (`CasparCapability.refines_sensor_from_rig`).
         ba_options.refine_sensor_from_rig = options.optimize_extrinsics and plan.capability.refines_sensor_from_rig
-        ba_options.refine_extra_params = ba_options.refine_focal_length
         # `-1` is COLMAP's own pick, which is what `use_gpu` off means everywhere else
         # in this dataclass. Both were measured to solve on the 5090.
         ba_options.caspar.gpu_index = "0" if options.use_gpu else "-1"
