@@ -52,6 +52,17 @@ git diff --name-only 137f2168 HEAD | xargs sha256sum > SHA256SUMS   # with all f
 
 Drop an adapter when upstream CASPAR supports its model.
 
+## OPENCV_FISHEYE ray angle (2026-11-25)
+
+`opencv_fisheye_core` takes the off-axis angle from the ray, `theta = atan2(|(X, Y)|, Z)`, instead of
+`atan(|(X, Y)| / Z)`. Equal for Z > 0 (7e-4 px max on a TartanAir 195 deg model); the X/Z form mirrors a point at
+Z = 0, so a step that carried a rim observation (89-90 deg) across the image plane raised the cost x20-x77, every LM
+trial was rejected and CASPAR returned its start values as CONVERGENCE (`CONVERGED_DIAG_EXIT`). Rays past 90 deg now
+project to their Kannala-Brandt pixel; COLMAP's own `ImgFromCam` still refuses them, and colsfm's post-solve guards
+remove those observations. Both adapter patches were re-cut as above (45 regenerated `opencv_fisheye*` kernels, the
+aggregates unchanged); colsfm `tests/test_caspar_fisheye.py` checks it. Root cause:
+`loop-and-quality/a7/caspar-fisheye-rootcause.md` (NAS scratch).
+
 ## caspar-pcg-beta-recurrence.patch and caspar-reduced-camera-system.patch
 
 Hand-written patches, cut like the others. One part depends on the generated layout: the span helpers in `solver.cc`
