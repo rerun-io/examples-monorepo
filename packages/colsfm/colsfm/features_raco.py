@@ -6,7 +6,7 @@ The `raco` half of `colsfm.features`, and the third backend after `pycolmap`
 **What the model is.** RaCo-ALIKED is fabio-sim's rotation-and-scale-consistent
 retraining of ALIKED, published with LightGlue-ONNX and the subject of the
 "Discovering TensorRT Optimizations for RaCo-ALIKED-LightGlue+" write-up. The
-graph this module runs is `packages/colsfm/data/models/raco-aliked-b1-16.onnx`, exported
+graph this module runs is `MODEL_DIR/raco-aliked-b1-16.onnx`, exported
 from that package by `tools/export_cusfm_raco.py --batched-extractor-path` in
 the repo's `raco` Pixi environment (`lightglue-onnx` at `d12b4ba`). Nothing here
 imports `onnx` or `torch`: the `colsfm` environment only parses the graph with
@@ -37,7 +37,7 @@ and the old engine, so the two are measurable against each other.
 
 **Native resolution does not mean the shape-dynamic engine.** Two engines can
 serve a size, and the shape-dynamic one
-(`packages/colsfm/data/models/raco-aliked-dyn.onnx`, spatial axes symbolic) is only faster
+(`MODEL_DIR/raco-aliked-dyn.onnx`, spatial axes symbolic) is only faster
 below the top of its profile. Galileo *is* the top — 1920x1200, the profile
 maximum — and there the dynamic engine costs 4.96 s against the fixed engine's
 2.70 s over 226 images: one profile's tactics have to cover 256x256 to 1216x1920,

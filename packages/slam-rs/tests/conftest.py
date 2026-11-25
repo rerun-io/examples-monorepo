@@ -19,6 +19,8 @@ Tests request benchmark definitions only when they evaluate regression cases.
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import os
 import socket
 from collections.abc import Iterator
@@ -44,6 +46,19 @@ if TYPE_CHECKING:
 
 # beartype runs under pytest only; code that cannot run under it reads this (test_frameset_matching.py checks it).
 os.environ.setdefault("PIXI_DEV_MODE", "1")
+
+
+def pytest_configure() -> None:
+    """Stop the session with the fix when the Rust core is not built.
+
+    ``_core.so`` is a gitignored output of the ``slam-rs-build`` task (pixi install does not run cargo), so a fresh
+    worktree has none and every test would fail at import. The check looks for the file next to the package without
+    importing slam_rs, so pytest-beartype still instruments every slam_rs module.
+    """
+    spec = importlib.util.find_spec("slam_rs")
+    locations: list[str] = list(spec.submodule_search_locations or []) if spec is not None else []
+    if not any((Path(location) / f"_core{suffix}").is_file() for location in locations for suffix in importlib.machinery.EXTENSION_SUFFIXES):
+        pytest.exit("slam_rs._core is not built: run `pixi run -e slam-rs-dev slam-rs-build` (pixi install does not build it)", returncode=4)
 
 
 @pytest.fixture(autouse=True)

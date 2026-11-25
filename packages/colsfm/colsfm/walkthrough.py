@@ -190,7 +190,7 @@ class WalkthroughConfig:
     """Which ALIKED the drawn run uses. `pycolmap` here, not the pipeline's `raco` default.
 
     The walkthrough is the teaching artifact: it has to draw on a bare checkout, where
-    `packages/colsfm/data/models/` is empty (`colsfm.model_assets`), and every panel it draws is
+    `colsfm.MODEL_DIR` holds no graph (`colsfm.model_assets`), and every panel it draws is
     the same whichever extractor filled the database. Pass `raco` to draw the default
     pipeline instead."""
     matching_backend: MatchingBackend = "pycolmap"

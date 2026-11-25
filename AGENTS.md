@@ -117,7 +117,8 @@ Two rules learned the hard way:
   source package's directory and rebuilds the package when any of them changes, so a conda source
   dependency on slam-rs would recompile the Rust core on every Python edit or test run. The `*-dev`
   and prod environments stay on the editable PyPI path dependency plus the `slam-rs-build` task; only
-  `slam-rs-pkg` and external consumers use the conda outputs.
+  `slam-rs-pkg` and external consumers use the conda outputs. In a fresh worktree, run
+  `pixi run -e slam-rs-dev slam-rs-build` once before a bare `pytest` (the `tests` tasks build it first).
 - **No `staging:` output for a path source.** rattler-build keys its multi-output staging cache on the
   rendered source spec, not on the file contents, so after an edit pixi re-runs the recipe and the
   cache hands back the old files. Give every output its own `script:` (the slam-rs catalog output is a
