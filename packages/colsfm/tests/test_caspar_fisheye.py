@@ -48,8 +48,9 @@ def _rim_rig(seed: int = 0) -> tuple[pycolmap.Reconstruction, dict[int, Float64[
         frame: pycolmap.Frame = pycolmap.Frame()
         frame.frame_id = index + 1
         frame.rig_id = RIG_ID
-        frame.rig_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(np.array([0.0, 0.01 * index, 0.0])), np.array([0.0, 0.0, -0.3 * index]))
-        truth[frame.frame_id] = np.asarray(frame.rig_from_world.inverse().translation)
+        rig_from_world: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(np.array([0.0, 0.01 * index, 0.0])), np.array([0.0, 0.0, -0.3 * index]))
+        frame.rig_from_world = rig_from_world
+        truth[frame.frame_id] = np.asarray(rig_from_world.inverse().translation)
         for camera_id in (1, 2):
             frame.add_data_id(pycolmap.data_t(camera_sensor_id(camera_id), 2 * index + camera_id))
         reconstruction.add_frame(frame)
