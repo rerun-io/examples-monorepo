@@ -227,7 +227,7 @@ class PipelineOptions:
 
     `raco` by default (NOTES.md decision 17): 2.6 s of Galileo's 20.0 s total against
     6.0 s for the blob's engine and 8.3 s for COLMAP's, at the same accuracy. It needs
-    the graphs under `packages/colsfm/data/models/`, which are gitignored; a checkout without them
+    the graphs under `colsfm.MODEL_DIR`, which are not committed; a checkout without them
     is told to export them or to ask for `--features-backend pycolmap`
     (`colsfm.model_assets`), never quietly given another extractor.
     See `colsfm.features.FeatureBackend`."""
