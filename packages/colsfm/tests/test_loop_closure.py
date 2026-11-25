@@ -24,6 +24,9 @@ import numpy as np
 import pycolmap
 import pytest
 from google.protobuf.message import Message
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from hypothesis.extra.numpy import arrays as hypothesis_arrays
 from jaxtyping import Float32, Float64, Int
 from loop_helpers import ProjectedPoints, matcher_from_point_indices, project_and_mask
 from numpy import ndarray
@@ -43,12 +46,14 @@ from colsfm.loop_closure import (
     LoopSearchPlan,
     MatchFunction,
     RetrievalHit,
+    agrees_with_prior,
     best_per_query_rig,
     find_loop_edges,
     is_good_match,
     minimum_time_gap_seconds,
     pairs_outside_accepted_edges,
     plan_loop_search,
+    prior_distance_bound,
     session_duration_seconds,
     verify_loop_plan,
 )
@@ -474,6 +479,136 @@ def test_planning_then_verifying_gives_the_same_edges_as_one_call(
     stepwise: LoopClosureResult = verify_loop_plan(plan, match_fn)
     assert [(edge.source, edge.target) for edge in stepwise.edges] == [(edge.source, edge.target) for edge in loop_result.edges]
     assert stepwise.diagnostics == loop_result.diagnostics
+
+
+# --------------------------------------------------------------------------------------
+# c. the prior bound: a rig pair no accepted edge can come from is never matched
+# --------------------------------------------------------------------------------------
+
+UNBOUNDED_SCENE_RIG_PAIRS: Final[int] = 46
+"""Rig pairs the square scene shortlists under `LoopClosureConfig()`, captured before the prior bound existed."""
+
+UNBOUNDED_SCENE_IMAGE_PAIRS: Final[int] = 248
+"""Image pairs that shortlist needs, captured at the same commit."""
+
+
+def _prior_distance_m(plan: LoopSearchPlan, rig_pair: tuple[int, int]) -> float:
+    """The distance between two rig frames in the prior the plan was made from.
+
+    Args:
+        plan: A plan.
+        rig_pair: `(source rig id, target rig id)`.
+
+    Returns:
+        `||t||` of the prior `source_T_target`, metres.
+    """
+    source_xyz: Float64[ndarray, "3"] = np.asarray(plan.rig_index.world_T_rig[rig_pair[0]].translation, dtype=np.float64)
+    target_xyz: Float64[ndarray, "3"] = np.asarray(plan.rig_index.world_T_rig[rig_pair[1]].translation, dtype=np.float64)
+    return float(np.linalg.norm(source_xyz - target_xyz))
+
+
+def _observation_pairs(plan: LoopSearchPlan, rig_pair: tuple[int, int]) -> set[tuple[int, int]]:
+    """The source-to-target image pairs one rig pair's measurement asks for (same camera of the target rig).
+
+    Args:
+        plan: A plan.
+        rig_pair: `(source rig id, target rig id)`.
+
+    Returns:
+        The image pairs, low id first.
+    """
+    pairs: set[tuple[int, int]] = set()
+    for camera_id in plan.geometry.camera_ids:
+        anchor: int | None = plan.rig_index.keyframe(rig_pair[0], camera_id)
+        observed: int | None = plan.rig_index.keyframe(rig_pair[1], camera_id)
+        if anchor is not None and observed is not None:
+            pairs.add((min(anchor, observed), max(anchor, observed)))
+    return pairs
+
+
+def test_the_prior_bound_is_the_sum_of_the_edge_and_prior_gates() -> None:
+    """3 m edge gate + 1.5 m prior gate = 4.5 m; no bound without a prior translation gate or with closed edge gates."""
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_translation_m=1.5)) == 4.5
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0)) is None
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=3.0, max_prior_rotation_deg=10.0)) is None
+    assert prior_distance_bound(LoopClosureConfig(max_translation_m=0.0, max_prior_translation_m=1.5)) is None
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    measured_xyz=hypothesis_arrays(np.float64, 3, elements=st.floats(-4.0, 4.0)),
+    measured_rotvec=hypothesis_arrays(np.float64, 3, elements=st.floats(-3.0, 3.0)),
+    error_xyz=hypothesis_arrays(np.float64, 3, elements=st.floats(-2.0, 2.0)),
+    error_rotvec=hypothesis_arrays(np.float64, 3, elements=st.floats(-0.3, 0.3)),
+)
+def test_no_rig_pair_beyond_the_bound_can_pass_both_gates(
+    measured_xyz: Float64[ndarray, "3"],
+    measured_rotvec: Float64[ndarray, "3"],
+    error_xyz: Float64[ndarray, "3"],
+    error_rotvec: Float64[ndarray, "3"],
+) -> None:
+    """Triangle inequality: `|t_meas| <= T` and `|t(prior^-1 meas)| <= P` imply `|t_prior| <= T + P`.
+
+    The prior is built as `measured * error^-1`, so `agrees_with_prior` sees exactly `error`; every case that passes
+    both the prior gate and the edge gate must have a prior distance inside the bound.
+    """
+    config: LoopClosureConfig = LoopClosureConfig(max_translation_m=3.0, max_rotation_deg=180.0, max_prior_translation_m=1.5)
+    measured: pycolmap.Rigid3d = rigid3d_from_matrix(Rotation.from_rotvec(measured_rotvec).as_matrix(), measured_xyz)
+    error: pycolmap.Rigid3d = rigid3d_from_matrix(Rotation.from_rotvec(error_rotvec).as_matrix(), error_xyz)
+    prior: pycolmap.Rigid3d = measured * error.inverse()
+    template: LoopCandidate = _candidate(1, 2, 200)
+    candidate: LoopCandidate = replace(template, estimate=replace(template.estimate, source_T_target=measured))
+    edge: PoseGraphEdge = PoseGraphEdge(source=1, target=2, source_T_target=measured, information=np.eye(6), kind="loop")
+    passes_both: bool = agrees_with_prior(candidate, {1: pycolmap.Rigid3d(), 2: prior}, config) and bool(
+        gate_loop_edges([edge], config.max_translation_m, config.max_rotation_deg)
+    )
+    bound: float | None = prior_distance_bound(config)
+    assert bound is not None
+    if passes_both:
+        assert float(np.linalg.norm(prior.translation)) <= bound + 1e-9
+
+
+def test_a_rig_pair_the_prior_puts_beyond_the_bound_is_never_matched(scene: SquareRigScene) -> None:
+    """With T = P = 0.5 m the bound is 1 m: the scene's shortlisted pairs 1.2-3.6 m apart in the prior leave the plan.
+
+    Their observation pairs are not matched, and `rejected_by_prior_bound` counts them.
+    """
+    unbounded: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    bounded: LoopSearchPlan = plan_loop_search(
+        scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(max_translation_m=0.5, max_prior_translation_m=0.5)
+    )
+    far: list[tuple[int, int]] = [pair for pair in unbounded.rig_pairs if _prior_distance_m(unbounded, pair) > 1.0]
+    assert len(far) >= 10, "the scene must shortlist pairs beyond 1 m for the test to mean anything"
+    assert not set(far) & set(bounded.rig_pairs)
+    assert all(_prior_distance_m(bounded, pair) <= 1.0 for pair in bounded.rig_pairs)
+    assert bounded.counters.rejected_by_prior_bound == len(far)
+    for pair in far:
+        assert not _observation_pairs(bounded, pair) & set(bounded.image_pairs), f"{pair} is beyond the bound but its pairs are planned"
+    assert {(3, 43), (4, 44)} <= {(min(pair), max(pair)) for pair in bounded.rig_pairs}, "the true revisits 0.3 m apart stay"
+
+
+def test_without_a_prior_gate_the_plan_is_unchanged(scene: SquareRigScene) -> None:
+    """No prior translation gate, or closed edge gates (KITTI's T = 0): the plan is the one before the bound existed."""
+    for config in (
+        LoopClosureConfig(),
+        LoopClosureConfig(max_prior_rotation_deg=10.0),
+        LoopClosureConfig(max_translation_m=0.0, max_prior_translation_m=1.5),
+    ):
+        plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, config)
+        assert len(plan.rig_pairs) == UNBOUNDED_SCENE_RIG_PAIRS
+        assert len(plan.image_pairs) == UNBOUNDED_SCENE_IMAGE_PAIRS
+        assert plan.counters.rejected_by_prior_bound == 0
+
+
+def test_the_bound_drops_after_the_cap(scene: SquareRigScene) -> None:
+    """Pure subtraction: no rig pair takes a slot the bound freed, and the measurement order stays."""
+    unbounded: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig())
+    bounded: LoopSearchPlan = plan_loop_search(
+        scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(max_translation_m=0.5, max_prior_translation_m=0.5)
+    )
+    assert list(bounded.rig_pairs) == [pair for pair in unbounded.rig_pairs if _prior_distance_m(unbounded, pair) <= 1.0]
+    kept: set[tuple[int, int]] = {(min(pair), max(pair)) for pair in bounded.rig_pairs}
+    assert set(bounded.queried_by) == kept
 
 
 # --------------------------------------------------------------------------------------

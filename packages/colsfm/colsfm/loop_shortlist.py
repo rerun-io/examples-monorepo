@@ -50,6 +50,8 @@ class FunnelCounters:
     """Hits left after each query rig frame kept its `loop_candidates_per_frame` best target rig frames."""
     after_deduplication: int = 0
     """Rig pairs left after one hit per unordered rig pair."""
+    rejected_by_prior_bound: int = 0
+    """Deduplicated rig pairs the prior puts beyond `colsfm.loop_closure.prior_distance_bound`; never matched."""
     rejected_no_matches: int = 0
     """Rig pairs with too few 2-D-3-D observations."""
     rejected_by_geometry: int = 0

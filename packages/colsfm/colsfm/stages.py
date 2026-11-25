@@ -459,6 +459,7 @@ def run_loop_closure_stage(
         f"[colsfm] loop closure: {len(edges)} loop edges | {result.diagnostics.counters.queries} queries, "
         f"{result.diagnostics.counters.candidates_retrieved} retrieved, {result.diagnostics.counters.rejected_by_score} below score, "
         f"{result.diagnostics.counters.rejected_by_time} inside the {result.diagnostics.min_time_gap_seconds:.2f}s gap, "
+        f"{result.diagnostics.counters.rejected_by_prior_bound} rig pairs beyond the prior bound, "
         f"{result.diagnostics.counters.rejected_by_geometry} failed geometry, {result.diagnostics.counters.rejected_by_is_good} not good, "
         f"{result.diagnostics.counters.verified} verified, {result.diagnostics.counters.not_best} not the best of their rig frame, "
         f"{result.diagnostics.counters.below_good_loop} best below {plan.config.good_loop_threshold} inliers, over {len(plan.image_pairs)} image pairs; "
