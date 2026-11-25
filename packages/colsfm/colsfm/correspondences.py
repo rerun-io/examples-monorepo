@@ -91,8 +91,10 @@ def load_correspondences(
     cache_options.image_names = {image.name for image in reconstruction.images.values()}
     with pycolmap.Database.open(database_path) as database:
         database_cache: pycolmap.DatabaseCache = pycolmap.DatabaseCache.create(database, cache_options)
-        # The rows `DatabaseCache` itself read (`ReadTwoViewGeometries`, in row order), for the rebuild below.
-        geometry_rows: tuple[list[int], list[pycolmap.TwoViewGeometry]] = database.read_two_view_geometries()
+        # The rows `DatabaseCache` itself read (`ReadTwoViewGeometries`, in row order), for the rebuild below; with
+        # nothing overridden the cache's own graph is used, so neither the read nor the rebuild runs.
+        rebuild: bool = bool(inlier_overrides)
+        geometry_rows: tuple[list[int], list[pycolmap.TwoViewGeometry]] = database.read_two_view_geometries() if rebuild else ([], [])
 
     image_id_by_name: dict[str, int] = {image.name: image_id for image_id, image in reconstruction.images.items()}
     mismatched: list[str] = []
@@ -116,8 +118,10 @@ def load_correspondences(
     if num_loaded == 0:
         raise ValueError(f"{database_path} holds none of the reconstruction's {reconstruction.num_images()} images")
 
-    graph: pycolmap.CorrespondenceGraph = graph_with_inlier_overrides(
-        database_cache, geometry_rows, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches
+    graph: pycolmap.CorrespondenceGraph = (
+        graph_with_inlier_overrides(database_cache, geometry_rows, inlier_overrides=inlier_overrides, min_num_matches=min_num_matches)
+        if rebuild
+        else database_cache.correspondence_graph
     )
     observation_manager: pycolmap.ObservationManager = pycolmap.ObservationManager(reconstruction, graph)
     return Correspondences(
@@ -140,7 +144,8 @@ def graph_with_inlier_overrides(
 
     `DatabaseCache` has no match filter, and replacing a pair's inliers here is what lets a stage trim the pairs it
     matched without rewriting database rows (COLMAP runs a full `VACUUM` when it closes a connection that deleted
-    anything). The rebuild runs for every load, no override included, so there is one path.
+    anything). `load_correspondences` calls it only when a pair is overridden; without one it returns the cache's graph,
+    correspondence for correspondence (`test_correspondence_exclusion`).
 
     It replays what `DatabaseCache::Load` did: the same rows (`ReadTwoViewGeometries`), in their order, each added with
     its stored geometry, so every correspondence list comes out in the same order, many-to-one matches included. Which
