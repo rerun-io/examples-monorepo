@@ -60,7 +60,7 @@ struct RenderFlags {
     log_scale_offset: f32,
     mip: u32,
     has_min_scale: u32,
-    padding: u32,
+    linear_opacity: u32,
 }
 
 impl Uniforms {
@@ -112,7 +112,13 @@ impl Uniforms {
                         ..
                     }
                 )),
-                padding: 0,
+                linear_opacity: u32::from(matches!(
+                    scene.inputs,
+                    Inputs::Splats {
+                        linear_opacity: true,
+                        ..
+                    }
+                )),
             },
             coefficients,
             lens: LensInfo {
@@ -174,10 +180,15 @@ impl ViewState {
             .ok_or(Error::Busy(
                 "three frames are pending; poll view feedback before rendering again",
             ))?;
+        let forward_rows = self.selected_rows();
         let frame = &mut self.frames[index];
         let scene = &self.scene;
         let uniforms = Uniforms::new(camera, options, scene, tiles);
         queue.write_buffer(&frame.uniform, 0, bytemuck::bytes_of(&uniforms));
+        if !scene.hexels() {
+            let words = crate::lod::run_words(self.runs.as_deref());
+            queue.write_buffer(&frame.runs, 0, bytemuck::cast_slice(&words));
+        }
         frame.raster.take_if(|(cached, _)| cached != &target);
         let (_, raster_group) = frame.raster.get_or_insert_with(|| {
             let (_, ids) = scratch.intersections.sort.output(scratch.bits);
@@ -240,7 +251,7 @@ impl ViewState {
             encoder,
             &stages.forward,
             &frame.forward,
-            scene.n.div_ceil(WG),
+            forward_rows.div_ceil(WG),
             timestamps(Some(0), 1),
         );
         self.dispatches

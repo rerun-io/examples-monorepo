@@ -15,6 +15,8 @@ fn required_limits() -> wgpu::Limits {
         max_compute_invocations_per_workgroup: 256,
         max_compute_workgroup_size_x: 256,
         max_compute_workgroup_storage_size: REQUIRED_WORKGROUP_STORAGE_BYTES,
+        // The level-of-detail run list (`lod::RUN_UNIFORM_BYTES`); the WebGPU default.
+        max_uniform_buffer_binding_size: 65_536,
         ..wgpu::Limits::downlevel_webgl2_defaults()
     }
 }
@@ -87,7 +89,8 @@ mod capability_tests {
             false,
             |_, _, _| failures += 1,
         );
-        assert_eq!(failures, 8);
+        // The ninth: the 64 KiB uniform of the level-of-detail run list.
+        assert_eq!(failures, 9);
     }
 
     #[test]
@@ -121,6 +124,7 @@ mod capability_tests {
         );
         assert_eq!(limits.max_storage_buffers_per_shader_stage, 8);
         assert_eq!(limits.max_storage_textures_per_shader_stage, 3);
+        assert_eq!(limits.max_uniform_buffer_binding_size, 65_536);
         super::check_adapter(&limits).unwrap();
         assert!(limits.check_limits(&available));
         let weak = wgpu::Limits::downlevel_webgl2_defaults();

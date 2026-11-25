@@ -87,6 +87,33 @@ impl Renderer {
         )?))
     }
 
+    /// A Streamed SOG set (all loaded levels in one scene, see [`crate::lod`]) and its host-side index.
+    /// WebP decode on the CPU, one GPU de-quantisation pass per file (submitted on `queue`).
+    /// The finest level >= `requested` at which a Streamed SOG set (per file: level, rows, SH degree bound) fits
+    /// this device; [`Self::upload_lod`] applies the same rule. `None` when not even the coarsest level fits.
+    pub fn fit_lod_min_level(&self, files: &[(u32, usize, u32)], requested: u32) -> Option<u32> {
+        crate::lod::fit_min_level(files, requested, |rows, degree| {
+            self.check_capacity(rows, degree).is_ok()
+        })
+    }
+
+    pub fn upload_lod(
+        &self,
+        queue: &wgpu::Queue,
+        set: &crate::lod::LodSet<'_>,
+        options: &crate::lod::LoadOptions,
+    ) -> Result<(Arc<Scene>, Arc<crate::lod::LodIndex>), Error> {
+        let (scene, index) = crate::lod::upload(
+            &self.device,
+            queue,
+            &self.kernels.sog_dequant,
+            set,
+            options,
+            self.limit,
+        )?;
+        Ok((Arc::new(scene), Arc::new(index)))
+    }
+
     /// An entropy-decoded `.asog` on the GPU: static part through `sog_dequant.wgsl`, motion through
     /// `asog_motion.wgsl` (both submitted on `queue`), evaluated per view at `RenderOptions::time` (one dispatch per
     /// time change, no re-upload). The tests' CPU oracle is `AsogParts::motion` + `AsogMotion::evaluate`.

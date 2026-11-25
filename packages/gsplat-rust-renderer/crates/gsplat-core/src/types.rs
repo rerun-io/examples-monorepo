@@ -106,6 +106,11 @@ pub struct RenderOptions {
 
     /// Timeline time in seconds for animated scenes (the motion pass runs when it changes); ignored otherwise.
     pub time: f32,
+
+    /// Level-of-detail selection for Streamed SOG scenes. The renderer draws the rows of
+    /// [`crate::ViewState::set_runs`]; a caller that selects per view ([`crate::lod::select`]) reads these, so a
+    /// change of parameters is a change of options (new image, new selection).
+    pub lod: crate::lod::LodParams,
 }
 
 impl Default for RenderOptions {
@@ -116,6 +121,7 @@ impl Default for RenderOptions {
             background: Vec3::ZERO,
             splat_scale: 1.0,
             time: 0.0,
+            lod: crate::lod::LodParams::default(),
         }
     }
 }

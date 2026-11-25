@@ -8,6 +8,8 @@ pub(crate) enum Inputs {
         sh: wgpu::Buffer,
         min_scale: wgpu::Buffer,
         has_min_scale: bool,
+        /// `opacity` holds linear opacity (may exceed 1: merged SOG v3 levels), not a logit.
+        linear_opacity: bool,
         degree: u32,
         /// Per-row motion: views evaluate it into their own transforms and opacity (`trigs_deform.wgsl`).
         motion: Option<crate::motion_gpu::GpuMotion>,
@@ -120,7 +122,8 @@ impl Scene {
         }
     }
 
-    fn count(n: usize) -> Result<u32, Error> {
+    /// A row count that fits the visible counter (its high bit flags overflow).
+    pub(crate) fn count(n: usize) -> Result<u32, Error> {
         let n = u32::try_from(n)?;
         if n >= 0x8000_0000 {
             return Err(Error::Input(
@@ -162,6 +165,7 @@ impl Scene {
                     bytemuck::cast_slice(splats.min_scale.as_deref().unwrap_or(&[0.0])),
                 )?,
                 has_min_scale: splats.min_scale.is_some(),
+                linear_opacity: false,
                 degree: splats.sh_degree,
                 motion: None,
             },

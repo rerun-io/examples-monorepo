@@ -17,17 +17,68 @@ const WG: u32 = 256;
 /// Codebooks (3 x 256) + opacity logits (256) + positions (3 x 65536).
 const TABLE_LEN: usize = 1024 + 3 * 65536;
 
-/// The f32 lookup tables of `sog_dequant.wgsl`.
+/// The f32 lookup tables of `sog_dequant.wgsl` (opacity as logits).
+#[cfg(test)]
 pub(crate) fn tables(q: &Quantization) -> Vec<f32> {
+    tables_with(q, false)
+}
+
+/// Linear opacity of an sh0 alpha byte without the clamp to 1: v3 `(a / 204)^2` reaches 1.5625.
+pub(crate) fn linear_opacity(version: Version, byte: u8) -> f32 {
+    match version {
+        Version::V2 => f32::from(byte) / 255.0,
+        Version::V3 => (f64::from(byte) / 204.0).powi(2) as f32,
+    }
+}
+
+/// The tables with the opacity entries as raw logits (clamped to 1) or as linear opacity (`linear`).
+pub(crate) fn tables_with(q: &Quantization, linear: bool) -> Vec<f32> {
     let mut out = Vec::with_capacity(TABLE_LEN);
     out.extend_from_slice(&q.scales);
     out.extend_from_slice(&q.sh0);
     out.extend_from_slice(&q.sh_rest);
-    out.extend((0..=255u8).map(|a| logit(opacity(q.version, a))));
+    if linear {
+        out.extend((0..=255u8).map(|a| linear_opacity(q.version, a)));
+    } else {
+        out.extend((0..=255u8).map(|a| logit(opacity(q.version, a))));
+    }
     for axis in 0..3 {
         out.extend((0..=u16::MAX).map(|code| position(q, axis, code)));
     }
     out
+}
+
+/// The scene buffers one or more de-quantisation passes write.
+pub(crate) struct Outputs {
+    pub transforms: wgpu::Buffer,
+    pub opacity: wgpu::Buffer,
+    pub sh: wgpu::Buffer,
+    /// SH coefficients per channel beyond DC of the scene (a file with fewer leaves the rest zero).
+    pub rest: usize,
+    /// Write linear opacity (unclamped) instead of logits.
+    pub linear_opacity: bool,
+}
+
+impl Outputs {
+    /// Zeroed buffers for `n` rows with `rest` AC coefficients per channel.
+    pub fn new(device: &wgpu::Device, n: usize, rest: usize, limit: u64) -> Result<Self, Error> {
+        let checked = |label: &str, bytes: u64| {
+            if bytes > limit {
+                return Err(Error::Capacity {
+                    required: bytes,
+                    limit,
+                });
+            }
+            Ok(storage(device, label, bytes))
+        };
+        Ok(Self {
+            transforms: checked("raw transforms", n as u64 * 40)?,
+            opacity: checked("raw opacity", n as u64 * 4)?,
+            sh: checked("SH RGB coefficients", (n * (rest + 1) * 12) as u64)?,
+            rest,
+            linear_opacity: false,
+        })
+    }
 }
 
 /// Upload the planes, run the de-quantisation pass (submitted on `queue`) and return the scene it fills.
@@ -39,12 +90,61 @@ pub(crate) fn upload_sog(
     planes: &Planes<'_>,
     limit: u64,
 ) -> Result<Scene, Error> {
+    let rest = planes.sh.map_or(0, |s| rest_coefficients(s.bands));
+    let out = Outputs::new(device, q.count, rest, limit)?;
+    dequantize_into(device, queue, kernel, q, planes, limit, &out, 0)?;
+    Ok(scene(device, out, u32::try_from(q.count)?))
+}
+
+/// The scene of filled buffers (no scale floor).
+pub(crate) fn scene(device: &wgpu::Device, out: Outputs, n: u32) -> Scene {
+    let degree = (1..=4)
+        .find(|&b| rest_coefficients(b) == out.rest)
+        .unwrap_or(0);
+    Scene {
+        inputs: Inputs::Splats {
+            transforms: out.transforms,
+            opacity: out.opacity,
+            sh: out.sh,
+            min_scale: upload(
+                device,
+                "3D scale floor",
+                bytemuck::bytes_of(&0.0f32),
+                wgpu::BufferUsages::STORAGE,
+            ),
+            has_min_scale: false,
+            linear_opacity: out.linear_opacity,
+            degree,
+            motion: None,
+        },
+        n,
+    }
+}
+
+/// One de-quantisation pass (submitted on `queue`) writing the file's rows at `first_row` of `out`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one pass per file of a set; the caller owns every input"
+)]
+pub(crate) fn dequantize_into(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    kernel: &Kernel,
+    q: &Quantization,
+    planes: &Planes<'_>,
+    limit: u64,
+    out: &Outputs,
+    first_row: u32,
+) -> Result<(), Error> {
     let palette_count = check_planes(q, planes)?;
     let n = q.count;
     let count = u32::try_from(n)?;
-    let (bands, rest) = planes
-        .sh
-        .map_or((0, 0), |s| (s.bands, rest_coefficients(s.bands)));
+    let rest = planes.sh.map_or(0, |s| rest_coefficients(s.bands));
+    if rest > out.rest || (u64::from(first_row) + n as u64) * 40 > out.transforms.size() {
+        return Err(Error::Input(
+            "SOG file does not fit the scene buffers (rows or SH bands)",
+        ));
+    }
     let (labels, centroids) = planes.sh.map_or((&[][..], &[][..]), |s| {
         (&s.labels[..4 * n], &s.centroids[..4 * palette_count * rest])
     });
@@ -82,24 +182,16 @@ pub(crate) fn upload_sog(
         offsets[5],
         offsets[6],
         x * WG,
+        first_row,
+        out.rest as u32,
+        0,
+        0,
     ];
-    let checked = |label: &str, bytes: u64| {
-        if bytes > limit {
-            return Err(Error::Capacity {
-                required: bytes,
-                limit,
-            });
-        }
-        Ok(storage(device, label, bytes))
-    };
-    let transforms = checked("raw transforms", n as u64 * 40)?;
-    let opacity = checked("raw opacity", n as u64 * 4)?;
-    let sh = checked("SH RGB coefficients", (n * (rest + 1) * 12) as u64)?;
     let planes_buffer = crate::scene::upload(device, "SOG texel planes", &words, limit)?;
     let table_buffer = upload(
         device,
         "SOG tables",
-        bytemuck::cast_slice(&tables(q)),
+        bytemuck::cast_slice(&tables_with(q, out.linear_opacity)),
         wgpu::BufferUsages::STORAGE,
     );
     let params = uniform(device, &params);
@@ -110,9 +202,9 @@ pub(crate) fn upload_sog(
             (0, params.as_entire_binding()),
             (1, planes_buffer.as_entire_binding()),
             (2, table_buffer.as_entire_binding()),
-            (3, transforms.as_entire_binding()),
-            (4, opacity.as_entire_binding()),
-            (5, sh.as_entire_binding()),
+            (3, out.transforms.as_entire_binding()),
+            (4, out.opacity.as_entire_binding()),
+            (5, out.sh.as_entire_binding()),
         ],
     );
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -128,23 +220,7 @@ pub(crate) fn upload_sog(
         pass.dispatch_workgroups(x, y, 1);
     }
     queue.submit([encoder.finish()]);
-    Ok(Scene {
-        inputs: Inputs::Splats {
-            transforms,
-            opacity,
-            sh,
-            min_scale: upload(
-                device,
-                "3D scale floor",
-                bytemuck::bytes_of(&0.0f32),
-                wgpu::BufferUsages::STORAGE,
-            ),
-            has_min_scale: false,
-            degree: bands,
-            motion: None,
-        },
-        n: count,
-    })
+    Ok(())
 }
 
 #[cfg(test)]

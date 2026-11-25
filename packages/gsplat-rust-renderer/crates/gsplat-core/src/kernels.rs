@@ -85,6 +85,7 @@ pub(crate) fn bindings(entry: &str) -> &'static [(u32, wgpu::BindingType)] {
             (6, W),
             (8, W),
             (9, R),
+            (10, U),
         ],
         "gather" => &[(1, R), (2, R), (3, R), (4, W)],
         "map_tiles" => &[(0, U), (1, R), (2, R), (5, R), (6, R), (7, W), (8, W)],
@@ -279,6 +280,34 @@ impl Kernels {
 
 #[cfg(test)]
 mod tests {
+    /// The viewer asks WebGPU default limits: no stage may declare a 9th storage buffer (the GPU test device takes
+    /// the adapter's limits, so the GPU tests would not catch it).
+    #[test]
+    fn no_entry_point_declares_more_than_eight_storage_buffers() {
+        for source in super::sources(true) {
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            for entry in &module.entry_points {
+                let storage = super::bindings(&entry.name)
+                    .iter()
+                    .filter(|(_, ty)| {
+                        matches!(
+                            ty,
+                            wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { .. },
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                assert!(
+                    storage <= 8,
+                    "{} declares {storage} storage buffers",
+                    entry.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_native_shader_validates_with_naga() {
         for source in super::sources(true)
@@ -317,6 +346,9 @@ mod tests {
             for (handle, ty) in module.types.iter() {
                 if ty.name.as_deref() == Some("Uniforms") {
                     assert_eq!(layout[handle].size, 256);
+                }
+                if ty.name.as_deref() == Some("RunList") {
+                    assert_eq!(layout[handle].size as usize, crate::lod::RUN_UNIFORM_BYTES);
                 }
                 if ty.name.as_deref() == Some("Splat") {
                     assert_eq!(layout[handle].size, 40);

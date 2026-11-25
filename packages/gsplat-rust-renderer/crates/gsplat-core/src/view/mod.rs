@@ -38,6 +38,8 @@ struct MappingGroups {
 
 struct FrameSlot {
     uniform: wgpu::Buffer,
+    /// The level-of-detail run list read by the splat forward pass (`lod::RUN_UNIFORM_BYTES`; 16 B for hexels).
+    runs: wgpu::Buffer,
     readback: wgpu::Buffer,
     forward: wgpu::BindGroup,
     mapping: MappingGroups,
@@ -123,6 +125,8 @@ pub struct ViewState {
     overflow_events: u32,
     /// This view's evaluated transforms + opacity when the scene is animated.
     deform: Option<crate::motion_gpu::Deform>,
+    /// Rows the forward pass projects (`None` = all rows); see [`ViewState::set_runs`].
+    runs: Option<Vec<crate::lod::Run>>,
 }
 
 /// Byte offset of the per-primitive tile counts in the counts buffer (`TILE_HITS` in counts.wgsl).
@@ -180,7 +184,7 @@ impl ViewState {
             + self
                 .frames
                 .iter()
-                .map(|frame| frame.uniform.size() + frame.readback.size())
+                .map(|frame| frame.uniform.size() + frame.runs.size() + frame.readback.size())
                 .sum::<u64>()
             + self
                 .deform
@@ -256,8 +260,16 @@ impl ViewState {
         let stages = kernels.stages(scene);
         let frames = std::array::from_fn(|_| {
             let uniform = uniform(device, &[0; size_of::<Uniforms>() / 4]);
+            let runs = if scene.hexels() {
+                gpu::uniform(device, &[0; 4])
+            } else {
+                gpu::uniform(device, &vec![0; crate::lod::RUN_UNIFORM_BYTES / 4])
+            };
             let forward = {
                 let mut bindings = scene.bindings();
+                if !scene.hexels() {
+                    bindings.push((10, runs.as_entire_binding()));
+                }
                 if let Some(deform) = &deform {
                     // The projector reads this view's evaluated rows instead of the canonical ones.
                     for (binding, resource) in &mut bindings {
@@ -280,6 +292,7 @@ impl ViewState {
             let mapping = scratch.mapping(device, kernels, scene, &uniform);
             FrameSlot {
                 uniform,
+                runs,
                 forward,
                 mapping,
                 raster: None,
@@ -304,7 +317,40 @@ impl ViewState {
             timing: None,
             overflow_events: 0,
             deform,
+            runs: None,
         })
+    }
+
+    /// Rows the forward pass projects from the next encode on: `Some(runs)` = only these global rows (sorted,
+    /// disjoint, inside the scene, at most [`crate::lod::MAX_RUNS`]), `None` = all rows. Picking ids stay global rows.
+    pub fn set_runs(&mut self, runs: Option<&[crate::lod::Run]>) -> Result<(), Error> {
+        if let Some(runs) = runs {
+            if self.scene.hexels() {
+                return Err(Error::Input("run lists select splat rows only"));
+            }
+            if runs.len() > crate::lod::MAX_RUNS {
+                return Err(Error::Input("run list exceeds lod::MAX_RUNS"));
+            }
+            let mut end = 0u64;
+            for run in runs {
+                let first = u64::from(run.first);
+                if first < end || first + u64::from(run.count) > u64::from(self.scene.n) {
+                    return Err(Error::Input(
+                        "run list must be sorted, disjoint and inside the scene",
+                    ));
+                }
+                end = first + u64::from(run.count);
+            }
+        }
+        self.runs = runs.map(<[_]>::to_vec);
+        Ok(())
+    }
+
+    /// Rows the forward pass projects (all rows without a run list).
+    pub fn selected_rows(&self) -> u32 {
+        self.runs
+            .as_ref()
+            .map_or(self.scene.n, |runs| runs.iter().map(|r| r.count).sum())
     }
 
     fn resize(

@@ -10,6 +10,36 @@
 @group(0) @binding(5) var<storage, read_write> depths: array<u32>;
 @group(0) @binding(8) var<storage, read_write> projected: array<Splat>;
 @group(0) @binding(9) var<storage, read> coeffs: array<f32>;
+// Level-of-detail run list (`lod.rs` `run_words`): header (count, total, active, 0), then (first row, prefix) pairs,
+// two runs per vec4. A uniform, not a storage buffer: this stage is at the 8-storage-buffer WebGPU limit.
+struct RunList {
+    header: vec4u,
+    pairs: array<vec4u, 4095>,
+}
+@group(0) @binding(10) var<uniform> runs: RunList;
+
+fn run_first(i: u32) -> u32 {
+    return runs.pairs[i / 2u][(i % 2u) * 2u];
+}
+
+fn run_prefix(i: u32) -> u32 {
+    return runs.pairs[i / 2u][(i % 2u) * 2u + 1u];
+}
+
+// The scene row of selected-row index `t` (t < total): the last run whose prefix is <= t.
+fn selected_row(t: u32) -> u32 {
+    var lo = 0u;
+    var hi = runs.header.x;
+    while hi - lo > 1u {
+        let mid = (lo + hi) / 2u;
+        if run_prefix(mid) <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return run_first(lo) + (t - run_prefix(lo));
+}
 struct Projection {
     valid: bool,
     xy: vec2f,
@@ -25,7 +55,8 @@ fn project_core(id: u32, mean: vec3f, point: vec3f) -> Projection {
     let qraw = vec4f(transforms[base + 3u], transforms[base + 4u], transforms[base + 5u], transforms[base + 6u]);
     let qnorm = dot(qraw, qraw);
     let valid_input = finite3(scale) && qnorm >= 1e-6 && finite(qnorm) && finite(raw_opacity[id]);
-    var opacity = 1.0 / (1.0 + exp(-raw_opacity[id]));
+    // Linear opacity (Streamed SOG levels; merged v3 splats reach 1.5625) or a logit.
+    var opacity = select(1.0 / (1.0 + exp(-raw_opacity[id])), max(raw_opacity[id], 1e-6), frame.options.linear_opacity != 0u);
     if frame.options.has_min_scale != 0u {
         let floor = min_scale[id];
         let filtered = sqrt(scale * scale + floor * floor);
@@ -159,7 +190,13 @@ fn sh_color(id: u32, v: vec3f) -> vec3f {
 
 @compute @workgroup_size(WG) fn project_forward(@builtin(workgroup_id) gid: vec3u,
     @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let id = (gid.x + gid.y * groups.x) * WG + lid;
+    var id = (gid.x + gid.y * groups.x) * WG + lid;
+    if runs.header.z != 0u {
+        if id >= runs.header.y {
+            return;
+        }
+        id = selected_row(id);
+    }
     if id >= frame.scene.splats {
         return;
     }
