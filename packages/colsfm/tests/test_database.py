@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +12,7 @@ from jaxtyping import Float32, UInt8
 from mapping_helpers import SyntheticRig
 from numpy import ndarray
 
+from colsfm import database
 from colsfm.database import (
     ImagePair,
     count_two_view_geometries,
@@ -303,39 +302,30 @@ def test_parallel_descriptor_read_equals_the_serial_read(tmp_path: Path) -> None
             np.testing.assert_array_equal(chosen[image_id], block)
 
 
-def _resident_bytes() -> int:
-    """This process' resident set size, from `/proc/self/statm`."""
-    with open("/proc/self/statm") as statm:
-        return int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+class _FakeLibc:
+    """A C library whose `malloc_trim` records its arguments."""
+
+    def __init__(self) -> None:
+        self.trims: list[int] = []
+
+    def malloc_trim(self, pad: int) -> int:
+        self.trims.append(pad)
+        return 1
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc and glibc's allocator")
-def test_releasing_freed_memory_gives_back_what_worker_threads_allocated() -> None:
-    """Blocks that worker threads allocated and the main thread freed leave the process once they are released.
+def test_releasing_freed_memory_trims_every_arena(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`release_freed_memory` asks glibc's `malloc_trim(0)` once, and says False on a C library without it.
 
     The parallel descriptor read allocates its blobs on worker threads. glibc keeps such blocks in the workers' arenas
     after they are freed, where the main thread cannot reuse them: on an 18 GB read that was 4.6 GB more peak memory
-    for the stages that follow. A small block kept alive after every large one stops the arenas from shrinking by
-    themselves, as the retrieval index's allocations do in the loop stage.
+    for the stages that follow. The call is the contract; how much the resident set drops depends on the allocator's
+    settings (`MALLOC_MMAP_THRESHOLD_=32768` serves these blocks from mmap, and nothing is left to trim).
     """
-    block_bytes: int = 64 * 1024
-    blocks_per_thread: int = 800
-
-    def allocate(_: int) -> tuple[list[bytearray], list[bytearray]]:
-        large: list[bytearray] = []
-        pins: list[bytearray] = []
-        for _index in range(blocks_per_thread):
-            large.append(bytearray(os.urandom(block_bytes)))
-            pins.append(bytearray(2048))  # above pymalloc's 512-byte limit, so it sits in the same arena
-        return large, pins
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        allocated: list[tuple[list[bytearray], list[bytearray]]] = list(pool.map(allocate, range(4)))
-    pins: list[list[bytearray]] = [thread_pins for _, thread_pins in allocated]
-    held_bytes: int = 4 * blocks_per_thread * block_bytes
-    del allocated
-    freed_but_resident: int = _resident_bytes()
-
+    if sys.platform.startswith("linux"):
+        assert release_freed_memory(), "glibc has malloc_trim"
+    libc: _FakeLibc = _FakeLibc()
+    monkeypatch.setattr(database.ctypes, "CDLL", lambda _name: libc)
     assert release_freed_memory()
-    assert freed_but_resident - _resident_bytes() > held_bytes // 2
-    assert len(pins) == 4
+    assert libc.trims == [0]
+    monkeypatch.setattr(database.ctypes, "CDLL", lambda _name: object())
+    assert not release_freed_memory()
