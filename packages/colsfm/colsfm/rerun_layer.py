@@ -220,14 +220,15 @@ def log_points_by_first_view(
         columns=rr.Points3D.columns(positions=xyz_sorted, colors=rgb_sorted).partition(counts.tolist()),
     )
     recording.log(recent, rr.Points3D.from_fields(radii=rr.Radius.ui_points(1.5)), static=True)
-    # Sorted by first view, so each block is one slice.
-    block: Int64[ndarray, " p"] = (seen_sorted - seen_sorted[0]) // block_ns
-    starts: Int64[ndarray, " b"] = np.flatnonzero(np.r_[True, block[1:] != block[:-1]])
-    ends: Int64[ndarray, " b"] = np.r_[starts[1:], len(block)]
-    for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
-        recording.set_time(timeline, duration=np.timedelta64(int(seen_sorted[end - 1]), "ns"))
-        recording.log(f"{entity}/blocks/{int(block[start]):04d}", rr.Points3D(xyz_sorted[start:end], colors=rgb_sorted[start:end]))
-    recording.reset_time()
+    # Sorted by first view, so each block is one slice; like the recent rows, sent as columns (no stream time set).
+    block_ids, starts = np.unique((seen_sorted - seen_sorted[0]) // block_ns, return_index=True)
+    ends: Int64[ndarray, " b"] = np.r_[starts[1:], len(seen_sorted)]
+    for block_id, start, end in zip(block_ids.tolist(), starts.tolist(), ends.tolist(), strict=True):
+        recording.send_columns(
+            f"{entity}/blocks/{block_id:04d}",
+            indexes=[rr.TimeColumn(timeline, duration=seen_sorted[end - 1 : end].astype("timedelta64[ns]"))],
+            columns=rr.Points3D.columns(positions=xyz_sorted[start:end], colors=rgb_sorted[start:end]).partition([end - start]),
+        )
 
 
 def log_position_difference(
