@@ -411,8 +411,10 @@ def test_caspar_recovers_a_perturbed_rig_where_ceres_does(model: str, intrinsics
 
     With every intrinsic of a fisheye free, a principal-point shift and a small rotation trade almost freely (~1 px per
     0.15 deg); f32 CASPAR stops a hair above Ceres' cost along that mode. So every CASPAR run reaches Ceres' cost
-    (within 1e-4), the reduced camera system (colsfm's mode) matches the rig to 0.01 deg (0.05 deg on that weak mode),
-    and the full PCG's rig is checked where the principal point is held. The full PCG's stop along the weak mode varies
+    (within 1e-4), the reduced camera system (colsfm's mode) matches the rig to 0.02 deg (0.1 deg on that weak mode),
+    and the full PCG's rig is checked where the principal point is held. The rig bounds are twice the largest
+    difference seen over 17 runs of every case on an RTX 5090 (0.0108 deg, and 0.0558 deg on the weak mode): f32 CASPAR
+    does not stop at the same place every run. The start is 2 deg off. The full PCG's stop along the weak mode varies
     from run to run (1.2e-4 to 1.6e-4 above Ceres over 8 runs on an RTX 5090, on two builds), so its cost bound there
     is 5e-4.
     """
@@ -429,7 +431,7 @@ def test_caspar_recovers_a_perturbed_rig_where_ceres_does(model: str, intrinsics
         if not reduced and intrinsics == "all":
             continue
         diff: RigDiff = _rig_diff(ceres, caspar)
-        tolerance_deg: float = 0.05 if weak else 0.01
+        tolerance_deg: float = 0.1 if weak else 0.02
         assert diff.rig_rot_deg < tolerance_deg and diff.rig_trans < 1e-3, (mode, diff)
         assert diff.pose_rot_deg_max < tolerance_deg and diff.pose_center_max < 1e-3, (mode, diff)
         if reduced:
