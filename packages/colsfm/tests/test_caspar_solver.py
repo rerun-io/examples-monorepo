@@ -8,7 +8,8 @@ CASPAR's options go through `apply_caspar_options`, the production cast path.
 The OPENCV_FISHEYE factor (`add-caspar-adapters*.patch`) projects through the off-axis angle of the ray,
 atan2(|XY|, Z). The X/Z form it replaced jumps at Z = 0 (the point is mirrored to the far side of the image), so a step
 that carried a rim observation across the image plane raised the cost by orders of magnitude; every LM trial was
-rejected and the solve returned its start values. The rim-rig test below covers it.
+rejected and the solve returned its start values. The rim-rig test below covers it, at several scene scales: the
+factor normalises the ray before its f32 epsilons, so a scene a few centimetres across projects as one metres across.
 """
 
 from __future__ import annotations
@@ -260,10 +261,11 @@ RIM_NUM_FRAMES: int = 6
 RIM_NUM_POINTS: int = 400
 
 
-def _rim_rig(seed: int = 0) -> tuple[pycolmap.Reconstruction, dict[int, Float64[ndarray, " 3"]]]:
+def _rim_rig(seed: int = 0, *, scale: float = 1.0) -> tuple[pycolmap.Reconstruction, dict[int, Float64[ndarray, " 3"]]]:
     """A two-camera OPENCV_FISHEYE rig moving forward past points out to 89.5 deg off-axis, then knocked off.
 
-    Returns the perturbed reconstruction and each frame's true rig centre.
+    `scale` multiplies every length (baseline, path, points, knocks); the pixels do not change. Returns the perturbed
+    reconstruction and each frame's true rig centre.
     """
     rng: np.random.Generator = np.random.default_rng(seed)
     reconstruction: pycolmap.Reconstruction = pycolmap.Reconstruction()
@@ -272,14 +274,14 @@ def _rim_rig(seed: int = 0) -> tuple[pycolmap.Reconstruction, dict[int, Float64[
     for camera_id in (1, 2):
         reconstruction.add_camera(pycolmap.Camera.create_from_model_id(camera_id, pycolmap.CameraModelId.OPENCV_FISHEYE, RIM_FOCAL_PX, RIM_SIZE_PX, RIM_SIZE_PX))
     rig.add_ref_sensor(camera_sensor_id(1))
-    rig.add_sensor(camera_sensor_id(2), pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([-RIM_BASELINE_M, 0.0, 0.0])))
+    rig.add_sensor(camera_sensor_id(2), pycolmap.Rigid3d(pycolmap.Rotation3d(), np.array([-RIM_BASELINE_M * scale, 0.0, 0.0])))
     reconstruction.add_rig(rig)
     truth: dict[int, Float64[ndarray, " 3"]] = {}
     for index in range(RIM_NUM_FRAMES):
         frame: pycolmap.Frame = pycolmap.Frame()
         frame.frame_id = index + 1
         frame.rig_id = RIG_ID
-        rig_from_world: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(np.array([0.0, 0.01 * index, 0.0])), np.array([0.0, 0.0, -0.3 * index]))
+        rig_from_world: pycolmap.Rigid3d = pycolmap.Rigid3d(pycolmap.Rotation3d(np.array([0.0, 0.01 * index, 0.0])), np.array([0.0, 0.0, -0.3 * index * scale]))
         frame.rig_from_world = rig_from_world
         truth[frame.frame_id] = np.asarray(rig_from_world.inverse().translation)
         for camera_id in (1, 2):
@@ -295,9 +297,9 @@ def _rim_rig(seed: int = 0) -> tuple[pycolmap.Reconstruction, dict[int, Float64[
         np.concatenate([rng.uniform(0.0, 87.5, 3 * RIM_NUM_POINTS // 4), rng.uniform(87.5, 89.5, RIM_NUM_POINTS // 4)])
     )
     azimuth: Float64[ndarray, " n"] = rng.uniform(0.0, 2.0 * np.pi, RIM_NUM_POINTS)
-    distance: Float64[ndarray, " n"] = rng.uniform(3.0, 8.0, RIM_NUM_POINTS)
+    distance: Float64[ndarray, " n"] = rng.uniform(3.0, 8.0, RIM_NUM_POINTS) * scale
     rays: Float64[ndarray, "n 3"] = np.column_stack([np.sin(theta) * np.cos(azimuth), np.sin(theta) * np.sin(azimuth), np.cos(theta)])
-    points: Float64[ndarray, "n 3"] = rays * distance[:, None] + np.array([0.0, 0.0, 0.15 * RIM_NUM_FRAMES])
+    points: Float64[ndarray, "n 3"] = rays * distance[:, None] + np.array([0.0, 0.0, 0.15 * RIM_NUM_FRAMES * scale])
     observations: dict[int, list[tuple[int, int]]] = {index: [] for index in range(RIM_NUM_POINTS)}
     for image_id in sorted(reconstruction.images):
         image = reconstruction.image(image_id)
@@ -313,13 +315,13 @@ def _rim_rig(seed: int = 0) -> tuple[pycolmap.Reconstruction, dict[int, Float64[
             track: pycolmap.Track = pycolmap.Track()
             for image_id, point2D_index in observed:
                 track.add_element(image_id, point2D_index)
-            reconstruction.add_point3D(points[index] + rng.normal(0.0, 0.02, 3), track)
+            reconstruction.add_point3D(points[index] + rng.normal(0.0, 0.02 * scale, 3), track)
     for frame_id in sorted(reconstruction.frames)[1:]:
         frame = reconstruction.frame(frame_id)
         start: pycolmap.Rigid3d | None = frame.rig_from_world
         assert start is not None
         knock: pycolmap.Rotation3d = pycolmap.Rotation3d(rng.normal(0.0, np.radians(0.2), 3))
-        frame.rig_from_world = pycolmap.Rigid3d(knock * start.rotation, np.asarray(start.translation) + rng.normal(0.0, 0.02, 3))
+        frame.rig_from_world = pycolmap.Rigid3d(knock * start.rotation, np.asarray(start.translation) + rng.normal(0.0, 0.02 * scale, 3))
     return reconstruction, truth
 
 
@@ -331,16 +333,18 @@ def _centre_error_m(reconstruction: pycolmap.Reconstruction, truth: dict[int, Fl
     )
 
 
-def test_caspar_moves_a_fisheye_rig_with_rim_observations_to_the_ceres_minimum() -> None:
+@pytest.mark.parametrize("scale", [1.0, 0.01, 0.002])
+def test_caspar_moves_a_fisheye_rig_with_rim_observations_to_the_ceres_minimum(scale: float) -> None:
     """From the same knocked-off start as Ceres, CASPAR ends at Ceres' cost and brings the rig back to the truth.
 
     Stock (X/Z) factor: every LM trial uphill, the start returned unchanged (cost and centre error as knocked off).
+    Scale 0.002 (points 6-16 mm away): with the epsilons on metric X^2 + Y^2 and Z the factor's pixels were 1-2 px off.
     Both solvers are scored on the observations in front of their camera at the start and in Ceres' solution.
     """
-    start, truth = _rim_rig()
-    reference, _ = _rim_rig()
+    start, truth = _rim_rig(scale=scale)
+    reference, _ = _rim_rig(scale=scale)
     _solve(reference, "ceres", [1], {})
-    reconstruction, _ = _rim_rig()
+    reconstruction, _ = _rim_rig(scale=scale)
     _solve(reconstruction, "caspar", [1], {"reduced_camera_system": True})
     scored: frozenset[Observation] = _in_front(start, reference)
     start_error: float = _squared_error(start, scored)

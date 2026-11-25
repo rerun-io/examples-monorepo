@@ -54,14 +54,21 @@ Drop an adapter when upstream CASPAR supports its model.
 
 ## OPENCV_FISHEYE ray angle (2026-11-25)
 
-`opencv_fisheye_core` takes the off-axis angle from the ray, `theta = atan2(|(X, Y)|, Z)`, instead of
-`atan(|(X, Y)| / Z)`. Equal for Z > 0 (7e-4 px max on a TartanAir 195 deg model); the X/Z form mirrors a point at
-Z = 0, so a step that carried a rim observation (89-90 deg) across the image plane raised the cost x20-x77, every LM
-trial was rejected and CASPAR returned its start values as CONVERGENCE (`CONVERGED_DIAG_EXIT`). Rays past 90 deg now
-project to their Kannala-Brandt pixel; COLMAP's own `ImgFromCam` still refuses them, and colsfm's post-solve guards
-remove those observations. Both adapter patches were re-cut as above (45 regenerated `opencv_fisheye*` kernels, the
-aggregates unchanged); colsfm `tests/test_caspar_fisheye.py` checks it. Root cause:
-`loop-and-quality/a7/caspar-fisheye-rootcause.md` (NAS scratch).
+`opencv_fisheye_core` takes the off-axis angle from the unit ray, `theta = atan2(|(x, y)|, z)` with
+`(x, y, z) = P / |P|`, instead of `atan(|(X, Y)| / Z)`. Equal for Z > 0 (7e-4 px max on a TartanAir 195 deg model); the
+X/Z form mirrors a point at Z = 0, so a step that carried a rim observation (89-90 deg) across the image plane raised
+the cost x20-x77, every LM trial was rejected and CASPAR returned its start values as CONVERGENCE
+(`CONVERGED_DIAG_EXIT`). Rays past 90 deg now project to their Kannala-Brandt pixel; COLMAP's own `ImgFromCam` still
+refuses them, and colsfm's post-solve guards remove those observations. The ray is normalised before the f32 epsilons
+(`sqrt(r^2 + 1e-6)`, `atan2`'s 1e-6 on Z): on metric X, Y and Z they moved the pixel by up to 2 px for points 1 cm away,
+so the factor depended on the scene scale. Root cause: `loop-and-quality/a7/caspar-fisheye-rootcause.md` (NAS scratch).
+
+Both adapter patches were re-cut as above: 45 regenerated `opencv_fisheye*` kernels, the aggregates unchanged, every
+other generated file byte for byte as the generator env gives it. Source: local branch `caspar-fisheye-fix-ray-main` @
+`573b507f` in `~/0Dev/forks/colmap-caspar-fisheye` on pablo-dl-server (pushed nowhere): `4c5ea2aa` hand-written,
+`8a608f5b` generated, then the other three patches, one commit each. colsfm `tests/test_caspar_solver.py` checks it: the
+rim rig at scene scales 1, 0.01 and 0.002 ends at Ceres' cost, both solvers scored on one set of observations (in front
+at the start and in Ceres' solution).
 
 ## caspar-pcg-beta-recurrence.patch and caspar-reduced-camera-system.patch
 
