@@ -2134,6 +2134,7 @@ pandas = ">=2.3.3"
 # clang compiles the C deps, also for the wasm32 web build (linux-only). macOS uses Xcode's clang and linker: conda's
 # ld64 956 cannot link against the macOS 27 SDK, whose libSystem.tbd lists arm64e but no arm64 slice ("malformed file").
 clang = "*"
+nasm = "*"
 # gilrs (via re_viewer) links libudev through pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"
