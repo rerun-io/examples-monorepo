@@ -33,6 +33,7 @@ fn synthetic_scene(degree: u32) -> PlyScene {
         mode: gsplat_core::RenderMode::Default,
         center: Vec3::new(0.0, 0.0, 2.0),
         extent: 1.0,
+        lod: None,
     }
 }
 

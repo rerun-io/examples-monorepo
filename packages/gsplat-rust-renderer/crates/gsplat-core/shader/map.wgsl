@@ -8,7 +8,7 @@
 @group(0) @binding(5) var<storage, read> projected: array<Splat>;
 @group(0) @binding(6) var<storage, read> cum_tile_hits: array<u32>;
 @group(0) @binding(7) var<storage, read_write> tile_from_isect: array<u32>;
-@group(0) @binding(8) var<storage, read_write> compact_from_isect: array<u32>;
+@group(0) @binding(8) var<storage, read_write> global_from_isect: array<u32>;
 @group(0) @binding(9) var<storage, read_write> offsets: array<u32>;
 @compute @workgroup_size(WG) fn gather(@builtin(workgroup_id) gid: vec3u,
     @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
@@ -24,7 +24,8 @@
     if i >= counts[0] {
         return;
     }
-    let p = projected[i];
+    let id = global_from_compact[i];
+    let p = projected[id];
     let xy = vec2f(p.x, p.y);
     let c = vec3f(p.conic_x, p.conic_y, p.conic_z);
     let power = log(p.color_a * 255.0);
@@ -42,7 +43,7 @@
         if tile_hit(tile, xy, c, power) && emitted < reserved {
             if base + emitted < arrayLength(&tile_from_isect) {
                 tile_from_isect[base + emitted] = tile.x + tile.y * frame.image.tiles_x;
-                compact_from_isect[base + emitted] = i;
+                global_from_isect[base + emitted] = id;
             }
             emitted++;
         }
@@ -50,7 +51,7 @@
     for (var t = emitted; t < reserved; t++) {
         if base + t < arrayLength(&tile_from_isect) {
             tile_from_isect[base + t] = frame.image.tiles_x * frame.image.tiles_y;
-            compact_from_isect[base + t] = i;
+            global_from_isect[base + t] = id;
         }
     }
 }

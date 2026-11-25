@@ -28,6 +28,8 @@ pub struct SpeedArgs {
     pub camera: CameraArgs,
     #[command(flatten)]
     settings: RenderSettings,
+    #[command(flatten)]
+    lod: gsplat_cli::lod::LodArgs,
     #[arg(long, default_value_t = 120)]
     warmup: usize,
     #[arg(long, default_value_t = 600)]
@@ -96,6 +98,9 @@ struct SpeedReport {
     minimum_frames: usize,
     repeat_count: usize,
     backends: Vec<BackendReport>,
+    /// `--lod`: the set and, per camera, the selection with its counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lod: Option<LodSpeed>,
 }
 struct Lane {
     kind: Implementation,
@@ -189,6 +194,20 @@ async fn repeat(
 }
 
 #[derive(Serialize)]
+struct LodCamera {
+    #[serde(flatten)]
+    selection: gsplat_cli::lod::CameraSelection,
+    /// GPU stage times of one diagnostic frame of this camera.
+    stages: Option<Vec<StageTiming>>,
+}
+
+#[derive(Serialize)]
+struct LodSpeed {
+    set: gsplat_cli::lod::SetReport,
+    cameras: Vec<LodCamera>,
+}
+
+#[derive(Serialize)]
 struct CameraCheck {
     camera: usize,
     metrics: RenderMetrics,
@@ -227,7 +246,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             "duplicate implementation"
         );
     }
-    let scene = PlyScene::load(&a.camera.ply).await?;
+    let scene = PlyScene::load_any(&a.camera.ply, &a.lod).await?;
     let cameras = cameras(&a.camera, &scene).await?;
     let mut engines = Vec::new();
     for &kind in &a.implementations {
@@ -260,12 +279,13 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
     }
     let mut backends = Vec::new();
     // Brush checks splat renders; hexel scenes have no reference renderer here.
-    let mut oracle = match scene.hexels {
-        None => Some(Engine::Brush(Box::new(
+    let mut oracle = match (&scene.hexels, &scene.lod) {
+        (None, None) => Some(Engine::Brush(Box::new(
             Brush::new(&scene, &a.settings).await,
         ))),
-        Some(_) => None,
+        _ => None,
     };
+    let mut lod = None;
     for Lane {
         kind: implementation,
         mut engine,
@@ -284,6 +304,29 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
                 .collect();
             (*value / median(&others) - 1.0).abs() <= 0.05
         });
+        if let (Some(source), None) = (&scene.lod, &lod) {
+            let mut frames = Vec::new();
+            for (index, c) in cameras.iter().enumerate() {
+                let counts = engine.render(c, false).await?;
+                engine.finish()?;
+                let stages = engine.stages(c).await?;
+                let renderer = engine.standalone().expect("--lod renders with ours");
+                frames.push(LodCamera {
+                    selection: gsplat_cli::lod::CameraSelection::new(
+                        index,
+                        renderer,
+                        counts.visible.unwrap_or(0),
+                        counts.intersections.unwrap_or(0),
+                    )?,
+                    stages,
+                });
+            }
+            let renderer = engine.standalone().expect("--lod renders with ours");
+            lod = Some(LodSpeed {
+                set: gsplat_cli::lod::SetReport::new(source, &a.lod, renderer)?,
+                cameras: frames,
+            });
+        }
         backends.push(BackendReport {
             implementation,
             adapter: engine.adapter(),
@@ -329,6 +372,7 @@ pub async fn run(a: SpeedArgs) -> Result<()> {
             minimum_frames: a.frames,
             repeat_count: a.repeats,
             backends,
+            lod,
         },
     )
 }

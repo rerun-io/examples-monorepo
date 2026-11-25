@@ -3,11 +3,8 @@
 //! The reference intersects each pixel ray with the hexel plane by solving
 //! `c + u a + v b = t r` (Cramer's rule), not through the GPU's plane-to-pixel map,
 //! and composites in centre-depth order without tiles.
-use crate::test_utils::{gpu, read, upload};
-use crate::{
-    Camera, CameraModel, FrameStats, HexelVariant, Hexels, RenderOptions, Renderer, Target,
-    ViewState,
-};
+use crate::test_utils::{gpu, read, render_fitted, upload};
+use crate::{Camera, CameraModel, HexelVariant, Hexels, RenderOptions, Renderer, Target};
 use glam::{DAffine3, DMat3, DQuat, DVec3, Quat, UVec2, Vec2, Vec3};
 
 const NEAR: f64 = 0.2;
@@ -178,29 +175,6 @@ struct Gpu {
     rgba: Vec<[f32; 4]>,
     depth: Vec<[f32; 2]>,
     normal: Vec<[f32; 4]>,
-}
-
-/// Render `target`, again while the view grows its intersection buffer (the first frame holds one).
-fn render_fitted(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    renderer: &Renderer,
-    view: &mut ViewState,
-    camera: &Camera,
-    options: &RenderOptions,
-    target: &Target,
-) -> FrameStats {
-    loop {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        let frame = renderer.render(queue, &mut encoder, view, camera, options, target.clone());
-        frame.unwrap();
-        queue.submit([encoder.finish()]);
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let stats = view.poll_feedback().unwrap().unwrap();
-        if !stats.needs_rerender {
-            return stats;
-        }
-    }
 }
 
 fn render(hexels: &Hexels, camera: &Camera, options: &RenderOptions) -> Gpu {
