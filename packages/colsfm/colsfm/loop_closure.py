@@ -20,7 +20,10 @@ Pipeline per rig frame
    same-rig-frame gate.
 3. Candidates: each query rig frame pools its query keyframes' hits and keeps the
    `loop_candidates_per_frame` best target rig frames by retrieval score (3; 1 in the kitti
-   profile), then one hit per unordered rig pair.
+   profile), then one hit per unordered rig pair. The prior bound (`prior_distance_bound`:
+   the edge reach plus the drift allowance) then drops the rig pairs too far apart in the
+   prior to give an edge; those still inside the covisibility radius
+   (`colsfm.loop_covisibility`) are matched for the mapper only and never measured.
 4. Measurement: `colsfm.loop_pose.RigPoseEstimator` on each surviving rig pair — a metric
    point cloud triangulated in the source rig frame from its own cameras and its temporal
    neighbours, then `estimate_and_refine_generalized_absolute_pose` for the whole target
@@ -33,12 +36,11 @@ Pipeline per rig frame
    when it has at least `good_loop_threshold` inliers (cuSFM's isaac default, 150), then
    `colsfm.pose_graph.gate_loop_edges` with real thresholds.
 
-Steps 1-3 read nothing but the retrieval index and the timestamps. That is deliberate: the
-pipeline learns which image pairs to match by running this whole stage once with a matcher
-that returns nothing, so any pair whose request depends on a match result would never be
-matched in production (`colsfm.pipeline._find_loop_edges`, `colsfm.loop_pose`). It is also
-why step 3 ranks by retrieval score: the inlier count only exists after the measurement, and
-step 5 is where it decides.
+Steps 1-3 read no loop match: only the retrieval index, the timestamps and the prior poses.
+That is deliberate: `plan_loop_search` decides every image pair to match before the batch
+match runs, so any pair whose request depended on a match result would never be matched
+(`LoopSearchPlan`, `colsfm.loop_pose`). It is also why step 3 ranks by retrieval score: the
+inlier count only exists after the measurement, and step 5 is where it decides.
 
 The temporal gate
 -----------------
@@ -593,8 +595,8 @@ class LoopSearchPlan:
     change to verification became a change to scheduling.
 
     Nothing in the first pass needed matches. Retrieval, the score and time gates,
-    the candidate cap and the rig-pair deduplication read the index and the
-    timestamps; the pair list follows from the rig geometry and the shortlist
+    the candidate cap, the rig-pair deduplication and the prior bound read the index, the
+    timestamps and the prior poses; the pair list follows from the rig geometry and the shortlist
     (`colsfm.loop_pairs.required_image_pairs`). So the plan is simply that work, done
     once, and `verify_loop_plan` is the only pass that matches anything.
     """
