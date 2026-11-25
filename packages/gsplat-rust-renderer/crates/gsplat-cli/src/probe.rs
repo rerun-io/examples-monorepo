@@ -20,6 +20,38 @@ const MEASURE_MS: f64 = 10_000.0;
 struct Frame {
     ms: f64,
     camera: CameraSpec,
+    /// Streamed SOG: rows the views' last selections draw (summed over views) at this frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lod_rows: Option<u64>,
+}
+
+/// The last level selection of one view (Streamed SOG recordings only).
+#[derive(Serialize)]
+struct LodView {
+    #[serde(flatten)]
+    params: gsplat_core::lod::LodParams,
+    /// Rows drawn by the last selection and their split per level (index = level, 0 = finest).
+    #[serde(flatten)]
+    stats: gsplat_core::lod::SelectionStats,
+    select_us: f64,
+    /// Selections the view made since it was created (at most one per encoded frame with a new eye).
+    selections: u64,
+    /// Rows of the scene (all loaded levels) and of each level.
+    scene_rows: u32,
+    level_rows: Vec<u64>,
+}
+
+impl From<gsplat_viewer::LodSelectionReport> for LodView {
+    fn from(r: gsplat_viewer::LodSelectionReport) -> Self {
+        Self {
+            params: r.params,
+            stats: r.stats,
+            select_us: r.select_us,
+            selections: r.selections,
+            scene_rows: r.scene_rows,
+            level_rows: r.level_rows,
+        }
+    }
 }
 #[derive(Serialize)]
 struct Report<'a> {
@@ -43,7 +75,25 @@ struct Report<'a> {
     /// Compute-renderer GPU bytes at the last frame: shared scene uploads, per-view scratch and targets.
     gpu_bytes_scene: u64,
     gpu_bytes_views: u64,
+    /// 3D views that published an eye in the last frame (the timing camera is the first one).
+    views: usize,
+    /// Seconds from the start of `gsplat probe` to the end of the first UI frame that encoded a splat frame.
+    first_splat_frame_seconds: f64,
+    /// Peak resident set size of the process (Linux `VmHWM`), at the end of the run.
+    peak_rss_bytes: Option<u64>,
+    /// Streamed SOG recordings: the last selection of every view at the last frame; empty otherwise.
+    lod: Vec<LodView>,
+    /// Streamed SOG: mean over the measured frames of `frames[].lod_rows`.
+    lod_rows_mean: Option<f64>,
     frames: &'a [Frame],
+}
+
+/// Linux `VmHWM` of this process in bytes.
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib * 1024)
 }
 
 pub struct FrameProbe {
@@ -61,6 +111,8 @@ pub struct FrameProbe {
     encoded_at_start: u64,
     measured_from: Instant,
     splats_seen: bool,
+    process_start: Instant,
+    first_splat_frame_seconds: f64,
 }
 impl FrameProbe {
     pub fn new(
@@ -69,6 +121,7 @@ impl FrameProbe {
         size: egui::Vec2,
         require_motion: bool,
         frames_in_flight: usize,
+        process_start: Instant,
     ) -> Self {
         let target = state.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("headless frame probe"),
@@ -99,6 +152,8 @@ impl FrameProbe {
             encoded_at_start: 0,
             measured_from: Instant::now(),
             splats_seen: false,
+            process_start,
+            first_splat_frame_seconds: f64::NAN,
         }
     }
     /// Paint the full UI into a persistent offscreen target, then wait for the GPU to finish all but
@@ -110,6 +165,8 @@ impl FrameProbe {
         camera: gsplat_core::Camera,
         msaa_samples: u32,
         gpu_bytes: [u64; 2],
+        views: usize,
+        lod: Vec<gsplat_viewer::LodSelectionReport>,
     ) -> anyhow::Result<bool> {
         if let Some(first) = self.frames.first() {
             anyhow::ensure!(
@@ -171,6 +228,7 @@ impl FrameProbe {
         // UI-only frames, and a desktop GPU needs that long under load to settle its clock.
         if !self.splats_seen && encoded_frames > 0 {
             self.splats_seen = true;
+            self.first_splat_frame_seconds = self.process_start.elapsed().as_secs_f64();
             self.warmup_ms = 0.0;
             // A load longer than the warm-up: the frames measured so far drew no splats.
             self.warmup += self.frames.len();
@@ -190,6 +248,7 @@ impl FrameProbe {
         self.frames.push(Frame {
             ms,
             camera: CameraSpec::from_core(camera),
+            lod_rows: (!lod.is_empty()).then(|| lod.iter().map(|r| r.stats.rows).sum()),
         });
         self.measured_ms += ms;
         if self.frames.len() < ORBIT_FRAMES
@@ -245,6 +304,14 @@ impl FrameProbe {
             measured_wall_seconds: self.measured_from.elapsed().as_secs_f64(),
             gpu_bytes_scene: gpu_bytes[0],
             gpu_bytes_views: gpu_bytes[1],
+            views,
+            first_splat_frame_seconds: self.first_splat_frame_seconds,
+            peak_rss_bytes: peak_rss_bytes(),
+            lod_rows_mean: (!lod.is_empty()).then(|| {
+                self.frames.iter().filter_map(|f| f.lod_rows).sum::<u64>() as f64
+                    / self.frames.len() as f64
+            }),
+            lod: lod.into_iter().map(LodView::from).collect(),
             frames: &self.frames,
         };
         std::fs::write(&self.path, serde_json::to_vec_pretty(&report)?)?;
@@ -281,11 +348,17 @@ pub struct Args {
     /// Queue up to this many frames before waiting for the oldest, like a swapchain; 0 waits for every frame.
     #[arg(long, default_value_t = 0)]
     frames_in_flight: usize,
+    /// Accept a recording with several 3D views (the first view's eye is the timing camera).
+    #[arg(long)]
+    multi_view: bool,
 }
 struct ProbeView {
+    /// The view's id (Debug text): a stable order across frames, so the timing camera stays the same view.
+    view: String,
     camera: gsplat_core::Camera,
     msaa_samples: u32,
     gpu_bytes: [u64; 2],
+    lod: Vec<gsplat_viewer::LodSelectionReport>,
 }
 static CAMERAS: Mutex<Vec<ProbeView>> = Mutex::new(Vec::new());
 #[derive(Default)]
@@ -305,6 +378,7 @@ impl ViewContextSystem for ProbeEye {
     ) {
         if let Some(camera) = gsplat_viewer::camera_from_view(ctx, query) {
             CAMERAS.lock().push(ProbeView {
+                view: format!("{:?}", query.view_id),
                 camera,
                 msaa_samples: re_renderer::ViewBuilder::main_target_default_msaa_state(
                     ctx.render_ctx().render_config(),
@@ -312,11 +386,13 @@ impl ViewContextSystem for ProbeEye {
                 )
                 .count,
                 gpu_bytes: gsplat_viewer::compute_gpu_bytes(ctx),
+                lod: gsplat_viewer::compute_lod_selections(ctx),
             });
         }
     }
 }
 pub fn run(cli: Args) -> anyhow::Result<()> {
+    let process_start = Instant::now();
     anyhow::ensure!(
         cli.rrd.is_file(),
         "recording does not exist: {}",
@@ -384,14 +460,25 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
         cli.window_size,
         cli.require_motion,
         cli.frames_in_flight,
+        process_start,
     );
     let started = Instant::now();
     loop {
         CAMERAS.lock().clear();
         probe.started = Instant::now();
         harness.step();
-        let cameras = std::mem::take(&mut *CAMERAS.lock());
-        anyhow::ensure!(cameras.len() <= 1, "the frame probe requires one 3D view");
+        let mut cameras = std::mem::take(&mut *CAMERAS.lock());
+        anyhow::ensure!(
+            cli.multi_view || cameras.len() <= 1,
+            "the frame probe requires one 3D view (or --multi-view)"
+        );
+        let views = cameras.len();
+        cameras.sort_by(|a, b| a.view.cmp(&b.view));
+        // The selections are process-wide (every view): take them from the last view's sample.
+        let lod = cameras
+            .last_mut()
+            .map(|v| std::mem::take(&mut v.lod))
+            .unwrap_or_default();
         let Some(view) = cameras.first() else {
             anyhow::ensure!(
                 started.elapsed().as_secs() < 120,
@@ -405,6 +492,8 @@ pub fn run(cli: Args) -> anyhow::Result<()> {
             view.camera,
             view.msaa_samples,
             view.gpu_bytes,
+            views,
+            lod,
         )? {
             harness
                 .render()

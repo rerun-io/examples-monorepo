@@ -38,6 +38,11 @@ impl Engine {
         archetype: Option<&Path>,
     ) -> Result<Self> {
         settings.validate()?;
+        if scene.lod.is_some() && !matches!(kind, Implementation::Ours) {
+            return Err(
+                crate::Unsupported("Streamed SOG sets in this reference renderer".into()).into(),
+            );
+        }
         if scene.hexels.is_some() && !matches!(kind, Implementation::Ours) {
             return Err(crate::Unsupported("hexel PLYs in this reference renderer".into()).into());
         }
@@ -66,6 +71,13 @@ impl Engine {
                 )
                 .await?,
             ))),
+        }
+    }
+    /// The standalone renderer of `Ours`.
+    pub fn standalone(&self) -> Option<&crate::StandaloneRenderer> {
+        match self {
+            Self::Ours(r) => Some(r),
+            _ => None,
         }
     }
     pub fn output_format(&self) -> &'static str {
@@ -103,6 +115,7 @@ impl Engine {
                     visible: Some(stats.visible),
                     intersections: Some(stats.intersections),
                     overflow_events: Some(stats.overflow_events),
+                    selected_rows: r.lod_stats().map(|(s, _)| s.rows),
                 })
             }
             Self::Native(r) => r.render(camera, parity),
@@ -166,6 +179,9 @@ pub struct Counts {
     pub intersections: Option<u32>,
     #[serde(default)]
     pub overflow_events: Option<u32>,
+    /// Rows the level-of-detail selection gave the forward pass (`--lod` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_rows: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,6 +217,20 @@ pub async fn ours(
         background,
         ..settings.options(scene.mode)
     };
+    if let Some(source) = &scene.lod {
+        anyhow::ensure!(
+            archetype.is_none() && settings.min_scale.is_none(),
+            "Streamed SOG sets have no archetype or scale floor"
+        );
+        let capacity = settings.initial_capacity;
+        return crate::StandaloneRenderer::new(
+            crate::Primitives::Lod(source),
+            options,
+            size,
+            capacity,
+        )
+        .await;
+    }
     if let Some(hexels) = &scene.hexels {
         anyhow::ensure!(
             archetype.is_none() && settings.min_scale.is_none(),
