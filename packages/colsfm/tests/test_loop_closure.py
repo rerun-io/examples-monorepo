@@ -373,6 +373,13 @@ def make_match_function(scene: SquareRigScene, outlier_ratio: float = 0.25, seed
 SEEDED_SERIAL_CONFIG: LoopClosureConfig = LoopClosureConfig(num_threads=1, rig_pose=replace(DEFAULT_RIG_POSE_CONFIG, ransac_random_seed=0))
 """One thread and a pinned RANSAC seed: two searches over the same input must return the same edges."""
 
+SEEDED_CONFIG: LoopClosureConfig = LoopClosureConfig(rig_pose=replace(DEFAULT_RIG_POSE_CONFIG, ransac_random_seed=0))
+"""The default settings with a pinned RANSAC seed, at the default thread count.
+
+Unseeded (`ransac_random_seed=-1`), each generalized estimator draws a fresh seed per call, so a rig
+pair near the inlier or direction gate falls either way between two searches of the same input and
+their diagnostics (sometimes their edges) differ."""
+
 
 @pytest.fixture(scope="module")
 def scene(tmp_path_factory: pytest.TempPathFactory) -> SquareRigScene:
@@ -388,8 +395,8 @@ def match_fn(scene: SquareRigScene) -> MatchFunction:
 
 @pytest.fixture(scope="module")
 def loop_result(scene: SquareRigScene, match_fn: MatchFunction) -> LoopClosureResult:
-    """The loop-closure run over the synthetic scene, with the stage switched on."""
-    return find_loop_edges(scene.frames_meta, scene.database_path, scene.index, LoopClosureConfig(), match_fn)
+    """The loop-closure run over the synthetic scene, with the stage switched on and the RANSAC seed pinned."""
+    return find_loop_edges(scene.frames_meta, scene.database_path, scene.index, SEEDED_CONFIG, match_fn)
 
 
 # --------------------------------------------------------------------------------------
@@ -458,9 +465,12 @@ def test_the_plan_keeps_the_shortlisted_rig_pairs_and_the_retrieval_diagnostics(
 def test_planning_then_verifying_gives_the_same_edges_as_one_call(
     scene: SquareRigScene, match_fn: MatchFunction, loop_result: LoopClosureResult
 ) -> None:
-    """The two-step form is the one-step form; `find_loop_edges` is now their composition."""
-    config: LoopClosureConfig = LoopClosureConfig()
-    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, config)
+    """The two-step form is the one-step form; `find_loop_edges` is now their composition.
+
+    Both sides pin the RANSAC seed (`SEEDED_CONFIG`): unseeded, two searches of the same input differ
+    in their counters 13 runs in 20, so this comparison would test the sampler, not the composition.
+    """
+    plan: LoopSearchPlan = plan_loop_search(scene.frames_meta, scene.database_path, scene.index, SEEDED_CONFIG)
     stepwise: LoopClosureResult = verify_loop_plan(plan, match_fn)
     assert [(edge.source, edge.target) for edge in stepwise.edges] == [(edge.source, edge.target) for edge in loop_result.edges]
     assert stepwise.diagnostics == loop_result.diagnostics
