@@ -117,7 +117,7 @@ def read_video_stream(store: rrc.LazyStore, entity: str) -> CatalogVideo:
     about twice the samples in memory (6.4 GB against 2.7 GB for a two-lens 1920 px base of 17 minutes).
 
     Raises:
-        ValueError: If the entity holds no samples or no codec.
+        ValueError: If the entity holds no samples or no codec, or two samples share a stamp.
     """
     codec: CatalogCodecName | None = None
     times: list[Int64[ndarray, " c"]] = []
@@ -143,6 +143,8 @@ def read_video_stream(store: rrc.LazyStore, entity: str) -> CatalogVideo:
     all_times: Int64[ndarray, " n"] = np.concatenate(times)
     order: Int64[ndarray, " n"] = np.argsort(all_times, kind="stable")
     times_ns: Int64[ndarray, " n"] = all_times[order]
+    if np.any(np.diff(times_ns) <= 0):
+        raise ValueError(f"{entity}: expected samples with strictly increasing stamps")
     keyframes: Bool[ndarray, " n"] = np.isin(times_ns, np.concatenate(keyframe_times)) if keyframe_times else np.zeros(times_ns.size, dtype=np.bool_)
     return CatalogVideo(times=times_ns, samples=[samples[k] for k in order.tolist()], keyframes=keyframes.tolist(), codec=codec)
 

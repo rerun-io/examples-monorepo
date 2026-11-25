@@ -103,7 +103,8 @@ def read_base_lens_videos(base: Path) -> BaseLensVideos:
     """Both lens videos of a base recording (``cam_00``, ``cam_01``), as ``CatalogVideo`` packet views (``read_video_stream``).
 
     Raises:
-        ValueError: If a lens video does not start on a keyframe, or the two differ in stamps or codec.
+        ValueError: If a lens video has two samples on one stamp or does not start on a keyframe, or the two differ in
+            stamps or codec.
     """
     store: rrc.LazyStore = rrc.RrdReader(base).store()
     videos: tuple[CatalogVideo, CatalogVideo] = (read_video_stream(store, schema.video_path(RIG, 0)), read_video_stream(store, schema.video_path(RIG, 1)))

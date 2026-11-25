@@ -92,7 +92,7 @@ def test_the_base_serves_each_lens_s_samples_gops_and_stamps(tmp_path: Path) -> 
     np.testing.assert_array_equal(irap, [False, True])
 
 
-def test_lens_videos_on_different_stamps_or_without_a_first_keyframe_are_refused(tmp_path: Path) -> None:
+def test_lens_videos_on_different_or_shared_stamps_or_without_a_first_keyframe_are_refused(tmp_path: Path) -> None:
     from dataforge.datasets.insta360_lens_video import read_base_lens_videos
 
     shifted = write_lens_videos(tmp_path / "shifted.rrd", [[0, 33], [0, 34]], [[True, False]] * 2)
@@ -101,3 +101,6 @@ def test_lens_videos_on_different_stamps_or_without_a_first_keyframe_are_refused
     late = write_lens_videos(tmp_path / "late.rrd", [[0, 33]] * 2, [[False, True]] * 2)
     with pytest.raises(ValueError, match="keyframe"):
         read_base_lens_videos(late)
+    shared = write_lens_videos(tmp_path / "shared.rrd", [[0, 33, 33]] * 2, [[True, False, False]] * 2)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        read_base_lens_videos(shared)
