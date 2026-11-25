@@ -293,3 +293,24 @@ def test_the_insta360_colsfm_views_draw_the_viewing_rig_only_when_a_colsfm_layer
     assert dropped_rigs(entry) == {"rig_view"}, "the layer has no rig_view, so its rig stays"
     entry.register([colsfm_layer("colsfm_view", ("rig", "rig_view"))], layer_name="colsfm_view").wait()
     assert dropped_rigs(entry) == {"rig"}, "a layer with rig_view: the views draw it"
+
+
+def test_the_insta360_face_panes_play_the_viewing_faces_only_when_every_segment_holds_them(server: Server, layer: Callable[[str, str], str]) -> None:
+    """One layout serves every segment of a dataset. A segment without the ``cube_view`` layer has no ``video_view``, so
+    its face panes would be empty; the analysis faces (``video``) play in every segment."""
+    from dataforge.datasets.insta360 import CUBE_VIEW_LAYER, Insta360Config, Insta360Dataset
+    from dataforge.datasets.insta360_blueprint import FACE_CAMS, RIG
+
+    dataset = Insta360Dataset(Insta360Config())
+
+    def face_videos(entry: DatasetEntry) -> set[str]:
+        rules: set[str] = {rule for view in blueprint_views(dataset.catalog_blueprints(entry)[0]) for rule in content_rules(view)}
+        return rules & {video(RIG, cam) for cam in FACE_CAMS for video in (schema.video_path, schema.video_view_path)}
+
+    entry: DatasetEntry = server.client().create_dataset("insta360-mixed-faces-test")
+    entry.register([layer("base", FOUR), layer("base", THREE)], layer_name="base").wait()
+    entry.register([layer(CUBE_VIEW_LAYER, FOUR)], layer_name=CUBE_VIEW_LAYER).wait()
+    assert face_videos(entry) == {schema.video_path(RIG, cam) for cam in FACE_CAMS}, "one segment has no viewing faces"
+    entry.register([layer(CUBE_VIEW_LAYER, THREE)], layer_name=CUBE_VIEW_LAYER).wait()
+    assert face_videos(entry) == {schema.video_view_path(RIG, cam) for cam in FACE_CAMS}
+

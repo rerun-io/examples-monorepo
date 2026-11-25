@@ -623,11 +623,12 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
 
     def catalog_blueprints(self, entry: DatasetEntry) -> tuple[rrb.Blueprint, rrb.Blueprint]:
         """The segment layout shows the panorama tab when any registered segment holds the panorama layer, plays the
-        viewing faces when any holds the cube_view layer, draws colsfm's viewing rig when a colsfm layer holds it
-        (``insta360_blueprint.colsfm_view_rig``), and its overviews frame the walk when the dataset holds one walked
-        segment (``insta360_blueprint.segment_walk``)."""
+        viewing faces when every segment holds the cube_view layer (one layout serves the dataset: a segment without
+        them would get empty face panes, while the analysis faces play in every segment), draws colsfm's viewing rig
+        when a colsfm layer holds it (``insta360_blueprint.colsfm_view_rig``), and its overviews frame the walk when
+        the dataset holds one walked segment (``insta360_blueprint.segment_walk``)."""
         layer_names: list[list[str]] = entry.segment_table().to_arrow_table()["rerun_layer_names"].to_pylist()
-        view_faces: bool = any(CUBE_VIEW_LAYER in names for names in layer_names)
+        view_faces: bool = bool(layer_names) and all(CUBE_VIEW_LAYER in names for names in layer_names)
         layout: rrb.Blueprint = segment_layout(
             panorama=any(PANORAMA_LAYER in names for names in layer_names),
             view_faces=view_faces,
