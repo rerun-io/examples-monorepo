@@ -245,6 +245,24 @@ def project_kannala_brandt_diagonal(
     return uv_filtered
 
 
+def kb_fold_angle(radial: Sequence[float], cap_rad: float) -> float:
+    """The widest angle off the optical axis, at most ``cap_rad``, up to which a Kannala-Brandt lens stays monotonic.
+
+    ``theta_d = theta (1 + k1 theta^2 + k2 theta^4 + ...)`` folds at the first root of its derivative,
+    ``1 + 3 k1 x + 5 k2 x^2 + ...`` with ``x = theta^2``: past it two rays share a pixel.
+
+    Args:
+        radial: The radial coefficients ``k1, k2, ...``, any number of them.
+        cap_rad: The angle to return when the polynomial does not fold before it, in radians.
+
+    Returns:
+        The smaller of the first fold and ``cap_rad``, in radians.
+    """
+    roots: Complex128[ndarray, "r"] = np.polynomial.polynomial.polyroots([1.0, *((2 * i + 1) * k for i, k in enumerate(radial, 1))]).astype(np.complex128)
+    folds: list[float] = [float(np.sqrt(root.real)) for root in roots if abs(root.imag) < 1e-10 and 0 < root.real < cap_rad**2]
+    return min(folds, default=cap_rad)
+
+
 def project_fisheye62(xyz_cam: Float64[ndarray, "n 3"], camera: Fisheye62Parameters) -> Float64[ndarray, "n 2"]:
     """Project Float64[n,3] camera metres to Float64[n,2] pixels, bounded by the lens's monotonic field of view.
 
@@ -259,13 +277,7 @@ def project_fisheye62(xyz_cam: Float64[ndarray, "n 3"], camera: Fisheye62Paramet
     lens: KannalaBrandtDistortion | None = camera.distortion
     if lens is None:
         raise ValueError(f"{camera.name}: project_fisheye62 needs a KannalaBrandt distortion")
-    radial: tuple[float, ...] = (lens.k1, lens.k2, lens.k3, lens.k4, lens.k5, lens.k6)
-    # The derivative is a degree-six polynomial in theta squared.
-    roots: Complex128[ndarray, "r"] = np.polynomial.polynomial.polyroots(
-        [1.0, *((2 * i + 1) * k for i, k in enumerate(radial, 1))]
-    ).astype(np.complex128)
-    bounds: list[float] = [float(np.sqrt(root.real)) for root in roots if abs(root.imag) < 1e-10 and 0 < root.real <= (np.pi / 2) ** 2]
-    theta_max: float = min(bounds, default=float(np.pi / 2))
+    theta_max: float = kb_fold_angle((lens.k1, lens.k2, lens.k3, lens.k4, lens.k5, lens.k6), float(np.pi / 2))
     radius: Float64[ndarray, "n"] = np.hypot(xyz_cam[:, 0], xyz_cam[:, 1])
     theta: Float64[ndarray, "n"] = np.arctan2(radius, xyz_cam[:, 2])
     valid: Bool[ndarray, "n"] = np.isfinite(xyz_cam).all(axis=1) & (xyz_cam[:, 2] > 0) & (theta < theta_max)

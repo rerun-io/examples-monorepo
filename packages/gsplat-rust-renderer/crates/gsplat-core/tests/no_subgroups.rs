@@ -108,7 +108,7 @@ fn max_difference(a: &[[f32; 4]], b: &[[f32; 4]]) -> (usize, f32) {
 #[test]
 #[ignore = "integration: GPU"]
 fn portable_scan_and_sort_render_the_subgroup_pixels() {
-    let splats = cloud(200_000);
+    let splats = cloud(230_000);
     let (with, intersections) = render(true, &splats);
     let (again, _) = render(true, &splats);
     let (without, portable_intersections) = render(false, &splats);

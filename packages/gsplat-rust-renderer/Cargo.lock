@@ -6217,6 +6217,7 @@ dependencies = [
  "re_log_msg",
  "re_math",
  "re_tracing 0.42.0",
+ "re_video 0.42.0",
  "re_viewer",
  "tokio",
  "web-time",

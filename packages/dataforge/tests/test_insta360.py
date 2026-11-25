@@ -131,10 +131,15 @@ def test_the_clip_converts_into_mei_cameras_on_the_imu_with_their_readout_and_ex
     assert clip.rolling_shutter_ms is not None
     frame_ns: Int64[ndarray, " n"] = video_times(converted.targets[paths.BASE_LAYER], schema.video_path(0, 0))
     assert frame_ns.size == FRAMES
+    from dataforge.datasets.insta360_lens_video import LENS_MAX_SIZE
+
+    width: int = insta360_io.InsvRig(str(converted.clip), 1).resolution[0]
+    halvings: int = insta360_io.lens_halvings(width, LENS_MAX_SIZE)
     for cam, lens in enumerate(clip.lenses_v6):
-        camera = lens.camera
+        camera = insta360_io.halved_camera(lens.camera, halvings)
         node: dict[str, object] = static_values(store, schema.cam_path(0, cam))
         assert (node["name"], node["camera_model"], node["stream_id"]) == (f"lens{cam}", "mei_v6", f"track{clip.lens_track[cam]}")
+        assert (node["video_codec"], node["stored_width"], node["source_width"]) == ("av1", width >> halvings, width)
         assert node["rolling_shutter_readout_s"] == pytest.approx(clip.rolling_shutter_ms * 1e-3)
         pinhole: dict[str, object] = static_values(store, schema.pinhole_path(0, cam))
         # exoego:v2 section 4: gamma rides in the coefficients, the Pinhole is the paraxial gamma / (1 + xi).
@@ -164,7 +169,7 @@ def test_the_cpu_lens_decoder_decodes_both_lenses_of_an_h264_body(insv_x3_clip: 
     """The X3 records H.264: the PyAV lens decoder (the cpu panorama and cube) follows the clip's codec."""
     import insta360_io
 
-    from dataforge.datasets.insta360 import rgb_frames
+    from dataforge.datasets.insta360_lens_video import rgb_frames
 
     rig = insta360_io.InsvRig(str(insv_x3_clip), 30)
     width, height = rig.resolution
@@ -174,17 +179,19 @@ def test_the_cpu_lens_decoder_decodes_both_lenses_of_an_h264_body(insv_x3_clip: 
 
 
 @pytest.mark.integration
-def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_clip: Path) -> None:
-    """The X3 (H.264, a GOP of 16, its lenses in two files) at stride 7 in batches of 5, so batches span several GOP segments."""
+@pytest.mark.parametrize("stride", [1, 7])
+def test_the_cube_lens_decoder_reads_an_h264_body_on_nvdec_as_pyav_does(insv_x3_clip: Path, stride: int) -> None:
+    """The X3 (H.264, a GOP of 16, its lenses in two files) in batches of 5: at stride 1 batches span decode runs (eight
+    GOPs each), at stride 7 several GOPs."""
     import insta360_io
     import torch
 
-    from dataforge.datasets.insta360 import lens_pictures
+    from dataforge.datasets.insta360_lens_video import lens_pictures
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
     rig = insta360_io.InsvRig(str(insv_x3_clip), 120)
-    indices: Int64[ndarray, " k"] = np.arange(0, 120, 7, dtype=np.int64)
+    indices: Int64[ndarray, " k"] = np.arange(0, 120, stride, dtype=np.int64)
     pairs = {device: list(lens_pictures(rig, indices, torch.device(device), batch=5, threads=4)) for device in ("cuda", "cpu")}
     for lens in range(2):
         cuda, cpu = (torch.cat([pair[lens] for pair in pairs[device]]).cpu().numpy().astype(np.int16) for device in ("cuda", "cpu"))
@@ -199,14 +206,18 @@ def test_the_lenses_sit_33_3_mm_apart_along_the_lens_axis_with_the_factory_focal
 
     store: rrc.ChunkStore = read_back(converted.targets[paths.BASE_LAYER])
     centres: list[Float64[ndarray, "3"]] = []
+    from dataforge.datasets.insta360 import cameras_from_recording
+
+    scale: float = 1920.0 / cameras_from_recording(converted.targets[paths.BASE_LAYER]).size[0]  # the factory focal at 1920
     for cam, focal in enumerate((1835.37, 1848.94)):
         transform: dict[str, object] = static_values(store, schema.cam_path(0, cam))
         cam_R_imu: Float64[ndarray, "3 3"] = np.asarray(transform["mat3x3"], dtype=np.float64).reshape(3, 3).T  # column-major
         centres.append(-cam_R_imu.T @ np.asarray(transform["translation"], dtype=np.float64))
         if cam == 0:
             assert cam_R_imu[2] @ np.array([0.0, -1.0, 0.0]) == pytest.approx(1.0, abs=1e-3)
-        image_from_camera: list[float] = static_values(store, schema.pinhole_path(0, cam))["image_from_camera"]  # pyrefly: ignore[bad-assignment]
-        assert image_from_camera[0] == pytest.approx(focal, abs=0.1)
+        # The factory focal is the Mei gamma, the first distortion coefficient (the Pinhole holds the paraxial gamma / (1 + xi)).
+        coefficients: list[float] = static_values(store, schema.pinhole_path(0, cam))["simplecv.components.DistortionCoefficients"]  # pyrefly: ignore[bad-assignment]
+        assert coefficients[0] * scale == pytest.approx(focal, abs=0.1)
     baseline: Float64[ndarray, "3"] = centres[1] - centres[0]
     assert np.linalg.norm(baseline) == pytest.approx(0.03329, abs=1e-4)
     assert baseline[1] > 0.99 * np.linalg.norm(baseline)
@@ -231,11 +242,11 @@ def test_the_panorama_layer_is_av1_on_the_base_frame_times(converted: Converted,
 
 @pytest.mark.golden
 def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: Converted, panorama_rrd: Path) -> None:
-    import insta360_io
     import torch
 
     from dataforge import paths
-    from dataforge.datasets.insta360 import PANO_ENTITY, cameras_from_recording, lens_pictures
+    from dataforge.datasets.insta360 import PANO_ENTITY, cameras_from_recording
+    from dataforge.datasets.insta360_lens_video import lens_pictures, read_base_lens_videos
     from dataforge.datasets.insta360_panorama import SEAM_BAND_DEG, PanoramaJoin, default_panorama_width, panorama_table
 
     # Only the first sample (a keyframe) is decoded: the whole layer at 3840x1920 RGB would hold about 2 GB.
@@ -250,12 +261,12 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
     decoder = av.CodecContext.create("libdav1d", "r")
     decoded: UInt8[ndarray, "h w 3"] = (decoder.decode(av.Packet(first)) + decoder.decode(None))[0].to_ndarray(format="rgb24")  # pyrefly: ignore[missing-attribute]
     assert decoded.shape == (1920, 3840, 3)
-    rig = insta360_io.InsvRig(str(converted.clip), 1)
+    source = read_base_lens_videos(converted.targets[paths.BASE_LAYER])  # the pixels the layer reads
     lenses = cameras_from_recording(converted.targets[paths.BASE_LAYER])
     table = panorama_table(lenses.cameras, lenses.lens1_from_lens0, lenses.size, default_panorama_width(lenses.size[0]), SEAM_BAND_DEG)
     join = PanoramaJoin(table, lenses.size, torch.device("cuda"))
     try:
-        lens0, lens1 = next(lens_pictures(rig, np.zeros(1, dtype=np.int64), torch.device("cuda"), batch=1, threads=1))
+        lens0, lens1 = next(lens_pictures(source, np.zeros(1, dtype=np.int64), torch.device("cuda"), batch=1, threads=1))
         expected: UInt8[ndarray, "h w 3"] = join.panoramas(lens0, lens1)[0].permute(1, 2, 0).cpu().numpy()
     finally:
         join.close()
@@ -263,6 +274,32 @@ def test_the_first_panorama_frame_is_the_flow_seam_join_within_36_db(converted: 
     psnr: float = 10.0 * np.log10(255.0**2 / mse)
     print(f"first panorama frame PSNR {psnr:.2f} dB")
     assert psnr > MIN_PSNR_DB
+
+
+@pytest.mark.integration
+def test_the_x5_base_stores_each_lens_as_1920_av1_of_that_lens(insv_x5_clip: Path, tmp_path: Path) -> None:
+    """The X5's 3840 lenses stored halved: each base video is its own lens box-filtered (within the AV1 band) and not
+    the other lens, whichever track holds it (lens 0 is the clip's second track)."""
+    import insta360_io
+    import torch
+
+    from dataforge import paths
+    from dataforge.datasets.insta360 import cameras_from_recording
+    from dataforge.datasets.insta360_lens_video import lens_pictures, read_base_lens_videos
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    base: Path = convert_layers(insv_x5_clip, tmp_path, panorama=False)[paths.BASE_LAYER]
+    assert cameras_from_recording(base).size == (1920, 1920)
+    rig = insta360_io.InsvRig(str(insv_x5_clip), 1)
+    first = np.zeros(1, dtype=np.int64)
+    cuda = torch.device("cuda")
+    clip = [torch.nn.functional.avg_pool2d(lens.float(), 2)[0] for lens in next(lens_pictures(rig, first, cuda, batch=1, threads=1))]
+    stored = [lens.float()[0] for lens in next(lens_pictures(read_base_lens_videos(base), first, cuda, batch=1, threads=1))]
+    psnr = [[float(10.0 * torch.log10(255.0**2 / torch.mean((stored[a] - clip[b]) ** 2))) for b in range(2)] for a in range(2)]
+    print(f"stored lens vs halved clip lens PSNR (rows: stored cam_00, cam_01): {psnr}")
+    for lens in range(2):
+        assert psnr[lens][lens] > 30.0 and psnr[lens][lens] > psnr[lens][1 - lens] + 6.0
 
 
 def decoded_rgb(rrd: Path, entity: str) -> UInt8[ndarray, "k h w 3"]:
@@ -299,6 +336,37 @@ def test_the_cube_layer_on_cuda_is_the_cpu_layer_within_the_nvenc_band(insv_clip
         assert cuda.shape == cpu.shape == (stamps.size, 800, 800, 3)
         mse: float = float(np.mean((cuda.astype(np.float64) - cpu.astype(np.float64)) ** 2))
         assert 10.0 * np.log10(255.0**2 / mse) > 40.0, f"cam_{cam:02d}"
+
+
+@pytest.mark.integration
+def test_the_cube_view_layer_holds_the_six_faces_on_every_base_stamp_beside_the_analysis_faces(insv_clip: Path, tmp_path: Path) -> None:
+    """``--cube --cube-view``: ``video`` on every ``stride``-th stamp, ``video_view`` on every stamp up to the last analysis
+    face, the same faces at the same size; with ``cube_max_framesets`` the viewing faces end at the last analysis face too."""
+    import torch
+
+    from dataforge import paths, schema
+    from dataforge.datasets.insta360 import CUBE_LAYER, CUBE_VIEW_LAYER, FACE_CAMS
+
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device")
+    for limit, root in ((None, tmp_path / "all"), (3, tmp_path / "pack")):
+        targets: dict[str, Path] = convert_layers(insv_clip, root, cube=True, cube_view=True, cube_max_framesets=limit)
+        stamps: Int64[ndarray, " n"] = video_times(targets[paths.BASE_LAYER], schema.video_path(0, 0))
+        cube: dict[str, object] = recording_properties(read_back(targets[CUBE_LAYER]), "cube")
+        stride, size = int(cube["stride"]), int(cube["face_size"])  # pyrefly: ignore[bad-argument-type]
+        analysis: Int64[ndarray, " k"] = stamps[::stride][:limit]
+        shown: Int64[ndarray, " m"] = stamps[stamps <= analysis[-1]]
+        assert recording_properties(read_back(targets[CUBE_VIEW_LAYER]), "cube_view")["stride"] == 1
+        for cam in FACE_CAMS:
+            np.testing.assert_array_equal(video_times(targets[CUBE_LAYER], schema.video_path(0, cam)), analysis)
+            np.testing.assert_array_equal(video_times(targets[CUBE_VIEW_LAYER], schema.video_view_path(0, cam)), shown)
+            if limit is not None:
+                continue
+            view: UInt8[ndarray, "n h w 3"] = decoded_rgb(targets[CUBE_VIEW_LAYER], schema.video_view_path(0, cam))
+            faces: UInt8[ndarray, "k h w 3"] = decoded_rgb(targets[CUBE_LAYER], schema.video_path(0, cam))
+            assert view.shape == (shown.size, size, size, 3)
+            mse: float = float(np.mean((view[::stride].astype(np.float64) - faces.astype(np.float64)) ** 2))
+            assert 10.0 * np.log10(255.0**2 / mse) > 30.0, f"cam_{cam:02d}"
 
 
 @pytest.mark.integration

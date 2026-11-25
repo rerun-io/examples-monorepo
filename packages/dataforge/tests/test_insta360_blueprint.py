@@ -8,16 +8,17 @@ import rerun.blueprint as rrb
 from conftest import content_rules  # pyrefly: ignore[missing-import]
 from jaxtyping import Float64
 from numpy import ndarray
+from simplecv.rerun_growing_points import GROWING_BLOCK_S
+from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, TRAJECTORY
 
 from dataforge import blueprints, schema, writing
 from dataforge.datasets.insta360_blueprint import (
-    COLSFM_COLOR,
-    FOLLOW_FLOOR_WINDOW_S,
-    FOLLOW_PATH_WINDOW_S,
-    OVERVIEW_PATH_WINDOW_S,
+    COMPARISON_SLAM_COLOR,
+    FACE_CAMS,
+    OVERVIEW_SPIN_RAD_S,
     PANO_ENTITY,
     RIG,
-    SLAM_COLOR,
+    TRAIL_S,
     segment_layout,
     walk_eye,
 )
@@ -40,16 +41,20 @@ def override(view: rrb.View, entity: str) -> list[object]:
     return list(found) if isinstance(found, list) else [found]
 
 
-def stroke_color(view: rrb.View, entity: str) -> tuple[int, ...]:
-    """The colour a view repaints a line entity in."""
+def ui_radii(items: list[object]) -> list[float]:
+    """The point radii among a view's defaults or an entity's overrides (negative: ui points)."""
+    return [radius for item in items if isinstance(item, rr.Points3D) and item.radii is not None for radius in item.radii.pa_array.to_pylist()]
+
+
+def stroke_color(view: rrb.View, entity: str) -> tuple[int, ...] | None:
+    """The colour a view repaints a line entity in; None when it keeps the entity's own (the walk gradient)."""
     strips: rr.LineStrips3D = next(item for item in override(view, entity) if isinstance(item, rr.LineStrips3D))
-    assert strips.colors is not None
-    return tuple(strips.colors.as_arrow_array().to_pylist())
+    return None if strips.colors is None else tuple(strips.colors.as_arrow_array().to_pylist())
 
 
-def packed(color: tuple[int, int, int]) -> tuple[int, ...]:
-    """A colour as the viewer packs it: one RGBA integer, opaque."""
-    return ((color[0] << 24) | (color[1] << 16) | (color[2] << 8) | 255,)
+def packed(color: tuple[int, ...]) -> tuple[int, ...]:
+    """A colour as the viewer packs it: one RGBA integer, opaque unless it names its alpha."""
+    return ((color[0] << 24) | (color[1] << 16) | (color[2] << 8) | (color[3] if len(color) == 4 else 255),)
 
 
 def test_the_tabs_are_slam_colsfm_and_comparison_and_the_panorama_only_with_its_layer() -> None:
@@ -95,52 +100,68 @@ def test_the_slam_tab_shows_both_lenses_with_keypoints_and_masks_over_a_short_im
 
 def test_the_colsfm_tab_shows_the_six_cube_faces_with_their_masks() -> None:
     faces: list[rrb.View] = [view for view in tabs(segment_layout(panorama=False))["colsfm"] if isinstance(view, rrb.Spatial2DView)]
-    assert [str(view.origin) for view in faces] == [schema.pinhole_path(RIG, cam) for cam in range(2, 8)]
+    assert [str(view.origin) for view in faces] == [schema.pinhole_path(RIG, cam) for cam in FACE_CAMS]
     assert [str(view.name) for view in faces] == ["Face front 0", "Face front 1", "Face left", "Face right", "Face up", "Face down"]
-    for cam, pane in zip(range(2, 8), faces, strict=True):
-        assert content_rules(pane) == [schema.video_path(RIG, cam), f"{schema.pinhole_path(RIG, cam)}/people_mask"]
+    for cam, pane in zip(FACE_CAMS, faces, strict=True):
+        assert content_rules(pane) == [schema.video_path(RIG, cam), schema.people_mask_path(RIG, cam)]
+        assert schema.people_mask_path(RIG, cam) not in (pane.visualizer_overrides or {}), "the analysis faces share the masks' stamps"
 
 
-def test_paths_and_the_colsfm_cloud_accumulate_through_cursor_windows() -> None:
+def test_on_the_viewing_faces_a_people_mask_shows_only_on_its_own_stamp() -> None:
+    """The masks are on the analysis stamps only: latest-at would hold one over the viewing frames up to the next."""
+    faces: list[rrb.View] = [view for view in tabs(segment_layout(panorama=False, view_faces=True))["colsfm"] if isinstance(view, rrb.Spatial2DView)]
+    for cam, pane in zip(FACE_CAMS, faces, strict=True):
+        assert content_rules(pane) == [schema.video_view_path(RIG, cam), schema.people_mask_path(RIG, cam)]
+        assert override(pane, schema.people_mask_path(RIG, cam)) == [blueprints.cursor_window(0.0)]
+
+
+def test_paths_are_trails_and_the_colsfm_cloud_accumulates_through_cursor_windows() -> None:
+    """A path's segments (``schema.trail_path``) show over the last ``TRAIL_S`` of the cursor in every view; its whole
+    path (``schema.trajectory_path``, logged once at the last frame) takes no window, so it shows from the end on only."""
     layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
-    slam_overview, slam_follow = layout["SLAM"][:2]
-    assert blueprints.cursor_window(OVERVIEW_PATH_WINDOW_S) in override(slam_overview, f"{VIO}/trajectory"), "a bounded window keeps a long walk fast"
-    assert blueprints.cursor_window(FOLLOW_PATH_WINDOW_S) in override(slam_follow, f"{VIO}/trajectory"), "the follow view draws the recent path only"
+    sources: dict[str, list[str]] = {
+        "SLAM": [schema.SLAM_RS_VIO_SOURCE, schema.SLAM_RS_SOURCE],
+        "colsfm": [schema.COLSFM_SOURCE],
+        "Comparison": [schema.SLAM_RS_SOURCE, schema.COLSFM_SOURCE],
+    }
+    for name, runs in sources.items():
+        for view in layout[name][:2]:
+            for run in runs:
+                assert blueprints.cursor_window(TRAIL_S) in override(view, schema.trail_path(run)), (name, run)
+                assert not any(isinstance(item, rrb.VisibleTimeRanges) for item in override(view, schema.trajectory_path(run))), (name, run)
     for view in layout["colsfm"][:2]:
-        assert blueprints.cursor_window(None) in override(view, f"{COLSFM}/points_growing"), "the cloud grows from the start of the walk"
+        # simplecv.rerun_growing_points.log_points_by_first_view: finished blocks by latest-at (no window, so the viewer keeps them
+        # processed through playback), the block the cursor is in from the recent rows.
+        # A layer written before the blocks has its rows on the parent: those keep growing since the start (exact paths
+        # only, so this does not reach the blocks).
+        assert blueprints.cursor_window(None) in override(view, f"{COLSFM}/points_growing"), "a layer without blocks still grows"
+        assert not any(str(entity).startswith(f"{COLSFM}/points_growing/blocks") for entity in view.visualizer_overrides or {}), "the blocks show as they are"
+        assert blueprints.cursor_window(GROWING_BLOCK_S) in override(view, f"{COLSFM}/points_growing/recent"), "the block the cursor is in"
+    for view, size in zip(layout["colsfm"][:2], (2.0, 1.5), strict=True):
+        # No override reaches the block entities (exact paths only): they log no radius and take the view's default.
+        assert ui_radii(view.defaults or []) == [-size], view.name
+        assert ui_radii(override(view, f"{COLSFM}/points_growing/recent")) == [-size], view.name
         assert f"- {COLSFM}/points/**" in content_rules(view), "the static copy would hide the growth"
     for view in layout["Comparison"][:2]:
         assert f"- {COLSFM}/points_growing/**" in content_rules(view), "the comparison shows both whole clouds"
 
 
-def test_the_follow_views_show_the_floor_around_the_cursor_and_the_overviews_all_of_it() -> None:
-    """slam-rs stamps each floor edge with the time the walk passed it. A follow view shows the floor of the seconds
-    around the cursor, so on a walk over several storeys it draws the floor under the rig and not the one above; an
-    overview shows every floor, whatever the cursor."""
-    around = rrb.VisibleTimeRanges(
-        rrb.VisibleTimeRange(
-            schema.TIMELINE,
-            start=rrb.TimeRangeBoundary.cursor_relative(seconds=-FOLLOW_FLOOR_WINDOW_S),
-            end=rrb.TimeRangeBoundary.cursor_relative(seconds=FOLLOW_FLOOR_WINDOW_S),
-        )
-    )
-    whole = rrb.VisibleTimeRanges(rrb.VisibleTimeRange(schema.TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.infinite()))
-    for name, views in tabs(segment_layout(panorama=False)).items():
+def test_no_view_draws_a_grid_and_the_overviews_turn_slowly_about_the_walk() -> None:
+    walk: Float64[ndarray, "n 3"] = np.column_stack([np.linspace(0.0, 10.0, 50), np.zeros(50), np.full(50, 1.5)])
+    for name, views in tabs(segment_layout(panorama=False, walk=walk)).items():
         overview, follow = views[:2]
-        floor_entity: str = schema.floor_path(FOLLOWED[name])
-        floor: list[object] = override(overview, floor_entity)
-        assert whole in floor, name
-        # Far off, a walk's floor edges merge into a haze (clip 007: 41,687 edges over six storeys): one faint colour.
-        strips: rr.LineStrips3D = next(item for item in floor if isinstance(item, rr.LineStrips3D))
-        assert strips.colors is not None
-        packed_rgba: int = strips.colors.as_arrow_array().to_pylist()[0]
-        assert max((packed_rgba >> 24) & 255, (packed_rgba >> 16) & 255, (packed_rgba >> 8) & 255) <= 40, name
-        assert override(follow, floor_entity) == [around], name
-        other: str = schema.floor_path(schema.SLAM_RS_SOURCE if FOLLOWED[name] == schema.SLAM_RS_VIO_SOURCE else schema.SLAM_RS_VIO_SOURCE)
         for view in (overview, follow):
-            rules: list[str] = content_rules(view)
-            dropped: bool = any(rule.startswith("- ") and rule.endswith("/**") and other.startswith(rule[2:-3]) for rule in rules)
-            assert dropped or "/world/**" not in rules, (name, "one floor per tab")
+            assert view.properties["LineGrid3D"] is not None, name
+            assert not any("floor" in str(entity) for entity in (view.visualizer_overrides or {})), name
+        eye: rrb.EyeControls3D = overview.properties["EyeControls3D"]
+        assert eye.spin_speed is not None and eye.spin_speed.as_arrow_array().to_pylist() == [OVERVIEW_SPIN_RAD_S], name
+        assert follow.properties["EyeControls3D"].spin_speed.as_arrow_array().to_pylist() == [0.0], name
+
+
+def test_the_marginalized_frames_are_hidden_in_every_slam_view() -> None:
+    """slam-rs logs the frames a marginalization removed (``marginalized/NN``); they stay in the views, hidden."""
+    for view in tabs(segment_layout(panorama=False))["SLAM"][:2]:
+        assert rrb.EntityBehavior(visible=False) in override(view, f"{VIO}/marginalized")
 
 
 def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> None:
@@ -151,7 +172,11 @@ def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> No
     slam_follow: rrb.View = layout["SLAM"][1]
     for entity in (f"{VIO}/rig/cam_00/pinhole", f"{VIO}/rig/cam_01/pinhole", f"{VIO}/window/00/cam_00/pinhole", f"{VIO}/window/08/cam_01/pinhole"):
         assert any(isinstance(item, rr.Pinhole) for item in override(slam_follow, entity)), entity
-    assert not any("pinhole/video" in rule for rule in content_rules(slam_follow)), "the SLAM follow view shows the lens pictures"
+    window: rr.Pinhole = next(item for item in override(slam_follow, f"{VIO}/window/03/cam_00/pinhole") if isinstance(item, rr.Pinhole))
+    assert window.color is None, "a window frame keeps the role colour slam-rs logs"
+    rules: list[str] = content_rules(slam_follow)
+    assert f"- {VIO}/window/03/cam_01/pinhole/video" in rules, "a window keyframe's pictures would decode two frames per slot and step"
+    assert not any(rule.startswith(f"- {VIO}/rig") for rule in rules), "the SLAM follow view shows the lens pictures"
     for view in layout["colsfm"][:2]:
         assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/rig/cube6_up/pinhole"))
         assert not any("pinhole/video" in rule for rule in content_rules(view)), "the colsfm views show the face pictures"
@@ -160,15 +185,17 @@ def test_the_run_frusta_are_restyled_where_their_layers_put_the_pinholes() -> No
             assert f"- {picture}/**" in content_rules(view), picture
 
 
-def test_each_source_keeps_one_colour_in_every_tab() -> None:
-    """slam-rs is orange and colsfm blue wherever a path of theirs is drawn; in Comparison their clouds take the tint too."""
+def test_paths_keep_their_gradient_and_comparison_tells_the_runs_apart() -> None:
+    """The raw slam-rs run and colsfm keep the walk gradient their layers log; in Comparison slam-rs is flat grey beside
+    colsfm's gradient, colsfm's frusta keep its colour and the two clouds take their sources' tints."""
     layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
     for view in layout["SLAM"][:2]:
-        assert stroke_color(view, f"{VIO}/trajectory") == packed(SLAM_COLOR)
-    assert stroke_color(layout["colsfm"][1], f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
+        assert stroke_color(view, schema.trail_path(schema.SLAM_RS_VIO_SOURCE)) is None, "the raw run carries its walk gradient"
+    assert stroke_color(layout["colsfm"][1], schema.trail_path(schema.COLSFM_SOURCE)) is None, "colsfm carries its walk gradient"
     for view in layout["Comparison"][:2]:
-        assert stroke_color(view, f"{SLAM}/path") == packed(SLAM_COLOR)
-        assert stroke_color(view, f"{COLSFM}/trajectory") == packed(COLSFM_COLOR)
+        assert stroke_color(view, schema.trail_path(schema.SLAM_RS_SOURCE)) == packed(COMPARISON_SLAM_COLOR), "one gradient per view"
+        assert stroke_color(view, schema.trail_path(schema.COLSFM_SOURCE)) is None
+        assert next(item for item in override(view, f"{COLSFM}/rig/cube6_up/pinhole") if isinstance(item, rr.Pinhole)).color is not None
         tints: dict[str, tuple[int, ...]] = {}
         for entity in (f"{SLAM}/map/points", f"{COLSFM}/points"):
             points: rr.Points3D = next(item for item in override(view, entity) if isinstance(item, rr.Points3D))
@@ -185,8 +212,6 @@ def test_colsfm_and_comparison_show_the_final_path_and_no_causal_vio() -> None:
             rules: list[str] = content_rules(view)
             assert f"- {VIO}/**" in rules or ("/world/**" not in rules and not any(rule.startswith(VIO) for rule in rules)), name
             assert f"- {schema.rig_path(RIG)}" in rules or schema.rig_path(RIG) not in rules, (name, "the base rig rides the VIO in a replay")
-    comparison: list[rrb.View] = tabs(segment_layout(panorama=False))["Comparison"]
-    assert stroke_color(comparison[0], f"{SLAM}/path") == packed(SLAM_COLOR)
     for name, views in tabs(segment_layout(panorama=False)).items():
         mark = override(views[0], schema.follow_path(FOLLOWED[name]))
         assert any(isinstance(item, rr.Points3D) for item in mark), name
@@ -224,6 +249,65 @@ def test_the_run_sources_name_the_entities_their_producers_write() -> None:
     assert schema.run_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs"
     # slam_rs.follow_frame (a slam-rs test pins its two names to these).
     assert schema.follow_path(schema.SLAM_RS_VIO_SOURCE) == "/world/runs/slam_rs_vio/follow"
-    assert schema.floor_path(schema.SLAM_RS_SOURCE) == "/world/runs/slam_rs/floor_grid"
     # colsfm.rerun_layer.write_run_layer (colsfm does not depend on dataforge).
     assert f"{COLSFM}/points_growing" == "/world/runs/colsfm/points_growing"
+
+
+def test_with_the_viewing_faces_the_colsfm_views_play_them_on_the_viewing_rig() -> None:
+    """With ``cube_view``: the face panes play ``video_view`` (every frame) and the colsfm and Comparison views draw
+    ``rig_view`` (a pose at every viewing frame) and drop ``rig``; without it they draw ``rig`` and drop ``rig_view``."""
+    for view_faces, drawn, dropped, video in ((True, "rig_view", "rig", schema.video_view_path), (False, "rig", "rig_view", schema.video_path)):
+        layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False, view_faces=view_faces))
+        faces: list[rrb.View] = [view for view in layout["colsfm"] if isinstance(view, rrb.Spatial2DView)]
+        assert [content_rules(pane)[0] for pane in faces] == [video(RIG, cam) for cam in FACE_CAMS]
+        for name in ("colsfm", "Comparison"):
+            for view in layout[name][:2]:
+                assert f"- {COLSFM}/{dropped}/**" in content_rules(view), (name, view_faces)
+                assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/{drawn}/cube6_front0/pinhole")), (name, view_faces)
+
+
+def test_a_colsfm_layer_without_the_viewing_rig_keeps_its_rig_beside_the_viewing_faces() -> None:
+    """``rig_view`` is the colsfm layer's own (``colsfm run`` with viewing faces writes it; ``align_to_prior`` and
+    ``--no-view-rig`` do not): without it the views keep ``rig``, and the face panes still play the viewing faces."""
+    layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False, view_faces=True, view_rig=False))
+    faces: list[rrb.View] = [view for view in layout["colsfm"] if isinstance(view, rrb.Spatial2DView)]
+    assert [content_rules(pane)[0] for pane in faces] == [schema.video_view_path(RIG, cam) for cam in FACE_CAMS]
+    for name in ("colsfm", "Comparison"):
+        for view in layout[name][:2]:
+            assert f"- {COLSFM}/rig_view/**" in content_rules(view), name
+            assert f"- {COLSFM}/rig/**" not in content_rules(view), name
+            assert any(isinstance(item, rr.Pinhole) for item in override(view, f"{COLSFM}/rig/cube6_front0/pinhole")), name
+
+WRITTEN: dict[str, set[str]] = {
+    schema.SLAM_RS_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "map", "keyframes", "loops", "gba", "pgo", "pose_graph"},
+    schema.SLAM_RS_VIO_SOURCE: {"rig", TRAIL, TRAJECTORY, ENDPOINTS, "follow", "landmarks", "window", "marginalized"},
+    schema.COLSFM_SOURCE: {"rig", "rig_view", "points", "points_growing", TRAIL, TRAJECTORY, ENDPOINTS, "position_difference"},
+}
+"""The first entity under each run that its writers produce (slam-rs ``vio_log``, ``catalog_layer``, ``map_loops``,
+``gba_log``; ``colsfm.rerun_layer``); the path leaves are :mod:`simplecv.rerun_walk_path`'s."""
+
+
+def test_every_run_override_targets_an_entity_a_writer_produces() -> None:
+    """An override on an entity no writer produces is inert, so a renamed or removed entity (a slam-rs ``path``, a
+    ``floor_grid``) would leave a view silently unstyled: each overridden run entity is one the writers produce."""
+    for name, views in tabs(segment_layout(panorama=True)).items():
+        for view in views:
+            for entity in view.visualizer_overrides or {}:
+                parts: list[str] = str(entity).removeprefix("/world/runs/").split("/")
+                if str(entity).startswith("/world/runs/"):
+                    assert parts[1] in WRITTEN[parts[0]], (name, view.name, str(entity))
+
+
+def test_every_run_trail_a_tab_shows_is_drawn_through_a_cursor_window() -> None:
+    """A trail is a segment a pose: without a cursor window a view draws only the latest one, and the whole path comes
+    only at the last frame, so a run would show no path through the walk."""
+    shown: dict[str, tuple[str, ...]] = {
+        "SLAM": (schema.SLAM_RS_VIO_SOURCE, schema.SLAM_RS_SOURCE),
+        "colsfm": (schema.COLSFM_SOURCE,),
+        "Comparison": (schema.SLAM_RS_SOURCE, schema.COLSFM_SOURCE),
+    }
+    layout: dict[str, list[rrb.View]] = tabs(segment_layout(panorama=False))
+    for name, sources in shown.items():
+        for view in layout[name][:2]:
+            for source in sources:
+                assert any(isinstance(item, rrb.VisibleTimeRanges) for item in override(view, schema.trail_path(source))), (name, view.name, source)

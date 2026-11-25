@@ -1,10 +1,12 @@
 #import <./raster_outputs.wgsl>
 
 // Front-to-back tile rasterizer (hand port of Brush rasterize 1388f74c) for any primitive. The importing
-// module defines `alias Primitive`, `const BATCH` (BATCH primitives fit the 10 KiB workgroup budget) and
-// `fn sample(p: Primitive, pix: vec2u, surface: bool) -> Sample`; alpha below the cutoff is a miss.
+// module defines `alias Primitive`, `const BATCH` (BATCH primitives fit the 10 KiB workgroup budget),
+// `fn sample(p: Primitive, pix: vec2u, surface: bool) -> Sample` (alpha below the cutoff is a miss),
+// `fn stage(t: u32, p: Primitive, tile: vec2u)`, called as p enters the batch at t, and
+// `fn reaches(t: u32, lid: u32) -> bool`, false only when batch[t] misses pixel lid for sure.
 struct Sample { alpha: f32, color: vec3f, depth: f32, normal: vec3f, }
-@group(0) @binding(1) var<storage, read> compact_from_isect: array<u32>;
+@group(0) @binding(1) var<storage, read> global_from_isect: array<u32>;
 @group(0) @binding(2) var<storage, read> offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> projected: array<Primitive>;
 @group(0) @binding(7) var<storage, read> counts: array<u32>;
@@ -14,11 +16,12 @@ var<workgroup> range_lo: u32;
 var<workgroup> range_hi: u32;
 var<workgroup> num_done: atomic<u32>;
 
-// Composite candidate t front to back; nothing once the pixel is done or past the batch, and alpha below the
-// cutoff is a miss.
-fn blend(start: u32, t: u32, remaining: u32, pix: vec2u, surface: bool, transmittance: ptr<function, f32>,
-    color: ptr<function, vec3f>, done: ptr<function, bool>, out: ptr<function, Raster>) {
-    if *done || t >= remaining {
+// Composite candidate t front to back; nothing once the pixel is done, past the batch or out of the candidate's
+// reach, and alpha below the cutoff is a miss.
+fn blend(start: u32, t: u32, remaining: u32, lid: u32, pix: vec2u, surface: bool,
+    transmittance: ptr<function, f32>, color: ptr<function, vec3f>, done: ptr<function, bool>,
+    out: ptr<function, Raster>) {
+    if *done || t >= remaining || !reaches(t, lid) {
         return;
     }
     let s = sample(batch[t], pix, surface);
@@ -45,7 +48,7 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
     var out: Raster;
     out.isect = NO_ID;
     if lid == 0u {
-        skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&compact_from_isect));
+        skip = select(0u, 1u, (counts[0] & 0x80000000u) != 0u || counts[1] > arrayLength(&global_from_isect));
     }
     if workgroupUniformLoad(&skip) != 0u {
         return out;
@@ -72,17 +75,19 @@ fn raster(tile: vec2u, lid: u32, surface: bool) -> Raster {
         }
         let remaining = min(BATCH, hi - start);
         if lid < remaining {
-            batch[lid] = projected[compact_from_isect[start + lid]];
+            let p = projected[global_from_isect[start + lid]];
+            batch[lid] = p;
+            stage(lid, p, tile);
         }
         workgroupBarrier();
         let was_done = done;
         // Four candidates per iteration: on Apple GPUs the loop overhead (naga's loop bound, the exit tests) is a
         // large share of a cheap candidate. The order and every early exit are those of one per iteration.
         for (var t = 0u; !done && t < remaining; t += 4u) {
-            blend(start, t, remaining, out.pix, surface, &transmittance, &color, &done, &out);
-            blend(start, t + 1u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
-            blend(start, t + 2u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
-            blend(start, t + 3u, remaining, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t, remaining, lid, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 1u, remaining, lid, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 2u, remaining, lid, out.pix, surface, &transmittance, &color, &done, &out);
+            blend(start, t + 3u, remaining, lid, out.pix, surface, &transmittance, &color, &done, &out);
         }
         if !was_done && done {
             atomicAdd(&num_done, 1u);

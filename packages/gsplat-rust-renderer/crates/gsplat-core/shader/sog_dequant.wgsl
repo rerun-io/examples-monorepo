@@ -21,6 +21,11 @@ struct SogParams {
     centroids: u32,
     // Threads per dispatch row (2D dispatch beyond 65535 workgroups).
     row_threads: u32,
+    // Scene row of this file's row 0 (Streamed SOG sets put several files in one scene).
+    first_row: u32,
+    // SH coefficients per channel beyond DC in the scene buffers (>= rest; the extra ones stay zero).
+    out_rest: u32,
+    padding: vec2u,
 }
 
 @group(0) @binding(0) var<uniform> params: SogParams;
@@ -80,7 +85,8 @@ fn sog_dequant(@builtin(global_invocation_id) gid: vec3u) {
     }
     let lo = planes[params.means_l + i];
     let hi = planes[params.means_u + i];
-    let t = i * 10u;
+    let row = params.first_row + i;
+    let t = row * 10u;
     for (var a = 0u; a < 3u; a++) {
         let code = channel(lo, a) | (channel(hi, a) << 8u);
         transforms[t + a] = tables[POSITIONS + a * 65536u + code];
@@ -108,9 +114,9 @@ fn sog_dequant(@builtin(global_invocation_id) gid: vec3u) {
         transforms[t + 7u + a] = tables[SCALES + channel(scale, a)];
     }
     let color = planes[params.sh0 + i];
-    raw_opacity[i] = tables[OPACITY + channel(color, 3u)];
-    let stride = (params.rest + 1u) * 3u;
-    let s = i * stride;
+    raw_opacity[row] = tables[OPACITY + channel(color, 3u)];
+    let stride = (params.out_rest + 1u) * 3u;
+    let s = row * stride;
     for (var c = 0u; c < 3u; c++) {
         sh[s + c] = tables[SH_DC + channel(color, c)];
     }

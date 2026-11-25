@@ -6,6 +6,6 @@ profile. ``PanoramaStitch`` turns the two lens images of a frameset into the vie
 """
 
 from insta360_io._insta360_io import ImuNoise, InsvClip, InsvLens, InsvRig, MeiCamera, PanoramaStitch
-from insta360_io.reader import InsvReader
+from insta360_io.reader import InsvReader, halved_camera, lens_halvings
 
-__all__ = ["ImuNoise", "InsvClip", "InsvLens", "InsvReader", "InsvRig", "MeiCamera", "PanoramaStitch"]
+__all__ = ["ImuNoise", "InsvClip", "InsvLens", "InsvReader", "InsvRig", "MeiCamera", "PanoramaStitch", "halved_camera", "lens_halvings"]

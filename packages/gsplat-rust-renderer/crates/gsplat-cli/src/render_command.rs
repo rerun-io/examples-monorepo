@@ -15,9 +15,19 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(about = "Render a Gaussian splat or hexel PLY with the shared raw-wgpu core")]
 pub(crate) struct Args {
-    /// Splat PLY, or hexel PLY (selected by its `comment hexels_format 1` header line).
-    #[arg(long)]
+    /// Splat PLY, or hexel PLY (selected by its `comment hexels_format 1` header line). Not with `--lod`.
+    #[arg(
+        long,
+        default_value = "",
+        hide_default_value = true,
+        conflicts_with = "lod"
+    )]
     ply: PathBuf,
+    #[command(flatten)]
+    lod: gsplat_cli::lod::LodArgs,
+    /// With `--lod`: write the set and the per-camera selection (rows, runs, rows per level) here as JSON.
+    #[arg(long)]
+    lod_stats: Option<PathBuf>,
     /// NeRF transforms JSON, Hexels `cameras.json`/`contract.json`, `CameraSpec` JSON array,
     /// or COLMAP sparse model directory. 2D hexel fits render their image without one.
     #[arg(long)]
@@ -288,13 +298,26 @@ fn save(image: &image::DynamicImage, path: &Path, png16: bool) -> Result<()> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct LodFrame {
+    #[serde(flatten)]
+    selection: gsplat_cli::lod::CameraSelection,
+    output: PathBuf,
+}
+
+#[derive(Serialize)]
+struct LodReport {
+    set: gsplat_cli::lod::SetReport,
+    frames: Vec<LodFrame>,
+}
+
 pub(crate) async fn run(args: Args) -> Result<()> {
     let resize = args.width.zip(args.height);
     ensure!(
         resize.is_none_or(|(w, h)| w > 0 && h > 0),
         "image dimensions must be positive"
     );
-    let scene = PlyScene::load(&args.ply).await?;
+    let scene = PlyScene::load_any(&args.ply, &args.lod).await?;
     let frames = match (&args.camera, scene.image_size) {
         (Some(camera), None) => load_frames(camera, resize).await?,
         (None, Some(size)) if resize.is_none() => vec![image_frame(&args.ply, size)],
@@ -350,13 +373,25 @@ pub(crate) async fn run(args: Args) -> Result<()> {
         })
         .transpose()?;
     let surface_name = args.surface_name();
+    let mut selections = Vec::new();
     for (done, (index, frame, path)) in selected.iter().enumerate() {
         let output = if recording.is_some() {
             Output::Surface
         } else {
             Output::Float
         };
-        renderer.render(&frame.camera, output)?;
+        let stats = renderer.render(&frame.camera, output)?;
+        if scene.lod.is_some() {
+            selections.push(LodFrame {
+                selection: gsplat_cli::lod::CameraSelection::new(
+                    *index,
+                    &renderer,
+                    stats.visible,
+                    stats.intersections,
+                )?,
+                output: path.clone(),
+            });
+        }
         let image = gsplat_cli::parity_image(renderer.read_rgba()?, size.x, size.y)?;
         save(&image, path, args.png16)?;
         if let Some(recording) = &recording {
@@ -368,6 +403,15 @@ pub(crate) async fn run(args: Args) -> Result<()> {
     }
     if let Some(recording) = recording {
         recording.flush_blocking()?;
+    }
+    if let (Some(path), Some(source)) = (&args.lod_stats, &scene.lod) {
+        crate::write_json(
+            path,
+            &LodReport {
+                set: gsplat_cli::lod::SetReport::new(source, &args.lod, &renderer)?,
+                frames: selections,
+            },
+        )?;
     }
     if let Some(path) = &args.fps {
         let timed: Vec<&CameraFrame> = selected.iter().map(|(_, frame, _)| *frame).collect();

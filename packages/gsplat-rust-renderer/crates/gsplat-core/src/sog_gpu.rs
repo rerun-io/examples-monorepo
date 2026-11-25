@@ -17,17 +17,68 @@ const WG: u32 = 256;
 /// Codebooks (3 x 256) + opacity logits (256) + positions (3 x 65536).
 const TABLE_LEN: usize = 1024 + 3 * 65536;
 
-/// The f32 lookup tables of `sog_dequant.wgsl`.
+/// The f32 lookup tables of `sog_dequant.wgsl` (opacity as logits).
+#[cfg(test)]
 pub(crate) fn tables(q: &Quantization) -> Vec<f32> {
+    tables_with(q, false)
+}
+
+/// Linear opacity of an sh0 alpha byte without the clamp to 1: v3 `(a / 204)^2` reaches 1.5625.
+pub(crate) fn linear_opacity(version: Version, byte: u8) -> f32 {
+    match version {
+        Version::V2 => f32::from(byte) / 255.0,
+        Version::V3 => (f64::from(byte) / 204.0).powi(2) as f32,
+    }
+}
+
+/// The tables with the opacity entries as raw logits (clamped to 1) or as linear opacity (`linear`).
+pub(crate) fn tables_with(q: &Quantization, linear: bool) -> Vec<f32> {
     let mut out = Vec::with_capacity(TABLE_LEN);
     out.extend_from_slice(&q.scales);
     out.extend_from_slice(&q.sh0);
     out.extend_from_slice(&q.sh_rest);
-    out.extend((0..=255u8).map(|a| logit(opacity(q.version, a))));
+    if linear {
+        out.extend((0..=255u8).map(|a| linear_opacity(q.version, a)));
+    } else {
+        out.extend((0..=255u8).map(|a| logit(opacity(q.version, a))));
+    }
     for axis in 0..3 {
         out.extend((0..=u16::MAX).map(|code| position(q, axis, code)));
     }
     out
+}
+
+/// The scene buffers one or more de-quantisation passes write.
+pub(crate) struct Outputs {
+    pub transforms: wgpu::Buffer,
+    pub opacity: wgpu::Buffer,
+    pub sh: wgpu::Buffer,
+    /// SH coefficients per channel beyond DC of the scene (a file with fewer leaves the rest zero).
+    pub rest: usize,
+    /// Write linear opacity (unclamped) instead of logits.
+    pub linear_opacity: bool,
+}
+
+impl Outputs {
+    /// Zeroed buffers for `n` rows with `rest` AC coefficients per channel.
+    pub fn new(device: &wgpu::Device, n: usize, rest: usize, limit: u64) -> Result<Self, Error> {
+        let checked = |label: &str, bytes: u64| {
+            if bytes > limit {
+                return Err(Error::Capacity {
+                    required: bytes,
+                    limit,
+                });
+            }
+            Ok(storage(device, label, bytes))
+        };
+        Ok(Self {
+            transforms: checked("raw transforms", n as u64 * 40)?,
+            opacity: checked("raw opacity", n as u64 * 4)?,
+            sh: checked("SH RGB coefficients", (n * (rest + 1) * 12) as u64)?,
+            rest,
+            linear_opacity: false,
+        })
+    }
 }
 
 /// Upload the planes, run the de-quantisation pass (submitted on `queue`) and return the scene it fills.
@@ -39,12 +90,61 @@ pub(crate) fn upload_sog(
     planes: &Planes<'_>,
     limit: u64,
 ) -> Result<Scene, Error> {
+    let rest = planes.sh.map_or(0, |s| rest_coefficients(s.bands));
+    let out = Outputs::new(device, q.count, rest, limit)?;
+    dequantize_into(device, queue, kernel, q, planes, limit, &out, 0)?;
+    Ok(scene(device, out, u32::try_from(q.count)?))
+}
+
+/// The scene of filled buffers (no scale floor).
+pub(crate) fn scene(device: &wgpu::Device, out: Outputs, n: u32) -> Scene {
+    let degree = (1..=4)
+        .find(|&b| rest_coefficients(b) == out.rest)
+        .unwrap_or(0);
+    Scene {
+        inputs: Inputs::Splats {
+            transforms: out.transforms,
+            opacity: out.opacity,
+            sh: out.sh,
+            min_scale: upload(
+                device,
+                "3D scale floor",
+                bytemuck::bytes_of(&0.0f32),
+                wgpu::BufferUsages::STORAGE,
+            ),
+            has_min_scale: false,
+            linear_opacity: out.linear_opacity,
+            degree,
+            motion: None,
+        },
+        n,
+    }
+}
+
+/// One de-quantisation pass (submitted on `queue`) writing the file's rows at `first_row` of `out`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one pass per file of a set; the caller owns every input"
+)]
+pub(crate) fn dequantize_into(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    kernel: &Kernel,
+    q: &Quantization,
+    planes: &Planes<'_>,
+    limit: u64,
+    out: &Outputs,
+    first_row: u32,
+) -> Result<(), Error> {
     let palette_count = check_planes(q, planes)?;
     let n = q.count;
     let count = u32::try_from(n)?;
-    let (bands, rest) = planes
-        .sh
-        .map_or((0, 0), |s| (s.bands, rest_coefficients(s.bands)));
+    let rest = planes.sh.map_or(0, |s| rest_coefficients(s.bands));
+    if rest > out.rest || (u64::from(first_row) + n as u64) * 40 > out.transforms.size() {
+        return Err(Error::Input(
+            "SOG file does not fit the scene buffers (rows or SH bands)",
+        ));
+    }
     let (labels, centroids) = planes.sh.map_or((&[][..], &[][..]), |s| {
         (&s.labels[..4 * n], &s.centroids[..4 * palette_count * rest])
     });
@@ -82,24 +182,16 @@ pub(crate) fn upload_sog(
         offsets[5],
         offsets[6],
         x * WG,
+        first_row,
+        out.rest as u32,
+        0,
+        0,
     ];
-    let checked = |label: &str, bytes: u64| {
-        if bytes > limit {
-            return Err(Error::Capacity {
-                required: bytes,
-                limit,
-            });
-        }
-        Ok(storage(device, label, bytes))
-    };
-    let transforms = checked("raw transforms", n as u64 * 40)?;
-    let opacity = checked("raw opacity", n as u64 * 4)?;
-    let sh = checked("SH RGB coefficients", (n * (rest + 1) * 12) as u64)?;
     let planes_buffer = crate::scene::upload(device, "SOG texel planes", &words, limit)?;
     let table_buffer = upload(
         device,
         "SOG tables",
-        bytemuck::cast_slice(&tables(q)),
+        bytemuck::cast_slice(&tables_with(q, out.linear_opacity)),
         wgpu::BufferUsages::STORAGE,
     );
     let params = uniform(device, &params);
@@ -110,9 +202,9 @@ pub(crate) fn upload_sog(
             (0, params.as_entire_binding()),
             (1, planes_buffer.as_entire_binding()),
             (2, table_buffer.as_entire_binding()),
-            (3, transforms.as_entire_binding()),
-            (4, opacity.as_entire_binding()),
-            (5, sh.as_entire_binding()),
+            (3, out.transforms.as_entire_binding()),
+            (4, out.opacity.as_entire_binding()),
+            (5, out.sh.as_entire_binding()),
         ],
     );
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -128,23 +220,7 @@ pub(crate) fn upload_sog(
         pass.dispatch_workgroups(x, y, 1);
     }
     queue.submit([encoder.finish()]);
-    Ok(Scene {
-        inputs: Inputs::Splats {
-            transforms,
-            opacity,
-            sh,
-            min_scale: upload(
-                device,
-                "3D scale floor",
-                bytemuck::bytes_of(&0.0f32),
-                wgpu::BufferUsages::STORAGE,
-            ),
-            has_min_scale: false,
-            degree: bands,
-            motion: None,
-        },
-        n: count,
-    })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -271,6 +347,185 @@ mod tests {
             assert_eq!(logits, 0.0, "{version:?} logits");
             assert_eq!(sh, 0.0, "{version:?} SH");
             assert!(quats <= 1e-5, "{version:?} quaternions {quats}");
+        }
+    }
+
+    /// One v3 SOG file as stored: meta.json and its lossless WebP planes (one row of `count` texels each).
+    struct StoredSog {
+        meta_json: String,
+        planes: [Vec<u8>; 5],
+        sh: Option<[Vec<u8>; 2]>,
+    }
+
+    impl StoredSog {
+        /// `count` splats from `seed`; with `bands`, a 64-entry SH palette (every label inside it).
+        fn new(count: usize, bands: Option<u32>, seed: u32) -> Self {
+            let webp = |data: &[u8], width: usize| {
+                let mut out = Vec::new();
+                image_webp::WebPEncoder::new(&mut out)
+                    .encode(data, width as u32, 1, image_webp::ColorType::Rgba8)
+                    .unwrap();
+                out
+            };
+            let cb = (0..256)
+                .map(|i| (-2.0 + f64::from(i) / 64.0).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sh_meta = bands.map_or(String::new(), |b| {
+                format!(r#","shN":{{"count":64,"bands":{b},"codebook":[{cb}],"files":["c.webp","l.webp"]}}"#)
+            });
+            let meta_json = format!(
+                r#"{{"version":3,"count":{count},"means":{{"mins":[-1,-1,-1],"maxs":[1,1,1],"files":["l.webp","u.webp"]}},
+                "scales":{{"codebook":[{cb}],"files":["s.webp"]}},"quats":{{"files":["q.webp"]}},
+                "sh0":{{"codebook":[{cb}],"files":["sh0.webp"]}}{sh_meta}}}"#
+            );
+            let planes = std::array::from_fn(|k| webp(&bytes(4 * count, seed + k as u32), count));
+            let sh = bands.map(|b| {
+                let width = 64 * rest_coefficients(b);
+                let mut labels = bytes(4 * count, seed + 9);
+                for t in labels.as_chunks_mut::<4>().0 {
+                    t[0] %= 64;
+                    t[1] = 0;
+                    t[2] = 0;
+                }
+                [
+                    webp(&bytes(4 * width, seed + 8), width),
+                    webp(&labels, count),
+                ]
+            });
+            Self {
+                meta_json,
+                planes,
+                sh,
+            }
+        }
+
+        fn lod_file(&self) -> crate::lod::LodFile<'_> {
+            let [means_l, means_u, quats, scales, sh0] = &self.planes;
+            crate::lod::LodFile {
+                meta_json: &self.meta_json,
+                webp: crate::sog::SogWebp {
+                    means_l,
+                    means_u,
+                    quats,
+                    scales,
+                    sh0,
+                    sh_centroids: self.sh.as_ref().map(|s| &s[0][..]),
+                    sh_labels: self.sh.as_ref().map(|s| &s[1][..]),
+                },
+            }
+        }
+    }
+
+    /// The scene's transforms, raw opacities and SH (coefficients per row = the scene's degree).
+    fn read_scene(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, usize) {
+        let Inputs::Splats {
+            transforms,
+            opacity,
+            sh,
+            degree,
+            ..
+        } = &scene.inputs
+        else {
+            panic!("splat scene expected");
+        };
+        let n = scene.n as usize;
+        let coefficients = (*degree as usize + 1).pow(2);
+        (
+            read(device, queue, transforms, n * 10),
+            read(device, queue, opacity, n),
+            read(device, queue, sh, n * coefficients * 3),
+            coefficients,
+        )
+    }
+
+    #[test]
+    #[ignore = "integration: GPU"]
+    fn lod_upload_places_each_file_at_its_row_offset_and_zeroes_missing_sh() {
+        let (device, queue) = gpu();
+        let kernels = crate::kernels::Kernels::new(&device);
+        // Level 0: file A, 5 splats with SH 3; level 1: file B, 3 splats without SH. Two leaves split each file.
+        let (n_a, n_b) = (5, 3);
+        let files = [
+            StoredSog::new(n_a, Some(3), 40),
+            StoredSog::new(n_b, None, 50),
+        ];
+        let meta = crate::lod::LodMeta::parse(&format!(
+            r#"{{"version":1,"count":{},"lodLevels":2,"filenames":["a/meta.json","b/meta.json"],"tree":{{"bound":{{"min":[-1,-1,-1],"max":[1,1,1]}},"children":[
+            {{"bound":{{"min":[-1,-1,-1],"max":[0,1,1]}},"lods":{{"0":{{"file":0,"offset":0,"count":2}},"1":{{"file":1,"offset":0,"count":1}}}}}},
+            {{"bound":{{"min":[0,-1,-1],"max":[1,1,1]}},"lods":{{"0":{{"file":0,"offset":2,"count":3}},"1":{{"file":1,"offset":1,"count":2}}}}}}]}}}}"#,
+            n_a + n_b
+        ))
+        .unwrap();
+        let set = crate::lod::LodSet {
+            meta: &meta,
+            files: files.iter().map(|f| Some(f.lod_file())).collect(),
+        };
+        // Clamped opacity, as a single SOG upload does.
+        let options = crate::lod::LoadOptions {
+            clamp_opacity: true,
+            ..Default::default()
+        };
+        let (scene, index) = crate::lod::upload(
+            &device,
+            &queue,
+            &kernels.sog_dequant,
+            &set,
+            &options,
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(scene.n as usize, n_a + n_b);
+        assert_eq!(
+            index.leaves()[1].runs,
+            [
+                Some(crate::lod::Run { first: 2, count: 3 }),
+                Some(crate::lod::Run {
+                    first: n_a as u32 + 1,
+                    count: 2
+                })
+            ]
+        );
+        let (transforms, opacity, sh, coefficients) = read_scene(&device, &queue, &scene);
+        assert_eq!(coefficients, 16);
+        for (file, first) in [(&files[0], 0), (&files[1], n_a)] {
+            let meta = crate::sog::Meta::parse(&file.meta_json).unwrap();
+            let decoded = crate::sog::decode_planes(&meta, &file.lod_file().webp).unwrap();
+            let alone = upload_sog(
+                &device,
+                &queue,
+                &kernels.sog_dequant,
+                &decoded.quantization,
+                &decoded.planes(),
+                u64::MAX,
+            )
+            .unwrap();
+            let (t, o, s, own) = read_scene(&device, &queue, &alone);
+            let n = alone.n as usize;
+            assert_eq!(
+                transforms[first * 10..(first + n) * 10],
+                t[..],
+                "rows from {first}"
+            );
+            assert_eq!(opacity[first..first + n], o[..], "rows from {first}");
+            for row in 0..n {
+                let placed = &sh[(first + row) * 48..(first + row + 1) * 48];
+                assert_eq!(
+                    placed[..own * 3],
+                    s[row * own * 3..(row + 1) * own * 3],
+                    "SH of row {}",
+                    first + row
+                );
+                assert!(
+                    placed[own * 3..].iter().all(|&c| c == 0.0),
+                    "SH past the file's bands of row {}",
+                    first + row
+                );
+            }
         }
     }
 

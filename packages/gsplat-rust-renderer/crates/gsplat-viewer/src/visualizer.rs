@@ -248,7 +248,7 @@ fn draw_splat_entity(
                 .unwrap_or(*fallback_degree.0),
         };
         // A payload replaces the rows, which stay its preview (bounds and the native fallback).
-        let (sog, asog);
+        let (sog, asog, lod, lod_metas);
         let (signature, primitives, time) = match &payload {
             Some(crate::payload::Payload::Sog {
                 meta,
@@ -261,6 +261,25 @@ fn draw_splat_entity(
                     preview: &native,
                 };
                 (hash64((signature, *generation)), Primitives::Sog(&sog), 0.0)
+            }
+            Some(crate::payload::Payload::SogLod {
+                info,
+                metas,
+                webp,
+                generation,
+            }) => {
+                lod_metas = metas.iter().map(|m| m.as_str()).collect::<Vec<_>>();
+                lod = crate::sog_lod::Payload {
+                    info,
+                    metas: &lod_metas,
+                    webp,
+                    preview: &native,
+                };
+                (
+                    hash64((signature, *generation)),
+                    Primitives::SogLod(&lod),
+                    0.0,
+                )
             }
             Some(crate::payload::Payload::Asog {
                 bytes,
@@ -361,6 +380,7 @@ pub(crate) fn draw_instances(
             render_mode,
             world_from_local: to_core(world_from_local),
             time,
+            lod: crate::sog_lod::params(),
             ..Default::default()
         };
         let prepared = ctx
@@ -390,6 +410,9 @@ pub(crate) fn draw_instances(
                 draw.push(match primitives {
                     Primitives::Splats(native)
                     | Primitives::Sog(&crate::sog::Payload {
+                        preview: native, ..
+                    })
+                    | Primitives::SogLod(&crate::sog_lod::Payload {
                         preview: native, ..
                     })
                     | Primitives::Asog(&crate::asog::Payload {

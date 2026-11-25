@@ -1,5 +1,5 @@
 //! Frame uniforms and the ordered forward compute passes.
-use super::{INTERSECTIONS, PendingFrame, VISIBLE, ViewState};
+use super::{DEPTH_KEY_BITS, INTERSECTIONS, PendingFrame, VISIBLE, ViewState};
 use crate::gpu::{self, bind};
 use crate::kernels::{Kernels, TILE_WIDTH, WG};
 use crate::primitives::dispatch::dispatch_direct;
@@ -60,7 +60,7 @@ struct RenderFlags {
     log_scale_offset: f32,
     mip: u32,
     has_min_scale: u32,
-    padding: u32,
+    linear_opacity: u32,
 }
 
 impl Uniforms {
@@ -112,7 +112,13 @@ impl Uniforms {
                         ..
                     }
                 )),
-                padding: 0,
+                linear_opacity: u32::from(matches!(
+                    scene.inputs,
+                    Inputs::Splats {
+                        linear_opacity: true,
+                        ..
+                    }
+                )),
             },
             coefficients,
             lens: LensInfo {
@@ -174,10 +180,15 @@ impl ViewState {
             .ok_or(Error::Busy(
                 "three frames are pending; poll view feedback before rendering again",
             ))?;
+        let forward_rows = self.selected_rows();
         let frame = &mut self.frames[index];
         let scene = &self.scene;
         let uniforms = Uniforms::new(camera, options, scene, tiles);
         queue.write_buffer(&frame.uniform, 0, bytemuck::bytes_of(&uniforms));
+        if !scene.hexels() {
+            let words = crate::lod::run_words(self.runs.as_deref());
+            queue.write_buffer(&frame.runs, 0, bytemuck::cast_slice(&words));
+        }
         frame.raster.take_if(|(cached, _)| cached != &target);
         let (_, raster_group) = frame.raster.get_or_insert_with(|| {
             let (_, ids) = scratch.intersections.sort.output(scratch.bits);
@@ -193,8 +204,6 @@ impl ViewState {
                 Target::TextureDepth { depth, id, .. } => {
                     bindings.extend([
                         (8, wgpu::BindingResource::TextureView(depth)),
-                        // The 32-bit depth sort ends in its input buffers: global rows in depth order.
-                        (11, scratch.depth_sort.output(32).1.as_entire_binding()),
                         (12, wgpu::BindingResource::TextureView(id)),
                     ]);
                 }
@@ -218,7 +227,7 @@ impl ViewState {
                     end_of_pass_write_index: Some(end),
                 })
         };
-        encoder.clear_buffer(&scratch.counts, 0, None);
+        encoder.clear_buffer(&scratch.counts, 0, Some(8));
         if let Some(deform) = &mut self.deform {
             // One motion dispatch per time change; the projector then reads this view's evaluated rows.
             deform.encode(
@@ -241,27 +250,29 @@ impl ViewState {
         dispatch_direct(
             encoder,
             &stages.forward,
-            &frame.projection.forward,
-            scene.n.div_ceil(WG),
+            &frame.forward,
+            forward_rows.div_ceil(WG),
             timestamps(Some(0), 1),
         );
         self.dispatches
             .prepare(encoder, &kernels.prepare, timestamps(None, 2));
-        scratch
-            .depth_sort
-            .encode(encoder, kernels, &self.dispatches, 32, timestamps(None, 3));
-        self.dispatches
-            .dispatch_indirect(encoder, VISIBLE, &kernels.gather, &scratch.gather, None);
-        scratch
-            .scan
-            .encode(encoder, kernels, &self.dispatches, timestamps(None, 4));
+        scratch.depth_sort.encode(
+            encoder,
+            kernels,
+            &self.dispatches,
+            DEPTH_KEY_BITS,
+            timestamps(None, 3),
+        );
         self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,
-            &stages.visible,
-            &frame.projection.visible,
-            timestamps(None, 5),
+            &kernels.gather,
+            &scratch.gather,
+            timestamps(None, 4),
         );
+        scratch
+            .scan
+            .encode(encoder, kernels, &self.dispatches, timestamps(None, 5));
         self.dispatches.dispatch_indirect(
             encoder,
             VISIBLE,

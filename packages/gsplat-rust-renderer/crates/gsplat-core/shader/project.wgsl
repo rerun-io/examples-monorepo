@@ -2,15 +2,44 @@
 #import <./counts.wgsl>
 #import <./lens.wgsl>
 
-// Brush project_forward + project_visible, adapted to raw buffers.
+// Brush project_forward (projection, tile count and SH colour in one pass), adapted to raw buffers.
 @group(0) @binding(1) var<storage, read> transforms: array<f32>;
 @group(0) @binding(2) var<storage, read> raw_opacity: array<f32>;
 @group(0) @binding(3) var<storage, read> min_scale: array<f32>;
 @group(0) @binding(4) var<storage, read_write> global_from_compact: array<u32>;
 @group(0) @binding(5) var<storage, read_write> depths: array<u32>;
-@group(0) @binding(7) var<storage, read_write> tile_hits: array<u32>;
 @group(0) @binding(8) var<storage, read_write> projected: array<Splat>;
 @group(0) @binding(9) var<storage, read> coeffs: array<f32>;
+// Level-of-detail run list (`lod.rs` `run_words`): header (count, total, active, 0), then (first row, prefix) pairs,
+// two runs per vec4. A uniform, not a storage buffer: this stage is at the 8-storage-buffer WebGPU limit.
+struct RunList {
+    header: vec4u,
+    pairs: array<vec4u, 4095>,
+}
+@group(0) @binding(10) var<uniform> runs: RunList;
+
+fn run_first(i: u32) -> u32 {
+    return runs.pairs[i / 2u][(i % 2u) * 2u];
+}
+
+fn run_prefix(i: u32) -> u32 {
+    return runs.pairs[i / 2u][(i % 2u) * 2u + 1u];
+}
+
+// The scene row of selected-row index `t` (t < total): the last run whose prefix is <= t.
+fn selected_row(t: u32) -> u32 {
+    var lo = 0u;
+    var hi = runs.header.x;
+    while hi - lo > 1u {
+        let mid = (lo + hi) / 2u;
+        if run_prefix(mid) <= t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return run_first(lo) + (t - run_prefix(lo));
+}
 struct Projection {
     valid: bool,
     xy: vec2f,
@@ -20,15 +49,14 @@ struct Projection {
     mean: vec3f
 }
 
-// Shared projection arithmetic. The visible pass trusts forward culling;
-// its unused validity result lets the compiler discard the finite predicates.
 fn project_core(id: u32, mean: vec3f, point: vec3f) -> Projection {
     let base = id * 10u;
     var scale = exp(vec3f(transforms[base + 7u], transforms[base + 8u], transforms[base + 9u]) + frame.options.log_scale_offset);
     let qraw = vec4f(transforms[base + 3u], transforms[base + 4u], transforms[base + 5u], transforms[base + 6u]);
     let qnorm = dot(qraw, qraw);
     let valid_input = finite3(scale) && qnorm >= 1e-6 && finite(qnorm) && finite(raw_opacity[id]);
-    var opacity = 1.0 / (1.0 + exp(-raw_opacity[id]));
+    // Linear opacity (Streamed SOG levels; merged v3 splats reach 1.5625) or a logit.
+    var opacity = select(1.0 / (1.0 + exp(-raw_opacity[id])), max(raw_opacity[id], 1e-6), frame.options.linear_opacity != 0u);
     if frame.options.has_min_scale != 0u {
         let floor = min_scale[id];
         let filtered = sqrt(scale * scale + floor * floor);
@@ -162,7 +190,13 @@ fn sh_color(id: u32, v: vec3f) -> vec3f {
 
 @compute @workgroup_size(WG) fn project_forward(@builtin(workgroup_id) gid: vec3u,
     @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let id = (gid.x + gid.y * groups.x) * WG + lid;
+    var id = (gid.x + gid.y * groups.x) * WG + lid;
+    if runs.header.z != 0u {
+        if id >= runs.header.y {
+            return;
+        }
+        id = selected_row(id);
+    }
     if id >= frame.scene.splats {
         return;
     }
@@ -181,25 +215,11 @@ fn sh_color(id: u32, v: vec3f) -> vec3f {
             hit++;
         }
     }
-    tile_hits[id] = hit;
-    add_intersections(hit);
+    add_tile_hits(id, hit);
     let write = atomicAdd(&counts[0], 1u) & 0x7fffffffu;
     global_from_compact[write] = id;
     depths[write] = depth_key(p.depth);
-}
-
-@compute @workgroup_size(WG) fn project_visible(@builtin(workgroup_id) gid: vec3u,
-    @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lid: u32) {
-    let compact = (gid.x + gid.y * groups.x) * WG + lid;
-    if compact >= atomicLoad(&counts[0]) {
-        return;
-    }
-    let id = global_from_compact[compact];
-    let base = id * 10u;
-    let mean = vec3f(transforms[base], transforms[base + 1u], transforms[base + 2u]);
-    let point = (frame.view_from_obj * vec4f(mean, 1.0)).xyz;
-    let p = project_core(id, mean, point);
-    let v = normalize(p.mean - frame.camera_position_in_obj.xyz);
-    let color = sh_color(id, v);
-    projected[compact] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z, p.depth);
+    // Splat-id order keeps the SH row reads coalesced.
+    let color = sh_color(id, normalize(p.mean - frame.camera_position_in_obj.xyz));
+    projected[id] = Splat(p.xy.x, p.xy.y, p.conic.x, p.conic.y, p.conic.z, p.opacity, color.x, color.y, color.z, p.depth);
 }

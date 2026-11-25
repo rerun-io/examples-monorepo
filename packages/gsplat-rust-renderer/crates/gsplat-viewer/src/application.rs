@@ -181,6 +181,8 @@ fn run_headless(
     loop {
         let frame_start = Instant::now();
         harness.step();
+        // Like re_viewer's run_headless_app: close the puffin frame, or a profile capture (MCP CaptureProfileTrace) never completes.
+        re_tracing::reexports::puffin::GlobalProfiler::lock().new_frame();
         if has_pending_close(&harness) {
             re_log::info!("Headless viewer received close request, shutting down.");
             return Ok(());

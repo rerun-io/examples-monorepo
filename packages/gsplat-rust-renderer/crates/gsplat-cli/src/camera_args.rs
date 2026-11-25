@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(clap::Args)]
 pub(super) struct CameraArgs {
-    #[arg(long)]
+    /// Splat PLY (`speed` also takes `--lod <dir>` instead).
+    #[arg(long, default_value = "", hide_default_value = true)]
     pub(super) ply: PathBuf,
     #[arg(long, default_value = "orbit:300")]
     pub(super) path: String,

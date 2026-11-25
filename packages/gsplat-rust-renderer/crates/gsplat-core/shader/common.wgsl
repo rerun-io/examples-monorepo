@@ -3,7 +3,7 @@
 struct ImageInfo { width: u32, height: u32, tiles_x: u32, tiles_y: u32, }
 struct SceneInfo { splats: u32, sh_degree: u32, coefficients: u32, variant: u32, }
 struct LensInfo { kind: u32, padding: u32, padding2: vec2u, half_max_render_fov: f32, radial_limit: f32, padding3: vec2f, }
-struct RenderFlags { log_scale_offset: f32, mip: u32, has_min_scale: u32, padding: u32, }
+struct RenderFlags { log_scale_offset: f32, mip: u32, has_min_scale: u32, linear_opacity: u32, }
 // Forward math hand-ported from Brush 1388f74c.
 struct Uniforms {
     view_from_obj: mat4x4f,
@@ -60,28 +60,32 @@ fn bbox_extent(c: vec3f, power: f32) -> vec2f {
     return sqrt(2.0 * power * vec2f(c.z, c.x) * (1.0 / det));
 }
 
+// Tiles whose pixel centres (tile * TILE_WIDTH + 0.5 ..= + TILE_WIDTH - 0.5) can fall inside p +- extent.
 fn tile_bbox(p: vec2f, extent: vec2f) -> vec4u {
     let bounds = vec2f(vec2u(frame.image.tiles_x, frame.image.tiles_y));
-    return vec4u(vec2u(clamp((p - extent) / f32(TILE_WIDTH), vec2f(0.0), bounds)), vec2u(clamp((p + extent) / f32(TILE_WIDTH) + 1.0, vec2f(0.0), bounds)));
+    let lo = ceil((p - extent - (f32(TILE_WIDTH) - 0.5)) / f32(TILE_WIDTH));
+    let hi = floor((p + extent - 0.5) / f32(TILE_WIDTH)) + 1.0;
+    return vec4u(vec2u(clamp(lo, vec2f(0.0), bounds)), vec2u(clamp(hi, vec2f(0.0), bounds)));
 }
 
-fn tile_hit(tile: vec2u, p: vec2f, c: vec3f, power: f32) -> bool {
-    let lo = vec2f(tile * TILE_WIDTH);
-    let hi = lo + f32(TILE_WIDTH);
+// Whether sigma <= power somewhere in the rectangle lo..hi (non-empty). sigma is convex, so outside the
+// rectangle its minimum lies on an edge through the nearest corner: test the closest point of both.
+fn rect_hit(lo: vec2f, hi: vec2f, p: vec2f, c: vec3f, power: f32) -> bool {
     let left = p.x < lo.x;
-    let right = p.x > hi.x;
     let above = p.y < lo.y;
-    let below = p.y > hi.y;
-    let in_x = !(left || right);
-    let in_y = !(above || below);
-    if in_x && in_y {
+    if !(left || p.x > hi.x) && !(above || p.y > hi.y) {
         return true;
     }
     let corner = vec2f(select(hi.x, lo.x, left), select(hi.y, lo.y, above));
-    let d = vec2f(select(-f32(TILE_WIDTH), f32(TILE_WIDTH), left), select(-f32(TILE_WIDTH), f32(TILE_WIDTH), above));
+    let d = select(lo - hi, hi - lo, vec2<bool>(left, above));
     let diff = p - corner;
-    let tx_raw = (d.x * c.x * diff.x + d.x * c.y * diff.y) / (d.x * c.x * d.x);
-    let ty_raw = (d.y * c.y * diff.x + d.y * c.z * diff.y) / (d.y * c.z * d.y);
-    let t = vec2f(select(clamp(tx_raw, 0.0, 1.0), 0.0, in_y), select(clamp(ty_raw, 0.0, 1.0), 0.0, in_x));
-    return sigma(corner + t * d, p, c) <= power;
+    let tx = clamp((c.x * diff.x + c.y * diff.y) / (c.x * d.x), 0.0, 1.0);
+    let ty = clamp((c.y * diff.x + c.z * diff.y) / (c.z * d.y), 0.0, 1.0);
+    return min(sigma(corner + vec2f(tx * d.x, 0.0), p, c), sigma(corner + vec2f(0.0, ty * d.y), p, c)) <= power;
+}
+
+// Raster samples pixel centres only, so a tile is hit when one of them can reach alpha >= 1/255.
+fn tile_hit(tile: vec2u, p: vec2f, c: vec3f, power: f32) -> bool {
+    let lo = vec2f(tile * TILE_WIDTH) + 0.5;
+    return rect_hit(lo, lo + f32(TILE_WIDTH - 1u), p, c, power);
 }

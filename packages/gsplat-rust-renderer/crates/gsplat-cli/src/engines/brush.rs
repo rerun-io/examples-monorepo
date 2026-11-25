@@ -83,6 +83,7 @@ impl Brush {
             visible: Some(aux.num_visible),
             intersections: Some(aux.num_intersections),
             overflow_events: Some(0),
+            selected_rows: None,
         })
     }
     pub fn finish(&self) -> Result<()> {

@@ -14,8 +14,8 @@ of this package.
 ## Run it
 
 ```bash
-pixi run -e colsfm colsfm-raco-export        # once: RaCo-ALIKED + LightGlue+ ONNX graphs -> packages/colsfm/data/models
-pixi run -e colsfm colsfm-download-flexglue  # once: FlexGlue's ONNX graphs (sha256-pinned) -> packages/colsfm/data/models/flexglue
+pixi run -e colsfm colsfm-raco-export        # once: RaCo-ALIKED + LightGlue+ ONNX graphs -> the model directory
+pixi run -e colsfm colsfm-download-flexglue  # once: FlexGlue's ONNX graphs (sha256-pinned) -> <model directory>/flexglue
 pixi run -e colsfm colsfm-flexglue-fp8       # once: FlexGlue's FP8 matcher, calibrated on the Galileo frames (TensorRT backend)
 pixi run -e colsfm colsfm-galileo            # r2b Galileo sample (downloaded by colsfm-download-galileo), default pipeline
 pixi run -e colsfm colsfm-galileo-ablation   # COLMAP's own ALIKED + LightGlue, Ceres, no refinement, no loops
@@ -23,6 +23,9 @@ pixi run -e colsfm colsfm-robocap            # RoboCap fisheye segment s00000021
 pixi run -e colsfm colsfm-kitti06            # KITTI 06 from the Spark catalog (cuvslam layer start)
 pixi run -e colsfm colsfm-walkthrough        # Galileo stage by stage, as a Rerun recording
 ```
+
+The model directory is `$COLSFM_MODEL_DIR`, else this checkout's `packages/colsfm/data/models` when it already holds
+graphs, else `~/.cache/colsfm/models`, shared by every worktree on the host (`colsfm.resolve_model_dir`).
 
 `python tools/run.py catalog --help` lists the catalog source options (dataset, segment, cameras, stereo pairs, the entity
 whose temporal `Transform3D` is the initial trajectory, stride, trim) and every pipeline knob.

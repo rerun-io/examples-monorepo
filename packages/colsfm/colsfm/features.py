@@ -50,7 +50,7 @@ import pycolmap
 
 from colsfm.database import image_ids_by_name, keypoint_counts
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, FrameSource, is_catalog_input, read_manifest
-from colsfm.keypoint_masks import MaskSource, open_mask_source
+from colsfm.keypoint_masks import MaskSource, drop_masked_keypoints, open_mask_source, with_valid_angle_masks
 
 AlikedVariant: TypeAlias = Literal["ALIKED_N16ROT", "ALIKED_N32"]
 """The two ALIKED graphs COLMAP 4.2 can download and run."""
@@ -277,17 +277,16 @@ def extract_features(
         RuntimeError: When `options.device` is `cuda` and CUDA is unusable.
         ImportError: When `options.backend` is `raco` and TensorRT or
             `cuda-python` is not importable.
-        ValueError: When the catalog input names keypoint masks and the backend is not `raco`.
     """
     if not database_path.is_file():
         raise FileNotFoundError(f"No COLMAP database at {database_path}")
     if not image_root.is_dir():
         raise FileNotFoundError(f"No image directory at {image_root}")
 
-    # A catalog input may name keypoint masks per camera stream; only the raco backend applies them.
+    # A catalog input may name keypoint masks per camera stream. Every backend applies them, joined with the camera
+    # model's valid angle (`colsfm.keypoint_masks.valid_angle`): a no-op for a camera none of whose pixels lies past it.
     masks: MaskSource | None = open_mask_source(read_manifest(image_root / FRAME_SOURCE_FILE) if is_catalog_input(image_root) else None)
-    if masks is not None and options.backend != "raco":
-        raise ValueError(f"keypoint masks are applied by the raco backend only, not {options.backend}")
+    masks = with_valid_angle_masks(database_path, masks)
 
     if options.backend == "raco":
         # Imported here, not at module scope: TensorRT and `cuda-python` are only needed by this branch, and a machine
@@ -328,6 +327,8 @@ def extract_features(
         extraction_options=extraction_options,
         device=pycolmap.Device.cuda if device == "cuda" else pycolmap.Device.cpu,
     )
+    if masks is not None:
+        drop_masked_keypoints(database_path, masks)
     elapsed_seconds: float = time.perf_counter() - started
 
     name_to_id: dict[str, int] = image_ids_by_name(database_path)

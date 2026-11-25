@@ -36,7 +36,8 @@ SLAM_RS_VIO_SOURCE: str = "slam_rs_vio"
 """Run source of slam-rs's raw causal VIO replay, in the same layer."""
 COLSFM_SOURCE: str = "colsfm"
 """Run source of the colsfm layer (``colsfm.rerun_layer.DEFAULT_SOURCE``): rig, frusta, ``points`` (static) and
-``points_growing`` (each point at its first observing rig frame). colsfm does not depend on dataforge; a test pins the names."""
+``points_growing`` (the points by first view, in blocks and recent rows: ``simplecv.rerun_growing_points``). colsfm does not depend on
+dataforge; a test pins the names."""
 GT_RUN_SOURCE: str = "gt"
 """Run source of the ground-truth trajectory and trail under ``/world/runs/``.
 
@@ -82,6 +83,18 @@ def boxes_path(rig: int, cam: int, label: str) -> str:
 def video_path(rig: int, cam: int) -> str:
     """``.../pinhole/video`` — the VideoStream entity on ``video_time``."""
     return f"{pinhole_path(rig, cam)}/video"
+
+
+def people_mask_path(rig: int, cam: int) -> str:
+    """``.../pinhole/people_mask`` — the ``SegmentationImage`` that keeps keypoints off people (posekit's lens masks,
+    dataforge's Insta360 face masks)."""
+    return f"{pinhole_path(rig, cam)}/people_mask"
+
+
+def video_view_path(rig: int, cam: int) -> str:
+    """``.../pinhole/video_view`` — a second VideoStream of the same camera for playback (every frame, lower quality)
+    where ``video`` is the sparser analysis stream (dataforge's Insta360 ``cube_view`` layer)."""
+    return f"{pinhole_path(rig, cam)}/video_view"
 
 
 def audio_path(rig: int, audio: int) -> str:
@@ -162,12 +175,6 @@ def follow_path(source: str) -> str:
     slam-rs writes one for each of its runs (``slam_rs.follow_frame``).
     """
     return f"{run_path(source)}/follow"
-
-
-def floor_path(source: str) -> str:
-    """``.../runs/<source>/floor_grid`` — one-metre cells on the floor under the source's walk, each edge on
-    ``video_time`` at the time the walk passed it (slam-rs: ``slam_rs.follow_frame``)."""
-    return f"{run_path(source)}/floor_grid"
 
 
 def capture_property(name: str) -> str:
