@@ -116,7 +116,7 @@ from colsfm.verification import (
 )
 
 FLEXGLUE_MODEL_DIR: Final[Path] = MODEL_DIR / "flexglue"
-"""Where `colsfm-download-flexglue` puts FlexGlue's ONNX graphs (gitignored, like the RaCo exports)."""
+"""Where `colsfm-download-flexglue` puts FlexGlue's ONNX graphs (not committed, like the RaCo exports)."""
 
 FLEXGLUE_MODEL_FILES: Final[dict[str, str]] = {
     "descriptor_model_path": "flexglue_descriptor.onnx",

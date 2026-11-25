@@ -3,9 +3,9 @@
 `colsfm.MODEL_DIR` holds them: `$COLSFM_MODEL_DIR`, else a worktree's gitignored
 `data/models/` that already has graphs, else the host-local `~/.cache/colsfm/models/`.
 The RaCo graphs are exported, not shipped, and the engines built from them are specific
-to one TensorRT version and one GPU architecture. A fresh host therefore has none of it — and since 2026-09-06 the
-default run asks for RaCo-ALIKED and LightGlue+ (NOTES.md decision 17), so "none of
-it" is the first thing a fresh clone hits.
+to one TensorRT version and one GPU architecture. A fresh host therefore has none of it —
+and since 2026-09-06 the default run asks for RaCo-ALIKED and LightGlue+ (NOTES.md
+decision 17), so "none of it" is the first thing a fresh host hits.
 
 The pipeline **stops** there rather than falling back to `pycolmap`. A silent
 fallback would be the one failure mode worth avoiding: every number a run reports —
