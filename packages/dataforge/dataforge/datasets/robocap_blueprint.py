@@ -177,7 +177,7 @@ def map_tab(camera_positions: Sequence[int] = SLAM_CAMERAS) -> rrb.Horizontal:
     """The GPS track on OpenStreetMap with the moving position and the loop ends, speed and heading drift, the cameras."""
     return rrb.Horizontal(
         rrb.Vertical(
-            rrb.MapView(origin=GPS_ROOT, name="Map: GPS track, position, loop ends (magenta real, red false)", zoom=15.0,
+            rrb.MapView(origin=GPS_ROOT, name="Map: GPS track, position, loop ends (magenta real, red false)", zoom=12.5,
                         background=rrb.MapProvider.OpenStreetMap),
             rrb.Horizontal(
                 rrb.TimeSeriesView(name="Speed [m/s]", origin=f"{ANALYSIS_ROOT}/speed"),
