@@ -213,3 +213,24 @@ def test_a_stream_without_samples_or_codec_is_named(tmp_path: Path) -> None:
             read_video_index(dataset, "segment", ["cam/video"], "video_time")
         with pytest.raises(ValueError, match="segment /bare/video: the video stream carries no codec"):
             read_video_index(dataset, "segment", ["/bare/video"], "video_time")
+
+
+def test_a_stream_that_runs_too_far_ahead_fails_instead_of_holding_the_session(server: rr.server.Server, index: tuple[StreamIndex, ...]) -> None:
+    reader = CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5)
+    shared = SharedChunks(reader, range(reader.num_chunks), max_held=2)
+    lead = shared.stream(0)
+    next(lead)
+    next(lead)
+    with pytest.raises(ValueError, match="ahead"):
+        next(lead)
+
+
+def test_a_sequence_timeline_is_refused(tmp_path: Path) -> None:
+    path: Path = tmp_path / "frames.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(path)
+        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+        rec.set_time("frame", sequence=0)
+        rec.log("/cam/video", rr.VideoStream.from_fields(sample=b"x", is_keyframe=True))
+    with rr.server.Server(datasets={"test": [path]}) as running, pytest.raises(ValueError, match="seconds"):
+        read_video_index(running.client().get_dataset("test"), "segment", ["/cam/video"], "frame")

@@ -20,8 +20,7 @@ Five decisions matter here because each one can change the numbers:
   them in one query each, the next chunk fetched while this one decodes, so
   memory is a few chunks whatever the segment's length. Each camera's decoder
   runs chunk after chunk through the whole read. IMU and ground truth are read
-  per time window, cut on ``video_time`` at frames that are keyframes in every
-  camera. Time filters compare ``video_time`` in its own type: a cast is not
+  per time window of framesets on ``video_time``. Time filters compare ``video_time`` in its own type: a cast is not
   pushed down to the server and scans the whole recording. Decimated AV1 decode
   is a known upstream hazard: every frame is decoded and ``frame_stride`` only
   decides which framesets are yielded.
@@ -532,8 +531,6 @@ class _VideoIndex:
     """Which frame of each fed camera belongs to each frameset, non-decreasing down each column."""
     camera_t_ns: tuple[Int64[ndarray, " n_frames"], ...]
     """Every fed camera's own frame timestamps, in the order they are fed."""
-    keyframe: Bool[ndarray, " n_framesets"]
-    """True where each fed camera's frame in this frameset is a keyframe, so a window may start there."""
     codec: CatalogCodecName
     """Codec of the elementary stream."""
     fps: int
@@ -718,7 +715,7 @@ class SegmentFeed:
         emitted_imu_t_ns: int = -(2**62)
         bounds: list[tuple[int, int]] = [
             (start, stop)
-            for start, stop in _window_bounds(self.index, self.window_ns)
+            for start, stop in _window_bounds(self.index.t_ns, self.window_ns)
             if (stop_ns is None or int(self.frame_t_ns[start]) <= stop_ns) and (start_ns is None or int(self.frame_t_ns[stop - 1]) >= start_ns)
         ]
         if not bounds:
@@ -822,18 +819,15 @@ class SegmentFeed:
                 frame += 1
 
 
-def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
-    """Cut the frame index into half-open ranges that each start on a shared keyframe."""
-    keyframe_indices: list[int] = [position for position in np.flatnonzero(index.keyframe).tolist() if position > 0]
+def _window_bounds(t_ns: Int64[ndarray, " n_framesets"], window_ns: int) -> list[tuple[int, int]]:
+    """Cut the framesets into half-open ranges of ``window_ns`` each (at least one frameset): the IMU and ground-truth reads.
+
+    The video does not follow these windows (each camera's decoder runs chunk after chunk), so they need not start on keyframes.
+    """
     bounds: list[tuple[int, int]] = []
     start: int = 0
-    while start < len(index.t_ns):
-        deadline: int = int(index.t_ns[start]) + window_ns
-        stop: int = len(index.t_ns)
-        for candidate in keyframe_indices:
-            if candidate > start and int(index.t_ns[candidate]) >= deadline:
-                stop = candidate
-                break
+    while start < len(t_ns):
+        stop: int = max(start + 1, int(np.searchsorted(t_ns, int(t_ns[start]) + window_ns, side="left")))
         bounds.append((start, stop))
         start = stop
     return bounds
@@ -868,9 +862,8 @@ def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id
 
 
 def _read_video_index(streams: Sequence[StreamIndex], segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
-    """Frameset timing, per-camera frames, shared keyframes and codec, from the fed cameras' blob-free indexes (feed order)."""
+    """Frameset timing, per-camera frames and codec, from the fed cameras' blob-free indexes (feed order)."""
     per_camera_times: list[Int64[ndarray, " n_frames"]] = [stream.t_ns for stream in streams]
-    per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = [stream.keyframes for stream in streams]
     per_camera_codec: list[tuple[int, CatalogCodecName]] = [(camera, stream.codec) for camera, stream in zip(camera_positions, streams, strict=True)]
     if not per_camera_codec:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
@@ -892,15 +885,11 @@ def _read_video_index(streams: Sequence[StreamIndex], segment_id: str, camera_po
         frameset_t_ns, frame_index = match_framesets(per_camera_times, tolerance_ns)
     if len(frameset_t_ns) < 2:
         raise ValueError(f"{segment_id}: {len(frameset_t_ns)} framesets is not a segment")
-    keyframe: Bool[ndarray, " n_framesets"] = np.ones(len(frameset_t_ns), dtype=bool)
-    for position, flags in enumerate(per_camera_keyframe):
-        keyframe &= flags[frame_index[:, position]]
     fps: int = max(1, round((len(frameset_t_ns) - 1) * 1e9 / float(frameset_t_ns[-1] - frameset_t_ns[0])))
     return _VideoIndex(
         t_ns=frameset_t_ns,
         frame_index=frame_index,
         camera_t_ns=tuple(per_camera_times),
-        keyframe=keyframe,
         codec=codec,
         fps=fps,
     )

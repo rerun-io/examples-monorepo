@@ -101,11 +101,9 @@ class VideoChunk:
     """Chunk number."""
     streams: tuple[StreamPackets, ...]
     """Per stream, in the reader's order."""
-
-    @property
-    def nbytes(self) -> int:
-        """Encoded bytes of every stream's samples."""
-        return sum(stream.nbytes for stream in self.streams)
+    nbytes: int
+    """Bytes of the query result the packets keep alive: every stream's samples, and the neighbouring chunks' samples the
+    query spans (it covers the union of the streams' chunk spans, and the packets are views into it)."""
 
 
 def time_window(timeline: str, timeline_type: pa.DataType, first: int, last: int) -> Expr:
@@ -115,6 +113,12 @@ def time_window(timeline: str, timeline_type: pa.DataType, first: int, last: int
 
 def _entity_path(entity: str) -> str:
     return f"/{entity.strip('/')}"
+
+
+def _require_nanoseconds(timeline: str, timeline_type: pa.DataType) -> None:
+    """Chunk and window sizes are seconds: a sequence timeline (frame numbers) has none, and would read in one piece."""
+    if not (pa.types.is_duration(timeline_type) or pa.types.is_timestamp(timeline_type)) or timeline_type.unit != "ns":
+        raise ValueError(f"{timeline} is {timeline_type}: chunks are cut in seconds, which needs a nanosecond duration or timestamp timeline")
 
 
 def read_video_index(
@@ -156,6 +160,7 @@ def read_video_index(
         if columns[1] not in schema.names:
             raise ValueError(f"{segment_id} {path}: the video stream carries no codec, so its samples cannot be decoded")
         timeline_type: pa.DataType = schema.field(timeline).type
+        _require_nanoseconds(timeline, timeline_type)
         tables: list[pa.Table] = []
         for first in range(start, end + 1, window_ns):
             window: Expr = time_window(timeline, timeline_type, first, min(first + window_ns - 1, end))
@@ -240,6 +245,7 @@ class CatalogVideoReader:
         # The dataset, not a DataFrame built from it: a DataFrame that outlives its client's session fails to plan.
         self._dataset: DatasetEntry = dataset
         self._timeline_type: pa.DataType = self._query().schema().field(timeline).type
+        _require_nanoseconds(timeline, self._timeline_type)
         self._cache: OrderedDict[int, VideoChunk] = OrderedDict()
         self._cached_bytes: int = 0
         self._lock: threading.Lock = threading.Lock()
@@ -271,7 +277,7 @@ class CatalogVideoReader:
             (int(stream.t_ns[first]), int(stream.t_ns[stop - 1])) for stream, (first, stop) in zip(self.streams, bounds, strict=True) if stop > first
         ]
         if not spans:
-            return VideoChunk(index=chunk, streams=tuple(StreamPackets(first=first, samples=[], keyframes=[]) for first, _ in bounds))
+            return VideoChunk(index=chunk, streams=tuple(StreamPackets(first=first, samples=[], keyframes=[]) for first, _ in bounds), nbytes=0)
         columns: list[str] = [f"{stream.entity}:VideoStream:sample" for stream in self.streams]
         window: Expr = time_window(self.timeline, self._timeline_type, min(span[0] for span in spans), max(span[1] for span in spans))
         table: pa.Table = self._query().filter(window).select(self.timeline, *columns).to_arrow_table()
@@ -290,7 +296,7 @@ class CatalogVideoReader:
                 )
             views: list[UInt8[ndarray, " n_bytes"]] = packet_views(samples)[lo:hi] if stop > first else []
             packets.append(StreamPackets(first=first, samples=views, keyframes=stream.keyframes[first:stop].tolist()))
-        fetched: VideoChunk = VideoChunk(index=chunk, streams=tuple(packets))
+        fetched: VideoChunk = VideoChunk(index=chunk, streams=tuple(packets), nbytes=table.nbytes)
         with self._lock:
             self.fetched_bytes += fetched.nbytes
             self.fetch_count += 1
@@ -339,12 +345,21 @@ class SharedChunks:
     """Each stream walks its chunks in order, at its own pace, from one read-ahead fetch of every stream (:func:`iter_chunks`).
 
     A chunk is held until every stream has taken its part, so memory is the chunks between the slowest stream and the
-    fastest one, plus the one being fetched. Not thread-safe: walk the streams from one thread.
+    fastest one, plus the one being fetched; ``max_held`` bounds that lead. Not thread-safe: walk the streams from one
+    thread.
     """
 
-    def __init__(self, reader: CatalogVideoReader, chunks: Sequence[int]) -> None:
-        """Start the read-ahead over ``chunks`` (increasing)."""
+    def __init__(self, reader: CatalogVideoReader, chunks: Sequence[int], *, max_held: int = 4) -> None:
+        """Start the read-ahead over ``chunks`` (increasing).
+
+        Args:
+            reader: The reader the chunks are fetched from.
+            chunks: Chunk numbers, increasing.
+            max_held: Chunks a stream may run ahead of the slowest one; a stream that would go further raises, rather
+                than hold the session in memory.
+        """
         self._chunks: list[int] = list(chunks)
+        self._max_held: int = max_held
         self._source: Iterator[VideoChunk] = iter_chunks(reader, self._chunks)
         self._streams: int = len(reader.streams)
         self._held: dict[int, tuple[VideoChunk, set[int]]] = {}
@@ -356,6 +371,8 @@ class SharedChunks:
 
     def _take(self, chunk: int, stream: int) -> StreamPackets:
         while chunk not in self._held:
+            if len(self._held) >= self._max_held:
+                raise ValueError(f"stream {stream} is {self._max_held} chunks ahead of the slowest stream; walk the streams together")
             fetched: VideoChunk = next(self._source)
             self._held[fetched.index] = (fetched, set())
         held: tuple[VideoChunk, set[int]] = self._held[chunk]

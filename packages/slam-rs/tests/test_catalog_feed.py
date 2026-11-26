@@ -32,6 +32,7 @@ from slam_rs.catalog_feed import (
     _static_int,
     _static_string,
     _static_values,
+    _window_bounds,
     camera_calib,
     check_imu_is_rig_frame,
     open_segment,
@@ -532,3 +533,11 @@ def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPat
     available: CatalogSegment = resolve_catalog_segments((CatalogSegment("test", "dataset", "present"),))[0]
     assert available.dataset is not None
     assert not available.has_ground_truth
+
+
+def test_inertial_windows_are_cut_by_time_alone() -> None:
+    """Video no longer follows the windows, so a rig whose cameras share no keyframe still reads IMU a window at a time."""
+    t_ns = np.arange(0, 10_000, 1_000, dtype=np.int64)  # ten framesets, 1 us apart
+    assert _window_bounds(t_ns, 3_000) == [(0, 3), (3, 6), (6, 9), (9, 10)]
+    assert _window_bounds(t_ns, 1) == [(index, index + 1) for index in range(10)]
+    assert _window_bounds(t_ns, 10**12) == [(0, 10)]
