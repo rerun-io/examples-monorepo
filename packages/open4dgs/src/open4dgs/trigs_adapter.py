@@ -67,8 +67,8 @@ class TrainConfig:
     """Trainer seed (camera/frame sampling)."""
     log_every: int = 25
     """Scalar logging interval (loss/*)."""
-    pixel_stride: Literal[1, 2] = 1
-    """Strided pixel sampling (PennyGS 3.4): 2 = each step renders and supervises one pixel of every 2x2 block, cycling the
+    pixel_stride: Literal[1, 2] = 2
+    """Strided pixel sampling (PennyGS 3.4, default on; 1 = full images): each step renders and supervises one pixel of every 2x2 block, cycling the
     offset so every pixel is supervised once every four steps (steps whose cameras do not share one time render full size);
     the MoGe-2 prior reads the same pixels."""
     adam_moments: Literal["fp32", "bf16"] = "bf16"
