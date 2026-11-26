@@ -10,8 +10,8 @@ reads the same packets in pieces whose size does not depend on the session's len
    of whole GOPs (it starts on a keyframe, and the next chunk starts on the next one), so each decodes alone and the
    chunks of a stream partition its samples: decoding chunk by chunk yields exactly the frames of one decoder over the
    whole stream. One query fetches a chunk of every stream.
-3. :class:`ChunkedVideoDecoder` (random access by sample index, a drop-in for ``VideoDecoder.get_frames_at``) and
-   :func:`iter_chunks` (sequential, the next chunk fetched on a thread while the caller decodes this one).
+3. :class:`ChunkedVideoDecoder` for random access, :func:`iter_chunks` and :class:`SharedChunks` for sequential reads
+   with the next chunk fetched on a thread.
 
 Two facts about the server decide the queries (rerun 0.42, ``rr.server.Server`` and ``rerun server``):
 
@@ -48,27 +48,27 @@ RoboCap cameras is ~0.9 GB; a 4 h session takes 49 windows (~1 min on a local se
 CHUNK_S: float = 30.0
 """Seconds of every stream in a chunk: about 90 MB for six RoboCap cameras (1080p fisheye, ~0.5 MB/s each)."""
 CACHE_BYTES: int = 1 << 30
-"""Encoded bytes :meth:`CatalogVideoReader.packets` keeps for random access (whole chunks, least recently used out)."""
+"""Whole chunks, least recently used out."""
 MP4_FPS: int = 30
 """Frame rate written into a chunk's MP4 wrapper; frames are addressed by index, so it only has to be valid."""
 
 
 @dataclass(frozen=True, slots=True)
 class StreamIndex:
-    """One stream's samples, without their bytes: what :func:`read_video_index` reads."""
+    """One stream's sample timestamps and keyframe flags, without the sample bytes."""
 
     entity: str
-    """Entity path of the ``VideoStream``, with a leading slash."""
+    """With a leading slash."""
     times: Shaped[ndarray, " n"]
-    """Every sample's index value, strictly increasing, in the timeline's own dtype (timedelta64, datetime64, int64)."""
+    """Strictly increasing, in the timeline's own dtype."""
     keyframes: Bool[ndarray, " n"]
-    """True on keyframes; a sample whose flag is null or false is not one."""
+    """A null flag counts as false: RoboCap logs ``is_keyframe`` on keyframes only."""
     codec: CatalogCodecName
-    """Codec of the samples."""
+    """From ``VideoStream:codec``, logged as a static or on every sample."""
 
     @property
     def t_ns(self) -> Int64[ndarray, " n"]:
-        """Integer index values (nanoseconds for temporal indices)."""
+        """The times as nanoseconds, without a copy."""
         return self.times.view(np.int64)
 
 
@@ -79,30 +79,30 @@ class StreamPackets:
     first: int
     """Stream sample index of ``samples[0]``."""
     samples: list[UInt8[ndarray, " n_bytes"]]
-    """Encoded samples in decode order: views into the chunk's Arrow buffers, not copies."""
+    """Views into the chunk's Arrow buffers, which they keep alive."""
     keyframes: list[bool]
-    """Keyframe flag per sample."""
+    """One per sample."""
 
     def mp4(self, codec: CatalogCodecName) -> bytes:
-        """The samples muxed into an in-memory MP4 (one copy of the chunk's bytes), sample ``i`` at frame ``i``."""
+        """An in-memory MP4 (one copy of the chunk's bytes) with sample ``i`` at frame ``i``."""
         return wrap_mp4(self.samples, self.keyframes, MP4_FPS, codec=codec)
 
 
 @dataclass(frozen=True, slots=True)
 class VideoChunk:
-    """Every stream's samples in one chunk, as one query returned them."""
+    """Every stream's samples in one chunk, from one query."""
 
     index: int
-    """Chunk number."""
+    """Position in :attr:`CatalogVideoReader.starts`."""
     streams: tuple[StreamPackets, ...]
-    """Per stream, in the reader's order."""
+    """In the reader's stream order."""
     nbytes: int
-    """Bytes of the query result the packets keep alive: every stream's samples, and the neighbouring chunks' samples the
-    query spans (it covers the union of the streams' chunk spans, and the packets are views into it)."""
+    """The whole query result, which the packet views keep alive: it also holds the neighbouring chunks' samples that
+    the union of the streams' spans reaches."""
 
 
 def time_window(timeline: str, timeline_type: pa.DataType, first: int, last: int) -> Expr:
-    """``first <= timeline <= last`` (integer index values), in the column's own type so the server pushes it down."""
+    """``first <= timeline <= last`` with literals of the column's own type: a cast column is not pushed down."""
     return (col(timeline) >= lit(pa.scalar(first, type=timeline_type))) & (col(timeline) <= lit(pa.scalar(last, type=timeline_type)))
 
 
@@ -119,23 +119,20 @@ def _require_nanoseconds(timeline: str, timeline_type: pa.DataType) -> None:
 def read_video_index(
     dataset: DatasetEntry, segment_id: str, entities: Sequence[str], timeline: str, *, window_s: float = INDEX_WINDOW_S
 ) -> tuple[StreamIndex, ...]:
-    """Every sample's timestamp and keyframe flag for each stream, in ``window_s`` windows and without the blobs.
-
-    One query per stream and window (``is_keyframe`` may be sparse, see the module docstring); the streams' queries
-    run concurrently.
+    """Index every stream: one query per stream and window, the streams' queries run concurrently.
 
     Args:
         dataset: Dataset holding the segment.
         segment_id: Segment to read.
         entities: ``VideoStream`` entity paths, with or without a leading slash.
-        timeline: Index timeline the samples are on.
-        window_s: Seconds per index query (bounds what the server reads at once).
+        timeline: A nanosecond duration or timestamp timeline.
+        window_s: Seconds per query; the server holds that window's blobs to answer it.
 
     Returns:
         One index per entity, in order.
 
     Raises:
-        ValueError: If a stream has no samples, timestamps that do not strictly increase, or no codec.
+        ValueError: If a stream has no samples, no codec, or timestamps that do not strictly increase.
     """
     paths: list[str] = [_entity_path(entity) for entity in entities]
     selection = dataset.filter_segments(segment_id)
@@ -174,7 +171,7 @@ def read_video_index(
 
 
 def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray, "n_bounds n_streams"]:
-    """Where each chunk of each stream starts: chunk ``k`` of stream ``s`` is its samples ``[starts[k, s], starts[k + 1, s])``.
+    """Chunk ``k`` of stream ``s`` is its samples ``[starts[k, s], starts[k + 1, s])``.
 
     Chunk ``k`` covers the time grid ``[t0 + k * chunk_ns, t0 + (k + 1) * chunk_ns)``, moved back per stream to the
     keyframe at or before each edge, so every chunk of a stream starts on a keyframe and the chunks partition it. The
@@ -183,7 +180,7 @@ def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray
 
     Args:
         streams: The streams' indexes.
-        chunk_ns: Grid step in index units (nanoseconds for temporal indices).
+        chunk_ns: Grid step.
 
     Returns:
         ``n_chunks + 1`` rows: row 0 is all zeros, the last row each stream's sample count.
@@ -200,7 +197,7 @@ def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray
         keyframe_at: Int64[ndarray, " n_keyframes"] = np.flatnonzero(stream.keyframes).astype(np.int64)
         if not len(keyframe_at):
             raise ValueError(f"{stream.entity}: the stream has no keyframe, so none of it decodes")
-        # The last keyframe at or before each inner edge; sample 0 when none is (already increasing: keyframes are).
+        # Sample 0 for edges before the first keyframe; no running maximum needed, keyframe positions increase.
         position: Int64[ndarray, " n_inner"] = np.searchsorted(stream.t_ns[keyframe_at], edges, side="right") - 1
         inner: Int64[ndarray, " n_inner"] = np.where(position >= 0, keyframe_at[np.maximum(position, 0)], 0)
         columns.append(np.concatenate([[0], inner, [len(stream.t_ns)]]).astype(np.int64))
@@ -208,10 +205,7 @@ def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray
 
 
 class CatalogVideoReader:
-    """A segment's video streams read chunk by chunk; memory is a few chunks, whatever the segment's length.
-
-    Thread-safe: :meth:`packets` and :meth:`fetch` may be called from several threads.
-    """
+    """Memory is a few chunks, whatever the segment's length. :meth:`packets` and :meth:`fetch` are thread-safe."""
 
     def __init__(
         self,
@@ -228,10 +222,10 @@ class CatalogVideoReader:
         Args:
             dataset: Dataset holding the segment.
             segment_id: Segment to read.
-            streams: The streams' indexes (:func:`read_video_index`), in the order chunks list them.
-            timeline: Index timeline the samples are on.
+            streams: From :func:`read_video_index`; chunks list the streams in this order.
+            timeline: A nanosecond duration or timestamp timeline.
             chunk_s: Seconds of every stream per chunk.
-            cache_bytes: Encoded bytes :meth:`packets` keeps; at least the most recent chunk is kept.
+            cache_bytes: What :meth:`packets` keeps; the most recent chunk is kept even when larger.
         """
         if not streams:
             raise ValueError("a reader needs at least one stream")
@@ -248,24 +242,23 @@ class CatalogVideoReader:
         self._cached_bytes: int = 0
         self._lock: threading.Lock = threading.Lock()
         self.fetched_bytes: int = 0
-        """Encoded bytes fetched so far, refetches included."""
+        """Refetches of evicted chunks included."""
         self.fetch_count: int = 0
-        """Chunk queries run so far."""
 
     def _query(self) -> DataFrame:
         return self._dataset.filter_segments(self.segment_id).filter_contents([stream.entity for stream in self.streams]).reader(index=self.timeline)
 
     @property
     def num_chunks(self) -> int:
-        """Chunks per stream."""
+        """The same for every stream; a stream's chunk may be empty."""
         return len(self.starts) - 1
 
     def chunk_of(self, stream: int, sample: int) -> int:
-        """The chunk holding a stream's sample."""
+        """The chunk holding a stream's sample index."""
         return int(np.searchsorted(self.starts[:, stream], sample, side="right")) - 1
 
     def fetch(self, chunk: int) -> VideoChunk:
-        """Fetch one chunk of every stream in one query, bypassing the cache (sequential reads).
+        """One chunk of every stream in one query, not cached.
 
         Raises:
             ValueError: If a stream's fetched timestamps are not the ones its index lists for the chunk.
@@ -285,7 +278,7 @@ class CatalogVideoReader:
             samples: pa.ChunkedArray = table[column]
             valid: Bool[ndarray, " n_rows"] = samples.is_valid().to_numpy(zero_copy_only=False)
             own_ns: Int64[ndarray, " n_own"] = times_ns[valid]
-            # The query spans every stream's chunk, so a stream's rows reach into its neighbouring chunks: keep its own.
+            # The query spans every stream's chunk, so a stream's rows reach into its neighbouring chunks.
             lo: int = int(np.searchsorted(own_ns, stream.t_ns[first], side="left")) if stop > first else 0
             hi: int = lo + (stop - first)
             if not np.array_equal(own_ns[lo:hi], stream.t_ns[first:stop]):
@@ -301,7 +294,7 @@ class CatalogVideoReader:
         return fetched
 
     def packets(self, chunk: int) -> VideoChunk:
-        """One chunk of every stream, from the cache or fetched into it (random access)."""
+        """:meth:`fetch` through the byte-bounded cache, for random access."""
         with self._lock:
             if chunk in self._cache:
                 self._cache.move_to_end(chunk)
@@ -318,9 +311,9 @@ class CatalogVideoReader:
 
 
 def iter_chunks(reader: CatalogVideoReader, chunks: Sequence[int]) -> Iterator[VideoChunk]:
-    """Yield the chunks in order, the next one fetched on a thread while the caller works on this one.
+    """The chunks in order, the next one fetched on a thread while the caller works on this one.
 
-    Holds at most two fetched chunks besides the one the caller holds; nothing goes into the reader's cache.
+    Holds at most two fetched chunks besides the caller's; bypasses the reader's cache.
     """
     if not chunks:
         return
@@ -334,21 +327,19 @@ def iter_chunks(reader: CatalogVideoReader, chunks: Sequence[int]) -> Iterator[V
 
 
 class SharedChunks:
-    """Each stream walks its chunks in order, at its own pace, from one read-ahead fetch of every stream (:func:`iter_chunks`).
+    """Each stream walks its chunks at its own pace from one read-ahead (:func:`iter_chunks`) of every stream.
 
-    A chunk is held until every stream has taken its part, so memory is the chunks between the slowest stream and the
-    fastest one, plus the one being fetched; ``max_held`` bounds that lead. Not thread-safe: walk the streams from one
-    thread.
+    A chunk is held until every stream has taken its part, so memory is the chunks between the slowest and the fastest
+    stream, bounded by ``max_held``. Not thread-safe.
     """
 
     def __init__(self, reader: CatalogVideoReader, chunks: Sequence[int], *, max_held: int = 4) -> None:
-        """Start the read-ahead over ``chunks`` (increasing).
+        """Start the read-ahead.
 
         Args:
-            reader: The reader the chunks are fetched from.
-            chunks: Chunk numbers, increasing.
-            max_held: Chunks a stream may run ahead of the slowest one; a stream that would go further raises, rather
-                than hold the session in memory.
+            reader: Where the chunks come from.
+            chunks: Increasing.
+            max_held: How far a stream may run ahead of the slowest one; further raises rather than hold the session.
         """
         self._chunks: list[int] = list(chunks)
         self._max_held: int = max_held
@@ -358,7 +349,7 @@ class SharedChunks:
 
     @property
     def held(self) -> int:
-        """Chunks fetched that some stream has not taken yet."""
+        """Fetched chunks that some stream has not taken yet."""
         return len(self._held)
 
     def _take(self, chunk: int, stream: int) -> StreamPackets:
@@ -374,40 +365,40 @@ class SharedChunks:
         return held[0].streams[stream]
 
     def stream(self, stream: int) -> Iterator[StreamPackets]:
-        """One stream's packets, chunk by chunk."""
+        """One stream's packets of each chunk, in order."""
         for chunk in self._chunks:
             yield self._take(chunk, stream)
 
 
 @runtime_checkable
 class _FrameBatch(Protocol):
-    """What ``torchcodec``'s ``FrameBatch`` gives here: the frames."""
+    """``torchcodec``'s ``FrameBatch``, which is imported lazily."""
 
     data: Tensor
 
 
 @runtime_checkable
 class _ChunkDecoder(Protocol):
-    """The part of ``torchcodec``'s ``VideoDecoder`` a chunk decoder is used through (torchcodec is imported lazily)."""
+    """``torchcodec``'s ``VideoDecoder``: a CPU lane that only reads packets has no torchcodec."""
 
     def get_frames_at(self, indices: list[int]) -> _FrameBatch: ...
 
 
 class ChunkedVideoDecoder:
-    """One stream's frames by sample index, decoded on the device from the chunks that hold them.
+    """One stream's frames by sample index, decoded from the chunks that hold them.
 
-    The drop-in for a whole-stream ``torchcodec`` ``VideoDecoder(seek_mode="exact")``'s ``get_frames_at``: the same
-    frames for any indices, because every chunk starts on a keyframe. Up to ``max_open`` chunk decoders stay open
-    (each holds its chunk's MP4), so requests in sample order decode each chunk once.
+    The same frames as a whole-stream ``VideoDecoder(seek_mode="exact")``, because every chunk starts on a keyframe.
+    ``max_open`` chunk decoders, each holding its chunk's MP4, stay open, so requests in sample order decode each chunk
+    once.
     """
 
     def __init__(self, reader: CatalogVideoReader, stream: int, device: torch.device, *, max_open: int = 2) -> None:
-        """Bind the decoder to one of the reader's streams; nothing is fetched until frames are asked for.
+        """Nothing is fetched until frames are asked for.
 
         Args:
-            reader: The reader, shared by the decoders of a rig so one query serves every stream's chunk.
+            reader: Share one between a rig's decoders: one query then serves every stream's chunk.
             stream: Position of the stream in the reader.
-            device: Device frames are decoded on (``cuda`` uses NVDEC).
+            device: ``cuda`` decodes on NVDEC.
             max_open: Chunk decoders kept open.
         """
         self.reader: CatalogVideoReader = reader
@@ -417,7 +408,6 @@ class ChunkedVideoDecoder:
         self._open: OrderedDict[int, _ChunkDecoder] = OrderedDict()
 
     def _decoder(self, chunk: int) -> _ChunkDecoder:
-        # Imported here: a CPU lane that only reads packets does not need torchcodec.
         from torchcodec.decoders import VideoDecoder
 
         if chunk in self._open:
@@ -433,7 +423,7 @@ class ChunkedVideoDecoder:
         return decoder
 
     def get_frames_at(self, indices: Sequence[int]) -> UInt8[Tensor, "n 3 h w"]:
-        """The frames at stream sample indices, in the order asked (repeats allowed).
+        """In the order asked, repeats allowed.
 
         Raises:
             IndexError: If an index is outside the stream.
@@ -450,14 +440,14 @@ class ChunkedVideoDecoder:
             parts.append(self._decoder(int(chunk)).get_frames_at(local).data)
         if not parts:
             return torch.empty((0, 3, 0, 0), dtype=torch.uint8, device=self.device)
-        # A sorted request within one chunk (colsfm's usual one) is the decoder's own batch: no copy, no reorder.
+        # colsfm's usual request, sorted within one chunk, needs no copy.
         frames: Tensor = parts[0] if len(parts) == 1 else torch.cat(parts)
         if np.array_equal(unique, wanted):
             return frames
         return frames[torch.from_numpy(np.searchsorted(unique, wanted)).to(frames.device)]
 
     def close(self) -> None:
-        """Close every chunk decoder."""
+        """Release the open chunk decoders and their MP4s."""
         self._open.clear()
 
 

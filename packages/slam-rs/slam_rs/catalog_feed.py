@@ -581,7 +581,7 @@ class SegmentFeed:
     window_ns: int
     """Longest time window of IMU and ground truth fetched in one round trip."""
     video: CatalogVideoReader
-    """The fed cameras' video, in feed order, read chunk by chunk."""
+    """In feed order."""
     decode_device: Literal["cpu", "cuda"] = "cpu"
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
     masks: FrameMasks | None = None
@@ -831,7 +831,7 @@ def _window_bounds(t_ns: Int64[ndarray, " n_framesets"], window_ns: int) -> list
 
 
 def _read_video_index(streams: Sequence[StreamIndex], segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
-    """Frameset timing and per-camera frames, from the fed cameras' blob-free indexes (feed order)."""
+    """Match the fed cameras' frames into framesets, from their blob-free indexes (feed order)."""
     if not streams:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
     per_camera_times: list[Int64[ndarray, " n_frames"]] = [stream.t_ns for stream in streams]

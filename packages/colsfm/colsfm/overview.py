@@ -235,18 +235,17 @@ def log_overview(
 def relay_source_video(
     dataset: DatasetEntry, segment: str, sources: Sequence[str], targets: Sequence[str], timeline: str, recording: rr.RecordingStream | None
 ) -> None:
-    """Re-log each source ``VideoStream``'s stored samples at its target entity, never decoded, a chunk of every camera at a time.
+    """Re-log each source ``VideoStream``'s stored samples at its target, never decoded, a chunk of every camera at a time.
 
-    Memory is a few chunks (`simplecv.catalog_video_reader`), not the session; the samples, their timestamps and keyframe
-    flags are the source's.
+    Memory is a few chunks, not the session.
 
     Args:
         dataset: Dataset holding the segment.
         segment: Segment to read.
         sources: The source ``VideoStream`` entities.
-        targets: Where each source's samples go, in the same order.
-        timeline: Index timeline the samples are on, and the one they are logged on.
-        recording: Recording to log to; None logs to the global one.
+        targets: One per source, in the same order.
+        timeline: Read from, and logged on.
+        recording: None logs to the global recording.
     """
     index: tuple[StreamIndex, ...] = read_video_index(dataset, segment, sources, timeline)
     for target, stream in zip(targets, index, strict=True):

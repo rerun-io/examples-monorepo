@@ -50,10 +50,10 @@ input evicts and decodes again from the video instead of growing, and leaves the
 
 @runtime_checkable
 class FrameDecoder(Protocol):
-    """One stream's frames by sample index (simplecv's `ChunkedVideoDecoder`)."""
+    """simplecv's `ChunkedVideoDecoder`, or a test double."""
 
     def get_frames_at(self, indices: Sequence[int]) -> Tensor:
-        """RGB uint8 `[n, 3, h, w]` frames at stream sample indices, in the order asked."""
+        """RGB frames in the order asked."""
         ...
 
 
@@ -151,7 +151,7 @@ class VideoStreamFrames:
             name: (stream_index, position) for stream_index, stream in enumerate(manifest.streams) for position, name in enumerate(stream.names)
         }
         self.decoders: dict[int, tuple[ndarray, FrameDecoder]] = {}
-        """Per stream: the stream's sample timestamps and its decoder; every stream opens on the first decode."""
+        """Every stream opens on the first decode."""
 
     def _decoder(self, stream_index: int) -> tuple[ndarray, FrameDecoder]:
         if not self.decoders:
@@ -219,16 +219,14 @@ class VideoStreamFrames:
 
 
 def _open_streams(manifest: FrameSourceManifest, device: torch.device) -> list[tuple[ndarray, FrameDecoder]]:
-    """Index every stream of the manifest and open a chunked NVDEC decoder per stream over one shared reader.
-
-    One reader serves all streams, so a chunk is fetched for every camera in one query and decoded from its cache.
+    """One chunked NVDEC decoder per stream, over one shared reader: a chunk is fetched for every camera in one query.
 
     Args:
         manifest: The segment and its streams.
         device: The CUDA device.
 
     Returns:
-        Per stream, in manifest order: its sample timestamps (int64 ns) and its decoder.
+        In manifest order: the stream's sample timestamps (int64 ns) and its decoder.
     """
     # Imported here: the catalog client and torchcodec are only needed by a catalog input.
     from rerun.catalog import CatalogClient
