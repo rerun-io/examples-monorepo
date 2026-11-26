@@ -19,8 +19,8 @@ from pathlib import Path
 import rerun as rr
 import rerun.blueprint as rrb
 from dataforge import blueprints, schema
+from dataforge.robocap_kalibr import CAMERA_DISPLAY_ORDER
 from dataforge.writing import atomic_recording
-from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
 
 APPLICATION_ID: str = "robocap"
 """Shared with the live recording, so the blueprint applies to it (Rust ``display::APPLICATION_ID``)."""

@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from simplecv.camera_parameters import Fisheye62Parameters
-from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
 
 from dataforge.datasets.robocap import RobocapConfig, RobocapDataset, build_blueprint
+from dataforge.robocap_kalibr import CAMERA_DISPLAY_ORDER
 from dataforge.writing import atomic_recording
 
 

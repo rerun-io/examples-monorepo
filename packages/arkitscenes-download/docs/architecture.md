@@ -243,7 +243,7 @@ sequenceDiagram
 ### Known rerun 0.34.1 bugs found by this project
 
 1. `VideoStream` cannot decode B-frame HEVC (documented TODO #10090) — "Error constructing the frame RPS".
-2. Large B-frame HEVC `AssetVideo` inside a full recording deadlocks the viewer's ffmpeg feeder (spinner forever, zero errors).
+2. A large B-frame HEVC video logged as one whole-file blob (not a `VideoStream`) inside a full recording deadlocks the viewer's ffmpeg feeder (spinner forever, zero errors).
 3. `Boxes3D(centers=…)` + separate `InstancePoses3D(mat3x3=…)` rotates boxes about the entity origin instead of in place (the upstream `arkit_scenes` example has this bug, plus the missing `normalizedAxes` transpose).
 4. `Spatial2DView` box reprojection artifacts were entirely downstream of (3) — retracted after the composition fix.
 5. OSS-server registration cost grows ~cubically with distinct entity-path count (per-file cumulative schema merge) — see [full-run-runbook.md](full-run-runbook.md) §8 and the `rerun-schema-width-register-repro` repo.

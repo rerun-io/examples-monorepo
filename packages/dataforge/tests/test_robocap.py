@@ -16,7 +16,6 @@ from numpy import ndarray
 pytest.importorskip("rerun.catalog", reason="catalog metadata tests need the Rerun catalog dependencies")
 
 from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
-from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER  # noqa: E402
 from simplecv.imu_calibration import ImuCalibration  # noqa: E402
 
 from dataforge import blueprints, schema  # noqa: E402
@@ -33,6 +32,7 @@ from dataforge.datasets.robocap import (  # noqa: E402
 )
 from dataforge.identity import SequenceIdentity  # noqa: E402
 from dataforge.logging_toolkit import ImuChannel  # noqa: E402
+from dataforge.robocap_kalibr import CAMERA_DISPLAY_ORDER  # noqa: E402
 from dataforge.writing import blueprint_views
 
 DEVICE: str = "f408193e6447b3b0"

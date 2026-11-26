@@ -57,7 +57,7 @@ def row_major_4x4(rows: list[list[float]]) -> Float64[ndarray, "4 4"]:
 class KalibrCamera:
     """One ``cam<N>`` block of camchain.yaml.
 
-    simplecv's ``KalibrCamWithExtrinsic`` (``simplecv.data.ego.robocap_ego``) reads the same block, but takes any model
+    ``dataforge.robocap_kalibr.KalibrCamWithExtrinsic`` reads the same block, but takes any model
     string and plain lists. This class is the strict door: it refuses another projection or distortion model and a
     wrong-length vector when the file is read, not later in ``kb4_camera``.
     """

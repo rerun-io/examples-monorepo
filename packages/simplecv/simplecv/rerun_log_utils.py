@@ -12,7 +12,7 @@ import av
 import numpy as np
 import rerun as rr
 import rerun.chunk as rrc
-from jaxtyping import Float32, Float64, Int
+from jaxtyping import Float32, Float64, Int, Int64
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
 
@@ -259,7 +259,7 @@ def log_video(
     if target_recording is None:
         raise RuntimeError("No active Rerun recording. Call rr.init() or pass recording= before logging video.")
     # The VideoStream chunks carry the sample times on ``timeline``; they are the frame
-    # timestamps, so no separate AssetVideo probe (which rejects QuickTime-brand .MOV files).
+    # timestamps, so no separate frame-index probe (which finds no frames in QuickTime-brand .MOV files).
     times: list[Int[ndarray, "rows"]] = []
 
     def send(try_gpu: bool) -> None:
@@ -296,6 +296,24 @@ def log_video(
 
     frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(np.concatenate(times)) if times else np.empty(0, dtype=np.int64)
     return frame_timestamps_ns
+
+
+def mp4_frame_timestamps_ns(video_path: Path) -> Int64[ndarray, "num_frames"]:
+    """Frame timestamps of an MP4 file, sorted ascending: the times :func:`log_video` puts on its timeline.
+
+    They come from ``Mp4Reader``'s asset-mode frame index, which parses the container and decodes nothing; stream mode
+    would re-encode a B-frame source through FFmpeg only to read its times. The asset chunk is dropped, never logged.
+
+    Raises:
+        RuntimeError: When Rerun cannot parse the MP4 or finds no frames in it (a QuickTime-brand .MOV).
+    """
+    reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(video_path, mode="asset", entity_path="/video", timeline_name="video")
+    times: list[Int64[ndarray, "rows"]] = [
+        chunk.to_record_batch().column("video").to_numpy().astype("timedelta64[ns]").astype(np.int64) for chunk in reader.stream() if not chunk.is_static
+    ]
+    if not times:
+        raise RuntimeError(f"Mp4Reader found no frames in {video_path}")
+    return np.sort(np.concatenate(times))
 
 
 def read_video_stream_from_rrd(

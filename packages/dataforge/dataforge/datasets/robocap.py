@@ -29,9 +29,7 @@ timeline — retagging it as ``timestamp`` would render the boot clock as
 1970-01-01T00:00:25. Segments recorded within one boot share the axis, which
 is exactly what makes the merged session line up without any retiming.
 
-Calibration comes from simplecv's RoboCap ego loader; the private helpers are
-imported deliberately (the donor is scheduled for deletion once the dataset
-lives here).
+Calibration is the factory Kalibr camchain (``dataforge.robocap_kalibr``).
 """
 
 from __future__ import annotations
@@ -55,14 +53,6 @@ from numpy import ndarray
 from serde import SerdeError, serde
 from serde.yaml import from_yaml
 from simplecv.camera_parameters import Fisheye62Parameters
-from simplecv.data.ego.robocap_ego import (
-    CAM_TO_CALIB_INFO,
-    CAMERA_DISPLAY_ORDER,
-    VIDEO_SUFFIX_TO_CAM_NAME,
-    KalibrCamWithExtrinsic,
-    _kalibr_cam_to_fisheye62,
-    _load_kalibr_camchain_imucam,
-)
 from simplecv.imu_calibration import ImuCalibration
 from yaml import YAMLError
 
@@ -70,6 +60,14 @@ from dataforge import blueprints, paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
 from dataforge.logging_toolkit import ImuChannel, log_camera_node, log_imu, log_rig_node, log_video_stream
+from dataforge.robocap_kalibr import (
+    CAM_TO_CALIB_INFO,
+    CAMERA_DISPLAY_ORDER,
+    VIDEO_SUFFIX_TO_CAM_NAME,
+    KalibrCamWithExtrinsic,
+    kalibr_cam_to_fisheye62,
+    load_kalibr_camchain_imucam,
+)
 
 # Beartype runs only under pytest (pytest-beartype imports it); its violations must escape broad handlers then.
 BeartypeException: tuple[type[Exception], ...] = (sys.modules["beartype.roar"].BeartypeException,) if "beartype.roar" in sys.modules else ()
@@ -384,7 +382,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             path: Path = imucam_files[0]
             if path not in camchains:
                 try:
-                    camchains[path] = _load_kalibr_camchain_imucam(path)
+                    camchains[path] = load_kalibr_camchain_imucam(path)
                 except (SerdeError, YAMLError) as error:
                     raise ValueError(f"{path}: {error}") from error
             entry: KalibrCamWithExtrinsic | None = camchains[path].get(f"cam{cam_index}")
@@ -397,7 +395,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
         if not calib_dir.is_dir():
             raise FileNotFoundError(f"Calibration directory not found: {calib_dir}")
-        return {name: _kalibr_cam_to_fisheye62(camera.entry, name=name) for name, camera in self._factory_cameras(device).items()}
+        return {name: kalibr_cam_to_fisheye62(camera.entry, name=name) for name, camera in self._factory_cameras(device).items()}
 
     # ── conversion ────────────────────────────────────────────────────────
     def convert(self, identity: SequenceIdentity, source: RobocapSource, *, force: bool) -> Path:

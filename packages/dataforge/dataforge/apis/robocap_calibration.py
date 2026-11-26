@@ -7,10 +7,10 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import rerun as rr
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
 
 from dataforge import paths, schema, writing
 from dataforge.datasets.robocap import RobocapConfig, RobocapDataset
+from dataforge.robocap_kalibr import CAMERA_DISPLAY_ORDER
 
 
 @dataclass
