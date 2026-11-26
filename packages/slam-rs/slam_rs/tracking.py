@@ -6,7 +6,7 @@ inertial, and timestamp handling. Returned trajectories use the device clock.
 
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
@@ -231,6 +231,10 @@ class SegmentRun:
     """What :meth:`slam_rs._core.Vio.finish_map` returned (the GBA's keyframes, on the estimator's clock); None with the back end off."""
 
 
+    def uncovered(self) -> int:
+        """Framesets that never got the inertial samples that cover them: a run a tool refuses to export."""
+        return sum(drop.reason == DropReason.IMU_ENDED for drop in self.dropped)
+
     def unexplained_loss(self) -> str | None:
         """Describe an incomplete run that cannot replace a published pose layer."""
         if (len(self.estimate) < 2 or self.lost != len(self.dropped)
@@ -298,6 +302,32 @@ def final_trajectory(vio: _core.Vio, estimate: Trajectory, *, run_gba: bool) -> 
     return FinalRun(final=reanchored(estimate, map_result), map_result=map_result, gba_failure=gba_failure)
 
 
+def track(framesets: Iterable[Frameset], lockstep: Lockstep, observer: RunObserver | None = None) -> Iterator[_core.VioResult]:
+    """Push every frameset through the lockstep, then flush it: the one loop every driver of the estimator runs.
+
+    Args:
+        framesets: The framesets, in time order, each with the samples since the previous one.
+        lockstep: The estimator and its IMU hold.
+        observer: Told of each pose, each frameset's push and the flush (:class:`RunObserver`).
+
+    Yields:
+        Each pose's result, in trajectory order.
+    """
+    for frameset in framesets:
+        for held, result in lockstep.push(frameset):
+            yield result
+            if observer is not None:
+                observer.tracked(held, result)
+        if observer is not None:
+            observer.consumed(frameset)
+    for held, result in lockstep.flush():
+        yield result
+        if observer is not None:
+            observer.tracked(held, result)
+    if observer is not None:
+        observer.flushed()
+
+
 def drive(
     feed: SegmentFeed,
     lockstep: Lockstep,
@@ -319,8 +349,6 @@ def drive(
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
     quaternions: list[Float64[ndarray, " 4"]] = []
-    replayed: int = 0
-
     def record(result: _core.VioResult) -> None:
         """Keep one pose without retaining a view of its seven-value buffer."""
         pose: Float64[ndarray, " 7"] | None = result.world_from_rig
@@ -335,25 +363,21 @@ def drive(
     counted_ns: int | None = feed.stop_ns_after(max_framesets)
     if counted_ns is not None:
         stop_ns = counted_ns if stop_ns is None else min(stop_ns, counted_ns)
+    replayed: list[int] = [0]
+
+    def inputs() -> Iterator[Frameset]:
+        """The feed's framesets up to the count and the time it was asked to stop at."""
+        for frameset in feed.framesets(stop_ns):
+            if max_framesets is not None and replayed[0] >= max_framesets:
+                return
+            if stop_ns is not None and frameset.t_ns > stop_ns:
+                return
+            replayed[0] += 1
+            yield frameset
+
     started: float = time.monotonic()
-    for frameset in feed.framesets(stop_ns):
-        if max_framesets is not None and replayed >= max_framesets:
-            break
-        if stop_ns is not None and frameset.t_ns > stop_ns:
-            break
-        replayed += 1
-        for tracked, result in lockstep.push(frameset):
-            record(result)
-            if observer is not None:
-                observer.tracked(tracked, result)
-        if observer is not None:
-            observer.consumed(frameset)
-    for tracked, result in lockstep.flush():
+    for result in track(inputs(), lockstep, observer):
         record(result)
-        if observer is not None:
-            observer.tracked(tracked, result)
-    if observer is not None:
-        observer.flushed()
     wall_s: float = time.monotonic() - started
     estimate: Trajectory = Trajectory(
         t_ns=np.array(t_ns, dtype=np.int64),
@@ -367,8 +391,8 @@ def drive(
         final=None if finished.map_result is None else shift_clock(finished.final, feed.export_offset_ns),
         map_result=finished.map_result,
         gba_failure=finished.gba_failure,
-        framesets=replayed,
-        lost=replayed - len(t_ns),
+        framesets=replayed[0],
+        lost=replayed[0] - len(t_ns),
         wall_s=wall_s,
         config_sha256=config_sha256,
         calibration_sha256=config_text_sha256(calibration.to_json()),

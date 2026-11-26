@@ -1,12 +1,11 @@
-"""The tracked keypoints' names, colours and size on the camera images, and each camera's 2D view."""
+"""The tracked keypoints' entity, colours and size on the base camera images."""
 
 
 import numpy as np
-import rerun.blueprint as rrb
 from jaxtyping import Int64, UInt8, UInt64
 from numpy import ndarray
 
-from slam_rs.rig import RIG_ENTITY, CameraCalib
+from slam_rs.rig import RIG_ENTITY
 
 KEYPOINT_RADIUS_PX: float = 2.0
 """Radius of a tracked keypoint, in image pixels."""
@@ -48,18 +47,3 @@ def track_colors(ids: Int64[ndarray, " n_tracks"]) -> UInt8[ndarray, "n_tracks 3
     """
     hashed: UInt64[ndarray, " n_tracks"] = (ids.astype(np.uint64) * np.uint64(2654435761)) % np.uint64(2**32)
     return HUE_RAMP[hashed % np.uint64(len(HUE_RAMP))]
-
-
-def camera_views(cameras: tuple[CameraCalib, ...]) -> list[rrb.View]:
-    """One 2D view per camera, named and origined on the camera's own entity.
-
-    The panel layout of a camera is a convention both rungs share, so both
-    blueprints build their views here.
-
-    Args:
-        cameras: The rig's cameras, in rig order.
-
-    Returns:
-        The views, in the same order.
-    """
-    return [rrb.Spatial2DView(origin=camera_entity(camera.index), name=f"cam {camera.index:02d}") for camera in cameras]

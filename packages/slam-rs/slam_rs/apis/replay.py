@@ -27,10 +27,10 @@ from slam_rs.catalog_feed import (
     select_decode_device,
 )
 from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.gba_log import keyframe_trajectory
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.tracking import DropReason, SegmentRun
+from slam_rs.tracking import SegmentRun
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
 from slam_rs.vio_log import BootstrapLog, VioStage, vio_blueprint
 
@@ -175,14 +175,13 @@ def main(config: Config) -> None:
         # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
         # non-zero exit rather than a traceback through the feed.
         vio: _core.Vio = _core.Vio(calibration, vio_config, backend=config.backend, ba_backend=config.ba_backend)
-        backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
         print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else "") + f", GBA lane: {vio.gba_lane}")
-        rr.send_blueprint(vio_blueprint(feed.cameras))
+        rr.send_blueprint(vio_blueprint(feed.camera_positions))
         recording: rr.RecordingStream | None = rr.get_global_data_recording()
         assert recording is not None, "RerunTyroConfig sets up the global recording"
         layer: LayerRun = track_layer(
-            recording, feed, vio, config_sha256=config_text_sha256(config_text), calibration=calibration, run_gba=config.gba, detail=config.detail,
-            profile=config.profile, backend=backend, decoder=feed.decode_device, animate_base_rig=config.animate_base_rig, strict=False,
+            recording, feed, vio, config_text=config_text, calibration=calibration, run_gba=config.gba, detail=config.detail,
+            profile=config.profile, animate_base_rig=config.animate_base_rig, strict=False,
             max_framesets=config.max_framesets,
         )
         export_offset_ns: int = feed.export_offset_ns
@@ -204,9 +203,9 @@ def main(config: Config) -> None:
                 f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "
                 f"mean {np.mean(stage.keypoints):.1f}, min {np.min(stage.keypoints)}, max {np.max(stage.keypoints)}"
             )
-    uncovered: int = sum(drop.reason == DropReason.IMU_ENDED for drop in run.dropped)
-    if uncovered:
-        raise SystemExit(f"{uncovered} framesets never got the inertial samples that cover them")
+    print(f"Vio.track median {run.median_tracker_ms:.2f} ms")
+    if run.uncovered():
+        raise SystemExit(f"{run.uncovered()} framesets never got the inertial samples that cover them")
 
     estimate: Trajectory = run.estimate
     # The raw VIO first, beside the final run with ``_vio`` added to the stem (the names the scorer's

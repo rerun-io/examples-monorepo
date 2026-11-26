@@ -56,16 +56,17 @@ class ColumnLog:
     styled: set[str] = field(default_factory=set)
     """Entities whose static style (:meth:`static_once`) is already logged."""
 
-    def static_once(self, entity: str, style: rr.AsComponents) -> None:
+    def static_once(self, entity: str, style: Callable[[], rr.AsComponents]) -> None:
         """Log what every row of ``entity`` shares (a radius, a colour) once, static, the first time it is asked for.
 
         Args:
             entity: Entity path.
-            style: The shared components, e.g. ``rr.Points3D.from_fields(radii=0.01)``.
+            style: Builds the shared components, e.g. ``lambda: rr.Points3D.from_fields(radii=0.01)``; called once, so
+                a per-frameset caller does not build an archetype it throws away.
         """
         if entity not in self.styled:
             self.styled.add(entity)
-            rr.log(entity, style, static=True, recording=self.recording)
+            rr.log(entity, style(), static=True, recording=self.recording)
 
     def add(self, entity: str, columns_of: ColumnsOf, t_ns: int, **fields: Any) -> None:
         """Hold one row with one instance of each field: a ``Transform3D``, a ``Scalars`` value, a ``Clear``.
@@ -77,6 +78,7 @@ class ColumnLog:
             **fields: One value per field (a translation, a scalar); every row of the entity names the same fields.
         """
         held: EntityRows = self._held(entity, columns_of, "one")
+        _check_fields(entity, held, fields)
         held.t_ns.append(t_ns)
         for name, value in fields.items():
             held.fields.setdefault(name, []).append(value)
@@ -92,6 +94,7 @@ class ColumnLog:
                 count in each.
         """
         held: EntityRows = self._held(entity, columns_of, "many")
+        _check_fields(entity, held, fields)
         counts: set[int] = {len(value) for value in fields.values()}
         if len(counts) != 1:
             raise ValueError(f"{entity}: a row's fields hold different instance counts {sorted(counts)}")
@@ -120,6 +123,13 @@ class ColumnLog:
         if held is None:
             held = self.rows[key] = EntityRows(columns_of=columns_of, mode=mode)
         return held
+
+
+def _check_fields(entity: str, held: EntityRows, fields: dict[str, Any]) -> None:
+    """Refuse a row that names other fields than the rows before it: the columns would no longer line up, and
+    ``send_columns`` drops such a block with one warning instead of raising."""
+    if held.t_ns and fields.keys() != held.fields.keys():
+        raise ValueError(f"{entity}: a row with fields {sorted(fields)} after rows with {sorted(held.fields)}")
 
 
 def _stacked(values: list[Any]) -> Any:

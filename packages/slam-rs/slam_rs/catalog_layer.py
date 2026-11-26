@@ -22,8 +22,8 @@ from simplecv.rerun_walk_path import ENDPOINTS, TRAIL, segments, send_endpoints,
 from slam_rs import _core
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, SegmentFeed
 from slam_rs.columns import ColumnLog
+from slam_rs.config import config_text_sha256
 from slam_rs.follow_frame import follow_entity, follow_yaw, yaw_quaternion_xyzw
-from slam_rs.gba_log import log_map_result
 from slam_rs.tracking import Lockstep, SegmentRun, drive
 from slam_rs.trajectory import Trajectory, shift_clock
 from slam_rs.vio_log import COLOR_DOWNSCALE, VioLogger, VioStage, dataset_videos
@@ -55,13 +55,11 @@ def track_layer(
     feed: SegmentFeed,
     vio: _core.Vio,
     *,
-    config_sha256: str,
+    config_text: str,
     calibration: _core.Calibration,
     run_gba: bool,
     detail: LayerDetail,
     profile: Literal["fast", "reference"],
-    backend: str,
-    decoder: str,
     animate_base_rig: bool,
     strict: bool,
     max_framesets: int | None = None,
@@ -76,14 +74,12 @@ def track_layer(
     Args:
         rec: The layer's recording (an atomic file for the catalog, or a viewer for a replay).
         feed: The open segment.
-        vio: The estimator, built from ``calibration`` and the config whose hash is ``config_sha256``.
-        config_sha256: Hash of the exact config text, recorded.
+        vio: The estimator, built from ``calibration`` and ``config_text``.
+        config_text: The exact config text the estimator was built from; its hash is recorded.
         calibration: The calibration the estimator was built from.
         run_gba: Run the global BA for the final run.
         detail: :data:`LayerDetail`.
         profile: Estimator configuration profile, recorded.
-        backend: Frontend lane, recorded.
-        decoder: Video decoder, recorded.
         animate_base_rig: Also move ``/world/rig_00`` with the final run (no ``gt`` layer).
         strict: Refuse an incomplete run (:func:`log_layer`).
         max_framesets: Stop after this many framesets; None tracks the whole segment.
@@ -101,29 +97,24 @@ def track_layer(
         logger: VioLogger = VioLogger(
             cameras=feed.cameras,
             ground_truth=feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1])),
-            frame_t_ns=feed.frame_t_ns,
             tracked_resolution=tuple(vio.tracked_resolution),
             cam_time_offset_ns=cam_offset_ns,
             # The base's own lens videos: the window's frusta reference their frames, nothing is encoded again.
             video_entities=dataset_videos(feed.camera_positions),
             camera_positions=feed.camera_positions,
             base_downscale=feed.profile.downscale,
-            # The final loop set is drawn once at the end, not each loop from its detection on.
-            loops_as_found=False,
             columns=ColumnLog(recording=rec),
         )
         stage = VioStage(lockstep=lockstep, logger=logger)
-    run: SegmentRun = drive(feed, lockstep, stop_ns, max_framesets, config_sha256=config_sha256, calibration=calibration, run_gba=run_gba,
-                            observer=stage)
-    log_layer(rec, run, clock_offset_ns=feed.video_time_offset_ns, profile=profile, backend=backend, decoder=decoder, animate_base_rig=animate_base_rig,
-              lens_videos=dataset_videos(feed.camera_positions), walk_span_ns=(int(feed.frame_t_ns[0]) - cam_offset_ns, int(feed.frame_t_ns[-1]) - cam_offset_ns),
-              strict=strict)
-    if stage is not None and len(run.estimate):
-        final: Trajectory = shift_clock(run.estimate if run.final is None else run.final, -feed.export_offset_ns)
-        stage.logger.log_ground_truth_path()
-        stage.logger.log_final_alignment(final)
-        if run.map_result is not None:
-            log_map_result(run.map_result, stage.logger.columns, stage.logger.video_t_ns(int(final.t_ns[-1])))
+    run: SegmentRun = drive(feed, lockstep, stop_ns, max_framesets, config_sha256=config_text_sha256(config_text), calibration=calibration,
+                            run_gba=run_gba, observer=stage)
+    log_layer(rec, run, clock_offset_ns=feed.video_time_offset_ns, profile=profile, backend=str(_core.gpu_backend) if vio.gpu else "cpu",
+              decoder=feed.decode_device, detail=detail, animate_base_rig=animate_base_rig,
+              # The lens frames hang under the frusta only the full layer's rig copy draws (VioLogger).
+              lens_videos=dataset_videos(feed.camera_positions) if stage is not None else (),
+              walk_span_ns=(int(feed.frame_t_ns[0]) - cam_offset_ns, int(feed.frame_t_ns[-1]) - cam_offset_ns), strict=strict)
+    if stage is not None:
+        stage.finish(shift_clock(run.estimate if run.final is None else run.final, -feed.export_offset_ns), run.map_result)
     return LayerRun(run=run, stage=stage)
 
 
@@ -154,6 +145,7 @@ def log_layer(
     profile: Literal["fast", "reference"],
     backend: str,
     decoder: str = "cpu",
+    detail: LayerDetail = "poses",
     animate_base_rig: bool = False,
     lens_videos: Sequence[str] = (),
     walk_span_ns: tuple[int, int] | None = None,
@@ -165,9 +157,9 @@ def log_layer(
     and the replay alike; what a run adds frameset by frameset (keypoints, window, landmarks, map, counters) is
     :class:`slam_rs.vio_log.VioLogger`'s, in the same recording.
 
-    ``clock_offset_ns`` is the feed's export offset plus camera-to-IMU offset.
-    With ``strict``, explicit initialization and terminal IMU drops are recorded; unexplained
-    losses, interior gaps and non-finite runs cannot replace an existing result (a replay passes False: it shows any run).
+    ``clock_offset_ns`` is the feed's export offset plus camera-to-IMU offset. Explicit initialization and terminal IMU
+    drops are recorded. Unexplained losses, interior gaps and non-finite runs cannot replace an existing result with
+    ``strict``; without it (a replay, which shows any run) they are a warning.
     ``animate_base_rig`` also writes the final poses on ``/world/rig_00``; only
     for a dataset without a ``gt`` layer, where nothing else moves the rig.
     Each run carries its level follow frame (:func:`slam_rs.follow_frame.follow_entity`).
@@ -182,6 +174,7 @@ def log_layer(
         profile: Estimator configuration profile, recorded.
         backend: Frontend lane, recorded.
         decoder: Video decoder, recorded.
+        detail: What the layer holds (:data:`LayerDetail`), recorded.
         animate_base_rig: Also move ``/world/rig_00`` with the final run.
         lens_videos: The base ``VideoStream`` of each fed camera, in feed order: the raw run's rig then shows each lens's
             current frame in its frustum (``VideoFrameReference``). Empty, the frusta stay empty.
@@ -211,13 +204,16 @@ def log_layer(
     span: tuple[int, int] = (int(times[0]), int(times[-1])) if walk_span_ns is None else walk_span_ns
     gradient: UInt8[ndarray, "n 3"] = walk_colors(times, span[0], span[1])
     root: str = schema.run_path(POSE_SOURCE)
-    rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    if len(run.ground_truth) == 0:
+        # The runs are in the estimator's own gravity-aligned world; aligned to a ground truth they are in the
+        # dataset's, whose base layer states its own axes.
+        rec.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     _log_run(rec, POSE_SOURCE, times, positions, rotations, gradient)
     _log_run(rec, VIO_SOURCE, times, raw_positions, raw_rotations, gradient, lens_videos)
     if animate_base_rig:
         rec.send_columns(RIG_ENTITY, indexes=[rr.TimeColumn(TIMELINE, duration=times.astype("timedelta64[ns]"))],
                          columns=rr.Transform3D.columns(translation=positions, quaternion=rotations))
-    rec.log(f"{root}", rr.AnyValues(source="slam-rs catalog VIO", profile=profile, backend=backend, decoder=decoder, config_sha256=run.config_sha256,
+    rec.log(f"{root}", rr.AnyValues(source="slam-rs catalog VIO", profile=profile, backend=backend, decoder=decoder, detail=detail, config_sha256=run.config_sha256,
                                   calibration_sha256=run.calibration_sha256,
                                   num_poses=len(positions), num_framesets=run.framesets, num_dropped=len(run.dropped),
                                   wall_s=run.wall_s, median_tracker_ms=run.median_tracker_ms,

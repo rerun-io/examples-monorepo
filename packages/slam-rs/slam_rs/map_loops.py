@@ -85,8 +85,8 @@ def log_loops(keyframes: _core.MapKeyframes, columns: ColumnLog, t_ns: int) -> N
     segments: Float64[ndarray, "l 2 3"] = loop_segments(keyframes.t_ns, keyframes.poses, keyframes.loop_edges)
     fused: Bool[ndarray, " l"] = keyframes.loop_fused
     colors: UInt8[ndarray, "l 4"] = np.where(fused[:, None], np.array(FUSED_LOOP_COLOR, dtype=np.uint8), np.array(PGO_LOOP_COLOR, dtype=np.uint8))
-    columns.static_once(LOOPS_ENTITY, rr.LineStrips3D.from_fields(radii=LOOP_RADIUS_M))
-    columns.add_batch(LOOPS_ENTITY, rr.LineStrips3D.columns, t_ns, strips=list(segments), colors=colors)
+    columns.static_once(LOOPS_ENTITY, lambda: rr.LineStrips3D.from_fields(radii=LOOP_RADIUS_M))
+    columns.add_batch(LOOPS_ENTITY, rr.LineStrips3D.columns, t_ns, strips=segments, colors=colors)
 
 
 def log_pose_graph(map_snapshot: _core.MapSnapshot, columns: ColumnLog, t_ns: int) -> None:
@@ -95,9 +95,9 @@ def log_pose_graph(map_snapshot: _core.MapSnapshot, columns: ColumnLog, t_ns: in
         (PGO_BEFORE_ENTITY, map_snapshot.keyframe_raw_poses, PGO_BEFORE_COLOR),
         (PGO_AFTER_ENTITY, map_snapshot.keyframe_poses, PGO_AFTER_COLOR),
     ):
-        columns.static_once(entity, rr.LineStrips3D.from_fields(colors=color, radii=PGO_PATH_RADIUS_M))
+        columns.static_once(entity, lambda color=color: rr.LineStrips3D.from_fields(colors=color, radii=PGO_PATH_RADIUS_M))
         columns.add_batch(entity, rr.LineStrips3D.columns, t_ns, strips=[poses[:, 0:3]])
     segments: Float64[ndarray, "g 2 3"] = loop_segments(map_snapshot.keyframe_t_ns, map_snapshot.keyframe_poses, map_snapshot.pose_graph_edges)
     colors: UInt8[ndarray, "g 4"] = np.array(POSE_GRAPH_COLORS, dtype=np.uint8)[map_snapshot.pose_graph_edge_kinds]
-    columns.static_once(POSE_GRAPH_ENTITY, rr.LineStrips3D.from_fields(radii=POSE_GRAPH_RADIUS_M))
-    columns.add_batch(POSE_GRAPH_ENTITY, rr.LineStrips3D.columns, t_ns, strips=list(segments), colors=colors)
+    columns.static_once(POSE_GRAPH_ENTITY, lambda: rr.LineStrips3D.from_fields(radii=POSE_GRAPH_RADIUS_M))
+    columns.add_batch(POSE_GRAPH_ENTITY, rr.LineStrips3D.columns, t_ns, strips=segments, colors=colors)

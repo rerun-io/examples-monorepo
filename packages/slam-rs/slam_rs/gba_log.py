@@ -12,8 +12,8 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.columns import ColumnLog
+from slam_rs.map_loops import RUN_ENTITY
 from slam_rs.trajectory import Trajectory
-from slam_rs.vio_log import RUN_ENTITY
 
 GBA_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/gba/keyframes"
 """The map keyframes after the global BA, one point each."""
@@ -60,9 +60,9 @@ def log_map_result(result: _core.MapResult, columns: ColumnLog, t_ns: int) -> No
         return
     recording: rr.RecordingStream | None = columns.recording
     positions: Float64[ndarray, "k 3"] = result.keyframe_poses[:, 0:3]
-    columns.static_once(GBA_KEYFRAMES_ENTITY, rr.Points3D.from_fields(colors=GBA_COLOR, radii=GBA_KEYFRAME_RADIUS_M))
+    columns.static_once(GBA_KEYFRAMES_ENTITY, lambda: rr.Points3D.from_fields(colors=GBA_COLOR, radii=GBA_KEYFRAME_RADIUS_M))
     columns.add_batch(GBA_KEYFRAMES_ENTITY, rr.Points3D.columns, t_ns, positions=positions)
-    columns.static_once(GBA_PATH_ENTITY, rr.LineStrips3D.from_fields(colors=GBA_COLOR, radii=GBA_PATH_RADIUS_M))
+    columns.static_once(GBA_PATH_ENTITY, lambda: rr.LineStrips3D.from_fields(colors=GBA_COLOR, radii=GBA_PATH_RADIUS_M))
     columns.add_batch(GBA_PATH_ENTITY, rr.LineStrips3D.columns, t_ns, strips=[positions])
     columns.flush()
     attempts: rr.TimeColumn = rr.TimeColumn(GBA_TIMELINE, sequence=np.arange(gba.iteration_lambda.shape[0], dtype=np.int64))

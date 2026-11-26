@@ -1,10 +1,10 @@
-"""Log VIO estimates, ground truth, rig and window Pinhole cameras, and tracker statistics.
+"""What a run's layer holds frameset by frameset: keypoints, the window's frusta, landmarks, the map, counters.
 
-The run names follow the catalog layer (f0, :mod:`slam_rs.catalog_layer`): the raw causal VIO, drawn live, is
+The run names follow the catalog layer (f0, :mod:`slam_rs.catalog_layer`): the raw causal VIO is
 ``/world/runs/slam_rs_vio``; the final run (the raw VIO re-anchored on the back end's map after the flush) is
-``/world/runs/slam_rs``, where the map, the loops and the pose graph are drawn too. Each run carries its own
-alignment to the ground truth. Until the final run exists, ``slam_rs`` repeats the raw run's alignment, so the map
-sits on the raw run while the replay plays.
+``/world/runs/slam_rs``, where the map, the loops and the pose graph are drawn too. Both runs' paths are drawn from
+the finished trajectories by :func:`slam_rs.catalog_layer.log_layer`. With ground truth, each run carries its own
+alignment to it; until the final run exists, ``slam_rs`` repeats the raw run's, so the map sits on the raw run.
 """
 
 import itertools
@@ -19,13 +19,14 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
-from simplecv.rerun_walk_path import PATH_RADIUS_UI, TRAIL, TRAJECTORY, send_trajectory
+from simplecv.rerun_walk_path import TRAIL
 from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import RIG_ENTITY, TIMELINE, CameraCalib, Frameset
 from slam_rs.columns import ColumnLog
-from slam_rs.frontend_log import KEYPOINT_RADIUS_PX, camera_entity, camera_views, track_colors
+from slam_rs.frontend_log import KEYPOINT_RADIUS_PX, camera_entity, track_colors
+from slam_rs.gba_log import log_map_result
 from slam_rs.landmark_colors import LandmarkColors
 from slam_rs.map_loops import PGO_CORRECTION_COLOR, PGO_CORRECTIONS_ENTITY, RUN_ENTITY, correction_segments, log_loops, log_pose_graph
 from slam_rs.map_point_blocks import MapPointBlocks
@@ -33,9 +34,9 @@ from slam_rs.tracking import DropReason, Lockstep
 from slam_rs.trajectory import MIN_ASSOCIATED_POSES, AteResult, PoseLog, Trajectory, ate
 
 VIO_RUN_ENTITY: str = "/world/runs/slam_rs_vio"
-"""The raw causal VIO, drawn live: rig, trajectory, window, landmarks (the catalog layer's ``slam_rs_vio``)."""
+"""The raw causal VIO: its window, landmarks and rig frusta here, its path from :func:`slam_rs.catalog_layer.log_layer`."""
 GT_ENTITY: str = "/world/runs/gt"
-"""The dataset's own ground-truth run, which the base recording already names."""
+"""The dataset's own ground-truth run, which its ``gt`` layer draws (:func:`vio_blueprint` gives its trail a time range)."""
 MAP_KEYFRAMES_ENTITY: str = f"{RUN_ENTITY}/keyframes"
 """The back end's map keyframes (DESIGN §8), one point per keyframe at its raw pose."""
 MAP_POINTS_ENTITY: str = f"{RUN_ENTITY}/map/points"
@@ -58,10 +59,6 @@ VIO_STATS_ENTITY: str = "/stats/vio"
 """Entity path for per-frame VIO counters, separate from dataset and frontend stats.
 """
 
-FINAL_COLOR: tuple[int, int, int] = (255, 120, 40)
-"""The final run: orange, over the raw run's green."""
-GT_COLOR: tuple[int, int, int] = (235, 235, 235)
-"""Ground truth: near-white, the reference every error is measured against."""
 KEYFRAME_COLOR: tuple[int, int, int, int] = (90, 200, 255, 255)
 """A keyframe still inside the window."""
 LTKF_COLOR: tuple[int, int, int, int] = (255, 235, 90, 255)
@@ -104,33 +101,6 @@ UNIFIED_SPHERE_MODELS: tuple[str, ...] = ("mei_v3", "mei_v6", "ds")
 """Camera models whose focal is the unified sphere's ``gamma`` and whose first coefficient is ``xi`` (:func:`display_intrinsics`)."""
 IDENTITY: SimilarityTransform = SimilarityTransform(dst_R_src=np.eye(3), dst_t_src=np.zeros(3), scale=1.0)
 """The alignment a run carries before enough of it has been associated with the ground truth."""
-
-
-def at_frameset_cadence(trajectory: Trajectory, frame_t_ns: Int64[ndarray, " n_frames"]) -> Trajectory:
-    """Thin a reference to one pose per frameset: the last one at or before each frame time.
-
-    Only what is **drawn** is thinned. The ATE and the alignment are computed
-    against the whole reference, because there the truth's own density is the
-    thing being measured against; a line drawn one segment a frameset can only
-    move by one pose a frameset, so the poses between them would never be drawn
-    at all.
-
-    Args:
-        trajectory: The reference to thin; an empty one comes back unchanged.
-        frame_t_ns: The segment's frameset times, ascending.
-
-    Returns:
-        The reference's poses at the frameset cadence, in time order.
-    """
-    if len(trajectory) == 0:
-        return trajectory
-    latest: Int64[ndarray, " n_frames"] = np.searchsorted(trajectory.t_ns, frame_t_ns, side="right") - 1
-    keep: Int64[ndarray, " n_kept"] = np.unique(latest[latest >= 0])
-    return Trajectory(
-        t_ns=trajectory.t_ns[keep],
-        position_m=trajectory.position_m[keep],
-        quaternion_wxyz=trajectory.quaternion_wxyz[keep],
-    )
 
 
 def inverted(alignment: SimilarityTransform) -> SimilarityTransform:
@@ -180,21 +150,16 @@ def dataset_videos(camera_positions: Sequence[int]) -> tuple[str, ...]:
     return tuple(f"{RIG_ENTITY}/cam_{position:02d}/pinhole/video" for position in camera_positions)
 
 
-def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bool = False, recording: rr.RecordingStream | None = None) -> None:
-    """Log a rig's static camera geometry, so whatever moves it draws as frusta.
+def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, recording: rr.RecordingStream | None = None) -> None:
+    """Log the run's own static copy of the rig's camera geometry, so the run's rig pose draws as frusta.
 
-    Two rigs are drawn from the same calibration and this is the one place that
-    spells it: the dataset's own under ``/world/rig_00`` and the estimated run's
-    own copy under its run entity — without which the estimate and the ground
-    truth would move the same frusta. Both have the dataset's layout: the
-    camera node carries the pose in the rig, its ``pinhole`` child the
-    ``Pinhole``, and the pictures and keypoints hang under that.
+    A copy, not the dataset's ``/world/rig_00``: without it the estimate and the ground truth would move the same frusta.
+    It has the dataset's layout: the camera node carries the pose in the rig, its ``pinhole`` child the ``Pinhole`` (with
+    :func:`display_intrinsics`, so a wide lens's picture has the right size), and the lens frames hang under that.
 
     Args:
-        cameras: The rig's cameras, in rig order.
+        cameras: The rig's fed cameras, in feed order.
         entity_prefix: What ``cam_MM`` hangs under.
-        display: The rig is a drawn copy, not the dataset's calibration: its frusta take
-            :func:`display_intrinsics`, so a wide lens's picture has the right size.
         recording: Where to log; None is the global recording.
     """
     for camera in cameras:
@@ -208,7 +173,7 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
         rr.log(
             f"{node}/pinhole",
             rr.Pinhole(
-                image_from_camera=display_intrinsics(camera) if display else image_from_camera(camera),
+                image_from_camera=display_intrinsics(camera),
                 resolution=[camera.width, camera.height],
                 camera_xyz=rr.ViewCoordinates.RDF,
                 image_plane_distance=IMAGE_PLANE_M,
@@ -220,22 +185,18 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
 
 @dataclass(slots=True)
 class VioLogger:
-    """Logs one frameset's estimator output, and carries the paths between them.
+    """Logs one frameset's estimator output.
 
-    The two reference trajectories are handed over whole, on the estimator's
-    clock the results come on (:attr:`SegmentFeed.frame_t_ns`); the estimate
-    accumulates as it is produced. Each row is stamped with its own frameset's
-    base ``video_time`` (the estimator's stamp minus :attr:`cam_time_offset_ns`)
-    and held in :attr:`columns`, which goes out every :attr:`block_framesets`
-    framesets and at every whole-run draw; :meth:`flush` sends the rest.
+    The ground truth is handed over whole, on the estimator's clock the results come on (:attr:`SegmentFeed.frame_t_ns`).
+    Each row is stamped with its own frameset's base ``video_time`` (the estimator's stamp minus
+    :attr:`cam_time_offset_ns`) and held in :attr:`columns`, which goes out every :data:`BLOCK_FRAMESETS` framesets and
+    at every whole-run draw; :meth:`flush` sends the rest.
     """
 
     cameras: tuple[CameraCalib, ...]
     """The rig's cameras, in rig order."""
     ground_truth: Trajectory
-    """Ground truth for the whole segment, on the estimator's clock; may be empty."""
-    frame_t_ns: Int64[ndarray, " n_frames"]
-    """The segment's frameset times: the cadence used to draw ground truth."""
+    """Ground truth for the whole segment, on the estimator's clock, which the runs are aligned to; may be empty."""
     tracked_resolution: tuple[tuple[int, int], ...]
     """``(width, height)`` of the frames each camera is tracked on (``Vio.tracked_resolution``), which the keypoints are in."""
     cam_time_offset_ns: int
@@ -251,20 +212,12 @@ class VioLogger:
     base_downscale: int = 1
     """How much smaller the decoded frames are than the base's (:attr:`RigProfile.downscale`): the keypoints are drawn in
     the base camera's own pixels."""
-    loops_as_found: bool = True
-    """Draw the map's loops at every map read, as the back end finds them (a live run). Off (a replay), the loops are
-    drawn once, the final set at the end (:meth:`log_final_map`): a replay's loops would otherwise stand from their
-    detection on, each drawn again at every read."""
     columns: ColumnLog = field(default_factory=ColumnLog)
     """The rows not sent yet, and the recording they go to."""
-    block_framesets: int = BLOCK_FRAMESETS
-    """Framesets between two sends of :attr:`columns` (:data:`BLOCK_FRAMESETS`)."""
     corrections_shown: bool = False
     """Whether pose-graph corrections are drawn from the last map read on (:meth:`_log_corrections`)."""
     poses: PoseLog = field(default_factory=PoseLog)
-    """Every pose the run reported, for the CSV export, the ATE and the per-frameset path segment."""
-    ground_truth_strip: Trajectory = field(init=False)
-    """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
+    """Every pose the run reported, on the estimator's clock: what the ATE-so-far and the alignment are fitted to."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
     """Previous window poses by timestamp, used to draw marginalized frames."""
     display_intrinsics: tuple[Float64[ndarray, "3 3"], ...] = field(init=False)
@@ -301,10 +254,8 @@ class VioLogger:
     """The map's points by host as read, and the blocks to draw again; its revision is the next read's ``since``."""
 
     def __post_init__(self) -> None:
-        """Log the estimated rig's static geometry and thin the references."""
-        recording: rr.RecordingStream | None = self.columns.recording
-        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig", display=True, recording=recording)
-        self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
+        """Log the estimated rig's static geometry."""
+        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig", recording=self.columns.recording)
         self.display_intrinsics = tuple(display_intrinsics(camera) for camera in self.cameras)
         self.keypoint_scale = tuple(self.base_downscale * camera.width / width for camera, (width, _) in zip(self.cameras, self.tracked_resolution, strict=True))
         positions: tuple[int, ...] = self.camera_positions or tuple(camera.index for camera in self.cameras)
@@ -325,7 +276,7 @@ class VioLogger:
         map_delta: _core.MapDelta | None = None,
         colors: list[UInt8[ndarray, "ch cw 3"]] | None = None,
     ) -> None:
-        """Log one tracked frameset: the keypoints, the ground truth's path, the window, the landmarks, the map and the counters.
+        """Log one tracked frameset: the keypoints, the window, the landmarks, the map and the counters.
 
         The run's own poses (rig, follow frame, trail, lens frames) are drawn from the whole trajectory at the end, by
         :func:`slam_rs.catalog_layer.log_layer`, the one writer of both runs' paths.
@@ -343,13 +294,9 @@ class VioLogger:
         self.framesets += 1
         self.poses.append(result.t_ns, pose[0:3], np.roll(pose[3:7], 1))
         t: int = self.video_t_ns(result.t_ns)
-        if colors is not None:
-            for camera, color in enumerate(colors):
-                self.landmark_colors.remember(frame.ids(camera), frame.positions(camera), color, self.tracked_resolution[camera])
-        self._log_keypoints(frame, t)
-        self._log_ground_truth_trail(result.t_ns, t)
+        self._log_keypoints(frame, t, colors)
         self._log_window(snapshot, t)
-        self.columns.static_once(f"{VIO_RUN_ENTITY}/landmarks", rr.Points3D.from_fields(radii=LANDMARK_RADIUS_M))
+        self.columns.static_once(f"{VIO_RUN_ENTITY}/landmarks", lambda: rr.Points3D.from_fields(radii=LANDMARK_RADIUS_M))
         self.columns.add_batch(f"{VIO_RUN_ENTITY}/landmarks", rr.Points3D.columns, t, positions=snapshot.landmark_positions,
                                colors=self.landmark_colors.lookup(snapshot.landmark_ids, LANDMARK_COLOR))
         if map_delta is not None:
@@ -368,10 +315,10 @@ class VioLogger:
             # that solution inverted, not a second association and a second SVD.
             against_truth: AteResult | None = self._log_ate(estimated, t)
             alignment: SimilarityTransform = IDENTITY if against_truth is None else inverted(against_truth.alignment)
-            # The map under the final run's entity sits on the raw run until :meth:`log_final_run` places it.
+            # The map under the final run's entity sits on the raw run until :meth:`log_final_alignment` places it.
             for run in (VIO_RUN_ENTITY, RUN_ENTITY):
                 self._log_alignment(run, alignment, t)
-        if self.framesets % self.block_framesets == 0:
+        if self.framesets % BLOCK_FRAMESETS == 0:
             self.columns.flush()
 
     def flush(self) -> None:
@@ -379,42 +326,21 @@ class VioLogger:
         self.columns.flush()
 
     def estimated(self) -> Trajectory:
-        """Everything reported so far, on the replay's ``video_time`` clock."""
+        """Everything reported so far, on the estimator's clock."""
         return self.poses.trajectory()
 
-    def log_ground_truth_path(self) -> None:
-        """Log the ground truth's whole path once, at the last pose (:mod:`simplecv.rerun_walk_path`): the trail shows where
-        it had got to, this where it went, from the end of the walk on."""
-        estimated: Trajectory = self.estimated()
-        if len(self.ground_truth_strip) >= 2 and len(estimated):
-            send_trajectory(f"{GT_ENTITY}/{TRAJECTORY}", self.video_t_ns(int(estimated.t_ns[-1])), self.ground_truth_strip.position_m, GT_COLOR,
-                            recording=self.columns.recording)
-        self.flush()
-
-    def _log_keypoints(self, frame: _core.FlowFrame, t: int) -> None:
-        """Each camera's tracked keypoints on its base camera, in that camera's pixels (:func:`slam_rs.frontend_log.log_keypoints`)."""
+    def _log_keypoints(self, frame: _core.FlowFrame, t: int, colors: list[UInt8[ndarray, "ch cw 3"]] | None) -> None:
+        """Each camera's tracked keypoints on its base camera, in that camera's pixels; with ``colors``, a new track's
+        landmark also takes the image's colour under its keypoint (:class:`LandmarkColors`)."""
         for index, (position, scale) in enumerate(zip(self.camera_positions, self.keypoint_scale, strict=True)):
             ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
             tracked: Float32[ndarray, "n_tracks 2"] = frame.positions(index)
-            self.columns.static_once(f"{camera_entity(position)}/keypoints", rr.Points2D.from_fields(radii=KEYPOINT_RADIUS_PX * scale))
-            self.columns.add_batch(f"{camera_entity(position)}/keypoints", rr.Points2D.columns, t,
-                                   positions=tracked if scale == 1.0 else tracked * np.float32(scale), colors=track_colors(ids))
-
-    def _log_ground_truth_trail(self, t_ns: int, t: int) -> None:
-        """Draw the segment the ground truth gained by this frameset: from its newest-but-one to its newest pose at or
-        before it, on the frameset's row (the view's visible time range accumulates them into the path so far). None
-        before its first pose; the alignment transforms bring it and the runs together in the dataset's world.
-
-        Args:
-            t_ns: The frameset's estimator stamp.
-            t: Its ``video_time``.
-        """
-        drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
-        if drawn < 1:
-            return
-        reference: Float64[ndarray, "2 3"] = self.ground_truth_strip.position_m[[max(drawn - 2, 0), drawn - 1]]
-        self.columns.static_once(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D.from_fields(colors=GT_COLOR, radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
-        self.columns.add_batch(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D.columns, t, strips=[reference])
+            if colors is not None:
+                self.landmark_colors.remember(ids, tracked, colors[index], self.tracked_resolution[index])
+            entity: str = f"{camera_entity(position)}/keypoints"
+            self.columns.static_once(entity, lambda radius=KEYPOINT_RADIUS_PX * scale: rr.Points2D.from_fields(radii=radius))
+            self.columns.add_batch(entity, rr.Points2D.columns, t, positions=tracked if scale == 1.0 else tracked * np.float32(scale),
+                                   colors=track_colors(ids))
 
     def _draw_slot(
         self, family: SlotFamily, k: int, t_ns: int, pose: Float64[ndarray, " 7"], color: tuple[int, int, int, int], t: int, *, pictures: bool
@@ -525,10 +451,13 @@ class VioLogger:
             t_ns: Estimator time of the frameset it is drawn at, usually the last one's.
         """
         t: int = self.video_t_ns(t_ns)
+        # Rows of one entity at one stamp keep their send order: the last map read's rows (a correction's Clear among
+        # them) go out before the final map's, so they cannot hide it.
+        self.flush()
         self._log_map_keyframes(map_snapshot.map_keyframes, t_ns, loops=True)
         # The end of the run: one entity holds the whole map from here on, where a layout's overrides find it.
         self.columns.add(MAP_POINT_BLOCKS_ENTITY, rr.Clear.columns, t, is_recursive=True)
-        self.columns.static_once(MAP_POINTS_ENTITY, rr.Points3D.from_fields(radii=MAP_POINT_RADIUS_M))
+        self.columns.static_once(MAP_POINTS_ENTITY, lambda: rr.Points3D.from_fields(radii=MAP_POINT_RADIUS_M))
         self.columns.add_batch(MAP_POINTS_ENTITY, rr.Points3D.columns, t, positions=map_snapshot.points_world,
                                colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR))
         self.map_points_t_ns = t_ns
@@ -567,7 +496,7 @@ class VioLogger:
         colors: UInt8[ndarray, "k 4"] = np.where(
             keyframes.active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
         )
-        self.columns.static_once(MAP_KEYFRAMES_ENTITY, rr.Points3D.from_fields(radii=MAP_KEYFRAME_RADIUS_M))
+        self.columns.static_once(MAP_KEYFRAMES_ENTITY, lambda: rr.Points3D.from_fields(radii=MAP_KEYFRAME_RADIUS_M))
         self.columns.add_batch(MAP_KEYFRAMES_ENTITY, rr.Points3D.columns, t, positions=keyframes.poses[:, 0:3], colors=colors)
         if loops:
             log_loops(keyframes, self.columns, t)
@@ -578,8 +507,8 @@ class VioLogger:
         """Draw the pose-graph corrections at the frameset when there are any; clear them once when they go."""
         corrections: Float64[ndarray, "m 2 3"] = correction_segments(keyframes.raw_poses, keyframes.poses)
         if len(corrections):
-            self.columns.static_once(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.from_fields(colors=PGO_CORRECTION_COLOR, radii=PGO_CORRECTION_RADIUS_M))
-            self.columns.add_batch(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.columns, t, strips=list(corrections))
+            self.columns.static_once(PGO_CORRECTIONS_ENTITY, lambda: rr.LineStrips3D.from_fields(colors=PGO_CORRECTION_COLOR, radii=PGO_CORRECTION_RADIUS_M))
+            self.columns.add_batch(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.columns, t, strips=corrections)
         elif self.corrections_shown:
             self.columns.add(PGO_CORRECTIONS_ENTITY, rr.Clear.columns, t, is_recursive=False)
         self.corrections_shown = bool(len(corrections))
@@ -587,7 +516,9 @@ class VioLogger:
     def _log_map_delta(self, map_delta: _core.MapDelta, t_ns: int) -> None:
         """While the run goes on: the keyframes and loops, the delta into :attr:`map_point_blocks`, and when the points
         are due the blocks it marked."""
-        self._log_map_keyframes(map_delta.map_keyframes, t_ns, loops=self.loops_as_found)
+        # The loops are drawn once, the final set with the final map: drawn at every read, each would stand from its
+        # detection on and go out again with every read.
+        self._log_map_keyframes(map_delta.map_keyframes, t_ns, loops=False)
         self.map_point_blocks.apply(
             map_delta.revision, map_delta.map_keyframes.t_ns, map_delta.changed_hosts, map_delta.point_counts, map_delta.point_ids, map_delta.points_world
         )
@@ -597,7 +528,7 @@ class VioLogger:
         for block, ids, positions in self.map_point_blocks.redraw():
             path: str = f"{MAP_POINT_BLOCKS_ENTITY}/{block:04d}"
             if ids.shape[0]:
-                self.columns.static_once(path, rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_POINT_BLOCK_RADIUS_UI)))
+                self.columns.static_once(path, lambda: rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_POINT_BLOCK_RADIUS_UI)))
                 self.columns.add_batch(path, rr.Points3D.columns, t, positions=positions, colors=self.landmark_colors.lookup(ids, MAP_POINT_COLOR))
             else:
                 self.columns.add(path, rr.Clear.columns, t, is_recursive=False)
@@ -739,59 +670,29 @@ class BootstrapLog:
 
 @dataclass(slots=True)
 class VioStage:
-    """The whole pipeline over one segment, and the Rerun layer it draws.
-
-    The estimator, its logger and its timings only ever exist together, on
-    ``--stage vio``.
-    """
+    """The estimator over one segment and the layer it draws: what :func:`slam_rs.tracking.drive` tells as the run goes
+    (a :class:`slam_rs.tracking.RunObserver`), and :meth:`finish` once the final trajectory exists."""
 
     lockstep: Lockstep
     """The estimator and the D17 hold, which the V2 gate drives the same way."""
     logger: VioLogger
-    """Where the trajectories, the window, the landmarks and the counters go."""
+    """Where the window, the landmarks, the map and the counters go."""
     times: StageTimes = field(default_factory=StageTimes)
     """Per-frameset wall time of each stage: ``track`` (the whole call), the ``frontend`` (pyramid, detection, tracking, stereo) and its ``imu`` prediction, the ``estimator`` (the
     rest of the call: bootstrap, estimator and glue) and the ``log`` work after it."""
     keypoints: list[int] = field(default_factory=list)
-    """Keypoints the frontend holds after each frameset, summed over cameras."""
+    """Keypoints the frontend holds at each pose, summed over cameras."""
     calls_seen: int = 0
     """``track`` calls already in :attr:`times`."""
     bootstrap: "BootstrapLog" = field(init=False)
     """The inertial bootstrap's attempts, logged as they happen."""
 
-    @property
-    def elapsed_ms(self) -> list[float]:
-        """Wall time each ``track`` call that tracked took, in frameset order."""
-        return self.lockstep.elapsed_ms
-
-    @property
-    def pending(self) -> list[Frameset]:
-        """Framesets still held for want of the inertial samples that cover them."""
-        return self.lockstep.pending
-
     def __post_init__(self) -> None:
         """Start the bootstrap's log on the logger's recording."""
         self.bootstrap = BootstrapLog(self.logger.cam_time_offset_ns, self.logger.columns)
 
-    def run(self, frameset: Frameset) -> None:
-        """Track the frameset and everything its samples now cover, and log each one (a caller that drives the lockstep
-        itself; :func:`slam_rs.tracking.drive` calls :meth:`tracked` and :meth:`consumed` instead).
-
-        Args:
-            frameset: The frameset to track, with the samples since the previous one.
-        """
-        for held, result in self.lockstep.push(frameset):
-            self.tracked(held, result)
-        self.consumed(frameset)
-
-    def flush(self) -> None:
-        """Log the last lagged frame, then the final map (the flush made it current), before completing paths or exporting poses."""
-        for held, result in self.lockstep.flush():
-            self.tracked(held, result)
-        self.flushed()
-
     def consumed(self, frameset: Frameset) -> None:
-        """After a frameset's push: the new ``track`` calls' stage times, the keypoints held and the bootstrap's attempts.
+        """After a frameset's push: the new ``track`` calls' stage times and the bootstrap's attempts.
 
         Args:
             frameset: The frameset just pushed.
@@ -807,10 +708,6 @@ class VioStage:
             self.times.add("frontend", flow)
             self.times.add("imu", frontend["imu"])
             self.times.add("estimator", calls[-1] - flow - frontend["imu"])
-            # One copy of the frontend's keypoints per frameset, for the count.
-            frame: _core.FlowFrame | None = vio.flow_frame()
-            if frame is not None:
-                self.keypoints.append(sum(frame.num_tracks(camera) for camera in range(vio.camera_count)))
         self.bootstrap.log_new(vio)
 
     def tracked(self, held: Frameset, result: _core.VioResult) -> None:
@@ -822,6 +719,7 @@ class VioStage:
         assert frame.t_ns == result.t_ns
         map_delta: _core.MapDelta | None = self.logger.read_map(self.lockstep.vio, snapshot)
         self.logger.log(result, snapshot, frame, self.lockstep.elapsed_ms[-1], map_delta, held.colors)
+        self.keypoints.append(sum(frame.num_tracks(camera) for camera in range(frame.camera_count)))
         self.times.add("log", 1e3 * (time.monotonic() - started))
 
     def flushed(self) -> None:
@@ -833,43 +731,38 @@ class VioStage:
         self.bootstrap.log_new(self.lockstep.vio)
         self.logger.flush()
 
-    def refuse_lost_framesets(self) -> None:
-        """Stop the run when a frameset never got the inertial samples that cover it.
+    def finish(self, final: Trajectory, map_result: _core.MapResult | None) -> None:
+        """Once the final trajectory exists: its alignment to the ground truth and the global BA's keyframes, at its last
+        pose; then every row held goes out.
 
-        Frames waiting for stereo are consumed without a pose. An input still
-        held for IMU at the end is an error; both tools use the same rule.
-
-        Raises:
-            SystemExit: If any frameset is still held.
+        Args:
+            final: The final trajectory on the estimator's clock (the raw VIO with the back end off).
+            map_result: What :meth:`slam_rs._core.Vio.finish_map` returned; None with the back end off.
         """
-        uncovered: int = len(self.pending) + sum(drop.reason == DropReason.IMU_ENDED for drop in self.lockstep.dropped)
-        if uncovered:
-            raise SystemExit(f"{uncovered} framesets never got the inertial samples that cover them")
+        if len(final):
+            self.logger.log_final_alignment(final)
+            if map_result is not None:
+                log_map_result(map_result, self.logger.columns, self.logger.video_t_ns(int(final.t_ns[-1])))
+        self.logger.flush()
 
     def summary(self) -> str:
-        """One line on what the stage did, for the end of a replay.
-
-        The empty case is this stage's own to report: the run that tracked
-        nothing is the one whose held framesets most need naming, and a caller
-        that guarded the call on ``elapsed_ms`` suppressed exactly that line.
-        """
+        """One line on what the stage did, for the end of a run; the run that tracked nothing still names its IMU-uncovered framesets."""
         unresolved: str = ""
-        uncovered: list[int] = [held.t_ns for held in self.pending] + [
-            drop.t_ns for drop in self.lockstep.dropped if drop.reason == DropReason.IMU_ENDED
-        ]
+        uncovered: list[int] = [drop.t_ns for drop in self.lockstep.dropped if drop.reason == DropReason.IMU_ENDED]
         if uncovered:
             unresolved = f", {len(uncovered)} FRAMESETS NEVER COVERED BY THE IMU at {uncovered}"
-        if not self.elapsed_ms:
+        elapsed_ms: list[float] = self.lockstep.elapsed_ms
+        if not elapsed_ms:
             return f"vio: {self.lockstep.imu_samples} IMU samples pushed, nothing tracked{unresolved}"
         return (
-            f"vio: {self.lockstep.imu_samples} IMU samples pushed, {len(self.elapsed_ms)} tracked, "
-            f"{self.lockstep.retries} retries, {np.mean(self.elapsed_ms):.1f} ms per frameset "
-            f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
+            f"vio: {self.lockstep.imu_samples} IMU samples pushed, {len(elapsed_ms)} tracked, "
+            f"{self.lockstep.retries} retries, {np.mean(elapsed_ms):.1f} ms per frameset "
+            f"(median {np.median(elapsed_ms):.1f}, max {np.max(elapsed_ms):.1f})"
             f"{unresolved}"
         )
 
 
-def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
+def vio_blueprint(camera_positions: Sequence[int]) -> rrb.Blueprint:
     """One 3D view of the world, the camera images beside it, and the counters below.
 
     The counters are one time-series view per magnitude rather than one view for
@@ -901,12 +794,13 @@ def vio_blueprint(cameras: tuple[CameraCalib, ...]) -> rrb.Blueprint:
     would draw every copy of it at once.
 
     Args:
-        cameras: The rig's cameras, in rig order.
+        camera_positions: The rig position of each fed camera (:attr:`SegmentFeed.camera_positions`): one 2D view per
+            base camera the run tracked on, where its keypoints are.
 
     Returns:
         A blueprint with the panels collapsed, so the frame is all content.
     """
-    views: list[rrb.View] = camera_views(cameras)
+    views: list[rrb.View] = [rrb.Spatial2DView(origin=camera_entity(position), name=f"cam {position:02d}") for position in camera_positions]
     trail: rrb.VisibleTimeRanges = rrb.VisibleTimeRanges(
         rrb.VisibleTimeRange(TIMELINE, start=rrb.TimeRangeBoundary.infinite(), end=rrb.TimeRangeBoundary.cursor_relative())
     )

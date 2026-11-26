@@ -19,9 +19,9 @@ from slam_rs.catalog_feed import (
     select_decode_device,
 )
 from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.reference import Benchmarks, RobocapSession, load_benchmarks
-from slam_rs.tracking import DropReason, SegmentRun, check_calibration_matches_recording, robocap_estimator_files
+from slam_rs.tracking import SegmentRun, check_calibration_matches_recording, robocap_estimator_files
 from slam_rs.trajectory import AteResult, Trajectory, ate, coverage, empty_trajectory, read_trajectory, write_trajectory
 from slam_rs.vio_log import vio_blueprint
 
@@ -100,7 +100,7 @@ def main(config: Config) -> None:
             f"NOT added (video_time is the device clock), so the export shifts by {feed.export_offset_ns} ns"
         )
 
-        rr.send_blueprint(vio_blueprint(feed.cameras))
+        rr.send_blueprint(vio_blueprint(feed.camera_positions))
         # The catalog layer's driver and writer: the D17 hold, the D32 invariant asserts and the rows at the held
         # frameset's own time are one contract, not two copies of one.
         vio: _core.Vio = _core.Vio(calibration, flow_config, backend=config.backend)
@@ -108,8 +108,8 @@ def main(config: Config) -> None:
         assert recording is not None, "RerunTyroConfig sets up the global recording"
         started: float = time.monotonic()
         layer: LayerRun = track_layer(
-            recording, feed, vio, config_sha256=config_text_sha256(config_text), calibration=calibration, run_gba=False, detail=config.detail,
-            profile=config.profile, backend=str(_core.gpu_backend) if vio.gpu else "cpu", decoder=feed.decode_device, animate_base_rig=False,
+            recording, feed, vio, config_text=config_text, calibration=calibration, run_gba=False, detail=config.detail,
+            profile=config.profile, animate_base_rig=False,
             strict=False, stop_ns=last_ns,
         )
         elapsed: float = time.monotonic() - started
@@ -121,6 +121,7 @@ def main(config: Config) -> None:
             f"wall {elapsed:.1f} s for {replayed_ns / 1e9:.1f} s of footage = {replayed_ns / 1e9 / max(elapsed, 1e-9):.2f}x realtime, "
             f"{1e3 * elapsed / max(replayed, 1):.1f} ms per frameset"
         )
+        print(f"Vio.track median {run.median_tracker_ms:.2f} ms")
         if layer.stage is not None:
             print(layer.stage.summary())
         # What the recording says its own clock is, not what this tool assumes:
@@ -129,9 +130,8 @@ def main(config: Config) -> None:
 
     # The feed's own in-process catalog server is what the `with` holds, and
     # nothing below reads a frameset: the export and the ATE happen with it shut.
-    uncovered: int = sum(drop.reason == DropReason.IMU_ENDED for drop in run.dropped)
-    if uncovered:
-        raise SystemExit(f"{uncovered} framesets never got the inertial samples that cover them")
+    if run.uncovered():
+        raise SystemExit(f"{run.uncovered()} framesets never got the inertial samples that cover them")
     estimate: Trajectory = run.estimate
     write_trajectory(output_csv, estimate, video_time_offset_ns=video_time_offset_ns)
     print(f"{len(estimate)} tracked poses (raw VIO) -> {output_csv} (absolute device clock)")

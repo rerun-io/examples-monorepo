@@ -18,7 +18,7 @@ from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuStream
 from slam_rs.columns import ColumnLog
 from slam_rs.frontend_log import camera_entity
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import Lockstep, track
 from slam_rs.trajectory import empty_trajectory
 from slam_rs.vio_log import VIO_RUN_ENTITY, VIO_STATS_ENTITY, VioLogger, VioStage
 
@@ -37,16 +37,16 @@ def test_every_layer_row_sits_on_its_base_video_frame(
         vio: _core.Vio = pipeline(2)
         stage: VioStage = VioStage(
             Lockstep(vio),
-            VioLogger(cameras=cameras, ground_truth=empty_trajectory(), frame_t_ns=base_video_ns + offset_ns,
-                      tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=offset_ns, columns=ColumnLog(recording=recording)),
+            VioLogger(cameras=cameras, ground_truth=empty_trajectory(), tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=offset_ns, columns=ColumnLog(recording=recording)),
         )
+        framesets: list[Frameset] = []
         for step, video_ns in enumerate(base_video_ns.tolist()):
             t_ns: int = video_ns + offset_ns
             samples: Int64[ndarray, " n_samples"] = np.arange(t_ns, t_ns + FRAME_PERIOD_NS, IMU_PERIOD_NS, dtype=np.int64)
             gyro, accel = gravity_batch(samples)
-            stage.run(Frameset(t_ns=t_ns, images=[texture(step, 0), texture(step - 2, 0)],
-                               imu=ImuStream(t_ns=samples, gyro_rad_s=gyro, accel_m_s2=accel), ground_truth=None))
-        stage.flush()
+            framesets.append(Frameset(t_ns=t_ns, images=[texture(step, 0), texture(step - 2, 0)],
+                                      imu=ImuStream(t_ns=samples, gyro_rad_s=gyro, accel_m_s2=accel), ground_truth=None))
+        assert list(track(framesets, stage.lockstep, stage))
     rows: Rows = read_rows(output)
     base: set[int] = set(base_video_ns.tolist())
     for entity in (f"{camera_entity(0)}/keypoints", f"{VIO_RUN_ENTITY}/window/00", f"{VIO_RUN_ENTITY}/landmarks", f"{VIO_STATS_ENTITY}/track_ms"):

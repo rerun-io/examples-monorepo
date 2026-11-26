@@ -440,8 +440,8 @@ def test_a_replay_export_associates_with_the_catalog_ground_truth(benchmarks: Be
         assert len(truth)
         calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
         vio: _core.Vio = _core.Vio(calibration, resolved_flow_config(settings, segment)[0], backend="cpu")
-        layer: LayerRun = track_layer(recording, feed, vio, config_sha256="test", calibration=calibration, run_gba=False, detail="full", profile="fast",
-                                      backend="cpu", decoder="cpu", animate_base_rig=False, strict=False, max_framesets=40)
+        layer: LayerRun = track_layer(recording, feed, vio, config_text="{}", calibration=calibration, run_gba=False, detail="full", profile="fast",
+                                      animate_base_rig=False, strict=False, max_framesets=40)
         run: SegmentRun = layer.run
         # The run comes back on the export clock; the estimator's own is what an export without the offset would hold.
         estimate: Trajectory = shift_clock(run.estimate, -feed.export_offset_ns)

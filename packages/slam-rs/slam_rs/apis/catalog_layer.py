@@ -22,7 +22,7 @@ from slam_rs.catalog_feed import (
     select_decode_device,
 )
 from slam_rs.catalog_layer import POSE_SOURCE, LayerDetail, LayerRun, track_layer
-from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
+from slam_rs.config import SlamConfig, load_slam_config
 from slam_rs.tracking import SegmentRun
 
 
@@ -78,8 +78,8 @@ def main(config: Config) -> None:
               f"{len(feed.frame_t_ns)} framesets, cameras={feed.camera_positions}", flush=True)
         # Every row goes into the temporary file; a refused run leaves the registered layer as it was.
         with atomic_recording(output, recording_id=config.segment, send_properties=False) as rec:
-            layer: LayerRun = track_layer(rec, feed, vio, config_sha256=config_text_sha256(config_text), calibration=calibration, run_gba=True,
-                                          detail=config.detail, profile=config.profile, backend=backend, decoder=decode_device,
+            layer: LayerRun = track_layer(rec, feed, vio, config_text=config_text, calibration=calibration, run_gba=True,
+                                          detail=config.detail, profile=config.profile,
                                           animate_base_rig=not segment.has_ground_truth, strict=True)
         run: SegmentRun = layer.run
         if run.gba_failure is not None:

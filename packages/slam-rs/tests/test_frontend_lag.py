@@ -12,7 +12,7 @@ from numpy import ndarray
 
 from slam_rs import _core
 from slam_rs.catalog_feed import CameraCalib, Frameset, ImuStream
-from slam_rs.tracking import Lockstep
+from slam_rs.tracking import Lockstep, track
 from slam_rs.trajectory import empty_trajectory
 from slam_rs.vio_log import VioLogger, VioStage, vio_blueprint
 
@@ -124,18 +124,16 @@ def test_lagged_viewer_layer_keeps_all_frame_timestamps(
     rr.init("slam-rs-frontend-lag", recording_id="frontend-lag")
     rr.save(output)
     cameras: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
-    rr.send_blueprint(vio_blueprint(cameras))
+    rr.send_blueprint(vio_blueprint((0, 1)))
     config: _core.VioConfig = _core.VioConfig.from_json(json.dumps({"value0": {"port.frontend_lag": True}}))
     timestamps: Int64[ndarray, "n"] = np.arange(0, 240_000_000, 20_000_000, dtype=np.int64)
     vio: _core.Vio = _core.Vio(rig(2), config, backend="cpu")
     stage: VioStage = VioStage(
         Lockstep(vio),
-        VioLogger(cameras=cameras, ground_truth=empty_trajectory(), frame_t_ns=timestamps, tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=0),
+        VioLogger(cameras=cameras, ground_truth=empty_trajectory(), tracked_resolution=tuple(vio.tracked_resolution), cam_time_offset_ns=0),
     )
-    for index in range(len(timestamps)):
-        frameset: Frameset = still_frameset(index, [texture(index, 0), texture(index - 2, 0)])
-        stage.run(frameset)
-    stage.flush()
+    framesets: list[Frameset] = [still_frameset(index, [texture(index, 0), texture(index - 2, 0)]) for index in range(len(timestamps))]
+    assert len(list(track(framesets, stage.lockstep, stage))) == len(timestamps)
     rr.disconnect()
     np.testing.assert_array_equal(stage.logger.estimated().t_ns, timestamps)
     rows: Rows = read_rows(output)
