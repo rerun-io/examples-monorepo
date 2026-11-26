@@ -26,7 +26,7 @@ from handtrack.data.stream import KeyNetSamples, select_samples
 from handtrack.eval.metrics import KeypointMetrics, keynet_metrics
 from handtrack.labels.heatmaps import decode_distance, decode_heatmaps
 from handtrack.models.keynet import KeyNetF, keynet_from_state
-from handtrack.pipeline import read_state
+from handtrack.train.checkpoint import read_state
 
 SHORT: dict[str, str] = {"dataforge-umetrack": "UmeTrack", "dataforge-show3d": "SHOW3D", "dataforge-hot3d-quest3": "HOT3D", "gsi-six-view": "GSI",
                          "dataforge-gen-humanego-subset": "Gen-HumanEgo"}

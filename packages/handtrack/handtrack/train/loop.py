@@ -186,7 +186,8 @@ class Trainer:
     """
     def __init__(self, nets: Nets, detnet: OptimiserSettings, keynet: OptimiserSettings,
                  cadence: LoopSettings, run_dir: Path, device: str, *, resume: bool = False,
-                 max_val_batches: int = 20, config_json: str = '{}', keynet_init: Path | None = None) -> None:
+                 max_val_batches: int = 20, config_json: str = '{}', keynet_init: Path | None = None,
+                 detnet_init: Path | None = None) -> None:
         if max_val_batches < 1:
             raise ValueError('max_val_batches must be positive')
         self.cadence: LoopSettings = cadence
@@ -197,9 +198,13 @@ class Trainer:
         self.models: dict[str, nn.Module] = {}
         if nets in ('detnet', 'both'):
             self.models['detnet'] = DetNetF().to(self.device)
+            if detnet_init is not None:  # warm start (fine-tune); a resumed run's checkpoint replaces these weights later
+                from handtrack.train.checkpoint import load_weights
+
+                load_weights(self.models['detnet'], detnet_init)
         if nets in ('keynet', 'both') and keynet_init is not None:
             # Warm start: the weights' own heads (pinch, visibility) and BatchNorm epsilon; a pinch head rides along untrained.
-            from handtrack.pipeline import read_state
+            from handtrack.train.checkpoint import read_state
 
             self.models['keynet'] = keynet_from_state(read_state(keynet_init)[0]).to(self.device)
         elif nets in ('keynet', 'both'):

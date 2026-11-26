@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, get_args
 
+import pyarrow as pa
 import torch
 from serde import serde
 from serde.json import from_json, to_json
@@ -35,9 +36,17 @@ class DetectorHoldout:
 class RerunStreamSettings:
     """Train DetNet from the Rerun 0.42 dataloader: one streaming producer per dataset into per-dataset echo pools."""
     datasets: tuple[str, ...] = ("dataforge-umetrack", "dataforge-show3d", "gsi-six-view", "dataforge-gen-humanego-subset")
-    """Training datasets; each gets an equal share of every batch."""
+    """Training datasets; each gets an equal share of every batch unless ``shares`` says otherwise."""
+    shares: tuple[int, ...] = ()
+    """DetNet images per batch from each dataset (same order as ``datasets``, summing to ``stream.detnet_batch``); empty: equal."""
     decode: Literal["nvdec", "cpu"] = "nvdec"
     """nvdec: decode on the GPU in the training process (simplecv's segment-wide decoder); cpu: the 0.42 CPU decoder in spawn workers."""
+    nvdec_frames_per_call: int = 64
+    """Frames per NVDEC call; each call peaks at about 25 MB of GPU memory per 1080p frame (RGB float), so a 12 GB card wants 16."""
+    nvdec_chunk: int = 256
+    """Decoded images an NVDEC producer labels and pools at once (each costs ~1.2 MB of float scratch); 64 suits a 12 GB card."""
+    nvdec_fetch_block: int = 1024
+    """Samples the dataloader fetches and decodes at once per camera (each held as a 640x480 frame, ~0.3 MB); 512 suits a 12 GB card."""
     workers: tuple[int, ...] = (4, 6, 8, 8)
     """Spawn decode workers per dataset for ``decode=cpu`` (same order as ``datasets``)."""
     pool_capacity: int = 32_768
@@ -69,6 +78,8 @@ class RerunStreamSettings:
     catalog_url: str = CATALOG_URL
 
     def __post_init__(self) -> None:
+        if self.shares and len(self.shares) != len(self.datasets):
+            raise ValueError("rerun.shares needs one count per dataset")
         if len(self.workers) != len(self.datasets) or min(self.workers) < 1:
             raise ValueError("rerun.workers needs one positive count per dataset")
         unknown: list[str] = [name for name in self.datasets if name not in DATASET_SPECS]
@@ -158,6 +169,8 @@ class Config:
     """Shared stream factory settings."""
     keynet_init: Path | None = None
     """Start KeyNet from these weights (a ``*.weights.pt`` with its ``.sha256`` sidecar) instead of from scratch."""
+    detnet_init: Path | None = None
+    """Start DetNet from these weights (a ``*.weights.pt`` with its ``.sha256`` sidecar) instead of from scratch (a fine-tune)."""
 
 
 SPLITS: dict[str, SplitName] = {"training": "train", "train": "train", "validation": "val", "val": "val", "testing": "test", "test": "test"}
@@ -230,6 +243,7 @@ def build_source(settings: StreamSettings, split: str, nets: Nets, device: str =
             keynet_crop=settings.keynet_crop,
             keynet=KeyNetAugment(negative_margin=settings.keynet_negative_margin),
             upright=settings.upright,
+            catalog_url=settings.rerun.catalog_url if settings.rerun is not None else CATALOG_URL,
         )
     )
 
@@ -244,7 +258,12 @@ def training_segments(name: str, holdout: DetectorHoldout, catalog_url: str) -> 
     held: set[str] = set(holdout.segments.get(name, []))
     if not held:
         raise ValueError(f"{name} has no held-out episodes in the holdout file; freeze them before training")
-    return sorted(set(dataset.segment_ids()) - held)
+    segments: set[str] = set(dataset.segment_ids())
+    if DATASET_SPECS[name][2] == "teacher":  # pseudo-labels arrive per segment: train only on segments that have them
+        table: pa.Table = dataset.segment_table().to_arrow_table()
+        layers: dict[str, list[str] | None] = dict(zip(table["rerun_segment_id"].to_pylist(), table["rerun_layer_names"].to_pylist(), strict=True))
+        segments = {segment for segment in segments if "hand_teacher" in (layers.get(segment) or [])}
+    return sorted(segments - held)
 
 
 def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: torch.device, nets: Nets = "detnet") -> EchoStream:
@@ -264,7 +283,9 @@ def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: t
     for index, (name, workers) in enumerate(zip(rerun.datasets, rerun.workers, strict=True)):
         segments: list[str] = training_segments(name, holdout, rerun.catalog_url)
         if rerun.decode == "nvdec":
-            producers.append(nvdec_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, device=device, endless=True))
+            producers.append(nvdec_producer(source_spec(name, index, settings.upright), segments, catalog_url=rerun.catalog_url, device=device, endless=True,
+                                            frames_per_call=rerun.nvdec_frames_per_call, chunk=rerun.nvdec_chunk,
+                                            fetch_block_size=rerun.nvdec_fetch_block))
             continue
         digest: str = hashlib.sha256("\n".join(segments).encode()).hexdigest()[:10]
         manifest: Path = build_manifest(source_spec(name, index), segments, rerun.catalog_url, rerun.manifest_dir / f"{name}-train-{digest}-w{workers}.parquet", workers)
@@ -272,7 +293,7 @@ def rerun_source(settings: StreamSettings, rerun: RerunStreamSettings, device: t
                                         device=device, endless=True))
     return EchoStream(producers, batch_size=settings.detnet_batch, pool_capacity=rerun.pool_capacity, min_fill=rerun.min_fill, max_echo=rerun.max_echo,
                       device=device, seed=settings.seed, finish=training_finish(settings.detnet_augment), epoch_steps=rerun.epoch_steps,
-                      min_echo=rerun.min_echo, prefetch=rerun.prefetch)
+                      min_echo=rerun.min_echo, prefetch=rerun.prefetch, shares=rerun.shares)
 
 
 GPU_OVERHEAD_GB: float = 0.75
@@ -296,7 +317,7 @@ def main(config: Config) -> None:
     cap_gpu_memory(config.stream.gpu_memory_gb, config.device)
     trainer: Trainer = Trainer(config.nets, config.detnet, config.keynet, config.loop, config.run_dir, config.device,
                                resume=config.resume, max_val_batches=config.stream.max_val_batches, config_json=to_json(config),
-                               keynet_init=config.keynet_init)
+                               keynet_init=config.keynet_init, detnet_init=config.detnet_init)
     source: BatchSource = build_source(config.stream, config.stream.train_split, config.nets, device=config.device)
     try:
         validation: BatchSource = build_source(config.stream, config.stream.val_split, config.nets, device=config.device)
