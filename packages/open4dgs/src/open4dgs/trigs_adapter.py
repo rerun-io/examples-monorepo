@@ -71,10 +71,10 @@ class TrainConfig:
     """Strided pixel sampling (PennyGS 3.4): 2 = each step renders and supervises one pixel of every 2x2 block, cycling the
     offset so every pixel is supervised once every four steps (steps whose cameras do not share one time render full size);
     the MoGe-2 prior reads the same pixels."""
-    adam_moments: Literal["fp32", "bf16"] = "fp32"
+    adam_moments: Literal["fp32", "bf16"] = "bf16"
     """Adam moment storage: ``fp32`` (torch.optim.Adam) or ``bf16`` (HiGS 4.3: bfloat16 moments, stochastically rounded,
     one fused Triton kernel per parameter; ``open4dgs.adam_bf16``)."""
-    fused_loss: bool = False
+    fused_loss: bool = True
     """Photometric loss as one ``torch.compile``d function per camera (PennyGS 3.5's single pass; same maths, Triton
     kernels compiled at the first step)."""
     resident_frames: bool = True

@@ -86,14 +86,15 @@ Steps (`open4dgs.apis.train`):
 
 `open4dgs.trigs_trainer.Open4dgsTrainer` always runs the exact levers: one gather and deform per step time, one batched
 rasterization per image size (unbound once per batch), host-sync fixes, and `index_select` gathers (here and in recipe
-patch 0009's rigid loss). Three more come from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918); measured on run C
-in `/mnt/nas/ssd-8tb/scratch/open4dgs-train-speed/REPORT.md`:
+patch 0009's rigid loss). Three more come from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918). On run C
+(5,000 steps, `/mnt/nas/ssd-8tb/scratch/open4dgs-train-speed/REPORT.md`) the two defaults train 1.44x faster on the 5090
+and 1.65x on the DGX Spark; strided sampling as well gives 1.58x and 2.46x; held-out numbers unchanged:
 
 | flag | what | maths |
 |---|---|---|
-| `--train.fused-loss` | the masked-composite photometric loss as one `torch.compile`d function (`open4dgs.fused_loss`) | same as TRiGS's loss |
-| `--train.adam-moments bf16` | `open4dgs.adam_bf16.AdamBf16`: bfloat16 Adam moments, stochastically rounded, one Triton kernel per parameter | moments rounded (unbiased) |
-| `--train.pixel-stride 2` | each step renders and supervises one pixel of every 2x2 block, the offset cycling over four steps (`open4dgs.strided`); the MoGe-2 prior reads the same pixels | a quarter of the pixels per step |
+| `--train.fused-loss` (on; `--train.no-fused-loss`) | the masked-composite photometric loss as one `torch.compile`d function (`open4dgs.fused_loss`) | same as TRiGS's loss |
+| `--train.adam-moments bf16` (default; `fp32` = torch Adam) | `open4dgs.adam_bf16.AdamBf16`: bfloat16 Adam moments, stochastically rounded, one Triton kernel per parameter | moments rounded (unbiased) |
+| `--train.pixel-stride 2` (opt-in) | each step renders and supervises one pixel of every 2x2 block, the offset cycling over four steps (`open4dgs.strided`); the MoGe-2 prior reads the same pixels | a quarter of the pixels per step |
 
 ### What the held-out protocol shares with the held-out cameras
 
