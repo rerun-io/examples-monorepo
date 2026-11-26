@@ -229,7 +229,9 @@ class Open4dgsTrainer(TrigsTrainer):
         self.pixel_stride: int = pixel_stride
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
         self.fused_loss: bool = fused_loss
-        self._compiled_terms = torch.compile(masked_composite_terms, dynamic=False) if fused_loss else None
+        # dynamic=True: one compile for every image size (ROI cameras each have their own size; per-size compiles hit
+        # dynamo's recompile limit and fall back to eager).
+        self._compiled_terms = torch.compile(masked_composite_terms, dynamic=True) if fused_loss else None
         self.stride_state: StrideState = StrideState()
         self._strided: dict[tuple[int, int], CameraConfig] = {}
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
