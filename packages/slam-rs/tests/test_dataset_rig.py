@@ -143,7 +143,7 @@ def test_only_frames_both_euroc_cameras_took_together_are_fed(settings: SlamConf
         include_ground_truth=False,
     ) as feed:
         assert len(feed.frame_t_ns) == framesets
-        stamps = feed.index.camera_t_ns
+        stamps = [stream.t_ns for stream in feed.video.streams]
         pairs = feed.index.frame_index
         assert (stamps[0][pairs[:, 0]] == stamps[1][pairs[:, 1]]).all()
 

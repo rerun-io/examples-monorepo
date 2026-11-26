@@ -59,10 +59,10 @@ def main(config: Config) -> None:
         raise ValueError(f"{config.segment}: catalog resolution returned no dataset handle")
     output: Path = config.output_dir.resolve() / f"{config.segment}.rrd"
     decode_device: DecodeDevice = select_decode_device(config.decode_device)
-    print(f"Loading {config.segment}: one bulk video query, decode={decode_device}", flush=True)
+    print(f"Loading {config.segment}: video index, then chunked reads, decode={decode_device}", flush=True)
     started: float = perf_counter()
     feed: SegmentFeed
-    with open_segment(segment, profile=rig_profile, cache_video=True, decode_device=decode_device, include_ground_truth=False) as feed:
+    with open_segment(segment, profile=rig_profile, decode_device=decode_device, include_ground_truth=False) as feed:
         load_s: float = perf_counter() - started
         config_text: str = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, config.profile)
         calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)

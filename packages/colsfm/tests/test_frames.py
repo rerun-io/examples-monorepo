@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
@@ -88,9 +89,9 @@ class _FakeVideo:
     def __init__(self) -> None:
         self.requested: list[int] = []
 
-    def get_frames_at(self, indices: list[int]) -> object:
+    def get_frames_at(self, indices: Sequence[int]) -> torch.Tensor:
         self.requested.extend(indices)
-        return type("Batch", (), {"data": torch.stack([torch.full((3, 4, 4), index, dtype=torch.uint8) for index in indices])})()
+        return torch.stack([torch.full((3, 4, 4), index, dtype=torch.uint8) for index in indices])
 
 
 def _stream_manifest(camera: str = "cam0") -> FrameSourceManifest:
@@ -106,14 +107,17 @@ def _stream_manifest(camera: str = "cam0") -> FrameSourceManifest:
 
 @pytest.fixture
 def opened(monkeypatch: pytest.MonkeyPatch) -> list[_FakeVideo]:
-    """Every decoder `_open_stream` hands out, in opening order."""
+    """Every decoder `_open_streams` hands out, in opening order."""
     videos: list[_FakeVideo] = []
 
-    def fake_open(manifest: FrameSourceManifest, stream: StreamKeyframes, device: torch.device) -> tuple[np.ndarray, _FakeVideo]:
-        videos.append(_FakeVideo())
-        return np.arange(SAMPLES, dtype=np.int64) * 10, videos[-1]
+    def fake_open(manifest: FrameSourceManifest, device: torch.device) -> list[tuple[np.ndarray, _FakeVideo]]:
+        opened: list[tuple[np.ndarray, _FakeVideo]] = []
+        for _ in manifest.streams:
+            videos.append(_FakeVideo())
+            opened.append((np.arange(SAMPLES, dtype=np.int64) * 10, videos[-1]))
+        return opened
 
-    monkeypatch.setattr(frames_module, "_open_stream", fake_open)
+    monkeypatch.setattr(frames_module, "_open_streams", fake_open)
     return videos
 
 

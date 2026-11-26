@@ -25,8 +25,8 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.catalog_video_codec import video_codec
+from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, iter_chunks, read_video_index
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, reconstruction_metrics
 from colsfm.catalog import CatalogCameraModel, CatalogTrajectory
@@ -195,9 +195,8 @@ def log_overview(
         recording=recording,
     )
     refined_by_name = {camera.sensor_name: camera for camera in artifacts.frames_meta.cameras.values()}
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment, [f"{camera.entity}/pinhole/video" for camera in cameras], timeline)
-    for camera, video in zip(cameras, videos, strict=True):
-        entity: str = f"{rig_entity}/{camera.name}"
+    entities: list[str] = [f"{rig_entity}/{camera.name}" for camera in cameras]
+    for camera, entity in zip(cameras, entities, strict=True):
         refined = refined_by_name.get(camera.name)
         rig_T_cam: Float64[ndarray, "3 4"] = refined.vehicle_T_cam.matrix() if refined is not None else camera.rig_T_cam[:3, :]
         rr.log(entity, rr.Transform3D(translation=rig_T_cam[:, 3], mat3x3=rig_T_cam[:, :3]), static=True, recording=recording)
@@ -213,13 +212,14 @@ def log_overview(
             static=True,
             recording=recording,
         )
-        rr.log(f"{entity}/pinhole/video", rr.VideoStream(codec=video_codec(video.codec)), static=True, recording=recording)
-        rr.send_columns(
-            f"{entity}/pinhole/video",
-            indexes=[rr.TimeColumn(timeline, duration=video.t_ns.astype("timedelta64[ns]"))],
-            columns=rr.VideoStream.columns(sample=list(video.samples), is_keyframe=list(video.keyframes)),
-            recording=recording,
-        )
+    relay_source_video(
+        dataset,
+        segment,
+        [f"{camera.entity}/pinhole/video" for camera in cameras],
+        [f"{entity}/pinhole/video" for entity in entities],
+        timeline,
+        recording,
+    )
 
     numbers: OverviewNumbers = OverviewNumbers(
         input_error=input_error,
@@ -230,6 +230,37 @@ def log_overview(
     )
     rr.log(f"{ROOT}/notes", rr.TextDocument(notes_markdown(segment, numbers), media_type=rr.MediaType.MARKDOWN), static=True, recording=recording)
     return numbers
+
+
+def relay_source_video(
+    dataset: DatasetEntry, segment: str, sources: Sequence[str], targets: Sequence[str], timeline: str, recording: rr.RecordingStream | None
+) -> None:
+    """Re-log each source ``VideoStream``'s stored samples at its target, never decoded, a chunk of every camera at a time.
+
+    Memory is a few chunks, not the session.
+
+    Args:
+        dataset: Dataset holding the segment.
+        segment: Segment to read.
+        sources: The source ``VideoStream`` entities.
+        targets: One per source, in the same order.
+        timeline: Read from, and logged on.
+        recording: None logs to the global recording.
+    """
+    index: tuple[StreamIndex, ...] = read_video_index(dataset, segment, sources, timeline)
+    for target, stream in zip(targets, index, strict=True):
+        rr.log(target, rr.VideoStream(codec=video_codec(stream.codec)), static=True, recording=recording)
+    reader: CatalogVideoReader = CatalogVideoReader(dataset, segment, index, timeline)
+    for chunk in iter_chunks(reader, range(reader.num_chunks)):
+        for target, stream, packets in zip(targets, index, chunk.streams, strict=True):
+            if packets.samples:
+                stop: int = packets.first + len(packets.samples)
+                rr.send_columns(
+                    target,
+                    indexes=[rr.TimeColumn(timeline, duration=stream.t_ns[packets.first : stop].astype("timedelta64[ns]"))],
+                    columns=rr.VideoStream.columns(sample=packets.samples, is_keyframe=packets.keyframes),
+                    recording=recording,
+                )
 
 
 def overview_eye(ground_truth: CatalogTrajectory) -> tuple[list[float], list[float]]:

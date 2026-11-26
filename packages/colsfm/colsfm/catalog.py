@@ -42,7 +42,7 @@ from serde.json import to_json
 from simplecv.catalog_calibration import CatalogCameraCalibration, CatalogDistortion, read_camera_models
 from simplecv.catalog_layers import serve_local_segment
 from simplecv.catalog_rig_layout import CatalogCamera, catalog_components, parse_rig_layout
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
+from simplecv.catalog_video_reader import StreamIndex, read_video_index
 from simplecv.rrd_query_utils import first_valid_value
 
 from colsfm import DATA_DIR
@@ -599,10 +599,11 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
         if unmasked:
             raise ValueError(f"{config.segment}: cameras {unmasked} carry no SegmentationImage at <camera>/pinhole/{config.mask_entity}")
     trajectory: CatalogTrajectory = read_catalog_trajectory(dataset, config.segment, config.trajectory_entity, config.timeline)
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(
+    # Timestamps only: the pixels are decoded from the catalog later (`colsfm.frames`), so no sample is read here.
+    videos: tuple[StreamIndex, ...] = read_video_index(
         dataset, config.segment, [f"{camera.entity}/pinhole/video" for camera in cameras], config.timeline
     )
-    reference: CatalogVideo = videos[0]
+    reference: StreamIndex = videos[0]
     times: Int64[ndarray, " n"] = reference.t_ns
     first: int = int(np.searchsorted(times, times[0] + int(config.trim_start_seconds * 1e9)))
     last: int = int(np.searchsorted(times, times[-1] - int(config.trim_end_seconds * 1e9), side="right"))
@@ -669,22 +670,22 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
     return PreparedInput(input_dir=input_dir, cameras=cameras, num_rig_frames=len(candidates), num_keyframes=written, seconds=seconds, view=view)
 
 
-def view_rig_source(dataset: DatasetEntry, config: CatalogInputConfig, cameras: Sequence[CatalogCameraModel], prior: CatalogTrajectory) -> ViewRigSource | None:
+def view_rig_source(
+    dataset: DatasetEntry, config: CatalogInputConfig, cameras: Sequence[CatalogCameraModel], prior: CatalogTrajectory
+) -> ViewRigSource | None:
     """The prior and the viewing frames a layer's `rig_view` is drawn from, when every camera has a viewing stream
     (`<camera>/pinhole/video_view`, dataforge's Insta360 `cube_view` layer); None otherwise.
 
     The viewing frames are the stamps of the first camera's viewing stream (the layer gives every face the same ones),
-    read without its samples.
+    read without its samples (`read_video_index`).
     """
     streams: set[str] = {
-        component.entity_path for component in catalog_components(dataset.schema()) if component.archetype == "VideoStream" and component.field == "sample"
+        component.entity_path
+        for component in catalog_components(dataset.schema())
+        if component.archetype == "VideoStream" and component.field == "sample"
     }
     views: dict[str, str] = {f"/{camera.entity.strip('/')}/pinhole/video": f"/{camera.entity.strip('/')}/pinhole/video_view" for camera in cameras}
     if not views or any(view not in streams for view in views.values()):
         return None
-    first: str = next(iter(views.values()))
-    table: pa.Table = (
-        dataset.filter_segments(config.segment).filter_contents([first]).reader(index=config.timeline).select(config.timeline, f"{first}:VideoStream:is_keyframe").to_arrow_table()
-    )
-    view_t_ns: Int64[ndarray, " m"] = np.unique(table[config.timeline].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64))
+    view_t_ns: Int64[ndarray, " m"] = read_video_index(dataset, config.segment, [next(iter(views.values()))], config.timeline)[0].t_ns
     return ViewRigSource(prior_t_ns=prior.t_ns, world_T_prior=prior.world_T_rig(), view_t_ns=view_t_ns, view_entities=views)

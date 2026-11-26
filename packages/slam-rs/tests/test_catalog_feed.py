@@ -28,11 +28,10 @@ from slam_rs.catalog_feed import (
     RigProfile,
     SegmentFeed,
     _rig_trajectory,
-    _shared_codec,
     _static_int,
     _static_string,
     _static_values,
-    _video_codec,
+    _window_bounds,
     camera_calib,
     check_imu_is_rig_frame,
     open_segment,
@@ -248,36 +247,6 @@ def test_a_malformed_rig_reference_is_named_as_malformed_not_as_missing(statics:
     with pytest.raises(ValueError, match=message) as error:
         check_imu_is_rig_frame(statics, "seg")
     assert str(error.value).startswith("seg: ") and "names no reference sensor" not in str(error.value)
-
-
-def test_a_video_stream_with_no_codec_names_the_entity() -> None:
-    """The codec is read from row zero of this camera's non-null codecs; both can be empty."""
-    entity: str = "/rig/cam_00/pinhole/video"
-    columns: list[str] = ["video_time", f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec"]
-    no_rows: pa.Table = pa.table({name: pa.array([], type=pa.int64()) for name in columns})
-    with pytest.raises(ValueError, match=f"{entity}: the recording carries no video samples"):
-        _video_codec(no_rows, entity)
-
-    no_codec: pa.Table = pa.table(
-        {
-            columns[0]: pa.array([1, 2], type=pa.int64()),
-            columns[1]: pa.array([None, None], type=pa.int64()),
-            columns[2]: pa.array([None, None], type=pa.list_(pa.uint32())),
-        }
-    )
-    with pytest.raises(ValueError, match=f"{entity}: the video stream carries no codec"):
-        _video_codec(no_codec, entity)
-
-
-def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
-    """One index carries one codec, so a mixed rig must say which two cameras differ.
-
-    Every current rig is uniform (MSD is AV1, RoboCap H.264), so the muxer would
-    otherwise write the last camera's codec over every camera's samples.
-    """
-    assert _shared_codec([(0, "av1"), (2, "av1")], SMOKE_SEGMENT) == "av1"
-    with pytest.raises(ValueError, match="cam_02 is h264 where cam_00 is av1"):
-        _shared_codec([(0, "av1"), (2, "h264")], SMOKE_SEGMENT)
 
 
 def _transform_rows(t_ns: list[int], translations: list[list[float] | None], quaternions: list[list[float] | None]) -> pa.Table:
@@ -552,3 +521,11 @@ def test_catalog_resolution_refuses_missing_inputs(monkeypatch: pytest.MonkeyPat
     available: CatalogSegment = resolve_catalog_segments((CatalogSegment("test", "dataset", "present"),))[0]
     assert available.dataset is not None
     assert not available.has_ground_truth
+
+
+def test_inertial_windows_are_cut_by_time_alone() -> None:
+    """Video no longer follows the windows, so a rig whose cameras share no keyframe still reads IMU a window at a time."""
+    t_ns = np.arange(0, 10_000, 1_000, dtype=np.int64)  # ten framesets, 1 us apart
+    assert _window_bounds(t_ns, 3_000) == [(0, 3), (3, 6), (6, 9), (9, 10)]
+    assert _window_bounds(t_ns, 1) == [(index, index + 1) for index in range(10)]
+    assert _window_bounds(t_ns, 10**12) == [(0, 10)]
