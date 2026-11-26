@@ -1,0 +1,17 @@
+diff --git a/src/trigs/core/losses.py b/src/trigs/core/losses.py
+--- a/src/trigs/core/losses.py
++++ b/src/trigs/core/losses.py
+@@ -283,8 +283,11 @@
+     Returns:
+         Scalar loss.
+     """
+-    nn_zeta = zeta_base[nn_indices]                          # [N, K, 6]
+-    nn_color = sh_dc[nn_indices]                             # [N, K, 3]
++    # index_select, not advanced indexing: the same rows, but its backward is one index_add_ instead of a sort-based
++    # index_put_ over N * K indices (the rigid loss covers every dynamic row each step).
++    nn_flat = nn_indices.reshape(-1)
++    nn_zeta = zeta_base.index_select(0, nn_flat).reshape(*nn_indices.shape, zeta_base.shape[-1])  # [N, K, 6]
++    nn_color = sh_dc.index_select(0, nn_flat).reshape(*nn_indices.shape, sh_dc.shape[-1])  # [N, K, 3]
+ 
+     diff_zeta = zeta_base.unsqueeze(1) - nn_zeta             # [N, K, 6]
+     diff_color = sh_dc.unsqueeze(1) - nn_color               # [N, K, 3]

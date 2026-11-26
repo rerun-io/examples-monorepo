@@ -1,0 +1,11 @@
+diff --git a/src/trigs/core/trainer.py b/src/trigs/core/trainer.py
+--- a/src/trigs/core/trainer.py
++++ b/src/trigs/core/trainer.py
+@@ -3377,6 +3377,7 @@
+             sh_degree=inputs["sh_degree"],
+             packed=False,
+             render_mode="RGB+ED" if config.render_depth else "RGB",
++            **inputs.get("raster_kwargs", {}),
+         )
+         if config.render_depth:
+             info["render_depth"] = render_colors[..., 3:4]
