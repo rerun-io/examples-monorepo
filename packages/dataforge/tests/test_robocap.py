@@ -23,6 +23,7 @@ from dataforge.datasets.robocap import (  # noqa: E402
     ACCEL_SCALE,
     CAMERA_TO_IMU_OFFSET_NS,
     GYRO_SCALE,
+    TIME_SHIFT_CAMERAS,
     RobocapConfig,
     RobocapDataset,
     RobocapSource,
@@ -140,24 +141,60 @@ def write_imu_db(db_path: Path) -> None:
 def test_imu_parsing_scales_values_and_shifts_onto_camera_clock(tmp_path: Path) -> None:
     db_path: Path = tmp_path / "IMUWriter_dev0_session1_segment1.db"
     write_imu_db(db_path)
-    channels: tuple[ImuChannel, ImuChannel] | None = read_imu_database(db_path)
+    offset_ns: int = 1_217_000
+    channels: tuple[ImuChannel, ImuChannel] | None = read_imu_database(db_path, offset_ns)
     assert channels is not None
     gyro: ImuChannel = channels[0]
     accel: ImuChannel = channels[1]
 
-    expected_gyro_times: Int64[ndarray, "2"] = np.array([1000000000, 1002000000], dtype=np.int64) - CAMERA_TO_IMU_OFFSET_NS
+    expected_gyro_times: Int64[ndarray, "2"] = np.array([1000000000, 1002000000], dtype=np.int64) - offset_ns
     np.testing.assert_array_equal(gyro.times_ns, expected_gyro_times)
     expected_gyro_xyz: Float64[ndarray, "2 3"] = np.array([[10.0, -20.0, 30.0], [11.0, -21.0, 31.0]]) * GYRO_SCALE
     np.testing.assert_allclose(gyro.values_xyz, expected_gyro_xyz)
 
-    np.testing.assert_array_equal(accel.times_ns, np.array([1001000000 - CAMERA_TO_IMU_OFFSET_NS], dtype=np.int64))
+    np.testing.assert_array_equal(accel.times_ns, np.array([1001000000 - offset_ns], dtype=np.int64))
     np.testing.assert_allclose(accel.values_xyz, np.array([[100.0, 200.0, -300.0]]) * ACCEL_SCALE)
 
 
 def test_malformed_imu_db_is_skipped_not_fatal(tmp_path: Path) -> None:
     db_path: Path = tmp_path / "IMUWriter_dev2_session1_segment1.db"
     db_path.write_bytes(b"SQLite format 3\x00 this is not a database")
-    assert read_imu_database(db_path) is None
+    assert read_imu_database(db_path, CAMERA_TO_IMU_OFFSET_NS) is None
+
+
+def write_camchain(path: Path, timeshifts_s: list[float | None]) -> None:
+    """One Kalibr camchain-imucam file with a camera per shift (``None`` leaves ``timeshift_cam_imu`` out)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries: list[str] = []
+    for index, shift in enumerate(timeshifts_s):
+        entries.append(
+            f"cam{index}:\n  camera_model: pinhole\n  distortion_model: equidistant\n  intrinsics: [300.0, 300.0, 320.0, 240.0]\n"
+            "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n  resolution: [640, 480]\n"
+            "  T_cam_imu: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]\n"
+            + ("" if shift is None else f"  timeshift_cam_imu: {shift!r}\n")
+        )
+    path.write_text("".join(entries))
+
+
+def test_imu_time_shift_is_the_mean_factory_shift_of_the_slam_cameras(tmp_path: Path) -> None:
+    # Cap B's factory values (fe6fede545c972fa); the eye pair (2.0 ms here) is not a SLAM camera and must not count.
+    factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
+    write_camchain(factory / "imus_cam_lr_front_extrinsic/front-camchain-imucam.yaml", [0.0008661293958066206, 0.0009766584965254315])
+    write_camchain(factory / "imus_cam_lr_eye_extrinsic/eye-camchain-imucam.yaml", [0.002, 0.002])
+    write_camchain(factory / "imus_cam_l_extrinsic/l-camchain-imucam.yaml", [0.001591904372869934])
+    write_camchain(factory / "imus_cam_r_extrinsic/r-camchain-imucam.yaml", [0.0014493197885760412])
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    expected_s: float = (0.0008661293958066206 + 0.0009766584965254315 + 0.001591904372869934 + 0.0014493197885760412) / 4
+    assert TIME_SHIFT_CAMERAS == ("left_front", "right_front", "left", "right")
+    assert dataset.camera_to_imu_offset_ns(DEVICE) == round(expected_s * 1e9) == 1_221_003
+
+
+def test_imu_time_shift_falls_back_to_the_legacy_constant_without_factory_shifts(tmp_path: Path) -> None:
+    factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
+    write_camchain(factory / "imus_cam_lr_front_extrinsic/front-camchain-imucam.yaml", [None, None])
+    write_camchain(factory / "imus_cam_l_extrinsic/l-camchain-imucam.yaml", [None])
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    assert dataset.camera_to_imu_offset_ns(DEVICE) == CAMERA_TO_IMU_OFFSET_NS
 
 
 @pytest.mark.integration
