@@ -235,8 +235,12 @@ def test_the_probe_refuses_a_calibration_whose_imu_is_not_the_catalogs(settings:
 @pytest.mark.usefixtures("live_catalog")
 def test_the_feed_opens_the_real_robocap_rig(benchmarks: Benchmarks, settings: SlamConfig) -> None:
     """Read four of six cameras at 640x360 with matched clocks and paired IMU.
-    This whole-feed integration test needs the catalog and is marked integration.
+    This whole-feed integration test needs the catalog's ``robocap`` dataset and is marked integration.
     """
+    from rerun.catalog import CatalogClient
+
+    if "robocap" not in {dataset.name for dataset in CatalogClient(settings.catalog_url).datasets()}:
+        pytest.skip(f"catalog {settings.catalog_url} has no 'robocap' dataset (session s00000015); register it with dataforge's robocap converter")
     session: RobocapSession = benchmarks.robocap.session("s00000015")
     with open_segment(
         CatalogSegment(settings.catalog_url, "robocap", session.segment_id), profile=ROBOCAP_RIG
