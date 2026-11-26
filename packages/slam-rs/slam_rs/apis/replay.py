@@ -15,6 +15,7 @@ from simplecv.stage_times import StageTimes
 from slam_rs import BackendRequest, GbaRequest, _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
+    ROBOCAP_RIG,
     CatalogSegment,
     DecodeRequest,
     Frameset,
@@ -104,6 +105,9 @@ class Config:
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
     vio_bootstrap: Literal["stereo", "inertial"] | None = None
     """Override ``config.vio_bootstrap``: how the estimator gets its first state. None keeps the dataset config's."""
+    config_overlay: str | None = None
+    """A JSON object merged into the VIO config's ``value0`` before it is parsed (a nested object updates the section it
+    names), e.g. ``{"backend.loop_closing": {"frame_time_margin_s": 120.0}}``; None changes nothing."""
     blank_cameras: tuple[int, ...] = ()
     """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording.
 
@@ -344,6 +348,28 @@ def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage |
     return replayed
 
 
+def overlay_config(config_text: str, overlay: str) -> str:
+    """Merge a JSON object into a VIO config's ``value0``: a nested object updates the section of that name, any other
+    value replaces the key.
+
+    Raises:
+        ValueError: If ``overlay`` is not a JSON object.
+    """
+    import json
+
+    changes: object = json.loads(overlay)
+    if not isinstance(changes, dict):
+        raise ValueError(f"--config-overlay must be a JSON object, got {overlay!r}")
+    document: dict = json.loads(config_text)
+    root: dict = document["value0"]
+    for key, value in changes.items():
+        if isinstance(value, dict) and isinstance(root.get(key), dict):
+            root[key] = {**root[key], **value}
+        else:
+            root[key] = value
+    return json.dumps(document)
+
+
 def main(config: Config) -> None:
     """Replay one segment, log it, write the trajectory and report the error.
 
@@ -356,11 +382,17 @@ def main(config: Config) -> None:
     benchmarks: Benchmarks = load_benchmarks(settings)
     listed: ReferenceSegment | None = next((s for s in benchmarks.segments if s.segment_id == config.segment), None)
     dataset_name: str = listed.dataset_name if listed is not None else config.segment.split("__")[0]
+    # RoboCap is slam.toml's [robocap] section, not a [[dataset]]: its own VIO config and rig, as catalog_layer reads it.
+    is_robocap: bool = dataset_name == "robocap" and listed is None
     vio_config: _core.VioConfig
     if listed is not None:
         vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
+        config_text: str = _config_text
     else:
-        vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+        config_text = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, profile=config.profile)
+        vio_config = _core.VioConfig.from_json(config_text)  # vio_config_text refuses an unknown dataset
+    if config.config_overlay is not None:
+        vio_config = _core.VioConfig.from_json(overlay_config(config_text, config.config_overlay))
     if config.vio_bootstrap is not None:
         vio_config.vio_bootstrap = config.vio_bootstrap
     if config.map is not None:
@@ -390,7 +422,7 @@ def main(config: Config) -> None:
 
     with open_segment(
         source,
-        profile=replace(dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
+        profile=replace(ROBOCAP_RIG if is_robocap else dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
         frame_stride=config.frame_stride,
         window_s=config.window_s,
         decode_device=select_decode_device(config.decode_device),
