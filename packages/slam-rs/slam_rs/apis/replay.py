@@ -1,23 +1,24 @@
-"""Replay catalog or local recordings through the Rust core and log ground-truth comparisons."""
+"""Replay a catalog or local segment through the slam-rs core into a viewer or a file, and report the ground-truth error.
+
+The run and its layer are the catalog layer's (:func:`slam_rs.catalog_layer.track_layer`): one driver, one writer of
+every entity. What this tool adds is where the layer goes (``RerunTyroConfig``: a viewer, a file, both), the knobs of an
+experiment, the trajectory CSVs and the ATE against the ground truth.
+"""
 
 import dataclasses
-import time
-from collections.abc import Generator, Iterable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal
 
 import numpy as np
 import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.stage_times import StageTimes
 
 from slam_rs import BackendRequest, GbaRequest, _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
     CatalogSegment,
     DecodeRequest,
-    Frameset,
     LocalSegment,
     SegmentFeed,
     SegmentSource,
@@ -25,34 +26,16 @@ from slam_rs.catalog_feed import (
     open_segment,
     select_decode_device,
 )
-from slam_rs.config import SlamConfig, load_slam_config
-from slam_rs.frontend_log import FrontendLogger, frontend_blueprint
-from slam_rs.gba_log import keyframe_trajectory, log_map_result
+from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
+from slam_rs.config import SlamConfig, config_text_sha256, load_slam_config
+from slam_rs.gba_log import keyframe_trajectory
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
-from slam_rs.tracking import FinalRun, Lockstep, final_trajectory
+from slam_rs.tracking import DropReason, SegmentRun
 from slam_rs.trajectory import Trajectory, ate, coverage, shift_clock, write_trajectory
-from slam_rs.vio_log import (
-    COLOR_DOWNSCALE,
-    RUN_ENTITY,
-    FrameMaskLog,
-    FrameMode,
-    VioLogger,
-    VioStage,
-    dataset_videos,
-    log_calibration,
-    log_frameset_inputs,
-    set_video_time,
-    vio_blueprint,
-)
+from slam_rs.vio_log import BootstrapLog, VioStage, vio_blueprint
 
 SMOKE_SEGMENT: str = SMOKE_SEGMENTS[1]
 """Default segment: the 7.6 s rotation-dominated panorama from the smoke tier."""
-
-BOOTSTRAP_ENTITY: str = f"{RUN_ENTITY}/bootstrap"
-"""Where the inertial bootstrap's attempts go, one row per attempt at the frameset that ran it."""
-
-Stage: TypeAlias = Literal["input", "frontend", "vio"]
-"""How far a replay runs: the estimator's inputs, the optical-flow frontend over them, or the whole pipeline."""
 
 
 @dataclass(slots=True)
@@ -61,12 +44,6 @@ class Config:
 
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Viewer, save and headless behaviour."""
-    stage: Stage = "input"
-    """``input`` logs what the estimator is fed, ``frontend`` runs the optical flow over it, ``vio`` runs the whole pipeline.
-
-    The two stages that track log full-resolution frames, because their keypoints
-    are in the pixels of the frame they tracked, not of a downscaled copy of it.
-    """
     segment: str = SMOKE_SEGMENT
     """Segment id from ``benchmarks.toml``; also names the IMU parameters used for ``--rrd``."""
     rrd: Path | None = None
@@ -74,7 +51,7 @@ class Config:
     gt_rrd: Path | None = None
     """Optional local ground-truth recording; requires --rrd."""
     mask_entity: str | None = None
-    """Segmentation masks for ``--stage vio``: the name of each camera's mask entity under its ``pinhole`` (e.g. ``people_mask``
+    """Segmentation masks: the name of each camera's mask entity under its ``pinhole`` (e.g. ``people_mask``
     reads ``<camera>/pinhole/people_mask``). The frontend neither detects nor keeps tracks where a camera's latest mask
     at or before its frame is nonzero (``slam_rs.frame_masks``). None tracks every pixel."""
     mask_rrd: Path | None = None
@@ -93,35 +70,22 @@ class Config:
     profile: Literal["reference", "fast"] = "fast"
     """Config overlay applied before tracking."""
     backend: BackendRequest = "auto"
-    """Where ``--stage vio`` runs the frontend's pyramid, patch build and KLT tracker.
+    """Where the frontend's pyramid, patch build and KLT tracker run.
 
     ``auto`` runs them on the GPU through CubeCL when this host can, otherwise
     on the CPU with one warning that names the reason. ``gpu`` stops with that
-    reason instead of falling back; ``cpu`` forces the CPU port. ``--stage
-    frontend`` always runs the CPU frontend.
+    reason instead of falling back; ``cpu`` forces the CPU port.
     """
     decode_device: DecodeRequest = "auto"
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
     vio_bootstrap: Literal["stereo", "inertial"] | None = None
     """Override ``config.vio_bootstrap``: how the estimator gets its first state. None keeps the dataset config's."""
     blank_cameras: tuple[int, ...] = ()
-    """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording.
-
-    A stereo-off switch is not a valid proxy: stereo observations
-    would still reach the estimator and give it metric scale. Black images give
-    the frontend nothing to detect or track (``tests/test_vio_bootstrap.py::test_blanked_cameras_track_nothing``).
-    """
+    """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording (:attr:`SegmentFeed.blank_cameras`)."""
     decode_threads: int = 1
     """PyAV decoder threads per camera stream (CPU decode); the Insta360 lenses decode at about 2.6x real time with 4."""
-    image_log_every: int = 1
-    """Log the camera images on every n-th frameset; 0 logs none.
-
-    On a long clip the images dominate the recording's size, the replay's memory (a headless replay without
-    ``--rr-config.save`` holds everything it logs) and its wall time. Poses, keypoints and counters are logged
-    on every frameset regardless.
-    """
     map: Literal["off", "offline", "realtime"] | None = None
-    """``--stage vio``: the back end's persistent keyframe map, drawn under ``/world/runs/slam_rs``; None keeps the profile's.
+    """The back end's persistent keyframe map, drawn under ``/world/runs/slam_rs``; None keeps the profile's.
 
     On by default (``backend.enabled``). ``offline`` steps it inline (tracking waits, results
     repeat); ``realtime`` runs it on its own thread (tracking never waits); ``off`` builds none. The VIO poses are the
@@ -135,242 +99,36 @@ class Config:
     """Where the global BA's PCG runs: ``follow`` takes the frontend's lane (the GPU when the back-end probe passes);
     ``cpu`` or ``gpu`` choose it outright, for benches and A/B runs."""
     animate_base_rig: bool = False
-    """``--stage vio`` on a segment without ground truth: also move the dataset's rig ``/world/rig_00`` with the raw VIO
-    pose, so views rooted at the rig follow it when this recording is viewed on its own (beside the base only). Leave it
-    off for a layer that goes beside the catalog ``slam_rs`` layer, which owns that transform and writes the final
-    poses there; two writers would give colsfm's pose prior two trajectories on one entity."""
-
-
-@dataclass(slots=True)
-class FrontendStage:
-    """The optical-flow frontend over one segment, and the Rerun layer it draws.
-
-    One value rather than three: the frontend, its logger and its timings only
-    ever exist together, on ``--stage frontend``.
-    """
-
-    flow: _core.OpticalFlow
-    """The frontend every frameset goes through."""
-    logger: FrontendLogger
-    """Where its keypoints, trails, occupancy and counters go."""
-    elapsed_ms: list[float] = field(default_factory=list)
-    """Wall time each ``process`` call took, in frameset order."""
-
-    def run(self, frameset: Frameset) -> None:
-        """Track one frameset and log what it produced, at the caller's time cursor.
-
-        Args:
-            frameset: The frameset to track.
-        """
-        started: float = time.monotonic()
-        frame: _core.FlowFrame = self.flow.process(frameset.t_ns, frameset.images)
-        self.elapsed_ms.append(1e3 * (time.monotonic() - started))
-        self.logger.log(frame, self.elapsed_ms[-1])
-
-    def summary(self) -> str:
-        """One line on what the stage did, for the end of a replay."""
-        if not self.elapsed_ms:
-            return "frontend: no frameset reached it"
-        return (
-            f"frontend: {self.flow.last_keypoint_id} keypoint ids handed out, "
-            f"{np.mean(self.elapsed_ms):.1f} ms per frameset "
-            f"(median {np.median(self.elapsed_ms):.1f}, max {np.max(self.elapsed_ms):.1f})"
-        )
-
-
-@dataclass(slots=True)
-class BootstrapLog:
-    """The inertial bootstrap in the result recording: each attempt when it happens, the status as a recording property.
-
-    The attempts are logged as the run makes them, so a bootstrap that never accepts and stops the run is still in
-    the recording. Nothing is logged on the stereo start.
-    """
-
-    cam_time_offset_ns: int
-    """The feed's :attr:`ImuCalib.cam_time_offset_ns`: the attempts' stamps are on the estimator's clock."""
-    logged: int = 0
-    """Attempts already in the recording."""
-    accepted: bool = False
-    """Whether the recording already holds the accepted status."""
-
-    def log_new(self, vio: _core.Vio) -> None:
-        """Log the attempts made since the last call, at their own frameset time, and the status when it changed.
-
-        Args:
-            vio: The pipeline that runs the bootstrap.
-        """
-        report: _core.BootstrapReport | None = vio.bootstrap_report()
-        if report is None:
-            return
-        attempts: list[_core.BootstrapAttempt] = report.attempts
-        for attempt in attempts[self.logged :]:
-            set_video_time(attempt.last_t_ns, self.cam_time_offset_ns)
-            rr.log(
-                BOOTSTRAP_ENTITY,
-                rr.AnyValues(
-                    verdict=attempt.verdict,
-                    accepted=attempt.accepted,
-                    first_t_ns=attempt.first_t_ns,
-                    frames=attempt.frames,
-                    tracks=attempt.tracks,
-                    tracks_used=attempt.tracks_used,
-                ),
-            )
-            quality: dict[str, float | None] = {
-                "window_s": (attempt.last_t_ns - attempt.first_t_ns) * 1e-9,
-                "excitation_mps2": attempt.excitation_mps2,
-                "residual_rms_rad": attempt.residual_rms_rad,
-                "condition": attempt.condition,
-                "gravity_norm_unconstrained": attempt.gravity_norm_unconstrained,
-                "scale_sigma": attempt.scale_sigma,
-            }
-            for name, value in quality.items():
-                if value is not None:
-                    rr.log(f"{BOOTSTRAP_ENTITY}/{name}", rr.Scalars(value))
-        accepted: bool = report.start_t_ns is not None
-        if len(attempts) == self.logged and accepted == self.accepted:
-            return
-        self.logged = len(attempts)
-        self.accepted = accepted
-        # A recording property holds the latest value: on a run that stops this is the status where it stopped.
-        rr.send_property(
-            "bootstrap",
-            rr.AnyValues(
-                status="accepted" if accepted else "bootstrapping",
-                attempts=len(attempts),
-                start_t_ns=report.start_t_ns,
-                accepted_at_t_ns=report.accepted_at_t_ns,
-                replayed=report.replayed,
-            ),
-        )
-
-    @staticmethod
-    def summary(vio: _core.Vio, first_t_ns: int) -> str | None:
-        """One line on the bootstrap for the console, or None on the stereo start.
-
-        Args:
-            vio: The pipeline that ran.
-            first_t_ns: The segment's first frameset time, the origin of the printed seconds.
-        """
-        report: _core.BootstrapReport | None = vio.bootstrap_report()
-        if report is None:
-            return None
-        verdicts: list[str] = [attempt.verdict for attempt in report.attempts]
-        if report.start_t_ns is None or report.accepted_at_t_ns is None:
-            return f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; no window accepted"
-        return (
-            f"inertial bootstrap: {len(verdicts)} attempts {verdicts}; started at {(report.start_t_ns - first_t_ns) * 1e-9:.2f} s, "
-            f"first pose at {(report.accepted_at_t_ns - first_t_ns) * 1e-9:.2f} s, {report.replayed} framesets replayed"
-        )
-
-
-def blank(framesets: Iterable[Frameset], cameras: tuple[int, ...]) -> Iterator[Frameset]:
-    """The framesets with black images in ``cameras`` (``--blank-cameras``); unchanged when ``cameras`` is empty.
-
-    Args:
-        framesets: The feed's framesets.
-        cameras: Camera indices whose images are replaced by zeros.
-
-    Yields:
-        Each frameset, its blanked cameras' images zeroed.
-    """
-    for frameset in framesets:
-        if cameras:
-            frameset = dataclasses.replace(
-                frameset, images=[np.zeros_like(image) if index in cameras else image for index, image in enumerate(frameset.images)]
-            )
-        yield frameset
-
-
-def _replay(feed: SegmentFeed, config: Config, stage: FrontendStage | VioStage | None) -> int:
-    """Log every frameset's inputs and drive whichever stage was built over them.
-
-    Args:
-        feed: Open segment feed.
-        config: Parsed CLI options.
-        stage: The frontend or the whole pipeline, or None for ``--stage input``.
-
-    Returns:
-        Framesets replayed. Everything a stage produced is on the stage itself.
-    """
-    started: float = time.monotonic()
-    replayed: int = 0
-    # `--max-framesets` is a count and the feed reads by time; the feed is what
-    # converts one to the other, so this loop and `tracking.drive` cannot
-    # disagree about which frameset a count ends on.
-    stop_ns: int | None = feed.stop_ns_after(config.max_framesets)
-    # The stage that tracks needs the pixels its keypoints were computed on.
-    mode: FrameMode = "downscaled" if config.stage == "input" else "jpeg"
-    mask_log: FrameMaskLog | None = None if config.mask_entity is None else FrameMaskLog(config.mask_entity)
-    times: StageTimes = stage.times if isinstance(stage, VioStage) else StageTimes()
-    source: Generator[Frameset, None, None] = feed.framesets(stop_ns)
-    framesets: Iterator[Frameset] = blank(source, config.blank_cameras)
-    bootstrap: BootstrapLog = BootstrapLog(feed.imu.cam_time_offset_ns)
-    while config.max_framesets is None or replayed < config.max_framesets:
-        waited: float = time.monotonic()
-        frameset: Frameset | None = next(framesets, None)
-        if frameset is None:
-            break
-        times.add("decode", 1e3 * (time.monotonic() - waited))
-        log_images: bool = config.image_log_every > 0 and replayed % config.image_log_every == 0
-        replayed += 1
-        logged: float = time.monotonic()
-        log_frameset_inputs(feed.cameras, feed.imu.cam_time_offset_ns, frameset, mode if log_images else "off", mask_log)
-        times.add("log_inputs", 1e3 * (time.monotonic() - logged))
-        if isinstance(stage, VioStage):
-            stage.run(frameset)
-            bootstrap.log_new(stage.lockstep.vio)
-        elif stage is not None:
-            stage.run(frameset)
-    source.close()  # a --max-framesets stop leaves the decode worker up to 64 framesets ahead; stop it and free them
-
-    if isinstance(stage, VioStage):
-        stage.flush()
-        bootstrap.log_new(stage.lockstep.vio)
-    elapsed: float = time.monotonic() - started
-    print(f"{replayed} framesets in {elapsed:.1f} s ({replayed / max(elapsed, 1e-9):.1f} fps)")
-    print(times.line("frameset"))
-    if stage is not None:
-        print(stage.summary())
-    if isinstance(stage, VioStage) and (line := BootstrapLog.summary(stage.lockstep.vio, int(feed.frame_t_ns[0]))) is not None:
-        print(line)
-    if isinstance(stage, VioStage) and (shutter := stage.lockstep.vio.rolling_shutter_frames) is not None:
-        print(f"rolling shutter: {shutter[0]} frames corrected, {shutter[1]} left raw (no gyro coverage at the frame time)")
-    if isinstance(stage, VioStage) and stage.keypoints:
-        print(
-            f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "
-            f"mean {np.mean(stage.keypoints):.1f}, min {np.min(stage.keypoints)}, max {np.max(stage.keypoints)}"
-        )
-    return replayed
+    """On a segment without ground truth: also move the dataset's rig ``/world/rig_00`` with the final run, as the catalog
+    layer does there, so views rooted at the rig follow it when this recording is viewed beside the base alone."""
+    detail: LayerDetail = "full"
+    """What the layer holds (:data:`slam_rs.catalog_layer.LayerDetail`): ``poses`` measures the estimator with the layer's
+    paths alone."""
 
 
 def main(config: Config) -> None:
-    """Replay one segment, log it, write the trajectory and report the error.
+    """Replay one segment, log its layer, write the trajectories and report the error.
 
     Args:
         config: Parsed CLI options.
     """
-    if config.image_log_every < 0:
-        raise ValueError(f"--image-log-every {config.image_log_every}: a cadence of 0 (no images) or more")
     settings: SlamConfig = load_slam_config()
     benchmarks: Benchmarks = load_benchmarks(settings)
     listed: ReferenceSegment | None = next((s for s in benchmarks.segments if s.segment_id == config.segment), None)
     dataset_name: str = listed.dataset_name if listed is not None else config.segment.split("__")[0]
     vio_config: _core.VioConfig
+    config_text: str
     if listed is not None:
-        vio_config, _config_text = resolved_flow_config(settings, listed, profile=config.profile)
+        vio_config, config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
-        vio_config = _core.VioConfig.from_json(settings.vio_config_text(dataset_name, profile=config.profile))  # refuses an unknown dataset
+        config_text = settings.vio_config_text(dataset_name, profile=config.profile)  # refuses an unknown dataset
+        vio_config = _core.VioConfig.from_json(config_text)
     if config.vio_bootstrap is not None:
         vio_config.vio_bootstrap = config.vio_bootstrap
     if config.map is not None:
         vio_config = vio_config.with_backend(config.map)
     if config.mask_rrd is not None and config.mask_entity is None:
         raise ValueError("--mask-rrd names a layer; --mask-entity names the masks in it")
-    if config.mask_entity is not None and config.stage != "vio":
-        raise ValueError("--mask-entity applies to --stage vio, the one stage that tracks with masks")
-    if config.animate_base_rig and config.stage != "vio":
-        raise ValueError("--animate-base-rig moves the rig with the VIO estimate, which only --stage vio produces")
     source: SegmentSource
     origin: str
     if config.rrd is not None:
@@ -388,9 +146,10 @@ def main(config: Config) -> None:
         f"replaying {config.segment} ({f'{listed.tier} tier' if listed is not None else 'not in the reference set: ground truth only'}) from {origin}"
     )
 
+    feed: SegmentFeed
     with open_segment(
         source,
-        profile=replace(dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
+        profile=dataclasses.replace(dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
         frame_stride=config.frame_stride,
         window_s=config.window_s,
         decode_device=select_decode_device(config.decode_device),
@@ -404,83 +163,74 @@ def main(config: Config) -> None:
             print("ground truth absent, not scored")
         elif config.animate_base_rig:
             raise ValueError("--animate-base-rig: this segment has ground truth, and the gt layer owns /world/rig_00")
-        log_calibration(feed.cameras, gravity_world=not feed.has_ground_truth)
-        stage: FrontendStage | VioStage | None = None
-        if config.stage == "frontend":
-            stage = FrontendStage(
-                flow=_core.OpticalFlow(_core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config),
-                logger=FrontendLogger(len(feed.cameras)),
-            )
-            rr.send_blueprint(frontend_blueprint(feed.cameras))
-        elif config.stage == "vio":
-            truth: Trajectory = feed.ground_truth_between(int(feed.frame_t_ns[0]), int(feed.frame_t_ns[-1]))
-            # Everything this constructor refuses is the caller's own request —
-            # a configuration this port does not run, or ``--backend gpu`` on a
-            # host with no driver, no device or no adapter — and the shim
-            # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
-            # non-zero exit rather than a traceback through the feed.
-            vio: _core.Vio = _core.Vio(
-                _core.Calibration.from_catalog(feed.cameras, feed.imu), vio_config, backend=config.backend, ba_backend=config.ba_backend
-            )
-            print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else "") + f", GBA lane: {vio.gba_lane}")
-            unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
-            if unknown:
-                raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
-            stage = VioStage(
-                lockstep=Lockstep(vio=vio),
-                logger=VioLogger(
-                    cameras=feed.cameras,
-                    ground_truth=truth,
-                    frame_t_ns=feed.frame_t_ns,
-                    tracked_resolution=tuple(vio.tracked_resolution),
-                    cam_time_offset_ns=feed.imu.cam_time_offset_ns,
-                    animate_base_rig=config.animate_base_rig,
-                    # The base's own lens videos: the run's frusta reference their frames, nothing is encoded again.
-                    video_entities=dataset_videos(feed.camera_positions),
-                    # A replay draws the final loop set at the end, not each loop from its detection on.
-                    loops_as_found=False,
-                ),
-            )
-            rr.send_blueprint(vio_blueprint(feed.cameras))
-        # The landmarks take their colour from the frames: the estimator's own stay gray, the logger gets an RGB copy.
-        _replay(dataclasses.replace(feed, color_downscale=COLOR_DOWNSCALE) if isinstance(stage, VioStage) else feed, config, stage)
-        if not isinstance(stage, VioStage):
-            return
-        # The per-frameset segments show where the run had got to; these show
-        # where it went, at every cursor and for one copy of each path.
-        stage.logger.log_complete_paths()
-        stage.refuse_lost_framesets()
+        unknown: list[int] = [camera for camera in config.blank_cameras if not 0 <= camera < len(feed.cameras)]
+        if unknown:
+            raise ValueError(f"--blank-cameras {unknown}: the rig has cameras 0..{len(feed.cameras) - 1}")
+        if config.blank_cameras:
+            feed = dataclasses.replace(feed, blank_cameras=config.blank_cameras)
+        calibration: _core.Calibration = _core.Calibration.from_catalog(feed.cameras, feed.imu)
+        # Everything this constructor refuses is the caller's own request —
+        # a configuration this port does not run, or ``--backend gpu`` on a
+        # host with no driver, no device or no adapter — and the shim
+        # (:func:`slam_rs.apis.run`) is what turns it into one sentence and a
+        # non-zero exit rather than a traceback through the feed.
+        vio: _core.Vio = _core.Vio(calibration, vio_config, backend=config.backend, ba_backend=config.ba_backend)
+        backend: str = str(_core.gpu_backend) if vio.gpu else "cpu"
+        print(f"frontend backend: {vio.backend}" + (f" ({_core.gpu_backend})" if vio.gpu else "") + f", GBA lane: {vio.gba_lane}")
+        rr.send_blueprint(vio_blueprint(feed.cameras))
+        recording: rr.RecordingStream | None = rr.get_global_data_recording()
+        assert recording is not None, "RerunTyroConfig sets up the global recording"
+        layer: LayerRun = track_layer(
+            recording, feed, vio, config_sha256=config_text_sha256(config_text), calibration=calibration, run_gba=config.gba, detail=config.detail,
+            profile=config.profile, backend=backend, decoder=feed.decode_device, animate_base_rig=config.animate_base_rig, strict=False,
+            max_framesets=config.max_framesets,
+        )
+        export_offset_ns: int = feed.export_offset_ns
+        video_time_offset_ns: int = feed.video_time_offset_ns
+        first_t_ns: int = int(feed.frame_t_ns[0])
 
-        estimate: Trajectory = stage.logger.estimated()
-        # The raw VIO first, beside the final run with ``_vio`` added to the stem (the names the scorer's
-        # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
-        # tracked run.
-        vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
-        write_trajectory(vio_csv, shift_clock(estimate, feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns)
-        # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
-        # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
-        finished: FinalRun = final_trajectory(stage.lockstep.vio, estimate, run_gba=config.gba)
-        final: Trajectory = finished.final
-        map_result: _core.MapResult | None = finished.map_result
-        if finished.gba_failure is not None:
-            print(f"global BA: failed: {finished.gba_failure}")
-        stage.logger.log_final_run(final)
-        write_trajectory(output_csv, shift_clock(final, feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns)
-        print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
-        if map_result is not None and map_result.gba is not None:
-            # At the cursor the flush left on the last frameset, beside the final map.
-            log_map_result(map_result)
-            gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
-            write_trajectory(
-                gba_csv, shift_clock(keyframe_trajectory(map_result, after_gba=True), feed.export_offset_ns), video_time_offset_ns=feed.video_time_offset_ns
+    run: SegmentRun = layer.run
+    stage: VioStage | None = layer.stage
+    print(f"{run.framesets} framesets in {run.wall_s:.1f} s ({run.framesets / max(run.wall_s, 1e-9):.1f} fps)")
+    if stage is not None:
+        print(stage.times.line("frameset"))
+        print(stage.summary())
+        if (line := BootstrapLog.summary(stage.lockstep.vio, first_t_ns)) is not None:
+            print(line)
+        if (shutter := stage.lockstep.vio.rolling_shutter_frames) is not None:
+            print(f"rolling shutter: {shutter[0]} frames corrected, {shutter[1]} left raw (no gyro coverage at the frame time)")
+        if stage.keypoints:
+            print(
+                f"keypoints held per frameset (all cameras): median {np.median(stage.keypoints):.0f}, "
+                f"mean {np.mean(stage.keypoints):.1f}, min {np.min(stage.keypoints)}, max {np.max(stage.keypoints)}"
             )
-            print(f"global BA: {map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
-        if len(estimate) == 0:
-            print("no ATE: the estimator reported no tracked pose")
-            return
-        reference: Trajectory = stage.logger.ground_truth
-        if len(reference) == 0:
-            return
-        print(f"vs ground truth, {coverage(reference, estimate):.1%} of its span covered")
-        print(f"raw VIO: {ate(estimate, reference).summary()}")
-        print(f"final: {ate(final, reference).summary()}")
+    uncovered: int = sum(drop.reason == DropReason.IMU_ENDED for drop in run.dropped)
+    if uncovered:
+        raise SystemExit(f"{uncovered} framesets never got the inertial samples that cover them")
+
+    estimate: Trajectory = run.estimate
+    # The raw VIO first, beside the final run with ``_vio`` added to the stem (the names the scorer's
+    # ``--est slam_rs=... --est slam_rs_vio=...`` reads), both on the dataset's clock: nothing after it can lose a
+    # tracked run.
+    vio_csv: Path = output_csv.with_stem(f"{output_csv.stem}_vio")
+    write_trajectory(vio_csv, estimate, video_time_offset_ns=video_time_offset_ns)
+    # The final run: the GBA on the map after loops and PGO, then the raw VIO re-anchored on its keyframes (the raw
+    # VIO itself with the back end off). A failed GBA falls back to the map after loops and PGO.
+    final: Trajectory = estimate if run.final is None else run.final
+    if run.gba_failure is not None:
+        print(f"global BA: failed: {run.gba_failure}")
+    write_trajectory(output_csv, final, video_time_offset_ns=video_time_offset_ns)
+    print(f"{len(estimate)} tracked poses -> {output_csv} (final), {vio_csv} (raw VIO) (absolute ns)")
+    if run.map_result is not None and run.map_result.gba is not None:
+        gba_csv: Path = output_csv.with_name(f"{output_csv.stem}_gba_keyframes.csv")
+        write_trajectory(gba_csv, shift_clock(keyframe_trajectory(run.map_result, after_gba=True), export_offset_ns), video_time_offset_ns=video_time_offset_ns)
+        print(f"global BA: {run.map_result.gba!r}; keyframes -> {gba_csv} (absolute ns)")
+    if len(estimate) == 0:
+        print("no ATE: the estimator reported no tracked pose")
+        return
+    reference: Trajectory = run.ground_truth
+    if len(reference) == 0:
+        return
+    print(f"vs ground truth, {coverage(reference, estimate):.1%} of its span covered")
+    print(f"raw VIO: {ate(estimate, reference).summary()}")
+    print(f"final: {ate(final, reference).summary()}")

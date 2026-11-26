@@ -11,6 +11,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from slam_rs import _core
+from slam_rs.columns import ColumnLog
 from slam_rs.trajectory import Trajectory
 from slam_rs.vio_log import RUN_ENTITY
 
@@ -24,6 +25,10 @@ GBA_TIMELINE: str = "gba_attempt"
 """Sequence timeline of the LM attempts, from 0."""
 GBA_COLOR: tuple[int, int, int] = (255, 120, 220)
 """The GBA-corrected keyframes: magenta, apart from the raw estimate's green."""
+GBA_KEYFRAME_RADIUS_M: float = 0.012
+"""Radius of a GBA-corrected keyframe, metres."""
+GBA_PATH_RADIUS_M: float = 0.004
+"""Stroke of the GBA keyframes' path, metres."""
 
 
 def keyframe_trajectory(result: _core.MapResult, *, after_gba: bool) -> Trajectory:
@@ -40,20 +45,26 @@ def keyframe_trajectory(result: _core.MapResult, *, after_gba: bool) -> Trajecto
     return Trajectory.from_xyzw(result.keyframe_t_ns, poses)
 
 
-def log_map_result(result: _core.MapResult) -> None:
-    """Draw the GBA-corrected keyframes at the caller's cursor, and the GBA's attempts on :data:`GBA_TIMELINE`.
+def log_map_result(result: _core.MapResult, columns: ColumnLog, t_ns: int) -> None:
+    """Draw the GBA-corrected keyframes at ``video_time`` ``t_ns``, and the GBA's attempts on :data:`GBA_TIMELINE`.
 
     Nothing is drawn when the GBA did not run: the map's keyframes are already drawn by the VIO layer.
 
     Args:
         result: What :meth:`slam_rs._core.Vio.finish_map` returned.
+        columns: The run's held rows (:attr:`slam_rs.vio_log.VioLogger.columns`), and the recording they go to.
+        t_ns: ``video_time`` of the row, usually the last pose's.
     """
     gba: _core.GbaRun | None = result.gba
     if gba is None or result.keyframe_t_ns.shape[0] == 0:
         return
+    recording: rr.RecordingStream | None = columns.recording
     positions: Float64[ndarray, "k 3"] = result.keyframe_poses[:, 0:3]
-    rr.log(GBA_KEYFRAMES_ENTITY, rr.Points3D(positions, colors=GBA_COLOR, radii=0.012))
-    rr.log(GBA_PATH_ENTITY, rr.LineStrips3D([positions], colors=GBA_COLOR, radii=0.004))
+    columns.static_once(GBA_KEYFRAMES_ENTITY, rr.Points3D.from_fields(colors=GBA_COLOR, radii=GBA_KEYFRAME_RADIUS_M))
+    columns.add_batch(GBA_KEYFRAMES_ENTITY, rr.Points3D.columns, t_ns, positions=positions)
+    columns.static_once(GBA_PATH_ENTITY, rr.LineStrips3D.from_fields(colors=GBA_COLOR, radii=GBA_PATH_RADIUS_M))
+    columns.add_batch(GBA_PATH_ENTITY, rr.LineStrips3D.columns, t_ns, strips=[positions])
+    columns.flush()
     attempts: rr.TimeColumn = rr.TimeColumn(GBA_TIMELINE, sequence=np.arange(gba.iteration_lambda.shape[0], dtype=np.int64))
     for name, values in (
         ("cost", gba.iteration_cost),
@@ -62,7 +73,7 @@ def log_map_result(result: _core.MapResult) -> None:
         ("accepted", gba.iteration_accepted.astype(np.float64)),
         ("wall_s", gba.iteration_stage_s.sum(axis=1)),
     ):
-        rr.send_columns(f"{GBA_STATS_ENTITY}/{name}", indexes=[attempts], columns=rr.Scalars.columns(scalars=values))
+        rr.send_columns(f"{GBA_STATS_ENTITY}/{name}", indexes=[attempts], columns=rr.Scalars.columns(scalars=values), recording=recording)
     rr.log(
         GBA_STATS_ENTITY,
         rr.AnyValues(
@@ -81,4 +92,5 @@ def log_map_result(result: _core.MapResult) -> None:
             threads=gba.threads,
         ),
         static=True,
+        recording=recording,
     )

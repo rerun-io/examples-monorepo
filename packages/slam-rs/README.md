@@ -41,10 +41,10 @@ pixi run -e slam-rs slam-rs-download-all           # all 64 recordings, 15.5 GB
 pixi run -e slam-rs slam-rs-register               # picks up the new files; idempotent
 pixi run -e slam-rs slam-rs-gate --tier release    # three longer clips; --tier listed scores the other five
 pixi run -e slam-rs slam-rs-gate --backend cpu     # the same clips on the CPU lane
-pixi run -e slam-rs slam-rs-replay --stage vio --segment <id>                     # any segment in the viewer
-pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment <id> --output-dir <dir>   # a catalog segment's slam_rs layer
-pixi run -e slam-rs slam-rs-replay --stage vio --rrd base.rrd --gt-rrd gt.rrd     # your own recording, no catalog
-pixi run -e slam-rs slam-rs-replay --stage vio --rrd base.rrd --mask-entity people_mask --mask-rrd masks.rrd  # no features on masked pixels
+pixi run -e slam-rs slam-rs-replay --segment <id>                                 # any segment's layer in the viewer
+pixi run -e slam-rs-cuda slam-rs-catalog-layer --segment <id> --output-dir <dir>   # the same layer, registered as slam_rs
+pixi run -e slam-rs slam-rs-replay --rrd base.rrd --gt-rrd gt.rrd                 # your own recording, no catalog
+pixi run -e slam-rs slam-rs-replay --rrd base.rrd --mask-entity people_mask --mask-rrd masks.rrd  # no features on masked pixels
 ```
 
 Segmentation masks (people, the operator, a selfie stick) keep the frontend off moving pixels. The mask layer has, per

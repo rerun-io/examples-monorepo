@@ -5,12 +5,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, RigFactory, TextureFactory, gravity_batch
+import rerun as rr
+import rerun.chunk as rrc
+from fixture_types import FRAME_PERIOD_NS, IMU_PERIOD_NS, RigFactory, Rows, RowsReader, TextureFactory, gravity_batch
 from jaxtyping import Int64
 from numpy import ndarray
 
 from slam_rs import _core
+from slam_rs.columns import ColumnLog
 from slam_rs.config import SLAM_CONFIG_PATH
+from slam_rs.vio_log import BOOTSTRAP_ENTITY, BootstrapLog
 
 MSD_CONFIG_KEYS: frozenset[str] = frozenset(
     f"config.{key}"
@@ -121,31 +125,22 @@ def test_a_still_rigs_first_attempt_is_a_typed_low_excitation_rejection(rig: Rig
     assert first is not None and first.last_t_ns == attempt.last_t_ns
 
 
-def test_each_attempt_goes_into_the_recording_once_at_its_own_time(
-    rig: RigFactory, texture: TextureFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The replay logs an attempt when it appears, at its last frameset's time, and states the status as a property."""
-    from slam_rs.apis import replay
-
-    logged: list[tuple[int, str]] = []
-    properties: list[str] = []
-    cursor: list[int] = [0]
-
-    def set_time(_timeline: str, *, duration: np.timedelta64) -> None:
-        cursor[0] = int(duration.astype("timedelta64[ns]").astype(np.int64))
-
-    monkeypatch.setattr(replay.rr, "set_time", set_time)
-    monkeypatch.setattr(replay.rr, "log", lambda entity, *_args, **_kwargs: logged.append((cursor[0], entity)))
-    monkeypatch.setattr(replay.rr, "send_property", lambda name, *_args: properties.append(name))
+def test_each_attempt_goes_into_the_recording_once_at_its_own_time(rig: RigFactory, texture: TextureFactory, tmp_path: Path, read_rows: RowsReader) -> None:
+    """The layer logs an attempt when it appears, at its last frameset's time, and states the status as a property."""
+    output: Path = tmp_path / "bootstrap.rrd"
     vio: _core.Vio = still_rig_until_first_attempt(rig, texture)
-    bootstrap: replay.BootstrapLog = replay.BootstrapLog(cam_time_offset_ns=0)
-    bootstrap.log_new(vio)
-    bootstrap.log_new(vio)
+    with rr.RecordingStream("slam-rs-bootstrap-test", recording_id="bootstrap") as recording:
+        recording.save(output)
+        bootstrap: BootstrapLog = BootstrapLog(cam_time_offset_ns=0, columns=ColumnLog(recording=recording))
+        bootstrap.log_new(vio)
+        bootstrap.log_new(vio)
+        bootstrap.columns.flush()
     report: _core.BootstrapReport | None = vio.bootstrap_report()
     assert report is not None
     attempt_t_ns: int = report.attempts[0].last_t_ns
-    assert (attempt_t_ns, replay.BOOTSTRAP_ENTITY) in logged
-    assert {t_ns for t_ns, _entity in logged} == {attempt_t_ns}
-    assert len([entity for _t, entity in logged if entity == replay.BOOTSTRAP_ENTITY]) == 1
-    assert properties == ["bootstrap"]
-    assert replay.BootstrapLog.summary(vio, 0) == "inertial bootstrap: 1 attempts ['LowExcitation']; no window accepted"
+    rows: Rows = read_rows(output)
+    assert [row.t_ns for row in rows[BOOTSTRAP_ENTITY]] == [attempt_t_ns]
+    assert {row.t_ns for entity, entity_rows in rows.items() if entity.startswith(BOOTSTRAP_ENTITY) for row in entity_rows} == {attempt_t_ns}
+    properties: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(output).stream().collect().stream() if chunk.entity_path.startswith("/__properties")}
+    assert "/__properties/bootstrap" in properties
+    assert BootstrapLog.summary(vio, 0) == "inertial bootstrap: 1 attempts ['LowExcitation']; no window accepted"

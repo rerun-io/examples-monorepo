@@ -442,6 +442,12 @@ ColorCopy: TypeAlias = Callable[[], UInt8[ndarray, "ch cw 3"]]
 """A decoded frame's small RGB copy, made when called: a feed converts only the frames of the framesets it yields."""
 
 
+def blanked(images: list[UInt8[ndarray, "h w"]], cameras: tuple[int, ...]) -> list[UInt8[ndarray, "h w"]]:
+    """The frameset's images with those of ``cameras`` (feed positions) black (:attr:`SegmentFeed.blank_cameras`); the
+    others are the same arrays."""
+    return [np.zeros_like(image) if position in cameras else image for position, image in enumerate(images)] if cameras else images
+
+
 def color_copy_size(width: int, height: int, color_downscale: int) -> tuple[int, int]:
     """``(width, height)`` of the RGB copy of a ``width`` x ``height`` frame: each side divided and floored, at least one.
 
@@ -589,6 +595,11 @@ class SegmentFeed:
     color_downscale: int | None = None
     """Also hand each frameset its frames in RGB, this many times smaller (:attr:`Frameset.colors`), from the same decode;
     None decodes gray only. Logging only: the gray frames and what the estimator does are the same either way."""
+    blank_cameras: tuple[int, ...] = ()
+    """Cameras (by feed position) fed black images instead of their frames: a mono-inertial proxy on a stereo rig.
+
+    A stereo-off switch is not a valid proxy: stereo observations would still reach the estimator and give it metric
+    scale. Black images give the frontend nothing to detect or track (``tests/test_vio_bootstrap.py``)."""
 
     @property
     def has_ground_truth(self) -> bool:
@@ -786,7 +797,7 @@ class SegmentFeed:
                 )
                 yield Frameset(
                     t_ns=t_ns,
-                    images=images,
+                    images=blanked(images, self.blank_cameras),
                     imu=frame_imu,
                     ground_truth=_nearest_pose(window_gt, t_ns),
                     masks=masks,

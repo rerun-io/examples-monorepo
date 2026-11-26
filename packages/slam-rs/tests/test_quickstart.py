@@ -92,7 +92,7 @@ def test_one_command_runs_the_whole_demo_in_the_viewer() -> None:
     demo: dict[str, object] = tasks["slam-rs-demo"]
     assert list(demo["depends-on"]) == ["slam-rs-build", "slam-rs-download-sample", "slam-rs-register"]  # type: ignore[arg-type]
     cmd: str = str(demo["cmd"])
-    assert cmd.startswith("python tools/apps/replay.py --stage vio") and "headless" not in cmd, "only the replay, on screen"
+    assert cmd.startswith("python tools/apps/replay.py --segment") and "headless" not in cmd, "only the replay, on screen"
     assert f"--segment {DEMO_CLIP}" in cmd, "the four-camera clip from the gif, not the two-camera smoke clip"
     assert demo["cwd"] == "packages/slam-rs"
     assert str(tasks["slam-rs-catalog-up"]["cmd"]) == "python tools/apps/catalog_up.py", "the lifecycle is Python, not a shell string"

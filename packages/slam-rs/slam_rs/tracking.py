@@ -9,7 +9,7 @@ import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
 from jaxtyping import Float64
@@ -179,6 +179,23 @@ class Lockstep:
         yield held, result
 
 
+@runtime_checkable
+class RunObserver(Protocol):
+    """What :func:`drive` tells a layer writer while the run goes on (:class:`slam_rs.vio_log.VioStage`)."""
+
+    def consumed(self, frameset: Frameset) -> None:
+        """Called after each frameset's push, whether or not it yielded a pose (an inertial bootstrap attempt may have run)."""
+        ...
+
+    def tracked(self, held: Frameset, result: _core.VioResult) -> None:
+        """Called for each pose, in trajectory order, while the estimator still holds that frame's snapshot."""
+        ...
+
+    def flushed(self) -> None:
+        """Called once after the estimator's flush, before the final trajectory: the map is current."""
+        ...
+
+
 @dataclass(slots=True, frozen=True)
 class SegmentRun:
     """What one clip through the whole pipeline produced, on the absolute device clock."""
@@ -210,6 +227,8 @@ class SegmentRun:
     """Why the global BA failed, when it was asked for and did: ``final`` is then the map after loops and PGO."""
     final: Trajectory | None = None
     """The final trajectory (:func:`final_trajectory`: the global BA, then re-anchoring), at the estimate's timestamps; None with the back end off, where it is the estimate."""
+    map_result: _core.MapResult | None = None
+    """What :meth:`slam_rs._core.Vio.finish_map` returned (the GBA's keyframes, on the estimator's clock); None with the back end off."""
 
 
     def unexplained_loss(self) -> str | None:
@@ -280,12 +299,22 @@ def final_trajectory(vio: _core.Vio, estimate: Trajectory, *, run_gba: bool) -> 
 
 
 def drive(
-    feed: SegmentFeed, lockstep: Lockstep, stop_ns: int | None = None, max_framesets: int | None = None, *, config_sha256: str, calibration: _core.Calibration, run_gba: bool
+    feed: SegmentFeed,
+    lockstep: Lockstep,
+    stop_ns: int | None = None,
+    max_framesets: int | None = None,
+    *,
+    config_sha256: str,
+    calibration: _core.Calibration,
+    run_gba: bool,
+    observer: RunObserver | None = None,
 ) -> SegmentRun:
     """Track framesets with IMU hold/retry; export estimates, the final trajectory (:func:`final_trajectory`) and truth on the device clock.
 
     ``run_gba`` runs the global BA for the final trajectory; callers that score only the raw VIO pass False and never
-    run it. A GBA that fails falls back as :func:`final_trajectory` says and is recorded in ``gba_failure``.
+    run it. A GBA that fails falls back as :func:`final_trajectory` says and is recorded in ``gba_failure``. An
+    ``observer`` sees every frameset, every pose and the flush as they happen (the full result layer); without one
+    nothing but the poses is kept.
     """
     t_ns: list[int] = []
     positions: list[Float64[ndarray, " 3"]] = []
@@ -313,10 +342,18 @@ def drive(
         if stop_ns is not None and frameset.t_ns > stop_ns:
             break
         replayed += 1
-        for _tracked, result in lockstep.push(frameset):
+        for tracked, result in lockstep.push(frameset):
             record(result)
-    for _tracked, result in lockstep.flush():
+            if observer is not None:
+                observer.tracked(tracked, result)
+        if observer is not None:
+            observer.consumed(frameset)
+    for tracked, result in lockstep.flush():
         record(result)
+        if observer is not None:
+            observer.tracked(tracked, result)
+    if observer is not None:
+        observer.flushed()
     wall_s: float = time.monotonic() - started
     estimate: Trajectory = Trajectory(
         t_ns=np.array(t_ns, dtype=np.int64),
@@ -328,6 +365,7 @@ def drive(
     return SegmentRun(
         estimate=shift_clock(estimate, feed.export_offset_ns),
         final=None if finished.map_result is None else shift_clock(finished.final, feed.export_offset_ns),
+        map_result=finished.map_result,
         gba_failure=finished.gba_failure,
         framesets=replayed,
         lost=replayed - len(t_ns),

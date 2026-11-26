@@ -2767,7 +2767,7 @@ dataforge = { path = "packages/dataforge", editable = true }
 dataforge = { path = "packages/dataforge", editable = true }
 
 [feature.slam-rs.tasks.slam-rs-demo]
-cmd = "python tools/apps/replay.py --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy"
+cmd = "python tools/apps/replay.py --segment msd-g2__MGO_others__MGO07_mapping_easy"
 cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build", "slam-rs-download-sample", "slam-rs-register"]
 description = "Build, fetch the sample, start the local catalog, register, and replay the four-camera MGO07 clip in the viewer"
@@ -2798,7 +2798,7 @@ cwd = "packages/slam-rs"
 depends-on = ["slam-rs-build"]
 description = "Build the core, then score catalog segments against ground truth and baselines (GPU frontend when available)"
 
-# Any replay flag passes through, e.g. `--stage vio --segment <id>`; `--backend cpu` forces the CPU lane.
+# Any replay flag passes through, e.g. `--segment <id>`; `--backend cpu` forces the CPU lane.
 [feature.slam-rs.tasks.slam-rs-replay]
 cmd = "python tools/apps/replay.py"
 cwd = "packages/slam-rs"

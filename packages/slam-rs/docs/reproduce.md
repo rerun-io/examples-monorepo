@@ -161,14 +161,14 @@ segment on the catalog rather than the ten gated ones.
 
 ```bash
 cd packages/slam-rs
-pixi run -e slam-rs slam-rs-replay --stage vio --segment msd-g2__MGO_others__MGO07_mapping_easy
-pixi run -e slam-rs slam-rs-replay --stage vio --backend cpu --profile reference --segment msd-g2__MGO_others__MGO07_mapping_easy
+pixi run -e slam-rs slam-rs-replay --segment msd-g2__MGO_others__MGO07_mapping_easy
+pixi run -e slam-rs slam-rs-replay --backend cpu --profile reference --segment msd-g2__MGO_others__MGO07_mapping_easy
 ```
 
-`--stage input` (the default) logs only what the estimator is fed; `--stage
-frontend` runs the optical flow and draws its keypoints; `--stage vio` is the
-whole pipeline. Long segments want `--max-framesets`. Without a display, add
-`--rr-config.headless --rr-config.save out.rrd`.
+The replay runs the whole pipeline once and writes the same layer `slam-rs-catalog-layer` registers (one driver,
+`slam_rs.catalog_layer.track_layer`): both runs' paths, and with `--detail full` (the default) the keypoints on the base
+cameras, the window, the landmarks, the map and the counters. The inputs are not logged again: view the layer beside
+its base. Long segments want `--max-framesets`. Without a display, add `--rr-config.headless --rr-config.save out.rrd`.
 
 ## Another catalog
 
