@@ -1,7 +1,7 @@
 context:
   # The core output's files in slam_rs/: the abi3 extension and the modules that run on numpy + rerun-sdk. The catalog
   # output gets every other file, so a new module lands in exactly one output.
-  core_files: __init__.py rig.py frontend_log.py config.py machine.py _core.so _core.pyi py.typed
+  core_files: __init__.py rig.py columns.py frontend_log.py config.py machine.py _core.so _core.pyi py.typed
 
 recipe:
   name: slam-rs

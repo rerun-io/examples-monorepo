@@ -11,6 +11,7 @@ from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 
 from slam_rs import _core
+from slam_rs.columns import ColumnLog
 
 RUN_ENTITY: str = "/world/runs/slam_rs"
 """The final run and the back end's map, beside the dataset's own ``/world/runs/gt`` (the catalog layer's ``slam_rs``)."""
@@ -34,6 +35,12 @@ PGO_AFTER_COLOR: tuple[int, int, int, int] = (60, 200, 120, 255)
 """After: green."""
 POSE_GRAPH_ENTITY: str = f"{RUN_ENTITY}/pose_graph"
 """The edges a pose-graph optimization takes: spanning tree, loop closures, high covisibility."""
+LOOP_RADIUS_M: float = 0.006
+"""Stroke of a loop edge, metres."""
+PGO_PATH_RADIUS_M: float = 0.003
+"""Stroke of the keyframe paths before and after the pose-graph corrections, metres."""
+POSE_GRAPH_RADIUS_M: float = 0.002
+"""Stroke of a pose-graph edge, metres."""
 POSE_GRAPH_COLORS: tuple[tuple[int, int, int, int], ...] = ((90, 90, 110, 160), (255, 225, 40, 255), (80, 170, 255, 110))
 """Per edge kind (``MapSnapshot.pose_graph_edge_kinds``): tree dark grey, loop closure yellow, high covisibility faint blue."""
 
@@ -71,20 +78,26 @@ def correction_segments(raw_poses: Float64[ndarray, "k 7"], corrected_poses: Flo
     return np.stack([raw_poses[moved, 0:3], corrected_poses[moved, 0:3]], axis=1)
 
 
-def log_loops(keyframes: _core.MapKeyframes) -> None:
-    """Draw every loop the map holds at the current cursor, between its keyframes' current positions.
+def log_loops(keyframes: _core.MapKeyframes, columns: ColumnLog, t_ns: int) -> None:
+    """Draw every loop the map holds at ``video_time`` ``t_ns``, between its keyframes' current positions.
 
     An empty set is logged too, which clears old ones."""
     segments: Float64[ndarray, "l 2 3"] = loop_segments(keyframes.t_ns, keyframes.poses, keyframes.loop_edges)
     fused: Bool[ndarray, " l"] = keyframes.loop_fused
     colors: UInt8[ndarray, "l 4"] = np.where(fused[:, None], np.array(FUSED_LOOP_COLOR, dtype=np.uint8), np.array(PGO_LOOP_COLOR, dtype=np.uint8))
-    rr.log(LOOPS_ENTITY, rr.LineStrips3D(list(segments), colors=colors, radii=0.006))
+    columns.static_once(LOOPS_ENTITY, rr.LineStrips3D.from_fields(radii=LOOP_RADIUS_M))
+    columns.add_batch(LOOPS_ENTITY, rr.LineStrips3D, t_ns, strips=list(segments), colors=colors)
 
 
-def log_pose_graph(map_snapshot: _core.MapSnapshot) -> None:
-    """Draw the map keyframes' path before and after the pose-graph corrections, and the pose graph's edges, at the current cursor."""
-    rr.log(PGO_BEFORE_ENTITY, rr.LineStrips3D([map_snapshot.keyframe_raw_poses[:, 0:3]], colors=PGO_BEFORE_COLOR, radii=0.003))
-    rr.log(PGO_AFTER_ENTITY, rr.LineStrips3D([map_snapshot.keyframe_poses[:, 0:3]], colors=PGO_AFTER_COLOR, radii=0.003))
+def log_pose_graph(map_snapshot: _core.MapSnapshot, columns: ColumnLog, t_ns: int) -> None:
+    """Draw the map keyframes' path before and after the pose-graph corrections, and the pose graph's edges, at ``video_time`` ``t_ns``."""
+    for entity, poses, color in (
+        (PGO_BEFORE_ENTITY, map_snapshot.keyframe_raw_poses, PGO_BEFORE_COLOR),
+        (PGO_AFTER_ENTITY, map_snapshot.keyframe_poses, PGO_AFTER_COLOR),
+    ):
+        columns.static_once(entity, rr.LineStrips3D.from_fields(colors=color, radii=PGO_PATH_RADIUS_M))
+        columns.add_batch(entity, rr.LineStrips3D, t_ns, strips=[poses[:, 0:3]])
     segments: Float64[ndarray, "g 2 3"] = loop_segments(map_snapshot.keyframe_t_ns, map_snapshot.keyframe_poses, map_snapshot.pose_graph_edges)
     colors: UInt8[ndarray, "g 4"] = np.array(POSE_GRAPH_COLORS, dtype=np.uint8)[map_snapshot.pose_graph_edge_kinds]
-    rr.log(POSE_GRAPH_ENTITY, rr.LineStrips3D(list(segments), colors=colors, radii=0.002))
+    columns.static_once(POSE_GRAPH_ENTITY, rr.LineStrips3D.from_fields(radii=POSE_GRAPH_RADIUS_M))
+    columns.add_batch(POSE_GRAPH_ENTITY, rr.LineStrips3D, t_ns, strips=list(segments), colors=colors)

@@ -16,7 +16,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float64, Int64, UInt8
+from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.ops.umeyama import SimilarityTransform
 from simplecv.rerun_walk_path import ENDPOINTS, PATH_RADIUS_UI, TRAIL, TRAJECTORY, send_endpoints, send_trail, send_trajectory, walk_colors
@@ -24,8 +24,9 @@ from simplecv.stage_times import StageTimes
 
 from slam_rs import _core
 from slam_rs.catalog_feed import IMU_ENTITY, RIG_ENTITY, TIMELINE, CameraCalib, Frameset, ImuStream
+from slam_rs.columns import ColumnLog
 from slam_rs.follow_frame import HeadingFilter, follow_entity, follow_yaw, yaw_quaternion_xyzw
-from slam_rs.frontend_log import camera_entity, camera_views, log_keypoints
+from slam_rs.frontend_log import KEYPOINT_RADIUS_PX, camera_entity, camera_views, track_colors
 from slam_rs.landmark_colors import LandmarkColors
 from slam_rs.map_loops import PGO_CORRECTION_COLOR, PGO_CORRECTIONS_ENTITY, RUN_ENTITY, correction_segments, log_loops, log_pose_graph
 from slam_rs.map_point_blocks import MapPointBlocks
@@ -103,6 +104,15 @@ IMAGE_PLANE_M: float = 0.1
 """How far a rig camera's ``Pinhole`` frustum extends, metres: Rerun's default grows with the scene, so they changed size as landmarks came in."""
 ATE_EVERY: int = 30
 """Framesets between two ATE-so-far points: about one a second, and each costs a rigid alignment."""
+BLOCK_FRAMESETS: int = 300
+"""Framesets between two sends of the held rows (:class:`slam_rs.columns.ColumnLog`): ten seconds of a 30 Hz rig, so a
+chunk holds hundreds of rows while a four-hour run holds at most one block in memory."""
+LANDMARK_RADIUS_M: float = 0.008
+"""Radius of the window's landmarks, metres."""
+MAP_KEYFRAME_RADIUS_M: float = 0.012
+"""Radius of the map's keyframe points, metres."""
+PGO_CORRECTION_RADIUS_M: float = 0.004
+"""Stroke of a pose-graph correction, metres."""
 SlotFamily: TypeAlias = Literal["window", "marginalized"]
 """The two families of numbered frame slots under the run: the estimator's window, and what its last marginalization removed."""
 UNIFIED_SPHERE_MODELS: tuple[str, ...] = ("mei_v3", "mei_v6", "ds")
@@ -159,11 +169,6 @@ def inverted(alignment: SimilarityTransform) -> SimilarityTransform:
     )
 
 
-def log_alignment(entity: str, alignment: SimilarityTransform) -> None:
-    """Place one run's whole subtree in the frame its alignment maps into."""
-    rr.log(entity, rr.Transform3D(translation=alignment.dst_t_src, mat3x3=alignment.dst_R_src))
-
-
 def image_from_camera(camera: CameraCalib) -> Float64[ndarray, "3 3"]:
     """Build the camera's pinhole intrinsics matrix."""
     return np.array([[camera.fx, 0.0, camera.cx], [0.0, camera.fy, camera.cy], [0.0, 0.0, 1.0]], dtype=np.float64)
@@ -190,7 +195,7 @@ def dataset_videos(camera_positions: Sequence[int]) -> tuple[str, ...]:
     return tuple(f"{RIG_ENTITY}/cam_{position:02d}/pinhole/video" for position in camera_positions)
 
 
-def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bool = False) -> None:
+def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bool = False, recording: rr.RecordingStream | None = None) -> None:
     """Log a rig's static camera geometry, so whatever moves it draws as frusta.
 
     Two rigs are drawn from the same calibration and this is the one place that
@@ -205,6 +210,7 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
         entity_prefix: What ``cam_MM`` hangs under.
         display: The rig is a drawn copy, not the dataset's calibration: its frusta take
             :func:`display_intrinsics`, so a wide lens's picture has the right size.
+        recording: Where to log; None is the global recording.
     """
     for camera in cameras:
         node: str = f"{entity_prefix}/cam_{camera.index:02d}"
@@ -212,6 +218,7 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
             node,
             rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
             static=True,
+            recording=recording,
         )
         rr.log(
             f"{node}/pinhole",
@@ -222,6 +229,7 @@ def log_rig(cameras: tuple[CameraCalib, ...], entity_prefix: str, *, display: bo
                 image_plane_distance=IMAGE_PLANE_M,
             ),
             static=True,
+            recording=recording,
         )
 
 
@@ -231,9 +239,10 @@ class VioLogger:
 
     The two reference trajectories are handed over whole, on the estimator's
     clock the results come on (:attr:`SegmentFeed.frame_t_ns`); the estimate
-    accumulates as it is produced. Every ``log`` call writes at the caller's time
-    cursor and nowhere else; :func:`set_video_time` puts that cursor on the base
-    video's ``video_time``.
+    accumulates as it is produced. Each row is stamped with its own frameset's
+    base ``video_time`` (the estimator's stamp minus :attr:`cam_time_offset_ns`)
+    and held in :attr:`columns`, which goes out every :attr:`block_framesets`
+    framesets and at every whole-run draw; :meth:`flush` sends the rest.
     """
 
     cameras: tuple[CameraCalib, ...]
@@ -245,8 +254,8 @@ class VioLogger:
     tracked_resolution: tuple[tuple[int, int], ...]
     """``(width, height)`` of the frames each camera is tracked on (``Vio.tracked_resolution``), which the keypoints are in."""
     cam_time_offset_ns: int
-    """The estimator's clock minus the base video's ``video_time`` (:attr:`ImuCalib.cam_time_offset_ns`): what
-    :func:`set_video_time` removes, so every row lands on the base frame it belongs to."""
+    """The estimator's clock minus the base video's ``video_time`` (:attr:`ImuCalib.cam_time_offset_ns`): what every row's
+    stamp has removed, so it lands on the base frame it belongs to (:func:`set_video_time`)."""
     animate_base_rig: bool = False
     """Also move the dataset's rig (``/world/rig_00``) with the raw VIO pose: only for a replay viewed on its own, on a
     segment without ground truth. Off, the rig belongs to the layers that own it: ``gt``, or the catalog ``slam_rs``
@@ -257,12 +266,22 @@ class VioLogger:
     """The dataset's ``VideoStream`` of each camera, in :attr:`cameras` order. With them the run's rig references the
     current frame of each lens under its ``pinhole`` and a window keyframe the frames of its own time
     (``VideoFrameReference``: nothing is encoded again); empty, the frusta stay empty."""
+    camera_positions: tuple[int, ...] = ()
+    """The rig position of each fed camera, in :attr:`cameras` order (:attr:`SegmentFeed.camera_positions`): the keypoints
+    go on that base camera. Empty: each camera's own index, which is its position on a rig fed whole."""
+    base_downscale: int = 1
+    """How much smaller the decoded frames are than the base's (:attr:`RigProfile.downscale`): the keypoints are drawn in
+    the base camera's own pixels."""
     heading: HeadingFilter = field(default_factory=HeadingFilter)
     """The follow frame's heading so far: the direction of travel, low-passed."""
     loops_as_found: bool = True
     """Draw the map's loops at every map read, as the back end finds them (a live run). Off (a replay), the loops are
     drawn once, the final set at the end (:meth:`log_final_map`): a replay's loops would otherwise stand from their
     detection on, each drawn again at every read."""
+    columns: ColumnLog = field(default_factory=ColumnLog)
+    """The rows not sent yet, and the recording they go to."""
+    block_framesets: int = BLOCK_FRAMESETS
+    """Framesets between two sends of :attr:`columns` (:data:`BLOCK_FRAMESETS`)."""
     corrections_shown: bool = False
     """Whether pose-graph corrections are drawn from the last map read on (:meth:`_log_corrections`)."""
     poses: PoseLog = field(default_factory=PoseLog)
@@ -271,8 +290,10 @@ class VioLogger:
     """The ground truth thinned to the frameset cadence: what the drawn strip is taken from."""
     previous_window: dict[int, Float64[ndarray, " 7"]] = field(default_factory=dict)
     """Previous window poses by timestamp, used to draw marginalized frames."""
-    pinholes: dict[tuple[int, tuple[int, int, int, int]], rr.Pinhole] = field(init=False)
-    """Each camera's frustum by position in :attr:`cameras` and role colour, reused for every slot and frameset."""
+    display_intrinsics: tuple[Float64[ndarray, "3 3"], ...] = field(init=False)
+    """Each camera's frustum intrinsics (:func:`display_intrinsics`), shared by every slot."""
+    keypoint_scale: tuple[float, ...] = field(init=False)
+    """Base pixels per tracked pixel, per camera."""
     highest_slots: dict[SlotFamily, int] = field(default_factory=dict)
     """Highest initialized slot index in each family; static rig offsets are logged once."""
     window_slots: dict[int, int] = field(default_factory=dict)
@@ -285,14 +306,14 @@ class VioLogger:
     slot_pictures: dict[tuple[SlotFamily, int], int] = field(default_factory=dict)
     """The frame each slot's pictures reference, for the slots that show any."""
     framesets: int = 0
-    """Framesets logged, which paces the ATE-so-far."""
+    """Framesets logged, which paces the ATE-so-far and the sends."""
     map_keyframe: int | None = None
     """Newest keyframe of the map as last read; None before the first. Until the map holds the window's newest
     keyframe (Realtime: the back-end thread has yet to step its stamp), the map is read again at the cadence."""
     map_keyframes_t_ns: int | None = None
-    """Video time of the last map-keyframes draw; None before the first."""
+    """Estimator time of the last map-keyframes draw; None before the first."""
     map_points_t_ns: int | None = None
-    """Video time of the last map-points draw; None before the first."""
+    """Estimator time of the last map-points draw; None before the first."""
     map_keyframes_every_ns: int = MAP_KEYFRAMES_EVERY_NS
     """Least video time between two map-keyframes draws (:data:`MAP_KEYFRAMES_EVERY_NS`)."""
     map_points_every_ns: int = MAP_POINTS_EVERY_NS
@@ -304,21 +325,22 @@ class VioLogger:
 
     def __post_init__(self) -> None:
         """Log the estimated rig's static geometry and thin the references."""
-        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig", display=True)
+        recording: rr.RecordingStream | None = self.columns.recording
+        log_rig(self.cameras, f"{VIO_RUN_ENTITY}/rig", display=True, recording=recording)
         for camera, video in zip(self.cameras, self.video_entities, strict=False):
-            rr.log(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference.from_fields(video_reference=video), static=True)
+            rr.log(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference.from_fields(video_reference=video),
+                   static=True, recording=recording)
         self.ground_truth_strip = at_frameset_cadence(self.ground_truth, self.frame_t_ns)
-        self.pinholes = {
-            (position, color): rr.Pinhole(
-                image_from_camera=display_intrinsics(camera),
-                resolution=[camera.width, camera.height],
-                camera_xyz=rr.ViewCoordinates.RDF,
-                image_plane_distance=FRUSTUM_DEPTH_M,
-                color=color,
-            )
-            for position, camera in enumerate(self.cameras)
-            for color in (KEYFRAME_COLOR, LTKF_COLOR, POSE_COLOR, MARGINALIZED_COLOR)
-        }
+        self.display_intrinsics = tuple(display_intrinsics(camera) for camera in self.cameras)
+        self.keypoint_scale = tuple(self.base_downscale * camera.width / width for camera, (width, _) in zip(self.cameras, self.tracked_resolution, strict=True))
+        positions: tuple[int, ...] = self.camera_positions or tuple(camera.index for camera in self.cameras)
+        if len(positions) != len(self.cameras):
+            raise ValueError(f"{len(positions)} camera positions for {len(self.cameras)} cameras")
+        self.camera_positions = positions
+
+    def video_t_ns(self, t_ns: int) -> int:
+        """The base ``video_time`` of an estimator stamp (:func:`set_video_time`)."""
+        return t_ns - self.cam_time_offset_ns
 
     def log(
         self,
@@ -343,29 +365,31 @@ class VioLogger:
         assert pose is not None, f"Tracking result at {result.t_ns} has no pose"
         self.framesets += 1
         self.poses.append(result.t_ns, pose[0:3], np.roll(pose[3:7], 1))
-
-        rig_pose: rr.Transform3D = rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7]))
-        rr.log(f"{VIO_RUN_ENTITY}/rig", rig_pose)
+        t: int = self.video_t_ns(result.t_ns)
+        translation: Float64[ndarray, " 3"] = pose[0:3].copy()
+        quaternion: Float64[ndarray, " 4"] = pose[3:7].copy()
+        self.columns.add(f"{VIO_RUN_ENTITY}/rig", rr.Transform3D, t, translation=translation, quaternion=quaternion)
         for camera, _ in zip(self.cameras, self.video_entities, strict=False):
-            rr.log(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference(nanoseconds=result.t_ns - self.cam_time_offset_ns))
+            self.columns.add(f"{VIO_RUN_ENTITY}/rig/cam_{camera.index:02d}/pinhole/video", rr.VideoFrameReference, t, timestamp=t)
         if self.animate_base_rig:
-            rr.log(RIG_ENTITY, rig_pose)
+            self.columns.add(RIG_ENTITY, rr.Transform3D, t, translation=translation, quaternion=quaternion)
         half_yaw: float = 0.5 * self.heading.update(result.t_ns, pose[0:3])
-        rr.log(follow_entity(VIO_RUN_ENTITY), rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=[0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)])))
+        self.columns.add(follow_entity(VIO_RUN_ENTITY), rr.Transform3D, t, translation=translation,
+                         quaternion=np.array([0.0, 0.0, np.sin(half_yaw), np.cos(half_yaw)]))
         if colors is not None:
             for camera, color in enumerate(colors):
                 self.landmark_colors.remember(frame.ids(camera), frame.positions(camera), color, self.tracked_resolution[camera])
-        # The estimator's own frontend output, on the frontend rung's paths and
-        # in its palette (:func:`slam_rs.frontend_log.log_keypoints`).
-        log_keypoints(frame)
-        self._log_paths()
-        self._log_window(snapshot)
-        self._log_landmarks(snapshot)
+        self._log_keypoints(frame, t)
+        self._log_paths(t)
+        self._log_window(snapshot, t)
+        self.columns.static_once(f"{VIO_RUN_ENTITY}/landmarks", rr.Points3D.from_fields(radii=LANDMARK_RADIUS_M))
+        self.columns.add_batch(f"{VIO_RUN_ENTITY}/landmarks", rr.Points3D, t, positions=snapshot.landmark_positions,
+                               colors=self.landmark_colors.lookup(snapshot.landmark_ids, LANDMARK_COLOR))
         if map_delta is not None:
             self._log_map_delta(map_delta, snapshot.t_ns)
             map_keyframes: Int64[ndarray, " k"] = map_delta.map_keyframes.t_ns
             self.map_keyframe = int(map_keyframes[-1]) if len(map_keyframes) else None
-        self._log_scalars(snapshot, elapsed_ms)
+        self._log_scalars(snapshot, elapsed_ms, t)
         if self.framesets % ATE_EVERY == 0:
             # The only two readers of the whole estimate, and the reason it is
             # not built every frameset: three arrays over lists that grow with
@@ -375,11 +399,17 @@ class VioLogger:
             # The ATE against the ground truth has already solved this alignment,
             # in the direction its own residuals are measured in; drawing it is
             # that solution inverted, not a second association and a second SVD.
-            against_truth: AteResult | None = self._log_ate(estimated)
+            against_truth: AteResult | None = self._log_ate(estimated, t)
             alignment: SimilarityTransform = IDENTITY if against_truth is None else inverted(against_truth.alignment)
             # The map under the final run's entity sits on the raw run until :meth:`log_final_run` places it.
             for run in (VIO_RUN_ENTITY, RUN_ENTITY):
-                log_alignment(run, alignment)
+                self._log_alignment(run, alignment, t)
+        if self.framesets % self.block_framesets == 0:
+            self.columns.flush()
+
+    def flush(self) -> None:
+        """Send every row held so far."""
+        self.columns.flush()
 
     def estimated(self) -> Trajectory:
         """Everything reported so far, on the replay's ``video_time`` clock."""
@@ -392,20 +422,33 @@ class VioLogger:
         ``trajectory`` entities show where it went, from the end of the walk on, so no whole path stands over a cursor
         halfway through the clip. The raw run keeps its walk gradient.
         """
+        recording: rr.RecordingStream | None = self.columns.recording
         estimated: Trajectory = self.estimated()
         if len(estimated) >= 2:
-            last_ns: int = int(estimated.t_ns[-1]) - self.cam_time_offset_ns
+            last_ns: int = self.video_t_ns(int(estimated.t_ns[-1]))
             colors: UInt8[ndarray, "n 3"] = self._walk_colors_at(estimated.t_ns)
-            send_trajectory(f"{VIO_RUN_ENTITY}/{TRAJECTORY}", last_ns, estimated.position_m, colors)
-            send_endpoints(f"{VIO_RUN_ENTITY}/{ENDPOINTS}", last_ns, estimated.position_m[0], estimated.position_m[-1], (colors[0], colors[-1]))
+            send_trajectory(f"{VIO_RUN_ENTITY}/{TRAJECTORY}", last_ns, estimated.position_m, colors, recording=recording)
+            send_endpoints(f"{VIO_RUN_ENTITY}/{ENDPOINTS}", last_ns, estimated.position_m[0], estimated.position_m[-1], (colors[0], colors[-1]),
+                           recording=recording)
         if len(self.ground_truth_strip) >= 2 and len(estimated):
-            send_trajectory(f"{GT_ENTITY}/{TRAJECTORY}", int(estimated.t_ns[-1]) - self.cam_time_offset_ns, self.ground_truth_strip.position_m, GT_COLOR)
+            send_trajectory(f"{GT_ENTITY}/{TRAJECTORY}", self.video_t_ns(int(estimated.t_ns[-1])), self.ground_truth_strip.position_m, GT_COLOR,
+                            recording=recording)
+        self.flush()
 
     def _walk_colors_at(self, t_ns: Int64[ndarray, " n"]) -> UInt8[ndarray, "n 3"]:
         """The walk gradient at each stamp over the segment's framesets (:attr:`frame_t_ns`)."""
         return walk_colors(t_ns, int(self.frame_t_ns[0]), int(self.frame_t_ns[-1]))
 
-    def _log_paths(self) -> None:
+    def _log_keypoints(self, frame: _core.FlowFrame, t: int) -> None:
+        """Each camera's tracked keypoints on its base camera, in that camera's pixels (:func:`slam_rs.frontend_log.log_keypoints`)."""
+        for index, (position, scale) in enumerate(zip(self.camera_positions, self.keypoint_scale, strict=True)):
+            ids: Int64[ndarray, " n_tracks"] = frame.ids(index)
+            tracked: Float32[ndarray, "n_tracks 2"] = frame.positions(index)
+            self.columns.static_once(f"{camera_entity(position)}/keypoints", rr.Points2D.from_fields(radii=KEYPOINT_RADIUS_PX * scale))
+            self.columns.add_batch(f"{camera_entity(position)}/keypoints", rr.Points2D, t,
+                                   positions=tracked if scale == 1.0 else tracked * np.float32(scale), colors=track_colors(ids))
+
+    def _log_paths(self, t: int) -> None:
         """Draw the segment each trajectory gained at this cursor.
 
         One two-point strip a line a frameset, ending on the newest pose at or
@@ -424,14 +467,18 @@ class VioLogger:
         t_ns: int = int(self.poses.t_ns[last])
         segment: Float64[ndarray, "2 3"] = self.poses.position_m[[max(last - 1, 0), last]]
         color: UInt8[ndarray, "1 3"] = self._walk_colors_at(np.array([t_ns], dtype=np.int64))
-        rr.log(f"{VIO_RUN_ENTITY}/{TRAIL}", rr.LineStrips3D([segment], colors=color, radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
+        self.columns.static_once(f"{VIO_RUN_ENTITY}/{TRAIL}", rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
+        self.columns.add_batch(f"{VIO_RUN_ENTITY}/{TRAIL}", rr.LineStrips3D, t, strips=[segment], colors=color)
         drawn: int = int(np.searchsorted(self.ground_truth_strip.t_ns, t_ns, side="right"))
         if drawn < 1:
             return
         reference: Float64[ndarray, "2 3"] = self.ground_truth_strip.position_m[[max(drawn - 2, 0), drawn - 1]]
-        rr.log(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D([reference], colors=GT_COLOR, radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
+        self.columns.static_once(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D.from_fields(colors=GT_COLOR, radii=rr.Radius.ui_points(PATH_RADIUS_UI)))
+        self.columns.add_batch(f"{GT_ENTITY}/{TRAIL}", rr.LineStrips3D, t, strips=[reference])
 
-    def _draw_slot(self, family: SlotFamily, k: int, t_ns: int, pose: Float64[ndarray, " 7"], color: tuple[int, int, int, int], *, pictures: bool) -> None:
+    def _draw_slot(
+        self, family: SlotFamily, k: int, t_ns: int, pose: Float64[ndarray, " 7"], color: tuple[int, int, int, int], t: int, *, pictures: bool
+    ) -> None:
         """Draw one window or marginalized frame on its slot: the rig's pose, and a frustum a camera in the role's colour.
 
         The pose goes out every frameset (the window refines it). The frusta go out when the slot's role colour
@@ -444,18 +491,23 @@ class VioLogger:
             t_ns: The frame's stamp on the estimator's clock.
             pose: ``world_from_rig`` as ``[tx, ty, tz, qx, qy, qz, qw]``.
             color: The frame's role colour.
+            t: The row's ``video_time``: the frameset being logged.
             pictures: Whether the frusta show the frame's pictures.
         """
         slot: str = f"{VIO_RUN_ENTITY}/{family}/{k:02d}"
+        recording: rr.RecordingStream | None = self.columns.recording
         if k > self.highest_slots.get(family, -1):
             for camera in self.cameras:
-                rr.log(f"{slot}/cam_{camera.index:02d}", rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]), static=True)
+                rr.log(f"{slot}/cam_{camera.index:02d}", rr.Transform3D(translation=camera.imu_T_cam[:3, 3], mat3x3=camera.imu_T_cam[:3, :3]),
+                       static=True, recording=recording)
             self.highest_slots[family] = k
-        rr.log(slot, rr.Transform3D(translation=pose[0:3], quaternion=rr.Quaternion(xyzw=pose[3:7])))
+        self.columns.add(slot, rr.Transform3D, t, translation=pose[0:3].copy(), quaternion=pose[3:7].copy())
         if self.slot_frusta.get((family, k)) != color:
             self.slot_frusta[family, k] = color
             for position, camera in enumerate(self.cameras):
-                rr.log(f"{slot}/cam_{camera.index:02d}/pinhole", self.pinholes[position, color])
+                self.columns.add(f"{slot}/cam_{camera.index:02d}/pinhole", rr.Pinhole, t, image_from_camera=self.display_intrinsics[position],
+                                 resolution=np.array([camera.width, camera.height], dtype=np.float32), camera_xyz=rr.ViewCoordinates.RDF,
+                                 image_plane_distance=FRUSTUM_DEPTH_M, color=color)
         shown: int | None = self.slot_pictures.get((family, k))
         wanted: int | None = t_ns if pictures and self.video_entities else None
         if wanted == shown:
@@ -463,21 +515,21 @@ class VioLogger:
         for camera, video in zip(self.cameras, self.video_entities, strict=False):
             entity: str = f"{slot}/cam_{camera.index:02d}/pinhole/video"
             if wanted is None:
-                rr.log(entity, rr.Clear(recursive=False))
+                self.columns.add(entity, rr.Clear, t, is_recursive=False)
             else:
-                rr.log(entity, rr.VideoFrameReference(nanoseconds=wanted - self.cam_time_offset_ns, video_reference=video))
+                self.columns.add(entity, rr.VideoFrameReference, t, timestamp=self.video_t_ns(wanted), video_reference=video)
         if wanted is None:
             del self.slot_pictures[family, k]
         else:
             self.slot_pictures[family, k] = wanted
 
-    def _clear_slot(self, family: SlotFamily, k: int) -> None:
+    def _clear_slot(self, family: SlotFamily, k: int, t: int) -> None:
         """Clear a slot that just emptied, once: Rerun keeps the latest state, so it stays empty until it is drawn again."""
-        rr.log(f"{VIO_RUN_ENTITY}/{family}/{k:02d}", rr.Clear(recursive=True))
+        self.columns.add(f"{VIO_RUN_ENTITY}/{family}/{k:02d}", rr.Clear, t, is_recursive=True)
         self.slot_frusta.pop((family, k), None)
         self.slot_pictures.pop((family, k), None)
 
-    def _log_window(self, snapshot: _core.VioSnapshot) -> None:
+    def _log_window(self, snapshot: _core.VioSnapshot, t: int) -> None:
         """Draw window and marginalized frames as the rig's cameras, coloured by role.
 
         A window frame takes the lowest free slot when it enters and keeps it until it leaves; a keyframe's frusta
@@ -494,26 +546,19 @@ class VioLogger:
                 self.window_slots[t_ns] = next(k for k in itertools.count() if k not in taken)
                 taken.add(self.window_slots[t_ns])
             color: tuple[int, int, int, int] = LTKF_COLOR if long_term else KEYFRAME_COLOR if keyframe else POSE_COLOR
-            self._draw_slot("window", self.window_slots[t_ns], t_ns, pose, color, pictures=bool(keyframe))
+            self._draw_slot("window", self.window_slots[t_ns], t_ns, pose, color, t, pictures=bool(keyframe))
         for k in freed - taken:
-            self._clear_slot("window", k)
+            self._clear_slot("window", k, t)
 
         # Removed frames retain the poses from the last snapshot that held them.
         leaving: set[int] = set(snapshot.marginalized.tolist())
         marginalized: list[tuple[int, Float64[ndarray, " 7"]]] = [(t_ns, pose) for t_ns, pose in self.previous_window.items() if t_ns in leaving]
         for k, (t_ns, pose) in enumerate(marginalized):
-            self._draw_slot("marginalized", k, t_ns, pose, MARGINALIZED_COLOR, pictures=False)
+            self._draw_slot("marginalized", k, t_ns, pose, MARGINALIZED_COLOR, t, pictures=False)
         for k in range(len(marginalized), self.marginalized_count):
-            self._clear_slot("marginalized", k)
+            self._clear_slot("marginalized", k, t)
         self.marginalized_count = len(marginalized)
         self.previous_window = {t_ns: pose for t_ns, pose in zip(stamps, poses, strict=True)}
-
-    def _log_landmarks(self, snapshot: _core.VioSnapshot) -> None:
-        """Draw the window's landmarks in the colour of the image where each was first tracked."""
-        rr.log(
-            f"{VIO_RUN_ENTITY}/landmarks",
-            rr.Points3D(snapshot.landmark_positions, colors=self.landmark_colors.lookup(snapshot.landmark_ids, LANDMARK_COLOR), radii=0.008),
-        )
 
     def map_is_due(self, snapshot: _core.VioSnapshot) -> bool:
         """Whether to read the map now: the map does not hold the window's newest keyframe yet as last read, and the
@@ -537,20 +582,21 @@ class VioLogger:
 
         Args:
             map_snapshot: The map after :meth:`slam_rs._core.Vio.flush` (current in both modes).
-            t_ns: Video time of the cursor the caller set, usually the last frameset's.
+            t_ns: Estimator time of the frameset it is drawn at, usually the last one's.
         """
+        t: int = self.video_t_ns(t_ns)
         self._log_map_keyframes(map_snapshot.map_keyframes, t_ns, loops=True)
         # The end of the run: one entity holds the whole map from here on, where a layout's overrides find it.
-        rr.log(MAP_POINT_BLOCKS_ENTITY, rr.Clear(recursive=True))
-        rr.log(
-            MAP_POINTS_ENTITY,
-            rr.Points3D(map_snapshot.points_world, colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR), radii=MAP_POINT_RADIUS_M),
-        )
+        self.columns.add(MAP_POINT_BLOCKS_ENTITY, rr.Clear, t, is_recursive=True)
+        self.columns.static_once(MAP_POINTS_ENTITY, rr.Points3D.from_fields(radii=MAP_POINT_RADIUS_M))
+        self.columns.add_batch(MAP_POINTS_ENTITY, rr.Points3D, t, positions=map_snapshot.points_world,
+                               colors=self.landmark_colors.lookup(map_snapshot.point_ids, MAP_POINT_COLOR))
         self.map_points_t_ns = t_ns
-        log_pose_graph(map_snapshot)
+        log_pose_graph(map_snapshot, self.columns, t)
+        self.flush()
 
     def log_final_run(self, final: Trajectory) -> None:
-        """Draw the final run's whole path at the cursor the caller set (the last frameset's), under its own alignment.
+        """Draw the final run's whole path at the last frameset, under its own alignment.
 
         The alignment is fitted to the final run, not to the raw one, so a loop the back end closed lands on the ground
         truth. It replaces the raw run's alignment on :data:`RUN_ENTITY` from this cursor on, so the final map drawn
@@ -561,42 +607,55 @@ class VioLogger:
         """
         if len(final) < 2:
             return
+        recording: rr.RecordingStream | None = self.columns.recording
         # On the walk's own times: a segment a pose (a view's visible time range makes the trail), the whole path from
         # the last pose on, and the level follow frame.
         pose_ns: Int64[ndarray, " n"] = final.t_ns - self.cam_time_offset_ns
-        send_trail(f"{RUN_ENTITY}/{TRAIL}", pose_ns, final.position_m, FINAL_COLOR)
-        send_trajectory(f"{RUN_ENTITY}/{TRAJECTORY}", int(pose_ns[-1]), final.position_m, FINAL_COLOR)
+        send_trail(f"{RUN_ENTITY}/{TRAIL}", pose_ns, final.position_m, FINAL_COLOR, recording=recording)
+        send_trajectory(f"{RUN_ENTITY}/{TRAJECTORY}", int(pose_ns[-1]), final.position_m, FINAL_COLOR, recording=recording)
         rr.send_columns(
             follow_entity(RUN_ENTITY),
             indexes=[rr.TimeColumn(TIMELINE, duration=pose_ns.astype("timedelta64[ns]"))],
             columns=rr.Transform3D.columns(translation=final.position_m, quaternion=yaw_quaternion_xyzw(follow_yaw(final.t_ns, final.position_m))),
+            recording=recording,
         )
         alignment: SimilarityTransform = IDENTITY
         if len(self.ground_truth) and len(final) >= MIN_ASSOCIATED_POSES:
             against_truth: AteResult = ate(final, self.ground_truth)
             if against_truth.n_associated >= MIN_ASSOCIATED_POSES:
                 alignment = inverted(against_truth.alignment)
-        log_alignment(RUN_ENTITY, alignment)
+        last_t_ns: int | None = self.poses.last_t_ns()
+        self._log_alignment(RUN_ENTITY, alignment, self.video_t_ns(int(final.t_ns[-1]) if last_t_ns is None else last_t_ns))
+        self.flush()
+
+    def _log_alignment(self, entity: str, alignment: SimilarityTransform, t: int) -> None:
+        """Place one run's whole subtree in the frame its alignment maps into."""
+        self.columns.add(entity, rr.Transform3D, t, translation=np.asarray(alignment.dst_t_src, dtype=np.float64),
+                         mat3x3=np.asarray(alignment.dst_R_src, dtype=np.float64))
 
     def _log_map_keyframes(self, keyframes: _core.MapKeyframes, t_ns: int, *, loops: bool) -> None:
         """Draw the back end's keyframes (window ones in the window colour), with ``loops`` its loops, and its pose-graph
-        corrections at the cursor."""
+        corrections at the frameset of estimator time ``t_ns``."""
+        t: int = self.video_t_ns(t_ns)
         colors: UInt8[ndarray, "k 4"] = np.where(
             keyframes.active[:, None], np.array(KEYFRAME_COLOR, dtype=np.uint8), np.array(MAP_KEYFRAME_COLOR, dtype=np.uint8)
         )
-        rr.log(MAP_KEYFRAMES_ENTITY, rr.Points3D(keyframes.poses[:, 0:3], colors=colors, radii=0.012))
+        self.columns.static_once(MAP_KEYFRAMES_ENTITY, rr.Points3D.from_fields(radii=MAP_KEYFRAME_RADIUS_M))
+        self.columns.add_batch(MAP_KEYFRAMES_ENTITY, rr.Points3D, t, positions=keyframes.poses[:, 0:3], colors=colors)
         if loops:
-            log_loops(keyframes)
-        self._log_corrections(keyframes)
+            log_loops(keyframes, self.columns, t)
+        self._log_corrections(keyframes, t)
         self.map_keyframes_t_ns = t_ns
 
-    def _log_corrections(self, keyframes: _core.MapKeyframes) -> None:
-        """Draw the pose-graph corrections at the cursor when there are any; clear them once when they go."""
+    def _log_corrections(self, keyframes: _core.MapKeyframes, t: int) -> None:
+        """Draw the pose-graph corrections at the frameset when there are any; clear them once when they go."""
         corrections: Float64[ndarray, "m 2 3"] = correction_segments(keyframes.raw_poses, keyframes.poses)
         if len(corrections):
-            rr.log(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D(list(corrections), colors=PGO_CORRECTION_COLOR, radii=0.004))
+            self.columns.static_once(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.from_fields(radii=PGO_CORRECTION_RADIUS_M))
+            self.columns.add_batch(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D, t, strips=list(corrections),
+                                   colors=np.tile(np.array(PGO_CORRECTION_COLOR, dtype=np.uint8), (len(corrections), 1)))
         elif self.corrections_shown:
-            rr.log(PGO_CORRECTIONS_ENTITY, rr.Clear(recursive=False))
+            self.columns.add(PGO_CORRECTIONS_ENTITY, rr.Clear, t, is_recursive=False)
         self.corrections_shown = bool(len(corrections))
 
     def _log_map_delta(self, map_delta: _core.MapDelta, t_ns: int) -> None:
@@ -608,16 +667,17 @@ class VioLogger:
         )
         if self.map_points_t_ns is not None and t_ns - self.map_points_t_ns < self.map_points_every_ns:
             return
+        t: int = self.video_t_ns(t_ns)
         for block, ids, positions in self.map_point_blocks.redraw():
             path: str = f"{MAP_POINT_BLOCKS_ENTITY}/{block:04d}"
             if ids.shape[0]:
-                radii = rr.Radius.ui_points(MAP_POINT_BLOCK_RADIUS_UI)
-                rr.log(path, rr.Points3D(positions, colors=self.landmark_colors.lookup(ids, MAP_POINT_COLOR), radii=radii))
+                self.columns.static_once(path, rr.Points3D.from_fields(radii=rr.Radius.ui_points(MAP_POINT_BLOCK_RADIUS_UI)))
+                self.columns.add_batch(path, rr.Points3D, t, positions=positions, colors=self.landmark_colors.lookup(ids, MAP_POINT_COLOR))
             else:
-                rr.log(path, rr.Clear(recursive=False))
+                self.columns.add(path, rr.Clear, t, is_recursive=False)
         self.map_points_t_ns = t_ns
 
-    def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float) -> None:
+    def _log_scalars(self, snapshot: _core.VioSnapshot, elapsed_ms: float, t: int) -> None:
         """Log the counters the time-series views plot.
 
         The estimator's velocity and its two biases used to be logged here, under
@@ -627,27 +687,31 @@ class VioLogger:
         into seven views undid — so they are dropped instead; the pose they
         belong to is on the trajectory either way.
         """
-        rr.log(f"{VIO_STATS_ENTITY}/num_landmarks", rr.Scalars(float(len(snapshot.landmark_ids))))
-        rr.log(f"{VIO_STATS_ENTITY}/num_observations", rr.Scalars(float(snapshot.num_observations)))
-        rr.log(f"{VIO_STATS_ENTITY}/num_keyframes", rr.Scalars(float(len(snapshot.kf_ids))))
-        rr.log(f"{VIO_STATS_ENTITY}/lm_iterations", rr.Scalars(float(snapshot.lm_iterations)))
-        rr.log(f"{VIO_STATS_ENTITY}/lm_lambda", rr.Scalars(snapshot.lm_lambda))
-        # The cost the frame started and ended the LM loop at: the pair is the
-        # convergence trace, and :func:`vio_blueprint` gives it an axis of its
-        # own. Both are negative on most frames, following the prior cost convention
-        # and not a sign error: the marginalization prior term deliberately drops
-        # the 1/2 r^T r (``crates/slam-rs/src/estimator/optimize.rs:71``, D20).
-        rr.log(f"{VIO_STATS_ENTITY}/lm_error_before", rr.Scalars(snapshot.lm_error_before))
-        rr.log(f"{VIO_STATS_ENTITY}/lm_error_after", rr.Scalars(snapshot.lm_error_after))
-        rr.log(f"{VIO_STATS_ENTITY}/track_ms", rr.Scalars(elapsed_ms))
-        for stage, milliseconds in snapshot.timings_ms.items():
-            rr.log(f"{VIO_STATS_ENTITY}/stage_ms/{stage}", rr.Scalars(milliseconds))
+        counters: dict[str, float] = {
+            "num_landmarks": float(len(snapshot.landmark_ids)),
+            "num_observations": float(snapshot.num_observations),
+            "num_keyframes": float(len(snapshot.kf_ids)),
+            "lm_iterations": float(snapshot.lm_iterations),
+            "lm_lambda": snapshot.lm_lambda,
+            # The cost the frame started and ended the LM loop at: the pair is the
+            # convergence trace, and :func:`vio_blueprint` gives it an axis of its
+            # own. Both are negative on most frames, following the prior cost convention
+            # and not a sign error: the marginalization prior term deliberately drops
+            # the 1/2 r^T r (``crates/slam-rs/src/estimator/optimize.rs:71``, D20).
+            "lm_error_before": snapshot.lm_error_before,
+            "lm_error_after": snapshot.lm_error_after,
+            "track_ms": elapsed_ms,
+        }
+        counters.update({f"stage_ms/{stage}": milliseconds for stage, milliseconds in snapshot.timings_ms.items()})
+        for name, value in counters.items():
+            self.columns.add(f"{VIO_STATS_ENTITY}/{name}", rr.Scalars, t, scalars=value)
 
-    def _log_ate(self, estimated: Trajectory) -> AteResult | None:
+    def _log_ate(self, estimated: Trajectory, t: int) -> AteResult | None:
         """Log the rigid-aligned error of everything reported so far, against ground truth.
 
         Args:
             estimated: Everything reported so far.
+            t: The row's ``video_time``.
 
         Returns:
             The error against the ground truth, whose alignment is also what
@@ -659,7 +723,7 @@ class VioLogger:
         result: AteResult = ate(estimated, self.ground_truth)
         if result.n_associated < MIN_ASSOCIATED_POSES:
             return None
-        rr.log(f"{VIO_STATS_ENTITY}/ate_cm/gt", rr.Scalars(100.0 * result.rmse_m))
+        self.columns.add(f"{VIO_STATS_ENTITY}/ate_cm/gt", rr.Scalars, t, scalars=100.0 * result.rmse_m)
         return result
 
 
@@ -696,12 +760,6 @@ class VioStage:
     rest of the call: bootstrap, estimator and glue) and the ``log`` work after it."""
     keypoints: list[int] = field(default_factory=list)
     """Keypoints the frontend holds after each frameset, summed over cameras."""
-
-    def __post_init__(self) -> None:
-        """Draw the keypoints in each camera's own pixels: a rig wider than 2048 px is tracked on frames reduced by two."""
-        for camera, (width, _) in zip(self.logger.cameras, self.logger.tracked_resolution, strict=True):
-            if width != camera.width:
-                rr.log(f"{camera_entity(camera.index)}/keypoints", rr.Transform3D(scale=2.0), static=True)
 
     @property
     def elapsed_ms(self) -> list[float]:
@@ -749,12 +807,11 @@ class VioStage:
         if last_t_ns is None:
             last_t_ns = self.logger.poses.last_t_ns()
         if final is not None and last_t_ns is not None:
-            set_video_time(last_t_ns, self.logger.cam_time_offset_ns)
             self.logger.log_final_map(final, last_t_ns)
+        self.logger.flush()
 
     def _log_result(self, held: Frameset, result: _core.VioResult) -> None:
         """Log a result with the keypoints and timestamp of its own input frame."""
-        set_video_time(held.t_ns, self.logger.cam_time_offset_ns)
         snapshot: _core.VioSnapshot | None = self.lockstep.vio.snapshot()
         frame: _core.FlowFrame = self.lockstep.flow_frame()
         assert snapshot is not None, f"frameset {held.t_ns} tracked without a window snapshot"
