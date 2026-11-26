@@ -17,7 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_checkable
+from typing import Any, Literal, TypeAlias, cast, get_args
 
 import cv2
 import numpy as np
@@ -43,26 +43,6 @@ TIMELINE: str = "video_time"
 RIG_PATH: str = "world/rig_00"
 TimedeltaNs: TypeAlias = Shaped[ndarray, " samples"]
 """Sample timestamps in timeline order, dtype ``timedelta64[ns]`` (jaxtyping has no timedelta dtype)."""
-
-
-@runtime_checkable
-class VideoFrame(Protocol):
-    """Decoded RGB frame returned by TorchCodec."""
-
-    data: UInt8[Tensor, "3 height width"]
-
-
-@runtime_checkable
-class SegmentVideoDecoder(Protocol):
-    """TorchCodec operation used by the benchmark's frame sampler."""
-
-    def get_frame_at(self, index: int) -> VideoFrame:
-        """Decode one frame by sample index."""
-        ...
-
-
-DecoderBundle: TypeAlias = tuple[TimedeltaNs, list[bytes], list[bool], SegmentVideoDecoder]
-"""What ``open_segment_decoder`` returns: sample times, raw samples, keyframe flags, and the decoder."""
 
 
 def nearest_time_index(times: TimedeltaNs, target_ns: int) -> int:
@@ -217,23 +197,22 @@ def fit_to_network(frame: UInt8[ndarray, "h0 w0 3"], camera: Fisheye62Parameters
 def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UInt8[ndarray, "h0 w0 3"]], dict[str, Fisheye62Parameters]]:
     """Decode the first shared frameset of the segment for ``cams`` and read their cameras."""
     from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
-    from simplecv.rerun_dataloader import open_segment_decoder
+    from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, select_decode_device
 
     from monopriors.apis.stereo_catalog import read_fisheye_camera
 
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     view: DatasetSelection = dataset.filter_segments(config.segment_id)
     cameras: dict[str, Fisheye62Parameters] = {cam: read_fisheye_camera(view, cam) for cam in cams}
-    device = torch.device("cuda")
-    decoders: dict[str, DecoderBundle] = {
-        cam: cast(DecoderBundle, open_segment_decoder(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30))
-        for cam in cams
-    }
-    shared_start_ns: int = max(int(bundle[0][0].astype(np.int64)) for bundle in decoders.values())
+    videos: list[str] = [f"{RIG_PATH}/{cam}/pinhole/video" for cam in cams]
+    decoders: dict[str, ChunkedVideoDecoder] = dict(
+        zip(cams, open_decoders(dataset, config.segment_id, videos, TIMELINE, torch.device(select_decode_device())), strict=True)
+    )
+    shared_start_ns: int = max(int(decoder.index.t_ns[0]) for decoder in decoders.values())
     frames: dict[str, UInt8[ndarray, "h0 w0 3"]] = {}
     for cam in cams:
-        index: int = nearest_time_index(decoders[cam][0], shared_start_ns)
-        frame_chw: UInt8[Tensor, "3 h0 w0"] = decoders[cam][3].get_frame_at(index).data
+        index: int = nearest_time_index(decoders[cam].index.times, shared_start_ns)
+        frame_chw: UInt8[Tensor, "3 h0 w0"] = decoders[cam].get_frame_at(index)
         frames[cam] = rearrange(frame_chw, "c h w -> h w c").cpu().numpy()  # pyrefly: ignore  # bad-argument-type — einops stub false positive
     return frames, cameras
 

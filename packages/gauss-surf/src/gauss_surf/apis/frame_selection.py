@@ -21,12 +21,11 @@ from einops import rearrange
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.rerun_dataloader import open_segment_decoder
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 from torch import Tensor
-from torchcodec.decoders import VideoDecoder
 
 from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, connect_catalog, register_layer
-from gauss_surf.contracts import FRAME_SELECTION_LAYER, ULTRAWIDE_FPS, WIDE_FPS
+from gauss_surf.contracts import FRAME_SELECTION_LAYER
 from gauss_surf.frame_selection import SelectionResult, TimedeltaNs, select_ultrawide_frames, select_wide_frames, sharpness_scores
 
 
@@ -64,16 +63,10 @@ class CameraMeasurements:
     """Normalized sharpness score per frame."""
 
 
-def _score_frame_batch(frames_hwc: list[UInt8[Tensor, "h w 3"]]) -> Float32[ndarray, "b"]:
-    """Stack and score one same-resolution decoded frame batch."""
-    return sharpness_scores(torch.stack(frames_hwc)).detach().cpu().numpy().astype(np.float32, copy=False)
-
-
 def _score_camera(
     dataset: DatasetEntry,
     video_id: str,
     entity_path: str,
-    fps: float,
     device: torch.device,
     batch_size: int,
 ) -> CameraMeasurements:
@@ -86,27 +79,14 @@ def _score_camera(
     """
     if batch_size < 1:
         raise ValueError("score_batch_size must be positive")
-    timestamps_n: TimedeltaNs
-    decoder: VideoDecoder
-    timestamps_n, _, _, decoder = open_segment_decoder(dataset, video_id, entity_path, TIMELINE, device, int(fps))
-    if len(timestamps_n) == 0:
-        raise RuntimeError(f"{entity_path} has no video packets for segment {video_id}")
-    if np.any(np.diff(timestamps_n.astype(np.int64)) <= 0):
-        raise RuntimeError(f"{entity_path} packet timestamps are not strictly increasing for segment {video_id}")
-
-    pending_frames_hwc: list[UInt8[Tensor, "h w 3"]] = []
+    decoder: ChunkedVideoDecoder = open_decoders(dataset, video_id, [entity_path], TIMELINE, device)[0]
+    timestamps_n: TimedeltaNs = decoder.index.times
     sharpness_parts: list[Float32[ndarray, "batch"]] = []
     with torch.inference_mode():
-        for frame_index in range(len(timestamps_n)):
-            frame_chw: UInt8[Tensor, "3 h w"] = decoder.get_frame_at(frame_index).data
-            frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")
-            pending_frames_hwc.append(frame_hwc)
-            if len(pending_frames_hwc) < batch_size:
-                continue
-            sharpness_parts.append(_score_frame_batch(pending_frames_hwc))
-            pending_frames_hwc = []
-        if pending_frames_hwc:
-            sharpness_parts.append(_score_frame_batch(pending_frames_hwc))
+        for first in range(0, len(decoder), batch_size):
+            frames_bchw: UInt8[Tensor, "b 3 h w"] = decoder.get_frames_at(range(first, min(first + batch_size, len(decoder))))
+            frames_bhwc: UInt8[Tensor, "b h w 3"] = rearrange(frames_bchw, "b c h w -> b h w c")
+            sharpness_parts.append(sharpness_scores(frames_bhwc).detach().cpu().numpy().astype(np.float32, copy=False))
 
     sharpness_n: Float32[ndarray, "n_frames"] = np.concatenate(sharpness_parts).astype(np.float32, copy=False)
     assert len(sharpness_n) == len(timestamps_n), f"{entity_path} scored {len(sharpness_n)} of {len(timestamps_n)} packets"
@@ -160,7 +140,6 @@ def process_segment(dataset: DatasetEntry, config: Config, video_id: str, rrd_pa
         dataset,
         video_id,
         VIDEO_WIDE,
-        WIDE_FPS,
         device,
         config.score_batch_size,
     )
@@ -168,7 +147,6 @@ def process_segment(dataset: DatasetEntry, config: Config, video_id: str, rrd_pa
         dataset,
         video_id,
         VIDEO_ULTRAWIDE,
-        ULTRAWIDE_FPS,
         device,
         config.score_batch_size,
     )

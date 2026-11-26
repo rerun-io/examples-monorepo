@@ -39,6 +39,7 @@ from torchcodec.decoders import VideoDecoder
 
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.catalog_video_codec import catalog_codec_name, wrap_mp4
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 
 TimedeltaNs: TypeAlias = Shaped[ndarray, " n_samples"]
 """Catalog index values in timeline order, preserving the timeline dtype."""
@@ -162,11 +163,11 @@ def relay_video_packets(
 
 
 class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
-    """Serve a fetched request block from the cached whole-segment GPU decoder.
+    """Serve a fetched request block from the segment's chunked decoder (:mod:`simplecv.catalog_video_reader`).
 
-    The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each
-    grid slot as a point read. The shipped bytes are ignored because frames come from
-    the cached segment-wide NVDEC decoder instead.
+    The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each grid slot as a point read; the
+    shipped bytes are ignored, the frames come from GOP-aligned chunks of the segment instead, so memory is a few
+    chunks whatever the segment's length.
     """
 
     def __init__(
@@ -175,7 +176,6 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
         entity: str,
         timeline: str,
         device: torch.device,
-        fps: int,
         *,
         max_frames_per_call: int | None = None,
         transform: Callable[[UInt8[Tensor, "n 3 h w"]], Tensor] | None = None,
@@ -184,11 +184,9 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
 
         Args:
             dataset: Rerun catalog dataset entry the segments come from.
-            entity: Entity path of the ``VideoStream`` column, without a leading slash.
-            timeline: Index timeline the packets are read on (row order per
-                ``open_segment_decoder``'s ordering guard).
-            device: Device decoded frames land on (``cuda`` uses NVDEC).
-            fps: Nominal frame rate of the stored video.
+            entity: Entity path of the ``VideoStream`` column.
+            timeline: A temporal or a sequence timeline.
+            device: ``cuda`` decodes on NVDEC; take it from :func:`simplecv.catalog_video_reader.select_decode_device`.
             max_frames_per_call: Decode a fetched block at most this many frames at a time (None: one call per segment run).
                 A 1,024-frame block of 1080p RGB is 6.4 GB on the device; slices bound that peak.
             transform: Applied on the device to each decoded slice (``n 3 h w`` uint8) before results are kept, e.g. to reduce
@@ -202,51 +200,45 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
         self._entity = entity
         self._timeline = timeline
         self._device = device
-        self._fps = fps
         self._segment_id: str | None = None
-        self._decoder: VideoDecoder | None = None
+        self.decoder: ChunkedVideoDecoder | None = None
+        """The current segment's decoder; its ``reader`` relays the stored samples (``relay_video``)."""
         self.query_seconds: float = 0.0
-        """Whole-segment packet query, mux, and decoder initialization wall time."""
+        """Index query and reader setup, per segment."""
         self.decode_seconds: float = 0.0
-        """Indexed GPU frame decode wall time."""
+        """Chunk fetches and GPU decode."""
         self.query_count: int = 0
-        """Whole-segment packet materializations performed by this decoder."""
         self.times: TimedeltaNs = np.empty(0, dtype="timedelta64[ns]")
-        """The current segment's sample timestamps (timedelta64[ns], timeline order)."""
-        self.samples: list[bytes] | None = None
-        """The current segment's raw video samples, relayable as a Rerun VideoStream."""
-        self.keyframes: list[bool] | None = None
-        """Keyframe flag per raw sample."""
+        """The current segment's sample index values, in the timeline's dtype."""
 
-    def _ensure_segment(self, segment_id: str) -> None:
-        if segment_id != self._segment_id:
+    def _ensure_segment(self, segment_id: str) -> ChunkedVideoDecoder:
+        if segment_id != self._segment_id or self.decoder is None:
             started: float = perf_counter()
-            self.times, self.samples, self.keyframes, self._decoder = open_segment_decoder(
-                self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps
-            )
+            self.decoder = open_decoders(self._dataset, segment_id, [self._entity], self._timeline, self._device)[0]
+            self.times = self.decoder.index.times
             self.query_seconds += perf_counter() - started
             self.query_count += 1
             self._segment_id = segment_id
+        return self.decoder
 
     def decode_at(self, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
         """Return a segment's latest frame at or before an index value."""
-        self._ensure_segment(segment_id)
+        decoder: ChunkedVideoDecoder = self._ensure_segment(segment_id)
         frame_index: int = int(np.searchsorted(self.times, index_value, side="right")) - 1
         if frame_index < 0:
             return None
-        assert self._decoder is not None
         started: float = perf_counter()
-        frame_chw: FrameRgbChw = self._decoder.get_frame_at(frame_index).data
+        frame_chw: FrameRgbChw = decoder.get_frame_at(frame_index)
         self.decode_seconds += perf_counter() - started
         return frame_chw
 
     def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[Tensor | None]:
         """Decode one aligned result per request in a fetched field block: an RGB ``FrameRgbChw``, or its ``transform``.
 
-        Contiguous same-segment requests share one ``get_frames_at`` call, so a
-        block costs one codec pass per segment instead of one seek per request.
+        Contiguous same-segment requests share one ``get_frames_at`` call, so a block costs one codec pass per segment
+        instead of one seek per request.
         """
-        del batch  # decoded from the segment-wide cache, not the fetched point reads
+        del batch  # decoded from the segment's chunks, not the fetched point reads
         decoded: list[Tensor | None] = [None] * len(requests)
         start: int = 0
         while start < len(requests):
@@ -254,7 +246,7 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
             stop: int = start
             while stop < len(requests) and requests[stop].segment_id == segment_id:
                 stop += 1
-            self._ensure_segment(segment_id)
+            decoder: ChunkedVideoDecoder = self._ensure_segment(segment_id)
             positions: list[int] = []
             frame_indices: list[int] = []
             for position in range(start, stop):
@@ -264,9 +256,8 @@ class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
                     frame_indices.append(frame_index)
             step: int = self._max_frames or max(len(frame_indices), 1)
             for first in range(0, len(frame_indices), step):
-                assert self._decoder is not None
                 started: float = perf_counter()
-                frames_nchw: Tensor = self._decoder.get_frames_at(frame_indices[first : first + step]).data
+                frames_nchw: Tensor = decoder.get_frames_at(frame_indices[first : first + step])
                 if self._transform is not None:
                     frames_nchw = self._transform(frames_nchw)
                 self.decode_seconds += perf_counter() - started

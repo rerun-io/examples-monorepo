@@ -42,6 +42,12 @@ ignore_names = [
     "product_frames",
     "wide_normal_frames",
     "ultrawide",
+    "pytestmark",
+    # PyAV encoder settings in the synthetic-video test.
+    "options",
+    "pix_fmt",
+    "pts",
+    "time_base",
 ]
 
 [tool.pytest.ini_options]

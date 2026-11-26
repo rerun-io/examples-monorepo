@@ -112,7 +112,7 @@ def estimate_metric_rescale(
     for view_idx in np.unique(view[finite]):
         view_groups: Int64[ndarray, " k"] = np.unique(group[finite & (view == view_idx)])
         decode_idx: list[int] = [int(sample_indices[chosen_frames[int(g) - int(view_idx) * chosen_frames.size]]) for g in view_groups]
-        frames: UInt8[Tensor, "k 3 h w"] = streams.decoders[int(view_idx)].get_frames_at(decode_idx).data
+        frames: UInt8[Tensor, "k 3 h w"] = streams.decoders[int(view_idx)].get_frames_at(decode_idx)
         for group_id, frame in zip(view_groups, frames, strict=True):
             frame_rgb: UInt8[ndarray, "h w 3"] = frame.permute(1, 2, 0).contiguous().cpu().numpy()
             depth: Float64[ndarray, "h w"] = moge(frame_rgb, K_33=intrinsics[int(view_idx)].astype(np.float32)).depth_meters.astype(np.float64)

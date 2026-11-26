@@ -1,5 +1,6 @@
-"""Behavioral tests for the catalog video decoder."""
+"""The Rerun dataloader's NVDEC column decoder, over the chunked catalog reader."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -17,94 +18,77 @@ pytest.importorskip("torchcodec", reason="torchcodec is required by this test mo
 from rerun.catalog import DatasetEntry  # noqa: E402
 from rerun.experimental.dataloader import DecodeRequest, FieldBatch  # noqa: E402
 from torch import Tensor  # noqa: E402
+from video_fixtures import encode_h264  # noqa: E402
 
 import simplecv.rerun_dataloader as rerun_dataloader  # noqa: E402
+from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, select_decode_device  # noqa: E402
 from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
 
 
 def test_segment_nvdec_decoder_decodes_a_fetch_block_across_segments(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Return one aligned result per request while reusing each segment decoder."""
+    """One aligned result per request; each segment's decoder is opened once."""
 
-    class _FakeVideoDecoder:
-        """Return a segment-specific scalar in a frame-shaped tensor."""
-
-        def __init__(self, offset: int) -> None:
+    class _FakeChunkedDecoder(ChunkedVideoDecoder):
+        def __init__(self, offset: int, times_ns: list[int]) -> None:
             self._offset: int = offset
+            self._index = SimpleNamespace(times=np.asarray(times_ns, dtype=np.int64).astype("timedelta64[ns]"))
 
-        def get_frame_at(self, index: int) -> SimpleNamespace:
-            """Return the requested frame using torchcodec's result shape."""
-            frame_chw: UInt8[Tensor, "3 1 1"] = torch.full((3, 1, 1), self._offset + index, dtype=torch.uint8)
-            return SimpleNamespace(data=frame_chw)
+        @property
+        def index(self) -> SimpleNamespace:  # pyrefly: ignore[bad-override]
+            return self._index
 
-        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
-            """Return the requested frames using torchcodec's batch result shape."""
-            frames_nchw: UInt8[Tensor, "n 3 1 1"] = torch.stack([self.get_frame_at(index).data for index in indices])
-            return SimpleNamespace(data=frames_nchw)
+        def get_frames_at(self, indices: list[int]) -> Tensor:
+            frames_nchw: UInt8[Tensor, "n 3 1 1"] = torch.stack([torch.full((3, 1, 1), self._offset + index, dtype=torch.uint8) for index in indices])
+            return frames_nchw
 
     opened_segments: list[str] = []
 
-    def open_decoder(
-        _dataset: DatasetEntry,
-        segment_id: str,
-        _entity: str,
-        _timeline: str,
-        _device: torch.device,
-        _fps: int,
-    ) -> tuple[np.ndarray, list[bytes], list[bool], _FakeVideoDecoder]:
-        """Stand in for the catalog and torchcodec boundary."""
+    def open_decoders(_dataset: DatasetEntry, segment_id: str, _entities: list[str], _timeline: str, _device: torch.device) -> tuple[_FakeChunkedDecoder]:
         opened_segments.append(segment_id)
-        if segment_id == "segment-a":
-            return np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]"), [], [], _FakeVideoDecoder(0)
-        return np.asarray([5, 15], dtype=np.int64).astype("timedelta64[ns]"), [], [], _FakeVideoDecoder(10)
+        return (_FakeChunkedDecoder(0, [10, 20]),) if segment_id == "segment-a" else (_FakeChunkedDecoder(10, [5, 15]),)
 
-    monkeypatch.setattr(rerun_dataloader, "open_segment_decoder", open_decoder)
-    dataset: DatasetEntry = object.__new__(DatasetEntry)
-    decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, "video/wide", "video_time", torch.device("cpu"), 60)
-    batch: FieldBatch = FieldBatch(column=pa.array([[b"ignored"], [b"ignored"], [b"ignored"]]))
+    monkeypatch.setattr(rerun_dataloader, "open_decoders", open_decoders)
+    decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(object.__new__(DatasetEntry), "video/wide", "video_time", torch.device("cpu"))
     requests: list[DecodeRequest] = [
         DecodeRequest(0, "segment-a", np.timedelta64(20, "ns"), (0,), (0,), True),
         DecodeRequest(1, "segment-b", np.timedelta64(4, "ns"), (1,), (1,), True),
         DecodeRequest(2, "segment-b", np.timedelta64(15, "ns"), (2,), (2,), True),
     ]
 
-    decoded = decoder.decode(batch, requests)
+    decoded = decoder.decode(FieldBatch(column=pa.array([[b"ignored"]] * 3)), requests)
 
     assert opened_segments == ["segment-a", "segment-b"]
     assert decoded[1] is None
-    assert decoded[0] is not None
-    assert decoded[2] is not None
-    assert int(decoded[0][0, 0, 0]) == 1
-    assert int(decoded[2][0, 0, 0]) == 11
+    assert decoded[0] is not None and int(decoded[0][0, 0, 0]) == 1
+    assert decoded[2] is not None and int(decoded[2][0, 0, 0]) == 11
 
 
-def test_relay_video_stream_opens_at_the_keyframe_before_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A decoder cannot start mid-GOP, so the relay backs up to the previous keyframe."""
-    times: np.ndarray = np.arange(0, 8, dtype=np.int64).astype("timedelta64[ns]")
-    samples: list[bytes] = [bytes([index]) for index in range(8)]
-    keyframes: list[bool] = [index % 4 == 0 for index in range(8)]
+def test_the_segment_decoder_decodes_on_nvdec_from_a_real_catalog(tmp_path: Path) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device: the NVDEC path cannot be checked here")
+    samples: list[tuple[bytes, bool]] = encode_h264(80, 8, seed=5)
+    times = (33_333_333 * np.arange(len(samples), dtype=np.int64)).astype("timedelta64[ns]")
+    path: Path = tmp_path / "video.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(path)
+        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+        rec.send_columns(
+            "/cam/video",
+            indexes=[rr.TimeColumn("video_time", duration=times)],
+            columns=rr.VideoStream.columns(sample=[s for s, _ in samples], is_keyframe=[k for _, k in samples]),
+        )
+    from torchcodec.decoders import VideoDecoder
 
-    def read_packets(
-        _dataset: DatasetEntry, _segment_id: str, _entity: str, _timeline: str
-    ) -> tuple[np.ndarray, list[bytes], list[bool], int]:
-        """Stand in for the catalog reader query."""
-        return times, samples, keyframes, rr.VideoCodec.H264.value
-
-    logged: list[tuple[str, object, dict[str, object]]] = []
-    sent: list[tuple[str, list[rr.TimeColumn], object]] = []
-    monkeypatch.setattr(rerun_dataloader, "read_segment_packets", read_packets)
-    monkeypatch.setattr(rr, "log", lambda entity_path, archetype, **kwargs: logged.append((entity_path, archetype, kwargs)))
-    monkeypatch.setattr(rr, "send_columns", lambda entity_path, *, indexes, columns: sent.append((entity_path, indexes, columns)))
-    dataset: DatasetEntry = object.__new__(DatasetEntry)
-
-    relayed: int = rerun_dataloader.relay_video_stream(dataset, "segment-a", "world/cam/video", "video_time", 6, 7)
-
-    assert relayed == 4, "the window [6, 7] opens at the keyframe at t=4"
-    assert [(entity, kwargs.get("static", False)) for entity, _, kwargs in logged] == [("world/cam/video", True)], "codec once, static"
-    codec = {batch.component_descriptor().component: batch for batch in logged[0][1].as_component_batches()}
-    assert codec["VideoStream:codec"].as_arrow_array().to_pylist() == [rr.VideoCodec.H264.value]
-    (entity_path, indexes, columns), = sent
-    assert entity_path == "world/cam/video"
-    assert indexes[0].as_arrow_array().cast("int64").to_pylist() == [4, 5, 6, 7], "one send_columns for the window, on its own timestamps"
-    by_component = {column.component_descriptor().component: column.as_arrow_array().to_pylist() for column in columns}
-    assert [bytes(sample[0]) for sample in by_component["VideoStream:sample"]] == samples[4:8]
-    assert by_component["VideoStream:is_keyframe"] == [[True], [False], [False], [False]], "only the anchor packet is a keyframe"
+    whole: Tensor = VideoDecoder(wrap_mp4([s for s, _ in samples], [k for _, k in samples], 30, codec="h264"), device="cuda").get_frames_at(
+        list(range(len(samples)))
+    ).data
+    with rr.server.Server(datasets={"test": [path]}) as server:
+        decoder = SegmentNvdecDecoder(server.client().get_dataset("test"), "cam/video", "video_time", torch.device(select_decode_device()))
+        requests: list[DecodeRequest] = [DecodeRequest(row, "segment", times[index], (row,), (row,), True) for row, index in enumerate((0, 7, 8, 41, 79))]
+        decoded = decoder.decode(FieldBatch(column=pa.array([[b"ignored"]] * len(requests))), requests)
+        single: Tensor | None = decoder.decode_at(times[50], "segment")
+    for frame, index in zip(decoded, (0, 7, 8, 41, 79), strict=True):
+        assert frame is not None and frame.device.type == "cuda"
+        assert torch.equal(frame, whole[index])
+    assert single is not None and single.device.type == "cuda" and torch.equal(single, whole[50])

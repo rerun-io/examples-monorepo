@@ -128,7 +128,7 @@ def test_decode_frames_refuses_timestamp_drift(monkeypatch: pytest.MonkeyPatch) 
     drifted_n: np.ndarray = np.asarray([10, 21], dtype=np.int64).astype("timedelta64[ns]")
 
     with pytest.raises(ValueError, match="no exact video-packet match"):
-        list(reader.decode_frames("video/wide", drifted_n, fps=60.0, device=torch.device("cpu")))
+        list(reader.decode_frames("video/wide", drifted_n, device=torch.device("cpu")))
 
 
 def test_decode_frames_preserves_requested_timestamp_order(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,6 +149,6 @@ def test_decode_frames_preserves_requested_timestamp_order(monkeypatch: pytest.M
     reader: SegmentReader = SegmentReader(_Dataset([_row()]), "segment-a")
     requested_n: np.ndarray = np.asarray([20, 10], dtype=np.int64).astype("timedelta64[ns]")
 
-    frames: list[UInt8[Tensor, "3 h w"]] = list(reader.decode_frames("video/wide", requested_n, fps=60.0, device=torch.device("cpu")))
+    frames: list[UInt8[Tensor, "3 h w"]] = list(reader.decode_frames("video/wide", requested_n, device=torch.device("cpu")))
 
     assert [int(frame[0, 0, 0]) for frame in frames] == [20, 10]

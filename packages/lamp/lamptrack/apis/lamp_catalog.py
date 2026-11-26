@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from typing import Protocol, runtime_checkable
 
 import numpy as np
 import rerun as rr
@@ -18,8 +17,7 @@ from posekit.skeletons import COCO_17
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
 from scipy.spatial.transform import Rotation, Slerp
 from simplecv.camera_parameters import Fisheye62Parameters
-from simplecv.catalog_video_codec import video_codec
-from simplecv.rerun_dataloader import open_segment_decoder, relay_video_packets
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, relay_video
 from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
@@ -28,22 +26,6 @@ from lamptrack.cameras import RigCamera
 from lamptrack.catalog_rig import RIG, TIMELINE, read_fisheye_camera, read_rig_poses
 from lamptrack.models.lamp import AnnotatedLampTrackerUnion, Frameset, LampConfig, LampStep, LampTracker, PersonState
 from lamptrack.rerun_logging import LivePeopleLogger, log_smpl_annotation_context
-
-
-@runtime_checkable
-class VideoFrame(Protocol):
-    """Decoded RGB frame returned by TorchCodec."""
-
-    data: UInt8[torch.Tensor, "3 h w"]
-
-
-@runtime_checkable
-class SegmentVideoDecoder(Protocol):
-    """TorchCodec method used by the catalog loop."""
-
-    def get_frame_at(self, index: int) -> VideoFrame:
-        """Decode one frame by sample index."""
-        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,16 +215,12 @@ def log_static_context(cams: tuple[str, ...]) -> None:
         log_skeleton_annotation_context(COCO_17, entity_path=f"{RIG}/{cam}/pinhole")
 
 
-def _frame_at(
-    times: np.ndarray,
-    decoder: SegmentVideoDecoder,
-    timestamp_ns: int,
-) -> UInt8[torch.Tensor, "h w 3"]:
+def _frame_at(decoder: ChunkedVideoDecoder, timestamp_ns: int) -> UInt8[torch.Tensor, "h w 3"]:
     """Decode the latest camera frame at or before one grid timestamp, on the decoder's device."""
-    index = int(np.searchsorted(times, np.timedelta64(timestamp_ns, "ns"), side="right")) - 1
+    index = int(np.searchsorted(decoder.index.times, np.timedelta64(timestamp_ns, "ns"), side="right")) - 1
     if index < 0:
         raise ValueError(f"Timestamp {timestamp_ns} precedes the first video sample")
-    return decoder.get_frame_at(index).data.permute(1, 2, 0)
+    return decoder.get_frame_at(index).permute(1, 2, 0)
 
 
 def _log_camera_observations(
@@ -342,21 +320,10 @@ def run(config: Config) -> RunMetrics:
     pose_times, world_T_rig_values = read_rig_poses(view)
     pose_times_ns = pose_times.astype("timedelta64[ns]").astype(np.int64)
     device = torch.device("cuda")
-    decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], SegmentVideoDecoder]] = {}
-    codecs: dict[str, rr.VideoCodec] = {}
-    for cam in config.cams:
-        times, samples, keyframes, decoder = open_segment_decoder(
-            dataset,
-            config.segment_id,
-            f"{RIG}/{cam}/pinhole/video",
-            TIMELINE,
-            device,
-            30,
-        )
-        decoders[cam] = (times, samples, keyframes, decoder)
-        codecs[cam] = video_codec(decoder.metadata.codec)
+    videos: list[str] = [f"{RIG}/{cam}/pinhole/video" for cam in config.cams]
+    decoders: dict[str, ChunkedVideoDecoder] = dict(zip(config.cams, open_decoders(dataset, config.segment_id, videos, TIMELINE, device), strict=True))
     grid_ns = build_time_grid(
-        [entry[0] for entry in decoders.values()],
+        [decoder.index.times for decoder in decoders.values()],
         fps=config.fps,
         start_s=config.start_s,
         max_seconds=config.max_seconds,
@@ -380,14 +347,10 @@ def run(config: Config) -> RunMetrics:
     )
     log_rig_static(rig)
     # Relay the stored H.264 packets instead of re-encoding decoded frames: full sensor
-    # resolution and the source frame rate, for a fraction of the bytes. They are the packets
-    # the tracker's NVDEC decoders were opened from, so the catalog is not queried again.
-    for cam in config.cams:
-        times, samples, keyframes, _ = decoders[cam]
-        relayed: int = relay_video_packets(
-            f"{RIG}/{cam}/pinhole/video", TIMELINE, times, samples, keyframes, codecs[cam], int(grid_ns[0]), int(grid_ns[-1])
-        )
-        print(f"relayed {relayed} {cam} video samples")
+    # resolution and the source frame rate, for a fraction of the bytes, read through the
+    # tracker's decoders' reader one chunk of every camera at a time.
+    relayed: int = relay_video(decoders[config.cams[0]].reader, videos, int(grid_ns[0]), int(grid_ns[-1]))
+    print(f"relayed {relayed} video samples from {len(videos)} cameras")
 
     tracker_config = replace(config.tracker, floor_z=config.floor_z)
     tracker: LampTracker = tracker_config.setup(device=device)
@@ -403,7 +366,7 @@ def run(config: Config) -> RunMetrics:
         timestamp_ns = int(timestamp_ns_raw)
         world_T_rig = interpolate_pose(pose_times_ns, world_T_rig_values, timestamp_ns)
         # The NVDEC frames stay on the GPU: the tracker's detector and pose models read them there.
-        images: UInt8[torch.Tensor, "v h w 3"] = torch.stack([_frame_at(decoders[cam][0], decoders[cam][3], timestamp_ns) for cam in config.cams])
+        images: UInt8[torch.Tensor, "v h w 3"] = torch.stack([_frame_at(decoders[cam], timestamp_ns) for cam in config.cams])
         step: LampStep = tracker.step(Frameset(timestamp_ns=timestamp_ns, images=images, world_T_rig=world_T_rig))
         current_people = [state for state in step.people.values() if int(state.timestamps_ns[-1]) == timestamp_ns]
         rr.set_time(TIMELINE, duration=np.timedelta64(timestamp_ns, "ns"))

@@ -7,19 +7,17 @@ from typing import Literal
 
 from dataforge.writing import atomic_recording
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
+from simplecv.catalog_video_reader import DecodeDevice, DecodeRequest, select_decode_device
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
     ROBOCAP_RIG,
     CatalogSegment,
-    DecodeDevice,
-    DecodeRequest,
     RigProfile,
     SegmentFeed,
     dataset_rig,
     open_segment,
     resolve_catalog_segments,
-    select_decode_device,
 )
 from slam_rs.catalog_layer import POSE_SOURCE, LayerDetail, LayerRun, track_layer
 from slam_rs.config import SlamConfig, load_slam_config

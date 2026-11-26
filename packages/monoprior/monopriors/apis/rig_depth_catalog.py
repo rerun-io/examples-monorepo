@@ -256,7 +256,8 @@ def main(config: RigDepthCatalogConfig) -> None:
         RerunIterableDataset,
         SegmentMetadata,
     )
-    from simplecv.rerun_dataloader import TimedNvdecDecoder, relay_video_stream
+    from simplecv.catalog_video_reader import CatalogVideoReader, read_video_index, relay_video
+    from simplecv.rerun_dataloader import TimedNvdecDecoder
 
     from monopriors.apis.stereo_catalog import read_fisheye_camera, read_static
 
@@ -275,7 +276,7 @@ def main(config: RigDepthCatalogConfig) -> None:
     fields: dict[str, Field] = {
         cam: Field(
             f"/{RIG_PATH}/{cam}/pinhole/video:VideoStream:sample",
-            decode=TimedNvdecDecoder(dataset, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30),
+            decode=TimedNvdecDecoder(dataset, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device),
         )
         for cam in config.cams
     }
@@ -350,10 +351,13 @@ def main(config: RigDepthCatalogConfig) -> None:
     rr.send_blueprint(create_rig_depth_catalog_blueprint(config.cams))
     # Relay the stored packets rather than re-encoding what the dataloader decoded: the source
     # resolution and frame rate for a fraction of the bytes a per-frameset JPEG costs. This is an
-    # independent query on the same column the dataloader's NVDEC decoders read.
-    for cam in config.cams:
-        relayed: int = relay_video_stream(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, start_ns, end_ns)
-        print(f"relayed {relayed} {cam} video samples")
+    # independent read of the columns the dataloader's NVDEC decoders read, one query per chunk for every camera.
+    videos: list[str] = [f"{RIG_PATH}/{cam}/pinhole/video" for cam in config.cams]
+    relay_reader: CatalogVideoReader = CatalogVideoReader(
+        dataset, config.segment_id, read_video_index(dataset, config.segment_id, videos, TIMELINE), TIMELINE
+    )
+    relayed: int = relay_video(relay_reader, videos, start_ns, end_ns)
+    print(f"relayed {relayed} video samples from {len(videos)} cameras")
 
     predictor: BaseRigDepthPredictor = config.predictor.setup(device="cuda")
     fuser: Open3DFuser | None = (

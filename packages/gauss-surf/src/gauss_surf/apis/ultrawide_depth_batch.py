@@ -35,6 +35,7 @@ from einops import rearrange
 from jaxtyping import Float32, UInt8, UInt32
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetSelection
+from simplecv.catalog_video_reader import select_decode_device
 from torch import Tensor
 
 from gauss_surf.catalog import (
@@ -53,7 +54,6 @@ from gauss_surf.contracts import (
     FRAME_SELECTION_LAYER,
     PROMPTDA_LAYER,
     ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN,
-    ULTRAWIDE_FPS,
     ULTRAWIDE_QUATERNION_COLUMN,
     ULTRAWIDE_TRANSLATION_COLUMN,
 )
@@ -223,8 +223,7 @@ def generate_ultrawide_depth(reader: SegmentReader, rrd_path: Path, *, batch_siz
         decoded_frames: Iterator[UInt8[Tensor, "3 h w"]] = reader.decode_frames(
             VIDEO_ULTRAWIDE,
             timestamps_n,
-            fps=ULTRAWIDE_FPS,
-            device=torch.device("cpu"),
+            device=torch.device(select_decode_device()),
         )
         for start in range(0, frame_count, batch_size):
             batch_timestamps_n: TimedeltaNs = timestamps_n[start : start + batch_size]

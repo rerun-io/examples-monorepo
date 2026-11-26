@@ -13,8 +13,8 @@ Five decisions matter here because each one can change the numbers:
   up to 17 LSB. dav1d also pads rows, so the decoded plane's ``line_size``
   exceeds the frame width and the copy honours it. The CUDA path uses
   SimpleCV's NVDEC reader and GPU RGB-to-gray conversion; its pixel rounding differs.
-  :func:`select_decode_device` is the rule every tool follows: NVDEC when CUDA is
-  available, otherwise the CPU decoder.
+  ``simplecv.catalog_video_reader.select_decode_device`` is the rule every tool
+  follows: NVDEC when CUDA is available, otherwise the CPU decoder.
 * **Round trips.** Video goes through SimpleCV's ``CatalogVideoReader``: a
   blob-free index of every fed camera, then GOP-aligned time chunks of all of
   them in one query each, the next chunk fetched while this one decodes, so
@@ -45,12 +45,10 @@ Five decisions matter here because each one can change the numbers:
 """
 
 import hashlib
-import threading
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
-from functools import cache, partial
-from importlib.util import find_spec
+from functools import partial
 from io import BytesIO
 from os import PathLike
 from pathlib import Path
@@ -111,60 +109,6 @@ from slam_rs.rig import IMU_ENTITY as IMU_ENTITY
 from slam_rs.rig import RIG_ENTITY as RIG_ENTITY
 from slam_rs.rig import TIMELINE as TIMELINE
 from slam_rs.trajectory import ASSOCIATION_TOLERANCE_NS, Trajectory, empty_trajectory, shift_clock
-
-DecodeRequest: TypeAlias = Literal["auto", "cuda", "cpu"]
-"""What a tool asks for: ``auto`` (the default), NVDEC (``cuda``) or the CPU decoder."""
-
-DecodeDevice: TypeAlias = Literal["cpu", "cuda"]
-"""The decoder a feed runs."""
-
-
-@cache
-def nvdec_unavailable_reason() -> str | None:
-    """Why NVDEC decoding cannot run in this process, or None when it can; discovered once.
-
-    CUDA decoding needs torch with a visible CUDA device plus torchcodec, which
-    only the slam-rs-cuda environments carry.
-    """
-    if find_spec("torch") is None or find_spec("torchcodec") is None:
-        return "this environment has no torch with torchcodec (the slam-rs-cuda environment has them)"
-    import torch
-
-    if not torch.cuda.is_available():
-        return "torch sees no CUDA device"
-    return None
-
-
-_CPU_DECODE_NOTICE: threading.Event = threading.Event()
-"""Set once the CPU-decoding notice is printed; the notice is once per process."""
-
-_CPU_DECODE_NOTICE_LOCK: threading.Lock = threading.Lock()
-
-
-def select_decode_device(requested: DecodeRequest = "auto") -> DecodeDevice:
-    """Resolve a decode request: NVDEC when CUDA is available, otherwise the CPU decoder.
-
-    The rule every slam-rs tool follows, as :func:`slam_rs._core.select_backend`
-    is for the frontend. ``auto`` without CUDA prints one line naming the
-    reason, once per process however it is called, and returns ``"cpu"``.
-    ``cpu`` never inspects the environment.
-
-    Raises:
-        ValueError: If ``cuda`` is requested and CUDA is not available.
-    """
-    if requested == "cpu":
-        return "cpu"
-    reason: str | None = nvdec_unavailable_reason()
-    if reason is None:
-        return "cuda"
-    if requested == "cuda":
-        raise ValueError(f"NVDEC decoding is unavailable: {reason}")
-    with _CPU_DECODE_NOTICE_LOCK:
-        if not _CPU_DECODE_NOTICE.is_set():
-            _CPU_DECODE_NOTICE.set()
-            print(f"slam-rs: decoding on the CPU (PyAV/dav1d) because NVDEC is unavailable: {reason}", flush=True)
-    return "cpu"
-
 
 PREFETCH_FRAMESETS: int = 64
 """Framesets the feed decodes ahead of its caller: two NVDEC batches of 32, so one batch's decode hides behind tracking.

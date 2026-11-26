@@ -134,7 +134,7 @@ def track_multiview_keypoints(streams: ExoVideoStreams, detector: PersonDetector
     reanchor_interval_ns: int = int(DETECTOR_REANCHOR_INTERVAL_S * 1e9)
 
     def decode_frameset(sample_idx: int) -> UInt8[Tensor, "v h w 3"]:
-        frames: list[UInt8[Tensor, "3 h w"]] = [streams.decoders[view_idx].get_frames_at([sample_idx]).data[0] for view_idx in range(num_views)]
+        frames: list[UInt8[Tensor, "3 h w"]] = [streams.decoders[view_idx].get_frame_at(sample_idx) for view_idx in range(num_views)]
         if len({tuple(frame.shape) for frame in frames}) != 1:
             raise ValueError(f"exo cameras must share one video resolution; got {[tuple(frame.shape[1:]) for frame in frames]}")
         return torch.stack(frames).permute(0, 2, 3, 1).contiguous()

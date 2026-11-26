@@ -12,6 +12,7 @@ from typing import Literal
 
 import numpy as np
 import rerun as rr
+from simplecv.catalog_video_reader import DecodeRequest, select_decode_device
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from slam_rs import BackendRequest, GbaRequest, _core
@@ -19,13 +20,11 @@ from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
     ROBOCAP_RIG,
     CatalogSegment,
-    DecodeRequest,
     LocalSegment,
     SegmentFeed,
     SegmentSource,
     dataset_rig,
     open_segment,
-    select_decode_device,
 )
 from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
 from slam_rs.config import SlamConfig, load_slam_config, overlay_config_text

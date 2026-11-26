@@ -1012,12 +1012,12 @@ def build_rerun_iterable_dataset(
     )
     codecs: dict[str, CatalogCodecName] = detect_video_codecs(dataset_entry=dataset_entry, segment=segment, streams=streams)
     print(f"Video codecs: {codecs}", flush=True)
-    # A CUDA tracker gets NVDEC: one whole-segment decoder per stream, frames stay on the GPU.
+    # A CUDA tracker gets NVDEC: one chunked decoder per stream, frames stay on the GPU.
     # A CPU tracker keeps rerun's PyAV decoder.
     fields: dict[str, Any] = {
         stream.name: Field(
             path=stream.field_path,
-            decode=SegmentNvdecDecoder(dataset_entry, stream.video_entity.lstrip("/"), CATALOG_TIMELINE, torch.device("cuda"), round(native_fps))
+            decode=SegmentNvdecDecoder(dataset_entry, stream.video_entity.lstrip("/"), CATALOG_TIMELINE, torch.device("cuda"))
             if config.tracker_device == "cuda"
             else VideoFrameDecoder(codec=codecs[stream.name]),
         )

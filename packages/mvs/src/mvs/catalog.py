@@ -1,7 +1,7 @@
 """The ARKitScenes catalog input the mvs apps share, and how they log what every frame carries.
 
 Entity paths mirror the arkitscenes-download rig schema (``ingest/paths.py``); the source video is relayed once, from
-the raw AV1 samples the NVDEC decoder already fetched, never re-encoded per frame.
+the raw AV1 samples chunk by chunk through the NVDEC decoder's reader, never re-encoded per frame.
 """
 
 from dataclasses import dataclass
@@ -11,11 +11,13 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from einops import rearrange
-from jaxtyping import Float32, Int64, UInt16
+from jaxtyping import Float32, UInt16
 from numpy import ndarray
-from simplecv.rerun_dataloader import SegmentNvdecDecoder, relay_video_packets
+from simplecv.catalog_video_reader import StreamIndex, relay_video
+from simplecv.rerun_dataloader import SegmentNvdecDecoder
 
-from mvs.blueprint import TIMELINE, EntityPaths
+from mvs.blueprint import TIMELINE as TIMELINE
+from mvs.blueprint import EntityPaths
 from mvs.depth_engine import DepthOutputs
 
 CLOUD_CATALOG_URL: str = "rerun://api.latest.cloud.rerun.io:443"
@@ -62,13 +64,10 @@ def log_source_video(video_decoder: SegmentNvdecDecoder) -> int:
     """Relay the segment's raw AV1 samples once, whole, as a VideoStream (the source catalog's own schema), and return
     the time of its first relayed sample, ns: the relay opens at the first keyframe, which a ``VideoFrameReference``
     into the stream counts from."""
-    assert video_decoder.samples is not None and video_decoder.keyframes is not None
-    times_ns: Int64[ndarray, " n"] = video_decoder.times.astype("timedelta64[ns]").astype(np.int64)
-    relay_video_packets(
-        VIDEO_WIDE, TIMELINE, video_decoder.times, video_decoder.samples, video_decoder.keyframes, rr.VideoCodec.AV1, int(times_ns[0]), int(times_ns[-1])
-    )
-    # relay_video_packets opens at the last keyframe at or before the window start; the window starts at sample 0.
-    return int(times_ns[int(np.flatnonzero(np.asarray(video_decoder.keyframes, dtype=bool))[0])])
+    assert video_decoder.decoder is not None, "relay after the first decoded sample: the decoder opens its segment then"
+    stream: StreamIndex = video_decoder.decoder.index
+    relay_video(video_decoder.decoder.reader, [VIDEO_WIDE], int(stream.t_ns[0]), int(stream.t_ns[-1]))
+    return int(stream.t_ns[int(np.flatnonzero(stream.keyframes)[0])])
 
 
 def log_video_then_blueprint(video_decoder: SegmentNvdecDecoder, blueprint: rrb.Blueprint) -> int:

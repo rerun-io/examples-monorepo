@@ -1,10 +1,8 @@
 """Chunked catalog video reads give the frames of the whole-column path, and never hold the whole column."""
 
 from collections.abc import Iterator
-from fractions import Fraction
 from pathlib import Path
 
-import av
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -15,6 +13,7 @@ pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this t
 pytest.importorskip("torchcodec", reason="torchcodec is required by this test module")
 
 from simplecv.catalog_video import CatalogVideo, read_catalog_videos  # noqa: E402
+from video_fixtures import encode_h264  # noqa: E402
 from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_reader import (  # noqa: E402
     CatalogVideoReader,
@@ -40,30 +39,13 @@ CAMERAS: dict[str, tuple[int, int, int, bool]] = {
 }
 
 
-def _encode(frames: int, gop: int, seed: int) -> list[tuple[bytes, bool]]:
-    """H.264 samples of moving noise (every frame distinct), closed GOPs of ``gop`` frames, no B-frames."""
-    codec = av.CodecContext.create("libx264", "w")
-    codec.width, codec.height, codec.pix_fmt = 96, 64, "yuv420p"
-    codec.time_base = Fraction(1, 30)
-    codec.options = {"g": str(gop), "keyint_min": str(gop), "bf": "0", "sc_threshold": "0"}
-    rng: np.random.Generator = np.random.default_rng(seed)
-    base: np.ndarray = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
-    samples: list[tuple[bytes, bool]] = []
-    for index in range(frames):
-        frame = av.VideoFrame.from_ndarray(np.roll(base, 3 * index, axis=1), format="rgb24")
-        frame.pts = index
-        samples += [(bytes(packet), bool(packet.is_keyframe)) for packet in codec.encode(frame)]
-    samples += [(bytes(packet), bool(packet.is_keyframe)) for packet in codec.encode(None)]
-    return samples
-
-
 @pytest.fixture(scope="module")
 def recording(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path: Path = tmp_path_factory.mktemp("video") / "cameras.rrd"
     with rr.RecordingStream("test", recording_id="segment") as rec:
         rec.save(path)
         for seed, (entity, (frames, gop, offset_ns, sparse)) in enumerate(CAMERAS.items()):
-            samples: list[tuple[bytes, bool]] = _encode(frames, gop, seed)
+            samples: list[tuple[bytes, bool]] = encode_h264(frames, gop, seed)
             times = (offset_ns + FRAME_NS * np.arange(len(samples), dtype=np.int64)).astype("timedelta64[ns]")
             rec.log(entity, rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
             rec.send_columns(
@@ -248,24 +230,55 @@ def test_decoders_land_frames_on_cuda_whenever_it_is_available(server: rr.server
         np.testing.assert_array_equal(decoder.index.times, video.times)
 
 
-def test_without_cuda_the_decoder_says_so_once_and_cuda_on_request_fails(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.fixture
+def fresh_decode_policy(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Forget the cached NVDEC discovery and the printed notice for one test."""
     import simplecv.catalog_video_reader as reader_module
 
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    reader_module.nvdec_unavailable_reason.cache_clear()
+    discovery = reader_module.nvdec_unavailable_reason  # a test may replace it; clear the real cache
+    discovery.cache_clear()
     monkeypatch.setattr(reader_module, "_CPU_NOTICE_PRINTED", [])
-    try:
-        assert select_decode_device() == "cpu" and select_decode_device() == "cpu"
-        assert capsys.readouterr().out.count("decoding on the CPU") == 1
-        with pytest.raises(ValueError, match="NVDEC"):
+    yield
+    discovery.cache_clear()
+
+
+@pytest.mark.usefixtures("fresh_decode_policy")
+@pytest.mark.parametrize(
+    ("torchcodec_present", "cuda", "reason"),
+    [(False, False, "no torchcodec"), (False, True, "no torchcodec"), (True, False, "torch sees no CUDA device"), (True, True, None)],
+)
+def test_nvdec_discovery_covers_every_combination(monkeypatch: pytest.MonkeyPatch, torchcodec_present: bool, cuda: bool, reason: str | None) -> None:
+    import simplecv.catalog_video_reader as reader_module
+
+    monkeypatch.setattr(reader_module, "find_spec", lambda name: object() if name != "torchcodec" or torchcodec_present else None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    found: str | None = reader_module.nvdec_unavailable_reason()
+    assert (found is None) == (reason is None) and (reason is None or reason in str(found))
+    if reason is None:
+        assert select_decode_device("auto") == select_decode_device("cuda") == "cuda"
+    else:
+        assert select_decode_device("auto") == "cpu"
+        with pytest.raises(ValueError, match="NVDEC decoding is unavailable"):
             select_decode_device("cuda")
-    finally:
-        reader_module.nvdec_unavailable_reason.cache_clear()
+    assert select_decode_device("cpu") == "cpu"
+
+
+@pytest.mark.usefixtures("fresh_decode_policy")
+def test_the_cpu_decoding_notice_is_printed_once_per_process(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    import simplecv.catalog_video_reader as reader_module
+
+    monkeypatch.setattr(reader_module, "nvdec_unavailable_reason", lambda: "no CUDA here")
+    assert select_decode_device() == select_decode_device("auto") == "cpu"
+    with ThreadPoolExecutor(8) as pool:
+        assert set(pool.map(lambda _: select_decode_device(), range(32))) == {"cpu"}
+    assert capsys.readouterr().out.count("decoding on the CPU") == 1
 
 
 def test_a_sequence_timeline_reads_in_frame_counted_chunks(tmp_path: Path) -> None:
     path: Path = tmp_path / "frames.rrd"
-    samples: list[tuple[bytes, bool]] = _encode(70, 9, seed=3)
+    samples: list[tuple[bytes, bool]] = encode_h264(70, 9, seed=3)
     with rr.RecordingStream("test", recording_id="segment") as rec:
         rec.save(path)
         rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)

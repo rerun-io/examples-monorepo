@@ -80,7 +80,7 @@ def test_promptda_dataset_uses_nvdec_and_fetches_fusion_confidence(monkeypatch: 
 
     assert isinstance(samples, RerunIterableDataset)
     assert isinstance(decoder, SegmentNvdecDecoder)
-    assert captured["decoder_args"] == (dataset, VIDEO_WIDE, "video_time", torch.device("cuda"), 60)
+    assert captured["decoder_args"] == (dataset, VIDEO_WIDE, "video_time", torch.device("cuda"))
     fields = captured["dataset_kwargs"]["fields"]  # type: ignore[index]
     assert fields["video"].decode is decoder  # type: ignore[index]
     assert fields["conf"].path == f"/{CONFIDENCE}:SegmentationImage:buffer"  # type: ignore[index]

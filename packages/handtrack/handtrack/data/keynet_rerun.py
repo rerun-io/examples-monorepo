@@ -44,7 +44,7 @@ from handtrack.data.catalog import (
     static_number,
 )
 from handtrack.data.luma import grey_from_rgb
-from handtrack.data.rerun_source import DATASET_SPECS, HANDS, NOMINAL_FPS, PASS_STRIDE, SIDES, _frame_times, _scalar, _video_field, dense_rows
+from handtrack.data.rerun_source import DATASET_SPECS, HANDS, PASS_STRIDE, SIDES, _frame_times, _scalar, _video_field, dense_rows
 from handtrack.data.segment_labels import STALE_TRACKER_STEPS, HandProjection, KeypointPriors, keypoint_priors, project_hands, segment_labels
 from handtrack.data.stream import ImageHands, KeyNetAugment, KeyNetSamples, perspective_keynet_samples, sample_count
 from handtrack.geometry.camera import CameraRig
@@ -342,7 +342,7 @@ def stream_cuts(name: str, dataset_index: int, segments: Sequence[str], *, catal
         from rerun.experimental.dataloader import BlockShuffle, DataSource, Field, RerunIterableDataset
 
         dataset = rr.catalog.CatalogClient(catalog_url).get_dataset(name)
-        fields = {f"cam{c}": Field(_video_field(camera), decode=KeyedNvdecDecoder(dataset, f"{camera}/pinhole/video".lstrip("/"), "frame_index", device, NOMINAL_FPS,
+        fields = {f"cam{c}": Field(_video_field(camera), decode=KeyedNvdecDecoder(dataset, f"{camera}/pinhole/video".lstrip("/"), "frame_index", device,
                                                                                    max_frames_per_call=NVDEC_SLICE, transform=grey_from_rgb))
                   for c, camera in enumerate(cameras)}
         stream = RerunIterableDataset(DataSource(dataset=dataset, segments=list(segments)), index="frame_index", fields=fields,

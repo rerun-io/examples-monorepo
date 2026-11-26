@@ -29,10 +29,9 @@ from datafusion import col
 from jaxtyping import Bool, Int64, Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.rerun_dataloader import open_segment_decoder
+from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
 from torch import Tensor
 from torch.utils.data import IterableDataset, get_worker_info
-from torchcodec.decoders import VideoDecoder
 from torchvision.io import ImageReadMode, decode_jpeg
 
 from zipdepth.catalog.builders import SampleBuilder
@@ -54,8 +53,6 @@ ULTRAWIDE_DEPTH_BLOB_COLUMN: str = f"/{DEPTH_ULTRAWIDE_RECT}:EncodedDepthImage:b
 """Catalog column containing uint16 millimetre rectified-ultrawide depth PNG blobs."""
 ULTRAWIDE_RGB_BLOB_COLUMN: str = f"/{RGB_ULTRAWIDE_RECT}:EncodedImage:blob"
 """Catalog column containing rectified-ultrawide JPEG blobs."""
-NATIVE_VIDEO_FPS: int = 60
-"""Nominal frame rate used when wrapping the segment's encoded AV1 packets."""
 ULTRAWIDE_SEED_OFFSET: int = 500_000_011
 """Separates the ultrawide augmentation seed stream from the wide one within a segment."""
 ItemT = TypeVar("ItemT")
@@ -120,8 +117,8 @@ class _WideSegment:
     """Video packet index per chosen frame."""
     times_ns: Int64[ndarray, "n_chosen"]
     """Chosen-frame timeline position in nanoseconds."""
-    decoder: VideoDecoder
-    """Whole-segment video decoder owned by the calling producer."""
+    decoder: ChunkedVideoDecoder
+    """The segment's chunked video decoder, owned by the calling producer."""
 
 
 @dataclass(slots=True)
@@ -370,13 +367,12 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         if self._load_confidence:
             contents.append(f"/{CONFIDENCE}")
             columns.append(CONFIDENCE_COLUMN)
-        # The depth query is independent of the video query inside open_segment_decoder;
-        # both block in native code with the GIL released, so overlapping them takes
-        # ~30% off the per-segment stall. The depth query goes to the worker thread (pure
-        # datafusion/gRPC); the decoder stays on this thread because NVDEC creation needs
-        # the producer's CUDA context. Neither query sorts client-side — the reader's row
-        # order is trusted; the rationale lives in simplecv's open_segment_decoder, and
-        # the guard below fails loudly if the server ordering contract ever breaks.
+        # The depth query is independent of the video index query; both block in native
+        # code with the GIL released, so overlapping them takes ~30% off the per-segment
+        # stall. The depth query goes to the worker thread (pure datafusion/gRPC); the
+        # decoder stays on this thread because NVDEC creation needs the producer's CUDA
+        # context. The depth query does not sort client-side — the reader's row order is
+        # trusted, and the guard below fails loudly if that server contract ever breaks.
         def _query_depth_table() -> pa.Table:
             return (
                 self._dataset_entry.filter_segments(segment_id)
@@ -389,14 +385,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
 
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="segment-depth-query") as pool:
             table_future: Future[pa.Table] = pool.submit(_query_depth_table)
-            decoder_result: tuple[Shaped[ndarray, "n_packets"], list[bytes], list[bool], VideoDecoder] = open_segment_decoder(
-                self._dataset_entry,
-                segment_id,
-                VIDEO_WIDE,
-                TIMELINE,
-                self._device,
-                NATIVE_VIDEO_FPS,
-            )
+            decoder: ChunkedVideoDecoder = open_decoders(self._dataset_entry, segment_id, [VIDEO_WIDE], TIMELINE, self._device)[0]
             table: pa.Table = table_future.result()
         stats.segment_query += perf_counter() - started
         if table.num_rows == 0:
@@ -418,10 +407,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             # decoded prompt shape. The model range-gates the prompt itself.
             confidences = [None] * len(prompt_blobs)
 
-        packet_times_n: Shaped[ndarray, "n_packets"] = decoder_result[0]
-        decoder: VideoDecoder = decoder_result[3]
-        del decoder_result
-        packet_indices_n: Int64[ndarray, "n_chosen"] = match_exact_timestamps(packet_times_n, chosen_times_n)
+        packet_indices_n: Int64[ndarray, "n_chosen"] = match_exact_timestamps(decoder.index.times, chosen_times_n)
         return _WideSegment(
             quarter_turns=self._quarter_turns(segment_id),
             segment_seed=self._segment_seed(segment_id),
@@ -463,7 +449,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         for sample_index, (target_blob_bytes, prompt_blob_bytes, confidence, packet_index, time_ns) in enumerate(sample_inputs):
             started: float = perf_counter()
             try:
-                frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = prepared.decoder.get_frame_at(int(packet_index)).data
+                frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = prepared.decoder.get_frame_at(int(packet_index))
                 stats.video_decode += perf_counter() - started
             except BeartypeException:
                 raise

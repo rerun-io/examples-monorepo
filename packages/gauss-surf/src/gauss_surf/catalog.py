@@ -227,7 +227,6 @@ class SegmentReader:
         entity_path: str,
         timestamps_n: TimedeltaNs,
         *,
-        fps: float,
         device: torch.device,
     ) -> Iterator[UInt8[Tensor, "3 h w"]]:
         """Decode video frames at exact requested timestamps.
@@ -235,13 +234,12 @@ class SegmentReader:
         Args:
             entity_path: VideoStream entity to decode.
             timestamps_n: Requested ``timedelta64[ns]`` timestamps shaped ``n``.
-            fps: Nominal packet rate used by the decoder.
             device: Torch device that receives decoded frames.
 
         Yields:
             uint8 RGB frames shaped ``3 h w`` in requested timestamp order.
         """
-        decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(self.dataset, entity_path, TIMELINE, device, int(fps))
+        decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(self.dataset, entity_path, TIMELINE, device)
         timestamps_verified: bool = False
         for timestamp in timestamps_n:
             frame_chw: UInt8[Tensor, "3 h w"] | None = decoder.decode_at(timestamp, self.video_id)

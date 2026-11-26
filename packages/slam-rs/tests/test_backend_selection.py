@@ -4,15 +4,14 @@ import dataclasses
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fixture_types import RigFactory
+from simplecv.catalog_video_reader import select_decode_device
 
 from slam_rs import Lane, _core
 from slam_rs.apis import gate, replay, robocap_fleet, robocap_probe
-from slam_rs.catalog_feed import select_decode_device
 
 
 def _defaults(config_type: type) -> dict[str, object]:
@@ -65,67 +64,6 @@ def test_auto_and_gpu_agree_with_the_probe(rig: RigFactory) -> None:
     assert _core.gpu_backend == "wgpu"
     assert _core.select_backend("gpu") == "gpu"
     assert _core.Vio(rig(2), _core.VioConfig()).backend == "gpu", "the constructor's default is auto"
-
-
-@pytest.fixture
-def fresh_decode_policy(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Forget the cached NVDEC discovery and the printed notice for one test."""
-    import threading
-
-    from slam_rs import catalog_feed
-
-    discovery = catalog_feed.nvdec_unavailable_reason  # a test may replace it; clear the real cache
-    discovery.cache_clear()
-    monkeypatch.setattr(catalog_feed, "_CPU_DECODE_NOTICE", threading.Event())
-    yield
-    discovery.cache_clear()
-
-
-@pytest.mark.usefixtures("fresh_decode_policy")
-@pytest.mark.parametrize(
-    ("torch_present", "torchcodec_present", "cuda", "reason"),
-    [
-        (False, False, False, "no torch with torchcodec"),
-        (True, False, False, "no torch with torchcodec"),
-        (False, True, False, "no torch with torchcodec"),
-        (True, True, False, "torch sees no CUDA device"),
-        (True, True, True, None),
-    ],
-)
-def test_nvdec_discovery_covers_every_combination(
-    monkeypatch: pytest.MonkeyPatch, torch_present: bool, torchcodec_present: bool, cuda: bool, reason: str | None
-) -> None:
-    import sys
-    from types import SimpleNamespace
-
-    from slam_rs import catalog_feed
-
-    present: dict[str, bool] = {"torch": torch_present, "torchcodec": torchcodec_present}
-    monkeypatch.setattr(catalog_feed, "find_spec", lambda name: object() if present.get(name, True) else None)
-    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: cuda)))
-    found: str | None = catalog_feed.nvdec_unavailable_reason()
-    assert (found is None) == (reason is None) and (reason is None or reason in str(found))
-    if reason is None:
-        assert select_decode_device("auto") == "cuda"
-        assert select_decode_device("cuda") == "cuda"
-    else:
-        assert select_decode_device("auto") == "cpu"
-        with pytest.raises(ValueError, match="NVDEC decoding is unavailable"):
-            select_decode_device("cuda")
-    assert select_decode_device("cpu") == "cpu"
-
-
-@pytest.mark.usefixtures("fresh_decode_policy")
-def test_the_cpu_decoding_notice_is_printed_once_per_process(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    from slam_rs import catalog_feed
-
-    monkeypatch.setattr(catalog_feed, "nvdec_unavailable_reason", lambda: "no CUDA here")
-    assert select_decode_device() == select_decode_device("auto") == select_decode_device(requested="auto") == "cpu"
-    with ThreadPoolExecutor(8) as pool:
-        assert set(pool.map(lambda _: select_decode_device(), range(32))) == {"cpu"}
-    assert capsys.readouterr().out.count("decoding on the CPU") == 1
 
 
 def test_the_robocap_probe_routes_its_decoder_through_the_shared_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

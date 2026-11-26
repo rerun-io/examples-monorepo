@@ -52,7 +52,6 @@ from gauss_surf.contracts import (
     RIG_TRANSLATION_COLUMN,
     ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN,
     ULTRAWIDE_DEPTH_LAYER,
-    ULTRAWIDE_FPS,
     ULTRAWIDE_NORMALS_LAYER,
     ULTRAWIDE_QUATERNION_COLUMN,
     ULTRAWIDE_TRANSLATION_COLUMN,
@@ -312,7 +311,6 @@ def _process_and_write(
     decoded_frames: Iterator[UInt8[Tensor, "3 h w"]] = reader.decode_frames(
         VIDEO_ULTRAWIDE,
         inputs.timestamps,
-        fps=ULTRAWIDE_FPS,
         device=torch.device("cuda"),
     )
     coverage_fractions: list[float] = []
