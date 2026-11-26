@@ -83,14 +83,9 @@ class StreamPackets:
     keyframes: list[bool]
     """Keyframe flag per sample."""
 
-    @property
-    def nbytes(self) -> int:
-        """Encoded bytes of the samples."""
-        return sum(len(sample) for sample in self.samples)
-
-    def mp4(self, codec: CatalogCodecName, fps: int = MP4_FPS) -> bytes:
+    def mp4(self, codec: CatalogCodecName) -> bytes:
         """The samples muxed into an in-memory MP4 (one copy of the chunk's bytes), sample ``i`` at frame ``i``."""
-        return wrap_mp4(self.samples, self.keyframes, fps, codec=codec)
+        return wrap_mp4(self.samples, self.keyframes, MP4_FPS, codec=codec)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +179,7 @@ def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray
     Chunk ``k`` covers the time grid ``[t0 + k * chunk_ns, t0 + (k + 1) * chunk_ns)``, moved back per stream to the
     keyframe at or before each edge, so every chunk of a stream starts on a keyframe and the chunks partition it. The
     first chunk starts at sample 0 whatever it is; a chunk with no keyframe in its span is empty and the GOP stays
-    whole in an earlier chunk.
+    whole in an earlier chunk, so a stream's GOP length bounds its chunks from below.
 
     Args:
         streams: The streams' indexes.
@@ -192,6 +187,9 @@ def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray
 
     Returns:
         ``n_chunks + 1`` rows: row 0 is all zeros, the last row each stream's sample count.
+
+    Raises:
+        ValueError: If a stream has no keyframe: nothing of it decodes, and it would be one chunk of the whole session.
     """
     t0: int = min(int(stream.t_ns[0]) for stream in streams)
     t_end: int = max(int(stream.t_ns[-1]) for stream in streams)
@@ -200,12 +198,12 @@ def chunk_starts(streams: Sequence[StreamIndex], chunk_ns: int) -> Int64[ndarray
     columns: list[Int64[ndarray, " n_bounds"]] = []
     for stream in streams:
         keyframe_at: Int64[ndarray, " n_keyframes"] = np.flatnonzero(stream.keyframes).astype(np.int64)
-        # The last keyframe at or before each inner edge; 0 when none is.
+        if not len(keyframe_at):
+            raise ValueError(f"{stream.entity}: the stream has no keyframe, so none of it decodes")
+        # The last keyframe at or before each inner edge; sample 0 when none is (already increasing: keyframes are).
         position: Int64[ndarray, " n_inner"] = np.searchsorted(stream.t_ns[keyframe_at], edges, side="right") - 1
-        inner: Int64[ndarray, " n_inner"] = (
-            np.where(position >= 0, keyframe_at[np.maximum(position, 0)], 0) if len(keyframe_at) else np.zeros_like(edges)
-        )
-        columns.append(np.concatenate([[0], np.maximum.accumulate(inner) if len(inner) else inner, [len(stream.t_ns)]]).astype(np.int64))
+        inner: Int64[ndarray, " n_inner"] = np.where(position >= 0, keyframe_at[np.maximum(position, 0)], 0)
+        columns.append(np.concatenate([[0], inner, [len(stream.t_ns)]]).astype(np.int64))
     return np.stack(columns, axis=1)
 
 
@@ -317,12 +315,6 @@ class CatalogVideoReader:
                 _, evicted = self._cache.popitem(last=False)
                 self._cached_bytes -= evicted.nbytes
         return fetched
-
-    def clear(self) -> None:
-        """Drop every cached chunk."""
-        with self._lock:
-            self._cache.clear()
-            self._cached_bytes = 0
 
 
 def iter_chunks(reader: CatalogVideoReader, chunks: Sequence[int]) -> Iterator[VideoChunk]:
@@ -456,9 +448,13 @@ class ChunkedVideoDecoder:
         for chunk in np.unique(chunk_of).tolist():
             local: list[int] = (unique[chunk_of == chunk] - int(self.reader.starts[chunk, self.stream])).tolist()
             parts.append(self._decoder(int(chunk)).get_frames_at(local).data)
-        frames: Tensor = torch.cat(parts) if parts else torch.empty((0, 3, 0, 0), dtype=torch.uint8, device=self.device)
-        order: Tensor = torch.from_numpy(np.searchsorted(unique, wanted)).to(frames.device)
-        return frames if np.array_equal(unique, wanted) else frames[order]
+        if not parts:
+            return torch.empty((0, 3, 0, 0), dtype=torch.uint8, device=self.device)
+        # A sorted request within one chunk (colsfm's usual one) is the decoder's own batch: no copy, no reorder.
+        frames: Tensor = parts[0] if len(parts) == 1 else torch.cat(parts)
+        if np.array_equal(unique, wanted):
+            return frames
+        return frames[torch.from_numpy(np.searchsorted(unique, wanted)).to(frames.device)]
 
     def close(self) -> None:
         """Close every chunk decoder."""

@@ -22,6 +22,7 @@ from simplecv.catalog_video_reader import (  # noqa: E402
     SharedChunks,
     StreamIndex,
     VideoChunk,
+    chunk_starts,
     iter_chunks,
     read_video_index,
 )
@@ -234,3 +235,10 @@ def test_a_sequence_timeline_is_refused(tmp_path: Path) -> None:
         rec.log("/cam/video", rr.VideoStream.from_fields(sample=b"x", is_keyframe=True))
     with rr.server.Server(datasets={"test": [path]}) as running, pytest.raises(ValueError, match="seconds"):
         read_video_index(running.client().get_dataset("test"), "segment", ["/cam/video"], "frame")
+
+
+def test_a_stream_without_keyframes_is_refused_rather_than_read_whole() -> None:
+    times = np.arange(5, dtype=np.int64).astype("timedelta64[ns]")
+    flagless = StreamIndex(entity="/cam/video", times=times, keyframes=np.zeros(5, dtype=bool), codec="h264")
+    with pytest.raises(ValueError, match="/cam/video: the stream has no keyframe"):
+        chunk_starts([flagless], chunk_ns=2)

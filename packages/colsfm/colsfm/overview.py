@@ -25,8 +25,8 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from simplecv.catalog_video import CatalogVideo, read_catalog_videos
 from simplecv.catalog_video_codec import video_codec
+from simplecv.catalog_video_reader import CatalogVideoReader, StreamIndex, iter_chunks, read_video_index
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, reconstruction_metrics
 from colsfm.catalog import CatalogCameraModel, CatalogTrajectory
@@ -195,9 +195,9 @@ def log_overview(
         recording=recording,
     )
     refined_by_name = {camera.sensor_name: camera for camera in artifacts.frames_meta.cameras.values()}
-    videos: tuple[CatalogVideo, ...] = read_catalog_videos(dataset, segment, [f"{camera.entity}/pinhole/video" for camera in cameras], timeline)
-    for camera, video in zip(cameras, videos, strict=True):
-        entity: str = f"{rig_entity}/{camera.name}"
+    entities: list[str] = [f"{rig_entity}/{camera.name}" for camera in cameras]
+    index: tuple[StreamIndex, ...] = read_video_index(dataset, segment, [f"{camera.entity}/pinhole/video" for camera in cameras], timeline)
+    for camera, entity, stream in zip(cameras, entities, index, strict=True):
         refined = refined_by_name.get(camera.name)
         rig_T_cam: Float64[ndarray, "3 4"] = refined.vehicle_T_cam.matrix() if refined is not None else camera.rig_T_cam[:3, :]
         rr.log(entity, rr.Transform3D(translation=rig_T_cam[:, 3], mat3x3=rig_T_cam[:, :3]), static=True, recording=recording)
@@ -213,13 +213,20 @@ def log_overview(
             static=True,
             recording=recording,
         )
-        rr.log(f"{entity}/pinhole/video", rr.VideoStream(codec=video_codec(video.codec)), static=True, recording=recording)
-        rr.send_columns(
-            f"{entity}/pinhole/video",
-            indexes=[rr.TimeColumn(timeline, duration=video.t_ns.astype("timedelta64[ns]"))],
-            columns=rr.VideoStream.columns(sample=list(video.samples), is_keyframe=list(video.keyframes)),
-            recording=recording,
-        )
+        rr.log(f"{entity}/pinhole/video", rr.VideoStream(codec=video_codec(stream.codec)), static=True, recording=recording)
+    # The source video, relayed (never decoded) a chunk of every camera at a time: memory is a few chunks, not the session.
+    reader: CatalogVideoReader = CatalogVideoReader(dataset, segment, index, timeline)
+    for chunk in iter_chunks(reader, range(reader.num_chunks)):
+        for entity, stream, packets in zip(entities, index, chunk.streams, strict=True):
+            if packets.samples:
+                rr.send_columns(
+                    f"{entity}/pinhole/video",
+                    indexes=[
+                        rr.TimeColumn(timeline, duration=stream.t_ns[packets.first : packets.first + len(packets.samples)].astype("timedelta64[ns]"))
+                    ],
+                    columns=rr.VideoStream.columns(sample=packets.samples, is_keyframe=packets.keyframes),
+                    recording=recording,
+                )
 
     numbers: OverviewNumbers = OverviewNumbers(
         input_error=input_error,

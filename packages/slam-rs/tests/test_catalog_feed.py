@@ -28,7 +28,6 @@ from slam_rs.catalog_feed import (
     RigProfile,
     SegmentFeed,
     _rig_trajectory,
-    _shared_codec,
     _static_int,
     _static_string,
     _static_values,
@@ -248,17 +247,6 @@ def test_a_malformed_rig_reference_is_named_as_malformed_not_as_missing(statics:
     with pytest.raises(ValueError, match=message) as error:
         check_imu_is_rig_frame(statics, "seg")
     assert str(error.value).startswith("seg: ") and "names no reference sensor" not in str(error.value)
-
-
-def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
-    """One index carries one codec, so a mixed rig must say which two cameras differ.
-
-    Every current rig is uniform (MSD is AV1, RoboCap H.264), so the muxer would
-    otherwise write the last camera's codec over every camera's samples.
-    """
-    assert _shared_codec([(0, "av1"), (2, "av1")], SMOKE_SEGMENT) == "av1"
-    with pytest.raises(ValueError, match="cam_02 is h264 where cam_00 is av1"):
-        _shared_codec([(0, "av1"), (2, "h264")], SMOKE_SEGMENT)
 
 
 def _transform_rows(t_ns: list[int], translations: list[list[float] | None], quaternions: list[list[float] | None]) -> pa.Table:

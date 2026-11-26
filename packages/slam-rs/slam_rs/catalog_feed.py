@@ -529,10 +529,6 @@ class _VideoIndex:
     """Frameset timestamps on ``video_time``: the median of the frames in each one."""
     frame_index: Int64[ndarray, "n_framesets n_cameras"]
     """Which frame of each fed camera belongs to each frameset, non-decreasing down each column."""
-    camera_t_ns: tuple[Int64[ndarray, " n_frames"], ...]
-    """Every fed camera's own frame timestamps, in the order they are fed."""
-    codec: CatalogCodecName
-    """Codec of the elementary stream."""
     fps: int
     """Nominal frame rate, rounded from the timestamps."""
 
@@ -730,7 +726,8 @@ class SegmentFeed:
         )
         shared: SharedChunks = SharedChunks(self.video, chunks)
         decoders: list[Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]] = [
-            self._camera_frames(shared.stream(position), camera, first_frames[position]) for position, camera in enumerate(self.cameras)
+            self._camera_frames(shared.stream(position), self.video.streams[position].codec, camera, first_frames[position])
+            for position, camera in enumerate(self.cameras)
         ]
         cursor: list[int] = [frame - 1 for frame in first_frames]
         # One selected frame and one decode cursor per camera: a
@@ -749,7 +746,7 @@ class SegmentFeed:
                 )
             window_gt: Trajectory = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
             camera_frames: list[Int64[ndarray, " n_window"]] = [
-                self.index.camera_t_ns[position][self.index.frame_index[start:stop, position]] for position in range(len(self.cameras))
+                self.video.streams[position].t_ns[self.index.frame_index[start:stop, position]] for position in range(len(self.cameras))
             ]
             for frameset_index in range(start, stop):
                 images: list[UInt8[ndarray, "h w"]] = []
@@ -805,7 +802,7 @@ class SegmentFeed:
         return decode_gray(payload, self.profile.downscale, self.profile.decode_threads, self.color_downscale)
 
     def _camera_frames(
-        self, chunks: Iterator[StreamPackets], camera: CameraCalib, first_frame: int
+        self, chunks: Iterator[StreamPackets], codec: CatalogCodecName, camera: CameraCalib, first_frame: int
     ) -> Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]:
         """One fed camera's frames from ``first_frame`` on, a decoder per chunk; each chunk starts on a keyframe, so
         chunk after chunk gives the frames of one decoder over the whole stream."""
@@ -813,7 +810,7 @@ class SegmentFeed:
             if not packets.samples:
                 continue
             frame: int = packets.first
-            for pair in self._open_decoder(packets.mp4(self.index.codec, self.index.fps), camera):
+            for pair in self._open_decoder(packets.mp4(codec), camera):
                 if frame >= first_frame:
                     yield pair
                 frame += 1
@@ -833,41 +830,11 @@ def _window_bounds(t_ns: Int64[ndarray, " n_framesets"], window_ns: int) -> list
     return bounds
 
 
-def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id: str) -> CatalogCodecName:
-    """The one codec every fed camera's stream is in.
-
-    :attr:`_VideoIndex.codec` names the codec :meth:`SegmentFeed._camera_frames`
-    muxes *every* camera's samples under, so a rig whose cameras disagree cannot
-    be decoded from one index and has to name the two that differ rather than
-    silently decode three of four streams as the fourth.
-
-    Args:
-        per_camera: ``(camera_index, codec)`` in feed order, at least one entry.
-        segment_id: Segment the cameras belong to, for the error.
-
-    Returns:
-        The codec the sample wrapper needs.
-
-    Raises:
-        ValueError: If two fed cameras carry different codecs.
-    """
-    first_camera, codec = per_camera[0]
-    for camera_index, other in per_camera[1:]:
-        if other != codec:
-            raise ValueError(
-                f"{segment_id}: cam_{camera_index:02d} is {other} where cam_{first_camera:02d} is {codec}; "
-                f"one video index carries one codec for every camera"
-            )
-    return codec
-
-
 def _read_video_index(streams: Sequence[StreamIndex], segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
-    """Frameset timing, per-camera frames and codec, from the fed cameras' blob-free indexes (feed order)."""
-    per_camera_times: list[Int64[ndarray, " n_frames"]] = [stream.t_ns for stream in streams]
-    per_camera_codec: list[tuple[int, CatalogCodecName]] = [(camera, stream.codec) for camera, stream in zip(camera_positions, streams, strict=True)]
-    if not per_camera_codec:
+    """Frameset timing and per-camera frames, from the fed cameras' blob-free indexes (feed order)."""
+    if not streams:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
-    codec: CatalogCodecName = _shared_codec(per_camera_codec, segment_id)
+    per_camera_times: list[Int64[ndarray, " n_frames"]] = [stream.t_ns for stream in streams]
     if tolerance_ns == 0:
         # MSD is hardware-synced: a frameset is "all cameras at the same
         # video_time", and the identity table is what a matcher would return.
@@ -889,8 +856,6 @@ def _read_video_index(streams: Sequence[StreamIndex], segment_id: str, camera_po
     return _VideoIndex(
         t_ns=frameset_t_ns,
         frame_index=frame_index,
-        camera_t_ns=tuple(per_camera_times),
-        codec=codec,
         fps=fps,
     )
 

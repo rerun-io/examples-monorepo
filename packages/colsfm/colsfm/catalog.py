@@ -677,7 +677,7 @@ def view_rig_source(
     (`<camera>/pinhole/video_view`, dataforge's Insta360 `cube_view` layer); None otherwise.
 
     The viewing frames are the stamps of the first camera's viewing stream (the layer gives every face the same ones),
-    read without its samples.
+    read without its samples (`read_video_index`).
     """
     streams: set[str] = {
         component.entity_path
@@ -687,13 +687,5 @@ def view_rig_source(
     views: dict[str, str] = {f"/{camera.entity.strip('/')}/pinhole/video": f"/{camera.entity.strip('/')}/pinhole/video_view" for camera in cameras}
     if not views or any(view not in streams for view in views.values()):
         return None
-    first: str = next(iter(views.values()))
-    table: pa.Table = (
-        dataset.filter_segments(config.segment)
-        .filter_contents([first])
-        .reader(index=config.timeline)
-        .select(config.timeline, f"{first}:VideoStream:is_keyframe")
-        .to_arrow_table()
-    )
-    view_t_ns: Int64[ndarray, " m"] = np.unique(table[config.timeline].combine_chunks().to_numpy(zero_copy_only=False).view(np.int64))
+    view_t_ns: Int64[ndarray, " m"] = read_video_index(dataset, config.segment, [next(iter(views.values()))], config.timeline)[0].t_ns
     return ViewRigSource(prior_t_ns=prior.t_ns, world_T_prior=prior.world_T_rig(), view_t_ns=view_t_ns, view_entities=views)
