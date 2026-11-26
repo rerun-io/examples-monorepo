@@ -294,14 +294,14 @@ def test_discover_exo_camera_streams_uses_sorted_video_stream_fields() -> None:
     ]
 
 
-def test_discover_exo_camera_streams_fails_loudly_for_asset_video_only() -> None:
+def test_discover_exo_camera_streams_fails_loudly_without_a_video_stream() -> None:
     schema: _Schema = _Schema(
         [
-            _Descriptor("/world/exo/C10095/pinhole/video", "rerun.archetypes.AssetVideo:blob"),
+            _Descriptor("/world/exo/C10095/pinhole", "rerun.archetypes.Pinhole:image_from_camera"),
         ]
     )
 
-    with pytest.raises(ValueError, match="AssetVideo.*VideoStream:sample"):
+    with pytest.raises(ValueError, match="No exo VideoStream:sample fields"):
         discover_exo_camera_streams(schema)
 
 

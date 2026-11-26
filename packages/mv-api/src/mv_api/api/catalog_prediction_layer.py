@@ -320,12 +320,8 @@ def discover_exo_camera_streams(schema: SchemaLike) -> list[ExoCameraStream]:
     """
     components: list[CatalogComponent] = catalog_components(schema)
     streams_by_entity: dict[str, ExoCameraStream] = {}
-    asset_video_entities: list[str] = []
     for item in components:
         if not item.entity_path.startswith("/world/exo/"):
-            continue
-        if item.archetype == "AssetVideo" and item.field == "blob":
-            asset_video_entities.append(item.entity_path)
             continue
         if item.archetype != "VideoStream" or item.field != "sample":
             continue
@@ -352,11 +348,6 @@ def discover_exo_camera_streams(schema: SchemaLike) -> list[ExoCameraStream]:
 
     streams: list[ExoCameraStream] = sorted(streams_by_entity.values(), key=lambda stream: stream.name)
     if not streams:
-        if asset_video_entities:
-            raise ValueError(
-                "Found exo AssetVideo:blob fields but v1 requires VideoStream:sample fields: "
-                f"{sorted(asset_video_entities)}"
-            )
         raise ValueError("No exo VideoStream:sample fields were found in the catalog schema.")
     return streams
 

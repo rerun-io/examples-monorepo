@@ -192,8 +192,8 @@ def set_annotation_context(*, recording: rr.RecordingStream | None) -> None:
 def timestamp_to_frame_index(time_ns: int, frame_timestamps_ns: Int[ndarray, "num_frames"]) -> int:
     """Map a timestamp (ns) to the closest frame idx at-or-before that time.
 
-    The mapping mirrors how VideoFrameReference columns are generated from
-    AssetVideo.read_frame_timestamps_nanos().
+    The mapping mirrors how VideoFrameReference columns are generated from the
+    video's frame timestamps.
     """
 
     idx: int = int(np.searchsorted(frame_timestamps_ns, time_ns, side="right") - 1)
