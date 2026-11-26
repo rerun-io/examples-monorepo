@@ -14,7 +14,7 @@ Open4DGS in the monorepo: 4D Gaussian people trained from Rerun catalog segments
 `open4dgs` (prod: training runs and timings) and `open4dgs-dev` (tests, lint, typecheck), linux-64 and linux-aarch64:
 gsplat is the ai-demos 1.5.3 build (CUDA 13, torch 2.12, sm_86 + sm_120) on linux-64 and 1.6.0 on linux-aarch64 (no
 1.5.3 build exists there; the Spark passed a smoke test, no held-out band check). Both carry the Rerun catalog
-lane (rerun-sdk 0.42 with the catalog and dataloader extras), simplecv, torchcodec and monopriors.
+lane (rerun-sdk 0.44 with the catalog and dataloader extras), simplecv, torchcodec and monopriors.
 
 ```bash
 pixi install -e open4dgs-dev

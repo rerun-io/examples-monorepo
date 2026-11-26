@@ -43,10 +43,10 @@ one-view recording that `gsplat probe` measures.
 
 `gsplat-rust-renderer-web` builds the custom viewer for the browser in the layout of a stock
 Rerun web viewer directory (app files plus `npm/`), so it can be served beside it as
-`/rerun-viewer/0.42.0-gsplat/`:
+`/rerun-viewer/0.44.0-gsplat/`:
 
 ```bash
-pixi run -e gsplat-rust-renderer-web gsplat-web-build <stock 0.42.0 viewer dir> <out dir>
+pixi run -e gsplat-rust-renderer-web gsplat-web-build <stock 0.44.0 viewer dir> <out dir>
 ```
 
 The compute renderer needs WebGPU subgroups (Chrome or Edge 134+); without them the

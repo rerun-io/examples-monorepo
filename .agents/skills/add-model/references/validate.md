@@ -8,7 +8,7 @@ A phase is not done until its gate passes. Report failures as failures.
 - Rerun demo screenshot: rig frusta with images, depth/cloud in the 3D view, no red error badges.
 - No display: the producer saves `.rrd`s (`mkdir -p out && python -u demo_rerun.py --rr-config.headless --rr-config.save out/<scene>.rrd`
   — `RerunTyroConfig` opens the sink in `__post_init__`, so the directory must exist), then takes the screenshot from a headless
-  viewer (`ViewerClient.spawn(headless=True)` or `rerun --headless` + `rerun viewer-mcp`), or the reviewer does; reviewer
+  viewer (`ViewerClient.spawn(headless=True)` or `rerun --headless` + `rerun mcp`), or the reviewer does; reviewer
   evidence lives in `/tmp/rerun-viewer-validation/<date>-<model>/`.
 - In-script metric equals upstream eval on the same sample (or is recorded as baseline when upstream has none).
 

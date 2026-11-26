@@ -1,12 +1,12 @@
 # depth-video-viewer
 
-A Rerun 0.42 viewer that shows depth stored as AV1 10-bit monochrome lossless video (`DepthVideoStream`) in the
+A Rerun 0.44 viewer that shows depth stored as AV1 10-bit monochrome lossless video (`DepthVideoStream`) in the
 built-in 2D and 3D spatial views. In 2D the depth is a colormapped image; under a `Pinhole` in 3D it is a depth cloud,
 exactly as for `DepthImage`/`EncodedDepthImage`.
 
-It is an out-of-tree extension, like `gsplat-rust-renderer`'s viewer: published `=0.42.0` crates from crates.io,
-no Rerun fork, no `[patch]`. It adds one visualizer to `Spatial2DView` and `Spatial3DView` through
-`App::extend_view_class`.
+It is an out-of-tree extension, like `gsplat-rust-renderer`'s viewer: Rerun's crates at git tag `0.44.0` (not on
+crates.io) with a `[patch.crates-io]` for its unreleased egui, no Rerun fork. It adds one visualizer to
+`Spatial2DView` and `Spatial3DView` through `App::extend_view_class`.
 
 The Rust archetype, decoder and visualizer and the Python `log.py` are out-of-tree scaffolding for checking depth as
 video end to end. They are deleted once `DepthVideoStream` ships in Rerun; the encoder settings, the comparison tool
