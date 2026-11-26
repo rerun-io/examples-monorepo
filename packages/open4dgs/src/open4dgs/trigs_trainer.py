@@ -15,7 +15,8 @@ in ``_rasterize_inputs``). The logic lives here, one section per lever:
 
 Renders equal the per-camera path bit for bit; parameter gradients differ only in float summation order.
 
-Four opt-in levers from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918):
+Three levers from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918), off in the constructor (``TrainConfig`` turns
+them on):
 
 4. Strided pixel sampling (``pixel_stride``, PennyGS 3.4): each shared-time step renders one pixel of every 2x2 block, the
    same offset for every camera, cycling through the four offsets so every pixel is supervised once every four steps. The
@@ -35,7 +36,7 @@ backpropagates into a zero tensor of the whole batch) and the row gather is ``in
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import torch
 from torch import Tensor, nn
@@ -83,6 +84,16 @@ RenderOut = tuple[Tensor, Tensor, Tensor, dict]
 """What ``TrigsTrainer._render`` returns: colors, alphas, gamma over all rows, info."""
 
 
+class SizeBatch(NamedTuple):
+    """One batched rasterize call of a shared-time step, its outputs unbound per camera."""
+
+    colors: tuple[Tensor, ...]
+    alphas: tuple[Tensor, ...]
+    depths: tuple[Tensor, ...] | None
+    gamma: Tensor
+    info: dict
+
+
 class SharedTimeGroup:
     """The cameras of one train step that render at one time: shared inputs once, per-camera or per-size batched rasterize.
 
@@ -117,8 +128,7 @@ class SharedTimeGroup:
             self._leaves["raster_kwargs"] = {"eps2d": GSPLAT_EPS2D / STRIDE**2}
         self._last_info: dict | None = None
         self._loss: Tensor | None = None
-        self._batches: list[RenderOut] = []
-        self._camera_views: list[tuple[tuple[Tensor, ...], tuple[Tensor, ...], tuple[Tensor, ...] | None, Tensor, dict]] = []
+        self._batches: list[SizeBatch] = []
         self._batch_of: dict[int, tuple[int, int]] = {}
         if batch_cameras:
             by_size: dict[tuple[int, int], list[int]] = {}
@@ -128,13 +138,11 @@ class SharedTimeGroup:
                 for j, group_i in enumerate(members):
                     self._batch_of[group_i] = (len(self._batches), j)
                 cams = [self._cam_group[g] for g in members]
-                self._batches.append(trainer._rasterize_inputs(params, self._leaves, self._cameras, cams, config))
-            # One unbind per output, not a slice per camera: a slice's backward fills a zero tensor of the WHOLE batch and
-            # the cameras' gradients are then summed; unbind's backward stacks the cameras' gradients once.
-            self._camera_views = [
-                (colors.unbind(0), alphas.unbind(0), info["render_depth"].unbind(0) if "render_depth" in info else None, gamma, info)
-                for colors, alphas, gamma, info in self._batches
-            ]
+                colors, alphas, gamma, info = trainer._rasterize_inputs(params, self._leaves, self._cameras, cams, config)
+                # One unbind per output, not a slice per camera: a slice's backward fills a zero tensor of the WHOLE batch
+                # and the cameras' gradients are then summed; unbind's backward stacks the cameras' gradients once.
+                depths = info["render_depth"].unbind(0) if "render_depth" in info else None
+                self._batches.append(SizeBatch(colors.unbind(0), alphas.unbind(0), depths, gamma, info))
 
     def render(self, group_i: int) -> RenderOut:
         """Camera ``cam_group[group_i]``'s render: its slice of the size batch, or its own rasterize call."""
@@ -144,7 +152,7 @@ class SharedTimeGroup:
             self._last_info = out[3]
             return out
         b, j = self._batch_of[group_i]
-        colors, alphas, depths, gamma, info = self._camera_views[b]
+        colors, alphas, depths, gamma, info = self._batches[b]
         cam_info: dict = {**info, "stride_offset": self._trainer.stride_state.offset}
         if depths is not None:
             cam_info["render_depth"] = depths[j][None]
@@ -164,12 +172,12 @@ class SharedTimeGroup:
         if self._loss is not None and self._loss.requires_grad:
             self._loss.backward()
         for batch in self._batches:
-            relocation.accumulate_2d(reloc_state, batch[3], batch_size=n_group)
+            relocation.accumulate_2d(reloc_state, batch.info, batch_size=n_group)
         outs = [self._outputs[k] for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         grads = [self._leaves[k].grad for k in RENDER_INPUT_KEYS if self._leaves[k].grad is not None and self._outputs[k].requires_grad]
         if outs:
             torch.autograd.backward(outs, grads)
-        self._batches, self._camera_views, self._loss, self._outputs, self._leaves = [], [], None, {}, {}
+        self._batches, self._loss, self._outputs, self._leaves = [], None, {}, {}
         self._trainer.stride_state.offset = None
 
 
@@ -178,18 +186,18 @@ class SharedTimeGroup:
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-def strided_camera_config(cameras: CameraConfig, offset: tuple[int, int], stride: int = STRIDE) -> CameraConfig:
-    """``cameras`` rendering only full-size pixels ``(offset[0] + stride * i, offset[1] + stride * j)``.
+def strided_camera_config(cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
+    """``cameras`` rendering only full-size pixels ``(offset[0] + STRIDE * i, offset[1] + STRIDE * j)``.
 
-    gsplat samples pixel q at q + 0.5: the strided pixel q is full-size pixel p = stride * q + o, at p + 0.5, so
-    ``f' = f / stride`` and ``c' = (c - o - 0.5) / stride + 0.5``. Sizes are the number of full-size pixels sampled.
-    Rasterize with ``eps2d = GSPLAT_EPS2D / stride**2`` to keep the full-size dilation.
+    gsplat samples pixel q at q + 0.5: the strided pixel q is full-size pixel p = STRIDE * q + o, at p + 0.5, so
+    ``f' = f / STRIDE`` and ``c' = (c - o - 0.5) / STRIDE + 0.5``. Sizes are the number of full-size pixels sampled.
+    Rasterize with ``eps2d = GSPLAT_EPS2D / STRIDE**2`` to keep the full-size dilation.
     """
     oy, ox = offset
-    Ks: Tensor = strided_intrinsics(cameras.Ks, offset, stride)
+    Ks: Tensor = strided_intrinsics(cameras.Ks, offset)
     n: int = int(Ks.shape[0])
-    widths: list[int] = [len(range(ox, cameras.width_for(c), stride)) for c in range(n)]
-    heights: list[int] = [len(range(oy, cameras.height_for(c), stride)) for c in range(n)]
+    widths: list[int] = [len(range(ox, cameras.width_for(c), STRIDE)) for c in range(n)]
+    heights: list[int] = [len(range(oy, cameras.height_for(c), STRIDE)) for c in range(n)]
     return HostSizedCameraConfig.from_matrices(viewmats=cameras.viewmats, Ks=Ks, widths=widths, heights=heights)
 
 
@@ -217,7 +225,7 @@ class Open4dgsTrainer(TrigsTrainer):
         self,
         *args: object,
         batch_cameras: bool = True,
-        pixel_stride: int = 1,
+        pixel_stride: Literal[1, 2] = 1,
         adam_moments: Literal["fp32", "bf16"] = "fp32",
         fused_loss: bool = False,
         **kwargs: object,
@@ -226,13 +234,13 @@ class Open4dgsTrainer(TrigsTrainer):
         if pixel_stride not in (1, STRIDE):
             raise ValueError(f"pixel_stride must be 1 or {STRIDE}, got {pixel_stride}")
         self.batch_cameras = batch_cameras
-        self.pixel_stride: int = pixel_stride
+        self.pixel_stride: Literal[1, 2] = pixel_stride
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
-        self.fused_loss: bool = fused_loss
-        # dynamic=True: one compile for every image size (ROI cameras each have their own size; per-size compiles hit
-        # dynamo's recompile limit and fall back to eager).
+        # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
+        # per-size compiles hit dynamo's recompile limit and fall back to eager).
         self._compiled_terms = torch.compile(masked_composite_terms, dynamic=True) if fused_loss else None
         self.stride_state: StrideState = StrideState()
+        self._strided_of: CameraConfig | None = None
         self._strided: dict[tuple[int, int], CameraConfig] = {}
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
 
@@ -253,7 +261,9 @@ class Open4dgsTrainer(TrigsTrainer):
         }
 
     def strided_cameras(self, cameras: CameraConfig, offset: tuple[int, int]) -> CameraConfig:
-        """Lever 4: ``strided_camera_config(cameras, offset)``, built once per offset (the run's cameras do not change)."""
+        """Lever 4: ``strided_camera_config(cameras, offset)``, built once per offset of one ``cameras`` object."""
+        if cameras is not self._strided_of:
+            self._strided_of, self._strided = cameras, {}
         out = self._strided.get(offset)
         if out is None:
             out = self._strided[offset] = strided_camera_config(cameras, offset)
@@ -271,12 +281,13 @@ class Open4dgsTrainer(TrigsTrainer):
         config: TrigsTrainingConfig,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Lever 6: the fused masked-composite loss when the configuration is the one it reproduces, else TRiGS's."""
+        compiled_terms = self._compiled_terms
         if not (
-            self.fused_loss
+            compiled_terms is not None
             and config.masked_rgb_loss
             and config.masked_rgb_composite
             and not config.masked_rgb_random_bg
-            and getattr(config, "clamp_render_for_loss", True)
+            and config.clamp_render_for_loss
             and "cam_gain" not in params
             and gt_alphas_per_frame is not None
         ):
@@ -286,8 +297,7 @@ class Open4dgsTrainer(TrigsTrainer):
         if mask.ndim != 2 or alpha.shape[-1] != 1 or tuple(mask.shape) != tuple(render_colors.shape[1:3]):
             return super()._photometric_losses(params, render_colors, render_alphas, gt_rgb, gt_alphas_per_frame, frame_idx, cam_idx, config)
         bg: Tensor = self._const_tensor(tuple(config.masked_rgb_bg_color), render_colors.device, render_colors.dtype)
-        assert self._compiled_terms is not None
-        l1, pred_l, gt_l, alpha_out, alpha_mask = self._compiled_terms(render_colors[0], alpha, gt_rgb, mask, bg, float(config.alpha_loss_eps))
+        l1, pred_l, gt_l, alpha_out, alpha_mask = compiled_terms(render_colors[0], alpha, gt_rgb, mask, bg, float(config.alpha_loss_eps))
         from hexels_mojo.fused_ssim import fused_ssim
 
         ssim: Tensor = fused_ssim(pred_l.permute(2, 0, 1)[None], gt_l.permute(2, 0, 1)[None], padding="valid")

@@ -26,14 +26,14 @@ class StrideState:
     offset: tuple[int, int] | None = None
 
 
-def strided_intrinsics(Ks: Float32[Tensor, "c 3 3"], offset: tuple[int, int], stride: int = STRIDE) -> Float32[Tensor, "c 3 3"]:
-    """Intrinsics whose pixel q is full-size pixel ``stride * q + offset`` (see ``strided_camera_config``)."""
+def strided_intrinsics(Ks: Float32[Tensor, "c 3 3"], offset: tuple[int, int]) -> Float32[Tensor, "c 3 3"]:
+    """Intrinsics whose pixel q is full-size pixel ``STRIDE * q + offset`` (see ``strided_camera_config``)."""
     oy, ox = offset
     out: Tensor = Ks.clone()
-    out[:, 0, 0] /= stride
-    out[:, 1, 1] /= stride
-    out[:, 0, 2] = (out[:, 0, 2] - ox - 0.5) / stride + 0.5
-    out[:, 1, 2] = (out[:, 1, 2] - oy - 0.5) / stride + 0.5
+    out[:, 0, 0] /= STRIDE
+    out[:, 1, 1] /= STRIDE
+    out[:, 0, 2] = (out[:, 0, 2] - ox - 0.5) / STRIDE + 0.5
+    out[:, 1, 2] = (out[:, 1, 2] - oy - 0.5) / STRIDE + 0.5
     return out
 
 
