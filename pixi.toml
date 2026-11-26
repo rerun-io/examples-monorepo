@@ -1330,69 +1330,6 @@ env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Track people with LAMP in a four-camera Robocap catalog segment"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# robocap-slam
-# ═══════════════════════════════════════════════════════════════════════════
-# Explicit platforms: libcublas can never solve on osx-arm64; omitting the list
-# would abort every workspace lock write (see AGENTS.md "Platforms & lockfile").
-[feature.robocap-slam]
-platforms = ["linux-64", "linux-aarch64"]
-
-[feature.robocap-slam.dependencies]
-python = "3.12.*"
-pyyaml = "*"
-cuda-version = "13.*"
-libcublas = "*"
-libcusolver = "*"
-libstdcxx-ng = ">=14.2"
-pyarrow = ">=20.0.0,<21"
-# CPU torch only satisfies simplecv's module-load import; cuVSLAM brings its
-# own cu13 wheel and never executes torch.
-pytorch-cpu = ">=2.8.0"
-
-[feature.robocap-slam.pypi-dependencies]
-robocap-slam = { path = "packages/robocap-slam", editable = true }
-tyro = ">=0.9,<1"
-
-[feature.robocap-slam.target.linux-64.pypi-dependencies]
-cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_x86_64.whl" }
-
-[feature.robocap-slam.target.linux-aarch64.pypi-dependencies]
-cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_aarch64.whl" }
-
-[feature.robocap-slam.activation.env]
-PACKAGE_DIR = "packages/robocap-slam"
-LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-
-[feature.robocap-slam.tasks.robocap-slam-download-example]
-cmd = """test -d data/robocap/f408193e6447b3b0_session_14 || hf download pablovela5620/robocap-example --repo-type dataset --local-dir data/robocap"""
-cwd = "packages/robocap-slam"
-outputs = ["packages/robocap-slam/data/robocap/f408193e6447b3b0_session_14"]
-description = "Download example Robocap dataset from HuggingFace"
-
-[feature.robocap-slam.tasks.robocap-slam-track]
-cmd = "python tools/track_odometry.py"
-cwd = "packages/robocap-slam"
-depends-on = ["robocap-slam-download-example"]
-description = "Run multicamera visual odometry on Robocap data"
-
-[feature.robocap-slam.tasks.robocap-slam-track-slam]
-cmd = "python tools/track_slam.py"
-cwd = "packages/robocap-slam"
-depends-on = ["robocap-slam-download-example"]
-description = "Run multicamera visual SLAM on Robocap data"
-
-[feature.robocap-slam.tasks.robocap-slam-track-candidate]
-cmd = "python tools/track_odometry.py --rr-config.save /tmp/robocap_cuvslam_15_candidate.rrd --rr-config.headless --no-auto-orient --max-frames 30 --no-log-videos"
-cwd = "packages/robocap-slam"
-depends-on = ["robocap-slam-download-example"]
-description = "Run a bounded Robocap odometry smoke and save the migrated cuVSLAM candidate RRD"
-
-[feature.robocap-slam.tasks.robocap-slam-compare-reference]
-cmd = "python tools/compare_rrd_reference.py --reference-rrd /tmp/robocap_cuvslam_0_2_0_baseline.rrd --candidate-rrd /tmp/robocap_cuvslam_15_candidate.rrd --index video_time --max-rows 30 --rtol 0.01 --atol 0.25"
-cwd = "packages/robocap-slam"
-description = "Compare migrated Robocap pose output against the saved cuVSLAM 0.2.0 baseline"
-
-# ═══════════════════════════════════════════════════════════════════════════
 # pysfm
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.pysfm]
@@ -4739,17 +4676,6 @@ lamp-catalog-dev = { features = [
     "torchcodec",
     "ffmpeg",
 ], solve-group = "lamp-catalog", no-default-feature = true }
-robocap-slam = { features = [
-    "common",
-    "robocap-slam",
-    "ffmpeg",
-], solve-group = "robocap-slam", no-default-feature = true }
-robocap-slam-dev = { features = [
-    "common",
-    "robocap-slam",
-    "dev",
-    "ffmpeg",
-], solve-group = "robocap-slam", no-default-feature = true }
 # pysfm runs on the conda CPU pycolmap build — see the feature.pysfm note.
 pysfm = { features = [
     "common",

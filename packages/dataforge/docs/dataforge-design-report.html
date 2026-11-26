@@ -160,7 +160,7 @@ svg .mono{font-family:var(--mono)}
   <h2>The decisions, first</h2>
   <p class="sub">Settled in the interview. Hover a card for the fine print.</p>
   <ol class="decisions">
-    <li data-tip="egoexo-forge dies. simplecv-exoego and arkitscenes-download migrate in later, one at a time. robocap-slam stays untouched for now."><b>One package: <code>packages/dataforge/</code></b> Future home for all dataset work. v1 ports exactly two simplecv datasets: <strong>robocap</strong> + <strong>HOCap</strong>.</li>
+    <li data-tip="egoexo-forge dies. simplecv-exoego and arkitscenes-download migrate in later, one at a time. robocap-slam was deleted on 2026-11-26 (slam-rs replaces it)."><b>One package: <code>packages/dataforge/</code></b> Future home for all dataset work. v1 ports exactly two simplecv datasets: <strong>robocap</strong> + <strong>HOCap</strong>.</li>
     <li data-tip="One generic driver module per verb; per-dataset logic lives in the spec. v1 ships no training or metric code, but the schema must not need a migration when they arrive."><b>Four verbs: download → convert → register → view.</b> Train + eval are the reserved second half.</li>
     <li data-tip="dict of default configs → tyro.extras.subcommand_type_from_defaults, nerfstudio-style _target + setup() — exactly as simplecv does today."><b>Registration idiom: unchanged.</b> Adding a dataset = one import + one dict line.</li>
     <li data-tip="Readers (Mp4Reader / McapReader / ParquetReader) → lenses → write_rrd with optimize=OBJECT_STORE. rr.log / send_columns stay legal for one-off statics. Transcode folds inside convert with a fingerprinted cache — no preprocess stage, no AV1 mirror."><b>Chunk-native conversion.</b> No per-frame <code>rr.log</code> loops. <strong>The .rrd is the baseline artifact.</strong></li>
@@ -409,7 +409,7 @@ svg .mono{font-family:var(--mono)}
         <td class="c g-full" data-tip="Live viewer with blueprint built from the dataset's own cam_names.">●</td>
         <td class="c g-none" data-tip="No training.">✗</td>
         <td class="c g-part" data-tip="rrd_compare.py: reference-rrd regression diff with rtol/atol, media columns skipped. Baselines hardcoded to /tmp.">◐</td>
-        <td>a consumer (cuVSLAM), not a dataset — untouched</td></tr>
+        <td>a consumer (cuVSLAM), not a dataset — deleted 2026-11-26; slam-rs replaces it</td></tr>
       <tr><th>arkitscenes-download</th>
         <td class="c g-full" data-tip="Apple CDN with metadata.csv index, curl --retry -C -, .part staging, per-capture planning, asset tables.">●</td>
         <td class="c g-full" data-tip="Chunk-native-ish ingest, AV1 transcode with fingerprinted cache, atomic writes, rrd verify. But 8 layer files per capture and a ~195-line straight-line ingest fn.">●</td>
@@ -476,7 +476,7 @@ svg .mono{font-family:var(--mono)}
   <table>
     <thead><tr><th>dataset</th><th>family</th><th>source</th><th>transport helper</th><th>access gate</th><th>status</th></tr></thead>
     <tbody>
-      <tr data-tip="Self-captured rig data: ~24 sessions + factory calibration, 129 GB, 6 camera MP4s + 3 IMU .db per session. download() only verifies the mount and layout — it never fetches. (robocap-slam's small HF example sequence stays as its own demo task.)"><td><strong>robocap</strong></td><td>rig / ego</td><td>self-captured · NAS <code>/mnt/nas/datasets/robocap</code> (24 sessions, 129&nbsp;GB, synced from M5 2026-08-16)</td><td><span class="chip s4">local_verify</span></td><td>none — we generate it</td><td><span class="chip ok">v1 port</span></td></tr>
+      <tr data-tip="Self-captured rig data: ~24 sessions + factory calibration, 129 GB, 6 camera MP4s + 3 IMU .db per session. download() only verifies the mount and layout — it never fetches."><td><strong>robocap</strong></td><td>rig / ego</td><td>self-captured · NAS <code>/mnt/nas/datasets/robocap</code> (24 sessions, 129&nbsp;GB, synced from M5 2026-08-16)</td><td><span class="chip s4">local_verify</span></td><td>none — we generate it</td><td><span class="chip ok">v1 port</span></td></tr>
       <tr><td><strong>HOCap</strong></td><td>rig / exo+ego</td><td>HF sample zip <code>pablovela5620/hocap-sample</code>; full set upstream</td><td><span class="chip s1">hf_fetch</span></td><td>none (sample)</td><td><span class="chip ok">v1 port</span></td></tr>
       <tr><td>MAMMA</td><td>rig / exo</td><td>vendor HTTP POST + NAS mirror (6.85 TB verified)</td><td><span class="chip s2">api_fetch</span> / <span class="chip s4">local_verify</span></td><td>username + password (env)</td><td><span class="chip">later</span></td></tr>
       <tr><td>EPFL smart-kitchen</td><td>rig / exo+ego</td><td>HF sample zip</td><td><span class="chip s1">hf_fetch</span></td><td>none</td><td><span class="chip">later</span></td></tr>
@@ -534,7 +534,7 @@ svg .mono{font-family:var(--mono)}
 
   <div class="sys">
     <h3>robocap-slam <span class="chip">packages/robocap-slam</span></h3>
-    <p class="role">A consumer, not a dataset: cuVSLAM over the simplecv robocap loader. Studied as the simplicity baseline (1,452 LOC).</p>
+    <p class="role">A consumer, not a dataset: cuVSLAM over the simplecv robocap loader. Studied as the simplicity baseline (1,452 LOC). Deleted on 2026-11-26: slam-rs replaces it.</p>
     <div class="cols">
       <div><h4 class="adopt">Adopt</h4><ul>
         <li>Self-bootstrapping download task (<code>outputs=</code> + <code>depends-on</code>). <cite class="ref">pixi.toml:1163</cite></li>
@@ -654,7 +654,7 @@ svg .mono{font-family:var(--mono)}
       <span class="kept">base_config.py</span>             <span class="dim"># _target + setup() — kept</span>
     <span class="kept">rerun_log_utils.py</span>           <span class="dim"># RerunTyroConfig — stays, imported</span>
 <span class="del">packages/egoexo-forge/</span>          <span class="dim"># ~360 live LOC — deleted</span>
-packages/robocap-slam/           <span class="dim"># no artifact; untouched for now</span>
+packages/robocap-slam/           <span class="dim"># deleted 2026-11-26; slam-rs replaces it</span>
 packages/arkitscenes-download/   <span class="dim"># own verbs; migrates in later</span>
 <span class="del">+ AV1 mirror dirs · per-frame rr.log · 5 download paths</span></pre>
     </div>

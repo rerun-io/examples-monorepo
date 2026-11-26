@@ -22,7 +22,7 @@ pyrefly check .     # typecheck
 
 # From repo root (needed for tasks with depends-on chains):
 pixi run -e monoprior --frozen monoprior-relative-depth   # runs download + demo
-pixi run -e robocap-slam-dev --frozen tests
+pixi run -e slam-rs-dev --frozen tests
 ```
 
 Prefer `pixi run --frozen` to skip re-solving deps. Only omit `--frozen` when you've modified dependencies. The dev tasks (`pixi run -e <name>-dev {lint,typecheck,deadcode,tests}`) are the canonical runners — `typecheck` applies the monorepo `pyrefly.toml` plus any per-package baseline, whereas a bare `pyrefly check .` skips the baseline and can surface known false-positives.
