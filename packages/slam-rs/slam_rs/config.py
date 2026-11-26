@@ -137,6 +137,35 @@ def config_text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def overlay_config_text(config_text: str, overlay: str) -> str:
+    """Merge a JSON object into a VIO config's ``value0``: a nested object updates the section of that name, any other
+    value replaces the key (an experiment's ``--config-overlay``, e.g. ``{"backend.loop_closing": {"frame_time_margin_s": 120.0}}``).
+
+    Text in, text out, as :func:`profiled_config_text`: the Rust config parses the result, which is also what the run's
+    config hash covers.
+
+    Args:
+        config_text: The config JSON.
+        overlay: A JSON object.
+
+    Returns:
+        The merged config JSON.
+
+    Raises:
+        ValueError: If ``overlay`` is not a JSON object, or Rust rejects the merged config.
+    """
+    changes: object = json.loads(overlay)
+    if not isinstance(changes, dict):
+        raise ValueError(f"--config-overlay must be a JSON object, got {overlay!r}")
+    document: dict = json.loads(config_text)
+    values: dict = document["value0"]
+    for key, value in changes.items():
+        values[key] = {**values[key], **value} if isinstance(value, dict) and isinstance(values.get(key), dict) else value
+    merged: str = json.dumps(document)
+    _core.VioConfig.from_json(merged)
+    return merged
+
+
 def profiled_config_text(path: Path, profile: str = "reference", profiles: Path = SLAM_CONFIG_PATH.parent / "configs/profiles") -> str:
     """Read a config and apply a named overlay; empty overlays preserve its text.
 

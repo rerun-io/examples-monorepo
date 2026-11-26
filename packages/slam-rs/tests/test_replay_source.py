@@ -102,3 +102,21 @@ def test_unlisted_odyssey_opens_without_a_segment_row(settings: SlamConfig, monk
     with pytest.raises(_Opened):
         main(Config(rr_config=RerunTyroConfig(headless=True), segment=identifier))
     assert seen == [CatalogSegment(settings.catalog_url, "msd-odyssey", identifier)]
+
+
+def test_a_robocap_segment_replays_with_the_robocap_rig(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RoboCap is slam.toml's ``[robocap]`` section, not a ``[[dataset]]``: its segments open with the RoboCap rig (four of
+    six cameras), as the catalog layer opens them, instead of being refused as an unknown dataset."""
+    from slam_rs.catalog_feed import ROBOCAP_RIG
+
+    profiles: list[object] = []
+
+    def opened(source: SegmentSource, *_args: object, profile: object, **_kwargs: object) -> None:
+        profiles.append(profile)
+        raise _Opened
+
+    monkeypatch.setattr(replay, "open_segment", opened)
+    segment: str = "robocap__fe6fede545c972fa__s00000028"
+    with pytest.raises(_Opened):
+        main(Config(rr_config=RerunTyroConfig(headless=True), segment=segment, catalog=CATALOG, config_overlay='{"config.vio_max_iterations": 5}'))
+    assert profiles == [ROBOCAP_RIG]

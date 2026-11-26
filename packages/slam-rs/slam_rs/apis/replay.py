@@ -17,6 +17,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from slam_rs import BackendRequest, GbaRequest, _core
 from slam_rs.catalog_feed import (
     DEFAULT_WINDOW_S,
+    ROBOCAP_RIG,
     CatalogSegment,
     DecodeRequest,
     LocalSegment,
@@ -27,7 +28,7 @@ from slam_rs.catalog_feed import (
     select_decode_device,
 )
 from slam_rs.catalog_layer import LayerDetail, LayerRun, track_layer
-from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.config import SlamConfig, load_slam_config, overlay_config_text
 from slam_rs.gba_log import keyframe_trajectory
 from slam_rs.reference import SMOKE_SEGMENTS, Benchmarks, ReferenceSegment, load_benchmarks, resolved_flow_config
 from slam_rs.tracking import SegmentRun
@@ -80,6 +81,10 @@ class Config:
     """Video decoder: NVDEC when CUDA is available (the slam-rs-cuda environment), otherwise the CPU decoder."""
     vio_bootstrap: Literal["stereo", "inertial"] | None = None
     """Override ``config.vio_bootstrap``: how the estimator gets its first state. None keeps the dataset config's."""
+    config_overlay: str | None = None
+    """A JSON object merged into the VIO config's ``value0`` before it is parsed (a nested object updates the section it
+    names), e.g. ``{"backend.loop_closing": {"frame_time_margin_s": 120.0}}``; None changes nothing. The layer's config
+    hash covers the merged text."""
     blank_cameras: tuple[int, ...] = ()
     """Cameras fed black images instead of their frames: a mono-inertial proxy on a stereo recording (:attr:`SegmentFeed.blank_cameras`)."""
     decode_threads: int = 1
@@ -116,12 +121,18 @@ def main(config: Config) -> None:
     benchmarks: Benchmarks = load_benchmarks(settings)
     listed: ReferenceSegment | None = next((s for s in benchmarks.segments if s.segment_id == config.segment), None)
     dataset_name: str = listed.dataset_name if listed is not None else config.segment.split("__")[0]
+    # RoboCap is slam.toml's [robocap] section, not a [[dataset]]: its own VIO config and rig, as the catalog layer reads them.
+    is_robocap: bool = dataset_name == "robocap" and listed is None
     vio_config: _core.VioConfig
     config_text: str
     if listed is not None:
         vio_config, config_text = resolved_flow_config(settings, listed, profile=config.profile)
     else:
-        config_text = settings.vio_config_text(dataset_name, profile=config.profile)  # refuses an unknown dataset
+        # vio_config_text refuses an unknown dataset.
+        config_text = settings.robocap_config_text(config.profile) if is_robocap else settings.vio_config_text(dataset_name, profile=config.profile)
+        vio_config = _core.VioConfig.from_json(config_text)
+    if config.config_overlay is not None:
+        config_text = overlay_config_text(config_text, config.config_overlay)
         vio_config = _core.VioConfig.from_json(config_text)
     if config.vio_bootstrap is not None:
         vio_config.vio_bootstrap = config.vio_bootstrap
@@ -149,7 +160,7 @@ def main(config: Config) -> None:
     feed: SegmentFeed
     with open_segment(
         source,
-        profile=dataclasses.replace(dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
+        profile=dataclasses.replace(ROBOCAP_RIG if is_robocap else dataset_rig(settings.dataset(dataset_name)), decode_threads=config.decode_threads),
         frame_stride=config.frame_stride,
         window_s=config.window_s,
         decode_device=select_decode_device(config.decode_device),
