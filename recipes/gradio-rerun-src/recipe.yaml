@@ -89,11 +89,11 @@ requirements:
     - python-build
     # gradio cc build imports gradio_rerun (which imports gradio and rerun).
     - gradio ==6.32.0
-    - rerun-sdk ==0.42.0
+    - rerun-sdk ==0.44.0
   run:
     - python >=3.10
     - gradio >=6.0.0
-    - rerun-sdk ==0.42.0
+    - rerun-sdk ==0.44.0
 
 tests:
   - python:
