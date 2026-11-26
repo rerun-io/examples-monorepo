@@ -26,7 +26,7 @@ def _round_bf16_stochastic(x, rand):
 
 
 @triton.jit
-def _adam_bf16_kernel(p_ptr, g_ptr, m_ptr, v_ptr, n, lr, beta1, beta2, eps, step_size, bc2_sqrt, seed, BLOCK: tl.constexpr):
+def _adam_bf16_kernel(p_ptr, g_ptr, m_ptr, v_ptr, n, beta1, beta2, eps, step_size, bc2_sqrt, seed, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     p = tl.load(p_ptr + offs, mask=mask)
@@ -81,7 +81,6 @@ class AdamBf16(torch.optim.Optimizer):
                     state["exp_avg"],
                     state["exp_avg_sq"],
                     n,
-                    group["lr"],
                     beta1,
                     beta2,
                     group["eps"],
