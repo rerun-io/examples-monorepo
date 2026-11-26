@@ -30,7 +30,7 @@ from gsplat.utils import depth_to_normal
 from jaxtyping import Bool, Float16, Float32, Int64, UInt8
 from torch import Tensor
 
-from open4dgs.strided import strided_intrinsics, strided_pixels
+from open4dgs.strided import STRIDE_OFFSETS, strided_intrinsics, strided_pixels
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +246,7 @@ class MonoPriorLoss:
     _normals: tuple[Tensor, ...] = ()
     _static: tuple[Tensor, ...] = ()
     _K: Tensor | None = None
+    _K_strided: dict[tuple[int, int], Tensor] = field(default_factory=dict)
 
     def _to_device(self, device: torch.device) -> None:
         self._device = device
@@ -256,6 +257,7 @@ class MonoPriorLoss:
             for m, d in zip(self.masks, self._depth, strict=True)
         )
         self._K = self.K.to(device)
+        self._K_strided = {offset: strided_intrinsics(self._K, offset) for offset in STRIDE_OFFSETS}
 
     def _flush(self) -> None:
         if self._step >= 0 and self._sums is not None:
@@ -295,7 +297,7 @@ class MonoPriorLoss:
         offset: tuple[int, int] | None = info.get("stride_offset")
         if offset is not None:
             normals, static, prior_depth = (strided_pixels(x, offset) for x in (normals, static, prior_depth))
-            K = strided_intrinsics(K[None], offset)[0]
+            K = self._K_strided[offset][cam_idx]
         prior_normals, _ = decode_normals(normals)
         terms: PriorTerms = prior_terms(depth_rendered, alphas[0, ..., 0], static, prior_depth.float(), prior_normals, K, step, self.config)
         if logged:
