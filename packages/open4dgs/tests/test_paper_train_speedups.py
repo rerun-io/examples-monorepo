@@ -30,9 +30,11 @@ def _scene(dev: str) -> dict[str, torch.Tensor]:
 def test_strided_camera_render_equals_full_render_subsampled(offset: tuple[int, int], size: tuple[int, int]) -> None:
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU (gsplat rasterization)")
+    import inspect
+
     from gsplat import rasterization
 
-    from open4dgs.strided import STRIDE
+    from open4dgs.strided import GSPLAT_EPS2D, STRIDE
     from open4dgs.trigs_adapter import camera_config
     from open4dgs.trigs_trainer import strided_camera_config
 
@@ -54,8 +56,9 @@ def test_strided_camera_render_equals_full_render_subsampled(offset: tuple[int, 
         width=strided.width_for(0),
         height=strided.height_for(0),
         packed=False,
-        eps2d=0.3 / STRIDE**2,
+        eps2d=GSPLAT_EPS2D / STRIDE**2,
     )
+    assert inspect.signature(rasterization).parameters["eps2d"].default == GSPLAT_EPS2D
     assert out.shape[1:3] == ref[:, oy::STRIDE, ox::STRIDE].shape[1:3]
     assert (strided.width_for(0), strided.height_for(0)) == (len(range(ox, w, STRIDE)), len(range(oy, h, STRIDE)))
     torch.testing.assert_close(out, ref[:, oy::STRIDE, ox::STRIDE], atol=2e-5, rtol=1e-4)
