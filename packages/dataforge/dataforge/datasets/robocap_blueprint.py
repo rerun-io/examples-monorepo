@@ -10,7 +10,9 @@ What differs from Insta360:
   rig numbers them by feed order (``/world/runs/slam_rs_vio/rig/cam_00..03``); the keypoints drawn on the base cameras
   are a layer of their own (``SLAM_KEYPOINTS`` under each fed camera's ``pinhole``).
 - colsfm runs on all six cameras; its rig's frusta are named by camera (``/world/runs/colsfm/rig/<camera>/pinhole``).
-- Every 3D view follows the raw slam-rs run (``slam_rs_vio``), colsfm's prior: the final run can carry a false loop.
+- The colsfm and Comparison views follow the raw slam-rs run (``slam_rs_vio``), colsfm's prior: the final run can carry a
+  false loop. The SLAM tab follows ``slam_follow`` (default the final run): the slam-rs catalog layer moves the base rig
+  (``/world/rig_00``, its frusta and mesh) with the final poses, so its follow view stays centred on that rig.
 
 The layout names entities of layers a segment may not have yet; an override on a missing entity is inert.
 """
@@ -73,18 +75,18 @@ def base_cameras_out() -> list[str]:
     return [f"- {schema.cam_path(RIG, position)}/**" for position in range(len(CAMERAS))]
 
 
-def slam_tab(eye: rrb.EyeControls3D | None) -> rrb.Vertical:
+def slam_tab(eye: rrb.EyeControls3D | None, slam_follow: str = schema.SLAM_RS_SOURCE) -> rrb.Vertical:
     """slam-rs: the map and the VIO path, the follow view with the window and landmarks, the four fed cameras."""
     scene: list[str] = ["/world/**", *base_cameras_out(), f"- {shared.COLSFM}/**", f"- {GPS_ROOT}/**", *shared.window_pictures()]
     return rrb.Vertical(
         rrb.Horizontal(
             rrb.Vertical(
-                shared.overview("Overview: SLAM map and VIO path", scene, shared.slam_overrides(close=False), eye, FOLLOW_SOURCE),
+                shared.overview("Overview: SLAM map, final and VIO paths", scene, shared.slam_overrides(close=False), eye, slam_follow),
                 shared.follow(
                     "Follow: level chase view, VIO window and landmarks",
                     scene,
                     {**shared.slam_overrides(close=True), **slam_rig_frusta(0.18)},
-                    FOLLOW_SOURCE,
+                    slam_follow,
                 ),
                 row_shares=[5, 4],
             ),
@@ -189,15 +191,16 @@ def map_tab(camera_positions: Sequence[int] = SLAM_CAMERAS) -> rrb.Horizontal:
     )
 
 
-def result_layout(walk: Float64[ndarray, "n 3"] | None = None) -> rrb.Blueprint:
+def result_layout(walk: Float64[ndarray, "n 3"] | None = None, slam_follow: str = schema.SLAM_RS_SOURCE) -> rrb.Blueprint:
     """The RoboCap result layout: SLAM, colsfm, Comparison and Map tabs.
 
     Args:
         walk: Rig positions of the walk (world frame, metres), when known: each overview then frames it (``walk_eye``).
+        slam_follow: The run the SLAM tab's follow view and overview dot ride (the one that moves ``/world/rig_00``).
     """
     eyes: list[rrb.EyeControls3D | None] = [None if walk is None else shared.walk_eye(walk, aspect=aspect) for aspect in shared.OVERVIEW_ASPECTS]
     return rrb.Blueprint(
-        rrb.Tabs(slam_tab(eyes[0]), colsfm_tab(eyes[1]), comparison_tab(eyes[2]), map_tab(), active_tab=0),
+        rrb.Tabs(slam_tab(eyes[0], slam_follow), colsfm_tab(eyes[1]), comparison_tab(eyes[2]), map_tab(), active_tab=0),
         rrb.TimePanel(timeline=schema.TIMELINE, state="collapsed"),
         collapse_panels=True,
     )

@@ -59,5 +59,6 @@ def test_follow_views_ride_the_vio_run_and_the_map_tab_has_a_map() -> None:
     blueprint: rrb.Blueprint = layout.result_layout()
     follows = [view for view in blueprint_views(blueprint) if isinstance(view, rrb.Spatial3DView) and str(view.name).startswith("Follow")]
     assert len(follows) == 3
-    assert {str(view.origin) for view in follows} == {schema.follow_path(schema.SLAM_RS_VIO_SOURCE)}
+    # SLAM rides the run that moves /world/rig_00 (the final run); colsfm and Comparison ride colsfm's prior, the VIO.
+    assert [str(view.origin) for view in follows] == [schema.follow_path(schema.SLAM_RS_SOURCE)] + [schema.follow_path(schema.SLAM_RS_VIO_SOURCE)] * 2
     assert any(isinstance(view, rrb.MapView) for view in views_of(tab(blueprint, "Map")))
