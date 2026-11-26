@@ -48,7 +48,7 @@ One command (prod env, under the shared GPU lock):
 cd packages/open4dgs
 flock -x /tmp/gpu-5090.lock pixi run -e open4dgs --frozen open4dgs-train \
   --dataset fdanyone-views --segment-id pexels-2785536__v06-seed42 \
-  --num-frames 30 --max-side 640 --num-holdout 1 --train.steps 1500 --run-name my-run
+  --num-frames 30 --max-side 640 --num-holdout 1 --run-name my-run
 ```
 
 Steps (`open4dgs.apis.train`):

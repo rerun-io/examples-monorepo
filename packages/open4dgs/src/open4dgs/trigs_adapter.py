@@ -49,8 +49,9 @@ from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer, strid
 class TrainConfig:
     """The trainer settings we expose; everything else keeps the TRiGS default."""
 
-    steps: int = 1500
-    """Optimizer steps."""
+    steps: int = 5000
+    """Optimizer steps. Run C on the RTX 5090 (2026-11-26): 2.5k = 30 s, 21.95 dB / LPIPS 0.215; 5k = 60 s, 22.46 dB / 0.180;
+    12.5k = ~150 s, 22.96 dB / 0.149; 25k = 306 s, 23.12 dB / 0.140."""
     cameras_per_step: int = 4
     """Cameras rendered per optimizer step (TRiGS ``batch_cameras``); cost per step scales with it."""
     sh_degree: int = 3
