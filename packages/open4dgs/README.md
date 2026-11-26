@@ -82,6 +82,19 @@ Steps (`open4dgs.apis.train`):
    `run`/`summary` properties. It is registered as a segment of `open4dgs-runs` on the local catalog.
    `/world` carries `ViewCoordinates` from the mean camera up. `--no-register` is the one switch that skips registration.
 
+### Training speed options (`--train.*`)
+
+`open4dgs.trigs_trainer.Open4dgsTrainer` always runs the exact levers: one gather and deform per step time, one batched
+rasterization per image size (unbound once per batch), host-sync fixes, and `index_select` gathers (here and in recipe
+patch 0009's rigid loss). Three more come from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918); measured on run C
+in `/mnt/nas/ssd-8tb/scratch/open4dgs-train-speed/REPORT.md`:
+
+| flag | what | maths |
+|---|---|---|
+| `--train.fused-loss` | the masked-composite photometric loss as one `torch.compile`d function (`open4dgs.fused_loss`) | same as TRiGS's loss |
+| `--train.adam-moments bf16` | `open4dgs.adam_bf16.AdamBf16`: bfloat16 Adam moments, stochastically rounded, one Triton kernel per parameter | moments rounded (unbiased) |
+| `--train.pixel-stride 2` | each step renders and supervises one pixel of every 2x2 block, the offset cycling over four steps (`open4dgs.strided`); the MoGe-2 prior reads the same pixels | a quarter of the pixels per step |
+
 ### What the held-out protocol shares with the held-out cameras
 
 No held-out pixel reaches the trainer or the body-surface init. Two priors are shared, though: the SMPL-X body is

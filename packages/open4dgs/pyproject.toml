@@ -49,6 +49,8 @@ ignore_names = [
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks open4dgs only while pytest runs (AGENTS.md, Beartype).
 beartype_packages = ["open4dgs"]
+# Triton kernels and torch.compile graphs: the import hook would wrap functions that Triton parses or dynamo traces.
+beartype_skip_packages = ["open4dgs.adam_bf16", "open4dgs.fused_loss"]
 # A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
 filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 markers = [

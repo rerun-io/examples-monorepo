@@ -220,6 +220,35 @@ def test_hook_skips_cameras_without_maps_and_logs_terms() -> None:
     assert set(loss.rows) == {"prior/depth", "prior/normal", "prior/valid_fraction", "prior/weight"}
 
 
+def test_hook_on_a_strided_step_reads_the_strided_pixels() -> None:
+    """On a strided step (info["stride_offset"], TrainConfig.pixel_stride) the hook scores the half-size render against the maps
+    sliced at the step's offset with the strided intrinsics: the same terms as prior_terms on those inputs."""
+    from open4dgs.prior import ClipPriors, MonoPriorLoss, PriorConfig, decode_normals, encode_normals, prior_terms, static_valid
+    from open4dgs.strided import strided_intrinsics
+
+    depth, normals, hit = _sphere(torch.tensor([0.0, 0.0, 3.0]), 0.8)
+    config = PriorConfig(start_step=0, ramp_end_step=0, log_every=1, depth_edge_max=1.0)
+    priors = ClipPriors(("rig_00/cam_00",), torch.tensor([0]), (depth.half()[None],), (encode_normals(normals, hit)[None],))
+    loss = MonoPriorLoss(config, priors, (hit.float()[None],), (0,), _K()[None])
+    rendered = (depth + 0.1 * _rays()[..., 0])[1::2, 0::2]
+    alphas = hit.float()[1::2, 0::2][None, ..., None]
+    value = loss(
+        step=0,
+        frame_idx=0,
+        cam_idx=0,
+        colors=torch.zeros(1),
+        alphas=alphas,
+        info={"render_depth": rendered[None, ..., None], "stride_offset": (1, 0)},
+        cameras=None,
+    )
+    static = static_valid(hit.float(), depth.half().float(), config)[1::2, 0::2]
+    prior_normals, _ = decode_normals(encode_normals(normals, hit)[1::2, 0::2])
+    K = strided_intrinsics(_K()[None], (1, 0))[0]
+    ref = prior_terms(rendered, alphas[0, ..., 0], static, depth.half().float()[1::2, 0::2], prior_normals, K, 0, config)
+    assert float(value) == pytest.approx(float(config.lambda_depth * ref.depth + config.lambda_normal * ref.normal), rel=1e-6)
+    assert float(value) > 0.0
+
+
 def test_rasterized_plane_depth_and_geometry_metric() -> None:
     from open4dgs.geometry_eval import geometry_frame, rasterize_depth
 
@@ -327,7 +356,12 @@ def _train_config(**kwargs):  # noqa: ANN003, ANN202
 def _priors_for(names):  # noqa: ANN001, ANN202
     from open4dgs.prior import ClipPriors
 
-    return ClipPriors(tuple(names), torch.tensor([0]), tuple(torch.full((1, 2, 2), float(i), dtype=torch.float16) for i in range(len(names))), tuple(torch.zeros(1, 2, 2, 3, dtype=torch.uint8) for _ in names))
+    return ClipPriors(
+        tuple(names),
+        torch.tensor([0]),
+        tuple(torch.full((1, 2, 2), float(i), dtype=torch.float16) for i in range(len(names))),
+        tuple(torch.zeros(1, 2, 2, 3, dtype=torch.uint8) for _ in names),
+    )
 
 
 def test_prior_auto_uses_a_matching_layer_and_computes_otherwise() -> None:

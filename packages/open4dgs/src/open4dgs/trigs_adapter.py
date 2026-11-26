@@ -41,7 +41,7 @@ from trigs.init.from_colmap import build_canonical_from_npz
 from open4dgs.catalog_clip import MultiViewClip
 from open4dgs.init_cloud import InitCloud
 from open4dgs.prior import MonoPriorLoss
-from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer
+from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer, strided_frames
 
 
 @serde(deny_unknown_fields=True)
@@ -67,6 +67,16 @@ class TrainConfig:
     """Trainer seed (camera/frame sampling)."""
     log_every: int = 25
     """Scalar logging interval (loss/*)."""
+    pixel_stride: Literal[1, 2] = 1
+    """Strided pixel sampling (PennyGS 3.4): 2 = each step renders and supervises one pixel of every 2x2 block, cycling the
+    offset so every pixel is supervised once every four steps (steps whose cameras do not share one time render full size);
+    the MoGe-2 prior reads the same pixels."""
+    adam_moments: Literal["fp32", "bf16"] = "fp32"
+    """Adam moment storage: ``fp32`` (torch.optim.Adam) or ``bf16`` (HiGS 4.3: bfloat16 moments, stochastically rounded,
+    one fused Triton kernel per parameter; ``open4dgs.adam_bf16``)."""
+    fused_loss: bool = False
+    """Photometric loss as one ``torch.compile``d function per camera (PennyGS 3.5's single pass; same maths, Triton
+    kernels compiled at the first step)."""
     resident_frames: bool = True
     """Keep the training frames and masks on the GPU for the run when they fit (``resident_device``); off = the CPU path
     (the trainer copies each camera's frame and mask every step)."""
@@ -572,8 +582,15 @@ def train_clip(
         gt_times = capture_times_per_frame(capture_times)
     meta: CheckpointMeta = CheckpointMeta.for_clip(clip, config, sh_degree, init.keyframe_step, holdout_positions, prior is not None, gt_times)
     writer: ScalarLog = ScalarLog()
-    trainer: TrigsTrainer = Open4dgsTrainer(device=str(dev))
+    trainer: Open4dgsTrainer = Open4dgsTrainer(
+        device=str(dev),
+        pixel_stride=config.pixel_stride,
+        adam_moments=config.adam_moments,
+        fused_loss=config.fused_loss,
+    )
     trainer.camera_loss_hook = prior
+    if config.pixel_stride > 1:
+        gt_images, gt_alphas = strided_frames(gt_images, trainer.stride_state), strided_frames(gt_alphas, trainer.stride_state)
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
     live: TrainedClip = TrainedClip.from_params(params, meta, dev, trainer=trainer, scalars=writer.rows)
     torch.cuda.reset_peak_memory_stats(dev)
