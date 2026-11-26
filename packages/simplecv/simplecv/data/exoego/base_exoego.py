@@ -69,7 +69,7 @@ class ExoEgoLabels:
     # datasets (MAMMA dance/multi-people) only get keypoints for person 0 — extra
     # people get SMPL-X meshes only (SmplxStack has an n_people axis; ManoStack and
     # this field do not). Lifting it means a people axis here, per-person entity
-    # paths in view_exoego's 3D/2D keypoint logging, and updating rrd_exoego.load_labels.
+    # paths in view_exoego's 3D/2D keypoint logging.
     xyzc_stack: Float[ndarray, "num_frames 133 4"]
     timestamps_ns: Int[ndarray, "num_frames"] | None = None
     mano_stack: ManoStack | None = None

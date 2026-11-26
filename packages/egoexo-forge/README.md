@@ -47,9 +47,9 @@ pixi run -e egoexo-forge --frozen egoexo-forge-app
 ### CLI
 
 #### Batch Convert ExoEgo Datasets to RRD (deprecated)
-Ego/exo dataset → Rerun `.rrd` batch conversion moved to **simplecv**
-(`simplecv.apis.batch_raw_to_rrd`). The `egoexo-forge-batch-convert` task is now a
-no-op stub kept only so it does not error; use the simplecv entrypoint instead.
+Ego/exo dataset → Rerun `.rrd` batch conversion moved to **dataforge**
+(`dataforge.apis.convert`). The `egoexo-forge-batch-convert` task is now a
+no-op stub kept only so it does not error; use the dataforge entrypoint instead.
 
 You can see all tasks by running `pixi task list --manifest-path ../../pixi.toml -e egoexo-forge`
 

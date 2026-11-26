@@ -269,8 +269,7 @@ detections sit under that camera's `pinhole` exactly as `coco133_uv` does:
 When ingesting a recording:
 
 1. Read `schema_version` (`"exoego:v2"`) on any `/world/rig_*` node; refuse older
-   revisions (the v1 flat reader, `rrd_exoego.py`, is **deprecated** and cannot
-   read v2).
+   revisions (the v1 flat layout has no reader).
 2. Walk `/world/rig_*/cam_*`. Each calibrated camera has a static `Pinhole`/
    `PinholeWithDistortion` and a static `rig_T_cam` `Transform3D`.
 3. A **moving** rig has a temporal `world_T_rig` on its rig node; a **static** rig
@@ -464,7 +463,7 @@ and neither is derived from the other.
   (`world/gt/coco133_xyz`, class 0, dense 133 points every frame, per-keypoint
   confidence = that hand's confidence, 0 where the hand is absent), logged with
   `simplecv.rerun_custom_types.Points3DWithConfidence`, exactly as the
-  simplecv exoego writers do and as `rrd_exoego.py` reads back. Wrist-frame
+  simplecv exoego writers do. Wrist-frame
   landmarks are never logged as their own entity; they are the skinning of
   `joint_angles` with the profile.
 - **Source threshold.** When a dataset publishes a recommended confidence

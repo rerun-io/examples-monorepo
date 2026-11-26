@@ -1,9 +1,6 @@
-import hashlib
 import io
-import json
 import logging
 import os
-import shutil
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -26,7 +23,7 @@ from simplecv.rerun_custom_types import (
 from simplecv.rerun_custom_types import (
     confidence_scores_to_rgb as confidence_scores_to_rgb,
 )
-from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
+from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -69,96 +66,6 @@ def compute_vertex_normals(
     mask: ndarray = norms > eps
     vn_unit = np.where(mask, vn_unit, np.float32(0.0))
     return vn_unit
-
-
-def _default_cache_root() -> Path:
-    env_override: str | None = os.environ.get("SIMPLECV_VIDEO_CACHE")
-    if env_override:
-        return Path(env_override).expanduser()
-    return Path.home() / ".cache" / "simplecv" / "exoego_videos"
-
-
-@dataclass(slots=True)
-class _VideoCacheMetadata:
-    rrd_mtime_ns: int
-    rrd_size: int
-
-
-class VideoCache:
-    """Filesystem-backed cache for remuxed AssetVideo blobs."""
-
-    def __init__(self, root: Path | None = None) -> None:
-        self.root: Path = (root or _default_cache_root()).expanduser()
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def _bucket_dir(self, rrd_path: Path) -> Path:
-        resolved: Path = rrd_path.resolve()
-        sha1: str = hashlib.sha1(str(resolved).encode(), usedforsecurity=False).hexdigest()
-        bucket: Path = self.root / sha1
-        bucket.mkdir(parents=True, exist_ok=True)
-        return bucket
-
-    def _fingerprint(self, rrd_path: Path) -> tuple[int, int]:
-        stat_result: os.stat_result = rrd_path.stat()
-        return stat_result.st_mtime_ns, stat_result.st_size
-
-    def _metadata_path(self, mp4_path: Path) -> Path:
-        return mp4_path.with_suffix(mp4_path.suffix + ".json")
-
-    def _load_metadata(self, metadata_path: Path) -> _VideoCacheMetadata | None:
-        try:
-            payload: Any = json.loads(metadata_path.read_text())
-            return _VideoCacheMetadata(
-                rrd_mtime_ns=int(payload["rrd_mtime_ns"]),
-                rrd_size=int(payload["rrd_size"]),
-            )
-        except FileNotFoundError:
-            return None
-        except (json.JSONDecodeError, KeyError, ValueError):
-            return None
-
-    def get(self, *, rrd_path: Path, camera_name: str) -> Path | None:
-        bucket: Path = self._bucket_dir(rrd_path)
-        cached_mp4: Path = bucket / f"{camera_name}.mp4"
-        metadata_path: Path = self._metadata_path(cached_mp4)
-        metadata: _VideoCacheMetadata | None = self._load_metadata(metadata_path)
-        if metadata is None or not cached_mp4.exists():
-            return None
-        current_mtime, current_size = self._fingerprint(rrd_path)
-        if metadata.rrd_mtime_ns != current_mtime or metadata.rrd_size != current_size:
-            try:
-                cached_mp4.unlink(missing_ok=True)
-                metadata_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            return None
-        return cached_mp4
-
-    def store(self, *, rrd_path: Path, camera_name: str, source_path: Path) -> None:
-        bucket: Path = self._bucket_dir(rrd_path)
-        dest: Path = bucket / f"{camera_name}.mp4"
-        metadata_path: Path = self._metadata_path(dest)
-        tmp_dest: Path = dest.with_suffix(dest.suffix + ".tmp")
-        shutil.copy2(source_path, tmp_dest)
-        os.replace(tmp_dest, dest)
-        mtime, size = self._fingerprint(rrd_path)
-        metadata_payload: dict[str, int] = {"rrd_mtime_ns": mtime, "rrd_size": size}
-        metadata_path.write_text(json.dumps(metadata_payload))
-
-
-_CACHE_DISABLED: bool = os.environ.get("SIMPLECV_VIDEO_CACHE_DISABLE", "0") in {"1", "true", "True"}
-_VIDEO_CACHE: VideoCache | None = None
-
-
-def get_video_cache() -> VideoCache | None:
-    """Return process-wide video cache unless disabled via env."""
-
-    global _VIDEO_CACHE
-    if _CACHE_DISABLED:
-        return None
-    if _VIDEO_CACHE is None:
-        _VIDEO_CACHE = VideoCache()
-    return _VIDEO_CACHE
 
 
 def get_safe_application_id() -> str:
@@ -463,81 +370,6 @@ def read_h264_samples_from_rrd(rrd_path: str, video_entity: str, timeline: str) 
             f"Got {hex(codec.value)}, but the value for H.264 is {hex(rr.VideoCodec.H264.value)}."
         )
     return times, samples
-
-
-def extract_asset_video_blob_fast(
-    video_entity: str,
-    timeline: str = "video_time",
-    *,
-    query_session: RRDQuerySession | None = None,
-    rrd_path: Path | str | None = None,
-) -> bytes:
-    """Extract AssetVideo blob bytes from a Rerun recording using fast pyarrow buffer access.
-
-    This method is ~680x faster than the slow as_py() approach for large videos.
-    It directly accesses the underlying pyarrow buffer without creating
-    intermediate Python objects.
-
-    Args:
-        video_entity: Entity path (without leading ``/``) containing the AssetVideo component.
-        timeline: Timeline used to index the recording view.
-        query_session: Optional shared RRD query session for catalog reads.
-        rrd_path: Optional RRD path used to create a temporary query session.
-
-    Returns:
-        Video bytes suitable for TorchCodec VideoDecoder.
-
-    Raises:
-        ValueError: If no AssetVideo blob found.
-    """
-    import pyarrow as pa
-
-    normalized_entity: str = video_entity.lstrip("/")
-    blob_column: str = f"{normalized_entity}:AssetVideo:blob"
-
-    active_session = query_session
-    if active_session is None and rrd_path is not None:
-        active_session = RRDQuerySession(Path(rrd_path))
-    if active_session is None:
-        raise ValueError("extract_asset_video_blob_fast requires either query_session or rrd_path.")
-
-    table = active_session.read_arrow(
-        contents=normalized_entity,
-        selectors=[blob_column],
-        index=None,
-    )
-    blob_column_idx = 0
-    if table.num_rows == 0:
-        table = active_session.read_arrow(
-            contents=normalized_entity,
-            selectors=[blob_column],
-            index=timeline,
-        )
-        blob_column_idx = 1
-    if table.num_rows == 0:
-        raise ValueError(f"No AssetVideo blob found for entity {video_entity}")
-    column: pa.Array | pa.ChunkedArray = table.column(blob_column_idx)
-
-    if isinstance(column, pa.ChunkedArray):
-        column = column.combine_chunks()
-
-    # FAST PATH: Access pyarrow buffer directly without Python list intermediate
-    # Structure: list<list<uint8>> -> values -> list<uint8> -> values -> uint8[]
-    try:
-        inner_list: pa.ListArray = column.values  # type: ignore[assignment]  # Inner list<uint8>
-        uint8_values: pa.UInt8Array = inner_list.values  # type: ignore[assignment]  # The actual uint8 array
-        buffers = uint8_values.buffers()
-        # Buffer 0 is validity bitmap (null), Buffer 1 is data
-        if len(buffers) >= 2 and buffers[1] is not None:
-            blob: bytes = buffers[1].to_pybytes()
-            return blob
-    except Exception:
-        pass  # Fall back to slow path
-
-    # SLOW FALLBACK: Use as_py() if buffer access fails
-    first_row = column[0].as_py()
-    first_row = unwrap_singleton_lists(first_row)
-    return bytes(first_row)
 
 
 def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str) -> None:
