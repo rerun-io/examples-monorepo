@@ -2,11 +2,12 @@
 
 * `ImageFolderFrames` — the input directory holds the images (Galileo JPEGs, KITTI PNGs). Files are read a bounded
   `READ_AHEAD` ahead on a thread pool; JPEGs decode on the GPU with nvJPEG, anything else with OpenCV and one upload.
-* `VideoStreamFrames` — a catalog segment's `VideoStream`s (the catalog door's input). Each camera's packets are read
-  from the catalog once and decoded on NVDEC (simplecv's `open_segment_decoder`, the decoder behind the Rerun
-  dataloader's `SegmentNvdecDecoder`). Only the names asked for are decoded, `DECODE_CHUNK` at a time in packet order,
-  into a GPU LRU with a byte budget; a frame the LRU evicted is decoded again from the video. No JPEG is written or
-  read: the door records which packet each keyframe is (`FrameSourceManifest`) and nothing else.
+* `VideoStreamFrames` — a catalog segment's `VideoStream`s (the catalog door's input), read through simplecv's
+  `CatalogVideoReader`: a blob-free index of every stream, then GOP-aligned time chunks of every camera in one query,
+  decoded on NVDEC chunk by chunk (`ChunkedVideoDecoder`), so memory is a few chunks whatever the session's length.
+  Only the names asked for are decoded, `DECODE_CHUNK` at a time in packet order, into a GPU LRU with a byte budget; a
+  frame the LRU evicted is decoded again from the video. No JPEG is written or read: the door records which packet
+  each keyframe is (`FrameSourceManifest`) and nothing else.
 
 Both return RGB uint8 `[3, height, width]` CUDA tensors keyed by the image names of `frames_meta.json` and the COLMAP
 database. `open_frame_source` picks the backend from the input directory: a `frame_source.json` means the video
@@ -20,7 +21,7 @@ from collections import OrderedDict, deque
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Final
+from typing import Final, Protocol, runtime_checkable
 
 import cv2
 import numpy as np
@@ -46,8 +47,14 @@ FRAME_STORE_FRACTION: Final[float] = 0.15
 3192 keyframes at 480x640 (2.9 GB) stay resident and every stage after extraction reads them without decoding; a longer
 input evicts and decodes again from the video instead of growing, and leaves the rest to the engines and the mapper."""
 
-NOMINAL_FPS: Final[int] = 30
-"""Frame rate written into the MP4 wrapper; frames are addressed by index, so it only has to be valid."""
+
+@runtime_checkable
+class FrameDecoder(Protocol):
+    """One stream's frames by sample index (simplecv's `ChunkedVideoDecoder`)."""
+
+    def get_frames_at(self, indices: Sequence[int]) -> Tensor:
+        """RGB uint8 `[n, 3, h, w]` frames at stream sample indices, in the order asked."""
+        ...
 
 
 def decode_image_bytes(payload: bytes, origin: str, device: torch.device) -> Tensor:
@@ -143,12 +150,12 @@ class VideoStreamFrames:
         self.location: dict[str, tuple[int, int]] = {
             name: (stream_index, position) for stream_index, stream in enumerate(manifest.streams) for position, name in enumerate(stream.names)
         }
-        self.decoders: dict[int, tuple[ndarray, Any]] = {}
-        """Per stream: the stream's sample timestamps and its open decoder."""
+        self.decoders: dict[int, tuple[ndarray, FrameDecoder]] = {}
+        """Per stream: the stream's sample timestamps and its decoder; every stream opens on the first decode."""
 
-    def _decoder(self, stream_index: int) -> tuple[ndarray, Any]:
-        if stream_index not in self.decoders:
-            self.decoders[stream_index] = _open_stream(self.manifest, self.manifest.streams[stream_index], self.device)
+    def _decoder(self, stream_index: int) -> tuple[ndarray, FrameDecoder]:
+        if not self.decoders:
+            self.decoders = dict(enumerate(_open_streams(self.manifest, self.device)))
         return self.decoders[stream_index]
 
     def _decode(self, names: Sequence[str]) -> dict[str, Tensor]:
@@ -164,7 +171,7 @@ class VideoStreamFrames:
             if np.any(indices >= len(sample_ns)) or np.any(sample_ns[np.minimum(indices, len(sample_ns) - 1)] != wanted):
                 raise ValueError(f"{stream.entity}: a keyframe timestamp is not a sample of the stream")
             order: ndarray = np.argsort(indices, kind="stable")
-            frames: Tensor = decoder.get_frames_at([int(indices[position]) for position in order]).data
+            frames: Tensor = decoder.get_frames_at([int(indices[position]) for position in order])
             for row, position in enumerate(order):
                 decoded[stream_names[int(position)]] = frames[row].clone()
         self.decoded_frames += len(decoded)
@@ -211,25 +218,28 @@ class VideoStreamFrames:
         self.decoders.clear()
 
 
-def _open_stream(manifest: FrameSourceManifest, stream: StreamKeyframes, device: torch.device) -> tuple[ndarray, Any]:
-    """Read one stream's packets from the catalog and open its NVDEC decoder.
+def _open_streams(manifest: FrameSourceManifest, device: torch.device) -> list[tuple[ndarray, FrameDecoder]]:
+    """Index every stream of the manifest and open a chunked NVDEC decoder per stream over one shared reader.
+
+    One reader serves all streams, so a chunk is fetched for every camera in one query and decoded from its cache.
 
     Args:
-        manifest: The segment the stream belongs to.
-        stream: The stream.
+        manifest: The segment and its streams.
         device: The CUDA device.
 
     Returns:
-        The stream's sample timestamps (int64 ns) and its decoder.
+        Per stream, in manifest order: its sample timestamps (int64 ns) and its decoder.
     """
     # Imported here: the catalog client and torchcodec are only needed by a catalog input.
     from rerun.catalog import CatalogClient
-    from simplecv.rerun_dataloader import open_segment_decoder
+    from simplecv.catalog_video_reader import CatalogVideoReader, ChunkedVideoDecoder, StreamIndex, read_video_index
 
     dataset = CatalogClient(manifest.catalog_url).get_dataset(name=manifest.dataset)
-    times, _, _, decoder = open_segment_decoder(dataset, manifest.segment, stream.entity, manifest.timeline, device, NOMINAL_FPS)
-    # The same int64 view `simplecv.catalog_video.CatalogVideo.t_ns` gives the catalog door: no unit change.
-    return np.asarray(times).view(np.int64), decoder
+    entities: list[str] = [stream.entity for stream in manifest.streams]
+    index: tuple[StreamIndex, ...] = read_video_index(dataset, manifest.segment, entities, manifest.timeline)
+    reader: CatalogVideoReader = CatalogVideoReader(dataset, manifest.segment, index, manifest.timeline)
+    # The same int64 view `simplecv.catalog_video_reader.StreamIndex.t_ns` gives the catalog door: no unit change.
+    return [(stream.t_ns, ChunkedVideoDecoder(reader, position, device)) for position, stream in enumerate(index)]
 
 
 def open_frame_source(input_dir: Path, device: torch.device | None = None) -> FrameSource:
