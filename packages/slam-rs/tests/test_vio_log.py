@@ -122,6 +122,8 @@ def drive(
     animate_base_rig: bool = False,
     video_entities: tuple[str, ...] = (),
     loops_as_found: bool = True,
+    camera_positions: tuple[int, ...] = (),
+    base_downscale: int = 1,
 ) -> Logged:
     """Log ``FRAMESETS`` framesets of the synthetic rig, end as :func:`slam_rs.catalog_layer.track_layer` does, and read the recording back.
 
@@ -138,6 +140,8 @@ def drive(
         animate_base_rig: :func:`slam_rs.catalog_layer.log_layer`'s ``animate_base_rig``.
         video_entities: The lens videos, for the logger's window frusta and the layer's rig.
         loops_as_found: The logger's :attr:`VioLogger.loops_as_found`.
+        camera_positions: The logger's :attr:`VioLogger.camera_positions`.
+        base_downscale: The logger's :attr:`VioLogger.base_downscale`.
 
     Returns:
         The recording's rows, the framesets that tracked, and the logger.
@@ -157,6 +161,8 @@ def drive(
             loops_as_found=loops_as_found,
             map_keyframes_every_ns=map_every_ns[0],
             map_points_every_ns=map_every_ns[1],
+            camera_positions=camera_positions,
+            base_downscale=base_downscale,
             columns=ColumnLog(recording=recording),
         )
         for step in range(FRAMESETS):
@@ -459,6 +465,25 @@ def test_the_keypoints_land_on_the_camera_images(logged: Logged) -> None:
         entity: str = f"/world/rig_00/cam_{index:02d}/pinhole/keypoints"
         assert [t_ns for t_ns, _ in logged.rows[entity]] == logged.tracked
         assert all(len(values["Points2D:positions"]) > 0 for _, values in logged.rows[entity])
+
+
+def test_a_fed_subset_draws_its_keypoints_on_its_own_base_cameras_in_their_pixels(
+    pipeline: PipelineFactory, texture: TextureFactory, camera: CameraFactory, tmp_path: Path, read_rows: RowsReader
+) -> None:
+    """A rig that feeds rig positions 0 and 4 of its cameras, decoded three times smaller (RoboCap: positions 0, 1, 4, 5
+    at downscale 3), draws each camera's keypoints on that base camera and in the base camera's own pixels: feed index
+    1 must not land on the base's camera 1."""
+    rig: tuple[CameraCalib, ...] = (camera(0, 0.0), camera(1, 0.1))
+    fed: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "fed.rrd", read_rows)
+    subset: Logged = drive(pipeline(2), rig, empty_trajectory(), texture, tmp_path / "subset.rrd", read_rows, camera_positions=(0, 4), base_downscale=3)
+    keypoints: list[str] = sorted(entity for entity in subset.rows if entity.endswith("/keypoints"))
+    assert keypoints == ["/world/rig_00/cam_00/pinhole/keypoints", "/world/rig_00/cam_04/pinhole/keypoints"]
+    for index, position in ((0, 0), (1, 4)):
+        tracked: list[Row] = fed.rows[f"/world/rig_00/cam_{index:02d}/pinhole/keypoints"]
+        drawn: list[Row] = subset.rows[f"/world/rig_00/cam_{position:02d}/pinhole/keypoints"]
+        assert [row.t_ns for row in drawn] == [row.t_ns for row in tracked]
+        for base, own in zip(drawn, tracked, strict=True):
+            np.testing.assert_allclose(base.values["Points2D:positions"], 3.0 * np.asarray(own.values["Points2D:positions"]), rtol=1e-6)
 
 
 def test_the_rig_rides_the_estimate_only_when_asked(

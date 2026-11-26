@@ -578,9 +578,8 @@ class VioLogger:
         """Draw the pose-graph corrections at the frameset when there are any; clear them once when they go."""
         corrections: Float64[ndarray, "m 2 3"] = correction_segments(keyframes.raw_poses, keyframes.poses)
         if len(corrections):
-            self.columns.static_once(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.from_fields(radii=PGO_CORRECTION_RADIUS_M))
-            self.columns.add_batch(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.columns, t, strips=list(corrections),
-                                   colors=np.tile(np.array(PGO_CORRECTION_COLOR, dtype=np.uint8), (len(corrections), 1)))
+            self.columns.static_once(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.from_fields(colors=PGO_CORRECTION_COLOR, radii=PGO_CORRECTION_RADIUS_M))
+            self.columns.add_batch(PGO_CORRECTIONS_ENTITY, rr.LineStrips3D.columns, t, strips=list(corrections))
         elif self.corrections_shown:
             self.columns.add(PGO_CORRECTIONS_ENTITY, rr.Clear.columns, t, is_recursive=False)
         self.corrections_shown = bool(len(corrections))
