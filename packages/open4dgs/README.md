@@ -48,7 +48,7 @@ One command (prod env, under the shared GPU lock):
 cd packages/open4dgs
 flock -x /tmp/gpu-5090.lock pixi run -e open4dgs --frozen open4dgs-train \
   --dataset fdanyone-views --segment-id pexels-2785536__v06-seed42 \
-  --num-frames 30 --max-side 640 --num-holdout 1 --train.steps 1500 --run-name my-run
+  --num-frames 30 --max-side 640 --num-holdout 1 --run-name my-run
 ```
 
 Steps (`open4dgs.apis.train`):
@@ -81,6 +81,20 @@ Steps (`open4dgs.apis.train`):
    gt/render/error videos, per-frame metrics, the orbit video, the init cloud, the body mesh, loss curves and the
    `run`/`summary` properties. It is registered as a segment of `open4dgs-runs` on the local catalog.
    `/world` carries `ViewCoordinates` from the mean camera up. `--no-register` is the one switch that skips registration.
+
+### Training speed options (`--train.*`)
+
+`open4dgs.trigs_trainer.Open4dgsTrainer` always runs the exact levers: one gather and deform per step time, one batched
+rasterization per image size (unbound once per batch), host-sync fixes, and `index_select` gathers (here and in recipe
+patch 0009's rigid loss). Three more come from PennyGS (arXiv 2611.27525) and HiGS (arXiv 2611.31918). On run C
+(5,000 steps, `/mnt/nas/ssd-8tb/scratch/open4dgs-train-speed/REPORT.md`) the three defaults train 1.58x faster on the 5090
+(84 vs 52.5 it/s) and 2.46x on the DGX Spark (25.6 vs 10.0 it/s); held-out PSNR and LPIPS unchanged, SSIM 0.002 lower:
+
+| flag | what | maths |
+|---|---|---|
+| `--train.fused-loss` (on; `--train.no-fused-loss`) | the masked-composite photometric loss as one `torch.compile`d function (`open4dgs.fused_loss`) | same as TRiGS's loss |
+| `--train.adam-moments bf16` (default; `fp32` = torch Adam) | `open4dgs.adam_bf16.AdamBf16`: bfloat16 Adam moments, stochastically rounded, one Triton kernel per parameter | moments rounded (unbiased) |
+| `--train.pixel-stride 2` (default; `1` = full images) | each step renders and supervises one pixel of every 2x2 block, the offset cycling over four steps (`open4dgs.strided`); the MoGe-2 prior reads the same pixels | a quarter of the pixels per step |
 
 ### What the held-out protocol shares with the held-out cameras
 

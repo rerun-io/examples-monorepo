@@ -44,11 +44,15 @@ ignore_names = [
     "ratio", "alpha_part", "colour_part", "alpha_mean",
     # open4dgs.trigs_trainer: called by the recipe's camera-group seam in the TRiGS train loop
     "_camera_group", "add_loss",
+    # open4dgs.trigs_trainer: overrides that TRiGS's _render_inputs calls
+    "_slice_rowwise_params",
 ]
 
 [tool.pytest.ini_options]
 # pytest-beartype: beartype checks open4dgs only while pytest runs (AGENTS.md, Beartype).
 beartype_packages = ["open4dgs"]
+# Triton kernels and torch.compile graphs: the import hook would wrap functions that Triton parses or dynamo traces.
+beartype_skip_packages = ["open4dgs.adam_bf16", "open4dgs.fused_loss"]
 # A package imported before pytest-beartype's hook (e.g. by tests/conftest.py) would go unchecked: fail instead.
 filterwarnings = ["error::pytest_beartype.roar.PytestBeartypeOptionPackagesWarning"]
 markers = [
