@@ -145,26 +145,31 @@ def read_video_index(
         raise ValueError(f"{segment_id}: expected one segment in the index ranges, got {ranges.num_rows}")
     start: int = int(ranges[f"{timeline}:start"].combine_chunks().cast(pa.int64())[0].as_py())
     end: int = int(ranges[f"{timeline}:end"].combine_chunks().cast(pa.int64())[0].as_py())
-    statics: pa.Table = selection.filter_contents(paths).reader(index=None).select(*[f"{path}:VideoStream:codec" for path in paths]).to_arrow_table()
-    codecs: list[CatalogCodecName] = [catalog_codec(statics[f"{path}:VideoStream:codec"], f"{segment_id} {path}") for path in paths]
     window_ns: int = max(1, int(window_s * 1e9))
 
-    def read_stream(path: str, codec: CatalogCodecName) -> StreamIndex:
-        reader = selection.filter_contents([path]).reader(index=timeline)
-        timeline_type: pa.DataType = reader.schema().field(timeline).type
+    def read_stream(path: str) -> StreamIndex:
+        reader: DataFrame = selection.filter_contents([path]).reader(index=timeline)
+        schema: pa.Schema = reader.schema()
+        columns: list[str] = [f"{path}:VideoStream:{component}" for component in ("is_keyframe", "codec")]
+        if f"{path}:VideoStream:sample" not in schema.names or columns[0] not in schema.names:
+            raise ValueError(f"{segment_id} {path}: expected samples with keyframe flags on {timeline}, the recording has none")
+        if columns[1] not in schema.names:
+            raise ValueError(f"{segment_id} {path}: the video stream carries no codec, so its samples cannot be decoded")
+        timeline_type: pa.DataType = schema.field(timeline).type
         tables: list[pa.Table] = []
         for first in range(start, end + 1, window_ns):
             window: Expr = time_window(timeline, timeline_type, first, min(first + window_ns - 1, end))
-            tables.append(reader.filter(window).select(timeline, f"{path}:VideoStream:is_keyframe").to_arrow_table())
+            # The codec is a static on most recordings (then on every row) and a temporal on some; either way one uint32 a row.
+            tables.append(reader.filter(window).select(timeline, *columns).to_arrow_table())
         table: pa.Table = pa.concat_tables(tables)
         times: Shaped[ndarray, " n"] = table[timeline].combine_chunks().to_numpy(zero_copy_only=False)
         if not len(times) or not np.all(np.diff(times.view(np.int64)) > 0):
             raise ValueError(f"{segment_id} {path}: expected samples with strictly increasing timestamps")
-        keyframes: Bool[ndarray, " n"] = np.asarray(catalog_keyframes(table[f"{path}:VideoStream:is_keyframe"]), dtype=bool)
-        return StreamIndex(entity=path, times=times, keyframes=keyframes, codec=codec)
+        keyframes: Bool[ndarray, " n"] = np.asarray(catalog_keyframes(table[columns[0]]), dtype=bool)
+        return StreamIndex(entity=path, times=times, keyframes=keyframes, codec=catalog_codec(table[columns[1]], f"{segment_id} {path}"))
 
     with ThreadPoolExecutor(max_workers=len(paths), thread_name_prefix="video-index") as pool:
-        futures: list[Future[StreamIndex]] = [pool.submit(read_stream, path, codec) for path, codec in zip(paths, codecs, strict=True)]
+        futures: list[Future[StreamIndex]] = [pool.submit(read_stream, path) for path in paths]
         return tuple(future.result() for future in futures)
 
 
@@ -330,6 +335,41 @@ def iter_chunks(reader: CatalogVideoReader, chunks: Sequence[int]) -> Iterator[V
         yield pending.result()
 
 
+class SharedChunks:
+    """Each stream walks its chunks in order, at its own pace, from one read-ahead fetch of every stream (:func:`iter_chunks`).
+
+    A chunk is held until every stream has taken its part, so memory is the chunks between the slowest stream and the
+    fastest one, plus the one being fetched. Not thread-safe: walk the streams from one thread.
+    """
+
+    def __init__(self, reader: CatalogVideoReader, chunks: Sequence[int]) -> None:
+        """Start the read-ahead over ``chunks`` (increasing)."""
+        self._chunks: list[int] = list(chunks)
+        self._source: Iterator[VideoChunk] = iter_chunks(reader, self._chunks)
+        self._streams: int = len(reader.streams)
+        self._held: dict[int, tuple[VideoChunk, set[int]]] = {}
+
+    @property
+    def held(self) -> int:
+        """Chunks fetched that some stream has not taken yet."""
+        return len(self._held)
+
+    def _take(self, chunk: int, stream: int) -> StreamPackets:
+        while chunk not in self._held:
+            fetched: VideoChunk = next(self._source)
+            self._held[fetched.index] = (fetched, set())
+        held: tuple[VideoChunk, set[int]] = self._held[chunk]
+        held[1].add(stream)
+        if len(held[1]) == self._streams:
+            del self._held[chunk]
+        return held[0].streams[stream]
+
+    def stream(self, stream: int) -> Iterator[StreamPackets]:
+        """One stream's packets, chunk by chunk."""
+        for chunk in self._chunks:
+            yield self._take(chunk, stream)
+
+
 @runtime_checkable
 class _FrameBatch(Protocol):
     """What ``torchcodec``'s ``FrameBatch`` gives here: the frames."""
@@ -411,6 +451,7 @@ class ChunkedVideoDecoder:
 __all__ = (
     "CatalogVideoReader",
     "ChunkedVideoDecoder",
+    "SharedChunks",
     "StreamIndex",
     "StreamPackets",
     "VideoChunk",

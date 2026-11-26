@@ -15,13 +15,16 @@ Five decisions matter here because each one can change the numbers:
   SimpleCV's NVDEC reader and GPU RGB-to-gray conversion; its pixel rounding differs.
   :func:`select_decode_device` is the rule every tool follows: NVDEC when CUDA is
   available, otherwise the CPU decoder.
-* **Round trips.** The default reads each camera, IMU and ground truth per time
-  window, and long segments are cut into windows on ``video_time`` whose
-  edges land on frames that are keyframes in *every* camera, so a window decodes
-  standalone. Decimated AV1 decode is a known upstream hazard: every frame is
-  decoded and ``frame_stride`` only decides which framesets are yielded. Offline
-  ``cache_video`` instead fetches all selected compressed streams once, reuses
-  those packets for the frame index, and keeps decoders alive for the segment.
+* **Round trips.** Video goes through SimpleCV's ``CatalogVideoReader``: a
+  blob-free index of every fed camera, then GOP-aligned time chunks of all of
+  them in one query each, the next chunk fetched while this one decodes, so
+  memory is a few chunks whatever the segment's length. Each camera's decoder
+  runs chunk after chunk through the whole read. IMU and ground truth are read
+  per time window, cut on ``video_time`` at frames that are keyframes in every
+  camera. Time filters compare ``video_time`` in its own type: a cast is not
+  pushed down to the server and scans the whole recording. Decimated AV1 decode
+  is a known upstream hazard: every frame is decoded and ``frame_stride`` only
+  decides which framesets are yielded.
 * **Rig shape.** A rig is not always four hardware-synced cameras fed at their
   stored resolution on one IMU clock. :class:`RigProfile` carries the four things
   that differ and default to what MSD is: which cameras of the rig are fed and in
@@ -59,12 +62,12 @@ import av
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from datafusion import col, lit
+from datafusion import DataFrame
 from jaxtyping import Bool, Float64, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from simplecv.catalog_video import CatalogVideo, catalog_codec, catalog_keyframes, packet_views, read_catalog_videos
-from simplecv.catalog_video_codec import CatalogCodecName, wrap_mp4
+from simplecv.catalog_video_codec import CatalogCodecName
+from simplecv.catalog_video_reader import CatalogVideoReader, SharedChunks, StreamIndex, StreamPackets, read_video_index, time_window
 from simplecv.imu_calibration import ImuCalibration
 
 from slam_rs import _core
@@ -473,7 +476,7 @@ def decode_gray(
     afterwards is a second, different filter and a different trajectory.
 
     Args:
-        mp4_bytes: MP4 produced by :func:`wrap_mp4`.
+        mp4_bytes: MP4 produced by ``StreamPackets.mp4`` (``simplecv.catalog_video_codec.wrap_mp4``).
         downscale: Integer factor to shrink each frame by.
         threads: Decoder threads; above one PyAV decodes with frame threading (same pixels, more latency).
         color_downscale: Also pair each frame with an RGB copy at :func:`color_copy_size` of the gray frame (a second
@@ -583,9 +586,9 @@ class SegmentFeed:
     index: _VideoIndex
     """Frameset timing, the per-camera frames behind it, and the codec."""
     window_ns: int
-    """Longest time window fetched in one round trip."""
-    cached_payloads: tuple[bytes, ...] | None = None
-    """Muxed streams for an offline run; packet buffers are released after indexing and muxing."""
+    """Longest time window of IMU and ground truth fetched in one round trip."""
+    video: CatalogVideoReader
+    """The fed cameras' video, in feed order, read chunk by chunk."""
     decode_device: Literal["cpu", "cuda"] = "cpu"
     """Pixel decoder; CUDA uses the shared TorchCodec reader with GPU resize."""
     masks: FrameMasks | None = None
@@ -669,21 +672,20 @@ class SegmentFeed:
     def _read_framesets(self, stop_ns: int | None, start_ns: int | None) -> Generator[Frameset, None, None]:
         """Decode the segment and yield one frameset at a time, on the calling thread.
 
-        By default, video, inertial samples and ground truth are fetched one
-        window at a time, bounding memory and startup cost. Window edges land on
-        frames that are keyframes in every camera so each window decodes alone.
-        With cached video, the whole segment is one window, including its IMU
-        and ground truth. CPU decoding holds one image per camera; CUDA holds
-        a batch per camera. Masks come through this iterator's own short window
-        (``slam_rs.frame_masks.MaskCursor``), whatever the video window.
+        Inertial samples and ground truth are fetched one window at a time; the
+        video comes chunk by chunk from :attr:`video`, every camera's chunk in one
+        query, the next fetched while this one decodes, and each camera's decoder
+        carries on across windows. CPU decoding holds one image per camera; CUDA
+        holds a batch per camera. Masks come through this iterator's own short
+        window (``slam_rs.frame_masks.MaskCursor``), whatever the video window.
 
         Each frameset carries the inertial samples since the previous one, running
         one sample past its own timestamp, and the nearest ground-truth pose.
 
         A caller that stops early states where, because the fetch is a window
         ahead of what it yields: a consumer breaking out of the loop has already
-        paid for a whole window of encoded samples — 30 s x 30 fps x 4 cameras of
-        1080p on a RoboCap run — that nothing will read.
+        paid for a whole window of IMU and a chunk of encoded samples that nothing
+        will read.
 
         Args:
             stop_ns: Last frameset time worth reading, on the inertial clock; a
@@ -714,15 +716,34 @@ class SegmentFeed:
         imu_period_ns: int = int(1e9 / max(self.imu.frequency_hz, 1.0))
         margin_ns: int = max(2 * frame_period_ns + 2 * imu_period_ns, 2_000_000)
         emitted_imu_t_ns: int = -(2**62)
-        bounds: list[tuple[int, int]] = [(0, len(self.frame_t_ns))] if self.cached_payloads is not None else _window_bounds(self.index, self.window_ns)
+        bounds: list[tuple[int, int]] = [
+            (start, stop)
+            for start, stop in _window_bounds(self.index, self.window_ns)
+            if (stop_ns is None or int(self.frame_t_ns[start]) <= stop_ns) and (start_ns is None or int(self.frame_t_ns[stop - 1]) >= start_ns)
+        ]
+        if not bounds:
+            return
         mask_cursor: MaskCursor | None = None if self.masks is None else MaskCursor(self.masks)
+        # Each camera decodes from the first frameset's frame to the last one's, chunk after chunk, across every window.
+        first_frames: list[int] = [int(frame) for frame in self.index.frame_index[bounds[0][0]]]
+        last_frames: list[int] = [int(frame) for frame in self.index.frame_index[bounds[-1][1] - 1]]
+        chunks: range = range(
+            min(self.video.chunk_of(position, frame) for position, frame in enumerate(first_frames)),
+            max(self.video.chunk_of(position, frame) for position, frame in enumerate(last_frames)) + 1,
+        )
+        shared: SharedChunks = SharedChunks(self.video, chunks)
+        decoders: list[Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]] = [
+            self._camera_frames(shared.stream(position), camera, first_frames[position]) for position, camera in enumerate(self.cameras)
+        ]
+        cursor: list[int] = [frame - 1 for frame in first_frames]
+        # One selected frame and one decode cursor per camera: a
+        # camera that contributes no frame to this frameset still has its own
+        # frames decoded in order, because dropping one breaks the next.
+        decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
+        decoded_colors: list[ColorCopy | None] = [None] * len(self.cameras)
         for start, stop in bounds:
             window_first_ns: int = int(self.frame_t_ns[start])
-            if stop_ns is not None and window_first_ns > stop_ns:
-                break
             window_last_ns: int = int(self.frame_t_ns[stop - 1])
-            if start_ns is not None and window_last_ns < start_ns:
-                continue
             window_imu: ImuStream = self.imu_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
             if len(window_imu) and emitted_imu_t_ns > -(2**62) and int(window_imu.t_ns[0]) > emitted_imu_t_ns + 1:
                 raise ValueError(
@@ -730,18 +751,6 @@ class SegmentFeed:
                     f"the read begins at {int(window_imu.t_ns[0])} but the last emitted sample was {emitted_imu_t_ns}"
                 )
             window_gt: Trajectory = self.ground_truth_between(window_first_ns - margin_ns, window_last_ns + margin_ns)
-
-            decoders: list[Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]] = []
-            cursor: list[int] = []
-            for position, camera in enumerate(self.cameras):
-                window: tuple[bytes, int] = self._window_payload(position, start, stop)
-                decoders.append(self._open_decoder(window[0], camera))
-                cursor.append(window[1] - 1)
-            # One selected frame and one decode cursor per camera: a
-            # camera that contributes no frame to this frameset still has its own
-            # frames decoded in order, because dropping one breaks the next.
-            decoded: list[UInt8[ndarray, "h w"] | None] = [None] * len(self.cameras)
-            decoded_colors: list[ColorCopy | None] = [None] * len(self.cameras)
             camera_frames: list[Int64[ndarray, " n_window"]] = [
                 self.index.camera_t_ns[position][self.index.frame_index[start:stop, position]] for position in range(len(self.cameras))
             ]
@@ -798,41 +807,19 @@ class SegmentFeed:
             return decode_gray_cuda(payload, (camera.height, camera.width), self.profile.downscale, self.color_downscale)
         return decode_gray(payload, self.profile.downscale, self.profile.decode_threads, self.color_downscale)
 
-    def _window_payload(self, position: int, start: int, stop: int) -> tuple[bytes, int]:
-        """Muxed window and its first source-frame index, before frameset matching."""
-        if self.cached_payloads is not None:
-            return self.cached_payloads[position], 0
-        packets: tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]] = self._fetch_samples(position, start, stop)
-        return wrap_mp4(packets[0], packets[1], fps=self.index.fps, codec=self.index.codec), int(self.index.frame_index[start, position])
-
-    def _fetch_samples(self, position: int, start: int, stop: int) -> tuple[list[UInt8[ndarray, " n_sample_bytes"]], list[bool]]:
-        """Encoded samples and keyframe flags of one fed camera, over the framesets ``[start, stop)``.
-
-        The range is contiguous in that camera's own frames, from the frame the
-        first frameset takes to the frame the last one does, so the decoder gets
-        every frame the ones it must produce depend on.
-        """
-        camera_index: int = self.camera_positions[position]
-        camera_t_ns: Int64[ndarray, " n_frames"] = self.index.camera_t_ns[position]
-        first_frame: int = int(self.index.frame_index[start, position])
-        last_frame: int = int(self.index.frame_index[stop - 1, position])
-        entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
-        first_ns: int = int(camera_t_ns[first_frame])
-        last_ns: int = int(camera_t_ns[last_frame])
-        table: pa.Table = (
-            self.dataset.filter_segments([self.segment_id])
-            .filter_contents(entity)
-            .reader(index=TIMELINE)
-            .select(TIMELINE, f"{entity}:VideoStream:sample", f"{entity}:VideoStream:is_keyframe")
-            .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
-            .to_arrow_table()
-        )
-        times: Int64[ndarray, " n_window"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
-        if not np.array_equal(times, camera_t_ns[first_frame : last_frame + 1]):
-            raise ValueError(
-                f"{self.segment_id}: cam_{camera_index:02d} returned {len(times)} samples for its frames [{first_frame}, {last_frame}]"
-            )
-        return packet_views(table[1]), catalog_keyframes(table[2])
+    def _camera_frames(
+        self, chunks: Iterator[StreamPackets], camera: CameraCalib, first_frame: int
+    ) -> Iterator[tuple[UInt8[ndarray, "h w"], ColorCopy | None]]:
+        """One fed camera's frames from ``first_frame`` on, a decoder per chunk; each chunk starts on a keyframe, so
+        chunk after chunk gives the frames of one decoder over the whole stream."""
+        for packets in chunks:
+            if not packets.samples:
+                continue
+            frame: int = packets.first
+            for pair in self._open_decoder(packets.mp4(self.index.codec, self.index.fps), camera):
+                if frame >= first_frame:
+                    yield pair
+                frame += 1
 
 
 def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
@@ -852,33 +839,10 @@ def _window_bounds(index: _VideoIndex, window_ns: int) -> list[tuple[int, int]]:
     return bounds
 
 
-def _video_codec(table: pa.Table, entity: str) -> CatalogCodecName:
-    """The codec every sample of one camera's stream is in.
-
-    ``VideoStream:codec`` is logged once, as a static, so the value is row zero
-    of the non-null codecs — and a recording that carries neither the samples nor
-    the codec has to say which camera it was asked about rather than raise an
-    index error out of pyarrow.
-
-    Args:
-        table: The three columns ``_read_video_index`` selects: the timeline, ``is_keyframe``, ``codec``.
-        entity: The camera's video entity path, for the error.
-
-    Returns:
-        The codec name the sample wrapper needs.
-
-    Raises:
-        ValueError: If the stream has no samples or carries no codec.
-    """
-    if table.num_rows == 0:
-        raise ValueError(f"{entity}: the recording carries no video samples")
-    return catalog_codec(table[2], entity)
-
-
 def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id: str) -> CatalogCodecName:
     """The one codec every fed camera's stream is in.
 
-    :attr:`_VideoIndex.codec` names the codec :meth:`SegmentFeed._fetch_samples`
+    :attr:`_VideoIndex.codec` names the codec :meth:`SegmentFeed._camera_frames`
     muxes *every* camera's samples under, so a rig whose cameras disagree cannot
     be decoded from one index and has to name the two that differ rather than
     silently decode three of four streams as the fourth.
@@ -903,32 +867,11 @@ def _shared_codec(per_camera: Sequence[tuple[int, CatalogCodecName]], segment_id
     return codec
 
 
-def _read_video_index(
-    dataset: DatasetEntry, segment_id: str, camera_positions: Sequence[int], tolerance_ns: int,
-    cached_videos: tuple[CatalogVideo, ...] | None = None,
-) -> _VideoIndex:
-    """Frameset timing, per-camera frames, shared keyframes and codec, fetched without any sample bytes."""
-    per_camera_times: list[Int64[ndarray, " n_frames"]] = []
-    per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = []
-    per_camera_codec: list[tuple[int, CatalogCodecName]] = []
-    for position, camera_index in enumerate(camera_positions):
-        if cached_videos is not None:
-            video: CatalogVideo = cached_videos[position]
-            per_camera_times.append(video.t_ns)
-            per_camera_keyframe.append(np.asarray(video.keyframes, dtype=bool))
-            per_camera_codec.append((camera_index, video.codec))
-            continue
-        entity: str = f"{RIG_ENTITY}/cam_{camera_index:02d}/pinhole/video"
-        table: pa.Table = (
-            dataset.filter_segments([segment_id])
-            .filter_contents(entity)
-            .reader(index=TIMELINE)
-            .select(TIMELINE, f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec")
-            .to_arrow_table()
-        )
-        per_camera_times.append(np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64())))
-        per_camera_keyframe.append(np.asarray(catalog_keyframes(table[1]), dtype=bool))
-        per_camera_codec.append((camera_index, _video_codec(table, entity)))
+def _read_video_index(streams: Sequence[StreamIndex], segment_id: str, camera_positions: Sequence[int], tolerance_ns: int) -> _VideoIndex:
+    """Frameset timing, per-camera frames, shared keyframes and codec, from the fed cameras' blob-free indexes (feed order)."""
+    per_camera_times: list[Int64[ndarray, " n_frames"]] = [stream.t_ns for stream in streams]
+    per_camera_keyframe: list[Bool[ndarray, " n_frames"]] = [stream.keyframes for stream in streams]
+    per_camera_codec: list[tuple[int, CatalogCodecName]] = [(camera, stream.codec) for camera, stream in zip(camera_positions, streams, strict=True)]
     if not per_camera_codec:
         raise ValueError(f"{segment_id}: no camera was selected, so no video columns were read")
     codec: CatalogCodecName = _shared_codec(per_camera_codec, segment_id)
@@ -981,13 +924,8 @@ def _nearest_pose(trajectory: Trajectory, t_ns: int, tolerance_ns: int = ASSOCIA
 
 def _read_imu(dataset: DatasetEntry, segment_id: str, interpolate_accel: bool, first_ns: int, last_ns: int) -> ImuStream:
     """Gyroscope and accelerometer over one window on the catalog's ``video_time`` clock."""
-    table: pa.Table = (
-        dataset.filter_segments([segment_id])
-        .filter_contents([f"{IMU_ENTITY}/gyro", f"{IMU_ENTITY}/accel"])
-        .reader(index=TIMELINE)
-        .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
-        .to_arrow_table()
-    )
+    reader: DataFrame = dataset.filter_segments([segment_id]).filter_contents([f"{IMU_ENTITY}/gyro", f"{IMU_ENTITY}/accel"]).reader(index=TIMELINE)
+    table: pa.Table = reader.filter(time_window(TIMELINE, reader.schema().field(TIMELINE).type, first_ns, last_ns)).to_arrow_table()
     row_t_ns: Int64[ndarray, " n_rows"] = np.asarray(table[TIMELINE].combine_chunks().cast(pa.int64()))
     order: Int64[ndarray, " n_rows"] = np.argsort(row_t_ns, kind="stable")
     row_t_ns = row_t_ns[order]
@@ -1012,13 +950,8 @@ def _read_ground_truth(dataset: DatasetEntry, segment_id: str, first_ns: int, la
     holds no pose: the two are the same answer to "what is the truth here", and
     the layer's own absence is :attr:`SegmentFeed.has_ground_truth`.
     """
-    table: pa.Table = (
-        dataset.filter_segments([segment_id])
-        .filter_contents([RIG_ENTITY])
-        .reader(index=TIMELINE)
-        .filter(col(TIMELINE).cast(pa.int64()).between(lit(first_ns), lit(last_ns)))
-        .to_arrow_table()
-    )
+    reader: DataFrame = dataset.filter_segments([segment_id]).filter_contents([RIG_ENTITY]).reader(index=TIMELINE)
+    table: pa.Table = reader.filter(time_window(TIMELINE, reader.schema().field(TIMELINE).type, first_ns, last_ns)).to_arrow_table()
     return _rig_trajectory(table, segment_id)
 
 
@@ -1137,7 +1070,6 @@ def _build_feed(
     profile: RigProfile,
     frame_stride: int,
     window_s: float,
-    cache_video: bool = False,
     decode_device: Literal["cpu", "cuda"] = "cpu",
     mask_dataset: DatasetEntry | None = None,
     mask_entity: str | None = None,
@@ -1165,23 +1097,10 @@ def _build_feed(
         .to_arrow_table()
     )
     camera_positions: tuple[int, ...] = select_cameras(camera_statics, camera_count, profile.camera_names)
-    cached_videos: tuple[CatalogVideo, ...] | None = (
-        read_catalog_videos(sensor_dataset, segment_id, [f"{rig_entities[position]}/pinhole/video" for position in camera_positions], TIMELINE)
-        if cache_video else None
+    streams: tuple[StreamIndex, ...] = read_video_index(
+        sensor_dataset, segment_id, [f"{rig_entities[position]}/pinhole/video" for position in camera_positions], TIMELINE
     )
-    index: _VideoIndex = _read_video_index(sensor_dataset, segment_id, camera_positions, profile.frameset_tolerance_ns, cached_videos)
-    cached_payloads: tuple[bytes, ...] | None = None
-    if cached_videos is not None:
-        # Mux one camera at a time and drop its packet views as soon as its MP4 exists,
-        # so the peak holds the packets plus one payload rather than every payload.
-        pending: list[CatalogVideo] = list(cached_videos)
-        del cached_videos
-        payloads: list[bytes] = []
-        while pending:
-            video: CatalogVideo = pending.pop(0)
-            payloads.append(wrap_mp4(video.samples, video.keyframes, fps=index.fps, codec=video.codec))
-            del video
-        cached_payloads = tuple(payloads)
+    index: _VideoIndex = _read_video_index(streams, segment_id, camera_positions, profile.frameset_tolerance_ns)
     fed_statics: list[CameraStatics] = [read_camera_statics(camera_statics, rig_entities[position]) for position in camera_positions]
     cameras: tuple[CameraCalib, ...] = tuple(camera_calib(number, statics, profile.downscale) for number, statics in enumerate(fed_statics))
     masks: FrameMasks | None = None
@@ -1214,7 +1133,7 @@ def _build_feed(
         gt_dataset=gt_dataset,
         index=index,
         window_ns=int(window_s * 1e9),
-        cached_payloads=cached_payloads,
+        video=CatalogVideoReader(sensor_dataset, segment_id, streams, TIMELINE),
         decode_device=decode_device,
         masks=masks,
     )
@@ -1227,7 +1146,6 @@ def open_segment(
     frame_stride: int = 1,
     window_s: float = DEFAULT_WINDOW_S,
     *,
-    cache_video: bool = False,
     decode_device: Literal["cpu", "cuda"] = "cpu",
     include_ground_truth: bool = True,
     mask_entity: str | None = None,
@@ -1243,8 +1161,7 @@ def open_segment(
         source: Where the segment lives.
         profile: How this rig has to be read; the default is what MSD is.
         frame_stride: Yield every n-th frameset; every frame is still decoded.
-        window_s: Longest time window fetched in one round trip.
-        cache_video: Fetch compressed streams together once; RAM use scales with encoded segment size.
+        window_s: Longest time window of IMU and ground truth fetched in one round trip.
         decode_device: CPU PyAV or CUDA TorchCodec; CUDA requires the slam-rs-cuda environment.
         include_ground_truth: Read isolated GT for scoring; False reads only the estimator's inputs.
         mask_entity: Name of each fed camera's mask entity under its ``pinhole`` (e.g. ``people_mask``), read from the
@@ -1271,7 +1188,7 @@ def open_segment(
                 raise ValueError(f"{source.base_rrd} holds {len(segment_ids)} segments; the feed reads one")
             mask_dataset: DatasetEntry | None = client.get_dataset("masks") if "masks" in datasets else None
             yield _build_feed(
-                base, ground_truth, segment_ids[0], profile, frame_stride, window_s, cache_video, decode_device,
+                base, ground_truth, segment_ids[0], profile, frame_stride, window_s, decode_device,
                 mask_dataset=mask_dataset, mask_entity=mask_entity,
             )
     else:
@@ -1293,5 +1210,5 @@ def open_segment(
                 ground_truth.register([resolved.ground_truth_uri]).wait()
             yield _build_feed(
                 resolved.dataset, ground_truth,
-                resolved.segment_id, profile, frame_stride, window_s, cache_video, decode_device, mask_entity=mask_entity,
+                resolved.segment_id, profile, frame_stride, window_s, decode_device, mask_entity=mask_entity,
             )

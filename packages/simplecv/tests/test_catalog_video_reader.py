@@ -19,6 +19,7 @@ from simplecv.catalog_video_codec import wrap_mp4  # noqa: E402
 from simplecv.catalog_video_reader import (  # noqa: E402
     CatalogVideoReader,
     ChunkedVideoDecoder,
+    SharedChunks,
     StreamIndex,
     VideoChunk,
     iter_chunks,
@@ -174,3 +175,41 @@ def test_reader_never_holds_the_whole_column(server: rr.server.Server, index: tu
     # The cache, the open decoders' chunks and one query in flight: a few chunks, never the column.
     assert peak < total / 2, f"Arrow held {peak} of {total} encoded bytes"
     assert reader._cached_bytes <= total // 8 + largest
+
+
+def test_streams_walk_one_shared_read_ahead_in_their_own_pace(
+    server: rr.server.Server, index: tuple[StreamIndex, ...], whole: tuple[CatalogVideo, ...]
+) -> None:
+    reader = CatalogVideoReader(server.client().get_dataset("test"), "segment", index, "video_time", chunk_s=0.5)
+    chunks: range = range(1, reader.num_chunks - 1)
+    shared = SharedChunks(reader, chunks)
+    walks = [shared.stream(position) for position in range(len(whole))]
+    # One stream runs three chunks ahead of the other; each still sees its own chunks in order, each fetched once.
+    seen: list[list[bytes]] = [[], []]
+    for _ in range(3):
+        seen[0] += [bytes(sample) for sample in next(walks[0]).samples]
+    for packets in walks[1]:
+        seen[1] += [bytes(sample) for sample in packets.samples]
+    for packets in walks[0]:
+        seen[0] += [bytes(sample) for sample in packets.samples]
+    for position, video in enumerate(whole):
+        first, stop = int(reader.starts[chunks[0], position]), int(reader.starts[chunks[-1] + 1, position])
+        assert seen[position] == [bytes(sample) for sample in video.samples[first:stop]]
+    assert reader.fetch_count == len(chunks)
+    assert shared.held == 0
+
+
+def test_a_stream_without_samples_or_codec_is_named(tmp_path: Path) -> None:
+    path: Path = tmp_path / "empty.rrd"
+    with rr.RecordingStream("test", recording_id="segment") as rec:
+        rec.save(path)
+        rec.log("/cam/video", rr.VideoStream(codec=rr.VideoCodec.H264), static=True)
+        rec.set_time("video_time", duration=np.timedelta64(5, "ns"))
+        rec.log("/other", rr.Scalars([1.0]))
+        rec.log("/bare/video", rr.VideoStream.from_fields(sample=b"x", is_keyframe=True))
+    with rr.server.Server(datasets={"test": [path]}) as running:
+        dataset = running.client().get_dataset("test")
+        with pytest.raises(ValueError, match="segment /cam/video: expected samples"):
+            read_video_index(dataset, "segment", ["cam/video"], "video_time")
+        with pytest.raises(ValueError, match="segment /bare/video: the video stream carries no codec"):
+            read_video_index(dataset, "segment", ["/bare/video"], "video_time")

@@ -58,10 +58,9 @@ def clock_recording(tmp_path: Path, offset_ns: int) -> Path:
 
 
 @pytest.mark.parametrize("offset_ns", [0, 14_902_432])
-@pytest.mark.parametrize("cache_video", [False, True])
-def test_camera_and_imu_share_one_clock_and_window(clock_recording: Path, offset_ns: int, cache_video: bool) -> None:
+def test_camera_and_imu_share_one_clock_and_window(clock_recording: Path, offset_ns: int) -> None:
     """Select the sample at the frame's estimator time, excluding both neighbours."""
-    with open_segment(LocalSegment(clock_recording), cache_video=cache_video) as feed:
+    with open_segment(LocalSegment(clock_recording)) as feed:
         expected_ns: int = 1_000_000_000 if offset_ns == 0 else 1_014_902_432
         assert feed.imu.gyro_noise_std == 0.0007
         assert feed.imu.frequency_hz == 200.0

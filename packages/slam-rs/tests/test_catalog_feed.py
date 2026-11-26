@@ -32,7 +32,6 @@ from slam_rs.catalog_feed import (
     _static_int,
     _static_string,
     _static_values,
-    _video_codec,
     camera_calib,
     check_imu_is_rig_frame,
     open_segment,
@@ -248,25 +247,6 @@ def test_a_malformed_rig_reference_is_named_as_malformed_not_as_missing(statics:
     with pytest.raises(ValueError, match=message) as error:
         check_imu_is_rig_frame(statics, "seg")
     assert str(error.value).startswith("seg: ") and "names no reference sensor" not in str(error.value)
-
-
-def test_a_video_stream_with_no_codec_names_the_entity() -> None:
-    """The codec is read from row zero of this camera's non-null codecs; both can be empty."""
-    entity: str = "/rig/cam_00/pinhole/video"
-    columns: list[str] = ["video_time", f"{entity}:VideoStream:is_keyframe", f"{entity}:VideoStream:codec"]
-    no_rows: pa.Table = pa.table({name: pa.array([], type=pa.int64()) for name in columns})
-    with pytest.raises(ValueError, match=f"{entity}: the recording carries no video samples"):
-        _video_codec(no_rows, entity)
-
-    no_codec: pa.Table = pa.table(
-        {
-            columns[0]: pa.array([1, 2], type=pa.int64()),
-            columns[1]: pa.array([None, None], type=pa.int64()),
-            columns[2]: pa.array([None, None], type=pa.list_(pa.uint32())),
-        }
-    )
-    with pytest.raises(ValueError, match=f"{entity}: the video stream carries no codec"):
-        _video_codec(no_codec, entity)
 
 
 def test_a_rig_whose_cameras_disagree_on_the_codec_names_both() -> None:
