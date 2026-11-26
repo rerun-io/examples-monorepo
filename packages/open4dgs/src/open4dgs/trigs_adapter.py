@@ -41,7 +41,7 @@ from trigs.init.from_colmap import build_canonical_from_npz
 from open4dgs.catalog_clip import MultiViewClip
 from open4dgs.init_cloud import InitCloud
 from open4dgs.prior import MonoPriorLoss
-from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer, strided_frames
+from open4dgs.trigs_trainer import HostSizedCameraConfig, Open4dgsTrainer
 
 
 @serde(deny_unknown_fields=True)
@@ -590,8 +590,6 @@ def train_clip(
         fused_loss=config.fused_loss,
     )
     trainer.camera_loss_hook = prior
-    if config.pixel_stride > 1:
-        gt_images, gt_alphas = strided_frames(gt_images, trainer.stride_state), strided_frames(gt_alphas, trainer.stride_state)
     # The model as it trains: TRiGS updates ``params`` in place; the returned clip replaces them with the result's.
     live: TrainedClip = TrainedClip.from_params(params, meta, dev, trainer=trainer, scalars=writer.rows)
     torch.cuda.reset_peak_memory_stats(dev)

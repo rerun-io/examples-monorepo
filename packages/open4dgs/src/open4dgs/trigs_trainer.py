@@ -36,12 +36,12 @@ backpropagates into a zero tensor of the whole batch) and the row gather is ``in
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import torch
 from torch import Tensor, nn
 from trigs.core.camera import CameraConfig
-from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig
+from trigs.core.trainer import TrigsTrainer, TrigsTrainingConfig, TrigsTrainingResult
 from trigs.strategy.motion_guided_relocation import MotionGuidedRelocationStrategy
 
 from open4dgs.fused_loss import masked_composite_terms
@@ -111,11 +111,10 @@ class SharedTimeGroup:
         sh_degree: int,
         config: TrigsTrainingConfig,
         step: int,
-        batch_cameras: bool,
     ) -> None:
         self._trainer, self._params, self._config = trainer, params, config
         self._cam_group = list(cam_group)
-        self._batch_cameras = batch_cameras
+        self._batch_cameras: bool = trainer.batch_cameras
         self._outputs: dict = trainer._render_inputs(params, cameras, self._cam_group[0], t, sh_degree, config, step=step)
         self._leaves: dict = dict(self._outputs)
         for key in RENDER_INPUT_KEYS:
@@ -130,7 +129,7 @@ class SharedTimeGroup:
         self._loss: Tensor | None = None
         self._batches: list[SizeBatch] = []
         self._batch_of: dict[int, tuple[int, int]] = {}
-        if batch_cameras:
+        if self._batch_cameras:
             by_size: dict[tuple[int, int], list[int]] = {}
             for group_i, cam in enumerate(self._cam_group):
                 by_size.setdefault((self._cameras.width_for(cam), self._cameras.height_for(cam)), []).append(group_i)
@@ -233,7 +232,7 @@ class Open4dgsTrainer(TrigsTrainer):
         super().__init__(*args, **kwargs)  # pyrefly: ignore[bad-argument-type]
         if pixel_stride not in (1, STRIDE):
             raise ValueError(f"pixel_stride must be 1 or {STRIDE}, got {pixel_stride}")
-        self.batch_cameras = batch_cameras
+        self.batch_cameras: bool = batch_cameras
         self.pixel_stride: Literal[1, 2] = pixel_stride
         self.adam_moments: Literal["fp32", "bf16"] = adam_moments
         # Lever 6, None when off. dynamic=True: one compile for every image size (ROI cameras each have their own size;
@@ -243,6 +242,23 @@ class Open4dgsTrainer(TrigsTrainer):
         self._strided_of: CameraConfig | None = None
         self._strided: dict[tuple[int, int], CameraConfig] = {}
         self._const_cache: dict[tuple[object, str, torch.dtype], Tensor] = {}
+
+    def train_from_params(  # pyrefly: ignore[bad-override]  # keyword-only: every caller (TRiGS's train too) passes keywords
+        self,
+        *,
+        gt_images_per_frame: dict[int, list[Tensor]],
+        gt_alphas_per_frame: dict[int, list[Tensor]],
+        **kwargs: Any,  # the rest of TrigsTrainer.train_from_params, passed through
+    ) -> TrigsTrainingResult:
+        """Lever 4: with ``pixel_stride=2`` the train loop reads every frame and mask through ``strided_frames``."""
+        if self.pixel_stride > 1:
+            gt_images_per_frame = strided_frames(gt_images_per_frame, self.stride_state)
+            gt_alphas_per_frame = strided_frames(gt_alphas_per_frame, self.stride_state)
+        return super().train_from_params(
+            gt_images_per_frame=gt_images_per_frame,
+            gt_alphas_per_frame=gt_alphas_per_frame,
+            **kwargs,
+        )
 
     def _build_optimizers(self, params: nn.ParameterDict, config: TrigsTrainingConfig, scene_extent: float) -> dict[str, torch.optim.Optimizer]:
         """Lever 5 (HiGS 4.3, PennyGS 3.7): with ``adam_moments="bf16"`` every Adam of TRiGS becomes ``AdamBf16`` with the same
@@ -342,4 +358,4 @@ class Open4dgsTrainer(TrigsTrainer):
             times.add(default_t if capture is None else float(capture))
         if len(times) != 1:
             return None
-        return SharedTimeGroup(self, params, cameras, cam_group, times.pop(), sh_degree, config, step, self.batch_cameras)
+        return SharedTimeGroup(self, params, cameras, cam_group, times.pop(), sh_degree, config, step)
