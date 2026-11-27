@@ -1,4 +1,5 @@
-"""The Rerun catalog dataloader's NVDEC column decoder, over the chunked reader (:mod:`simplecv.catalog_video_reader`).
+"""The Rerun catalog dataloader's NVDEC column decoder, over the chunked reader (:mod:`simplecv.catalog_video_reader`), and keyed
+decoders (NVDEC and the dataloader's CPU decoder) whose values name the segment and index they answer.
 
 Import this module explicitly: it needs ``rerun-sdk``'s ``dataloader`` extra, which only the catalog lanes install, so
 it must never be re-exported from ``simplecv/__init__.py``.
@@ -15,14 +16,14 @@ TODO(rerun#upstream): delete this module once the dataloader decodes video fast 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from time import perf_counter
-from typing import TypeAlias
+from typing import Generic, Literal, TypeAlias, TypeVar
 
 import numpy as np
 import torch
 from jaxtyping import Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
-from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBatch
+from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBatch, VideoFrameDecoder, Yuv420Frame
 from torch import Tensor
 
 from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders
@@ -33,6 +34,7 @@ FrameRgbChw: TypeAlias = UInt8[Tensor, "3 h w"]
 """One decoded frame, channels-first RGB on the decoder's device."""
 RECOMMENDED_FETCH_BLOCK_SIZE: int = 1024
 """Recommended samples per query when a decoder ignores the shipped payloads."""
+DecodedT = TypeVar("DecodedT")
 
 
 class SegmentNvdecDecoder(ColumnDecoder[Tensor]):
@@ -168,23 +170,37 @@ class TimedNvdecDecoder(SegmentNvdecDecoder):
 
 
 @dataclass(slots=True, frozen=True)
-class KeyedFrame:
-    """One decoded frame (or its transform) with the catalog key it answers; dataloader samples carry no key of their own."""
+class KeyedFrame(Generic[DecodedT]):
+    """One decoded value with the catalog key it answers; dataloader samples carry no key of their own."""
 
     segment_id: str
     index: int
     """The request's index value on an integer timeline (e.g. ``frame_index``)."""
-    image: Tensor
-    """The decoded frame, or the decoder's ``transform`` of it, on the decoder's device."""
+    image: DecodedT
+    """The decoded value: a ``Tensor`` from ``KeyedNvdecDecoder`` (the frame, or its ``transform``, on the decoder's device), a
+    ``Yuv420Frame`` from ``KeyedVideoFrameDecoder``."""
 
 
 class KeyedNvdecDecoder(SegmentNvdecDecoder):
     """``SegmentNvdecDecoder`` whose values also name their segment and integer index, so a consumer can join per-frame labels."""
 
     # pyrefly: ignore  # bad-override — the base decodes to Tensor; the dataloader only moves the value into the sample dict.
-    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[KeyedFrame | None]:
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[KeyedFrame[Tensor] | None]:
         """Pair each decoded frame with its request's segment and index; slots before the first sample stay None."""
         frames: Sequence[Tensor | None] = super().decode(batch, requests)
+        return [
+            None if frame is None else KeyedFrame(segment_id=request.segment_id, index=int(request.index_value), image=frame)
+            for request, frame in zip(requests, frames, strict=True)
+        ]
+
+
+class KeyedVideoFrameDecoder(VideoFrameDecoder[Literal["yuv420p"]]):
+    """The dataloader's CPU ``VideoFrameDecoder`` (``yuv420p``) whose values also name their segment and integer index."""
+
+    # pyrefly: ignore  # bad-override — the base decodes to Yuv420Frame; the dataloader only moves the value into the sample dict.
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[KeyedFrame[Yuv420Frame] | None]:
+        """Pair each decoded frame with its request's segment and index; samples the decoder cannot answer stay None."""
+        frames: Sequence[Yuv420Frame | None] = super().decode(batch, requests)
         return [
             None if frame is None else KeyedFrame(segment_id=request.segment_id, index=int(request.index_value), image=frame)
             for request, frame in zip(requests, frames, strict=True)
