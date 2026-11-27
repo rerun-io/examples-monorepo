@@ -8,7 +8,7 @@ classes (``Body``, ``Wholebody``, ...) become named presets pairing a detector
 config with a pose config.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from posekit.models import (
@@ -24,6 +24,7 @@ from posekit.models.rtmpose import RTMPOSE_ONNX_ZIP_URLS
 from posekit.models.sam3d_body import SAM3D_BODY_REVISION
 from posekit.models.wilor import WILOR_REVISION
 from posekit.models.yolox import YOLOX_ONNX_ZIP_URLS
+from posekit.runtimes import OnnxOrTrtBackendConfig
 
 ZooRole = Literal["detector", "hand-detector", "pose2d", "instance-pose2d", "pose3d", "hand-pose3d", "body-pose3d", "segmenter", "identity"]
 ZooParadigm = Literal["detector", "top-down", "one-stage", "query-based", "full-frame"]
@@ -190,6 +191,22 @@ class PosePreset:
     """Pose stage configuration."""
     description: str
     """What the preset is tuned for."""
+
+    def with_backend(self, backend: OnnxOrTrtBackendConfig) -> tuple[YoloxDetectorConfig, RtmPoseConfig]:
+        """The preset's detector and pose configs, both on ``backend``.
+
+        Args:
+            backend: What runs both models.
+
+        Returns:
+            The detector and the pose config.
+
+        Raises:
+            TypeError: For a preset whose models do not run from ONNX artifacts (no swappable backend).
+        """
+        if not (isinstance(self.detector, YoloxDetectorConfig) and isinstance(self.pose, RtmPoseConfig)):
+            raise TypeError(f"only the YOLOX + RTMPose presets take a backend, not {type(self.detector).__name__} + {type(self.pose).__name__}")
+        return replace(self.detector, backend=backend), replace(self.pose, backend=backend)
 
 
 PRESETS: dict[str, PosePreset] = {
