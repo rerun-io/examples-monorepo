@@ -46522,7 +46522,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/eigen-abi-5.0.1.80-hf414acd_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/embree-4.4.1-h9f4c3c8_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fastar-0.12.0-py312h15b83fc_2.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h6d6c1bd_900.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h1bf8424_901.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fmt-12.1.0-hff5e90c_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fontconfig-2.18.1-h27c8c51_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fonttools-4.63.0-py312h8a5da7c_0.conda
@@ -46654,23 +46654,23 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libnvjpeg-13.0.1.86-hecca717_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnvptxcompiler-dev-13.0.88-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libogg-1.3.5-hd0c01bc_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopencv-4.13.0-qt6_py312h8cf1c45_610.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopencv-5.0.0-headless_h35a6498_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopengl-1.7.0-ha4b6fd6_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopentelemetry-cpp-1.27.0-h9692893_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopentelemetry-cpp-headers-1.27.0-ha770c72_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-batch-plugin-2026.2.0-h7e124b3_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-plugin-2026.2.0-h7e124b3_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-hetero-plugin-2026.2.0-hd41364c_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-cpu-plugin-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-gpu-plugin-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-npu-plugin-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-ir-frontend-2026.2.0-hd41364c_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-onnx-frontend-2026.2.0-h7a07914_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-paddle-frontend-2026.2.0-h7a07914_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-pytorch-frontend-2026.2.0-hecca717_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-frontend-2026.2.0-h78e8023_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-lite-frontend-2026.2.0-hecca717_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-batch-plugin-2026.2.1-h7e124b3_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-plugin-2026.2.1-h7e124b3_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-hetero-plugin-2026.2.1-hd41364c_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-cpu-plugin-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-gpu-plugin-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-npu-plugin-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-ir-frontend-2026.2.1-hd41364c_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-onnx-frontend-2026.2.1-h7a07914_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-paddle-frontend-2026.2.1-h7a07914_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-pytorch-frontend-2026.2.1-hecca717_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-frontend-2026.2.1-h78e8023_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-lite-frontend-2026.2.1-hecca717_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopus-1.6.1-h280c20c_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libparquet-24.0.0-h7376487_9_cpu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libpciaccess-0.19-hb03c661_0.conda
@@ -46759,7 +46759,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/pthread-stubs-0.4-hb9d3cd8_1002.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pugixml-1.15-h3f63f65_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pulseaudio-client-17.0-h9a6aba3_3.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/py-opencv-4.13.0-qt6_py312h2638c08_610.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/py-opencv-5.0.0-headless_h75b7ce4_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pyarrow-24.0.0-py312h7900ff3_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pyarrow-core-24.0.0-py312h2054cf2_0_cpu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pydantic-core-2.33.2-py312h868fb18_1.conda
@@ -50796,7 +50796,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/eigen-abi-5.0.1.80-hf414acd_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/embree-4.4.1-h9f4c3c8_4.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fastar-0.12.0-py312h15b83fc_2.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h6d6c1bd_900.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h1bf8424_901.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fmt-12.1.0-hff5e90c_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fontconfig-2.18.1-h27c8c51_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/fonttools-4.63.0-py312h8a5da7c_0.conda
@@ -50928,23 +50928,23 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libnvjpeg-13.0.1.86-hecca717_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libnvptxcompiler-dev-13.0.88-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libogg-1.3.5-hd0c01bc_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopencv-4.13.0-qt6_py312h8cf1c45_610.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopencv-5.0.0-headless_h35a6498_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopengl-1.7.0-ha4b6fd6_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopentelemetry-cpp-1.27.0-h9692893_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopentelemetry-cpp-headers-1.27.0-ha770c72_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-batch-plugin-2026.2.0-h7e124b3_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-plugin-2026.2.0-h7e124b3_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-hetero-plugin-2026.2.0-hd41364c_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-cpu-plugin-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-gpu-plugin-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-npu-plugin-2026.2.0-h1f0fae8_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-ir-frontend-2026.2.0-hd41364c_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-onnx-frontend-2026.2.0-h7a07914_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-paddle-frontend-2026.2.0-h7a07914_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-pytorch-frontend-2026.2.0-hecca717_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-frontend-2026.2.0-h78e8023_1.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-lite-frontend-2026.2.0-hecca717_1.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-batch-plugin-2026.2.1-h7e124b3_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-auto-plugin-2026.2.1-h7e124b3_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-hetero-plugin-2026.2.1-hd41364c_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-cpu-plugin-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-gpu-plugin-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-intel-npu-plugin-2026.2.1-h1f0fae8_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-ir-frontend-2026.2.1-hd41364c_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-onnx-frontend-2026.2.1-h7a07914_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-paddle-frontend-2026.2.1-h7a07914_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-pytorch-frontend-2026.2.1-hecca717_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-frontend-2026.2.1-h78e8023_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/libopenvino-tensorflow-lite-frontend-2026.2.1-hecca717_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libopus-1.6.1-h280c20c_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libparquet-24.0.0-h7376487_9_cpu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libpciaccess-0.19-hb03c661_0.conda
@@ -51033,7 +51033,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/pthread-stubs-0.4-hb9d3cd8_1002.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pugixml-1.15-h3f63f65_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pulseaudio-client-17.0-h9a6aba3_3.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/py-opencv-4.13.0-qt6_py312h2638c08_610.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/py-opencv-5.0.0-headless_h75b7ce4_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pyarrow-24.0.0-py312h7900ff3_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pyarrow-core-24.0.0-py312h2054cf2_0_cpu.conda
       - conda: https://prefix.dev/conda-forge/linux-64/pydantic-core-2.33.2-py312h868fb18_1.conda
