@@ -88,6 +88,21 @@ class TrackOptions:
     GPU). Same masks as ``False``, which runs SAM 3 in line on the tracker's stream."""
 
 
+def with_lookahead[StepT](steps: Iterator[StepT], ahead: int) -> Iterator[tuple[StepT, StepT | None]]:
+    """Each step with the step ``ahead`` later (None for the last ``ahead`` steps): what SAM 3's lookahead starts on."""
+    window: deque[StepT] = deque(islice(steps, ahead))
+    while window:
+        step: StepT = window.popleft()
+        window.extend(islice(steps, 1))
+        yield step, window[-1] if len(window) == ahead else None
+
+
+def pool_cells(masks: Bool[Tensor, "s h w"], factor: int) -> Bool[Tensor, "s hm wm"]:
+    """Full-resolution masks on the ``factor`` times coarser mask grid: a cell is masked when any of its pixels is."""
+    n_slots, height, width = int(masks.shape[0]), int(masks.shape[1]), int(masks.shape[2])
+    return masks.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+
+
 @dataclass
 class PeopleTracksConfig:
     """Write a tracked people-mask layer for the video streams of one Rerun recording."""
@@ -152,6 +167,9 @@ class PeopleTracker:
         self.detect_stream: torch.cuda.Stream | None = torch.cuda.Stream(device=device) if options.lookahead else None
         self.pending: tuple[int, Future[tuple[BoxDetections, float]]] | None = None
         """The tracker step a running SAM 3 call is for, and the call."""
+        # With lookahead the tracker runs on a high-priority stream: its small kernels go ahead of SAM 3's queued GEMM blocks.
+        self.track_stream: torch.cuda.Stream = torch.cuda.Stream(device=device, priority=-1) if options.lookahead else torch.cuda.current_stream()
+        """The stream the caller runs :meth:`step` on (``with torch.cuda.stream(tracker.track_stream)``)."""
 
     def detect_on_stream(self, frames_rgb: UInt8[Tensor, "s h w 3"]) -> tuple[BoxDetections, float]:
         """SAM 3 on the detect stream (worker thread); returns the detections and the call's wall time."""
@@ -348,21 +366,15 @@ def track_segment(
         for chunk, frames in zip(chunks, decoded, strict=True)
         for column, index in enumerate(chunk)
     )
-    ahead: int = config.track.redetect_every
-    # with lookahead the tracker runs on a high-priority stream: its small kernels go ahead of SAM 3's queued GEMM blocks
-    track_stream: torch.cuda.Stream = torch.cuda.Stream(device=config.device, priority=-1) if config.track.lookahead else torch.cuda.current_stream()
-    with torch.cuda.stream(track_stream):
-        window: deque[tuple[int, Tensor, bool]] = deque(islice(steps, ahead))
-        while window:
-            index, frame, chunk_end = window.popleft()
-            window.extend(islice(steps, 1))  # now the steps after this one, up to redetect_every later
-            n_slots, height, width = int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2])
+    with torch.cuda.stream(tracker.track_stream):
+        for (index, frame, chunk_end), upcoming in with_lookahead(steps, config.track.redetect_every):
+            height, width = int(frame.shape[1]), int(frame.shape[2])
             if tracker.steps == 0 and (height % factor or width % factor):
                 raise ValueError(f"mask_downscale {factor} does not divide the {width}x{height} frames of {entities}")
-            union: Bool[Tensor, "s h w"] = tracker.step(frame, window[-1][1] if len(window) == ahead else None)
+            union: Bool[Tensor, "s h w"] = tracker.step(frame, None if upcoming is None else upcoming[1])
             if index in outputs:
                 dilated: Bool[Tensor, "s h w"] = dilate_masks(union, config.mask.dilate_px)
-                cells: Bool[Tensor, "s hm wm"] = dilated.reshape(n_slots, height // factor, factor, width // factor, factor).any(dim=4).any(dim=2)
+                cells: Bool[Tensor, "s hm wm"] = pool_cells(dilated, factor)
                 masks: UInt8[ndarray, "s hm wm"] = (cells.to(torch.uint8) * PERSON_CLASS_ID).cpu().numpy()
                 for slot, entity in enumerate(entities):
                     set_frame_time(config.timeline, streams[slot].times[index])

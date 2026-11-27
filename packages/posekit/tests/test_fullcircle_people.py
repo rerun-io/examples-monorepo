@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -76,13 +78,22 @@ def test_mask_radius_is_the_dilation_in_mask_cells() -> None:
 
 def test_people_refuse_the_sam3_operator_detector() -> None:
     import pytest
-    from simplecv.rerun_log_utils import RerunTyroConfig
 
-    from posekit.apis.fullcircle_masks import FullCircleMasksConfig
+    from posekit.apis.lens_masks import LensMasksConfig
     from posekit.models.fullcircle import FullCircleConfig
     from posekit.models.fullcircle_people import FacePeopleConfig
 
-    sink: RerunTyroConfig = RerunTyroConfig(headless=True)
     with pytest.raises(ValueError, match="YOLOX"):
-        FullCircleMasksConfig(rr_config=sink, masker=FullCircleConfig(detector="sam3"))
-    FullCircleMasksConfig(rr_config=sink, masker=FullCircleConfig(detector="sam3"), people=FacePeopleConfig(enabled=False))
+        LensMasksConfig(output_dir=Path("layers"), masker=FullCircleConfig(detector="sam3"))
+    LensMasksConfig(output_dir=Path("layers"), masker=FullCircleConfig(detector="sam3"), people=FacePeopleConfig(enabled=False))
+
+
+def test_the_lens_mask_step_tracks_people_on_its_own_framesets() -> None:
+    """One decode serves FullCircle and the people tracker, so the tracker has no stride of its own."""
+    import pytest
+
+    from posekit.apis.lens_masks import LensMasksConfig
+    from posekit.apis.people_tracks import TrackOptions
+
+    with pytest.raises(ValueError, match="track.stride"):
+        LensMasksConfig(output_dir=Path("layers"), track=TrackOptions(stride=5))
