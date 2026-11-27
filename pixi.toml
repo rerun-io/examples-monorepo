@@ -145,7 +145,7 @@ cuda-nvtx-dev = "*"
 cuda-nvml-dev = "*"
 cuda-profiler-api = "*"
 # CUDA Libraries
-cudnn = ">=9,<10"  # onnxruntime 1.29 and pytorch cuda130 builds are cuDNN 9 ABI
+cudnn = ">=9,<10"  # onnxruntime and pytorch cuda130 builds are cuDNN 9 ABI
 libcublas-dev = "*"
 libcudss-dev = "*"
 libcufile-dev = "*"
@@ -157,8 +157,13 @@ libnvjitlink = "*"
 # PyTorch — forces the cuda130/2.12.1 build (explicit beats relying on cuda-version alone)
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
-# onnxruntime comes from PyPI (see [feature.cuda.pypi-dependencies]); conda-forge
-# supplies only the CUDA/cuDNN libraries it dlopens.
+# One ONNX Runtime build per env (ci/tests/test_one_onnxruntime.py): the Python bindings and onnxruntime-cpp
+# (colsfm's COLMAP, robocap-live: the same pin in their features) come out of the same conda-forge feedstock build, so
+# they are pinned together, build number included. Two builds share libonnxruntime_providers_shared.so through RTLD_GLOBAL and crash each other's CUDA EP.
+# 1.30.0 is conda-forge's last cuda130 release (later ones are cuda129/cuda134), so this pin moves with the CUDA 13.4
+# migration. The feedstock's CUDA 13 arch list stops at sm_120 (no sm_121): on the GB10 ORT runs on its CPU EP and
+# TensorRT is the GPU path. If ORT-CUDA on sm_121 is ever needed, build our own package in ai-demos recipes.
+onnxruntime = { version = "==1.30.0", build = "*_201_cuda130" }
 # TensorRT's shared libraries are conda packages, so every env hard-links one
 # cached copy. The pypi.nvidia.com tensorrt-cu13-libs wheel is sent with
 # `cache-control: no-store`, and uv unpacked a fresh 4.4 GB copy per env install.
@@ -176,19 +181,13 @@ libnvonnxparser = { version = "==11.2.1.2", channel = "https://prefix.dev/ai-dem
 [feature.cuda.pypi-dependencies]
 tensorrt-cu13 = "==11.2.1.2"
 tensorrt-cu13-bindings = "==11.2.1.2"
-# onnxruntime from PyPI, like the TensorRT bindings: conda-forge's build ships no sm_121 kernels
-# (its CUDA EP dies on the GB10), and 1.29.0 is the first release whose aarch64
-# CUDA 13 wheels carry sm_121a. No [cuda]/[cudnn] extras — cudart/cuBLAS/cuDNN come
-# from conda above through the LD_LIBRARY_PATH activation. Exact pin: bump
-# deliberately and re-run the GB10 smoke tests.
-onnxruntime-gpu = "==1.29.0"
 cuda-python = "*"
 # The dynamo exporter — the only torch.onnx.export path now that TRT 11 made
 # strongly-typed networks mandatory — imports onnxscript at export time.
 onnxscript = "*"
 
-# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default): ORT needs
-# conda's cuDNN/cuBLAS, and the tensorrt bindings find conda's libnvinfer there.
+# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default): the tensorrt bindings (PyPI) find
+# conda's libnvinfer there.
 [feature.cuda.activation.env]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
@@ -3608,9 +3607,9 @@ PYREFLY_TARGET = "handtrack"
 # The RoboCap hands catalog layer: robocap-live's Rust hand pipeline (DetNet and KeyNet on ONNX Runtime, the perspective
 # KeyNet crops, the ROBUST tracker on handfit, the UmeTrack mesh and the hands-layer writer) as the pyo3 module
 # robocap_live._core, fed one catalog segment at a time by robocap_live.catalog_segment. The cap binary needs none of this:
-# it builds in `robocap-cross` (packages/robocap-live/scripts/build-arm.sh). The env composes `cuda` for onnxruntime-gpu,
-# whose libonnxruntime.so the core loads at run time (CUDA execution provider, or the CPU one), and the cuDNN/cuBLAS libraries
-# that provider opens. Explicit platforms — see AGENTS.md.
+# it builds in `robocap-cross` (packages/robocap-live/scripts/build-arm.sh). The core loads the env's onnxruntime-cpp
+# libonnxruntime.so at run time (CUDA execution provider, or the CPU one); `cuda` brings the cuDNN/cuBLAS libraries that
+# provider opens. Explicit platforms — see AGENTS.md.
 [feature.robocap-live]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -3619,6 +3618,8 @@ python = "3.12.*"
 # conda-forge `rust` ships cargo/rustc and the host C compiler the capture shim's build.rs needs; same pin as slam-rs.
 rust = "1.98.*"
 tyro = ">=0.9.1,<0.10"
+# The `ort` nets dlopen libonnxruntime.so: the C++ package of [feature.cuda]'s onnxruntime build.
+onnxruntime-cpp = { version = "==1.30.0", build = "*_201_cuda130" }
 
 # The Vulkan loader robocap-live ships beside its cap binary: the caps' firmware has the Mali ICD but no system loader
 # (only Chromium's private copy), and wgpu dlopens libvulkan.so.1. scripts/stage-vulkan.sh takes it from this locked package.
@@ -3701,9 +3702,9 @@ depends-on = [{ task = "kornia-staging-patch-deps", environment = "kornia-stagin
 cwd = "packages/robocap-live"
 description = "Build robocap-live for this host with the ONNX Runtime hand nets"
 
-# The ort feature loads ONNX Runtime at run time: the library of this env's onnxruntime package.
+# The ort feature loads ONNX Runtime at run time: the onnxruntime-cpp library, the same build the Python bindings come from.
 [feature.robocap-live.tasks.robocap-live-demo]
-cmd = '''ORT_DYLIB_PATH=$(python -c "import onnxruntime, pathlib; print(next((pathlib.Path(onnxruntime.__file__).parent / 'capi').glob('libonnxruntime.so*')))") LD_LIBRARY_PATH=$CONDA_PREFIX/lib target/release/robocap-live --source replay data/robocap-live-sample/capb-s14-445 --nets ort data/robocap-live-sample/models --display data/robocap-live-sample/robocap-live-display.rrd --save data/robocap-live-demo.rrd && rerun data/robocap-live-demo.rrd'''
+cmd = '''ORT_DYLIB_PATH=$CONDA_PREFIX/lib/libonnxruntime.so LD_LIBRARY_PATH=$CONDA_PREFIX/lib target/release/robocap-live --source replay data/robocap-live-sample/capb-s14-445 --nets ort data/robocap-live-sample/models --display data/robocap-live-sample/robocap-live-display.rrd --save data/robocap-live-demo.rrd && rerun data/robocap-live-demo.rrd'''
 cwd = "packages/robocap-live"
 depends-on = ["robocap-live-download-sample", "robocap-live-build-host"]
 description = "Replay the sample clip through SLAM and hand tracking, save it, and open it in Rerun"
@@ -4046,6 +4047,8 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.colsfm.dependencies]
 python = "3.12.*"
 colmap-src = { path = "recipes/colmap-src" }
+# COLMAP's ONNX Runtime: the same feedstock build as [feature.cuda]'s Python bindings (ci/tests/test_one_onnxruntime.py).
+onnxruntime-cpp = { version = "==1.30.0", build = "*_201_cuda130" }
 # The RaCo-ALIKED and LightGlue+ torch modules the ONNX export (colsfm-raco-export) reads.
 lightglue-onnx-src = { path = "recipes/lightglue-onnx-src" }
 # Pose-graph optimisation and the regularised extrinsic refinement: pycolmap ships cost functions but no PGO driver.

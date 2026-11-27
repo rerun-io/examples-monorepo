@@ -28,7 +28,7 @@ from trtkit.backends import (
     create_runtime_from_onnx,
 )
 from trtkit.base import RuntimeSpec, TensorRuntime, TensorSpec, run_chunked, validate_runtime_inputs
-from trtkit.onnx_cuda import OnnxCudaRuntime
+from trtkit.onnx_cuda import OnnxCudaRuntime, require_cuda_kernels
 from trtkit.onnx_export import DynamicDim, DynamicDims, export_onnx, shallow_module_copy, sweep_stale_onnx_exports
 from trtkit.onnx_graph import onnx_static_batch_size
 from trtkit.tensorrt_runtime import TensorRtDynamicRuntime, TensorRtRuntime
@@ -70,6 +70,7 @@ __all__ = (
     "export_onnx",
     "onnx_content_hash",
     "onnx_static_batch_size",
+    "require_cuda_kernels",
     "run_chunked",
     "shallow_module_copy",
     "sweep_stale_onnx_exports",

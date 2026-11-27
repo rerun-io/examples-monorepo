@@ -2,7 +2,7 @@
 authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
 dependencies = [
     # common: numpy, jaxtyping, rerun-sdk, huggingface_hub, tqdm, simplecv
-    # cuda: pytorch-gpu, torchvision, onnxruntime-gpu, tensorrt-cu13
+    # cuda: pytorch-gpu, torchvision, onnxruntime, tensorrt-cu13
     "simplecv",
     "tyro>=0.9.1",
 ]
