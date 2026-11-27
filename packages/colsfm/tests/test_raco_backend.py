@@ -58,9 +58,12 @@ MAX_MEDIAN_INLIERS: int = 650
 """Upper band on the same, i.e. SSC's target plus its 30 % tolerance."""
 
 SMOKE_MIN_INTER_FRAME_DISTANCE_M: float = 0.5
-"""`feature_extractor_main`'s own default gate; keeps 34 of Galileo's 226 keyframes.
+"""`feature_extractor_main`'s own default gates, 0.5 m with `SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES`; keep 34 of Galileo's 226 keyframes.
 
 The same subset `tests/colsfm/test_pipeline.py` and the TensorRT smoke run on."""
+
+SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES: float = 5.0
+"""Stated, not inherited: colsfm's own default is 15 deg (`DEFAULT_MIN_INTER_FRAME_ROTATION_DEGREES`), which keeps 14 keyframes."""
 
 SMOKE_MIN_REGISTERED_IMAGES: int = 30
 """Of the 34 selected keyframes, at least this many must end up registered."""
@@ -350,6 +353,7 @@ def test_the_whole_pipeline_runs_on_the_raco_backend(galileo_input_dir: Path, tm
         input_dir=galileo_input_dir,
         output_dir=tmp_path_factory.mktemp("galileo_raco"),
         min_inter_frame_distance=SMOKE_MIN_INTER_FRAME_DISTANCE_M,
+        min_inter_frame_rotation_degrees=SMOKE_MIN_INTER_FRAME_ROTATION_DEGREES,
         features_backend="raco",
         matching_backend="raco",
         # The backend is what this module measures; the rest of the default
