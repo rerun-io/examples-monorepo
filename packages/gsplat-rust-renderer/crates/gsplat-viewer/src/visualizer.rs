@@ -450,6 +450,8 @@ pub(crate) fn draw_instances(
                         )?
                     }
                 });
+                // After the push: a fallback that failed to build its draw data drew nothing.
+                crate::renderer::FALLBACK_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             Err(error) => {
                 return Err(ViewSystemExecutionError::DrawDataCreationError(

@@ -93,6 +93,14 @@ pub fn compute_encoded_frames() -> u64 {
     ENCODED_FRAMES.load(Ordering::Relaxed)
 }
 
+// The compute renderer never sees these frames, so the frame probe needs its own count to know the scene drew.
+pub(crate) static FALLBACK_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Entity frames a capacity or capability fallback drew instead of the compute renderer, over this process.
+pub fn fallback_drawn_frames() -> u64 {
+    FALLBACK_FRAMES.load(Ordering::Relaxed)
+}
+
 impl RenderView {
     pub(crate) fn gpu_byte_size(&self) -> u64 {
         self.core.gpu_byte_size()
