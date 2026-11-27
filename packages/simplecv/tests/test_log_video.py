@@ -203,8 +203,7 @@ def test_log_video_accepts_quicktime_brand(synthetic_h264_mp4: Path, tmp_path: P
     rec.save(str(tmp_path / "mov.rrd"))
     ts_stream: Int64[ndarray, "num_frames"] = log_video(mov_path, Path("/video"), recording=rec)
     assert len(ts_stream) == _FRAME_COUNT
-    with pytest.raises(RuntimeError, match="no frames"):
-        mp4_frame_timestamps_ns(mov_path)
+    np.testing.assert_array_equal(mp4_frame_timestamps_ns(mov_path), ts_stream)
 
 
 def test_log_video_sends_chunks_incrementally(synthetic_h264_mp4: Path, monkeypatch: pytest.MonkeyPatch) -> None:

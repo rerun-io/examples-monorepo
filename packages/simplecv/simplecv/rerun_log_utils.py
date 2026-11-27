@@ -297,19 +297,18 @@ def log_video(
 def mp4_frame_timestamps_ns(video_path: Path) -> Int64[ndarray, "num_frames"]:
     """Frame timestamps of an MP4 file, sorted ascending: the times :func:`log_video` puts on its timeline.
 
-    They come from ``Mp4Reader``'s asset-mode frame index, which parses the container and decodes nothing; stream mode
-    would re-encode a B-frame source through FFmpeg only to read its times. The asset chunk is dropped, never logged.
+    They are the presentation times in ``Mp4Reader.info()``'s sample table, which reads the container and decodes
+    nothing; stream mode would re-encode a B-frame source through FFmpeg only to read its times.
 
     Raises:
-        RuntimeError: When Rerun cannot parse the MP4 or finds no frames in it (a QuickTime-brand .MOV).
+        RuntimeError: When Rerun cannot parse the MP4 or finds no frames in it.
     """
-    reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(video_path, mode="asset", entity_path="/video", timeline_name="video")
-    times: list[Int64[ndarray, "rows"]] = [
-        chunk.to_record_batch().column("video").to_numpy().astype("timedelta64[ns]").astype(np.int64) for chunk in reader.stream() if not chunk.is_static
-    ]
-    if not times:
+    pts: Int64[ndarray, "num_frames"] = (
+        rr.experimental.Mp4Reader(video_path).info().samples.column("pts").to_numpy().astype("timedelta64[ns]").astype(np.int64)
+    )
+    if pts.size == 0:
         raise RuntimeError(f"Mp4Reader found no frames in {video_path}")
-    return np.sort(np.concatenate(times))
+    return np.sort(pts)
 
 
 def mesh_bounding_geometry(vertices: Float64[ndarray, "n 3"]) -> tuple[Float64[ndarray, "3"], float]:
