@@ -23,7 +23,7 @@ from rerun.encodings import EntityPathLike
 from rerun.experimental import ViewerClient
 from serde.json import to_json
 
-from gsplat_rust_renderer.asog_decode import AsogFrame, DecodedAsog, evaluate
+from gsplat_rust_renderer.asog_decode import AsogFrame, DecodedAsog, decode_sh, evaluate
 from gsplat_rust_renderer.asog_decode import decode as decode_asog
 from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
 from gsplat_rust_renderer.hexels3d import HEXELS_ENTITY, Hexels3D, log_hexels, write_hexel_ply
@@ -84,28 +84,37 @@ def capture(viewer: ViewerClient, view: rrb.Spatial3DView, path: Path, allow_bla
     raise RuntimeError(f"Viewer pixels did not settle: {path}")
 
 
-def seek(viewer: ViewerClient, timeline: str, frame: int) -> None:
-    """Move the time cursor and wait until the viewer state reports it, so the next capture shows that frame.
+def seek(viewer: ViewerClient, timeline: str, *, sequence: int | None = None, duration_ns: int | None = None) -> int:
+    """Move the paused time cursor to a sequence frame or a duration (ns) and wait until the viewer state reports it.
 
     `set_time` returns before the cursor lands: a capture right after it can settle on two equal frames of the
-    previous time (the hexels-tracked flake).
+    previous time (the hexels-tracked flake). Returns the cursor value, for `cursor_at`.
     """
+    if sequence is not None and duration_ns is None:
+        value: int = sequence
+    elif duration_ns is not None and sequence is None:
+        value = duration_ns
+    else:
+        raise ValueError("seek: give exactly one of sequence and duration_ns")
     deadline: float = time.monotonic() + 30.0
     while True:
         try:
-            viewer.set_time(timeline, sequence=frame)
-            if cursor_at(viewer, timeline, frame):
-                return
+            if sequence is not None:
+                viewer.set_time(timeline, sequence=sequence, play_state="paused")
+            else:
+                viewer.set_time(timeline, duration=np.timedelta64(value, "ns"), play_state="paused")
+            if cursor_at(viewer, timeline, value):
+                return value
         except ConnectionError:
             pass
         if time.monotonic() > deadline:
-            raise RuntimeError(f"Viewer time cursor did not reach {timeline}={frame}")
+            raise RuntimeError(f"Viewer time cursor did not reach {timeline}={value}")
         time.sleep(0.2)
 
 
-def cursor_at(viewer: ViewerClient, timeline: str, frame: int) -> bool:
-    """Whether the viewer's time cursor is on `timeline` at `frame`."""
-    return any(r.current_timeline == timeline and r.current_time == frame for r in viewer.get_state().recordings)
+def cursor_at(viewer: ViewerClient, timeline: str, value: int) -> bool:
+    """Whether the viewer's time cursor is on `timeline` at `value` (a sequence frame or nanoseconds)."""
+    return any(r.current_timeline == timeline and r.current_time == value for r in viewer.get_state().recordings)
 
 
 def wait_for_view(viewer: ViewerClient, view: rrb.Spatial3DView) -> None:
@@ -408,7 +417,7 @@ def check_hexels_tracked(config: Config, ply: Path) -> None:
         wait_for_view(viewer, view)
         images: list[UInt8[np.ndarray, "h w 3"]] = []
         for frame, pose in enumerate(poses):
-            seek(viewer, "frame", frame)
+            seek(viewer, "frame", sequence=frame)
             image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / f"tracked-{frame}.png",
                 ready=lambda pixels, frame=frame: int(pixels.max()) - int(pixels.min()) > 20 and cursor_at(viewer, "frame", frame))
             score: float = pose_psnr(config, ply, image, pose, fov_y, f"tracked-{frame}")
@@ -540,7 +549,7 @@ def check_sog_lod(config: Config) -> None:
     assert lit > 100, "the LOD recording drew nothing"
 
 
-def asog_reference_ply(path: Path, decoded: DecodedAsog, frame: AsogFrame) -> Float32[np.ndarray, "n 3"]:
+def asog_reference_ply(path: Path, decoded: DecodedAsog, sh_rest: Float64[np.ndarray, "n c 3"], frame: AsogFrame) -> Float32[np.ndarray, "n 3"]:
     """Write the evaluated clip as a splat PLY (rows with weight 0 are not drawn); return the drawn centres."""
     drawn = frame.weights > 0
     reference = DecodedSog(
@@ -549,7 +558,7 @@ def asog_reference_ply(path: Path, decoded: DecodedAsog, frame: AsogFrame) -> Fl
         log_scales=decoded.log_scales[drawn].astype(np.float32),
         opacity=decoded.opacity[drawn] * frame.weights[drawn],
         sh0=decoded.sh0[drawn].astype(np.float32),
-        sh_rest=decoded.sh_rest[drawn].astype(np.float32),
+        sh_rest=sh_rest[drawn].astype(np.float32),
         sh_bands=3,
     )
     write_splat_ply(path, core_layout(reference))
@@ -567,10 +576,11 @@ def check_asog(config: Config) -> None:
 
     asog = fixture_asog()
     decoded: DecodedAsog = decode_asog(asog)
+    sh_rest: Float64[np.ndarray, "n c 3"] = decode_sh(asog)
     times = columns(FIXTURE, "/expected/canonical")["Expected:times"]
     t: float = float(times[2])
     ply: Path = config.out / "asog-reference.ply"
-    means: Float32[np.ndarray, "n 3"] = asog_reference_ply(ply, decoded, evaluate(decoded, asog.manifest, t))
+    means: Float32[np.ndarray, "n 3"] = asog_reference_ply(ply, decoded, sh_rest, evaluate(decoded, asog.manifest, t))
     target: Float64[np.ndarray, "3"] = np.median(means, axis=0).astype(np.float64)
     radius: float = float(np.percentile(np.linalg.norm(means - target, axis=1), 90))
     position: Float64[np.ndarray, "3"] = target + np.array([0.6 * radius, -0.4 * radius, -2.6 * radius])
@@ -584,22 +594,18 @@ def check_asog(config: Config) -> None:
         rr.send_columns("/clock", indexes=[rr.TimeColumn("time", duration=np.array([0.0, asog.manifest.duration]))], columns=rr.Scalars.columns(scalars=[0.0, 0.0]))
 
     recording_path: Path = save_recording(config.out / "asog.rrd", view, log)
-    nanoseconds: int = round(t * 1e9)
     with spawn_viewer(str(config.viewer)) as viewer:
         viewer.open_url(str(recording_path.resolve()))
-        deadline: float = time.monotonic() + 30.0
-        while not any(r.current_timeline == "time" and r.current_time == nanoseconds for r in viewer.get_state().recordings):
-            if time.monotonic() > deadline:
-                raise RuntimeError(f"Viewer time cursor did not reach time={nanoseconds} ns")
-            viewer.set_time("time", duration=np.timedelta64(nanoseconds, "ns"), play_state="paused")
-            time.sleep(0.2)
-        image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "asog-gpu.png")
+        wait_for_view(viewer, view)
+        cursor: int = seek(viewer, "time", duration_ns=round(t * 1e9))
+        image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "asog-gpu.png",
+                                                    ready=lambda pixels: int(pixels.max()) - int(pixels.min()) > 20 and cursor_at(viewer, "time", cursor))  # fmt: skip
         reports = [report.summary for item in viewer.get_state().views for report in item.reports]
         assert not reports, f"view reports: {reports}"
     pose: Float64[np.ndarray, "4 4"] = look_at(position, target, up)
     score: float = pose_psnr(config, ply, image, pose, DEFAULT_FOV_Y, "asog-gpu")
     other_ply: Path = config.out / "asog-other-time.ply"
-    asog_reference_ply(other_ply, decoded, evaluate(decoded, asog.manifest, float(times[1])))
+    asog_reference_ply(other_ply, decoded, sh_rest, evaluate(decoded, asog.manifest, float(times[1])))
     other: float = pose_psnr(config, other_ply, image, pose, DEFAULT_FOV_Y, "asog-other-time")
     print(f"ASOG_PIXELS t={t:.3f} s: {score:.3f} dB; against t={float(times[1]):.3f} s: {other:.3f} dB", flush=True)
     assert score >= 45.0, f"ASOG motion differs from gsplat render of the reference evaluation: {score} dB"
