@@ -15,9 +15,10 @@ discovery to conversion (a directory, or a small record of parsed path parts).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Generic, TypeVar
 
@@ -25,6 +26,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from rerun.catalog import DatasetEntry
 from serde import serde
+from simplecv.run_record import RunStart, start_run, write_run_record
 
 from dataforge import paths, writing
 from dataforge.identity import SequenceIdentity
@@ -99,6 +101,9 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     def __init__(self, config: ConfigT) -> None:
         self.config: ConfigT = config
         self.timer: SequenceTimer = SequenceTimer()
+        self.run: RunStart | None = None
+        """This process's run identity (``simplecv.run_record.start_run``): the convert command sets it before any
+        work; a dataset used outside it starts one at its first layer."""
         """Stage clock of the sequence being converted.
 
         dataforge-convert installs a fresh one before every sequence; converters
@@ -154,10 +159,12 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     optimized_layers: ClassVar[tuple[str, ...]] = ()
     """Small columnar layers compacted before publication; mesh layers must keep their boundaries."""
 
+    @contextmanager
     def layer_recording(
         self, identity: SequenceIdentity, layer: str, target: Path, blueprint: rrb.Blueprint | None = None
-    ) -> AbstractContextManager[rr.RecordingStream]:
-        """Open one layer's atomic recording; see ``writing.atomic_recording``.
+    ) -> Iterator[rr.RecordingStream]:
+        """Open one layer's atomic recording (``writing.atomic_recording``); on a clean exit it gets its run record
+        (:mod:`simplecv.run_record`), timed from the sequence's start.
 
         Only the base layer embeds a blueprint (``blueprint``, else the dataset's default) and Rerun's own
         ``RecordingInfo``; a derived layer stacks onto it under the same recording id.
@@ -169,13 +176,18 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         sequence's rig). The alternative: stop embedding and save an ``.rbl`` beside local files.
         """
         base: bool = layer == paths.BASE_LAYER
-        return writing.atomic_recording(
+        if self.run is None:
+            self.run = start_run(self.config)
+        sequence: RunStart = replace(self.run, started=datetime.fromisoformat(self.timer.started_at))
+        with writing.atomic_recording(
             target,
             recording_id=identity.recording_id,
             default_blueprint=(self.default_blueprint() if blueprint is None else blueprint) if base else None,
             send_properties=base,
             optimize=layer in self.optimized_layers,
-        )
+        ) as recording:
+            yield recording
+            write_run_record(recording, sequence.finish(layer, identity.recording_id))
 
     @abstractmethod
     def download(self) -> None:

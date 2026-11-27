@@ -1,5 +1,6 @@
 """Run one catalog segment and replace its single slam_rs results layer."""
 
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -8,6 +9,7 @@ from typing import Literal
 from dataforge.writing import atomic_recording
 from rerun.catalog import DatasetEntry, OnDuplicateSegmentLayer
 from simplecv.catalog_video_reader import DecodeDevice, DecodeRequest, select_decode_device
+from simplecv.run_record import RunStart, start_run, write_run_record
 
 from slam_rs import BackendRequest, _core
 from slam_rs.catalog_feed import (
@@ -58,6 +60,7 @@ def main(config: Config) -> None:
     is_robocap: bool = dataset_name == "robocap"
     rig_profile: RigProfile = ROBOCAP_RIG if is_robocap else dataset_rig(settings.dataset(dataset_name))
     catalog_url: str = config.catalog or settings.catalog_url
+    run_start: RunStart = start_run(dataclasses.replace(config, catalog=catalog_url))
     # One manifest query resolves the dataset handle that open_segment and the final register share.
     segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]
     dataset: DatasetEntry | None = segment.dataset
@@ -83,6 +86,7 @@ def main(config: Config) -> None:
             layer: LayerRun = track_layer(rec, feed, vio, config_text=config_text, calibration=calibration, run_gba=True,
                                           detail=config.detail, profile=config.profile,
                                           animate_base_rig=not segment.has_ground_truth, strict=True)
+            write_run_record(rec, run_start.finish(POSE_SOURCE, config.segment))
         run: SegmentRun = layer.run
         if run.gba_failure is not None:
             print(f"global BA: failed: {run.gba_failure}; the final run is re-anchored on the map after loops and PGO", flush=True)

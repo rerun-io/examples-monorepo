@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import rerun as rr
 import rerun.chunk as rrc
+from conftest import read_back, recording_properties
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 
@@ -125,6 +126,8 @@ def test_each_lens_disc_lands_on_its_face_at_every_face_stamp(tmp_path: Path) ->
     main(Config(base=base, masks=masks, faces=faces, output=output))
     found = read_masks(output)
     assert sorted(found) == [f"/world/rig_00/cam_{cam:02d}/pinhole/people_mask" for cam in range(2, 8)]
+    record: dict[str, object] = recording_properties(read_back(output), "run_masks")
+    assert record["layer"] == "masks" and record["segment"] == rrc.RrdReader(base).recordings()[0].recording_id
     hit: dict[str, bool] = {"cam_02": True, "cam_03": False, "cam_04": True, "cam_05": False, "cam_06": False, "cam_07": False}
     for entity, rows in found.items():
         assert sorted(stamp for stamp, _ in rows) == STAMPS, entity

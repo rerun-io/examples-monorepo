@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import rerun as rr
+from conftest import read_back, recording_properties
 
 from dataforge import paths, writing
 from dataforge.apis import convert
@@ -236,14 +237,20 @@ def test_parallel_jobs_convert_every_selected_sequence_with_its_own_timer(tmp_pa
         with guard:
             running.pop()
         target = paths.rrd_path(tmp_path, layer="base", identity=identity)
-        with writing.atomic_recording(target, recording_id=identity.recording_id, send_properties=False) as recording:
+        with self.layer_recording(identity, "base", target) as recording:
             rr.send_columns("/value", indexes=[rr.TimeColumn("video_time", duration=[0.0])], columns=rr.Scalars.columns(scalars=[0.0]), recording=recording)
         return target
 
     monkeypatch.setattr(RobocapDataset, "convert", slow_convert)
-    convert.main(convert.Config(dataset=RobocapConfig(), jobs=2, max_sequences=4))
+    config = convert.Config(dataset=RobocapConfig(), jobs=2, max_sequences=4)
+    convert.main(config)
     records = load_records(tmp_path / "timing/convert.jsonl", ConvertRecord)
+    assert [r.error for r in records] == [None] * 4
     assert sorted(r.recording_id for r in records) == sorted(i.recording_id for i in identities[:4])
+    # Every worker's layers carry the one run identity the command took before dispatching (simplecv.run_record).
+    for identity in identities[:4]:
+        record = recording_properties(read_back(paths.rrd_path(tmp_path, layer="base", identity=identity)), "run_base")
+        assert record["config"] == repr(config) and record["segment"] == identity.recording_id
     assert all(r.capture_s == float(r.recording_id.rsplit("s", 1)[1]) for r in records)
     assert all(r.stage_s["transcode"] >= 0.2 for r in records)
     assert peak[0] == 2

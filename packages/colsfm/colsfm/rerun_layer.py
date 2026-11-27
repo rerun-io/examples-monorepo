@@ -43,6 +43,7 @@ from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 from simplecv.rerun_growing_points import log_points_by_first_view
 from simplecv.rerun_walk_path import send_walk_path
+from simplecv.run_record import RunRecord, write_run_record
 
 from colsfm.benchmark import ReconstructionMetrics, RunArtifacts, read_run, reconstruction_metrics
 from colsfm.frame_manifest import FrameSourceManifest
@@ -333,6 +334,7 @@ def write_run_layer(
     timeline: str = "video_time",
     frames: FrameSourceManifest | None = None,
     view: ViewRigSource | None = None,
+    record: RunRecord | None = None,
 ) -> LayerSummary:
     """Write one finished run as a layer of `segment`.
 
@@ -345,6 +347,7 @@ def write_run_layer(
         frames: The run's frame source, for a catalog input: the frusta then reference their pictures in the segment's
             video streams (`log_frame_references`).
         view: With `frames`, the prior and the segment's viewing frames: the layer then carries `rig_view` (`log_view_rig`).
+        record: The run record of the process that ran it (:mod:`simplecv.run_record`), written into the layer.
 
     Returns:
         What was written.
@@ -399,5 +402,7 @@ def write_run_layer(
             run_dir=str(run_dir),
         ),
     )
+    if record is not None:
+        write_run_record(recording, record)
     recording.flush()
     return LayerSummary(path=rrd_path, num_rig_poses=int(len(times_ns)), num_points=int(points.shape[0]), metrics=metrics)

@@ -202,7 +202,7 @@ def test_the_shipped_tool_moves_the_base_rig_only_without_ground_truth(
     output: Path = tmp_path / f"{segment_id}.rrd"
     entities: set[str] = {chunk.entity_path for chunk in rrc.RrdReader(output).stream().collect().stream()}
     assert ("/world/rig_00" in entities) is writes_base_rig
-    assert {"/world/runs/slam_rs/rig", "/world/runs/slam_rs_vio/rig"} <= entities
+    assert {"/world/runs/slam_rs/rig", "/world/runs/slam_rs_vio/rig", "/__properties/run_slam_rs"} <= entities, "the layer carries its run record"
     dataset.register.assert_called_once()
     assert dataset.register.call_args.args == ([output.resolve().as_uri()],)
 

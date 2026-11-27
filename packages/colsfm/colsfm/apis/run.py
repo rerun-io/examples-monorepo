@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Annotated, TypeAlias
 
 import tyro
+from simplecv.run_record import RunStart, start_run
 
 from colsfm import DATA_DIR
 from colsfm.catalog import CatalogInputConfig, PreparedInput, prepare_catalog_input, serve_catalog_input
 from colsfm.frame_manifest import FRAME_SOURCE_FILE, read_manifest
 from colsfm.pipeline import StageResult, run_pipeline, run_stage
-from colsfm.rerun_layer import LayerSummary, write_run_layer
+from colsfm.rerun_layer import DEFAULT_SOURCE, LayerSummary, write_run_layer
 from colsfm.run_config import PipelineOptions, SelectionOptions
 from colsfm.run_lifecycle import SUMMARY_NAME, CheapStageName
 from colsfm.run_report import PipelineSummary
@@ -61,10 +62,11 @@ class CatalogCommand:
 
     def execute(self) -> None:
         """Prepare the input, run the pipeline and write the layer (a local input is served for the whole run)."""
+        run: RunStart = start_run(self)
         with serve_catalog_input(self.source) as source:
-            self._run(source)
+            self._run(source, run)
 
-    def _run(self, source: CatalogInputConfig) -> None:
+    def _run(self, source: CatalogInputConfig, run: RunStart) -> None:
         prepared: PreparedInput = prepare_catalog_input(source, view_rig=self.view_rig)
         output_dir: Path = (
             DATA_DIR / "runs" / prepared.input_dir.name if self.options.output_dir == UNSET_DIR else self.options.output_dir
@@ -80,6 +82,7 @@ class CatalogCommand:
             timeline=source.timeline,
             frames=read_manifest(prepared.input_dir / FRAME_SOURCE_FILE),
             view=prepared.view,
+            record=dataclasses.replace(run, config=repr(dataclasses.replace(self, source=source, options=options))).finish(DEFAULT_SOURCE, source.segment),
         )
         print(
             f"[colsfm] layer {layer.path}: {layer.num_rig_poses} rig poses, {layer.num_points} points, "

@@ -11,6 +11,8 @@ from pathlib import Path
 from socket import gethostname
 from threading import Lock, local
 
+from simplecv.run_record import RunStart, start_run
+
 from dataforge import paths
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
@@ -140,6 +142,8 @@ def main(config: Config) -> None:
     """
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
+    run_start: RunStart = start_run(config)
+    dataset.run = run_start
     selected: list[tuple[SequenceIdentity, object]] = select(dataset.discover(), config.sequence)[: config.max_sequences]
     print(f"converting {len(selected)} sequence(s), {config.jobs} at once")
     failed: list[str] = []
@@ -149,9 +153,10 @@ def main(config: Config) -> None:
         records = Lock()
         workers = local()  # convert_one keeps its timer on the dataset: one dataset per worker thread
 
-        def run(pair: tuple[SequenceIdentity, object]) -> None:
+        def convert_pair(pair: tuple[SequenceIdentity, object]) -> None:
             if not hasattr(workers, "dataset"):
                 workers.dataset = dataset_config.setup()
+                workers.dataset.run = run_start
             record: ConvertRecord = convert_one(workers.dataset, pair[0], pair[1], force=config.force, version=source_version)
             with records:
                 append_record(root / "timing/convert.jsonl", record)
@@ -160,7 +165,7 @@ def main(config: Config) -> None:
                     failed.append(pair[0].sequence_key)
 
         with ThreadPoolExecutor(max_workers=config.jobs) as pool:
-            list(pool.map(run, selected))
+            list(pool.map(convert_pair, selected))
         if failed:
             raise SystemExit(f"{len(failed)} of {len(selected)} sequence(s) failed: {', '.join(failed)}")
         return
