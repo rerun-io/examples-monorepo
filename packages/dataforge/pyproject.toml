@@ -108,6 +108,9 @@ ignore_names = [
     "host",
     # MagicMock configuration in the fake catalog (tests/test_register.py).
     "return_value",
+    # The fake catalog's registrars, called by simplecv.catalog_layers.register_named_blueprint (outside these scan paths).
+    "register_blueprint",
+    "register_table_blueprint",
     # PyAV decoder setting, read by the decoder.
     "thread_type",
     "thread_count",

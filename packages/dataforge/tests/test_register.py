@@ -38,7 +38,7 @@ class FakeEntry:
     registered: dict[str, list[str]] = field(default_factory=dict)
     duplicates: dict[str, Any] = field(default_factory=dict)
     """The ``on_duplicate`` policy each layer was registered under."""
-    blueprints: list[tuple[str, bool, bool]] = field(default_factory=list)
+    registrations: list[tuple[str, bool, bool]] = field(default_factory=list)
     """``(uri, set_default, segment_table)`` of every ``register_blueprint`` / ``register_table_blueprint`` call."""
     names: dict[str, str] = field(default_factory=dict)
     """Blueprint name by entry id; names are unique within the dataset."""
@@ -54,30 +54,31 @@ class FakeEntry:
         self.duplicates[layer_name] = on_duplicate
         return FakeRegistration()
 
-    def register_blueprint(self, uri: str, name: str, *, set_default: bool = True) -> None:
-        self._add(uri, name, set_default, segment_table=False)
+    def register_blueprint(self, uri: str, name: str, *, set_default: bool = True) -> SimpleNamespace:
+        return self._add(uri, name, set_default, segment_table=False)
 
-    def register_table_blueprint(self, uri: str, name: str, *, set_default: bool = True) -> None:
-        self._add(uri, name, set_default, segment_table=True)
+    def register_table_blueprint(self, uri: str, name: str, *, set_default: bool = True) -> SimpleNamespace:
+        return self._add(uri, name, set_default, segment_table=True)
 
-    def _add(self, uri: str, name: str, set_default: bool, *, segment_table: bool) -> None:
+    def _add(self, uri: str, name: str, set_default: bool, *, segment_table: bool) -> SimpleNamespace:
         assert name not in self.names.values(), f"blueprint name {name!r} is taken"  # AlreadyExistsError on a real catalog
-        self.blueprints.append((uri, set_default, segment_table))
-        entry_id: str = f"rec_new_{len(self.blueprints)}"
+        self.registrations.append((uri, set_default, segment_table))
+        entry_id: str = f"rec_new_{len(self.registrations)}"
         self.blueprint_rows[entry_id] = uri  # the server lists new entries beside the old ones
         self.names[entry_id] = name
+        return SimpleNamespace(id=entry_id, name=name)
 
-    def get_blueprint_by_name(self, name: str) -> SimpleNamespace | None:
-        held_by: str | None = next((key for key, held in self.names.items() if held == name), None)
-        if held_by is None:
-            return None
-        entry_id: str = held_by
+    def blueprints(self) -> list[SimpleNamespace]:
+        """The named entries, each renameable like a ``RegisteredBlueprint``."""
 
-        def rename(new_name: str) -> None:
-            assert new_name not in self.names.values()
-            self.names[entry_id] = new_name
+        def renamer(entry_id: str):  # noqa: ANN202 — stands in for RegisteredBlueprint.rename
+            def rename(new_name: str) -> None:
+                assert new_name not in self.names.values()
+                self.names[entry_id] = new_name
 
-        return SimpleNamespace(id=entry_id, rename=rename)
+            return rename
+
+        return [SimpleNamespace(id=entry_id, name=name, rename=renamer(entry_id)) for entry_id, name in self.names.items()]
 
     def blueprint_dataset(self) -> FakeEntry:
         """The real entry has a hidden per-dataset blueprint dataset; one object plays both here."""
@@ -168,13 +169,13 @@ def test_base_is_required(tmp_path: Path, catalog: FakeEntry) -> None:
 
 def registered_files(catalog: FakeEntry) -> list[Path]:
     """The files behind every ``register_blueprint`` call, in call order."""
-    return [Path(uri.removeprefix("file://")) for uri, _, _ in catalog.blueprints]
+    return [Path(uri.removeprefix("file://")) for uri, _, _ in catalog.registrations]
 
 
 def test_every_run_registers_both_blueprints_as_the_defaults(tmp_path: Path, catalog: FakeEntry) -> None:
     make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
     register.main(Config(dataset=RobocapConfig()))
-    assert [(set_default, segment_table) for _, set_default, segment_table in catalog.blueprints] == [(True, False), (True, True)]
+    assert [(set_default, segment_table) for _, set_default, segment_table in catalog.registrations] == [(True, False), (True, True)]
     assert all(path.exists() for path in registered_files(catalog))
 
 
@@ -220,7 +221,8 @@ def test_back_to_back_runs_keep_only_the_latest_blueprints(tmp_path: Path, catal
     make_rrds(tmp_path, paths.BASE_LAYER, ["robocap__a.rrd"])
     register.main(Config(dataset=RobocapConfig()))
     register.main(Config(dataset=RobocapConfig()))
-    assert sorted(catalog.unregistered) == ["rec_new_1", "rec_new_2"]
+    # register_named_blueprint retires each name's holder; the sweep of every listed entry drops them again (a no-op).
+    assert sorted(set(catalog.unregistered)) == ["rec_new_1", "rec_new_2"]
     assert sorted((tmp_path / "blueprints").iterdir()) == sorted(registered_files(catalog)[2:])
     assert catalog.names == {"rec_new_3": "robocap", "rec_new_4": "robocap table"}, "the latest pair holds the stable names"
 

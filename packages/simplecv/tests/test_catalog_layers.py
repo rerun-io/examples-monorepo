@@ -6,10 +6,18 @@ import pytest
 
 rr = pytest.importorskip("rerun", reason="rerun-sdk is required by this test module")
 pytest.importorskip("rerun.catalog", reason="rerun.catalog is required by this test module")
+import rerun.blueprint as rrb  # noqa: E402
 import rerun.chunk as rrc  # noqa: E402
 from rerun.catalog import CatalogClient  # noqa: E402
 
-from simplecv.catalog_layers import atomic_recording, atomic_write, ensure_dataset, register_layer, serve_local_segment  # noqa: E402
+from simplecv.catalog_layers import (  # noqa: E402
+    atomic_recording,
+    atomic_write,
+    ensure_dataset,
+    register_layer,
+    register_named_blueprint,
+    serve_local_segment,
+)
 
 
 def _write_layer(path: Path, group: str, value: str, *, send_properties: bool) -> Path:
@@ -117,3 +125,28 @@ def test_a_layer_of_another_recording_is_refused(tmp_path: Path) -> None:
         recording.log("/other", rr.Points3D([[0.0, 0.0, 0.0]]), static=True)
     with pytest.raises(ValueError, match="other"), serve_local_segment(base, {"slam_rs": other}, dataset="local"):
         pass
+
+
+@pytest.mark.integration
+def test_a_named_blueprint_replaces_its_holder_and_a_failed_one_keeps_it(tmp_path: Path) -> None:
+    """Re-runs leave one blueprint per name; the same file re-registers in place; a failed registration keeps the old holder."""
+    base: Path = _write_layer(tmp_path / "base.rrd", "capture", "base", send_properties=True)
+    files: dict[str, Path] = {}
+    for stem in ("first", "second", "table"):
+        files[stem] = tmp_path / f"{stem}.rbl"
+        rrb.Blueprint(rrb.Spatial3DView(origin="/")).save("simplecv-test", files[stem])
+    with rr.server.Server() as server:
+        entry = ensure_dataset(server.client(), "blueprints")
+        register_layer(entry, [base], None)
+        first = register_named_blueprint(entry, files["first"].as_uri(), "layout")
+        again = register_named_blueprint(entry, files["first"].as_uri(), "layout")
+        assert again.id == first.id, "the same file re-registers in place"
+        second = register_named_blueprint(entry, files["second"].as_uri(), "layout")
+        table = register_named_blueprint(entry, files["table"].as_uri(), "table", table=True)
+        assert [(blueprint.id, blueprint.name) for blueprint in entry.blueprints()] == [(second.id, "layout"), (table.id, "table")]
+        assert entry.default_blueprint() == second and entry.default_segment_table_blueprint() == table
+
+        with pytest.raises(Exception):  # noqa: B017 — the server's error for an unreadable file
+            register_named_blueprint(entry, (tmp_path / "missing.rbl").as_uri(), "layout")
+        assert [(blueprint.id, blueprint.name) for blueprint in entry.blueprints()] == [(second.id, "layout"), (table.id, "table")]
+        assert entry.default_blueprint() == second

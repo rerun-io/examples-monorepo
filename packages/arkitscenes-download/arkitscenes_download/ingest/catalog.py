@@ -25,6 +25,7 @@ from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rich.console import Console, Group
 from rich.live import Live
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
+from simplecv.catalog_layers import register_named_blueprint
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
 from arkitscenes_download.schema import ALL_LAYER_NAMES, OPTIONAL_LAYER_NAMES, REQUIRED_LAYER_NAMES
@@ -133,6 +134,8 @@ def register_layer(config: Config, layer_name: str, paths: list[Path], progress:
 
 
 TABLE_BLUEPRINT_NAME: str = "segment table"
+ORIENTATIONS: tuple[tuple[str, bool], ...] = (("landscape", False), ("portrait", True))
+"""Name and ``is_portrait`` of the orientation blueprint pair; prompt-da and gauss-surf replace the pair under these names."""
 
 
 def register_default_blueprints(dataset: DatasetEntry, dataset_name: str, blueprint_dir: Path) -> None:
@@ -148,20 +151,16 @@ def register_default_blueprints(dataset: DatasetEntry, dataset_name: str, bluepr
     blueprint_dir.mkdir(parents=True, exist_ok=True)
     # Each name belongs to one blueprint: a re-run replaces the blueprint holding it (prompt-da's pair, or one
     # registered from another directory) instead of failing with AlreadyExistsError.
-    held = [dataset.get_blueprint_by_name(name) for name in ("landscape", "portrait", TABLE_BLUEPRINT_NAME)]
-    blueprints: DatasetEntry | None = dataset.blueprint_dataset()
-    if blueprints is not None and (stale := [blueprint.id for blueprint in held if blueprint is not None]):
-        blueprints.unregister(segments_to_drop=stale, layers_to_drop=[]).wait()
-    for orientation, is_portrait in (("landscape", False), ("portrait", True)):
+    for orientation, is_portrait in ORIENTATIONS:
         blueprint_path: Path = blueprint_dir / f"{dataset_name}-{orientation}.rbl"
         make_blueprint(is_portrait).save("arkitscenes", blueprint_path)
         blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
-        dataset.register_blueprint(blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait)
+        register_named_blueprint(dataset, blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait)
     table_blueprint_path: Path = blueprint_dir / f"{dataset_name}-table.rbl"
     make_table_blueprint().save("arkitscenes", table_blueprint_path)
     table_blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
     try:
-        dataset.register_table_blueprint(table_blueprint_path.resolve().as_uri(), TABLE_BLUEPRINT_NAME)
+        register_named_blueprint(dataset, table_blueprint_path.resolve().as_uri(), TABLE_BLUEPRINT_NAME, table=True)
     except BeartypeException:
         raise
     except Exception as error:  # noqa: BLE001

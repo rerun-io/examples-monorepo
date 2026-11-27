@@ -23,6 +23,7 @@ import rerun as rr
 from dataforge import schema, writing
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rerun.chunk import LazyChunkStream, RrdReader
+from simplecv.catalog_layers import register_named_blueprint
 
 from handtrack import rerun_layers
 from handtrack.blueprint import handtrack_blueprint
@@ -165,11 +166,7 @@ def register_layers(config: Config, segments: list[str]) -> None:
         with writing.atomic_write(blueprint_file) as temp_path:
             handtrack_blueprint(config.dataset).save(writing.APPLICATION_ID, str(temp_path))
         # One blueprint per name: this run's file replaces the one an earlier run registered.
-        previous = entry.get_blueprint_by_name(BLUEPRINT_NAME)
-        blueprints: DatasetEntry | None = entry.blueprint_dataset()
-        if previous is not None and blueprints is not None:
-            blueprints.unregister(segments_to_drop=[previous.id], layers_to_drop=[]).wait()
-        entry.register_blueprint(blueprint_file.resolve().as_uri(), BLUEPRINT_NAME, set_default=True)
+        register_named_blueprint(entry, blueprint_file.resolve().as_uri(), BLUEPRINT_NAME)
         print(f"registered the {BLUEPRINT_NAME!r} blueprint as {config.dataset}'s default")
 
 

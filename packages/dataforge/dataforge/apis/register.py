@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlparse
 
 import rerun.blueprint as rrb
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from simplecv.catalog_layers import register_named_blueprint
 
 from dataforge import paths, schema, writing
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
@@ -102,8 +103,9 @@ def republish_blueprints(entry: DatasetEntry, dataset: DataforgeDataset, catalog
     """Publish fresh default blueprints and retire their previous catalog entries."""
     # Every run republishes the blueprints from the current code, so a new layer's columns and a changed
     # layout both land without a separate step. A live server holds registered files open (never overwrite
-    # them), so the run writes new stamped files, registers them as the defaults, and retires every entry the
-    # blueprint dataset listed before it. Names are unique per dataset: the old entries give theirs up first.
+    # them), so the run writes new stamped files and registers them under the dataset's two names, which retires
+    # the entries that held them. It then also retires every other entry the blueprint dataset listed before it
+    # (unnamed ones from Rerun < 0.44, leftovers of an interrupted run) and deletes the files of all of them.
     blueprint_entries: DatasetEntry | None = entry.blueprint_dataset()  # None while the dataset has no blueprints
     retiring: dict[str, Path] = {}
     if blueprint_entries is not None:
@@ -111,16 +113,12 @@ def republish_blueprints(entry: DatasetEntry, dataset: DataforgeDataset, catalog
             blueprint_entries.segment_table().select("rerun_segment_id", "rerun_storage_urls").to_arrow_table().to_pylist()
         )
         retiring = {row["rerun_segment_id"]: Path(unquote(urlparse(row["rerun_storage_urls"][0]).path)) for row in listed}
-    names: tuple[str, str] = (catalog_name, f"{catalog_name} table")
-    for name in names:
-        if (holder := entry.get_blueprint_by_name(name)) is not None:
-            holder.rename(f"{name} (retiring {holder.id})")
     stamp: str = datetime.now().strftime("%Y%m%d-%H%M%S-%f")  # microseconds: back-to-back runs never share a file name
     blueprint_path: Path = paths.blueprint_path(output_root, catalog_name, stamp=stamp).resolve()
     segment_layout, table_layout = dataset.catalog_blueprints(entry)
     with writing.atomic_write(blueprint_path) as temp_path:
         segment_layout.save(catalog_name, str(temp_path))
-    entry.register_blueprint(blueprint_path.as_uri(), names[0], set_default=True)
+    register_named_blueprint(entry, blueprint_path.as_uri(), catalog_name)
     table_path: Path = paths.blueprint_path(output_root, catalog_name, segment_table=True, stamp=stamp).resolve()
     if isinstance(table_layout, rrb.table.TableBlueprint):  # a dataset's own table, complete with its timeline and columns
         with writing.atomic_write(table_path) as temp_path:
@@ -128,7 +126,7 @@ def republish_blueprints(entry: DatasetEntry, dataset: DataforgeDataset, catalog
     else:
         columns: list[str] = entry.segment_table().schema().names
         writing.save_table_blueprint(table_layout, table_path, timeline=schema.TIMELINE, fields=dataset.table_fields(), columns=columns)
-    entry.register_table_blueprint(table_path.as_uri(), names[1], set_default=True)
+    register_named_blueprint(entry, table_path.as_uri(), f"{catalog_name} table", table=True)
     if blueprint_entries is not None and retiring:
         blueprint_entries.unregister(segments_to_drop=list(retiring), layers_to_drop=[]).wait()
         # Only this dataset's own .rbl files in its blueprint directory (both resolved) are deleted: an entry can point anywhere.

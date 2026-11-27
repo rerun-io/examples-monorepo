@@ -19,6 +19,7 @@ from pathlib import Path
 
 import rerun.blueprint as rrb
 import tyro
+from simplecv.catalog_layers import register_named_blueprint
 
 from exo_calib.catalog_io import RigLayout, StageConfig, StageContext, stage_context
 from exo_calib.kp2d_layer import kp2d_raw_entity
@@ -86,9 +87,5 @@ def main(config: BlueprintConfig) -> None:
     print(f"wrote {rbl_path} for application id {context.dataset.id}")
     if config.stage.register:
         # The name is unique per dataset: this run's layout replaces the one an earlier run registered.
-        previous = context.dataset.get_blueprint_by_name(BLUEPRINT_NAME)
-        blueprints = context.dataset.blueprint_dataset()
-        if previous is not None and blueprints is not None:
-            blueprints.unregister(segments_to_drop=[previous.id], layers_to_drop=[]).wait()
-        registered = context.dataset.register_blueprint(rbl_path.resolve().as_uri(), BLUEPRINT_NAME, set_default=True)
+        registered = register_named_blueprint(context.dataset, rbl_path.resolve().as_uri(), BLUEPRINT_NAME)
         print(f"registered as default blueprint: {registered.name} ({registered.id})")

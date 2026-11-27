@@ -20,7 +20,7 @@ import rerun as rr
 import torch
 import torch.nn.functional as F
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
-from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
+from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL, ORIENTATIONS
 from arkitscenes_download.ingest.cells import landscape_quarter_turns, portrait_from_segment_row
 from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, PROMPTDA_MESH, TIMELINE
 from arkitscenes_download.ingest.recording import atomic_recording
@@ -30,6 +30,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationOperation
 from rerun.experimental.dataloader import RerunIterableDataset
 from simplecv.camera_parameters import Intrinsics, rescale_intri
+from simplecv.catalog_layers import register_named_blueprint
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 from simplecv.rerun_log_utils import mesh_bounding_geometry
 from torch import Tensor
@@ -396,18 +397,11 @@ def main(config: PDAArkitScenesConfig) -> None:
     if config.register and config.update_blueprint:
         # The portrait/landscape pair is shared with the ARKitScenes ingest under the same names: replace whatever
         # holds them, and leave the dataset's other blueprints (the segment-table one) alone.
-        orientations: tuple[tuple[str, bool], ...] = (("landscape", False), ("portrait", True))
-        held: list[str] = [blueprint.id for name, _ in orientations if (blueprint := dataset_entry.get_blueprint_by_name(name)) is not None]
-        if held:
-            blueprint_dataset: DatasetEntry | None = dataset_entry.blueprint_dataset()
-            if blueprint_dataset is None:
-                raise RuntimeError(f"dataset reports blueprints {held!r} but has no blueprint dataset")
-            blueprint_dataset.unregister(segments_to_drop=held, layers_to_drop=[]).wait()
-        for orientation, is_portrait in orientations:
+        for orientation, is_portrait in ORIENTATIONS:
             blueprint_path: Path = config.output_dir / f"{ARKITSCENES_DATASET}-{orientation}.rbl"
             blueprint_path.parent.mkdir(parents=True, exist_ok=True)
             make_blueprint(portrait=is_portrait, include_promptda=True).save(f"arkitscenes-{orientation}", blueprint_path)
-            dataset_entry.register_blueprint(blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait)
+            register_named_blueprint(dataset_entry, blueprint_path.resolve().as_uri(), orientation, set_default=is_portrait)
 
     print(f"segments processed: {len(results)}")
     print(f"frames inferred: {sum(r.inferred_frames for r in results)}")
