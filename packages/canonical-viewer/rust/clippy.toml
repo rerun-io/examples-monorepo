@@ -1,7 +1,7 @@
 # Rerun main's clippy.toml (rerun-io/rerun@151102d), minus entries for crates this package does not use
 # (egui widgets, arrow, ecolor, re_async, opentelemetry, sha1) and `catch_unwind` (we do not build with panic = "abort").
 
-msrv = "1.96"
+msrv = "1.98" # the 0.44.0 tag this workspace builds (Rerun main @151102d said 1.96)
 
 allow-unwrap-in-tests = true
 

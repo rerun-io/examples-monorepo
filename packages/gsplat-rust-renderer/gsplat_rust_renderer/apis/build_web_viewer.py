@@ -47,6 +47,8 @@ PATCHED_CRATES: tuple[PatchedCrate, ...] = (
 
 # Rerun 0.44.0 is not on crates.io; the web crate's [patch."https://github.com/rerun-io/rerun"] points into a patched
 # checkout of this tag.
+# A staged copy of canonical_viewer.apis.prepare_rerun (tag, commit, fetch, prepare_tree): it goes when this web build
+# moves onto the canonical viewer's web crate. ci/tests/test_rerun_pins.py keeps the tag and commit in step.
 RERUN_URL: str = "https://github.com/rerun-io/rerun"
 RERUN_TAG: str = "0.44.0"
 RERUN_COMMIT: str = "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd"

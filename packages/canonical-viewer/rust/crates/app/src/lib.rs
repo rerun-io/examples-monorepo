@@ -1,39 +1,39 @@
 //! The canonical Rerun viewer: stock Rerun plus every extension in [`EXTENSIONS`].
 //!
 //! The patched `re_viewer` (`patches/re_viewer-0.44.0-extension-hooks.patch`) calls two hooks that every viewer goes
-//! through, native, headless and web: one adjusts the wgpu setup, one runs on each new `App`. [`install_hooks`] points
-//! them at [`EXTENSIONS`].
+//! through, native, headless and web: one adjusts the device request, one runs on each new `App`. [`install_hooks`]
+//! points them at [`EXTENSIONS`].
 
 use canonical_viewer_extension::{Extension, wgpu};
-use re_viewer::external::eframe::egui_wgpu;
-use std::sync::Arc;
 
 /// Every extension in the canonical viewer. Adding one = its crate in Cargo.toml + one line here.
 pub const EXTENSIONS: &[Extension] = &[];
 
 /// Point the patched `re_viewer`'s hooks at [`EXTENSIONS`]; call once, before the viewer starts.
 pub fn install_hooks() {
-    // A second call finds the hooks set to these same functions.
-    re_viewer::extension_hooks::WGPU_OPTIONS
+    let device_set = re_viewer::extension_hooks::DEVICE_DESCRIPTOR
         .set(request_device_needs)
-        .ok();
-    re_viewer::extension_hooks::SETUP_APP
+        .is_ok();
+    let setup_set = re_viewer::extension_hooks::SETUP_APP
         .set(register_extensions)
-        .ok();
+        .is_ok();
+    if !(device_set && setup_set) {
+        re_log::error!(
+            "canonical viewer: the re_viewer extension hooks were already set; extensions may be missing"
+        );
+    }
 }
 
-fn request_device_needs(options: &mut egui_wgpu::WgpuConfiguration) {
-    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
-        let rerun_descriptor = Arc::clone(&setup.device_descriptor);
-        setup.device_descriptor = Arc::new(move |adapter| {
-            with_device_needs(
-                EXTENSIONS,
-                &adapter.features(),
-                &adapter.limits(),
-                rerun_descriptor(adapter),
-            )
-        });
-    }
+fn request_device_needs(
+    adapter: &wgpu::Adapter,
+    rerun_descriptor: wgpu::DeviceDescriptor<'static>,
+) -> wgpu::DeviceDescriptor<'static> {
+    with_device_needs(
+        EXTENSIONS,
+        &adapter.features(),
+        &adapter.limits(),
+        rerun_descriptor,
+    )
 }
 
 fn register_extensions(app: &mut re_viewer::App) {

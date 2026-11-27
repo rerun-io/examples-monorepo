@@ -27,17 +27,18 @@ pixi run -e canonical-viewer --frozen rerun-canonical -- recording.rrd       # a
 ## How it works
 
 `patches/re_viewer-0.44.0-extension-hooks.patch` adds two hooks to `re_viewer`, at the two places every viewer
-(native, headless, web) passes through: `wgpu_options()` (the wgpu setup) and the end of `App::with_commands` (every
-new `App`). `canonical_viewer::install_hooks` points them at `EXTENSIONS`, and `rerun-canonical` then runs the stock
-`rerun::run`.
+(native, headless, web) passes through: the device request in `wgpu_options()` (it receives the adapter and Rerun's
+device descriptor) and the end of `App::with_commands` (every new `App`). `canonical_viewer::install_hooks` points them
+at `EXTENSIONS`, and `rerun-canonical` then runs the stock `rerun::run`.
 
 Each extension's device needs apply in list order to Rerun's device descriptor. A change is kept only when it keeps
 everything already requested and stays within the adapter's offer (`with_device_needs`). An extension that fails to
 register logs an error, and the other extensions still load.
 
-`tools/prepare_rerun.py` checks out the Rerun tag into `target/patch/rerun-<tag>/` and applies the patches. The Cargo
-workspace (`rust/`) redirects every Rerun crate there. The checkout sits outside `rust/` because, inside it, cargo
-passes re_renderer's sources as relative paths and re_renderer's embedded shader lookup breaks.
+`tools/prepare_rerun.py` checks out the Rerun tag into `target/patch/rerun-<tag>/` and applies the patches (gsplat's web
+build keeps a staged copy of this code until it moves onto the canonical web crate). The Cargo workspace (`rust/`) redirects every Rerun crate
+there. The checkout sits outside `rust/` because, inside it, cargo passes re_renderer's sources as relative paths and
+re_renderer's embedded shader lookup breaks.
 
 ## Tests
 

@@ -1,4 +1,4 @@
-"""Rerun pin guards: the Rust crates, their egui patches and the gsplat web build follow the conda rerun-sdk pin.
+"""Rerun pin guards: the Rust crates, their egui patches and the patched Rerun checkouts follow the conda rerun-sdk pin.
 
 Rerun 0.44.0 is not on crates.io, so every Rust package takes the `re_*` crates from the rerun-io/rerun release tag
 and patches the egui family, egui_crates and re_mp4 to the revisions in that tag's Cargo.lock. A bump that misses one
@@ -10,7 +10,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import pytest
 import tomllib
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
@@ -20,8 +19,9 @@ PATCHED_GIT: tuple[str, ...] = (
     "https://github.com/rerun-io/egui_crates.git",
     "https://github.com/rerun-io/re_mp4.git",
 )
-WEB_VIEWER_BUILD: Path = REPO_ROOT / "packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py"
 CANONICAL_PREPARE: Path = REPO_ROOT / "packages/canonical-viewer/canonical_viewer/apis/prepare_rerun.py"
+# A staged copy of CANONICAL_PREPARE until gsplat's web build moves onto the canonical viewer's web crate.
+WEB_VIEWER_BUILD: Path = REPO_ROOT / "packages/gsplat-rust-renderer/gsplat_rust_renderer/apis/build_web_viewer.py"
 
 
 def _cargo_manifests() -> list[Path]:
@@ -72,8 +72,28 @@ def test_patched_egui_family_uses_one_rev_per_repository() -> None:
     assert revs[PATCHED_GIT[0]], "no [patch.crates-io] entry pins the egui family"
 
 
-@pytest.mark.parametrize("script", [WEB_VIEWER_BUILD, CANONICAL_PREPARE], ids=lambda script: script.parent.parent.name)
-def test_patched_rerun_checkouts_use_the_conda_pin_tag(script: Path) -> None:
-    match: re.Match[str] | None = re.search(r'^RERUN_TAG: str = "([^"]+)"$', script.read_text(), flags=re.MULTILINE)
-    assert match is not None, f"{script.relative_to(REPO_ROOT)}: RERUN_TAG constant not found"
-    assert match.group(1) == _conda_rerun_version()
+def _constant(script: Path, name: str) -> str:
+    match: re.Match[str] | None = re.search(rf'^{name}: str = "([^"]+)"$', script.read_text(), flags=re.MULTILINE)
+    assert match is not None, f"{script.relative_to(REPO_ROOT)}: {name} constant not found"
+    return match.group(1)
+
+
+def test_patched_rerun_checkouts_use_the_conda_pin_tag() -> None:
+    scripts: tuple[Path, ...] = (CANONICAL_PREPARE, WEB_VIEWER_BUILD)
+    tags: dict[str, str] = {str(script.relative_to(REPO_ROOT)): _constant(script, "RERUN_TAG") for script in scripts}
+    commits: dict[str, str] = {str(script.relative_to(REPO_ROOT)): _constant(script, "RERUN_COMMIT") for script in scripts}
+    assert set(tags.values()) == {_conda_rerun_version()}, f"RERUN_TAG must be the conda rerun-sdk pin: {tags}"
+    assert len(set(commits.values())) == 1, f"the copies must check out the same commit: {commits}"
+
+
+def test_rerun_patch_paths_name_the_conda_pin_tag() -> None:
+    # cargo accepts a path patch of any version for a git dependency, so a stale checkout left on disk would still build.
+    checkout: str = f"/rerun-{_conda_rerun_version()}/"
+    paths: dict[str, str] = {}
+    for manifest in _cargo_manifests():
+        relative: str = str(manifest.relative_to(REPO_ROOT))
+        patches: dict[str, Any] = tomllib.loads(manifest.read_text()).get("patch", {}).get(RERUN_GIT, {})
+        paths |= {f"{relative}:{name}": entry["path"] for name, entry in patches.items() if "path" in entry}
+    assert paths, f"no Cargo.toml patches {RERUN_GIT} to a prepared checkout"
+    stale: dict[str, str] = {where: path for where, path in paths.items() if checkout not in path}
+    assert not stale, f"[patch.{RERUN_GIT!r}] paths must point into a {checkout} checkout: {stale}"

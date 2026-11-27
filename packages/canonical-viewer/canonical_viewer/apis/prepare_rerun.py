@@ -17,7 +17,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-PACKAGE_DIR: Path = Path(__file__).resolve().parents[2]
+from canonical_viewer import PACKAGE_DIR
+
 RERUN_URL: str = "https://github.com/rerun-io/rerun"
 RERUN_TAG: str = "0.44.0"
 RERUN_COMMIT: str = "f346ba2728b9f55afdfd5afdb2b976fecb98dcdd"

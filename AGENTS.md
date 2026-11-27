@@ -404,8 +404,10 @@ To bump, in one change:
    tarball, regenerating its one patch (`package.json` + `pnpm-lock.yaml`);
 3. the Rust `rerun`/`re_*` crates to match exactly (matching that release's egui family):
    `packages/robocap-live`, `packages/slam-rs`, the gsplat custom viewer
-   (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`) and the depth-video viewer
-   (`packages/depth-video-viewer/Cargo.toml`); re-lock their Cargo with
+   (`packages/gsplat-rust-renderer/crates/*/Cargo.toml`), the depth-video viewer
+   (`packages/depth-video-viewer/Cargo.toml`) and the canonical viewer (`packages/canonical-viewer/rust/Cargo.toml`,
+   its `[patch]` paths, and `RERUN_TAG`/`RERUN_COMMIT` with regenerated patches in
+   `canonical_viewer/apis/prepare_rerun.py` and its staged copy in gsplat's `build_web_viewer.py`); re-lock their Cargo with
    `cargo update -p <crate>@<old>` for the re_* family, not a blanket update, or the viewer
    silently loses protocol/tooling parity. 0.44.0 is not on crates.io (its egui is unreleased):
    the crates are git dependencies on rerun-io/rerun tag `0.44.0`, with a `[patch.crates-io]` for
@@ -419,8 +421,9 @@ the viewer's Rust port. Brush stays on its own glam; the viewer converts at the 
 Several lanes restate the exact pin rather than composing `common`:
 `[feature.mv-api-catalog-register-mac]` and `[feature.slam-rs-osx]` (macOS), `[feature.fdanyone-rerun]` (gradio only:
 its envs take gradio-rerun from `recipes/gradio-rerun-src`, not `common`),
-`[feature.agent-traces]` (torch-free), `[feature.selfcap-soma]` and `[feature.depth-video-viewer]`
-(moves with its viewer's `re_*` crates). They are tagged
+`[feature.agent-traces]` (torch-free), `[feature.selfcap-soma]`, `[feature.depth-video-viewer]`
+(moves with its viewer's `re_*` crates) and `[feature.canonical-viewer]` (the stock viewer its parity golden
+compares against). They are tagged
 `# pin-bump: hold`; a bump that misses one leaves that lane a release behind, and for
 the Mac lanes no linux gate and no `pixi lock --check` can see it.
 

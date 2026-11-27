@@ -24,6 +24,7 @@ rerun = { git = "https://github.com/rerun-io/rerun", tag = "0.44.0", default-fea
 # Rerun 0.44.0's allocator pin (its Cargo.toml: v3, and 0.1.48 for microsoft/mimalloc#1287).
 mimalloc = { version = "=0.1.48", features = ["v3"] }
 
+# Lint policy copied from Rerun main (Cargo.toml `[workspace.lints.*]`, rerun-io/rerun@151102d); see also clippy.toml.
 [workspace.lints.rust]
 unknown_lints = "deny"
 unsafe_code = "deny"
@@ -208,6 +209,8 @@ re_video = { path = "../target/patch/rerun-0.44.0/crates/utils/re_video" }
 re_viewer = { path = "../target/patch/rerun-0.44.0/crates/top/re_viewer" }
 rerun = { path = "../target/patch/rerun-0.44.0/crates/top/rerun" }
 
+# Stock Rerun releases with codegen-units = 1; 16 keeps a release build at about 4 min. Revisit with a frame-time
+# measurement before this becomes the only viewer (PR 8).
 [profile.release]
 lto = "thin"
 codegen-units = 16

@@ -11,7 +11,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, UInt8
 
-from canonical_viewer.pixels import CANONICAL_VIEWER, STOCK_VIEWER, capture, spawn_viewer
+from canonical_viewer.pixels import STOCK_VIEWER, capture, spawn_viewer
 
 pytestmark = pytest.mark.golden
 
@@ -46,17 +46,14 @@ def write_scene(path: Path) -> list[rrb.View]:
     return views
 
 
-def test_canonical_draws_what_stock_draws(tmp_path: Path) -> None:
-    if not CANONICAL_VIEWER.is_file():
-        pytest.skip(f"{CANONICAL_VIEWER} is missing: run `pixi run -e canonical-viewer-dev canonical-viewer-build`")
+def test_canonical_draws_what_stock_draws(canonical_viewer: Path, tmp_path: Path) -> None:
     recording_path: Path = tmp_path / "stock-parity.rrd"
     views: list[rrb.View] = write_scene(recording_path)
     pixels: dict[str, list[UInt8[np.ndarray, "h w 3"]]] = {}
-    for name, binary in (("canonical", CANONICAL_VIEWER), ("stock", STOCK_VIEWER)):
+    for name, binary in (("canonical", canonical_viewer), ("stock", STOCK_VIEWER)):
         with spawn_viewer(binary) as viewer:
             viewer.open(str(recording_path))
             pixels[name] = [capture(viewer, view, tmp_path / f"{name}-{view.name}.png") for view in views]
     for view, canonical, stock in zip(views, pixels["canonical"], pixels["stock"], strict=True):
         assert canonical.shape == stock.shape, view.name
-        difference: UInt8[np.ndarray, "h w 3"] = np.abs(canonical.astype(np.int16) - stock.astype(np.int16)).astype(np.uint8)
-        assert int(difference.max()) == 0, f"{view.name}: canonical differs from stock (max {int(difference.max())}, {float((difference > 0).mean()):.4%} of values)"
+        assert np.array_equal(canonical, stock), f"{view.name}: canonical differs from stock in {float((canonical != stock).mean()):.4%} of values"

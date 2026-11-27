@@ -16,9 +16,6 @@ from jaxtyping import UInt8
 from PIL import Image
 from rerun.experimental import ViewerClient
 
-PACKAGE_DIR: Path = Path(__file__).resolve().parents[1]
-CANONICAL_VIEWER: Path = PACKAGE_DIR / "target" / "release" / "rerun-canonical"
-"""The release binary that ``canonical-viewer-build`` writes."""
 STOCK_VIEWER: Path = Path(sys.executable).parent / "rerun"
 """This environment's stock viewer, from the conda rerun-sdk at the same Rerun release."""
 
@@ -33,11 +30,11 @@ def free_port() -> int:
 def spawn_viewer(binary: Path) -> ViewerClient:
     """Start an owned headless viewer on a free port; the client is a context manager that stops it.
 
-    The viewer must report the SDK's Rerun release, or its pixels prove nothing about this release. It runs with
-    ``RUST_LOG=warn``: every INFO line is also a toast for about 4 s, and the startup one ("Headless viewer running at
-    ...") lies over the top-right view, so two otherwise equal viewers differed by when they were captured.
+    The viewer must report the SDK's Rerun release, or its pixels prove nothing about this release. Its startup line
+    "Headless viewer running at ..." is also a toast for about 4 s, over the top-right view, so a capture would depend
+    on timing; ``re_viewer::headless=warn`` silences that one line and keeps every other INFO line.
     """
-    with patch.dict(os.environ, {"RUST_LOG": "warn"}):
+    with patch.dict(os.environ, {"RUST_LOG": "info,re_viewer::headless=warn"}):
         viewer: ViewerClient = ViewerClient.spawn(headless=True, port=free_port(), executable_path=str(binary), hide_welcome_screen=True)
     version: str | None = viewer.get_state().viewer_version
     if version != rr.__version__:
@@ -72,15 +69,10 @@ def capture(viewer: ViewerClient, view: rrb.View, path: Path, timeout_s: float =
                 raise
             time.sleep(0.1)
             continue
-        pixels: UInt8[np.ndarray, "h w 3"] | None = None
-        file_deadline: float = min(deadline, time.monotonic() + 2.0)
-        while pixels is None and time.monotonic() < file_deadline:
-            try:
-                with Image.open(path) as screenshot:
-                    pixels = np.asarray(screenshot.convert("RGB"), dtype=np.uint8)
-            except (FileNotFoundError, OSError):
-                time.sleep(0.1)
-        if pixels is not None and int(pixels.max()) - int(pixels.min()) > 20:
+        # save_screenshot returns once the viewer has written the file.
+        with Image.open(path) as screenshot:
+            pixels: UInt8[np.ndarray, "h w 3"] = np.asarray(screenshot.convert("RGB"), dtype=np.uint8)
+        if int(pixels.max()) - int(pixels.min()) > 20:
             if previous is not None and np.array_equal(previous, pixels):
                 return pixels
             previous = pixels
