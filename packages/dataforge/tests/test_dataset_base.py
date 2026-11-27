@@ -89,6 +89,18 @@ def test_every_layer_carries_the_run_record_of_the_conversion_that_wrote_it(outp
         assert record["started_at"] == dataset.timer.started_at and record["config"] == repr(dataset.config)
 
 
+def test_a_reused_dataset_records_each_conversions_own_identity(output_root: Path, tmp_path: Path) -> None:
+    """Outside the convert command the record is taken per layer, never kept: a changed config shows in the next run."""
+    dataset = ToyDataset(ToyConfig(root=tmp_path / "raw"))
+    base: Path = output_root / paths.BASE_LAYER / f"{IDENTITY.recording_id}.rrd"
+    dataset.convert(IDENTITY, None, force=False)
+    first: object = recording_properties(read_back(base), f"run_{paths.BASE_LAYER}")["config"]
+    dataset.config.root = tmp_path / "raw-moved"
+    dataset.convert(IDENTITY, None, force=True)
+    second: object = recording_properties(read_back(base), f"run_{paths.BASE_LAYER}")["config"]
+    assert first != second and second == repr(dataset.config)
+
+
 def test_a_published_layer_is_pending_again_only_under_force(output_root: Path, tmp_path: Path) -> None:
     dataset = ToyDataset(ToyConfig(root=tmp_path / "raw"))
     dataset.convert(IDENTITY, None, force=False)

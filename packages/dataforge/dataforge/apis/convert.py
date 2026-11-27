@@ -142,7 +142,7 @@ def main(config: Config) -> None:
     """
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
-    run_start: RunStart = start_run(config)
+    run_start: RunStart = start_run(config, source=Path(__file__), environment=paths.RUN_ENVIRONMENT)
     dataset.run = run_start
     selected: list[tuple[SequenceIdentity, object]] = select(dataset.discover(), config.sequence)[: config.max_sequences]
     print(f"converting {len(selected)} sequence(s), {config.jobs} at once")

@@ -22,7 +22,7 @@ from slam_rs.catalog_feed import (
     resolve_catalog_segments,
 )
 from slam_rs.catalog_layer import POSE_SOURCE, LayerDetail, LayerRun, track_layer
-from slam_rs.config import SlamConfig, load_slam_config
+from slam_rs.config import CATALOG_URL_ENV, SlamConfig, load_slam_config
 from slam_rs.tracking import SegmentRun
 
 
@@ -60,7 +60,7 @@ def main(config: Config) -> None:
     is_robocap: bool = dataset_name == "robocap"
     rig_profile: RigProfile = ROBOCAP_RIG if is_robocap else dataset_rig(settings.dataset(dataset_name))
     catalog_url: str = config.catalog or settings.catalog_url
-    run_start: RunStart = start_run(dataclasses.replace(config, catalog=catalog_url))
+    run_start: RunStart = start_run(dataclasses.replace(config, catalog=catalog_url), source=Path(__file__), environment=(CATALOG_URL_ENV,))
     # One manifest query resolves the dataset handle that open_segment and the final register share.
     segment: CatalogSegment = resolve_catalog_segments((CatalogSegment(catalog_url, dataset_name, config.segment),))[0]
     dataset: DatasetEntry | None = segment.dataset

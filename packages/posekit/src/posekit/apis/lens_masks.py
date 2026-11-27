@@ -205,7 +205,7 @@ def main(config: LensMasksConfig) -> None:
     Raises:
         ValueError: Unless exactly one of ``rrd`` and ``dataset`` + ``segment`` names the base.
     """
-    run: RunStart = start_run(config)
+    run: RunStart = start_run(config, source=Path(__file__))
     if (config.rrd is None) == (config.dataset is None or config.segment is None):
         raise ValueError("name the base recording with --dataset and --segment, or with --rrd")
     if config.rrd is None:
