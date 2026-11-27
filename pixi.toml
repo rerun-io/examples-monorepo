@@ -2003,15 +2003,20 @@ xorg-libxi = "*"
 xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 
-# Web build of the custom gsplat viewer (crates/gsplat-viewer-web): wasm32 std for the pinned rust, wasm-bindgen-cli
-# pinned to Rerun 0.44's wasm-bindgen =0.2.129, wasm-opt from binaryen. clang (above) compiles the C deps for wasm32.
-[feature.gsplat-web]
+# The wasm32 toolchain of the web viewer builds (gsplat-rust-renderer-web, canonical-viewer-web): wasm32 std for the
+# pinned rust, wasm-bindgen-cli pinned to Rerun 0.44's wasm-bindgen =0.2.129, wasm-opt from binaryen. Each env's clang
+# compiles the C deps for wasm32.
+[feature.rust-wasm32]
 platforms = ["linux-64", "linux-aarch64"]
 
-[feature.gsplat-web.dependencies]
+[feature.rust-wasm32.dependencies]
 rust-std-wasm32-unknown-unknown = "1.98.1.*"
 wasm-bindgen-cli = "==0.2.129"
 binaryen = "*"
+
+# Web build of the custom gsplat viewer (crates/gsplat-viewer-web), until recipes/gradio-rerun-src builds the canonical one.
+[feature.gsplat-web]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.gsplat-web.tasks.gsplat-web-build]
 args = ["stock_dir", "out_dir"]
@@ -2256,6 +2261,16 @@ cmd = "cargo-fmt --manifest-path rust/Cargo.toml -p canonical-viewer -p canonica
 depends-on = ["canonical-viewer-prepare"]
 cwd = "packages/canonical-viewer"
 description = "Check Rust formatting, run Clippy and the Rust unit tests"
+
+# The canonical web viewer (rust/crates/web) in the stock /rerun-viewer/<version>/ layout.
+[feature.canonical-viewer-web]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.canonical-viewer-web.tasks.canonical-viewer-web-build]
+args = ["stock_dir", "out_dir"]
+cmd = "python tools/build_web.py --stock-dir {{ stock_dir }} --out-dir {{ out_dir }}"
+cwd = "packages/canonical-viewer"
+description = "Build the canonical viewer for the web (wasm32) into a copy of a stock Rerun 0.44.0 web viewer directory"
 
 [feature.canonical-viewer.tasks.gate]
 depends-on = ["lint", "typecheck", "deadcode", "tests", "canonical-viewer-rust-check", "canonical-viewer-build", "tests-integration"]
@@ -4902,6 +4917,7 @@ gsplat-rust-renderer-dev = { features = [
 gsplat-rust-renderer-web = { features = [
     "gsplat-rust-renderer",
     "gsplat-web",
+    "rust-wasm32",
     "ffmpeg",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 canonical-viewer = { features = [
@@ -4911,6 +4927,12 @@ canonical-viewer = { features = [
 canonical-viewer-dev = { features = [
     "canonical-viewer",
     "dev",
+    "ffmpeg",
+], solve-group = "canonical-viewer", no-default-feature = true }
+canonical-viewer-web = { features = [
+    "canonical-viewer",
+    "canonical-viewer-web",
+    "rust-wasm32",
     "ffmpeg",
 ], solve-group = "canonical-viewer", no-default-feature = true }
 depth-video-viewer = { features = [

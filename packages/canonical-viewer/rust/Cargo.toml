@@ -223,3 +223,10 @@ rerun = { path = "../target/patch/rerun-0.44.0/crates/top/rerun" }
 [profile.release]
 lto = "thin"
 codegen-units = 16
+
+# The web build (canonical_viewer/apis/build_web.py): the smallest wasm, as gsplat's web build was tuned.
+[profile.web]
+inherits = "release"
+opt-level = 2
+lto = "fat"
+codegen-units = 1
