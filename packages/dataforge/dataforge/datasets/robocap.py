@@ -23,11 +23,14 @@ from Basalt, whose RoboCap loader (``src/io/dataset_io_robocap.cpp``) *adds*
 the **raw camera clock** for ``video_time`` — video times are
 ``comment_us * 1000 + pts_ns`` (the MP4 format-level ``comment`` tag is the
 capture start on that device clock, in microseconds), and IMU sample times are
-therefore ``t_imu_ns - offset``, where ``offset`` is the device's own factory camera-to-IMU time shift: the mean Kalibr
-``timeshift_cam_imu`` of the cameras slam-rs feeds (``TIME_SHIFT_CAMERAS``), from ``0factory-calibration-<device>``.
-Cap A's factory value is close to the legacy Basalt constant (``CAMERA_TO_IMU_OFFSET_NS``, 14.9 ms); Cap B's is ~1.2 ms,
-and the legacy constant gave Cap B's slam-rs runs a large yaw drift (session 28, 2026-11-26). A device without factory
-time shifts falls back to the legacy constant with a warning. Nothing is resampled: raw
+therefore ``t_imu_ns - offset``, where ``offset`` is the cap's own factory camera-to-IMU time shift: the mean Kalibr
+``timeshift_cam_imu`` of the cameras slam-rs feeds (``TIME_SHIFT_CAMERAS``), from the cap's factory calibration folder
+(``CAPS``). Every cap has its own: Cap A's mean is 15.2 ms, close to the legacy Basalt constant
+(``CAMERA_TO_IMU_OFFSET_NS``, 14.9 ms); Cap B's is 1.2 ms, and the legacy constant gave Cap B's slam-rs runs a large yaw
+drift (session 28, 2026-11-26). A serial missing from ``CAPS``, a missing calibration folder or a SLAM camera without a
+time shift stops the conversion. One shift serves all four cameras because slam-rs matches them into framesets within
+1 ms and gives a frameset one time; Cap A's per-camera factory shifts spread 6.7 ms, so the recording states the spread
+(``time_shift_spread_ns``) and each camera's own shift. Nothing is resampled: raw
 samples land at their native rate. ``video_time`` is deliberately a *duration*
 timeline — retagging it as ``timestamp`` would render the boot clock as
 1970-01-01T00:00:25. Segments recorded within one boot share the axis, which
@@ -81,12 +84,15 @@ GYRO_SCALE: float = 0.000266316
 ACCEL_SCALE: float = 0.001197101
 """Raw accel LSB → m/s^2; measured in the basalt fork (``dataset_io_robocap.cpp``)."""
 CAMERA_TO_IMU_OFFSET_NS: int = 14_902_432
-"""Legacy Basalt correction, matching the median of Cap A's four coverage-camera
-factory offsets. Not an independently validated offset for every camera/device: conversions use the device's own factory
-shift (``RobocapDataset.camera_to_imu_offset_ns``); this stays as the fallback for a calibration without time shifts and as
-the shift recordings converted before 2026-11-26 carry (the calibration backfill states it)."""
+"""Legacy Basalt correction (the median of Cap A's four SLAM-camera factory shifts) that every recording converted
+before 2026-11-27 carries, whatever its cap; only the calibration backfill states it. Conversions use the cap's own
+factory shift (``FactoryCalibration.mean_time_shift_ns``)."""
+LEGACY_TIME_SHIFT_SOURCE: str = "DataForge legacy RoboCap ingestion; Basalt kCameraToImuOffsetNs; Cap A four-camera factory median, applied to every cap"
+"""``time_shift_source`` of a recording whose IMU samples carry ``CAMERA_TO_IMU_OFFSET_NS``."""
 TIME_SHIFT_CAMERAS: tuple[str, ...] = ("left_front", "right_front", "left", "right")
 """The cameras whose factory ``timeshift_cam_imu`` the IMU shift averages: the ones slam-rs's RoboCap rig feeds."""
+FACTORY_TIME_SHIFT_SOURCE: str = f"DataForge RoboCap ingestion; mean factory Kalibr timeshift_cam_imu of {', '.join(TIME_SHIFT_CAMERAS)}"
+"""``time_shift_source`` of a recording whose IMU samples carry the cap's ``FactoryCalibration.mean_time_shift_ns``."""
 IMAGE_PLANE_DISTANCE: float = 0.025
 """Frustum length in metres."""
 RIG: int = 0
@@ -114,6 +120,39 @@ MESH_MAT3X3: list[list[float]] = [
     [0.0, -1.0, 0.0],
 ]
 """Rz(-80deg) @ Rx(-90deg), the rotation half of the same hand-tuned alignment."""
+
+
+@dataclass(frozen=True, slots=True)
+class Cap:
+    """One RoboCap unit and its factory calibration."""
+
+    name: str
+    """What people call the cap ("Cap A")."""
+    calibration_dir: str
+    """Folder under the corpus root that holds the cap's factory Kalibr calibration."""
+    calibration_date: str
+    """Date on the factory Kalibr files (ISO)."""
+
+
+CAPS: dict[str, Cap] = {
+    "f408193e6447b3b0": Cap(name="Cap A", calibration_dir="0factory-calibration-f408193e6447b3b0", calibration_date="2026-03-02"),
+    "fe6fede545c972fa": Cap(name="Cap B", calibration_dir="0factory-calibration-fe6fede545c972fa", calibration_date="2026-08-28"),
+}
+"""Every RoboCap the converter accepts, by serial (the ``<serial>_session_<S>`` folder prefix). More caps exist; each
+joins once its factory calibration is on the corpus root."""
+
+
+def cap(serial: str) -> Cap:
+    """The registered cap with this serial.
+
+    Raises:
+        ValueError: If ``CAPS`` does not list the serial.
+    """
+    if serial not in CAPS:
+        raise ValueError(f"unknown RoboCap serial {serial}: add it to CAPS in dataforge/datasets/robocap.py with its name and factory calibration folder")
+    return CAPS[serial]
+
+
 VIDEO_NAME_RE: re.Pattern[str] = re.compile(r"^video_dev(?P<device>\d+)_session(?P<session>\d+)_segment(?P<segment>\d+)_(?P<camname>[a-z-]+)$")
 """Per-camera MP4 stem, e.g. ``video_dev0_session1_segment1_right-eye``."""
 
@@ -145,13 +184,40 @@ class _FactoryCamera:
 
 
 @dataclass(frozen=True, slots=True)
+class FactoryCalibration:
+    """One read of a cap's factory calibration folder, with its SLAM cameras' time shifts checked."""
+
+    serial: str
+    cap: Cap
+    directory: Path
+    cameras: dict[str, _FactoryCamera]
+    """Every canonical camera with an entry in the folder's camchain files."""
+    time_shifts_ns: dict[str, int]
+    """Each ``TIME_SHIFT_CAMERAS`` camera's ``timeshift_cam_imu`` in nanoseconds (Kalibr: ``t_imu = t_cam + shift``)."""
+
+    @property
+    def mean_time_shift_ns(self) -> int:
+        """The camera-to-IMU time shift a conversion subtracts from the IMU stamps."""
+        return round(sum(self.time_shifts_ns.values()) / len(self.time_shifts_ns))
+
+    @property
+    def time_shift_spread_ns(self) -> int:
+        """How far apart the SLAM cameras' factory shifts lie; the mean hides this much."""
+        return max(self.time_shifts_ns.values()) - min(self.time_shifts_ns.values())
+
+    def fisheye62(self) -> dict[str, Fisheye62Parameters]:
+        """Camera geometry, keyed by canonical camera name."""
+        return {name: kalibr_cam_to_fisheye62(camera.entry, name=name) for name, camera in self.cameras.items()}
+
+
+@dataclass(frozen=True, slots=True)
 class RobocapSource:
     """One session as discovery found it; ``convert`` needs nothing else from the tree."""
 
     session_dir: Path
     """``<root>/<device>_session_<S>`` directory holding the videos and IMU dbs."""
     device: str
-    """Capture-device id, which also names the factory calibration directory."""
+    """Cap serial, the key into ``CAPS``."""
     session: int
     """Session number ``S`` (part of every filename in the directory)."""
     segments: tuple[int, ...]
@@ -167,7 +233,7 @@ class RobocapConfig(DataforgeDatasetConfig):
 
     _target: type = field(default_factory=lambda: RobocapDataset)
     """Dataset class instantiated by ``setup()``."""
-    root: Path = Path("/mnt/nas/datasets/robocap")
+    root: Path = Path("/mnt/nas/ssd-8tb/datasets/robocap")
     """Corpus root holding ``<device>_session_<N>/`` and the factory calibration."""
     mesh_path: Path | None = None
     """Cap mesh glb; defaults to ``<root>/robocap-mesh/3DModel.glb`` when None."""
@@ -180,7 +246,7 @@ def read_imu_channel(database: sqlite3.Connection, table: str, scale: float, off
         database: Read-only connection to an ``IMUWriter_dev*.db``.
         table: ``gyro_data`` or ``acc_data``; columns are ``(id, imuid_, x, y, z, timestamp)``.
         scale: LSB scale factor (``GYRO_SCALE`` or ``ACCEL_SCALE``).
-        offset_ns: Camera-to-IMU time shift subtracted from the IMU stamps (``RobocapDataset.camera_to_imu_offset_ns``).
+        offset_ns: Camera-to-IMU time shift subtracted from the IMU stamps (``FactoryCalibration.mean_time_shift_ns``).
 
     Returns:
         The channel's samples, sorted by time, on the ``video_time`` clock.
@@ -376,13 +442,18 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 by_name[cam_name] = video_path
         return {name: by_name[name] for name in CAMERA_DISPLAY_ORDER if name in by_name}
 
-    def _factory_cameras(self, device: str) -> dict[str, _FactoryCamera]:
-        """Every canonical camera that has an entry in the device's factory camchain files.
+    def factory_calibration(self, device: str) -> FactoryCalibration:
+        """Read the cap's factory Kalibr calibration.
 
         Raises:
-            ValueError: If a camchain file is malformed, naming the file.
+            ValueError: If ``CAPS`` does not list the serial, a camchain file is malformed, a camera's time shift is not
+                finite, or a ``TIME_SHIFT_CAMERAS`` camera has none.
+            FileNotFoundError: If the cap's calibration folder is not under the corpus root.
         """
-        calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
+        entry: Cap = cap(device)
+        calib_dir: Path = self.config.root / entry.calibration_dir
+        if not calib_dir.is_dir():
+            raise FileNotFoundError(f"{entry.name} ({device}): factory calibration folder not found: {calib_dir}")
         camchains: dict[Path, dict[str, KalibrCamWithExtrinsic]] = {}
         cameras: dict[str, _FactoryCamera] = {}
         for cam_name, (calib_folder, cam_index) in CAM_TO_CALIB_INFO.items():
@@ -395,34 +466,19 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                     camchains[path] = load_kalibr_camchain_imucam(path)
                 except (SerdeError, YAMLError) as error:
                     raise ValueError(f"{path}: {error}") from error
-            entry: KalibrCamWithExtrinsic | None = camchains[path].get(f"cam{cam_index}")
-            if entry is not None:
-                cameras[cam_name] = _FactoryCamera(path, cam_index, entry)
-        return cameras
-
-    def camera_to_imu_offset_ns(self, device: str) -> int:
-        """The device's camera-to-IMU time shift: the mean factory ``timeshift_cam_imu`` of ``TIME_SHIFT_CAMERAS``.
-
-        Falls back to the legacy ``CAMERA_TO_IMU_OFFSET_NS`` (with a warning) when none of those cameras states a finite
-        shift. Kalibr's convention is ``t_imu = t_cam + timeshift_cam_imu``, the same direction as Basalt's constant.
-        """
-        cameras: dict[str, _FactoryCamera] = self._factory_cameras(device)
-        shifts_s: list[float] = []
+            camchain_entry: KalibrCamWithExtrinsic | None = camchains[path].get(f"cam{cam_index}")
+            if camchain_entry is None:
+                continue
+            if camchain_entry.timeshift_cam_imu is not None and not math.isfinite(camchain_entry.timeshift_cam_imu):
+                raise ValueError(f"{path}#cam{cam_index}: timeshift_cam_imu must be finite")
+            cameras[cam_name] = _FactoryCamera(path, cam_index, camchain_entry)
+        time_shifts_ns: dict[str, int] = {}
         for name in TIME_SHIFT_CAMERAS:
             shift: float | None = cameras[name].entry.timeshift_cam_imu if name in cameras else None
-            if shift is not None and math.isfinite(shift):
-                shifts_s.append(shift)
-        if not shifts_s:
-            print(f"  warning: no factory timeshift_cam_imu for {device}'s {TIME_SHIFT_CAMERAS}; using the legacy {CAMERA_TO_IMU_OFFSET_NS} ns")
-            return CAMERA_TO_IMU_OFFSET_NS
-        return round(sum(shifts_s) / len(shifts_s) * 1e9)
-
-    def calibration(self, device: str) -> dict[str, Fisheye62Parameters]:
-        """Load the factory Kalibr calibration, keyed by canonical camera name."""
-        calib_dir: Path = self.config.root / f"0factory-calibration-{device}"
-        if not calib_dir.is_dir():
-            raise FileNotFoundError(f"Calibration directory not found: {calib_dir}")
-        return {name: kalibr_cam_to_fisheye62(camera.entry, name=name) for name, camera in self._factory_cameras(device).items()}
+            if shift is None:
+                raise ValueError(f"{entry.name} ({device}): no factory timeshift_cam_imu for {name} in {calib_dir}")
+            time_shifts_ns[name] = round(shift * 1e9)
+        return FactoryCalibration(serial=device, cap=entry, directory=calib_dir, cameras=cameras, time_shifts_ns=time_shifts_ns)
 
     # ── conversion ────────────────────────────────────────────────────────
     def convert(self, identity: SequenceIdentity, source: RobocapSource, *, force: bool) -> Path:
@@ -437,8 +493,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             print(f"skip {identity.sequence_key} → {target}")
             return target
 
-        cameras: dict[str, Fisheye62Parameters] = self.calibration(source.device)
-        offset_ns: int = self.camera_to_imu_offset_ns(source.device)
+        factory: FactoryCalibration = self.factory_calibration(source.device)
+        cameras: dict[str, Fisheye62Parameters] = factory.fisheye62()
         # Every MP4's container comment is parsed before the recording opens: each
         # stream is retimed by its own epoch, and the earliest doubles as start_time_ns.
         segment_videos: dict[int, dict[str, Path]] = {}
@@ -472,9 +528,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             # Deliberately NO ViewCoordinates at "/": the pose layer owns the root
             # ViewCoordinates (its world is gravity-aligned Z-up).
             self.log_scene(recording, {name: cameras[name] for name in camera_names})
-            self.log_sensor_metadata(
-                recording, source.device, {name: schema.cam_path(RIG, CAMERA_DISPLAY_ORDER.index(name)) for name in camera_names}, applied_shift_ns=offset_ns
-            )
+            camera_entities: dict[str, str] = {name: schema.cam_path(RIG, CAMERA_DISPLAY_ORDER.index(name)) for name in camera_names}
+            self.log_sensor_metadata(recording, factory, camera_entities, applied_shift_ns=factory.mean_time_shift_ns, time_shift_source=FACTORY_TIME_SHIFT_SOURCE)
 
             frames_per_camera: dict[str, int] = dict.fromkeys(camera_names, 0)
             for cam_name in camera_names:
@@ -489,7 +544,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                         shift_ns=segment_epochs[segment][cam_name],
                     )
 
-            self._log_imu(recording, source, offset_ns)
+            self._log_imu(recording, source, factory.mean_time_shift_ns)
 
             # start_time_ns makes the device-clock origin queryable without scanning chunks
             # (e.g. for a consumer that wants a zero-based axis or cross-segment alignment).
@@ -515,19 +570,33 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             log_camera_node(recording, RIG, CAMERA_DISPLAY_ORDER.index(name), camera, name=name, kind="grayscale", image_plane_distance=IMAGE_PLANE_DISTANCE)
 
     def log_sensor_metadata(
-        self, recording: rr.RecordingStream, device: str, camera_entities: dict[str, str], applied_shift_ns: int = CAMERA_TO_IMU_OFFSET_NS
+        self, recording: rr.RecordingStream, factory: FactoryCalibration, camera_entities: dict[str, str], *, applied_shift_ns: int, time_shift_source: str
     ) -> None:
-        """Log factory calibration and the camera-to-IMU time shift the recording's IMU samples carry.
-
-        ``applied_shift_ns`` is what the conversion subtracted from the IMU stamps: the device's factory shift for a new
-        conversion, the legacy constant (the default) for the calibration backfill of recordings converted before.
+        """Log the cap, its factory calibration, and the camera-to-IMU time shift the recording's IMU samples carry.
 
         Camera paths come from ingestion or the existing catalog so backfills
         preserve the recording's camera numbering. No video or IMU samples are read.
+
+        Args:
+            recording: Destination recording stream.
+            factory: The cap's factory calibration.
+            camera_entities: Canonical camera name -> its camera node in this recording.
+            applied_shift_ns: What the conversion subtracted from the IMU stamps: ``factory.mean_time_shift_ns``, or
+                ``CAMERA_TO_IMU_OFFSET_NS`` for a recording converted before 2026-11-27.
+            time_shift_source: ``FACTORY_TIME_SHIFT_SOURCE`` or ``LEGACY_TIME_SHIFT_SOURCE``, matching ``applied_shift_ns``.
         """
-        factory: Path = self.config.root / f"0factory-calibration-{device}"
+        recording.log(
+            schema.rig_path(RIG),
+            rr.AnyValues(
+                cap_name=factory.cap.name,
+                cap_serial=factory.serial,
+                calibration_source=factory.cap.calibration_dir,
+                calibration_date=factory.cap.calibration_date,
+            ),
+            static=True,
+        )
         imu_entity: str = schema.imu_path(RIG, IMU_DEVICE)
-        noise_path: Path = factory / "imus_intrinsic/imu_mid_0.yaml"
+        noise_path: Path = factory.directory / "imus_intrinsic/imu_mid_0.yaml"
         if noise_path.is_file():
             try:
                 noise: _KalibrImu = from_yaml(_KalibrImu, noise_path.read_text())
@@ -541,19 +610,15 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 rate_hz=noise.update_rate,
                 source=str(noise_path.relative_to(self.config.root)),
             ), static=True)
-        source: str = (
-            "DataForge legacy RoboCap ingestion; Basalt kCameraToImuOffsetNs; matches Cap A four-camera factory median; physical alignment not independently validated"
-            if applied_shift_ns == CAMERA_TO_IMU_OFFSET_NS
-            else f"DataForge RoboCap ingestion; mean factory Kalibr timeshift_cam_imu of {', '.join(TIME_SHIFT_CAMERAS)} in 0factory-calibration-{device}"
+        recording.log(
+            imu_entity,
+            rr.AnyValues(applied_time_shift_ns=-applied_shift_ns, time_shift_source=time_shift_source, time_shift_spread_ns=factory.time_shift_spread_ns),
+            static=True,
         )
-        recording.log(imu_entity, rr.AnyValues(applied_time_shift_ns=-applied_shift_ns, time_shift_source=source), static=True)
-        factory_cameras: dict[str, _FactoryCamera] = self._factory_cameras(device)
         for name, entity in camera_entities.items():
-            camera: _FactoryCamera | None = factory_cameras.get(name)
+            camera: _FactoryCamera | None = factory.cameras.get(name)
             if camera is None or camera.entry.timeshift_cam_imu is None:
                 continue
-            if not math.isfinite(camera.entry.timeshift_cam_imu):
-                raise ValueError(f"{camera.path}#cam{camera.index}: timeshift_cam_imu must be finite")
             recording.log(entity, rr.AnyValues(
                 camera_imu_time_offset_ns=round(camera.entry.timeshift_cam_imu * 1e9),
                 time_offset_reference=imu_entity,

@@ -10,6 +10,7 @@ pytest.importorskip("rerun.catalog", reason="calibration backfill tests need the
 
 from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
 from rerun.chunk import RrdReader  # noqa: E402
+from robocap_factory import write_factory  # noqa: E402
 
 from dataforge.apis.register import Config as RegisterConfig  # noqa: E402
 from dataforge.apis.register import main as register  # noqa: E402
@@ -21,9 +22,7 @@ pytestmark = pytest.mark.integration
 def test_backfill_adds_only_static_metadata_and_preserves_base(tmp_path: Path) -> None:
     device: str = "f408193e6447b3b0"
     segment: str = f"robocap__{device}__s00000015"
-    factory: Path = tmp_path / f"0factory-calibration-{device}/imus_intrinsic"
-    factory.mkdir(parents=True)
-    (factory / "imu_mid_0.yaml").write_text("update_rate: 200.0\ngyroscope_noise_density: 0.0007\n")
+    write_factory(tmp_path, device)
     base: Path = tmp_path / "base.rrd"
     with rr.RecordingStream("dataforge", recording_id=segment) as recording:
         recording.save(base)
@@ -46,6 +45,30 @@ def test_backfill_adds_only_static_metadata_and_preserves_base(tmp_path: Path) -
     layer_entities: set[str] = {str(chunk.entity_path) for chunk in RrdReader(tmp_path / "calibration" / f"{segment}.rrd").stream()}
     assert "/__properties" not in layer_entities
     assert "/world/rig_00/imu_00" in layer_entities
+
+
+def write_base(path: Path, segment: str, applied_time_shift_ns: int | None) -> None:
+    """A dataforge:v1 base recording with one named camera; ``applied_time_shift_ns`` None leaves the IMU statics out."""
+    with rr.RecordingStream("dataforge", recording_id=segment) as recording:
+        recording.save(path)
+        recording.send_property("capture", rr.AnyValues(schema="dataforge:v1"))
+        recording.log("/world/rig_00/cam_04", rr.AnyValues(name="left"), static=True)
+        if applied_time_shift_ns is not None:
+            recording.log("/world/rig_00/imu_00", rr.AnyValues(applied_time_shift_ns=applied_time_shift_ns), static=True)
+
+
+def test_backfill_leaves_recordings_converted_with_their_factory_shift_alone(tmp_path: Path) -> None:
+    device: str = "fe6fede545c972fa"
+    write_factory(tmp_path, device)
+    legacy: str = f"robocap__{device}__s00000022"
+    factory: str = f"robocap__{device}__s00000028"
+    write_base(tmp_path / "legacy.rrd", legacy, None)
+    write_base(tmp_path / "factory.rrd", factory, -1_221_003)
+    with rr.server.Server(datasets={"robocap": [tmp_path / "legacy.rrd", tmp_path / "factory.rrd"]}) as server:
+        main(Config(catalog_url=server.url(), root=tmp_path, output_dir=tmp_path / "calibration"))
+        assert sorted(path.name for path in (tmp_path / "calibration").iterdir()) == [f"{legacy}.rrd"]
+        with pytest.raises(ValueError, match=f"{factory}: states applied_time_shift_ns \\[\\[-1221003\\]\\], not the legacy -14902432"):
+            main(Config(catalog_url=server.url(), root=tmp_path, output_dir=tmp_path / "calibration", segments=(factory,)))
 
 
 def test_registration_restores_saved_sensor_metadata_after_a_catalog_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

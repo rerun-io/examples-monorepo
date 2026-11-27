@@ -16,14 +16,19 @@ from numpy import ndarray
 pytest.importorskip("rerun.catalog", reason="catalog metadata tests need the Rerun catalog dependencies")
 
 from rerun.catalog import CatalogClient, DatasetEntry  # noqa: E402
+from robocap_factory import CAP_B_SLAM_SHIFTS_S, write_factory
 from simplecv.imu_calibration import ImuCalibration  # noqa: E402
 
 from dataforge import blueprints, schema  # noqa: E402
 from dataforge.datasets.robocap import (  # noqa: E402
     ACCEL_SCALE,
     CAMERA_TO_IMU_OFFSET_NS,
+    CAPS,
+    FACTORY_TIME_SHIFT_SOURCE,
     GYRO_SCALE,
+    LEGACY_TIME_SHIFT_SOURCE,
     TIME_SHIFT_CAMERAS,
+    FactoryCalibration,
     RobocapConfig,
     RobocapDataset,
     RobocapSource,
@@ -162,83 +167,107 @@ def test_malformed_imu_db_is_skipped_not_fatal(tmp_path: Path) -> None:
     assert read_imu_database(db_path, CAMERA_TO_IMU_OFFSET_NS) is None
 
 
-def write_camchain(path: Path, timeshifts_s: list[float | None]) -> None:
-    """One Kalibr camchain-imucam file with a camera per shift (``None`` leaves ``timeshift_cam_imu`` out)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    entries: list[str] = []
-    for index, shift in enumerate(timeshifts_s):
-        entries.append(
-            f"cam{index}:\n  camera_model: pinhole\n  distortion_model: equidistant\n  intrinsics: [300.0, 300.0, 320.0, 240.0]\n"
-            "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n  resolution: [640, 480]\n"
-            "  T_cam_imu: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]\n"
-            + ("" if shift is None else f"  timeshift_cam_imu: {shift!r}\n")
-        )
-    path.write_text("".join(entries))
-
-
 def test_imu_time_shift_is_the_mean_factory_shift_of_the_slam_cameras(tmp_path: Path) -> None:
-    # Cap B's factory values (fe6fede545c972fa); the eye pair (2.0 ms here) is not a SLAM camera and must not count.
-    factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
-    write_camchain(factory / "imus_cam_lr_front_extrinsic/front-camchain-imucam.yaml", [0.0008661293958066206, 0.0009766584965254315])
-    write_camchain(factory / "imus_cam_lr_eye_extrinsic/eye-camchain-imucam.yaml", [0.002, 0.002])
-    write_camchain(factory / "imus_cam_l_extrinsic/l-camchain-imucam.yaml", [0.001591904372869934])
-    write_camchain(factory / "imus_cam_r_extrinsic/r-camchain-imucam.yaml", [0.0014493197885760412])
-    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
-    expected_s: float = (0.0008661293958066206 + 0.0009766584965254315 + 0.001591904372869934 + 0.0014493197885760412) / 4
+    write_factory(tmp_path, DEVICE)
+    factory: FactoryCalibration = RobocapDataset(RobocapConfig(root=tmp_path)).factory_calibration(DEVICE)
     assert TIME_SHIFT_CAMERAS == ("left_front", "right_front", "left", "right")
-    assert dataset.camera_to_imu_offset_ns(DEVICE) == round(expected_s * 1e9) == 1_221_003
+    # The eye pair (2 ms) is not a SLAM camera and does not count.
+    assert factory.time_shifts_ns == {"left_front": 866_129, "right_front": 976_658, "left": 1_591_904, "right": 1_449_320}
+    assert factory.mean_time_shift_ns == round(sum(CAP_B_SLAM_SHIFTS_S) / 4 * 1e9) == 1_221_003
+    assert factory.time_shift_spread_ns == 725_775
+    assert factory.cap == CAPS[DEVICE]
+    assert set(factory.fisheye62()) == {"left_front", "right_front", "left_eye", "right_eye", "left", "right"}
 
 
-def test_imu_time_shift_falls_back_to_the_legacy_constant_without_factory_shifts(tmp_path: Path) -> None:
-    factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
-    write_camchain(factory / "imus_cam_lr_front_extrinsic/front-camchain-imucam.yaml", [None, None])
-    write_camchain(factory / "imus_cam_l_extrinsic/l-camchain-imucam.yaml", [None])
+def test_a_slam_camera_without_a_factory_time_shift_is_an_error(tmp_path: Path) -> None:
+    write_factory(tmp_path, DEVICE, (0.012, 0.013, None, 0.016))
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
-    assert dataset.camera_to_imu_offset_ns(DEVICE) == CAMERA_TO_IMU_OFFSET_NS
+    with pytest.raises(ValueError, match=f"Cap A \\({DEVICE}\\): no factory timeshift_cam_imu for left in"):
+        dataset.factory_calibration(DEVICE)
+
+
+def test_a_non_finite_factory_time_shift_is_an_error(tmp_path: Path) -> None:
+    write_factory(tmp_path, DEVICE, (0.012, float("nan"), 0.019, 0.016))
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    with pytest.raises(ValueError, match="front-camchain-imucam.yaml#cam1: timeshift_cam_imu must be finite"):
+        dataset.factory_calibration(DEVICE)
+
+
+def test_an_unknown_serial_is_refused_with_a_message_to_register_it(tmp_path: Path) -> None:
+    serial: str = "0123456789abcdef"
+    write_factory(tmp_path, serial)
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    with pytest.raises(ValueError, match=f"unknown RoboCap serial {serial}.*add it to CAPS"):
+        dataset.factory_calibration(serial)
+
+
+def test_a_known_cap_without_its_calibration_folder_is_an_error(tmp_path: Path) -> None:
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    with pytest.raises(FileNotFoundError, match=f"Cap A \\({DEVICE}\\).*{tmp_path / CAPS[DEVICE].calibration_dir}"):
+        dataset.factory_calibration(DEVICE)
+
+
+def test_the_registry_names_both_calibrated_caps() -> None:
+    assert {serial: cap.name for serial, cap in CAPS.items()} == {"f408193e6447b3b0": "Cap A", "fe6fede545c972fa": "Cap B"}
+    assert all(cap.calibration_dir == f"0factory-calibration-{serial}" for serial, cap in CAPS.items())
 
 
 @pytest.mark.integration
-def test_factory_metadata_preserves_offsets_and_applied_correction(tmp_path: Path) -> None:
-    factory: Path = tmp_path / f"0factory-calibration-{DEVICE}"
-    noise: Path = factory / "imus_intrinsic/imu_mid_0.yaml"
-    noise.parent.mkdir(parents=True)
-    noise.write_text("gyroscope_noise_density: 0.0007\naccelerometer_noise_density: 0.006\n"
-                     "gyroscope_random_walk: 0.00003\naccelerometer_random_walk: 0.0002\nupdate_rate: 200.0\n")
-    camera: Path = factory / "imus_cam_l_extrinsic/left-camchain-imucam.yaml"
-    camera.parent.mkdir()
-    camera.write_text(
-        "cam0:\n  camera_model: pinhole\n  distortion_model: equidistant\n  intrinsics: [300.0, 300.0, 320.0, 240.0]\n"
-        "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n  resolution: [640, 480]\n"
-        "  T_cam_imu: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]\n"
-        "  timeshift_cam_imu: 0.018961111236788484\n"
-    )
-    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
-    path: Path = tmp_path / "metadata.rrd"
+@pytest.mark.parametrize(
+    ("serial", "shifts_ns", "mean_ns", "spread_ns"),
+    [
+        ("f408193e6447b3b0", {"left_front": 12_219_303, "right_front": 13_052_872, "left": 18_961_111, "right": 16_751_992}, 15_246_320, 6_741_808),
+        ("fe6fede545c972fa", {"left_front": 866_129, "right_front": 976_658, "left": 1_591_904, "right": 1_449_320}, 1_221_003, 725_775),
+    ],
+)
+def test_factory_time_shifts_of_both_caps(serial: str, shifts_ns: dict[str, int], mean_ns: int, spread_ns: int) -> None:
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig())
+    if not (dataset.config.root / CAPS[serial].calibration_dir).is_dir():
+        pytest.skip(f"factory calibration {CAPS[serial].calibration_dir} not under {dataset.config.root}")
+    factory: FactoryCalibration = dataset.factory_calibration(serial)
+    assert factory.time_shifts_ns == shifts_ns
+    assert factory.mean_time_shift_ns == mean_ns
+    assert factory.time_shift_spread_ns == spread_ns
+
+
+def read_metadata(dataset: RobocapDataset, path: Path, applied_shift_ns: int, time_shift_source: str) -> pa.Table:
+    """Log one device's sensor metadata (left camera at ``cam_02``) to ``path`` and read it back as a catalog table."""
     with rr.RecordingStream("metadata", recording_id="test") as recording:
         recording.save(path)
-        dataset.log_sensor_metadata(recording, DEVICE, {"left": schema.cam_path(0, 2)})
+        dataset.log_sensor_metadata(
+            recording, dataset.factory_calibration(DEVICE), {"left": schema.cam_path(0, 2)}, applied_shift_ns=applied_shift_ns, time_shift_source=time_shift_source
+        )
     with rr.server.Server(datasets={"test": [path]}) as server:
         client: CatalogClient = server.client()
         entry: DatasetEntry = client.get_dataset("test")
-        table: pa.Table = entry.reader(index=None).to_arrow_table()
-        imu: ImuCalibration = ImuCalibration.from_catalog(table, "/world/rig_00/imu_00")
-        assert imu.gyro_noise_density == 0.0007
-        assert imu.rate_hz == 200.0
-        assert imu.source == f"0factory-calibration-{DEVICE}/imus_intrinsic/imu_mid_0.yaml"
-        assert table["/world/rig_00/imu_00:applied_time_shift_ns"].to_pylist() == [[-14_902_432]]
-        assert table["/world/rig_00/cam_02:camera_imu_time_offset_ns"].to_pylist() == [[18_961_111]]
-        assert table["/world/rig_00/cam_02:time_offset_reference"].to_pylist() == [["/world/rig_00/imu_00"]]
+        return entry.reader(index=None).to_arrow_table()
 
 
 @pytest.mark.integration
-def test_missing_device_calibration_is_not_replaced_with_another_caps(tmp_path: Path) -> None:
+def test_factory_metadata_states_the_cap_the_applied_mean_shift_and_the_per_camera_spread(tmp_path: Path) -> None:
+    write_factory(tmp_path, DEVICE)
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
-    path: Path = tmp_path / "unknown.rrd"
-    with rr.RecordingStream("metadata", recording_id="unknown") as recording:
-        recording.save(path)
-        dataset.log_sensor_metadata(recording, "unknown-device", {})
-    with rr.server.Server(datasets={"test": [path]}) as server:
-        client: CatalogClient = server.client()
-        entry: DatasetEntry = client.get_dataset("test")
-        table: pa.Table = entry.reader(index=None).to_arrow_table()
-        assert ImuCalibration.from_catalog(table, "/world/rig_00/imu_00") == ImuCalibration()
+    table: pa.Table = read_metadata(dataset, tmp_path / "metadata.rrd", 1_221_003, FACTORY_TIME_SHIFT_SOURCE)
+    imu: ImuCalibration = ImuCalibration.from_catalog(table, "/world/rig_00/imu_00")
+    assert imu.gyro_noise_density == 0.0007
+    assert imu.rate_hz == 200.0
+    assert imu.source == f"0factory-calibration-{DEVICE}/imus_intrinsic/imu_mid_0.yaml"
+    assert table["/world/rig_00/imu_00:applied_time_shift_ns"].to_pylist() == [[-1_221_003]]
+    assert table["/world/rig_00/imu_00:time_shift_spread_ns"].to_pylist() == [[725_775]]
+    assert table["/world/rig_00/imu_00:time_shift_source"].to_pylist() == [[FACTORY_TIME_SHIFT_SOURCE]]
+    assert table["/world/rig_00/cam_02:camera_imu_time_offset_ns"].to_pylist() == [[1_591_904]]
+    assert table["/world/rig_00/cam_02:time_offset_reference"].to_pylist() == [["/world/rig_00/imu_00"]]
+    assert table["/world/rig_00:cap_name"].to_pylist() == [["Cap A"]]
+    assert table["/world/rig_00:cap_serial"].to_pylist() == [[DEVICE]]
+    assert table["/world/rig_00:calibration_source"].to_pylist() == [[f"0factory-calibration-{DEVICE}"]]
+    assert table["/world/rig_00:calibration_date"].to_pylist() == [["2026-03-02"]]
+
+
+@pytest.mark.integration
+def test_backfill_metadata_states_the_legacy_shift_old_recordings_carry(tmp_path: Path) -> None:
+    write_factory(tmp_path, DEVICE)
+    dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=tmp_path))
+    table: pa.Table = read_metadata(dataset, tmp_path / "metadata.rrd", CAMERA_TO_IMU_OFFSET_NS, LEGACY_TIME_SHIFT_SOURCE)
+    assert table["/world/rig_00/imu_00:applied_time_shift_ns"].to_pylist() == [[-14_902_432]]
+    assert table["/world/rig_00/imu_00:time_shift_source"].to_pylist() == [[LEGACY_TIME_SHIFT_SOURCE]]
+    assert table["/world/rig_00:cap_name"].to_pylist() == [["Cap A"]]
