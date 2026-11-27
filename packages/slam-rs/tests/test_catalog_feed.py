@@ -1,5 +1,6 @@
 """The catalog-to-estimator mapping rules, on synthetic statics, plus one real smoke segment."""
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -7,12 +8,14 @@ import pyarrow as pa
 import pytest
 import rerun as rr
 from datafusion import SessionContext
-from jaxtyping import Float64, Int64
+from fixture_types import CameraFactory
+from jaxtyping import Float64, Int64, UInt8
 from numpy import ndarray
 
 pytest.importorskip("rerun.catalog", reason="requires the rerun.catalog dependency in this environment")
 
 from rerun.catalog import DatasetEntry
+from simplecv.catalog_video_reader import StreamPackets
 
 from slam_rs import _core
 from slam_rs.catalog_feed import (
@@ -522,3 +525,56 @@ def test_inertial_windows_are_cut_by_time_alone() -> None:
     assert _window_bounds(t_ns, 3_000) == [(0, 3), (3, 6), (6, 9), (9, 10)]
     assert _window_bounds(t_ns, 1) == [(index, index + 1) for index in range(10)]
     assert _window_bounds(t_ns, 10**12) == [(0, 10)]
+
+
+def _gop_chunk(first: int, size: int, gop: int, lead: int = 0) -> StreamPackets:
+    """``size`` one-byte samples holding their own stream index: ``lead`` before the first keyframe, then one every ``gop``."""
+    return StreamPackets(
+        first=first,
+        samples=[np.array([first + i], dtype=np.uint8) for i in range(size)],
+        keyframes=[i >= lead and (i - lead) % gop == 0 for i in range(size)],
+    )
+
+
+def _stub_feed(monkeypatch: pytest.MonkeyPatch, chunks: list[StreamPackets]) -> SegmentFeed:
+    """A feed whose decoder turns each chunk's samples from its first keyframe on into 1x1 frames of their stream index."""
+    feed: SegmentFeed = object.__new__(SegmentFeed)
+    object.__setattr__(feed, "segment_id", "synthetic")
+    opened: list[StreamPackets] = [packets for packets in chunks if packets.samples]
+
+    def open_decoder(_: SegmentFeed, __: bytes, ___: CameraCalib) -> Iterator[tuple[UInt8[ndarray, "h w"], None]]:
+        packets: StreamPackets = opened.pop(0)
+        return iter((sample.reshape(1, 1), None) for sample in packets.samples[packets.lead :])
+
+    monkeypatch.setattr(SegmentFeed, "_open_decoder", open_decoder)
+    return feed
+
+
+@pytest.mark.parametrize(
+    ("chunks", "first_frame"),
+    [
+        # Opens on a keyframe, read from its start: every later chunk starts past frame 0.
+        ([_gop_chunk(0, 60, 15), _gop_chunk(60, 60, 15), _gop_chunk(120, 30, 15)], 0),
+        # Starts mid-GOP, read from its first keyframe on.
+        ([_gop_chunk(0, 60, 15, lead=7), _gop_chunk(60, 60, 15), _gop_chunk(120, 30, 15)], 7),
+        # Read from a frame of the second chunk: the first is decoded and dropped.
+        ([_gop_chunk(0, 60, 15, lead=7), _gop_chunk(60, 60, 15), _gop_chunk(120, 30, 15)], 75),
+        # A chunk with no keyframe in its span is empty and skipped.
+        ([_gop_chunk(0, 60, 15), _gop_chunk(60, 0, 15), _gop_chunk(60, 30, 15)], 0),
+    ],
+)
+def test_a_camera_reads_every_frame_in_order_across_chunk_boundaries(
+    camera: CameraFactory, monkeypatch: pytest.MonkeyPatch, chunks: list[StreamPackets], first_frame: int
+) -> None:
+    """Every chunk after a stream's first starts on a keyframe past ``first_frame``: none of them is mid-GOP."""
+    feed: SegmentFeed = _stub_feed(monkeypatch, chunks)
+    decoded: list[int] = [int(image[0, 0]) for image, _ in feed._camera_frames(iter(chunks), "h264", camera(0, 0.0), first_frame)]
+    assert decoded == list(range(first_frame, chunks[-1].first + len(chunks[-1].samples)))
+
+
+def test_a_camera_that_starts_before_its_streams_first_keyframe_is_refused(camera: CameraFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skipping the undecodable lead would hand every later frame the wrong index."""
+    chunks: list[StreamPackets] = [_gop_chunk(0, 60, 15, lead=7), _gop_chunk(60, 60, 15)]
+    feed: SegmentFeed = _stub_feed(monkeypatch, chunks)
+    with pytest.raises(ValueError, match="camera 0 starts mid-GOP: frame 3 precedes its first keyframe"):
+        list(feed._camera_frames(iter(chunks), "h264", camera(0, 0.0), 3))
