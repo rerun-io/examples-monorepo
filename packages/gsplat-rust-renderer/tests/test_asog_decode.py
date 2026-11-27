@@ -48,6 +48,8 @@ def test_decode_and_evaluate_match_the_reference() -> None:
     np.testing.assert_allclose(decoded.means.ravel(), canonical["Expected:means"], rtol=1e-6, atol=1e-7)
     np.testing.assert_allclose(decoded.omega.transpose(1, 0, 2).ravel(), canonical["Expected:omega"], rtol=1e-6, atol=1e-7)
     np.testing.assert_allclose(decoded.g.T.ravel(), canonical["Expected:g"], rtol=1e-6, atol=1e-7)
+    # The fixture stores SH for its first rows only.
+    np.testing.assert_allclose(decoded.sh_rest[: len(canonical["Expected:sh_rest"]) // (3 * decoded.sh_rest.shape[1])].ravel(), canonical["Expected:sh_rest"], rtol=1e-6, atol=1e-7)
     for k, t in enumerate(canonical["Expected:times"]):
         expected: dict[str, np.ndarray] = columns(FIXTURE, f"/expected/t{k}")
         frame: AsogFrame = evaluate(decoded, asog.manifest, float(t))

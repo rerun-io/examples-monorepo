@@ -208,6 +208,8 @@ class DecodedAsog:
     quats_wxyz: Float64[ndarray, "n 4"]
     log_scales: Float64[ndarray, "n 3"]
     sh0: Float64[ndarray, "n 3"]
+    sh_rest: Float64[ndarray, "n c 3"]
+    """AC coefficients, coefficient-major then RGB; c = 0 without SH."""
     opacity: Float64[ndarray, " n"]
     mu: Float64[ndarray, " n"]
     sigma: Float64[ndarray, " n"]
@@ -225,7 +227,7 @@ def bezier2(tau: Float64[ndarray, " n"], c: Float64[ndarray, "3 n 3"]) -> Float6
 
 
 def decode(asog: AsogFile) -> DecodedAsog:
-    """Reference `asog.decode.read`, static and motion parts (SH is not needed for a preview and is not decoded)."""
+    """Reference `asog.decode.read`: static, SH and motion parts."""
     m: AsogManifest = asog.manifest
     s: dict[str, Int64[ndarray, "_ _"]] = decode_streams(asog)
     n: int = m.count
@@ -255,11 +257,18 @@ def decode(asog: AsogFile) -> DecodedAsog:
     mref: Float64[ndarray, " n"] = np.maximum(norms.min(0), 1e-9) * qpv
     w_g: tuple[float, ...] = (1.0, mo.mid_g, mo.mid_g, mo.mid_g, 1.0)
     flags: Int64[ndarray, " n"] = s["flags"][:, 0]
+    sh_rest: Float64[ndarray, "n c 3"] = np.zeros((n, 0, 3))
+    if m.sh_n is not None:
+        labels: Int64[ndarray, " n"] = s["shlabels"][:, 0]
+        if (labels >= m.sh_n.count).any():
+            raise ValueError(f"shlabels: label {int(labels.max())} beyond the {m.sh_n.count}-entry palette")
+        sh_rest = np.array(m.sh_n.codebook)[s["shpalette"][labels]].reshape(n, m.sh_n.coeffs, 3)
     return DecodedAsog(
         means=means,
         quats_wxyz=quats,
         log_scales=np.array(m.scales.codebook)[s["scales"]],
         sh0=np.array(m.sh0.codebook)[s["sh0"]],
+        sh_rest=sh_rest,
         opacity=s["opacity"][:, 0] / 255,
         mu=s["mu"][:, 0] / m.mu.scale,
         sigma=sigma,

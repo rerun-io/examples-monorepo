@@ -23,12 +23,15 @@ from rerun.encodings import EntityPathLike
 from rerun.experimental import ViewerClient
 from serde.json import to_json
 
+from gsplat_rust_renderer.asog_decode import AsogFrame, DecodedAsog, evaluate
+from gsplat_rust_renderer.asog_decode import decode as decode_asog
 from gsplat_rust_renderer.gaussians3d import compute_visualizer, log_ply
 from gsplat_rust_renderer.hexels3d import HEXELS_ENTITY, Hexels3D, log_hexels, write_hexel_ply
 from gsplat_rust_renderer.orbit import CameraSpec, look_at, write_orbit_json
 from gsplat_rust_renderer.scene_io import NerfFrame, NerfTransforms
-from gsplat_rust_renderer.sog3d import log_sog
-from gsplat_rust_renderer.sog_decode import CoreSplats, core_layout, decode, read_sog
+from gsplat_rust_renderer.sog3d import log_asog, log_sog, log_sog_lod
+from gsplat_rust_renderer.sog_decode import CoreSplats, DecodedSog, core_layout, decode, read_sog
+from gsplat_rust_renderer.sog_lod import read_sog_lod
 
 
 @dataclass(frozen=True)
@@ -39,7 +42,7 @@ class Config:
     """The viewer under test: rerun-canonical, the canonical viewer with the gsplat extension."""
     ply: Path
     out: Path
-    mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth", "hexels", "hexels-tracked", "hexels-portable", "sog"] = "relog"
+    mode: Literal["relog", "pair", "views", "portable", "pair-white", "depth", "hexels", "hexels-tracked", "hexels-portable", "sog", "sog-lod", "asog"] = "relog"
     sog: Path | None = None
     """sog mode: a bundled .sog, a meta.json or its directory."""
 
@@ -479,16 +482,7 @@ def check_sog(config: Config) -> None:
     position: Float64[np.ndarray, "3"] = target + np.array([0.6 * radius, -0.4 * radius, -2.6 * radius])
     up: Float64[np.ndarray, "3"] = np.array([0.0, -1.0, 0.0])
     view = splat_view((0, 0, 0), rrb.EyeControls3D(position=position, look_target=target, eye_up=up), contents=["world/splats"], name="sog")
-    recording_path: Path = config.out / "sog.rrd"
-    rr.init("sog-viewer-check", strict=True)
-    rr.save(recording_path)
-    rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
-    rr.log("/", rr.ViewCoordinates.RDF, static=True)
-    log_sog("/world/splats", sog)
-    recording = rr.get_global_data_recording()
-    assert recording is not None
-    recording.flush(timeout_sec=30.0)
-    rr.disconnect()
+    recording_path: Path = save_recording(config.out / "sog.rrd", view, lambda: log_sog("/world/splats", sog))
     with spawn_viewer(str(config.viewer)) as viewer:
         viewer.open_url(str(recording_path.resolve()))
         image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "sog-gpu.png")
@@ -505,11 +499,117 @@ def check_sog(config: Config) -> None:
     print(f"SOG_STOCK lit_pixels={lit} size={stock.shape[1]}x{stock.shape[0]}", flush=True)
     assert lit > 100, "Stock Rerun should draw the GaussianSplats3D preview"
 
+def save_recording(path: Path, view: rrb.Spatial3DView, log: Callable[[], None]) -> Path:
+    """Save one recording with `view` as its blueprint, the 3DGS PLY frame (RDF) and whatever `log` adds."""
+    rr.init("viewer-check", strict=True)
+    rr.save(path)
+    rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
+    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+    log()
+    recording = rr.get_global_data_recording()
+    assert recording is not None
+    recording.flush(timeout_sec=30.0)
+    rr.disconnect()
+    return path
+
+
+def capture_file(config: Config, recording: Path, view: rrb.Spatial3DView, name: str, env: dict[str, str]) -> UInt8[np.ndarray, "h w 3"]:
+    """Open `recording` in a fresh viewer under `env` (environment variables the viewer reads at start) and capture `view`."""
+    with patch.dict(os.environ, env), spawn_viewer(str(config.viewer)) as viewer:
+        viewer.open_url(str(recording.resolve()))
+        return capture(viewer, view, config.out / f"{name}.png")
+
+
+def check_sog_lod(config: Config) -> None:
+    """SogLodSplats3D: with LOD off the viewer draws level 0 exactly as the plain SogSplats3D path; with LOD on it draws."""
+    from test_sog_lod import write_lod_set  # pyrefly: ignore[missing-import]  (the script's directory is on sys.path)
+
+    root: Path = write_lod_set(config.out / "lod-set")
+    view = splat_view((0, 0, 0), rrb.EyeControls3D(position=(0.0, -2.0, -12.0), look_target=(0.0, 0.0, 0.0), eye_up=(0.0, -1.0, 0.0)),
+                      contents=["world/splats"], name="lod")  # fmt: skip
+    lod_rrd: Path = save_recording(config.out / "lod.rrd", view, lambda: log_sog_lod("/world/splats", read_sog_lod(root), 64))
+    plain_rrd: Path = save_recording(config.out / "plain.rrd", view, lambda: log_sog("/world/splats", read_sog(root / "0_0"), 64))
+    off: UInt8[np.ndarray, "h w 3"] = capture_file(config, lod_rrd, view, "lod-off", {"GSPLAT_LOD_MODE": "off"})
+    plain: UInt8[np.ndarray, "h w 3"] = capture_file(config, plain_rrd, view, "lod-plain", {})
+    differ: int = int(np.count_nonzero(off != plain))
+    print(f"SOG_LOD_PIXELS off vs plain: {differ} differing values", flush=True)
+    assert off.shape == plain.shape and differ == 0, f"LOD mode off differs from the plain SOG path in {differ} values"
+    lod: UInt8[np.ndarray, "h w 3"] = capture_file(config, lod_rrd, view, "lod-on", {"GSPLAT_LOD_MODE": "lod", "GSPLAT_LOD_PX": "2"})
+    lit: int = int(np.sum(np.max(lod, axis=2) > 20))
+    print(f"SOG_LOD_PIXELS lod lit_pixels={lit}", flush=True)
+    assert lit > 100, "the LOD recording drew nothing"
+
+
+def asog_reference_ply(path: Path, decoded: DecodedAsog, frame: AsogFrame) -> Float32[np.ndarray, "n 3"]:
+    """Write the evaluated clip as a splat PLY (rows with weight 0 are not drawn); return the drawn centres."""
+    drawn = frame.weights > 0
+    reference = DecodedSog(
+        means=frame.positions[drawn].astype(np.float32),
+        quats_wxyz=frame.rotations[drawn].astype(np.float32),
+        log_scales=decoded.log_scales[drawn].astype(np.float32),
+        opacity=decoded.opacity[drawn] * frame.weights[drawn],
+        sh0=decoded.sh0[drawn].astype(np.float32),
+        sh_rest=decoded.sh_rest[drawn].astype(np.float32),
+        sh_bands=3,
+    )
+    write_splat_ply(path, core_layout(reference))
+    return reference.means
+
+
+def check_asog(config: Config) -> None:
+    """AnimatedSogSplats3D at the fixture's third time: the viewer's GPU motion matches `gsplat render` of the numpy evaluation.
+
+    The fixture (`crates/gsplat-viewer/tests/fixtures/asog_reference.rrd`) holds a 2,048-row clip and the reference
+    decoder's values; `test_asog_decode.py` checks the numpy port against them. Most of the frame is background, so the
+    capture must also fail against the evaluation at the fixture's second time: the score depends on the time shown.
+    """
+    from test_asog_decode import FIXTURE, columns, fixture_asog  # pyrefly: ignore[missing-import]  (the script's directory is on sys.path)
+
+    asog = fixture_asog()
+    decoded: DecodedAsog = decode_asog(asog)
+    times = columns(FIXTURE, "/expected/canonical")["Expected:times"]
+    t: float = float(times[2])
+    ply: Path = config.out / "asog-reference.ply"
+    means: Float32[np.ndarray, "n 3"] = asog_reference_ply(ply, decoded, evaluate(decoded, asog.manifest, t))
+    target: Float64[np.ndarray, "3"] = np.median(means, axis=0).astype(np.float64)
+    radius: float = float(np.percentile(np.linalg.norm(means - target, axis=1), 90))
+    position: Float64[np.ndarray, "3"] = target + np.array([0.6 * radius, -0.4 * radius, -2.6 * radius])
+    up: Float64[np.ndarray, "3"] = np.array([0.0, -1.0, 0.0])
+    view = splat_view((0, 0, 0), rrb.EyeControls3D(position=position, look_target=target, eye_up=up), contents=["world/splats"], name="asog")
+    rate: float = asog.manifest.timeline.frame_rate
+
+    def log() -> None:
+        log_asog("/world/splats", asog, fps=rate)
+        # A duration timeline for the cursor: ASOG time there is t = seconds - frame_origin / frameRate.
+        rr.send_columns("/clock", indexes=[rr.TimeColumn("time", duration=np.array([0.0, asog.manifest.duration]))], columns=rr.Scalars.columns(scalars=[0.0, 0.0]))
+
+    recording_path: Path = save_recording(config.out / "asog.rrd", view, log)
+    nanoseconds: int = round(t * 1e9)
+    with spawn_viewer(str(config.viewer)) as viewer:
+        viewer.open_url(str(recording_path.resolve()))
+        deadline: float = time.monotonic() + 30.0
+        while not any(r.current_timeline == "time" and r.current_time == nanoseconds for r in viewer.get_state().recordings):
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"Viewer time cursor did not reach time={nanoseconds} ns")
+            viewer.set_time("time", duration=np.timedelta64(nanoseconds, "ns"), play_state="paused")
+            time.sleep(0.2)
+        image: UInt8[np.ndarray, "h w 3"] = capture(viewer, view, config.out / "asog-gpu.png")
+        reports = [report.summary for item in viewer.get_state().views for report in item.reports]
+        assert not reports, f"view reports: {reports}"
+    pose: Float64[np.ndarray, "4 4"] = look_at(position, target, up)
+    score: float = pose_psnr(config, ply, image, pose, DEFAULT_FOV_Y, "asog-gpu")
+    other_ply: Path = config.out / "asog-other-time.ply"
+    asog_reference_ply(other_ply, decoded, evaluate(decoded, asog.manifest, float(times[1])))
+    other: float = pose_psnr(config, other_ply, image, pose, DEFAULT_FOV_Y, "asog-other-time")
+    print(f"ASOG_PIXELS t={t:.3f} s: {score:.3f} dB; against t={float(times[1]):.3f} s: {other:.3f} dB", flush=True)
+    assert score >= 45.0, f"ASOG motion differs from gsplat render of the reference evaluation: {score} dB"
+    assert other < 45.0, f"the capture also matches another time ({other} dB): the check does not depend on the time shown"
+
 
 def main(config: Config) -> None:
     """Assert pixels through a real viewer; the calling test sets a process timeout."""
     config.out.mkdir(parents=True, exist_ok=True)
-    if check := {"depth": check_depth_and_framing, "portable": check_portable_recording, "sog": check_sog}.get(config.mode):
+    if check := {"depth": check_depth_and_framing, "portable": check_portable_recording, "sog": check_sog, "sog-lod": check_sog_lod, "asog": check_asog}.get(config.mode):
         check(config)
         return
     if hexel_check := {"hexels": check_hexels, "hexels-tracked": check_hexels_tracked, "hexels-portable": check_hexels_portable}.get(config.mode):
