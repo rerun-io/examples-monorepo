@@ -315,6 +315,37 @@ def _static_values(table: pa.Table, column: str) -> list[float] | list[str] | No
     return list(np.asarray(first_valid_value(values, component_name=column)).reshape(-1).tolist())
 
 
+def read_camera_names(dataset: DatasetEntry, segment: str, names: Sequence[str]) -> dict[str, str]:
+    """Every video camera's node and name, keeping the named ones; no calibration is read.
+
+    Args:
+        dataset: Catalog dataset.
+        segment: Segment id.
+        names: Camera names to keep, in any order; empty keeps all.
+
+    Returns:
+        Camera node entity -> camera name, in rig / camera index order.
+
+    Raises:
+        KeyError: When a requested name is not on the segment.
+    """
+    layout_cameras: tuple[CatalogCamera, ...] = parse_rig_layout(catalog_components(dataset.schema())).cameras
+    entities: list[str] = [camera.transform_entity for camera in layout_cameras]
+    # The camera's static `name` sits on the camera node itself, outside what the calibration reader reads.
+    names_table: pa.Table = dataset.filter_segments(segment).filter_contents(entities).reader(index=None).to_arrow_table()
+    named: dict[str, str] = {}
+    for camera in layout_cameras:
+        name_values = _static_values(names_table, f"{camera.transform_entity}:name")
+        name: str = str(name_values[0]) if name_values else camera.camera
+        if not names or name in names:  # an unrequested camera (e.g. a Mei lens beside the cube faces) is never projected
+            named[camera.transform_entity] = name
+    if names:
+        missing: list[str] = [name for name in names if name not in named.values()]
+        if missing:
+            raise KeyError(f"{segment}: cameras {missing} not on the segment (have {sorted(named.values())})")
+    return named
+
+
 def read_catalog_cameras(
     dataset: DatasetEntry, segment: str, names: Sequence[str], calibration_entity: str | None = None
 ) -> tuple[CatalogCameraModel, ...]:
@@ -334,20 +365,7 @@ def read_catalog_cameras(
         KeyError: When a requested name is not on the segment.
         ValueError: When a camera lacks its calibration.
     """
-    layout_cameras: tuple[CatalogCamera, ...] = parse_rig_layout(catalog_components(dataset.schema())).cameras
-    entities: list[str] = [camera.transform_entity for camera in layout_cameras]
-    # The camera's static `name` sits on the camera node itself, outside what the calibration reader reads.
-    names_table: pa.Table = dataset.filter_segments(segment).filter_contents(entities).reader(index=None).to_arrow_table()
-    named: dict[str, str] = {}
-    for camera in layout_cameras:
-        name_values = _static_values(names_table, f"{camera.transform_entity}:name")
-        name: str = str(name_values[0]) if name_values else camera.camera
-        if not names or name in names:  # an unrequested camera (e.g. a Mei lens beside the cube faces) is never projected
-            named[camera.transform_entity] = name
-    if names:
-        missing: list[str] = [name for name in names if name not in named.values()]
-        if missing:
-            raise KeyError(f"{segment}: cameras {missing} not on the segment (have {sorted(named.values())})")
+    named: dict[str, str] = read_camera_names(dataset, segment, names)
     read_from: dict[str, str] = {entity: entity if calibration_entity is None else f"{calibration_entity}/{name}" for entity, name in named.items()}
     models: dict[str, CatalogCameraCalibration] = read_camera_models(dataset, segment, list(read_from.values()))
     cameras: list[CatalogCameraModel] = []
@@ -588,6 +606,31 @@ def write_snapshot(
     publish_directory(staging, input_dir)
 
 
+def nearest_packets(videos: Sequence[StreamIndex], targets_ns: Sequence[int], tolerance_ns: int, span_ns: tuple[int, int]) -> list[dict[int, int]]:
+    """Per camera, the packet nearest each rig frame's reference time, within the sync tolerance and the span.
+
+    Args:
+        videos: Each camera's stream index.
+        targets_ns: The reference camera's time of each rig frame.
+        tolerance_ns: Largest |dt| between a packet and its rig frame's reference time.
+        span_ns: First and last time a packet may have (inclusive).
+
+    Returns:
+        Per camera, rig frame index -> packet index; a rig frame the camera has no packet for is absent.
+    """
+    selection: list[dict[int, int]] = []
+    for video in videos:
+        chosen: dict[int, int] = {}
+        for sample, target in enumerate(targets_ns):
+            nearest: int = int(np.clip(np.searchsorted(video.t_ns, target), 1, len(video.t_ns) - 1))
+            nearest = nearest if abs(int(video.t_ns[nearest]) - target) < abs(int(video.t_ns[nearest - 1]) - target) else nearest - 1
+            frame_t: int = int(video.t_ns[nearest])
+            if abs(frame_t - target) <= tolerance_ns and span_ns[0] <= frame_t <= span_ns[1]:
+                chosen[sample] = nearest
+        selection.append(chosen)
+    return selection
+
+
 def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False) -> PreparedInput:
     """Read the segment and write the pipeline's input directory: `frames_meta.json`, `frame_source.json`, ground truth.
 
@@ -628,18 +671,9 @@ def prepare_catalog_input(config: CatalogInputConfig, *, view_rig: bool = False)
     if not candidates:
         raise ValueError(f"{config.segment}: no reference frame inside the trajectory span")
 
-    # Per camera, the packet nearest each reference frame, within the sync tolerance.
-    selection: list[dict[int, int]] = []
-    for video in videos:
-        chosen: dict[int, int] = {}
-        for sample, reference_index in enumerate(candidates):
-            target: int = int(times[reference_index])
-            nearest: int = int(np.clip(np.searchsorted(video.t_ns, target), 1, len(video.t_ns) - 1))
-            nearest = nearest if abs(int(video.t_ns[nearest]) - target) < abs(int(video.t_ns[nearest - 1]) - target) else nearest - 1
-            frame_t: int = int(video.t_ns[nearest])
-            if abs(frame_t - target) <= config.sync_tolerance_ns and trajectory.t_ns[0] <= frame_t <= trajectory.t_ns[-1]:
-                chosen[sample] = nearest
-        selection.append(chosen)
+    selection: list[dict[int, int]] = nearest_packets(
+        videos, [int(times[index]) for index in candidates], config.sync_tolerance_ns, (int(trajectory.t_ns[0]), int(trajectory.t_ns[-1]))
+    )
 
     rig_frames: list[dict[str, tuple[int, Transform]]] = [{} for _ in candidates]
     streams: list[StreamKeyframes] = []
