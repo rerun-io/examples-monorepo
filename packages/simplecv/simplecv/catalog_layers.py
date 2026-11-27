@@ -2,6 +2,7 @@
 
 ``serve_local_segment`` serves a base recording and named layer files of its segment on a private in-process catalog.
 ``register_named_blueprint`` registers a blueprint under a name and retires the blueprint that held it.
+``segment_properties`` reads one segment's property group from the segment table.
 
 A layer is a recording file with its segment's recording id; the catalog stacks a segment's layers by that id. A target
 file either exists complete or not at all: half-written files poison batch runs and the catalog server, and saving over
@@ -24,9 +25,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 import rerun.chunk as rrc
+from datafusion import col, lit
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegisteredBlueprint
 
 DATASET_RETRY_DELAY_S: float = 1.0
@@ -113,6 +116,22 @@ def ensure_dataset(client: CatalogClient, name: str) -> DatasetEntry:
     except (ConnectionError, RuntimeError, ValueError):
         time.sleep(DATASET_RETRY_DELAY_S)
         return client.create_dataset(name, exist_ok=True)
+
+
+def segment_properties(entry: DatasetEntry, segment: str, group: str) -> dict[str, list[object]]:
+    """One segment's ``property:<group>:*`` cells from the segment table, keyed by field name; empty cells are left out.
+
+    Each cell stays the list the catalog holds (one value per instance), so list-valued properties keep every value.
+
+    Raises:
+        ValueError: If ``entry`` has no segment ``segment``.
+    """
+    table: pa.Table = entry.segment_table().filter(col("rerun_segment_id") == lit(segment)).to_arrow_table()
+    if table.num_rows == 0:
+        raise ValueError(f"no segment {segment!r} in dataset {entry.name!r}")
+    prefix: str = f"property:{group}:"
+    row: dict[str, object] = table.slice(0, 1).to_pylist()[0]
+    return {name.removeprefix(prefix): cell for name, cell in row.items() if name.startswith(prefix) and isinstance(cell, list) and cell}
 
 
 def register_layer(entry: DatasetEntry, paths: Sequence[Path], layer: str | None, *, replace: bool = True) -> None:

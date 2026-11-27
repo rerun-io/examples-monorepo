@@ -1,8 +1,8 @@
 """Read the Insta360 cube-face layer (and its people-mask layer) from a local ``.rrd``.
 
-Faces are the camera nodes ``/world/rig_NN/cam_NN`` whose static ``name`` is ``cube6_<direction>``
-(dataforge's ``insta360`` cube layer); the raw lenses (other names) are skipped. Geometry comes from the layer's static
-``Pinhole`` and ``Transform3D`` (face-from-rig), never from constants.
+Faces are the camera nodes ``/world/rig_NN/cam_NN`` whose static ``name`` the layer's ``cube`` property lists in
+``faces`` (dataforge's ``insta360`` cube layer); other cameras (the raw lenses) are skipped. Geometry comes from the
+layer's static ``Pinhole`` and ``Transform3D`` (face-from-rig), never from constants.
 """
 
 import re
@@ -20,10 +20,11 @@ from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.catalog_calibration import read_camera_calibration
+from simplecv.catalog_layers import segment_properties
 from simplecv.catalog_video_reader import ChunkedVideoDecoder, open_decoders, select_decode_device
 from simplecv.rrd_query_utils import first_valid_value
 
-from monopriors.cube_faces import FACE_NAME_PATTERN, CubeFace
+from monopriors.cube_faces import CubeFace
 
 CAMERA_NODE_PATTERN: re.Pattern[str] = re.compile(r"^/world/rig_\d+/cam_\d+$")
 """Camera nodes as simplecv's catalog discovery names them."""
@@ -58,7 +59,7 @@ def read_cube_faces(layer: LayerSegment) -> tuple[CubeFace, ...]:
     """The cube faces of the layer, ordered by entity, with K, size and face-from-rig rotation.
 
     Raises:
-        ValueError: If the layer has no cube faces or a face name repeats.
+        ValueError: If the layer's ``cube`` property lists no faces, or its camera nodes do not name exactly those faces.
     """
     entities: list[str] = sorted(
         {
@@ -67,17 +68,18 @@ def read_cube_faces(layer: LayerSegment) -> tuple[CubeFace, ...]:
             if str(column.component) == "name" and CAMERA_NODE_PATTERN.match(f"/{str(column.entity_path).lstrip('/')}")
         }
     )
+    faces: tuple[str, ...] = tuple(str(name) for name in segment_properties(layer.dataset, layer.segment_id, "cube").get("faces", []))
+    if not faces:
+        raise ValueError(f"segment {layer.segment_id}: no property:cube:faces (a cube layer written before dataforge recorded its faces)")
     table: pa.Table = layer.dataset.filter_segments(layer.segment_id).filter_contents(entities).reader(index=None).to_arrow_table()
     names: dict[str, str] = {}
     for entity in entities:
         value: object = first_valid_value(table.column(f"{entity}:name"), component_name=f"{entity}:name")
         name: str = str(np.asarray(value, dtype=str).reshape(-1)[0])
-        if FACE_NAME_PATTERN.match(name):
+        if name in faces:
             names[entity] = name
-    if not names:
-        raise ValueError(f"segment {layer.segment_id}: no camera node is named cube6_<front0|front1|left|right|up|down>")
-    if len(set(names.values())) != len(names):
-        raise ValueError(f"segment {layer.segment_id}: repeated face names {sorted(names.values())}")
+    if sorted(names.values()) != sorted(faces):
+        raise ValueError(f"segment {layer.segment_id}: the cube property lists faces {list(faces)}, the camera nodes name {sorted(names.values())}")
     calibration: dict[str, PinholeParameters] = read_camera_calibration(layer.dataset, layer.segment_id, list(names))
     return tuple(
         CubeFace(

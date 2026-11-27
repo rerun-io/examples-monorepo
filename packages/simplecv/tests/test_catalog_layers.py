@@ -16,6 +16,7 @@ from simplecv.catalog_layers import (  # noqa: E402
     ensure_dataset,
     register_layer,
     register_named_blueprint,
+    segment_properties,
     serve_local_segment,
 )
 
@@ -83,6 +84,23 @@ def test_layers_register_and_merge_their_property_groups(tmp_path: Path) -> None
     assert row["property:shared:value"] == ["masks"]  # registered last
     assert row["property:RecordingInfo:start_time"] == base_start
 
+
+
+def test_segment_properties_read_one_segments_group_and_keep_list_values(tmp_path: Path) -> None:
+    paths: list[Path] = []
+    for segment, faces in (("first", ["front", "left"]), ("second", ["up"])):
+        with atomic_recording(tmp_path / f"{segment}.rrd", application_id="simplecv-test", recording_id=segment) as recording:
+            recording.send_property("cube", rr.AnyValues(faces=faces, stride=10))
+            recording.log("/point", rr.Points3D([[0.0, 0.0, 0.0]]), static=True)
+        paths.append(tmp_path / f"{segment}.rrd")
+    with rr.server.Server() as server:
+        entry = ensure_dataset(server.client(), "segments")
+        register_layer(entry, paths, None)
+        assert segment_properties(entry, "first", "cube") == {"faces": ["front", "left"], "stride": [10]}
+        assert segment_properties(entry, "second", "cube")["faces"] == ["up"]
+        assert segment_properties(entry, "first", "absent") == {}
+        with pytest.raises(ValueError, match="no segment 'third'"):
+            segment_properties(entry, "third", "cube")
 
 @pytest.mark.integration
 def test_ensure_dataset_retries_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

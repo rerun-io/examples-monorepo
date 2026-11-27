@@ -50,7 +50,8 @@ vio_config = "configs/tartanair_pinhole_config.json"
 name = "tartanair-fisheye"
 vio_config = "configs/tartanair_fisheye_config.json"
 
-# Insta360 X4 Air (dataforge insta360, mei_v6 cameras) as a plain two-lens rig.
+# Insta360 X4 Air (dataforge insta360, mei_v6 cameras) as a plain two-lens rig. The name is the segment-id prefix
+# (`insta360__<clip>`), which is how replay and catalog_layer find a segment's dataset.
 [[dataset]]
-name = "insta360-native"
+name = "insta360"
 vio_config = "configs/insta360_native_config.json"

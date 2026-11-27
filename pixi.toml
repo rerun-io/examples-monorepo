@@ -4180,13 +4180,13 @@ cwd = "packages/colsfm"
 description = "The no-engine ablation on Galileo (COLMAP's ALIKED + LightGlue, Ceres, no refinement, no loops): the 4.33 mm / 19.4 s comparison"
 
 [feature.colsfm.tasks.colsfm-robocap]
-cmd = "python tools/run.py catalog --source.dataset robocap --source.segment robocap__f408193e6447b3b0__s00000021 --source.cameras left_front right_front left right --source.stereo-pairs left_front right_front --source.frame-stride 4 --source.trim-start-seconds 2 --source.trim-end-seconds 2"
+cmd = "python tools/run.py catalog --source.catalog-url rerun+http://dgx-spark:51235 --source.dataset robocap --source.segment robocap__f408193e6447b3b0__s00000021 --source.cameras left_front right_front left right --source.stereo-pairs left_front right_front --source.frame-stride 4 --source.trim-start-seconds 2 --source.trim-end-seconds 2"
 depends-on = ["colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
 description = "The default pipeline on the RoboCap fisheye segment s00000021 from the Spark catalog, starting from its slam_rs trajectory"
 
 [feature.colsfm.tasks.colsfm-kitti06]
-cmd = "python tools/run.py catalog --source.dataset dataforge-vslam-lab-kitti --source.segment vslam-lab-kitti__06 --source.cameras rgb_0 rgb_1 --source.stereo-pairs rgb_0 rgb_1 --source.trajectory-entity /world/runs/cuvslam/rig --options.config-dir colsfm/resources/configs/kitti --options.min-inter-frame-distance 0.5"
+cmd = "python tools/run.py catalog --source.catalog-url rerun+http://dgx-spark:51235 --source.dataset dataforge-vslam-lab-kitti --source.segment vslam-lab-kitti__06 --source.cameras rgb_0 rgb_1 --source.stereo-pairs rgb_0 rgb_1 --source.trajectory-entity /world/runs/cuvslam/rig --options.config-dir colsfm/resources/configs/kitti --options.min-inter-frame-distance 0.5"
 depends-on = ["colsfm-raco-export", "colsfm-download-flexglue", "colsfm-flexglue-fp8"]
 cwd = "packages/colsfm"
 description = "The default pipeline on KITTI 06 from the Spark catalog, starting from the cuvslam layer (the cuVSLAM SLAM trajectory)"

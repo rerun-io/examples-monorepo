@@ -31,7 +31,7 @@ class MoGeSpirulaPriorsConfig:
     """Write MoGe-2 depth + normal priors for a cube-faces layer into a spirula dataset folder."""
 
     faces_rrd: Path
-    """The cube-faces layer ``.rrd`` (``/world/rig_NN/cam_NN`` named ``cube6_<direction>``)."""
+    """The cube-faces layer ``.rrd`` (the ``/world/rig_NN/cam_NN`` nodes its ``cube`` property lists in ``faces``)."""
     dataset_dir: Path
     """The spirula dataset folder; ``depths/`` and ``normals/`` are written inside."""
     timeline: str = "video_time"

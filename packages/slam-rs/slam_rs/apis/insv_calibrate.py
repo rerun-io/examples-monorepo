@@ -43,7 +43,7 @@ class Config:
 
     rrd: Path
     """Converted Insta360 recording."""
-    dataset: str = "insta360-native"
+    dataset: str = "insta360"
     """Dataset whose VIO config (``slam.toml``) the frontend and the bootstrap run with."""
     rotation_spans_s: tuple[float, ...] = (40.0, 190.0)
     """Start of each span the rotation is fitted on, seconds after the first frame; two disjoint spans give the agreement."""

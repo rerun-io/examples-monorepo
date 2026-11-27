@@ -15,14 +15,8 @@ def _face(name: str = "cube6_left", width: int = N, height: int = N, cx: float =
     return CubeFace(entity="/world/rig_00/cam_04", name=name, k_matrix=k_matrix, width=width, height=height)
 
 
-@pytest.mark.parametrize("name", ["cube6_front0", "cube6_front1", "cube6_left", "cube6_right", "cube6_up", "cube6_down"])
-def test_full_centred_faces_are_accepted(name: str) -> None:
-    assert _face(name).name == name
-
-
-def test_seam_split_names_are_rejected() -> None:
-    with pytest.raises(ValueError, match="cube6_"):
-        _face("cube_0_left")
+def test_a_full_centred_face_is_accepted() -> None:
+    assert _face("cube6_front0").name == "cube6_front0"
 
 
 @pytest.mark.parametrize(("width", "height", "cx"), [(N, 480, (N - 1) / 2), (N, N, 79.5), (N, N, N / 2)])

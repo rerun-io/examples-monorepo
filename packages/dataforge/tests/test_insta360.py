@@ -345,6 +345,7 @@ def test_the_cube_view_layer_holds_the_six_faces_on_every_base_stamp_beside_the_
     import torch
 
     from dataforge import paths, schema
+    from dataforge.datasets import insta360_cube
     from dataforge.datasets.insta360 import CUBE_LAYER, CUBE_VIEW_LAYER, FACE_CAMS
 
     if not torch.cuda.is_available():
@@ -353,6 +354,7 @@ def test_the_cube_view_layer_holds_the_six_faces_on_every_base_stamp_beside_the_
         targets: dict[str, Path] = convert_layers(insv_clip, root, cube=True, cube_view=True, cube_max_framesets=limit)
         stamps: Int64[ndarray, " n"] = video_times(targets[paths.BASE_LAYER], schema.video_path(0, 0))
         cube: dict[str, object] = recording_properties(read_back(targets[CUBE_LAYER]), "cube")
+        assert cube["faces"] == [name for name, _ in insta360_cube.FACES], "readers take the face names from the cube property"
         stride, size = int(cube["stride"]), int(cube["face_size"])  # pyrefly: ignore[bad-argument-type]
         analysis: Int64[ndarray, " k"] = stamps[::stride][:limit]
         shown: Int64[ndarray, " m"] = stamps[stamps <= analysis[-1]]

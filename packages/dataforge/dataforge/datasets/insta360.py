@@ -554,7 +554,10 @@ class Insta360Dataset(DataforgeDataset[Insta360Config, ClipSource]):
         indices: Int64[ndarray, " k"] = self.analysis_indices(rig.source.num_frames)
         recording.send_property(
             "cube",
-            rr.AnyValues(face_size=rig.size, stride=self.config.cube_stride, framesets=int(indices.size), first_cam=FIRST_FACE_CAM, cq=self.config.cube_cq, gop=self.config.cube_gop),
+            rr.AnyValues(
+                face_size=rig.size, stride=self.config.cube_stride, framesets=int(indices.size), first_cam=FIRST_FACE_CAM,
+                faces=[face.name for face in rig.faces], cq=self.config.cube_cq, gop=self.config.cube_gop,
+            ),
         )
         log_face_cameras(recording, rig)
         with self.timer.stage("cube:faces"):
