@@ -13,11 +13,6 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 EXCLUDED: tuple[str, ...] = (
     ":!pixi.lock",
     ":!ci/tests/test_no_asset_video.py",
-    # Pending removal: fb14b00c's branch deletes this AssetVideo-rejecting guard and its test; drop both lines once it merges.
-    ":!packages/mv-api/src/mv_api/api/catalog_prediction_layer.py",
-    ":!packages/mv-api/tests/test_catalog_prediction_layer.py",
-    # Pending: the same branch rewords this docstring that names AssetVideo; drop the line once it merges.
-    ":!packages/mv-api/src/mv_api/api/metric_exoego_calib.py",
 )
 ASSET_MODE_PATTERN: str = r"""mode\s*=\s*["']asset["']"""
 ASSET_MODE_ALLOWED: tuple[str, str] = ("packages/simplecv/simplecv/rerun_log_utils.py", "mp4_frame_timestamps_ns")
